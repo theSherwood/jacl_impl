@@ -566,6 +566,162 @@ static int test_ptr_payload_isolation(void) {
   TEST_PASS();
 }
 
+/* ---- US-006 tests: Inline string packing and unpacking ---- */
+
+/* Test: empty inline string (len 0) */
+static int test_inline_string_empty(void) {
+  JaclVal v = jacl_inline_string("", 0);
+  char buf[8];
+
+  ASSERT(jacl_is_inline_string(v));
+  ASSERT_SIZE_EQ(jacl_inline_string_len(v), 0);
+
+  jacl_inline_string_get(v, buf, sizeof(buf));
+  ASSERT_STR_EQ(buf, "");
+
+  /* Payload should be zero for empty string */
+  ASSERT_U64_EQ(v & JACL_PAYLOAD_MASK, 0);
+
+  TEST_PASS();
+}
+
+/* Test: single char inline string */
+static int test_inline_string_single_char(void) {
+  JaclVal v = jacl_inline_string("A", 1);
+  char buf[8];
+
+  ASSERT(jacl_is_inline_string(v));
+  ASSERT_SIZE_EQ(jacl_inline_string_len(v), 1);
+
+  jacl_inline_string_get(v, buf, sizeof(buf));
+  ASSERT_STR_EQ(buf, "A");
+
+  TEST_PASS();
+}
+
+/* Test: 6-byte inline string */
+static int test_inline_string_6_bytes(void) {
+  JaclVal v = jacl_inline_string("abcdef", 6);
+  char buf[8];
+
+  ASSERT(jacl_is_inline_string(v));
+  ASSERT_SIZE_EQ(jacl_inline_string_len(v), 6);
+
+  jacl_inline_string_get(v, buf, sizeof(buf));
+  ASSERT_STR_EQ(buf, "abcdef");
+
+  TEST_PASS();
+}
+
+/* Test: 7-byte inline string (maximum) */
+static int test_inline_string_7_bytes(void) {
+  JaclVal v = jacl_inline_string("abcdefg", 7);
+  char buf[8];
+
+  ASSERT(jacl_is_inline_string(v));
+  ASSERT_SIZE_EQ(jacl_inline_string_len(v), 7);
+
+  jacl_inline_string_get(v, buf, sizeof(buf));
+  ASSERT_STR_EQ(buf, "abcdefg");
+
+  TEST_PASS();
+}
+
+/* Test: round-trip for all valid lengths */
+static int test_inline_string_roundtrip(void) {
+  const char *strs[] = {"", "x", "ab", "abc", "abcd", "abcde", "abcdef", "abcdefg"};
+  size_t lens[] = {0, 1, 2, 3, 4, 5, 6, 7};
+  char buf[8];
+
+  for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
+    JaclVal v = jacl_inline_string(strs[i], lens[i]);
+    ASSERT_SIZE_EQ(jacl_inline_string_len(v), lens[i]);
+    jacl_inline_string_get(v, buf, sizeof(buf));
+    ASSERT(memcmp(buf, strs[i], lens[i]) == 0);
+    ASSERT(buf[lens[i]] == '\0');
+  }
+
+  TEST_PASS();
+}
+
+/* Test: strings with various non-null byte values */
+static int test_inline_string_byte_values(void) {
+  /* High-bit bytes */
+  char s1[] = {(char)0xFF, (char)0x80, (char)0x7F, 0};
+  JaclVal v1 = jacl_inline_string(s1, 3);
+  char buf[8];
+
+  ASSERT_SIZE_EQ(jacl_inline_string_len(v1), 3);
+  jacl_inline_string_get(v1, buf, sizeof(buf));
+  ASSERT((unsigned char)buf[0] == 0xFF);
+  ASSERT((unsigned char)buf[1] == 0x80);
+  ASSERT((unsigned char)buf[2] == 0x7F);
+  ASSERT(buf[3] == '\0');
+
+  /* All bytes = 0x01 (near-zero but non-null) */
+  char s2[] = {1, 1, 1, 1, 1, 1, 1};
+  JaclVal v2 = jacl_inline_string(s2, 7);
+  ASSERT_SIZE_EQ(jacl_inline_string_len(v2), 7);
+  jacl_inline_string_get(v2, buf, sizeof(buf));
+  for (size_t i = 0; i < 7; i++) {
+    ASSERT(buf[i] == 1);
+  }
+  ASSERT(buf[7] == '\0');
+
+  TEST_PASS();
+}
+
+/* Test: INLINE_STRING type tag is distinct from STRING (heap pointer) type tag */
+static int test_inline_string_vs_string_tag(void) {
+  ASSERT(JACL_TAG_INLINE_STRING != JACL_TAG_STRING);
+
+  int dummy;
+  JaclVal istr = jacl_inline_string("test", 4);
+  JaclVal hstr = jacl_string_ptr(&dummy);
+
+  /* Inline string is not a heap string */
+  ASSERT(jacl_is_inline_string(istr));
+  ASSERT(!jacl_is_string(istr));
+
+  /* Heap string is not an inline string */
+  ASSERT(jacl_is_string(hstr));
+  ASSERT(!jacl_is_inline_string(hstr));
+
+  TEST_PASS();
+}
+
+/* Test: inline string predicate ignores flag bits */
+static int test_inline_string_predicate_with_flags(void) {
+  JaclVal v = jacl_inline_string("hi", 2);
+
+  ASSERT(jacl_is_inline_string(v | JACL_FLAG_TAINTED));
+  ASSERT(jacl_is_inline_string(v | JACL_FLAG_SECRET));
+  ASSERT(jacl_is_inline_string(v | JACL_FLAG_ERROR));
+  ASSERT(jacl_is_inline_string(v | JACL_FLAGS_MASK));
+
+  /* Other types are not inline string */
+  ASSERT(!jacl_is_inline_string(JACL_NIL));
+  ASSERT(!jacl_is_inline_string(JACL_TRUE));
+  ASSERT(!jacl_is_inline_string(jacl_i32(42)));
+  ASSERT(!jacl_is_inline_string(jacl_f32(1.0f)));
+
+  TEST_PASS();
+}
+
+/* Test: null in input string acts as terminator */
+static int test_inline_string_null_terminates(void) {
+  /* String "ab\0cd" with len 5 should only store "ab" */
+  char s[] = {'a', 'b', '\0', 'c', 'd'};
+  JaclVal v = jacl_inline_string(s, 5);
+  char buf[8];
+
+  ASSERT_SIZE_EQ(jacl_inline_string_len(v), 2);
+  jacl_inline_string_get(v, buf, sizeof(buf));
+  ASSERT_STR_EQ(buf, "ab");
+
+  TEST_PASS();
+}
+
 int main(void) {
   printf("Test: JaclVal size\n");
   if (!test_jaclval_size()) return 1;
@@ -657,6 +813,34 @@ int main(void) {
 
   printf("Test: pointer payload isolation\n");
   if (!test_ptr_payload_isolation()) return 1;
+
+  /* US-006: Inline string packing and unpacking */
+  printf("Test: inline string empty\n");
+  if (!test_inline_string_empty()) return 1;
+
+  printf("Test: inline string single char\n");
+  if (!test_inline_string_single_char()) return 1;
+
+  printf("Test: inline string 6 bytes\n");
+  if (!test_inline_string_6_bytes()) return 1;
+
+  printf("Test: inline string 7 bytes\n");
+  if (!test_inline_string_7_bytes()) return 1;
+
+  printf("Test: inline string round-trip\n");
+  if (!test_inline_string_roundtrip()) return 1;
+
+  printf("Test: inline string byte values\n");
+  if (!test_inline_string_byte_values()) return 1;
+
+  printf("Test: inline string vs string tag\n");
+  if (!test_inline_string_vs_string_tag()) return 1;
+
+  printf("Test: inline string predicate with flags\n");
+  if (!test_inline_string_predicate_with_flags()) return 1;
+
+  printf("Test: inline string null terminates\n");
+  if (!test_inline_string_null_terminates()) return 1;
 
   return 0;
 }

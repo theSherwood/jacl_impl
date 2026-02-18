@@ -156,6 +156,47 @@ static inline bool jacl_is_bignum(JaclVal v) {
     return (v & JACL_TYPE_MASK) == JACL_TAG_BIGNUM;
 }
 
+/* --- Inline string constructor --- */
+
+static inline JaclVal jacl_inline_string(const char *s, size_t len) {
+    uint64_t payload = 0;
+    if (len > 7) len = 7;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\0') break;
+        payload |= ((uint64_t)(unsigned char)s[i]) << (i * 8);
+    }
+    return JACL_TAG_INLINE_STRING | payload;
+}
+
+/* --- Inline string predicate --- */
+
+static inline bool jacl_is_inline_string(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_INLINE_STRING;
+}
+
+/* --- Inline string extractors --- */
+
+static inline size_t jacl_inline_string_len(JaclVal v) {
+    uint64_t payload = v & JACL_PAYLOAD_MASK;
+    size_t len = 0;
+    for (size_t i = 0; i < 7; i++) {
+        if (((payload >> (i * 8)) & 0xFF) == 0) break;
+        len++;
+    }
+    return len;
+}
+
+static inline void jacl_inline_string_get(JaclVal v, char *buf, size_t buflen) {
+    uint64_t payload = v & JACL_PAYLOAD_MASK;
+    size_t i;
+    for (i = 0; i < 7 && i + 1 < buflen; i++) {
+        unsigned char c = (unsigned char)((payload >> (i * 8)) & 0xFF);
+        if (c == '\0') break;
+        buf[i] = (char)c;
+    }
+    if (buflen > 0) buf[i] = '\0';
+}
+
 /* --- Extractors --- */
 
 static inline bool jacl_as_bool(JaclVal v) {
