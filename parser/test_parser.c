@@ -198,6 +198,57 @@ static int test_lit_string_with_escapes(void) {
   TEST_PASS();
 }
 
+/* ---- US-004 tests ---- */
+
+static int test_var_ref_single_char(void) {
+  setup();
+  AstNode* n = parse_atom("$x");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_VAR_REF);
+  ASSERT_U32_EQ(n->data.var_ref.length, 1);
+  ASSERT(memcmp(n->data.var_ref.name, "x", 1) == 0);
+  /* Source position includes the $ prefix */
+  ASSERT_U32_EQ(n->start.line, 1);
+  ASSERT_U32_EQ(n->start.column, 1);
+  ASSERT_U32_EQ(n->start.offset, 0);
+  ASSERT_U32_EQ(n->end.offset, 2);
+  ASSERT_U32_EQ(n->end.column, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_var_ref_multichar(void) {
+  setup();
+  AstNode* n = parse_atom("$foo");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_VAR_REF);
+  ASSERT_U32_EQ(n->data.var_ref.length, 3);
+  ASSERT(memcmp(n->data.var_ref.name, "foo", 3) == 0);
+  ASSERT_U32_EQ(n->start.line, 1);
+  ASSERT_U32_EQ(n->start.column, 1);
+  ASSERT_U32_EQ(n->start.offset, 0);
+  ASSERT_U32_EQ(n->end.offset, 4);
+  ASSERT_U32_EQ(n->end.column, 5);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_var_ref_long_name(void) {
+  setup();
+  AstNode* n = parse_atom("$long_name");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_VAR_REF);
+  ASSERT_U32_EQ(n->data.var_ref.length, 9);
+  ASSERT(memcmp(n->data.var_ref.name, "long_name", 9) == 0);
+  ASSERT_U32_EQ(n->start.offset, 0);
+  ASSERT_U32_EQ(n->end.offset, 10);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -223,6 +274,10 @@ int main(void) {
     {"lit_word_foo",         test_lit_word_foo},
     {"lit_string_quoted",    test_lit_string_quoted},
     {"lit_string_escapes",   test_lit_string_with_escapes},
+    /* US-004 */
+    {"var_ref_single_char",  test_var_ref_single_char},
+    {"var_ref_multichar",    test_var_ref_multichar},
+    {"var_ref_long_name",    test_var_ref_long_name},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;
