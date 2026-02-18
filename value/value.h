@@ -235,6 +235,16 @@ static inline JaclVal jacl_clear_error(JaclVal v) {
     return v & ~JACL_FLAG_ERROR;
 }
 
+/* --- Flag propagation --- */
+
+static inline uint64_t jacl_propagate_flags(JaclVal a, JaclVal b) {
+    return (a | b) & JACL_FLAGS_MASK;
+}
+
+static inline JaclVal jacl_apply_flags(JaclVal result, uint64_t flags) {
+    return result | (flags & JACL_FLAGS_MASK);
+}
+
 /* --- Extractors --- */
 
 static inline bool jacl_as_bool(JaclVal v) {

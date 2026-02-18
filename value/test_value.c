@@ -944,6 +944,208 @@ static int test_flag_idempotent(void) {
   TEST_PASS();
 }
 
+/* ---- US-008 tests: Flag propagation helpers ---- */
+
+/* Test: propagate_flags returns OR of both operands' flags */
+static int test_propagate_flags_basic(void) {
+  JaclVal a = jacl_set_tainted(jacl_i32(1));
+  JaclVal b = jacl_set_secret(jacl_i32(2));
+
+  uint64_t flags = jacl_propagate_flags(a, b);
+  ASSERT(flags & JACL_FLAG_TAINTED);
+  ASSERT(flags & JACL_FLAG_SECRET);
+  ASSERT(!(flags & JACL_FLAG_ERROR));
+
+  /* Only flag bits should be set */
+  ASSERT_U64_EQ(flags & ~JACL_FLAGS_MASK, 0);
+
+  TEST_PASS();
+}
+
+/* Test: propagate_flags with no flags on either operand */
+static int test_propagate_flags_none(void) {
+  JaclVal a = jacl_i32(10);
+  JaclVal b = jacl_f32(2.0f);
+
+  uint64_t flags = jacl_propagate_flags(a, b);
+  ASSERT_U64_EQ(flags, 0);
+
+  TEST_PASS();
+}
+
+/* Test: propagate_flags with one flag each (distinct) */
+static int test_propagate_flags_one_each(void) {
+  /* tainted + error */
+  JaclVal a = jacl_set_tainted(jacl_i32(1));
+  JaclVal b = jacl_set_error(jacl_i32(2));
+
+  uint64_t flags = jacl_propagate_flags(a, b);
+  ASSERT(flags & JACL_FLAG_TAINTED);
+  ASSERT(!(flags & JACL_FLAG_SECRET));
+  ASSERT(flags & JACL_FLAG_ERROR);
+
+  /* secret + error */
+  JaclVal c = jacl_set_secret(jacl_i32(3));
+  JaclVal d = jacl_set_error(jacl_i32(4));
+
+  uint64_t flags2 = jacl_propagate_flags(c, d);
+  ASSERT(!(flags2 & JACL_FLAG_TAINTED));
+  ASSERT(flags2 & JACL_FLAG_SECRET);
+  ASSERT(flags2 & JACL_FLAG_ERROR);
+
+  TEST_PASS();
+}
+
+/* Test: propagate_flags with all flags on both operands */
+static int test_propagate_flags_all(void) {
+  JaclVal a = jacl_set_tainted(jacl_set_secret(jacl_set_error(jacl_i32(1))));
+  JaclVal b = jacl_set_tainted(jacl_set_secret(jacl_set_error(jacl_i32(2))));
+
+  uint64_t flags = jacl_propagate_flags(a, b);
+  ASSERT(flags & JACL_FLAG_TAINTED);
+  ASSERT(flags & JACL_FLAG_SECRET);
+  ASSERT(flags & JACL_FLAG_ERROR);
+  ASSERT_U64_EQ(flags, JACL_FLAGS_MASK);
+
+  TEST_PASS();
+}
+
+/* Test: propagate_flags with mixed flags */
+static int test_propagate_flags_mixed(void) {
+  /* a has tainted+secret, b has secret+error -> result has all three */
+  JaclVal a = jacl_set_tainted(jacl_set_secret(jacl_i32(1)));
+  JaclVal b = jacl_set_secret(jacl_set_error(jacl_i32(2)));
+
+  uint64_t flags = jacl_propagate_flags(a, b);
+  ASSERT(flags & JACL_FLAG_TAINTED);
+  ASSERT(flags & JACL_FLAG_SECRET);
+  ASSERT(flags & JACL_FLAG_ERROR);
+
+  TEST_PASS();
+}
+
+/* Test: propagate_flags — error on either operand propagates */
+static int test_propagate_flags_error_either(void) {
+  JaclVal clean = jacl_i32(1);
+  JaclVal errored = jacl_set_error(jacl_i32(2));
+
+  /* Error on b */
+  uint64_t f1 = jacl_propagate_flags(clean, errored);
+  ASSERT(f1 & JACL_FLAG_ERROR);
+
+  /* Error on a */
+  uint64_t f2 = jacl_propagate_flags(errored, clean);
+  ASSERT(f2 & JACL_FLAG_ERROR);
+
+  TEST_PASS();
+}
+
+/* Test: apply_flags applies flag bits onto a result */
+static int test_apply_flags_basic(void) {
+  JaclVal result = jacl_i32(42);
+  uint64_t flags = JACL_FLAG_TAINTED | JACL_FLAG_SECRET;
+
+  JaclVal flagged = jacl_apply_flags(result, flags);
+
+  /* Result should have the flags */
+  ASSERT(jacl_is_tainted(flagged));
+  ASSERT(jacl_is_secret(flagged));
+  ASSERT(!jacl_is_error(flagged));
+
+  /* Type tag and payload should be preserved */
+  ASSERT(jacl_is_i32(flagged));
+  ASSERT_INT_EQ(jacl_as_i32(flagged), 42);
+
+  TEST_PASS();
+}
+
+/* Test: apply_flags with zero flags is a no-op */
+static int test_apply_flags_zero(void) {
+  JaclVal result = jacl_f32(3.14f);
+  JaclVal flagged = jacl_apply_flags(result, 0);
+  ASSERT_U64_EQ(flagged, result);
+
+  TEST_PASS();
+}
+
+/* Test: apply_flags preserves existing flags on result */
+static int test_apply_flags_preserves_existing(void) {
+  JaclVal result = jacl_set_tainted(jacl_i32(7));
+  uint64_t flags = JACL_FLAG_ERROR;
+
+  JaclVal flagged = jacl_apply_flags(result, flags);
+  ASSERT(jacl_is_tainted(flagged));  /* already on result */
+  ASSERT(jacl_is_error(flagged));     /* newly applied */
+  ASSERT(!jacl_is_secret(flagged));
+
+  ASSERT(jacl_is_i32(flagged));
+  ASSERT_INT_EQ(jacl_as_i32(flagged), 7);
+
+  TEST_PASS();
+}
+
+/* Test: apply_flags only applies flag bits (ignores non-flag bits in input) */
+static int test_apply_flags_masks_input(void) {
+  JaclVal result = jacl_i32(10);
+  /* Pass garbage bits plus a real flag */
+  uint64_t flags = JACL_FLAG_SECRET | UINT64_C(0x00FFFFFFFFFFFFFF);
+
+  JaclVal flagged = jacl_apply_flags(result, flags);
+  /* Only the secret flag should be applied */
+  ASSERT(jacl_is_secret(flagged));
+  /* Type and payload preserved */
+  ASSERT(jacl_is_i32(flagged));
+  ASSERT_INT_EQ(jacl_as_i32(flagged), 10);
+
+  TEST_PASS();
+}
+
+/* Test: end-to-end propagate then apply */
+static int test_propagate_and_apply(void) {
+  JaclVal a = jacl_set_tainted(jacl_i32(3));
+  JaclVal b = jacl_set_error(jacl_i32(4));
+
+  uint64_t flags = jacl_propagate_flags(a, b);
+  JaclVal result = jacl_apply_flags(jacl_i32(7), flags);
+
+  ASSERT(jacl_is_tainted(result));
+  ASSERT(!jacl_is_secret(result));
+  ASSERT(jacl_is_error(result));
+  ASSERT(jacl_is_i32(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 7);
+
+  TEST_PASS();
+}
+
+/* Test: propagate_flags with various flag combinations (spot-check 2^3 = 8 per operand) */
+static int test_propagate_flags_combinations(void) {
+  /* All 8 possible flag combos */
+  uint64_t combos[8] = {
+    0,
+    JACL_FLAG_TAINTED,
+    JACL_FLAG_SECRET,
+    JACL_FLAG_ERROR,
+    JACL_FLAG_TAINTED | JACL_FLAG_SECRET,
+    JACL_FLAG_TAINTED | JACL_FLAG_ERROR,
+    JACL_FLAG_SECRET | JACL_FLAG_ERROR,
+    JACL_FLAG_TAINTED | JACL_FLAG_SECRET | JACL_FLAG_ERROR
+  };
+
+  /* Spot-check: for each combo as a, pair with selected b combos */
+  for (int i = 0; i < 8; i++) {
+    for (int j = 0; j < 8; j++) {
+      JaclVal a = jacl_i32(1) | combos[i];
+      JaclVal b = jacl_i32(2) | combos[j];
+
+      uint64_t flags = jacl_propagate_flags(a, b);
+      uint64_t expected = combos[i] | combos[j];
+      ASSERT_U64_EQ(flags, expected);
+    }
+  }
+
+  TEST_PASS();
+}
+
 int main(void) {
   printf("Test: JaclVal size\n");
   if (!test_jaclval_size()) return 1;
@@ -1091,6 +1293,43 @@ int main(void) {
 
   printf("Test: flag idempotent\n");
   if (!test_flag_idempotent()) return 1;
+
+  /* US-008: Flag propagation helpers */
+  printf("Test: propagate flags basic\n");
+  if (!test_propagate_flags_basic()) return 1;
+
+  printf("Test: propagate flags none\n");
+  if (!test_propagate_flags_none()) return 1;
+
+  printf("Test: propagate flags one each\n");
+  if (!test_propagate_flags_one_each()) return 1;
+
+  printf("Test: propagate flags all\n");
+  if (!test_propagate_flags_all()) return 1;
+
+  printf("Test: propagate flags mixed\n");
+  if (!test_propagate_flags_mixed()) return 1;
+
+  printf("Test: propagate flags error either\n");
+  if (!test_propagate_flags_error_either()) return 1;
+
+  printf("Test: apply flags basic\n");
+  if (!test_apply_flags_basic()) return 1;
+
+  printf("Test: apply flags zero\n");
+  if (!test_apply_flags_zero()) return 1;
+
+  printf("Test: apply flags preserves existing\n");
+  if (!test_apply_flags_preserves_existing()) return 1;
+
+  printf("Test: apply flags masks input\n");
+  if (!test_apply_flags_masks_input()) return 1;
+
+  printf("Test: propagate and apply end-to-end\n");
+  if (!test_propagate_and_apply()) return 1;
+
+  printf("Test: propagate flags combinations\n");
+  if (!test_propagate_flags_combinations()) return 1;
 
   return 0;
 }
