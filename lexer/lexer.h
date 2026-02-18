@@ -295,6 +295,126 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       continue;
     }
 
+    /* Number literals: start with a digit */
+    if (c >= '0' && c <= '9') {
+      uint32_t start = lex.pos;
+      uint32_t sline = lex.line;
+      uint32_t scol  = lex.col;
+
+      /* Hex: 0x... */
+      if (c == '0' && (lex.source[lex.pos + 1] == 'x' ||
+                       lex.source[lex.pos + 1] == 'X')) {
+        lexer__advance(&lex); /* '0' */
+        lexer__advance(&lex); /* 'x' */
+        int64_t val = 0;
+        int has_digits = 0;
+        for (;;) {
+          char h = lexer__peek(&lex);
+          if (h >= '0' && h <= '9')      { val = val * 16 + (h - '0'); }
+          else if (h >= 'a' && h <= 'f') { val = val * 16 + (h - 'a' + 10); }
+          else if (h >= 'A' && h <= 'F') { val = val * 16 + (h - 'A' + 10); }
+          else break;
+          has_digits = 1;
+          lexer__advance(&lex);
+        }
+        if (!has_digits || lexer__is_word_start(lexer__peek(&lex))) {
+          while (lexer__is_word_char(lexer__peek(&lex)))
+            lexer__advance(&lex);
+          Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
+          tok.payload.error_msg = !has_digits
+            ? "hex literal with no digits"
+            : "invalid suffix on number";
+          lexer__arr_push(&arr, tok);
+          error_count++;
+          continue;
+        }
+        Token tok = lexer__make_token(&lex, TOKEN_INT, start, sline, scol);
+        tok.payload.int_val = (int32_t)val;
+        lexer__arr_push(&arr, tok);
+        continue;
+      }
+
+      /* Binary: 0b... */
+      if (c == '0' && (lex.source[lex.pos + 1] == 'b' ||
+                       lex.source[lex.pos + 1] == 'B')) {
+        lexer__advance(&lex); /* '0' */
+        lexer__advance(&lex); /* 'b' */
+        int64_t val = 0;
+        int has_digits = 0;
+        while (lexer__peek(&lex) == '0' || lexer__peek(&lex) == '1') {
+          val = val * 2 + (lexer__peek(&lex) - '0');
+          has_digits = 1;
+          lexer__advance(&lex);
+        }
+        if (!has_digits || lexer__is_word_start(lexer__peek(&lex)) ||
+            (lexer__peek(&lex) >= '2' && lexer__peek(&lex) <= '9')) {
+          while (lexer__is_word_char(lexer__peek(&lex)))
+            lexer__advance(&lex);
+          Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
+          tok.payload.error_msg = !has_digits
+            ? "binary literal with no digits"
+            : "invalid suffix on number";
+          lexer__arr_push(&arr, tok);
+          error_count++;
+          continue;
+        }
+        Token tok = lexer__make_token(&lex, TOKEN_INT, start, sline, scol);
+        tok.payload.int_val = (int32_t)val;
+        lexer__arr_push(&arr, tok);
+        continue;
+      }
+
+      /* Decimal integer or float */
+      int64_t int_val = 0;
+      while (lexer__peek(&lex) >= '0' && lexer__peek(&lex) <= '9') {
+        int_val = int_val * 10 + (lexer__peek(&lex) - '0');
+        lexer__advance(&lex);
+      }
+
+      /* Float: digits '.' digits */
+      if (lexer__peek(&lex) == '.' &&
+          lex.source[lex.pos + 1] >= '0' && lex.source[lex.pos + 1] <= '9') {
+        lexer__advance(&lex); /* consume '.' */
+        int64_t frac = 0;
+        int64_t frac_div = 1;
+        while (lexer__peek(&lex) >= '0' && lexer__peek(&lex) <= '9') {
+          frac = frac * 10 + (lexer__peek(&lex) - '0');
+          frac_div *= 10;
+          lexer__advance(&lex);
+        }
+        if (lexer__is_word_start(lexer__peek(&lex))) {
+          while (lexer__is_word_char(lexer__peek(&lex)))
+            lexer__advance(&lex);
+          Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
+          tok.payload.error_msg = "invalid suffix on number";
+          lexer__arr_push(&arr, tok);
+          error_count++;
+          continue;
+        }
+        Token tok = lexer__make_token(&lex, TOKEN_FLOAT, start, sline, scol);
+        tok.payload.float_val = (float)int_val + (float)frac / (float)frac_div;
+        lexer__arr_push(&arr, tok);
+        continue;
+      }
+
+      /* Integer — check for invalid suffix */
+      if (lexer__is_word_start(lexer__peek(&lex))) {
+        while (lexer__is_word_char(lexer__peek(&lex)))
+          lexer__advance(&lex);
+        Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
+        tok.payload.error_msg = "invalid suffix on number";
+        lexer__arr_push(&arr, tok);
+        error_count++;
+        continue;
+      }
+      {
+        Token tok = lexer__make_token(&lex, TOKEN_INT, start, sline, scol);
+        tok.payload.int_val = (int32_t)int_val;
+        lexer__arr_push(&arr, tok);
+      }
+      continue;
+    }
+
     /* Words: start with letter, underscore, or UTF-8 byte */
     if (lexer__is_word_start(c)) {
       uint32_t start = lex.pos;

@@ -504,6 +504,215 @@ static int test_multiline_with_comments(void) {
   TEST_PASS();
 }
 
+/* ---- US-004 helpers ---- */
+
+static int float_approx_eq(float a, float b) {
+  float diff = a - b;
+  if (diff < 0) diff = -diff;
+  return diff < 0.0001f;
+}
+
+/* ---- US-004 tests ---- */
+
+static int test_int_zero(void) {
+  setup();
+  LexResult r = lexer_lex("0", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* INT + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[0].payload.int_val, 0);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_U32_EQ(r.tokens[0].offset, 0);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_int_positive(void) {
+  setup();
+  LexResult r = lexer_lex("42", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[0].payload.int_val, 42);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_float_basic(void) {
+  setup();
+  LexResult r = lexer_lex("3.14", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_FLOAT);
+  ASSERT(float_approx_eq(r.tokens[0].payload.float_val, 3.14f));
+  ASSERT_U32_EQ(r.tokens[0].length, 4);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_float_leading_zero(void) {
+  setup();
+  LexResult r = lexer_lex("0.5", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_FLOAT);
+  ASSERT(float_approx_eq(r.tokens[0].payload.float_val, 0.5f));
+  ASSERT_U32_EQ(r.tokens[0].length, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_hex_literal(void) {
+  setup();
+  LexResult r = lexer_lex("0xFF", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[0].payload.int_val, 255);
+  ASSERT_U32_EQ(r.tokens[0].length, 4);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_hex_uppercase(void) {
+  setup();
+  LexResult r = lexer_lex("0X1A", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[0].payload.int_val, 26);
+  ASSERT_U32_EQ(r.tokens[0].length, 4);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_binary_literal(void) {
+  setup();
+  LexResult r = lexer_lex("0b1010", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[0].payload.int_val, 10);
+  ASSERT_U32_EQ(r.tokens[0].length, 6);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_binary_zero(void) {
+  setup();
+  LexResult r = lexer_lex("0b0", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[0].payload.int_val, 0);
+  ASSERT_U32_EQ(r.tokens[0].length, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_invalid_suffix_on_int(void) {
+  setup();
+  LexResult r = lexer_lex("42abc", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* ERROR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.tokens[0].length, 5);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_invalid_suffix_on_float(void) {
+  setup();
+  LexResult r = lexer_lex("3.14abc", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* ERROR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.tokens[0].length, 7);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_invalid_suffix_on_hex(void) {
+  setup();
+  LexResult r = lexer_lex("0xFFgg", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* ERROR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_int32_max(void) {
+  setup();
+  LexResult r = lexer_lex("2147483647", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[0].payload.int_val, 2147483647);
+  ASSERT_U32_EQ(r.tokens[0].length, 10);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_very_small_float(void) {
+  setup();
+  LexResult r = lexer_lex("0.001", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_FLOAT);
+  ASSERT(float_approx_eq(r.tokens[0].payload.float_val, 0.001f));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_numbers_in_expression(void) {
+  setup();
+  LexResult r = lexer_lex("[+ 1 2]", &test_arena);
+  /* [ OPERATOR INT INT ] EOF = 6 */
+  ASSERT_U32_EQ(r.count, 6);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_LBRACKET);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OPERATOR);
+  ASSERT(token_text_eq(r.tokens[1], "+"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[2].payload.int_val, 1);
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[3].payload.int_val, 2);
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_RBRACKET);
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_multiple_numbers(void) {
+  setup();
+  LexResult r = lexer_lex("42 3.14 0xFF", &test_arena);
+  ASSERT_U32_EQ(r.count, 4); /* INT FLOAT INT EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[0].payload.int_val, 42);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_FLOAT);
+  ASSERT(float_approx_eq(r.tokens[1].payload.float_val, 3.14f));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[2].payload.int_val, 255);
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -545,6 +754,22 @@ int main(void) {
     {"text_points_into_source",  test_text_points_into_source},
     {"mixed_sequence",           test_mixed_sequence},
     {"multiline_with_comments",  test_multiline_with_comments},
+    /* US-004 */
+    {"int_zero",                 test_int_zero},
+    {"int_positive",             test_int_positive},
+    {"float_basic",              test_float_basic},
+    {"float_leading_zero",       test_float_leading_zero},
+    {"hex_literal",              test_hex_literal},
+    {"hex_uppercase",            test_hex_uppercase},
+    {"binary_literal",           test_binary_literal},
+    {"binary_zero",              test_binary_zero},
+    {"invalid_suffix_int",       test_invalid_suffix_on_int},
+    {"invalid_suffix_float",     test_invalid_suffix_on_float},
+    {"invalid_suffix_hex",       test_invalid_suffix_on_hex},
+    {"int32_max",                test_int32_max},
+    {"very_small_float",         test_very_small_float},
+    {"numbers_in_expression",    test_numbers_in_expression},
+    {"multiple_numbers",         test_multiple_numbers},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;
