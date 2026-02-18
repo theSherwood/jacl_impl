@@ -1545,6 +1545,361 @@ static int test_interp_in_context(void) {
   TEST_PASS();
 }
 
+/* ---- US-008 tests ---- */
+
+static int test_error_control_char(void) {
+  setup();
+  /* Stray control character should produce ERROR with descriptive message */
+  LexResult r = lexer_lex("\x01", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* ERROR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_U32_EQ(r.tokens[0].offset, 0);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  /* Error message is arena-allocated with hex representation */
+  ASSERT_STR_EQ(r.tokens[0].payload.error_msg, "unexpected character (0x01)");
+  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_error_recovery_continues(void) {
+  setup();
+  /* After error token, valid tokens are still lexed correctly */
+  LexResult r = lexer_lex("\x01 hello 42", &test_arena);
+  ASSERT_U32_EQ(r.count, 4); /* ERROR WORD INT EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "hello"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[2].payload.int_val, 42);
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_error_positions_after_errors(void) {
+  setup();
+  /* Multiple errors across lines — position tracking stays correct */
+  const char* src = "\x01\nhello\n\x02\nworld";
+  LexResult r = lexer_lex(src, &test_arena);
+  ASSERT_U32_EQ(r.count, 8); /* ERROR NL WORD NL ERROR NL WORD EOF */
+
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_NEWLINE);
+  ASSERT_U32_EQ(r.tokens[1].line, 1);
+
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[2], "hello"));
+  ASSERT_U32_EQ(r.tokens[2].line, 2);
+  ASSERT_U32_EQ(r.tokens[2].column, 1);
+
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_NEWLINE);
+  ASSERT_U32_EQ(r.tokens[3].line, 2);
+
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.tokens[4].line, 3);
+  ASSERT_U32_EQ(r.tokens[4].column, 1);
+  ASSERT_STR_EQ(r.tokens[4].payload.error_msg, "unexpected character (0x02)");
+
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_NEWLINE);
+
+  ASSERT_INT_EQ(r.tokens[6].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[6], "world"));
+  ASSERT_U32_EQ(r.tokens[6].line, 4);
+  ASSERT_U32_EQ(r.tokens[6].column, 1);
+
+  ASSERT_INT_EQ(r.tokens[7].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 2);
+
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_error_count_reflects_total(void) {
+  setup();
+  /* Multiple different error types: control char, bad $, number suffix, DEL, bad escape */
+  const char* src = "\x01 $ 42abc \x7F \"bad\\q\"";
+  LexResult r = lexer_lex(src, &test_arena);
+  ASSERT_U32_EQ(r.count, 6); /* 5 errors + EOF */
+  ASSERT_U32_EQ(r.error_count, 5);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR); /* \x01 */
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_ERROR); /* $ */
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_ERROR); /* 42abc */
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_ERROR); /* \x7F */
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_ERROR); /* "bad\q" */
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_error_mixed_program(void) {
+  setup();
+  /* Multi-line program mixing valid and invalid constructs */
+  const char* src =
+    "set x 42\n"
+    "\x01\n"
+    "set y $\n"
+    "set z 99abc\n"
+    "[print $x]\n";
+
+  LexResult r = lexer_lex(src, &test_arena);
+
+  TokenType expected[] = {
+    TOKEN_WORD, TOKEN_WORD, TOKEN_INT, TOKEN_NEWLINE,
+    TOKEN_ERROR, TOKEN_NEWLINE,
+    TOKEN_WORD, TOKEN_WORD, TOKEN_ERROR, TOKEN_NEWLINE,
+    TOKEN_WORD, TOKEN_WORD, TOKEN_ERROR, TOKEN_NEWLINE,
+    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_VAR, TOKEN_RBRACKET, TOKEN_NEWLINE,
+    TOKEN_EOF
+  };
+
+  uint32_t expected_count = sizeof(expected) / sizeof(expected[0]);
+  ASSERT_U32_EQ(r.count, expected_count);
+  {
+    uint32_t i;
+    for (i = 0; i < expected_count && i < r.count; i++) {
+      if ((int)r.tokens[i].type != (int)expected[i]) {
+        fprintf(stderr, "FAIL: token[%u] type (Line %d)\n"
+                "  Actual: %d\n  Expected: %d\n",
+                i, __LINE__, r.tokens[i].type, expected[i]);
+        return 0;
+      }
+    }
+  }
+
+  ASSERT_U32_EQ(r.error_count, 3);
+  /* Position check: [print $x] starts on line 5 */
+  ASSERT_U32_EQ(r.tokens[14].line, 5);
+  ASSERT_U32_EQ(r.tokens[14].column, 1);
+
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_integration_full_program(void) {
+  setup();
+  /* A realistic 58-line JACL program exercising all token types */
+  const char* src =
+    "# JACL Integration Test\n"
+    "# Exercises all token types\n"
+    "\n"
+    "import http\n"
+    "import json\n"
+    "\n"
+    "# Variables and literals\n"
+    "set name \"world\"\n"
+    "set count 42\n"
+    "set ratio 3.14\n"
+    "set mask 0xFF\n"
+    "set flags 0b1010\n"
+    "\n"
+    "# Keywords and maps\n"
+    "[map :host \"localhost\" :port 8080]\n"
+    "\n"
+    "# Variable references and operators\n"
+    "set x $name\n"
+    "[+ $count 1]\n"
+    "[>= $x $name]\n"
+    "\n"
+    "# Dollar-bracket expressions\n"
+    "set result $[+ 1 2]\n"
+    "\n"
+    "# String interpolation - variable\n"
+    "[print \"Hello $name!\"]\n"
+    "\n"
+    "# String interpolation - expression\n"
+    "[print \"Sum: $[+ 1 2]\"]\n"
+    "\n"
+    "# Multi-line expression\n"
+    "[if [> $count 0]\n"
+    "  [print \"positive\"]\n"
+    "  [print \"negative\"]\n"
+    "]\n"
+    "\n"
+    "# Nested braces and parens\n"
+    "[define greet {person} (\n"
+    "  set msg \"Hi $person\"\n"
+    "  [print $msg]\n"
+    ")]\n"
+    "\n"
+    "# Complex interpolation\n"
+    "set report \"Found $count at $[now]\"\n"
+    "\n"
+    "# Mixed escapes in strings\n"
+    "set path \"C:\\\\dir\\\\file\"\n"
+    "set tabs \"a\\tb\\tc\"\n"
+    "\n"
+    "# All delimiter types\n"
+    "[foo {bar} (baz)]\n"
+    "\n"
+    "# Multi-line string\n"
+    "set multi \"line1\\nline2\\nline3\"\n"
+    "[print $multi]\n"
+    "\n"
+    "# Final line\n"
+    "[exit 0]\n";
+
+  LexResult r = lexer_lex(src, &test_arena);
+
+  /* Verify every token type in the program (190 tokens) */
+  TokenType expected[] = {
+    /* line 1-3: comments and blank */
+    TOKEN_NEWLINE, TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 4-5: imports */
+    TOKEN_WORD, TOKEN_WORD, TOKEN_NEWLINE,
+    TOKEN_WORD, TOKEN_WORD, TOKEN_NEWLINE,
+    /* line 6-7: blank + comment */
+    TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 8: set name "world" */
+    TOKEN_WORD, TOKEN_WORD, TOKEN_STRING, TOKEN_NEWLINE,
+    /* line 9: set count 42 */
+    TOKEN_WORD, TOKEN_WORD, TOKEN_INT, TOKEN_NEWLINE,
+    /* line 10: set ratio 3.14 */
+    TOKEN_WORD, TOKEN_WORD, TOKEN_FLOAT, TOKEN_NEWLINE,
+    /* line 11: set mask 0xFF */
+    TOKEN_WORD, TOKEN_WORD, TOKEN_INT, TOKEN_NEWLINE,
+    /* line 12: set flags 0b1010 */
+    TOKEN_WORD, TOKEN_WORD, TOKEN_INT, TOKEN_NEWLINE,
+    /* line 13-14: blank + comment */
+    TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 15: [map :host "localhost" :port 8080] */
+    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_KEYWORD, TOKEN_STRING,
+    TOKEN_KEYWORD, TOKEN_INT, TOKEN_RBRACKET, TOKEN_NEWLINE,
+    /* line 16-17: blank + comment */
+    TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 18: set x $name */
+    TOKEN_WORD, TOKEN_WORD, TOKEN_VAR, TOKEN_NEWLINE,
+    /* line 19: [+ $count 1] */
+    TOKEN_LBRACKET, TOKEN_OPERATOR, TOKEN_VAR, TOKEN_INT,
+    TOKEN_RBRACKET, TOKEN_NEWLINE,
+    /* line 20: [>= $x $name] */
+    TOKEN_LBRACKET, TOKEN_OPERATOR, TOKEN_VAR, TOKEN_VAR,
+    TOKEN_RBRACKET, TOKEN_NEWLINE,
+    /* line 21-22: blank + comment */
+    TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 23: set result $[+ 1 2] */
+    TOKEN_WORD, TOKEN_WORD, TOKEN_DOLLAR_BRACKET, TOKEN_OPERATOR,
+    TOKEN_INT, TOKEN_INT, TOKEN_RBRACKET, TOKEN_NEWLINE,
+    /* line 24-25: blank + comment */
+    TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 26: [print "Hello $name!"] */
+    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_STRING_BEGIN, TOKEN_INTERP_VAR,
+    TOKEN_STRING_END, TOKEN_RBRACKET, TOKEN_NEWLINE,
+    /* line 27-28: blank + comment */
+    TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 29: [print "Sum: $[+ 1 2]"] */
+    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_STRING_BEGIN,
+    TOKEN_INTERP_EXPR_START, TOKEN_OPERATOR, TOKEN_INT, TOKEN_INT,
+    TOKEN_INTERP_EXPR_END, TOKEN_STRING_END, TOKEN_RBRACKET,
+    TOKEN_NEWLINE,
+    /* line 30-31: blank + comment */
+    TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 32: [if [> $count 0] */
+    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_LBRACKET, TOKEN_OPERATOR,
+    TOKEN_VAR, TOKEN_INT, TOKEN_RBRACKET, TOKEN_NEWLINE,
+    /* line 33: [print "positive"] */
+    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_STRING, TOKEN_RBRACKET,
+    TOKEN_NEWLINE,
+    /* line 34: [print "negative"] */
+    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_STRING, TOKEN_RBRACKET,
+    TOKEN_NEWLINE,
+    /* line 35: ] */
+    TOKEN_RBRACKET, TOKEN_NEWLINE,
+    /* line 36-37: blank + comment */
+    TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 38: [define greet {person} ( */
+    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_WORD, TOKEN_LBRACE, TOKEN_WORD,
+    TOKEN_RBRACE, TOKEN_LPAREN, TOKEN_NEWLINE,
+    /* line 39: set msg "Hi $person" */
+    TOKEN_WORD, TOKEN_WORD, TOKEN_STRING_BEGIN, TOKEN_INTERP_VAR,
+    TOKEN_STRING_END, TOKEN_NEWLINE,
+    /* line 40: [print $msg] */
+    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_VAR, TOKEN_RBRACKET,
+    TOKEN_NEWLINE,
+    /* line 41: )] */
+    TOKEN_RPAREN, TOKEN_RBRACKET, TOKEN_NEWLINE,
+    /* line 42-43: blank + comment */
+    TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 44: set report "Found $count at $[now]" */
+    TOKEN_WORD, TOKEN_WORD, TOKEN_STRING_BEGIN, TOKEN_INTERP_VAR,
+    TOKEN_STRING_PART, TOKEN_INTERP_EXPR_START, TOKEN_WORD,
+    TOKEN_INTERP_EXPR_END, TOKEN_STRING_END, TOKEN_NEWLINE,
+    /* line 45-46: blank + comment */
+    TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 47: set path "C:\\dir\\file" */
+    TOKEN_WORD, TOKEN_WORD, TOKEN_STRING, TOKEN_NEWLINE,
+    /* line 48: set tabs "a\tb\tc" */
+    TOKEN_WORD, TOKEN_WORD, TOKEN_STRING, TOKEN_NEWLINE,
+    /* line 49-50: blank + comment */
+    TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 51: [foo {bar} (baz)] */
+    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_LBRACE, TOKEN_WORD, TOKEN_RBRACE,
+    TOKEN_LPAREN, TOKEN_WORD, TOKEN_RPAREN, TOKEN_RBRACKET,
+    TOKEN_NEWLINE,
+    /* line 52-53: blank + comment */
+    TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 54: set multi "line1\nline2\nline3" */
+    TOKEN_WORD, TOKEN_WORD, TOKEN_STRING, TOKEN_NEWLINE,
+    /* line 55: [print $multi] */
+    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_VAR, TOKEN_RBRACKET,
+    TOKEN_NEWLINE,
+    /* line 56-57: blank + comment */
+    TOKEN_NEWLINE, TOKEN_NEWLINE,
+    /* line 58: [exit 0] */
+    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_INT, TOKEN_RBRACKET,
+    TOKEN_NEWLINE,
+    /* EOF */
+    TOKEN_EOF
+  };
+
+  uint32_t expected_count = sizeof(expected) / sizeof(expected[0]);
+  ASSERT_U32_EQ(r.count, expected_count);
+  {
+    uint32_t i;
+    for (i = 0; i < expected_count && i < r.count; i++) {
+      if ((int)r.tokens[i].type != (int)expected[i]) {
+        fprintf(stderr, "FAIL: token[%u] type (Line %d)\n"
+                "  Actual: %d\n  Expected: %d\n",
+                i, __LINE__, r.tokens[i].type, expected[i]);
+        return 0;
+      }
+    }
+  }
+
+  ASSERT_U32_EQ(r.error_count, 0);
+
+  /* Spot-check token content */
+  ASSERT(token_text_eq(r.tokens[3], "import"));
+  ASSERT_STR_EQ(r.tokens[13].payload.text, "world");
+  ASSERT_INT_EQ(r.tokens[17].payload.int_val, 42);
+  ASSERT(float_approx_eq(r.tokens[21].payload.float_val, 3.14f));
+  ASSERT_INT_EQ(r.tokens[25].payload.int_val, 255);  /* 0xFF */
+  ASSERT_INT_EQ(r.tokens[29].payload.int_val, 10);   /* 0b1010 */
+
+  /* Position tracking at key points */
+  ASSERT_U32_EQ(r.tokens[33].line, 15);   /* [map on line 15 */
+  ASSERT_U32_EQ(r.tokens[33].column, 1);
+  ASSERT_U32_EQ(r.tokens[184].line, 58);  /* [exit on line 58 */
+  ASSERT_U32_EQ(r.tokens[184].column, 1);
+
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -1651,6 +2006,13 @@ int main(void) {
     {"interp_dollar_end_str",      test_interp_dollar_at_end_of_string},
     {"interp_expr_with_string",    test_interp_expr_with_string},
     {"interp_in_context",          test_interp_in_context},
+    /* US-008 */
+    {"error_control_char",          test_error_control_char},
+    {"error_recovery_continues",    test_error_recovery_continues},
+    {"error_positions_after_errs",  test_error_positions_after_errors},
+    {"error_count_total",           test_error_count_reflects_total},
+    {"error_mixed_program",         test_error_mixed_program},
+    {"integration_full_program",    test_integration_full_program},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

@@ -273,6 +273,23 @@ static int lexer__is_operator_char(char c) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Arena-allocated error message for unexpected characters
+ * ------------------------------------------------------------------------- */
+
+static const char* lexer__unexpected_char_msg(Lexer* lex, char c) {
+  static const char hex[] = "0123456789ABCDEF";
+  unsigned char uc = (unsigned char)c;
+  /* "unexpected character (0xNN)" = 27 chars + null */
+  char* msg = (char*)arena_alloc(lex->arena, 28);
+  memcpy(msg, "unexpected character (0x", 24);
+  msg[24] = hex[uc >> 4];
+  msg[25] = hex[uc & 0x0F];
+  msg[26] = ')';
+  msg[27] = '\0';
+  return msg;
+}
+
+/* -------------------------------------------------------------------------
  * Internal: Forward declarations for mutually recursive functions
  * ------------------------------------------------------------------------- */
 
@@ -860,7 +877,7 @@ static void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
       uint32_t sc = lex->col;
       lexer__advance(lex);
       Token tok = lexer__make_token(lex, TOKEN_ERROR, s, sl, sc);
-      tok.payload.error_msg = "unexpected character";
+      tok.payload.error_msg = lexer__unexpected_char_msg(lex, c);
       lexer__arr_push(arr, tok);
       (*error_count)++;
     }
@@ -1051,7 +1068,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       uint32_t scol  = lex.col;
       lexer__advance(&lex);
       Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
-      tok.payload.error_msg = "unexpected character";
+      tok.payload.error_msg = lexer__unexpected_char_msg(&lex, c);
       lexer__arr_push(&arr, tok);
       error_count++;
     }
