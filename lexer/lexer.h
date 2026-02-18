@@ -185,6 +185,74 @@ static Token lexer__make_token(Lexer* lex, TokenType type,
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Growable string buffer backed by arena
+ * ------------------------------------------------------------------------- */
+
+typedef struct {
+  char*    data;
+  uint32_t len;
+  uint32_t cap;
+  arena_t* arena;
+} StringBuf;
+
+static void strbuf_init(StringBuf* sb, arena_t* arena) {
+  sb->cap   = 64;
+  sb->len   = 0;
+  sb->arena = arena;
+  sb->data  = (char*)arena_alloc(arena, sb->cap);
+}
+
+static void strbuf_push(StringBuf* sb, char c) {
+  if (sb->len >= sb->cap) {
+    uint32_t new_cap = sb->cap * 2;
+    char* new_data = (char*)arena_alloc(sb->arena, new_cap);
+    memcpy(new_data, sb->data, sb->len);
+    sb->data = new_data;
+    sb->cap  = new_cap;
+  }
+  sb->data[sb->len++] = c;
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: UTF-8 encoding helper
+ * ------------------------------------------------------------------------- */
+
+/* Encode a Unicode codepoint as UTF-8. Returns number of bytes written. */
+static uint32_t lexer__encode_utf8(uint32_t cp, char* out) {
+  if (cp <= 0x7F) {
+    out[0] = (char)cp;
+    return 1;
+  }
+  if (cp <= 0x7FF) {
+    out[0] = (char)(0xC0 | (cp >> 6));
+    out[1] = (char)(0x80 | (cp & 0x3F));
+    return 2;
+  }
+  if (cp <= 0xFFFF) {
+    out[0] = (char)(0xE0 | (cp >> 12));
+    out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[2] = (char)(0x80 | (cp & 0x3F));
+    return 3;
+  }
+  if (cp <= 0x10FFFF) {
+    out[0] = (char)(0xF0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+  }
+  return 0; /* invalid codepoint */
+}
+
+/* Parse a single hex digit. Returns -1 if not a hex digit. */
+static int lexer__hex_digit(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+/* -------------------------------------------------------------------------
  * Internal: Character classification helpers
  * ------------------------------------------------------------------------- */
 
@@ -483,6 +551,152 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
         error_count++;
         continue;
       }
+    }
+
+    /* Strings: "..." with escape sequences */
+    if (c == '"') {
+      uint32_t start = lex.pos;
+      uint32_t sline = lex.line;
+      uint32_t scol  = lex.col;
+      lexer__advance(&lex); /* consume opening '"' */
+
+      StringBuf sb;
+      strbuf_init(&sb, lex.arena);
+      const char* str_error = NULL;
+
+      while (lexer__peek(&lex) != '\0' && lexer__peek(&lex) != '"'
+             && !str_error) {
+        char ch = lexer__peek(&lex);
+
+        /* Embedded newlines */
+        if (ch == '\n' || ch == '\r') {
+          lexer__advance(&lex);
+          if (ch == '\r' && lexer__peek(&lex) == '\n')
+            lexer__advance(&lex);
+          strbuf_push(&sb, '\n'); /* normalize line endings */
+          lex.line++;
+          lex.col = 1;
+          continue;
+        }
+
+        /* Escape sequences */
+        if (ch == '\\') {
+          lexer__advance(&lex); /* consume backslash */
+          char esc = lexer__peek(&lex);
+
+          if (esc == '\0') {
+            str_error = "unterminated string";
+            break;
+          }
+
+          switch (esc) {
+            case '\\': strbuf_push(&sb, '\\'); lexer__advance(&lex); break;
+            case '"':  strbuf_push(&sb, '"');  lexer__advance(&lex); break;
+            case 'n':  strbuf_push(&sb, '\n'); lexer__advance(&lex); break;
+            case 't':  strbuf_push(&sb, '\t'); lexer__advance(&lex); break;
+            case 'r':  strbuf_push(&sb, '\r'); lexer__advance(&lex); break;
+            case '0':  strbuf_push(&sb, '\0'); lexer__advance(&lex); break;
+            case 'x': {
+              lexer__advance(&lex); /* consume 'x' */
+              int d1 = lexer__hex_digit(lexer__peek(&lex));
+              if (d1 < 0) { str_error = "invalid hex escape"; break; }
+              lexer__advance(&lex);
+              int d2 = lexer__hex_digit(lexer__peek(&lex));
+              if (d2 < 0) { str_error = "invalid hex escape"; break; }
+              lexer__advance(&lex);
+              strbuf_push(&sb, (char)(d1 * 16 + d2));
+              break;
+            }
+            case 'u': {
+              lexer__advance(&lex); /* consume 'u' */
+              uint32_t cp = 0;
+              int i;
+              for (i = 0; i < 4; i++) {
+                int d = lexer__hex_digit(lexer__peek(&lex));
+                if (d < 0) { str_error = "invalid unicode escape"; break; }
+                cp = cp * 16 + (uint32_t)d;
+                lexer__advance(&lex);
+              }
+              if (!str_error) {
+                char utf8[4];
+                uint32_t n = lexer__encode_utf8(cp, utf8);
+                uint32_t j;
+                for (j = 0; j < n; j++) strbuf_push(&sb, utf8[j]);
+              }
+              break;
+            }
+            case 'U': {
+              lexer__advance(&lex); /* consume 'U' */
+              uint32_t cp = 0;
+              int i;
+              for (i = 0; i < 8; i++) {
+                int d = lexer__hex_digit(lexer__peek(&lex));
+                if (d < 0) { str_error = "invalid unicode escape"; break; }
+                cp = cp * 16 + (uint32_t)d;
+                lexer__advance(&lex);
+              }
+              if (!str_error) {
+                if (cp > 0x10FFFF) {
+                  str_error = "unicode codepoint out of range";
+                } else {
+                  char utf8[4];
+                  uint32_t n = lexer__encode_utf8(cp, utf8);
+                  uint32_t j;
+                  for (j = 0; j < n; j++) strbuf_push(&sb, utf8[j]);
+                }
+              }
+              break;
+            }
+            default:
+              str_error = "invalid escape sequence";
+              lexer__advance(&lex); /* consume the invalid escape char */
+              break;
+          }
+          continue;
+        }
+
+        /* Regular character */
+        strbuf_push(&sb, ch);
+        lexer__advance(&lex);
+      }
+
+      /* Check for unterminated string (hit EOF without closing quote) */
+      if (!str_error && lexer__peek(&lex) == '\0') {
+        str_error = "unterminated string";
+      }
+
+      if (str_error) {
+        /* Skip remaining string content for error recovery */
+        while (lexer__peek(&lex) != '\0' && lexer__peek(&lex) != '"') {
+          char skip = lexer__peek(&lex);
+          if (skip == '\\') {
+            lexer__advance(&lex);
+            if (lexer__peek(&lex) != '\0') lexer__advance(&lex);
+          } else if (skip == '\n' || skip == '\r') {
+            lexer__advance(&lex);
+            if (skip == '\r' && lexer__peek(&lex) == '\n')
+              lexer__advance(&lex);
+            lex.line++;
+            lex.col = 1;
+          } else {
+            lexer__advance(&lex);
+          }
+        }
+        if (lexer__peek(&lex) == '"')
+          lexer__advance(&lex); /* consume closing '"' */
+
+        Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
+        tok.payload.error_msg = str_error;
+        lexer__arr_push(&arr, tok);
+        error_count++;
+      } else {
+        lexer__advance(&lex); /* consume closing '"' */
+        strbuf_push(&sb, '\0'); /* null-terminate */
+        Token tok = lexer__make_token(&lex, TOKEN_STRING, start, sline, scol);
+        tok.payload.text = sb.data;
+        lexer__arr_push(&arr, tok);
+      }
+      continue;
     }
 
     /* Unrecognized character — emit ERROR and advance */

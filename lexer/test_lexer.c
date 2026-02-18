@@ -938,6 +938,284 @@ static int test_var_underscore_start(void) {
   TEST_PASS();
 }
 
+/* ---- US-006 tests ---- */
+
+static int test_string_empty(void) {
+  setup();
+  LexResult r = lexer_lex("\"\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* STRING + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "");
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_U32_EQ(r.tokens[0].offset, 0);
+  ASSERT_U32_EQ(r.tokens[0].length, 2); /* both quotes */
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_simple(void) {
+  setup();
+  LexResult r = lexer_lex("\"hello world\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* STRING + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "hello world");
+  ASSERT_U32_EQ(r.tokens[0].length, 13); /* "hello world" = 13 bytes */
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_escape_backslash(void) {
+  setup();
+  /* JACL: "a\\b" */
+  LexResult r = lexer_lex("\"a\\\\b\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "a\\b");
+  ASSERT_U32_EQ(r.tokens[0].length, 6); /* "a\\b" = 6 source bytes */
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_escape_quote(void) {
+  setup();
+  /* JACL: "a\"b" */
+  LexResult r = lexer_lex("\"a\\\"b\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "a\"b");
+  ASSERT_U32_EQ(r.tokens[0].length, 6); /* "a\"b" = 6 source bytes */
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_escape_n_t_r(void) {
+  setup();
+  /* JACL: "\n\t\r" */
+  LexResult r = lexer_lex("\"\\n\\t\\r\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "\n\t\r");
+  ASSERT_U32_EQ(r.tokens[0].length, 8); /* "\n\t\r" = 8 source bytes */
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_escape_null(void) {
+  setup();
+  /* JACL: "a\0b" — contains embedded null byte */
+  LexResult r = lexer_lex("\"a\\0b\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  /* Check bytes directly since null byte truncates strcmp */
+  ASSERT(r.tokens[0].payload.text[0] == 'a');
+  ASSERT(r.tokens[0].payload.text[1] == '\0');
+  ASSERT(r.tokens[0].payload.text[2] == 'b');
+  ASSERT_U32_EQ(r.tokens[0].length, 6); /* "a\0b" = 6 source bytes */
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_hex_escape(void) {
+  setup();
+  /* JACL: "\x41\x42\x43" → "ABC" */
+  LexResult r = lexer_lex("\"\\x41\\x42\\x43\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "ABC");
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_unicode_4digit(void) {
+  setup();
+  /* JACL: "\u0041" → "A" (U+0041 = 1-byte UTF-8) */
+  LexResult r = lexer_lex("\"\\u0041\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "A");
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_unicode_2byte(void) {
+  setup();
+  /* JACL: "\u00E9" → "é" (U+00E9 = 2-byte UTF-8: C3 A9) */
+  LexResult r = lexer_lex("\"\\u00E9\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "\xC3\xA9");
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_unicode_3byte(void) {
+  setup();
+  /* JACL: "\u4E16" → "世" (U+4E16 = 3-byte UTF-8: E4 B8 96) */
+  LexResult r = lexer_lex("\"\\u4E16\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "\xE4\xB8\x96");
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_unicode_8digit(void) {
+  setup();
+  /* JACL: "\U0001F600" → 😀 (U+1F600 = 4-byte UTF-8: F0 9F 98 80) */
+  LexResult r = lexer_lex("\"\\U0001F600\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "\xF0\x9F\x98\x80");
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_multiline(void) {
+  setup();
+  /* JACL: "hello\nworld" with actual embedded newline */
+  LexResult r = lexer_lex("\"hello\nworld\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "hello\nworld");
+  /* Token starts on line 1 */
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  /* EOF is on line 2 (after the embedded newline) */
+  ASSERT_U32_EQ(r.tokens[1].line, 2);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_unterminated(void) {
+  setup();
+  LexResult r = lexer_lex("\"hello", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* ERROR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_invalid_escape(void) {
+  setup();
+  /* JACL: "hello\q" — invalid escape, should error then continue */
+  LexResult r = lexer_lex("\"hello\\q\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* ERROR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.tokens[0].length, 9); /* entire "hello\q" */
+  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_invalid_escape_recovery(void) {
+  setup();
+  /* After invalid escape, lexing continues past the string */
+  LexResult r = lexer_lex("\"bad\\q\" hello", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* ERROR WORD EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "hello"));
+  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_mixed_escapes(void) {
+  setup();
+  /* JACL: "tab:\there\nnewline" */
+  LexResult r = lexer_lex("\"tab:\\there\\nnewline\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "tab:\there\nnewline");
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_in_expression(void) {
+  setup();
+  LexResult r = lexer_lex("[print \"hello\"]", &test_arena);
+  /* [ WORD STRING ] EOF = 5 */
+  ASSERT_U32_EQ(r.count, 5);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_LBRACKET);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "print"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[2].payload.text, "hello");
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_RBRACKET);
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_position_tracking(void) {
+  setup();
+  /* Token after a multi-line string should have correct position */
+  LexResult r = lexer_lex("\"line1\nline2\" foo", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* STRING WORD EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  /* "foo" is on line 2 after the closing quote */
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "foo"));
+  ASSERT_U32_EQ(r.tokens[1].line, 2);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_string_backslash_at_eof(void) {
+  setup();
+  /* JACL: "hello\ — backslash at end of input */
+  LexResult r = lexer_lex("\"hello\\", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* ERROR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -1010,6 +1288,26 @@ int main(void) {
     {"var_at_delimiter",          test_var_terminates_at_delimiter},
     {"var_in_expression",         test_var_in_expression},
     {"var_underscore_start",      test_var_underscore_start},
+    /* US-006 */
+    {"string_empty",              test_string_empty},
+    {"string_simple",             test_string_simple},
+    {"string_escape_backslash",   test_string_escape_backslash},
+    {"string_escape_quote",       test_string_escape_quote},
+    {"string_escape_n_t_r",       test_string_escape_n_t_r},
+    {"string_escape_null",        test_string_escape_null},
+    {"string_hex_escape",         test_string_hex_escape},
+    {"string_unicode_4digit",     test_string_unicode_4digit},
+    {"string_unicode_2byte",      test_string_unicode_2byte},
+    {"string_unicode_3byte",      test_string_unicode_3byte},
+    {"string_unicode_8digit",     test_string_unicode_8digit},
+    {"string_multiline",          test_string_multiline},
+    {"string_unterminated",       test_string_unterminated},
+    {"string_invalid_escape",     test_string_invalid_escape},
+    {"string_invalid_esc_recov",  test_string_invalid_escape_recovery},
+    {"string_mixed_escapes",      test_string_mixed_escapes},
+    {"string_in_expression",      test_string_in_expression},
+    {"string_position_tracking",  test_string_position_tracking},
+    {"string_backslash_at_eof",   test_string_backslash_at_eof},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;
