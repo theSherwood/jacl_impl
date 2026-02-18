@@ -23,6 +23,13 @@ static ParseResult parse(const char* source) {
   return parser_parse(tokens, &test_arena);
 }
 
+static AstNode* parse_atom(const char* source) {
+  LexResult tokens = lexer_lex(source, &test_arena);
+  Parser p;
+  parser__init(&p, tokens, &test_arena);
+  return parser__parse_atom(&p);
+}
+
 /* ---- US-002 tests ---- */
 
 static int test_empty_input(void) {
@@ -71,6 +78,126 @@ static int test_parse_result_fields(void) {
   TEST_PASS();
 }
 
+/* ---- US-003 tests ---- */
+
+static int test_lit_int_decimal(void) {
+  setup();
+  AstNode* n = parse_atom("42");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_LIT_INT);
+  ASSERT_INT_EQ(n->data.lit_int.value, 42);
+  ASSERT_U32_EQ(n->start.line, 1);
+  ASSERT_U32_EQ(n->start.column, 1);
+  ASSERT_U32_EQ(n->start.offset, 0);
+  ASSERT_U32_EQ(n->end.offset, 2);
+  ASSERT_U32_EQ(n->end.column, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_lit_int_hex(void) {
+  setup();
+  AstNode* n = parse_atom("0xFF");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_LIT_INT);
+  ASSERT_INT_EQ(n->data.lit_int.value, 255);
+  ASSERT_U32_EQ(n->start.offset, 0);
+  ASSERT_U32_EQ(n->end.offset, 4);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_lit_int_binary(void) {
+  setup();
+  AstNode* n = parse_atom("0b1010");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_LIT_INT);
+  ASSERT_INT_EQ(n->data.lit_int.value, 10);
+  ASSERT_U32_EQ(n->start.offset, 0);
+  ASSERT_U32_EQ(n->end.offset, 6);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_lit_float(void) {
+  setup();
+  AstNode* n = parse_atom("3.14");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_LIT_FLOAT);
+  ASSERT(n->data.lit_float.value > 3.13f && n->data.lit_float.value < 3.15f);
+  ASSERT_U32_EQ(n->start.line, 1);
+  ASSERT_U32_EQ(n->start.column, 1);
+  ASSERT_U32_EQ(n->start.offset, 0);
+  ASSERT_U32_EQ(n->end.offset, 4);
+  ASSERT_U32_EQ(n->end.column, 5);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_lit_word(void) {
+  setup();
+  AstNode* n = parse_atom("hello");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_LIT_STRING);
+  ASSERT_U32_EQ(n->data.lit_string.length, 5);
+  ASSERT(memcmp(n->data.lit_string.value, "hello", 5) == 0);
+  ASSERT_U32_EQ(n->start.line, 1);
+  ASSERT_U32_EQ(n->start.column, 1);
+  ASSERT_U32_EQ(n->start.offset, 0);
+  ASSERT_U32_EQ(n->end.offset, 5);
+  ASSERT_U32_EQ(n->end.column, 6);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_lit_word_foo(void) {
+  setup();
+  AstNode* n = parse_atom("foo");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_LIT_STRING);
+  ASSERT_U32_EQ(n->data.lit_string.length, 3);
+  ASSERT(memcmp(n->data.lit_string.value, "foo", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_lit_string_quoted(void) {
+  setup();
+  AstNode* n = parse_atom("\"hello\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_LIT_STRING);
+  ASSERT_U32_EQ(n->data.lit_string.length, 5);
+  ASSERT(memcmp(n->data.lit_string.value, "hello", 5) == 0);
+  ASSERT_U32_EQ(n->start.line, 1);
+  ASSERT_U32_EQ(n->start.column, 1);
+  ASSERT_U32_EQ(n->start.offset, 0);
+  ASSERT_U32_EQ(n->end.offset, 7);
+  ASSERT_U32_EQ(n->end.column, 8);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_lit_string_with_escapes(void) {
+  setup();
+  AstNode* n = parse_atom("\"a\\nb\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_LIT_STRING);
+  ASSERT_U32_EQ(n->data.lit_string.length, 3);
+  ASSERT(n->data.lit_string.value[0] == 'a');
+  ASSERT(n->data.lit_string.value[1] == '\n');
+  ASSERT(n->data.lit_string.value[2] == 'b');
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -87,6 +214,15 @@ int main(void) {
     {"newline_only",         test_newline_only},
     {"comment_only",         test_comment_only},
     {"parse_result_fields",  test_parse_result_fields},
+    /* US-003 */
+    {"lit_int_decimal",      test_lit_int_decimal},
+    {"lit_int_hex",          test_lit_int_hex},
+    {"lit_int_binary",       test_lit_int_binary},
+    {"lit_float",            test_lit_float},
+    {"lit_word",             test_lit_word},
+    {"lit_word_foo",         test_lit_word_foo},
+    {"lit_string_quoted",    test_lit_string_quoted},
+    {"lit_string_escapes",   test_lit_string_with_escapes},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

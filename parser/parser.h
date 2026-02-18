@@ -172,6 +172,79 @@ static void parser__skip_newlines(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Parse a single atom (literal, variable reference, operator)
+ *
+ * Returns NULL if the current token is not an atom.
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_atom(Parser* p) {
+  Token* tok = parser__peek(p);
+
+  switch (tok->type) {
+    case TOKEN_INT: {
+      parser__advance(p);
+      AstNode* node = ast_alloc(p->arena);
+      node->type = AST_LIT_INT;
+      node->start = parser__token_start(tok);
+      node->end   = parser__token_end(tok);
+      node->data.lit_int.value = tok->payload.int_val;
+      return node;
+    }
+    case TOKEN_FLOAT: {
+      parser__advance(p);
+      AstNode* node = ast_alloc(p->arena);
+      node->type = AST_LIT_FLOAT;
+      node->start = parser__token_start(tok);
+      node->end   = parser__token_end(tok);
+      node->data.lit_float.value = tok->payload.float_val;
+      return node;
+    }
+    case TOKEN_WORD: {
+      parser__advance(p);
+      AstNode* node = ast_alloc(p->arena);
+      node->type = AST_LIT_STRING;
+      node->start = parser__token_start(tok);
+      node->end   = parser__token_end(tok);
+      node->data.lit_string.value  = tok->payload.text;
+      node->data.lit_string.length = tok->length;
+      return node;
+    }
+    case TOKEN_STRING: {
+      parser__advance(p);
+      AstNode* node = ast_alloc(p->arena);
+      node->type = AST_LIT_STRING;
+      node->start = parser__token_start(tok);
+      node->end   = parser__token_end(tok);
+      node->data.lit_string.value  = tok->payload.text;
+      node->data.lit_string.length = (uint32_t)strlen(tok->payload.text);
+      return node;
+    }
+    case TOKEN_OPERATOR: {
+      parser__advance(p);
+      AstNode* node = ast_alloc(p->arena);
+      node->type = AST_LIT_STRING;
+      node->start = parser__token_start(tok);
+      node->end   = parser__token_end(tok);
+      node->data.lit_string.value  = tok->payload.text;
+      node->data.lit_string.length = tok->length;
+      return node;
+    }
+    case TOKEN_VAR: {
+      parser__advance(p);
+      AstNode* node = ast_alloc(p->arena);
+      node->type = AST_VAR_REF;
+      node->start = parser__token_start(tok);
+      node->end   = parser__token_end(tok);
+      node->data.var_ref.name   = tok->payload.text;
+      node->data.var_ref.length = tok->length - 1; /* exclude '$' */
+      return node;
+    }
+    default:
+      return NULL;
+  }
+}
+
+/* -------------------------------------------------------------------------
  * Public API
  * ------------------------------------------------------------------------- */
 

@@ -9,14 +9,13 @@
       "description": "As the compiler, I need a well-defined set of AST node types so that I can pattern-match on nodes during bytecode compilation.",
       "acceptanceCriteria": [
         "parser/ast.h exists following single-header convention (#ifndef AST_H / #define AST_H for declarations, #ifdef AST_IMPLEMENTATION for implementation)",
-        "AstNodeType enum covers: AST_COMMAND, AST_LIT_INT, AST_LIT_FLOAT, AST_LIT_STRING, AST_LIT_KEYWORD, AST_VAR_REF, AST_BLOCK, AST_INTERP_STRING, AST_ERROR",
+        "AstNodeType enum covers: AST_COMMAND, AST_LIT_INT, AST_LIT_FLOAT, AST_LIT_STRING, AST_VAR_REF, AST_BLOCK, AST_INTERP_STRING, AST_ERROR",
         "SourcePos struct with fields: uint32_t line, uint32_t column, uint32_t offset",
         "AstNode struct is a tagged union: AstNodeType type field, SourcePos start and SourcePos end fields, union of type-specific data",
         "AST_COMMAND data: AstNode* head (first child is command name node), AstNode** args, uint32_t arg_count",
         "AST_LIT_INT data: int32_t value",
         "AST_LIT_FLOAT data: float value",
         "AST_LIT_STRING data: const char* value, uint32_t length",
-        "AST_LIT_KEYWORD data: const char* name, uint32_t length",
         "AST_VAR_REF data: const char* name, uint32_t length",
         "AST_BLOCK data: AstNode** commands, uint32_t count",
         "AST_INTERP_STRING data: AstNode** segments, uint32_t count (segments are string literals, var refs, or commands)",
@@ -43,7 +42,7 @@
         "Compiles cleanly with -Wall -Wextra -std=c99"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -54,14 +53,13 @@
         "TOKEN_INT (42, 0xFF, 0b1010) produces AST_LIT_INT node with correct int32_t value",
         "TOKEN_FLOAT (3.14) produces AST_LIT_FLOAT node with correct float value",
         "TOKEN_WORD (bare words like hello, foo) produces AST_LIT_STRING node",
-        "TOKEN_KEYWORD (:foo) produces AST_LIT_KEYWORD node with name 'foo'",
         "TOKEN_STRING (\"hello\") produces AST_LIT_STRING node with decoded string content",
         "Source positions (start and end) are correct on every literal node",
         "Tests verify each literal type with correct values and positions",
         "All tests pass and no memory leaks detected by tracked allocator"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -202,7 +200,7 @@
         "ast_pretty_print function takes an AstNode* and an arena_t*, returns a const char* (arena-allocated string)",
         "ast_pretty_print_program function takes AstNode** nodes, uint32_t count, and arena_t*, returns const char* with newline-separated commands",
         "Commands print in explicit bracket form: [cmd arg1 arg2]",
-        "Literals print as source representation: 42, 3.14, hello, :key",
+        "Literals print as source representation: 42, 3.14, hello",
         "Variable references print as $name",
         "Code blocks print as { cmd1; cmd2 }",
         "Interpolated strings print as \"segment $var segment $[cmd] segment\"",

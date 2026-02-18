@@ -6,7 +6,7 @@
 - Compiler flags: `-Wall -Wextra -std=c99 -g`
 - Relative includes from module dirs use `../` prefix (e.g., `#include "../arena/arena.h"`)
 - Implementation language is C (C99)
-- Existing modules: platform/ (atomics, threading), arena/ (bulk allocation), test/ (test harness), lexer/ (tokenizer), value/ (tagged value system)
+- Existing modules: platform/ (atomics, threading), arena/ (bulk allocation), test/ (test harness), lexer/ (tokenizer), value/ (tagged value system), parser/ (AST + parser)
 - Private/internal functions use double-underscore prefix: `module__function_name`
 - Public types use PascalCase (Token, LexResult, AstNode) or lower_t for system-level (arena_t)
 - Public functions use module_verb_noun pattern (lexer_lex, arena_alloc, parser_parse)
@@ -15,18 +15,23 @@
 - Test main() uses table-driven pattern: array of {name, fn} structs, iterates and counts pass/fail
 - Memory leak check pattern: setup() -> exercise -> teardown() -> ASSERT(check_no_leaks()) -> TEST_PASS()
 - Tests grouped by US-XXX story comments in the test table
-- Lexer token types: TOKEN_LBRACKET, TOKEN_RBRACKET, TOKEN_LBRACE, TOKEN_RBRACE, TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_WORD, TOKEN_OPERATOR, TOKEN_INT, TOKEN_FLOAT, TOKEN_STRING, TOKEN_STRING_BEGIN, TOKEN_STRING_PART, TOKEN_STRING_END, TOKEN_INTERP_VAR, TOKEN_INTERP_EXPR_START, TOKEN_INTERP_EXPR_END, TOKEN_VAR, TOKEN_DOLLAR_BRACKET, TOKEN_NEWLINE, TOKEN_KEYWORD, TOKEN_ERROR, TOKEN_EOF
+- Lexer token types: TOKEN_LBRACKET, TOKEN_RBRACKET, TOKEN_LBRACE, TOKEN_RBRACE, TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_WORD, TOKEN_OPERATOR, TOKEN_INT, TOKEN_FLOAT, TOKEN_STRING, TOKEN_STRING_BEGIN, TOKEN_STRING_PART, TOKEN_STRING_END, TOKEN_INTERP_VAR, TOKEN_INTERP_EXPR_START, TOKEN_INTERP_EXPR_END, TOKEN_VAR, TOKEN_DOLLAR_BRACKET, TOKEN_NEWLINE, TOKEN_ERROR, TOKEN_EOF
+- NOTE: The lexer does NOT have TOKEN_SEMICOLON — semicolons (;) are not handled at the lexer level yet
 - LexResult struct: Token* tokens, uint32_t count, uint32_t error_count
 - Token struct: TokenType type, uint32_t line/column/offset/length, union payload (text/int_val/float_val/error_msg)
 - TOKEN_VAR payload.text points into source buffer, skips the $ prefix
 - Lexer API: LexResult lexer_lex(const char* source, arena_t* arena)
 - Token array always ends with TOKEN_EOF
 
-- AST node types: AST_COMMAND, AST_LIT_INT, AST_LIT_FLOAT, AST_LIT_STRING, AST_LIT_KEYWORD, AST_VAR_REF, AST_BLOCK, AST_INTERP_STRING, AST_ERROR
+- AST node types: AST_COMMAND, AST_LIT_INT, AST_LIT_FLOAT, AST_LIT_STRING, AST_VAR_REF, AST_BLOCK, AST_INTERP_STRING, AST_ERROR
 - SourcePos struct: uint32_t line, column, offset
 - AstNode is a tagged union with SourcePos start/end and type-specific data union
 - ast_alloc(arena) and ast_alloc_array(arena, count) helpers in ast.h header section (static inline)
 - AST_COMMAND has head (AstNode*) + args (AstNode**) + arg_count — head is the command name node
+- ParseResult struct: AstNode** nodes, uint32_t count, uint32_t error_count
+- Parser API: ParseResult parser_parse(LexResult tokens, arena_t* arena)
+- Parser internal: Parser struct (tokens, count, pos, arena, error_count), parser__peek/advance/at_end helpers
+- Parser test helper: `static ParseResult parse(const char* source)` wraps lexer_lex + parser_parse
 
 ---
 
@@ -38,4 +43,32 @@
   - ast.h includes arena.h via relative path `../arena/arena.h`
   - ast_alloc and ast_alloc_array are static helpers in the header section (not implementation section) for convenience
   - arena_alloc zero-initializes memory, so freshly allocated AstNodes have all fields zeroed
+---
+
+## 2026-02-18 - US-002
+- Implemented ParseResult struct and parser_parse API in parser/parser.h
+- Created parser/test_parser.c with table-driven test scaffolding
+- Added parser test entry to build.sh TESTS array
+- Files changed: parser/parser.h (new), parser/test_parser.c (new), build.sh (modified)
+- **Learnings for future iterations:**
+  - parser.h includes lexer.h and ast.h via relative paths (`../lexer/lexer.h`, `ast.h`)
+  - Parser internal state: Parser struct holds tokens array, position cursor, arena pointer, error count
+  - NodeArray helper (growable AstNode** array) mirrors lexer's TokenArray pattern
+  - Helper `parse()` function in test wraps lexer_lex + parser_parse for convenient one-liner test setup
+  - The lexer does NOT produce TOKEN_SEMICOLON — `;` is an unrecognized char (TOKEN_ERROR). Future stories may need a lexer extension for this.
+  - Unused static function warnings from single-header includes are expected — they're used in future stories
+---
+
+## 2026-02-18 - US-003
+- Implemented parser__parse_atom() for literal token → AST node conversion
+- Removed AST_LIT_KEYWORD from AST and all references (user decided no keyword type)
+- Added 8 tests: int decimal/hex/binary, float, word (2), quoted string, string with escapes
+- Files changed: parser/parser.h (modified), parser/test_parser.c (modified), parser/ast.h (modified), DESIGN.md (modified), .ralph/prd.json (modified), .ralph/tasks/prd-parser-ast.md (modified), .ralph/progress.txt (modified)
+- **Learnings for future iterations:**
+  - parser__parse_atom() is a static function accessible from tests since test_parser.c includes the implementation
+  - parse_atom() test helper creates a Parser directly for unit-testing atom parsing before top-level command parsing exists
+  - TOKEN_WORD payload.text points into source buffer, length = token.length
+  - TOKEN_STRING payload.text is arena-allocated decoded content, length = strlen(payload.text)
+  - TOKEN_OPERATOR handled same as TOKEN_WORD (AST_LIT_STRING) — needed for operator-as-command-name in US-005
+  - TOKEN_VAR also handled in parse_atom (AST_VAR_REF) — ready for US-004
 ---

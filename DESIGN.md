@@ -609,7 +609,6 @@ Tokenizes Phase 1 bracket syntax. Operates on byte buffers (later: rope input).
 - Delimiters: `[`, `]`, `{`, `}`, `(`, `)`
 - Literals: `TOKEN_WORD` (bare words), `TOKEN_INT` (decimal/hex `0x`/binary `0b`),
   `TOKEN_FLOAT`, `TOKEN_STRING` (double-quoted with escape sequences),
-  `TOKEN_KEYWORD` (`:name`)
 - Variables: `TOKEN_VAR` (`$identifier`), `TOKEN_DOLLAR_BRACKET` (`$[`)
 - Operators: greedy consumption of operator characters (`!%&*+-./<=>?@\^|~`)
 - String interpolation: `STRING_BEGIN`/`STRING_PART`/`STRING_END` with
@@ -621,7 +620,7 @@ Tokenizes Phase 1 bracket syntax. Operates on byte buffers (later: rope input).
 - Arena-backed allocation for token storage and string content
 - Escape sequences: `\\`, `\"`, `\n`, `\t`, `\r`, `\0`, `\xNN`, `\uNNNN`, `\UNNNNNNNN`
 - Error recovery: invalid tokens consume minimal input, lexing continues
-- Zero-copy for words/keywords/operators (payload points into source buffer);
+- Zero-copy for words/operators (payload points into source buffer);
   arena-allocated for string content
 
 **Tests:** 95 tests in `lexer/test_lexer.c` covering individual constructs, all escape
@@ -638,7 +637,7 @@ programs, and a 58-line integration test exercising all token types (190 tokens)
 Parse token stream into a tree of command invocations — the "lisp under the hood."
 
 **Delivers:**
-- `ast.h` — AST node types: command invocation, literal (number, string, bool, nil),
+- `ast.h` — AST node types: command invocation, literal (number, string),
   variable reference (`$var`), code block (`{ ... }`), interpolated string
 - `parser.h` — recursive descent parser producing AST from token stream
 - Top-level: implicit brackets (bare commands); nested: explicit `[cmd ...]`

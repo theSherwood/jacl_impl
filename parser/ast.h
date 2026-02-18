@@ -25,7 +25,6 @@ typedef enum {
   AST_LIT_INT,       /* integer literal: 42, 0xFF, 0b1010 */
   AST_LIT_FLOAT,     /* float literal: 3.14 */
   AST_LIT_STRING,    /* string literal: "hello" or bare word */
-  AST_LIT_KEYWORD,   /* keyword literal: :foo */
   AST_VAR_REF,       /* variable reference: $name */
   AST_BLOCK,         /* code block: { cmd1; cmd2 } */
   AST_INTERP_STRING, /* interpolated string: "hello $name" */
@@ -57,7 +56,6 @@ struct AstNode {
     struct { int32_t   value; }                                    lit_int;
     struct { float     value; }                                    lit_float;
     struct { const char* value;   uint32_t length; }               lit_string;
-    struct { const char* name;    uint32_t length; }               lit_keyword;
     struct { const char* name;    uint32_t length; }               var_ref;
     struct { AstNode**   commands; uint32_t count; }               block;
     struct { AstNode**   segments; uint32_t count; }               interp_string;
