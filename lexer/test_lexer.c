@@ -245,6 +245,265 @@ static int test_bare_cr(void) {
   TEST_PASS();
 }
 
+/* ---- US-003 helpers ---- */
+
+static int token_text_eq(Token tok, const char* expected) {
+  size_t expected_len = strlen(expected);
+  return tok.length == (uint32_t)expected_len &&
+         memcmp(tok.payload.text, expected, expected_len) == 0;
+}
+
+/* ---- US-003 tests ---- */
+
+static int test_simple_word(void) {
+  setup();
+  LexResult r = lexer_lex("hello", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* WORD + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[0], "hello"));
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_U32_EQ(r.tokens[0].offset, 0);
+  ASSERT_U32_EQ(r.tokens[0].length, 5);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_multiple_words(void) {
+  setup();
+  LexResult r = lexer_lex("hello world", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* WORD WORD EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[0], "hello"));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "world"));
+  ASSERT_U32_EQ(r.tokens[1].column, 7);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_word_with_digits_and_hyphens(void) {
+  setup();
+  LexResult r = lexer_lex("foo42 my-thing foo_bar", &test_arena);
+  ASSERT_U32_EQ(r.count, 4); /* 3 WORDs + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[0], "foo42"));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "my-thing"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[2], "foo_bar"));
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_utf8_word(void) {
+  setup();
+  /* "café" = 63 61 66 c3 a9 — 5 bytes */
+  LexResult r = lexer_lex("caf\xC3\xA9", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* WORD + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT_U32_EQ(r.tokens[0].length, 5);
+  ASSERT(token_text_eq(r.tokens[0], "caf\xC3\xA9"));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_simple_operator(void) {
+  setup();
+  LexResult r = lexer_lex("+", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* OPERATOR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_OPERATOR);
+  ASSERT(token_text_eq(r.tokens[0], "+"));
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_multi_char_operator(void) {
+  setup();
+  LexResult r = lexer_lex(">= !=", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* OPERATOR OPERATOR EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_OPERATOR);
+  ASSERT(token_text_eq(r.tokens[0], ">="));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OPERATOR);
+  ASSERT(token_text_eq(r.tokens[1], "!="));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword(void) {
+  setup();
+  LexResult r = lexer_lex(":key", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* KEYWORD + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_KEYWORD);
+  ASSERT(token_text_eq(r.tokens[0], ":key"));
+  ASSERT_U32_EQ(r.tokens[0].length, 4);
+  ASSERT_U32_EQ(r.tokens[0].offset, 0);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_with_hyphens(void) {
+  setup();
+  LexResult r = lexer_lex(":my-thing", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* KEYWORD + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_KEYWORD);
+  ASSERT(token_text_eq(r.tokens[0], ":my-thing"));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_comment_skipped(void) {
+  setup();
+  LexResult r = lexer_lex("# this is a comment", &test_arena);
+  ASSERT_U32_EQ(r.count, 1); /* just EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_comment_before_newline(void) {
+  setup();
+  LexResult r = lexer_lex("# comment\nworld", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* NEWLINE WORD EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_NEWLINE);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "world"));
+  ASSERT_U32_EQ(r.tokens[1].line, 2);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_comment_after_tokens(void) {
+  setup();
+  LexResult r = lexer_lex("hello # comment", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* WORD EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[0], "hello"));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_word_terminates_at_delimiters(void) {
+  setup();
+  LexResult r = lexer_lex("foo[bar]baz", &test_arena);
+  ASSERT_U32_EQ(r.count, 6); /* WORD [ WORD ] WORD EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[0], "foo"));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_LBRACKET);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[2], "bar"));
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_RBRACKET);
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[4], "baz"));
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_word_terminates_at_hash(void) {
+  setup();
+  LexResult r = lexer_lex("foo#comment", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* WORD EOF (comment consumed) */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[0], "foo"));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_text_points_into_source(void) {
+  setup();
+  const char* src = "hello :key >=";
+  LexResult r = lexer_lex(src, &test_arena);
+  ASSERT_U32_EQ(r.count, 4); /* WORD KEYWORD OPERATOR EOF */
+  /* Verify payload.text points into the source buffer */
+  ASSERT_PTR_EQ(r.tokens[0].payload.text, src + 0);
+  ASSERT_PTR_EQ(r.tokens[1].payload.text, src + 6);
+  ASSERT_PTR_EQ(r.tokens[2].payload.text, src + 11);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_mixed_sequence(void) {
+  setup();
+  /* A realistic JACL fragment */
+  LexResult r = lexer_lex("[map :key1 val1 :key2 val2]", &test_arena);
+  /* [ WORD KEYWORD WORD KEYWORD WORD ] EOF = 8 */
+  ASSERT_U32_EQ(r.count, 8);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_LBRACKET);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "map"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_KEYWORD);
+  ASSERT(token_text_eq(r.tokens[2], ":key1"));
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[3], "val1"));
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_KEYWORD);
+  ASSERT(token_text_eq(r.tokens[4], ":key2"));
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[5], "val2"));
+  ASSERT_INT_EQ(r.tokens[6].type, TOKEN_RBRACKET);
+  ASSERT_INT_EQ(r.tokens[7].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_multiline_with_comments(void) {
+  setup();
+  LexResult r = lexer_lex("print hello # greet\n[+ foo bar]", &test_arena);
+  /* WORD WORD NEWLINE [ OPERATOR WORD WORD ] EOF = 9 */
+  ASSERT_U32_EQ(r.count, 9);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[0], "print"));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "hello"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_NEWLINE);
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_LBRACKET);
+  ASSERT_U32_EQ(r.tokens[3].line, 2);
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_OPERATOR);
+  ASSERT(token_text_eq(r.tokens[4], "+"));
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[5], "foo"));
+  ASSERT_INT_EQ(r.tokens[6].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[6], "bar"));
+  ASSERT_INT_EQ(r.tokens[7].type, TOKEN_RBRACKET);
+  ASSERT_INT_EQ(r.tokens[8].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -256,6 +515,7 @@ typedef struct {
 
 int main(void) {
   TestEntry tests[] = {
+    /* US-002 */
     {"empty_input",              test_empty_input},
     {"single_lbracket",          test_single_lbracket},
     {"all_delimiters",           test_all_delimiters},
@@ -268,6 +528,23 @@ int main(void) {
     {"mixed_crlf_lf",           test_mixed_crlf_lf},
     {"eof_position_after_content", test_eof_position_after_content},
     {"bare_cr",                  test_bare_cr},
+    /* US-003 */
+    {"simple_word",              test_simple_word},
+    {"multiple_words",           test_multiple_words},
+    {"word_with_digits_hyphens", test_word_with_digits_and_hyphens},
+    {"utf8_word",                test_utf8_word},
+    {"simple_operator",          test_simple_operator},
+    {"multi_char_operator",      test_multi_char_operator},
+    {"keyword",                  test_keyword},
+    {"keyword_with_hyphens",     test_keyword_with_hyphens},
+    {"comment_skipped",          test_comment_skipped},
+    {"comment_before_newline",   test_comment_before_newline},
+    {"comment_after_tokens",     test_comment_after_tokens},
+    {"word_at_delimiters",       test_word_terminates_at_delimiters},
+    {"word_at_hash",             test_word_terminates_at_hash},
+    {"text_points_into_source",  test_text_points_into_source},
+    {"mixed_sequence",           test_mixed_sequence},
+    {"multiline_with_comments",  test_multiline_with_comments},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

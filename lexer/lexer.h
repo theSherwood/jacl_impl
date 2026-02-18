@@ -185,6 +185,26 @@ static Token lexer__make_token(Lexer* lex, TokenType type,
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Character classification helpers
+ * ------------------------------------------------------------------------- */
+
+static int lexer__is_word_start(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+         || ((unsigned char)c >= 0x80);
+}
+
+static int lexer__is_word_char(char c) {
+  return lexer__is_word_start(c) || (c >= '0' && c <= '9') || c == '-';
+}
+
+static int lexer__is_operator_char(char c) {
+  return c == '!' || c == '%' || c == '&' || c == '*' || c == '+' ||
+         c == '-' || c == '.' || c == '/' || c == '<' || c == '=' ||
+         c == '>' || c == '?' || c == '@' || c == '\\' || c == '^' ||
+         c == '|' || c == '~';
+}
+
+/* -------------------------------------------------------------------------
  * Public API
  * ------------------------------------------------------------------------- */
 
@@ -246,6 +266,59 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
         default:  type = TOKEN_RPAREN;   break;
       }
       Token tok = lexer__make_token(&lex, type, start, sline, scol);
+      lexer__arr_push(&arr, tok);
+      continue;
+    }
+
+    /* Comments: # to end of line, no token emitted */
+    if (c == '#') {
+      lexer__advance(&lex);
+      while (lexer__peek(&lex) != '\0' && lexer__peek(&lex) != '\n'
+             && lexer__peek(&lex) != '\r') {
+        lexer__advance(&lex);
+      }
+      continue;
+    }
+
+    /* Keywords: colon followed by word-start character */
+    if (c == ':' && lexer__is_word_start(lex.source[lex.pos + 1])) {
+      uint32_t start = lex.pos;
+      uint32_t sline = lex.line;
+      uint32_t scol  = lex.col;
+      lexer__advance(&lex); /* consume ':' */
+      while (lexer__is_word_char(lexer__peek(&lex))) {
+        lexer__advance(&lex);
+      }
+      Token tok = lexer__make_token(&lex, TOKEN_KEYWORD, start, sline, scol);
+      tok.payload.text = lex.source + start;
+      lexer__arr_push(&arr, tok);
+      continue;
+    }
+
+    /* Words: start with letter, underscore, or UTF-8 byte */
+    if (lexer__is_word_start(c)) {
+      uint32_t start = lex.pos;
+      uint32_t sline = lex.line;
+      uint32_t scol  = lex.col;
+      while (lexer__is_word_char(lexer__peek(&lex))) {
+        lexer__advance(&lex);
+      }
+      Token tok = lexer__make_token(&lex, TOKEN_WORD, start, sline, scol);
+      tok.payload.text = lex.source + start;
+      lexer__arr_push(&arr, tok);
+      continue;
+    }
+
+    /* Operators: sequences of operator characters */
+    if (lexer__is_operator_char(c)) {
+      uint32_t start = lex.pos;
+      uint32_t sline = lex.line;
+      uint32_t scol  = lex.col;
+      while (lexer__is_operator_char(lexer__peek(&lex))) {
+        lexer__advance(&lex);
+      }
+      Token tok = lexer__make_token(&lex, TOKEN_OPERATOR, start, sline, scol);
+      tok.payload.text = lex.source + start;
       lexer__arr_push(&arr, tok);
       continue;
     }
