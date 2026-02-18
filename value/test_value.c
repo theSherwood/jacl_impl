@@ -1680,6 +1680,302 @@ static int test_f32_neg_preserves_flags(void) {
   TEST_PASS();
 }
 
+/* ---- US-012 tests: Comparison operations with flag propagation ---- */
+
+/* Test: jacl_eq same-type equality */
+static int test_eq_same_type(void) {
+  /* nil == nil */
+  ASSERT(jacl_as_bool(jacl_eq(JACL_NIL, JACL_NIL)));
+
+  /* true == true */
+  ASSERT(jacl_as_bool(jacl_eq(JACL_TRUE, JACL_TRUE)));
+
+  /* false == false */
+  ASSERT(jacl_as_bool(jacl_eq(JACL_FALSE, JACL_FALSE)));
+
+  /* true != false */
+  ASSERT(!jacl_as_bool(jacl_eq(JACL_TRUE, JACL_FALSE)));
+
+  /* i32: 42 == 42, 42 != 43 */
+  ASSERT(jacl_as_bool(jacl_eq(jacl_i32(42), jacl_i32(42))));
+  ASSERT(!jacl_as_bool(jacl_eq(jacl_i32(42), jacl_i32(43))));
+
+  /* i32: negative */
+  ASSERT(jacl_as_bool(jacl_eq(jacl_i32(-1), jacl_i32(-1))));
+  ASSERT(!jacl_as_bool(jacl_eq(jacl_i32(-1), jacl_i32(1))));
+
+  /* f32: 3.14 == 3.14, 3.14 != 2.71 */
+  ASSERT(jacl_as_bool(jacl_eq(jacl_f32(3.14f), jacl_f32(3.14f))));
+  ASSERT(!jacl_as_bool(jacl_eq(jacl_f32(3.14f), jacl_f32(2.71f))));
+
+  /* Result should be bool-tagged */
+  ASSERT(jacl_is_bool(jacl_eq(jacl_i32(1), jacl_i32(1))));
+
+  TEST_PASS();
+}
+
+/* Test: cross-type comparisons return false */
+static int test_eq_cross_type(void) {
+  /* nil != false (different type tags) */
+  ASSERT(!jacl_as_bool(jacl_eq(JACL_NIL, JACL_FALSE)));
+
+  /* nil != 0 (i32) */
+  ASSERT(!jacl_as_bool(jacl_eq(JACL_NIL, jacl_i32(0))));
+
+  /* false != 0 (i32) */
+  ASSERT(!jacl_as_bool(jacl_eq(JACL_FALSE, jacl_i32(0))));
+
+  /* i32(1) != f32(1.0) */
+  ASSERT(!jacl_as_bool(jacl_eq(jacl_i32(1), jacl_f32(1.0f))));
+
+  /* i32(0) != nil */
+  ASSERT(!jacl_as_bool(jacl_eq(jacl_i32(0), JACL_NIL)));
+
+  /* inline string != string pointer (different type tags even if same content) */
+  int dummy;
+  ASSERT(!jacl_as_bool(jacl_eq(jacl_inline_string("hi", 2), jacl_string_ptr(&dummy))));
+
+  TEST_PASS();
+}
+
+/* Test: jacl_eq for inline strings compares payload bytes */
+static int test_eq_inline_string(void) {
+  JaclVal a = jacl_inline_string("hello", 5);
+  JaclVal b = jacl_inline_string("hello", 5);
+  JaclVal c = jacl_inline_string("world", 5);
+  JaclVal d = jacl_inline_string("hell", 4);
+  JaclVal e = jacl_inline_string("", 0);
+  JaclVal f = jacl_inline_string("", 0);
+
+  ASSERT(jacl_as_bool(jacl_eq(a, b)));
+  ASSERT(!jacl_as_bool(jacl_eq(a, c)));
+  ASSERT(!jacl_as_bool(jacl_eq(a, d)));
+  ASSERT(jacl_as_bool(jacl_eq(e, f)));
+  ASSERT(!jacl_as_bool(jacl_eq(e, a)));
+
+  TEST_PASS();
+}
+
+/* Test: jacl_eq for pointer types compares pointer values */
+static int test_eq_pointer(void) {
+  int x, y;
+  JaclVal a = jacl_string_ptr(&x);
+  JaclVal b = jacl_string_ptr(&x);  /* same pointer */
+  JaclVal c = jacl_string_ptr(&y);  /* different pointer */
+
+  ASSERT(jacl_as_bool(jacl_eq(a, b)));
+  ASSERT(!jacl_as_bool(jacl_eq(a, c)));
+
+  /* Different pointer types with same address are not equal (different type tags) */
+  JaclVal vec = jacl_vector_ptr(&x);
+  ASSERT(!jacl_as_bool(jacl_eq(a, vec)));
+
+  TEST_PASS();
+}
+
+/* Test: jacl_eq ignores flags when comparing */
+static int test_eq_ignores_flags(void) {
+  JaclVal a = jacl_set_tainted(jacl_i32(42));
+  JaclVal b = jacl_i32(42);
+
+  /* Same type+payload, different flags -> equal */
+  ASSERT(jacl_as_bool(jacl_eq(a, b)));
+
+  JaclVal c = jacl_set_secret(jacl_set_tainted(jacl_i32(42)));
+  ASSERT(jacl_as_bool(jacl_eq(a, c)));
+
+  TEST_PASS();
+}
+
+/* Test: i32 ordering comparisons */
+static int test_cmp_i32_ordering(void) {
+  JaclVal a = jacl_i32(3);
+  JaclVal b = jacl_i32(7);
+  JaclVal c = jacl_i32(3);
+
+  /* lt */
+  ASSERT(jacl_as_bool(jacl_lt_i32(a, b)));
+  ASSERT(!jacl_as_bool(jacl_lt_i32(b, a)));
+  ASSERT(!jacl_as_bool(jacl_lt_i32(a, c)));  /* equal -> false */
+
+  /* gt */
+  ASSERT(!jacl_as_bool(jacl_gt_i32(a, b)));
+  ASSERT(jacl_as_bool(jacl_gt_i32(b, a)));
+  ASSERT(!jacl_as_bool(jacl_gt_i32(a, c)));  /* equal -> false */
+
+  /* le */
+  ASSERT(jacl_as_bool(jacl_le_i32(a, b)));
+  ASSERT(!jacl_as_bool(jacl_le_i32(b, a)));
+  ASSERT(jacl_as_bool(jacl_le_i32(a, c)));   /* equal -> true */
+
+  /* ge */
+  ASSERT(!jacl_as_bool(jacl_ge_i32(a, b)));
+  ASSERT(jacl_as_bool(jacl_ge_i32(b, a)));
+  ASSERT(jacl_as_bool(jacl_ge_i32(a, c)));   /* equal -> true */
+
+  /* Negative numbers: signed comparison */
+  JaclVal neg = jacl_i32(-5);
+  JaclVal pos = jacl_i32(5);
+  ASSERT(jacl_as_bool(jacl_lt_i32(neg, pos)));
+  ASSERT(!jacl_as_bool(jacl_gt_i32(neg, pos)));
+
+  /* INT32_MIN < INT32_MAX */
+  ASSERT(jacl_as_bool(jacl_lt_i32(jacl_i32(INT32_MIN), jacl_i32(INT32_MAX))));
+  ASSERT(jacl_as_bool(jacl_gt_i32(jacl_i32(INT32_MAX), jacl_i32(INT32_MIN))));
+
+  /* All results should be bool-tagged */
+  ASSERT(jacl_is_bool(jacl_lt_i32(a, b)));
+  ASSERT(jacl_is_bool(jacl_gt_i32(a, b)));
+  ASSERT(jacl_is_bool(jacl_le_i32(a, b)));
+  ASSERT(jacl_is_bool(jacl_ge_i32(a, b)));
+
+  TEST_PASS();
+}
+
+/* Test: f32 ordering comparisons */
+static int test_cmp_f32_ordering(void) {
+  JaclVal a = jacl_f32(1.5f);
+  JaclVal b = jacl_f32(2.5f);
+  JaclVal c = jacl_f32(1.5f);
+
+  /* lt */
+  ASSERT(jacl_as_bool(jacl_lt_f32(a, b)));
+  ASSERT(!jacl_as_bool(jacl_lt_f32(b, a)));
+  ASSERT(!jacl_as_bool(jacl_lt_f32(a, c)));
+
+  /* gt */
+  ASSERT(!jacl_as_bool(jacl_gt_f32(a, b)));
+  ASSERT(jacl_as_bool(jacl_gt_f32(b, a)));
+  ASSERT(!jacl_as_bool(jacl_gt_f32(a, c)));
+
+  /* le */
+  ASSERT(jacl_as_bool(jacl_le_f32(a, b)));
+  ASSERT(!jacl_as_bool(jacl_le_f32(b, a)));
+  ASSERT(jacl_as_bool(jacl_le_f32(a, c)));
+
+  /* ge */
+  ASSERT(!jacl_as_bool(jacl_ge_f32(a, b)));
+  ASSERT(jacl_as_bool(jacl_ge_f32(b, a)));
+  ASSERT(jacl_as_bool(jacl_ge_f32(a, c)));
+
+  /* Negative numbers */
+  JaclVal neg = jacl_f32(-1.0f);
+  JaclVal pos = jacl_f32(1.0f);
+  ASSERT(jacl_as_bool(jacl_lt_f32(neg, pos)));
+  ASSERT(!jacl_as_bool(jacl_gt_f32(neg, pos)));
+
+  /* NaN comparisons: all return false (IEEE 754) */
+  JaclVal nan_v = jacl_f32(NAN);
+  ASSERT(!jacl_as_bool(jacl_lt_f32(nan_v, a)));
+  ASSERT(!jacl_as_bool(jacl_gt_f32(nan_v, a)));
+  ASSERT(!jacl_as_bool(jacl_le_f32(nan_v, a)));
+  ASSERT(!jacl_as_bool(jacl_ge_f32(nan_v, a)));
+  ASSERT(!jacl_as_bool(jacl_lt_f32(a, nan_v)));
+  ASSERT(!jacl_as_bool(jacl_gt_f32(a, nan_v)));
+  ASSERT(!jacl_as_bool(jacl_le_f32(a, nan_v)));
+  ASSERT(!jacl_as_bool(jacl_ge_f32(a, nan_v)));
+
+  /* inf comparisons */
+  JaclVal inf_v = jacl_f32(INFINITY);
+  ASSERT(jacl_as_bool(jacl_lt_f32(a, inf_v)));
+  ASSERT(jacl_as_bool(jacl_gt_f32(inf_v, a)));
+
+  /* All results should be bool-tagged */
+  ASSERT(jacl_is_bool(jacl_lt_f32(a, b)));
+
+  TEST_PASS();
+}
+
+/* Test: flag propagation on comparison results */
+static int test_cmp_flag_propagation(void) {
+  JaclVal tainted_a = jacl_set_tainted(jacl_i32(3));
+  JaclVal secret_b = jacl_set_secret(jacl_i32(7));
+
+  /* eq: tainted + secret -> result has both flags */
+  JaclVal eq_result = jacl_eq(tainted_a, secret_b);
+  ASSERT(!jacl_as_bool(eq_result));  /* 3 != 7 */
+  ASSERT(jacl_is_tainted(eq_result));
+  ASSERT(jacl_is_secret(eq_result));
+  ASSERT(!jacl_is_error(eq_result));
+
+  /* lt_i32: tainted < secret -> result has both flags */
+  JaclVal lt_result = jacl_lt_i32(tainted_a, secret_b);
+  ASSERT(jacl_as_bool(lt_result));  /* 3 < 7 */
+  ASSERT(jacl_is_tainted(lt_result));
+  ASSERT(jacl_is_secret(lt_result));
+
+  /* gt_i32: clean > clean -> no flags */
+  JaclVal gt_result = jacl_gt_i32(jacl_i32(10), jacl_i32(5));
+  ASSERT(jacl_as_bool(gt_result));
+  ASSERT(!jacl_is_tainted(gt_result));
+  ASSERT(!jacl_is_secret(gt_result));
+  ASSERT(!jacl_is_error(gt_result));
+
+  /* f32 comparisons propagate flags too */
+  JaclVal tainted_f = jacl_set_tainted(jacl_f32(1.0f));
+  JaclVal secret_f = jacl_set_secret(jacl_f32(2.0f));
+  JaclVal lt_f_result = jacl_lt_f32(tainted_f, secret_f);
+  ASSERT(jacl_as_bool(lt_f_result));
+  ASSERT(jacl_is_tainted(lt_f_result));
+  ASSERT(jacl_is_secret(lt_f_result));
+
+  TEST_PASS();
+}
+
+/* Test: error short-circuit on comparisons */
+static int test_cmp_error_shortcircuit(void) {
+  JaclVal err_a = jacl_set_error(jacl_i32(99));
+  JaclVal ok_b = jacl_i32(5);
+
+  /* Error on a: returns a */
+  ASSERT_U64_EQ(jacl_eq(err_a, ok_b), err_a);
+  ASSERT_U64_EQ(jacl_lt_i32(err_a, ok_b), err_a);
+  ASSERT_U64_EQ(jacl_gt_i32(err_a, ok_b), err_a);
+  ASSERT_U64_EQ(jacl_le_i32(err_a, ok_b), err_a);
+  ASSERT_U64_EQ(jacl_ge_i32(err_a, ok_b), err_a);
+
+  /* Error on b: returns b */
+  JaclVal err_b = jacl_set_error(jacl_i32(77));
+  ASSERT_U64_EQ(jacl_eq(ok_b, err_b), err_b);
+  ASSERT_U64_EQ(jacl_lt_i32(ok_b, err_b), err_b);
+  ASSERT_U64_EQ(jacl_gt_i32(ok_b, err_b), err_b);
+  ASSERT_U64_EQ(jacl_le_i32(ok_b, err_b), err_b);
+  ASSERT_U64_EQ(jacl_ge_i32(ok_b, err_b), err_b);
+
+  /* Both error: returns a (first checked) */
+  ASSERT_U64_EQ(jacl_eq(err_a, err_b), err_a);
+  ASSERT_U64_EQ(jacl_lt_i32(err_a, err_b), err_a);
+
+  /* f32 error short-circuit */
+  JaclVal err_f = jacl_set_error(jacl_f32(99.0f));
+  JaclVal ok_f = jacl_f32(5.0f);
+  ASSERT_U64_EQ(jacl_lt_f32(err_f, ok_f), err_f);
+  ASSERT_U64_EQ(jacl_gt_f32(err_f, ok_f), err_f);
+  ASSERT_U64_EQ(jacl_le_f32(err_f, ok_f), err_f);
+  ASSERT_U64_EQ(jacl_ge_f32(err_f, ok_f), err_f);
+  ASSERT_U64_EQ(jacl_lt_f32(ok_f, err_f), err_f);
+  ASSERT_U64_EQ(jacl_gt_f32(ok_f, err_f), err_f);
+  ASSERT_U64_EQ(jacl_le_f32(ok_f, err_f), err_f);
+  ASSERT_U64_EQ(jacl_ge_f32(ok_f, err_f), err_f);
+
+  TEST_PASS();
+}
+
+/* Test: nil comparisons */
+static int test_eq_nil(void) {
+  /* nil == nil */
+  ASSERT(jacl_as_bool(jacl_eq(JACL_NIL, JACL_NIL)));
+
+  /* nil != anything else */
+  ASSERT(!jacl_as_bool(jacl_eq(JACL_NIL, JACL_TRUE)));
+  ASSERT(!jacl_as_bool(jacl_eq(JACL_NIL, JACL_FALSE)));
+  ASSERT(!jacl_as_bool(jacl_eq(JACL_NIL, jacl_i32(0))));
+  ASSERT(!jacl_as_bool(jacl_eq(JACL_NIL, jacl_f32(0.0f))));
+  ASSERT(!jacl_as_bool(jacl_eq(JACL_NIL, jacl_inline_string("", 0))));
+
+  TEST_PASS();
+}
+
 int main(void) {
   printf("Test: JaclVal size\n");
   if (!test_jaclval_size()) return 1;
@@ -1927,6 +2223,37 @@ int main(void) {
 
   printf("Test: f32 neg preserves flags\n");
   if (!test_f32_neg_preserves_flags()) return 1;
+
+  /* US-012: Comparison operations */
+  printf("Test: eq same type\n");
+  if (!test_eq_same_type()) return 1;
+
+  printf("Test: eq cross type\n");
+  if (!test_eq_cross_type()) return 1;
+
+  printf("Test: eq inline string\n");
+  if (!test_eq_inline_string()) return 1;
+
+  printf("Test: eq pointer\n");
+  if (!test_eq_pointer()) return 1;
+
+  printf("Test: eq ignores flags\n");
+  if (!test_eq_ignores_flags()) return 1;
+
+  printf("Test: i32 ordering comparisons\n");
+  if (!test_cmp_i32_ordering()) return 1;
+
+  printf("Test: f32 ordering comparisons\n");
+  if (!test_cmp_f32_ordering()) return 1;
+
+  printf("Test: comparison flag propagation\n");
+  if (!test_cmp_flag_propagation()) return 1;
+
+  printf("Test: comparison error short-circuit\n");
+  if (!test_cmp_error_shortcircuit()) return 1;
+
+  printf("Test: eq nil\n");
+  if (!test_eq_nil()) return 1;
 
   return 0;
 }

@@ -372,6 +372,82 @@ static inline JaclVal jacl_neg_f32(JaclVal a) {
     return jacl_apply_flags(result, flags);
 }
 
+/* --- Comparison operations --- */
+
+static inline JaclVal jacl_eq(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    /* Strip flags: compare type tag + payload only */
+    uint64_t mask = JACL_TYPE_MASK | JACL_PAYLOAD_MASK;
+    JaclVal result = jacl_bool((a & mask) == (b & mask));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_lt_i32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_i32(a) < jacl_as_i32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_gt_i32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_i32(a) > jacl_as_i32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_le_i32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_i32(a) <= jacl_as_i32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_ge_i32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_i32(a) >= jacl_as_i32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_lt_f32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_f32(a) < jacl_as_f32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_gt_f32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_f32(a) > jacl_as_f32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_le_f32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_f32(a) <= jacl_as_f32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_ge_f32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_f32(a) >= jacl_as_f32(b));
+    return jacl_apply_flags(result, flags);
+}
+
 #endif /* VALUE_H */
 
 /* =========================================================================
