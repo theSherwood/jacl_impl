@@ -1490,6 +1490,196 @@ static int test_i32_int32_min_edges(void) {
   TEST_PASS();
 }
 
+/* ---- US-011 tests: f32 arithmetic operations with flag propagation ---- */
+
+/* Test: basic f32 arithmetic */
+static int test_f32_arithmetic_basic(void) {
+  /* 1.0 + 2.0 = 3.0 */
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_add_f32(jacl_f32(1.0f), jacl_f32(2.0f))), 3.0f));
+
+  /* 10.0 - 3.0 = 7.0 */
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_sub_f32(jacl_f32(10.0f), jacl_f32(3.0f))), 7.0f));
+
+  /* 6.0 * 7.0 = 42.0 */
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_mul_f32(jacl_f32(6.0f), jacl_f32(7.0f))), 42.0f));
+
+  /* 10.0 / 4.0 = 2.5 */
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_div_f32(jacl_f32(10.0f), jacl_f32(4.0f))), 2.5f));
+
+  /* All results should be f32-tagged */
+  ASSERT(jacl_is_f32(jacl_add_f32(jacl_f32(1.0f), jacl_f32(2.0f))));
+  ASSERT(jacl_is_f32(jacl_sub_f32(jacl_f32(5.0f), jacl_f32(3.0f))));
+  ASSERT(jacl_is_f32(jacl_mul_f32(jacl_f32(2.0f), jacl_f32(3.0f))));
+  ASSERT(jacl_is_f32(jacl_div_f32(jacl_f32(6.0f), jacl_f32(2.0f))));
+
+  TEST_PASS();
+}
+
+/* Test: f32 arithmetic with negative numbers */
+static int test_f32_arithmetic_negative(void) {
+  /* -3.0 + 4.0 = 1.0 */
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_add_f32(jacl_f32(-3.0f), jacl_f32(4.0f))), 1.0f));
+
+  /* 3.0 + (-4.0) = -1.0 */
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_add_f32(jacl_f32(3.0f), jacl_f32(-4.0f))), -1.0f));
+
+  /* -3.0 - (-4.0) = 1.0 */
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_sub_f32(jacl_f32(-3.0f), jacl_f32(-4.0f))), 1.0f));
+
+  /* -6.0 * 7.0 = -42.0 */
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_mul_f32(jacl_f32(-6.0f), jacl_f32(7.0f))), -42.0f));
+
+  /* -6.0 * -7.0 = 42.0 */
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_mul_f32(jacl_f32(-6.0f), jacl_f32(-7.0f))), 42.0f));
+
+  /* -10.0 / 4.0 = -2.5 */
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_div_f32(jacl_f32(-10.0f), jacl_f32(4.0f))), -2.5f));
+
+  TEST_PASS();
+}
+
+/* Test: jacl_neg_f32 */
+static int test_f32_neg(void) {
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_neg_f32(jacl_f32(42.0f))), -42.0f));
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_neg_f32(jacl_f32(-42.0f))), 42.0f));
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_neg_f32(jacl_f32(0.0f))), -0.0f));
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_neg_f32(jacl_f32(-0.0f))), 0.0f));
+
+  /* Result should be f32-tagged */
+  ASSERT(jacl_is_f32(jacl_neg_f32(jacl_f32(42.0f))));
+
+  TEST_PASS();
+}
+
+/* Test: inf and nan behavior (IEEE 754) */
+static int test_f32_inf_nan(void) {
+  /* inf + 1 = inf */
+  float inf_plus = jacl_as_f32(jacl_add_f32(jacl_f32(INFINITY), jacl_f32(1.0f)));
+  ASSERT(float_bitwise_eq(inf_plus, INFINITY));
+
+  /* -inf + (-1) = -inf */
+  float ninf_plus = jacl_as_f32(jacl_add_f32(jacl_f32(-INFINITY), jacl_f32(-1.0f)));
+  ASSERT(float_bitwise_eq(ninf_plus, -INFINITY));
+
+  /* 1.0 / 0.0 = inf (IEEE 754, NOT error-flagged) */
+  JaclVal div_zero = jacl_div_f32(jacl_f32(1.0f), jacl_f32(0.0f));
+  ASSERT(jacl_is_f32(div_zero));
+  ASSERT(!jacl_is_error(div_zero));
+  ASSERT(float_bitwise_eq(jacl_as_f32(div_zero), INFINITY));
+
+  /* -1.0 / 0.0 = -inf */
+  JaclVal ndiv_zero = jacl_div_f32(jacl_f32(-1.0f), jacl_f32(0.0f));
+  ASSERT(!jacl_is_error(ndiv_zero));
+  ASSERT(float_bitwise_eq(jacl_as_f32(ndiv_zero), -INFINITY));
+
+  /* 0.0 / 0.0 = NaN */
+  JaclVal zero_div_zero = jacl_div_f32(jacl_f32(0.0f), jacl_f32(0.0f));
+  ASSERT(jacl_is_f32(zero_div_zero));
+  ASSERT(!jacl_is_error(zero_div_zero));
+  ASSERT(isnan(jacl_as_f32(zero_div_zero)));
+
+  /* inf - inf = NaN */
+  float inf_sub_inf = jacl_as_f32(jacl_sub_f32(jacl_f32(INFINITY), jacl_f32(INFINITY)));
+  ASSERT(isnan(inf_sub_inf));
+
+  /* inf * 0 = NaN */
+  float inf_mul_zero = jacl_as_f32(jacl_mul_f32(jacl_f32(INFINITY), jacl_f32(0.0f)));
+  ASSERT(isnan(inf_mul_zero));
+
+  /* NaN + anything = NaN */
+  float nan_add = jacl_as_f32(jacl_add_f32(jacl_f32(NAN), jacl_f32(1.0f)));
+  ASSERT(isnan(nan_add));
+
+  /* anything + NaN = NaN */
+  float add_nan = jacl_as_f32(jacl_add_f32(jacl_f32(1.0f), jacl_f32(NAN)));
+  ASSERT(isnan(add_nan));
+
+  /* neg(inf) = -inf */
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_neg_f32(jacl_f32(INFINITY))), -INFINITY));
+
+  /* neg(NaN) is NaN */
+  ASSERT(isnan(jacl_as_f32(jacl_neg_f32(jacl_f32(NAN)))));
+
+  TEST_PASS();
+}
+
+/* Test: error operand short-circuits (returns the error operand) */
+static int test_f32_error_shortcircuit(void) {
+  JaclVal err_a = jacl_set_error(jacl_f32(99.0f));
+  JaclVal ok_b = jacl_f32(5.0f);
+
+  /* Error on a: returns a */
+  ASSERT_U64_EQ(jacl_add_f32(err_a, ok_b), err_a);
+  ASSERT_U64_EQ(jacl_sub_f32(err_a, ok_b), err_a);
+  ASSERT_U64_EQ(jacl_mul_f32(err_a, ok_b), err_a);
+  ASSERT_U64_EQ(jacl_div_f32(err_a, ok_b), err_a);
+  ASSERT_U64_EQ(jacl_neg_f32(err_a), err_a);
+
+  /* Error on b: returns b */
+  JaclVal err_b = jacl_set_error(jacl_f32(77.0f));
+  ASSERT_U64_EQ(jacl_add_f32(ok_b, err_b), err_b);
+  ASSERT_U64_EQ(jacl_sub_f32(ok_b, err_b), err_b);
+  ASSERT_U64_EQ(jacl_mul_f32(ok_b, err_b), err_b);
+  ASSERT_U64_EQ(jacl_div_f32(ok_b, err_b), err_b);
+
+  /* Both error: returns a (first checked) */
+  ASSERT_U64_EQ(jacl_add_f32(err_a, err_b), err_a);
+
+  TEST_PASS();
+}
+
+/* Test: flag propagation through f32 arithmetic */
+static int test_f32_flag_propagation(void) {
+  JaclVal tainted_a = jacl_set_tainted(jacl_f32(3.0f));
+  JaclVal secret_b = jacl_set_secret(jacl_f32(4.0f));
+
+  /* add: tainted + secret -> result has both flags */
+  JaclVal sum = jacl_add_f32(tainted_a, secret_b);
+  ASSERT(float_bitwise_eq(jacl_as_f32(sum), 7.0f));
+  ASSERT(jacl_is_tainted(sum));
+  ASSERT(jacl_is_secret(sum));
+  ASSERT(!jacl_is_error(sum));
+
+  /* sub: same flags propagate */
+  JaclVal diff = jacl_sub_f32(tainted_a, secret_b);
+  ASSERT(float_bitwise_eq(jacl_as_f32(diff), -1.0f));
+  ASSERT(jacl_is_tainted(diff));
+  ASSERT(jacl_is_secret(diff));
+
+  /* mul: clean * tainted -> tainted */
+  JaclVal prod = jacl_mul_f32(jacl_f32(2.0f), tainted_a);
+  ASSERT(float_bitwise_eq(jacl_as_f32(prod), 6.0f));
+  ASSERT(jacl_is_tainted(prod));
+  ASSERT(!jacl_is_secret(prod));
+
+  /* div: secret / clean -> secret */
+  JaclVal quot = jacl_div_f32(secret_b, jacl_f32(2.0f));
+  ASSERT(float_bitwise_eq(jacl_as_f32(quot), 2.0f));
+  ASSERT(jacl_is_secret(quot));
+  ASSERT(!jacl_is_tainted(quot));
+
+  /* clean op clean -> no flags */
+  JaclVal clean = jacl_add_f32(jacl_f32(1.0f), jacl_f32(2.0f));
+  ASSERT(!jacl_is_tainted(clean));
+  ASSERT(!jacl_is_secret(clean));
+  ASSERT(!jacl_is_error(clean));
+
+  TEST_PASS();
+}
+
+/* Test: neg preserves flags */
+static int test_f32_neg_preserves_flags(void) {
+  JaclVal v = jacl_set_tainted(jacl_set_secret(jacl_f32(42.0f)));
+  JaclVal neg = jacl_neg_f32(v);
+
+  ASSERT(float_bitwise_eq(jacl_as_f32(neg), -42.0f));
+  ASSERT(jacl_is_tainted(neg));
+  ASSERT(jacl_is_secret(neg));
+  ASSERT(!jacl_is_error(neg));
+
+  TEST_PASS();
+}
+
 int main(void) {
   printf("Test: JaclVal size\n");
   if (!test_jaclval_size()) return 1;
@@ -1715,6 +1905,28 @@ int main(void) {
 
   printf("Test: i32 INT32_MIN edge cases\n");
   if (!test_i32_int32_min_edges()) return 1;
+
+  /* US-011: f32 arithmetic operations */
+  printf("Test: f32 arithmetic basic\n");
+  if (!test_f32_arithmetic_basic()) return 1;
+
+  printf("Test: f32 arithmetic negative\n");
+  if (!test_f32_arithmetic_negative()) return 1;
+
+  printf("Test: f32 neg\n");
+  if (!test_f32_neg()) return 1;
+
+  printf("Test: f32 inf/nan behavior\n");
+  if (!test_f32_inf_nan()) return 1;
+
+  printf("Test: f32 error short-circuit\n");
+  if (!test_f32_error_shortcircuit()) return 1;
+
+  printf("Test: f32 flag propagation\n");
+  if (!test_f32_flag_propagation()) return 1;
+
+  printf("Test: f32 neg preserves flags\n");
+  if (!test_f32_neg_preserves_flags()) return 1;
 
   return 0;
 }

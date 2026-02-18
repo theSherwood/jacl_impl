@@ -331,6 +331,47 @@ static inline JaclVal jacl_neg_i32(JaclVal a) {
     return jacl_apply_flags(result, flags);
 }
 
+/* --- f32 arithmetic --- */
+
+static inline JaclVal jacl_add_f32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_f32(jacl_as_f32(a) + jacl_as_f32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_sub_f32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_f32(jacl_as_f32(a) - jacl_as_f32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_mul_f32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_f32(jacl_as_f32(a) * jacl_as_f32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_div_f32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_f32(jacl_as_f32(a) / jacl_as_f32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_neg_f32(JaclVal a) {
+    if (jacl_is_error(a)) return a;
+    uint64_t flags = a & JACL_FLAGS_MASK;
+    JaclVal result = jacl_f32(-jacl_as_f32(a));
+    return jacl_apply_flags(result, flags);
+}
+
 #endif /* VALUE_H */
 
 /* =========================================================================
