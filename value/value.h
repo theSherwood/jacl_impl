@@ -197,6 +197,44 @@ static inline void jacl_inline_string_get(JaclVal v, char *buf, size_t buflen) {
     if (buflen > 0) buf[i] = '\0';
 }
 
+/* --- Flag manipulation --- */
+
+static inline bool jacl_is_tainted(JaclVal v) {
+    return (v & JACL_FLAG_TAINTED) != 0;
+}
+
+static inline JaclVal jacl_set_tainted(JaclVal v) {
+    return v | JACL_FLAG_TAINTED;
+}
+
+static inline JaclVal jacl_clear_tainted(JaclVal v) {
+    return v & ~JACL_FLAG_TAINTED;
+}
+
+static inline bool jacl_is_secret(JaclVal v) {
+    return (v & JACL_FLAG_SECRET) != 0;
+}
+
+static inline JaclVal jacl_set_secret(JaclVal v) {
+    return v | JACL_FLAG_SECRET;
+}
+
+static inline JaclVal jacl_clear_secret(JaclVal v) {
+    return v & ~JACL_FLAG_SECRET;
+}
+
+static inline bool jacl_is_error(JaclVal v) {
+    return (v & JACL_FLAG_ERROR) != 0;
+}
+
+static inline JaclVal jacl_set_error(JaclVal v) {
+    return v | JACL_FLAG_ERROR;
+}
+
+static inline JaclVal jacl_clear_error(JaclVal v) {
+    return v & ~JACL_FLAG_ERROR;
+}
+
 /* --- Extractors --- */
 
 static inline bool jacl_as_bool(JaclVal v) {

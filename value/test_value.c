@@ -722,6 +722,228 @@ static int test_inline_string_null_terminates(void) {
   TEST_PASS();
 }
 
+/* ---- US-007 tests: Tainted/secret/error flag manipulation ---- */
+
+/* Test: set/get/clear tainted flag */
+static int test_flag_tainted(void) {
+  JaclVal v = jacl_i32(42);
+  ASSERT(!jacl_is_tainted(v));
+
+  JaclVal t = jacl_set_tainted(v);
+  ASSERT(jacl_is_tainted(t));
+
+  JaclVal c = jacl_clear_tainted(t);
+  ASSERT(!jacl_is_tainted(c));
+
+  /* Value semantics: original unchanged */
+  ASSERT(!jacl_is_tainted(v));
+
+  TEST_PASS();
+}
+
+/* Test: set/get/clear secret flag */
+static int test_flag_secret(void) {
+  JaclVal v = jacl_i32(42);
+  ASSERT(!jacl_is_secret(v));
+
+  JaclVal s = jacl_set_secret(v);
+  ASSERT(jacl_is_secret(s));
+
+  JaclVal c = jacl_clear_secret(s);
+  ASSERT(!jacl_is_secret(c));
+
+  TEST_PASS();
+}
+
+/* Test: set/get/clear error flag */
+static int test_flag_error(void) {
+  JaclVal v = jacl_i32(42);
+  ASSERT(!jacl_is_error(v));
+
+  JaclVal e = jacl_set_error(v);
+  ASSERT(jacl_is_error(e));
+
+  JaclVal c = jacl_clear_error(e);
+  ASSERT(!jacl_is_error(c));
+
+  TEST_PASS();
+}
+
+/* Test: setting a flag preserves type tag and payload */
+static int test_flag_preserves_type_payload(void) {
+  JaclVal v = jacl_i32(-7);
+
+  /* Set each flag and verify type + payload preserved */
+  JaclVal t = jacl_set_tainted(v);
+  ASSERT(jacl_is_i32(t));
+  ASSERT_INT_EQ(jacl_as_i32(t), -7);
+
+  JaclVal s = jacl_set_secret(v);
+  ASSERT(jacl_is_i32(s));
+  ASSERT_INT_EQ(jacl_as_i32(s), -7);
+
+  JaclVal e = jacl_set_error(v);
+  ASSERT(jacl_is_i32(e));
+  ASSERT_INT_EQ(jacl_as_i32(e), -7);
+
+  /* All three flags at once */
+  JaclVal all = jacl_set_tainted(jacl_set_secret(jacl_set_error(v)));
+  ASSERT(jacl_is_i32(all));
+  ASSERT_INT_EQ(jacl_as_i32(all), -7);
+
+  TEST_PASS();
+}
+
+/* Test: clearing a flag preserves type tag and payload */
+static int test_clear_preserves_type_payload(void) {
+  JaclVal v = jacl_set_tainted(jacl_set_secret(jacl_set_error(jacl_f32(3.14f))));
+
+  JaclVal c1 = jacl_clear_tainted(v);
+  ASSERT(jacl_is_f32(c1));
+  ASSERT(float_bitwise_eq(jacl_as_f32(c1), 3.14f));
+  ASSERT(!jacl_is_tainted(c1));
+  ASSERT(jacl_is_secret(c1));
+  ASSERT(jacl_is_error(c1));
+
+  JaclVal c2 = jacl_clear_secret(v);
+  ASSERT(jacl_is_f32(c2));
+  ASSERT(float_bitwise_eq(jacl_as_f32(c2), 3.14f));
+  ASSERT(jacl_is_tainted(c2));
+  ASSERT(!jacl_is_secret(c2));
+  ASSERT(jacl_is_error(c2));
+
+  JaclVal c3 = jacl_clear_error(v);
+  ASSERT(jacl_is_f32(c3));
+  ASSERT(float_bitwise_eq(jacl_as_f32(c3), 3.14f));
+  ASSERT(jacl_is_tainted(c3));
+  ASSERT(jacl_is_secret(c3));
+  ASSERT(!jacl_is_error(c3));
+
+  TEST_PASS();
+}
+
+/* Test: multiple flags can be set simultaneously */
+static int test_flag_multiple(void) {
+  JaclVal v = jacl_bool(true);
+
+  /* Set tainted + error */
+  JaclVal te = jacl_set_tainted(jacl_set_error(v));
+  ASSERT(jacl_is_tainted(te));
+  ASSERT(!jacl_is_secret(te));
+  ASSERT(jacl_is_error(te));
+
+  /* Set all three */
+  JaclVal all = jacl_set_secret(te);
+  ASSERT(jacl_is_tainted(all));
+  ASSERT(jacl_is_secret(all));
+  ASSERT(jacl_is_error(all));
+
+  /* Still a bool with correct payload */
+  ASSERT(jacl_is_bool(all));
+  ASSERT(jacl_as_bool(all) == true);
+
+  TEST_PASS();
+}
+
+/* Test: flag independence (setting one doesn't affect others) */
+static int test_flag_independence(void) {
+  JaclVal v = JACL_NIL;
+
+  /* Set only tainted */
+  JaclVal t = jacl_set_tainted(v);
+  ASSERT(jacl_is_tainted(t));
+  ASSERT(!jacl_is_secret(t));
+  ASSERT(!jacl_is_error(t));
+
+  /* Set only secret */
+  JaclVal s = jacl_set_secret(v);
+  ASSERT(!jacl_is_tainted(s));
+  ASSERT(jacl_is_secret(s));
+  ASSERT(!jacl_is_error(s));
+
+  /* Set only error */
+  JaclVal e = jacl_set_error(v);
+  ASSERT(!jacl_is_tainted(e));
+  ASSERT(!jacl_is_secret(e));
+  ASSERT(jacl_is_error(e));
+
+  /* Clear one from all: only that one clears */
+  JaclVal all = jacl_set_tainted(jacl_set_secret(jacl_set_error(v)));
+  JaclVal ct = jacl_clear_tainted(all);
+  ASSERT(!jacl_is_tainted(ct));
+  ASSERT(jacl_is_secret(ct));
+  ASSERT(jacl_is_error(ct));
+
+  JaclVal cs = jacl_clear_secret(all);
+  ASSERT(jacl_is_tainted(cs));
+  ASSERT(!jacl_is_secret(cs));
+  ASSERT(jacl_is_error(cs));
+
+  JaclVal ce = jacl_clear_error(all);
+  ASSERT(jacl_is_tainted(ce));
+  ASSERT(jacl_is_secret(ce));
+  ASSERT(!jacl_is_error(ce));
+
+  TEST_PASS();
+}
+
+/* Test: flags work correctly with all value types */
+static int test_flags_all_types(void) {
+  int dummy;
+  JaclVal values[] = {
+    JACL_NIL,
+    JACL_TRUE,
+    JACL_FALSE,
+    jacl_i32(123),
+    jacl_f32(2.5f),
+    jacl_string_ptr(&dummy),
+    jacl_inline_string("hello", 5)
+  };
+  size_t n = sizeof(values) / sizeof(values[0]);
+
+  for (size_t i = 0; i < n; i++) {
+    JaclVal v = values[i];
+    uint64_t type_before = v & JACL_TYPE_MASK;
+    uint64_t payload_before = v & JACL_PAYLOAD_MASK;
+
+    /* Set each flag and verify type+payload preserved */
+    JaclVal t = jacl_set_tainted(v);
+    ASSERT(jacl_is_tainted(t));
+    ASSERT_U64_EQ(t & JACL_TYPE_MASK, type_before);
+    ASSERT_U64_EQ(t & JACL_PAYLOAD_MASK, payload_before);
+
+    JaclVal s = jacl_set_secret(v);
+    ASSERT(jacl_is_secret(s));
+    ASSERT_U64_EQ(s & JACL_TYPE_MASK, type_before);
+    ASSERT_U64_EQ(s & JACL_PAYLOAD_MASK, payload_before);
+
+    JaclVal e = jacl_set_error(v);
+    ASSERT(jacl_is_error(e));
+    ASSERT_U64_EQ(e & JACL_TYPE_MASK, type_before);
+    ASSERT_U64_EQ(e & JACL_PAYLOAD_MASK, payload_before);
+
+    /* Set all, clear all, should get back to original */
+    JaclVal all = jacl_set_tainted(jacl_set_secret(jacl_set_error(v)));
+    JaclVal cleared = jacl_clear_tainted(jacl_clear_secret(jacl_clear_error(all)));
+    ASSERT_U64_EQ(cleared, v);
+  }
+
+  TEST_PASS();
+}
+
+/* Test: setting an already-set flag is idempotent */
+static int test_flag_idempotent(void) {
+  JaclVal v = jacl_set_tainted(jacl_i32(99));
+  JaclVal v2 = jacl_set_tainted(v);
+  ASSERT_U64_EQ(v, v2);
+
+  JaclVal c = jacl_clear_tainted(jacl_i32(99));
+  JaclVal c2 = jacl_clear_tainted(c);
+  ASSERT_U64_EQ(c, c2);
+
+  TEST_PASS();
+}
+
 int main(void) {
   printf("Test: JaclVal size\n");
   if (!test_jaclval_size()) return 1;
@@ -841,6 +1063,34 @@ int main(void) {
 
   printf("Test: inline string null terminates\n");
   if (!test_inline_string_null_terminates()) return 1;
+
+  /* US-007: Tainted/secret/error flag manipulation */
+  printf("Test: tainted flag\n");
+  if (!test_flag_tainted()) return 1;
+
+  printf("Test: secret flag\n");
+  if (!test_flag_secret()) return 1;
+
+  printf("Test: error flag\n");
+  if (!test_flag_error()) return 1;
+
+  printf("Test: flags preserve type and payload\n");
+  if (!test_flag_preserves_type_payload()) return 1;
+
+  printf("Test: clear preserves type and payload\n");
+  if (!test_clear_preserves_type_payload()) return 1;
+
+  printf("Test: multiple flags simultaneously\n");
+  if (!test_flag_multiple()) return 1;
+
+  printf("Test: flag independence\n");
+  if (!test_flag_independence()) return 1;
+
+  printf("Test: flags with all value types\n");
+  if (!test_flags_all_types()) return 1;
+
+  printf("Test: flag idempotent\n");
+  if (!test_flag_idempotent()) return 1;
 
   return 0;
 }
