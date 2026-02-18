@@ -7,157 +7,35 @@
 - Relative includes from module dirs use `../` prefix (e.g., `#include "../arena/arena.h"`)
 - Implementation language is C (C99)
 - Existing modules: platform/ (atomics, threading), arena/ (bulk allocation), test/ (test harness), lexer/ (tokenizer), value/ (tagged value system)
-- Value module: `value/value.h` is the single-header for 64-bit tagged values. Type tags are pre-shifted constants (e.g., `JACL_TAG_I32 = 0x02 << 56`). Flags occupy bits 63-61, type tag bits 60-56, payload bits 55-0.
-- Test warnings from unused test_helpers.h static functions are expected and benign
-- Value predicates: use `(v & JACL_TYPE_MASK) == JACL_TAG_XXX` to ignore flag bits
-- Simple static inline functions go in the header declaration section, not the `#ifdef VALUE_IMPLEMENTATION` section
-- Pointer packing: cast `(uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK`, extraction: `(void *)(uintptr_t)(v & JACL_PAYLOAD_MASK)`
-- C99 compile-time assert: `typedef char name_[(cond) ? 1 : -1]` (no `_Static_assert` in C99)
-- Inline string packing: bytes packed via `((uint64_t)(unsigned char)s[i]) << (i * 8)`, length determined by first null byte in 7-byte payload
-- Arithmetic functions must be placed AFTER extractors in value.h (C99 requires forward declarations; extractors like `jacl_as_i32` must be defined before arithmetic functions that call them)
-- INT32_MIN / -1 and INT32_MIN % -1 are undefined behavior in C99; guard with explicit checks
-- Arithmetic pattern: error short-circuit first, then propagate flags, compute, apply flags to result
-- f32 division by zero: follows IEEE 754 (returns inf/NaN), NOT error-flagged — unlike i32 which returns error-flagged zero
-- Comparison pattern: same as arithmetic — error short-circuit, propagate flags, compute bool result, apply flags
-- Equality (`jacl_eq`): compares `(v & (JACL_TYPE_MASK | JACL_PAYLOAD_MASK))` — type+payload, ignoring flags; cross-type always false
+- Private/internal functions use double-underscore prefix: `module__function_name`
+- Public types use PascalCase (Token, LexResult, AstNode) or lower_t for system-level (arena_t)
+- Public functions use module_verb_noun pattern (lexer_lex, arena_alloc, parser_parse)
+- Constants and macros use ALL_CAPS (TOKEN_EOF, JACL_TAG_NIL)
+- Test functions are `static int test_name(void)` returning 0=fail, 1=pass
+- Test main() uses table-driven pattern: array of {name, fn} structs, iterates and counts pass/fail
+- Memory leak check pattern: setup() -> exercise -> teardown() -> ASSERT(check_no_leaks()) -> TEST_PASS()
+- Tests grouped by US-XXX story comments in the test table
+- Lexer token types: TOKEN_LBRACKET, TOKEN_RBRACKET, TOKEN_LBRACE, TOKEN_RBRACE, TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_WORD, TOKEN_OPERATOR, TOKEN_INT, TOKEN_FLOAT, TOKEN_STRING, TOKEN_STRING_BEGIN, TOKEN_STRING_PART, TOKEN_STRING_END, TOKEN_INTERP_VAR, TOKEN_INTERP_EXPR_START, TOKEN_INTERP_EXPR_END, TOKEN_VAR, TOKEN_DOLLAR_BRACKET, TOKEN_NEWLINE, TOKEN_KEYWORD, TOKEN_ERROR, TOKEN_EOF
+- LexResult struct: Token* tokens, uint32_t count, uint32_t error_count
+- Token struct: TokenType type, uint32_t line/column/offset/length, union payload (text/int_val/float_val/error_msg)
+- TOKEN_VAR payload.text points into source buffer, skips the $ prefix
+- Lexer API: LexResult lexer_lex(const char* source, arena_t* arena)
+- Token array always ends with TOKEN_EOF
+
+- AST node types: AST_COMMAND, AST_LIT_INT, AST_LIT_FLOAT, AST_LIT_STRING, AST_LIT_KEYWORD, AST_VAR_REF, AST_BLOCK, AST_INTERP_STRING, AST_ERROR
+- SourcePos struct: uint32_t line, column, offset
+- AstNode is a tagged union with SourcePos start/end and type-specific data union
+- ast_alloc(arena) and ast_alloc_array(arena, count) helpers in ast.h header section (static inline)
+- AST_COMMAND has head (AstNode*) + args (AstNode**) + arg_count — head is the command name node
 
 ---
 
 ## 2026-02-18 - US-001
-- Implemented JaclVal typedef (uint64_t), tag byte layout, mask/shift constants, flag constants, and type tag constants
-- Files changed: value/value.h (new), value/test_value.c (new), build.sh (added test entry)
+- Implemented AST node type definitions in parser/ast.h
+- Created parser/ directory
+- Files changed: parser/ast.h (new)
 - **Learnings for future iterations:**
-  - Tag byte layout: bits 63 (tainted), 62 (secret), 61 (error), 60-56 (type tag 0-31)
-  - JACL_TYPE_MASK | JACL_FLAGS_MASK == JACL_TAG_MASK — a useful identity to verify
-  - Type tags are pre-shifted to their position (e.g., `JACL_TAG_BOOL = 0x01 << 56`) for direct OR with payloads
----
-
-## 2026-02-18 - US-002
-- Implemented JACL_NIL, JACL_TRUE, JACL_FALSE constants; jacl_bool() constructor; jacl_is_nil(), jacl_is_bool() predicates; jacl_as_bool() extractor
-- Files changed: value/value.h (added constants + static inline functions), value/test_value.c (added 7 tests)
-- **Learnings for future iterations:**
-  - Simple constructors/extractors/predicates use `static inline` in the header declaration section (not the implementation section)
-  - Predicates mask with `JACL_TYPE_MASK` to ignore flag bits: `(v & JACL_TYPE_MASK) == JACL_TAG_XXX`
-  - `<stdbool.h>` added to value.h for `bool` type in C99
-  - JACL_NIL == 0 since JACL_TAG_NIL == 0 and payload is 0
----
-
-## 2026-02-18 - US-003
-- Implemented jacl_i32() constructor, jacl_is_i32() predicate, jacl_as_i32() extractor
-- Files changed: value/value.h (added 3 static inline functions), value/test_value.c (added 4 tests, added `<limits.h>` include)
-- **Learnings for future iterations:**
-  - Sign extension for negative int32_t: cast through `(uint32_t)` first to zero-extend, then mask with JACL_PAYLOAD_MASK: `(uint64_t)(uint32_t)n & JACL_PAYLOAD_MASK`
-  - Extraction casts back through `(uint32_t)` then `(int32_t)` to restore sign: `(int32_t)(uint32_t)(v & JACL_PAYLOAD_MASK)`
-  - -1 as uint32_t is 0xFFFFFFFF which fits cleanly in 56-bit payload (no bleed into tag byte)
-  - INT32_MIN as uint32_t is 0x80000000 — also safe
-  - `<limits.h>` added to test_value.c for INT32_MAX/INT32_MIN
----
-
-## 2026-02-18 - US-004
-- Implemented jacl_f32() constructor, jacl_is_f32() predicate, jacl_as_f32() extractor using memcpy bit-cast
-- Files changed: value/value.h (added `<string.h>` include, 3 static inline functions), value/test_value.c (added `<float.h>`, `<math.h>`, `<string.h>`, 6 tests + helper)
-- **Learnings for future iterations:**
-  - f32 packing uses memcpy for type-punning (C99-safe bit-cast): `memcpy(&bits, &f, sizeof(bits))` and reverse
-  - uint32_t fits in 56-bit payload with no bleed into tag byte (32 < 56)
-  - NaN round-trip testing requires bitwise comparison via `memcmp`, not `==` (NaN != NaN by IEEE 754)
-  - -0.0f and 0.0f have distinct bit patterns; tests verify they produce different JaclVal values
-  - `<string.h>` added to value.h for memcpy; `<float.h>` and `<math.h>` added to test_value.c for FLT_MAX/FLT_MIN/FLT_EPSILON/isnan
----
-
-## 2026-02-18 - US-005
-- Implemented pointer-payload constructors (jacl_string_ptr, jacl_vector_ptr, jacl_map_ptr, jacl_closure_ptr, jacl_bignum_ptr), jacl_as_ptr extractor, pointer type predicates (jacl_is_string/vector/map/closure/bignum), compile-time pointer size assert
-- Files changed: value/value.h (added static assert, 5 constructors, 1 extractor, 5 predicates), value/test_value.c (added 6 tests)
-- **Learnings for future iterations:**
-  - Pointer packing: cast through `(uintptr_t)` then `(uint64_t)` and mask with JACL_PAYLOAD_MASK: `(uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK`
-  - Pointer extraction: reverse cast `(void *)(uintptr_t)(v & JACL_PAYLOAD_MASK)`
-  - Compile-time assert uses C99 typedef trick: `typedef char name_[(cond) ? 1 : -1]` since `_Static_assert` is C11
-  - Cannot compile-time assert pointers fit in 56 bits directly (sizeof(void*)==8 on 64-bit), but can assert sizeof(void*)<=sizeof(uint64_t) to catch >64-bit platforms; user-space addresses on x86-64/ARM64 use at most 48-52 bits
-  - `ASSERT_PTR_EQ` macro available in test_helpers.h for pointer comparison with nice error messages
-  - Tests use malloc'd objects (various sizes) for realistic pointer alignment verification
----
-
-## 2026-02-18 - US-006
-- Implemented jacl_inline_string() constructor, jacl_is_inline_string() predicate, jacl_inline_string_len() length extractor, jacl_inline_string_get() string extractor
-- Files changed: value/value.h (added 4 static inline functions), value/test_value.c (added 9 tests)
-- **Learnings for future iterations:**
-  - Inline strings pack up to 7 bytes into the 56-bit payload using little-endian byte order via bit shifts: `payload |= ((uint64_t)(unsigned char)s[i]) << (i * 8)`
-  - Length is implicitly determined by null-termination: scan payload bytes for first zero byte, or 7 if all non-zero
-  - Null bytes in input are treated as terminators — inline strings cannot contain embedded nulls
-  - Cast input chars through `(unsigned char)` before shifting to avoid sign extension issues with high-bit bytes (e.g., 0xFF)
-  - `jacl_inline_string_get` respects buflen and always null-terminates when buflen > 0
-  - JACL_TAG_INLINE_STRING (0x04) is distinct from JACL_TAG_STRING (0x05) — tests verify both directions of type distinction
----
-
-## 2026-02-18 - US-007
-- Implemented flag manipulation functions: jacl_is_tainted/set_tainted/clear_tainted, jacl_is_secret/set_secret/clear_secret, jacl_is_error/set_error/clear_error
-- Files changed: value/value.h (added 9 static inline functions), value/test_value.c (added 9 tests)
-- **Learnings for future iterations:**
-  - Flag getters use bitwise AND: `(v & JACL_FLAG_XXX) != 0`
-  - Flag setters use bitwise OR: `v | JACL_FLAG_XXX` (returns new value, not mutation)
-  - Flag clearers use bitwise AND-NOT: `v & ~JACL_FLAG_XXX`
-  - Flags are fully independent — setting/clearing one never affects another
-  - Set/clear operations are idempotent (setting an already-set flag is a no-op)
-  - All flag operations preserve both the type tag (JACL_TYPE_MASK bits) and payload (JACL_PAYLOAD_MASK bits) exactly
-  - Tests verify flags across all value types: nil, bool (true/false), i32, f32, string pointer, inline string
----
-
-## 2026-02-18 - US-008
-- Implemented jacl_propagate_flags(a, b) and jacl_apply_flags(result, flags) as static inline functions in value.h
-- Files changed: value/value.h (added 2 static inline functions), value/test_value.c (added 12 tests)
-- **Learnings for future iterations:**
-  - `jacl_propagate_flags` is a simple OR of both values masked to JACL_FLAGS_MASK: `(a | b) & JACL_FLAGS_MASK`
-  - `jacl_apply_flags` ORs the flags onto the result (also masked): `result | (flags & JACL_FLAGS_MASK)`
-  - The masking in `jacl_apply_flags` ensures only flag bits are applied even if caller passes garbage
-  - These two functions will be the building blocks for arithmetic/comparison flag propagation in US-010, US-011, US-012
-  - Full 8x8 flag combination matrix test (all 64 pairs of 3-bit flag combos) verifies correctness exhaustively
----
-
-## 2026-02-18 - US-009
-- Implemented jacl_type_tag() extractor (returns 5-bit type tag with flags masked out)
-- All 10 type predicates already existed from previous stories; verified completeness
-- Added NxN predicate matrix test (10 types x 10 predicates = 100 checks)
-- Added flagged NxN test (same matrix with all flags set on each value)
-- Files changed: value/value.h (added jacl_type_tag static inline function), value/test_value.c (added 3 tests)
-- **Learnings for future iterations:**
-  - `jacl_type_tag(v)` is simply `v & JACL_TYPE_MASK` — returns a pre-shifted value matching `JACL_TAG_*` constants
-  - Function pointer arrays work well for NxN predicate testing: `typedef bool (*pred_fn)(JaclVal); pred_fn preds[] = { ... };`
-  - All predicates were already defined incrementally in US-001 through US-006; this story was mainly about the extractor and comprehensive testing
----
-
-## 2026-02-18 - US-010
-- Implemented jacl_add_i32, jacl_sub_i32, jacl_mul_i32, jacl_div_i32, jacl_mod_i32, jacl_neg_i32 with error short-circuit and flag propagation
-- Files changed: value/value.h (added 6 static inline arithmetic functions), value/test_value.c (added 10 tests)
-- **Learnings for future iterations:**
-  - Arithmetic functions must be placed AFTER extractor functions in value.h — C99 requires `jacl_as_i32` to be defined before any function that calls it (no forward declarations for static inline)
-  - INT32_MIN / -1 and INT32_MIN % -1 are undefined behavior in C99; must guard with explicit checks: `(dividend == INT32_MIN && divisor == -1)`
-  - The pattern for binary arithmetic: (1) error short-circuit on a, then b, (2) propagate flags from both operands, (3) compute result, (4) apply propagated flags
-  - For unary ops (neg): preserve flags from the single operand using `a & JACL_FLAGS_MASK`
-  - Division/mod by zero: returns error-flagged zero with propagated flags from both operands
-  - C99 integer division truncates toward zero; remainder sign follows dividend
-  - `-INT32_MIN` wraps to `INT32_MIN` in two's complement (tested as expected behavior)
----
-
-## 2026-02-18 - US-011
-- Implemented jacl_add_f32, jacl_sub_f32, jacl_mul_f32, jacl_div_f32, jacl_neg_f32 with error short-circuit and flag propagation
-- Files changed: value/value.h (added 5 static inline f32 arithmetic functions), value/test_value.c (added 7 tests)
-- **Learnings for future iterations:**
-  - f32 arithmetic follows the same pattern as i32 arithmetic: error short-circuit, propagate flags, compute, apply flags
-  - Key difference from i32: f32 division by zero follows IEEE 754 (returns inf/NaN), NOT an error-flagged value
-  - IEEE 754 edge cases: 1/0=inf, -1/0=-inf, 0/0=NaN, inf-inf=NaN, inf*0=NaN, NaN+x=NaN
-  - No mod operation for f32 (not in the spec)
-  - `jacl_neg_f32` correctly handles -0.0f -> 0.0f and vice versa via IEEE 754 negation
-  - The `float_bitwise_eq` helper (from US-004 tests) is reused for verifying exact float results
----
-
-## 2026-02-18 - US-012
-- Implemented jacl_eq, jacl_lt_i32, jacl_gt_i32, jacl_le_i32, jacl_ge_i32, jacl_lt_f32, jacl_gt_f32, jacl_le_f32, jacl_ge_f32 with error short-circuit and flag propagation
-- Files changed: value/value.h (added 10 static inline comparison functions), value/test_value.c (added 10 tests)
-- **Learnings for future iterations:**
-  - `jacl_eq` compares type tag + payload, ignoring flags: `(a & (JACL_TYPE_MASK | JACL_PAYLOAD_MASK)) == (b & (JACL_TYPE_MASK | JACL_PAYLOAD_MASK))`
-  - Cross-type comparisons always return false (nil != false, i32(0) != f32(0.0), etc.)
-  - Inline string equality works naturally via payload comparison (same packed bytes = equal)
-  - Pointer equality is pointer identity (same address = equal), not structural
-  - Comparison functions follow the same error short-circuit + flag propagation pattern as arithmetic
-  - NaN comparisons: all IEEE 754 ordering comparisons with NaN return false (NaN < x = false, NaN > x = false, NaN <= x = false, NaN >= x = false)
-  - jacl_eq with NaN is also false (NaN payload bits differ across NaN instances, and even same-bits NaN will match via payload comparison — but IEEE `<` etc. return false)
+  - ast.h includes arena.h via relative path `../arena/arena.h`
+  - ast_alloc and ast_alloc_array are static helpers in the header section (not implementation section) for convenience
+  - arena_alloc zero-initializes memory, so freshly allocated AstNodes have all fields zeroed
 ---
