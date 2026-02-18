@@ -1146,6 +1146,137 @@ static int test_propagate_flags_combinations(void) {
   TEST_PASS();
 }
 
+/* ---- US-009 tests: Complete type predicate set and type_tag extractor ---- */
+
+/* Test: jacl_type_tag extracts the 5-bit type tag, ignoring flags */
+static int test_type_tag_extractor(void) {
+  ASSERT_U64_EQ(jacl_type_tag(JACL_NIL), JACL_TAG_NIL);
+  ASSERT_U64_EQ(jacl_type_tag(JACL_TRUE), JACL_TAG_BOOL);
+  ASSERT_U64_EQ(jacl_type_tag(JACL_FALSE), JACL_TAG_BOOL);
+  ASSERT_U64_EQ(jacl_type_tag(jacl_i32(42)), JACL_TAG_I32);
+  ASSERT_U64_EQ(jacl_type_tag(jacl_f32(1.0f)), JACL_TAG_F32);
+  ASSERT_U64_EQ(jacl_type_tag(jacl_inline_string("hi", 2)), JACL_TAG_INLINE_STRING);
+
+  int dummy;
+  ASSERT_U64_EQ(jacl_type_tag(jacl_string_ptr(&dummy)), JACL_TAG_STRING);
+  ASSERT_U64_EQ(jacl_type_tag(jacl_vector_ptr(&dummy)), JACL_TAG_VECTOR);
+  ASSERT_U64_EQ(jacl_type_tag(jacl_map_ptr(&dummy)), JACL_TAG_MAP);
+  ASSERT_U64_EQ(jacl_type_tag(jacl_closure_ptr(&dummy)), JACL_TAG_CLOSURE);
+  ASSERT_U64_EQ(jacl_type_tag(jacl_bignum_ptr(&dummy)), JACL_TAG_BIGNUM);
+
+  /* Flags should be masked out */
+  ASSERT_U64_EQ(jacl_type_tag(jacl_set_tainted(jacl_i32(1))), JACL_TAG_I32);
+  ASSERT_U64_EQ(jacl_type_tag(jacl_set_secret(jacl_f32(1.0f))), JACL_TAG_F32);
+  ASSERT_U64_EQ(jacl_type_tag(jacl_set_error(JACL_NIL)), JACL_TAG_NIL);
+  ASSERT_U64_EQ(jacl_type_tag(jacl_set_tainted(jacl_set_secret(jacl_set_error(JACL_TRUE)))), JACL_TAG_BOOL);
+
+  TEST_PASS();
+}
+
+/* Test: NxN predicate matrix — each predicate returns true only for its own type */
+static int test_predicate_matrix(void) {
+  int dummy;
+  /* One value of each type */
+  JaclVal values[] = {
+    JACL_NIL,                          /* 0: nil */
+    JACL_TRUE,                         /* 1: bool */
+    jacl_i32(42),                      /* 2: i32 */
+    jacl_f32(3.14f),                   /* 3: f32 */
+    jacl_inline_string("test", 4),     /* 4: inline_string */
+    jacl_string_ptr(&dummy),           /* 5: string (ptr) */
+    jacl_vector_ptr(&dummy),           /* 6: vector */
+    jacl_map_ptr(&dummy),              /* 7: map */
+    jacl_closure_ptr(&dummy),          /* 8: closure */
+    jacl_bignum_ptr(&dummy)            /* 9: bignum */
+  };
+  size_t n = sizeof(values) / sizeof(values[0]);
+
+  /* Expected type tags in same order */
+  uint64_t expected_tags[] = {
+    JACL_TAG_NIL, JACL_TAG_BOOL, JACL_TAG_I32, JACL_TAG_F32,
+    JACL_TAG_INLINE_STRING, JACL_TAG_STRING, JACL_TAG_VECTOR,
+    JACL_TAG_MAP, JACL_TAG_CLOSURE, JACL_TAG_BIGNUM
+  };
+
+  /* Predicate function pointers */
+  typedef bool (*pred_fn)(JaclVal);
+  pred_fn preds[] = {
+    jacl_is_nil, jacl_is_bool, jacl_is_i32, jacl_is_f32,
+    jacl_is_inline_string, jacl_is_string, jacl_is_vector,
+    jacl_is_map, jacl_is_closure, jacl_is_bignum
+  };
+
+  const char *names[] = {
+    "nil", "bool", "i32", "f32", "inline_string",
+    "string", "vector", "map", "closure", "bignum"
+  };
+
+  /* Verify type tags */
+  for (size_t i = 0; i < n; i++) {
+    ASSERT_U64_EQ(jacl_type_tag(values[i]), expected_tags[i]);
+  }
+
+  /* NxN: each predicate should return true only for its own type */
+  for (size_t pred_idx = 0; pred_idx < n; pred_idx++) {
+    for (size_t val_idx = 0; val_idx < n; val_idx++) {
+      bool result = preds[pred_idx](values[val_idx]);
+      bool expected = (pred_idx == val_idx);
+      if (result != expected) {
+        fprintf(stderr, "FAIL: jacl_is_%s(value[%zu]=%s) = %d, expected %d\n",
+                names[pred_idx], val_idx, names[val_idx], result, expected);
+        return 0;
+      }
+    }
+  }
+
+  TEST_PASS();
+}
+
+/* Test: predicates ignore flags — error-flagged values still match their type */
+static int test_predicate_matrix_with_flags(void) {
+  int dummy;
+  JaclVal values[] = {
+    JACL_NIL,
+    JACL_TRUE,
+    jacl_i32(42),
+    jacl_f32(3.14f),
+    jacl_inline_string("test", 4),
+    jacl_string_ptr(&dummy),
+    jacl_vector_ptr(&dummy),
+    jacl_map_ptr(&dummy),
+    jacl_closure_ptr(&dummy),
+    jacl_bignum_ptr(&dummy)
+  };
+  size_t n = sizeof(values) / sizeof(values[0]);
+
+  typedef bool (*pred_fn)(JaclVal);
+  pred_fn preds[] = {
+    jacl_is_nil, jacl_is_bool, jacl_is_i32, jacl_is_f32,
+    jacl_is_inline_string, jacl_is_string, jacl_is_vector,
+    jacl_is_map, jacl_is_closure, jacl_is_bignum
+  };
+
+  /* Flag each value with all flags and re-check the matrix */
+  for (size_t val_idx = 0; val_idx < n; val_idx++) {
+    JaclVal flagged = values[val_idx] | JACL_FLAGS_MASK;
+
+    /* type_tag should still match */
+    ASSERT_U64_EQ(jacl_type_tag(flagged), jacl_type_tag(values[val_idx]));
+
+    for (size_t pred_idx = 0; pred_idx < n; pred_idx++) {
+      bool result = preds[pred_idx](flagged);
+      bool expected = (pred_idx == val_idx);
+      if (result != expected) {
+        fprintf(stderr, "FAIL: jacl_is_[%zu](flagged_value[%zu]) = %d, expected %d\n",
+                pred_idx, val_idx, result, expected);
+        return 0;
+      }
+    }
+  }
+
+  TEST_PASS();
+}
+
 int main(void) {
   printf("Test: JaclVal size\n");
   if (!test_jaclval_size()) return 1;
@@ -1330,6 +1461,16 @@ int main(void) {
 
   printf("Test: propagate flags combinations\n");
   if (!test_propagate_flags_combinations()) return 1;
+
+  /* US-009: Complete type predicate set and type_tag extractor */
+  printf("Test: type_tag extractor\n");
+  if (!test_type_tag_extractor()) return 1;
+
+  printf("Test: predicate NxN matrix\n");
+  if (!test_predicate_matrix()) return 1;
+
+  printf("Test: predicate matrix with flags\n");
+  if (!test_predicate_matrix_with_flags()) return 1;
 
   return 0;
 }

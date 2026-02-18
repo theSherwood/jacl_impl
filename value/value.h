@@ -81,6 +81,12 @@ static inline JaclVal jacl_f32(float f) {
     return JACL_TAG_F32 | ((uint64_t)bits & JACL_PAYLOAD_MASK);
 }
 
+/* --- Type tag extractor --- */
+
+static inline uint64_t jacl_type_tag(JaclVal v) {
+    return v & JACL_TYPE_MASK;
+}
+
 /* --- Predicates --- */
 
 static inline bool jacl_is_nil(JaclVal v) {
