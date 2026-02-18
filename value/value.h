@@ -23,6 +23,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 /* --- Core type --- */
 
@@ -74,6 +75,12 @@ static inline JaclVal jacl_i32(int32_t n) {
     return JACL_TAG_I32 | ((uint64_t)(uint32_t)n & JACL_PAYLOAD_MASK);
 }
 
+static inline JaclVal jacl_f32(float f) {
+    uint32_t bits;
+    memcpy(&bits, &f, sizeof(bits));
+    return JACL_TAG_F32 | ((uint64_t)bits & JACL_PAYLOAD_MASK);
+}
+
 /* --- Predicates --- */
 
 static inline bool jacl_is_nil(JaclVal v) {
@@ -88,6 +95,10 @@ static inline bool jacl_is_i32(JaclVal v) {
     return (v & JACL_TYPE_MASK) == JACL_TAG_I32;
 }
 
+static inline bool jacl_is_f32(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_F32;
+}
+
 /* --- Extractors --- */
 
 static inline bool jacl_as_bool(JaclVal v) {
@@ -96,6 +107,13 @@ static inline bool jacl_as_bool(JaclVal v) {
 
 static inline int32_t jacl_as_i32(JaclVal v) {
     return (int32_t)(uint32_t)(v & JACL_PAYLOAD_MASK);
+}
+
+static inline float jacl_as_f32(JaclVal v) {
+    uint32_t bits = (uint32_t)(v & JACL_PAYLOAD_MASK);
+    float f;
+    memcpy(&f, &bits, sizeof(f));
+    return f;
 }
 
 #endif /* VALUE_H */

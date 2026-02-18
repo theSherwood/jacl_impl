@@ -1,6 +1,9 @@
+#include <float.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "../test/test_helpers.h"
 
@@ -303,6 +306,116 @@ static int test_i32_sign_handling(void) {
   TEST_PASS();
 }
 
+/* ---- US-004 tests: f32 constructors and extractors ---- */
+
+/* Test: jacl_f32 constructor produces f32-tagged values */
+static int test_f32_constructor(void) {
+  JaclVal v0 = jacl_f32(0.0f);
+  JaclVal v1 = jacl_f32(1.0f);
+  JaclVal vn = jacl_f32(-1.0f);
+
+  ASSERT_U64_EQ(v0 & JACL_TYPE_MASK, JACL_TAG_F32);
+  ASSERT_U64_EQ(v1 & JACL_TYPE_MASK, JACL_TAG_F32);
+  ASSERT_U64_EQ(vn & JACL_TYPE_MASK, JACL_TAG_F32);
+
+  TEST_PASS();
+}
+
+/* Test: jacl_is_f32 predicate */
+static int test_is_f32(void) {
+  ASSERT(jacl_is_f32(jacl_f32(0.0f)));
+  ASSERT(jacl_is_f32(jacl_f32(1.0f)));
+  ASSERT(jacl_is_f32(jacl_f32(-1.0f)));
+  ASSERT(jacl_is_f32(jacl_f32(FLT_MAX)));
+  ASSERT(jacl_is_f32(jacl_f32(INFINITY)));
+  ASSERT(jacl_is_f32(jacl_f32(NAN)));
+
+  /* f32 with flags set is still f32 */
+  ASSERT(jacl_is_f32(jacl_f32(1.0f) | JACL_FLAG_TAINTED));
+  ASSERT(jacl_is_f32(jacl_f32(1.0f) | JACL_FLAG_SECRET));
+  ASSERT(jacl_is_f32(jacl_f32(1.0f) | JACL_FLAG_ERROR));
+  ASSERT(jacl_is_f32(jacl_f32(1.0f) | JACL_FLAGS_MASK));
+
+  /* Other types are not f32 */
+  ASSERT(!jacl_is_f32(JACL_NIL));
+  ASSERT(!jacl_is_f32(JACL_TRUE));
+  ASSERT(!jacl_is_f32(jacl_i32(42)));
+  ASSERT(!jacl_is_f32(JACL_TAG_INLINE_STRING));
+
+  TEST_PASS();
+}
+
+/* Helper: bitwise compare two floats via memcmp */
+static int float_bitwise_eq(float a, float b) {
+  return memcmp(&a, &b, sizeof(float)) == 0;
+}
+
+/* Test: jacl_as_f32 extractor and round-trip */
+static int test_as_f32(void) {
+  /* Basic round-trip values */
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_f32(0.0f)), 0.0f));
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_f32(-0.0f)), -0.0f));
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_f32(1.0f)), 1.0f));
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_f32(-1.0f)), -1.0f));
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_f32(FLT_MAX)), FLT_MAX));
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_f32(FLT_MIN)), FLT_MIN));
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_f32(FLT_EPSILON)), FLT_EPSILON));
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_f32(INFINITY)), INFINITY));
+  ASSERT(float_bitwise_eq(jacl_as_f32(jacl_f32(-INFINITY)), -INFINITY));
+
+  TEST_PASS();
+}
+
+/* Test: NaN round-trips correctly (bitwise, not just isnan) */
+static int test_f32_nan_roundtrip(void) {
+  float nan_in = NAN;
+  JaclVal v = jacl_f32(nan_in);
+  float nan_out = jacl_as_f32(v);
+
+  /* Must be NaN */
+  ASSERT(isnan(nan_out));
+
+  /* Must be bitwise identical */
+  ASSERT(float_bitwise_eq(nan_out, nan_in));
+
+  TEST_PASS();
+}
+
+/* Test: -0.0f and 0.0f are distinct bit patterns */
+static int test_f32_neg_zero(void) {
+  JaclVal vz = jacl_f32(0.0f);
+  JaclVal vnz = jacl_f32(-0.0f);
+
+  /* They should produce different JaclVal bit patterns */
+  ASSERT(vz != vnz);
+
+  /* Both round-trip correctly */
+  ASSERT(float_bitwise_eq(jacl_as_f32(vz), 0.0f));
+  ASSERT(float_bitwise_eq(jacl_as_f32(vnz), -0.0f));
+
+  /* Confirm -0.0f and 0.0f are actually different bit patterns */
+  ASSERT(!float_bitwise_eq(0.0f, -0.0f));
+
+  TEST_PASS();
+}
+
+/* Test: f32 payload doesn't bleed into tag byte */
+static int test_f32_payload_isolation(void) {
+  /* FLT_MAX has a large bit pattern; verify no bleed */
+  JaclVal v = jacl_f32(FLT_MAX);
+  ASSERT_U64_EQ(v & JACL_TAG_MASK, JACL_TAG_F32);
+
+  /* Negative infinity */
+  JaclVal vinf = jacl_f32(-INFINITY);
+  ASSERT_U64_EQ(vinf & JACL_TAG_MASK, JACL_TAG_F32);
+
+  /* NaN */
+  JaclVal vnan = jacl_f32(NAN);
+  ASSERT_U64_EQ(vnan & JACL_TAG_MASK, JACL_TAG_F32);
+
+  TEST_PASS();
+}
+
 int main(void) {
   printf("Test: JaclVal size\n");
   if (!test_jaclval_size()) return 1;
@@ -356,6 +469,25 @@ int main(void) {
 
   printf("Test: i32 sign handling\n");
   if (!test_i32_sign_handling()) return 1;
+
+  /* US-004: f32 constructor, predicate, extractor */
+  printf("Test: f32 constructor\n");
+  if (!test_f32_constructor()) return 1;
+
+  printf("Test: jacl_is_f32 predicate\n");
+  if (!test_is_f32()) return 1;
+
+  printf("Test: jacl_as_f32 extractor\n");
+  if (!test_as_f32()) return 1;
+
+  printf("Test: f32 NaN round-trip\n");
+  if (!test_f32_nan_roundtrip()) return 1;
+
+  printf("Test: f32 negative zero\n");
+  if (!test_f32_neg_zero()) return 1;
+
+  printf("Test: f32 payload isolation\n");
+  if (!test_f32_payload_isolation()) return 1;
 
   return 0;
 }
