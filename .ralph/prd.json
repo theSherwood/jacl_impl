@@ -74,7 +74,7 @@
         "All tests pass and no memory leaks"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -94,7 +94,7 @@
         "All tests pass and no memory leaks"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -114,7 +114,7 @@
         "All tests pass and no memory leaks"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -134,7 +134,7 @@
         "All tests pass and no memory leaks"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -152,7 +152,7 @@
         "All tests pass and no memory leaks"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

@@ -746,6 +746,128 @@ static int test_block_bare_cmd_arg(void) {
   TEST_PASS();
 }
 
+/* ---- US-008 tests ---- */
+
+static int test_interp_non_interpolated(void) {
+  setup();
+  /* Non-interpolated "hello" produces plain AST_LIT_STRING (not interp string) */
+  AstNode* n = parse_expr("\"hello\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_LIT_STRING);
+  ASSERT_U32_EQ(n->data.lit_string.length, 5);
+  ASSERT(memcmp(n->data.lit_string.value, "hello", 5) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_var(void) {
+  setup();
+  /* "hello $name" → AST_INTERP_STRING [string("hello "), var_ref("name")] */
+  AstNode* n = parse_expr("\"hello $name\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  ASSERT_U32_EQ(n->data.interp_string.count, 2);
+  /* Segment 0: string("hello ") */
+  AstNode* s0 = n->data.interp_string.segments[0];
+  ASSERT(s0->type == AST_LIT_STRING);
+  ASSERT_U32_EQ(s0->data.lit_string.length, 6);
+  ASSERT(memcmp(s0->data.lit_string.value, "hello ", 6) == 0);
+  /* Segment 1: var_ref("name") */
+  AstNode* s1 = n->data.interp_string.segments[1];
+  ASSERT(s1->type == AST_VAR_REF);
+  ASSERT_U32_EQ(s1->data.var_ref.length, 4);
+  ASSERT(memcmp(s1->data.var_ref.name, "name", 4) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_expr(void) {
+  setup();
+  /* "result: $[+ 1 2]" → AST_INTERP_STRING [string("result: "), command(+ 1 2)] */
+  AstNode* n = parse_expr("\"result: $[+ 1 2]\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  ASSERT_U32_EQ(n->data.interp_string.count, 2);
+  /* Segment 0: string("result: ") */
+  AstNode* s0 = n->data.interp_string.segments[0];
+  ASSERT(s0->type == AST_LIT_STRING);
+  ASSERT_U32_EQ(s0->data.lit_string.length, 8);
+  ASSERT(memcmp(s0->data.lit_string.value, "result: ", 8) == 0);
+  /* Segment 1: command(+ 1 2) */
+  AstNode* s1 = n->data.interp_string.segments[1];
+  ASSERT(s1->type == AST_COMMAND);
+  ASSERT(s1->data.command.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(s1->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(s1->data.command.arg_count, 2);
+  ASSERT(s1->data.command.args[0]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(s1->data.command.args[0]->data.lit_int.value, 1);
+  ASSERT(s1->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(s1->data.command.args[1]->data.lit_int.value, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_multiple(void) {
+  setup();
+  /* "$a and $b" → [var_ref("a"), string(" and "), var_ref("b")] */
+  AstNode* n = parse_expr("\"$a and $b\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  ASSERT_U32_EQ(n->data.interp_string.count, 3);
+  /* var_ref("a") */
+  ASSERT(n->data.interp_string.segments[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.interp_string.segments[0]->data.var_ref.name, "a", 1) == 0);
+  ASSERT_U32_EQ(n->data.interp_string.segments[0]->data.var_ref.length, 1);
+  /* string(" and ") */
+  ASSERT(n->data.interp_string.segments[1]->type == AST_LIT_STRING);
+  ASSERT_U32_EQ(n->data.interp_string.segments[1]->data.lit_string.length, 5);
+  ASSERT(memcmp(n->data.interp_string.segments[1]->data.lit_string.value, " and ", 5) == 0);
+  /* var_ref("b") */
+  ASSERT(n->data.interp_string.segments[2]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.interp_string.segments[2]->data.var_ref.name, "b", 1) == 0);
+  ASSERT_U32_EQ(n->data.interp_string.segments[2]->data.var_ref.length, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_adjacent(void) {
+  setup();
+  /* "$a$b" → [var_ref("a"), var_ref("b")] — empty segments skipped */
+  AstNode* n = parse_expr("\"$a$b\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  ASSERT_U32_EQ(n->data.interp_string.count, 2);
+  ASSERT(n->data.interp_string.segments[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.interp_string.segments[0]->data.var_ref.name, "a", 1) == 0);
+  ASSERT(n->data.interp_string.segments[1]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.interp_string.segments[1]->data.var_ref.name, "b", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_source_positions(void) {
+  setup();
+  /* "hello $name" → positions cover full string including quotes */
+  AstNode* n = parse_expr("\"hello $name\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  /* Start at opening " (offset 0, line 1, col 1) */
+  ASSERT_U32_EQ(n->start.line, 1);
+  ASSERT_U32_EQ(n->start.column, 1);
+  ASSERT_U32_EQ(n->start.offset, 0);
+  /* End after closing " (offset 13, line 1, col 14) */
+  ASSERT_U32_EQ(n->end.offset, 13);
+  ASSERT_U32_EQ(n->end.column, 14);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -804,6 +926,13 @@ int main(void) {
     {"block_mismatched",     test_block_mismatched},
     {"block_source_pos",     test_block_source_positions},
     {"block_bare_cmd_arg",   test_block_bare_cmd_arg},
+    /* US-008 */
+    {"interp_non_interpolated", test_interp_non_interpolated},
+    {"interp_var",           test_interp_var},
+    {"interp_expr",          test_interp_expr},
+    {"interp_multiple",      test_interp_multiple},
+    {"interp_adjacent",      test_interp_adjacent},
+    {"interp_source_pos",    test_interp_source_positions},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

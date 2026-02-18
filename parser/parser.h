@@ -250,6 +250,7 @@ static AstNode* parser__parse_atom(Parser* p) {
 
 static AstNode* parser__parse_expr(Parser* p);
 static AstNode* parser__parse_block(Parser* p);
+static AstNode* parser__parse_interp_string(Parser* p);
 
 /* -------------------------------------------------------------------------
  * Internal: Parse bracketed command [cmd arg1 arg2]
@@ -334,6 +335,9 @@ static AstNode* parser__parse_expr(Parser* p) {
 
     case TOKEN_LBRACE:
       return parser__parse_block(p);
+
+    case TOKEN_STRING_BEGIN:
+      return parser__parse_interp_string(p);
 
     case TOKEN_INT:
     case TOKEN_FLOAT:
@@ -445,6 +449,140 @@ static AstNode* parser__parse_block(Parser* p) {
   node->end   = parser__token_end(close);
   node->data.block.commands = commands.nodes;
   node->data.block.count    = commands.count;
+  return node;
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Parse interpolated string "text $var text $[expr] text"
+ *
+ * Called when the current token is TOKEN_STRING_BEGIN.
+ * Collects segments (string literals, var refs, commands) into
+ * AST_INTERP_STRING. Empty text segments are skipped.
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_interp_string(Parser* p) {
+  Token* begin = parser__advance(p); /* consume TOKEN_STRING_BEGIN */
+  SourcePos str_start = parser__token_start(begin);
+
+  NodeArray segments;
+  parser__arr_init(&segments, p->arena);
+
+  /* Add initial text segment from STRING_BEGIN if non-empty */
+  if (begin->payload.text[0] != '\0') {
+    AstNode* seg = ast_alloc(p->arena);
+    seg->type = AST_LIT_STRING;
+    seg->start = parser__token_start(begin);
+    seg->end = parser__token_end(begin);
+    seg->data.lit_string.value = begin->payload.text;
+    seg->data.lit_string.length = (uint32_t)strlen(begin->payload.text);
+    parser__arr_push(&segments, seg);
+  }
+
+  SourcePos str_end = parser__token_end(begin);
+
+  for (;;) {
+    Token* tok = parser__peek(p);
+
+    if (tok->type == TOKEN_INTERP_VAR) {
+      parser__advance(p);
+      AstNode* var = ast_alloc(p->arena);
+      var->type = AST_VAR_REF;
+      var->start = parser__token_start(tok);
+      var->end = parser__token_end(tok);
+      var->data.var_ref.name = tok->payload.text;
+      var->data.var_ref.length = tok->length - 1; /* exclude $ */
+      parser__arr_push(&segments, var);
+    }
+    else if (tok->type == TOKEN_INTERP_EXPR_START) {
+      SourcePos cmd_start = parser__token_start(tok);
+      parser__advance(p); /* consume INTERP_EXPR_START */
+
+      /* Parse head expression */
+      AstNode* head = parser__parse_expr(p);
+      if (head == NULL) {
+        AstNode* err = parser__error(p, "expected expression after $[", tok);
+        parser__arr_push(&segments, err);
+        /* Skip to INTERP_EXPR_END */
+        while (!parser__at_end(p) &&
+               parser__peek(p)->type != TOKEN_INTERP_EXPR_END) {
+          parser__advance(p);
+        }
+        if (parser__peek(p)->type == TOKEN_INTERP_EXPR_END) {
+          parser__advance(p);
+        }
+        continue;
+      }
+
+      /* Parse args until INTERP_EXPR_END */
+      NodeArray args;
+      parser__arr_init(&args, p->arena);
+      while (!parser__at_end(p) &&
+             parser__peek(p)->type != TOKEN_INTERP_EXPR_END) {
+        if (parser__peek(p)->type == TOKEN_NEWLINE) {
+          parser__advance(p);
+          continue;
+        }
+        AstNode* arg = parser__parse_expr(p);
+        if (arg == NULL) break;
+        parser__arr_push(&args, arg);
+      }
+
+      SourcePos cmd_end;
+      if (parser__peek(p)->type == TOKEN_INTERP_EXPR_END) {
+        Token* end_tok = parser__advance(p);
+        cmd_end = parser__token_end(end_tok);
+      } else {
+        cmd_end = parser__token_end(parser__peek(p));
+      }
+
+      AstNode* cmd = ast_alloc(p->arena);
+      cmd->type = AST_COMMAND;
+      cmd->start = cmd_start;
+      cmd->end = cmd_end;
+      cmd->data.command.head = head;
+      cmd->data.command.args = args.nodes;
+      cmd->data.command.arg_count = args.count;
+      parser__arr_push(&segments, cmd);
+    }
+    else if (tok->type == TOKEN_STRING_PART) {
+      parser__advance(p);
+      if (tok->payload.text[0] != '\0') {
+        AstNode* seg = ast_alloc(p->arena);
+        seg->type = AST_LIT_STRING;
+        seg->start = parser__token_start(tok);
+        seg->end = parser__token_end(tok);
+        seg->data.lit_string.value = tok->payload.text;
+        seg->data.lit_string.length = (uint32_t)strlen(tok->payload.text);
+        parser__arr_push(&segments, seg);
+      }
+    }
+    else if (tok->type == TOKEN_STRING_END) {
+      parser__advance(p);
+      if (tok->payload.text[0] != '\0') {
+        AstNode* seg = ast_alloc(p->arena);
+        seg->type = AST_LIT_STRING;
+        seg->start = parser__token_start(tok);
+        seg->end = parser__token_end(tok);
+        seg->data.lit_string.value = tok->payload.text;
+        seg->data.lit_string.length = (uint32_t)strlen(tok->payload.text);
+        parser__arr_push(&segments, seg);
+      }
+      str_end = parser__token_end(tok);
+      break;
+    }
+    else {
+      /* EOF or unexpected token */
+      str_end = parser__token_end(tok);
+      break;
+    }
+  }
+
+  AstNode* node = ast_alloc(p->arena);
+  node->type = AST_INTERP_STRING;
+  node->start = str_start;
+  node->end = str_end;
+  node->data.interp_string.segments = segments.nodes;
+  node->data.interp_string.count = segments.count;
   return node;
 }
 
