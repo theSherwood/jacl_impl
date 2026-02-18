@@ -268,6 +268,69 @@ static inline float jacl_as_f32(JaclVal v) {
     return f;
 }
 
+/* --- i32 arithmetic --- */
+
+static inline JaclVal jacl_add_i32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_i32(jacl_as_i32(a) + jacl_as_i32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_sub_i32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_i32(jacl_as_i32(a) - jacl_as_i32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_mul_i32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_i32(jacl_as_i32(a) * jacl_as_i32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_div_i32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    int32_t dividend = jacl_as_i32(a);
+    int32_t divisor = jacl_as_i32(b);
+    if (divisor == 0) {
+        return jacl_apply_flags(jacl_set_error(jacl_i32(0)), flags);
+    }
+    /* Avoid UB: INT32_MIN / -1 overflows; wrap via unsigned cast */
+    int32_t quot = (dividend == INT32_MIN && divisor == -1)
+        ? INT32_MIN : (dividend / divisor);
+    return jacl_apply_flags(jacl_i32(quot), flags);
+}
+
+static inline JaclVal jacl_mod_i32(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    int32_t dividend = jacl_as_i32(a);
+    int32_t divisor = jacl_as_i32(b);
+    if (divisor == 0) {
+        return jacl_apply_flags(jacl_set_error(jacl_i32(0)), flags);
+    }
+    /* Avoid UB: INT32_MIN % -1 is 0 (mathematically exact) */
+    int32_t rem = (dividend == INT32_MIN && divisor == -1)
+        ? 0 : (dividend % divisor);
+    return jacl_apply_flags(jacl_i32(rem), flags);
+}
+
+static inline JaclVal jacl_neg_i32(JaclVal a) {
+    if (jacl_is_error(a)) return a;
+    uint64_t flags = a & JACL_FLAGS_MASK;
+    JaclVal result = jacl_i32(-jacl_as_i32(a));
+    return jacl_apply_flags(result, flags);
+}
+
 #endif /* VALUE_H */
 
 /* =========================================================================

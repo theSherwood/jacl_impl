@@ -1277,6 +1277,219 @@ static int test_predicate_matrix_with_flags(void) {
   TEST_PASS();
 }
 
+/* ---- US-010 tests: i32 arithmetic operations with flag propagation ---- */
+
+/* Test: basic i32 arithmetic */
+static int test_i32_arithmetic_basic(void) {
+  /* 3 + 4 = 7 */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_add_i32(jacl_i32(3), jacl_i32(4))), 7);
+
+  /* 10 - 3 = 7 */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_sub_i32(jacl_i32(10), jacl_i32(3))), 7);
+
+  /* 6 * 7 = 42 */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_mul_i32(jacl_i32(6), jacl_i32(7))), 42);
+
+  /* 10 / 3 = 3 */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_div_i32(jacl_i32(10), jacl_i32(3))), 3);
+
+  /* 10 % 3 = 1 */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_mod_i32(jacl_i32(10), jacl_i32(3))), 1);
+
+  /* All results should be i32-tagged */
+  ASSERT(jacl_is_i32(jacl_add_i32(jacl_i32(1), jacl_i32(2))));
+  ASSERT(jacl_is_i32(jacl_sub_i32(jacl_i32(5), jacl_i32(3))));
+  ASSERT(jacl_is_i32(jacl_mul_i32(jacl_i32(2), jacl_i32(3))));
+  ASSERT(jacl_is_i32(jacl_div_i32(jacl_i32(6), jacl_i32(2))));
+  ASSERT(jacl_is_i32(jacl_mod_i32(jacl_i32(7), jacl_i32(4))));
+
+  TEST_PASS();
+}
+
+/* Test: i32 arithmetic with negative numbers */
+static int test_i32_arithmetic_negative(void) {
+  /* -3 + 4 = 1 */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_add_i32(jacl_i32(-3), jacl_i32(4))), 1);
+
+  /* 3 + (-4) = -1 */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_add_i32(jacl_i32(3), jacl_i32(-4))), -1);
+
+  /* -3 - (-4) = 1 */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_sub_i32(jacl_i32(-3), jacl_i32(-4))), 1);
+
+  /* -6 * 7 = -42 */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_mul_i32(jacl_i32(-6), jacl_i32(7))), -42);
+
+  /* -6 * -7 = 42 */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_mul_i32(jacl_i32(-6), jacl_i32(-7))), 42);
+
+  /* -10 / 3 = -3 (truncation toward zero in C99) */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_div_i32(jacl_i32(-10), jacl_i32(3))), -3);
+
+  /* -10 % 3 = -1 (sign follows dividend in C99) */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_mod_i32(jacl_i32(-10), jacl_i32(3))), -1);
+
+  TEST_PASS();
+}
+
+/* Test: jacl_neg_i32 */
+static int test_i32_neg(void) {
+  ASSERT_INT_EQ(jacl_as_i32(jacl_neg_i32(jacl_i32(42))), -42);
+  ASSERT_INT_EQ(jacl_as_i32(jacl_neg_i32(jacl_i32(-42))), 42);
+  ASSERT_INT_EQ(jacl_as_i32(jacl_neg_i32(jacl_i32(0))), 0);
+  ASSERT_INT_EQ(jacl_as_i32(jacl_neg_i32(jacl_i32(1))), -1);
+  ASSERT_INT_EQ(jacl_as_i32(jacl_neg_i32(jacl_i32(-1))), 1);
+
+  /* Result should be i32-tagged */
+  ASSERT(jacl_is_i32(jacl_neg_i32(jacl_i32(42))));
+
+  TEST_PASS();
+}
+
+/* Test: division by zero returns error-flagged value */
+static int test_i32_div_by_zero(void) {
+  JaclVal result = jacl_div_i32(jacl_i32(10), jacl_i32(0));
+  ASSERT(jacl_is_error(result));
+  ASSERT(jacl_is_i32(result));
+
+  TEST_PASS();
+}
+
+/* Test: mod by zero returns error-flagged value */
+static int test_i32_mod_by_zero(void) {
+  JaclVal result = jacl_mod_i32(jacl_i32(10), jacl_i32(0));
+  ASSERT(jacl_is_error(result));
+  ASSERT(jacl_is_i32(result));
+
+  TEST_PASS();
+}
+
+/* Test: error operand short-circuits (returns the error operand) */
+static int test_i32_error_shortcircuit(void) {
+  JaclVal err_a = jacl_set_error(jacl_i32(99));
+  JaclVal ok_b = jacl_i32(5);
+
+  /* Error on a: returns a */
+  ASSERT_U64_EQ(jacl_add_i32(err_a, ok_b), err_a);
+  ASSERT_U64_EQ(jacl_sub_i32(err_a, ok_b), err_a);
+  ASSERT_U64_EQ(jacl_mul_i32(err_a, ok_b), err_a);
+  ASSERT_U64_EQ(jacl_div_i32(err_a, ok_b), err_a);
+  ASSERT_U64_EQ(jacl_mod_i32(err_a, ok_b), err_a);
+  ASSERT_U64_EQ(jacl_neg_i32(err_a), err_a);
+
+  /* Error on b: returns b */
+  JaclVal err_b = jacl_set_error(jacl_i32(77));
+  ASSERT_U64_EQ(jacl_add_i32(ok_b, err_b), err_b);
+  ASSERT_U64_EQ(jacl_sub_i32(ok_b, err_b), err_b);
+  ASSERT_U64_EQ(jacl_mul_i32(ok_b, err_b), err_b);
+  ASSERT_U64_EQ(jacl_div_i32(ok_b, err_b), err_b);
+  ASSERT_U64_EQ(jacl_mod_i32(ok_b, err_b), err_b);
+
+  /* Both error: returns a (first checked) */
+  ASSERT_U64_EQ(jacl_add_i32(err_a, err_b), err_a);
+
+  TEST_PASS();
+}
+
+/* Test: flag propagation through arithmetic */
+static int test_i32_flag_propagation(void) {
+  JaclVal tainted_a = jacl_set_tainted(jacl_i32(3));
+  JaclVal secret_b = jacl_set_secret(jacl_i32(4));
+
+  /* add: tainted + secret -> result has both flags */
+  JaclVal sum = jacl_add_i32(tainted_a, secret_b);
+  ASSERT_INT_EQ(jacl_as_i32(sum), 7);
+  ASSERT(jacl_is_tainted(sum));
+  ASSERT(jacl_is_secret(sum));
+  ASSERT(!jacl_is_error(sum));
+
+  /* sub: same flags propagate */
+  JaclVal diff = jacl_sub_i32(tainted_a, secret_b);
+  ASSERT_INT_EQ(jacl_as_i32(diff), -1);
+  ASSERT(jacl_is_tainted(diff));
+  ASSERT(jacl_is_secret(diff));
+
+  /* mul: clean * tainted -> tainted */
+  JaclVal prod = jacl_mul_i32(jacl_i32(2), tainted_a);
+  ASSERT_INT_EQ(jacl_as_i32(prod), 6);
+  ASSERT(jacl_is_tainted(prod));
+  ASSERT(!jacl_is_secret(prod));
+
+  /* div: secret / clean -> secret */
+  JaclVal quot = jacl_div_i32(secret_b, jacl_i32(2));
+  ASSERT_INT_EQ(jacl_as_i32(quot), 2);
+  ASSERT(jacl_is_secret(quot));
+  ASSERT(!jacl_is_tainted(quot));
+
+  /* mod: clean % clean -> no flags */
+  JaclVal rem = jacl_mod_i32(jacl_i32(10), jacl_i32(3));
+  ASSERT(!jacl_is_tainted(rem));
+  ASSERT(!jacl_is_secret(rem));
+  ASSERT(!jacl_is_error(rem));
+
+  TEST_PASS();
+}
+
+/* Test: neg preserves flags */
+static int test_i32_neg_preserves_flags(void) {
+  JaclVal v = jacl_set_tainted(jacl_set_secret(jacl_i32(42)));
+  JaclVal neg = jacl_neg_i32(v);
+
+  ASSERT_INT_EQ(jacl_as_i32(neg), -42);
+  ASSERT(jacl_is_tainted(neg));
+  ASSERT(jacl_is_secret(neg));
+  ASSERT(!jacl_is_error(neg));
+
+  TEST_PASS();
+}
+
+/* Test: div/mod by zero propagates flags from operands */
+static int test_i32_divmod_zero_flag_propagation(void) {
+  JaclVal tainted_a = jacl_set_tainted(jacl_i32(10));
+  JaclVal secret_zero = jacl_set_secret(jacl_i32(0));
+
+  /* div by zero: result should have error + tainted + secret */
+  JaclVal div_result = jacl_div_i32(tainted_a, secret_zero);
+  ASSERT(jacl_is_error(div_result));
+  ASSERT(jacl_is_tainted(div_result));
+  ASSERT(jacl_is_secret(div_result));
+
+  /* mod by zero: same */
+  JaclVal mod_result = jacl_mod_i32(tainted_a, secret_zero);
+  ASSERT(jacl_is_error(mod_result));
+  ASSERT(jacl_is_tainted(mod_result));
+  ASSERT(jacl_is_secret(mod_result));
+
+  TEST_PASS();
+}
+
+/* Test: INT32_MIN edge cases */
+static int test_i32_int32_min_edges(void) {
+  /* -INT32_MIN overflows: in two's complement, -(-2147483648) wraps to -2147483648 */
+  JaclVal neg_min = jacl_neg_i32(jacl_i32(INT32_MIN));
+  /* C wraps on signed overflow (implementation-defined in C99, but we use uint32_t intermediates) */
+  /* -INT32_MIN as int32_t is INT32_MIN due to two's complement wrap */
+  ASSERT_INT_EQ(jacl_as_i32(neg_min), INT32_MIN);
+
+  /* INT32_MIN / -1 overflows: result wraps to INT32_MIN */
+  JaclVal div_min = jacl_div_i32(jacl_i32(INT32_MIN), jacl_i32(-1));
+  ASSERT_INT_EQ(jacl_as_i32(div_min), INT32_MIN);
+
+  /* INT32_MIN % -1 = 0 */
+  JaclVal mod_min = jacl_mod_i32(jacl_i32(INT32_MIN), jacl_i32(-1));
+  ASSERT_INT_EQ(jacl_as_i32(mod_min), 0);
+
+  /* INT32_MAX + 1 wraps to INT32_MIN */
+  JaclVal overflow = jacl_add_i32(jacl_i32(INT32_MAX), jacl_i32(1));
+  ASSERT_INT_EQ(jacl_as_i32(overflow), INT32_MIN);
+
+  /* INT32_MIN - 1 wraps to INT32_MAX */
+  JaclVal underflow = jacl_sub_i32(jacl_i32(INT32_MIN), jacl_i32(1));
+  ASSERT_INT_EQ(jacl_as_i32(underflow), INT32_MAX);
+
+  TEST_PASS();
+}
+
 int main(void) {
   printf("Test: JaclVal size\n");
   if (!test_jaclval_size()) return 1;
@@ -1471,6 +1684,37 @@ int main(void) {
 
   printf("Test: predicate matrix with flags\n");
   if (!test_predicate_matrix_with_flags()) return 1;
+
+  /* US-010: i32 arithmetic operations */
+  printf("Test: i32 arithmetic basic\n");
+  if (!test_i32_arithmetic_basic()) return 1;
+
+  printf("Test: i32 arithmetic negative\n");
+  if (!test_i32_arithmetic_negative()) return 1;
+
+  printf("Test: i32 neg\n");
+  if (!test_i32_neg()) return 1;
+
+  printf("Test: i32 div by zero\n");
+  if (!test_i32_div_by_zero()) return 1;
+
+  printf("Test: i32 mod by zero\n");
+  if (!test_i32_mod_by_zero()) return 1;
+
+  printf("Test: i32 error short-circuit\n");
+  if (!test_i32_error_shortcircuit()) return 1;
+
+  printf("Test: i32 flag propagation\n");
+  if (!test_i32_flag_propagation()) return 1;
+
+  printf("Test: i32 neg preserves flags\n");
+  if (!test_i32_neg_preserves_flags()) return 1;
+
+  printf("Test: i32 div/mod zero flag propagation\n");
+  if (!test_i32_divmod_zero_flag_propagation()) return 1;
+
+  printf("Test: i32 INT32_MIN edge cases\n");
+  if (!test_i32_int32_min_edges()) return 1;
 
   return 0;
 }
