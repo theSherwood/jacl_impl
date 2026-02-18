@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -224,6 +225,84 @@ static int test_nil_bool_distinction(void) {
   TEST_PASS();
 }
 
+/* ---- US-003 tests: i32 constructors and extractors ---- */
+
+/* Test: jacl_i32 constructor produces i32-tagged values */
+static int test_i32_constructor(void) {
+  JaclVal v0 = jacl_i32(0);
+  JaclVal v1 = jacl_i32(1);
+  JaclVal vn = jacl_i32(-1);
+
+  /* All should be i32-tagged */
+  ASSERT_U64_EQ(v0 & JACL_TYPE_MASK, JACL_TAG_I32);
+  ASSERT_U64_EQ(v1 & JACL_TYPE_MASK, JACL_TAG_I32);
+  ASSERT_U64_EQ(vn & JACL_TYPE_MASK, JACL_TAG_I32);
+
+  TEST_PASS();
+}
+
+/* Test: jacl_is_i32 predicate */
+static int test_is_i32(void) {
+  ASSERT(jacl_is_i32(jacl_i32(0)));
+  ASSERT(jacl_is_i32(jacl_i32(42)));
+  ASSERT(jacl_is_i32(jacl_i32(-1)));
+  ASSERT(jacl_is_i32(jacl_i32(INT32_MAX)));
+  ASSERT(jacl_is_i32(jacl_i32(INT32_MIN)));
+
+  /* i32 with flags set is still i32 */
+  ASSERT(jacl_is_i32(jacl_i32(7) | JACL_FLAG_TAINTED));
+  ASSERT(jacl_is_i32(jacl_i32(7) | JACL_FLAG_SECRET));
+  ASSERT(jacl_is_i32(jacl_i32(7) | JACL_FLAG_ERROR));
+  ASSERT(jacl_is_i32(jacl_i32(7) | JACL_FLAGS_MASK));
+
+  /* Other types are not i32 */
+  ASSERT(!jacl_is_i32(JACL_NIL));
+  ASSERT(!jacl_is_i32(JACL_TRUE));
+  ASSERT(!jacl_is_i32(JACL_FALSE));
+  ASSERT(!jacl_is_i32(JACL_TAG_F32));
+
+  TEST_PASS();
+}
+
+/* Test: jacl_as_i32 extractor and round-trip */
+static int test_as_i32(void) {
+  /* Round-trip: jacl_as_i32(jacl_i32(n)) == n */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_i32(0)), 0);
+  ASSERT_INT_EQ(jacl_as_i32(jacl_i32(1)), 1);
+  ASSERT_INT_EQ(jacl_as_i32(jacl_i32(-1)), -1);
+  ASSERT_INT_EQ(jacl_as_i32(jacl_i32(INT32_MAX)), INT32_MAX);
+  ASSERT_INT_EQ(jacl_as_i32(jacl_i32(INT32_MIN)), INT32_MIN);
+
+  /* Additional edge cases */
+  ASSERT_INT_EQ(jacl_as_i32(jacl_i32(42)), 42);
+  ASSERT_INT_EQ(jacl_as_i32(jacl_i32(-42)), -42);
+  ASSERT_INT_EQ(jacl_as_i32(jacl_i32(12345)), 12345);
+  ASSERT_INT_EQ(jacl_as_i32(jacl_i32(-12345)), -12345);
+
+  TEST_PASS();
+}
+
+/* Test: negative i32 sign handling (no sign extension into tag byte) */
+static int test_i32_sign_handling(void) {
+  /* Negative values must not bleed into the tag byte */
+  JaclVal vn1 = jacl_i32(-1);
+  /* -1 as uint32_t is 0xFFFFFFFF, which fits in 56 bits */
+  ASSERT_U64_EQ(vn1 & JACL_TAG_MASK, JACL_TAG_I32);
+  /* The payload should be 0x00000000FFFFFFFF, not 0x00FFFFFFFFFFFFFF */
+  ASSERT_U64_EQ(vn1 & JACL_PAYLOAD_MASK, UINT64_C(0xFFFFFFFF));
+
+  JaclVal vmin = jacl_i32(INT32_MIN);
+  ASSERT_U64_EQ(vmin & JACL_TAG_MASK, JACL_TAG_I32);
+  /* INT32_MIN = -2147483648, as uint32_t = 0x80000000 */
+  ASSERT_U64_EQ(vmin & JACL_PAYLOAD_MASK, UINT64_C(0x80000000));
+
+  /* Round-trip still works */
+  ASSERT_INT_EQ(jacl_as_i32(vn1), -1);
+  ASSERT_INT_EQ(jacl_as_i32(vmin), INT32_MIN);
+
+  TEST_PASS();
+}
+
 int main(void) {
   printf("Test: JaclVal size\n");
   if (!test_jaclval_size()) return 1;
@@ -264,6 +343,19 @@ int main(void) {
 
   printf("Test: nil/bool distinction\n");
   if (!test_nil_bool_distinction()) return 1;
+
+  /* US-003: i32 constructor, predicate, extractor */
+  printf("Test: i32 constructor\n");
+  if (!test_i32_constructor()) return 1;
+
+  printf("Test: jacl_is_i32 predicate\n");
+  if (!test_is_i32()) return 1;
+
+  printf("Test: jacl_as_i32 extractor\n");
+  if (!test_as_i32()) return 1;
+
+  printf("Test: i32 sign handling\n");
+  if (!test_i32_sign_handling()) return 1;
 
   return 0;
 }

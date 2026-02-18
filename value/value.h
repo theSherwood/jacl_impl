@@ -70,6 +70,10 @@ static inline JaclVal jacl_bool(bool b) {
     return JACL_TAG_BOOL | (b ? UINT64_C(1) : UINT64_C(0));
 }
 
+static inline JaclVal jacl_i32(int32_t n) {
+    return JACL_TAG_I32 | ((uint64_t)(uint32_t)n & JACL_PAYLOAD_MASK);
+}
+
 /* --- Predicates --- */
 
 static inline bool jacl_is_nil(JaclVal v) {
@@ -80,10 +84,18 @@ static inline bool jacl_is_bool(JaclVal v) {
     return (v & JACL_TYPE_MASK) == JACL_TAG_BOOL;
 }
 
+static inline bool jacl_is_i32(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_I32;
+}
+
 /* --- Extractors --- */
 
 static inline bool jacl_as_bool(JaclVal v) {
     return (v & JACL_PAYLOAD_MASK) != 0;
+}
+
+static inline int32_t jacl_as_i32(JaclVal v) {
+    return (int32_t)(uint32_t)(v & JACL_PAYLOAD_MASK);
 }
 
 #endif /* VALUE_H */
