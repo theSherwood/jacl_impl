@@ -249,6 +249,7 @@ static AstNode* parser__parse_atom(Parser* p) {
  * ------------------------------------------------------------------------- */
 
 static AstNode* parser__parse_expr(Parser* p);
+static AstNode* parser__parse_block(Parser* p);
 
 /* -------------------------------------------------------------------------
  * Internal: Parse bracketed command [cmd arg1 arg2]
@@ -331,6 +332,9 @@ static AstNode* parser__parse_expr(Parser* p) {
     case TOKEN_LBRACKET:
       return parser__parse_command(p);
 
+    case TOKEN_LBRACE:
+      return parser__parse_block(p);
+
     case TOKEN_INT:
     case TOKEN_FLOAT:
     case TOKEN_WORD:
@@ -350,7 +354,8 @@ static AstNode* parser__parse_expr(Parser* p) {
 
 static int parser__is_command_end(Parser* p) {
   TokenType t = parser__peek(p)->type;
-  return t == TOKEN_NEWLINE || t == TOKEN_SEMICOLON || t == TOKEN_EOF;
+  return t == TOKEN_NEWLINE || t == TOKEN_SEMICOLON || t == TOKEN_EOF
+      || t == TOKEN_RBRACE;
 }
 
 /* -------------------------------------------------------------------------
@@ -391,6 +396,55 @@ static AstNode* parser__parse_bare_command(Parser* p) {
   node->data.command.head      = head;
   node->data.command.args      = args.nodes;
   node->data.command.arg_count = args.count;
+  return node;
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Parse code block { cmd1; cmd2; ... }
+ *
+ * Called when the current token is TOKEN_LBRACE.
+ * Returns AST_BLOCK on success, AST_ERROR on failure.
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_block(Parser* p) {
+  Token* open = parser__advance(p); /* consume '{' */
+  SourcePos block_start = parser__token_start(open);
+
+  NodeArray commands;
+  parser__arr_init(&commands, p->arena);
+
+  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
+    /* Skip newlines and semicolons between commands */
+    while (parser__peek(p)->type == TOKEN_NEWLINE ||
+           parser__peek(p)->type == TOKEN_SEMICOLON) {
+      parser__advance(p);
+    }
+    if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
+
+    AstNode* cmd = parser__parse_bare_command(p);
+    if (cmd != NULL) {
+      parser__arr_push(&commands, cmd);
+    } else {
+      /* Skip unrecognized token to avoid infinite loop */
+      parser__advance(p);
+    }
+  }
+
+  /* Expect closing brace */
+  if (parser__peek(p)->type != TOKEN_RBRACE) {
+    AstNode* err = parser__error(p, "expected '}' to close block", open);
+    err->end = parser__token_end(parser__peek(p));
+    return err;
+  }
+  Token* close = parser__advance(p); /* consume '}' */
+
+  /* Build AST_BLOCK node */
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_BLOCK;
+  node->start = block_start;
+  node->end   = parser__token_end(close);
+  node->data.block.commands = commands.nodes;
+  node->data.block.count    = commands.count;
   return node;
 }
 
