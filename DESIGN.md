@@ -55,18 +55,21 @@ contexts from the start.
 
 ### Type Tags (5 bits — up to 32 types)
 
-Allocation TBD. Candidates:
+Assigned values (pre-shifted to bits 60-56):
 
-- `NIL`
-- `BOOL`
-- `I32`
-- `F32`
-- `STRING` (pointer to heap)
-- `VECTOR` (pointer to RRB vec)
-- `MAP` (pointer to HAMT)
-- `CLOSURE`
-- `BIGNUM` (pointer to heap)
-- ... (room for more)
+| Tag | Value | Payload |
+|-----|-------|---------|
+| `NIL` | 0x00 | zero |
+| `BOOL` | 0x01 | 0 or 1 |
+| `I32` | 0x02 | 32-bit signed int (zero-extended via `uint32_t` cast) |
+| `F32` | 0x03 | 32-bit float (bit-cast via `memcpy`) |
+| `INLINE_STRING` | 0x04 | up to 7 bytes, little-endian, null-terminated |
+| `STRING` | 0x05 | pointer to heap |
+| `VECTOR` | 0x06 | pointer to RRB vec |
+| `MAP` | 0x07 | pointer to HAMT |
+| `CLOSURE` | 0x08 | pointer to heap |
+| `BIGNUM` | 0x09 | pointer to heap |
+| 0x0A–0x1F | — | reserved (22 slots available) |
 
 ### Unboxed Values (Static/Typed Context)
 
@@ -150,10 +153,11 @@ Three-tier representation:
 
 - **Inline (0-7 bytes):** packed directly into the 56-bit payload of a tagged value.
   Zero allocation. Covers most command names, flags, short identifiers.
+  Length is determined by null-termination within the 7-byte payload (first zero byte
+  or 7 if all non-zero). Bytes are packed little-endian via bit shifts.
+  Uses the `INLINE_STRING` type tag (0x04), distinct from heap `STRING` (0x05).
 - **Heap interned (up to threshold):** deduplicated, cheap pointer-equality comparison.
 - **Large strings:** likely rope-based (rope module exists).
-
-Implementation detail TBD: how inline strings encode their length.
 
 ### Open Questions
 
@@ -556,43 +560,76 @@ binding IS a box under the hood. Deferred for now.
 Each milestone produces a testable, working increment. Later milestones build on earlier
 ones but each is a self-contained deliverable.
 
-### Milestone 0: Value Representation (`value/`)
+### Milestone 0: Value Representation (`value/`) — COMPLETE
 
-The foundation everything else sits on. Implement the 64-bit tagged value system from
+The foundation everything else sits on. Implements the 64-bit tagged value system from
 Section 2.
 
-**Delivers:**
-- `value.h` — the `JaclVal` type (64-bit tagged word)
-- Tag byte manipulation: type tag (5 bits), error/tainted/secret flags
-- Constructors and extractors for all inline types: nil, bool, i32, f32
-- Pointer-payload constructors for heap types (string, vector, map, closure, etc.)
-- Inline string packing (0–7 bytes in the 56-bit payload)
-- Flag propagation helpers (e.g., "combine flags from two operands")
-- Type predicate macros (`IS_NIL`, `IS_I32`, `IS_ERROR`, etc.)
+**Delivered:**
+- `value/value.h` — single-header with `JaclVal` type (`uint64_t` typedef)
+- Constants: `JACL_NIL`, `JACL_TRUE`, `JACL_FALSE`
+- Tag byte manipulation: shift/mask constants, flag constants, type tag constants
+  (all pre-shifted to bit position, e.g., `JACL_TAG_I32 = 0x02 << 56`)
+- Constructors: `jacl_bool`, `jacl_i32`, `jacl_f32`, `jacl_inline_string`,
+  `jacl_string_ptr`, `jacl_vector_ptr`, `jacl_map_ptr`, `jacl_closure_ptr`, `jacl_bignum_ptr`
+- Extractors: `jacl_as_bool`, `jacl_as_i32`, `jacl_as_f32`, `jacl_as_ptr`,
+  `jacl_inline_string_len`, `jacl_inline_string_get`, `jacl_type_tag`
+- Type predicates: `jacl_is_nil`, `jacl_is_bool`, `jacl_is_i32`, `jacl_is_f32`,
+  `jacl_is_inline_string`, `jacl_is_string`, `jacl_is_vector`, `jacl_is_map`,
+  `jacl_is_closure`, `jacl_is_bignum` (all ignore flag bits)
+- Flag manipulation: `jacl_is_tainted`/`set`/`clear`, `jacl_is_secret`/`set`/`clear`,
+  `jacl_is_error`/`set`/`clear` (value semantics — return new `JaclVal`)
+- Flag propagation: `jacl_propagate_flags(a, b)`, `jacl_apply_flags(result, flags)`
+- i32 arithmetic: `jacl_add_i32`, `sub`, `mul`, `div`, `mod`, `neg` — with error
+  short-circuit, flag propagation, division-by-zero → error-flagged, INT32_MIN UB guards
+- f32 arithmetic: `jacl_add_f32`, `sub`, `mul`, `div`, `neg` — IEEE 754 semantics
+  (division by zero → inf/NaN, not error-flagged)
+- Comparisons: `jacl_eq` (type+payload equality, ignoring flags, cross-type → false),
+  `jacl_lt_i32`/`gt`/`le`/`ge`, `jacl_lt_f32`/`gt`/`le`/`ge` — all return `JaclVal`
+  bool with propagated flags
+- All functions are `static inline` in the header declaration section
+- Compile-time pointer size assert (C99 typedef trick)
 
-**Tests:** construct/extract round-trips for every type, flag propagation, inline string
-pack/unpack, edge cases (max inline string length, i32 min/max, pointer tagging).
+**Tests:** 80 tests in `value/test_value.c` covering construct/extract round-trips for
+every type, NxN predicate matrix (10 types × 10 predicates), flag independence and
+propagation (exhaustive 8×8 flag combination matrix), inline string pack/unpack,
+arithmetic edge cases (INT32_MIN, overflow/wrap, IEEE 754 inf/NaN), comparison
+semantics, error short-circuit behavior.
 
 **No dependencies on other milestones.**
 
 ---
 
-### Milestone 1: Lexer (`lexer/`)
+### Milestone 1: Lexer (`lexer/`) — COMPLETE
 
-Tokenize Phase 1 bracket syntax. Operates on byte buffers (later: rope input).
+Tokenizes Phase 1 bracket syntax. Operates on byte buffers (later: rope input).
 
-**Delivers:**
-- `lexer.h` — streaming tokenizer
-- Token types: `[`, `]`, `{`, `}`, `(`, `)`, bare word, number (integer and float
-  literals), string (double-quoted, with `$var` and `$[expr]` interpolation markers),
-  `$identifier`, `#` comment (skipped), newline, EOF
-- Position tracking (line, column, byte offset) for error reporting
-- Arena-backed allocation for token storage
+**Delivered:**
+- `lexer/lexer.h` — single-header streaming tokenizer with 23 token types
+- Delimiters: `[`, `]`, `{`, `}`, `(`, `)`
+- Literals: `TOKEN_WORD` (bare words), `TOKEN_INT` (decimal/hex `0x`/binary `0b`),
+  `TOKEN_FLOAT`, `TOKEN_STRING` (double-quoted with escape sequences),
+  `TOKEN_KEYWORD` (`:name`)
+- Variables: `TOKEN_VAR` (`$identifier`), `TOKEN_DOLLAR_BRACKET` (`$[`)
+- Operators: greedy consumption of operator characters (`!%&*+-./<=>?@\^|~`)
+- String interpolation: `STRING_BEGIN`/`STRING_PART`/`STRING_END` with
+  `INTERP_VAR` and `INTERP_EXPR_START`/`INTERP_EXPR_END` for `$var` and `$[expr]`
+  (non-interpolated strings still emit single `STRING` token)
+- Comments: `#` to end of line (skipped, not emitted)
+- `TOKEN_NEWLINE`, `TOKEN_EOF`, `TOKEN_ERROR` (with descriptive messages)
+- Position tracking: line, column, byte offset per token
+- Arena-backed allocation for token storage and string content
+- Escape sequences: `\\`, `\"`, `\n`, `\t`, `\r`, `\0`, `\xNN`, `\uNNNN`, `\UNNNNNNNN`
+- Error recovery: invalid tokens consume minimal input, lexing continues
+- Zero-copy for words/keywords/operators (payload points into source buffer);
+  arena-allocated for string content
 
-**Tests:** tokenize individual constructs, full multi-line programs, edge cases (nested
-interpolation, escape sequences, unterminated strings, UTF-8 in bare words).
+**Tests:** 95 tests in `lexer/test_lexer.c` covering individual constructs, all escape
+types, string interpolation (nested `$[expr]` with recursive strings), number formats
+(decimal/hex/binary/float), error recovery, position tracking across multi-line
+programs, and a 58-line integration test exercising all token types (190 tokens).
 
-**Depends on:** Milestone 0 (for arena; value.h not strictly needed but co-developed).
+**Depends on:** Arena module (for allocation). No dependency on value module.
 
 ---
 
@@ -887,42 +924,44 @@ for C-held references).
 
 ### Milestone Summary
 
-| #  | Milestone                    | Key Deliverable                        | Enables                          |
-|----|------------------------------|----------------------------------------|----------------------------------|
-| 0  | Value Representation         | 64-bit tagged values                   | Everything                       |
-| 1  | Lexer                        | Token stream                           | Parsing                          |
-| 2  | Parser & AST                 | Command-invocation tree                | Compilation, macros              |
-| 3  | Bytecode Compiler & VM       | Running `[print [+ 1 2]]`             | Real programs                    |
-| 4  | Variables, Procs, Control    | `def`, `proc`, `if`, closures          | Turing-complete language         |
-| 5  | String System                | Three-tier strings, interpolation      | Command-language UX              |
-| 6  | Persistent Collections       | Vectors and maps from JACL             | Data manipulation                |
-| 7  | Error Handling               | Error flag propagation, `try`          | Robust programs                  |
-| 8  | Mutable State                | `mut`, `set!`, `box`, `atom`           | Stateful programs                |
-| 9  | Static Type System           | Typed/unboxed values, type checking    | Performance, safety              |
-| 10 | Garbage Collection           | Epoch-based tracing GC                 | Long-running programs            |
-| 11 | Concurrency                  | NxM scheduler, parallel/spawn/await    | Multithreaded programs           |
-| 12 | Module System                | File modules, sandboxing               | Code organization, security      |
-| 13 | Macro System                 | AST macros, hygiene                    | Language extensibility           |
-| 14 | Phase 2 Syntax               | Operators, assignment sugar            | User-friendly surface syntax     |
-| 15 | FFI & Embedding              | C interop, embedding API               | Real-world integration           |
+| #  | Milestone                    | Key Deliverable                        | Enables                          | Status       |
+|----|------------------------------|----------------------------------------|----------------------------------|--------------|
+| 0  | Value Representation         | 64-bit tagged values                   | Everything                       | **COMPLETE** |
+| 1  | Lexer                        | Token stream                           | Parsing                          | **COMPLETE** |
+| 2  | Parser & AST                 | Command-invocation tree                | Compilation, macros              |              |
+| 3  | Bytecode Compiler & VM       | Running `[print [+ 1 2]]`             | Real programs                    |              |
+| 4  | Variables, Procs, Control    | `def`, `proc`, `if`, closures          | Turing-complete language         |              |
+| 5  | String System                | Three-tier strings, interpolation      | Command-language UX              |              |
+| 6  | Persistent Collections       | Vectors and maps from JACL             | Data manipulation                |              |
+| 7  | Error Handling               | Error flag propagation, `try`          | Robust programs                  |              |
+| 8  | Mutable State                | `mut`, `set!`, `box`, `atom`           | Stateful programs                |              |
+| 9  | Static Type System           | Typed/unboxed values, type checking    | Performance, safety              |              |
+| 10 | Garbage Collection           | Epoch-based tracing GC                 | Long-running programs            |              |
+| 11 | Concurrency                  | NxM scheduler, parallel/spawn/await    | Multithreaded programs           |              |
+| 12 | Module System                | File modules, sandboxing               | Code organization, security      |              |
+| 13 | Macro System                 | AST macros, hygiene                    | Language extensibility           |              |
+| 14 | Phase 2 Syntax               | Operators, assignment sugar            | User-friendly surface syntax     |              |
+| 15 | FFI & Embedding              | C interop, embedding API               | Real-world integration           |              |
 
 ---
 
 ## Implementation Modules (Existing)
 
-| Module        | Purpose                                           | Key File                        |
-| ------------- | ------------------------------------------------- | ------------------------------- |
-| platform      | Cross-platform atomics, threading, allocators     | `platform/platform.h`           |
-| arena         | Bulk memory allocation by lifetime                | `arena/arena.h`                 |
-| rc            | Thread-safe reference counting                    | `rc/rc.h`                       |
-| rrb_vec       | Persistent vector (immutable, structural sharing) | `rrb_vec/rrb_vec.h`             |
-| hamt          | Persistent hashmap                                | `hamt/hamt.h`                   |
-| segment_array | Resizable array with stable pointers              | `segment_array/segment_array.h` |
-| sum_tree      | Generic B-tree with monoidal summaries            | `sum_tree/sum_tree.h`           |
-| rope          | Text rope (specialization of sum_tree)            | `sum_tree/rope.h`               |
-| chase_lev     | Lock-free work-stealing deque                     | `chase_lev/chase_lev.h`         |
-| bigint        | Arbitrary-precision integers                      | `bignum/bigint.h`               |
-| bigfloat      | Arbitrary-precision floats                        | `bignum/bigfloat.h`             |
-| rational      | Rational arithmetic                               | `bignum/rational.h`             |
-| regex/nfa     | Thompson NFA regex engine                         | `regex/nfa.h`                   |
-| test          | Memory-tracking test harness                      | `test/test_helpers.h`           |
+| Module        | Purpose                                           | Key File                        | Milestone |
+| ------------- | ------------------------------------------------- | ------------------------------- | --------- |
+| value         | 64-bit tagged value system (JaclVal)              | `value/value.h`                 | M0        |
+| lexer         | Streaming tokenizer for Phase 1 syntax            | `lexer/lexer.h`                 | M1        |
+| platform      | Cross-platform atomics, threading, allocators     | `platform/platform.h`           | infra     |
+| arena         | Bulk memory allocation by lifetime                | `arena/arena.h`                 | infra     |
+| rc            | Thread-safe reference counting                    | `rc/rc.h`                       | infra     |
+| rrb_vec       | Persistent vector (immutable, structural sharing) | `rrb_vec/rrb_vec.h`             | infra     |
+| hamt          | Persistent hashmap                                | `hamt/hamt.h`                   | infra     |
+| segment_array | Resizable array with stable pointers              | `segment_array/segment_array.h` | infra     |
+| sum_tree      | Generic B-tree with monoidal summaries            | `sum_tree/sum_tree.h`           | infra     |
+| rope          | Text rope (specialization of sum_tree)            | `sum_tree/rope.h`               | infra     |
+| chase_lev     | Lock-free work-stealing deque                     | `chase_lev/chase_lev.h`         | infra     |
+| bigint        | Arbitrary-precision integers                      | `bignum/bigint.h`               | infra     |
+| bigfloat      | Arbitrary-precision floats                        | `bignum/bigfloat.h`             | infra     |
+| rational      | Rational arithmetic                               | `bignum/rational.h`             | infra     |
+| regex/nfa     | Thompson NFA regex engine                         | `regex/nfa.h`                   | infra     |
+| test          | Memory-tracking test harness                      | `test/test_helpers.h`           | infra     |

@@ -1,0 +1,162 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/lexer",
+  "description": "JACL Lexer (Milestone 1) - Streaming tokenizer for Phase 1 bracket syntax, producing an arena-allocated token array from byte buffer input",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Define token types and lexer data structures",
+      "description": "As a developer, I need the token enum, Token struct, and lexer API defined in a single-header library so that all subsequent stories can build on a stable interface.",
+      "acceptanceCriteria": [
+        "lexer/lexer.h exists following single-header convention (#ifdef LEXER_IMPLEMENTATION guard)",
+        "TokenType enum includes: LBRACKET, RBRACKET, LBRACE, RBRACE, LPAREN, RPAREN, WORD, OPERATOR, KEYWORD, INT, FLOAT, STRING, STRING_BEGIN, STRING_PART, STRING_END, INTERP_VAR, INTERP_EXPR_START, INTERP_EXPR_END, VAR, DOLLAR_BRACKET, NEWLINE, ERROR, EOF_TOKEN",
+        "Token struct contains: TokenType type, uint32_t line, uint32_t column, uint32_t offset, uint32_t length, and a union payload (const char* text pointer, int32_t int_val, float float_val, const char* error_msg)",
+        "LexResult struct contains: Token* tokens, uint32_t count, uint32_t error_count",
+        "Public API function declared: LexResult lexer_lex(const char* source, arena_t* arena)",
+        "Header includes only arena/arena.h and platform/platform.h",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Lex delimiters, whitespace, newlines, and EOF",
+      "description": "As the parser, I need bracket/brace/paren tokens, newline tokens, and EOF so that the basic structure of JACL programs can be parsed.",
+      "acceptanceCriteria": [
+        "Each of [ ] { } ( ) produces the correct distinct token type",
+        "Spaces and tabs are skipped (no tokens emitted)",
+        "\\n produces a NEWLINE token; \\r\\n produces a single NEWLINE token",
+        "Consecutive newlines produce consecutive NEWLINE tokens",
+        "End of input produces an EOF_TOKEN as the final token",
+        "All tokens carry correct line, column, and byte offset",
+        "lexer/test_lexer.c exists and is added to TESTS array in build.sh",
+        "Tests use test/test_helpers.h with tracked_allocator plugged into the arena",
+        "Zero memory leaks under tracked allocator",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Lex comments, bare words, operators, and keywords",
+      "description": "As the parser, I need word tokens for command names/arguments, operator tokens for symbolic operators, keyword tokens for map keys, and comments skipped.",
+      "acceptanceCriteria": [
+        "# starts a line comment — everything from # to end of line is skipped, no token emitted",
+        "A comment before a newline still produces the NEWLINE token",
+        "Sequences of letter/digit/underscore/hyphen/UTF-8 characters produce WORD tokens",
+        "Sequences of operator characters (!%&*+-./<=>?@\\^|~) produce OPERATOR tokens",
+        "Colon followed by word characters (e.g. :key, :my-thing) produces KEYWORD tokens",
+        "Token payload text pointer points into original source buffer with correct length",
+        "Bare words terminate at whitespace, delimiters ([]{}()), $, \", #, or EOF",
+        "Tests cover: simple words, UTF-8 words, operators, keywords, comments before/after tokens, mixed sequences",
+        "Zero memory leaks under tracked allocator",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Lex numeric literals",
+      "description": "As the parser, I need integer and float tokens so that numeric values can be compiled to constants.",
+      "acceptanceCriteria": [
+        "Decimal integer literals (42, 0) produce INT tokens",
+        "Float literals (3.14, 0.5) produce FLOAT tokens",
+        "Hex literals (0xFF, 0x1A) produce INT tokens",
+        "Binary literals (0b1010, 0b0) produce INT tokens",
+        "Numbers followed immediately by word characters (42abc) produce an ERROR token",
+        "Token payload stores the parsed numeric value (int32_t for INT, float for FLOAT)",
+        "Tests cover: zero, positive ints, floats, hex, binary, invalid suffixes, edge cases (INT32_MAX, very small floats)",
+        "Zero memory leaks under tracked allocator",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Lex variable references",
+      "description": "As the parser, I need $identifier tokens for variable reads and $[ for subcommand expressions.",
+      "acceptanceCriteria": [
+        "$identifier produces a VAR token with payload pointing to the identifier name (without $)",
+        "$[ produces a DOLLAR_BRACKET token (parser will handle the expression inside)",
+        "$ followed by non-identifier, non-[ character produces an ERROR token with descriptive message",
+        "$ at end of input produces an ERROR token",
+        "Variable identifiers can contain letters, digits, underscores, hyphens (first char must be letter or underscore)",
+        "Tests cover: simple vars ($x, $foo), compound names ($my-var, $foo_bar), $[ token, error cases ($, $123, $!)",
+        "Zero memory leaks under tracked allocator",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Lex simple strings (no interpolation)",
+      "description": "As the parser, I need double-quoted string tokens with escape sequence handling for literal strings.",
+      "acceptanceCriteria": [
+        "Double-quoted strings with no interpolation (\"hello world\") produce a single STRING token",
+        "Escape sequences handled: \\\\, \\\", \\n, \\t, \\r, \\0",
+        "Hex escapes (\\xNN) produce the correct byte value",
+        "Unicode escapes (\\uNNNN, \\UNNNNNNNN) produce valid UTF-8 byte sequences",
+        "Invalid escape sequences (e.g. \\q) produce an ERROR token, lexing continues after the string",
+        "Unterminated strings (missing closing quote) produce an ERROR token at EOF",
+        "Strings may contain embedded newlines (multi-line strings)",
+        "Escaped content is stored in an arena-allocated buffer (since it differs from source)",
+        "Tests cover: empty string, simple string, all escape types, multi-line, unterminated, invalid escapes",
+        "Zero memory leaks under tracked allocator",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Lex interpolated strings",
+      "description": "As the parser, I need strings with $var and $[expr] interpolation to produce structured token sequences so the parser can build interpolated string AST nodes.",
+      "acceptanceCriteria": [
+        "String with $var interpolation (\"hello $name\") produces: STRING_BEGIN, INTERP_VAR, STRING_END",
+        "String with $[expr] interpolation (\"val: $[+ 1 2]\") produces: STRING_BEGIN, INTERP_EXPR_START, tokens for expr, INTERP_EXPR_END, STRING_END",
+        "STRING_BEGIN/STRING_PART/STRING_END carry the literal text portions of the string",
+        "Multiple interpolations in one string produce alternating STRING_PART and INTERP tokens",
+        "Nested brackets within $[expr] are handled correctly (lexer tracks bracket depth)",
+        "String with no interpolation still produces a single STRING token (not BEGIN/END)",
+        "Mixed escape sequences and interpolation in same string work correctly",
+        "Tests cover: single var interpolation, single expr interpolation, multiple interpolations, nested brackets in expr, adjacent interpolations, interpolation at start/end of string",
+        "Zero memory leaks under tracked allocator",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Error recovery and full-program lexing",
+      "description": "As a developer, I need the lexer to recover from errors and correctly lex complete multi-line programs so that multiple errors can be reported at once.",
+      "acceptanceCriteria": [
+        "Invalid characters (stray control chars like \\x01) produce ERROR tokens with descriptive messages",
+        "After an error token, lexing continues from the next recoverable position",
+        "Multiple errors in one input all produce separate ERROR tokens with correct positions",
+        "LexResult.error_count reflects the total number of ERROR tokens",
+        "Error token payload carries an arena-allocated human-readable message string",
+        "Full multi-line programs with mixed valid and invalid constructs produce correct token sequences",
+        "Position tracking (line, column, offset) remains correct after errors",
+        "Integration test: lex a realistic 50+ line JACL program and verify every token",
+        "Zero memory leaks under tracked allocator",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
