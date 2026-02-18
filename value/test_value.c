@@ -1,0 +1,139 @@
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "../test/test_helpers.h"
+
+#define VALUE_IMPLEMENTATION
+#include "./value.h"
+
+/* Test: JaclVal is uint64_t (8 bytes) */
+static int test_jaclval_size(void) {
+  ASSERT(sizeof(JaclVal) == 8);
+  TEST_PASS();
+}
+
+/* Test: tag byte shift and masks */
+static int test_tag_layout(void) {
+  /* Tag byte occupies bits 63-56 */
+  ASSERT(JACL_TAG_SHIFT == 56);
+
+  /* Tag mask should select only the top byte */
+  ASSERT_U64_EQ(JACL_TAG_MASK, UINT64_C(0xFF00000000000000));
+
+  /* Payload mask should select the low 56 bits */
+  ASSERT_U64_EQ(JACL_PAYLOAD_MASK, UINT64_C(0x00FFFFFFFFFFFFFF));
+
+  /* Tag and payload masks should be complementary */
+  ASSERT_U64_EQ(JACL_TAG_MASK | JACL_PAYLOAD_MASK, UINT64_MAX);
+  ASSERT_U64_EQ(JACL_TAG_MASK & JACL_PAYLOAD_MASK, 0);
+
+  TEST_PASS();
+}
+
+/* Test: flag bit positions */
+static int test_flag_bits(void) {
+  /* Tainted = bit 7 of tag byte = bit 63 */
+  ASSERT_U64_EQ(JACL_FLAG_TAINTED, UINT64_C(1) << 63);
+
+  /* Secret = bit 6 of tag byte = bit 62 */
+  ASSERT_U64_EQ(JACL_FLAG_SECRET, UINT64_C(1) << 62);
+
+  /* Error = bit 5 of tag byte = bit 61 */
+  ASSERT_U64_EQ(JACL_FLAG_ERROR, UINT64_C(1) << 61);
+
+  /* Flags mask is the OR of all three */
+  ASSERT_U64_EQ(JACL_FLAGS_MASK, JACL_FLAG_TAINTED | JACL_FLAG_SECRET | JACL_FLAG_ERROR);
+
+  /* Flags should not overlap with type tag or payload */
+  ASSERT_U64_EQ(JACL_FLAGS_MASK & JACL_TYPE_MASK, 0);
+  ASSERT_U64_EQ(JACL_FLAGS_MASK & JACL_PAYLOAD_MASK, 0);
+
+  TEST_PASS();
+}
+
+/* Test: type tag mask */
+static int test_type_mask(void) {
+  /* Type mask should select low 5 bits of tag byte (bits 60-56) */
+  ASSERT_U64_EQ(JACL_TYPE_MASK, UINT64_C(0x1F) << 56);
+
+  /* Type mask + flags mask should cover the entire tag byte */
+  ASSERT_U64_EQ(JACL_TYPE_MASK | JACL_FLAGS_MASK, JACL_TAG_MASK);
+
+  TEST_PASS();
+}
+
+/* Test: type tag constants are distinct and in the tag byte */
+static int test_type_tags(void) {
+  /* All type tags must be within the type mask */
+  ASSERT_U64_EQ(JACL_TAG_NIL & ~JACL_TYPE_MASK, 0);
+  ASSERT_U64_EQ(JACL_TAG_BOOL & ~JACL_TYPE_MASK, 0);
+  ASSERT_U64_EQ(JACL_TAG_I32 & ~JACL_TYPE_MASK, 0);
+  ASSERT_U64_EQ(JACL_TAG_F32 & ~JACL_TYPE_MASK, 0);
+  ASSERT_U64_EQ(JACL_TAG_INLINE_STRING & ~JACL_TYPE_MASK, 0);
+  ASSERT_U64_EQ(JACL_TAG_STRING & ~JACL_TYPE_MASK, 0);
+  ASSERT_U64_EQ(JACL_TAG_VECTOR & ~JACL_TYPE_MASK, 0);
+  ASSERT_U64_EQ(JACL_TAG_MAP & ~JACL_TYPE_MASK, 0);
+  ASSERT_U64_EQ(JACL_TAG_CLOSURE & ~JACL_TYPE_MASK, 0);
+  ASSERT_U64_EQ(JACL_TAG_BIGNUM & ~JACL_TYPE_MASK, 0);
+
+  /* All type tags must be distinct */
+  uint64_t tags[] = {
+    JACL_TAG_NIL, JACL_TAG_BOOL, JACL_TAG_I32, JACL_TAG_F32,
+    JACL_TAG_INLINE_STRING, JACL_TAG_STRING, JACL_TAG_VECTOR,
+    JACL_TAG_MAP, JACL_TAG_CLOSURE, JACL_TAG_BIGNUM
+  };
+  size_t n = sizeof(tags) / sizeof(tags[0]);
+  for (size_t i = 0; i < n; i++) {
+    for (size_t j = i + 1; j < n; j++) {
+      if (tags[i] == tags[j]) {
+        fprintf(stderr, "FAIL: type tags %zu and %zu are equal\n", i, j);
+        return 0;
+      }
+    }
+  }
+
+  /* NIL tag should be zero (in the type bits) */
+  ASSERT_U64_EQ(JACL_TAG_NIL, 0);
+
+  TEST_PASS();
+}
+
+/* Test: tag byte does not overlap payload */
+static int test_tag_payload_separation(void) {
+  /* A value with all payload bits set and NIL tag should have zero in tag area */
+  JaclVal v = JACL_PAYLOAD_MASK;
+  ASSERT_U64_EQ(v & JACL_TAG_MASK, 0);
+
+  /* A value with BOOL tag should have zero in payload area */
+  JaclVal w = JACL_TAG_BOOL;
+  ASSERT_U64_EQ(w & JACL_PAYLOAD_MASK, 0);
+
+  /* Combining tag and payload should be lossless */
+  JaclVal combined = JACL_TAG_I32 | UINT64_C(0x00DEADBEEFCAFE);
+  ASSERT_U64_EQ(combined & JACL_TAG_MASK, JACL_TAG_I32);
+  ASSERT_U64_EQ(combined & JACL_PAYLOAD_MASK, UINT64_C(0x00DEADBEEFCAFE));
+
+  TEST_PASS();
+}
+
+int main(void) {
+  printf("Test: JaclVal size\n");
+  if (!test_jaclval_size()) return 1;
+
+  printf("Test: tag byte layout\n");
+  if (!test_tag_layout()) return 1;
+
+  printf("Test: flag bit positions\n");
+  if (!test_flag_bits()) return 1;
+
+  printf("Test: type tag mask\n");
+  if (!test_type_mask()) return 1;
+
+  printf("Test: type tag constants\n");
+  if (!test_type_tags()) return 1;
+
+  printf("Test: tag/payload separation\n");
+  if (!test_tag_payload_separation()) return 1;
+
+  return 0;
+}
