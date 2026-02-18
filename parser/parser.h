@@ -245,6 +245,106 @@ static AstNode* parser__parse_atom(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Forward declarations for mutual recursion
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_expr(Parser* p);
+
+/* -------------------------------------------------------------------------
+ * Internal: Parse bracketed command [cmd arg1 arg2]
+ *
+ * Called when the current token is TOKEN_LBRACKET.
+ * Returns AST_COMMAND on success, AST_ERROR on failure.
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_command(Parser* p) {
+  Token* open = parser__advance(p); /* consume '[' */
+  SourcePos cmd_start = parser__token_start(open);
+
+  /* Empty brackets [] → error */
+  if (parser__peek(p)->type == TOKEN_RBRACKET) {
+    Token* close = parser__advance(p);
+    AstNode* err = parser__error(p, "empty command brackets", open);
+    err->end = parser__token_end(close);
+    return err;
+  }
+
+  /* Parse head (command name) */
+  AstNode* head = parser__parse_expr(p);
+  if (head == NULL) {
+    Token* bad = parser__peek(p);
+    AstNode* err = parser__error(p, "expected command name after '['", open);
+    err->end = parser__token_end(bad);
+    return err;
+  }
+
+  /* Parse arguments until ] or EOF */
+  NodeArray args;
+  parser__arr_init(&args, p->arena);
+
+  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACKET) {
+    /* Skip newlines inside brackets */
+    if (parser__peek(p)->type == TOKEN_NEWLINE) {
+      parser__advance(p);
+      continue;
+    }
+    AstNode* arg = parser__parse_expr(p);
+    if (arg == NULL) {
+      break;
+    }
+    parser__arr_push(&args, arg);
+  }
+
+  /* Expect closing bracket */
+  if (parser__peek(p)->type != TOKEN_RBRACKET) {
+    Token* bad = parser__peek(p);
+    AstNode* err = parser__error(p, "expected ']' to close command", open);
+    err->end = parser__token_end(bad);
+    return err;
+  }
+  Token* close = parser__advance(p); /* consume ']' */
+
+  /* Build AST_COMMAND node */
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_COMMAND;
+  node->start = cmd_start;
+  node->end   = parser__token_end(close);
+  node->data.command.head      = head;
+  node->data.command.args      = args.nodes;
+  node->data.command.arg_count = args.count;
+  return node;
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Parse a single expression
+ *
+ * Dispatches based on the current token:
+ *   TOKEN_LBRACKET  → parse_command
+ *   atom tokens     → parse_atom
+ *   otherwise       → NULL
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_expr(Parser* p) {
+  Token* tok = parser__peek(p);
+
+  switch (tok->type) {
+    case TOKEN_LBRACKET:
+      return parser__parse_command(p);
+
+    case TOKEN_INT:
+    case TOKEN_FLOAT:
+    case TOKEN_WORD:
+    case TOKEN_STRING:
+    case TOKEN_OPERATOR:
+    case TOKEN_VAR:
+      return parser__parse_atom(p);
+
+    default:
+      return NULL;
+  }
+}
+
+/* -------------------------------------------------------------------------
  * Public API
  * ------------------------------------------------------------------------- */
 
@@ -258,7 +358,7 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
   /* Skip leading newlines */
   parser__skip_newlines(&p);
 
-  /* TODO: Parse top-level commands (US-003+) */
+  /* TODO: Parse top-level commands (US-006) */
 
   ParseResult result;
   result.nodes       = top_level.nodes;
