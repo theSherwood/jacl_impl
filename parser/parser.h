@@ -345,6 +345,56 @@ static AstNode* parser__parse_expr(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Check if current token ends a command
+ * ------------------------------------------------------------------------- */
+
+static int parser__is_command_end(Parser* p) {
+  TokenType t = parser__peek(p)->type;
+  return t == TOKEN_NEWLINE || t == TOKEN_SEMICOLON || t == TOKEN_EOF;
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Parse a top-level bare command
+ *
+ * Reads the first expression as the command head, then collects subsequent
+ * expressions as arguments until a command delimiter (newline, semicolon,
+ * or EOF). If the head is already a bracketed command with no trailing
+ * arguments, it is returned directly without wrapping.
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_bare_command(Parser* p) {
+  AstNode* head = parser__parse_expr(p);
+  if (head == NULL) return NULL;
+
+  NodeArray args;
+  parser__arr_init(&args, p->arena);
+
+  while (!parser__is_command_end(p)) {
+    AstNode* arg = parser__parse_expr(p);
+    if (arg == NULL) break;
+    parser__arr_push(&args, arg);
+  }
+
+  /* Bracketed command with no trailing args: return as-is */
+  if (head->type == AST_COMMAND && args.count == 0) {
+    return head;
+  }
+
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_COMMAND;
+  node->start = head->start;
+  if (args.count > 0) {
+    node->end = args.nodes[args.count - 1]->end;
+  } else {
+    node->end = head->end;
+  }
+  node->data.command.head      = head;
+  node->data.command.args      = args.nodes;
+  node->data.command.arg_count = args.count;
+  return node;
+}
+
+/* -------------------------------------------------------------------------
  * Public API
  * ------------------------------------------------------------------------- */
 
@@ -355,10 +405,22 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
   NodeArray top_level;
   parser__arr_init(&top_level, arena);
 
-  /* Skip leading newlines */
-  parser__skip_newlines(&p);
+  while (!parser__at_end(&p)) {
+    /* Skip newlines and semicolons between commands */
+    while (parser__peek(&p)->type == TOKEN_NEWLINE ||
+           parser__peek(&p)->type == TOKEN_SEMICOLON) {
+      parser__advance(&p);
+    }
+    if (parser__at_end(&p)) break;
 
-  /* TODO: Parse top-level commands (US-006) */
+    AstNode* cmd = parser__parse_bare_command(&p);
+    if (cmd != NULL) {
+      parser__arr_push(&top_level, cmd);
+    } else {
+      /* Skip unrecognized token to avoid infinite loop */
+      parser__advance(&p);
+    }
+  }
 
   ParseResult result;
   result.nodes       = top_level.nodes;
