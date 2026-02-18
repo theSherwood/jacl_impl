@@ -273,6 +273,601 @@ static int lexer__is_operator_char(char c) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Forward declarations for mutually recursive functions
+ * ------------------------------------------------------------------------- */
+
+static void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
+                                    uint32_t* error_count,
+                                    uint32_t str_start, uint32_t str_line,
+                                    uint32_t str_col);
+static void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
+                                    uint32_t* error_count);
+
+/* -------------------------------------------------------------------------
+ * Internal: String escape sequence handler
+ * Returns non-NULL error message on failure, NULL on success.
+ * ------------------------------------------------------------------------- */
+
+static const char* lexer__handle_escape(Lexer* lex, StringBuf* sb) {
+  char esc = lexer__peek(lex);
+
+  if (esc == '\0') return "unterminated string";
+
+  switch (esc) {
+    case '\\': strbuf_push(sb, '\\'); lexer__advance(lex); return NULL;
+    case '"':  strbuf_push(sb, '"');  lexer__advance(lex); return NULL;
+    case 'n':  strbuf_push(sb, '\n'); lexer__advance(lex); return NULL;
+    case 't':  strbuf_push(sb, '\t'); lexer__advance(lex); return NULL;
+    case 'r':  strbuf_push(sb, '\r'); lexer__advance(lex); return NULL;
+    case '0':  strbuf_push(sb, '\0'); lexer__advance(lex); return NULL;
+    case 'x': {
+      lexer__advance(lex);
+      int d1 = lexer__hex_digit(lexer__peek(lex));
+      if (d1 < 0) return "invalid hex escape";
+      lexer__advance(lex);
+      int d2 = lexer__hex_digit(lexer__peek(lex));
+      if (d2 < 0) return "invalid hex escape";
+      lexer__advance(lex);
+      strbuf_push(sb, (char)(d1 * 16 + d2));
+      return NULL;
+    }
+    case 'u': {
+      lexer__advance(lex);
+      uint32_t cp = 0;
+      int i;
+      for (i = 0; i < 4; i++) {
+        int d = lexer__hex_digit(lexer__peek(lex));
+        if (d < 0) return "invalid unicode escape";
+        cp = cp * 16 + (uint32_t)d;
+        lexer__advance(lex);
+      }
+      {
+        char utf8[4];
+        uint32_t n = lexer__encode_utf8(cp, utf8);
+        uint32_t j;
+        for (j = 0; j < n; j++) strbuf_push(sb, utf8[j]);
+      }
+      return NULL;
+    }
+    case 'U': {
+      lexer__advance(lex);
+      uint32_t cp = 0;
+      int i;
+      for (i = 0; i < 8; i++) {
+        int d = lexer__hex_digit(lexer__peek(lex));
+        if (d < 0) return "invalid unicode escape";
+        cp = cp * 16 + (uint32_t)d;
+        lexer__advance(lex);
+      }
+      if (cp > 0x10FFFF) return "unicode codepoint out of range";
+      {
+        char utf8[4];
+        uint32_t n = lexer__encode_utf8(cp, utf8);
+        uint32_t j;
+        for (j = 0; j < n; j++) strbuf_push(sb, utf8[j]);
+      }
+      return NULL;
+    }
+    default:
+      lexer__advance(lex);
+      return "invalid escape sequence";
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Skip to end of string for error recovery
+ * Handles \" escapes and embedded newlines during skip.
+ * ------------------------------------------------------------------------- */
+
+static void lexer__skip_to_string_end(Lexer* lex) {
+  while (lexer__peek(lex) != '\0' && lexer__peek(lex) != '"') {
+    char skip = lexer__peek(lex);
+    if (skip == '\\') {
+      lexer__advance(lex);
+      if (lexer__peek(lex) != '\0') lexer__advance(lex);
+    } else if (skip == '\n' || skip == '\r') {
+      lexer__advance(lex);
+      if (skip == '\r' && lexer__peek(lex) == '\n')
+        lexer__advance(lex);
+      lex->line++;
+      lex->col = 1;
+    } else {
+      lexer__advance(lex);
+    }
+  }
+  if (lexer__peek(lex) == '"')
+    lexer__advance(lex);
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Number literal lexer
+ * Called when current char is a digit. Pushes one token.
+ * ------------------------------------------------------------------------- */
+
+static void lexer__lex_number(Lexer* lex, TokenArray* arr,
+                               uint32_t* error_count) {
+  char c = lexer__peek(lex);
+  uint32_t start = lex->pos;
+  uint32_t sline = lex->line;
+  uint32_t scol  = lex->col;
+
+  /* Hex: 0x... */
+  if (c == '0' && (lex->source[lex->pos + 1] == 'x' ||
+                   lex->source[lex->pos + 1] == 'X')) {
+    lexer__advance(lex); /* '0' */
+    lexer__advance(lex); /* 'x' */
+    int64_t val = 0;
+    int has_digits = 0;
+    for (;;) {
+      char h = lexer__peek(lex);
+      if (h >= '0' && h <= '9')      { val = val * 16 + (h - '0'); }
+      else if (h >= 'a' && h <= 'f') { val = val * 16 + (h - 'a' + 10); }
+      else if (h >= 'A' && h <= 'F') { val = val * 16 + (h - 'A' + 10); }
+      else break;
+      has_digits = 1;
+      lexer__advance(lex);
+    }
+    if (!has_digits || lexer__is_word_start(lexer__peek(lex))) {
+      while (lexer__is_word_char(lexer__peek(lex)))
+        lexer__advance(lex);
+      Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
+      tok.payload.error_msg = !has_digits
+        ? "hex literal with no digits"
+        : "invalid suffix on number";
+      lexer__arr_push(arr, tok);
+      (*error_count)++;
+      return;
+    }
+    {
+      Token tok = lexer__make_token(lex, TOKEN_INT, start, sline, scol);
+      tok.payload.int_val = (int32_t)val;
+      lexer__arr_push(arr, tok);
+    }
+    return;
+  }
+
+  /* Binary: 0b... */
+  if (c == '0' && (lex->source[lex->pos + 1] == 'b' ||
+                   lex->source[lex->pos + 1] == 'B')) {
+    lexer__advance(lex); /* '0' */
+    lexer__advance(lex); /* 'b' */
+    int64_t val = 0;
+    int has_digits = 0;
+    while (lexer__peek(lex) == '0' || lexer__peek(lex) == '1') {
+      val = val * 2 + (lexer__peek(lex) - '0');
+      has_digits = 1;
+      lexer__advance(lex);
+    }
+    if (!has_digits || lexer__is_word_start(lexer__peek(lex)) ||
+        (lexer__peek(lex) >= '2' && lexer__peek(lex) <= '9')) {
+      while (lexer__is_word_char(lexer__peek(lex)))
+        lexer__advance(lex);
+      Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
+      tok.payload.error_msg = !has_digits
+        ? "binary literal with no digits"
+        : "invalid suffix on number";
+      lexer__arr_push(arr, tok);
+      (*error_count)++;
+      return;
+    }
+    {
+      Token tok = lexer__make_token(lex, TOKEN_INT, start, sline, scol);
+      tok.payload.int_val = (int32_t)val;
+      lexer__arr_push(arr, tok);
+    }
+    return;
+  }
+
+  /* Decimal integer or float */
+  {
+    int64_t int_val = 0;
+    while (lexer__peek(lex) >= '0' && lexer__peek(lex) <= '9') {
+      int_val = int_val * 10 + (lexer__peek(lex) - '0');
+      lexer__advance(lex);
+    }
+
+    /* Float: digits '.' digits */
+    if (lexer__peek(lex) == '.' &&
+        lex->source[lex->pos + 1] >= '0' && lex->source[lex->pos + 1] <= '9') {
+      lexer__advance(lex); /* consume '.' */
+      int64_t frac = 0;
+      int64_t frac_div = 1;
+      while (lexer__peek(lex) >= '0' && lexer__peek(lex) <= '9') {
+        frac = frac * 10 + (lexer__peek(lex) - '0');
+        frac_div *= 10;
+        lexer__advance(lex);
+      }
+      if (lexer__is_word_start(lexer__peek(lex))) {
+        while (lexer__is_word_char(lexer__peek(lex)))
+          lexer__advance(lex);
+        Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
+        tok.payload.error_msg = "invalid suffix on number";
+        lexer__arr_push(arr, tok);
+        (*error_count)++;
+        return;
+      }
+      {
+        Token tok = lexer__make_token(lex, TOKEN_FLOAT, start, sline, scol);
+        tok.payload.float_val = (float)int_val + (float)frac / (float)frac_div;
+        lexer__arr_push(arr, tok);
+      }
+      return;
+    }
+
+    /* Integer — check for invalid suffix */
+    if (lexer__is_word_start(lexer__peek(lex))) {
+      while (lexer__is_word_char(lexer__peek(lex)))
+        lexer__advance(lex);
+      Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
+      tok.payload.error_msg = "invalid suffix on number";
+      lexer__arr_push(arr, tok);
+      (*error_count)++;
+      return;
+    }
+    {
+      Token tok = lexer__make_token(lex, TOKEN_INT, start, sline, scol);
+      tok.payload.int_val = (int32_t)int_val;
+      lexer__arr_push(arr, tok);
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: String body lexer (handles content after opening " consumed)
+ *
+ * Emits either:
+ *   - A single TOKEN_STRING (no interpolation), or
+ *   - STRING_BEGIN, INTERP_VAR/INTERP_EXPR_START...INTERP_EXPR_END,
+ *     STRING_PART (repeated), STRING_END
+ * On error: emits TOKEN_ERROR.
+ * ------------------------------------------------------------------------- */
+
+static void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
+                                    uint32_t* error_count,
+                                    uint32_t str_start, uint32_t str_line,
+                                    uint32_t str_col) {
+  StringBuf sb;
+  strbuf_init(&sb, lex->arena);
+  const char* str_error = NULL;
+  int has_interp = 0;
+  uint32_t seg_start = str_start;
+  uint32_t seg_line  = str_line;
+  uint32_t seg_col   = str_col;
+
+  while (lexer__peek(lex) != '\0' && lexer__peek(lex) != '"' && !str_error) {
+    char ch = lexer__peek(lex);
+
+    /* Embedded newlines */
+    if (ch == '\n' || ch == '\r') {
+      lexer__advance(lex);
+      if (ch == '\r' && lexer__peek(lex) == '\n')
+        lexer__advance(lex);
+      strbuf_push(&sb, '\n');
+      lex->line++;
+      lex->col = 1;
+      continue;
+    }
+
+    /* Escape sequences */
+    if (ch == '\\') {
+      lexer__advance(lex); /* consume backslash */
+      str_error = lexer__handle_escape(lex, &sb);
+      continue;
+    }
+
+    /* Interpolation: $var or $[expr] */
+    if (ch == '$') {
+      char next_ch = lex->source[lex->pos + 1];
+
+      if (lexer__is_word_start(next_ch) || next_ch == '[') {
+        /* Emit current text segment as STRING_BEGIN or STRING_PART */
+        strbuf_push(&sb, '\0');
+        {
+          Token seg_tok;
+          memset(&seg_tok, 0, sizeof(Token));
+          seg_tok.type   = has_interp ? TOKEN_STRING_PART : TOKEN_STRING_BEGIN;
+          seg_tok.line   = seg_line;
+          seg_tok.column = seg_col;
+          seg_tok.offset = seg_start;
+          seg_tok.length = lex->pos - seg_start;
+          seg_tok.payload.text = sb.data;
+          lexer__arr_push(arr, seg_tok);
+        }
+        has_interp = 1;
+        strbuf_init(&sb, lex->arena); /* reset for next segment */
+
+        if (next_ch == '[') {
+          /* $[expr] interpolation */
+          uint32_t expr_start = lex->pos;
+          uint32_t expr_line  = lex->line;
+          uint32_t expr_col   = lex->col;
+          lexer__advance(lex); /* consume '$' */
+          lexer__advance(lex); /* consume '[' */
+          {
+            Token expr_tok = lexer__make_token(lex, TOKEN_INTERP_EXPR_START,
+                                                expr_start, expr_line, expr_col);
+            lexer__arr_push(arr, expr_tok);
+          }
+          lexer__lex_interp_expr(lex, arr, error_count);
+        } else {
+          /* $var interpolation */
+          uint32_t var_start = lex->pos;
+          uint32_t var_line  = lex->line;
+          uint32_t var_col   = lex->col;
+          lexer__advance(lex); /* consume '$' */
+          while (lexer__is_word_char(lexer__peek(lex)))
+            lexer__advance(lex);
+          {
+            Token var_tok = lexer__make_token(lex, TOKEN_INTERP_VAR,
+                                               var_start, var_line, var_col);
+            var_tok.payload.text = lex->source + var_start + 1; /* skip '$' */
+            lexer__arr_push(arr, var_tok);
+          }
+        }
+
+        seg_start = lex->pos;
+        seg_line  = lex->line;
+        seg_col   = lex->col;
+        continue;
+      }
+    }
+
+    /* Regular character (including $ not followed by identifier/bracket) */
+    strbuf_push(&sb, ch);
+    lexer__advance(lex);
+  }
+
+  /* Check for unterminated string */
+  if (!str_error && lexer__peek(lex) == '\0') {
+    str_error = "unterminated string";
+  }
+
+  if (str_error) {
+    /* Skip remaining string content for error recovery */
+    lexer__skip_to_string_end(lex);
+    Token tok = lexer__make_token(lex, TOKEN_ERROR, str_start, str_line, str_col);
+    tok.payload.error_msg = str_error;
+    lexer__arr_push(arr, tok);
+    (*error_count)++;
+  } else {
+    lexer__advance(lex); /* consume closing '"' */
+    strbuf_push(&sb, '\0');
+
+    if (has_interp) {
+      Token end_tok;
+      memset(&end_tok, 0, sizeof(Token));
+      end_tok.type   = TOKEN_STRING_END;
+      end_tok.line   = seg_line;
+      end_tok.column = seg_col;
+      end_tok.offset = seg_start;
+      end_tok.length = lex->pos - seg_start;
+      end_tok.payload.text = sb.data;
+      lexer__arr_push(arr, end_tok);
+    } else {
+      Token tok = lexer__make_token(lex, TOKEN_STRING, str_start, str_line, str_col);
+      tok.payload.text = sb.data;
+      lexer__arr_push(arr, tok);
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Interpolation expression lexer (inside $[...])
+ *
+ * Lexes tokens until matching ] is found, tracking bracket depth.
+ * Emits INTERP_EXPR_END for the closing ].
+ * Called after $[ has been consumed and INTERP_EXPR_START emitted.
+ * ------------------------------------------------------------------------- */
+
+static void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
+                                    uint32_t* error_count) {
+  int depth = 1;
+
+  while (depth > 0) {
+    char c = lexer__peek(lex);
+
+    /* EOF — unterminated expression */
+    if (c == '\0') {
+      Token tok = lexer__make_token(lex, TOKEN_ERROR, lex->pos, lex->line, lex->col);
+      tok.length = 0;
+      tok.payload.error_msg = "unterminated interpolation expression";
+      lexer__arr_push(arr, tok);
+      (*error_count)++;
+      return;
+    }
+
+    /* Skip whitespace */
+    if (c == ' ' || c == '\t') {
+      lexer__advance(lex);
+      continue;
+    }
+
+    /* Comments */
+    if (c == '#') {
+      lexer__advance(lex);
+      while (lexer__peek(lex) != '\0' && lexer__peek(lex) != '\n'
+             && lexer__peek(lex) != '\r') {
+        lexer__advance(lex);
+      }
+      continue;
+    }
+
+    /* Newlines */
+    if (c == '\n' || c == '\r') {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      lexer__advance(lex);
+      if (c == '\r' && lexer__peek(lex) == '\n')
+        lexer__advance(lex);
+      Token tok = lexer__make_token(lex, TOKEN_NEWLINE, s, sl, sc);
+      lexer__arr_push(arr, tok);
+      lex->line++;
+      lex->col = 1;
+      continue;
+    }
+
+    /* Closing bracket */
+    if (c == ']') {
+      depth--;
+      if (depth == 0) {
+        uint32_t s  = lex->pos;
+        uint32_t sl = lex->line;
+        uint32_t sc = lex->col;
+        lexer__advance(lex);
+        Token tok = lexer__make_token(lex, TOKEN_INTERP_EXPR_END, s, sl, sc);
+        lexer__arr_push(arr, tok);
+        return;
+      }
+      /* Nested ] — emit RBRACKET */
+      {
+        uint32_t s  = lex->pos;
+        uint32_t sl = lex->line;
+        uint32_t sc = lex->col;
+        lexer__advance(lex);
+        Token tok = lexer__make_token(lex, TOKEN_RBRACKET, s, sl, sc);
+        lexer__arr_push(arr, tok);
+      }
+      continue;
+    }
+
+    /* Opening bracket */
+    if (c == '[') {
+      depth++;
+      {
+        uint32_t s  = lex->pos;
+        uint32_t sl = lex->line;
+        uint32_t sc = lex->col;
+        lexer__advance(lex);
+        Token tok = lexer__make_token(lex, TOKEN_LBRACKET, s, sl, sc);
+        lexer__arr_push(arr, tok);
+      }
+      continue;
+    }
+
+    /* Other delimiters */
+    if (c == '{' || c == '}' || c == '(' || c == ')') {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      lexer__advance(lex);
+      TokenType type;
+      switch (c) {
+        case '{': type = TOKEN_LBRACE;  break;
+        case '}': type = TOKEN_RBRACE;  break;
+        case '(': type = TOKEN_LPAREN;  break;
+        default:  type = TOKEN_RPAREN;  break;
+      }
+      Token tok = lexer__make_token(lex, type, s, sl, sc);
+      lexer__arr_push(arr, tok);
+      continue;
+    }
+
+    /* Keywords */
+    if (c == ':' && lexer__is_word_start(lex->source[lex->pos + 1])) {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      lexer__advance(lex);
+      while (lexer__is_word_char(lexer__peek(lex)))
+        lexer__advance(lex);
+      Token tok = lexer__make_token(lex, TOKEN_KEYWORD, s, sl, sc);
+      tok.payload.text = lex->source + s;
+      lexer__arr_push(arr, tok);
+      continue;
+    }
+
+    /* Numbers */
+    if (c >= '0' && c <= '9') {
+      lexer__lex_number(lex, arr, error_count);
+      continue;
+    }
+
+    /* Words */
+    if (lexer__is_word_start(c)) {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      while (lexer__is_word_char(lexer__peek(lex)))
+        lexer__advance(lex);
+      Token tok = lexer__make_token(lex, TOKEN_WORD, s, sl, sc);
+      tok.payload.text = lex->source + s;
+      lexer__arr_push(arr, tok);
+      continue;
+    }
+
+    /* Operators */
+    if (lexer__is_operator_char(c)) {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      while (lexer__is_operator_char(lexer__peek(lex)))
+        lexer__advance(lex);
+      Token tok = lexer__make_token(lex, TOKEN_OPERATOR, s, sl, sc);
+      tok.payload.text = lex->source + s;
+      lexer__arr_push(arr, tok);
+      continue;
+    }
+
+    /* Variable references: $identifier or $[ */
+    if (c == '$') {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      lexer__advance(lex);
+      char next = lexer__peek(lex);
+
+      if (next == '[') {
+        lexer__advance(lex);
+        depth++; /* $[ introduces another bracket level */
+        Token tok = lexer__make_token(lex, TOKEN_DOLLAR_BRACKET, s, sl, sc);
+        lexer__arr_push(arr, tok);
+        continue;
+      }
+      if (lexer__is_word_start(next)) {
+        while (lexer__is_word_char(lexer__peek(lex)))
+          lexer__advance(lex);
+        Token tok = lexer__make_token(lex, TOKEN_VAR, s, sl, sc);
+        tok.payload.text = lex->source + s + 1;
+        lexer__arr_push(arr, tok);
+        continue;
+      }
+      {
+        Token tok = lexer__make_token(lex, TOKEN_ERROR, s, sl, sc);
+        tok.payload.error_msg = next == '\0'
+          ? "unexpected end of input after $"
+          : "invalid character after $";
+        lexer__arr_push(arr, tok);
+        (*error_count)++;
+      }
+      continue;
+    }
+
+    /* Strings inside expressions (may recursively contain interpolation) */
+    if (c == '"') {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      lexer__advance(lex);
+      lexer__lex_string_body(lex, arr, error_count, s, sl, sc);
+      continue;
+    }
+
+    /* Unrecognized character */
+    {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      lexer__advance(lex);
+      Token tok = lexer__make_token(lex, TOKEN_ERROR, s, sl, sc);
+      tok.payload.error_msg = "unexpected character";
+      lexer__arr_push(arr, tok);
+      (*error_count)++;
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------
  * Public API
  * ------------------------------------------------------------------------- */
 
@@ -365,121 +960,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
 
     /* Number literals: start with a digit */
     if (c >= '0' && c <= '9') {
-      uint32_t start = lex.pos;
-      uint32_t sline = lex.line;
-      uint32_t scol  = lex.col;
-
-      /* Hex: 0x... */
-      if (c == '0' && (lex.source[lex.pos + 1] == 'x' ||
-                       lex.source[lex.pos + 1] == 'X')) {
-        lexer__advance(&lex); /* '0' */
-        lexer__advance(&lex); /* 'x' */
-        int64_t val = 0;
-        int has_digits = 0;
-        for (;;) {
-          char h = lexer__peek(&lex);
-          if (h >= '0' && h <= '9')      { val = val * 16 + (h - '0'); }
-          else if (h >= 'a' && h <= 'f') { val = val * 16 + (h - 'a' + 10); }
-          else if (h >= 'A' && h <= 'F') { val = val * 16 + (h - 'A' + 10); }
-          else break;
-          has_digits = 1;
-          lexer__advance(&lex);
-        }
-        if (!has_digits || lexer__is_word_start(lexer__peek(&lex))) {
-          while (lexer__is_word_char(lexer__peek(&lex)))
-            lexer__advance(&lex);
-          Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
-          tok.payload.error_msg = !has_digits
-            ? "hex literal with no digits"
-            : "invalid suffix on number";
-          lexer__arr_push(&arr, tok);
-          error_count++;
-          continue;
-        }
-        Token tok = lexer__make_token(&lex, TOKEN_INT, start, sline, scol);
-        tok.payload.int_val = (int32_t)val;
-        lexer__arr_push(&arr, tok);
-        continue;
-      }
-
-      /* Binary: 0b... */
-      if (c == '0' && (lex.source[lex.pos + 1] == 'b' ||
-                       lex.source[lex.pos + 1] == 'B')) {
-        lexer__advance(&lex); /* '0' */
-        lexer__advance(&lex); /* 'b' */
-        int64_t val = 0;
-        int has_digits = 0;
-        while (lexer__peek(&lex) == '0' || lexer__peek(&lex) == '1') {
-          val = val * 2 + (lexer__peek(&lex) - '0');
-          has_digits = 1;
-          lexer__advance(&lex);
-        }
-        if (!has_digits || lexer__is_word_start(lexer__peek(&lex)) ||
-            (lexer__peek(&lex) >= '2' && lexer__peek(&lex) <= '9')) {
-          while (lexer__is_word_char(lexer__peek(&lex)))
-            lexer__advance(&lex);
-          Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
-          tok.payload.error_msg = !has_digits
-            ? "binary literal with no digits"
-            : "invalid suffix on number";
-          lexer__arr_push(&arr, tok);
-          error_count++;
-          continue;
-        }
-        Token tok = lexer__make_token(&lex, TOKEN_INT, start, sline, scol);
-        tok.payload.int_val = (int32_t)val;
-        lexer__arr_push(&arr, tok);
-        continue;
-      }
-
-      /* Decimal integer or float */
-      int64_t int_val = 0;
-      while (lexer__peek(&lex) >= '0' && lexer__peek(&lex) <= '9') {
-        int_val = int_val * 10 + (lexer__peek(&lex) - '0');
-        lexer__advance(&lex);
-      }
-
-      /* Float: digits '.' digits */
-      if (lexer__peek(&lex) == '.' &&
-          lex.source[lex.pos + 1] >= '0' && lex.source[lex.pos + 1] <= '9') {
-        lexer__advance(&lex); /* consume '.' */
-        int64_t frac = 0;
-        int64_t frac_div = 1;
-        while (lexer__peek(&lex) >= '0' && lexer__peek(&lex) <= '9') {
-          frac = frac * 10 + (lexer__peek(&lex) - '0');
-          frac_div *= 10;
-          lexer__advance(&lex);
-        }
-        if (lexer__is_word_start(lexer__peek(&lex))) {
-          while (lexer__is_word_char(lexer__peek(&lex)))
-            lexer__advance(&lex);
-          Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
-          tok.payload.error_msg = "invalid suffix on number";
-          lexer__arr_push(&arr, tok);
-          error_count++;
-          continue;
-        }
-        Token tok = lexer__make_token(&lex, TOKEN_FLOAT, start, sline, scol);
-        tok.payload.float_val = (float)int_val + (float)frac / (float)frac_div;
-        lexer__arr_push(&arr, tok);
-        continue;
-      }
-
-      /* Integer — check for invalid suffix */
-      if (lexer__is_word_start(lexer__peek(&lex))) {
-        while (lexer__is_word_char(lexer__peek(&lex)))
-          lexer__advance(&lex);
-        Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
-        tok.payload.error_msg = "invalid suffix on number";
-        lexer__arr_push(&arr, tok);
-        error_count++;
-        continue;
-      }
-      {
-        Token tok = lexer__make_token(&lex, TOKEN_INT, start, sline, scol);
-        tok.payload.int_val = (int32_t)int_val;
-        lexer__arr_push(&arr, tok);
-      }
+      lexer__lex_number(&lex, &arr, &error_count);
       continue;
     }
 
@@ -553,149 +1034,13 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       }
     }
 
-    /* Strings: "..." with escape sequences */
+    /* Strings: "..." with escape sequences and interpolation */
     if (c == '"') {
       uint32_t start = lex.pos;
       uint32_t sline = lex.line;
       uint32_t scol  = lex.col;
       lexer__advance(&lex); /* consume opening '"' */
-
-      StringBuf sb;
-      strbuf_init(&sb, lex.arena);
-      const char* str_error = NULL;
-
-      while (lexer__peek(&lex) != '\0' && lexer__peek(&lex) != '"'
-             && !str_error) {
-        char ch = lexer__peek(&lex);
-
-        /* Embedded newlines */
-        if (ch == '\n' || ch == '\r') {
-          lexer__advance(&lex);
-          if (ch == '\r' && lexer__peek(&lex) == '\n')
-            lexer__advance(&lex);
-          strbuf_push(&sb, '\n'); /* normalize line endings */
-          lex.line++;
-          lex.col = 1;
-          continue;
-        }
-
-        /* Escape sequences */
-        if (ch == '\\') {
-          lexer__advance(&lex); /* consume backslash */
-          char esc = lexer__peek(&lex);
-
-          if (esc == '\0') {
-            str_error = "unterminated string";
-            break;
-          }
-
-          switch (esc) {
-            case '\\': strbuf_push(&sb, '\\'); lexer__advance(&lex); break;
-            case '"':  strbuf_push(&sb, '"');  lexer__advance(&lex); break;
-            case 'n':  strbuf_push(&sb, '\n'); lexer__advance(&lex); break;
-            case 't':  strbuf_push(&sb, '\t'); lexer__advance(&lex); break;
-            case 'r':  strbuf_push(&sb, '\r'); lexer__advance(&lex); break;
-            case '0':  strbuf_push(&sb, '\0'); lexer__advance(&lex); break;
-            case 'x': {
-              lexer__advance(&lex); /* consume 'x' */
-              int d1 = lexer__hex_digit(lexer__peek(&lex));
-              if (d1 < 0) { str_error = "invalid hex escape"; break; }
-              lexer__advance(&lex);
-              int d2 = lexer__hex_digit(lexer__peek(&lex));
-              if (d2 < 0) { str_error = "invalid hex escape"; break; }
-              lexer__advance(&lex);
-              strbuf_push(&sb, (char)(d1 * 16 + d2));
-              break;
-            }
-            case 'u': {
-              lexer__advance(&lex); /* consume 'u' */
-              uint32_t cp = 0;
-              int i;
-              for (i = 0; i < 4; i++) {
-                int d = lexer__hex_digit(lexer__peek(&lex));
-                if (d < 0) { str_error = "invalid unicode escape"; break; }
-                cp = cp * 16 + (uint32_t)d;
-                lexer__advance(&lex);
-              }
-              if (!str_error) {
-                char utf8[4];
-                uint32_t n = lexer__encode_utf8(cp, utf8);
-                uint32_t j;
-                for (j = 0; j < n; j++) strbuf_push(&sb, utf8[j]);
-              }
-              break;
-            }
-            case 'U': {
-              lexer__advance(&lex); /* consume 'U' */
-              uint32_t cp = 0;
-              int i;
-              for (i = 0; i < 8; i++) {
-                int d = lexer__hex_digit(lexer__peek(&lex));
-                if (d < 0) { str_error = "invalid unicode escape"; break; }
-                cp = cp * 16 + (uint32_t)d;
-                lexer__advance(&lex);
-              }
-              if (!str_error) {
-                if (cp > 0x10FFFF) {
-                  str_error = "unicode codepoint out of range";
-                } else {
-                  char utf8[4];
-                  uint32_t n = lexer__encode_utf8(cp, utf8);
-                  uint32_t j;
-                  for (j = 0; j < n; j++) strbuf_push(&sb, utf8[j]);
-                }
-              }
-              break;
-            }
-            default:
-              str_error = "invalid escape sequence";
-              lexer__advance(&lex); /* consume the invalid escape char */
-              break;
-          }
-          continue;
-        }
-
-        /* Regular character */
-        strbuf_push(&sb, ch);
-        lexer__advance(&lex);
-      }
-
-      /* Check for unterminated string (hit EOF without closing quote) */
-      if (!str_error && lexer__peek(&lex) == '\0') {
-        str_error = "unterminated string";
-      }
-
-      if (str_error) {
-        /* Skip remaining string content for error recovery */
-        while (lexer__peek(&lex) != '\0' && lexer__peek(&lex) != '"') {
-          char skip = lexer__peek(&lex);
-          if (skip == '\\') {
-            lexer__advance(&lex);
-            if (lexer__peek(&lex) != '\0') lexer__advance(&lex);
-          } else if (skip == '\n' || skip == '\r') {
-            lexer__advance(&lex);
-            if (skip == '\r' && lexer__peek(&lex) == '\n')
-              lexer__advance(&lex);
-            lex.line++;
-            lex.col = 1;
-          } else {
-            lexer__advance(&lex);
-          }
-        }
-        if (lexer__peek(&lex) == '"')
-          lexer__advance(&lex); /* consume closing '"' */
-
-        Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
-        tok.payload.error_msg = str_error;
-        lexer__arr_push(&arr, tok);
-        error_count++;
-      } else {
-        lexer__advance(&lex); /* consume closing '"' */
-        strbuf_push(&sb, '\0'); /* null-terminate */
-        Token tok = lexer__make_token(&lex, TOKEN_STRING, start, sline, scol);
-        tok.payload.text = sb.data;
-        lexer__arr_push(&arr, tok);
-      }
+      lexer__lex_string_body(&lex, &arr, &error_count, start, sline, scol);
       continue;
     }
 

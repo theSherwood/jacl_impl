@@ -1216,6 +1216,335 @@ static int test_string_backslash_at_eof(void) {
   TEST_PASS();
 }
 
+/* ---- US-007 tests ---- */
+
+static int test_interp_var_simple(void) {
+  setup();
+  /* "hello $name" → STRING_BEGIN INTERP_VAR STRING_END EOF */
+  LexResult r = lexer_lex("\"hello $name\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 4);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING_BEGIN);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "hello ");
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_U32_EQ(r.tokens[0].offset, 0);
+  ASSERT_U32_EQ(r.tokens[0].length, 7); /* "hello  (quote + 6 chars) */
+
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_INTERP_VAR);
+  ASSERT(var_text_eq(r.tokens[1], "name"));
+  ASSERT_U32_EQ(r.tokens[1].offset, 7);
+  ASSERT_U32_EQ(r.tokens[1].length, 5); /* $name */
+
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_STRING_END);
+  ASSERT_STR_EQ(r.tokens[2].payload.text, "");
+  ASSERT_U32_EQ(r.tokens[2].offset, 12);
+  ASSERT_U32_EQ(r.tokens[2].length, 1); /* closing " */
+
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_expr_simple(void) {
+  setup();
+  /* "val: $[+ 1 2]" → STRING_BEGIN INTERP_EXPR_START OP INT INT INTERP_EXPR_END STRING_END EOF */
+  LexResult r = lexer_lex("\"val: $[+ 1 2]\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 8);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING_BEGIN);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "val: ");
+  ASSERT_U32_EQ(r.tokens[0].offset, 0);
+  ASSERT_U32_EQ(r.tokens[0].length, 6); /* "val:  */
+
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_INTERP_EXPR_START);
+  ASSERT_U32_EQ(r.tokens[1].offset, 6);
+  ASSERT_U32_EQ(r.tokens[1].length, 2); /* $[ */
+
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_OPERATOR);
+  ASSERT(token_text_eq(r.tokens[2], "+"));
+
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[3].payload.int_val, 1);
+
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[4].payload.int_val, 2);
+
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_INTERP_EXPR_END);
+  ASSERT_U32_EQ(r.tokens[5].offset, 13);
+  ASSERT_U32_EQ(r.tokens[5].length, 1);
+
+  ASSERT_INT_EQ(r.tokens[6].type, TOKEN_STRING_END);
+  ASSERT_STR_EQ(r.tokens[6].payload.text, "");
+  ASSERT_U32_EQ(r.tokens[6].offset, 14);
+  ASSERT_U32_EQ(r.tokens[6].length, 1);
+
+  ASSERT_INT_EQ(r.tokens[7].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_multiple(void) {
+  setup();
+  /* "$a and $b" → STRING_BEGIN INTERP_VAR STRING_PART INTERP_VAR STRING_END EOF */
+  LexResult r = lexer_lex("\"$a and $b\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 6);
+
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING_BEGIN);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "");
+  ASSERT_U32_EQ(r.tokens[0].offset, 0);
+  ASSERT_U32_EQ(r.tokens[0].length, 1); /* just " */
+
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_INTERP_VAR);
+  ASSERT(var_text_eq(r.tokens[1], "a"));
+  ASSERT_U32_EQ(r.tokens[1].offset, 1);
+  ASSERT_U32_EQ(r.tokens[1].length, 2);
+
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_STRING_PART);
+  ASSERT_STR_EQ(r.tokens[2].payload.text, " and ");
+  ASSERT_U32_EQ(r.tokens[2].offset, 3);
+  ASSERT_U32_EQ(r.tokens[2].length, 5);
+
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_INTERP_VAR);
+  ASSERT(var_text_eq(r.tokens[3], "b"));
+  ASSERT_U32_EQ(r.tokens[3].offset, 8);
+  ASSERT_U32_EQ(r.tokens[3].length, 2);
+
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_STRING_END);
+  ASSERT_STR_EQ(r.tokens[4].payload.text, "");
+  ASSERT_U32_EQ(r.tokens[4].offset, 10);
+  ASSERT_U32_EQ(r.tokens[4].length, 1);
+
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_nested_brackets(void) {
+  setup();
+  /* "$[get [list]]" → STRING_BEGIN INTERP_EXPR_START WORD [ WORD ] INTERP_EXPR_END STRING_END EOF */
+  LexResult r = lexer_lex("\"$[get [list]]\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 9);
+
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING_BEGIN);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "");
+
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_INTERP_EXPR_START);
+  ASSERT_U32_EQ(r.tokens[1].offset, 1);
+  ASSERT_U32_EQ(r.tokens[1].length, 2);
+
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[2], "get"));
+
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_LBRACKET);
+
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[4], "list"));
+
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_RBRACKET);
+
+  ASSERT_INT_EQ(r.tokens[6].type, TOKEN_INTERP_EXPR_END);
+  ASSERT_U32_EQ(r.tokens[6].offset, 13);
+
+  ASSERT_INT_EQ(r.tokens[7].type, TOKEN_STRING_END);
+  ASSERT_STR_EQ(r.tokens[7].payload.text, "");
+
+  ASSERT_INT_EQ(r.tokens[8].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_no_interp_still_string(void) {
+  setup();
+  /* String with no interpolation → single STRING token (not BEGIN/END) */
+  LexResult r = lexer_lex("\"just text\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "just text");
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_mixed_escapes(void) {
+  setup();
+  /* "tab:\t$x\n" → STRING_BEGIN("tab:\t") INTERP_VAR(x) STRING_END("\n") */
+  LexResult r = lexer_lex("\"tab:\\t$x\\n\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 4);
+
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING_BEGIN);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "tab:\t");
+
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_INTERP_VAR);
+  ASSERT(var_text_eq(r.tokens[1], "x"));
+
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_STRING_END);
+  ASSERT_STR_EQ(r.tokens[2].payload.text, "\n");
+
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_adjacent(void) {
+  setup();
+  /* "$a$b" → STRING_BEGIN("") INTERP_VAR(a) STRING_PART("") INTERP_VAR(b) STRING_END("") */
+  LexResult r = lexer_lex("\"$a$b\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 6);
+
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING_BEGIN);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "");
+
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_INTERP_VAR);
+  ASSERT(var_text_eq(r.tokens[1], "a"));
+
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_STRING_PART);
+  ASSERT_STR_EQ(r.tokens[2].payload.text, "");
+  ASSERT_U32_EQ(r.tokens[2].length, 0); /* empty segment */
+
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_INTERP_VAR);
+  ASSERT(var_text_eq(r.tokens[3], "b"));
+
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_STRING_END);
+  ASSERT_STR_EQ(r.tokens[4].payload.text, "");
+
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_at_start(void) {
+  setup();
+  /* "$x end" → STRING_BEGIN("") INTERP_VAR(x) STRING_END(" end") */
+  LexResult r = lexer_lex("\"$x end\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 4);
+
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING_BEGIN);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "");
+  ASSERT_U32_EQ(r.tokens[0].length, 1); /* just " */
+
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_INTERP_VAR);
+  ASSERT(var_text_eq(r.tokens[1], "x"));
+
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_STRING_END);
+  ASSERT_STR_EQ(r.tokens[2].payload.text, " end");
+  ASSERT_U32_EQ(r.tokens[2].offset, 3);
+
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_at_end(void) {
+  setup();
+  /* "start $x" → STRING_BEGIN("start ") INTERP_VAR(x) STRING_END("") */
+  LexResult r = lexer_lex("\"start $x\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 4);
+
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING_BEGIN);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "start ");
+
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_INTERP_VAR);
+  ASSERT(var_text_eq(r.tokens[1], "x"));
+
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_STRING_END);
+  ASSERT_STR_EQ(r.tokens[2].payload.text, "");
+
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_dollar_not_var(void) {
+  setup();
+  /* "$5" is not interpolation — $ followed by digit → just a regular string */
+  LexResult r = lexer_lex("\"price $5\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "price $5");
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_dollar_at_end_of_string(void) {
+  setup();
+  /* "hello $" — $ followed by closing " → not interpolation */
+  LexResult r = lexer_lex("\"hello $\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "hello $");
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_expr_with_string(void) {
+  setup();
+  /* "$[concat "a" "b"]" → STRING_BEGIN INTERP_EXPR_START WORD STRING STRING INTERP_EXPR_END STRING_END */
+  LexResult r = lexer_lex("\"$[concat \"a\" \"b\"]\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 8);
+
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING_BEGIN);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_INTERP_EXPR_START);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[2], "concat"));
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[3].payload.text, "a");
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[4].payload.text, "b");
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_INTERP_EXPR_END);
+  ASSERT_INT_EQ(r.tokens[6].type, TOKEN_STRING_END);
+  ASSERT_INT_EQ(r.tokens[7].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_interp_in_context(void) {
+  setup();
+  /* Interpolated string used in a command: [print "hello $name"] */
+  LexResult r = lexer_lex("[print \"hello $name\"]", &test_arena);
+  /* [ WORD STRING_BEGIN INTERP_VAR STRING_END ] EOF = 7 */
+  ASSERT_U32_EQ(r.count, 7);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_LBRACKET);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "print"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_STRING_BEGIN);
+  ASSERT_STR_EQ(r.tokens[2].payload.text, "hello ");
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_INTERP_VAR);
+  ASSERT(var_text_eq(r.tokens[3], "name"));
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_STRING_END);
+  ASSERT_STR_EQ(r.tokens[4].payload.text, "");
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_RBRACKET);
+  ASSERT_INT_EQ(r.tokens[6].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -1308,6 +1637,20 @@ int main(void) {
     {"string_in_expression",      test_string_in_expression},
     {"string_position_tracking",  test_string_position_tracking},
     {"string_backslash_at_eof",   test_string_backslash_at_eof},
+    /* US-007 */
+    {"interp_var_simple",          test_interp_var_simple},
+    {"interp_expr_simple",         test_interp_expr_simple},
+    {"interp_multiple",            test_interp_multiple},
+    {"interp_nested_brackets",     test_interp_nested_brackets},
+    {"interp_no_interp_string",    test_interp_no_interp_still_string},
+    {"interp_mixed_escapes",       test_interp_mixed_escapes},
+    {"interp_adjacent",            test_interp_adjacent},
+    {"interp_at_start",            test_interp_at_start},
+    {"interp_at_end",              test_interp_at_end},
+    {"interp_dollar_not_var",      test_interp_dollar_not_var},
+    {"interp_dollar_end_str",      test_interp_dollar_at_end_of_string},
+    {"interp_expr_with_string",    test_interp_expr_with_string},
+    {"interp_in_context",          test_interp_in_context},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;
