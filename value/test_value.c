@@ -116,6 +116,114 @@ static int test_tag_payload_separation(void) {
   TEST_PASS();
 }
 
+/* ---- US-002 tests: Nil and boolean constructors, extractors, predicates ---- */
+
+/* Test: JACL_NIL is nil-tagged with zero payload */
+static int test_nil_constant(void) {
+  ASSERT_U64_EQ(JACL_NIL & JACL_TYPE_MASK, JACL_TAG_NIL);
+  ASSERT_U64_EQ(JACL_NIL & JACL_PAYLOAD_MASK, 0);
+  ASSERT_U64_EQ(JACL_NIL, 0);
+  TEST_PASS();
+}
+
+/* Test: JACL_TRUE and JACL_FALSE are bool-tagged */
+static int test_bool_constants(void) {
+  /* Both should be bool-tagged */
+  ASSERT_U64_EQ(JACL_TRUE & JACL_TYPE_MASK, JACL_TAG_BOOL);
+  ASSERT_U64_EQ(JACL_FALSE & JACL_TYPE_MASK, JACL_TAG_BOOL);
+
+  /* TRUE has payload 1, FALSE has payload 0 */
+  ASSERT_U64_EQ(JACL_TRUE & JACL_PAYLOAD_MASK, 1);
+  ASSERT_U64_EQ(JACL_FALSE & JACL_PAYLOAD_MASK, 0);
+
+  /* TRUE != FALSE */
+  ASSERT(JACL_TRUE != JACL_FALSE);
+
+  TEST_PASS();
+}
+
+/* Test: jacl_bool constructor */
+static int test_jacl_bool(void) {
+  JaclVal t = jacl_bool(true);
+  JaclVal f = jacl_bool(false);
+
+  ASSERT_U64_EQ(t, JACL_TRUE);
+  ASSERT_U64_EQ(f, JACL_FALSE);
+
+  TEST_PASS();
+}
+
+/* Test: jacl_is_nil predicate */
+static int test_is_nil(void) {
+  ASSERT(jacl_is_nil(JACL_NIL));
+
+  /* Bool values are not nil */
+  ASSERT(!jacl_is_nil(JACL_TRUE));
+  ASSERT(!jacl_is_nil(JACL_FALSE));
+
+  /* Nil with flags set is still nil */
+  ASSERT(jacl_is_nil(JACL_NIL | JACL_FLAG_TAINTED));
+  ASSERT(jacl_is_nil(JACL_NIL | JACL_FLAG_SECRET));
+  ASSERT(jacl_is_nil(JACL_NIL | JACL_FLAG_ERROR));
+  ASSERT(jacl_is_nil(JACL_NIL | JACL_FLAGS_MASK));
+
+  /* Other type tags are not nil */
+  ASSERT(!jacl_is_nil(JACL_TAG_BOOL));
+  ASSERT(!jacl_is_nil(JACL_TAG_I32));
+  ASSERT(!jacl_is_nil(JACL_TAG_F32));
+
+  TEST_PASS();
+}
+
+/* Test: jacl_is_bool predicate */
+static int test_is_bool(void) {
+  ASSERT(jacl_is_bool(JACL_TRUE));
+  ASSERT(jacl_is_bool(JACL_FALSE));
+  ASSERT(jacl_is_bool(jacl_bool(true)));
+  ASSERT(jacl_is_bool(jacl_bool(false)));
+
+  /* Nil is not bool */
+  ASSERT(!jacl_is_bool(JACL_NIL));
+
+  /* Bool with flags set is still bool */
+  ASSERT(jacl_is_bool(JACL_TRUE | JACL_FLAG_TAINTED));
+  ASSERT(jacl_is_bool(JACL_FALSE | JACL_FLAG_ERROR));
+  ASSERT(jacl_is_bool(JACL_TRUE | JACL_FLAGS_MASK));
+
+  /* Other type tags are not bool */
+  ASSERT(!jacl_is_bool(JACL_TAG_I32));
+  ASSERT(!jacl_is_bool(JACL_TAG_F32));
+  ASSERT(!jacl_is_bool(JACL_TAG_NIL));
+
+  TEST_PASS();
+}
+
+/* Test: jacl_as_bool extractor */
+static int test_as_bool(void) {
+  /* Round-trip: jacl_as_bool(jacl_bool(x)) == x */
+  ASSERT(jacl_as_bool(jacl_bool(true)) == true);
+  ASSERT(jacl_as_bool(jacl_bool(false)) == false);
+
+  /* Constants */
+  ASSERT(jacl_as_bool(JACL_TRUE) == true);
+  ASSERT(jacl_as_bool(JACL_FALSE) == false);
+
+  TEST_PASS();
+}
+
+/* Test: nil is not bool, bool is not nil (cross-type) */
+static int test_nil_bool_distinction(void) {
+  /* nil is not bool */
+  ASSERT(!jacl_is_bool(JACL_NIL));
+  /* bool is not nil */
+  ASSERT(!jacl_is_nil(JACL_TRUE));
+  ASSERT(!jacl_is_nil(JACL_FALSE));
+  /* TRUE != FALSE */
+  ASSERT(JACL_TRUE != JACL_FALSE);
+
+  TEST_PASS();
+}
+
 int main(void) {
   printf("Test: JaclVal size\n");
   if (!test_jaclval_size()) return 1;
@@ -134,6 +242,28 @@ int main(void) {
 
   printf("Test: tag/payload separation\n");
   if (!test_tag_payload_separation()) return 1;
+
+  /* US-002: Nil and boolean tests */
+  printf("Test: nil constant\n");
+  if (!test_nil_constant()) return 1;
+
+  printf("Test: bool constants\n");
+  if (!test_bool_constants()) return 1;
+
+  printf("Test: jacl_bool constructor\n");
+  if (!test_jacl_bool()) return 1;
+
+  printf("Test: jacl_is_nil predicate\n");
+  if (!test_is_nil()) return 1;
+
+  printf("Test: jacl_is_bool predicate\n");
+  if (!test_is_bool()) return 1;
+
+  printf("Test: jacl_as_bool extractor\n");
+  if (!test_as_bool()) return 1;
+
+  printf("Test: nil/bool distinction\n");
+  if (!test_nil_bool_distinction()) return 1;
 
   return 0;
 }

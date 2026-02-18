@@ -21,6 +21,7 @@
 #ifndef VALUE_H
 #define VALUE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* --- Core type --- */
@@ -56,6 +57,34 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_MAP            ((uint64_t)0x07 << JACL_TAG_SHIFT)
 #define JACL_TAG_CLOSURE        ((uint64_t)0x08 << JACL_TAG_SHIFT)
 #define JACL_TAG_BIGNUM         ((uint64_t)0x09 << JACL_TAG_SHIFT)
+
+/* --- Nil and boolean constants --- */
+
+#define JACL_NIL    ((JaclVal)JACL_TAG_NIL)
+#define JACL_TRUE   ((JaclVal)(JACL_TAG_BOOL | UINT64_C(1)))
+#define JACL_FALSE  ((JaclVal)(JACL_TAG_BOOL))
+
+/* --- Constructors --- */
+
+static inline JaclVal jacl_bool(bool b) {
+    return JACL_TAG_BOOL | (b ? UINT64_C(1) : UINT64_C(0));
+}
+
+/* --- Predicates --- */
+
+static inline bool jacl_is_nil(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_NIL;
+}
+
+static inline bool jacl_is_bool(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_BOOL;
+}
+
+/* --- Extractors --- */
+
+static inline bool jacl_as_bool(JaclVal v) {
+    return (v & JACL_PAYLOAD_MASK) != 0;
+}
 
 #endif /* VALUE_H */
 
