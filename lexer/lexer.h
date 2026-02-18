@@ -36,7 +36,6 @@ typedef enum {
   TOKEN_RPAREN,           /* ) */
   TOKEN_WORD,             /* bare word: command names, arguments */
   TOKEN_OPERATOR,         /* symbolic operators: +, -, >=, etc. */
-  TOKEN_KEYWORD,          /* :key, :my-thing */
   TOKEN_INT,              /* integer literal: 42, 0xFF, 0b1010 */
   TOKEN_FLOAT,            /* float literal: 3.14, 0.5 */
   TOKEN_STRING,           /* complete string with no interpolation */
@@ -64,7 +63,7 @@ typedef struct {
   uint32_t  offset;   /* byte offset from start of source */
   uint32_t  length;   /* length in bytes in the source */
   union {
-    const char* text;      /* TOKEN_WORD, TOKEN_KEYWORD, TOKEN_STRING, etc. */
+    const char* text;      /* TOKEN_WORD, TOKEN_STRING, etc. */
     int32_t     int_val;   /* TOKEN_INT */
     float       float_val; /* TOKEN_FLOAT */
     const char* error_msg; /* TOKEN_ERROR */
@@ -780,20 +779,6 @@ static void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
       continue;
     }
 
-    /* Keywords */
-    if (c == ':' && lexer__is_word_start(lex->source[lex->pos + 1])) {
-      uint32_t s  = lex->pos;
-      uint32_t sl = lex->line;
-      uint32_t sc = lex->col;
-      lexer__advance(lex);
-      while (lexer__is_word_char(lexer__peek(lex)))
-        lexer__advance(lex);
-      Token tok = lexer__make_token(lex, TOKEN_KEYWORD, s, sl, sc);
-      tok.payload.text = lex->source + s;
-      lexer__arr_push(arr, tok);
-      continue;
-    }
-
     /* Numbers */
     if (c >= '0' && c <= '9') {
       lexer__lex_number(lex, arr, error_count);
@@ -957,21 +942,6 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
              && lexer__peek(&lex) != '\r') {
         lexer__advance(&lex);
       }
-      continue;
-    }
-
-    /* Keywords: colon followed by word-start character */
-    if (c == ':' && lexer__is_word_start(lex.source[lex.pos + 1])) {
-      uint32_t start = lex.pos;
-      uint32_t sline = lex.line;
-      uint32_t scol  = lex.col;
-      lexer__advance(&lex); /* consume ':' */
-      while (lexer__is_word_char(lexer__peek(&lex))) {
-        lexer__advance(&lex);
-      }
-      Token tok = lexer__make_token(&lex, TOKEN_KEYWORD, start, sline, scol);
-      tok.payload.text = lex.source + start;
-      lexer__arr_push(&arr, tok);
       continue;
     }
 

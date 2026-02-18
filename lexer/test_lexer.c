@@ -344,32 +344,6 @@ static int test_multi_char_operator(void) {
   TEST_PASS();
 }
 
-static int test_keyword(void) {
-  setup();
-  LexResult r = lexer_lex(":key", &test_arena);
-  ASSERT_U32_EQ(r.count, 2); /* KEYWORD + EOF */
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_KEYWORD);
-  ASSERT(token_text_eq(r.tokens[0], ":key"));
-  ASSERT_U32_EQ(r.tokens[0].length, 4);
-  ASSERT_U32_EQ(r.tokens[0].offset, 0);
-  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
-  teardown();
-  ASSERT(check_no_leaks());
-  TEST_PASS();
-}
-
-static int test_keyword_with_hyphens(void) {
-  setup();
-  LexResult r = lexer_lex(":my-thing", &test_arena);
-  ASSERT_U32_EQ(r.count, 2); /* KEYWORD + EOF */
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_KEYWORD);
-  ASSERT(token_text_eq(r.tokens[0], ":my-thing"));
-  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
-  teardown();
-  ASSERT(check_no_leaks());
-  TEST_PASS();
-}
-
 static int test_comment_skipped(void) {
   setup();
   LexResult r = lexer_lex("# this is a comment", &test_arena);
@@ -441,13 +415,13 @@ static int test_word_terminates_at_hash(void) {
 
 static int test_text_points_into_source(void) {
   setup();
-  const char* src = "hello :key >=";
+  const char* src = "hello world >=";
   LexResult r = lexer_lex(src, &test_arena);
-  ASSERT_U32_EQ(r.count, 4); /* WORD KEYWORD OPERATOR EOF */
+  ASSERT_U32_EQ(r.count, 4); /* WORD WORD OPERATOR EOF */
   /* Verify payload.text points into the source buffer */
   ASSERT_PTR_EQ(r.tokens[0].payload.text, src + 0);
   ASSERT_PTR_EQ(r.tokens[1].payload.text, src + 6);
-  ASSERT_PTR_EQ(r.tokens[2].payload.text, src + 11);
+  ASSERT_PTR_EQ(r.tokens[2].payload.text, src + 12);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -456,18 +430,18 @@ static int test_text_points_into_source(void) {
 static int test_mixed_sequence(void) {
   setup();
   /* A realistic JACL fragment */
-  LexResult r = lexer_lex("[map :key1 val1 :key2 val2]", &test_arena);
-  /* [ WORD KEYWORD WORD KEYWORD WORD ] EOF = 8 */
+  LexResult r = lexer_lex("[map key1 val1 key2 val2]", &test_arena);
+  /* [ WORD WORD WORD WORD WORD ] EOF = 8 */
   ASSERT_U32_EQ(r.count, 8);
   ASSERT_INT_EQ(r.tokens[0].type, TOKEN_LBRACKET);
   ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
   ASSERT(token_text_eq(r.tokens[1], "map"));
-  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_KEYWORD);
-  ASSERT(token_text_eq(r.tokens[2], ":key1"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[2], "key1"));
   ASSERT_INT_EQ(r.tokens[3].type, TOKEN_WORD);
   ASSERT(token_text_eq(r.tokens[3], "val1"));
-  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_KEYWORD);
-  ASSERT(token_text_eq(r.tokens[4], ":key2"));
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[4], "key2"));
   ASSERT_INT_EQ(r.tokens[5].type, TOKEN_WORD);
   ASSERT(token_text_eq(r.tokens[5], "val2"));
   ASSERT_INT_EQ(r.tokens[6].type, TOKEN_RBRACKET);
@@ -1706,8 +1680,8 @@ static int test_integration_full_program(void) {
     "set mask 0xFF\n"
     "set flags 0b1010\n"
     "\n"
-    "# Keywords and maps\n"
-    "[map :host \"localhost\" :port 8080]\n"
+    "# Maps\n"
+    "[map host \"localhost\" port 8080]\n"
     "\n"
     "# Variable references and operators\n"
     "set x $name\n"
@@ -1775,9 +1749,9 @@ static int test_integration_full_program(void) {
     TOKEN_WORD, TOKEN_WORD, TOKEN_INT, TOKEN_NEWLINE,
     /* line 13-14: blank + comment */
     TOKEN_NEWLINE, TOKEN_NEWLINE,
-    /* line 15: [map :host "localhost" :port 8080] */
-    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_KEYWORD, TOKEN_STRING,
-    TOKEN_KEYWORD, TOKEN_INT, TOKEN_RBRACKET, TOKEN_NEWLINE,
+    /* line 15: [map host "localhost" port 8080] */
+    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_WORD, TOKEN_STRING,
+    TOKEN_WORD, TOKEN_INT, TOKEN_RBRACKET, TOKEN_NEWLINE,
     /* line 16-17: blank + comment */
     TOKEN_NEWLINE, TOKEN_NEWLINE,
     /* line 18: set x $name */
@@ -1931,8 +1905,6 @@ int main(void) {
     {"utf8_word",                test_utf8_word},
     {"simple_operator",          test_simple_operator},
     {"multi_char_operator",      test_multi_char_operator},
-    {"keyword",                  test_keyword},
-    {"keyword_with_hyphens",     test_keyword_with_hyphens},
     {"comment_skipped",          test_comment_skipped},
     {"comment_before_newline",   test_comment_before_newline},
     {"comment_after_tokens",     test_comment_after_tokens},

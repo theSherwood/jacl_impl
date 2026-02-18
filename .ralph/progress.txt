@@ -1,0 +1,180 @@
+## Codebase Patterns
+- Single-header convention: `#ifndef X_H` / `#define X_H` for declarations, `#ifdef X_IMPLEMENTATION` / `#ifndef X_IMPL_GUARD_` for implementation
+- Arena allocator: zero-init `arena_t arena = {0}`, uses libc by default, lazy-initializes on first alloc
+- Test tracked allocator: `tracked_allocator` from `test/test_helpers.h`, plug into arena via `.allocator = tracked_allocator`
+- Build system: `build.sh` with `TESTS=()` array entries formatted as `"path/test.c|name|optional_extra_cflags"`
+- Compiler flags: `-Wall -Wextra -std=c99 -g`
+- Relative includes from module dirs use `../` prefix (e.g., `#include "../arena/arena.h"`)
+- Token payload.text for WORD/KEYWORD/OPERATOR points into the original source buffer (zero-copy)
+- Character classification helpers: `lexer__is_word_start`, `lexer__is_word_char`, `lexer__is_operator_char`
+- Words start with letter/underscore/UTF-8 (>=0x80); continue with those plus digits and hyphens
+- Operator chars: `!%&*+-./<=>?@\^|~` — consumed greedily
+- `-` is both a word continuation char and an operator start char; context (word vs new token) determines which
+- VAR token payload.text skips `$` prefix (points to `source + start + 1`); token.length includes `$`
+- Error recovery for prefix chars (like `$`): only consume the prefix, let following chars lex independently
+- Number literals: digits at token start trigger number handler; negative numbers are handled by parser (unary minus), not lexer
+- Hex/binary prefixes: `0x`/`0X` and `0b`/`0B`; parse with `int64_t` intermediate to avoid overflow, cast to `int32_t` at end
+- Float parsing: integer arithmetic (frac/frac_div) avoids float accumulation errors; `3.` with no trailing digit is INT + OPERATOR(`.`)
+- Number suffix validation: after consuming number, check `lexer__is_word_start` — if true, consume remaining word chars and emit ERROR
+- String tokens: `payload.text` points to arena-allocated null-terminated buffer (NOT source); `token.length` is source length including quotes
+- StringBuf helper: arena-backed growable char buffer (init 64, doubles), used for building processed string content
+- `lexer__encode_utf8(cp, out)`: encode codepoint to UTF-8 bytes, returns byte count (1-4)
+- `lexer__hex_digit(c)`: parse single hex digit, returns -1 on invalid
+- String error recovery: on invalid escape, skip to closing `"` (handling `\"` inside), emit ERROR spanning entire string
+- Embedded newlines in strings: normalize `\r\n`/`\r` to `\n`, track `lex.line`/`lex.col` for correct positions after string
+- Interpolation in strings: `$` + word-start or `$[` triggers interpolation; bare `$` (followed by digit, quote, etc.) is a regular char
+- Interpolated strings emit: STRING_BEGIN, INTERP_VAR/INTERP_EXPR_START...INTERP_EXPR_END, STRING_PART (between interpolations), STRING_END
+- Non-interpolated strings still emit a single STRING token (backward compatible)
+- String handler refactored into `lexer__lex_string_body()` — called from main loop and from interp expr sub-lexer (mutual recursion)
+- `lexer__lex_interp_expr()` tracks bracket depth; `$[` inside expressions emits DOLLAR_BRACKET and increments depth
+- Number handler extracted to `lexer__lex_number()` — shared by main loop and interp expr sub-lexer
+- Escape handling extracted to `lexer__handle_escape()` — single source of truth for all escape sequences
+- Error recovery extracted to `lexer__skip_to_string_end()` — handles `\"` escapes and newline tracking during skip
+- `lexer__unexpected_char_msg(lex, c)` — arena-allocated error message with hex representation of unexpected chars
+- Unrecognized characters: anything not handled by specific handlers (control chars, bare `:`, `,`, `;`, etc.) → ERROR
+- Characters >= 0x80 are treated as word-start, so only single-byte non-handled chars reach the error handler
+
+---
+
+## 2026-02-18 - US-001
+- Implemented TokenType enum with all 23 token types (LBRACKET through EOF)
+- Implemented Token struct with type, position fields (line/column/offset/length), and union payload
+- Implemented LexResult struct with tokens array, count, and error_count
+- Declared public API: `LexResult lexer_lex(const char* source, arena_t* arena)`
+- Added stub implementation (returns single EOF token) for compilation testing
+- Files changed: lexer/lexer.h (new)
+- **Learnings for future iterations:**
+  - arena.h static functions produce -Wunused-function warnings in translation units that don't call them; this is expected and not a lexer issue
+  - The single-header pattern requires both a header guard AND an implementation guard
+  - Token payload uses a union — text and error_msg share the same slot (both are `const char*`)
+---
+
+## 2026-02-18 - US-002
+- Implemented real lexer_lex() replacing stub: main loop with position tracking, whitespace skipping, delimiter recognition, newline handling, EOF
+- Internal TokenArray growable buffer using arena (starts at 256, doubles on overflow)
+- Internal Lexer state struct with source, pos, line, col, arena
+- Created lexer/test_lexer.c with 12 tests covering all acceptance criteria
+- Added "lexer/test_lexer.c|lexer|" to TESTS array in build.sh
+- Files changed: lexer/lexer.h (replaced implementation), lexer/test_lexer.c (new), build.sh
+- **Learnings for future iterations:**
+  - Tab characters count as 1 column (not expanded to tab stops)
+  - \r\n is consumed as a single NEWLINE token with length=2
+  - Bare \r (without \n) is also treated as a newline
+  - Unrecognized characters fall through to ERROR token — this is the extension point for future token types
+  - The test pattern is: setup() → lexer_lex() → assertions → teardown() → check_no_leaks()
+  - test_helpers.h has unused static functions (string_hash, string_eq, tracker_active_count) that produce warnings; these are from the shared helper, not our code
+---
+
+## 2026-02-18 - US-003
+- Added character classification helpers: `lexer__is_word_start`, `lexer__is_word_char`, `lexer__is_operator_char`
+- Implemented comment skipping: `#` to end of line, stops before `\n`/`\r`/`\0`
+- Implemented keyword lexing: `:` + word-start → TOKEN_KEYWORD
+- Implemented word lexing: letter/underscore/UTF-8 start → TOKEN_WORD
+- Implemented operator lexing: greedy consumption of operator chars → TOKEN_OPERATOR
+- Added `token_text_eq` test helper for comparing token text against expected strings
+- Added 16 new tests (28 total) covering all acceptance criteria
+- Files changed: lexer/lexer.h (added helpers and handlers), lexer/test_lexer.c (added tests)
+- **Learnings for future iterations:**
+  - Word payload.text points directly into source buffer — no allocation needed for words/keywords/operators
+  - Cast to `(unsigned char)` is required for UTF-8 byte comparisons to avoid signed char issues
+  - Keyword check must peek ahead (`lex.source[lex.pos + 1]`) before consuming `:` to avoid mishandling lone `:`
+  - Comments stop before newline chars so the newline handler still produces NEWLINE tokens
+  - Digits at token start currently fall through to ERROR — US-004 will handle them
+  - `$` and `"` also fall through to ERROR — handled by US-005 and US-006 respectively
+---
+
+## 2026-02-18 - US-004
+- Added number literal handler between keyword and word handlers in main lexer loop
+- Hex literals (0x/0X prefix): parse hex digits with int64_t intermediate, cast to int32_t
+- Binary literals (0b/0B prefix): parse binary digits, validate no trailing digits 2-9
+- Decimal integers: consume digit sequence, store parsed int32_t value
+- Floats: decimal digits + '.' + more digits → float via integer arithmetic (frac/frac_div)
+- Invalid suffix detection: if word-start char follows number, consume remaining word chars → ERROR
+- Added float_approx_eq test helper for float comparison with epsilon
+- Added 15 new tests (43 total) covering all acceptance criteria
+- Files changed: lexer/lexer.h (added number handler), lexer/test_lexer.c (added tests)
+- **Learnings for future iterations:**
+  - Use int64_t for intermediate number parsing to avoid int32_t overflow UB
+  - Float parsing via integer arithmetic (frac_part / frac_divisor) is more accurate than accumulating float * 0.1f
+  - `0.` (dot with no trailing digit) correctly falls through as INT(0) + OPERATOR(`.`) — no special case needed
+  - Binary suffix check needs `(peek >= '2' && peek <= '9')` in addition to `lexer__is_word_start` since digits aren't word-start chars
+  - `$` and `"` still fall through to ERROR — handled by US-005 and US-006 respectively
+---
+
+## 2026-02-18 - US-005
+- Added `$` handler in main lexer loop, placed before the unrecognized character fallback
+- `$[` → TOKEN_DOLLAR_BRACKET (length 2)
+- `$identifier` → TOKEN_VAR with payload.text pointing past `$` into source buffer (zero-copy)
+- `$` at EOF or followed by non-identifier/non-`[` → TOKEN_ERROR (only `$` consumed, remaining chars lex normally)
+- Variable identifier rules reuse `lexer__is_word_start` (first char) and `lexer__is_word_char` (continuation)
+- Added `var_text_eq` test helper that accounts for `$` prefix in length calculation
+- Added 14 new tests (57 total) covering all acceptance criteria
+- Files changed: lexer/lexer.h (added $ handler), lexer/test_lexer.c (added tests)
+- **Learnings for future iterations:**
+  - VAR payload.text skips the `$` — points to `source + start + 1` — but token.length includes `$`
+  - Error on invalid `$` usage only consumes the `$` itself, allowing the following char to lex as its own token (e.g., `$123` → ERROR + INT)
+  - `"` still falls through to ERROR — handled by US-006
+---
+
+## 2026-02-18 - US-006
+- Added StringBuf helper (arena-backed growable char buffer) for building processed string content
+- Added lexer__encode_utf8() for encoding Unicode codepoints to UTF-8 bytes (1-4 bytes)
+- Added lexer__hex_digit() for parsing single hex digits
+- Added `"` string handler in main lexer loop between `$` handler and unrecognized char fallback
+- Escape sequences: `\\`, `\"`, `\n`, `\t`, `\r`, `\0`, `\xNN`, `\uNNNN`, `\UNNNNNNNN`
+- Invalid escapes → ERROR token spanning entire string, lexing continues after closing quote
+- Unterminated strings (EOF before closing quote) → ERROR token
+- Embedded newlines: `\r\n`/`\r` normalized to `\n`, line/column tracking updated for correct positions after string
+- `$` treated as regular character inside strings (US-007 will add interpolation)
+- Added 19 new tests (76 total) covering: empty string, simple string, all escape types (backslash, quote, \n\t\r, null, hex, unicode 2/3/4-byte), multi-line strings, unterminated strings, invalid escapes, error recovery, mixed escapes, strings in expressions, position tracking, backslash at EOF
+- Files changed: lexer/lexer.h (added helpers and string handler), lexer/test_lexer.c (added tests)
+- **Learnings for future iterations:**
+  - STRING payload.text is arena-allocated null-terminated buffer (unlike WORD/KEYWORD which point into source)
+  - token.length for STRING is the source length including both quotes
+  - Strings with `\0` escapes contain embedded null bytes; strlen will see truncated length — use byte-level checks in tests
+  - Error recovery for strings: skip to closing `"` handling `\"` escapes to avoid premature termination
+  - Embedded newline tracking must happen both in the normal scan AND in the error recovery skip loop
+  - UTF-8 encoding: U+0000-7F=1 byte, U+0080-7FF=2 bytes, U+0800-FFFF=3 bytes, U+10000-10FFFF=4 bytes
+  - `\U` codepoints > 0x10FFFF produce "unicode codepoint out of range" error
+---
+
+## 2026-02-18 - US-007
+- Refactored string handler from inline code to `lexer__lex_string_body()` function for reuse
+- Extracted `lexer__lex_number()` to share number parsing between main loop and interp expr sub-lexer
+- Extracted `lexer__handle_escape()` for single-source escape sequence handling
+- Extracted `lexer__skip_to_string_end()` for error recovery reuse
+- Added `lexer__lex_interp_expr()`: bracket-depth-tracking expression sub-lexer for `$[...]`
+- Forward declarations enable mutual recursion between string body and interp expr handlers
+- `$var` inside strings: emits INTERP_VAR with payload.text pointing past `$` (same as VAR outside strings)
+- `$[expr]` inside strings: emits INTERP_EXPR_START, lexes expression tokens, emits INTERP_EXPR_END
+- STRING_BEGIN/PART/END carry arena-allocated null-terminated text for their literal portions
+- Strings without interpolation still produce single STRING token (no behavior change)
+- `$` not followed by word-start or `[` remains a regular character in strings
+- Added 13 new tests (89 total) covering: single var interpolation, single expr interpolation, multiple interpolations, nested brackets in expr, no-interp still STRING, mixed escapes + interpolation, adjacent interpolations, interpolation at start/end, $ not triggering interpolation (digit/end-of-string), expr with nested strings, interpolated string in command context
+- Files changed: lexer/lexer.h (major refactor + new functions), lexer/test_lexer.c (added tests)
+- **Learnings for future iterations:**
+  - Mutual recursion between string body and interp expr handlers requires forward declarations in C
+  - Extracting common handlers (number, escape, error recovery) greatly reduces duplication when the same logic is needed in multiple contexts
+  - INTERP_VAR payload.text structure matches VAR: points past `$`, length includes `$`
+  - STRING_BEGIN/PART/END segments can have length=0 and empty text (e.g., adjacent interpolations like `"$a$b"`)
+  - `$[` inside interp expressions produces DOLLAR_BRACKET (not INTERP_EXPR_START) and increments bracket depth
+  - Strings inside `$[expr]` call `lexer__lex_string_body` recursively, enabling arbitrarily nested interpolation
+---
+
+## 2026-02-18 - US-008
+- Added `lexer__unexpected_char_msg()` helper: arena-allocated descriptive error message with hex representation (e.g., "unexpected character (0x01)")
+- Updated unrecognized character handler in main loop and interp expr sub-lexer to use the new helper
+- Added 6 new tests (95 total) covering all acceptance criteria:
+  - `test_error_control_char`: stray \x01 produces ERROR with descriptive arena-allocated message
+  - `test_error_recovery_continues`: valid tokens lex correctly after error
+  - `test_error_positions_after_errors`: line/column tracking correct across multiple errors on different lines
+  - `test_error_count_reflects_total`: 5 different error types (control char, bad $, number suffix, DEL, bad escape) all counted
+  - `test_error_mixed_program`: multi-line program with mixed valid/invalid constructs produces correct token sequence
+  - `test_integration_full_program`: 58-line JACL program exercising ALL token types (190 tokens verified), including words, keywords, operators, ints, floats, hex, binary, strings, interpolated strings (var + expr), variables, dollar-bracket, all 6 delimiter types, comments, newlines
+- Files changed: lexer/lexer.h (added helper, updated 2 error handlers), lexer/test_lexer.c (added tests)
+- **Learnings for future iterations:**
+  - String length calculation for memcpy: "unexpected character (0x" is 24 chars, not 23 — always count carefully or use strlen
+  - Characters >= 0x80 are treated as word-start by lexer__is_word_start, so only ASCII bytes 0x00-0x7F can reach the unrecognized character handler
+  - Integration test with large expected token array: use a loop with index-based error reporting for debuggability, not individual ASSERT_INT_EQ per token
+  - The lexer already handles all error recovery correctly from previous stories; US-008 is mostly about testing comprehensiveness and descriptive messages
+---

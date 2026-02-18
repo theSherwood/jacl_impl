@@ -62,13 +62,10 @@ Allocation TBD. Candidates:
 - `I32`
 - `F32`
 - `STRING` (pointer to heap)
-- `SYMBOL` / `KEYWORD`
 - `VECTOR` (pointer to RRB vec)
 - `MAP` (pointer to HAMT)
-- `FUNCTION` / `CLOSURE`
-- `ERROR` (pointer to error info)
-- `BIGINT` (pointer to heap)
-- `RATIONAL` (pointer to heap)
+- `CLOSURE`
+- `BIGNUM` (pointer to heap)
 - ... (room for more)
 
 ### Unboxed Values (Static/Typed Context)
@@ -84,8 +81,7 @@ raw native type with no tag overhead. This means:
 
 - The tainted/secret/error flags flow through computations automatically at the
   value representation level, not as a separate error-handling or taint-tracking mechanism
-- i32/f32 is a fair tradeoff for dynamic values — users needing full-width numerics
-  use static typing, which also gives them better performance
+- i32/f32 is a fair tradeoff for dynamic values — users needing full-width numerics use static typing, which also gives them better performance
 - This representation is very compact (single 64-bit word) and cache-friendly
 
 ## 3. Syntax
@@ -555,21 +551,378 @@ binding IS a box under the hood. Deferred for now.
 
 ---
 
+## Incremental Implementation Plan
+
+Each milestone produces a testable, working increment. Later milestones build on earlier
+ones but each is a self-contained deliverable.
+
+### Milestone 0: Value Representation (`value/`)
+
+The foundation everything else sits on. Implement the 64-bit tagged value system from
+Section 2.
+
+**Delivers:**
+- `value.h` — the `JaclVal` type (64-bit tagged word)
+- Tag byte manipulation: type tag (5 bits), error/tainted/secret flags
+- Constructors and extractors for all inline types: nil, bool, i32, f32
+- Pointer-payload constructors for heap types (string, vector, map, closure, etc.)
+- Inline string packing (0–7 bytes in the 56-bit payload)
+- Flag propagation helpers (e.g., "combine flags from two operands")
+- Type predicate macros (`IS_NIL`, `IS_I32`, `IS_ERROR`, etc.)
+
+**Tests:** construct/extract round-trips for every type, flag propagation, inline string
+pack/unpack, edge cases (max inline string length, i32 min/max, pointer tagging).
+
+**No dependencies on other milestones.**
+
+---
+
+### Milestone 1: Lexer (`lexer/`)
+
+Tokenize Phase 1 bracket syntax. Operates on byte buffers (later: rope input).
+
+**Delivers:**
+- `lexer.h` — streaming tokenizer
+- Token types: `[`, `]`, `{`, `}`, `(`, `)`, bare word, number (integer and float
+  literals), string (double-quoted, with `$var` and `$[expr]` interpolation markers),
+  `$identifier`, `#` comment (skipped), newline, EOF
+- Position tracking (line, column, byte offset) for error reporting
+- Arena-backed allocation for token storage
+
+**Tests:** tokenize individual constructs, full multi-line programs, edge cases (nested
+interpolation, escape sequences, unterminated strings, UTF-8 in bare words).
+
+**Depends on:** Milestone 0 (for arena; value.h not strictly needed but co-developed).
+
+---
+
+### Milestone 2: Parser & AST (`parser/`)
+
+Parse token stream into a tree of command invocations — the "lisp under the hood."
+
+**Delivers:**
+- `ast.h` — AST node types: command invocation, literal (number, string, bool, nil),
+  variable reference (`$var`), code block (`{ ... }`), interpolated string
+- `parser.h` — recursive descent parser producing AST from token stream
+- Top-level: implicit brackets (bare commands); nested: explicit `[cmd ...]`
+- Code blocks `{ ... }` parsed as a sequence of commands
+- Error recovery: meaningful parse error messages with source positions
+
+**Tests:** parse and verify AST structure for all Phase 1 syntax constructs, error
+cases (mismatched brackets, unexpected tokens), round-trip pretty-printing.
+
+**Depends on:** Milestone 1.
+
+---
+
+### Milestone 3: Bytecode Compiler & VM — Minimal (`compiler/`, `vm/`)
+
+The point where JACL becomes a running language. Enough to execute `[print [+ 1 2]]`.
+
+**Delivers:**
+- `bytecode.h` — instruction encoding (opcode + operands), constant pool, bytecode chunk
+- `compiler.h` — AST → bytecode compilation for:
+  - Literal loading (nil, bool, i32, f32, strings)
+  - Builtin command dispatch (`+`, `-`, `*`, `/`, `print`, comparison ops)
+  - Nested subcommand evaluation (`[cmd [cmd ...]]`)
+  - Variable reference (`$var`) — read from environment
+- `vm.h` — stack-based bytecode interpreter:
+  - Operand stack, call frames
+  - Instruction dispatch loop
+  - An environment structure for name → value bindings
+  - A small set of builtins registered by name
+
+**Tests:** compile and execute arithmetic expressions, nested commands, print output,
+variable lookup, type errors at runtime (e.g., `[+ "a" 1]`).
+
+**Depends on:** Milestones 0, 2.
+
+---
+
+### Milestone 4: Variables, Procedures & Control Flow
+
+JACL becomes a real programming language.
+
+**Delivers:**
+- `def` — immutable variable binding
+- `proc` — procedure definition (name, param list, body block)
+- Procedure invocation (user-defined procedures dispatch like builtins)
+- Lexical scoping: nested environments, procedure bodies create new scopes
+- `if` — conditional (takes condition, then-block, optional else-block)
+- Closures: capture immutable bindings by value
+- Recursion and tail-call optimization (optional — can defer TCO)
+
+**Tests:** define and call procedures, closures capturing variables, recursive
+fibonacci/factorial, nested scopes, if/else branching, higher-order procedures
+(passing procs as arguments).
+
+**Depends on:** Milestone 3.
+
+---
+
+### Milestone 5: String System
+
+Critical for a command language. Implement the three-tier representation from Section 3.
+
+**Delivers:**
+- Inline strings (0–7 bytes packed in value payload) — from Milestone 0, now fully wired
+- Heap-interned strings: intern table (hash-consed), pointer-equality comparison
+- Large strings: backed by the existing rope module (`sum_tree/rope.h`)
+- String operations: `concat`, `length`, `slice`, `index`, comparison
+- String interpolation: `"text $var and $[expr] here"` fully working end-to-end
+  (lexer marks interpolation boundaries, parser builds interpolated-string AST nodes,
+  compiler emits concat sequences)
+
+**Tests:** small/medium/large string creation, interpolation with variables and
+subcommands, string operations, intern deduplication, comparison (pointer-eq fast path
+for interned, structural for others).
+
+**Depends on:** Milestone 4 (needs working variable lookup and subcommand evaluation
+for interpolation).
+
+---
+
+### Milestone 6: Persistent Collections
+
+Wire up the existing HAMT and RRB vector modules as JACL's map and vector types.
+
+**Delivers:**
+- Vector type: backed by `rrb_vec`. Builtins: `vec`, `vec-get`, `vec-set`, `vec-push`,
+  `vec-pop`, `vec-len`, `vec-concat`, `vec-slice`, `vec-map`, `vec-filter`, `vec-reduce`
+- Map type: backed by `hamt`. Builtins: `map`, `map-get`, `map-set`, `map-unset`,
+  `map-has`, `map-keys`, `map-vals`, `map-merge`
+- Iteration: `each` builtin for both vectors and maps
+- Literal syntax TBD — initially use constructor builtins: `[vec 1 2 3]`,
+  `[map :key1 val1 :key2 val2]`
+
+**Tests:** create, query, update, iterate over vectors and maps from JACL code;
+nested structures; structural sharing (update returns new value, original unchanged).
+
+**Depends on:** Milestone 4 (needs procedures and control flow for `each`/`map`/etc.).
+
+---
+
+### Milestone 7: Error Handling
+
+Implement the error-flag system from Section 7.
+
+**Delivers:**
+- `error` builtin — create an error-flagged value
+- Implicit error propagation: any operation on an error-flagged value returns the error
+  unchanged (implemented in the VM dispatch: check error flag before executing opcodes)
+- `try` builtin — evaluate block, use fallback if result is error-flagged
+- `error?` predicate — test if a value carries the error flag
+- Error values carry arbitrary payloads (strings, maps, etc.)
+
+**Tests:** error creation, propagation through arithmetic/string ops/procedure calls,
+try/catch, nested try, error payload inspection.
+
+**Depends on:** Milestone 4. Benefits from Milestone 6 (structured error payloads
+using maps).
+
+---
+
+### Milestone 8: Mutable State
+
+Add mutable bindings and container types.
+
+**Delivers:**
+- Mutable bindings: `mut` (creates mutable binding), `set!` (reassigns)
+  - Phase 1 syntax: `[mut bar 4]`, `[set! bar 5]`
+- Closure capture of mutable bindings by reference
+- `box` — thread-local mutable container. Builtins: `box`, `unbox`, `box-set!`
+- `atom` — thread-safe CAS container. Builtins: `atom`, `deref`, `swap!`, `reset!`
+  (concurrency semantics come in Milestone 11, but the data structure is introduced here)
+
+**Tests:** mutable variables, reassignment, closures over mutable bindings, box
+operations, atom CAS (single-threaded for now).
+
+**Depends on:** Milestone 4.
+
+---
+
+### Milestone 9: Static Type System — Basics
+
+Begin the gradual typing system from Section 6. This is a compiler change — the VM
+already handles unboxed values via Milestone 0.
+
+**Delivers:**
+- Type annotations on variable definitions: `[def i64 x 42]` (or surface syntax TBD)
+- Compiler emits typed (unboxed) instructions when type is statically known
+- Separate opcode variants for unboxed i64/f64/u64 arithmetic
+- Type checking at compile time for statically typed contexts
+- `to` builtin for explicit conversions: `[to dyn $x]`, `[to i64 $y]`
+- Type errors at compile time (e.g., passing i64 where f64 expected)
+
+**Tests:** typed arithmetic (i64, f64), type errors caught at compile time, dyn↔static
+conversions, mixed typed/untyped code in same program.
+
+**Depends on:** Milestone 4. Benefits from Milestone 7 (fallible conversions return errors).
+
+---
+
+### Milestone 10: Garbage Collection (`gc/`)
+
+Replace manual/arena memory management with the epoch-based tracing GC from Section 5.
+
+**Delivers:**
+- `gc.h` — epoch-based tracing garbage collector
+- Global epoch counter, per-thread epoch tracking
+- Mark phase: trace from roots (operand stack, call frames, globals, scheduled tasks)
+- Sweep phase: collect unreachable objects below the epoch waterline
+- Write barriers for mutable containers (box, atom)
+- Safe points at procedure call/return boundaries
+- Per-thread heap allocation
+- Integration: all heap-allocated values (strings, vectors, maps, closures) managed by GC
+
+**Tests:** allocation and collection cycles, reachability (live objects survive, dead
+objects collected), write barrier correctness, stress tests with many allocations.
+
+**Depends on:** Milestones 0–8 (GC must trace all value types). Milestone 9 optional
+(unboxed values don't need GC, but boxed wrappers do).
+
+---
+
+### Milestone 11: Concurrency (`scheduler/`)
+
+Implement the NxM work-stealing scheduler from Section 4, using the existing chase_lev
+deque.
+
+**Delivers:**
+- `scheduler.h` — NxM thread pool with work-stealing (one chase_lev deque per thread)
+- Task representation: a closure + continuation
+- CPS transform in compiler: split procedures at suspension points into continuations
+- `parallel` — run blocks concurrently, join on all
+- `race` — run blocks concurrently, take first result
+- `spawn` — launch background task, return handle
+- `await` — suspend current task on a handle
+- Thread-safety: tasks mutating thread-local state (boxes) pinned to their thread;
+  immutable values shared freely; atoms use CAS
+
+**Tests:** parallel execution, race semantics, spawn/await, shared immutable data across
+threads, atom contention, scheduler fairness under load, no data races (TSAN).
+
+**Depends on:** Milestones 4, 8, 10 (GC must be thread-aware).
+
+---
+
+### Milestone 12: Module System
+
+Implement file-based modules from Section 8.
+
+**Delivers:**
+- File = module. Module name derived from file path
+- `use` builtin: `[use math]`, `[use math [sin cos]]`
+- Module compilation: each module compiled independently, exports all top-level bindings
+- Module cache: each module compiled/loaded once
+- Circular import detection (error)
+- Sandboxing: `[interpret $src $restriction-map]` — restrict available modules and builtins
+
+**Tests:** import whole module, selective import, circular import error, sandboxed
+interpretation with restricted builtins, module caching.
+
+**Depends on:** Milestone 4. Benefits from Milestone 6 (maps for restriction specs).
+
+---
+
+### Milestone 13: Macro System
+
+Implement AST-based macros from Section 9.
+
+**Delivers:**
+- `defmacro` — define a macro that receives unevaluated AST and returns transformed AST
+- AST quasiquoting for building templates
+- Hygienic expansion (automatic gensym for introduced bindings)
+- Macro expansion pass: runs after parsing, before compilation
+- Built-in macros: rewrite `proc`, `if`, `use` etc. as macros where possible
+  (simplifies the compiler — fewer special forms)
+
+**Tests:** basic macro expansion, hygiene (no accidental capture), nested macro
+expansion, macros that generate macros, error cases.
+
+**Depends on:** Milestone 2 (AST), Milestone 4 (needs working language for macro bodies).
+
+---
+
+### Milestone 14: Phase 2 Syntax — Syntactic Sugar
+
+Add the operator and assignment syntax from Section 3 Phase 2.
+
+**Delivers:**
+- Assignment syntax: `foo = 3` → `[def foo 3]`, `bar : 4` → `[mut bar 4]`,
+  `bar :: 5` → `[set! bar 5]`
+- Typed assignment: `i64 baz = 13` → `[def i64 baz 13]`
+- Infix operators: `$x + $y * $z` → `[+ $x [* $y $z]]` with precedence
+- Operator precedence and associativity rules
+- Parenthesized grouping in expression contexts: `($x + $y) * $z`
+- Desugaring pass: runs before macro expansion, rewrites surface syntax to bracket form
+- All sugar is purely syntactic — no new semantics
+
+**Tests:** all sugar forms desugar correctly, operator precedence, mixed bracket and
+sugar syntax, error cases (ambiguous expressions).
+
+**Depends on:** Milestone 13 (macros, so sugar and macros compose correctly).
+
+---
+
+### Milestone 15: FFI & Embedding
+
+Top-tier FFI and C embedding — a core language goal.
+
+**Delivers:**
+- C embedding API: `jacl_vm_new()`, `jacl_eval()`, `jacl_call()`, `jacl_register_fn()`,
+  value conversion helpers (C ↔ JaclVal)
+- FFI for calling C from JACL: declare external functions with type signatures,
+  automatic marshaling between JACL values and C types
+- Struct interop: JACL structs with known layout can be passed to/from C
+- Callback support: pass JACL closures as C function pointers (trampoline)
+
+**Tests:** embed JACL in a C test harness, register C functions callable from JACL,
+call C from JACL, pass structs across boundary, callback round-trips.
+
+**Depends on:** Milestones 9 (type system for FFI signatures), 10 (GC-safe handles
+for C-held references).
+
+---
+
+### Milestone Summary
+
+| #  | Milestone                    | Key Deliverable                        | Enables                          |
+|----|------------------------------|----------------------------------------|----------------------------------|
+| 0  | Value Representation         | 64-bit tagged values                   | Everything                       |
+| 1  | Lexer                        | Token stream                           | Parsing                          |
+| 2  | Parser & AST                 | Command-invocation tree                | Compilation, macros              |
+| 3  | Bytecode Compiler & VM       | Running `[print [+ 1 2]]`             | Real programs                    |
+| 4  | Variables, Procs, Control    | `def`, `proc`, `if`, closures          | Turing-complete language         |
+| 5  | String System                | Three-tier strings, interpolation      | Command-language UX              |
+| 6  | Persistent Collections       | Vectors and maps from JACL             | Data manipulation                |
+| 7  | Error Handling               | Error flag propagation, `try`          | Robust programs                  |
+| 8  | Mutable State                | `mut`, `set!`, `box`, `atom`           | Stateful programs                |
+| 9  | Static Type System           | Typed/unboxed values, type checking    | Performance, safety              |
+| 10 | Garbage Collection           | Epoch-based tracing GC                 | Long-running programs            |
+| 11 | Concurrency                  | NxM scheduler, parallel/spawn/await    | Multithreaded programs           |
+| 12 | Module System                | File modules, sandboxing               | Code organization, security      |
+| 13 | Macro System                 | AST macros, hygiene                    | Language extensibility           |
+| 14 | Phase 2 Syntax               | Operators, assignment sugar            | User-friendly surface syntax     |
+| 15 | FFI & Embedding              | C interop, embedding API               | Real-world integration           |
+
+---
+
 ## Implementation Modules (Existing)
 
-| Module | Purpose | Key File |
-|--------|---------|----------|
-| platform | Cross-platform atomics, threading, allocators | `platform/platform.h` |
-| arena | Bulk memory allocation by lifetime | `arena/arena.h` |
-| rc | Thread-safe reference counting | `rc/rc.h` |
-| rrb_vec | Persistent vector (immutable, structural sharing) | `rrb_vec/rrb_vec.h` |
-| hamt | Persistent hashmap | `hamt/hamt.h` |
-| segment_array | Resizable array with stable pointers | `segment_array/segment_array.h` |
-| sum_tree | Generic B-tree with monoidal summaries | `sum_tree/sum_tree.h` |
-| rope | Text rope (specialization of sum_tree) | `sum_tree/rope.h` |
-| chase_lev | Lock-free work-stealing deque | `chase_lev/chase_lev.h` |
-| bigint | Arbitrary-precision integers | `bignum/bigint.h` |
-| bigfloat | Arbitrary-precision floats | `bignum/bigfloat.h` |
-| rational | Rational arithmetic | `bignum/rational.h` |
-| regex/nfa | Thompson NFA regex engine | `regex/nfa.h` |
-| test | Memory-tracking test harness | `test/test_helpers.h` |
+| Module        | Purpose                                           | Key File                        |
+| ------------- | ------------------------------------------------- | ------------------------------- |
+| platform      | Cross-platform atomics, threading, allocators     | `platform/platform.h`           |
+| arena         | Bulk memory allocation by lifetime                | `arena/arena.h`                 |
+| rc            | Thread-safe reference counting                    | `rc/rc.h`                       |
+| rrb_vec       | Persistent vector (immutable, structural sharing) | `rrb_vec/rrb_vec.h`             |
+| hamt          | Persistent hashmap                                | `hamt/hamt.h`                   |
+| segment_array | Resizable array with stable pointers              | `segment_array/segment_array.h` |
+| sum_tree      | Generic B-tree with monoidal summaries            | `sum_tree/sum_tree.h`           |
+| rope          | Text rope (specialization of sum_tree)            | `sum_tree/rope.h`               |
+| chase_lev     | Lock-free work-stealing deque                     | `chase_lev/chase_lev.h`         |
+| bigint        | Arbitrary-precision integers                      | `bignum/bigint.h`               |
+| bigfloat      | Arbitrary-precision floats                        | `bignum/bigfloat.h`             |
+| rational      | Rational arithmetic                               | `bignum/rational.h`             |
+| regex/nfa     | Thompson NFA regex engine                         | `regex/nfa.h`                   |
+| test          | Memory-tracking test harness                      | `test/test_helpers.h`           |
