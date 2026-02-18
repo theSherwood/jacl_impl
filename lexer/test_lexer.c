@@ -713,6 +713,231 @@ static int test_multiple_numbers(void) {
   TEST_PASS();
 }
 
+/* ---- US-005 helpers ---- */
+
+static int var_text_eq(Token tok, const char* expected) {
+  /* VAR payload.text points past '$', so length of identifier = token.length - 1 */
+  size_t expected_len = strlen(expected);
+  return (tok.length - 1) == (uint32_t)expected_len &&
+         memcmp(tok.payload.text, expected, expected_len) == 0;
+}
+
+/* ---- US-005 tests ---- */
+
+static int test_var_simple_single_char(void) {
+  setup();
+  LexResult r = lexer_lex("$x", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* VAR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_VAR);
+  ASSERT(var_text_eq(r.tokens[0], "x"));
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_U32_EQ(r.tokens[0].offset, 0);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_var_simple_multichar(void) {
+  setup();
+  LexResult r = lexer_lex("$foo", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* VAR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_VAR);
+  ASSERT(var_text_eq(r.tokens[0], "foo"));
+  ASSERT_U32_EQ(r.tokens[0].length, 4);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_var_with_hyphen(void) {
+  setup();
+  LexResult r = lexer_lex("$my-var", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* VAR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_VAR);
+  ASSERT(var_text_eq(r.tokens[0], "my-var"));
+  ASSERT_U32_EQ(r.tokens[0].length, 7);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_var_with_underscore(void) {
+  setup();
+  LexResult r = lexer_lex("$foo_bar", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* VAR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_VAR);
+  ASSERT(var_text_eq(r.tokens[0], "foo_bar"));
+  ASSERT_U32_EQ(r.tokens[0].length, 8);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_var_with_digits(void) {
+  setup();
+  LexResult r = lexer_lex("$x1", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_VAR);
+  ASSERT(var_text_eq(r.tokens[0], "x1"));
+  ASSERT_U32_EQ(r.tokens[0].length, 3);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_var_payload_points_into_source(void) {
+  setup();
+  const char* src = "$foo";
+  LexResult r = lexer_lex(src, &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_VAR);
+  /* payload.text should point past the '$' into source */
+  ASSERT_PTR_EQ(r.tokens[0].payload.text, src + 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_bracket(void) {
+  setup();
+  LexResult r = lexer_lex("$[", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* DOLLAR_BRACKET + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_DOLLAR_BRACKET);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_U32_EQ(r.tokens[0].offset, 0);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_bracket_with_expr(void) {
+  setup();
+  LexResult r = lexer_lex("$[+ 1 2]", &test_arena);
+  /* DOLLAR_BRACKET OPERATOR INT INT RBRACKET EOF = 6 */
+  ASSERT_U32_EQ(r.count, 6);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_DOLLAR_BRACKET);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OPERATOR);
+  ASSERT(token_text_eq(r.tokens[1], "+"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[2].payload.int_val, 1);
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[3].payload.int_val, 2);
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_RBRACKET);
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_at_eof(void) {
+  setup();
+  LexResult r = lexer_lex("$", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* ERROR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_digit(void) {
+  setup();
+  LexResult r = lexer_lex("$123", &test_arena);
+  /* ERROR + INT + EOF = 3 ($ is error, 123 is separate number) */
+  ASSERT_U32_EQ(r.count, 3);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[1].payload.int_val, 123);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_bang(void) {
+  setup();
+  LexResult r = lexer_lex("$!", &test_arena);
+  /* ERROR + OPERATOR + EOF = 3 ($ is error, ! is operator) */
+  ASSERT_U32_EQ(r.count, 3);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OPERATOR);
+  ASSERT(token_text_eq(r.tokens[1], "!"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_var_terminates_at_delimiter(void) {
+  setup();
+  LexResult r = lexer_lex("$foo[bar]", &test_arena);
+  /* VAR LBRACKET WORD RBRACKET EOF = 5 */
+  ASSERT_U32_EQ(r.count, 5);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_VAR);
+  ASSERT(var_text_eq(r.tokens[0], "foo"));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_LBRACKET);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[2], "bar"));
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_RBRACKET);
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_var_in_expression(void) {
+  setup();
+  LexResult r = lexer_lex("[+ $x $y]", &test_arena);
+  /* [ OPERATOR VAR VAR ] EOF = 6 */
+  ASSERT_U32_EQ(r.count, 6);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_LBRACKET);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OPERATOR);
+  ASSERT(token_text_eq(r.tokens[1], "+"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_VAR);
+  ASSERT(var_text_eq(r.tokens[2], "x"));
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_VAR);
+  ASSERT(var_text_eq(r.tokens[3], "y"));
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_RBRACKET);
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_var_underscore_start(void) {
+  setup();
+  LexResult r = lexer_lex("$_private", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_VAR);
+  ASSERT(var_text_eq(r.tokens[0], "_private"));
+  ASSERT_U32_EQ(r.tokens[0].length, 9);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -770,6 +995,21 @@ int main(void) {
     {"very_small_float",         test_very_small_float},
     {"numbers_in_expression",    test_numbers_in_expression},
     {"multiple_numbers",         test_multiple_numbers},
+    /* US-005 */
+    {"var_simple_single_char",    test_var_simple_single_char},
+    {"var_simple_multichar",      test_var_simple_multichar},
+    {"var_with_hyphen",           test_var_with_hyphen},
+    {"var_with_underscore",       test_var_with_underscore},
+    {"var_with_digits",           test_var_with_digits},
+    {"var_payload_into_source",   test_var_payload_points_into_source},
+    {"dollar_bracket",            test_dollar_bracket},
+    {"dollar_bracket_with_expr",  test_dollar_bracket_with_expr},
+    {"dollar_at_eof",             test_dollar_at_eof},
+    {"dollar_digit",              test_dollar_digit},
+    {"dollar_bang",               test_dollar_bang},
+    {"var_at_delimiter",          test_var_terminates_at_delimiter},
+    {"var_in_expression",         test_var_in_expression},
+    {"var_underscore_start",      test_var_underscore_start},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

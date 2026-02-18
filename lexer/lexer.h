@@ -443,6 +443,48 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       continue;
     }
 
+    /* Variable references: $identifier or $[ */
+    if (c == '$') {
+      uint32_t start = lex.pos;
+      uint32_t sline = lex.line;
+      uint32_t scol  = lex.col;
+      lexer__advance(&lex); /* consume '$' */
+
+      char next = lexer__peek(&lex);
+
+      /* $[ → DOLLAR_BRACKET */
+      if (next == '[') {
+        lexer__advance(&lex); /* consume '[' */
+        Token tok = lexer__make_token(&lex, TOKEN_DOLLAR_BRACKET, start, sline, scol);
+        lexer__arr_push(&arr, tok);
+        continue;
+      }
+
+      /* $identifier → VAR */
+      if (lexer__is_word_start(next)) {
+        while (lexer__is_word_char(lexer__peek(&lex))) {
+          lexer__advance(&lex);
+        }
+        Token tok = lexer__make_token(&lex, TOKEN_VAR, start, sline, scol);
+        tok.payload.text = lex.source + start + 1; /* skip '$' */
+        lexer__arr_push(&arr, tok);
+        continue;
+      }
+
+      /* $ followed by invalid char or EOF → ERROR */
+      {
+        Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
+        if (next == '\0') {
+          tok.payload.error_msg = "unexpected end of input after $";
+        } else {
+          tok.payload.error_msg = "invalid character after $";
+        }
+        lexer__arr_push(&arr, tok);
+        error_count++;
+        continue;
+      }
+    }
+
     /* Unrecognized character — emit ERROR and advance */
     {
       uint32_t start = lex.pos;
