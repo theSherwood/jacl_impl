@@ -42,6 +42,7 @@ TESTS=(
     "bignum/test_rational.c|rational|"
     "lexer/test_lexer.c|lexer|"
     "value/test_value.c|value|"
+    "parser/test_parser.c|parser|"
 )
 
 echo "=== ds test runner ==="
