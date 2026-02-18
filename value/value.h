@@ -99,6 +99,63 @@ static inline bool jacl_is_f32(JaclVal v) {
     return (v & JACL_TYPE_MASK) == JACL_TAG_F32;
 }
 
+/* --- Compile-time pointer size check --- */
+
+/* User-space addresses on x86-64 use 48 bits, ARM64 uses up to 52 bits.
+ * Both fit comfortably in our 56-bit payload. This assert catches any
+ * platform with pointers wider than 64 bits. */
+typedef char jacl_assert_ptr_fits_payload_[(sizeof(void *) <= sizeof(uint64_t)) ? 1 : -1];
+
+/* --- Pointer-payload constructors --- */
+
+static inline JaclVal jacl_string_ptr(void *p) {
+    return JACL_TAG_STRING | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclVal jacl_vector_ptr(void *p) {
+    return JACL_TAG_VECTOR | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclVal jacl_map_ptr(void *p) {
+    return JACL_TAG_MAP | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclVal jacl_closure_ptr(void *p) {
+    return JACL_TAG_CLOSURE | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclVal jacl_bignum_ptr(void *p) {
+    return JACL_TAG_BIGNUM | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+/* --- Pointer extractor --- */
+
+static inline void *jacl_as_ptr(JaclVal v) {
+    return (void *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+}
+
+/* --- Pointer type predicates --- */
+
+static inline bool jacl_is_string(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_STRING;
+}
+
+static inline bool jacl_is_vector(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_VECTOR;
+}
+
+static inline bool jacl_is_map(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_MAP;
+}
+
+static inline bool jacl_is_closure(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_CLOSURE;
+}
+
+static inline bool jacl_is_bignum(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_BIGNUM;
+}
+
 /* --- Extractors --- */
 
 static inline bool jacl_as_bool(JaclVal v) {

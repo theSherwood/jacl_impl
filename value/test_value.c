@@ -416,6 +416,156 @@ static int test_f32_payload_isolation(void) {
   TEST_PASS();
 }
 
+/* ---- US-005 tests: Pointer-payload constructors and extractors ---- */
+
+/* Test: pointer constructors produce correctly tagged values */
+static int test_ptr_constructors(void) {
+  int dummy;
+  void *p = &dummy;
+
+  ASSERT_U64_EQ(jacl_string_ptr(p) & JACL_TYPE_MASK, JACL_TAG_STRING);
+  ASSERT_U64_EQ(jacl_vector_ptr(p) & JACL_TYPE_MASK, JACL_TAG_VECTOR);
+  ASSERT_U64_EQ(jacl_map_ptr(p) & JACL_TYPE_MASK, JACL_TAG_MAP);
+  ASSERT_U64_EQ(jacl_closure_ptr(p) & JACL_TYPE_MASK, JACL_TAG_CLOSURE);
+  ASSERT_U64_EQ(jacl_bignum_ptr(p) & JACL_TYPE_MASK, JACL_TAG_BIGNUM);
+
+  TEST_PASS();
+}
+
+/* Test: pointer type predicates (positive and negative) */
+static int test_ptr_predicates(void) {
+  int dummy;
+  void *p = &dummy;
+
+  JaclVal sv = jacl_string_ptr(p);
+  JaclVal vv = jacl_vector_ptr(p);
+  JaclVal mv = jacl_map_ptr(p);
+  JaclVal cv = jacl_closure_ptr(p);
+  JaclVal bv = jacl_bignum_ptr(p);
+
+  /* Each predicate matches its own type */
+  ASSERT(jacl_is_string(sv));
+  ASSERT(jacl_is_vector(vv));
+  ASSERT(jacl_is_map(mv));
+  ASSERT(jacl_is_closure(cv));
+  ASSERT(jacl_is_bignum(bv));
+
+  /* Each predicate rejects other pointer types */
+  ASSERT(!jacl_is_string(vv));
+  ASSERT(!jacl_is_string(mv));
+  ASSERT(!jacl_is_string(cv));
+  ASSERT(!jacl_is_string(bv));
+
+  ASSERT(!jacl_is_vector(sv));
+  ASSERT(!jacl_is_vector(mv));
+  ASSERT(!jacl_is_vector(cv));
+  ASSERT(!jacl_is_vector(bv));
+
+  ASSERT(!jacl_is_map(sv));
+  ASSERT(!jacl_is_map(vv));
+  ASSERT(!jacl_is_map(cv));
+  ASSERT(!jacl_is_map(bv));
+
+  ASSERT(!jacl_is_closure(sv));
+  ASSERT(!jacl_is_closure(vv));
+  ASSERT(!jacl_is_closure(mv));
+  ASSERT(!jacl_is_closure(bv));
+
+  ASSERT(!jacl_is_bignum(sv));
+  ASSERT(!jacl_is_bignum(vv));
+  ASSERT(!jacl_is_bignum(mv));
+  ASSERT(!jacl_is_bignum(cv));
+
+  /* Non-pointer types are not pointer types */
+  ASSERT(!jacl_is_string(JACL_NIL));
+  ASSERT(!jacl_is_string(JACL_TRUE));
+  ASSERT(!jacl_is_string(jacl_i32(42)));
+  ASSERT(!jacl_is_string(jacl_f32(1.0f)));
+
+  ASSERT(!jacl_is_vector(JACL_NIL));
+  ASSERT(!jacl_is_map(JACL_TRUE));
+  ASSERT(!jacl_is_closure(jacl_i32(0)));
+  ASSERT(!jacl_is_bignum(jacl_f32(0.0f)));
+
+  TEST_PASS();
+}
+
+/* Test: pointer predicates ignore flag bits */
+static int test_ptr_predicates_with_flags(void) {
+  int dummy;
+  void *p = &dummy;
+
+  JaclVal sv = jacl_string_ptr(p);
+
+  /* String with flags set is still string */
+  ASSERT(jacl_is_string(sv | JACL_FLAG_TAINTED));
+  ASSERT(jacl_is_string(sv | JACL_FLAG_SECRET));
+  ASSERT(jacl_is_string(sv | JACL_FLAG_ERROR));
+  ASSERT(jacl_is_string(sv | JACL_FLAGS_MASK));
+
+  /* Same for other pointer types */
+  ASSERT(jacl_is_vector(jacl_vector_ptr(p) | JACL_FLAGS_MASK));
+  ASSERT(jacl_is_map(jacl_map_ptr(p) | JACL_FLAGS_MASK));
+  ASSERT(jacl_is_closure(jacl_closure_ptr(p) | JACL_FLAGS_MASK));
+  ASSERT(jacl_is_bignum(jacl_bignum_ptr(p) | JACL_FLAGS_MASK));
+
+  TEST_PASS();
+}
+
+/* Test: pointer round-trip with malloc'd aligned objects */
+static int test_ptr_roundtrip(void) {
+  void *p1 = malloc(64);
+  void *p2 = malloc(128);
+  void *p3 = malloc(256);
+  void *p4 = malloc(512);
+  void *p5 = malloc(1024);
+
+  ASSERT(p1 && p2 && p3 && p4 && p5);
+
+  /* Round-trip: pointer survives pack/unpack unchanged */
+  ASSERT_PTR_EQ(jacl_as_ptr(jacl_string_ptr(p1)), p1);
+  ASSERT_PTR_EQ(jacl_as_ptr(jacl_vector_ptr(p2)), p2);
+  ASSERT_PTR_EQ(jacl_as_ptr(jacl_map_ptr(p3)), p3);
+  ASSERT_PTR_EQ(jacl_as_ptr(jacl_closure_ptr(p4)), p4);
+  ASSERT_PTR_EQ(jacl_as_ptr(jacl_bignum_ptr(p5)), p5);
+
+  free(p1);
+  free(p2);
+  free(p3);
+  free(p4);
+  free(p5);
+
+  TEST_PASS();
+}
+
+/* Test: NULL pointer round-trip */
+static int test_ptr_null(void) {
+  ASSERT_PTR_EQ(jacl_as_ptr(jacl_string_ptr(NULL)), NULL);
+  ASSERT_PTR_EQ(jacl_as_ptr(jacl_vector_ptr(NULL)), NULL);
+  ASSERT_PTR_EQ(jacl_as_ptr(jacl_map_ptr(NULL)), NULL);
+  ASSERT_PTR_EQ(jacl_as_ptr(jacl_closure_ptr(NULL)), NULL);
+  ASSERT_PTR_EQ(jacl_as_ptr(jacl_bignum_ptr(NULL)), NULL);
+
+  TEST_PASS();
+}
+
+/* Test: pointer payload does not bleed into tag byte */
+static int test_ptr_payload_isolation(void) {
+  void *p = malloc(64);
+  ASSERT(p != NULL);
+
+  /* Tag byte should contain only the type tag, no pointer bits */
+  ASSERT_U64_EQ(jacl_string_ptr(p) & JACL_TAG_MASK, JACL_TAG_STRING);
+  ASSERT_U64_EQ(jacl_vector_ptr(p) & JACL_TAG_MASK, JACL_TAG_VECTOR);
+  ASSERT_U64_EQ(jacl_map_ptr(p) & JACL_TAG_MASK, JACL_TAG_MAP);
+  ASSERT_U64_EQ(jacl_closure_ptr(p) & JACL_TAG_MASK, JACL_TAG_CLOSURE);
+  ASSERT_U64_EQ(jacl_bignum_ptr(p) & JACL_TAG_MASK, JACL_TAG_BIGNUM);
+
+  free(p);
+
+  TEST_PASS();
+}
+
 int main(void) {
   printf("Test: JaclVal size\n");
   if (!test_jaclval_size()) return 1;
@@ -488,6 +638,25 @@ int main(void) {
 
   printf("Test: f32 payload isolation\n");
   if (!test_f32_payload_isolation()) return 1;
+
+  /* US-005: Pointer-payload constructors and extractors */
+  printf("Test: pointer constructors\n");
+  if (!test_ptr_constructors()) return 1;
+
+  printf("Test: pointer predicates\n");
+  if (!test_ptr_predicates()) return 1;
+
+  printf("Test: pointer predicates with flags\n");
+  if (!test_ptr_predicates_with_flags()) return 1;
+
+  printf("Test: pointer round-trip\n");
+  if (!test_ptr_roundtrip()) return 1;
+
+  printf("Test: NULL pointer round-trip\n");
+  if (!test_ptr_null()) return 1;
+
+  printf("Test: pointer payload isolation\n");
+  if (!test_ptr_payload_isolation()) return 1;
 
   return 0;
 }
