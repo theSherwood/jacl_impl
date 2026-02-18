@@ -1,32 +1,61 @@
-# ds
+# jacl
 
-A collection of generic data structures implemented in C using macro-polymorphism.
+Just A Command Lisp. A fusion of a command language and a lisp. Love child of Tcl and Clojure. Gradually typed. Supports inline operators. Easily embeddable in C with top-tier FFI. Supports multithreaded runtime using NxM work stealing. Garbage collection. Be as safe or as unsafe as you like and the language will support you.
 
-## Modules
+## Goals/Features
 
-| Module | Status | Description |
-|--------|--------|-------------|
-| `arena` | Complete | Arena (bump) allocator |
-| `array/realloc_array` | Complete | Growable array via realloc |
-| `array/segment_array` | Complete | Segmented array with stable pointers |
-| `rc` | Complete | Reference-counted smart pointer |
-| `hamt` | Complete | Hash Array Mapped Trie (persistent map) |
-| `pvec` | WIP | Persistent vector (relaxed radix balanced tree) |
-| `chase_lev` | Complete | Chase-Lev concurrent work-stealing deque |
-| `array/immutable_vec` | WIP | Immutable vector |
+- Safety by default
+  - Absolute freedom to be unsafe if you like
+    - Poke at memory addresses directly
+- Great comptime/macros (lisp under the hood)
+- Great shell language (command syntax)
+  - Pragma to fall back to binaries on the path if a command is not defined
+  - Aliases? (maybe some kind of macro)
+- Top-tier FFI
+  - Use it as an embedded command language in other applications
+- Effortless, safe multithreading/concurrency
+- Gradual yet strict typing
+  - Type system strict enough that you can have unboxed structs yet gradual enough to support dynamic immutable value semantics
+  - Some type inference
+- Sandbox untrusted code without performance compromises
+  - Use restricted environments (includes restricting/replacing builtins) for untrusted code
 
-## Demos
+## Syntax
 
-### rdoc terminal editor
-
-A minimal terminal editor exercising the rdoc rich-text document data structure (text editing, marks, blocks, inline blocks, and token cursor rendering).
+Comments
 
 ```
-cc -std=c99 -Wall -Wextra -o demo_rdoc sum_tree/demo_rdoc.c
-./demo_rdoc
+# This is a comment
 ```
 
-Keys: type to insert, arrow keys to move, shift+arrow to select, Ctrl+B bold, Ctrl+K block, Ctrl+I inline, Ctrl+C quit.
+Assignments
+
+```
+foo = 3   # immutable definition
+bar : 4   # mutable definition
+bar :: 5  # mutable reassignment
+
+i64 baz = 13          # statically typed
+i64 werf : $baz + 3   # use $var to read var
+```
+
+Commands
+
+```
+proc add [x y] {
+  x + y
+}
+
+ten = add 3 7
+```
+
+Subcommands
+
+```
+prn "three: " [add 1 2] " five: " [add 2 3]
+# or
+prn "three: $[add 1 2] five: $[add 2 3]"
+```
 
 ## Build & Test
 
@@ -41,16 +70,3 @@ Or compile and run a single module's test:
 ```
 gcc -Wall -Wextra -std=c99 -g <module>/test_<name>.c && ./a.out
 ```
-
-## Macro-Polymorphism Pattern
-
-Modules use header-only, macro-driven generics. Define type/name macros
-before including a header to generate a type-specific implementation:
-
-```c
-#define REALLOC_ARRAY_TYPE int
-#define REALLOC_ARRAY_NAME int_array
-#include "array/realloc_array.h"
-```
-
-Some modules use `#define <MODULE>_IMPL` to emit the implementation.
