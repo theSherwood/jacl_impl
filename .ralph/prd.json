@@ -23,7 +23,7 @@
         "Compiles cleanly with -Wall -Wextra -std=c99"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -46,7 +46,7 @@
         "All tests pass and no memory leaks"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -69,7 +69,7 @@
         "All tests pass and no memory leaks"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

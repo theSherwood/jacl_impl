@@ -37,5 +37,70 @@
 - Type checks: jacl_is_i32, jacl_is_f32, jacl_is_nil, jacl_is_bool, jacl_is_inline_string, jacl_is_error
 - Extraction: jacl_as_i32, jacl_as_f32, jacl_inline_string_ptr, jacl_inline_string_len
 
+- Bytecode API: BytecodeChunk in compiler/bytecode.h, chunk_init, chunk_write, chunk_write_u16, chunk_add_constant
+- OpCode enum: OP_CONST (+ u16 index), OP_NIL, OP_TRUE, OP_FALSE, OP_POP, OP_ADD..OP_MOD, OP_NEG, OP_EQ..OP_GE, OP_PRINT, OP_DEF_GLOBAL (+ u16), OP_GET_GLOBAL (+ u16), OP_HALT
+- Bytecode arrays auto-grow via arena re-allocation (old memory left for arena to reclaim)
+- Function declarations in header section must include `static` to match implementation section
+
+- Compiler API: CompileResult compiler_compile(ParseResult, arena_t*) in compiler/compiler.h
+- CompileResult struct: BytecodeChunk chunk, uint32_t error_count
+- Compiler internal: Compiler struct with chunk*, arena*, error_count
+- compiler__emit_byte, compiler__emit_u16, compiler__emit_constant helpers
+- Bare top-level literals are wrapped by parser as AST_COMMAND{head: literal, args: [], arg_count: 0}
+- Compiler handles AST_COMMAND with arg_count==0 by compiling just the head (bare expression)
+- Test helper: compile_source(source, arena) chains lexer_lex -> parser_parse -> compiler_compile
+
+- VM API: VM struct in vm/vm.h, vm_init, vm_exec
+- VMResult enum: VM_OK, VM_RUNTIME_ERROR, VM_STACK_OVERFLOW
+- VM stack: JaclVal stack[256], stack_top is next free slot index
+- VM has configurable print_fn + print_ctx, defaults to stdout via vm__default_print
+- vm_exec takes VM* + BytecodeChunk*, returns VMResult
+- Internal helpers: vm__push, vm__pop, vm__read_byte, vm__read_u16
+
 ---
 
+## 2026-02-19 - US-001
+- Implemented BytecodeChunk data structure and OpCode enum in compiler/bytecode.h
+- Created compiler/test_bytecode.c with 13 tests covering all acceptance criteria
+- Added test entry to build.sh TESTS array
+- Files changed: compiler/bytecode.h (new), compiler/test_bytecode.c (new), build.sh (modified)
+- **Learnings for future iterations:**
+  - Header declarations must have `static` keyword to match the `static` definitions in the IMPLEMENTATION section
+  - Arena-based growth: allocate new buffer, memcpy old data, point to new (old memory stays until arena_destroy)
+  - BytecodeChunk tracks code_cap, const_cap, lines_cap separately for growth
+---
+
+## 2026-02-19 - US-002
+- Implemented VM state struct, VMResult enum, vm_init, vm_exec dispatch loop in vm/vm.h
+- Dispatch handles: OP_CONST, OP_NIL, OP_TRUE, OP_FALSE, OP_POP, OP_HALT
+- Stack overflow/underflow detection with correct error codes
+- Configurable print function (VMPrintFn callback + void* ctx)
+- Created vm/test_vm.c with 14 tests covering all acceptance criteria
+- Added test entry to build.sh TESTS array
+- Files changed: vm/vm.h (new), vm/test_vm.c (new), build.sh (modified)
+- **Learnings for future iterations:**
+  - VM dispatch loop uses `for(;;)` with switch on instruction byte
+  - vm__push returns VMResult so caller can propagate overflow immediately
+  - vm__pop returns VMResult for underflow; takes JaclVal* out param
+  - vm__read_u16 reads big-endian (hi byte first, matching chunk_write_u16)
+  - Default case in switch returns VM_RUNTIME_ERROR for unknown/unimplemented opcodes
+---
+
+## 2026-02-19 - US-003
+- Implemented compiler skeleton in compiler/compiler.h with single-header convention
+- CompileResult struct, compiler_compile function, internal Compiler state
+- Literal compilation: AST_LIT_INT -> OP_CONST(jacl_i32), AST_LIT_FLOAT -> OP_CONST(jacl_f32), AST_LIT_STRING (<=7) -> OP_CONST(jacl_inline_string)
+- String >7 bytes produces compile error
+- Multi-statement: OP_POP between statements, no pop after last
+- OP_HALT emitted at end of every chunk
+- AST_COMMAND with arg_count==0 handled as bare expression (compile head only)
+- Created compiler/test_compiler.c with 14 tests
+- Added test entry to build.sh TESTS array
+- Files changed: compiler/compiler.h (new), compiler/test_compiler.c (new), build.sh (modified)
+- **Learnings for future iterations:**
+  - Parser wraps ALL top-level expressions in AST_COMMAND (even bare literals like `42`)
+  - AST_COMMAND{head: literal, args: [], arg_count: 0} means "just evaluate the head"
+  - `-7` is parsed as command `[- 7]` (operator + int), not as negative literal
+  - Compile errors from parse errors are propagated by seeding result.error_count from parse.error_count
+  - Test helper `compile_source(source, arena)` chains lex->parse->compile for convenience
+---
