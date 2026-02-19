@@ -57,6 +57,10 @@
 - OP_MOD is i32-only in VM; f32 operands produce VM_RUNTIME_ERROR
 - Division by zero produces error-flagged value (VM_OK), not VM_RUNTIME_ERROR
 
+- OP_PRINT: pops value, formats via print_fn, pushes JACL_NIL as return value
+- Print formatting: error-flagged -> "<error>", nil -> "nil", bool -> "true"/"false", i32 -> %d, f32 -> %g, inline_string -> content
+- Test print output: PrintCapture struct {buf[256], len} with capture_print callback set via vm.print_fn/vm.print_ctx
+
 - VM API: VM struct in vm/vm.h, vm_init, vm_exec
 - VMResult enum: VM_OK, VM_RUNTIME_ERROR, VM_STACK_OVERFLOW
 - VM stack: JaclVal stack[256], stack_top is next free slot index
@@ -141,4 +145,19 @@
   - OP_EQ is special: uses jacl_eq directly without type checking, so different types return false (not error)
   - Ordered comparisons (LT, GT, LE, GE) reuse VM__BINARY_NUMERIC_OP macro since they have same i32/f32 dispatch pattern
   - Multi-char operators like ==, <=, >= use compiler__head_matches with length 2
+---
+
+## 2026-02-19 - US-006
+- Implemented print builtin in compiler and VM
+- Compiler: recognizes "print" command head (5 chars), requires exactly 1 argument, emits OP_PRINT
+- VM OP_PRINT: pops value, formats based on type (nil, true, false, i32, f32, inline_string, error), outputs via print_fn with trailing newline, pushes JACL_NIL as return value
+- Print formatting: i32 uses %d, f32 uses %g, inline_string extracts content, error-flagged prints "<error>"
+- Files changed: compiler/compiler.h (modified), compiler/test_compiler.c (modified), vm/vm.h (modified), vm/test_vm.c (modified)
+- Added 3 compiler tests + 8 VM tests, all 26 compiler / 46 VM tests pass
+- **Learnings for future iterations:**
+  - OP_PRINT must push JACL_NIL as return value (print returns nil) to keep stack consistent
+  - Use snprintf for numeric formatting into a stack buffer, then pass to print_fn
+  - For inline strings, use jacl_inline_string_get to extract content, then manually append newline
+  - Error-flagged values must be checked FIRST (before type checks) since error flag is orthogonal to type tag
+  - PrintCapture test helper struct (buf + len) with capture_print callback is the pattern for testing print output
 ---
