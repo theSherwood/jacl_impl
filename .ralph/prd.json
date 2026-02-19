@@ -170,7 +170,7 @@
         "All tests pass and no memory leaks"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -189,7 +189,7 @@
         "All tests pass and no memory leaks"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

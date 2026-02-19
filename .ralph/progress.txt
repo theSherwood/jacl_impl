@@ -49,6 +49,10 @@
 - INTERP_EXPR_START/END bracket expression tokens that are parsed like a command: head + args until INTERP_EXPR_END
 - Empty text segments (STRING_BEGIN/PART/END with empty payload.text) are skipped in AST — no empty AST_LIT_STRING nodes
 - Non-interpolated strings (TOKEN_STRING) still produce AST_LIT_STRING via parse_atom, not AST_INTERP_STRING
+- Panic mode bracket sync: parser__sync_bracket skips to matching ] tracking bracket depth, stops at newline or } at depth 0
+- Error recovery in brackets: newlines inside brackets use peek-ahead (save/restore) instead of free skipping — if ] not found after newlines, restore position and break for error recovery
+- parse_bare_command returns AST_ERROR head immediately (no arg parsing) so tokens after error remain for recovery
+- parser_parse creates AST_ERROR nodes for unexpected top-level tokens (], }, etc.) instead of silently skipping
 
 ---
 
@@ -157,4 +161,34 @@
   - Command nodes from $[...] have start at INTERP_EXPR_START and end at INTERP_EXPR_END token positions
   - Non-interpolated strings still route through TOKEN_STRING → parse_atom → AST_LIT_STRING (no parser change needed)
   - All 47 parser tests pass, 29/29 full build test suites green
+---
+
+## 2026-02-18 - US-009
+- Added 6 integration tests for complete multi-line program parsing
+- Tests: multi_basic (3-line program), multi_mixed_syntax (bare+bracketed+blocks), multi_realistic (10+ line program with def/proc/if/arithmetic/interp strings), multi_source_pos (line tracking), multi_comments (interspersed comments), multi_semi_newlines (mixed delimiters)
+- No parser implementation changes needed — existing code already handles all cases
+- Files changed: parser/test_parser.c (modified), .ralph/prd.json (modified), .ralph/progress.txt (modified)
+- **Learnings for future iterations:**
+  - The parser already handles comments transparently — lexer skips them, so no comment tokens appear in the stream
+  - Realistic program test covers: def, proc with block body, if with condition + two block args, bare word commands, interp strings, arithmetic sub-expressions — all work together
+  - Source position tracking across lines is correct: line/column/offset all maintain proper values through newlines
+  - All 53 parser tests pass, 29/29 full build test suites green
+---
+
+## 2026-02-19 - US-010
+- Implemented panic mode error recovery in the parser
+- Added parser__sync_bracket: skips to matching ] tracking bracket/brace depth, stops at newline or EOF
+- Modified parse_command: newline handling uses peek-ahead (save/restore) instead of free skipping — allows recovery at newline boundaries when ] is missing
+- Modified parse_command error paths: call sync_bracket for recovery after error
+- Modified parse_bare_command: early return when head is AST_ERROR — prevents consuming tokens after a failed bracket/block parse
+- Modified parser_parse: creates AST_ERROR nodes for unexpected top-level tokens instead of silently skipping
+- Added 8 tests: missing bracket recovery, missing brace, unexpected token, multiple errors, panic bracket sync, interleaved errors, error positions, valid code after errors
+- Files changed: parser/parser.h (modified), parser/test_parser.c (modified), .ralph/prd.json (modified), .ralph/progress.txt (modified)
+- **Learnings for future iterations:**
+  - Newline handling in bracket commands is critical for error recovery — free newline skipping prevents recovery at line boundaries
+  - Peek-ahead with save/restore pattern: save p->pos, advance past newlines, check for expected token, restore if not found
+  - sync_bracket must respect brace depth (don't consume } that belongs to enclosing block)
+  - parse_bare_command's early error return is key — it prevents the arg loop from consuming tokens that should be available for the next top-level command
+  - Error nodes at top level (for unexpected tokens like ] or }) require explicit creation — they shouldn't be silently skipped
+  - All 61 parser tests pass, 29/29 full build test suites green
 ---

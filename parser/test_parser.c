@@ -1118,6 +1118,146 @@ static int test_multi_semicolons_and_newlines(void) {
   TEST_PASS();
 }
 
+/* ---- US-010 tests ---- */
+
+static int test_error_missing_bracket(void) {
+  setup();
+  /* Missing ] → error, recovery continues to next command */
+  ParseResult r = parse("[print hello\nprint bye");
+  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT(r.nodes[0]->type == AST_ERROR);
+  ASSERT(r.nodes[0]->data.error.message != NULL);
+  /* Valid command after error */
+  ASSERT(r.nodes[1]->type == AST_COMMAND);
+  ASSERT(memcmp(r.nodes[1]->data.command.head->data.lit_string.value, "print", 5) == 0);
+  ASSERT_U32_EQ(r.nodes[1]->data.command.arg_count, 1);
+  ASSERT(memcmp(r.nodes[1]->data.command.args[0]->data.lit_string.value, "bye", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_error_missing_brace(void) {
+  setup();
+  /* Missing } → error */
+  ParseResult r = parse("{ print hello");
+  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_U32_EQ(r.count, 1);
+  ASSERT(r.nodes[0]->type == AST_ERROR);
+  ASSERT(r.nodes[0]->data.error.message != NULL);
+  ASSERT_U32_EQ(r.nodes[0]->start.offset, 0); /* starts at { */
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_error_unexpected_token(void) {
+  setup();
+  /* ] at top level → error, continue to next command */
+  ParseResult r = parse("]\nprint bye");
+  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT(r.nodes[0]->type == AST_ERROR);
+  ASSERT(r.nodes[0]->data.error.message != NULL);
+  ASSERT(r.nodes[1]->type == AST_COMMAND);
+  ASSERT(memcmp(r.nodes[1]->data.command.head->data.lit_string.value, "print", 5) == 0);
+  ASSERT_U32_EQ(r.nodes[1]->data.command.arg_count, 1);
+  ASSERT(memcmp(r.nodes[1]->data.command.args[0]->data.lit_string.value, "bye", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_error_multiple(void) {
+  setup();
+  /* Multiple errors: two unclosed brackets with valid code between */
+  ParseResult r = parse("[unclosed\nprint ok\n[also unclosed");
+  ASSERT_U32_EQ(r.error_count, 2);
+  ASSERT_U32_EQ(r.count, 3);
+  ASSERT(r.nodes[0]->type == AST_ERROR);
+  ASSERT(r.nodes[1]->type == AST_COMMAND);
+  ASSERT(memcmp(r.nodes[1]->data.command.head->data.lit_string.value, "print", 5) == 0);
+  ASSERT(r.nodes[2]->type == AST_ERROR);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_error_panic_bracket_sync(void) {
+  setup();
+  /* Error inside brackets: panic mode syncs to ] and continues */
+  ParseResult r = parse("[cmd )]\nprint ok");
+  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT(r.nodes[0]->type == AST_ERROR);
+  ASSERT(r.nodes[1]->type == AST_COMMAND);
+  ASSERT(memcmp(r.nodes[1]->data.command.head->data.lit_string.value, "print", 5) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_error_interleaved(void) {
+  setup();
+  /* Errors interleaved with valid code */
+  ParseResult r = parse("print a\n[bad\nprint b\n]\nprint c");
+  ASSERT_U32_EQ(r.error_count, 2);
+  ASSERT_U32_EQ(r.count, 5);
+  ASSERT(r.nodes[0]->type == AST_COMMAND);
+  ASSERT(memcmp(r.nodes[0]->data.command.head->data.lit_string.value, "print", 5) == 0);
+  ASSERT(r.nodes[1]->type == AST_ERROR);
+  ASSERT(r.nodes[2]->type == AST_COMMAND);
+  ASSERT(memcmp(r.nodes[2]->data.command.head->data.lit_string.value, "print", 5) == 0);
+  ASSERT(r.nodes[3]->type == AST_ERROR);
+  ASSERT(r.nodes[4]->type == AST_COMMAND);
+  ASSERT(memcmp(r.nodes[4]->data.command.head->data.lit_string.value, "print", 5) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_error_positions(void) {
+  setup();
+  /* Error nodes have correct source positions */
+  ParseResult r = parse("[unclosed arg");
+  ASSERT_U32_EQ(r.error_count, 1);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* err = r.nodes[0];
+  ASSERT(err->type == AST_ERROR);
+  /* Start at [ (offset 0, line 1, col 1) */
+  ASSERT_U32_EQ(err->start.line, 1);
+  ASSERT_U32_EQ(err->start.column, 1);
+  ASSERT_U32_EQ(err->start.offset, 0);
+  /* End should be past the last parsed token */
+  ASSERT(err->end.offset > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_error_valid_after(void) {
+  setup();
+  /* Valid code after multiple errors is correctly parsed */
+  ParseResult r = parse("]\n}\nprint hello\n[+ 1 2]\nif $x { yes }");
+  ASSERT_U32_EQ(r.error_count, 2);
+  ASSERT_U32_EQ(r.count, 5);
+  /* First two: errors for ] and } */
+  ASSERT(r.nodes[0]->type == AST_ERROR);
+  ASSERT(r.nodes[1]->type == AST_ERROR);
+  /* Next three: valid commands */
+  ASSERT(r.nodes[2]->type == AST_COMMAND);
+  ASSERT(r.nodes[3]->type == AST_COMMAND);
+  ASSERT(r.nodes[4]->type == AST_COMMAND);
+  /* Verify last command is fully parsed */
+  ASSERT(memcmp(r.nodes[4]->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(r.nodes[4]->data.command.arg_count, 2);
+  ASSERT(r.nodes[4]->data.command.args[1]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -1190,6 +1330,15 @@ int main(void) {
     {"multi_source_pos",     test_multi_source_positions},
     {"multi_comments",       test_multi_comments_between},
     {"multi_semi_newlines",  test_multi_semicolons_and_newlines},
+    /* US-010 */
+    {"error_missing_bracket", test_error_missing_bracket},
+    {"error_missing_brace",   test_error_missing_brace},
+    {"error_unexpected_tok",  test_error_unexpected_token},
+    {"error_multiple",        test_error_multiple},
+    {"error_panic_sync",      test_error_panic_bracket_sync},
+    {"error_interleaved",     test_error_interleaved},
+    {"error_positions",       test_error_positions},
+    {"error_valid_after",     test_error_valid_after},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

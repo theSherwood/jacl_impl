@@ -172,6 +172,41 @@ static void parser__skip_newlines(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Panic mode — sync to matching bracket or newline
+ *
+ * Called after consuming an opening '[' when error recovery is needed.
+ * Skips tokens until matching ']' (tracking bracket depth), newline,
+ * or EOF. Respects brace depth to avoid consuming an enclosing '}'.
+ * ------------------------------------------------------------------------- */
+
+static void parser__sync_bracket(Parser* p) {
+  int bracket_depth = 1;
+  int brace_depth = 0;
+  while (!parser__at_end(p)) {
+    TokenType t = parser__peek(p)->type;
+    if (t == TOKEN_LBRACKET) {
+      bracket_depth++;
+    } else if (t == TOKEN_RBRACKET) {
+      bracket_depth--;
+      if (bracket_depth == 0) {
+        parser__advance(p); /* consume matching ] */
+        return;
+      }
+    } else if (t == TOKEN_LBRACE) {
+      brace_depth++;
+    } else if (t == TOKEN_RBRACE) {
+      if (brace_depth == 0) {
+        return; /* don't consume — belongs to enclosing block */
+      }
+      brace_depth--;
+    } else if (t == TOKEN_NEWLINE) {
+      return; /* sync point for top-level recovery */
+    }
+    parser__advance(p);
+  }
+}
+
+/* -------------------------------------------------------------------------
  * Internal: Parse a single atom (literal, variable reference, operator)
  *
  * Returns NULL if the current token is not an atom.
@@ -274,9 +309,9 @@ static AstNode* parser__parse_command(Parser* p) {
   /* Parse head (command name) */
   AstNode* head = parser__parse_expr(p);
   if (head == NULL) {
-    Token* bad = parser__peek(p);
     AstNode* err = parser__error(p, "expected command name after '['", open);
-    err->end = parser__token_end(bad);
+    err->end = parser__token_end(parser__peek(p));
+    parser__sync_bracket(p);
     return err;
   }
 
@@ -285,10 +320,18 @@ static AstNode* parser__parse_command(Parser* p) {
   parser__arr_init(&args, p->arena);
 
   while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACKET) {
-    /* Skip newlines inside brackets */
+    /* On newline: peek ahead for ] to allow trailing newlines before ] */
     if (parser__peek(p)->type == TOKEN_NEWLINE) {
-      parser__advance(p);
-      continue;
+      uint32_t saved_pos = p->pos;
+      while (parser__peek(p)->type == TOKEN_NEWLINE) {
+        parser__advance(p);
+      }
+      if (parser__peek(p)->type == TOKEN_RBRACKET) {
+        break; /* ] found after newlines */
+      }
+      /* No ] — unclosed bracket, restore to newline for recovery */
+      p->pos = saved_pos;
+      break;
     }
     AstNode* arg = parser__parse_expr(p);
     if (arg == NULL) {
@@ -299,9 +342,11 @@ static AstNode* parser__parse_command(Parser* p) {
 
   /* Expect closing bracket */
   if (parser__peek(p)->type != TOKEN_RBRACKET) {
-    Token* bad = parser__peek(p);
     AstNode* err = parser__error(p, "expected ']' to close command", open);
-    err->end = parser__token_end(bad);
+    if (p->pos > 0) {
+      err->end = parser__token_end(&p->tokens[p->pos - 1]);
+    }
+    parser__sync_bracket(p);
     return err;
   }
   Token* close = parser__advance(p); /* consume ']' */
@@ -374,6 +419,9 @@ static int parser__is_command_end(Parser* p) {
 static AstNode* parser__parse_bare_command(Parser* p) {
   AstNode* head = parser__parse_expr(p);
   if (head == NULL) return NULL;
+
+  /* Error from sub-expression (e.g. unclosed bracket): propagate immediately */
+  if (head->type == AST_ERROR) return head;
 
   NodeArray args;
   parser__arr_init(&args, p->arena);
@@ -609,8 +657,11 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
     if (cmd != NULL) {
       parser__arr_push(&top_level, cmd);
     } else {
-      /* Skip unrecognized token to avoid infinite loop */
+      /* Unexpected token at top level — create error node and skip */
+      Token* bad = parser__peek(&p);
+      AstNode* err = parser__error(&p, "unexpected token", bad);
       parser__advance(&p);
+      parser__arr_push(&top_level, err);
     }
   }
 
