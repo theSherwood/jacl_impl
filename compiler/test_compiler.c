@@ -885,6 +885,166 @@ static int test_var_undefined(void) {
   TEST_PASS();
 }
 
+/* ===== US-008: Nested subcommands and multi-statement programs ===== */
+
+/* Test: [print [+ 1 [* 2 3]]] outputs "7\n" */
+static int test_nested_print_add_mul(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[print [+ 1 [* 2 3]]]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "7\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [+ [* 2 3] [- 10 4]] evaluates to i32(12) */
+static int test_nested_both_args(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[+ [* 2 3] [- 10 4]]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 12);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [+ 1 [+ 2 [+ 3 4]]] evaluates to i32(10) */
+static int test_deeply_nested(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[+ 1 [+ 2 [+ 3 4]]]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 10);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: multi-statement with def: def x 10\ndef y 20\nprint [+ $x $y] outputs "30\n" */
+static int test_multi_def_print(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[def x 10]\n[def y 20]\n[print [+ $x $y]]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "30\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: multi-statement with semicolons: def a 1; def b 2; print [+ $a $b] outputs "3\n" */
+static int test_multi_semicolons_def_print(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[def a 1]; [def b 2]; [print [+ $a $b]]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: intermediate statement results are popped (stack clean between stmts) */
+static int test_intermediate_results_popped(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Three statements: 10, 20, 30 — only the last should remain on stack */
+  CompileResult cr = compile_source("10\n20\n30", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 30);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: final statement result is available as execution result */
+static int test_final_result_available(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[def x 5]\n[+ $x 10]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 15);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -932,6 +1092,14 @@ int main(void) {
     { "def_expr_print_var",          test_def_expr_print_var },
     { "var_true_false_nil",          test_var_true_false_nil },
     { "var_undefined",               test_var_undefined },
+    /* US-008: Nested subcommands and multi-statement programs */
+    { "nested_print_add_mul",        test_nested_print_add_mul },
+    { "nested_both_args",            test_nested_both_args },
+    { "deeply_nested",               test_deeply_nested },
+    { "multi_def_print",             test_multi_def_print },
+    { "multi_semicolons_def_print",  test_multi_semicolons_def_print },
+    { "intermediate_results_popped", test_intermediate_results_popped },
+    { "final_result_available",      test_final_result_available },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
