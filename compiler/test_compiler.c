@@ -864,7 +864,7 @@ static int test_var_true_false_nil(void) {
   TEST_PASS();
 }
 
-/* Test: undefined variable produces error-flagged value */
+/* Test: undefined variable produces runtime error naming the variable */
 static int test_var_undefined(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -876,9 +876,9 @@ static int test_var_undefined(void) {
   vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &cr.chunk);
 
-  ASSERT_INT_EQ(result, VM_OK);
-  ASSERT_U32_EQ(vm.stack_top, 1);
-  ASSERT(jacl_is_error(vm.stack[0]));
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "nope") != NULL);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -1045,6 +1045,157 @@ static int test_final_result_available(void) {
   TEST_PASS();
 }
 
+/* ===== US-009: Runtime error reporting ===== */
+
+/* Test: [+ $true 1] produces runtime error with type mismatch message */
+static int test_runtime_error_add_bool_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[+ $true 1]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strlen(vm.error_message) > 0);
+  ASSERT(strstr(vm.error_message, "bool") != NULL);
+  ASSERT(strstr(vm.error_message, "i32") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [< $true 1] produces runtime error */
+static int test_runtime_error_lt_bool_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[< $true 1]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "bool") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: print $undefined produces runtime error naming the variable */
+static int test_runtime_error_print_undefined(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[print $undef]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "undef") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: runtime errors include source line number */
+static int test_runtime_error_line_number(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Error on line 2: def x $true; [+ $x 1] */
+  CompileResult cr = compile_source("[def x $true]\n[+ $x 1]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT_U32_EQ(vm.error_line, 2);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: unknown command name produces compile error with source position */
+static int test_compile_error_unknown_command(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[foo 42]", &arena);
+
+  ASSERT(cr.error_count > 0);
+  ASSERT(cr.error_message != NULL);
+  ASSERT(strlen(cr.error_message) > 0);
+  ASSERT(strstr(cr.error_message, "line") != NULL);
+  ASSERT(strstr(cr.error_message, "unknown command") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: string >7 bytes produces compile error with message */
+static int test_compile_error_long_string_msg(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("abcdefgh", &arena);
+
+  ASSERT(cr.error_count > 0);
+  ASSERT(cr.error_message != NULL);
+  ASSERT(strlen(cr.error_message) > 0);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: vm_exec returns VM_RUNTIME_ERROR on runtime errors */
+static int test_vm_returns_runtime_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Multiple error types all return VM_RUNTIME_ERROR */
+
+  /* Type mismatch */
+  CompileResult cr = compile_source("[* $true $false]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  VM vm;
+  vm_init(&vm, &arena);
+  ASSERT_INT_EQ(vm_exec(&vm, &cr.chunk), VM_RUNTIME_ERROR);
+
+  /* Undefined var */
+  cr = compile_source("$xyz", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  vm_init(&vm, &arena);
+  ASSERT_INT_EQ(vm_exec(&vm, &cr.chunk), VM_RUNTIME_ERROR);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1100,6 +1251,14 @@ int main(void) {
     { "multi_semicolons_def_print",  test_multi_semicolons_def_print },
     { "intermediate_results_popped", test_intermediate_results_popped },
     { "final_result_available",      test_final_result_available },
+    /* US-009: Runtime error reporting */
+    { "runtime_error_add_bool_i32",  test_runtime_error_add_bool_i32 },
+    { "runtime_error_lt_bool_i32",   test_runtime_error_lt_bool_i32 },
+    { "runtime_error_print_undefined", test_runtime_error_print_undefined },
+    { "runtime_error_line_number",   test_runtime_error_line_number },
+    { "compile_error_unknown_command", test_compile_error_unknown_command },
+    { "compile_error_long_string_msg", test_compile_error_long_string_msg },
+    { "vm_returns_runtime_error",    test_vm_returns_runtime_error },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

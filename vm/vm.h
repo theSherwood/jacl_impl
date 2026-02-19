@@ -57,6 +57,8 @@ typedef struct {
   void*          print_ctx;  /* user context for print callback */
   Environment    env;
   arena_t*       arena;
+  const char*    error_message;  /* last error message, or NULL */
+  uint32_t       error_line;     /* source line of last error */
 } VM;
 
 /* --- API --- */
@@ -75,8 +77,35 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk);
 #ifndef VM_IMPL_GUARD_
 #define VM_IMPL_GUARD_
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+
+/* --- Type name helper for error messages --- */
+
+static const char* vm__type_name(JaclVal v) {
+  if (jacl_is_nil(v))           return "nil";
+  if (jacl_is_bool(v))          return "bool";
+  if (jacl_is_i32(v))           return "i32";
+  if (jacl_is_f32(v))           return "f32";
+  if (jacl_is_inline_string(v)) return "string";
+  return "unknown";
+}
+
+/* --- Error reporting helper --- */
+
+static void vm__set_error(VM* vm, const char* fmt, ...) {
+  va_list ap;
+  char buf[256];
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  if (n < 0) n = 0;
+  uint32_t len = (uint32_t)n;
+  char* msg = (char*)arena_alloc(vm->arena, len + 1);
+  memcpy(msg, buf, len + 1);
+  vm->error_message = msg;
+}
 
 /* --- Default print function: write to stdout --- */
 
@@ -96,7 +125,9 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->chunk     = NULL;
   vm->print_fn  = vm__default_print;
   vm->print_ctx = NULL;
-  vm->arena     = arena;
+  vm->arena         = arena;
+  vm->error_message = NULL;
+  vm->error_line    = 0;
 
   /* Initialize environment */
   vm->env.count  = 0;
@@ -118,6 +149,7 @@ static void vm_init(VM* vm, arena_t* arena) {
 
 static VMResult vm__push(VM* vm, JaclVal value) {
   if (vm->stack_top >= VM_STACK_MAX) {
+    vm->error_message = "stack overflow";
     return VM_STACK_OVERFLOW;
   }
   vm->stack[vm->stack_top++] = value;
@@ -126,6 +158,7 @@ static VMResult vm__push(VM* vm, JaclVal value) {
 
 static VMResult vm__pop(VM* vm, JaclVal* out) {
   if (vm->stack_top == 0) {
+    vm->error_message = "stack underflow";
     return VM_RUNTIME_ERROR;
   }
   *out = vm->stack[--vm->stack_top];
@@ -185,7 +218,7 @@ static JaclVal vm__env_get(VM* vm, JaclVal name) {
 
 /* --- Binary numeric operation macro --- */
 
-#define VM__BINARY_NUMERIC_OP(fn_i32, fn_f32)                               \
+#define VM__BINARY_NUMERIC_OP(fn_i32, fn_f32, op_name)                       \
   do {                                                                        \
     JaclVal b, a;                                                             \
     result = vm__pop(vm, &b); if (result != VM_OK) return result;             \
@@ -196,6 +229,9 @@ static JaclVal vm__env_get(VM* vm, JaclVal name) {
     } else if (jacl_is_f32(a) && jacl_is_f32(b)) {                           \
       res = fn_f32(a, b);                                                     \
     } else {                                                                  \
+      vm__set_error(vm,                                                       \
+        "type error in '%s': expected matching numeric types, got %s and %s", \
+        op_name, vm__type_name(a), vm__type_name(b));                         \
       return VM_RUNTIME_ERROR;                                                \
     }                                                                         \
     result = vm__push(vm, res); if (result != VM_OK) return result;           \
@@ -208,10 +244,16 @@ static JaclVal vm__env_get(VM* vm, JaclVal name) {
  * VM_STACK_OVERFLOW on stack overflow.
  */
 static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
-  vm->chunk = chunk;
-  vm->ip    = chunk->code;
+  vm->chunk         = chunk;
+  vm->ip            = chunk->code;
+  vm->error_message = NULL;
+  vm->error_line    = 0;
 
   for (;;) {
+    /* Track source line for error reporting */
+    uint32_t instr_offset = (uint32_t)(vm->ip - chunk->code);
+    vm->error_line = chunk->lines[instr_offset];
+
     uint8_t instruction = vm__read_byte(vm);
     VMResult result;
 
@@ -250,22 +292,22 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
       }
 
       case OP_ADD: {
-        VM__BINARY_NUMERIC_OP(jacl_add_i32, jacl_add_f32);
+        VM__BINARY_NUMERIC_OP(jacl_add_i32, jacl_add_f32, "+");
         break;
       }
 
       case OP_SUB: {
-        VM__BINARY_NUMERIC_OP(jacl_sub_i32, jacl_sub_f32);
+        VM__BINARY_NUMERIC_OP(jacl_sub_i32, jacl_sub_f32, "-");
         break;
       }
 
       case OP_MUL: {
-        VM__BINARY_NUMERIC_OP(jacl_mul_i32, jacl_mul_f32);
+        VM__BINARY_NUMERIC_OP(jacl_mul_i32, jacl_mul_f32, "*");
         break;
       }
 
       case OP_DIV: {
-        VM__BINARY_NUMERIC_OP(jacl_div_i32, jacl_div_f32);
+        VM__BINARY_NUMERIC_OP(jacl_div_i32, jacl_div_f32, "/");
         break;
       }
 
@@ -276,8 +318,15 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         if (jacl_is_i32(a) && jacl_is_i32(b)) {
           result = vm__push(vm, jacl_mod_i32(a, b));
           if (result != VM_OK) return result;
+        } else if (jacl_is_f32(a) && jacl_is_f32(b)) {
+          vm__set_error(vm,
+            "type error in '%%': modulo is not supported for f32");
+          return VM_RUNTIME_ERROR;
         } else {
-          return VM_RUNTIME_ERROR;  /* MOD is i32-only */
+          vm__set_error(vm,
+            "type error in '%%': expected matching numeric types, got %s and %s",
+            vm__type_name(a), vm__type_name(b));
+          return VM_RUNTIME_ERROR;
         }
         break;
       }
@@ -291,6 +340,9 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         } else if (jacl_is_f32(a)) {
           res = jacl_neg_f32(a);
         } else {
+          vm__set_error(vm,
+            "type error in '-': expected numeric type, got %s",
+            vm__type_name(a));
           return VM_RUNTIME_ERROR;
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
@@ -307,22 +359,22 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
       }
 
       case OP_LT: {
-        VM__BINARY_NUMERIC_OP(jacl_lt_i32, jacl_lt_f32);
+        VM__BINARY_NUMERIC_OP(jacl_lt_i32, jacl_lt_f32, "<");
         break;
       }
 
       case OP_GT: {
-        VM__BINARY_NUMERIC_OP(jacl_gt_i32, jacl_gt_f32);
+        VM__BINARY_NUMERIC_OP(jacl_gt_i32, jacl_gt_f32, ">");
         break;
       }
 
       case OP_LE: {
-        VM__BINARY_NUMERIC_OP(jacl_le_i32, jacl_le_f32);
+        VM__BINARY_NUMERIC_OP(jacl_le_i32, jacl_le_f32, "<=");
         break;
       }
 
       case OP_GE: {
-        VM__BINARY_NUMERIC_OP(jacl_ge_i32, jacl_ge_f32);
+        VM__BINARY_NUMERIC_OP(jacl_ge_i32, jacl_ge_f32, ">=");
         break;
       }
 
@@ -385,6 +437,12 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal name = chunk->constants[name_idx];
         JaclVal value = vm__env_get(vm, name);
+        if (jacl_is_error(value)) {
+          char name_buf[8];
+          jacl_inline_string_get(name, name_buf, sizeof(name_buf));
+          vm__set_error(vm, "undefined variable '$%s'", name_buf);
+          return VM_RUNTIME_ERROR;
+        }
         result = vm__push(vm, value); if (result != VM_OK) return result;
         break;
       }
@@ -394,7 +452,7 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
       }
 
       default: {
-        /* Unknown or unimplemented opcode */
+        vm__set_error(vm, "unknown opcode %d", (int)instruction);
         return VM_RUNTIME_ERROR;
       }
     }

@@ -231,7 +231,7 @@ static int test_op_pop(void) {
   TEST_PASS();
 }
 
-/* Test: stack overflow returns VM_STACK_OVERFLOW */
+/* Test: stack overflow returns VM_STACK_OVERFLOW with error message */
 static int test_stack_overflow(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -249,13 +249,15 @@ static int test_stack_overflow(void) {
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_STACK_OVERFLOW);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strlen(vm.error_message) > 0);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* Test: stack underflow returns VM_RUNTIME_ERROR */
+/* Test: stack underflow returns VM_RUNTIME_ERROR with error message */
 static int test_stack_underflow(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -271,6 +273,8 @@ static int test_stack_underflow(void) {
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strlen(vm.error_message) > 0);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -627,7 +631,7 @@ static int test_op_div_by_zero(void) {
   TEST_PASS();
 }
 
-/* Test: OP_MOD with f32 produces runtime error */
+/* Test: OP_MOD with f32 produces runtime error with message */
 static int test_op_mod_f32_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -648,13 +652,15 @@ static int test_op_mod_f32_error(void) {
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strlen(vm.error_message) > 0);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* Test: mixed types (i32 + f32) produces runtime error */
+/* Test: mixed types (i32 + f32) produces runtime error with message */
 static int test_op_add_mixed_type_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -675,6 +681,9 @@ static int test_op_add_mixed_type_error(void) {
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "i32") != NULL);
+  ASSERT(strstr(vm.error_message, "f32") != NULL);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -1022,7 +1031,7 @@ static int test_op_gt_f32(void) {
   TEST_PASS();
 }
 
-/* Test: comparison with mismatched numeric types produces runtime error */
+/* Test: comparison with mismatched numeric types produces runtime error with message */
 static int test_op_lt_mixed_type_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -1043,6 +1052,9 @@ static int test_op_lt_mixed_type_error(void) {
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "i32") != NULL);
+  ASSERT(strstr(vm.error_message, "f32") != NULL);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -1435,7 +1447,7 @@ static int test_op_def_global_redefine(void) {
   TEST_PASS();
 }
 
-/* Test: OP_GET_GLOBAL for undefined variable pushes error-flagged value */
+/* Test: OP_GET_GLOBAL for undefined variable produces runtime error naming variable */
 static int test_op_get_global_undefined(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -1452,9 +1464,9 @@ static int test_op_get_global_undefined(void) {
   vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
-  ASSERT_INT_EQ(result, VM_OK);
-  ASSERT_U32_EQ(vm.stack_top, 1);
-  ASSERT(jacl_is_error(vm.stack[0]));
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "nope") != NULL);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -1489,6 +1501,116 @@ static int test_env_prepopulated(void) {
   ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
   ASSERT_U64_EQ(vm.stack[1], JACL_FALSE);
   ASSERT(jacl_is_nil(vm.stack[2]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ===== US-009: Runtime error reporting (VM) ===== */
+
+/* Test: type mismatch bool + i32 produces error with types in message */
+static int test_runtime_error_bool_add_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  chunk_write(&chunk, OP_TRUE, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_ADD, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "bool") != NULL);
+  ASSERT(strstr(vm.error_message, "i32") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: type mismatch bool < i32 produces error with types in message */
+static int test_runtime_error_bool_lt_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  chunk_write(&chunk, OP_TRUE, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_LT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "bool") != NULL);
+  ASSERT(strstr(vm.error_message, "i32") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: error_line tracks source line from bytecode line table */
+static int test_runtime_error_line_tracking(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  /* Line 5: push true, push i32(1), add -> type error on line 5 */
+  chunk_write(&chunk, OP_TRUE, 5);
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  chunk_write(&chunk, OP_CONST, 5);
+  chunk_write_u16(&chunk, c1, 5);
+  chunk_write(&chunk, OP_ADD, 5);
+  chunk_write(&chunk, OP_HALT, 5);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT_U32_EQ(vm.error_line, 5);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: stack overflow includes error_line */
+static int test_stack_overflow_line(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  for (uint32_t i = 0; i <= VM_STACK_MAX; i++) {
+    chunk_write(&chunk, OP_NIL, 7);
+  }
+  chunk_write(&chunk, OP_HALT, 7);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_STACK_OVERFLOW);
+  ASSERT_U32_EQ(vm.error_line, 7);
+  ASSERT(vm.error_message != NULL);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -1557,6 +1679,11 @@ int main(void) {
     { "op_def_global_redefine",   test_op_def_global_redefine },
     { "op_get_global_undefined",  test_op_get_global_undefined },
     { "env_prepopulated",         test_env_prepopulated },
+    /* US-009: Runtime error reporting (VM) */
+    { "runtime_error_bool_add_i32", test_runtime_error_bool_add_i32 },
+    { "runtime_error_bool_lt_i32",  test_runtime_error_bool_lt_i32 },
+    { "runtime_error_line_tracking", test_runtime_error_line_tracking },
+    { "stack_overflow_line",        test_stack_overflow_line },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
