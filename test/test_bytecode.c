@@ -363,6 +363,161 @@ static int test_inline_string_constant(void) {
   TEST_PASS();
 }
 
+/* ===== US-002: JaclClosure struct and closure value helpers ===== */
+
+/* Test: JaclClosure struct fields and arena allocation */
+static int test_closure_struct(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->param_count = 2;
+  cl->param_names = (JaclVal*)arena_alloc(&arena, 2 * sizeof(JaclVal));
+  cl->param_names[0] = jacl_inline_string("a", 1);
+  cl->param_names[1] = jacl_inline_string("b", 1);
+  cl->upvalue_count = 1;
+  cl->upvalues = (JaclVal*)arena_alloc(&arena, 1 * sizeof(JaclVal));
+  cl->upvalues[0] = jacl_i32(42);
+  cl->name = "add";
+
+  ASSERT_INT_EQ(cl->param_count, 2);
+  ASSERT_INT_EQ(cl->upvalue_count, 1);
+  ASSERT_STR_EQ(cl->name, "add");
+  ASSERT(cl->chunk.code != NULL);
+  ASSERT(jacl_is_inline_string(cl->param_names[0]));
+  ASSERT(jacl_is_inline_string(cl->param_names[1]));
+  ASSERT_INT_EQ(jacl_as_i32(cl->upvalues[0]), 42);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: jacl_closure() constructor creates closure-tagged value */
+static int test_jacl_closure_constructor(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->param_count = 0;
+  cl->param_names = NULL;
+  cl->upvalue_count = 0;
+  cl->upvalues = NULL;
+  cl->name = NULL;
+
+  JaclVal val = jacl_closure(cl);
+
+  ASSERT(jacl_is_closure(val));
+  ASSERT(!jacl_is_nil(val));
+  ASSERT(!jacl_is_i32(val));
+  ASSERT(!jacl_is_bool(val));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: jacl_as_closure() extracts pointer back from tagged value */
+static int test_jacl_as_closure_extractor(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->param_count = 3;
+  cl->param_names = NULL;
+  cl->upvalue_count = 0;
+  cl->upvalues = NULL;
+  cl->name = "test";
+
+  JaclVal val = jacl_closure(cl);
+  JaclClosure* extracted = jacl_as_closure(val);
+
+  ASSERT_PTR_EQ(extracted, cl);
+  ASSERT_INT_EQ(extracted->param_count, 3);
+  ASSERT_STR_EQ(extracted->name, "test");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: closure with populated param_names and upvalues arrays */
+static int test_closure_full_roundtrip(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->param_count = 2;
+  cl->param_names = (JaclVal*)arena_alloc(&arena, 2 * sizeof(JaclVal));
+  cl->param_names[0] = jacl_inline_string("x", 1);
+  cl->param_names[1] = jacl_inline_string("y", 1);
+  cl->upvalue_count = 2;
+  cl->upvalues = (JaclVal*)arena_alloc(&arena, 2 * sizeof(JaclVal));
+  cl->upvalues[0] = jacl_i32(10);
+  cl->upvalues[1] = jacl_i32(20);
+  cl->name = "adder";
+
+  /* Write some bytecode into the closure's chunk */
+  chunk_write(&cl->chunk, OP_GET_LOCAL, 1);
+  chunk_write(&cl->chunk, 0, 1);
+  chunk_write(&cl->chunk, OP_GET_LOCAL, 1);
+  chunk_write(&cl->chunk, 1, 1);
+  chunk_write(&cl->chunk, OP_ADD, 1);
+  chunk_write(&cl->chunk, OP_RETURN, 1);
+
+  /* Roundtrip through tagged value */
+  JaclVal val = jacl_closure(cl);
+  ASSERT(jacl_is_closure(val));
+
+  JaclClosure* out = jacl_as_closure(val);
+  ASSERT_PTR_EQ(out, cl);
+  ASSERT_INT_EQ(out->param_count, 2);
+  ASSERT_INT_EQ(out->upvalue_count, 2);
+  ASSERT_STR_EQ(out->name, "adder");
+  ASSERT_U32_EQ(out->chunk.code_count, 6);
+  ASSERT_INT_EQ(out->chunk.code[0], OP_GET_LOCAL);
+  ASSERT_INT_EQ(out->chunk.code[4], OP_ADD);
+  ASSERT_INT_EQ(out->chunk.code[5], OP_RETURN);
+
+  char buf[8];
+  jacl_inline_string_get(out->param_names[0], buf, sizeof(buf));
+  ASSERT_STR_EQ(buf, "x");
+  jacl_inline_string_get(out->param_names[1], buf, sizeof(buf));
+  ASSERT_STR_EQ(buf, "y");
+  ASSERT_INT_EQ(jacl_as_i32(out->upvalues[0]), 10);
+  ASSERT_INT_EQ(jacl_as_i32(out->upvalues[1]), 20);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: closure with NULL name (anonymous) */
+static int test_closure_null_name(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->param_count = 0;
+  cl->param_names = NULL;
+  cl->upvalue_count = 0;
+  cl->upvalues = NULL;
+  cl->name = NULL;
+
+  JaclVal val = jacl_closure(cl);
+  JaclClosure* out = jacl_as_closure(val);
+  ASSERT_PTR_EQ(out->name, NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -383,6 +538,12 @@ int main(void) {
     { "constant_growth",           test_constant_growth },
     { "complete_bytecode_sequence",test_complete_bytecode_sequence },
     { "inline_string_constant",    test_inline_string_constant },
+    /* US-002: JaclClosure struct and closure value helpers */
+    { "closure_struct",             test_closure_struct },
+    { "jacl_closure_constructor",   test_jacl_closure_constructor },
+    { "jacl_as_closure_extractor",  test_jacl_as_closure_extractor },
+    { "closure_full_roundtrip",     test_closure_full_roundtrip },
+    { "closure_null_name",          test_closure_null_name },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

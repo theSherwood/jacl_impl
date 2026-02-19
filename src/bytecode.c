@@ -147,4 +147,23 @@ static uint16_t chunk_add_constant(BytecodeChunk* chunk, JaclVal value) {
   return index;
 }
 
+/* --- JaclClosure --- */
+
+typedef struct {
+  BytecodeChunk chunk;        /* compiled body */
+  uint8_t       param_count;  /* number of parameters */
+  JaclVal*      param_names;  /* inline string array (arena-allocated) */
+  JaclVal*      upvalues;     /* captured values array (arena-allocated) */
+  uint8_t       upvalue_count;/* number of upvalues */
+  const char*   name;         /* procedure name for debug, may be NULL */
+} JaclClosure;
+
+static inline JaclVal jacl_closure(JaclClosure* cl) {
+  return jacl_closure_ptr(cl);
+}
+
+static inline JaclClosure* jacl_as_closure(JaclVal v) {
+  return (JaclClosure*)jacl_as_ptr(v);
+}
+
 #endif /* BYTECODE_C */
