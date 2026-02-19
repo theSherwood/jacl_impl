@@ -173,6 +173,28 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* def builtin */
+  if (compiler__head_matches(head, "def", 3)) {
+    if (argc != 2) { compiler__error(c, "def requires 2 arguments"); return; }
+    if (args[0]->type != AST_LIT_STRING) {
+      compiler__error(c, "def first argument must be a name");
+      return;
+    }
+    uint32_t name_len = args[0]->data.lit_string.length;
+    if (name_len > 7) {
+      compiler__error(c, "variable name exceeds 7-byte inline limit");
+      return;
+    }
+    /* Compile the value expression */
+    compiler__compile_node(c, args[1]);
+    /* Add name to constant pool and emit OP_DEF_GLOBAL */
+    JaclVal name_val = jacl_inline_string(args[0]->data.lit_string.value, name_len);
+    uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+    compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+    compiler__emit_u16(c, name_idx, line);
+    return;
+  }
+
   /* Unknown command */
   compiler__error(c, "unknown command");
 }
@@ -206,8 +228,15 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_VAR_REF: {
-      /* Will be implemented in US-007 */
-      compiler__error(c, "variable references not yet supported");
+      uint32_t name_len = node->data.var_ref.length;
+      if (name_len > 7) {
+        compiler__error(c, "variable name exceeds 7-byte inline limit");
+        break;
+      }
+      JaclVal name_val = jacl_inline_string(node->data.var_ref.name, name_len);
+      uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+      compiler__emit_byte(c, OP_GET_GLOBAL, line);
+      compiler__emit_u16(c, name_idx, line);
       break;
     }
 

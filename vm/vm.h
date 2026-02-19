@@ -21,6 +21,10 @@
 
 #define VM_STACK_MAX 256
 
+/* --- Environment initial capacity --- */
+
+#define VM_ENV_INIT_CAP 16
+
 /* --- Result codes --- */
 
 typedef enum {
@@ -33,6 +37,15 @@ typedef enum {
 
 typedef void (*VMPrintFn)(const char* text, uint32_t len, void* ctx);
 
+/* --- Environment --- */
+
+typedef struct {
+  JaclVal*  names;    /* inline string names */
+  JaclVal*  values;   /* corresponding values */
+  uint32_t  count;
+  uint32_t  cap;
+} Environment;
+
 /* --- VM state --- */
 
 typedef struct {
@@ -42,11 +55,13 @@ typedef struct {
   BytecodeChunk* chunk;
   VMPrintFn      print_fn;   /* output callback, defaults to stdout */
   void*          print_ctx;  /* user context for print callback */
+  Environment    env;
+  arena_t*       arena;
 } VM;
 
 /* --- API --- */
 
-static void     vm_init(VM* vm);
+static void     vm_init(VM* vm, arena_t* arena);
 static VMResult vm_exec(VM* vm, BytecodeChunk* chunk);
 
 #endif /* VM_H */
@@ -72,14 +87,31 @@ static void vm__default_print(const char* text, uint32_t len, void* ctx) {
 
 /**
  * Initialize the VM to a clean state.
+ * Arena is used for environment storage.
  */
-static void vm_init(VM* vm) {
+static void vm_init(VM* vm, arena_t* arena) {
   memset(vm->stack, 0, sizeof(vm->stack));
   vm->stack_top = 0;
   vm->ip        = NULL;
   vm->chunk     = NULL;
   vm->print_fn  = vm__default_print;
   vm->print_ctx = NULL;
+  vm->arena     = arena;
+
+  /* Initialize environment */
+  vm->env.count  = 0;
+  vm->env.cap    = VM_ENV_INIT_CAP;
+  vm->env.names  = (JaclVal*)arena_alloc(arena, VM_ENV_INIT_CAP * sizeof(JaclVal));
+  vm->env.values = (JaclVal*)arena_alloc(arena, VM_ENV_INIT_CAP * sizeof(JaclVal));
+
+  /* Pre-populate: true, false, nil */
+  vm->env.names[0]  = jacl_inline_string("true", 4);
+  vm->env.values[0] = JACL_TRUE;
+  vm->env.names[1]  = jacl_inline_string("false", 5);
+  vm->env.values[1] = JACL_FALSE;
+  vm->env.names[2]  = jacl_inline_string("nil", 3);
+  vm->env.values[2] = JACL_NIL;
+  vm->env.count = 3;
 }
 
 /* --- Stack helpers --- */
@@ -110,6 +142,45 @@ static uint16_t vm__read_u16(VM* vm) {
   uint8_t hi = vm__read_byte(vm);
   uint8_t lo = vm__read_byte(vm);
   return (uint16_t)((hi << 8) | lo);
+}
+
+/* --- Environment helpers --- */
+
+static void vm__env_grow(VM* vm) {
+  uint32_t new_cap = vm->env.cap * 2;
+  JaclVal* new_names  = (JaclVal*)arena_alloc(vm->arena, new_cap * sizeof(JaclVal));
+  JaclVal* new_values = (JaclVal*)arena_alloc(vm->arena, new_cap * sizeof(JaclVal));
+  memcpy(new_names, vm->env.names, vm->env.count * sizeof(JaclVal));
+  memcpy(new_values, vm->env.values, vm->env.count * sizeof(JaclVal));
+  vm->env.names  = new_names;
+  vm->env.values = new_values;
+  vm->env.cap    = new_cap;
+}
+
+static void vm__env_set(VM* vm, JaclVal name, JaclVal value) {
+  /* Check if name already exists */
+  for (uint32_t i = 0; i < vm->env.count; i++) {
+    if (vm->env.names[i] == name) {
+      vm->env.values[i] = value;
+      return;
+    }
+  }
+  /* New entry */
+  if (vm->env.count >= vm->env.cap) {
+    vm__env_grow(vm);
+  }
+  vm->env.names[vm->env.count]  = name;
+  vm->env.values[vm->env.count] = value;
+  vm->env.count++;
+}
+
+static JaclVal vm__env_get(VM* vm, JaclVal name) {
+  for (uint32_t i = 0; i < vm->env.count; i++) {
+    if (vm->env.names[i] == name) {
+      return vm->env.values[i];
+    }
+  }
+  return jacl_set_error(JACL_NIL);  /* undefined variable */
 }
 
 /* --- Binary numeric operation macro --- */
@@ -296,6 +367,25 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
 
         /* print returns nil */
         result = vm__push(vm, JACL_NIL); if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_DEF_GLOBAL: {
+        uint16_t name_idx = vm__read_u16(vm);
+        JaclVal name = chunk->constants[name_idx];
+        JaclVal value;
+        result = vm__pop(vm, &value); if (result != VM_OK) return result;
+        vm__env_set(vm, name, value);
+        /* def returns nil */
+        result = vm__push(vm, JACL_NIL); if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_GET_GLOBAL: {
+        uint16_t name_idx = vm__read_u16(vm);
+        JaclVal name = chunk->constants[name_idx];
+        JaclVal value = vm__env_get(vm, name);
+        result = vm__push(vm, value); if (result != VM_OK) return result;
         break;
       }
 

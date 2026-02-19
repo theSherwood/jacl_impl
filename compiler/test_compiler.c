@@ -25,6 +25,9 @@
 #define COMPILER_IMPLEMENTATION
 #include "./compiler.h"
 
+#define VM_IMPLEMENTATION
+#include "../vm/vm.h"
+
 /* ===== Helper: parse source and compile ===== */
 
 static CompileResult compile_source(const char* source, arena_t* arena) {
@@ -642,6 +645,246 @@ static int test_compile_print_nested(void) {
   TEST_PASS();
 }
 
+/* ===== US-007: Global environment, def, and variable references (compiler) ===== */
+
+/* Test: def x 42 compiles to OP_CONST(42), OP_DEF_GLOBAL(name_idx) */
+static int test_compile_def(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[def x 42]", &arena);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_U32_EQ(cr.chunk.const_count, 2);
+  /* constants[0] = i32(42), constants[1] = inline_string("x") */
+  ASSERT(jacl_is_i32(cr.chunk.constants[0]));
+  ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[0]), 42);
+  ASSERT(jacl_is_inline_string(cr.chunk.constants[1]));
+
+  /* Bytecode: OP_CONST u16(0) OP_DEF_GLOBAL u16(1) OP_HALT */
+  ASSERT_U32_EQ(cr.chunk.code_count, 7);
+  ASSERT_INT_EQ(cr.chunk.code[0], OP_CONST);
+  ASSERT_INT_EQ(cr.chunk.code[1], 0);
+  ASSERT_INT_EQ(cr.chunk.code[2], 0);
+  ASSERT_INT_EQ(cr.chunk.code[3], OP_DEF_GLOBAL);
+  ASSERT_INT_EQ(cr.chunk.code[4], 0);
+  ASSERT_INT_EQ(cr.chunk.code[5], 1);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_HALT);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: def x [+ 1 2] compiles value expression before OP_DEF_GLOBAL */
+static int test_compile_def_expr(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[def x [+ 1 2]]", &arena);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  /* constants: 1, 2, "x" */
+  ASSERT_U32_EQ(cr.chunk.const_count, 3);
+  ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[0]), 1);
+  ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[1]), 2);
+  ASSERT(jacl_is_inline_string(cr.chunk.constants[2]));
+
+  /* Bytecode: CONST(1) CONST(2) ADD DEF_GLOBAL(name) HALT */
+  /* = 3 + 3 + 1 + 3 + 1 = 11 bytes */
+  ASSERT_U32_EQ(cr.chunk.code_count, 11);
+  ASSERT_INT_EQ(cr.chunk.code[0], OP_CONST);
+  ASSERT_INT_EQ(cr.chunk.code[3], OP_CONST);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_ADD);
+  ASSERT_INT_EQ(cr.chunk.code[7], OP_DEF_GLOBAL);
+  ASSERT_INT_EQ(cr.chunk.code[10], OP_HALT);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: def with wrong argument count is a compile error */
+static int test_compile_def_wrong_argc(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Too few args: [def x] */
+  CompileResult cr = compile_source("[def x]", &arena);
+  ASSERT(cr.error_count > 0);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+
+  /* Too many args: [def x 1 2] */
+  tracker_reset();
+  arena = (arena_t){ .allocator = tracked_allocator };
+  cr = compile_source("[def x 1 2]", &arena);
+  ASSERT(cr.error_count > 0);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+
+  TEST_PASS();
+}
+
+/* Test: def first argument must be AST_LIT_STRING */
+static int test_compile_def_non_string_name(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* [def 42 10] - first arg is int, not string */
+  CompileResult cr = compile_source("[def 42 10]", &arena);
+  ASSERT(cr.error_count > 0);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: $x compiles to OP_GET_GLOBAL(name_idx) */
+static int test_compile_var_ref(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("$x", &arena);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_U32_EQ(cr.chunk.const_count, 1);
+  ASSERT(jacl_is_inline_string(cr.chunk.constants[0]));
+
+  /* Bytecode: OP_GET_GLOBAL u16(0) OP_HALT */
+  ASSERT_U32_EQ(cr.chunk.code_count, 4);
+  ASSERT_INT_EQ(cr.chunk.code[0], OP_GET_GLOBAL);
+  ASSERT_INT_EQ(cr.chunk.code[1], 0);
+  ASSERT_INT_EQ(cr.chunk.code[2], 0);
+  ASSERT_INT_EQ(cr.chunk.code[3], OP_HALT);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ===== US-007: Integration tests (compile + execute) ===== */
+
+/* Capture buffer for testing print output */
+typedef struct {
+  char   buf[256];
+  uint32_t len;
+} PrintCapture;
+
+static void capture_print(const char* text, uint32_t len, void* ctx) {
+  PrintCapture* cap = (PrintCapture*)ctx;
+  uint32_t remaining = (uint32_t)sizeof(cap->buf) - cap->len - 1;
+  uint32_t copy_len = len < remaining ? len : remaining;
+  memcpy(cap->buf + cap->len, text, copy_len);
+  cap->len += copy_len;
+  cap->buf[cap->len] = '\0';
+}
+
+/* Test: def x 42; print $x outputs "42\n" */
+static int test_def_print_var(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[def x 42]\n[print $x]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: def x [+ 1 2]; print $x outputs "3\n" */
+static int test_def_expr_print_var(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[def x [+ 1 2]]\n[print $x]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: $true evaluates to JACL_TRUE, $false to JACL_FALSE, $nil to JACL_NIL */
+static int test_var_true_false_nil(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Test $true */
+  CompileResult cr = compile_source("$true", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
+
+  /* Test $false */
+  cr = compile_source("$false", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  vm_init(&vm, &arena);
+  result = vm_exec(&vm, &cr.chunk);
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U64_EQ(vm.stack[0], JACL_FALSE);
+
+  /* Test $nil */
+  cr = compile_source("$nil", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  vm_init(&vm, &arena);
+  result = vm_exec(&vm, &cr.chunk);
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: undefined variable produces error-flagged value */
+static int test_var_undefined(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("$nope", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_error(vm.stack[0]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -678,6 +921,17 @@ int main(void) {
     { "compile_print",               test_compile_print },
     { "compile_print_no_args",       test_compile_print_no_args },
     { "compile_print_nested",        test_compile_print_nested },
+    /* US-007: Global environment, def, and variable references (compiler) */
+    { "compile_def",                 test_compile_def },
+    { "compile_def_expr",            test_compile_def_expr },
+    { "compile_def_wrong_argc",      test_compile_def_wrong_argc },
+    { "compile_def_non_string_name", test_compile_def_non_string_name },
+    { "compile_var_ref",             test_compile_var_ref },
+    /* US-007: Integration tests (compile + execute) */
+    { "def_print_var",               test_def_print_var },
+    { "def_expr_print_var",          test_def_expr_print_var },
+    { "var_true_false_nil",          test_var_true_false_nil },
+    { "var_undefined",               test_var_undefined },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

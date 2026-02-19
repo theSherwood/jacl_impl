@@ -20,15 +20,23 @@
 
 /* Test: vm_init zeroes state and sets defaults */
 static int test_vm_init(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
 
   ASSERT_U32_EQ(vm.stack_top, 0);
   ASSERT(vm.ip == NULL);
   ASSERT(vm.chunk == NULL);
   ASSERT(vm.print_fn != NULL);  /* default print function set */
   ASSERT(vm.print_ctx == NULL);
+  ASSERT(vm.arena == &arena);
+  /* env is pre-populated with 3 entries: true, false, nil */
+  ASSERT_U32_EQ(vm.env.count, 3);
 
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -50,7 +58,7 @@ static int test_op_halt(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -74,7 +82,7 @@ static int test_op_const(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -107,7 +115,7 @@ static int test_op_const_multiple(void) {
   chunk_write(&chunk, OP_HALT, 3);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -133,7 +141,7 @@ static int test_op_nil(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -156,7 +164,7 @@ static int test_op_true(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -180,7 +188,7 @@ static int test_op_false(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -211,7 +219,7 @@ static int test_op_pop(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -237,7 +245,7 @@ static int test_stack_overflow(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_STACK_OVERFLOW);
@@ -259,7 +267,7 @@ static int test_stack_underflow(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
@@ -271,17 +279,16 @@ static int test_stack_underflow(void) {
 
 /* Test: configurable print function */
 static int test_custom_print_fn(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
 
   /* Verify default is set */
   ASSERT(vm.print_fn != NULL);
 
   /* Set custom print function */
-  static int called = 0;
-  called = 0;
-  /* We can't easily test print_fn without OP_PRINT (future story),
-     but we can verify the fields are settable */
   int ctx_data = 42;
   vm.print_fn  = NULL;  /* clear to verify we can set it */
   vm.print_ctx = &ctx_data;
@@ -289,6 +296,8 @@ static int test_custom_print_fn(void) {
   ASSERT(vm.print_fn == NULL);
   ASSERT(vm.print_ctx == &ctx_data);
 
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -310,7 +319,7 @@ static int test_literal_push_sequence(void) {
   chunk_write(&chunk, OP_HALT, 4);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -348,7 +357,7 @@ static int test_push_pop_interleaved(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -380,7 +389,7 @@ static int test_op_add_i32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -410,7 +419,7 @@ static int test_op_add_f32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -441,7 +450,7 @@ static int test_op_sub_i32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -469,7 +478,7 @@ static int test_op_mul_i32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -497,7 +506,7 @@ static int test_op_div_i32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -525,7 +534,7 @@ static int test_op_mod_i32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -550,7 +559,7 @@ static int test_op_neg_i32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -576,7 +585,7 @@ static int test_op_neg_f32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -606,7 +615,7 @@ static int test_op_div_by_zero(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -635,7 +644,7 @@ static int test_op_mod_f32_error(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
@@ -662,7 +671,7 @@ static int test_op_add_mixed_type_error(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
@@ -695,7 +704,7 @@ static int test_op_nested_arithmetic(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -726,7 +735,7 @@ static int test_op_f32_arithmetic(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -758,7 +767,7 @@ static int test_op_eq_i32_true(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -787,7 +796,7 @@ static int test_op_eq_i32_false(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -816,7 +825,7 @@ static int test_op_eq_different_types(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -845,7 +854,7 @@ static int test_op_lt_i32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -862,7 +871,7 @@ static int test_op_lt_i32(void) {
   chunk_write(&chunk, OP_LT, 1);
   chunk_write(&chunk, OP_HALT, 1);
 
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -890,7 +899,7 @@ static int test_op_gt_i32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -918,7 +927,7 @@ static int test_op_le_i32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -946,7 +955,7 @@ static int test_op_ge_i32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -974,7 +983,7 @@ static int test_op_lt_f32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -1002,7 +1011,7 @@ static int test_op_gt_f32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -1030,7 +1039,7 @@ static int test_op_lt_mixed_type_error(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
@@ -1057,7 +1066,7 @@ static int test_op_eq_f32(void) {
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -1100,7 +1109,7 @@ static int test_op_print_i32(void) {
 
   PrintCapture cap = { .len = 0 };
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = vm_exec(&vm, &chunk);
@@ -1131,7 +1140,7 @@ static int test_op_print_f32(void) {
 
   PrintCapture cap = { .len = 0 };
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = vm_exec(&vm, &chunk);
@@ -1158,7 +1167,7 @@ static int test_op_print_nil(void) {
 
   PrintCapture cap = { .len = 0 };
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = vm_exec(&vm, &chunk);
@@ -1187,7 +1196,7 @@ static int test_op_print_bool(void) {
 
   PrintCapture cap = { .len = 0 };
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = vm_exec(&vm, &chunk);
@@ -1215,7 +1224,7 @@ static int test_op_print_string(void) {
 
   PrintCapture cap = { .len = 0 };
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = vm_exec(&vm, &chunk);
@@ -1243,7 +1252,7 @@ static int test_op_print_error(void) {
 
   PrintCapture cap = { .len = 0 };
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = vm_exec(&vm, &chunk);
@@ -1275,7 +1284,7 @@ static int test_op_print_add_result(void) {
 
   PrintCapture cap = { .len = 0 };
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = vm_exec(&vm, &chunk);
@@ -1304,13 +1313,182 @@ static int test_op_print_negative(void) {
 
   PrintCapture cap = { .len = 0 };
   VM vm;
-  vm_init(&vm);
+  vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "-7\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ===== US-007: Global environment, def, and variable references (VM) ===== */
+
+/* Test: OP_DEF_GLOBAL + OP_GET_GLOBAL: define and retrieve a value */
+static int test_op_def_get_global(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t val_idx  = chunk_add_constant(&chunk, jacl_i32(42));
+  uint16_t name_idx = chunk_add_constant(&chunk, jacl_inline_string("x", 1));
+
+  /* def x = 42 */
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, val_idx, 1);
+  chunk_write(&chunk, OP_DEF_GLOBAL, 1);
+  chunk_write_u16(&chunk, name_idx, 1);
+  /* pop the nil return from def */
+  chunk_write(&chunk, OP_POP, 1);
+  /* get x */
+  chunk_write(&chunk, OP_GET_GLOBAL, 2);
+  chunk_write_u16(&chunk, name_idx, 2);
+  chunk_write(&chunk, OP_HALT, 2);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_DEF_GLOBAL pushes JACL_NIL as return value */
+static int test_op_def_global_returns_nil(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t val_idx  = chunk_add_constant(&chunk, jacl_i32(99));
+  uint16_t name_idx = chunk_add_constant(&chunk, jacl_inline_string("y", 1));
+
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, val_idx, 1);
+  chunk_write(&chunk, OP_DEF_GLOBAL, 1);
+  chunk_write_u16(&chunk, name_idx, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_DEF_GLOBAL redefining an existing name overwrites silently */
+static int test_op_def_global_redefine(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t v1_idx   = chunk_add_constant(&chunk, jacl_i32(10));
+  uint16_t v2_idx   = chunk_add_constant(&chunk, jacl_i32(20));
+  uint16_t name_idx = chunk_add_constant(&chunk, jacl_inline_string("z", 1));
+
+  /* def z = 10 */
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, v1_idx, 1);
+  chunk_write(&chunk, OP_DEF_GLOBAL, 1);
+  chunk_write_u16(&chunk, name_idx, 1);
+  chunk_write(&chunk, OP_POP, 1);
+  /* def z = 20 (redefine) */
+  chunk_write(&chunk, OP_CONST, 2);
+  chunk_write_u16(&chunk, v2_idx, 2);
+  chunk_write(&chunk, OP_DEF_GLOBAL, 2);
+  chunk_write_u16(&chunk, name_idx, 2);
+  chunk_write(&chunk, OP_POP, 2);
+  /* get z -> should be 20 */
+  chunk_write(&chunk, OP_GET_GLOBAL, 3);
+  chunk_write_u16(&chunk, name_idx, 3);
+  chunk_write(&chunk, OP_HALT, 3);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 20);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_GET_GLOBAL for undefined variable pushes error-flagged value */
+static int test_op_get_global_undefined(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t name_idx = chunk_add_constant(&chunk, jacl_inline_string("nope", 4));
+
+  chunk_write(&chunk, OP_GET_GLOBAL, 1);
+  chunk_write_u16(&chunk, name_idx, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_error(vm.stack[0]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: pre-populated env: $true, $false, $nil resolve correctly */
+static int test_env_prepopulated(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t t_idx = chunk_add_constant(&chunk, jacl_inline_string("true", 4));
+  uint16_t f_idx = chunk_add_constant(&chunk, jacl_inline_string("false", 5));
+  uint16_t n_idx = chunk_add_constant(&chunk, jacl_inline_string("nil", 3));
+
+  chunk_write(&chunk, OP_GET_GLOBAL, 1);
+  chunk_write_u16(&chunk, t_idx, 1);
+  chunk_write(&chunk, OP_GET_GLOBAL, 1);
+  chunk_write_u16(&chunk, f_idx, 1);
+  chunk_write(&chunk, OP_GET_GLOBAL, 1);
+  chunk_write_u16(&chunk, n_idx, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 3);
+  ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
+  ASSERT_U64_EQ(vm.stack[1], JACL_FALSE);
+  ASSERT(jacl_is_nil(vm.stack[2]));
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -1373,6 +1551,12 @@ int main(void) {
     { "op_print_error",           test_op_print_error },
     { "op_print_add_result",      test_op_print_add_result },
     { "op_print_negative",        test_op_print_negative },
+    /* US-007: Global environment, def, and variable references (VM) */
+    { "op_def_get_global",        test_op_def_get_global },
+    { "op_def_global_returns_nil", test_op_def_global_returns_nil },
+    { "op_def_global_redefine",   test_op_def_global_redefine },
+    { "op_get_global_undefined",  test_op_get_global_undefined },
+    { "env_prepopulated",         test_env_prepopulated },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
