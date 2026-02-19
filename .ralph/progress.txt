@@ -74,9 +74,17 @@
 - vm__env_get: linear scan, returns jacl_set_error(JACL_NIL) if not found
 - Name comparison uses direct JaclVal == (inline strings with same content produce identical bit patterns)
 - OP_DEF_GLOBAL: pops value, stores in env, pushes JACL_NIL as return
-- OP_GET_GLOBAL: looks up name in env, pushes value or error-flagged value
+- OP_GET_GLOBAL: looks up name in env, pushes value or returns VM_RUNTIME_ERROR for undefined vars
 - Compiler `def`: checks argc==2, args[0] must be AST_LIT_STRING, compiles value then emits OP_DEF_GLOBAL
 - Compiler AST_VAR_REF: creates inline_string from name, emits OP_GET_GLOBAL
+
+- VM error reporting: error_message (arena-allocated or static) and error_line fields on VM struct
+- vm__set_error(vm, fmt, ...) for formatted error messages via vsnprintf + arena_alloc
+- vm__type_name(val) returns "nil"/"bool"/"i32"/"f32"/"string"/"unknown" for error messages
+- VM dispatch loop sets vm->error_line from chunk->lines[offset] at start of each iteration
+- VM__BINARY_NUMERIC_OP macro takes third arg op_name for error messages
+- CompileResult.error_message stores first compile error with source position ("line N, col N: message")
+- compiler__error(c, line, col, message) accepts position and stores formatted error message
 
 ---
 
@@ -206,4 +214,27 @@
   - US-008 was purely integration testing — the compiler's recursive AST traversal and OP_POP between statements already handled nesting and multi-statement correctly
   - Integration tests in test_compiler.c use compile_source + vm_exec pattern, requiring both COMPILER_IMPLEMENTATION and VM_IMPLEMENTATION includes
   - PrintCapture struct and capture_print callback are already defined in test_compiler.c for US-007 integration tests, reuse them
+---
+
+## 2026-02-19 - US-009
+- Implemented runtime error reporting for VM and compile error messages for compiler
+- VM: added `error_message` (arena-allocated or static string) and `error_line` fields to VM struct
+- VM: added `vm__set_error(vm, fmt, ...)` for formatted error messages, `vm__type_name(val)` for type names
+- VM: dispatch loop now sets `vm->error_line` from bytecode line table at start of each iteration
+- VM: `VM__BINARY_NUMERIC_OP` macro now takes op_name parameter and produces descriptive type error messages
+- VM: OP_MOD f32 and OP_NEG type mismatches produce descriptive error messages
+- VM: OP_GET_GLOBAL for undefined variables now returns VM_RUNTIME_ERROR with message naming the variable (changed from previous error-flagged value behavior)
+- VM: vm__push/vm__pop set error_message on overflow/underflow
+- VM: default opcode case sets error_message with opcode number
+- Compiler: added `error_message` field to CompileResult (first error with source position)
+- Compiler: updated `compiler__error` to accept line/col and format "line N, col N: message"
+- Files changed: vm/vm.h (modified), vm/test_vm.c (modified), compiler/compiler.h (modified), compiler/test_compiler.c (modified)
+- Updated 6 existing tests to verify error_message content; added 4 new VM tests + 7 new compiler integration tests
+- All 55 VM tests pass, all 49 compiler tests pass, full build suite green (32/32 modules)
+- **Learnings for future iterations:**
+  - vm__set_error uses vsnprintf + arena_alloc for formatted error messages; simple static strings also work for error_message
+  - error_line is set at the start of each dispatch iteration from chunk->lines[offset]; all error paths in that iteration inherit it
+  - OP_GET_GLOBAL behavior changed in US-009: undefined vars now return VM_RUNTIME_ERROR instead of pushing error-flagged value
+  - compiler__error was updated from (Compiler*, message) to (Compiler*, line, col, message); all callers updated
+  - strstr() in test assertions is useful for verifying error messages contain expected substrings without brittle exact matching
 ---
