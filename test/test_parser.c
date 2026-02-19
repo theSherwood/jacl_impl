@@ -356,11 +356,14 @@ static int test_cmd_var_arg(void) {
 
 static int test_cmd_empty_brackets(void) {
   setup();
-  /* [] → parse error */
+  /* [] → empty command (used for proc param lists) */
   AstNode* n = parse_expr("[]");
   ASSERT(n != NULL);
-  ASSERT(n->type == AST_ERROR);
-  ASSERT(n->data.error.message != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(n->data.command.head != NULL);
+  ASSERT(n->data.command.head->type == AST_LIT_STRING);
+  ASSERT_U32_EQ(n->data.command.head->data.lit_string.length, 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 0);
   /* Source position spans the brackets */
   ASSERT_U32_EQ(n->start.offset, 0);
   ASSERT_U32_EQ(n->end.offset, 2);
@@ -537,15 +540,14 @@ static int test_bare_var_ref(void) {
 
 static int test_bare_single_word(void) {
   setup();
-  /* "foo" → command with no arguments */
+  /* "foo" → bare word is returned directly as AST_LIT_STRING (not wrapped) */
   ParseResult r = parse("foo");
   ASSERT_U32_EQ(r.count, 1);
   ASSERT_U32_EQ(r.error_count, 0);
   AstNode* n = r.nodes[0];
-  ASSERT(n->type == AST_COMMAND);
-  ASSERT(n->data.command.head->type == AST_LIT_STRING);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "foo", 3) == 0);
-  ASSERT_U32_EQ(n->data.command.arg_count, 0);
+  ASSERT(n->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.lit_string.value, "foo", 3) == 0);
+  ASSERT_U32_EQ(n->data.lit_string.length, 3);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -671,8 +673,9 @@ static int test_block_nested(void) {
   AstNode* inner_block = cmd->data.command.args[1];
   ASSERT(inner_block->type == AST_BLOCK);
   ASSERT_U32_EQ(inner_block->data.block.count, 1);
-  ASSERT(inner_block->data.block.commands[0]->type == AST_COMMAND);
-  ASSERT(memcmp(inner_block->data.block.commands[0]->data.command.head->data.lit_string.value, "inner", 5) == 0);
+  /* Bare word "inner" is returned directly as AST_LIT_STRING (not wrapped) */
+  ASSERT(inner_block->data.block.commands[0]->type == AST_LIT_STRING);
+  ASSERT(memcmp(inner_block->data.block.commands[0]->data.lit_string.value, "inner", 5) == 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -736,7 +739,8 @@ static int test_block_bare_cmd_arg(void) {
   AstNode* blk = n->data.command.args[1];
   ASSERT(blk->type == AST_BLOCK);
   ASSERT_U32_EQ(blk->data.block.count, 1);
-  ASSERT(memcmp(blk->data.block.commands[0]->data.command.head->data.lit_string.value, "yes", 3) == 0);
+  ASSERT(blk->data.block.commands[0]->type == AST_LIT_STRING);
+  ASSERT(memcmp(blk->data.block.commands[0]->data.lit_string.value, "yes", 3) == 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1031,10 +1035,9 @@ static int test_multi_realistic_program(void) {
   ASSERT(else_blk->type == AST_BLOCK);
   ASSERT_U32_EQ(else_blk->data.block.count, 1);
 
-  /* 5: greet (no args) */
-  ASSERT(r.nodes[5]->type == AST_COMMAND);
-  ASSERT(memcmp(r.nodes[5]->data.command.head->data.lit_string.value, "greet", 5) == 0);
-  ASSERT_U32_EQ(r.nodes[5]->data.command.arg_count, 0);
+  /* 5: greet (bare word, no args → unwrapped to AST_LIT_STRING) */
+  ASSERT(r.nodes[5]->type == AST_LIT_STRING);
+  ASSERT(memcmp(r.nodes[5]->data.lit_string.value, "greet", 5) == 0);
 
   teardown();
   ASSERT(check_no_leaks());

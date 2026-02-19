@@ -568,6 +568,14 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         break;
       }
 
+      case OP_CLOSURE: {
+        uint16_t index = vm__read_u16(vm);
+        JaclVal closure_val = vm->chunk->constants[index];
+        result = vm__push(vm, closure_val);
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_POP_N: {
         uint8_t count = vm__read_byte(vm);
         if (vm->stack_top < count) {

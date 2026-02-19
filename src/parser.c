@@ -267,12 +267,24 @@ static AstNode* parser__parse_command(Parser* p) {
   Token* open = parser__advance(p); /* consume '[' */
   SourcePos cmd_start = parser__token_start(open);
 
-  /* Empty brackets [] → error */
+  /* Empty brackets [] → empty command node (used for proc param lists) */
   if (parser__peek(p)->type == TOKEN_RBRACKET) {
     Token* close = parser__advance(p);
-    AstNode* err = parser__error(p, "empty command brackets", open);
-    err->end = parser__token_end(close);
-    return err;
+    AstNode* empty_head = ast_alloc(p->arena);
+    empty_head->type = AST_LIT_STRING;
+    empty_head->start = parser__token_start(open);
+    empty_head->end   = parser__token_start(close);
+    empty_head->data.lit_string.value  = "";
+    empty_head->data.lit_string.length = 0;
+
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_COMMAND;
+    node->start = parser__token_start(open);
+    node->end   = parser__token_end(close);
+    node->data.command.head      = empty_head;
+    node->data.command.args      = NULL;
+    node->data.command.arg_count = 0;
+    return node;
   }
 
   /* Parse head (command name) */
@@ -401,8 +413,10 @@ static AstNode* parser__parse_bare_command(Parser* p) {
     parser__arr_push(&args, arg);
   }
 
-  /* Bracketed command with no trailing args: return as-is */
-  if (head->type == AST_COMMAND && args.count == 0) {
+  /* Single expression with no trailing args: return as-is.
+     This distinguishes bare `hello` (AST_LIT_STRING) from `[hello]` (AST_COMMAND)
+     so the compiler can treat bracketed zero-arg forms as calls. */
+  if (args.count == 0) {
     return head;
   }
 

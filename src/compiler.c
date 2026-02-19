@@ -302,6 +302,128 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* proc definition */
+  if (compiler__head_matches(head, "proc", 4)) {
+    if (argc != 3) {
+      compiler__error(c, line, col, "proc requires 3 arguments");
+      return;
+    }
+    if (args[0]->type != AST_LIT_STRING) {
+      compiler__error(c, line, col, "proc name must be a string");
+      return;
+    }
+    if (args[1]->type != AST_COMMAND) {
+      compiler__error(c, line, col, "proc params must be a bracketed list");
+      return;
+    }
+    if (args[2]->type != AST_BLOCK) {
+      compiler__error(c, line, col, "proc body must be a block");
+      return;
+    }
+
+    /* Get proc name */
+    const char* proc_name = args[0]->data.lit_string.value;
+    uint32_t proc_name_len = args[0]->data.lit_string.length;
+    if (proc_name_len > 7) {
+      compiler__error(c, line, col, "proc name exceeds 7-byte inline limit");
+      return;
+    }
+
+    /* Parse parameters from command node [a b c] */
+    AstNode* params_node = args[1];
+    AstNode* params_head = params_node->data.command.head;
+    uint8_t param_count;
+
+    if (params_head->data.lit_string.length == 0) {
+      /* Empty params: [] */
+      param_count = 0;
+    } else {
+      param_count = 1 + (uint8_t)params_node->data.command.arg_count;
+    }
+
+    /* Allocate closure */
+    JaclClosure* closure = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
+    chunk_init(&closure->chunk, c->arena);
+    closure->param_count  = param_count;
+    closure->upvalue_count = 0;
+    closure->upvalues     = NULL;
+    closure->name         = proc_name;
+
+    /* Allocate and fill param_names */
+    if (param_count > 0) {
+      closure->param_names = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * param_count);
+
+      /* First param is the head of the params command */
+      if (params_head->type != AST_LIT_STRING ||
+          params_head->data.lit_string.length > 7) {
+        compiler__error(c, line, col, "proc parameter name invalid");
+        return;
+      }
+      closure->param_names[0] = jacl_inline_string(
+          params_head->data.lit_string.value,
+          params_head->data.lit_string.length);
+
+      /* Remaining params are the args of the params command */
+      for (uint8_t i = 0; i < params_node->data.command.arg_count; i++) {
+        AstNode* param = params_node->data.command.args[i];
+        if (param->type != AST_LIT_STRING ||
+            param->data.lit_string.length > 7) {
+          compiler__error(c, line, col, "proc parameter name invalid");
+          return;
+        }
+        closure->param_names[1 + i] = jacl_inline_string(
+            param->data.lit_string.value,
+            param->data.lit_string.length);
+      }
+    } else {
+      closure->param_names = NULL;
+    }
+
+    /* Create body compiler with function-level scope */
+    Compiler body_compiler;
+    compiler__init(&body_compiler, &closure->chunk, c->arena);
+    body_compiler.scope_depth = 1;
+
+    /* Add params as locals in body compiler (slots 0..N-1) */
+    for (uint8_t i = 0; i < param_count; i++) {
+      compiler__add_local(&body_compiler, closure->param_names[i], line, col);
+    }
+
+    /* Compile body as expression (last stmt value stays on stack) */
+    compiler__compile_block_expr(&body_compiler, args[2]);
+
+    /* Emit implicit return */
+    compiler__emit_byte(&body_compiler, OP_RETURN, line);
+
+    /* Propagate errors from body compiler */
+    c->error_count += body_compiler.error_count;
+    if (!c->first_error && body_compiler.first_error) {
+      c->first_error = body_compiler.first_error;
+    }
+
+    /* Store closure in parent's constant pool */
+    uint16_t closure_idx = chunk_add_constant(c->chunk, jacl_closure(closure));
+
+    /* Emit OP_CLOSURE to push the closure value */
+    compiler__emit_byte(c, OP_CLOSURE, line);
+    compiler__emit_u16(c, closure_idx, line);
+
+    /* Bind the name */
+    JaclVal name_val = jacl_inline_string(proc_name, proc_name_len);
+    if (c->scope_depth > 0) {
+      /* Local scope: closure is on stack as local */
+      compiler__add_local(c, name_val, line, col);
+      /* proc returns nil */
+      compiler__emit_byte(c, OP_NIL, line);
+    } else {
+      /* Global scope */
+      uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+      compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+      compiler__emit_u16(c, name_idx, line);
+    }
+    return;
+  }
+
   /* if conditional */
   if (compiler__head_matches(head, "if", 2)) {
     if (argc != 2 && argc != 3) {
@@ -345,8 +467,39 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* Unknown command */
-  compiler__error(c, line, col, "unknown command");
+  /* Dynamic call: unrecognized command head — look up and call */
+  {
+    if (head->type == AST_LIT_STRING) {
+      /* Look up bare word as a variable */
+      uint32_t name_len = head->data.lit_string.length;
+      if (name_len > 7) {
+        compiler__error(c, line, col, "command name exceeds 7-byte inline limit");
+        return;
+      }
+      JaclVal name_val = jacl_inline_string(head->data.lit_string.value, name_len);
+      int local_slot = compiler__resolve_local(c, name_val);
+      if (local_slot != -1) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)local_slot, line);
+      } else {
+        uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+        compiler__emit_byte(c, OP_GET_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+      }
+    } else {
+      /* Non-string head (e.g. $var, nested command): compile as expression */
+      compiler__compile_node(c, head);
+    }
+
+    /* Compile arguments */
+    for (uint32_t i = 0; i < argc; i++) {
+      compiler__compile_node(c, args[i]);
+    }
+
+    /* Emit call */
+    compiler__emit_byte(c, OP_CALL, line);
+    compiler__emit_byte(c, (uint8_t)argc, line);
+  }
 }
 
 /* --- Internal: Compile a single AST node --- */
@@ -400,12 +553,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_COMMAND: {
-      if (node->data.command.arg_count == 0) {
-        /* Bare expression (e.g. bare literal at top level): compile head */
-        compiler__compile_node(c, node->data.command.head);
-      } else {
-        compiler__compile_command(c, node);
-      }
+      compiler__compile_command(c, node);
       break;
     }
 

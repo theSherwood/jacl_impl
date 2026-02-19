@@ -1110,18 +1110,19 @@ static int test_runtime_error_line_number(void) {
   TEST_PASS();
 }
 
-/* Test: unknown command name produces compile error with source position */
-static int test_compile_error_unknown_command(void) {
+/* Test: unknown command name compiles as dynamic call, produces runtime error */
+static int test_runtime_error_unknown_command(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
 
-  CompileResult cr = compile_source("[foo 42]", &arena);
+  /* [foo 42] compiles to GET_GLOBAL("foo"), CONST(42), CALL(1) */
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[foo 42]", &vm, &arena);
 
-  ASSERT(cr.error_count > 0);
-  ASSERT(cr.error_message != NULL);
-  ASSERT(strlen(cr.error_message) > 0);
-  ASSERT(strstr(cr.error_message, "line") != NULL);
-  ASSERT(strstr(cr.error_message, "unknown command") != NULL);
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "foo") != NULL);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -1574,6 +1575,189 @@ static int test_if_else_not_block(void) {
   TEST_PASS();
 }
 
+/* ===== US-006 (M4): Compile and execute proc definition ===== */
+
+/* Test: [proc add [a b] { [+ $a $b] }] then [add 1 2] returns i32(3) */
+static int test_proc_basic_call(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "[proc add [a b] { [+ $a $b] }]\n[add 1 2]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 3);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [proc greet [name] { [print $name] }] then [greet hello] prints "hello\n" */
+static int test_proc_print_param(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "[proc greet [name] { [print $name] }]\n[greet hello]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: zero-parameter procedure: [proc answer [] { 42 }] then [answer] returns i32(42) */
+static int test_proc_zero_params(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "[proc answer [] { 42 }]\n[answer]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: proc returns the value of the last expression in the body */
+static int test_proc_implicit_return(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "[proc double [n] { [* $n 2] }]\n[double 5]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 10);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: proc with multiple body statements returns last one */
+static int test_proc_multi_stmt_body(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "[proc foo [x] { [print $x]; [+ $x 1] }]\n[foo 10]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n");
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 11);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: redefining a proc name overwrites the binding */
+static int test_proc_redefine(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "[proc f [] { 1 }]\n[proc f [] { 2 }]\n[f]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: wrong argument count for proc (not 3 args) produces compile error */
+static int test_proc_wrong_argc(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Too few args */
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[proc foo [a]]", &vm, &arena);
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+
+  /* Too many args */
+  vm_init(&vm, &arena);
+  result = jacl_run("[proc foo [a] { 1 } extra]", &vm, &arena);
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: calling with wrong arg count produces runtime error */
+static int test_proc_call_arg_mismatch(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "[proc add [a b] { [+ $a $b] }]\n[add 1]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "argument") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: proc used as expression (value is nil from def) */
+static int test_proc_def_returns_nil(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[proc f [] { 42 }]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  /* proc definition at global scope returns nil (from DEF_GLOBAL) */
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1634,7 +1818,7 @@ int main(void) {
     { "runtime_error_lt_bool_i32",   test_runtime_error_lt_bool_i32 },
     { "runtime_error_print_undefined", test_runtime_error_print_undefined },
     { "runtime_error_line_number",   test_runtime_error_line_number },
-    { "compile_error_unknown_command", test_compile_error_unknown_command },
+    { "runtime_error_unknown_command", test_runtime_error_unknown_command },
     { "compile_error_long_string_msg", test_compile_error_long_string_msg },
     { "vm_returns_runtime_error",    test_vm_returns_runtime_error },
     /* US-004 (M4): Compiler local variable resolution */
@@ -1660,6 +1844,16 @@ int main(void) {
     { "if_wrong_argc_4",             test_if_wrong_argc_4 },
     { "if_then_not_block",           test_if_then_not_block },
     { "if_else_not_block",           test_if_else_not_block },
+    /* US-006 (M4): Compile and execute proc definition */
+    { "proc_basic_call",             test_proc_basic_call },
+    { "proc_print_param",            test_proc_print_param },
+    { "proc_zero_params",            test_proc_zero_params },
+    { "proc_implicit_return",        test_proc_implicit_return },
+    { "proc_multi_stmt_body",        test_proc_multi_stmt_body },
+    { "proc_redefine",               test_proc_redefine },
+    { "proc_wrong_argc",             test_proc_wrong_argc },
+    { "proc_call_arg_mismatch",      test_proc_call_arg_mismatch },
+    { "proc_def_returns_nil",        test_proc_def_returns_nil },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

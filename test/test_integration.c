@@ -89,12 +89,12 @@ static int test_compile_error_reported(void) {
   VM vm;
   vm_init(&vm, &arena);
 
-  /* Unknown command is a compile error */
-  VMResult result = jacl_run("[foo 42]", &vm, &arena);
+  /* Long variable name > 7 bytes is a compile error */
+  VMResult result = jacl_run("[def abcdefgh 42]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
-  ASSERT(strstr(vm.error_message, "unknown command") != NULL);
+  ASSERT(strstr(vm.error_message, "7-byte") != NULL);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
