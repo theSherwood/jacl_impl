@@ -15,6 +15,7 @@
 /* --- Stack size --- */
 
 #define VM_STACK_MAX 256
+#define VM_FRAMES_MAX 64
 
 /* --- Environment initial capacity --- */
 
@@ -41,11 +42,22 @@ typedef struct {
   uint32_t  cap;
 } Environment;
 
+/* --- Call frame --- */
+
+typedef struct {
+  JaclClosure*   closure;     /* closure being executed */
+  uint8_t*       return_ip;   /* caller's ip to restore on return */
+  uint32_t       stack_base;  /* first slot for this frame's locals */
+  BytecodeChunk* chunk;       /* chunk being executed */
+} CallFrame;
+
 /* --- VM state --- */
 
 typedef struct {
   JaclVal        stack[VM_STACK_MAX];
   uint32_t       stack_top;   /* index of next free slot */
+  CallFrame      frames[VM_FRAMES_MAX];
+  uint32_t       frame_count;
   uint8_t*       ip;          /* instruction pointer */
   BytecodeChunk* chunk;
   VMPrintFn      print_fn;   /* output callback, defaults to stdout */
@@ -73,6 +85,7 @@ static const char* vm__type_name(JaclVal v) {
   if (jacl_is_i32(v))           return "i32";
   if (jacl_is_f32(v))           return "f32";
   if (jacl_is_inline_string(v)) return "string";
+  if (jacl_is_closure(v))       return "closure";
   return "unknown";
 }
 
@@ -98,6 +111,12 @@ static void vm__default_print(const char* text, uint32_t len, void* ctx) {
   fwrite(text, 1, len, stdout);
 }
 
+/* --- Truthiness helper --- */
+
+static bool vm__is_falsy(JaclVal v) {
+  return jacl_is_nil(v) || v == JACL_FALSE;
+}
+
 /**
  * Initialize the VM to a clean state.
  * Arena is used for environment storage.
@@ -110,6 +129,7 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->print_fn  = vm__default_print;
   vm->print_ctx = NULL;
   vm->arena         = arena;
+  vm->frame_count   = 0;
   vm->error_message = NULL;
   vm->error_line    = 0;
 
@@ -228,15 +248,28 @@ static JaclVal vm__env_get(VM* vm, JaclVal name) {
  * VM_STACK_OVERFLOW on stack overflow.
  */
 static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
-  vm->chunk         = chunk;
-  vm->ip            = chunk->code;
   vm->error_message = NULL;
   vm->error_line    = 0;
 
+  /* Wrap top-level code in an implicit closure/frame */
+  JaclClosure top_closure;
+  memset(&top_closure, 0, sizeof(top_closure));
+  top_closure.chunk = *chunk;
+
+  CallFrame* frame = &vm->frames[0];
+  frame->closure    = &top_closure;
+  frame->return_ip  = NULL;
+  frame->stack_base = 0;
+  frame->chunk      = chunk;
+  vm->frame_count   = 1;
+
+  vm->chunk = chunk;
+  vm->ip    = chunk->code;
+
   for (;;) {
     /* Track source line for error reporting */
-    uint32_t instr_offset = (uint32_t)(vm->ip - chunk->code);
-    vm->error_line = chunk->lines[instr_offset];
+    uint32_t instr_offset = (uint32_t)(vm->ip - vm->chunk->code);
+    vm->error_line = vm->chunk->lines[instr_offset];
 
     uint8_t instruction = vm__read_byte(vm);
     VMResult result;
@@ -245,7 +278,7 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
 
       case OP_CONST: {
         uint16_t index = vm__read_u16(vm);
-        result = vm__push(vm, chunk->constants[index]);
+        result = vm__push(vm, vm->chunk->constants[index]);
         if (result != VM_OK) return result;
         break;
       }
@@ -408,7 +441,7 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
 
       case OP_DEF_GLOBAL: {
         uint16_t name_idx = vm__read_u16(vm);
-        JaclVal name = chunk->constants[name_idx];
+        JaclVal name = vm->chunk->constants[name_idx];
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
         vm__env_set(vm, name, value);
@@ -419,7 +452,7 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
 
       case OP_GET_GLOBAL: {
         uint16_t name_idx = vm__read_u16(vm);
-        JaclVal name = chunk->constants[name_idx];
+        JaclVal name = vm->chunk->constants[name_idx];
         JaclVal value = vm__env_get(vm, name);
         if (jacl_is_error(value)) {
           char name_buf[8];
@@ -428,6 +461,120 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
           return VM_RUNTIME_ERROR;
         }
         result = vm__push(vm, value); if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_GET_LOCAL: {
+        uint8_t slot = vm__read_byte(vm);
+        result = vm__push(vm, vm->stack[frame->stack_base + slot]);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_SET_LOCAL: {
+        uint8_t slot = vm__read_byte(vm);
+        vm->stack[frame->stack_base + slot] = vm->stack[vm->stack_top - 1];
+        break;
+      }
+
+      case OP_GET_UPVALUE: {
+        uint8_t index = vm__read_byte(vm);
+        result = vm__push(vm, frame->closure->upvalues[index]);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_JUMP: {
+        uint16_t offset = vm__read_u16(vm);
+        vm->ip += offset;
+        break;
+      }
+
+      case OP_JUMP_IF_FALSE: {
+        uint16_t offset = vm__read_u16(vm);
+        JaclVal condition;
+        result = vm__pop(vm, &condition);
+        if (result != VM_OK) return result;
+        if (vm__is_falsy(condition)) {
+          vm->ip += offset;
+        }
+        break;
+      }
+
+      case OP_LOOP: {
+        uint16_t offset = vm__read_u16(vm);
+        vm->ip -= offset;
+        break;
+      }
+
+      case OP_CALL: {
+        uint8_t arg_count = vm__read_byte(vm);
+        JaclVal callee = vm->stack[vm->stack_top - arg_count - 1];
+
+        if (!jacl_is_closure(callee)) {
+          vm__set_error(vm, "cannot call %s value", vm__type_name(callee));
+          return VM_RUNTIME_ERROR;
+        }
+
+        JaclClosure* closure = jacl_as_closure(callee);
+
+        if (arg_count != closure->param_count) {
+          vm__set_error(vm, "expected %d arguments but got %d",
+                       (int)closure->param_count, (int)arg_count);
+          return VM_RUNTIME_ERROR;
+        }
+
+        if (vm->frame_count >= VM_FRAMES_MAX) {
+          vm__set_error(vm, "stack overflow");
+          return VM_RUNTIME_ERROR;
+        }
+
+        CallFrame* new_frame = &vm->frames[vm->frame_count++];
+        new_frame->closure    = closure;
+        new_frame->return_ip  = vm->ip;
+        new_frame->stack_base = vm->stack_top - arg_count;
+        new_frame->chunk      = &closure->chunk;
+
+        frame     = new_frame;
+        vm->ip    = frame->chunk->code;
+        vm->chunk = frame->chunk;
+        break;
+      }
+
+      case OP_RETURN: {
+        JaclVal return_value;
+        result = vm__pop(vm, &return_value);
+        if (result != VM_OK) return result;
+
+        uint32_t callee_base = frame->stack_base;
+        uint8_t* caller_ip   = frame->return_ip;
+
+        vm->frame_count--;
+
+        if (vm->frame_count == 0) {
+          /* Returning from top-level */
+          vm->stack[0] = return_value;
+          vm->stack_top = 1;
+          return VM_OK;
+        }
+
+        /* Place return value where the callee's closure was */
+        vm->stack[callee_base - 1] = return_value;
+        vm->stack_top = callee_base;
+
+        frame     = &vm->frames[vm->frame_count - 1];
+        vm->ip    = caller_ip;
+        vm->chunk = frame->chunk;
+        break;
+      }
+
+      case OP_POP_N: {
+        uint8_t count = vm__read_byte(vm);
+        if (vm->stack_top < count) {
+          vm__set_error(vm, "stack underflow");
+          return VM_RUNTIME_ERROR;
+        }
+        vm->stack_top -= count;
         break;
       }
 

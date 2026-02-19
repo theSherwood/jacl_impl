@@ -1602,6 +1602,598 @@ static int test_stack_overflow_line(void) {
   TEST_PASS();
 }
 
+/* ===== US-003: Call frames and VM execution with frames ===== */
+
+/* Test: vm_init sets frame_count to 0 */
+static int test_vm_frame_count_init(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  ASSERT_U32_EQ(vm.frame_count, 0);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_GET_LOCAL pushes stack[frame.stack_base + slot] */
+static int test_op_get_local(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  /* Push two values as locals 0 and 1 */
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(10));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(20));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  /* GET_LOCAL 0 should push 10 */
+  chunk_write(&chunk, OP_GET_LOCAL, 1);
+  chunk_write(&chunk, 0, 1);
+  /* GET_LOCAL 1 should push 20 */
+  chunk_write(&chunk, OP_GET_LOCAL, 1);
+  chunk_write(&chunk, 1, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  /* Stack: [10, 20, 10, 20] */
+  ASSERT_U32_EQ(vm.stack_top, 4);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[2]), 10);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[3]), 20);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_SET_LOCAL writes top-of-stack into the local slot */
+static int test_op_set_local(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(10));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(99));
+
+  /* Push local 0 */
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  /* Push new value and SET_LOCAL 0 (peeks, doesn't pop) */
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_SET_LOCAL, 1);
+  chunk_write(&chunk, 0, 1);
+  chunk_write(&chunk, OP_POP, 1);
+  /* GET_LOCAL 0 should be 99 now */
+  chunk_write(&chunk, OP_GET_LOCAL, 1);
+  chunk_write(&chunk, 0, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 2);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 99);  /* local 0 was overwritten */
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[1]), 99);  /* GET_LOCAL pushed copy */
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_GET_UPVALUE pushes captured value from closure */
+static int test_op_get_upvalue(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Create a closure with one upvalue = 42 */
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->param_count = 0;
+  cl->param_names = NULL;
+  cl->upvalue_count = 1;
+  cl->upvalues = (JaclVal*)arena_alloc(&arena, sizeof(JaclVal));
+  cl->upvalues[0] = jacl_i32(42);
+  cl->name = NULL;
+
+  /* Body: GET_UPVALUE 0, RETURN */
+  chunk_write(&cl->chunk, OP_GET_UPVALUE, 1);
+  chunk_write(&cl->chunk, 0, 1);
+  chunk_write(&cl->chunk, OP_RETURN, 1);
+
+  /* Main chunk: push closure, call 0, halt */
+  BytecodeChunk main_chunk;
+  chunk_init(&main_chunk, &arena);
+  uint16_t cl_idx = chunk_add_constant(&main_chunk, jacl_closure(cl));
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, cl_idx, 1);
+  chunk_write(&main_chunk, OP_CALL, 1);
+  chunk_write(&main_chunk, 0, 1);
+  chunk_write(&main_chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &main_chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_JUMP skips forward by offset */
+static int test_op_jump(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(2));
+
+  /* JUMP over first CONST (3 bytes), land at second CONST */
+  chunk_write(&chunk, OP_JUMP, 1);
+  chunk_write_u16(&chunk, 3, 1);
+  /* Skipped: */
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  /* Lands here: */
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_JUMP_IF_FALSE jumps when condition is false or nil */
+static int test_op_jump_if_false_falsy(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(2));
+
+  /* false is falsy: should jump over CONST 1 */
+  chunk_write(&chunk, OP_FALSE, 1);
+  chunk_write(&chunk, OP_JUMP_IF_FALSE, 1);
+  chunk_write_u16(&chunk, 3, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
+
+  /* nil is also falsy */
+  chunk_init(&chunk, &arena);
+  c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  c2 = chunk_add_constant(&chunk, jacl_i32(2));
+  chunk_write(&chunk, OP_NIL, 1);
+  chunk_write(&chunk, OP_JUMP_IF_FALSE, 1);
+  chunk_write_u16(&chunk, 3, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  vm_init(&vm, &arena);
+  result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_JUMP_IF_FALSE does not jump when condition is truthy */
+static int test_op_jump_if_false_truthy(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+
+  /* true is truthy: should NOT jump */
+  chunk_write(&chunk, OP_TRUE, 1);
+  chunk_write(&chunk, OP_JUMP_IF_FALSE, 1);
+  chunk_write_u16(&chunk, 3, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
+
+  /* i32(0) is truthy (only false and nil are falsy) */
+  chunk_init(&chunk, &arena);
+  uint16_t c0 = chunk_add_constant(&chunk, jacl_i32(0));
+  c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c0, 1);
+  chunk_write(&chunk, OP_JUMP_IF_FALSE, 1);
+  chunk_write_u16(&chunk, 3, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  vm_init(&vm, &arena);
+  result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);  /* i32(0) is truthy, did not jump */
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_LOOP jumps backward (simple two-iteration loop) */
+static int test_op_loop(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c42 = chunk_add_constant(&chunk, jacl_i32(42));
+
+  /*
+   * Position 0: OP_TRUE                         (1 byte)
+   * Position 1: OP_JUMP_IF_FALSE offset=4       (3 bytes: 1,2,3)
+   * Position 4: OP_FALSE                        (1 byte)
+   * Position 5: OP_LOOP offset=7                (3 bytes: 5,6,7)
+   * Position 8: OP_CONST i32(42)                (3 bytes: 8,9,10)
+   * Position 11: OP_HALT                        (1 byte)
+   *
+   * Iteration 1: TRUE→truthy→don't jump→FALSE→LOOP back to pos 1
+   * Iteration 2: JIF pops false→falsy→jump to pos 8→CONST 42→HALT
+   */
+  chunk_write(&chunk, OP_TRUE, 1);
+  chunk_write(&chunk, OP_JUMP_IF_FALSE, 1);
+  chunk_write_u16(&chunk, 4, 1);
+  chunk_write(&chunk, OP_FALSE, 1);
+  chunk_write(&chunk, OP_LOOP, 1);
+  chunk_write_u16(&chunk, 7, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c42, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_POP_N discards N values from the stack */
+static int test_op_pop_n(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(2));
+  uint16_t c3 = chunk_add_constant(&chunk, jacl_i32(3));
+  uint16_t c4 = chunk_add_constant(&chunk, jacl_i32(4));
+
+  /* Push 4 values, pop 3 → only first remains */
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c3, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c4, 1);
+  chunk_write(&chunk, OP_POP_N, 1);
+  chunk_write(&chunk, 3, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: basic call and return with zero-arg closure */
+static int test_basic_call_return(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Create a zero-arg closure that returns 42 */
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->param_count = 0;
+  cl->param_names = NULL;
+  cl->upvalue_count = 0;
+  cl->upvalues = NULL;
+  cl->name = "answer";
+
+  uint16_t c42 = chunk_add_constant(&cl->chunk, jacl_i32(42));
+  chunk_write(&cl->chunk, OP_CONST, 1);
+  chunk_write_u16(&cl->chunk, c42, 1);
+  chunk_write(&cl->chunk, OP_RETURN, 1);
+
+  /* Main chunk: push closure, call 0, halt */
+  BytecodeChunk main_chunk;
+  chunk_init(&main_chunk, &arena);
+  uint16_t cl_idx = chunk_add_constant(&main_chunk, jacl_closure(cl));
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, cl_idx, 1);
+  chunk_write(&main_chunk, OP_CALL, 1);
+  chunk_write(&main_chunk, 0, 1);
+  chunk_write(&main_chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &main_chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: call with arguments — closure adds two parameters */
+static int test_call_with_args(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Create a 2-arg closure: GET_LOCAL 0, GET_LOCAL 1, ADD, RETURN */
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->param_count = 2;
+  cl->param_names = (JaclVal*)arena_alloc(&arena, 2 * sizeof(JaclVal));
+  cl->param_names[0] = jacl_inline_string("a", 1);
+  cl->param_names[1] = jacl_inline_string("b", 1);
+  cl->upvalue_count = 0;
+  cl->upvalues = NULL;
+  cl->name = "add";
+
+  chunk_write(&cl->chunk, OP_GET_LOCAL, 1);
+  chunk_write(&cl->chunk, 0, 1);
+  chunk_write(&cl->chunk, OP_GET_LOCAL, 1);
+  chunk_write(&cl->chunk, 1, 1);
+  chunk_write(&cl->chunk, OP_ADD, 1);
+  chunk_write(&cl->chunk, OP_RETURN, 1);
+
+  /* Main: push closure, push 10, push 20, call 2, halt */
+  BytecodeChunk main_chunk;
+  chunk_init(&main_chunk, &arena);
+  uint16_t cl_idx = chunk_add_constant(&main_chunk, jacl_closure(cl));
+  uint16_t c10 = chunk_add_constant(&main_chunk, jacl_i32(10));
+  uint16_t c20 = chunk_add_constant(&main_chunk, jacl_i32(20));
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, cl_idx, 1);
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, c10, 1);
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, c20, 1);
+  chunk_write(&main_chunk, OP_CALL, 1);
+  chunk_write(&main_chunk, 2, 1);
+  chunk_write(&main_chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &main_chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 30);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: calling a non-closure value produces 'cannot call' error */
+static int test_call_non_closure(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c = chunk_add_constant(&chunk, jacl_i32(42));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c, 1);
+  chunk_write(&chunk, OP_CALL, 1);
+  chunk_write(&chunk, 0, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "cannot call") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: arg count mismatch produces error */
+static int test_call_arg_mismatch(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->param_count = 2;
+  cl->param_names = NULL;
+  cl->upvalue_count = 0;
+  cl->upvalues = NULL;
+  cl->name = NULL;
+  chunk_write(&cl->chunk, OP_NIL, 1);
+  chunk_write(&cl->chunk, OP_RETURN, 1);
+
+  BytecodeChunk main_chunk;
+  chunk_init(&main_chunk, &arena);
+  uint16_t cl_idx = chunk_add_constant(&main_chunk, jacl_closure(cl));
+  uint16_t c1 = chunk_add_constant(&main_chunk, jacl_i32(10));
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, cl_idx, 1);
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, c1, 1);
+  chunk_write(&main_chunk, OP_CALL, 1);
+  chunk_write(&main_chunk, 1, 1);  /* 1 arg but closure expects 2 */
+  chunk_write(&main_chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &main_chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "expected") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: exceeding VM_FRAMES_MAX produces 'stack overflow' error */
+static int test_call_frame_overflow(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Create a self-recursive closure */
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->param_count = 0;
+  cl->param_names = NULL;
+  cl->upvalue_count = 0;
+  cl->upvalues = NULL;
+  cl->name = "recurse";
+
+  /* Add self to own constant pool */
+  uint16_t self_idx = chunk_add_constant(&cl->chunk, jacl_closure(cl));
+  chunk_write(&cl->chunk, OP_CONST, 1);
+  chunk_write_u16(&cl->chunk, self_idx, 1);
+  chunk_write(&cl->chunk, OP_CALL, 1);
+  chunk_write(&cl->chunk, 0, 1);
+  chunk_write(&cl->chunk, OP_RETURN, 1);
+
+  /* Main chunk: push closure, call 0, halt */
+  BytecodeChunk main_chunk;
+  chunk_init(&main_chunk, &arena);
+  uint16_t cl_main = chunk_add_constant(&main_chunk, jacl_closure(cl));
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, cl_main, 1);
+  chunk_write(&main_chunk, OP_CALL, 1);
+  chunk_write(&main_chunk, 0, 1);
+  chunk_write(&main_chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &main_chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "stack overflow") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: truthiness — empty string and i32(0) are truthy */
+static int test_truthiness(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t cs = chunk_add_constant(&chunk, jacl_inline_string("", 0));
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+
+  /* Empty string is truthy → should NOT jump → push 1 */
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, cs, 1);
+  chunk_write(&chunk, OP_JUMP_IF_FALSE, 1);
+  chunk_write_u16(&chunk, 3, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1669,6 +2261,22 @@ int main(void) {
     { "runtime_error_bool_lt_i32",  test_runtime_error_bool_lt_i32 },
     { "runtime_error_line_tracking", test_runtime_error_line_tracking },
     { "stack_overflow_line",        test_stack_overflow_line },
+    /* US-003: Call frames and VM execution with frames */
+    { "vm_frame_count_init",        test_vm_frame_count_init },
+    { "op_get_local",               test_op_get_local },
+    { "op_set_local",               test_op_set_local },
+    { "op_get_upvalue",             test_op_get_upvalue },
+    { "op_jump",                    test_op_jump },
+    { "op_jump_if_false_falsy",     test_op_jump_if_false_falsy },
+    { "op_jump_if_false_truthy",    test_op_jump_if_false_truthy },
+    { "op_loop",                    test_op_loop },
+    { "op_pop_n",                   test_op_pop_n },
+    { "basic_call_return",          test_basic_call_return },
+    { "call_with_args",             test_call_with_args },
+    { "call_non_closure",           test_call_non_closure },
+    { "call_arg_mismatch",          test_call_arg_mismatch },
+    { "call_frame_overflow",        test_call_frame_overflow },
+    { "truthiness",                 test_truthiness },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
