@@ -467,6 +467,48 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* while loop */
+  if (compiler__head_matches(head, "while", 5)) {
+    if (argc != 2) {
+      compiler__error(c, line, col, "while requires 2 arguments");
+      return;
+    }
+    if (args[1]->type != AST_BLOCK) {
+      compiler__error(c, line, col, "while body must be a block");
+      return;
+    }
+
+    /* Loop-start label */
+    uint32_t loop_start = c->chunk->code_count;
+
+    /* Compile condition */
+    compiler__compile_node(c, args[0]);
+
+    /* OP_JUMP_IF_FALSE to exit */
+    uint32_t exit_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+
+    /* Compile body statements directly (no extra scope, so def rebinds
+       at the same scope level as the surrounding code) */
+    uint32_t body_count = args[1]->data.block.count;
+    for (uint32_t i = 0; i < body_count; i++) {
+      compiler__compile_node(c, args[1]->data.block.commands[i]);
+      compiler__emit_byte(c, OP_POP, line);
+    }
+
+    /* OP_LOOP back to loop_start */
+    compiler__emit_byte(c, OP_LOOP, line);
+    uint32_t offset = c->chunk->code_count - loop_start + 2;
+    compiler__emit_byte(c, (uint8_t)((offset >> 8) & 0xFF), line);
+    compiler__emit_byte(c, (uint8_t)(offset & 0xFF), line);
+
+    /* Patch exit jump to here */
+    compiler__patch_jump(c, exit_jump);
+
+    /* while returns nil */
+    compiler__emit_byte(c, OP_NIL, line);
+    return;
+  }
+
   /* Dynamic call: unrecognized command head — look up and call */
   {
     if (head->type == AST_LIT_STRING) {

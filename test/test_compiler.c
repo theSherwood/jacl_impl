@@ -1758,6 +1758,173 @@ static int test_proc_def_returns_nil(void) {
   TEST_PASS();
 }
 
+/* ===== US-007 (M4): Compile and execute while loop ===== */
+
+/* Test: while with false condition never executes body, returns nil */
+static int test_while_zero_iterations(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[while $false { 999 }]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: while with nil condition never executes body */
+static int test_while_nil_falsy(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[while $nil { 999 }]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: while loop iterates and exits correctly (counter-based) */
+static int test_while_iterative_sum(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Sum 1..5 using def rebinding in while loop */
+  const char* program =
+    "[def i 1]\n"
+    "[def sum 0]\n"
+    "[while [<= $i 5] {\n"
+    "  [def sum [+ $sum $i]]\n"
+    "  [def i [+ $i 1]]\n"
+    "}]\n"
+    "[print $sum]";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "15\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: while returns nil when loop exits */
+static int test_while_returns_nil(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Print the result of a while loop — should be nil */
+  const char* program =
+    "[def i 0]\n"
+    "[print [while [< $i 3] {\n"
+    "  [def i [+ $i 1]]\n"
+    "}]]";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "nil\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: while wrong arg count (1 arg) */
+static int test_while_wrong_argc_1(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[while $true]", &arena);
+  ASSERT(cr.error_count > 0);
+  ASSERT(strstr(cr.error_message, "while requires 2") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: while wrong arg count (3 args) */
+static int test_while_wrong_argc_3(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[while $true { 1 } { 2 }]", &arena);
+  ASSERT(cr.error_count > 0);
+  ASSERT(strstr(cr.error_message, "while requires 2") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: while body must be a block */
+static int test_while_body_not_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[while $true 42]", &arena);
+  ASSERT(cr.error_count > 0);
+  ASSERT(strstr(cr.error_message, "while body must be a block") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: while with counter that decrements to zero */
+static int test_while_countdown(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[def n 3]\n"
+    "[while [> $n 0] {\n"
+    "  [print $n]\n"
+    "  [def n [- $n 1]]\n"
+    "}]";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n2\n1\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1854,6 +2021,15 @@ int main(void) {
     { "proc_wrong_argc",             test_proc_wrong_argc },
     { "proc_call_arg_mismatch",      test_proc_call_arg_mismatch },
     { "proc_def_returns_nil",        test_proc_def_returns_nil },
+    /* US-007 (M4): Compile and execute while loop */
+    { "while_zero_iterations",       test_while_zero_iterations },
+    { "while_nil_falsy",             test_while_nil_falsy },
+    { "while_iterative_sum",         test_while_iterative_sum },
+    { "while_returns_nil",           test_while_returns_nil },
+    { "while_wrong_argc_1",          test_while_wrong_argc_1 },
+    { "while_wrong_argc_3",          test_while_wrong_argc_3 },
+    { "while_body_not_block",        test_while_body_not_block },
+    { "while_countdown",             test_while_countdown },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
