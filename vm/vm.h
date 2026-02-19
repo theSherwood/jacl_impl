@@ -226,6 +226,35 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         break;
       }
 
+      case OP_EQ: {
+        JaclVal b, a;
+        result = vm__pop(vm, &b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &a); if (result != VM_OK) return result;
+        result = vm__push(vm, jacl_eq(a, b));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_LT: {
+        VM__BINARY_NUMERIC_OP(jacl_lt_i32, jacl_lt_f32);
+        break;
+      }
+
+      case OP_GT: {
+        VM__BINARY_NUMERIC_OP(jacl_gt_i32, jacl_gt_f32);
+        break;
+      }
+
+      case OP_LE: {
+        VM__BINARY_NUMERIC_OP(jacl_le_i32, jacl_le_f32);
+        break;
+      }
+
+      case OP_GE: {
+        VM__BINARY_NUMERIC_OP(jacl_ge_i32, jacl_ge_f32);
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }

@@ -138,6 +138,33 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* Comparison builtins */
+  if (compiler__head_matches(head, "==", 2)) {
+    if (argc != 2) { compiler__error(c, "== requires 2 arguments"); return; }
+    compiler__compile_binary(c, args, OP_EQ, line);
+    return;
+  }
+  if (compiler__head_matches(head, "<", 1)) {
+    if (argc != 2) { compiler__error(c, "< requires 2 arguments"); return; }
+    compiler__compile_binary(c, args, OP_LT, line);
+    return;
+  }
+  if (compiler__head_matches(head, ">", 1)) {
+    if (argc != 2) { compiler__error(c, "> requires 2 arguments"); return; }
+    compiler__compile_binary(c, args, OP_GT, line);
+    return;
+  }
+  if (compiler__head_matches(head, "<=", 2)) {
+    if (argc != 2) { compiler__error(c, "<= requires 2 arguments"); return; }
+    compiler__compile_binary(c, args, OP_LE, line);
+    return;
+  }
+  if (compiler__head_matches(head, ">=", 2)) {
+    if (argc != 2) { compiler__error(c, ">= requires 2 arguments"); return; }
+    compiler__compile_binary(c, args, OP_GE, line);
+    return;
+  }
+
   /* Unknown command */
   compiler__error(c, "unknown command");
 }

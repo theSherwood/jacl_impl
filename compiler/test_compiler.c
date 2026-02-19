@@ -477,6 +477,90 @@ static int test_compile_f32_arithmetic(void) {
   TEST_PASS();
 }
 
+/* ===== US-005: Comparison builtins (compiler) ===== */
+
+/* Test: [== 1 2] compiles to OP_CONST(1), OP_CONST(2), OP_EQ */
+static int test_compile_eq(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[== 1 2]", &arena);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_U32_EQ(cr.chunk.const_count, 2);
+  ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[0]), 1);
+  ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[1]), 2);
+
+  /* Bytecode: OP_CONST u16(0) OP_CONST u16(1) OP_EQ OP_HALT */
+  ASSERT_U32_EQ(cr.chunk.code_count, 8);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_EQ);
+  ASSERT_INT_EQ(cr.chunk.code[7], OP_HALT);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [< 1 2], [> 5 3], [<= 3 3], [>= 2 5] compile to correct opcodes */
+static int test_compile_lt_gt_le_ge(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Test < */
+  CompileResult cr = compile_source("[< 1 2]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_LT);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+
+  /* Test > */
+  tracker_reset();
+  arena = (arena_t){ .allocator = tracked_allocator };
+  cr = compile_source("[> 5 3]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_GT);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+
+  /* Test <= */
+  tracker_reset();
+  arena = (arena_t){ .allocator = tracked_allocator };
+  cr = compile_source("[<= 3 3]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_LE);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+
+  /* Test >= */
+  tracker_reset();
+  arena = (arena_t){ .allocator = tracked_allocator };
+  cr = compile_source("[>= 2 5]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_GE);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+
+  TEST_PASS();
+}
+
+/* Test: f32 comparison compiles the same way */
+static int test_compile_f32_comparison(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[< 1.5 2.5]", &arena);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_U32_EQ(cr.chunk.const_count, 2);
+  ASSERT(jacl_is_f32(cr.chunk.constants[0]));
+  ASSERT(jacl_is_f32(cr.chunk.constants[1]));
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_LT);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -505,6 +589,10 @@ int main(void) {
     { "compile_unary_neg",           test_compile_unary_neg },
     { "compile_nested_arithmetic",   test_compile_nested_arithmetic },
     { "compile_f32_arithmetic",      test_compile_f32_arithmetic },
+    /* US-005: Comparison builtins (compiler) */
+    { "compile_eq",                  test_compile_eq },
+    { "compile_lt_gt_le_ge",         test_compile_lt_gt_le_ge },
+    { "compile_f32_comparison",      test_compile_f32_comparison },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

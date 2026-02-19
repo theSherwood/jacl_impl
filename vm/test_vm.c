@@ -739,6 +739,335 @@ static int test_op_f32_arithmetic(void) {
   TEST_PASS();
 }
 
+/* ===== US-005: Comparison builtins (VM) ===== */
+
+/* Test: OP_EQ with equal i32 values -> JACL_TRUE */
+static int test_op_eq_i32_true(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(1));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_EQ, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_EQ with unequal i32 values -> JACL_FALSE */
+static int test_op_eq_i32_false(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(2));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_EQ, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_U64_EQ(vm.stack[0], JACL_FALSE);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_EQ with different types -> JACL_FALSE (not error) */
+static int test_op_eq_different_types(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_f32(1.0f));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_EQ, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_U64_EQ(vm.stack[0], JACL_FALSE);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_LT with i32 values */
+static int test_op_lt_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(2));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_LT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
+
+  /* Reverse: 2 < 1 -> false */
+  chunk_init(&chunk, &arena);
+  c1 = chunk_add_constant(&chunk, jacl_i32(2));
+  c2 = chunk_add_constant(&chunk, jacl_i32(1));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_LT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  vm_init(&vm);
+  result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U64_EQ(vm.stack[0], JACL_FALSE);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_GT with i32 values */
+static int test_op_gt_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(5));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(3));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_GT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_LE with i32 values (equal case) */
+static int test_op_le_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(3));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(3));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_LE, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_GE with i32 values (false case) */
+static int test_op_ge_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(2));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(5));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_GE, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U64_EQ(vm.stack[0], JACL_FALSE);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_LT with f32 values */
+static int test_op_lt_f32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_f32(1.5f));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_f32(2.5f));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_LT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_GT with f32 values */
+static int test_op_gt_f32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_f32(5.0f));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_f32(3.0f));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_GT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: comparison with mismatched numeric types produces runtime error */
+static int test_op_lt_mixed_type_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_f32(2.0f));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_LT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_EQ with f32 equal values */
+static int test_op_eq_f32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_f32(3.14f));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_f32(3.14f));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_EQ, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -774,6 +1103,18 @@ int main(void) {
     { "op_add_mixed_type_error",  test_op_add_mixed_type_error },
     { "op_nested_arithmetic",     test_op_nested_arithmetic },
     { "op_f32_arithmetic",        test_op_f32_arithmetic },
+    /* US-005: Comparison builtins (VM) */
+    { "op_eq_i32_true",           test_op_eq_i32_true },
+    { "op_eq_i32_false",          test_op_eq_i32_false },
+    { "op_eq_different_types",    test_op_eq_different_types },
+    { "op_lt_i32",                test_op_lt_i32 },
+    { "op_gt_i32",                test_op_gt_i32 },
+    { "op_le_i32",                test_op_le_i32 },
+    { "op_ge_i32",                test_op_ge_i32 },
+    { "op_lt_f32",                test_op_lt_f32 },
+    { "op_gt_f32",                test_op_gt_f32 },
+    { "op_lt_mixed_type_error",   test_op_lt_mixed_type_error },
+    { "op_eq_f32",                test_op_eq_f32 },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
