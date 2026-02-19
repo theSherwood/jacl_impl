@@ -128,3 +128,17 @@
   - OP_MOD explicitly rejects f32 (not handled by the generic macro)
   - Forward declaration of compiler__compile_node needed since compiler__compile_binary calls it before definition
 ---
+
+## 2026-02-19 - US-005
+- Implemented comparison builtins (==, <, >, <=, >=) in compiler and VM
+- Compiler: recognizes ==, <, >, <=, >= command heads and emits OP_EQ, OP_LT, OP_GT, OP_LE, OP_GE
+- VM: OP_EQ uses jacl_eq (works across types, returns JACL_FALSE for different types)
+- VM: OP_LT, OP_GT, OP_LE, OP_GE use VM__BINARY_NUMERIC_OP macro with i32/f32 dispatch
+- Mismatched numeric types on ordered comparisons produce VM_RUNTIME_ERROR (same as arithmetic)
+- Files changed: compiler/compiler.h (modified), compiler/test_compiler.c (modified), vm/vm.h (modified), vm/test_vm.c (modified)
+- Added 3 compiler tests + 11 VM tests, all 32 suite tests pass (23 compiler, 38 VM)
+- **Learnings for future iterations:**
+  - OP_EQ is special: uses jacl_eq directly without type checking, so different types return false (not error)
+  - Ordered comparisons (LT, GT, LE, GE) reuse VM__BINARY_NUMERIC_OP macro since they have same i32/f32 dispatch pattern
+  - Multi-char operators like ==, <=, >= use compiler__head_matches with length 2
+---
