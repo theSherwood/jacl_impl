@@ -165,6 +165,14 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* Print builtin */
+  if (compiler__head_matches(head, "print", 5)) {
+    if (argc != 1) { compiler__error(c, "print requires 1 argument"); return; }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_PRINT, line);
+    return;
+  }
+
   /* Unknown command */
   compiler__error(c, "unknown command");
 }

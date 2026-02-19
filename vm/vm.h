@@ -255,6 +255,50 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         break;
       }
 
+      case OP_PRINT: {
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+
+        char buf[64];
+        const char* text;
+        uint32_t len;
+
+        if (jacl_is_error(val)) {
+          text = "<error>\n";
+          len = 8;
+        } else if (jacl_is_nil(val)) {
+          text = "nil\n";
+          len = 4;
+        } else if (jacl_is_bool(val)) {
+          if (val == JACL_TRUE) { text = "true\n"; len = 5; }
+          else { text = "false\n"; len = 6; }
+        } else if (jacl_is_i32(val)) {
+          int n = snprintf(buf, sizeof(buf), "%d\n", (int)jacl_as_i32(val));
+          text = buf;
+          len = (uint32_t)n;
+        } else if (jacl_is_f32(val)) {
+          int n = snprintf(buf, sizeof(buf), "%g\n", (double)jacl_as_f32(val));
+          text = buf;
+          len = (uint32_t)n;
+        } else if (jacl_is_inline_string(val)) {
+          size_t slen = jacl_inline_string_len(val);
+          jacl_inline_string_get(val, buf, sizeof(buf));
+          buf[slen] = '\n';
+          buf[slen + 1] = '\0';
+          text = buf;
+          len = (uint32_t)(slen + 1);
+        } else {
+          text = "<unknown>\n";
+          len = 10;
+        }
+
+        vm->print_fn(text, len, vm->print_ctx);
+
+        /* print returns nil */
+        result = vm__push(vm, JACL_NIL); if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }

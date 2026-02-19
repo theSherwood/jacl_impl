@@ -1068,6 +1068,255 @@ static int test_op_eq_f32(void) {
   TEST_PASS();
 }
 
+/* ===== US-006: Print builtin (VM) ===== */
+
+/* Capture buffer for testing print output */
+typedef struct {
+  char   buf[256];
+  uint32_t len;
+} PrintCapture;
+
+static void capture_print(const char* text, uint32_t len, void* ctx) {
+  PrintCapture* cap = (PrintCapture*)ctx;
+  uint32_t remaining = (uint32_t)sizeof(cap->buf) - cap->len - 1;
+  uint32_t copy_len = len < remaining ? len : remaining;
+  memcpy(cap->buf + cap->len, text, copy_len);
+  cap->len += copy_len;
+  cap->buf[cap->len] = '\0';
+}
+
+/* Test: OP_PRINT with i32 value */
+static int test_op_print_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c = chunk_add_constant(&chunk, jacl_i32(42));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+  /* print pushes nil as return value */
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_PRINT with f32 value */
+static int test_op_print_f32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c = chunk_add_constant(&chunk, jacl_f32(3.14f));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3.14\n");
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_PRINT with nil value */
+static int test_op_print_nil(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  chunk_write(&chunk, OP_NIL, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "nil\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_PRINT with true and false */
+static int test_op_print_bool(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  chunk_write(&chunk, OP_TRUE, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_POP, 1);  /* discard nil return */
+  chunk_write(&chunk, OP_FALSE, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\nfalse\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_PRINT with inline string */
+static int test_op_print_string(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c = chunk_add_constant(&chunk, jacl_inline_string("hello", 5));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_PRINT with error-flagged value */
+static int test_op_print_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c = chunk_add_constant(&chunk, jacl_set_error(jacl_i32(0)));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "<error>\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: print [+ 1 2] outputs 3\n via hand-assembled bytecode */
+static int test_op_print_add_result(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(2));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_ADD, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n");
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_PRINT with negative i32 */
+static int test_op_print_negative(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c = chunk_add_constant(&chunk, jacl_i32(-7));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "-7\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1115,6 +1364,15 @@ int main(void) {
     { "op_gt_f32",                test_op_gt_f32 },
     { "op_lt_mixed_type_error",   test_op_lt_mixed_type_error },
     { "op_eq_f32",                test_op_eq_f32 },
+    /* US-006: Print builtin (VM) */
+    { "op_print_i32",             test_op_print_i32 },
+    { "op_print_f32",             test_op_print_f32 },
+    { "op_print_nil",             test_op_print_nil },
+    { "op_print_bool",            test_op_print_bool },
+    { "op_print_string",          test_op_print_string },
+    { "op_print_error",           test_op_print_error },
+    { "op_print_add_result",      test_op_print_add_result },
+    { "op_print_negative",        test_op_print_negative },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
