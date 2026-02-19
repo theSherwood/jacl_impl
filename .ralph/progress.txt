@@ -78,6 +78,10 @@
 - Compiler `def`: checks argc==2, args[0] must be AST_LIT_STRING, compiles value then emits OP_DEF_GLOBAL
 - Compiler AST_VAR_REF: creates inline_string from name, emits OP_GET_GLOBAL
 
+- Pipeline API: jacl_run(source, vm, arena) in vm/vm.h (guarded by #ifdef COMPILER_H)
+- jacl_run chains: lexer_lex -> parser_parse -> compiler_compile -> vm_exec
+- Returns VM_RUNTIME_ERROR for parse/compile errors, sets vm->error_message
+
 - VM error reporting: error_message (arena-allocated or static) and error_line fields on VM struct
 - vm__set_error(vm, fmt, ...) for formatted error messages via vsnprintf + arena_alloc
 - vm__type_name(val) returns "nil"/"bool"/"i32"/"f32"/"string"/"unknown" for error messages
@@ -237,4 +241,29 @@
   - OP_GET_GLOBAL behavior changed in US-009: undefined vars now return VM_RUNTIME_ERROR instead of pushing error-flagged value
   - compiler__error was updated from (Compiler*, message) to (Compiler*, line, col, message); all callers updated
   - strstr() in test assertions is useful for verifying error messages contain expected substrings without brittle exact matching
+---
+
+## 2026-02-19 - US-010
+- Implemented jacl_run pipeline helper in vm/vm.h: chains lexer_lex -> parser_parse -> compiler_compile -> vm_exec
+- jacl_run guarded by `#ifdef COMPILER_H` so it's only available when the full pipeline is included
+- Parse errors and compile errors halt the pipeline and set vm->error_message before returning VM_RUNTIME_ERROR
+- Created vm/test_integration.c with 10 integration tests covering all acceptance criteria:
+  - jacl_run_basic: simple print execution
+  - motivating_example: [print [+ 1 2]] outputs "3\n"
+  - parse_error_reported: unclosed bracket halts pipeline
+  - compile_error_reported: unknown command halts pipeline
+  - runtime_error_with_line: type mismatch includes line number
+  - deliberate_errors: multiple error paths (long string, undefined var, div by zero)
+  - comprehensive_program: 12-line program mixing def, arithmetic, comparisons, print, nested subcommands
+  - f32_pipeline: float arithmetic end-to-end
+  - semicolons_pipeline: multi-statement with semicolons
+  - empty_program: empty source succeeds
+- Files changed: vm/vm.h (modified), vm/test_integration.c (new), build.sh (modified)
+- All 10 integration tests pass, full build suite green (33/33 modules)
+- **Learnings for future iterations:**
+  - jacl_run is guarded by `#ifdef COMPILER_H` in both declaration and implementation sections of vm.h
+  - This works because test files that need jacl_run include compiler.h before vm.h (COMPILER_H is defined)
+  - test_vm.c doesn't include compiler.h, so jacl_run is invisible there — no unused static function warnings
+  - CompileResult.chunk is stack-allocated inside jacl_run but its data (code, constants) is arena-allocated, so vm_exec can safely use it
+  - PrintCapture buffer in integration tests is 1024 bytes (larger than test_compiler.c's 256) to accommodate multi-line output
 ---
