@@ -66,6 +66,12 @@ typedef struct {
 static void     vm_init(VM* vm, arena_t* arena);
 static VMResult vm_exec(VM* vm, BytecodeChunk* chunk);
 
+/* --- Pipeline convenience (available when compiler.h is included) --- */
+
+#ifdef COMPILER_H
+static VMResult jacl_run(const char* source, VM* vm, arena_t* arena);
+#endif
+
 #endif /* VM_H */
 
 /* =========================================================================
@@ -460,6 +466,34 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
 }
 
 #undef VM__BINARY_NUMERIC_OP
+
+/* --- Pipeline convenience: jacl_run --- */
+
+#ifdef COMPILER_H
+
+/**
+ * Source-to-execution pipeline.
+ * Chains: lexer_lex -> parser_parse -> compiler_compile -> vm_exec.
+ * Returns VM_RUNTIME_ERROR on parse or compile errors (message in vm->error_message).
+ */
+static VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
+  LexResult tokens = lexer_lex(source, arena);
+  ParseResult parse = parser_parse(tokens, arena);
+  if (parse.error_count > 0) {
+    vm->error_message = "parse error";
+    return VM_RUNTIME_ERROR;
+  }
+
+  CompileResult cr = compiler_compile(parse, arena);
+  if (cr.error_count > 0) {
+    vm->error_message = cr.error_message ? cr.error_message : "compile error";
+    return VM_RUNTIME_ERROR;
+  }
+
+  return vm_exec(vm, &cr.chunk);
+}
+
+#endif /* COMPILER_H */
 
 #endif /* VM_IMPL_GUARD_ */
 #endif /* VM_IMPLEMENTATION */

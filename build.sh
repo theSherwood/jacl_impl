@@ -46,6 +46,7 @@ TESTS=(
     "compiler/test_bytecode.c|bytecode|"
     "vm/test_vm.c|vm|"
     "compiler/test_compiler.c|compiler|"
+    "vm/test_integration.c|integration|"
 )
 
 echo "=== ds test runner ==="
