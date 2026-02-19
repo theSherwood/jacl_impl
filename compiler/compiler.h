@@ -78,6 +78,70 @@ static void compiler__error(Compiler* c, const char* message) {
   c->error_count++;
 }
 
+/* --- Internal: Command head matching --- */
+
+static int compiler__head_matches(AstNode* head, const char* name, uint32_t len) {
+  return head->type == AST_LIT_STRING &&
+         head->data.lit_string.length == len &&
+         memcmp(head->data.lit_string.value, name, len) == 0;
+}
+
+/* --- Internal: Compile a binary operation --- */
+
+static void compiler__compile_node(Compiler* c, AstNode* node);
+
+static void compiler__compile_binary(Compiler* c, AstNode** args,
+                                     uint8_t op, uint32_t line) {
+  compiler__compile_node(c, args[0]);
+  compiler__compile_node(c, args[1]);
+  compiler__emit_byte(c, op, line);
+}
+
+/* --- Internal: Compile a command invocation --- */
+
+static void compiler__compile_command(Compiler* c, AstNode* node) {
+  AstNode* head = node->data.command.head;
+  uint32_t argc = node->data.command.arg_count;
+  AstNode** args = node->data.command.args;
+  uint32_t line = node->start.line;
+
+  /* Arithmetic builtins */
+  if (compiler__head_matches(head, "+", 1)) {
+    if (argc != 2) { compiler__error(c, "+ requires 2 arguments"); return; }
+    compiler__compile_binary(c, args, OP_ADD, line);
+    return;
+  }
+  if (compiler__head_matches(head, "-", 1)) {
+    if (argc == 1) {
+      compiler__compile_node(c, args[0]);
+      compiler__emit_byte(c, OP_NEG, line);
+    } else if (argc == 2) {
+      compiler__compile_binary(c, args, OP_SUB, line);
+    } else {
+      compiler__error(c, "- requires 1 or 2 arguments");
+    }
+    return;
+  }
+  if (compiler__head_matches(head, "*", 1)) {
+    if (argc != 2) { compiler__error(c, "* requires 2 arguments"); return; }
+    compiler__compile_binary(c, args, OP_MUL, line);
+    return;
+  }
+  if (compiler__head_matches(head, "/", 1)) {
+    if (argc != 2) { compiler__error(c, "/ requires 2 arguments"); return; }
+    compiler__compile_binary(c, args, OP_DIV, line);
+    return;
+  }
+  if (compiler__head_matches(head, "%", 1)) {
+    if (argc != 2) { compiler__error(c, "%% requires 2 arguments"); return; }
+    compiler__compile_binary(c, args, OP_MOD, line);
+    return;
+  }
+
+  /* Unknown command */
+  compiler__error(c, "unknown command");
+}
+
 /* --- Internal: Compile a single AST node --- */
 
 static void compiler__compile_node(Compiler* c, AstNode* node) {
@@ -117,8 +181,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
         /* Bare expression (e.g. bare literal at top level): compile head */
         compiler__compile_node(c, node->data.command.head);
       } else {
-        /* Command invocation — will be expanded in US-004+ for builtins */
-        compiler__error(c, "commands not yet supported");
+        compiler__compile_command(c, node);
       }
       break;
     }

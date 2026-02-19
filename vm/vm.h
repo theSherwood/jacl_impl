@@ -112,6 +112,24 @@ static uint16_t vm__read_u16(VM* vm) {
   return (uint16_t)((hi << 8) | lo);
 }
 
+/* --- Binary numeric operation macro --- */
+
+#define VM__BINARY_NUMERIC_OP(fn_i32, fn_f32)                               \
+  do {                                                                        \
+    JaclVal b, a;                                                             \
+    result = vm__pop(vm, &b); if (result != VM_OK) return result;             \
+    result = vm__pop(vm, &a); if (result != VM_OK) return result;             \
+    JaclVal res;                                                              \
+    if (jacl_is_i32(a) && jacl_is_i32(b)) {                                  \
+      res = fn_i32(a, b);                                                     \
+    } else if (jacl_is_f32(a) && jacl_is_f32(b)) {                           \
+      res = fn_f32(a, b);                                                     \
+    } else {                                                                  \
+      return VM_RUNTIME_ERROR;                                                \
+    }                                                                         \
+    result = vm__push(vm, res); if (result != VM_OK) return result;           \
+  } while (0)
+
 /**
  * Execute a bytecode chunk.
  * Returns VM_OK on successful completion (OP_HALT),
@@ -160,6 +178,54 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         break;
       }
 
+      case OP_ADD: {
+        VM__BINARY_NUMERIC_OP(jacl_add_i32, jacl_add_f32);
+        break;
+      }
+
+      case OP_SUB: {
+        VM__BINARY_NUMERIC_OP(jacl_sub_i32, jacl_sub_f32);
+        break;
+      }
+
+      case OP_MUL: {
+        VM__BINARY_NUMERIC_OP(jacl_mul_i32, jacl_mul_f32);
+        break;
+      }
+
+      case OP_DIV: {
+        VM__BINARY_NUMERIC_OP(jacl_div_i32, jacl_div_f32);
+        break;
+      }
+
+      case OP_MOD: {
+        JaclVal b, a;
+        result = vm__pop(vm, &b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &a); if (result != VM_OK) return result;
+        if (jacl_is_i32(a) && jacl_is_i32(b)) {
+          result = vm__push(vm, jacl_mod_i32(a, b));
+          if (result != VM_OK) return result;
+        } else {
+          return VM_RUNTIME_ERROR;  /* MOD is i32-only */
+        }
+        break;
+      }
+
+      case OP_NEG: {
+        JaclVal a;
+        result = vm__pop(vm, &a); if (result != VM_OK) return result;
+        JaclVal res;
+        if (jacl_is_i32(a)) {
+          res = jacl_neg_i32(a);
+        } else if (jacl_is_f32(a)) {
+          res = jacl_neg_f32(a);
+        } else {
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, res); if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }
@@ -171,6 +237,8 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
     }
   }
 }
+
+#undef VM__BINARY_NUMERIC_OP
 
 #endif /* VM_IMPL_GUARD_ */
 #endif /* VM_IMPLEMENTATION */

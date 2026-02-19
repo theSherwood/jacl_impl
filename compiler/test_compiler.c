@@ -325,6 +325,158 @@ static int test_compile_parse_error_propagated(void) {
   TEST_PASS();
 }
 
+/* ===== US-004: Arithmetic builtins (compiler) ===== */
+
+/* Test: [+ 1 2] compiles to OP_CONST(1), OP_CONST(2), OP_ADD */
+static int test_compile_add(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[+ 1 2]", &arena);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_U32_EQ(cr.chunk.const_count, 2);
+  ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[0]), 1);
+  ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[1]), 2);
+
+  /* Bytecode: OP_CONST u16(0) OP_CONST u16(1) OP_ADD OP_HALT */
+  ASSERT_U32_EQ(cr.chunk.code_count, 8);
+  ASSERT_INT_EQ(cr.chunk.code[0], OP_CONST);
+  ASSERT_INT_EQ(cr.chunk.code[1], 0);
+  ASSERT_INT_EQ(cr.chunk.code[2], 0);
+  ASSERT_INT_EQ(cr.chunk.code[3], OP_CONST);
+  ASSERT_INT_EQ(cr.chunk.code[4], 0);
+  ASSERT_INT_EQ(cr.chunk.code[5], 1);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_ADD);
+  ASSERT_INT_EQ(cr.chunk.code[7], OP_HALT);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [- 10 3] compiles to OP_CONST(10), OP_CONST(3), OP_SUB */
+static int test_compile_sub(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[- 10 3]", &arena);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_U32_EQ(cr.chunk.const_count, 2);
+  ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[0]), 10);
+  ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[1]), 3);
+
+  ASSERT_U32_EQ(cr.chunk.code_count, 8);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_SUB);
+  ASSERT_INT_EQ(cr.chunk.code[7], OP_HALT);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [* 4 5], [/ 10 2], [% 7 3] compile to correct opcodes */
+static int test_compile_mul_div_mod(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Test * */
+  CompileResult cr = compile_source("[* 4 5]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_MUL);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+
+  /* Test / */
+  tracker_reset();
+  arena = (arena_t){ .allocator = tracked_allocator };
+  cr = compile_source("[/ 10 2]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_DIV);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+
+  /* Test % */
+  tracker_reset();
+  arena = (arena_t){ .allocator = tracked_allocator };
+  cr = compile_source("[% 7 3]", &arena);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_MOD);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+
+  TEST_PASS();
+}
+
+/* Test: unary negation [- 5] compiles to OP_CONST(5), OP_NEG */
+static int test_compile_unary_neg(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[- 5]", &arena);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_U32_EQ(cr.chunk.const_count, 1);
+  ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[0]), 5);
+
+  /* Bytecode: OP_CONST u16(0) OP_NEG OP_HALT */
+  ASSERT_U32_EQ(cr.chunk.code_count, 5);
+  ASSERT_INT_EQ(cr.chunk.code[0], OP_CONST);
+  ASSERT_INT_EQ(cr.chunk.code[3], OP_NEG);
+  ASSERT_INT_EQ(cr.chunk.code[4], OP_HALT);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: nested [+ 1 [* 2 3]] compiles correctly */
+static int test_compile_nested_arithmetic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[+ 1 [* 2 3]]", &arena);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_U32_EQ(cr.chunk.const_count, 3);
+  ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[0]), 1);
+  ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[1]), 2);
+  ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[2]), 3);
+
+  /* Bytecode: CONST(1) CONST(2) CONST(3) MUL ADD HALT */
+  /* = 3 + 3 + 3 + 1 + 1 + 1 = 12 bytes */
+  ASSERT_U32_EQ(cr.chunk.code_count, 12);
+  ASSERT_INT_EQ(cr.chunk.code[0], OP_CONST);  /* 1 */
+  ASSERT_INT_EQ(cr.chunk.code[3], OP_CONST);  /* 2 */
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_CONST);  /* 3 */
+  ASSERT_INT_EQ(cr.chunk.code[9], OP_MUL);
+  ASSERT_INT_EQ(cr.chunk.code[10], OP_ADD);
+  ASSERT_INT_EQ(cr.chunk.code[11], OP_HALT);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: f32 arithmetic compiles the same way as i32 */
+static int test_compile_f32_arithmetic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[+ 1.5 2.5]", &arena);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT_U32_EQ(cr.chunk.const_count, 2);
+  ASSERT(jacl_is_f32(cr.chunk.constants[0]));
+  ASSERT(jacl_is_f32(cr.chunk.constants[1]));
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_ADD);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -346,6 +498,13 @@ int main(void) {
     { "compile_const_pool_indices",  test_compile_const_pool_indices },
     { "compile_line_tracking",       test_compile_line_tracking },
     { "compile_parse_error_propagated", test_compile_parse_error_propagated },
+    /* US-004: Arithmetic builtins (compiler) */
+    { "compile_add",                 test_compile_add },
+    { "compile_sub",                 test_compile_sub },
+    { "compile_mul_div_mod",         test_compile_mul_div_mod },
+    { "compile_unary_neg",           test_compile_unary_neg },
+    { "compile_nested_arithmetic",   test_compile_nested_arithmetic },
+    { "compile_f32_arithmetic",      test_compile_f32_arithmetic },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

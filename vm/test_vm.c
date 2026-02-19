@@ -361,6 +361,384 @@ static int test_push_pop_interleaved(void) {
   TEST_PASS();
 }
 
+/* ===== US-004: Arithmetic builtins (VM) ===== */
+
+/* Test: OP_ADD with i32 values */
+static int test_op_add_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(10));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(32));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_ADD, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_ADD with f32 values */
+static int test_op_add_f32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_f32(1.5f));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_f32(2.5f));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_ADD, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_f32(vm.stack[0]));
+  float f = jacl_as_f32(vm.stack[0]);
+  ASSERT(f > 3.9f && f < 4.1f);  /* 1.5 + 2.5 = 4.0 */
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_SUB with i32 */
+static int test_op_sub_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(10));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(3));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_SUB, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 7);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_MUL with i32 */
+static int test_op_mul_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(4));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(5));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_MUL, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 20);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_DIV with i32 */
+static int test_op_div_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(10));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(2));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_DIV, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 5);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_MOD with i32 */
+static int test_op_mod_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(7));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(3));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_MOD, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_NEG with i32 */
+static int test_op_neg_i32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c = chunk_add_constant(&chunk, jacl_i32(42));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c, 1);
+  chunk_write(&chunk, OP_NEG, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), -42);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_NEG with f32 */
+static int test_op_neg_f32(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c = chunk_add_constant(&chunk, jacl_f32(3.14f));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c, 1);
+  chunk_write(&chunk, OP_NEG, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT(jacl_is_f32(vm.stack[0]));
+  float f = jacl_as_f32(vm.stack[0]);
+  ASSERT(f < -3.13f && f > -3.15f);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: division by zero produces error-flagged value */
+static int test_op_div_by_zero(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(10));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(0));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_DIV, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_error(vm.stack[0]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: OP_MOD with f32 produces runtime error */
+static int test_op_mod_f32_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_f32(7.0f));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_f32(3.0f));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_MOD, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: mixed types (i32 + f32) produces runtime error */
+static int test_op_add_mixed_type_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_f32(2.0f));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_ADD, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: nested arithmetic 1 + (2 * 3) = 7 via hand-assembled bytecode */
+static int test_op_nested_arithmetic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(1));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(2));
+  uint16_t c3 = chunk_add_constant(&chunk, jacl_i32(3));
+
+  /* Push 1, push 2, push 3, mul, add -> 1 + (2*3) = 7 */
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c3, 1);
+  chunk_write(&chunk, OP_MUL, 1);
+  chunk_write(&chunk, OP_ADD, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 7);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: f32 arithmetic operations (sub, mul, div) */
+static int test_op_f32_arithmetic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  /* 10.0 - 3.0 = 7.0 */
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_f32(10.0f));
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_f32(3.0f));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+  chunk_write(&chunk, OP_SUB, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm);
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT(jacl_is_f32(vm.stack[0]));
+  float f = jacl_as_f32(vm.stack[0]);
+  ASSERT(f > 6.9f && f < 7.1f);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -382,6 +760,20 @@ int main(void) {
     { "custom_print_fn",          test_custom_print_fn },
     { "literal_push_sequence",    test_literal_push_sequence },
     { "push_pop_interleaved",     test_push_pop_interleaved },
+    /* US-004: Arithmetic builtins (VM) */
+    { "op_add_i32",               test_op_add_i32 },
+    { "op_add_f32",               test_op_add_f32 },
+    { "op_sub_i32",               test_op_sub_i32 },
+    { "op_mul_i32",               test_op_mul_i32 },
+    { "op_div_i32",               test_op_div_i32 },
+    { "op_mod_i32",               test_op_mod_i32 },
+    { "op_neg_i32",               test_op_neg_i32 },
+    { "op_neg_f32",               test_op_neg_f32 },
+    { "op_div_by_zero",           test_op_div_by_zero },
+    { "op_mod_f32_error",         test_op_mod_f32_error },
+    { "op_add_mixed_type_error",  test_op_add_mixed_type_error },
+    { "op_nested_arithmetic",     test_op_nested_arithmetic },
+    { "op_f32_arithmetic",        test_op_f32_arithmetic },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
