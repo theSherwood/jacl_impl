@@ -43,6 +43,7 @@ TESTS=(
     "lexer/test_lexer.c|lexer|"
     "value/test_value.c|value|"
     "parser/test_parser.c|parser|"
+    "compiler/test_bytecode.c|bytecode|"
 )
 
 echo "=== ds test runner ==="
