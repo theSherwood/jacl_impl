@@ -1258,6 +1258,167 @@ static int test_error_valid_after(void) {
   TEST_PASS();
 }
 
+/* ---- US-011 tests ---- */
+
+static int roundtrip_ok(const char* input) {
+  /* Parse → pretty-print → re-parse → pretty-print → compare strings */
+  LexResult t1 = lexer_lex(input, &test_arena);
+  ParseResult r1 = parser_parse(t1, &test_arena);
+  if (r1.error_count > 0) return 0;
+  const char* pp1 = ast_pretty_print_program(r1.nodes, r1.count, &test_arena);
+  LexResult t2 = lexer_lex(pp1, &test_arena);
+  ParseResult r2 = parser_parse(t2, &test_arena);
+  if (r2.error_count > 0) return 0;
+  if (r2.count != r1.count) return 0;
+  const char* pp2 = ast_pretty_print_program(r2.nodes, r2.count, &test_arena);
+  return strcmp(pp1, pp2) == 0;
+}
+
+static int test_pp_command_format(void) {
+  setup();
+  /* Commands print in explicit bracket form */
+  AstNode* n = parse_expr("[cmd arg1 arg2]");
+  const char* s = ast_pretty_print(n, &test_arena);
+  ASSERT(strcmp(s, "[cmd arg1 arg2]") == 0);
+  /* No-arg command */
+  AstNode* n2 = parse_expr("[foo]");
+  const char* s2 = ast_pretty_print(n2, &test_arena);
+  ASSERT(strcmp(s2, "[foo]") == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_pp_literals_format(void) {
+  setup();
+  /* Integer */
+  AstNode* n1 = parse_atom("42");
+  ASSERT(strcmp(ast_pretty_print(n1, &test_arena), "42") == 0);
+  /* Float */
+  AstNode* n2 = parse_atom("3.14");
+  ASSERT(strcmp(ast_pretty_print(n2, &test_arena), "3.14") == 0);
+  /* Bare word */
+  AstNode* n3 = parse_atom("hello");
+  ASSERT(strcmp(ast_pretty_print(n3, &test_arena), "hello") == 0);
+  /* Quoted string with spaces */
+  AstNode* n4 = parse_atom("\"hello world\"");
+  ASSERT(strcmp(ast_pretty_print(n4, &test_arena), "\"hello world\"") == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_pp_var_ref_format(void) {
+  setup();
+  AstNode* n = parse_atom("$name");
+  ASSERT(strcmp(ast_pretty_print(n, &test_arena), "$name") == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_pp_block_format(void) {
+  setup();
+  /* Block with two commands: { [cmd1]; [cmd2] } */
+  AstNode* n = parse_expr("{ print a; print b }");
+  const char* s = ast_pretty_print(n, &test_arena);
+  ASSERT(strcmp(s, "{ [print a]; [print b] }") == 0);
+  /* Empty block */
+  AstNode* n2 = parse_expr("{}");
+  ASSERT(strcmp(ast_pretty_print(n2, &test_arena), "{}") == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_pp_interp_format(void) {
+  setup();
+  /* Interpolated string with var and expr */
+  AstNode* n = parse_expr("\"hello $name, result: $[+ 1 2]\"");
+  const char* s = ast_pretty_print(n, &test_arena);
+  ASSERT(strcmp(s, "\"hello $name, result: $[+ 1 2]\"") == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_pp_program_format(void) {
+  setup();
+  /* Multi-node program separated by newlines */
+  ParseResult r = parse("def x 42\nprint $x");
+  ASSERT_U32_EQ(r.count, 2);
+  const char* s = ast_pretty_print_program(r.nodes, r.count, &test_arena);
+  ASSERT(strcmp(s, "[def x 42]\n[print $x]") == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_literals(void) {
+  setup();
+  ASSERT(roundtrip_ok("def x 42"));
+  ASSERT(roundtrip_ok("def pi 3.14"));
+  ASSERT(roundtrip_ok("print hello"));
+  ASSERT(roundtrip_ok("print \"hello world\""));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_commands(void) {
+  setup();
+  ASSERT(roundtrip_ok("[+ 1 2]"));
+  ASSERT(roundtrip_ok("[print [+ 1 2]]"));
+  ASSERT(roundtrip_ok("[a [b [c 1]]]"));
+  ASSERT(roundtrip_ok("print [+ [* 2 3] 4]"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_blocks(void) {
+  setup();
+  ASSERT(roundtrip_ok("if $cond { print yes }"));
+  ASSERT(roundtrip_ok("if $x { print yes; print no }"));
+  ASSERT(roundtrip_ok("proc greet { print hello }"));
+  ASSERT(roundtrip_ok("if $x { if $y { inner } }"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_interp(void) {
+  setup();
+  ASSERT(roundtrip_ok("print \"hello $name\""));
+  ASSERT(roundtrip_ok("print \"result: $[+ 1 2]\""));
+  ASSERT(roundtrip_ok("print \"$a and $b\""));
+  ASSERT(roundtrip_ok("print \"$a$b\""));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_complex(void) {
+  setup();
+  ASSERT(roundtrip_ok(
+    "def x 42\n"
+    "def name \"world\"\n"
+    "def result [+ $x 10]\n"
+    "proc greet {\n"
+    "  print \"hello $name\"\n"
+    "}\n"
+    "if [> $x 0] {\n"
+    "  print \"positive\"\n"
+    "} {\n"
+    "  print \"non-positive\"\n"
+    "}\n"
+    "greet\n"
+  ));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -1339,6 +1500,18 @@ int main(void) {
     {"error_interleaved",     test_error_interleaved},
     {"error_positions",       test_error_positions},
     {"error_valid_after",     test_error_valid_after},
+    /* US-011 */
+    {"pp_command_format",     test_pp_command_format},
+    {"pp_literals_format",    test_pp_literals_format},
+    {"pp_var_ref_format",     test_pp_var_ref_format},
+    {"pp_block_format",       test_pp_block_format},
+    {"pp_interp_format",      test_pp_interp_format},
+    {"pp_program_format",     test_pp_program_format},
+    {"roundtrip_literals",    test_roundtrip_literals},
+    {"roundtrip_commands",    test_roundtrip_commands},
+    {"roundtrip_blocks",      test_roundtrip_blocks},
+    {"roundtrip_interp",      test_roundtrip_interp},
+    {"roundtrip_complex",     test_roundtrip_complex},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;
