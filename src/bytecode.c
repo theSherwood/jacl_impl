@@ -30,10 +30,20 @@ typedef enum {
   OP_GT,          /* pop two, push greater-than result */
   OP_LE,          /* pop two, push less-or-equal result */
   OP_GE,          /* pop two, push greater-or-equal result */
-  OP_PRINT,       /* pop one, print it */
-  OP_DEF_GLOBAL,  /* define global: followed by uint16_t name index */
-  OP_GET_GLOBAL,  /* get global: followed by uint16_t name index */
-  OP_HALT         /* stop execution */
+  OP_PRINT,         /* pop one, print it */
+  OP_DEF_GLOBAL,    /* define global: followed by uint16_t name index */
+  OP_GET_GLOBAL,    /* get global: followed by uint16_t name index */
+  OP_GET_LOCAL,     /* push local: followed by uint8_t slot index */
+  OP_SET_LOCAL,     /* set local: followed by uint8_t slot index */
+  OP_GET_UPVALUE,   /* push upvalue: followed by uint8_t upvalue index */
+  OP_JUMP,          /* forward jump: followed by uint16_t offset */
+  OP_JUMP_IF_FALSE, /* conditional jump: followed by uint16_t offset, pops condition */
+  OP_LOOP,          /* backward jump: followed by uint16_t offset */
+  OP_CALL,          /* call closure: followed by uint8_t arg count */
+  OP_RETURN,        /* return from call */
+  OP_CLOSURE,       /* create closure: followed by uint16_t const index, then N upvalue descriptors */
+  OP_POP_N,         /* discard N values: followed by uint8_t count */
+  OP_HALT           /* stop execution */
 } OpCode;
 
 /* --- Initial capacities --- */

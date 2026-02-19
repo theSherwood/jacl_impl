@@ -3,28 +3,39 @@
 
 /* ===== US-001: Bytecode chunk and opcode definitions ===== */
 
-/* Test: OpCode enum defines all M3 opcodes */
+/* Test: OpCode enum defines all M3+M4 opcodes */
 static int test_opcode_enum(void) {
-  ASSERT_INT_EQ(OP_CONST,      0);
-  ASSERT_INT_EQ(OP_NIL,        1);
-  ASSERT_INT_EQ(OP_TRUE,       2);
-  ASSERT_INT_EQ(OP_FALSE,      3);
-  ASSERT_INT_EQ(OP_POP,        4);
-  ASSERT_INT_EQ(OP_ADD,        5);
-  ASSERT_INT_EQ(OP_SUB,        6);
-  ASSERT_INT_EQ(OP_MUL,        7);
-  ASSERT_INT_EQ(OP_DIV,        8);
-  ASSERT_INT_EQ(OP_MOD,        9);
-  ASSERT_INT_EQ(OP_NEG,       10);
-  ASSERT_INT_EQ(OP_EQ,        11);
-  ASSERT_INT_EQ(OP_LT,        12);
-  ASSERT_INT_EQ(OP_GT,        13);
-  ASSERT_INT_EQ(OP_LE,        14);
-  ASSERT_INT_EQ(OP_GE,        15);
-  ASSERT_INT_EQ(OP_PRINT,     16);
-  ASSERT_INT_EQ(OP_DEF_GLOBAL,17);
-  ASSERT_INT_EQ(OP_GET_GLOBAL,18);
-  ASSERT_INT_EQ(OP_HALT,      19);
+  ASSERT_INT_EQ(OP_CONST,          0);
+  ASSERT_INT_EQ(OP_NIL,            1);
+  ASSERT_INT_EQ(OP_TRUE,           2);
+  ASSERT_INT_EQ(OP_FALSE,          3);
+  ASSERT_INT_EQ(OP_POP,            4);
+  ASSERT_INT_EQ(OP_ADD,            5);
+  ASSERT_INT_EQ(OP_SUB,            6);
+  ASSERT_INT_EQ(OP_MUL,            7);
+  ASSERT_INT_EQ(OP_DIV,            8);
+  ASSERT_INT_EQ(OP_MOD,            9);
+  ASSERT_INT_EQ(OP_NEG,           10);
+  ASSERT_INT_EQ(OP_EQ,            11);
+  ASSERT_INT_EQ(OP_LT,            12);
+  ASSERT_INT_EQ(OP_GT,            13);
+  ASSERT_INT_EQ(OP_LE,            14);
+  ASSERT_INT_EQ(OP_GE,            15);
+  ASSERT_INT_EQ(OP_PRINT,         16);
+  ASSERT_INT_EQ(OP_DEF_GLOBAL,    17);
+  ASSERT_INT_EQ(OP_GET_GLOBAL,    18);
+  /* M4 opcodes */
+  ASSERT_INT_EQ(OP_GET_LOCAL,      19);
+  ASSERT_INT_EQ(OP_SET_LOCAL,      20);
+  ASSERT_INT_EQ(OP_GET_UPVALUE,    21);
+  ASSERT_INT_EQ(OP_JUMP,           22);
+  ASSERT_INT_EQ(OP_JUMP_IF_FALSE,  23);
+  ASSERT_INT_EQ(OP_LOOP,           24);
+  ASSERT_INT_EQ(OP_CALL,           25);
+  ASSERT_INT_EQ(OP_RETURN,         26);
+  ASSERT_INT_EQ(OP_CLOSURE,        27);
+  ASSERT_INT_EQ(OP_POP_N,          28);
+  ASSERT_INT_EQ(OP_HALT,           29);
   TEST_PASS();
 }
 
@@ -219,7 +230,7 @@ static int test_single_byte_opcodes(void) {
     OP_NIL, OP_TRUE, OP_FALSE, OP_POP,
     OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_NEG,
     OP_EQ, OP_LT, OP_GT, OP_LE, OP_GE,
-    OP_PRINT, OP_HALT
+    OP_PRINT, OP_RETURN, OP_HALT
   };
   uint32_t count = sizeof(single_byte) / sizeof(single_byte[0]);
 
