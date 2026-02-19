@@ -49,6 +49,13 @@
 - Bare top-level literals are wrapped by parser as AST_COMMAND{head: literal, args: [], arg_count: 0}
 - Compiler handles AST_COMMAND with arg_count==0 by compiling just the head (bare expression)
 - Test helper: compile_source(source, arena) chains lexer_lex -> parser_parse -> compiler_compile
+- Compiler command dispatch: compiler__head_matches(head, name, len) checks if AST_LIT_STRING matches a builtin name
+- compiler__compile_command dispatches known builtins (+, -, *, /, %) via if-chain with early returns
+- compiler__compile_binary(c, args, opcode, line) compiles 2 args + emits opcode
+- Unary negation: "-" with argc==1 emits OP_NEG; argc==2 emits OP_SUB
+- VM__BINARY_NUMERIC_OP macro dispatches i32/f32 variants, returns VM_RUNTIME_ERROR on type mismatch
+- OP_MOD is i32-only in VM; f32 operands produce VM_RUNTIME_ERROR
+- Division by zero produces error-flagged value (VM_OK), not VM_RUNTIME_ERROR
 
 - VM API: VM struct in vm/vm.h, vm_init, vm_exec
 - VMResult enum: VM_OK, VM_RUNTIME_ERROR, VM_STACK_OVERFLOW
@@ -103,4 +110,21 @@
   - `-7` is parsed as command `[- 7]` (operator + int), not as negative literal
   - Compile errors from parse errors are propagated by seeding result.error_count from parse.error_count
   - Test helper `compile_source(source, arena)` chains lex->parse->compile for convenience
+---
+
+## 2026-02-19 - US-004
+- Implemented arithmetic builtins in compiler and VM
+- Compiler: recognizes +, -, *, /, % command heads and emits OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_NEG
+- VM: dynamic type dispatch for i32/f32 on all arithmetic ops, OP_MOD i32-only, OP_NEG unary
+- Division by zero produces error-flagged value (not runtime error)
+- Added compiler__head_matches, compiler__compile_binary, compiler__compile_command helpers
+- Added VM__BINARY_NUMERIC_OP macro for DRY binary op dispatch
+- Files changed: compiler/compiler.h (modified), compiler/test_compiler.c (modified), vm/vm.h (modified), vm/test_vm.c (modified)
+- Added 6 compiler tests + 13 VM tests, all 32 suite tests pass
+- **Learnings for future iterations:**
+  - Command head is AST_LIT_STRING (from TOKEN_OPERATOR in parser), compare with memcmp on value/length
+  - compiler__compile_command is the central dispatch for builtin commands; extend with more if-chains for new builtins
+  - VM__BINARY_NUMERIC_OP macro cleanly handles the pop-pop-typecheck-dispatch-push pattern
+  - OP_MOD explicitly rejects f32 (not handled by the generic macro)
+  - Forward declaration of compiler__compile_node needed since compiler__compile_binary calls it before definition
 ---
