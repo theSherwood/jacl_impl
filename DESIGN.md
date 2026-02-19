@@ -27,7 +27,7 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | 1  | Lexer                        | **COMPLETE** | Token stream (23 token types) |
 | 2  | Parser & AST                 | **COMPLETE** | Recursive descent parser, arena-allocated AST |
 | 3  | Bytecode Compiler & VM       | **COMPLETE** | Opcodes, compiler, stack VM, `jacl_run` pipeline |
-| 4  | Variables, Procs, Control    |              | `proc`, `if`, closures, lexical scoping |
+| 4  | Variables, Procs, Control    | **COMPLETE** | `proc`, `if`, closures, lexical scoping |
 | 5  | String System                |              | Heap interned strings, interpolation end-to-end |
 | 6  | Persistent Collections       |              | Vectors (RRB) and maps (HAMT) from JACL |
 | 7  | Error Handling               |              | Error flag propagation, `try` |
@@ -60,7 +60,7 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 - Vector type backed by `rrb_vec`: `vec`, `vec-get`, `vec-set`, `vec-push`, `vec-len`, etc.
 - Map type backed by `hamt`: `map`, `map-get`, `map-set`, `map-has`, `map-keys`, etc.
 - Iteration via `each` builtin
-- Initially use constructor builtins: `[vec 1 2 3]`, `[map :key val]`
+- Initially use constructor builtins: `[vec 1 2 3]`, `[map key val]`
 
 ### M7: Error Handling
 - `error` builtin creates error-flagged values with arbitrary payloads

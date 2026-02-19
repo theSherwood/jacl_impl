@@ -210,7 +210,7 @@
         "Commit message references M4 completion"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ]
