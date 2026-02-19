@@ -562,92 +562,26 @@ ones but each is a self-contained deliverable.
 
 ### Milestone 0: Value Representation (`value/`) — COMPLETE
 
-The foundation everything else sits on. Implements the 64-bit tagged value system from
-Section 2.
-
-**Delivered:**
-- `value/value.h` — single-header with `JaclVal` type (`uint64_t` typedef)
-- Constants: `JACL_NIL`, `JACL_TRUE`, `JACL_FALSE`
-- Tag byte manipulation: shift/mask constants, flag constants, type tag constants
-  (all pre-shifted to bit position, e.g., `JACL_TAG_I32 = 0x02 << 56`)
-- Constructors: `jacl_bool`, `jacl_i32`, `jacl_f32`, `jacl_inline_string`,
-  `jacl_string_ptr`, `jacl_vector_ptr`, `jacl_map_ptr`, `jacl_closure_ptr`, `jacl_bignum_ptr`
-- Extractors: `jacl_as_bool`, `jacl_as_i32`, `jacl_as_f32`, `jacl_as_ptr`,
-  `jacl_inline_string_len`, `jacl_inline_string_get`, `jacl_type_tag`
-- Type predicates: `jacl_is_nil`, `jacl_is_bool`, `jacl_is_i32`, `jacl_is_f32`,
-  `jacl_is_inline_string`, `jacl_is_string`, `jacl_is_vector`, `jacl_is_map`,
-  `jacl_is_closure`, `jacl_is_bignum` (all ignore flag bits)
-- Flag manipulation: `jacl_is_tainted`/`set`/`clear`, `jacl_is_secret`/`set`/`clear`,
-  `jacl_is_error`/`set`/`clear` (value semantics — return new `JaclVal`)
-- Flag propagation: `jacl_propagate_flags(a, b)`, `jacl_apply_flags(result, flags)`
-- i32 arithmetic: `jacl_add_i32`, `sub`, `mul`, `div`, `mod`, `neg` — with error
-  short-circuit, flag propagation, division-by-zero → error-flagged, INT32_MIN UB guards
-- f32 arithmetic: `jacl_add_f32`, `sub`, `mul`, `div`, `neg` — IEEE 754 semantics
-  (division by zero → inf/NaN, not error-flagged)
-- Comparisons: `jacl_eq` (type+payload equality, ignoring flags, cross-type → false),
-  `jacl_lt_i32`/`gt`/`le`/`ge`, `jacl_lt_f32`/`gt`/`le`/`ge` — all return `JaclVal`
-  bool with propagated flags
-- All functions are `static inline` in the header declaration section
-- Compile-time pointer size assert (C99 typedef trick)
-
-**Tests:** 80 tests in `value/test_value.c` covering construct/extract round-trips for
-every type, NxN predicate matrix (10 types × 10 predicates), flag independence and
-propagation (exhaustive 8×8 flag combination matrix), inline string pack/unpack,
-arithmetic edge cases (INT32_MIN, overflow/wrap, IEEE 754 inf/NaN), comparison
-semantics, error short-circuit behavior.
-
-**No dependencies on other milestones.**
+64-bit tagged value system (`JaclVal`). Constructors, extractors, and predicates for all
+types. Tainted/secret/error flag propagation. i32/f32 arithmetic with error short-circuit.
+80 tests.
 
 ---
 
 ### Milestone 1: Lexer (`lexer/`) — COMPLETE
 
-Tokenizes Phase 1 bracket syntax. Operates on byte buffers (later: rope input).
-
-**Delivered:**
-- `lexer/lexer.h` — single-header streaming tokenizer with 23 token types
-- Delimiters: `[`, `]`, `{`, `}`, `(`, `)`
-- Literals: `TOKEN_WORD` (bare words), `TOKEN_INT` (decimal/hex `0x`/binary `0b`),
-  `TOKEN_FLOAT`, `TOKEN_STRING` (double-quoted with escape sequences),
-- Variables: `TOKEN_VAR` (`$identifier`), `TOKEN_DOLLAR_BRACKET` (`$[`)
-- Operators: greedy consumption of operator characters (`!%&*+-./<=>?@\^|~`)
-- String interpolation: `STRING_BEGIN`/`STRING_PART`/`STRING_END` with
-  `INTERP_VAR` and `INTERP_EXPR_START`/`INTERP_EXPR_END` for `$var` and `$[expr]`
-  (non-interpolated strings still emit single `STRING` token)
-- Comments: `#` to end of line (skipped, not emitted)
-- `TOKEN_NEWLINE`, `TOKEN_EOF`, `TOKEN_ERROR` (with descriptive messages)
-- Position tracking: line, column, byte offset per token
-- Arena-backed allocation for token storage and string content
-- Escape sequences: `\\`, `\"`, `\n`, `\t`, `\r`, `\0`, `\xNN`, `\uNNNN`, `\UNNNNNNNN`
-- Error recovery: invalid tokens consume minimal input, lexing continues
-- Zero-copy for words/operators (payload points into source buffer);
-  arena-allocated for string content
-
-**Tests:** 95 tests in `lexer/test_lexer.c` covering individual constructs, all escape
-types, string interpolation (nested `$[expr]` with recursive strings), number formats
-(decimal/hex/binary/float), error recovery, position tracking across multi-line
-programs, and a 58-line integration test exercising all token types (190 tokens).
-
-**Depends on:** Arena module (for allocation). No dependency on value module.
+Single-header streaming tokenizer with 23 token types. Handles all Phase 1 bracket syntax
+including string interpolation, escape sequences, comments, and error recovery with
+position tracking. 95 tests.
 
 ---
 
-### Milestone 2: Parser & AST (`parser/`)
+### Milestone 2: Parser & AST (`parser/`) — COMPLETE
 
-Parse token stream into a tree of command invocations — the "lisp under the hood."
-
-**Delivers:**
-- `ast.h` — AST node types: command invocation, literal (number, string),
-  variable reference (`$var`), code block (`{ ... }`), interpolated string
-- `parser.h` — recursive descent parser producing AST from token stream
-- Top-level: implicit brackets (bare commands); nested: explicit `[cmd ...]`
-- Code blocks `{ ... }` parsed as a sequence of commands
-- Error recovery: meaningful parse error messages with source positions
-
-**Tests:** parse and verify AST structure for all Phase 1 syntax constructs, error
-cases (mismatched brackets, unexpected tokens), round-trip pretty-printing.
-
-**Depends on:** Milestone 1.
+Recursive descent parser producing arena-allocated AST from lexer token stream. Tagged
+union AST nodes (command, literals, var ref, block, interp string, error). Bare commands
+at top level, explicit `[cmd ...]` nested. Code blocks `{ ... }` as command arguments.
+Panic mode error recovery. Round-trip pretty-printer. 72 tests.
 
 ---
 
@@ -927,7 +861,7 @@ for C-held references).
 |----|------------------------------|----------------------------------------|----------------------------------|--------------|
 | 0  | Value Representation         | 64-bit tagged values                   | Everything                       | **COMPLETE** |
 | 1  | Lexer                        | Token stream                           | Parsing                          | **COMPLETE** |
-| 2  | Parser & AST                 | Command-invocation tree                | Compilation, macros              |              |
+| 2  | Parser & AST                 | Command-invocation tree                | Compilation, macros              | **COMPLETE** |
 | 3  | Bytecode Compiler & VM       | Running `[print [+ 1 2]]`             | Real programs                    |              |
 | 4  | Variables, Procs, Control    | `def`, `proc`, `if`, closures          | Turing-complete language         |              |
 | 5  | String System                | Three-tier strings, interpolation      | Command-language UX              |              |
@@ -950,6 +884,7 @@ for C-held references).
 | ------------- | ------------------------------------------------- | ------------------------------- | --------- |
 | value         | 64-bit tagged value system (JaclVal)              | `value/value.h`                 | M0        |
 | lexer         | Streaming tokenizer for Phase 1 syntax            | `lexer/lexer.h`                 | M1        |
+| parser        | Recursive descent parser and AST pretty-printer   | `parser/parser.h`, `parser/ast.h` | M2      |
 | platform      | Cross-platform atomics, threading, allocators     | `platform/platform.h`           | infra     |
 | arena         | Bulk memory allocation by lifetime                | `arena/arena.h`                 | infra     |
 | rc            | Thread-safe reference counting                    | `rc/rc.h`                       | infra     |

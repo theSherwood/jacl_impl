@@ -15,180 +15,27 @@
 - Test main() uses table-driven pattern: array of {name, fn} structs, iterates and counts pass/fail
 - Memory leak check pattern: setup() -> exercise -> teardown() -> ASSERT(check_no_leaks()) -> TEST_PASS()
 - Tests grouped by US-XXX story comments in the test table
-- Lexer token types: TOKEN_LBRACKET, TOKEN_RBRACKET, TOKEN_LBRACE, TOKEN_RBRACE, TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_SEMICOLON, TOKEN_WORD, TOKEN_OPERATOR, TOKEN_INT, TOKEN_FLOAT, TOKEN_STRING, TOKEN_STRING_BEGIN, TOKEN_STRING_PART, TOKEN_STRING_END, TOKEN_INTERP_VAR, TOKEN_INTERP_EXPR_START, TOKEN_INTERP_EXPR_END, TOKEN_VAR, TOKEN_DOLLAR_BRACKET, TOKEN_NEWLINE, TOKEN_ERROR, TOKEN_EOF
-- TOKEN_SEMICOLON added in US-006 — `;` is now a proper delimiter token (not TOKEN_ERROR)
-- LexResult struct: Token* tokens, uint32_t count, uint32_t error_count
-- Token struct: TokenType type, uint32_t line/column/offset/length, union payload (text/int_val/float_val/error_msg)
-- TOKEN_VAR payload.text points into source buffer, skips the $ prefix
+
 - Lexer API: LexResult lexer_lex(const char* source, arena_t* arena)
 - Token array always ends with TOKEN_EOF
+- TOKEN_VAR payload.text points into source buffer, skips the $ prefix
+- TOKEN_WORD payload.text points into source buffer
+- TOKEN_STRING payload.text is arena-allocated decoded content
+- TOKEN_OPERATOR handled same as TOKEN_WORD in parser
 
-- AST node types: AST_COMMAND, AST_LIT_INT, AST_LIT_FLOAT, AST_LIT_STRING, AST_VAR_REF, AST_BLOCK, AST_INTERP_STRING, AST_ERROR
-- SourcePos struct: uint32_t line, column, offset
-- AstNode is a tagged union with SourcePos start/end and type-specific data union
-- ast_alloc(arena) and ast_alloc_array(arena, count) helpers in ast.h header section (static inline)
-- AST_COMMAND has head (AstNode*) + args (AstNode**) + arg_count — head is the command name node
-- ParseResult struct: AstNode** nodes, uint32_t count, uint32_t error_count
 - Parser API: ParseResult parser_parse(LexResult tokens, arena_t* arena)
-- Parser internal: Parser struct (tokens, count, pos, arena, error_count), parser__peek/advance/at_end helpers
-- Parser test helper: `static ParseResult parse(const char* source)` wraps lexer_lex + parser_parse
-- Parser test helper: `static AstNode* parse_expr(const char* source)` wraps lexer_lex + parser__parse_expr for testing individual expressions
-- parser__parse_expr dispatches: TOKEN_LBRACKET → parse_command, atom tokens → parse_atom, otherwise → NULL
-- parser__parse_command handles [cmd args...], skips newlines inside brackets, returns AST_ERROR for empty [] or mismatched [
-- parser__parse_bare_command: parses head expr + args until command end (newline/semicolon/EOF), wraps in AST_COMMAND
-- parser__is_command_end checks TOKEN_NEWLINE, TOKEN_SEMICOLON, TOKEN_EOF
-- Top-level bracket commands ([+ 1 2] with no trailing args) are returned unwrapped from bare command parsing
-- parser_parse main loop: skip newlines/semicolons, parse bare commands, push to top_level array
-- parser__parse_block: consumes { ... }, parses commands inside like top-level loop (newline/semicolon delimited), returns AST_BLOCK
-- TOKEN_RBRACE is a command terminator in parser__is_command_end — bare commands inside blocks stop at }
-- Blocks dispatch from parser__parse_expr via TOKEN_LBRACE case
-- Blocks as command args work naturally: parse_expr dispatches to parse_block which consumes { ... }, so } never leaks to outer command parsing
-- Interpolated strings: TOKEN_STRING_BEGIN dispatches to parser__parse_interp_string in parse_expr
-- Lexer interpolation token sequence: STRING_BEGIN [INTERP_VAR|INTERP_EXPR_START...INTERP_EXPR_END] [STRING_PART [INTERP_VAR|...]]* STRING_END
-- TOKEN_INTERP_VAR payload.text points past $ into source buffer, length includes $ — var_ref.length = tok->length - 1
-- INTERP_EXPR_START/END bracket expression tokens that are parsed like a command: head + args until INTERP_EXPR_END
-- Empty text segments (STRING_BEGIN/PART/END with empty payload.text) are skipped in AST — no empty AST_LIT_STRING nodes
-- Non-interpolated strings (TOKEN_STRING) still produce AST_LIT_STRING via parse_atom, not AST_INTERP_STRING
-- Panic mode bracket sync: parser__sync_bracket skips to matching ] tracking bracket depth, stops at newline or } at depth 0
-- Error recovery in brackets: newlines inside brackets use peek-ahead (save/restore) instead of free skipping — if ] not found after newlines, restore position and break for error recovery
-- parse_bare_command returns AST_ERROR head immediately (no arg parsing) so tokens after error remain for recovery
-- parser_parse creates AST_ERROR nodes for unexpected top-level tokens (], }, etc.) instead of silently skipping
+- ParseResult struct: AstNode** nodes, uint32_t count, uint32_t error_count
+- AST node types: AST_COMMAND, AST_LIT_INT, AST_LIT_FLOAT, AST_LIT_STRING, AST_VAR_REF, AST_BLOCK, AST_INTERP_STRING, AST_ERROR
+- AST_COMMAND has head (AstNode*) + args (AstNode**) + arg_count
+- AstNode is a tagged union with SourcePos start/end
+
+- Value API: JaclVal is a 64-bit tagged value in value/value.h
+- Constructors: jacl_i32(val), jacl_f32(val), jacl_inline_string(ptr, len), JACL_NIL, JACL_TRUE, JACL_FALSE
+- Arithmetic: jacl_add_i32, jacl_sub_i32, jacl_mul_i32, jacl_div_i32, jacl_mod_i32, jacl_neg_i32 (and _f32 variants)
+- Comparison: jacl_lt_i32, jacl_gt_i32, jacl_le_i32, jacl_ge_i32 (and _f32 variants)
+- Equality: jacl_eq (works across types)
+- Type checks: jacl_is_i32, jacl_is_f32, jacl_is_nil, jacl_is_bool, jacl_is_inline_string, jacl_is_error
+- Extraction: jacl_as_i32, jacl_as_f32, jacl_inline_string_ptr, jacl_inline_string_len
 
 ---
 
-## 2026-02-18 - US-001
-- Implemented AST node type definitions in parser/ast.h
-- Created parser/ directory
-- Files changed: parser/ast.h (new)
-- **Learnings for future iterations:**
-  - ast.h includes arena.h via relative path `../arena/arena.h`
-  - ast_alloc and ast_alloc_array are static helpers in the header section (not implementation section) for convenience
-  - arena_alloc zero-initializes memory, so freshly allocated AstNodes have all fields zeroed
----
-
-## 2026-02-18 - US-002
-- Implemented ParseResult struct and parser_parse API in parser/parser.h
-- Created parser/test_parser.c with table-driven test scaffolding
-- Added parser test entry to build.sh TESTS array
-- Files changed: parser/parser.h (new), parser/test_parser.c (new), build.sh (modified)
-- **Learnings for future iterations:**
-  - parser.h includes lexer.h and ast.h via relative paths (`../lexer/lexer.h`, `ast.h`)
-  - Parser internal state: Parser struct holds tokens array, position cursor, arena pointer, error count
-  - NodeArray helper (growable AstNode** array) mirrors lexer's TokenArray pattern
-  - Helper `parse()` function in test wraps lexer_lex + parser_parse for convenient one-liner test setup
-  - The lexer does NOT produce TOKEN_SEMICOLON — `;` is an unrecognized char (TOKEN_ERROR). Future stories may need a lexer extension for this.
-  - Unused static function warnings from single-header includes are expected — they're used in future stories
----
-
-## 2026-02-18 - US-003
-- Implemented parser__parse_atom() for literal token → AST node conversion
-- Removed AST_LIT_KEYWORD from AST and all references (user decided no keyword type)
-- Added 8 tests: int decimal/hex/binary, float, word (2), quoted string, string with escapes
-- Files changed: parser/parser.h (modified), parser/test_parser.c (modified), parser/ast.h (modified), DESIGN.md (modified), .ralph/prd.json (modified), .ralph/tasks/prd-parser-ast.md (modified), .ralph/progress.txt (modified)
-- **Learnings for future iterations:**
-  - parser__parse_atom() is a static function accessible from tests since test_parser.c includes the implementation
-  - parse_atom() test helper creates a Parser directly for unit-testing atom parsing before top-level command parsing exists
-  - TOKEN_WORD payload.text points into source buffer, length = token.length
-  - TOKEN_STRING payload.text is arena-allocated decoded content, length = strlen(payload.text)
-  - TOKEN_OPERATOR handled same as TOKEN_WORD (AST_LIT_STRING) — needed for operator-as-command-name in US-005
-  - TOKEN_VAR also handled in parse_atom (AST_VAR_REF) — ready for US-004
----
-
-## 2026-02-18 - US-004
-- Added 3 tests for variable references: $x, $foo, $long_name
-- Implementation already existed in parser__parse_atom() from US-003 (TOKEN_VAR case)
-- Files changed: parser/test_parser.c (modified), .ralph/prd.json (modified), .ralph/progress.txt (modified)
-- **Learnings for future iterations:**
-  - var_ref.name points past the $ into source buffer (same pointer as TOKEN_VAR payload.text)
-  - var_ref.length = tok->length - 1 (excludes the $ prefix from the name length)
-  - Source positions (start/end) include the $ prefix since they come from token start/end
-  - All 15 parser tests pass, 29/29 full build test suites green
----
-
-## 2026-02-18 - US-005
-- Implemented parser__parse_command() for [cmd arg1 arg2] bracketed command parsing
-- Implemented parser__parse_expr() dispatcher (brackets → command, atoms → parse_atom)
-- Added 9 tests: basic command, operator head, nesting, deep 3-level nesting, var arg, empty brackets error, mismatched bracket error, source positions, no-args command
-- Files changed: parser/parser.h (modified), parser/test_parser.c (modified), .ralph/prd.json (modified), .ralph/progress.txt (modified)
-- **Learnings for future iterations:**
-  - parser__parse_expr is the main dispatch point — future node types (blocks, interp strings) add cases here
-  - parser__parse_command skips TOKEN_NEWLINE inside brackets to allow multi-line commands
-  - Empty brackets [] produce AST_ERROR (not an empty command); single-word [foo] produces a zero-arg command
-  - parse_expr test helper creates a Parser and calls parser__parse_expr directly for unit-testing expressions
-  - All 24 parser tests pass, 29/29 full build test suites green
----
-
-## 2026-02-18 - US-006
-- Implemented parser__parse_bare_command() and parser__is_command_end() for top-level bare commands
-- Updated parser_parse() main loop to parse top-level commands with newline/semicolon delimiters
-- Extended lexer with TOKEN_SEMICOLON (added to enum and delimiter handling in main loop)
-- Added 8 tests: basic bare command, newline-delimited, semicolon-delimited, blank lines, nested brackets, var refs, single word, source positions
-- Files changed: lexer/lexer.h (modified), parser/parser.h (modified), parser/test_parser.c (modified), .ralph/prd.json (modified), .ralph/progress.txt (modified)
-- **Learnings for future iterations:**
-  - TOKEN_SEMICOLON was added to the lexer enum between TOKEN_RPAREN and TOKEN_WORD, and to the single-character delimiter switch
-  - Bare command parsing: head = parse_expr, then collect args until is_command_end
-  - Bracketed commands at top level with no trailing args are returned directly (no double-wrapping)
-  - parser_parse skips both TOKEN_NEWLINE and TOKEN_SEMICOLON between commands
-  - For US-007 (blocks), parser__is_command_end will need TOKEN_RBRACE added
-  - All 32 parser tests pass, 29/29 full build test suites green
----
-
-## 2026-02-18 - US-007
-- Implemented parser__parse_block() for { cmd1; cmd2; ... } code block parsing
-- Added TOKEN_LBRACE dispatch in parser__parse_expr
-- Added TOKEN_RBRACE to parser__is_command_end so commands inside blocks terminate at }
-- Added 9 tests: single cmd, multiline, semicollon delimited, blocks as bracket cmd args, nested blocks, empty block, mismatched brace error, source positions, bare cmd with block arg
-- Files changed: parser/parser.h (modified), parser/test_parser.c (modified), .ralph/prd.json (modified), .ralph/progress.txt (modified)
-- **Learnings for future iterations:**
-  - parser__parse_block mirrors the parser_parse main loop structure: skip delimiters, parse bare commands, collect into array
-  - TOKEN_RBRACE in is_command_end is safe — bare commands stop at } which lets the block parser consume it
-  - Blocks as command args work naturally: parse_expr dispatches TOKEN_LBRACE → parse_block which fully consumes { ... }
-  - Forward-declared parser__parse_block alongside parser__parse_expr; defined after parse_bare_command since it calls it
-  - Empty block {} produces AST_BLOCK with count=0 (not an error, unlike empty brackets [])
-  - All 41 parser tests pass, 29/29 full build test suites green
----
-
-## 2026-02-18 - US-008
-- Implemented parser__parse_interp_string() for "text $var $[expr] text" interpolated string parsing
-- Added TOKEN_STRING_BEGIN dispatch in parser__parse_expr
-- Forward-declared parser__parse_interp_string alongside parse_expr and parse_block
-- Added 6 tests: non-interpolated string, var interpolation, expr interpolation, multiple interpolations, adjacent interpolations, source positions
-- Files changed: parser/parser.h (modified), parser/test_parser.c (modified), .ralph/prd.json (modified), .ralph/progress.txt (modified)
-- **Learnings for future iterations:**
-  - parser__parse_interp_string walks the token sequence: STRING_BEGIN, then loop over INTERP_VAR/INTERP_EXPR_START/STRING_PART/STRING_END
-  - Empty text segments (payload.text[0] == '\0') are skipped — keeps AST clean for "$a$b" → [var_ref(a), var_ref(b)]
-  - INTERP_EXPR parsing reuses parser__parse_expr for head and args, stopping at TOKEN_INTERP_EXPR_END
-  - Command nodes from $[...] have start at INTERP_EXPR_START and end at INTERP_EXPR_END token positions
-  - Non-interpolated strings still route through TOKEN_STRING → parse_atom → AST_LIT_STRING (no parser change needed)
-  - All 47 parser tests pass, 29/29 full build test suites green
----
-
-## 2026-02-18 - US-009
-- Added 6 integration tests for complete multi-line program parsing
-- Tests: multi_basic (3-line program), multi_mixed_syntax (bare+bracketed+blocks), multi_realistic (10+ line program with def/proc/if/arithmetic/interp strings), multi_source_pos (line tracking), multi_comments (interspersed comments), multi_semi_newlines (mixed delimiters)
-- No parser implementation changes needed — existing code already handles all cases
-- Files changed: parser/test_parser.c (modified), .ralph/prd.json (modified), .ralph/progress.txt (modified)
-- **Learnings for future iterations:**
-  - The parser already handles comments transparently — lexer skips them, so no comment tokens appear in the stream
-  - Realistic program test covers: def, proc with block body, if with condition + two block args, bare word commands, interp strings, arithmetic sub-expressions — all work together
-  - Source position tracking across lines is correct: line/column/offset all maintain proper values through newlines
-  - All 53 parser tests pass, 29/29 full build test suites green
----
-
-## 2026-02-19 - US-010
-- Implemented panic mode error recovery in the parser
-- Added parser__sync_bracket: skips to matching ] tracking bracket/brace depth, stops at newline or EOF
-- Modified parse_command: newline handling uses peek-ahead (save/restore) instead of free skipping — allows recovery at newline boundaries when ] is missing
-- Modified parse_command error paths: call sync_bracket for recovery after error
-- Modified parse_bare_command: early return when head is AST_ERROR — prevents consuming tokens after a failed bracket/block parse
-- Modified parser_parse: creates AST_ERROR nodes for unexpected top-level tokens instead of silently skipping
-- Added 8 tests: missing bracket recovery, missing brace, unexpected token, multiple errors, panic bracket sync, interleaved errors, error positions, valid code after errors
-- Files changed: parser/parser.h (modified), parser/test_parser.c (modified), .ralph/prd.json (modified), .ralph/progress.txt (modified)
-- **Learnings for future iterations:**
-  - Newline handling in bracket commands is critical for error recovery — free newline skipping prevents recovery at line boundaries
-  - Peek-ahead with save/restore pattern: save p->pos, advance past newlines, check for expected token, restore if not found
-  - sync_bracket must respect brace depth (don't consume } that belongs to enclosing block)
-  - parse_bare_command's early error return is key — it prevents the arg loop from consuming tokens that should be available for the next top-level command
-  - Error nodes at top level (for unexpected tokens like ] or }) require explicit creation — they shouldn't be silently skipped
-  - All 61 parser tests pass, 29/29 full build test suites green
----
