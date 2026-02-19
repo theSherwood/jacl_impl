@@ -1356,6 +1356,224 @@ static int test_local_empty_block(void) {
   TEST_PASS();
 }
 
+/* ===== US-005 (M4): Compile and execute if conditional ===== */
+
+/* Test: [if [> 5 3] { 1 } { 2 }] returns i32(1) — truthy condition takes then-branch */
+static int test_if_then_branch(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[if [> 5 3] { 1 } { 2 }]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [if $false { 1 } { 2 }] returns i32(2) — falsy condition takes else-branch */
+static int test_if_else_branch(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[if $false { 1 } { 2 }]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [if $false { 1 }] returns nil — no else-branch */
+static int test_if_no_else_nil(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[if $false { 1 }]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: nested if works — [if $true { [if $false { 1 } { 2 }] }] returns i32(2) */
+static int test_if_nested(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[if $true { [if $false { 1 } { 2 }] }]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: nil is falsy */
+static int test_if_nil_falsy(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[if $nil { 1 } { 2 }]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: 0 is truthy (only nil and false are falsy) */
+static int test_if_zero_truthy(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[if 0 { 1 } { 2 }]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: empty string is truthy */
+static int test_if_empty_string_truthy(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  /* Use "" for empty string — parser should handle it */
+  VMResult result = jacl_run("[if \"\" { 1 } { 2 }]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: if is an expression — can be used in larger expressions */
+static int test_if_as_expression(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[+ [if $true { 10 } { 20 }] 5]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 15);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: wrong argument count (1 arg) produces compile error */
+static int test_if_wrong_argc_1(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[if $true]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: wrong argument count (4 args) produces compile error */
+static int test_if_wrong_argc_4(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[if $true { 1 } { 2 } { 3 }]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: second arg must be AST_BLOCK */
+static int test_if_then_not_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[if $true 42]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: third arg must be AST_BLOCK */
+static int test_if_else_not_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("[if $true { 1 } 42]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1429,6 +1647,19 @@ int main(void) {
     { "local_top_level_var_ref_global", test_local_top_level_var_ref_global },
     { "local_max_exceeded",          test_local_max_exceeded },
     { "local_empty_block",           test_local_empty_block },
+    /* US-005 (M4): Compile and execute if conditional */
+    { "if_then_branch",              test_if_then_branch },
+    { "if_else_branch",              test_if_else_branch },
+    { "if_no_else_nil",              test_if_no_else_nil },
+    { "if_nested",                   test_if_nested },
+    { "if_nil_falsy",                test_if_nil_falsy },
+    { "if_zero_truthy",              test_if_zero_truthy },
+    { "if_empty_string_truthy",      test_if_empty_string_truthy },
+    { "if_as_expression",            test_if_as_expression },
+    { "if_wrong_argc_1",             test_if_wrong_argc_1 },
+    { "if_wrong_argc_4",             test_if_wrong_argc_4 },
+    { "if_then_not_block",           test_if_then_not_block },
+    { "if_else_not_block",           test_if_else_not_block },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -122,6 +122,61 @@ static int compiler__resolve_local(Compiler* c, JaclVal name) {
   return -1;
 }
 
+/* Forward declaration for compile_block_expr */
+static void compiler__compile_node(Compiler* c, AstNode* node);
+
+/* --- Internal: Jump patching helpers --- */
+
+static uint32_t compiler__emit_jump(Compiler* c, uint8_t instruction,
+                                     uint32_t line) {
+  compiler__emit_byte(c, instruction, line);
+  compiler__emit_byte(c, 0xFF, line);  /* placeholder high byte */
+  compiler__emit_byte(c, 0xFF, line);  /* placeholder low byte */
+  return c->chunk->code_count - 2;
+}
+
+static void compiler__patch_jump(Compiler* c, uint32_t offset) {
+  uint32_t jump = c->chunk->code_count - offset - 2;
+  c->chunk->code[offset]     = (uint8_t)((jump >> 8) & 0xFF);
+  c->chunk->code[offset + 1] = (uint8_t)(jump & 0xFF);
+}
+
+/* --- Internal: Compile block as expression (last stmt value stays on stack) --- */
+
+static void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
+  uint32_t line  = block_node->start.line;
+  uint32_t count = block_node->data.block.count;
+  uint32_t scope_start_locals = c->local_count;
+
+  compiler__begin_scope(c);
+
+  if (count == 0) {
+    compiler__end_scope(c, line);
+    compiler__emit_byte(c, OP_NIL, line);
+    return;
+  }
+
+  for (uint32_t i = 0; i < count - 1; i++) {
+    compiler__compile_node(c, block_node->data.block.commands[i]);
+    compiler__emit_byte(c, OP_POP, line);
+  }
+  compiler__compile_node(c, block_node->data.block.commands[count - 1]);
+
+  /* Clean up locals while preserving the result on the stack top */
+  uint32_t pop_count = c->local_count - scope_start_locals;
+  c->scope_depth--;
+  c->local_count = scope_start_locals;
+
+  if (pop_count > 0) {
+    /* Result is on top, locals are below it. Save result into the first
+       local's slot, then POP_N removes the rest plus the old top copy. */
+    compiler__emit_byte(c, OP_SET_LOCAL, line);
+    compiler__emit_byte(c, (uint8_t)scope_start_locals, line);
+    compiler__emit_byte(c, OP_POP_N, line);
+    compiler__emit_byte(c, (uint8_t)pop_count, line);
+  }
+}
+
 /* --- Internal: Command head matching --- */
 
 static int compiler__head_matches(AstNode* head, const char* name, uint32_t len) {
@@ -131,8 +186,6 @@ static int compiler__head_matches(AstNode* head, const char* name, uint32_t len)
 }
 
 /* --- Internal: Compile a binary operation --- */
-
-static void compiler__compile_node(Compiler* c, AstNode* node);
 
 static void compiler__compile_binary(Compiler* c, AstNode** args,
                                      uint8_t op, uint32_t line) {
@@ -246,6 +299,49 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
     }
+    return;
+  }
+
+  /* if conditional */
+  if (compiler__head_matches(head, "if", 2)) {
+    if (argc != 2 && argc != 3) {
+      compiler__error(c, line, col, "if requires 2 or 3 arguments");
+      return;
+    }
+    if (args[1]->type != AST_BLOCK) {
+      compiler__error(c, line, col, "if then-branch must be a block");
+      return;
+    }
+    if (argc == 3 && args[2]->type != AST_BLOCK) {
+      compiler__error(c, line, col, "if else-branch must be a block");
+      return;
+    }
+
+    /* Compile condition */
+    compiler__compile_node(c, args[0]);
+
+    /* OP_JUMP_IF_FALSE over then-body */
+    uint32_t then_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+
+    /* Compile then-body as expression */
+    compiler__compile_block_expr(c, args[1]);
+
+    /* OP_JUMP over else-body */
+    uint32_t else_jump = compiler__emit_jump(c, OP_JUMP, line);
+
+    /* Patch JUMP_IF_FALSE to here */
+    compiler__patch_jump(c, then_jump);
+
+    if (argc == 3) {
+      /* Compile else-body as expression */
+      compiler__compile_block_expr(c, args[2]);
+    } else {
+      /* No else: push nil */
+      compiler__emit_byte(c, OP_NIL, line);
+    }
+
+    /* Patch JUMP to here */
+    compiler__patch_jump(c, else_jump);
     return;
   }
 
