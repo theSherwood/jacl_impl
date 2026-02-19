@@ -44,6 +44,7 @@ TESTS=(
     "value/test_value.c|value|"
     "parser/test_parser.c|parser|"
     "compiler/test_bytecode.c|bytecode|"
+    "vm/test_vm.c|vm|"
 )
 
 echo "=== ds test runner ==="
