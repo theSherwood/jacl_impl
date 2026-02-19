@@ -1925,6 +1925,155 @@ static int test_while_countdown(void) {
   TEST_PASS();
 }
 
+/* ===== US-008 (M4): Closures and upvalue capture ===== */
+
+/* Test: mkadder pattern — closure captures variable from enclosing scope */
+static int test_closure_capture_local(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[proc mkadd [x] {\n"
+    "  [proc inner [y] { [+ $x $y] }]\n"
+    "}]\n"
+    "[def add10 [mkadd 10]]\n"
+    "[print [add10 5]]";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "15\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: multiple closures capture independently */
+static int test_closure_independent_captures(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[proc mkadd [x] {\n"
+    "  [proc inner [y] { [+ $x $y] }]\n"
+    "}]\n"
+    "[def add5 [mkadd 5]]\n"
+    "[def add20 [mkadd 20]]\n"
+    "[print [add5 1]]\n"
+    "[print [add20 1]]";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "6\n21\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: nested closures (3 levels) — transitive capture */
+static int test_closure_nested_3_levels(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[proc outer [a] {\n"
+    "  [proc middle [b] {\n"
+    "    [proc inner [c] { [+ [+ $a $b] $c] }]\n"
+    "  }]\n"
+    "}]\n"
+    "[def mid [outer 100]]\n"
+    "[def inn [mid 20]]\n"
+    "[print [inn 3]]";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "123\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: closure captures multiple variables */
+static int test_closure_capture_multiple(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[proc make-fn [a b] {\n"
+    "  [proc inner [c] { [+ [+ $a $b] $c] }]\n"
+    "}]\n"
+    "[def f [make-fn 10 20]]\n"
+    "[print [f 3]]";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "33\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: upvalue from enclosing function (not global) */
+static int test_closure_not_global(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* x=99 at global, x=5 as param — inner should capture param x=5 */
+  const char* program =
+    "[def x 99]\n"
+    "[proc wrap [x] {\n"
+    "  [proc inner [] { $x }]\n"
+    "}]\n"
+    "[def f [wrap 5]]\n"
+    "[print [f]]";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -2030,6 +2179,12 @@ int main(void) {
     { "while_wrong_argc_3",          test_while_wrong_argc_3 },
     { "while_body_not_block",        test_while_body_not_block },
     { "while_countdown",             test_while_countdown },
+    /* US-008 (M4): Closures and upvalue capture */
+    { "closure_capture_local",       test_closure_capture_local },
+    { "closure_independent_captures", test_closure_independent_captures },
+    { "closure_nested_3_levels",     test_closure_nested_3_levels },
+    { "closure_capture_multiple",    test_closure_capture_multiple },
+    { "closure_not_global",          test_closure_not_global },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

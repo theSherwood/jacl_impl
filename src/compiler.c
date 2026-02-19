@@ -24,15 +24,23 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena);
 /* --- Internal: Local variable tracking --- */
 
 #define COMPILER_LOCALS_MAX 256
+#define COMPILER_UPVALUES_MAX 256
 
 typedef struct {
   JaclVal name;     /* inline string name */
   int     depth;    /* scope depth when declared */
 } Local;
 
+typedef struct {
+  uint8_t index;    /* local slot (if is_local) or parent upvalue index */
+  uint8_t is_local; /* 1 = capture from enclosing locals, 0 = from parent upvalues */
+  JaclVal name;     /* for debug/lookup */
+} Upvalue;
+
 /* --- Internal: Compiler state --- */
 
-typedef struct {
+typedef struct Compiler Compiler;
+struct Compiler {
   BytecodeChunk* chunk;
   arena_t*       arena;
   uint32_t       error_count;
@@ -40,15 +48,20 @@ typedef struct {
   Local          locals[COMPILER_LOCALS_MAX];
   uint32_t       local_count;
   int            scope_depth;
-} Compiler;
+  Upvalue        upvalues[COMPILER_UPVALUES_MAX];
+  uint32_t       upvalue_count;
+  Compiler*      enclosing;  /* parent compiler for upvalue resolution */
+};
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena) {
-  c->chunk       = chunk;
-  c->arena       = arena;
-  c->error_count = 0;
-  c->first_error = NULL;
-  c->local_count = 0;
-  c->scope_depth = 0;
+  c->chunk         = chunk;
+  c->arena         = arena;
+  c->error_count   = 0;
+  c->first_error   = NULL;
+  c->local_count   = 0;
+  c->scope_depth   = 0;
+  c->upvalue_count = 0;
+  c->enclosing     = NULL;
 }
 
 /* --- Internal: Emit helpers --- */
@@ -119,6 +132,44 @@ static int compiler__resolve_local(Compiler* c, JaclVal name) {
       return i;
     }
   }
+  return -1;
+}
+
+/* --- Internal: Upvalue resolution --- */
+
+static int compiler__add_upvalue(Compiler* c, uint8_t index, uint8_t is_local,
+                                  JaclVal name) {
+  /* Check if this upvalue already exists */
+  for (uint32_t i = 0; i < c->upvalue_count; i++) {
+    if (c->upvalues[i].index == index &&
+        c->upvalues[i].is_local == is_local) {
+      return (int)i;
+    }
+  }
+  if (c->upvalue_count >= COMPILER_UPVALUES_MAX) {
+    return -1;
+  }
+  c->upvalues[c->upvalue_count].index    = index;
+  c->upvalues[c->upvalue_count].is_local = is_local;
+  c->upvalues[c->upvalue_count].name     = name;
+  return (int)c->upvalue_count++;
+}
+
+static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
+  if (!c->enclosing) return -1;
+
+  /* Check if the variable is a local in the enclosing scope */
+  int local = compiler__resolve_local(c->enclosing, name);
+  if (local != -1) {
+    return compiler__add_upvalue(c, (uint8_t)local, 1, name);
+  }
+
+  /* Check if it's an upvalue in the enclosing scope (transitive capture) */
+  int upvalue = compiler__resolve_upvalue(c->enclosing, name);
+  if (upvalue != -1) {
+    return compiler__add_upvalue(c, (uint8_t)upvalue, 0, name);
+  }
+
   return -1;
 }
 
@@ -383,6 +434,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     Compiler body_compiler;
     compiler__init(&body_compiler, &closure->chunk, c->arena);
     body_compiler.scope_depth = 1;
+    body_compiler.enclosing   = c;
 
     /* Add params as locals in body compiler (slots 0..N-1) */
     for (uint8_t i = 0; i < param_count; i++) {
@@ -401,20 +453,28 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       c->first_error = body_compiler.first_error;
     }
 
+    /* Set upvalue count on the closure */
+    closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
+
     /* Store closure in parent's constant pool */
     uint16_t closure_idx = chunk_add_constant(c->chunk, jacl_closure(closure));
 
-    /* Emit OP_CLOSURE to push the closure value */
+    /* Emit OP_CLOSURE to push the closure value, followed by upvalue descriptors */
     compiler__emit_byte(c, OP_CLOSURE, line);
     compiler__emit_u16(c, closure_idx, line);
+    for (uint32_t i = 0; i < body_compiler.upvalue_count; i++) {
+      compiler__emit_byte(c, body_compiler.upvalues[i].is_local, line);
+      compiler__emit_byte(c, body_compiler.upvalues[i].index, line);
+    }
 
     /* Bind the name */
     JaclVal name_val = jacl_inline_string(proc_name, proc_name_len);
     if (c->scope_depth > 0) {
       /* Local scope: closure is on stack as local */
       compiler__add_local(c, name_val, line, col);
-      /* proc returns nil */
-      compiler__emit_byte(c, OP_NIL, line);
+      /* proc returns the closure value (enables make-adder pattern) */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, (uint8_t)(c->local_count - 1), line);
     } else {
       /* Global scope */
       uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
@@ -587,9 +647,15 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, OP_GET_LOCAL, line);
         compiler__emit_byte(c, (uint8_t)local_slot, line);
       } else {
-        uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
-        compiler__emit_byte(c, OP_GET_GLOBAL, line);
-        compiler__emit_u16(c, name_idx, line);
+        int upvalue_idx = compiler__resolve_upvalue(c, name_val);
+        if (upvalue_idx != -1) {
+          compiler__emit_byte(c, OP_GET_UPVALUE, line);
+          compiler__emit_byte(c, (uint8_t)upvalue_idx, line);
+        } else {
+          uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+          compiler__emit_byte(c, OP_GET_GLOBAL, line);
+          compiler__emit_u16(c, name_idx, line);
+        }
       }
       break;
     }

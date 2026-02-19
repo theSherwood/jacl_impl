@@ -570,8 +570,33 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
 
       case OP_CLOSURE: {
         uint16_t index = vm__read_u16(vm);
-        JaclVal closure_val = vm->chunk->constants[index];
-        result = vm__push(vm, closure_val);
+        JaclClosure* template = jacl_as_closure(vm->chunk->constants[index]);
+
+        /* Allocate a new closure instance with its own upvalue array */
+        JaclClosure* cl = (JaclClosure*)arena_alloc(vm->arena, sizeof(JaclClosure));
+        cl->chunk        = template->chunk;
+        cl->param_count  = template->param_count;
+        cl->param_names  = template->param_names;
+        cl->name         = template->name;
+        cl->upvalue_count = template->upvalue_count;
+
+        if (cl->upvalue_count > 0) {
+          cl->upvalues = (JaclVal*)arena_alloc(vm->arena,
+                            sizeof(JaclVal) * cl->upvalue_count);
+          for (uint8_t i = 0; i < cl->upvalue_count; i++) {
+            uint8_t is_local = vm__read_byte(vm);
+            uint8_t uv_index = vm__read_byte(vm);
+            if (is_local) {
+              cl->upvalues[i] = vm->stack[frame->stack_base + uv_index];
+            } else {
+              cl->upvalues[i] = frame->closure->upvalues[uv_index];
+            }
+          }
+        } else {
+          cl->upvalues = NULL;
+        }
+
+        result = vm__push(vm, jacl_closure(cl));
         if (result != VM_OK) return result;
         break;
       }
