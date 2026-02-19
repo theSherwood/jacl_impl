@@ -61,12 +61,22 @@
 - Print formatting: error-flagged -> "<error>", nil -> "nil", bool -> "true"/"false", i32 -> %d, f32 -> %g, inline_string -> content
 - Test print output: PrintCapture struct {buf[256], len} with capture_print callback set via vm.print_fn/vm.print_ctx
 
-- VM API: VM struct in vm/vm.h, vm_init, vm_exec
+- VM API: VM struct in vm/vm.h, vm_init(VM*, arena_t*), vm_exec(VM*, BytecodeChunk*)
 - VMResult enum: VM_OK, VM_RUNTIME_ERROR, VM_STACK_OVERFLOW
 - VM stack: JaclVal stack[256], stack_top is next free slot index
 - VM has configurable print_fn + print_ctx, defaults to stdout via vm__default_print
-- vm_exec takes VM* + BytecodeChunk*, returns VMResult
+- VM has arena_t* for environment allocations (passed to vm_init)
 - Internal helpers: vm__push, vm__pop, vm__read_byte, vm__read_u16
+
+- Environment: growable (name, value) pairs in VM, arena-allocated arrays
+- vm_init pre-populates: "true" -> JACL_TRUE, "false" -> JACL_FALSE, "nil" -> JACL_NIL
+- vm__env_set: linear scan for existing name, overwrite or append
+- vm__env_get: linear scan, returns jacl_set_error(JACL_NIL) if not found
+- Name comparison uses direct JaclVal == (inline strings with same content produce identical bit patterns)
+- OP_DEF_GLOBAL: pops value, stores in env, pushes JACL_NIL as return
+- OP_GET_GLOBAL: looks up name in env, pushes value or error-flagged value
+- Compiler `def`: checks argc==2, args[0] must be AST_LIT_STRING, compiles value then emits OP_DEF_GLOBAL
+- Compiler AST_VAR_REF: creates inline_string from name, emits OP_GET_GLOBAL
 
 ---
 
@@ -160,4 +170,21 @@
   - For inline strings, use jacl_inline_string_get to extract content, then manually append newline
   - Error-flagged values must be checked FIRST (before type checks) since error flag is orthogonal to type tag
   - PrintCapture test helper struct (buf + len) with capture_print callback is the pattern for testing print output
+---
+
+## 2026-02-19 - US-007
+- Implemented global environment, def command, and variable references in compiler and VM
+- VM: Environment struct with growable arena-allocated (name, value) arrays
+- VM: vm_init now takes arena_t* parameter; pre-populates env with true/false/nil
+- VM: OP_DEF_GLOBAL pops value, stores in env, pushes JACL_NIL; OP_GET_GLOBAL looks up and pushes value
+- Compiler: `def` command validates argc==2, first arg is string name, compiles value then emits OP_DEF_GLOBAL
+- Compiler: AST_VAR_REF creates inline string from name and emits OP_GET_GLOBAL
+- Files changed: vm/vm.h (modified), vm/test_vm.c (modified), compiler/compiler.h (modified), compiler/test_compiler.c (modified)
+- Added 5 compiler tests + 4 integration tests + 5 VM tests; all 35 compiler / 51 VM tests pass
+- **Learnings for future iterations:**
+  - vm_init API changed to take arena_t* - all existing VM tests needed updating (vm_init(&vm) -> vm_init(&vm, &arena))
+  - Inline strings with identical content produce identical JaclVal bit patterns, so direct == comparison works for env name lookup
+  - Integration tests (compile + execute) in test_compiler.c require adding VM_IMPLEMENTATION include
+  - def returns nil (pushes JACL_NIL), undefined variable pushes error-flagged value (not VM_RUNTIME_ERROR)
+  - PrintCapture pattern reused in test_compiler.c for integration tests
 ---
