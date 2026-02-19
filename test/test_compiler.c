@@ -1169,6 +1169,193 @@ static int test_vm_returns_runtime_error(void) {
   TEST_PASS();
 }
 
+/* ===== US-004 (M4): Compiler local variable resolution ===== */
+
+/* Test: def inside block creates local, $x resolves to OP_GET_LOCAL */
+static int test_local_def_in_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* { [def x 42]; [print $x] } should print "42\n" */
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run("{ [def x 42]; [print $x] }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: locals are not visible outside their block scope */
+static int test_local_not_visible_outside(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("{ [def x 42] }\n$x", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "x") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: local shadows global within block, global restored outside */
+static int test_local_shadowing(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "[def x 1]\n{ [def x 2]; [print $x] }\n[print $x]",
+    &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "2\n1\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: nested blocks with locals from outer scope accessible */
+static int test_local_nested_scopes(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "{ [def a 10]; { [def b 20]; [print [+ $a $b]] }; [print $a] }",
+    &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "30\n10\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: shadowing in same scope creates new local slot */
+static int test_local_same_scope_shadow(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  /* Redefining x in the same scope creates a new local; $x resolves to the latest */
+  VMResult result = jacl_run(
+    "{ [def x 1]; [def x 2]; [print $x] }",
+    &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "2\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: top-level def still compiles to OP_DEF_GLOBAL */
+static int test_local_top_level_still_global(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* At top level, def should use OP_DEF_GLOBAL */
+  CompileResult cr = compile_source("[def x 42]", &arena);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  /* Bytecode: OP_CONST u16(0) OP_DEF_GLOBAL u16(1) OP_HALT */
+  ASSERT_INT_EQ(cr.chunk.code[3], OP_DEF_GLOBAL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: top-level $x still compiles to OP_GET_GLOBAL */
+static int test_local_top_level_var_ref_global(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("$x", &arena);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  /* Bytecode: OP_GET_GLOBAL u16(0) OP_HALT */
+  ASSERT_INT_EQ(cr.chunk.code[0], OP_GET_GLOBAL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: exceeding 256 locals produces compile error */
+static int test_local_max_exceeded(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Build source: { [def x 0]; [def x 1]; ...; [def x 256] } — 257 defs */
+  char source[8192];
+  int pos = 0;
+  pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "{ ");
+  for (int i = 0; i <= 256; i++) {
+    if (i > 0) {
+      pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "; ");
+    }
+    pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "[def x %d]", i);
+  }
+  pos += snprintf(source + pos, sizeof(source) - (size_t)pos, " }");
+
+  CompileResult cr = compile_source(source, &arena);
+
+  ASSERT(cr.error_count > 0);
+  ASSERT(cr.error_message != NULL);
+  ASSERT(strstr(cr.error_message, "too many local") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: empty block returns nil */
+static int test_local_empty_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("{ }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1232,6 +1419,16 @@ int main(void) {
     { "compile_error_unknown_command", test_compile_error_unknown_command },
     { "compile_error_long_string_msg", test_compile_error_long_string_msg },
     { "vm_returns_runtime_error",    test_vm_returns_runtime_error },
+    /* US-004 (M4): Compiler local variable resolution */
+    { "local_def_in_block",          test_local_def_in_block },
+    { "local_not_visible_outside",   test_local_not_visible_outside },
+    { "local_shadowing",             test_local_shadowing },
+    { "local_nested_scopes",         test_local_nested_scopes },
+    { "local_same_scope_shadow",     test_local_same_scope_shadow },
+    { "local_top_level_still_global", test_local_top_level_still_global },
+    { "local_top_level_var_ref_global", test_local_top_level_var_ref_global },
+    { "local_max_exceeded",          test_local_max_exceeded },
+    { "local_empty_block",           test_local_empty_block },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

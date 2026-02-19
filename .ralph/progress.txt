@@ -19,251 +19,90 @@
 - Tests grouped by US-XXX story comments in the test table
 
 - Lexer API: LexResult lexer_lex(const char* source, arena_t* arena)
-- Token array always ends with TOKEN_EOF
-- TOKEN_VAR payload.text points into source buffer, skips the $ prefix
-- TOKEN_WORD payload.text points into source buffer
-- TOKEN_STRING payload.text is arena-allocated decoded content
-- TOKEN_OPERATOR handled same as TOKEN_WORD in parser
-
 - Parser API: ParseResult parser_parse(LexResult tokens, arena_t* arena)
-- ParseResult struct: AstNode** nodes, uint32_t count, uint32_t error_count
-- AST node types: AST_COMMAND, AST_LIT_INT, AST_LIT_FLOAT, AST_LIT_STRING, AST_VAR_REF, AST_BLOCK, AST_INTERP_STRING, AST_ERROR
-- AST_COMMAND has head (AstNode*) + args (AstNode**) + arg_count
-- AstNode is a tagged union with SourcePos start/end
-
-- Value API: JaclVal is a 64-bit tagged value in src/value.c
-- Constructors: jacl_i32(val), jacl_f32(val), jacl_inline_string(ptr, len), JACL_NIL, JACL_TRUE, JACL_FALSE
-- Arithmetic: jacl_add_i32, jacl_sub_i32, jacl_mul_i32, jacl_div_i32, jacl_mod_i32, jacl_neg_i32 (and _f32 variants)
-- Comparison: jacl_lt_i32, jacl_gt_i32, jacl_le_i32, jacl_ge_i32 (and _f32 variants)
-- Equality: jacl_eq (works across types)
-- Type checks: jacl_is_i32, jacl_is_f32, jacl_is_nil, jacl_is_bool, jacl_is_inline_string, jacl_is_error
-- Extraction: jacl_as_i32, jacl_as_f32, jacl_inline_string_ptr, jacl_inline_string_len
-
-- Bytecode API: BytecodeChunk in src/bytecode.c, chunk_init, chunk_write, chunk_write_u16, chunk_add_constant
-- OpCode enum: OP_CONST (+ u16 index), OP_NIL, OP_TRUE, OP_FALSE, OP_POP, OP_ADD..OP_MOD, OP_NEG, OP_EQ..OP_GE, OP_PRINT, OP_DEF_GLOBAL (+ u16), OP_GET_GLOBAL (+ u16), OP_HALT
-- Bytecode arrays auto-grow via arena re-allocation (old memory left for arena to reclaim)
 - Compiler API: CompileResult compiler_compile(ParseResult, arena_t*) in src/compiler.c
-- CompileResult struct: BytecodeChunk chunk, uint32_t error_count
-- Compiler internal: Compiler struct with chunk*, arena*, error_count
-- compiler__emit_byte, compiler__emit_u16, compiler__emit_constant helpers
-- Bare top-level literals are wrapped by parser as AST_COMMAND{head: literal, args: [], arg_count: 0}
-- Compiler handles AST_COMMAND with arg_count==0 by compiling just the head (bare expression)
-- Test helper: compile_source(source, arena) chains lexer_lex -> parser_parse -> compiler_compile
-- Compiler command dispatch: compiler__head_matches(head, name, len) checks if AST_LIT_STRING matches a builtin name
-- compiler__compile_command dispatches known builtins (+, -, *, /, %) via if-chain with early returns
-- compiler__compile_binary(c, args, opcode, line) compiles 2 args + emits opcode
-- Unary negation: "-" with argc==1 emits OP_NEG; argc==2 emits OP_SUB
-- VM__BINARY_NUMERIC_OP macro dispatches i32/f32 variants, returns VM_RUNTIME_ERROR on type mismatch
-- OP_MOD is i32-only in VM; f32 operands produce VM_RUNTIME_ERROR
-- Division by zero produces error-flagged value (VM_OK), not VM_RUNTIME_ERROR
-
-- OP_PRINT: pops value, formats via print_fn, pushes JACL_NIL as return value
-- Print formatting: error-flagged -> "<error>", nil -> "nil", bool -> "true"/"false", i32 -> %d, f32 -> %g, inline_string -> content
-- Test print output: PrintCapture struct {buf[256], len} with capture_print callback set via vm.print_fn/vm.print_ctx
-
 - VM API: VM struct in src/vm.c, vm_init(VM*, arena_t*), vm_exec(VM*, BytecodeChunk*)
-- VMResult enum: VM_OK, VM_RUNTIME_ERROR, VM_STACK_OVERFLOW
-- VM stack: JaclVal stack[256], stack_top is next free slot index
-- VM has configurable print_fn + print_ctx, defaults to stdout via vm__default_print
-- VM has arena_t* for environment allocations (passed to vm_init)
-- Internal helpers: vm__push, vm__pop, vm__read_byte, vm__read_u16
-
-- Environment: growable (name, value) pairs in VM, arena-allocated arrays
-- vm_init pre-populates: "true" -> JACL_TRUE, "false" -> JACL_FALSE, "nil" -> JACL_NIL
-- vm__env_set: linear scan for existing name, overwrite or append
-- vm__env_get: linear scan, returns jacl_set_error(JACL_NIL) if not found
-- Name comparison uses direct JaclVal == (inline strings with same content produce identical bit patterns)
-- OP_DEF_GLOBAL: pops value, stores in env, pushes JACL_NIL as return
-- OP_GET_GLOBAL: looks up name in env, pushes value or returns VM_RUNTIME_ERROR for undefined vars
-- Compiler `def`: checks argc==2, args[0] must be AST_LIT_STRING, compiles value then emits OP_DEF_GLOBAL
-- Compiler AST_VAR_REF: creates inline_string from name, emits OP_GET_GLOBAL
-
 - Pipeline API: jacl_run(source, vm, arena) in src/vm.c
-- jacl_run chains: lexer_lex -> parser_parse -> compiler_compile -> vm_exec
-- Returns VM_RUNTIME_ERROR for parse/compile errors, sets vm->error_message
 
-- VM error reporting: error_message (arena-allocated or static) and error_line fields on VM struct
-- vm__set_error(vm, fmt, ...) for formatted error messages via vsnprintf + arena_alloc
-- vm__type_name(val) returns "nil"/"bool"/"i32"/"f32"/"string"/"unknown" for error messages
-- VM dispatch loop sets vm->error_line from chunk->lines[offset] at start of each iteration
-- VM__BINARY_NUMERIC_OP macro takes third arg op_name for error messages
-- CompileResult.error_message stores first compile error with source position ("line N, col N: message")
-- compiler__error(c, line, col, message) accepts position and stores formatted error message
+- Value API: JaclVal is uint64_t with tag byte (bits 63-56) + 56-bit payload
+- JACL_TAG_CLOSURE (0x08) already defined in value.c for closure values
+- Existing opcodes: OP_CONST, OP_NIL, OP_TRUE, OP_FALSE, OP_POP, OP_ADD..OP_MOD, OP_NEG, OP_EQ..OP_GE, OP_PRINT, OP_DEF_GLOBAL, OP_GET_GLOBAL, OP_GET_LOCAL, OP_SET_LOCAL, OP_GET_UPVALUE, OP_JUMP, OP_JUMP_IF_FALSE, OP_LOOP, OP_CALL, OP_RETURN, OP_CLOSURE, OP_POP_N, OP_HALT
+- VM has single Environment (flat name/value arrays) for globals, pre-populated with true/false/nil
+- Compiler dispatches builtins via compiler__head_matches if-chain in compiler__compile_command
+- AST_BLOCK compilation: begin_scope, compile stmts with OP_POP after each, end_scope (OP_POP_N), push OP_NIL
+- Compiler Local struct: { JaclVal name, int depth }, COMPILER_LOCALS_MAX = 256
+- Compiler scope_depth: 0 = top-level (globals), >0 = inside block/function (locals)
+- def at scope_depth > 0: value stays on stack as local slot, push OP_NIL for def's return value
+- $x resolution: check compiler__resolve_local first, fall back to OP_GET_GLOBAL
+- Block commands inside { } must be separated by `;` or `\n` — parser treats same-line expressions as bare command args
+- VM stack: JaclVal stack[256], stack_top is next free slot
+- PrintCapture test pattern: struct {buf[1024], len} with capture_print callback
+- JaclClosure struct is in bytecode.c (not value.c) because it contains BytecodeChunk by value
+- Typed closure helpers jacl_closure()/jacl_as_closure() are in bytecode.c; generic pointer helpers in value.c
+- VM_FRAMES_MAX = 64; CallFrame struct: closure, return_ip, stack_base, chunk pointer
+- vm_exec wraps top-level code in implicit JaclClosure (stack-allocated) for uniform frame-based execution
+- OP_CALL convention: closure at stack[stack_top - arg_count - 1], stack_base = stack_top - arg_count
+- OP_RETURN: return value placed at callee_base - 1, stack_top reset to callee_base
+- OP_RETURN from top-level (frame_count == 0): result in stack[0], stack_top = 1
+- Truthiness: only nil and JACL_FALSE are falsy; 0, empty string, etc. are truthy
+- OP_SET_LOCAL peeks (doesn't pop) — value stays on stack
+- OP_JUMP_IF_FALSE pops the condition value from the stack
+- vm->chunk is synced with current frame's chunk pointer throughout execution
 
 ---
 
 ## 2026-02-19 - US-001
-- Implemented BytecodeChunk data structure and OpCode enum in compiler/bytecode.h
-- Created compiler/test_bytecode.c with 13 tests covering all acceptance criteria
-- Added test entry to build.sh TESTS array
-- Files changed: compiler/bytecode.h (new), compiler/test_bytecode.c (new), build.sh (modified)
+- Added 10 new opcodes to OpCode enum in src/bytecode.c: OP_GET_LOCAL, OP_SET_LOCAL, OP_GET_UPVALUE, OP_JUMP, OP_JUMP_IF_FALSE, OP_LOOP, OP_CALL, OP_RETURN, OP_CLOSURE, OP_POP_N
+- Updated test_bytecode.c: fixed hardcoded OP_HALT enum value, added new opcode assertions, added OP_RETURN to single-byte opcodes list
+- Files changed: src/bytecode.c, test/test_bytecode.c
 - **Learnings for future iterations:**
-  - Header declarations must have `static` keyword to match the `static` definitions in the IMPLEMENTATION section
-  - Arena-based growth: allocate new buffer, memcpy old data, point to new (old memory stays until arena_destroy)
-  - BytecodeChunk tracks code_cap, const_cap, lines_cap separately for growth
+  - test_bytecode.c has hardcoded enum values in test_opcode_enum() — must update when adding opcodes
+  - test_single_byte_opcodes list must include any new zero-operand opcodes
+  - New opcodes placed before OP_HALT to keep it as the sentinel terminator
 ---
 
 ## 2026-02-19 - US-002
-- Implemented VM state struct, VMResult enum, vm_init, vm_exec dispatch loop in vm/vm.h
-- Dispatch handles: OP_CONST, OP_NIL, OP_TRUE, OP_FALSE, OP_POP, OP_HALT
-- Stack overflow/underflow detection with correct error codes
-- Configurable print function (VMPrintFn callback + void* ctx)
-- Created vm/test_vm.c with 14 tests covering all acceptance criteria
-- Added test entry to build.sh TESTS array
-- Files changed: vm/vm.h (new), vm/test_vm.c (new), build.sh (modified)
+- Added JaclClosure struct to src/bytecode.c (after BytecodeChunk definition, since it contains a BytecodeChunk by value)
+- Added typed helpers: jacl_closure(JaclClosure*) constructor and jacl_as_closure(JaclVal) extractor
+- jacl_is_closure() and jacl_closure_ptr() already existed in value.c from earlier milestones
+- Added 5 tests to test_bytecode.c: struct fields, constructor, extractor, full roundtrip, null name
+- Files changed: src/bytecode.c, test/test_bytecode.c
 - **Learnings for future iterations:**
-  - VM dispatch loop uses `for(;;)` with switch on instruction byte
-  - vm__push returns VMResult so caller can propagate overflow immediately
-  - vm__pop returns VMResult for underflow; takes JaclVal* out param
-  - vm__read_u16 reads big-endian (hi byte first, matching chunk_write_u16)
-  - Default case in switch returns VM_RUNTIME_ERROR for unknown/unimplemented opcodes
+  - JaclClosure struct must be in bytecode.c (not value.c) because it contains BytecodeChunk by value and value.c is included before bytecode.c in the unity build
+  - The generic pointer helpers (jacl_closure_ptr, jacl_as_ptr, jacl_is_closure) are in value.c; the typed helpers (jacl_closure, jacl_as_closure) that need JaclClosure are in bytecode.c
+  - All closure memory (struct, param_names, upvalues) should be arena-allocated via arena_alloc
 ---
 
 ## 2026-02-19 - US-003
-- Implemented compiler skeleton in compiler/compiler.h with single-header convention
-- CompileResult struct, compiler_compile function, internal Compiler state
-- Literal compilation: AST_LIT_INT -> OP_CONST(jacl_i32), AST_LIT_FLOAT -> OP_CONST(jacl_f32), AST_LIT_STRING (<=7) -> OP_CONST(jacl_inline_string)
-- String >7 bytes produces compile error
-- Multi-statement: OP_POP between statements, no pop after last
-- OP_HALT emitted at end of every chunk
-- AST_COMMAND with arg_count==0 handled as bare expression (compile head only)
-- Created compiler/test_compiler.c with 14 tests
-- Added test entry to build.sh TESTS array
-- Files changed: compiler/compiler.h (new), compiler/test_compiler.c (new), build.sh (modified)
+- Added CallFrame struct and frame-based execution to src/vm.c
+- VM_FRAMES_MAX = 64, frames[] array and frame_count added to VM struct
+- vm_exec creates implicit top-level JaclClosure (stack-allocated) wrapping the input chunk
+- Implemented 9 new opcode handlers: OP_GET_LOCAL, OP_SET_LOCAL, OP_GET_UPVALUE, OP_JUMP, OP_JUMP_IF_FALSE, OP_LOOP, OP_CALL, OP_RETURN, OP_POP_N
+- Added vm__is_falsy() helper and updated vm__type_name() for closures
+- Changed all chunk-> references in exec loop to vm->chunk-> for frame-aware access
+- Added 15 tests to test/test_vm.c: frame_count_init, get/set_local, get_upvalue, jump, jump_if_false (falsy/truthy), loop, pop_n, basic_call_return, call_with_args, call_non_closure, call_arg_mismatch, call_frame_overflow, truthiness
+- Files changed: src/vm.c, test/test_vm.c
 - **Learnings for future iterations:**
-  - Parser wraps ALL top-level expressions in AST_COMMAND (even bare literals like `42`)
-  - AST_COMMAND{head: literal, args: [], arg_count: 0} means "just evaluate the head"
-  - `-7` is parsed as command `[- 7]` (operator + int), not as negative literal
-  - Compile errors from parse errors are propagated by seeding result.error_count from parse.error_count
-  - Test helper `compile_source(source, arena)` chains lex->parse->compile for convenience
+  - OP_JUMP_IF_FALSE pops the condition — test assertions must account for one fewer stack item
+  - Top-level implicit closure is stack-allocated (not arena) since it only lives for the vm_exec call
+  - OP_CALL: closure sits at stack[stack_top - arg_count - 1]; params become locals 0..N-1 at stack_base
+  - OP_RETURN from top-level frame: special case where frame_count == 0, put result in stack[0]
+  - Self-referencing closures work for frame overflow tests: store closure in its own constant pool
+  - vm->chunk must be kept in sync with the current frame's chunk throughout execution
 ---
 
 ## 2026-02-19 - US-004
-- Implemented arithmetic builtins in compiler and VM
-- Compiler: recognizes +, -, *, /, % command heads and emits OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_NEG
-- VM: dynamic type dispatch for i32/f32 on all arithmetic ops, OP_MOD i32-only, OP_NEG unary
-- Division by zero produces error-flagged value (not runtime error)
-- Added compiler__head_matches, compiler__compile_binary, compiler__compile_command helpers
-- Added VM__BINARY_NUMERIC_OP macro for DRY binary op dispatch
-- Files changed: compiler/compiler.h (modified), compiler/test_compiler.c (modified), vm/vm.h (modified), vm/test_vm.c (modified)
-- Added 6 compiler tests + 13 VM tests, all 32 suite tests pass
+- Added Local struct, COMPILER_LOCALS_MAX (256), scope_depth tracking to Compiler in src/compiler.c
+- Added compiler__begin_scope/end_scope, compiler__add_local, compiler__resolve_local helpers
+- Modified def handler: scope_depth > 0 → local (value stays on stack, push OP_NIL); scope_depth == 0 → global (OP_DEF_GLOBAL)
+- Modified AST_VAR_REF: resolve_local first, fall back to OP_GET_GLOBAL
+- Implemented AST_BLOCK compilation: begin_scope, compile stmts with OP_POP after each, end_scope (emits OP_POP_N for locals), push OP_NIL
+- Added 9 tests to test/test_compiler.c: local_def_in_block, local_not_visible_outside, local_shadowing, local_nested_scopes, local_same_scope_shadow, local_top_level_still_global, local_top_level_var_ref_global, local_max_exceeded, local_empty_block
+- Files changed: src/compiler.c, test/test_compiler.c
 - **Learnings for future iterations:**
-  - Command head is AST_LIT_STRING (from TOKEN_OPERATOR in parser), compare with memcmp on value/length
-  - compiler__compile_command is the central dispatch for builtin commands; extend with more if-chains for new builtins
-  - VM__BINARY_NUMERIC_OP macro cleanly handles the pop-pop-typecheck-dispatch-push pattern
-  - OP_MOD explicitly rejects f32 (not handled by the generic macro)
-  - Forward declaration of compiler__compile_node needed since compiler__compile_binary calls it before definition
----
-
-## 2026-02-19 - US-005
-- Implemented comparison builtins (==, <, >, <=, >=) in compiler and VM
-- Compiler: recognizes ==, <, >, <=, >= command heads and emits OP_EQ, OP_LT, OP_GT, OP_LE, OP_GE
-- VM: OP_EQ uses jacl_eq (works across types, returns JACL_FALSE for different types)
-- VM: OP_LT, OP_GT, OP_LE, OP_GE use VM__BINARY_NUMERIC_OP macro with i32/f32 dispatch
-- Mismatched numeric types on ordered comparisons produce VM_RUNTIME_ERROR (same as arithmetic)
-- Files changed: compiler/compiler.h (modified), compiler/test_compiler.c (modified), vm/vm.h (modified), vm/test_vm.c (modified)
-- Added 3 compiler tests + 11 VM tests, all 32 suite tests pass (23 compiler, 38 VM)
-- **Learnings for future iterations:**
-  - OP_EQ is special: uses jacl_eq directly without type checking, so different types return false (not error)
-  - Ordered comparisons (LT, GT, LE, GE) reuse VM__BINARY_NUMERIC_OP macro since they have same i32/f32 dispatch pattern
-  - Multi-char operators like ==, <=, >= use compiler__head_matches with length 2
----
-
-## 2026-02-19 - US-006
-- Implemented print builtin in compiler and VM
-- Compiler: recognizes "print" command head (5 chars), requires exactly 1 argument, emits OP_PRINT
-- VM OP_PRINT: pops value, formats based on type (nil, true, false, i32, f32, inline_string, error), outputs via print_fn with trailing newline, pushes JACL_NIL as return value
-- Print formatting: i32 uses %d, f32 uses %g, inline_string extracts content, error-flagged prints "<error>"
-- Files changed: compiler/compiler.h (modified), compiler/test_compiler.c (modified), vm/vm.h (modified), vm/test_vm.c (modified)
-- Added 3 compiler tests + 8 VM tests, all 26 compiler / 46 VM tests pass
-- **Learnings for future iterations:**
-  - OP_PRINT must push JACL_NIL as return value (print returns nil) to keep stack consistent
-  - Use snprintf for numeric formatting into a stack buffer, then pass to print_fn
-  - For inline strings, use jacl_inline_string_get to extract content, then manually append newline
-  - Error-flagged values must be checked FIRST (before type checks) since error flag is orthogonal to type tag
-  - PrintCapture test helper struct (buf + len) with capture_print callback is the pattern for testing print output
----
-
-## 2026-02-19 - US-007
-- Implemented global environment, def command, and variable references in compiler and VM
-- VM: Environment struct with growable arena-allocated (name, value) arrays
-- VM: vm_init now takes arena_t* parameter; pre-populates env with true/false/nil
-- VM: OP_DEF_GLOBAL pops value, stores in env, pushes JACL_NIL; OP_GET_GLOBAL looks up and pushes value
-- Compiler: `def` command validates argc==2, first arg is string name, compiles value then emits OP_DEF_GLOBAL
-- Compiler: AST_VAR_REF creates inline string from name and emits OP_GET_GLOBAL
-- Files changed: vm/vm.h (modified), vm/test_vm.c (modified), compiler/compiler.h (modified), compiler/test_compiler.c (modified)
-- Added 5 compiler tests + 4 integration tests + 5 VM tests; all 35 compiler / 51 VM tests pass
-- **Learnings for future iterations:**
-  - vm_init API changed to take arena_t* - all existing VM tests needed updating (vm_init(&vm) -> vm_init(&vm, &arena))
-  - Inline strings with identical content produce identical JaclVal bit patterns, so direct == comparison works for env name lookup
-  - Integration tests (compile + execute) in test_compiler.c require adding VM_IMPLEMENTATION include
-  - def returns nil (pushes JACL_NIL), undefined variable pushes error-flagged value (not VM_RUNTIME_ERROR)
-  - PrintCapture pattern reused in test_compiler.c for integration tests
----
-
-## 2026-02-19 - US-008
-- Verified nested subcommands and multi-statement programs work end-to-end
-- No new compiler/VM code needed — existing recursive compilation and OP_POP between statements already handles all cases
-- Added 7 integration tests in compiler/test_compiler.c:
-  - nested_print_add_mul: [print [+ 1 [* 2 3]]] outputs "7\n"
-  - nested_both_args: [+ [* 2 3] [- 10 4]] evaluates to i32(12)
-  - deeply_nested: [+ 1 [+ 2 [+ 3 4]]] evaluates to i32(10)
-  - multi_def_print: def x 10; def y 20; print [+ $x $y] outputs "30\n"
-  - multi_semicolons_def_print: def a 1; def b 2; print [+ $a $b] outputs "3\n"
-  - intermediate_results_popped: multi-statement leaves only last result on stack
-  - final_result_available: def + arithmetic result accessible after execution
-- Files changed: compiler/test_compiler.c (modified)
-- All 42 compiler tests pass, full build suite green (32/32 modules)
-- **Learnings for future iterations:**
-  - US-008 was purely integration testing — the compiler's recursive AST traversal and OP_POP between statements already handled nesting and multi-statement correctly
-  - Integration tests in test_compiler.c use compile_source + vm_exec pattern, requiring both COMPILER_IMPLEMENTATION and VM_IMPLEMENTATION includes
-  - PrintCapture struct and capture_print callback are already defined in test_compiler.c for US-007 integration tests, reuse them
----
-
-## 2026-02-19 - US-009
-- Implemented runtime error reporting for VM and compile error messages for compiler
-- VM: added `error_message` (arena-allocated or static string) and `error_line` fields to VM struct
-- VM: added `vm__set_error(vm, fmt, ...)` for formatted error messages, `vm__type_name(val)` for type names
-- VM: dispatch loop now sets `vm->error_line` from bytecode line table at start of each iteration
-- VM: `VM__BINARY_NUMERIC_OP` macro now takes op_name parameter and produces descriptive type error messages
-- VM: OP_MOD f32 and OP_NEG type mismatches produce descriptive error messages
-- VM: OP_GET_GLOBAL for undefined variables now returns VM_RUNTIME_ERROR with message naming the variable (changed from previous error-flagged value behavior)
-- VM: vm__push/vm__pop set error_message on overflow/underflow
-- VM: default opcode case sets error_message with opcode number
-- Compiler: added `error_message` field to CompileResult (first error with source position)
-- Compiler: updated `compiler__error` to accept line/col and format "line N, col N: message"
-- Files changed: vm/vm.h (modified), vm/test_vm.c (modified), compiler/compiler.h (modified), compiler/test_compiler.c (modified)
-- Updated 6 existing tests to verify error_message content; added 4 new VM tests + 7 new compiler integration tests
-- All 55 VM tests pass, all 49 compiler tests pass, full build suite green (32/32 modules)
-- **Learnings for future iterations:**
-  - vm__set_error uses vsnprintf + arena_alloc for formatted error messages; simple static strings also work for error_message
-  - error_line is set at the start of each dispatch iteration from chunk->lines[offset]; all error paths in that iteration inherit it
-  - OP_GET_GLOBAL behavior changed in US-009: undefined vars now return VM_RUNTIME_ERROR instead of pushing error-flagged value
-  - compiler__error was updated from (Compiler*, message) to (Compiler*, line, col, message); all callers updated
-  - strstr() in test assertions is useful for verifying error messages contain expected substrings without brittle exact matching
----
-
-## 2026-02-19 - US-010
-- Implemented jacl_run pipeline helper in vm/vm.h: chains lexer_lex -> parser_parse -> compiler_compile -> vm_exec
-- jacl_run guarded by `#ifdef COMPILER_H` so it's only available when the full pipeline is included
-- Parse errors and compile errors halt the pipeline and set vm->error_message before returning VM_RUNTIME_ERROR
-- Created vm/test_integration.c with 10 integration tests covering all acceptance criteria:
-  - jacl_run_basic: simple print execution
-  - motivating_example: [print [+ 1 2]] outputs "3\n"
-  - parse_error_reported: unclosed bracket halts pipeline
-  - compile_error_reported: unknown command halts pipeline
-  - runtime_error_with_line: type mismatch includes line number
-  - deliberate_errors: multiple error paths (long string, undefined var, div by zero)
-  - comprehensive_program: 12-line program mixing def, arithmetic, comparisons, print, nested subcommands
-  - f32_pipeline: float arithmetic end-to-end
-  - semicolons_pipeline: multi-statement with semicolons
-  - empty_program: empty source succeeds
-- Files changed: vm/vm.h (modified), vm/test_integration.c (new), build.sh (modified)
-- All 10 integration tests pass, full build suite green (33/33 modules)
-- **Learnings for future iterations:**
-  - jacl_run is guarded by `#ifdef COMPILER_H` in both declaration and implementation sections of vm.h
-  - This works because test files that need jacl_run include compiler.h before vm.h (COMPILER_H is defined)
-  - test_vm.c doesn't include compiler.h, so jacl_run is invisible there — no unused static function warnings
-  - CompileResult.chunk is stack-allocated inside jacl_run but its data (code, constants) is arena-allocated, so vm_exec can safely use it
-  - PrintCapture buffer in integration tests is 1024 bytes (larger than test_compiler.c's 256) to accommodate multi-line output
+  - Commands inside blocks `{ }` must be separated by `;` or `\n` — the parser's bare command parser consumes consecutive expressions on the same line as args to a single command
+  - Local slot index = position in the locals array; VM accesses as stack[frame.stack_base + slot]
+  - Block compilation pops every statement result (including the last), then pushes nil — blocks don't return values yet (will be handled per-construct in if/while/proc stories)
+  - end_scope walks locals array backwards, counts locals with depth > new scope_depth, emits single OP_POP_N
+  - Shadowing in same scope creates new local slot (resolve_local searches backwards, finds latest)
 ---

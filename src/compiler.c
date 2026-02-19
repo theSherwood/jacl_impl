@@ -21,6 +21,15 @@ typedef struct {
 
 static CompileResult compiler_compile(ParseResult parse, arena_t* arena);
 
+/* --- Internal: Local variable tracking --- */
+
+#define COMPILER_LOCALS_MAX 256
+
+typedef struct {
+  JaclVal name;     /* inline string name */
+  int     depth;    /* scope depth when declared */
+} Local;
+
 /* --- Internal: Compiler state --- */
 
 typedef struct {
@@ -28,6 +37,9 @@ typedef struct {
   arena_t*       arena;
   uint32_t       error_count;
   const char*    first_error;
+  Local          locals[COMPILER_LOCALS_MAX];
+  uint32_t       local_count;
+  int            scope_depth;
 } Compiler;
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena) {
@@ -35,6 +47,8 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena) {
   c->arena       = arena;
   c->error_count = 0;
   c->first_error = NULL;
+  c->local_count = 0;
+  c->scope_depth = 0;
 }
 
 /* --- Internal: Emit helpers --- */
@@ -66,6 +80,46 @@ static void compiler__error(Compiler* c, uint32_t line, uint32_t col,
     memcpy(msg, buf, (uint32_t)n + 1);
     c->first_error = msg;
   }
+}
+
+/* --- Internal: Scope and local variable helpers --- */
+
+static void compiler__begin_scope(Compiler* c) {
+  c->scope_depth++;
+}
+
+static void compiler__end_scope(Compiler* c, uint32_t line) {
+  c->scope_depth--;
+  uint32_t pop_count = 0;
+  while (c->local_count > 0 &&
+         c->locals[c->local_count - 1].depth > c->scope_depth) {
+    c->local_count--;
+    pop_count++;
+  }
+  if (pop_count > 0) {
+    compiler__emit_byte(c, OP_POP_N, line);
+    compiler__emit_byte(c, (uint8_t)pop_count, line);
+  }
+}
+
+static void compiler__add_local(Compiler* c, JaclVal name,
+                                uint32_t line, uint32_t col) {
+  if (c->local_count >= COMPILER_LOCALS_MAX) {
+    compiler__error(c, line, col, "too many local variables in function");
+    return;
+  }
+  Local* local = &c->locals[c->local_count++];
+  local->name  = name;
+  local->depth = c->scope_depth;
+}
+
+static int compiler__resolve_local(Compiler* c, JaclVal name) {
+  for (int i = (int)c->local_count - 1; i >= 0; i--) {
+    if (c->locals[i].name == name) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 /* --- Internal: Command head matching --- */
@@ -178,11 +232,20 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     /* Compile the value expression */
     compiler__compile_node(c, args[1]);
-    /* Add name to constant pool and emit OP_DEF_GLOBAL */
+
     JaclVal name_val = jacl_inline_string(args[0]->data.lit_string.value, name_len);
-    uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
-    compiler__emit_byte(c, OP_DEF_GLOBAL, line);
-    compiler__emit_u16(c, name_idx, line);
+
+    if (c->scope_depth > 0) {
+      /* Local variable: value is on stack as the local slot */
+      compiler__add_local(c, name_val, line, col);
+      /* def returns nil */
+      compiler__emit_byte(c, OP_NIL, line);
+    } else {
+      /* Global variable */
+      uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+      compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+      compiler__emit_u16(c, name_idx, line);
+    }
     return;
   }
 
@@ -227,9 +290,16 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
         break;
       }
       JaclVal name_val = jacl_inline_string(node->data.var_ref.name, name_len);
-      uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
-      compiler__emit_byte(c, OP_GET_GLOBAL, line);
-      compiler__emit_u16(c, name_idx, line);
+
+      int local_slot = compiler__resolve_local(c, name_val);
+      if (local_slot != -1) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)local_slot, line);
+      } else {
+        uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+        compiler__emit_byte(c, OP_GET_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+      }
       break;
     }
 
@@ -244,8 +314,15 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_BLOCK: {
-      /* Future story */
-      compiler__error(c, line, node->start.column, "blocks not yet supported");
+      compiler__begin_scope(c);
+      uint32_t count = node->data.block.count;
+      for (uint32_t i = 0; i < count; i++) {
+        compiler__compile_node(c, node->data.block.commands[i]);
+        compiler__emit_byte(c, OP_POP, line);
+      }
+      compiler__end_scope(c, line);
+      /* Block evaluates to nil */
+      compiler__emit_byte(c, OP_NIL, line);
       break;
     }
 
