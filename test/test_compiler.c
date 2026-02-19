@@ -2074,6 +2074,86 @@ static int test_closure_not_global(void) {
   TEST_PASS();
 }
 
+/* ===== US-009 (M4): Recursion ===== */
+
+/* Test: factorial via recursion — fact(10) = 3628800 */
+static int test_recursion_factorial(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[proc fact [n] {\n"
+    "  [if [== $n 0] { 1 } { [* $n [fact [- $n 1]]] }]\n"
+    "}]\n"
+    "[print [fact 10]]";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3628800\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: fibonacci via recursion — fib(10) = 55 */
+static int test_recursion_fibonacci(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[proc fib [n] {\n"
+    "  [if [< $n 2] { $n } { [+ [fib [- $n 1]] [fib [- $n 2]]] }]\n"
+    "}]\n"
+    "[print [fib 10]]";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "55\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: recursion depth limit — exceeding VM_FRAMES_MAX produces stack overflow */
+static int test_recursion_depth_limit(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+
+  /* Infinite recursion with no base case */
+  const char* program =
+    "[proc inf [n] { [inf [+ $n 1]] }]\n"
+    "[inf 0]";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "stack overflow") != NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -2185,6 +2265,10 @@ int main(void) {
     { "closure_nested_3_levels",     test_closure_nested_3_levels },
     { "closure_capture_multiple",    test_closure_capture_multiple },
     { "closure_not_global",          test_closure_not_global },
+    /* US-009 (M4): Recursion */
+    { "recursion_factorial",         test_recursion_factorial },
+    { "recursion_fibonacci",         test_recursion_fibonacci },
+    { "recursion_depth_limit",       test_recursion_depth_limit },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
