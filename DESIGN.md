@@ -42,14 +42,6 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 
 ## Future Milestone Details
 
-### M4: Variables, Procedures & Control Flow
-- `proc name [params] { body }` — procedure definition
-- User-defined procedure invocation dispatches like builtins
-- Lexical scoping: nested environments, procedure bodies create new scopes
-- `if cond { then } { else }` — conditional with then/else blocks
-- Closures capture immutable bindings by value
-- Recursion (tail-call optimization can be deferred)
-
 ### M5: String System
 - Heap-interned strings: intern table with pointer-equality comparison
 - Large strings backed by existing rope module (`sum_tree/rope.h`)
