@@ -188,3 +188,22 @@
   - def returns nil (pushes JACL_NIL), undefined variable pushes error-flagged value (not VM_RUNTIME_ERROR)
   - PrintCapture pattern reused in test_compiler.c for integration tests
 ---
+
+## 2026-02-19 - US-008
+- Verified nested subcommands and multi-statement programs work end-to-end
+- No new compiler/VM code needed — existing recursive compilation and OP_POP between statements already handles all cases
+- Added 7 integration tests in compiler/test_compiler.c:
+  - nested_print_add_mul: [print [+ 1 [* 2 3]]] outputs "7\n"
+  - nested_both_args: [+ [* 2 3] [- 10 4]] evaluates to i32(12)
+  - deeply_nested: [+ 1 [+ 2 [+ 3 4]]] evaluates to i32(10)
+  - multi_def_print: def x 10; def y 20; print [+ $x $y] outputs "30\n"
+  - multi_semicolons_def_print: def a 1; def b 2; print [+ $a $b] outputs "3\n"
+  - intermediate_results_popped: multi-statement leaves only last result on stack
+  - final_result_available: def + arithmetic result accessible after execution
+- Files changed: compiler/test_compiler.c (modified)
+- All 42 compiler tests pass, full build suite green (32/32 modules)
+- **Learnings for future iterations:**
+  - US-008 was purely integration testing — the compiler's recursive AST traversal and OP_POP between statements already handled nesting and multi-statement correctly
+  - Integration tests in test_compiler.c use compile_source + vm_exec pattern, requiring both COMPILER_IMPLEMENTATION and VM_IMPLEMENTATION includes
+  - PrintCapture struct and capture_print callback are already defined in test_compiler.c for US-007 integration tests, reuse them
+---
