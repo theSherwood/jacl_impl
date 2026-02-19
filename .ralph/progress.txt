@@ -1,12 +1,14 @@
 ## Codebase Patterns
-- Single-header convention: `#ifndef X_H` / `#define X_H` for declarations, `#ifdef X_IMPLEMENTATION` for implementation
+- Unity build: `src/jacl.c` #includes all pipeline .c files + lib headers as a single translation unit
+- JACL pipeline files in `src/`: plain .c with `#ifndef X_C` guards, no `#define X_IMPLEMENTATION` needed
+- Lib modules in `lib/`: single-header convention with `#ifdef X_IMPLEMENTATION`
+- Test files: `#include "test_helpers.h"` then `#include "../src/jacl.c"` — gets everything
 - Arena allocator: zero-init `arena_t arena = {0}`, uses libc by default
 - Test tracked allocator: `tracked_allocator` from `test/test_helpers.h`, plug into arena via `.allocator = tracked_allocator`
 - Build system: `build.sh` with `TESTS=()` array entries formatted as `"path/test.c|name|optional_extra_cflags"`
 - Compiler flags: `-Wall -Wextra -std=c99 -g`
-- Relative includes from module dirs use `../` prefix (e.g., `#include "../arena/arena.h"`)
 - Implementation language is C (C99)
-- Existing modules: platform/ (atomics, threading), arena/ (bulk allocation), test/ (test harness), lexer/ (tokenizer), value/ (tagged value system), parser/ (AST + parser)
+- Pipeline: src/value.c → src/lexer.c → src/ast.c → src/parser.c → src/bytecode.c → src/compiler.c → src/vm.c
 - Private/internal functions use double-underscore prefix: `module__function_name`
 - Public types use PascalCase (Token, LexResult, AstNode) or lower_t for system-level (arena_t)
 - Public functions use module_verb_noun pattern (lexer_lex, arena_alloc, parser_parse)
@@ -29,7 +31,7 @@
 - AST_COMMAND has head (AstNode*) + args (AstNode**) + arg_count
 - AstNode is a tagged union with SourcePos start/end
 
-- Value API: JaclVal is a 64-bit tagged value in value/value.h
+- Value API: JaclVal is a 64-bit tagged value in src/value.c
 - Constructors: jacl_i32(val), jacl_f32(val), jacl_inline_string(ptr, len), JACL_NIL, JACL_TRUE, JACL_FALSE
 - Arithmetic: jacl_add_i32, jacl_sub_i32, jacl_mul_i32, jacl_div_i32, jacl_mod_i32, jacl_neg_i32 (and _f32 variants)
 - Comparison: jacl_lt_i32, jacl_gt_i32, jacl_le_i32, jacl_ge_i32 (and _f32 variants)
@@ -37,12 +39,10 @@
 - Type checks: jacl_is_i32, jacl_is_f32, jacl_is_nil, jacl_is_bool, jacl_is_inline_string, jacl_is_error
 - Extraction: jacl_as_i32, jacl_as_f32, jacl_inline_string_ptr, jacl_inline_string_len
 
-- Bytecode API: BytecodeChunk in compiler/bytecode.h, chunk_init, chunk_write, chunk_write_u16, chunk_add_constant
+- Bytecode API: BytecodeChunk in src/bytecode.c, chunk_init, chunk_write, chunk_write_u16, chunk_add_constant
 - OpCode enum: OP_CONST (+ u16 index), OP_NIL, OP_TRUE, OP_FALSE, OP_POP, OP_ADD..OP_MOD, OP_NEG, OP_EQ..OP_GE, OP_PRINT, OP_DEF_GLOBAL (+ u16), OP_GET_GLOBAL (+ u16), OP_HALT
 - Bytecode arrays auto-grow via arena re-allocation (old memory left for arena to reclaim)
-- Function declarations in header section must include `static` to match implementation section
-
-- Compiler API: CompileResult compiler_compile(ParseResult, arena_t*) in compiler/compiler.h
+- Compiler API: CompileResult compiler_compile(ParseResult, arena_t*) in src/compiler.c
 - CompileResult struct: BytecodeChunk chunk, uint32_t error_count
 - Compiler internal: Compiler struct with chunk*, arena*, error_count
 - compiler__emit_byte, compiler__emit_u16, compiler__emit_constant helpers
@@ -61,7 +61,7 @@
 - Print formatting: error-flagged -> "<error>", nil -> "nil", bool -> "true"/"false", i32 -> %d, f32 -> %g, inline_string -> content
 - Test print output: PrintCapture struct {buf[256], len} with capture_print callback set via vm.print_fn/vm.print_ctx
 
-- VM API: VM struct in vm/vm.h, vm_init(VM*, arena_t*), vm_exec(VM*, BytecodeChunk*)
+- VM API: VM struct in src/vm.c, vm_init(VM*, arena_t*), vm_exec(VM*, BytecodeChunk*)
 - VMResult enum: VM_OK, VM_RUNTIME_ERROR, VM_STACK_OVERFLOW
 - VM stack: JaclVal stack[256], stack_top is next free slot index
 - VM has configurable print_fn + print_ctx, defaults to stdout via vm__default_print
@@ -78,7 +78,7 @@
 - Compiler `def`: checks argc==2, args[0] must be AST_LIT_STRING, compiles value then emits OP_DEF_GLOBAL
 - Compiler AST_VAR_REF: creates inline_string from name, emits OP_GET_GLOBAL
 
-- Pipeline API: jacl_run(source, vm, arena) in vm/vm.h (guarded by #ifdef COMPILER_H)
+- Pipeline API: jacl_run(source, vm, arena) in src/vm.c
 - jacl_run chains: lexer_lex -> parser_parse -> compiler_compile -> vm_exec
 - Returns VM_RUNTIME_ERROR for parse/compile errors, sets vm->error_message
 

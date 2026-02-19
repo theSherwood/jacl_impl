@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../platform/platform.h"
+#include "../lib/platform/platform.h"
 
 /* --- Memory Spy / Tracker --- */
 
