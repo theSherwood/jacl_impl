@@ -48,6 +48,10 @@
 - OP_SET_LOCAL peeks (doesn't pop) — value stays on stack
 - OP_JUMP_IF_FALSE pops the condition value from the stack
 - vm->chunk is synced with current frame's chunk pointer throughout execution
+- Jump patching: compiler__emit_jump emits placeholder 0xFFFF, compiler__patch_jump fills in actual offset
+- compiler__compile_block_expr: compiles block as expression (last stmt value stays on stack), cleans up locals via SET_LOCAL+POP_N trick
+- if/while/proc body blocks should use compile_block_expr (not the default AST_BLOCK path which pops everything and pushes nil)
+- In JACL, bare `false` is a string (truthy); `$false` is the boolean false (falsy). Tests should use `$false`/`$true`/`$nil` for booleans
 
 ---
 
@@ -105,4 +109,83 @@
   - Block compilation pops every statement result (including the last), then pushes nil — blocks don't return values yet (will be handled per-construct in if/while/proc stories)
   - end_scope walks locals array backwards, counts locals with depth > new scope_depth, emits single OP_POP_N
   - Shadowing in same scope creates new local slot (resolve_local searches backwards, finds latest)
+---
+
+## 2026-02-19 - US-005
+- Added jump patching helpers (compiler__emit_jump, compiler__patch_jump) to src/compiler.c
+- Added compiler__compile_block_expr helper: compiles block as expression where last statement's value stays on stack; cleans up locals using OP_SET_LOCAL + OP_POP_N trick (saves result into first local slot, then pops extras)
+- Added `if` handler in compiler__compile_command: recognizes 'if' command head, supports 2 args (cond + then-block, returns nil for else) and 3 args (cond + then-block + else-block)
+- Compilation scheme: compile cond → JUMP_IF_FALSE → compile_block_expr(then) → JUMP → patch JUMP_IF_FALSE → compile_block_expr(else) or NIL → patch JUMP
+- Added 12 tests to test/test_compiler.c: if_then_branch, if_else_branch, if_no_else_nil, if_nested, if_nil_falsy, if_zero_truthy, if_empty_string_truthy, if_as_expression, if_wrong_argc_1, if_wrong_argc_4, if_then_not_block, if_else_not_block
+- Files changed: src/compiler.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Jump patching pattern: emit_jump returns offset of placeholder, patch_jump fills it with actual distance from current code position
+  - Block-as-expression requires special handling: default AST_BLOCK compilation pops everything and pushes nil, but if/while/proc need the last value
+  - The SET_LOCAL+POP_N trick for block-as-expr cleanup: write result into first local's slot, then POP_N removes extras + old top copy, leaving result in place
+  - In JACL, bare `false` is a string (truthy); `$false` is the boolean false. Tests for falsy conditions must use `$false` or `$nil`
+  - Forward declaration of compiler__compile_node is needed before compiler__compile_block_expr since it calls it
+---
+
+## 2026-02-19 - US-006
+- Added proc handler to compiler__compile_command in src/compiler.c (~100 lines)
+- proc compiles body into separate BytecodeChunk via child Compiler with scope_depth=1
+- Parameters become local slots 0..N-1 in the body compiler
+- Body compiled via compile_block_expr, then OP_RETURN emitted
+- Closure stored in constant pool, OP_CLOSURE + OP_DEF_GLOBAL (or local) emitted
+- Replaced "unknown command" compile error with dynamic call fallback: look up command head as variable, compile args, emit OP_CALL
+- Parser changes: `[]` is now valid empty AST_COMMAND (for empty param lists); bare single expressions unwrapped (bare `hello` → AST_LIT_STRING, bracketed `[hello]` → AST_COMMAND)
+- Added OP_CLOSURE handler to vm.c: reads u16 constant index, pushes closure value
+- Added 9 tests: proc_basic_call, proc_print_param, proc_zero_params, proc_implicit_return, proc_multi_stmt_body, proc_redefine, proc_wrong_argc, proc_call_arg_mismatch, proc_def_returns_nil
+- Updated existing tests: renamed test_compile_error_unknown_command → test_runtime_error_unknown_command, updated parser tests for bare word unwrapping behavior
+- Files changed: src/compiler.c, src/parser.c, src/vm.c, test/test_compiler.c, test/test_parser.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - Parser bare-word unwrapping means tests expecting AST_COMMAND for single bare words now get AST_LIT_STRING
+  - Dynamic call fallback enables user-defined procs without explicit compiler knowledge
+  - proc body compilation reuses compile_block_expr pattern from if/while
+  - Zero-param procs use `[]` syntax which parser now handles as valid empty command
+  - Bracketed `[name]` remains AST_COMMAND (zero-arg call), while bare `name` becomes AST_LIT_STRING (variable/string)
+---
+
+## 2026-02-19 - US-007
+- Added while handler to compiler__compile_command in src/compiler.c
+- Compilation: loop-start label → compile cond → JUMP_IF_FALSE → compile body stmts → POP each → LOOP back → patch exit → NIL
+- Body compiled WITHOUT extra scope (no begin_scope/end_scope) so def rebinds at same scope level as surrounding code
+- This means def inside a top-level while loop creates/rebinds globals, enabling counter patterns
+- Added 8 tests: while_zero_iterations, while_nil_falsy, while_iterative_sum, while_returns_nil, while_wrong_argc_1, while_wrong_argc_3, while_body_not_block, while_countdown
+- Files changed: src/compiler.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - While body must NOT use compile_block_expr (which creates a scope) — def inside while needs to rebind at the same scope level
+  - OP_LOOP offset calculation: distance from current code position back to loop_start, plus 2 for the offset bytes themselves
+  - While returns nil (not the last body value)
+---
+
+## 2026-02-19 - US-008
+- Added Upvalue struct and upvalue tracking to Compiler: index, is_local, name
+- Added enclosing pointer to Compiler for parent scope resolution
+- Added compiler__add_upvalue and compiler__resolve_upvalue (recursive transitive capture)
+- AST_VAR_REF now checks: local → upvalue → global (3-tier resolution)
+- proc handler sets body_compiler.enclosing = parent, emits upvalue descriptors after OP_CLOSURE
+- VM OP_CLOSURE: allocates new closure instance (not reuse template), reads upvalue descriptors, copies from enclosing locals/upvalues
+- Changed proc at scope_depth > 0 to return the closure value (OP_GET_LOCAL) instead of nil — enables make-adder pattern
+- Added 5 tests: closure_capture_local, closure_independent_captures, closure_nested_3_levels, closure_capture_multiple, closure_not_global
+- Files changed: src/compiler.c, src/vm.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Proc names must be ≤7 bytes (inline string limit) — use short names in tests
+  - proc inside function body must return closure value (not nil) for make-adder pattern to work
+  - OP_CLOSURE must allocate a fresh closure per instantiation so each has its own upvalue array
+  - Upvalue deduplication: compiler__add_upvalue checks existing upvalues before adding
+---
+
+## 2026-02-19 - US-009
+- Added 3 recursion tests: factorial(10)=3628800, fibonacci(10)=55, depth limit (stack overflow)
+- Recursion works out-of-the-box: proc name bound globally via OP_DEF_GLOBAL before body executes
+- Files changed: test/test_compiler.c
+---
+
+## 2026-02-19 - US-010
+- Created test/test_m4.c with 10 integration tests using jacl_run() and PrintCapture
+- Tests: proc_call_pipeline, factorial, fibonacci, closure_capture, truthy_falsy, nested_procs, error_wrong_argc, error_call_non_function, error_undefined_in_proc, while_iterative_sum
+- Added test/test_m4.c to build.sh TESTS array
+- Updated DESIGN.md M4 row status to **COMPLETE**
+- Files changed: test/test_m4.c (new), build.sh, DESIGN.md
 ---
