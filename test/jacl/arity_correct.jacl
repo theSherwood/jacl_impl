@@ -1,0 +1,10 @@
+# expect: 6
+# expect: 20
+# expect: 0
+# direct calls with correct arg counts compile and run
+proc add3 [a b c] { [+ [+ $a $b] $c] }
+print [add3 1 2 3]
+proc double [n] { [* $n 2] }
+print [double 10]
+proc zero [] { 0 }
+print [zero]

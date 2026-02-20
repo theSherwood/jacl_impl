@@ -1,0 +1,3 @@
+# expect-error: builtin '+' expects 2 arguments but got 1
+# builtin with wrong arity produces compile error
+[+ 1]

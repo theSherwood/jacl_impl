@@ -1,0 +1,5 @@
+# expect-error: proc 'f' expects 3 arguments but got 1
+# call through variable alias with wrong arity produces compile error
+proc add3 [a b c] { [+ [+ $a $b] $c] }
+def f $add3
+[$f 1]

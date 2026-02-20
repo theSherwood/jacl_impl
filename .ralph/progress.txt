@@ -101,3 +101,22 @@ Thread: N/A
   - The `%` builtin had `"%%"` in the old message (printf escape), but the new helper uses `%s` for the name so plain `"%"` is correct
   - `-` is flexible-arity (1 or 2) — unary negation with 1 arg, subtraction with 2 — not fixed at 2 as the PRD suggests
 ---
+
+## 2026-02-20 - US-006
+Thread: N/A
+- Created 8 .jacl test files for comprehensive arity checking coverage:
+  - arity_direct.jacl — too few args on direct proc call (expect-error)
+  - arity_direct_many.jacl — too many args on direct proc call (expect-error)
+  - arity_correct.jacl — correct arg counts for 3-arg, 1-arg, 0-arg procs
+  - arity_alias.jacl — wrong arity through variable alias (expect-error)
+  - arity_alias_correct.jacl — correct arity through alias + alias chain propagation
+  - arity_unknown.jacl — unknown-arity variable (proc returned from another proc) compiles and runs
+  - arity_builtins.jacl — builtin `+` with wrong arity (expect-error)
+  - arity_nested.jacl — nested proc definitions with independent arities
+- All 17 harness tests pass (8 new + 9 existing); 38 total tests pass
+- Files changed: test/jacl/arity_*.jacl (8 new files)
+- **Learnings for future iterations:**
+  - Proc names must be <= 7 bytes (inline string limit) — `make_adder` (10 chars) fails, use `mkadd` instead
+  - Test harness `# expect-error:` is substring match — only one error scenario per file
+  - Error format for proc arity: "proc 'name' expects N arguments but got M" (note: "1 arguments" not "1 argument")
+---

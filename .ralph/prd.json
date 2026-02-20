@@ -101,7 +101,7 @@
         "All tests pass as part of build.sh"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ]
