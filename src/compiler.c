@@ -28,8 +28,9 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
 #define COMPILER_UPVALUES_MAX 256
 
 typedef struct {
-  JaclVal name;     /* inline string name */
-  int     depth;    /* scope depth when declared */
+  JaclVal  name;         /* inline string name */
+  int      depth;        /* scope depth when declared */
+  int16_t  known_arity;  /* arity if bound to a proc, -1 = unknown */
 } Local;
 
 typedef struct {
@@ -126,8 +127,9 @@ static void compiler__add_local(Compiler* c, JaclVal name,
     return;
   }
   Local* local = &c->locals[c->local_count++];
-  local->name  = name;
-  local->depth = c->scope_depth;
+  local->name        = name;
+  local->depth       = c->scope_depth;
+  local->known_arity = -1;
 }
 
 static int compiler__resolve_local(Compiler* c, JaclVal name) {
@@ -238,6 +240,22 @@ static int compiler__head_matches(AstNode* head, const char* name, uint32_t len)
   return head->type == AST_LIT_STRING &&
          head->data.lit_string.length == len &&
          memcmp(head->data.lit_string.value, name, len) == 0;
+}
+
+/* --- Internal: Determine known arity of an AST expression --- */
+
+static int16_t compiler__node_known_arity(Compiler* c, AstNode* node) {
+  if (node->type == AST_VAR_REF) {
+    uint32_t name_len = node->data.var_ref.length;
+    if (name_len <= 7) {
+      JaclVal name_val = jacl_inline_string(node->data.var_ref.name, name_len);
+      int slot = compiler__resolve_local(c, name_val);
+      if (slot != -1) {
+        return c->locals[slot].known_arity;
+      }
+    }
+  }
+  return -1;
 }
 
 /* --- Internal: Compile a binary operation --- */
@@ -404,7 +422,9 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
     if (c->scope_depth > 0) {
       /* Local variable: value is on stack as the local slot */
+      int16_t rhs_arity = compiler__node_known_arity(c, args[1]);
       compiler__add_local(c, name_val, line, col);
+      c->locals[c->local_count - 1].known_arity = rhs_arity;
       /* def returns nil */
       compiler__emit_byte(c, OP_NIL, line);
     } else {
@@ -537,6 +557,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->scope_depth > 0) {
       /* Local scope: closure is on stack as local */
       compiler__add_local(c, name_val, line, col);
+      c->locals[c->local_count - 1].known_arity = (int16_t)param_count;
       /* proc returns the closure value (enables make-adder pattern) */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
       compiler__emit_byte(c, (uint8_t)(c->local_count - 1), line);
