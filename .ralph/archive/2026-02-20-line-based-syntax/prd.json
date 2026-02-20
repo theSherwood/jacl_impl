@@ -1,0 +1,138 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/line-based-syntax",
+  "description": "JACL Milestone 6 — Line-Based Syntax Sugar: Implicit brackets for bare commands, comma/semicolon/newline command separators, backslash line continuation, bare words and $var at statement position desugar to zero-arg command calls",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Comma token in lexer",
+      "description": "As the lexer, I need to emit TOKEN_COMMA when encountering ',' so the parser can use it as a command separator.",
+      "acceptanceCriteria": [
+        "Add TOKEN_COMMA to the TokenType enum (between TOKEN_SEMICOLON and TOKEN_WORD)",
+        "Lexer emits TOKEN_COMMA for ',' characters — same pattern as TOKEN_SEMICOLON in the single-character delimiters section of lexer_lex()",
+        "Comma inside strings is not tokenized (already handled — string body lexer consumes string content)",
+        "Update the lexer header comment from '23 token types' to reflect the new count",
+        "Unit test: 'def x 1, def y 2' lexes to [WORD WORD INT COMMA WORD WORD INT EOF]",
+        "Unit test: a comma inside a string literal '\"a,b\"' produces TOKEN_STRING, not TOKEN_COMMA",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Backslash line continuation in lexer",
+      "description": "As the lexer, I need to consume '\\' followed by a newline as whitespace so that long commands can span multiple lines.",
+      "acceptanceCriteria": [
+        "When '\\' is immediately followed by '\\n' (or '\\r\\n'), the lexer consumes both characters and emits no token — continues lexing the next line as part of the same logical line",
+        "Implementation: in the operator character section of lexer_lex(), when the first char is '\\', peek ahead — if next is '\\n' or '\\r\\n', consume the backslash + newline, increment lex->line, reset lex->col to 1, and continue (no token emitted)",
+        "'\\' followed by something other than a newline continues to be lexed as an operator character (existing behavior — '\\' is in lexer__is_operator_char)",
+        "Line counter (lex->line) is incremented and column resets to 1 after consuming backslash-newline",
+        "Unit test: 'puts \\\\\\nhello' (backslash-newline) lexes to [WORD WORD EOF] with hello on line 2",
+        "Unit test: 'puts \\\\\\r\\nhello' — CRLF continuation works, lexes to [WORD WORD EOF]",
+        "Backslash continuation inside strings is unaffected (strings have their own escape handling in lexer__lex_string_body)",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Comma as command separator in parser",
+      "description": "As the parser, I need to treat TOKEN_COMMA as a command terminator (like newlines and semicolons) so users can write multiple commands on one line separated by commas.",
+      "acceptanceCriteria": [
+        "parser__is_command_end returns true for TOKEN_COMMA (add to the condition alongside TOKEN_NEWLINE, TOKEN_SEMICOLON, TOKEN_EOF, TOKEN_RBRACE)",
+        "Top-level parsing loop in parser_parse() skips TOKEN_COMMA between commands (add TOKEN_COMMA to the while condition that already skips TOKEN_NEWLINE and TOKEN_SEMICOLON)",
+        "Block parsing loop in parser__parse_block() skips TOKEN_COMMA between commands (add TOKEN_COMMA to the while condition that already skips TOKEN_NEWLINE and TOKEN_SEMICOLON)",
+        "Integration test: 'def x 1, def y 2, [+ $x $y]' evaluates to 3 via jacl_run()",
+        "Integration test: '{ def a 10, def b 20, [+ $a $b] }' in a block evaluates to 30",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Bare words as zero-arg command calls",
+      "description": "As the parser, I need to treat a bare word alone at statement position as a zero-arg command call, so that 'exit' on its own line desugars to '[exit]'.",
+      "acceptanceCriteria": [
+        "In parser__parse_bare_command, when args.count == 0 and head->type is AST_LIT_STRING (bare word), wrap head in a new AST_COMMAND node with arg_count = 0 — instead of returning head directly",
+        "'exit' parses to AST_COMMAND { head: AST_LIT_STRING(\"exit\"), args: [], arg_count: 0 } — same structure as '[exit]'",
+        "'puts hello' still parses to AST_COMMAND { head: AST_LIT_STRING(\"puts\"), args: [AST_LIT_STRING(\"hello\")] } — multi-word lines are unchanged",
+        "Bare words inside brackets remain string literals: in '[puts exit]', 'exit' is parsed by parser__parse_atom as AST_LIT_STRING — not affected by this change",
+        "A bare integer alone on a line (42) is NOT wrapped — remains AST_LIT_INT",
+        "A bare float alone on a line (3.14) is NOT wrapped — remains AST_LIT_FLOAT",
+        "A bare quoted string alone ('\"hello\"') is NOT wrapped — remains AST_LIT_STRING",
+        "A bracketed command alone ('[foo]') is returned directly from parser__parse_expr — not double-wrapped",
+        "A block alone ('{ ... }') is returned directly — not wrapped as a call",
+        "Unit tests verify each case via ParseResult AST node inspection",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "$var lines as command calls",
+      "description": "As the parser, I need to treat $var alone at statement position as a zero-arg call, so that '$fn' on its own line desugars to '[$fn]'.",
+      "acceptanceCriteria": [
+        "In parser__parse_bare_command, when args.count == 0 and head->type is AST_VAR_REF, wrap head in a new AST_COMMAND node with arg_count = 0",
+        "'$fn' parses to AST_COMMAND { head: AST_VAR_REF(\"fn\"), args: [], arg_count: 0 }",
+        "'$fn 1 2' parses to AST_COMMAND { head: AST_VAR_REF(\"fn\"), args: [1, 2] } — this already works via the existing multi-arg path",
+        "$var inside brackets remains a variable reference: '[puts $x]' — $x is parsed by parser__parse_atom and is unchanged",
+        "Integration test: 'proc greet [] { 42 }\\ndef f greet\\n$f' evaluates to 42",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Update existing tests for new bare-word semantics",
+      "description": "As a developer, I need to verify that existing tests still pass with the new bare-word-as-call semantics and update any tests that relied on bare words being string literals at statement position.",
+      "acceptanceCriteria": [
+        "Run the full existing test suite: test_lexer, test_parser, test_compiler, test_vm, test_m4, test_m5, test_integration, test_value, test_string, test_bytecode",
+        "Identify any tests that fail due to: (a) bare words at statement position now being AST_COMMAND instead of AST_LIT_STRING, or (b) TOKEN_COMMA being a new token type",
+        "Update failing tests to match new semantics — e.g., parser tests that asserted a bare word at top level was AST_LIT_STRING should now assert AST_COMMAND",
+        "All existing tests pass after updates",
+        "No regressions in bracket-based code behavior — any test using [cmd ...] syntax should produce identical results",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "All test updates were done incrementally in US-004 and US-005. Full suite verified: 36/36 pass, 0 warnings."
+    },
+    {
+      "id": "US-007",
+      "title": "End-to-end M6 integration tests",
+      "description": "As a developer, I need comprehensive integration tests in test/test_m6.c that verify the full pipeline (lex -> parse -> compile -> run) for line-based syntax.",
+      "acceptanceCriteria": [
+        "test/test_m6.c exists using jacl_run() and PrintCapture pattern from previous milestones",
+        "Test: bare command with args — 'puts hello' compiles and runs like '[puts hello]'",
+        "Test: bare command no args — 'exit' produces AST_COMMAND with arg_count 0 (verified via parser_parse)",
+        "Test: $var command — 'proc f [] { 42 }\\ndef g f\\n$g' evaluates to 42",
+        "Test: semicolon separator — 'def x 1; def y 2; [+ $x $y]' evaluates to 3",
+        "Test: comma separator — 'def x 10, def y 20, [+ $x $y]' evaluates to 30",
+        "Test: mixed separators — 'def a 1; def b 2, def c 3\\n[+ [+ $a $b] $c]' evaluates to 6",
+        "Test: backslash continuation — 'def x \\\\\\n42\\n$x' evaluates to 42",
+        "Test: continuation in block — '{ def x 1, def y 2, [+ $x $y] }' evaluates to 3",
+        "Test: nested brackets in line mode — 'puts [+ 1 [* 2 3]]' works correctly",
+        "Test: explicit brackets still work — '[def x 42]\\n[+ $x 1]' evaluates to 43",
+        "Test: proc definition line-based — 'proc add [a b] { [+ $a $b] }\\nadd 3 4' evaluates to 7",
+        "Test: multi-line block — 'proc f [] {\\n  def x 10\\n  def y 20\\n  [+ $x $y]\\n}\\nf' evaluates to 30",
+        "Test file added to build.sh TESTS array as 'test/test_m6.c|test_m6'",
+        "All tests pass",
+        "M6 row in DESIGN.md milestone table status updated from empty to **COMPLETE**",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "12 integration tests covering bare commands, separators, continuation, blocks, brackets, procs, and multi-line blocks. All 37 test suites pass."
+    }
+  ]
+}

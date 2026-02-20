@@ -1,0 +1,210 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/string-system",
+  "description": "JACL Milestone 5 — String System: Heap-interned strings (non-null-terminated, length-carrying), intern table with pointer-equality comparison, string builtins (concat, length, slice, index), string comparison, value-to-string coercion, and string interpolation end-to-end",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Heap string type and intern table",
+      "description": "As the runtime, I need a heap-allocated interned string type so that strings longer than 7 bytes can be represented and deduplicated via an arena-allocated intern table.",
+      "acceptanceCriteria": [
+        "JaclHeapString struct defined: { uint32_t length; uint32_t hash; char data[]; } — flexible array member",
+        "String data is NOT null-terminated; length field is the sole source of truth for string size",
+        "JaclInternTable struct: hash table with open addressing or chaining, arena-allocated buckets",
+        "jacl_intern(arena, table, data, length) returns JaclVal with JACL_TAG_STRING (0x05) and pointer payload to JaclHeapString",
+        "Interning the same byte sequence twice returns the same pointer (pointer equality guaranteed)",
+        "Hash function: FNV-1a or similar, operating on (data, length) pair — does not rely on null terminator",
+        "Table resizes (rehashes) when load factor exceeds 0.75",
+        "All allocations (table buckets, JaclHeapString instances) go through the arena",
+        "jacl_is_heap_string(v) predicate returns true for JACL_TAG_STRING values",
+        "Unit tests: intern a string and intern same bytes again — verify pointer equality; intern different strings — verify different pointers; strings with embedded NUL bytes intern correctly",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Unified string access API",
+      "description": "As the VM and builtins, I need a uniform API to work with any string value (inline or heap) without caring about the underlying representation.",
+      "acceptanceCriteria": [
+        "jacl_string_len(JaclVal v) returns uint32_t length for both inline and heap strings",
+        "jacl_string_data(JaclVal v, char* buf, size_t buflen) copies string bytes into buf and returns actual length — dispatches on tag: inline extracts from payload, heap copies from JaclHeapString.data",
+        "jacl_is_string(JaclVal v) returns true for both JACL_TAG_INLINE_STRING and JACL_TAG_STRING",
+        "jacl_string_eq(JaclVal a, JaclVal b) implements representation-aware equality: inline vs inline uses bitwise comparison of tagged values; heap vs heap uses pointer comparison (interning guarantees correctness); cross-representation uses length check + memcmp",
+        "jacl_string_cmp(JaclVal a, JaclVal b) returns int for lexicographic ordering (negative/zero/positive), works across all representation combinations",
+        "Unit tests verify all combinations: short==short, long==long, short!=long, short<long ordering, cross-representation equality edge case",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Compiler support for heap string literals",
+      "description": "As the compiler, I need to emit heap-interned string constants for string literals longer than 7 bytes, removing the current hard error that rejects them.",
+      "acceptanceCriteria": [
+        "Compiler holds a pointer to a JaclInternTable (passed in via compilation context or owned by it)",
+        "AST_LIT_STRING with length <= 7 still emits inline string constant via jacl_inline_string (unchanged behavior)",
+        "AST_LIT_STRING with length > 7 interns the string via jacl_intern and emits the resulting JACL_TAG_STRING value as a bytecode constant",
+        "The compile error 'string literal exceeds 7-byte inline limit' is removed",
+        "[print \"hello world\"] compiles and runs without error (previously rejected)",
+        "[def greeting \"hello world\"] [print $greeting] works end-to-end",
+        "String constants appearing multiple times in source share the same interned pointer",
+        "Unit tests verify short literals still inline, long literals intern correctly, duplicate long literals share pointer",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Print support for heap strings",
+      "description": "As a JACL programmer, I want print to display heap strings correctly so that I can see long string values.",
+      "acceptanceCriteria": [
+        "[print \"hello world this is a long string\"] prints the full string without garbage or truncation",
+        "[print \"short\"] continues to work unchanged (inline strings)",
+        "Print handler extracts string data via the unified API (jacl_string_data or direct JaclHeapString.data pointer access with length)",
+        "No trailing garbage or null-terminator issues — heap strings are not null-terminated, print must use length",
+        "Tests verify printing short strings, long strings, and that output matches exactly",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "String equality and comparison in the VM",
+      "description": "As a JACL programmer, I want == < > to work on strings so that I can compare them in conditions and sorting.",
+      "acceptanceCriteria": [
+        "[== \"abc\" \"abc\"] returns true (inline-to-inline, bitwise fast path)",
+        "[== \"hello world\" \"hello world\"] returns true (heap-to-heap, pointer fast path via interning)",
+        "[== \"abc\" \"def\"] returns false",
+        "[< \"abc\" \"def\"] returns true (lexicographic byte comparison)",
+        "[> \"def\" \"abc\"] returns true",
+        "[== \"abc\" 42] returns false (type mismatch is not an error, just false)",
+        "VM comparison opcodes (OP_EQ, OP_LT, OP_GT, OP_LE, OP_GE) dispatch to jacl_string_eq / jacl_string_cmp when one or both operands are strings",
+        "Existing numeric comparisons continue to work unchanged",
+        "Tests cover inline-inline, heap-heap, mixed-type, and ordering comparisons",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "String concatenation (OP_CONCAT and concat builtin)",
+      "description": "As a JACL programmer, I want to concatenate strings so that I can build new strings from parts.",
+      "acceptanceCriteria": [
+        "OP_CONCAT opcode added to OpCode enum: pops two string values from stack, pushes their concatenation",
+        "Concatenation result is inline (JACL_TAG_INLINE_STRING) if total length <= 7, otherwise heap-interned via the intern table",
+        "concat registered as a builtin command: [concat \"hello\" \" world\"] produces \"hello world\"",
+        "concat accepts 2+ arguments (variadic): [concat \"a\" \"b\" \"c\"] produces \"abc\" — compiler emits pairwise OP_CONCAT chain",
+        "Concatenating two empty strings returns empty inline string",
+        "Concatenating an inline string + heap string works correctly",
+        "VM has access to the intern table for creating heap-interned concatenation results",
+        "Tests verify short+short, short+long, long+long, variadic, and empty string cases",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "String builtins (length, slice, index)",
+      "description": "As a JACL programmer, I want string inspection operations so that I can query and extract parts of strings.",
+      "acceptanceCriteria": [
+        "[length \"hello\"] returns i32(5)",
+        "[length \"\"] returns i32(0)",
+        "[length \"hello world this is long\"] returns correct length for heap string",
+        "[index \"hello\" 1] returns \"e\" (single-character inline string, 0-based indexing)",
+        "[index \"hello\" -1] or out-of-bounds index returns nil (not an error)",
+        "[slice \"hello\" 1 3] returns \"el\" (start inclusive, end exclusive)",
+        "[slice \"hello\" 2] returns \"llo\" (one-arg form: from start to end of string)",
+        "[slice \"hello world this is long\" 6 11] returns \"world\" (works on heap strings)",
+        "Slice result is inline if <= 7 bytes, otherwise heap-interned",
+        "All builtins work transparently on both inline and heap string inputs",
+        "Tests cover edge cases: empty string, full slice, zero-length slice, boundary indices",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "OP_TO_STRING value-to-string coercion",
+      "description": "As the runtime, I need to convert non-string values to their string representation so that string interpolation can include numbers, booleans, and nil.",
+      "acceptanceCriteria": [
+        "OP_TO_STRING opcode added to OpCode enum: pops a value, pushes its string representation",
+        "Integer to string: 42 becomes \"42\", -7 becomes \"-7\"",
+        "Float to string: 3.14 becomes \"3.14\" (reasonable formatting, no excessive trailing zeros)",
+        "Boolean to string: true becomes \"true\", false becomes \"false\"",
+        "Nil to string: becomes \"nil\"",
+        "String to string: no-op — already a string, pushed back unchanged",
+        "Closure to string: becomes \"<proc name>\" or \"<closure>\" (matches existing print type name behavior)",
+        "Result is inline if <= 7 bytes, otherwise heap-interned",
+        "Tests verify each type conversion produces correct string",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "String interpolation compilation",
+      "description": "As a JACL programmer, I want \"hello $name, result is $[+ 1 2]\" to produce a concatenated string at runtime, completing the interpolation pipeline from lexer through VM.",
+      "acceptanceCriteria": [
+        "AST_INTERP_STRING compilation no longer errors — the stub 'interpolated strings not yet supported' is replaced with real compilation code",
+        "Each literal segment compiles to a string constant (inline if <= 7 bytes, heap-interned otherwise)",
+        "Each AST_VAR_REF segment compiles to: get variable value, then OP_TO_STRING",
+        "Each AST_COMMAND segment compiles to: compile the command expression, then OP_TO_STRING",
+        "Segments concatenated left-to-right using OP_CONCAT between each pair",
+        "[def name \"world\"] [print \"hello $name\"] prints 'hello world'",
+        "[def x 42] [print \"x is $x\"] prints 'x is 42'",
+        "[print \"sum is $[+ 1 2]\"] prints 'sum is 3'",
+        "[print \"$[+ 1 2] plus $[+ 3 4]\"] prints '3 plus 7'",
+        "Empty interpolation segments (adjacent interpolations) handled correctly without extra empty strings",
+        "Tests verify variable interpolation, expression interpolation, mixed segments, adjacent interpolations",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "End-to-end integration tests",
+      "description": "As a developer, I need comprehensive integration tests in test/test_m5.c exercising the full string system through jacl_run().",
+      "acceptanceCriteria": [
+        "test/test_m5.c exists using jacl_run() and PrintCapture pattern from previous milestones",
+        "Test: [print \"hello world\"] prints 'hello world' (basic heap string literal)",
+        "Test: [def s \"hello\"] [print [concat $s \" world\"]] prints 'hello world'",
+        "Test: [print [length \"hello\"]] prints '5'",
+        "Test: [print [index \"hello\" 0]] prints 'h'",
+        "Test: [print [slice \"hello world\" 6 11]] prints 'world'",
+        "Test: [def name \"JACL\"] [print \"hello $name\"] prints 'hello JACL'",
+        "Test: [print \"1 + 2 = $[+ 1 2]\"] prints '1 + 2 = 3'",
+        "Test: [== \"hello world\" \"hello world\"] returns true via interned pointer equality",
+        "Test: [< \"abc\" \"xyz\"] returns true",
+        "Test: heap string used as proc argument and return value works correctly",
+        "Test: closure captures a heap string value",
+        "All existing M0-M4 tests continue to pass (build.sh full suite green)",
+        "Zero memory leaks detected by tracked allocator in all tests",
+        "Test file added to build.sh TESTS array",
+        "M5 row in DESIGN.md milestone table status updated from empty to **COMPLETE**",
+        "Commit message references M5 completion"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
