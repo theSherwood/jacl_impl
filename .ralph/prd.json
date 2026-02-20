@@ -18,7 +18,7 @@
         "Compiles cleanly with -Wall -Wextra -std=c99 -g"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -35,7 +35,7 @@
         "Compiles cleanly with -Wall -Wextra -std=c99 -g"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -51,7 +51,7 @@
         "Compiles cleanly with -Wall -Wextra -std=c99 -g"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -65,7 +65,7 @@
         "Compiles cleanly with -Wall -Wextra -std=c99 -g"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
