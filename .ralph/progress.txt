@@ -1,4 +1,7 @@
 ## Codebase Patterns
+- File-based test harness: test/test_jacl_harness.c reads .jacl files from test/jacl/, parses # expect: / # expect-error: headers, runs through jacl_run
+- PrintCapture buffer in harness is 8192 bytes (larger than integration tests' 1024) to handle multi-line test output
+- Harness uses malloc/free for file I/O (not tracked_allocator) — tracked_allocator is only for the VM arena
 - Unity build: `src/jacl.c` #includes all pipeline .c files + lib headers as a single translation unit
 - JACL pipeline files in `src/`: plain .c with `#ifndef X_C` guards, no `#define X_IMPLEMENTATION` needed
 - Lib modules in `lib/`: single-header convention with `#ifdef X_IMPLEMENTATION`
@@ -23,3 +26,26 @@
 - Integration tests use PrintCapture pattern with `vm.print_fn`/`vm.print_ctx` — no `last_result` field on VM
 - The `print` builtin appends `\n` to output
 - Files sorted alphabetically for deterministic test ordering
+
+## 2026-02-20 - US-001, US-002, US-003, US-004
+- Implemented file-based JACL test harness (test/test_jacl_harness.c)
+- Harness discovers .jacl files in test/jacl/, parses # expect: / # expect-error: headers, runs through jacl_run with PrintCapture
+- Supports single-file targeting via command-line argument
+- Added to build.sh TESTS array as test/test_jacl_harness.c|jacl_harness|
+- Created test/jacl/ directory
+- Files changed: test/test_jacl_harness.c (new), build.sh (modified)
+- **Learnings for future iterations:**
+  - All four stories (harness, expect parsing, single-file mode, build integration) are naturally a single deliverable
+  - The harness uses malloc/free for its own file I/O, tracked_allocator only for the VM arena
+  - PrintCapture buffer enlarged to 8192 for multi-line test output
+---
+
+## 2026-02-20 - US-005
+- Created 9 .jacl test files in test/jacl/ covering all core JACL features
+- Files: arithmetic.jacl, bare_commands.jacl, control_flow.jacl, error_basic.jacl, line_continuation.jacl, procs.jacl, separators.jacl, strings.jacl, variables.jacl
+- All 9 tests pass, full build.sh suite passes (38/38)
+- **Learnings for future iterations:**
+  - Double-check arithmetic in expected output (3*3=9 not 6)
+  - Remember bare word semantics: `{ "yes" }` for string blocks, `{ [+ $x 0] }` to force non-callable values
+  - `$var` at statement position calls the value, so use `[$f]` or `print [+ $x 0]` to print non-callable vars
+---

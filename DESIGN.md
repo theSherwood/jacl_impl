@@ -43,20 +43,6 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 
 ## Future Milestone Details
 
-### M6: Line-Based Syntax Sugar
-- A bare line `cmd arg1 arg2` desugars to `[cmd arg1 arg2]`
-- Works at top-level and inside `{ }` blocks
-- Explicit `[cmd ...]` still works everywhere — sugar, not replacement
-- Nested calls require explicit brackets: `puts [+ 1 2]`
-- `$var arg1 arg2` desugars to `[$var arg1 arg2]` — variable values can be called
-- Command separators: newlines, semicolons `;`, and commas `,`
-  - `def x 1; def y 2` — two commands on one line
-  - Blank lines and `#` comments are ignored
-- Line continuation:
-  - Backslash `\` at end of line continues on the next line
-  - Unclosed `[` or `{` automatically continues to the next line
-- Implementation: lexer emits newline/semicolon/comma tokens; parser uses them to delimit implicit commands and desugars to the existing bracket-command AST nodes
-
 ### M7: Persistent Collections
 - Vector type backed by `rrb_vec`: `vec`, `vec-get`, `vec-set`, `vec-push`, `vec-len`, etc.
 - Map type backed by `hamt`: `map`, `map-get`, `map-set`, `map-has`, `map-keys`, etc.
