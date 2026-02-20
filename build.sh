@@ -48,6 +48,7 @@ TESTS=(
     "test/test_compiler.c|compiler|"
     "test/test_integration.c|integration|"
     "test/test_m4.c|m4|"
+    "test/test_string.c|string|"
 )
 
 echo "=== ds test runner ==="

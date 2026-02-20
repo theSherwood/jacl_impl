@@ -8,7 +8,7 @@
 - Build system: `build.sh` with `TESTS=()` array entries formatted as `"path/test.c|name|optional_extra_cflags"`
 - Compiler flags: `-Wall -Wextra -std=c99 -g`
 - Implementation language is C (C99)
-- Pipeline: src/value.c → src/lexer.c → src/ast.c → src/parser.c → src/bytecode.c → src/compiler.c → src/vm.c
+- Pipeline: src/value.c → src/string.c → src/lexer.c → src/ast.c → src/parser.c → src/bytecode.c → src/compiler.c → src/vm.c
 - Private/internal functions use double-underscore prefix: `module__function_name`
 - Public types use PascalCase (Token, LexResult, AstNode) or lower_t for system-level (arena_t)
 - Public functions use module_verb_noun pattern (lexer_lex, arena_alloc, parser_parse)
@@ -25,167 +25,58 @@
 - Pipeline API: jacl_run(source, vm, arena) in src/vm.c
 
 - Value API: JaclVal is uint64_t with tag byte (bits 63-56) + 56-bit payload
-- JACL_TAG_CLOSURE (0x08) already defined in value.c for closure values
+- JACL_TAG_STRING (0x05) already reserved in value.c for heap string values
+- JACL_TAG_INLINE_STRING (0x04) for strings up to 7 bytes stored in payload
+- JACL_TAG_CLOSURE (0x08) for closure values
+- Existing inline string helpers: jacl_inline_string(), jacl_inline_string_len(), jacl_inline_string_get(), jacl_is_inline_string()
+- Existing generic pointer helpers: jacl_string_ptr() constructor, jacl_as_ptr() extractor
 - Existing opcodes: OP_CONST, OP_NIL, OP_TRUE, OP_FALSE, OP_POP, OP_ADD..OP_MOD, OP_NEG, OP_EQ..OP_GE, OP_PRINT, OP_DEF_GLOBAL, OP_GET_GLOBAL, OP_GET_LOCAL, OP_SET_LOCAL, OP_GET_UPVALUE, OP_JUMP, OP_JUMP_IF_FALSE, OP_LOOP, OP_CALL, OP_RETURN, OP_CLOSURE, OP_POP_N, OP_HALT
 - VM has single Environment (flat name/value arrays) for globals, pre-populated with true/false/nil
 - Compiler dispatches builtins via compiler__head_matches if-chain in compiler__compile_command
 - AST_BLOCK compilation: begin_scope, compile stmts with OP_POP after each, end_scope (OP_POP_N), push OP_NIL
 - Compiler Local struct: { JaclVal name, int depth }, COMPILER_LOCALS_MAX = 256
 - Compiler scope_depth: 0 = top-level (globals), >0 = inside block/function (locals)
-- def at scope_depth > 0: value stays on stack as local slot, push OP_NIL for def's return value
-- $x resolution: check compiler__resolve_local first, fall back to OP_GET_GLOBAL
-- Block commands inside { } must be separated by `;` or `\n` — parser treats same-line expressions as bare command args
-- VM stack: JaclVal stack[256], stack_top is next free slot
-- PrintCapture test pattern: struct {buf[1024], len} with capture_print callback
 - JaclClosure struct is in bytecode.c (not value.c) because it contains BytecodeChunk by value
 - Typed closure helpers jacl_closure()/jacl_as_closure() are in bytecode.c; generic pointer helpers in value.c
 - VM_FRAMES_MAX = 64; CallFrame struct: closure, return_ip, stack_base, chunk pointer
 - vm_exec wraps top-level code in implicit JaclClosure (stack-allocated) for uniform frame-based execution
-- OP_CALL convention: closure at stack[stack_top - arg_count - 1], stack_base = stack_top - arg_count
-- OP_RETURN: return value placed at callee_base - 1, stack_top reset to callee_base
-- OP_RETURN from top-level (frame_count == 0): result in stack[0], stack_top = 1
 - Truthiness: only nil and JACL_FALSE are falsy; 0, empty string, etc. are truthy
-- OP_SET_LOCAL peeks (doesn't pop) — value stays on stack
-- OP_JUMP_IF_FALSE pops the condition value from the stack
-- vm->chunk is synced with current frame's chunk pointer throughout execution
+- In JACL, bare `false` is a string (truthy); `$false` is the boolean false (falsy)
 - Jump patching: compiler__emit_jump emits placeholder 0xFFFF, compiler__patch_jump fills in actual offset
-- compiler__compile_block_expr: compiles block as expression (last stmt value stays on stack), cleans up locals via SET_LOCAL+POP_N trick
-- if/while/proc body blocks should use compile_block_expr (not the default AST_BLOCK path which pops everything and pushes nil)
-- In JACL, bare `false` is a string (truthy); `$false` is the boolean false (falsy). Tests should use `$false`/`$true`/`$nil` for booleans
+- compiler__compile_block_expr: compiles block as expression (last stmt value stays on stack)
+- Block commands inside { } must be separated by `;` or `\n`
+- VM stack: JaclVal stack[256], stack_top is next free slot
+- PrintCapture test pattern: struct {buf[1024], len} with capture_print callback
+
+## M5-Specific Context
+- Lexer already fully handles string interpolation: TOKEN_STRING, TOKEN_STRING_BEGIN/PART/END, TOKEN_INTERP_VAR, TOKEN_INTERP_EXPR_START/END
+- Parser already builds AST_LIT_STRING and AST_INTERP_STRING nodes
+- AST_LIT_STRING: { const char* value; uint32_t length; }
+- AST_INTERP_STRING: { AstNode** segments; uint32_t count; } — segments are AST_LIT_STRING, AST_VAR_REF, or AST_COMMAND
+- Compiler currently rejects strings > 7 bytes with error "string literal exceeds 7-byte inline limit"
+- Compiler currently rejects AST_INTERP_STRING with error "interpolated strings not yet supported"
+- No string comparison operators exist yet (== only works for numeric types)
+- No string concatenation opcode or builtin exists
+- Rope library (lib/sum_tree/rope.h) exists but is NOT used in M5 — deferred to later
+- Key design: heap strings are NOT null-terminated, carry uint32_t length field
+- String API: JaclHeapString struct in src/string.c: { uint32_t length, uint32_t hash, char data[] }
+- Intern table: JaclInternTable struct, open addressing + linear probing, intern_table_init(), jacl_intern()
+- jacl_is_heap_string() / jacl_as_heap_string() extractors in src/string.c
+- FNV-1a hash: string__fnv1a(data, length) operates on byte data, length-aware (no null-terminator)
+- Intern table resizes at > 0.75 load factor, initial cap 16
 
 ---
 
-## 2026-02-19 - US-001
-- Added 10 new opcodes to OpCode enum in src/bytecode.c: OP_GET_LOCAL, OP_SET_LOCAL, OP_GET_UPVALUE, OP_JUMP, OP_JUMP_IF_FALSE, OP_LOOP, OP_CALL, OP_RETURN, OP_CLOSURE, OP_POP_N
-- Updated test_bytecode.c: fixed hardcoded OP_HALT enum value, added new opcode assertions, added OP_RETURN to single-byte opcodes list
-- Files changed: src/bytecode.c, test/test_bytecode.c
+## 2026-02-20 - US-001
+- Implemented JaclHeapString struct with flexible array member (length, hash, data[])
+- Implemented JaclInternTable with open addressing + linear probing, arena-allocated
+- jacl_intern() returns JACL_TAG_STRING values with pointer equality for same byte sequences
+- FNV-1a hash function operating on (data, length) pair
+- Table resizes when load factor > 0.75
+- Added jacl_is_heap_string() and jacl_as_heap_string() helpers
+- Files changed: src/string.c (new), src/jacl.c (include string.c), test/test_string.c (new), build.sh (add test)
 - **Learnings for future iterations:**
-  - test_bytecode.c has hardcoded enum values in test_opcode_enum() — must update when adding opcodes
-  - test_single_byte_opcodes list must include any new zero-operand opcodes
-  - New opcodes placed before OP_HALT to keep it as the sentinel terminator
----
-
-## 2026-02-19 - US-002
-- Added JaclClosure struct to src/bytecode.c (after BytecodeChunk definition, since it contains a BytecodeChunk by value)
-- Added typed helpers: jacl_closure(JaclClosure*) constructor and jacl_as_closure(JaclVal) extractor
-- jacl_is_closure() and jacl_closure_ptr() already existed in value.c from earlier milestones
-- Added 5 tests to test_bytecode.c: struct fields, constructor, extractor, full roundtrip, null name
-- Files changed: src/bytecode.c, test/test_bytecode.c
-- **Learnings for future iterations:**
-  - JaclClosure struct must be in bytecode.c (not value.c) because it contains BytecodeChunk by value and value.c is included before bytecode.c in the unity build
-  - The generic pointer helpers (jacl_closure_ptr, jacl_as_ptr, jacl_is_closure) are in value.c; the typed helpers (jacl_closure, jacl_as_closure) that need JaclClosure are in bytecode.c
-  - All closure memory (struct, param_names, upvalues) should be arena-allocated via arena_alloc
----
-
-## 2026-02-19 - US-003
-- Added CallFrame struct and frame-based execution to src/vm.c
-- VM_FRAMES_MAX = 64, frames[] array and frame_count added to VM struct
-- vm_exec creates implicit top-level JaclClosure (stack-allocated) wrapping the input chunk
-- Implemented 9 new opcode handlers: OP_GET_LOCAL, OP_SET_LOCAL, OP_GET_UPVALUE, OP_JUMP, OP_JUMP_IF_FALSE, OP_LOOP, OP_CALL, OP_RETURN, OP_POP_N
-- Added vm__is_falsy() helper and updated vm__type_name() for closures
-- Changed all chunk-> references in exec loop to vm->chunk-> for frame-aware access
-- Added 15 tests to test/test_vm.c: frame_count_init, get/set_local, get_upvalue, jump, jump_if_false (falsy/truthy), loop, pop_n, basic_call_return, call_with_args, call_non_closure, call_arg_mismatch, call_frame_overflow, truthiness
-- Files changed: src/vm.c, test/test_vm.c
-- **Learnings for future iterations:**
-  - OP_JUMP_IF_FALSE pops the condition — test assertions must account for one fewer stack item
-  - Top-level implicit closure is stack-allocated (not arena) since it only lives for the vm_exec call
-  - OP_CALL: closure sits at stack[stack_top - arg_count - 1]; params become locals 0..N-1 at stack_base
-  - OP_RETURN from top-level frame: special case where frame_count == 0, put result in stack[0]
-  - Self-referencing closures work for frame overflow tests: store closure in its own constant pool
-  - vm->chunk must be kept in sync with the current frame's chunk throughout execution
----
-
-## 2026-02-19 - US-004
-- Added Local struct, COMPILER_LOCALS_MAX (256), scope_depth tracking to Compiler in src/compiler.c
-- Added compiler__begin_scope/end_scope, compiler__add_local, compiler__resolve_local helpers
-- Modified def handler: scope_depth > 0 → local (value stays on stack, push OP_NIL); scope_depth == 0 → global (OP_DEF_GLOBAL)
-- Modified AST_VAR_REF: resolve_local first, fall back to OP_GET_GLOBAL
-- Implemented AST_BLOCK compilation: begin_scope, compile stmts with OP_POP after each, end_scope (emits OP_POP_N for locals), push OP_NIL
-- Added 9 tests to test/test_compiler.c: local_def_in_block, local_not_visible_outside, local_shadowing, local_nested_scopes, local_same_scope_shadow, local_top_level_still_global, local_top_level_var_ref_global, local_max_exceeded, local_empty_block
-- Files changed: src/compiler.c, test/test_compiler.c
-- **Learnings for future iterations:**
-  - Commands inside blocks `{ }` must be separated by `;` or `\n` — the parser's bare command parser consumes consecutive expressions on the same line as args to a single command
-  - Local slot index = position in the locals array; VM accesses as stack[frame.stack_base + slot]
-  - Block compilation pops every statement result (including the last), then pushes nil — blocks don't return values yet (will be handled per-construct in if/while/proc stories)
-  - end_scope walks locals array backwards, counts locals with depth > new scope_depth, emits single OP_POP_N
-  - Shadowing in same scope creates new local slot (resolve_local searches backwards, finds latest)
----
-
-## 2026-02-19 - US-005
-- Added jump patching helpers (compiler__emit_jump, compiler__patch_jump) to src/compiler.c
-- Added compiler__compile_block_expr helper: compiles block as expression where last statement's value stays on stack; cleans up locals using OP_SET_LOCAL + OP_POP_N trick (saves result into first local slot, then pops extras)
-- Added `if` handler in compiler__compile_command: recognizes 'if' command head, supports 2 args (cond + then-block, returns nil for else) and 3 args (cond + then-block + else-block)
-- Compilation scheme: compile cond → JUMP_IF_FALSE → compile_block_expr(then) → JUMP → patch JUMP_IF_FALSE → compile_block_expr(else) or NIL → patch JUMP
-- Added 12 tests to test/test_compiler.c: if_then_branch, if_else_branch, if_no_else_nil, if_nested, if_nil_falsy, if_zero_truthy, if_empty_string_truthy, if_as_expression, if_wrong_argc_1, if_wrong_argc_4, if_then_not_block, if_else_not_block
-- Files changed: src/compiler.c, test/test_compiler.c
-- **Learnings for future iterations:**
-  - Jump patching pattern: emit_jump returns offset of placeholder, patch_jump fills it with actual distance from current code position
-  - Block-as-expression requires special handling: default AST_BLOCK compilation pops everything and pushes nil, but if/while/proc need the last value
-  - The SET_LOCAL+POP_N trick for block-as-expr cleanup: write result into first local's slot, then POP_N removes extras + old top copy, leaving result in place
-  - In JACL, bare `false` is a string (truthy); `$false` is the boolean false. Tests for falsy conditions must use `$false` or `$nil`
-  - Forward declaration of compiler__compile_node is needed before compiler__compile_block_expr since it calls it
----
-
-## 2026-02-19 - US-006
-- Added proc handler to compiler__compile_command in src/compiler.c (~100 lines)
-- proc compiles body into separate BytecodeChunk via child Compiler with scope_depth=1
-- Parameters become local slots 0..N-1 in the body compiler
-- Body compiled via compile_block_expr, then OP_RETURN emitted
-- Closure stored in constant pool, OP_CLOSURE + OP_DEF_GLOBAL (or local) emitted
-- Replaced "unknown command" compile error with dynamic call fallback: look up command head as variable, compile args, emit OP_CALL
-- Parser changes: `[]` is now valid empty AST_COMMAND (for empty param lists); bare single expressions unwrapped (bare `hello` → AST_LIT_STRING, bracketed `[hello]` → AST_COMMAND)
-- Added OP_CLOSURE handler to vm.c: reads u16 constant index, pushes closure value
-- Added 9 tests: proc_basic_call, proc_print_param, proc_zero_params, proc_implicit_return, proc_multi_stmt_body, proc_redefine, proc_wrong_argc, proc_call_arg_mismatch, proc_def_returns_nil
-- Updated existing tests: renamed test_compile_error_unknown_command → test_runtime_error_unknown_command, updated parser tests for bare word unwrapping behavior
-- Files changed: src/compiler.c, src/parser.c, src/vm.c, test/test_compiler.c, test/test_parser.c, test/test_integration.c
-- **Learnings for future iterations:**
-  - Parser bare-word unwrapping means tests expecting AST_COMMAND for single bare words now get AST_LIT_STRING
-  - Dynamic call fallback enables user-defined procs without explicit compiler knowledge
-  - proc body compilation reuses compile_block_expr pattern from if/while
-  - Zero-param procs use `[]` syntax which parser now handles as valid empty command
-  - Bracketed `[name]` remains AST_COMMAND (zero-arg call), while bare `name` becomes AST_LIT_STRING (variable/string)
----
-
-## 2026-02-19 - US-007
-- Added while handler to compiler__compile_command in src/compiler.c
-- Compilation: loop-start label → compile cond → JUMP_IF_FALSE → compile body stmts → POP each → LOOP back → patch exit → NIL
-- Body compiled WITHOUT extra scope (no begin_scope/end_scope) so def rebinds at same scope level as surrounding code
-- This means def inside a top-level while loop creates/rebinds globals, enabling counter patterns
-- Added 8 tests: while_zero_iterations, while_nil_falsy, while_iterative_sum, while_returns_nil, while_wrong_argc_1, while_wrong_argc_3, while_body_not_block, while_countdown
-- Files changed: src/compiler.c, test/test_compiler.c
-- **Learnings for future iterations:**
-  - While body must NOT use compile_block_expr (which creates a scope) — def inside while needs to rebind at the same scope level
-  - OP_LOOP offset calculation: distance from current code position back to loop_start, plus 2 for the offset bytes themselves
-  - While returns nil (not the last body value)
----
-
-## 2026-02-19 - US-008
-- Added Upvalue struct and upvalue tracking to Compiler: index, is_local, name
-- Added enclosing pointer to Compiler for parent scope resolution
-- Added compiler__add_upvalue and compiler__resolve_upvalue (recursive transitive capture)
-- AST_VAR_REF now checks: local → upvalue → global (3-tier resolution)
-- proc handler sets body_compiler.enclosing = parent, emits upvalue descriptors after OP_CLOSURE
-- VM OP_CLOSURE: allocates new closure instance (not reuse template), reads upvalue descriptors, copies from enclosing locals/upvalues
-- Changed proc at scope_depth > 0 to return the closure value (OP_GET_LOCAL) instead of nil — enables make-adder pattern
-- Added 5 tests: closure_capture_local, closure_independent_captures, closure_nested_3_levels, closure_capture_multiple, closure_not_global
-- Files changed: src/compiler.c, src/vm.c, test/test_compiler.c
-- **Learnings for future iterations:**
-  - Proc names must be ≤7 bytes (inline string limit) — use short names in tests
-  - proc inside function body must return closure value (not nil) for make-adder pattern to work
-  - OP_CLOSURE must allocate a fresh closure per instantiation so each has its own upvalue array
-  - Upvalue deduplication: compiler__add_upvalue checks existing upvalues before adding
----
-
-## 2026-02-19 - US-009
-- Added 3 recursion tests: factorial(10)=3628800, fibonacci(10)=55, depth limit (stack overflow)
-- Recursion works out-of-the-box: proc name bound globally via OP_DEF_GLOBAL before body executes
-- Files changed: test/test_compiler.c
----
-
-## 2026-02-19 - US-010
-- Created test/test_m4.c with 10 integration tests using jacl_run() and PrintCapture
-- Tests: proc_call_pipeline, factorial, fibonacci, closure_capture, truthy_falsy, nested_procs, error_wrong_argc, error_call_non_function, error_undefined_in_proc, while_iterative_sum
-- Added test/test_m4.c to build.sh TESTS array
-- Updated DESIGN.md M4 row status to **COMPLETE**
-- Files changed: test/test_m4.c (new), build.sh, DESIGN.md
+  - src/string.c is included between value.c and lexer.c in the pipeline
+  - String intern table will need to be threaded through compiler and VM for later stories (US-003+)
+  - Arena allocations don't need explicit cleanup, arena_destroy handles everything
 ---

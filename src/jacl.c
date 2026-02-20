@@ -18,6 +18,7 @@
 
 /* --- JACL pipeline (order matters) --- */
 #include "value.c"
+#include "string.c"
 #include "lexer.c"
 #include "ast.c"
 #include "parser.c"
