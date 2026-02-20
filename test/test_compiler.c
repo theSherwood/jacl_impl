@@ -123,7 +123,7 @@ static int test_compile_long_string_heap(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
 
-  CompileResult cr = compile_source("abcdefgh", &arena);
+  CompileResult cr = compile_source("\"abcdefgh\"", &arena);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT(cr.chunk.const_count >= 1);
@@ -1138,7 +1138,7 @@ static int test_compile_long_string_no_error_msg(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
 
-  CompileResult cr = compile_source("abcdefgh", &arena);
+  CompileResult cr = compile_source("\"abcdefgh\"", &arena);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT(cr.error_message == NULL);

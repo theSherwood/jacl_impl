@@ -140,11 +140,11 @@ static int test_truthy_falsy(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[print [if 0 { yes } { no }]]\n"          /* 0 is truthy */
-    "[print [if $nil { yes } { no }]]\n"        /* nil is falsy */
-    "[print [if $false { yes } { no }]]\n"      /* false is falsy */
-    "[print [if $true { yes } { no }]]\n"       /* true is truthy */
-    "[print [if 42 { yes } { no }]]";           /* positive int is truthy */
+    "[print [if 0 { \"yes\" } { \"no\" }]]\n"          /* 0 is truthy */
+    "[print [if $nil { \"yes\" } { \"no\" }]]\n"        /* nil is falsy */
+    "[print [if $false { \"yes\" } { \"no\" }]]\n"      /* false is falsy */
+    "[print [if $true { \"yes\" } { \"no\" }]]\n"       /* true is truthy */
+    "[print [if 42 { \"yes\" } { \"no\" }]]";           /* positive int is truthy */
 
   VMResult result = jacl_run(program, &vm, &arena);
 

@@ -135,7 +135,7 @@ static int test_heap_string_equality(void) {
   TEST_SETUP();
 
   const char* program =
-    "[print [if [== \"hello world\" \"hello world\"] { yes } { no }]]";
+    "[print [if [== \"hello world\" \"hello world\"] { \"yes\" } { \"no\" }]]";
   VMResult result = jacl_run(program, &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -149,7 +149,7 @@ static int test_string_ordering(void) {
   TEST_SETUP();
 
   const char* program =
-    "[print [if [< \"abc\" \"xyz\"] { yes } { no }]]";
+    "[print [if [< \"abc\" \"xyz\"] { \"yes\" } { \"no\" }]]";
   VMResult result = jacl_run(program, &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -242,7 +242,7 @@ static int test_string_vs_int_eq(void) {
   TEST_SETUP();
 
   const char* program =
-    "[print [if [== \"42\" 42] { same } { diff }]]";
+    "[print [if [== \"42\" 42] { \"same\" } { \"diff\" }]]";
   VMResult result = jacl_run(program, &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -269,7 +269,7 @@ static int test_index_oob_nil(void) {
   TEST_SETUP();
 
   const char* program =
-    "[print [if [== [index \"hi\" 5] $nil] { nil } { nope }]]";
+    "[print [if [== [index \"hi\" 5] $nil] { \"nil\" } { \"nope\" }]]";
   VMResult result = jacl_run(program, &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);

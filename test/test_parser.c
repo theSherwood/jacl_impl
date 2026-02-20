@@ -540,14 +540,15 @@ static int test_bare_var_ref(void) {
 
 static int test_bare_single_word(void) {
   setup();
-  /* "foo" → bare word is returned directly as AST_LIT_STRING (not wrapped) */
+  /* "foo" → bare word at statement position wraps to zero-arg AST_COMMAND */
   ParseResult r = parse("foo");
   ASSERT_U32_EQ(r.count, 1);
   ASSERT_U32_EQ(r.error_count, 0);
   AstNode* n = r.nodes[0];
-  ASSERT(n->type == AST_LIT_STRING);
-  ASSERT(memcmp(n->data.lit_string.value, "foo", 3) == 0);
-  ASSERT_U32_EQ(n->data.lit_string.length, 3);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(n->data.command.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "foo", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -617,6 +618,124 @@ static int test_bare_source_positions(void) {
   ASSERT_U32_EQ(n->end.offset, 11);
   ASSERT_U32_EQ(n->end.line, 1);
   ASSERT_U32_EQ(n->end.column, 12);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ---- M6 US-004 tests: Bare words as zero-arg command calls ---- */
+
+static int test_bare_word_zero_arg(void) {
+  setup();
+  /* 'exit' alone at statement position → AST_COMMAND { head: "exit", arg_count: 0 } */
+  ParseResult r = parse("exit");
+  ASSERT_U32_EQ(r.count, 1);
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(n->data.command.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "exit", 4) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bare_word_multi_arg_unchanged(void) {
+  setup();
+  /* 'puts hello' with args → AST_COMMAND with arg_count 1 (unchanged) */
+  ParseResult r = parse("puts hello");
+  ASSERT_U32_EQ(r.count, 1);
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(n->data.command.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "puts", 4) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "hello", 5) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bare_word_inside_brackets(void) {
+  setup();
+  /* In '[puts exit]', 'exit' is parsed as AST_LIT_STRING arg — NOT wrapped */
+  AstNode* n = parse_expr("[puts exit]");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "exit", 4) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bare_int_not_wrapped(void) {
+  setup();
+  /* 42 alone → remains AST_LIT_INT, not wrapped */
+  ParseResult r = parse("42");
+  ASSERT_U32_EQ(r.count, 1);
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT(r.nodes[0]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(r.nodes[0]->data.lit_int.value, 42);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bare_float_not_wrapped(void) {
+  setup();
+  /* 3.14 alone → remains AST_LIT_FLOAT, not wrapped */
+  ParseResult r = parse("3.14");
+  ASSERT_U32_EQ(r.count, 1);
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT(r.nodes[0]->type == AST_LIT_FLOAT);
+  ASSERT(r.nodes[0]->data.lit_float.value > 3.13f && r.nodes[0]->data.lit_float.value < 3.15f);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bare_quoted_string_not_wrapped(void) {
+  setup();
+  /* "hello" alone → remains AST_LIT_STRING, not wrapped */
+  ParseResult r = parse("\"hello\"");
+  ASSERT_U32_EQ(r.count, 1);
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT(r.nodes[0]->type == AST_LIT_STRING);
+  ASSERT(memcmp(r.nodes[0]->data.lit_string.value, "hello", 5) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bare_bracket_cmd_not_double_wrapped(void) {
+  setup();
+  /* [foo] alone → returned directly as AST_COMMAND, not double-wrapped */
+  ParseResult r = parse("[foo]");
+  ASSERT_U32_EQ(r.count, 1);
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(n->data.command.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "foo", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bare_block_not_wrapped(void) {
+  setup();
+  /* { print hello } alone → returned directly as AST_BLOCK, not wrapped */
+  ParseResult r = parse("{ print hello }");
+  ASSERT_U32_EQ(r.count, 1);
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT(r.nodes[0]->type == AST_BLOCK);
+  ASSERT_U32_EQ(r.nodes[0]->data.block.count, 1);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -722,9 +841,11 @@ static int test_block_nested(void) {
   AstNode* inner_block = cmd->data.command.args[1];
   ASSERT(inner_block->type == AST_BLOCK);
   ASSERT_U32_EQ(inner_block->data.block.count, 1);
-  /* Bare word "inner" is returned directly as AST_LIT_STRING (not wrapped) */
-  ASSERT(inner_block->data.block.commands[0]->type == AST_LIT_STRING);
-  ASSERT(memcmp(inner_block->data.block.commands[0]->data.lit_string.value, "inner", 5) == 0);
+  /* Bare word "inner" at statement position wraps to zero-arg AST_COMMAND */
+  ASSERT(inner_block->data.block.commands[0]->type == AST_COMMAND);
+  ASSERT(inner_block->data.block.commands[0]->data.command.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(inner_block->data.block.commands[0]->data.command.head->data.lit_string.value, "inner", 5) == 0);
+  ASSERT_U32_EQ(inner_block->data.block.commands[0]->data.command.arg_count, 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -788,8 +909,10 @@ static int test_block_bare_cmd_arg(void) {
   AstNode* blk = n->data.command.args[1];
   ASSERT(blk->type == AST_BLOCK);
   ASSERT_U32_EQ(blk->data.block.count, 1);
-  ASSERT(blk->data.block.commands[0]->type == AST_LIT_STRING);
-  ASSERT(memcmp(blk->data.block.commands[0]->data.lit_string.value, "yes", 3) == 0);
+  ASSERT(blk->data.block.commands[0]->type == AST_COMMAND);
+  ASSERT(blk->data.block.commands[0]->data.command.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(blk->data.block.commands[0]->data.command.head->data.lit_string.value, "yes", 3) == 0);
+  ASSERT_U32_EQ(blk->data.block.commands[0]->data.command.arg_count, 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1084,9 +1207,11 @@ static int test_multi_realistic_program(void) {
   ASSERT(else_blk->type == AST_BLOCK);
   ASSERT_U32_EQ(else_blk->data.block.count, 1);
 
-  /* 5: greet (bare word, no args → unwrapped to AST_LIT_STRING) */
-  ASSERT(r.nodes[5]->type == AST_LIT_STRING);
-  ASSERT(memcmp(r.nodes[5]->data.lit_string.value, "greet", 5) == 0);
+  /* 5: greet (bare word, no args → zero-arg AST_COMMAND) */
+  ASSERT(r.nodes[5]->type == AST_COMMAND);
+  ASSERT(r.nodes[5]->data.command.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(r.nodes[5]->data.command.head->data.lit_string.value, "greet", 5) == 0);
+  ASSERT_U32_EQ(r.nodes[5]->data.command.arg_count, 0);
 
   teardown();
   ASSERT(check_no_leaks());
@@ -1517,6 +1642,15 @@ int main(void) {
     {"bare_comma_delim",     test_bare_comma_delimited},
     {"block_comma_delim",    test_block_comma_delimited},
     {"bare_source_positions",test_bare_source_positions},
+    /* M6 US-004: Bare words as zero-arg command calls */
+    {"bare_word_zero_arg",    test_bare_word_zero_arg},
+    {"bare_word_multi_arg",   test_bare_word_multi_arg_unchanged},
+    {"bare_word_in_brackets", test_bare_word_inside_brackets},
+    {"bare_int_not_wrapped",  test_bare_int_not_wrapped},
+    {"bare_float_not_wrapped",test_bare_float_not_wrapped},
+    {"bare_quoted_not_wrapped",test_bare_quoted_string_not_wrapped},
+    {"bare_bracket_no_double",test_bare_bracket_cmd_not_double_wrapped},
+    {"bare_block_not_wrapped",test_bare_block_not_wrapped},
     /* US-007 */
     {"block_single_cmd",     test_block_single_cmd},
     {"block_multiline",      test_block_multiline},

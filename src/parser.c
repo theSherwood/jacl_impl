@@ -398,6 +398,7 @@ static int parser__is_command_end(Parser* p) {
  * ------------------------------------------------------------------------- */
 
 static AstNode* parser__parse_bare_command(Parser* p) {
+  TokenType head_token_type = parser__peek(p)->type;
   AstNode* head = parser__parse_expr(p);
   if (head == NULL) return NULL;
 
@@ -413,10 +414,20 @@ static AstNode* parser__parse_bare_command(Parser* p) {
     parser__arr_push(&args, arg);
   }
 
-  /* Single expression with no trailing args: return as-is.
-     This distinguishes bare `hello` (AST_LIT_STRING) from `[hello]` (AST_COMMAND)
-     so the compiler can treat bracketed zero-arg forms as calls. */
+  /* Single expression with no trailing args */
   if (args.count == 0) {
+    /* Bare word at statement position → zero-arg command call.
+       'exit' on its own line desugars to '[exit]'. */
+    if (head_token_type == TOKEN_WORD) {
+      AstNode* node = ast_alloc(p->arena);
+      node->type  = AST_COMMAND;
+      node->start = head->start;
+      node->end   = head->end;
+      node->data.command.head      = head;
+      node->data.command.args      = NULL;
+      node->data.command.arg_count = 0;
+      return node;
+    }
     return head;
   }
 

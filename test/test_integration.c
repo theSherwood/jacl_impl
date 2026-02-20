@@ -131,7 +131,7 @@ static int test_deliberate_errors(void) {
   vm_init(&vm, &arena);
 
   /* String >7 bytes now compiles as heap-interned string (no error) */
-  VMResult result = jacl_run("abcdefgh", &vm, &arena);
+  VMResult result = jacl_run("\"abcdefgh\"", &vm, &arena);
   ASSERT_INT_EQ(result, VM_OK);
 
   /* Undefined variable */
