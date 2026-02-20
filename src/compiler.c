@@ -293,6 +293,14 @@ static int16_t compiler__node_known_arity(Compiler* c, AstNode* node) {
       if (slot != -1) {
         return c->locals[slot].known_arity;
       }
+      return compiler__resolve_global_arity(c, name_val);
+    }
+  }
+  if (node->type == AST_LIT_STRING) {
+    uint32_t name_len = node->data.lit_string.length;
+    if (name_len <= 7) {
+      JaclVal name_val = jacl_inline_string(node->data.lit_string.value, name_len);
+      return compiler__resolve_global_arity(c, name_val);
     }
   }
   return -1;
@@ -469,9 +477,13 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_NIL, line);
     } else {
       /* Global variable */
+      int16_t rhs_arity = compiler__node_known_arity(c, args[1]);
       uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
+      if (rhs_arity != -1) {
+        compiler__set_global_arity(c, name_val, rhs_arity);
+      }
     }
     return;
   }
@@ -737,6 +749,20 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     } else {
       /* Non-string head (e.g. $var, nested command): compile as expression */
+      /* Arity check for $var heads */
+      if (head->type == AST_VAR_REF) {
+        int16_t head_arity = compiler__node_known_arity(c, head);
+        if (head_arity != -1 && (int16_t)argc != head_arity) {
+          uint32_t name_len = head->data.var_ref.length;
+          char err_msg[128];
+          snprintf(err_msg, sizeof(err_msg),
+                   "proc '%.*s' expects %d arguments but got %d",
+                   (int)name_len, head->data.var_ref.name,
+                   (int)head_arity, (int)argc);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+      }
       compiler__compile_node(c, head);
     }
 
