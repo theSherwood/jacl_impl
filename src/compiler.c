@@ -306,6 +306,19 @@ static int16_t compiler__node_known_arity(Compiler* c, AstNode* node) {
   return -1;
 }
 
+/* --- Internal: Builtin arity error helper --- */
+
+static void compiler__builtin_arity_error(Compiler* c, uint32_t line,
+                                           uint32_t col, const char* name,
+                                           const char* expected_desc,
+                                           uint32_t got) {
+  char err_msg[128];
+  snprintf(err_msg, sizeof(err_msg),
+           "builtin '%s' expects %s but got %d",
+           name, expected_desc, (int)got);
+  compiler__error(c, line, col, err_msg);
+}
+
 /* --- Internal: Compile a binary operation --- */
 
 static void compiler__compile_binary(Compiler* c, AstNode** args,
@@ -326,7 +339,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* Arithmetic builtins */
   if (compiler__head_matches(head, "+", 1)) {
-    if (argc != 2) { compiler__error(c, line, col, "+ requires 2 arguments"); return; }
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "+", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_ADD, line);
     return;
   }
@@ -337,56 +350,56 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     } else if (argc == 2) {
       compiler__compile_binary(c, args, OP_SUB, line);
     } else {
-      compiler__error(c, line, col, "- requires 1 or 2 arguments");
+      compiler__builtin_arity_error(c, line, col, "-", "1 or 2 arguments", argc);
     }
     return;
   }
   if (compiler__head_matches(head, "*", 1)) {
-    if (argc != 2) { compiler__error(c, line, col, "* requires 2 arguments"); return; }
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "*", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_MUL, line);
     return;
   }
   if (compiler__head_matches(head, "/", 1)) {
-    if (argc != 2) { compiler__error(c, line, col, "/ requires 2 arguments"); return; }
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "/", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_DIV, line);
     return;
   }
   if (compiler__head_matches(head, "%", 1)) {
-    if (argc != 2) { compiler__error(c, line, col, "%% requires 2 arguments"); return; }
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "%", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_MOD, line);
     return;
   }
 
   /* Comparison builtins */
   if (compiler__head_matches(head, "==", 2)) {
-    if (argc != 2) { compiler__error(c, line, col, "== requires 2 arguments"); return; }
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "==", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_EQ, line);
     return;
   }
   if (compiler__head_matches(head, "<", 1)) {
-    if (argc != 2) { compiler__error(c, line, col, "< requires 2 arguments"); return; }
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "<", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_LT, line);
     return;
   }
   if (compiler__head_matches(head, ">", 1)) {
-    if (argc != 2) { compiler__error(c, line, col, "> requires 2 arguments"); return; }
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, ">", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_GT, line);
     return;
   }
   if (compiler__head_matches(head, "<=", 2)) {
-    if (argc != 2) { compiler__error(c, line, col, "<= requires 2 arguments"); return; }
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "<=", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_LE, line);
     return;
   }
   if (compiler__head_matches(head, ">=", 2)) {
-    if (argc != 2) { compiler__error(c, line, col, ">= requires 2 arguments"); return; }
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, ">=", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_GE, line);
     return;
   }
 
   /* Print builtin */
   if (compiler__head_matches(head, "print", 5)) {
-    if (argc != 1) { compiler__error(c, line, col, "print requires 1 argument"); return; }
+    if (argc != 1) { compiler__builtin_arity_error(c, line, col, "print", "1 argument", argc); return; }
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_PRINT, line);
     return;
@@ -395,7 +408,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
   /* length builtin */
   if (compiler__head_matches(head, "length", 6)) {
     if (argc != 1) {
-      compiler__error(c, line, col, "length requires 1 argument");
+      compiler__builtin_arity_error(c, line, col, "length", "1 argument", argc);
       return;
     }
     compiler__compile_node(c, args[0]);
@@ -406,7 +419,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
   /* index builtin */
   if (compiler__head_matches(head, "index", 5)) {
     if (argc != 2) {
-      compiler__error(c, line, col, "index requires 2 arguments");
+      compiler__builtin_arity_error(c, line, col, "index", "2 arguments", argc);
       return;
     }
     compiler__compile_node(c, args[0]);
@@ -418,7 +431,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
   /* slice builtin (2 or 3 args) */
   if (compiler__head_matches(head, "slice", 5)) {
     if (argc != 2 && argc != 3) {
-      compiler__error(c, line, col, "slice requires 2 or 3 arguments");
+      compiler__builtin_arity_error(c, line, col, "slice", "2 or 3 arguments", argc);
       return;
     }
     compiler__compile_node(c, args[0]);
@@ -436,7 +449,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
   /* concat builtin (variadic: 2+ args) */
   if (compiler__head_matches(head, "concat", 6)) {
     if (argc < 2) {
-      compiler__error(c, line, col, "concat requires at least 2 arguments");
+      compiler__builtin_arity_error(c, line, col, "concat", "at least 2 arguments", argc);
       return;
     }
     /* Compile first two args, emit OP_CONCAT */
@@ -453,7 +466,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* def builtin */
   if (compiler__head_matches(head, "def", 3)) {
-    if (argc != 2) { compiler__error(c, line, col, "def requires 2 arguments"); return; }
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "def", "2 arguments", argc); return; }
     if (args[0]->type != AST_LIT_STRING) {
       compiler__error(c, line, col, "def first argument must be a name");
       return;
@@ -491,7 +504,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
   /* proc definition */
   if (compiler__head_matches(head, "proc", 4)) {
     if (argc != 3) {
-      compiler__error(c, line, col, "proc requires 3 arguments");
+      compiler__builtin_arity_error(c, line, col, "proc", "3 arguments", argc);
       return;
     }
     if (args[0]->type != AST_LIT_STRING) {
@@ -626,7 +639,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
   /* if conditional */
   if (compiler__head_matches(head, "if", 2)) {
     if (argc != 2 && argc != 3) {
-      compiler__error(c, line, col, "if requires 2 or 3 arguments");
+      compiler__builtin_arity_error(c, line, col, "if", "2 or 3 arguments", argc);
       return;
     }
     if (args[1]->type != AST_BLOCK) {
@@ -669,7 +682,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
   /* while loop */
   if (compiler__head_matches(head, "while", 5)) {
     if (argc != 2) {
-      compiler__error(c, line, col, "while requires 2 arguments");
+      compiler__builtin_arity_error(c, line, col, "while", "2 arguments", argc);
       return;
     }
     if (args[1]->type != AST_BLOCK) {

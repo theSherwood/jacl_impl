@@ -1877,7 +1877,7 @@ static int test_while_wrong_argc_1(void) {
 
   CompileResult cr = compile_source("[while $true]", &arena);
   ASSERT(cr.error_count > 0);
-  ASSERT(strstr(cr.error_message, "while requires 2") != NULL);
+  ASSERT(strstr(cr.error_message, "builtin 'while' expects 2 arguments but got 1") != NULL);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -1891,7 +1891,7 @@ static int test_while_wrong_argc_3(void) {
 
   CompileResult cr = compile_source("[while $true { 1 } { 2 }]", &arena);
   ASSERT(cr.error_count > 0);
-  ASSERT(strstr(cr.error_message, "while requires 2") != NULL);
+  ASSERT(strstr(cr.error_message, "builtin 'while' expects 2 arguments but got 3") != NULL);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
