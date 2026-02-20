@@ -1695,6 +1695,184 @@ static int test_to_string_heap_result(void) {
   TEST_PASS();
 }
 
+/* ===== US-009: String interpolation compilation ===== */
+
+/* Test: [def name "world"] [print "hello $name"] prints 'hello world' */
+static int test_interp_variable(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[def name \"world\"]\n[print \"hello $name\"]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello world\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [def x 42] [print "x is $x"] prints 'x is 42' */
+static int test_interp_int_variable(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[def x 42]\n[print \"x is $x\"]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "x is 42\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [print "sum is $[+ 1 2]"] prints 'sum is 3' */
+static int test_interp_command(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print \"sum is $[+ 1 2]\"]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "sum is 3\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [print "$[+ 1 2] plus $[+ 3 4]"] prints '3 plus 7' */
+static int test_interp_multiple_commands(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print \"$[+ 1 2] plus $[+ 3 4]\"]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3 plus 7\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: adjacent interpolations — [def a "x"] [def b "y"] [print "$a$b"] */
+static int test_interp_adjacent(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[def a \"x\"]\n[def b \"y\"]\n[print \"$a$b\"]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "xy\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: mixed variable and command interpolation */
+static int test_interp_mixed(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[def n 10]\n[print \"n=$n, n+1=$[+ $n 1]\"]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "n=10, n+1=11\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: interpolation with only a variable (no literal text) */
+static int test_interp_only_var(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[def x \"hi\"]\n[print \"$x\"]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hi\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: interpolation producing a long (heap) string */
+static int test_interp_heap_result(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[def name \"JACL\"]\n[print \"hello $name world\"]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello JACL world\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1777,6 +1955,15 @@ int main(void) {
     { "to_string_closure",                          test_to_string_closure },
     { "to_string_inline_result",                    test_to_string_inline_result },
     { "to_string_heap_result",                      test_to_string_heap_result },
+    /* US-009: String interpolation compilation */
+    { "interp_variable",                             test_interp_variable },
+    { "interp_int_variable",                         test_interp_int_variable },
+    { "interp_command",                              test_interp_command },
+    { "interp_multiple_commands",                    test_interp_multiple_commands },
+    { "interp_adjacent",                             test_interp_adjacent },
+    { "interp_mixed",                                test_interp_mixed },
+    { "interp_only_var",                             test_interp_only_var },
+    { "interp_heap_result",                          test_interp_heap_result },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

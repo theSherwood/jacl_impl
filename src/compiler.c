@@ -743,9 +743,37 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_INTERP_STRING: {
-      /* Future story */
-      compiler__error(c, line, node->start.column,
-                      "interpolated strings not yet supported");
+      uint32_t seg_count = node->data.interp_string.count;
+      AstNode** segments = node->data.interp_string.segments;
+
+      if (seg_count == 0) {
+        /* Empty interpolated string → empty string constant */
+        compiler__emit_constant(c, jacl_inline_string("", 0), line);
+        break;
+      }
+
+      /* Compile first segment */
+      {
+        AstNode* seg = segments[0];
+        if (seg->type == AST_LIT_STRING) {
+          compiler__compile_node(c, seg);
+        } else {
+          compiler__compile_node(c, seg);
+          compiler__emit_byte(c, OP_TO_STRING, line);
+        }
+      }
+
+      /* Compile remaining segments, each followed by OP_CONCAT */
+      for (uint32_t i = 1; i < seg_count; i++) {
+        AstNode* seg = segments[i];
+        if (seg->type == AST_LIT_STRING) {
+          compiler__compile_node(c, seg);
+        } else {
+          compiler__compile_node(c, seg);
+          compiler__emit_byte(c, OP_TO_STRING, line);
+        }
+        compiler__emit_byte(c, OP_CONCAT, line);
+      }
       break;
     }
 
