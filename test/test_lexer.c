@@ -1907,6 +1907,69 @@ static int test_comma_inside_string(void) {
   TEST_PASS();
 }
 
+/* ---- M6 US-002 tests ---- */
+
+static int test_backslash_newline_continuation(void) {
+  setup();
+  /* "puts \\\nhello" — backslash-newline joins lines */
+  LexResult r = lexer_lex("puts \\\nhello", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* WORD WORD EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[0], "puts"));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "hello"));
+  ASSERT_U32_EQ(r.tokens[1].line, 2);
+  ASSERT_U32_EQ(r.tokens[1].column, 1);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_backslash_crlf_continuation(void) {
+  setup();
+  /* "puts \\\r\nhello" — backslash-CRLF joins lines */
+  LexResult r = lexer_lex("puts \\\r\nhello", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* WORD WORD EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[0], "puts"));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "hello"));
+  ASSERT_U32_EQ(r.tokens[1].line, 2);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_backslash_not_continuation(void) {
+  setup();
+  /* "\\ " (backslash followed by space) — remains operator, not continuation */
+  LexResult r = lexer_lex("\\ ", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* OPERATOR EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_OPERATOR);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_backslash_string_unaffected(void) {
+  setup();
+  /* Backslash inside string is handled by string body, not continuation */
+  LexResult r = lexer_lex("\"a\\nb\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* STRING EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "a\nb");
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -2021,6 +2084,11 @@ int main(void) {
     /* M6 US-001 */
     {"comma_separator",              test_comma_separator},
     {"comma_inside_string",          test_comma_inside_string},
+    /* M6 US-002 */
+    {"backslash_newline_cont",       test_backslash_newline_continuation},
+    {"backslash_crlf_cont",          test_backslash_crlf_continuation},
+    {"backslash_not_continuation",   test_backslash_not_continuation},
+    {"backslash_string_unaffected",  test_backslash_string_unaffected},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

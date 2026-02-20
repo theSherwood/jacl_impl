@@ -939,6 +939,28 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       continue;
     }
 
+    /* Backslash line continuation: \ followed by newline */
+    if (c == '\\') {
+      char next = lex.source[lex.pos + 1];
+      if (next == '\n') {
+        lexer__advance(&lex); /* consume '\' */
+        lexer__advance(&lex); /* consume '\n' */
+        lex.line++;
+        lex.col = 1;
+        continue;
+      }
+      if (next == '\r') {
+        lexer__advance(&lex); /* consume '\' */
+        lexer__advance(&lex); /* consume '\r' */
+        if (lexer__peek(&lex) == '\n') {
+          lexer__advance(&lex); /* consume '\n' */
+        }
+        lex.line++;
+        lex.col = 1;
+        continue;
+      }
+    }
+
     /* Operators: sequences of operator characters */
     if (lexer__is_operator_char(c)) {
       uint32_t start = lex.pos;
