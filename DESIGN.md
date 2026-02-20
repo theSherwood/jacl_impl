@@ -42,12 +42,6 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 
 ## Future Milestone Details
 
-### M5: String System
-- Heap-interned strings: intern table with pointer-equality comparison
-- Large strings backed by existing rope module (`sum_tree/rope.h`)
-- String operations: `concat`, `length`, `slice`, `index`, comparison
-- String interpolation fully wired: `"text $var and $[expr]"` end-to-end
-
 ### M6: Persistent Collections
 - Vector type backed by `rrb_vec`: `vec`, `vec-get`, `vec-set`, `vec-push`, `vec-len`, etc.
 - Map type backed by `hamt`: `map`, `map-get`, `map-set`, `map-has`, `map-keys`, etc.

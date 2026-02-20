@@ -200,3 +200,34 @@
   - snprintf "%g" for floats avoids excessive trailing zeros (3.14f → "3.14", not "3.140000")
   - Adding 1 opcode shifts OP_HALT by 1 — always update test_bytecode.c
 ---
+
+## 2026-02-20 - US-009
+- Replaced AST_INTERP_STRING stub in compiler.c with real interpolation compilation
+- Algorithm: compile first segment, then for each subsequent segment compile + OP_CONCAT
+- AST_LIT_STRING segments compile as string constants (inline or heap-interned)
+- AST_VAR_REF segments compile as variable lookup + OP_TO_STRING
+- AST_COMMAND segments compile as command expression + OP_TO_STRING
+- Empty interpolation (0 segments) emits empty string constant
+- Adjacent interpolations handled naturally — no extra empty strings inserted
+- Added 8 tests: variable interp, int variable coercion, command expr, multiple commands, adjacent vars, mixed var+command, only-var, heap result
+- Files changed: src/compiler.c, test/test_string.c
+- **Learnings for future iterations:**
+  - String interpolation compilation is straightforward: segment-by-segment with pairwise OP_CONCAT (same pattern as variadic concat)
+  - AST_LIT_STRING segments in interpolation don't need OP_TO_STRING (already strings); only AST_VAR_REF and AST_COMMAND do
+  - Multiple top-level JACL statements in tests MUST be separated by `\n` — especially important for tests with [def ...] followed by [print ...]
+  - No new opcodes needed — OP_TO_STRING and OP_CONCAT from US-008/US-006 provide all the infrastructure
+---
+
+## 2026-02-20 - US-010
+- Created test/test_m5.c with 19 end-to-end integration tests using jacl_run() and PrintCapture pattern
+- Tests cover: heap string print, concat with variables, length/index/slice builtins, string interpolation (var, expr, mixed), heap string equality, string ordering, heap strings as proc args/returns, closure capturing heap strings, variadic concat, slice one-arg form, string-vs-int eq, length on heap strings, index OOB returning nil, string while loop, to_string coercion via interpolation
+- Added test_m5.c to build.sh TESTS array
+- Updated DESIGN.md M5 row status to **COMPLETE**
+- All 36 test suites pass (0 failures), zero memory leaks
+- Files changed: test/test_m5.c (new), build.sh, DESIGN.md
+- **Learnings for future iterations:**
+  - Count string lengths carefully — "hello world this is long" is 24 chars, not 23
+  - TEST_SETUP/TEST_TEARDOWN macros reduce boilerplate in integration test files
+  - PrintCapture pattern: capture_print callback + {buf[1024], len} struct is the standard way to test print output
+  - All M0-M4 tests continue to pass — no regressions from M5 string system
+---

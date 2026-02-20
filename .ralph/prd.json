@@ -176,7 +176,7 @@
         "Compiles cleanly with -Wall -Wextra -std=c99"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -203,7 +203,7 @@
         "Commit message references M5 completion"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ]

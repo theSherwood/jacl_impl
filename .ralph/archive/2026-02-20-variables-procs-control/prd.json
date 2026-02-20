@@ -1,0 +1,217 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/variables-procs-control",
+  "description": "JACL Milestone 4 — Variables, Procedures & Control Flow: Add proc definitions, lexical scoping with flat frames and upvalues, if/while control flow, closures with by-value capture, and recursion",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "New opcodes for locals, jumps, calls, and closures",
+      "description": "As the VM, I need new opcodes added to the OpCode enum and BytecodeChunk so that the compiler can emit instructions for local variables, control flow, procedure calls, and closures.",
+      "acceptanceCriteria": [
+        "OP_GET_LOCAL added to OpCode enum — followed by uint8_t slot index",
+        "OP_SET_LOCAL added to OpCode enum — followed by uint8_t slot index",
+        "OP_GET_UPVALUE added to OpCode enum — followed by uint8_t upvalue index",
+        "OP_JUMP added to OpCode enum — followed by uint16_t forward offset",
+        "OP_JUMP_IF_FALSE added to OpCode enum — followed by uint16_t forward offset, pops condition",
+        "OP_LOOP added to OpCode enum — followed by uint16_t backward offset",
+        "OP_CALL added to OpCode enum — followed by uint8_t argument count",
+        "OP_RETURN added to OpCode enum — no operands",
+        "OP_CLOSURE added to OpCode enum — followed by uint16_t constant pool index, then N upvalue descriptors",
+        "OP_POP_N added to OpCode enum — followed by uint8_t count",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "JaclClosure struct and closure value helpers",
+      "description": "As the VM and compiler, I need a closure data structure and value helpers so that procedures can be represented as first-class tagged values.",
+      "acceptanceCriteria": [
+        "JaclClosure struct defined in src/value.c: BytecodeChunk chunk (compiled body), uint8_t param_count, JaclVal* param_names (inline string array), JaclVal* upvalues (captured values array), uint8_t upvalue_count, const char* name (procedure name for debug, may be NULL)",
+        "jacl_closure(JaclClosure*) constructor creates a JaclVal with JACL_TAG_CLOSURE tag and pointer payload",
+        "jacl_is_closure(JaclVal) type check returns true for closure-tagged values",
+        "jacl_as_closure(JaclVal) extracts JaclClosure* pointer from payload",
+        "All closure memory (struct, param_names array, upvalues array) is arena-allocated",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Call frames and VM execution with frames",
+      "description": "As the VM, I need a call frame stack so that procedure calls save and restore execution context correctly, enabling nested and recursive calls.",
+      "acceptanceCriteria": [
+        "CallFrame struct defined: JaclClosure* closure, uint8_t* return_ip, uint32_t stack_base, BytecodeChunk* chunk",
+        "VM struct has CallFrame frames[VM_FRAMES_MAX] array where VM_FRAMES_MAX is 64",
+        "VM struct has uint32_t frame_count tracking current call depth",
+        "vm_exec wraps top-level code in an implicit top-level closure/frame so all execution uses frames uniformly",
+        "OP_CALL implementation: validates arg count matches closure param_count (runtime error if mismatch), pushes new CallFrame, sets ip to closure chunk code, sets stack_base",
+        "OP_RETURN implementation: pops CallFrame, restores ip from return_ip, places return value at caller stack position, adjusts stack_top",
+        "Exceeding VM_FRAMES_MAX produces runtime error with message containing 'stack overflow'",
+        "Calling a non-closure value produces runtime error with message containing 'cannot call'",
+        "OP_GET_LOCAL pushes stack[current_frame.stack_base + slot] onto stack",
+        "OP_SET_LOCAL writes top-of-stack into stack[current_frame.stack_base + slot]",
+        "OP_GET_UPVALUE pushes current_frame.closure->upvalues[index] onto stack",
+        "OP_JUMP adds offset to ip (forward jump)",
+        "OP_JUMP_IF_FALSE pops condition, jumps if falsy (false or nil), does not jump otherwise",
+        "OP_LOOP subtracts offset from ip (backward jump)",
+        "OP_POP_N discards N values from stack top",
+        "Truthiness: false and nil are falsy, everything else (0, empty string, etc.) is truthy",
+        "Tests verify basic call/return, stack overflow error, calling non-closure error, each jump opcode",
+        "All tests pass and no memory leaks"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Compiler local variable resolution",
+      "description": "As the compiler, I need to resolve def bindings to local slot indices inside procedure bodies so that variable access is a fast flat-array lookup.",
+      "acceptanceCriteria": [
+        "Compiler tracks a Local array (name as inline string JaclVal, scope_depth as int) for each local in the current compilation scope",
+        "Compiler tracks current scope_depth, incremented when entering a block, decremented when exiting",
+        "def inside a procedure body compiles to: evaluate expr, the value occupies the local slot (no explicit SET_LOCAL needed if slot is implicit from stack position)",
+        "$x referencing a local resolves at compile time to OP_GET_LOCAL <slot_index>",
+        "def at top-level (scope_depth == 0, not inside a function) still compiles to OP_DEF_GLOBAL; $x at top level still compiles to OP_GET_GLOBAL",
+        "Exiting a scope emits OP_POP_N to clean up locals from that scope",
+        "Redefining a name in the same scope creates a new local slot (shadow, not error)",
+        "Max 256 locals per function (uint8_t slot index); exceeding produces compile error",
+        "Tests verify local resolution for simple scope, nested scopes, and shadowing",
+        "Compiles cleanly with -Wall -Wextra -std=c99"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Compile and execute if conditional",
+      "description": "As a JACL programmer, I want if/else conditional branching so that I can make decisions in my programs.",
+      "acceptanceCriteria": [
+        "Compiler recognizes 'if' command head",
+        "[if cond { then-body }] compiles to: compile cond, OP_JUMP_IF_FALSE over then-body, compile then-body, (push nil for else case via OP_JUMP over else + OP_NIL)",
+        "[if cond { then-body } { else-body }] compiles to: compile cond, OP_JUMP_IF_FALSE over then-body, compile then-body, OP_JUMP over else-body, compile else-body",
+        "if is an expression — returns the value of the taken branch",
+        "[if [> 5 3] { 1 } { 2 }] returns i32(1)",
+        "[if false { 1 } { 2 }] returns i32(2)",
+        "[if false { 1 }] returns nil",
+        "Nested if works: [if true { [if false { 1 } { 2 }] }] returns i32(2)",
+        "Wrong argument count (not 2 or 3 args) produces compile error",
+        "Second and third args must be AST_BLOCK or compile error",
+        "Tests verify truthy/falsy values, both branches, nesting, expression return, error cases",
+        "All tests pass and no memory leaks"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Compile and execute proc definition",
+      "description": "As a JACL programmer, I want to define named procedures with proc so that I can create reusable functions.",
+      "acceptanceCriteria": [
+        "Compiler recognizes 'proc' command head",
+        "[proc name [params] { body }] syntax: first arg is name (AST_LIT_STRING), second is params (AST_COMMAND with bare words as args), third is body (AST_BLOCK)",
+        "proc compiles the body into a separate BytecodeChunk with its own constant pool",
+        "Parameters become local slots 0..N-1 in the new chunk",
+        "Body compilation emits OP_RETURN after the last expression (implicit return)",
+        "proc emits OP_CLOSURE to create the closure value, then OP_DEF_GLOBAL or local slot assignment to bind the name",
+        "[proc add [a b] { [+ $a $b] }] followed by [add 1 2] returns i32(3)",
+        "[proc greet [name] { [print $name] }] followed by [greet hello] prints 'hello'",
+        "Zero-parameter procedures: [proc answer [] { 42 }] then [answer] returns i32(42)",
+        "Redefining a proc name overwrites the binding",
+        "Wrong argument count for proc (not 3 args) produces compile error",
+        "Tests verify definition, invocation, parameter passing, return values, zero-params",
+        "All tests pass and no memory leaks"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Compile and execute while loop",
+      "description": "As a JACL programmer, I want a while loop so that I can perform iterative computation.",
+      "acceptanceCriteria": [
+        "Compiler recognizes 'while' command head",
+        "[while cond { body }] compiles to: loop-start label, compile cond, OP_JUMP_IF_FALSE to exit, compile body, OP_POP (discard body result), OP_LOOP back to loop-start",
+        "while returns nil when the loop exits",
+        "[while false { 1 }] returns nil (zero iterations)",
+        "def is allowed to rebind the same name in the same scope during while loops (pragmatic workaround for lack of mut/set! until M8)",
+        "Iterative computation test: a while loop with a counter can compute a sum (using global def rebinding)",
+        "Wrong argument count (not 2 args) produces compile error",
+        "Second arg must be AST_BLOCK or compile error",
+        "Tests verify iteration, zero-iteration, loop exit, and error cases",
+        "All tests pass and no memory leaks"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Closures and upvalue capture",
+      "description": "As a JACL programmer, I want procedures to capture variables from their enclosing scope so that I can create closures.",
+      "acceptanceCriteria": [
+        "Compiler tracks upvalues: when a proc body references a variable from an enclosing scope, the compiler records it as an upvalue with its source (local slot or parent upvalue index)",
+        "OP_CLOSURE instruction is followed by upvalue descriptors: for each upvalue, a (is_local, index) byte pair indicating whether to capture from the enclosing frame's locals or from its upvalues",
+        "VM OP_CLOSURE: creates JaclClosure, copies captured values into the closure's upvalue array",
+        "VM OP_GET_UPVALUE: pushes the captured value from the current closure's upvalue array",
+        "Capture is by value (snapshot at closure creation time) since all M4 bindings are immutable",
+        "[proc make-adder [x] { [proc inner [y] { [+ $x $y] }] }] — calling [make-adder 10] returns a closure, calling that with 5 returns i32(15)",
+        "Multiple closures over the same scope capture independently (modifying one does not affect the other — though values are immutable in M4 so this is automatically true)",
+        "Nested closures (3+ levels) work correctly",
+        "Tests verify capture, independent captures, nested closures",
+        "All tests pass and no memory leaks"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Recursion",
+      "description": "As a JACL programmer, I want to write recursive procedures so that I can express algorithms like factorial and fibonacci.",
+      "acceptanceCriteria": [
+        "A procedure can call itself by name — the proc name is bound globally before (or as) the closure is created, so the body can reference it",
+        "[proc fact [n] { [if [== $n 0] { 1 } { [* $n [fact [- $n 1]]] }] }] followed by [fact 10] returns i32(3628800)",
+        "Fibonacci works: [proc fib [n] { [if [< $n 2] { $n } { [+ [fib [- $n 1]] [fib [- $n 2]]] }] }] followed by [fib 10] returns i32(55)",
+        "Exceeding VM_FRAMES_MAX (64) produces a runtime error with 'stack overflow' in the message (catches runaway recursion)",
+        "Tests verify factorial, fibonacci, and recursion depth limit error message",
+        "All tests pass and no memory leaks"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "End-to-end integration tests",
+      "description": "As a developer, I need comprehensive integration tests in test/test_m4.c that exercise the full pipeline with all M4 features together.",
+      "acceptanceCriteria": [
+        "test/test_m4.c exists using jacl_run() and PrintCapture pattern from test/test_integration.c",
+        "Test: [def x 10] [proc double [n] { [* $n 2] }] [print [double $x]] prints '20'",
+        "Test: factorial via recursion returns correct result for fact(10)",
+        "Test: fibonacci via recursion returns correct result for fib(10)",
+        "Test: closure captures variable from enclosing scope (make-adder pattern)",
+        "Test: if/while with various truthy/falsy values (0, nil, false, empty string, positive int)",
+        "Test: nested procedure definitions and calls",
+        "Test: error cases — wrong arg count on call, calling non-function, undefined variable inside proc body",
+        "Test: while loop computes iterative sum using def rebinding",
+        "All existing M0-M3 tests continue to pass (build.sh full suite green)",
+        "Zero memory leaks detected by tracked allocator in all tests",
+        "Test file added to build.sh TESTS array",
+        "M4 row in DESIGN.md milestone table status column updated from empty to **COMPLETE**",
+        "Commit message references M4 completion"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
