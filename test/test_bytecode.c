@@ -40,7 +40,8 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_STR_LEN,        30);
   ASSERT_INT_EQ(OP_STR_INDEX,      31);
   ASSERT_INT_EQ(OP_STR_SLICE,      32);
-  ASSERT_INT_EQ(OP_HALT,           33);
+  ASSERT_INT_EQ(OP_TO_STRING,      33);
+  ASSERT_INT_EQ(OP_HALT,           34);
   TEST_PASS();
 }
 

@@ -46,6 +46,7 @@
 - Compiler variadic builtin pattern: compile first 2 args + OP, then loop remaining args each with OP (pairwise chain)
 - Truthiness: only nil and JACL_FALSE are falsy; 0, empty string, etc. are truthy
 - In JACL, bare `false` is a string (truthy); `$false` is the boolean false (falsy)
+- OP_TO_STRING: pops any value, pushes its string representation; no-op for strings; result inline <=7 or heap-interned
 - Jump patching: compiler__emit_jump emits placeholder 0xFFFF, compiler__patch_jump fills in actual offset
 - compiler__compile_block_expr: compiles block as expression (last stmt value stays on stack)
 - Block commands inside { } must be separated by `;` or `\n`
@@ -162,4 +163,40 @@
   - VM needs JaclInternTable* for any runtime string creation (concat, to_string, etc.) — threaded via vm->intern_table set in jacl_run()
   - OP_CONCAT uses stack buffer (256 bytes) for concatenation; falls back to arena_alloc for very long strings
   - Compiler variadic builtin pattern: compile first 2 args + OP, then loop remaining args each with OP (pairwise chain)
+- Compiler builtins with optional args: use OP_NIL as sentinel (e.g., slice 2-arg form pushes nil for end, VM checks for nil)
+---
+
+## 2026-02-20 - US-007
+- Added OP_STR_LEN, OP_STR_INDEX, OP_STR_SLICE opcodes to bytecode.c
+- Added `length`, `index`, `slice` compiler builtins in compiler.c
+- Implemented VM handlers: OP_STR_LEN pops string pushes i32 length; OP_STR_INDEX pops i32+string, pushes single-char or nil; OP_STR_SLICE pops end+start+string, pushes substring
+- Slice 2-arg form: compiler emits OP_NIL as end sentinel, VM detects nil and uses string length
+- Slice bounds are clamped (no runtime error for out-of-range)
+- Index out-of-bounds (negative or >= length) returns nil (not error)
+- Result strings: inline if <= 7 bytes, heap-interned otherwise
+- Updated test_bytecode.c: OP_STR_LEN=30, OP_STR_INDEX=31, OP_STR_SLICE=32, OP_HALT=33
+- Added 16 tests in test_string.c covering all acceptance criteria
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_string.c
+- **Learnings for future iterations:**
+  - Compiler builtins with optional args: emit OP_NIL as sentinel for missing args, VM checks with jacl_is_nil()
+  - Slice bounds clamping avoids runtime errors — consistent with dynamic language semantics
+  - OP_STR_INDEX uses direct data access (heap: hs->data[idx], inline: stack buffer) for efficiency
+  - Adding 3 opcodes shifts OP_HALT by 3 — always update test_bytecode.c
+- OP_TO_STRING uses snprintf for numeric types, memcpy for known short strings (nil/true/false)
+- OP_TO_STRING for closures: uses cl->name if available ("<proc name>"), otherwise "<closure>"
+---
+
+## 2026-02-20 - US-008
+- Added OP_TO_STRING opcode to OpCode enum in src/bytecode.c
+- Implemented OP_TO_STRING handler in vm.c: pops value, converts to string representation, pushes result
+- Conversions: i32→snprintf "%d", f32→snprintf "%g", bool→"true"/"false", nil→"nil", string→no-op, closure→"<proc name>" or "<closure>"
+- Result is inline if <= 7 bytes, otherwise heap-interned via intern_table
+- Updated test_bytecode.c: OP_TO_STRING=33, OP_HALT=34
+- Added 10 tests in test_string.c: integer, negative int, float, true, false, nil, string no-op, closure, inline result check, heap result check
+- Files changed: src/bytecode.c, src/vm.c, test/test_bytecode.c, test/test_string.c
+- **Learnings for future iterations:**
+  - OP_TO_STRING tests use direct bytecode construction (chunk_write) since there's no JACL syntax that emits OP_TO_STRING yet (US-009 will add it via interpolation)
+  - When testing raw opcodes, create the VM manually with vm_init + set vm.intern_table before calling vm_exec
+  - snprintf "%g" for floats avoids excessive trailing zeros (3.14f → "3.14", not "3.140000")
+  - Adding 1 opcode shifts OP_HALT by 1 — always update test_bytecode.c
 ---

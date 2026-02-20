@@ -849,6 +849,60 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         break;
       }
 
+      case OP_TO_STRING: {
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+
+        if (jacl_is_string(val)) {
+          /* Already a string — push back unchanged */
+          result = vm__push(vm, val);
+          if (result != VM_OK) return result;
+        } else {
+          char buf[64];
+          int n = 0;
+
+          if (jacl_is_nil(val)) {
+            memcpy(buf, "nil", 3);
+            n = 3;
+          } else if (jacl_is_bool(val)) {
+            if (val == JACL_TRUE) {
+              memcpy(buf, "true", 4);
+              n = 4;
+            } else {
+              memcpy(buf, "false", 5);
+              n = 5;
+            }
+          } else if (jacl_is_i32(val)) {
+            n = snprintf(buf, sizeof(buf), "%d", (int)jacl_as_i32(val));
+          } else if (jacl_is_f32(val)) {
+            n = snprintf(buf, sizeof(buf), "%g", (double)jacl_as_f32(val));
+          } else if (jacl_is_closure(val)) {
+            JaclClosure* cl = jacl_as_closure(val);
+            if (cl->name) {
+              n = snprintf(buf, sizeof(buf), "<proc %s>", cl->name);
+            } else {
+              memcpy(buf, "<closure>", 9);
+              n = 9;
+            }
+          } else {
+            memcpy(buf, "<unknown>", 9);
+            n = 9;
+          }
+
+          JaclVal str;
+          if (n < 0) n = 0;
+          uint32_t slen = (uint32_t)n;
+          if (slen <= 7) {
+            str = jacl_inline_string(buf, slen);
+          } else {
+            str = jacl_intern(vm->arena, vm->intern_table, buf, slen);
+          }
+          result = vm__push(vm, str);
+          if (result != VM_OK) return result;
+        }
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }

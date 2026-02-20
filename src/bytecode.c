@@ -47,6 +47,7 @@ typedef enum {
   OP_STR_LEN,       /* pop string, push i32 length */
   OP_STR_INDEX,     /* pop index + string, push char or nil */
   OP_STR_SLICE,     /* pop end + start + string, push substring */
+  OP_TO_STRING,     /* pop value, push string representation */
   OP_HALT           /* stop execution */
 } OpCode;
 

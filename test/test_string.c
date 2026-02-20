@@ -1321,6 +1321,380 @@ static int test_slice_boundary(void) {
   TEST_PASS();
 }
 
+/* ===== US-008: OP_TO_STRING value-to-string coercion ===== */
+
+/* Helper: run source, capture output, verify via OP_TO_STRING through print */
+/* Note: We test OP_TO_STRING indirectly by using concat with non-string values
+   that need coercion. But since OP_TO_STRING is a raw opcode, we test it via
+   the VM directly by building bytecode that uses it. Instead, we'll use the
+   end-to-end pattern: compile a program that exercises OP_TO_STRING when
+   string interpolation calls it (US-009). For now, we test via direct VM
+   bytecode construction. */
+
+/* Test: integer to string — 42 becomes "42" */
+static int test_to_string_integer(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Build bytecode: push i32(42), OP_TO_STRING, OP_PRINT, OP_HALT */
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  uint16_t idx = chunk_add_constant(&chunk, jacl_i32(42));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write(&chunk, (uint8_t)(idx >> 8), 1);
+  chunk_write(&chunk, (uint8_t)(idx & 0xFF), 1);
+  chunk_write(&chunk, OP_TO_STRING, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  vm.intern_table = &table;
+
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: negative integer to string — -7 becomes "-7" */
+static int test_to_string_negative_int(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  uint16_t idx = chunk_add_constant(&chunk, jacl_i32(-7));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write(&chunk, (uint8_t)(idx >> 8), 1);
+  chunk_write(&chunk, (uint8_t)(idx & 0xFF), 1);
+  chunk_write(&chunk, OP_TO_STRING, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  vm.intern_table = &table;
+
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "-7\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: float to string — 3.14 becomes "3.14" */
+static int test_to_string_float(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  uint16_t idx = chunk_add_constant(&chunk, jacl_f32(3.14f));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write(&chunk, (uint8_t)(idx >> 8), 1);
+  chunk_write(&chunk, (uint8_t)(idx & 0xFF), 1);
+  chunk_write(&chunk, OP_TO_STRING, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  vm.intern_table = &table;
+
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3.14\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: boolean true to string — becomes "true" */
+static int test_to_string_true(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  chunk_write(&chunk, OP_TRUE, 1);
+  chunk_write(&chunk, OP_TO_STRING, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  vm.intern_table = &table;
+
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: boolean false to string — becomes "false" */
+static int test_to_string_false(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  chunk_write(&chunk, OP_FALSE, 1);
+  chunk_write(&chunk, OP_TO_STRING, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  vm.intern_table = &table;
+
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "false\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: nil to string — becomes "nil" */
+static int test_to_string_nil(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  chunk_write(&chunk, OP_NIL, 1);
+  chunk_write(&chunk, OP_TO_STRING, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  vm.intern_table = &table;
+
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "nil\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: string to string — no-op, pushed back unchanged */
+static int test_to_string_string_noop(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  JaclVal str = jacl_inline_string("hello", 5);
+  uint16_t idx = chunk_add_constant(&chunk, str);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write(&chunk, (uint8_t)(idx >> 8), 1);
+  chunk_write(&chunk, (uint8_t)(idx & 0xFF), 1);
+  chunk_write(&chunk, OP_TO_STRING, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  vm.intern_table = &table;
+
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: closure to string — becomes "<proc name>" */
+static int test_to_string_closure(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Create a minimal closure with a name */
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  memset(cl, 0, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->name = "foo";
+  cl->param_count = 0;
+  cl->upvalue_count = 0;
+  cl->upvalues = NULL;
+  cl->param_names = NULL;
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  uint16_t idx = chunk_add_constant(&chunk, jacl_closure(cl));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write(&chunk, (uint8_t)(idx >> 8), 1);
+  chunk_write(&chunk, (uint8_t)(idx & 0xFF), 1);
+  chunk_write(&chunk, OP_TO_STRING, 1);
+  chunk_write(&chunk, OP_PRINT, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  vm.intern_table = &table;
+
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "<proc foo>\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: integer result is inline (<=7 bytes) */
+static int test_to_string_inline_result(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  uint16_t idx = chunk_add_constant(&chunk, jacl_i32(42));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write(&chunk, (uint8_t)(idx >> 8), 1);
+  chunk_write(&chunk, (uint8_t)(idx & 0xFF), 1);
+  chunk_write(&chunk, OP_TO_STRING, 1);
+  /* Check that result is an inline string */
+  chunk_write(&chunk, OP_HALT, 1);
+
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.intern_table = &table;
+
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  /* Top of stack should be inline string "42" */
+  JaclVal top = vm.stack[vm.stack_top - 1];
+  ASSERT(jacl_is_inline_string(top));
+  ASSERT_U32_EQ(jacl_string_len(top), 2);
+  char buf[8];
+  jacl_string_data(top, buf, sizeof(buf));
+  ASSERT(memcmp(buf, "42", 2) == 0);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: long closure name produces heap-interned result */
+static int test_to_string_heap_result(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  memset(cl, 0, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->name = "my_long_proc";  /* "<proc my_long_proc>" = 19 chars > 7 */
+  cl->param_count = 0;
+  cl->upvalue_count = 0;
+  cl->upvalues = NULL;
+  cl->param_names = NULL;
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  uint16_t idx = chunk_add_constant(&chunk, jacl_closure(cl));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write(&chunk, (uint8_t)(idx >> 8), 1);
+  chunk_write(&chunk, (uint8_t)(idx & 0xFF), 1);
+  chunk_write(&chunk, OP_TO_STRING, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.intern_table = &table;
+
+  VMResult result = vm_exec(&vm, &chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  JaclVal top = vm.stack[vm.stack_top - 1];
+  ASSERT(jacl_is_heap_string(top));
+  JaclHeapString* hs = jacl_as_heap_string(top);
+  ASSERT(memcmp(hs->data, "<proc my_long_proc>", hs->length) == 0);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1392,6 +1766,17 @@ int main(void) {
     { "slice_zero_length",                         test_slice_zero_length },
     { "slice_heap_result",                         test_slice_heap_result },
     { "slice_boundary",                            test_slice_boundary },
+    /* US-008: OP_TO_STRING value-to-string coercion */
+    { "to_string_integer",                          test_to_string_integer },
+    { "to_string_negative_int",                     test_to_string_negative_int },
+    { "to_string_float",                            test_to_string_float },
+    { "to_string_true",                             test_to_string_true },
+    { "to_string_false",                            test_to_string_false },
+    { "to_string_nil",                              test_to_string_nil },
+    { "to_string_string_noop",                      test_to_string_string_noop },
+    { "to_string_closure",                          test_to_string_closure },
+    { "to_string_inline_result",                    test_to_string_inline_result },
+    { "to_string_heap_result",                      test_to_string_heap_result },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
