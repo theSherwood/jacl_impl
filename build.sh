@@ -50,6 +50,7 @@ TESTS=(
     "test/test_m4.c|m4|"
     "test/test_string.c|string|"
     "test/test_m5.c|m5|"
+    "test/test_m6.c|m6|"
 )
 
 echo "=== ds test runner ==="
