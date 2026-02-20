@@ -478,6 +478,131 @@ static int test_compile_def_long_string_no_error(void) {
   TEST_PASS();
 }
 
+/* ===== US-004: Print support for heap strings ===== */
+
+/* Print capture helper */
+typedef struct {
+  char     buf[1024];
+  uint32_t len;
+} PrintCapture;
+
+static void capture_print(const char* text, uint32_t len, void* ctx) {
+  PrintCapture* cap = (PrintCapture*)ctx;
+  uint32_t remaining = (uint32_t)sizeof(cap->buf) - cap->len - 1;
+  uint32_t copy_len = len < remaining ? len : remaining;
+  memcpy(cap->buf + cap->len, text, copy_len);
+  cap->len += copy_len;
+  cap->buf[cap->len] = '\0';
+}
+
+/* Test: [print "hello world"] prints the full heap string */
+static int test_print_heap_string(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print \"hello world\"]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello world\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [print "short"] still works (inline strings unchanged) */
+static int test_print_inline_string(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print \"short\"]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "short\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [print "hello world this is a long string"] prints without truncation */
+static int test_print_long_heap_string(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print \"hello world this is a long string\"]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello world this is a long string\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [def greet "hello world"] [print $greet] works end-to-end */
+static int test_print_heap_string_via_variable(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[def greet \"hello world\"]\n[print $greet]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello world\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: printing both short and long strings in sequence */
+static int test_print_mixed_strings(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print \"hi\"]\n[print \"hello world\"]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hi\nhello world\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -507,6 +632,12 @@ int main(void) {
     { "compile_dup_long_strings_share_pointer", test_compile_dup_long_strings_share_pointer },
     { "compile_print_long_string_no_error",    test_compile_print_long_string_no_error },
     { "compile_def_long_string_no_error",      test_compile_def_long_string_no_error },
+    /* US-004: Print support for heap strings */
+    { "print_heap_string",                     test_print_heap_string },
+    { "print_inline_string",                   test_print_inline_string },
+    { "print_long_heap_string",                test_print_long_heap_string },
+    { "print_heap_string_via_variable",        test_print_heap_string_via_variable },
+    { "print_mixed_strings",                   test_print_mixed_strings },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

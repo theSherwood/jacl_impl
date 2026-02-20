@@ -84,7 +84,7 @@ static const char* vm__type_name(JaclVal v) {
   if (jacl_is_bool(v))          return "bool";
   if (jacl_is_i32(v))           return "i32";
   if (jacl_is_f32(v))           return "f32";
-  if (jacl_is_inline_string(v)) return "string";
+  if (jacl_is_string(v))        return "string";
   if (jacl_is_closure(v))       return "closure";
   return "unknown";
 }
@@ -399,7 +399,7 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
 
-        char buf[64];
+        char buf[256];
         const char* text;
         uint32_t len;
 
@@ -420,13 +420,27 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
           int n = snprintf(buf, sizeof(buf), "%g\n", (double)jacl_as_f32(val));
           text = buf;
           len = (uint32_t)n;
-        } else if (jacl_is_inline_string(val)) {
-          size_t slen = jacl_inline_string_len(val);
-          jacl_inline_string_get(val, buf, sizeof(buf));
-          buf[slen] = '\n';
-          buf[slen + 1] = '\0';
-          text = buf;
-          len = (uint32_t)(slen + 1);
+        } else if (jacl_is_string(val)) {
+          uint32_t slen = jacl_string_len(val);
+          if (slen + 1 <= sizeof(buf)) {
+            jacl_string_data(val, buf, slen);
+            buf[slen] = '\n';
+            text = buf;
+            len = slen + 1;
+          } else {
+            /* String too long for stack buffer: print data then newline */
+            if (jacl_is_heap_string(val)) {
+              JaclHeapString* hs = jacl_as_heap_string(val);
+              vm->print_fn(hs->data, hs->length, vm->print_ctx);
+            } else {
+              jacl_string_data(val, buf, sizeof(buf));
+              vm->print_fn(buf, slen, vm->print_ctx);
+            }
+            vm->print_fn("\n", 1, vm->print_ctx);
+            result = vm__push(vm, JACL_NIL);
+            if (result != VM_OK) return result;
+            break;
+          }
         } else {
           text = "<unknown>\n";
           len = 10;
