@@ -88,7 +88,7 @@
         "Compiles cleanly with -Wall -Wextra -std=c99"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

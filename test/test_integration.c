@@ -301,6 +301,35 @@ static int test_comma_separator_block(void) {
   TEST_PASS();
 }
 
+/* ===== US-005 (M6): $var lines as command calls ===== */
+
+static int test_var_ref_command_call(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* proc greet [] { 42 } defines a proc that returns 42.
+     def f $greet binds f to the greet closure (via $greet var ref).
+     [$f] calls f (zero-arg), which calls greet, returning 42. */
+  VMResult result = jacl_run(
+    "proc greet [] { 42 }\n"
+    "def f $greet\n"
+    "[print [$f]]",
+    &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -321,6 +350,8 @@ int main(void) {
     /* US-003 (M6): Comma as command separator */
     { "comma_sep_toplevel",      test_comma_separator_toplevel },
     { "comma_sep_block",         test_comma_separator_block },
+    /* US-005 (M6): $var lines as command calls */
+    { "var_ref_cmd_call",        test_var_ref_command_call },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

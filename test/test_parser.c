@@ -741,6 +741,59 @@ static int test_bare_block_not_wrapped(void) {
   TEST_PASS();
 }
 
+/* ---- M6 US-005 tests: $var lines as zero-arg command calls ---- */
+
+static int test_var_ref_zero_arg(void) {
+  setup();
+  /* '$fn' alone at statement position → AST_COMMAND { head: AST_VAR_REF("fn"), arg_count: 0 } */
+  ParseResult r = parse("$fn");
+  ASSERT_U32_EQ(r.count, 1);
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(n->data.command.head->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.head->data.var_ref.name, "fn", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.head->data.var_ref.length, 2);
+  ASSERT_U32_EQ(n->data.command.arg_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_var_ref_with_args(void) {
+  setup();
+  /* '$fn 1 2' → AST_COMMAND { head: AST_VAR_REF("fn"), args: [1, 2] } */
+  ParseResult r = parse("$fn 1 2");
+  ASSERT_U32_EQ(r.count, 1);
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(n->data.command.head->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.head->data.var_ref.name, "fn", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(n->data.command.args[0]->data.lit_int.value, 1);
+  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(n->data.command.args[1]->data.lit_int.value, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_var_ref_inside_brackets_unchanged(void) {
+  setup();
+  /* In '[puts $x]', $x is parsed as AST_VAR_REF — NOT wrapped */
+  AstNode* n = parse_expr("[puts $x]");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[0]->data.var_ref.name, "x", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- US-007 tests ---- */
 
 static int test_block_single_cmd(void) {
@@ -1651,6 +1704,10 @@ int main(void) {
     {"bare_quoted_not_wrapped",test_bare_quoted_string_not_wrapped},
     {"bare_bracket_no_double",test_bare_bracket_cmd_not_double_wrapped},
     {"bare_block_not_wrapped",test_bare_block_not_wrapped},
+    /* M6 US-005: $var lines as zero-arg command calls */
+    {"var_ref_zero_arg",      test_var_ref_zero_arg},
+    {"var_ref_with_args",     test_var_ref_with_args},
+    {"var_ref_in_brackets",   test_var_ref_inside_brackets_unchanged},
     /* US-007 */
     {"block_single_cmd",     test_block_single_cmd},
     {"block_multiline",      test_block_multiline},

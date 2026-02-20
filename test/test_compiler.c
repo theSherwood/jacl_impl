@@ -728,12 +728,15 @@ static int test_compile_var_ref(void) {
   ASSERT_U32_EQ(cr.chunk.const_count, 1);
   ASSERT(jacl_is_inline_string(cr.chunk.constants[0]));
 
-  /* Bytecode: OP_GET_GLOBAL u16(0) OP_HALT */
-  ASSERT_U32_EQ(cr.chunk.code_count, 4);
+  /* Bytecode: OP_GET_GLOBAL u16(0) OP_CALL 0 OP_HALT
+     ($x at statement position desugars to [$x] — zero-arg call) */
+  ASSERT_U32_EQ(cr.chunk.code_count, 6);
   ASSERT_INT_EQ(cr.chunk.code[0], OP_GET_GLOBAL);
   ASSERT_INT_EQ(cr.chunk.code[1], 0);
   ASSERT_INT_EQ(cr.chunk.code[2], 0);
-  ASSERT_INT_EQ(cr.chunk.code[3], OP_HALT);
+  ASSERT_INT_EQ(cr.chunk.code[3], OP_CALL);
+  ASSERT_INT_EQ(cr.chunk.code[4], 0);
+  ASSERT_INT_EQ(cr.chunk.code[5], OP_HALT);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -803,38 +806,46 @@ static int test_def_expr_print_var(void) {
   TEST_PASS();
 }
 
-/* Test: $true evaluates to JACL_TRUE, $false to JACL_FALSE, $nil to JACL_NIL */
+/* Test: $true evaluates to JACL_TRUE, $false to JACL_FALSE, $nil to JACL_NIL
+   Note: $var at statement position desugars to a zero-arg call (M6 US-005),
+   so we test these builtins as arguments in [if] expressions instead. */
 static int test_var_true_false_nil(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
 
-  /* Test $true */
-  CompileResult cr = compile_source("$true", &arena);
-  ASSERT_U32_EQ(cr.error_count, 0);
-
+  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
-  VMResult result = vm_exec(&vm, &cr.chunk);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
 
+  /* $true used as condition → truthy */
+  VMResult result = jacl_run("[if $true { [print 1] } { [print 0] }]",
+                             &vm, &arena);
   ASSERT_INT_EQ(result, VM_OK);
-  ASSERT_U32_EQ(vm.stack_top, 1);
-  ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
+  ASSERT_STR_EQ(cap.buf, "1\n");
 
-  /* Test $false */
-  cr = compile_source("$false", &arena);
-  ASSERT_U32_EQ(cr.error_count, 0);
+  /* $false used as condition → falsy */
+  cap.len = 0;
+  cap.buf[0] = '\0';
   vm_init(&vm, &arena);
-  result = vm_exec(&vm, &cr.chunk);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  result = jacl_run("[if $false { [print 1] } { [print 0] }]",
+                    &vm, &arena);
   ASSERT_INT_EQ(result, VM_OK);
-  ASSERT_U64_EQ(vm.stack[0], JACL_FALSE);
+  ASSERT_STR_EQ(cap.buf, "0\n");
 
-  /* Test $nil */
-  cr = compile_source("$nil", &arena);
-  ASSERT_U32_EQ(cr.error_count, 0);
+  /* $nil used as condition → falsy */
+  cap.len = 0;
+  cap.buf[0] = '\0';
   vm_init(&vm, &arena);
-  result = vm_exec(&vm, &cr.chunk);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  result = jacl_run("[if $nil { [print 1] } { [print 0] }]",
+                    &vm, &arena);
   ASSERT_INT_EQ(result, VM_OK);
-  ASSERT(jacl_is_nil(vm.stack[0]));
+  ASSERT_STR_EQ(cap.buf, "0\n");
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -2063,7 +2074,7 @@ static int test_closure_not_global(void) {
   const char* program =
     "[def x 99]\n"
     "[proc wrap [x] {\n"
-    "  [proc inner [] { $x }]\n"
+    "  [proc inner [] { [+ $x 0] }]\n"
     "}]\n"
     "[def f [wrap 5]]\n"
     "[print [f]]";
@@ -2120,7 +2131,7 @@ static int test_recursion_fibonacci(void) {
 
   const char* program =
     "[proc fib [n] {\n"
-    "  [if [< $n 2] { $n } { [+ [fib [- $n 1]] [fib [- $n 2]]] }]\n"
+    "  [if [< $n 2] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }]\n"
     "}]\n"
     "[print [fib 10]]";
 

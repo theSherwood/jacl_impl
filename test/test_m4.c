@@ -85,7 +85,7 @@ static int test_fibonacci(void) {
 
   const char* program =
     "[proc fib [n] {\n"
-    "  [if [< $n 2] { $n } { [+ [fib [- $n 1]] [fib [- $n 2]]] }]\n"
+    "  [if [< $n 2] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }]\n"
     "}]\n"
     "[print [fib 10]]";
 
