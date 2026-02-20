@@ -384,8 +384,8 @@ static AstNode* parser__parse_expr(Parser* p) {
 
 static int parser__is_command_end(Parser* p) {
   TokenType t = parser__peek(p)->type;
-  return t == TOKEN_NEWLINE || t == TOKEN_SEMICOLON || t == TOKEN_EOF
-      || t == TOKEN_RBRACE;
+  return t == TOKEN_NEWLINE || t == TOKEN_SEMICOLON || t == TOKEN_COMMA
+      || t == TOKEN_EOF || t == TOKEN_RBRACE;
 }
 
 /* -------------------------------------------------------------------------
@@ -449,9 +449,10 @@ static AstNode* parser__parse_block(Parser* p) {
   parser__arr_init(&commands, p->arena);
 
   while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
-    /* Skip newlines and semicolons between commands */
+    /* Skip newlines, semicolons, and commas between commands */
     while (parser__peek(p)->type == TOKEN_NEWLINE ||
-           parser__peek(p)->type == TOKEN_SEMICOLON) {
+           parser__peek(p)->type == TOKEN_SEMICOLON ||
+           parser__peek(p)->type == TOKEN_COMMA) {
       parser__advance(p);
     }
     if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
@@ -629,9 +630,10 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
   parser__arr_init(&top_level, arena);
 
   while (!parser__at_end(&p)) {
-    /* Skip newlines and semicolons between commands */
+    /* Skip newlines, semicolons, and commas between commands */
     while (parser__peek(&p)->type == TOKEN_NEWLINE ||
-           parser__peek(&p)->type == TOKEN_SEMICOLON) {
+           parser__peek(&p)->type == TOKEN_SEMICOLON ||
+           parser__peek(&p)->type == TOKEN_COMMA) {
       parser__advance(&p);
     }
     if (parser__at_end(&p)) break;

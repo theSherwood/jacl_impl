@@ -257,6 +257,50 @@ static int test_empty_program(void) {
   TEST_PASS();
 }
 
+/* ===== US-003 (M6): Comma as command separator ===== */
+
+static int test_comma_separator_toplevel(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("def x 1, def y 2, [print [+ $x $y]]",
+                             &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_comma_separator_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("{ def a 10, def b 20, [print [+ $a $b]] }",
+                             &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "30\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -274,6 +318,9 @@ int main(void) {
     { "f32_pipeline",            test_f32_pipeline },
     { "semicolons_pipeline",     test_semicolons_pipeline },
     { "empty_program",           test_empty_program },
+    /* US-003 (M6): Comma as command separator */
+    { "comma_sep_toplevel",      test_comma_separator_toplevel },
+    { "comma_sep_block",         test_comma_separator_block },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -553,6 +553,55 @@ static int test_bare_single_word(void) {
   TEST_PASS();
 }
 
+static int test_bare_comma_delimited(void) {
+  setup();
+  /* "def x 1, def y 2" → two separate command nodes */
+  ParseResult r = parse("def x 1, def y 2");
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_U32_EQ(r.error_count, 0);
+  /* First command: def x 1 */
+  ASSERT(r.nodes[0]->type == AST_COMMAND);
+  ASSERT(memcmp(r.nodes[0]->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT_U32_EQ(r.nodes[0]->data.command.arg_count, 2);
+  ASSERT(memcmp(r.nodes[0]->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(r.nodes[0]->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(r.nodes[0]->data.command.args[1]->data.lit_int.value, 1);
+  /* Second command: def y 2 */
+  ASSERT(r.nodes[1]->type == AST_COMMAND);
+  ASSERT(memcmp(r.nodes[1]->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT_U32_EQ(r.nodes[1]->data.command.arg_count, 2);
+  ASSERT(memcmp(r.nodes[1]->data.command.args[0]->data.lit_string.value, "y", 1) == 0);
+  ASSERT(r.nodes[1]->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(r.nodes[1]->data.command.args[1]->data.lit_int.value, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_block_comma_delimited(void) {
+  setup();
+  /* { def a 10, def b 20 } → block with two commands */
+  AstNode* n = parse_expr("{ def a 10, def b 20 }");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_BLOCK);
+  ASSERT_U32_EQ(n->data.block.count, 2);
+  ASSERT(n->data.block.commands[0]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.block.commands[0]->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT_U32_EQ(n->data.block.commands[0]->data.command.arg_count, 2);
+  ASSERT(memcmp(n->data.block.commands[0]->data.command.args[0]->data.lit_string.value, "a", 1) == 0);
+  ASSERT(n->data.block.commands[0]->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(n->data.block.commands[0]->data.command.args[1]->data.lit_int.value, 10);
+  ASSERT(n->data.block.commands[1]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.block.commands[1]->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT_U32_EQ(n->data.block.commands[1]->data.command.arg_count, 2);
+  ASSERT(memcmp(n->data.block.commands[1]->data.command.args[0]->data.lit_string.value, "b", 1) == 0);
+  ASSERT(n->data.block.commands[1]->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(n->data.block.commands[1]->data.command.args[1]->data.lit_int.value, 20);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 static int test_bare_source_positions(void) {
   setup();
   /* "print hello" → positions span from first to last token */
@@ -1465,6 +1514,8 @@ int main(void) {
     {"bare_nested_brackets", test_bare_nested_brackets},
     {"bare_var_ref",         test_bare_var_ref},
     {"bare_single_word",     test_bare_single_word},
+    {"bare_comma_delim",     test_bare_comma_delimited},
+    {"block_comma_delim",    test_block_comma_delimited},
     {"bare_source_positions",test_bare_source_positions},
     /* US-007 */
     {"block_single_cmd",     test_block_single_cmd},
