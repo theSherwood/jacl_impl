@@ -28,7 +28,7 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | 2  | Parser & AST                 | **COMPLETE** | Recursive descent parser, arena-allocated AST |
 | 3  | Bytecode Compiler & VM       | **COMPLETE** | Opcodes, compiler, stack VM, `jacl_run` pipeline |
 | 4  | Variables, Procs, Control    | **COMPLETE** | `proc`, `if`, closures, lexical scoping |
-| 5  | String System                |              | Heap interned strings, interpolation end-to-end |
+| 5  | String System                | **COMPLETE** | Heap interned strings, interpolation end-to-end |
 | 6  | Persistent Collections       |              | Vectors (RRB) and maps (HAMT) from JACL |
 | 7  | Error Handling               |              | Error flag propagation, `try` |
 | 8  | Mutable State                |              | `mut`, `set!`, `box`, `atom` |
