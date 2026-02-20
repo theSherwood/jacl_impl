@@ -462,6 +462,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     closure->upvalue_count = 0;
     closure->upvalues     = NULL;
     closure->name         = proc_name;
+    closure->min_args     = param_count;
+    closure->variadic     = false;
 
     /* Allocate and fill param_names */
     if (param_count > 0) {

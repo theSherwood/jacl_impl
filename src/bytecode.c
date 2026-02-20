@@ -161,6 +161,8 @@ typedef struct {
   JaclVal*      upvalues;     /* captured values array (arena-allocated) */
   uint8_t       upvalue_count;/* number of upvalues */
   const char*   name;         /* procedure name for debug, may be NULL */
+  uint8_t       min_args;     /* minimum argument count (== param_count for fixed-arity) */
+  bool          variadic;     /* true if proc accepts variable args (future use) */
 } JaclClosure;
 
 static inline JaclVal jacl_closure(JaclClosure* cl) {

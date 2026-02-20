@@ -256,7 +256,8 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
   /* Wrap top-level code in an implicit closure/frame */
   JaclClosure top_closure;
   memset(&top_closure, 0, sizeof(top_closure));
-  top_closure.chunk = *chunk;
+  top_closure.chunk    = *chunk;
+  top_closure.variadic = false;
 
   CallFrame* frame = &vm->frames[0];
   frame->closure    = &top_closure;
@@ -668,6 +669,8 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         cl->param_names  = template->param_names;
         cl->name         = template->name;
         cl->upvalue_count = template->upvalue_count;
+        cl->min_args     = template->min_args;
+        cl->variadic     = template->variadic;
 
         if (cl->upvalue_count > 0) {
           cl->upvalues = (JaclVal*)arena_alloc(vm->arena,
