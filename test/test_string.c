@@ -173,6 +173,192 @@ static int test_is_heap_string_predicate(void) {
   TEST_PASS();
 }
 
+/* ===== US-002: Unified string access API ===== */
+
+/* Test: jacl_string_len works for both inline and heap */
+static int test_string_len(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  JaclVal short_s = jacl_inline_string("hello", 5);
+  JaclVal empty_s = jacl_inline_string("", 0);
+  JaclVal long_s = jacl_intern(&arena, &table, "hello world!", 12);
+
+  ASSERT_U32_EQ(jacl_string_len(short_s), 5);
+  ASSERT_U32_EQ(jacl_string_len(empty_s), 0);
+  ASSERT_U32_EQ(jacl_string_len(long_s), 12);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: jacl_string_data copies bytes for both types */
+static int test_string_data(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  JaclVal short_s = jacl_inline_string("abc", 3);
+  JaclVal long_s = jacl_intern(&arena, &table, "hello world!", 12);
+
+  char buf[32];
+
+  /* Inline string */
+  uint32_t len = jacl_string_data(short_s, buf, sizeof(buf));
+  ASSERT_U32_EQ(len, 3);
+  ASSERT(memcmp(buf, "abc", 3) == 0);
+
+  /* Heap string */
+  len = jacl_string_data(long_s, buf, sizeof(buf));
+  ASSERT_U32_EQ(len, 12);
+  ASSERT(memcmp(buf, "hello world!", 12) == 0);
+
+  /* Truncated copy (buffer smaller than string) */
+  len = jacl_string_data(long_s, buf, 5);
+  ASSERT_U32_EQ(len, 12);  /* returns actual length */
+  ASSERT(memcmp(buf, "hello", 5) == 0);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: jacl_is_string returns true for both types */
+static int test_is_string_unified(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  JaclVal short_s = jacl_inline_string("hi", 2);
+  JaclVal long_s = jacl_intern(&arena, &table, "hello world!", 12);
+  JaclVal integer = jacl_i32(42);
+  JaclVal nil = JACL_NIL;
+
+  ASSERT(jacl_is_string(short_s) == true);
+  ASSERT(jacl_is_string(long_s) == true);
+  ASSERT(jacl_is_string(integer) == false);
+  ASSERT(jacl_is_string(nil) == false);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: jacl_string_eq — short==short */
+static int test_string_eq_short_short(void) {
+  JaclVal a = jacl_inline_string("abc", 3);
+  JaclVal b = jacl_inline_string("abc", 3);
+  JaclVal c = jacl_inline_string("def", 3);
+
+  ASSERT(jacl_string_eq(a, b) == true);
+  ASSERT(jacl_string_eq(a, c) == false);
+  TEST_PASS();
+}
+
+/* Test: jacl_string_eq — long==long (heap pointer equality) */
+static int test_string_eq_long_long(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  JaclVal a = jacl_intern(&arena, &table, "hello world!", 12);
+  JaclVal b = jacl_intern(&arena, &table, "hello world!", 12);
+  JaclVal c = jacl_intern(&arena, &table, "goodbye world", 13);
+
+  ASSERT(jacl_string_eq(a, b) == true);
+  ASSERT(jacl_string_eq(a, c) == false);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: jacl_string_eq — short!=long */
+static int test_string_eq_short_long(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  JaclVal short_s = jacl_inline_string("hello", 5);
+  JaclVal long_s = jacl_intern(&arena, &table, "hello world!", 12);
+
+  ASSERT(jacl_string_eq(short_s, long_s) == false);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: jacl_string_eq — cross-representation equality edge case */
+static int test_string_eq_cross_rep(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  /* Intern a short string (<=7 bytes) as heap string */
+  JaclVal heap_hi = jacl_intern(&arena, &table, "hi", 2);
+  JaclVal inline_hi = jacl_inline_string("hi", 2);
+
+  /* Different representations, same content */
+  ASSERT(jacl_is_heap_string(heap_hi));
+  ASSERT(jacl_is_inline_string(inline_hi));
+  ASSERT(jacl_string_eq(heap_hi, inline_hi) == true);
+  ASSERT(jacl_string_eq(inline_hi, heap_hi) == true);
+
+  /* Different content */
+  JaclVal inline_no = jacl_inline_string("no", 2);
+  ASSERT(jacl_string_eq(heap_hi, inline_no) == false);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: jacl_string_cmp — lexicographic ordering */
+static int test_string_cmp_ordering(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  JaclVal abc = jacl_inline_string("abc", 3);
+  JaclVal def = jacl_inline_string("def", 3);
+  JaclVal ab = jacl_inline_string("ab", 2);
+  JaclVal abc2 = jacl_inline_string("abc", 3);
+  JaclVal long_abc = jacl_intern(&arena, &table, "abcdefghij", 10);
+  JaclVal long_xyz = jacl_intern(&arena, &table, "xyzxyzxyzx", 10);
+
+  /* short < short */
+  ASSERT(jacl_string_cmp(abc, def) < 0);
+  ASSERT(jacl_string_cmp(def, abc) > 0);
+
+  /* Equal strings */
+  ASSERT(jacl_string_cmp(abc, abc2) == 0);
+
+  /* Prefix ordering: "ab" < "abc" */
+  ASSERT(jacl_string_cmp(ab, abc) < 0);
+  ASSERT(jacl_string_cmp(abc, ab) > 0);
+
+  /* long < long */
+  ASSERT(jacl_string_cmp(long_abc, long_xyz) < 0);
+  ASSERT(jacl_string_cmp(long_xyz, long_abc) > 0);
+
+  /* short < long (cross-rep) */
+  ASSERT(jacl_string_cmp(abc, long_xyz) < 0);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -187,6 +373,15 @@ int main(void) {
     { "fnv1a_hash",                test_fnv1a_hash },
     { "intern_resize",             test_intern_resize },
     { "is_heap_string_predicate",  test_is_heap_string_predicate },
+    /* US-002: Unified string access API */
+    { "string_len",                test_string_len },
+    { "string_data",               test_string_data },
+    { "is_string_unified",         test_is_string_unified },
+    { "string_eq_short_short",     test_string_eq_short_short },
+    { "string_eq_long_long",       test_string_eq_long_long },
+    { "string_eq_short_long",      test_string_eq_short_long },
+    { "string_eq_cross_rep",       test_string_eq_cross_rep },
+    { "string_cmp_ordering",       test_string_cmp_ordering },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

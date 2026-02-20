@@ -674,11 +674,13 @@ static int test_inline_string_vs_string_tag(void) {
   JaclVal istr = jacl_inline_string("test", 4);
   JaclVal hstr = jacl_string_ptr(&dummy);
 
-  /* Inline string is not a heap string */
+  /* Inline string: is_inline_string and is_string both true, not heap */
   ASSERT(jacl_is_inline_string(istr));
-  ASSERT(!jacl_is_string(istr));
+  ASSERT(jacl_is_string(istr));
+  ASSERT(!jacl_is_heap_string(istr));
 
-  /* Heap string is not an inline string */
+  /* Heap string: is_heap_string and is_string both true, not inline */
+  ASSERT(jacl_is_heap_string(hstr));
   ASSERT(jacl_is_string(hstr));
   ASSERT(!jacl_is_inline_string(hstr));
 
@@ -1197,13 +1199,13 @@ static int test_predicate_matrix(void) {
   typedef bool (*pred_fn)(JaclVal);
   pred_fn preds[] = {
     jacl_is_nil, jacl_is_bool, jacl_is_i32, jacl_is_f32,
-    jacl_is_inline_string, jacl_is_string, jacl_is_vector,
+    jacl_is_inline_string, jacl_is_heap_string, jacl_is_vector,
     jacl_is_map, jacl_is_closure, jacl_is_bignum
   };
 
   const char *names[] = {
     "nil", "bool", "i32", "f32", "inline_string",
-    "string", "vector", "map", "closure", "bignum"
+    "heap_string", "vector", "map", "closure", "bignum"
   };
 
   /* Verify type tags */
@@ -1247,7 +1249,7 @@ static int test_predicate_matrix_with_flags(void) {
   typedef bool (*pred_fn)(JaclVal);
   pred_fn preds[] = {
     jacl_is_nil, jacl_is_bool, jacl_is_i32, jacl_is_f32,
-    jacl_is_inline_string, jacl_is_string, jacl_is_vector,
+    jacl_is_inline_string, jacl_is_heap_string, jacl_is_vector,
     jacl_is_map, jacl_is_closure, jacl_is_bignum
   };
 

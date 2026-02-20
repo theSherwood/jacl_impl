@@ -131,7 +131,8 @@ static inline void *jacl_as_ptr(JaclVal v) {
 /* --- Pointer type predicates --- */
 
 static inline bool jacl_is_string(JaclVal v) {
-    return (v & JACL_TYPE_MASK) == JACL_TAG_STRING;
+    uint64_t tag = v & JACL_TYPE_MASK;
+    return tag == JACL_TAG_INLINE_STRING || tag == JACL_TAG_STRING;
 }
 
 static inline bool jacl_is_vector(JaclVal v) {

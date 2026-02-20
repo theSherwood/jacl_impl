@@ -140,4 +140,92 @@ static inline JaclHeapString* jacl_as_heap_string(JaclVal v) {
   return (JaclHeapString*)jacl_as_ptr(v);
 }
 
+/* --- Unified string API (works for both inline and heap strings) --- */
+
+static inline uint32_t jacl_string_len(JaclVal v) {
+  if (jacl_is_inline_string(v)) {
+    return (uint32_t)jacl_inline_string_len(v);
+  }
+  return jacl_as_heap_string(v)->length;
+}
+
+static uint32_t jacl_string_data(JaclVal v, char* buf, size_t buflen) {
+  if (jacl_is_inline_string(v)) {
+    uint32_t len = (uint32_t)jacl_inline_string_len(v);
+    uint64_t payload = v & JACL_PAYLOAD_MASK;
+    uint32_t copy = len < (uint32_t)buflen ? len : (uint32_t)buflen;
+    for (uint32_t i = 0; i < copy; i++) {
+      buf[i] = (char)((payload >> (i * 8)) & 0xFF);
+    }
+    return len;
+  }
+  JaclHeapString* hs = jacl_as_heap_string(v);
+  uint32_t copy = hs->length < (uint32_t)buflen ? hs->length : (uint32_t)buflen;
+  memcpy(buf, hs->data, copy);
+  return hs->length;
+}
+
+static bool jacl_string_eq(JaclVal a, JaclVal b) {
+  bool a_inline = jacl_is_inline_string(a);
+  bool b_inline = jacl_is_inline_string(b);
+  bool a_heap = jacl_is_heap_string(a);
+  bool b_heap = jacl_is_heap_string(b);
+
+  /* Both inline: bitwise comparison (tag+payload, ignoring flags) */
+  if (a_inline && b_inline) {
+    uint64_t mask = JACL_TYPE_MASK | JACL_PAYLOAD_MASK;
+    return (a & mask) == (b & mask);
+  }
+
+  /* Both heap: pointer comparison (interning guarantees correctness) */
+  if (a_heap && b_heap) {
+    return (a & JACL_PAYLOAD_MASK) == (b & JACL_PAYLOAD_MASK);
+  }
+
+  /* Cross-representation: length check + memcmp */
+  if ((a_inline || a_heap) && (b_inline || b_heap)) {
+    uint32_t len_a = jacl_string_len(a);
+    uint32_t len_b = jacl_string_len(b);
+    if (len_a != len_b) return false;
+    /* Cross-rep means one is inline (<=7 bytes), so stack buffers suffice */
+    char buf_a[8], buf_b[8];
+    jacl_string_data(a, buf_a, sizeof(buf_a));
+    jacl_string_data(b, buf_b, sizeof(buf_b));
+    return memcmp(buf_a, buf_b, len_a) == 0;
+  }
+
+  /* Not both strings */
+  return false;
+}
+
+static int jacl_string_cmp(JaclVal a, JaclVal b) {
+  uint32_t len_a = jacl_string_len(a);
+  uint32_t len_b = jacl_string_len(b);
+
+  char buf_a[8], buf_b[8];
+  const char* data_a;
+  const char* data_b;
+
+  if (jacl_is_inline_string(a)) {
+    jacl_string_data(a, buf_a, sizeof(buf_a));
+    data_a = buf_a;
+  } else {
+    data_a = jacl_as_heap_string(a)->data;
+  }
+
+  if (jacl_is_inline_string(b)) {
+    jacl_string_data(b, buf_b, sizeof(buf_b));
+    data_b = buf_b;
+  } else {
+    data_b = jacl_as_heap_string(b)->data;
+  }
+
+  uint32_t min_len = len_a < len_b ? len_a : len_b;
+  int result = min_len > 0 ? memcmp(data_a, data_b, min_len) : 0;
+  if (result != 0) return result;
+  if (len_a < len_b) return -1;
+  if (len_a > len_b) return 1;
+  return 0;
+}
+
 #endif /* STRING_C */
