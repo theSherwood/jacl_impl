@@ -33,6 +33,15 @@ typedef struct {
   int16_t  known_arity;  /* arity if bound to a proc, -1 = unknown */
 } Local;
 
+/* --- Internal: Global arity tracking --- */
+
+#define COMPILER_GLOBAL_ARITIES_MAX 64
+
+typedef struct {
+  JaclVal name;
+  int16_t known_arity;
+} GlobalArity;
+
 typedef struct {
   uint8_t index;    /* local slot (if is_local) or parent upvalue index */
   uint8_t is_local; /* 1 = capture from enclosing locals, 0 = from parent upvalues */
@@ -54,6 +63,8 @@ struct Compiler {
   Upvalue          upvalues[COMPILER_UPVALUES_MAX];
   uint32_t         upvalue_count;
   Compiler*        enclosing;  /* parent compiler for upvalue resolution */
+  GlobalArity      global_arities[COMPILER_GLOBAL_ARITIES_MAX];
+  uint32_t         global_arity_count;
 };
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -67,6 +78,7 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->scope_depth   = 0;
   c->upvalue_count = 0;
   c->enclosing     = NULL;
+  c->global_arity_count = 0;
 }
 
 /* --- Internal: Emit helpers --- */
@@ -139,6 +151,34 @@ static int compiler__resolve_local(Compiler* c, JaclVal name) {
     }
   }
   return -1;
+}
+
+/* --- Internal: Global arity helpers --- */
+
+static int16_t compiler__resolve_global_arity(Compiler* c, JaclVal name) {
+  /* Walk to root compiler which holds global arity info */
+  Compiler* root = c;
+  while (root->enclosing) root = root->enclosing;
+  for (uint32_t i = 0; i < root->global_arity_count; i++) {
+    if (root->global_arities[i].name == name) {
+      return root->global_arities[i].known_arity;
+    }
+  }
+  return -1;
+}
+
+static void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity) {
+  for (uint32_t i = 0; i < c->global_arity_count; i++) {
+    if (c->global_arities[i].name == name) {
+      c->global_arities[i].known_arity = arity;
+      return;
+    }
+  }
+  if (c->global_arity_count < COMPILER_GLOBAL_ARITIES_MAX) {
+    c->global_arities[c->global_arity_count].name = name;
+    c->global_arities[c->global_arity_count].known_arity = arity;
+    c->global_arity_count++;
+  }
 }
 
 /* --- Internal: Upvalue resolution --- */
@@ -566,6 +606,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
+      compiler__set_global_arity(c, name_val, (int16_t)param_count);
     }
     return;
   }
@@ -666,6 +707,26 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       JaclVal name_val = jacl_inline_string(head->data.lit_string.value, name_len);
       int local_slot = compiler__resolve_local(c, name_val);
+
+      /* Compile-time arity check for known procs */
+      {
+        int16_t head_arity = -1;
+        if (local_slot != -1) {
+          head_arity = c->locals[local_slot].known_arity;
+        } else {
+          head_arity = compiler__resolve_global_arity(c, name_val);
+        }
+        if (head_arity != -1 && (int16_t)argc != head_arity) {
+          char err_msg[128];
+          snprintf(err_msg, sizeof(err_msg),
+                   "proc '%.*s' expects %d arguments but got %d",
+                   (int)name_len, head->data.lit_string.value,
+                   (int)head_arity, (int)argc);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+      }
+
       if (local_slot != -1) {
         compiler__emit_byte(c, OP_GET_LOCAL, line);
         compiler__emit_byte(c, (uint8_t)local_slot, line);

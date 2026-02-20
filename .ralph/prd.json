@@ -1,21 +1,19 @@
 {
   "project": "JACL",
-  "branchName": "ralph/file-based-test-harness",
-  "description": "File-based JACL test harness: a small C program that reads .jacl test files from a directory, runs them through jacl_run, and compares actual output against expected output declared in # expect: header comments. Integrates with build.sh as a single test entry.",
+  "branchName": "ralph/arity-checking",
+  "description": "Compile-time arity checking for JACL (M7). Catch wrong-argument-count errors at compile time for statically resolvable proc calls and builtins. Track arity through variable assignments. Extend JaclClosure with arity metadata.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Test harness C program",
-      "description": "As a developer, I want a C test harness that discovers .jacl files in a directory and runs them so that I can write tests without touching C code.",
+      "title": "Extend JaclClosure with arity metadata",
+      "description": "As a developer of the JACL runtime, I want JaclClosure to carry arity metadata so it is available for compile-time checking and future variadic support.",
       "acceptanceCriteria": [
-        "test/test_jacl_harness.c exists, includes ../src/jacl.c and test_helpers.h (standard unity build pattern)",
-        "Harness scans a directory for *.jacl files (use opendir/readdir from <dirent.h>)",
-        "Default directory is test/jacl/ (relative to the binary's working directory — build.sh runs from project root)",
-        "For each .jacl file: reads the file contents, parses # expect: / # expect-error: header comments, runs through jacl_run with PrintCapture, compares actual output to expected",
-        "Uses tracked_allocator and checks for memory leaks after each test file (same pattern as existing tests)",
-        "Prints per-file pass/fail with the filename, plus a summary line at the end",
-        "Exits with code 0 if all pass, 1 if any fail",
-        "Compiles cleanly with -Wall -Wextra -std=c99 -g"
+        "JaclClosure struct in bytecode.c gains a 'variadic' bool field (set to false for now) and a 'min_args' uint8_t field (equal to param_count for fixed-arity procs)",
+        "Compiler populates variadic and min_args when creating closures in compiler.c",
+        "Existing runtime arity check in OP_CALL (vm.c) continues to function using param_count",
+        "No change to the JaclVal 64-bit tagged-value encoding — metadata lives on the heap JaclClosure struct",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All existing tests pass (build.sh)"
       ],
       "priority": 1,
       "passes": true,
@@ -23,16 +21,16 @@
     },
     {
       "id": "US-002",
-      "title": "Comment-based expected output parsing",
-      "description": "As a test author, I want to declare expected output in # expect: comments so that each test file is self-contained.",
+      "title": "Compiler local table arity tracking",
+      "description": "As a developer of the JACL compiler, I need the Local struct to optionally carry arity information so the compiler can check calls through variables.",
       "acceptanceCriteria": [
-        "Lines starting with '# expect: ' (note trailing space) at the top of the file define expected stdout lines, in order",
-        "Lines starting with '# expect-error: ' define an expected runtime error — the program should return VM_RUNTIME_ERROR and the VM error message should contain the given substring",
-        "A file can have multiple # expect: lines (one per expected output line) OR a single # expect-error: line, but not both",
-        "Regular # comments that don't match # expect: or # expect-error: are ignored (they're just JACL comments)",
-        "Header comment parsing stops at the first non-comment, non-blank line (expectations must be at the top)",
-        "If a file has no # expect: or # expect-error: directives, it is treated as 'expect success with no output' (VM_OK, empty stdout)",
-        "Compiles cleanly with -Wall -Wextra -std=c99 -g"
+        "Local struct in compiler.c gains an arity tracking field (e.g., int16_t known_arity where -1 means unknown)",
+        "When a local is initialized from a proc definition, known_arity is set to that proc's param_count",
+        "When a local is initialized from another local with known arity (e.g., def g f where f has known arity), known_arity propagates",
+        "When a local's source arity is unknown (runtime expression, non-proc value), known_arity is -1",
+        "Arity information is scoped correctly — does not leak across scope boundaries",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All existing tests pass (build.sh)"
       ],
       "priority": 2,
       "passes": true,
@@ -40,15 +38,15 @@
     },
     {
       "id": "US-003",
-      "title": "Individual test targeting",
-      "description": "As a developer, I want to run a single .jacl test file for debugging so that I can iterate quickly on failures.",
+      "title": "Compile-time arity error for direct proc calls",
+      "description": "As a developer, I want the compiler to reject [foo 1 2 3] when foo is defined as [proc foo [a b] { ... }] so that I catch mistakes before running my program.",
       "acceptanceCriteria": [
-        "The harness accepts an optional command-line argument: a path to a single .jacl file",
-        "When given a path, it runs only that one file instead of scanning the directory",
-        "When given a filename without a path (e.g., basics.jacl), it looks in the default test/jacl/ directory",
-        "Output for single-file mode is the same format as multi-file mode (pass/fail + summary)",
-        "Example usage: ./test_jacl_harness test/jacl/bare_commands.jacl",
-        "Compiles cleanly with -Wall -Wextra -std=c99 -g"
+        "Compiler emits an error when a command head resolves to a known proc and the argument count does not match param_count",
+        "Error message includes line, column, proc name, expected count, and actual count (e.g., 'line 5, col 1: proc 'foo' expects 2 arguments but got 3')",
+        "Compilation fails (non-zero error_count) and no bytecode is executed",
+        "Existing valid programs continue to compile and run unchanged",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All existing tests pass (build.sh)"
       ],
       "priority": 3,
       "passes": true,
@@ -56,38 +54,54 @@
     },
     {
       "id": "US-004",
-      "title": "Build system integration",
-      "description": "As a developer, I want the file-based tests to run as part of build.sh so that they're always verified alongside existing tests.",
+      "title": "Arity checking through variable assignments",
+      "description": "As a developer, I want arity checking to work when I bind a proc to a variable, so that [def f add3] [f 1 2] is caught at compile time.",
       "acceptanceCriteria": [
-        "test/jacl/ directory exists",
-        "Entry added to build.sh TESTS array: test/test_jacl_harness.c|jacl_harness|",
-        "build.sh passes (harness compiles and runs successfully, even if test/jacl/ has zero test files initially)",
-        "Compiles cleanly with -Wall -Wextra -std=c99 -g"
+        "When def binds a local to a value whose arity is known (a proc literal or another local with known arity), calls through that local are checked",
+        "Calls through a local with known arity produce compile-time errors on mismatch",
+        "When the bound value's arity is unknown, no compile-time check occurs and the call compiles normally",
+        "Arity info propagates through simple alias chains: [def g f] inherits f's arity when f is known",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All existing tests pass (build.sh)"
       ],
       "priority": 4,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-005",
-      "title": "Initial test suite",
-      "description": "As a developer, I want a starter set of .jacl test files covering core functionality so that the harness is immediately useful.",
+      "title": "Builtin arity enforcement audit",
+      "description": "As a developer, I want consistent arity errors for all builtins so that typos and missing arguments are caught early.",
       "acceptanceCriteria": [
-        "test/jacl/bare_commands.jacl — bare command with args (print hello), bare command no args (proc call), nested brackets in line mode",
-        "test/jacl/separators.jacl — semicolon, comma, newline, and mixed separators",
-        "test/jacl/line_continuation.jacl — backslash continuation",
-        "test/jacl/procs.jacl — proc definition, call, recursion (factorial), closures",
-        "test/jacl/variables.jacl — def, $var usage, $var as command call",
-        "test/jacl/control_flow.jacl — if/else, while loop",
-        "test/jacl/strings.jacl — string literals, interpolation, concat, length, index, slice",
-        "test/jacl/arithmetic.jacl — +, -, *, /, %, comparisons",
-        "test/jacl/error_basic.jacl — at least one # expect-error: test (e.g., calling a non-callable value)",
-        "All test files pass when run through the harness",
-        "Total suite passes as part of build.sh",
-        "Compiles cleanly with -Wall -Wextra -std=c99 -g"
+        "All existing builtins have arity constraints enforced in the compiler",
+        "Fixed-arity builtins (def: 2, proc: 3, print: 1, +: 2, -: 2, *: 2, /: 2, =: 2, <: 2, >: 2) produce compile-time errors on mismatch",
+        "Flexible-arity builtins (if: 2-3, slice: 2-3, concat: 2+) produce errors when outside their valid range",
+        "Error messages follow the same format as user proc arity errors (line, col, name, expected, got)",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All existing tests pass (build.sh)"
       ],
       "priority": 5,
-      "passes": true,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Arity checking test suite",
+      "description": "As a developer, I want a comprehensive test suite that validates arity checking behavior so that regressions are caught.",
+      "acceptanceCriteria": [
+        "test/jacl/arity_direct.jacl — direct call with too few args produces compile error (# expect-error:)",
+        "test/jacl/arity_direct_many.jacl — direct call with too many args produces compile error",
+        "test/jacl/arity_correct.jacl — direct calls with correct arg counts compile and run",
+        "test/jacl/arity_alias.jacl — call through variable alias with wrong arity produces compile error",
+        "test/jacl/arity_alias_correct.jacl — call through alias with correct arity compiles and runs",
+        "test/jacl/arity_unknown.jacl — call through unknown-arity variable compiles without error",
+        "test/jacl/arity_builtins.jacl — builtin with wrong arity produces compile error (at least if, def, +)",
+        "test/jacl/arity_nested.jacl — nested proc definitions with separate arities checked independently",
+        "All new tests pass; entire existing test suite remains green",
+        "All tests pass as part of build.sh"
+      ],
+      "priority": 6,
+      "passes": false,
       "notes": ""
     }
   ]

@@ -1,5 +1,5 @@
 ## Codebase Patterns
-- File-based test harness: test/test_jacl_harness.c reads .jacl files from test/jacl/, parses # expect: / # expect-error: headers, runs through jacl_run
+- File-based test harness: test/test_jacl_harness.c reads .jacl files from test/jacl/, parses # expect: / # expect-error: headers, runs through jacl_run with PrintCapture
 - PrintCapture buffer in harness is 8192 bytes (larger than integration tests' 1024) to handle multi-line test output
 - Harness uses malloc/free for file I/O (not tracked_allocator) — tracked_allocator is only for the VM arena
 - Unity build: `src/jacl.c` #includes all pipeline .c files + lib headers as a single translation unit
@@ -26,26 +26,50 @@
 - Integration tests use PrintCapture pattern with `vm.print_fn`/`vm.print_ctx` — no `last_result` field on VM
 - The `print` builtin appends `\n` to output
 - Files sorted alphabetically for deterministic test ordering
+- JaclClosure has `min_args` (uint8_t) and `variadic` (bool) fields for arity metadata — set by compiler, copied in OP_CLOSURE
+- Local struct has `known_arity` (int16_t, -1 = unknown) — set by proc definition and propagated by def from var refs
+- `compiler__node_known_arity(c, node)` determines arity of an AST node at compile time (currently handles AST_VAR_REF → local lookup)
+- Global arity tracking: `GlobalArity` table on root Compiler, set by `proc` at global scope, resolved via `compiler__resolve_global_arity` (walks `enclosing` chain to root)
+- Arity error format: `compiler__error` prepends "line X, col Y: ", message is "proc 'name' expects N arguments but got M"
+- Compile errors surface as VM_RUNTIME_ERROR from jacl_run — test harness `# expect-error:` works for both compile and runtime errors
 
-## 2026-02-20 - US-001, US-002, US-003, US-004
-- Implemented file-based JACL test harness (test/test_jacl_harness.c)
-- Harness discovers .jacl files in test/jacl/, parses # expect: / # expect-error: headers, runs through jacl_run with PrintCapture
-- Supports single-file targeting via command-line argument
-- Added to build.sh TESTS array as test/test_jacl_harness.c|jacl_harness|
-- Created test/jacl/ directory
-- Files changed: test/test_jacl_harness.c (new), build.sh (modified)
+## 2026-02-20 - US-001
+Thread: N/A (first iteration)
+- Added `min_args` (uint8_t) and `variadic` (bool) fields to JaclClosure struct in bytecode.c
+- Compiler sets min_args = param_count, variadic = false when creating closures
+- OP_CLOSURE in vm.c copies both fields from template to runtime closure
+- memset on top_closure in vm_exec zeroes both fields correctly (min_args=0, variadic=false)
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c
 - **Learnings for future iterations:**
-  - All four stories (harness, expect parsing, single-file mode, build integration) are naturally a single deliverable
-  - The harness uses malloc/free for its own file I/O, tracked_allocator only for the VM arena
-  - PrintCapture buffer enlarged to 8192 for multi-line test output
+  - The top-level closure in vm_exec is zero-initialized via memset, so new fields default to 0/false
+  - OP_CLOSURE copies template fields to a new arena-allocated closure — new fields must be added to both compiler (template creation) and VM (runtime copy)
 ---
 
-## 2026-02-20 - US-005
-- Created 9 .jacl test files in test/jacl/ covering all core JACL features
-- Files: arithmetic.jacl, bare_commands.jacl, control_flow.jacl, error_basic.jacl, line_continuation.jacl, procs.jacl, separators.jacl, strings.jacl, variables.jacl
-- All 9 tests pass, full build.sh suite passes (38/38)
+## 2026-02-20 - US-002
+Thread: N/A
+- Added `known_arity` (int16_t) field to Local struct in compiler.c — defaults to -1 (unknown)
+- `proc` at local scope sets `known_arity = param_count` on the newly created local
+- `def` at local scope determines RHS arity via `compiler__node_known_arity()` and propagates to new local
+- `compiler__node_known_arity()` resolves AST_VAR_REF → local slot → known_arity (returns -1 for non-var-ref or unresolvable)
+- Arity scoping is correct: locals removed by `compiler__end_scope` take their arity info with them
+- Files changed: src/compiler.c
 - **Learnings for future iterations:**
-  - Double-check arithmetic in expected output (3*3=9 not 6)
-  - Remember bare word semantics: `{ "yes" }` for string blocks, `{ [+ $x 0] }` to force non-callable values
-  - `$var` at statement position calls the value, so use `[$f]` or `print [+ $x 0]` to print non-callable vars
+  - `def g f` binds to string "f", not proc — only `def g $f` (AST_VAR_REF) propagates arity
+  - known_arity must be computed BEFORE compiler__add_local since the new local would shadow the source variable in the same scope
+  - Proc params in body compiler get known_arity = -1 correctly (we don't know what callers will pass)
+---
+
+## 2026-02-20 - US-003
+Thread: N/A
+- Added global arity tracking: `GlobalArity` struct + table (max 64) on Compiler, with `compiler__resolve_global_arity` and `compiler__set_global_arity` helpers
+- `compiler__resolve_global_arity` walks `enclosing` chain to root compiler (globals are always on the root)
+- `proc` at global scope now calls `compiler__set_global_arity(c, name_val, param_count)` after emitting OP_DEF_GLOBAL
+- Dynamic call section checks arity for bare word command heads: resolves local first, then global arity; emits compile error on mismatch
+- Error message format: "proc 'foo' expects 2 arguments but got 3" (compiler__error prepends line/col)
+- Arity checking works from nested proc bodies (e.g., `proc bar [x] { [foo $x 1 2] }` catches the error on foo)
+- Files changed: src/compiler.c
+- **Learnings for future iterations:**
+  - Global arity is recorded AFTER body compilation, so recursive calls to self are not arity-checked (correct: proc isn't defined yet)
+  - For calls from nested proc bodies, `compiler__resolve_global_arity` must walk `enclosing` chain since body_compiler has its own (empty) global_arities table
+  - Error handling in compiler returns early — arity check must happen BEFORE emitting GET_LOCAL/GET_GLOBAL and argument compilation
 ---
