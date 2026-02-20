@@ -370,28 +370,101 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
         result = vm__pop(vm, &a); if (result != VM_OK) return result;
-        result = vm__push(vm, jacl_eq(a, b));
+        JaclVal res;
+        if (jacl_is_string(a) || jacl_is_string(b)) {
+          /* String-aware equality: both must be strings for true */
+          bool eq = jacl_is_string(a) && jacl_is_string(b) &&
+                    jacl_string_eq(a, b);
+          res = jacl_bool(eq);
+        } else {
+          res = jacl_eq(a, b);
+        }
+        result = vm__push(vm, res);
         if (result != VM_OK) return result;
         break;
       }
 
       case OP_LT: {
-        VM__BINARY_NUMERIC_OP(jacl_lt_i32, jacl_lt_f32, "<");
+        JaclVal b, a;
+        result = vm__pop(vm, &b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &a); if (result != VM_OK) return result;
+        JaclVal res;
+        if (jacl_is_i32(a) && jacl_is_i32(b)) {
+          res = jacl_lt_i32(a, b);
+        } else if (jacl_is_f32(a) && jacl_is_f32(b)) {
+          res = jacl_lt_f32(a, b);
+        } else if (jacl_is_string(a) && jacl_is_string(b)) {
+          res = jacl_bool(jacl_string_cmp(a, b) < 0);
+        } else {
+          vm__set_error(vm,
+            "type error in '<': expected matching types, got %s and %s",
+            vm__type_name(a), vm__type_name(b));
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, res); if (result != VM_OK) return result;
         break;
       }
 
       case OP_GT: {
-        VM__BINARY_NUMERIC_OP(jacl_gt_i32, jacl_gt_f32, ">");
+        JaclVal b, a;
+        result = vm__pop(vm, &b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &a); if (result != VM_OK) return result;
+        JaclVal res;
+        if (jacl_is_i32(a) && jacl_is_i32(b)) {
+          res = jacl_gt_i32(a, b);
+        } else if (jacl_is_f32(a) && jacl_is_f32(b)) {
+          res = jacl_gt_f32(a, b);
+        } else if (jacl_is_string(a) && jacl_is_string(b)) {
+          res = jacl_bool(jacl_string_cmp(a, b) > 0);
+        } else {
+          vm__set_error(vm,
+            "type error in '>': expected matching types, got %s and %s",
+            vm__type_name(a), vm__type_name(b));
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, res); if (result != VM_OK) return result;
         break;
       }
 
       case OP_LE: {
-        VM__BINARY_NUMERIC_OP(jacl_le_i32, jacl_le_f32, "<=");
+        JaclVal b, a;
+        result = vm__pop(vm, &b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &a); if (result != VM_OK) return result;
+        JaclVal res;
+        if (jacl_is_i32(a) && jacl_is_i32(b)) {
+          res = jacl_le_i32(a, b);
+        } else if (jacl_is_f32(a) && jacl_is_f32(b)) {
+          res = jacl_le_f32(a, b);
+        } else if (jacl_is_string(a) && jacl_is_string(b)) {
+          res = jacl_bool(jacl_string_cmp(a, b) <= 0);
+        } else {
+          vm__set_error(vm,
+            "type error in '<=': expected matching types, got %s and %s",
+            vm__type_name(a), vm__type_name(b));
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, res); if (result != VM_OK) return result;
         break;
       }
 
       case OP_GE: {
-        VM__BINARY_NUMERIC_OP(jacl_ge_i32, jacl_ge_f32, ">=");
+        JaclVal b, a;
+        result = vm__pop(vm, &b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &a); if (result != VM_OK) return result;
+        JaclVal res;
+        if (jacl_is_i32(a) && jacl_is_i32(b)) {
+          res = jacl_ge_i32(a, b);
+        } else if (jacl_is_f32(a) && jacl_is_f32(b)) {
+          res = jacl_ge_f32(a, b);
+        } else if (jacl_is_string(a) && jacl_is_string(b)) {
+          res = jacl_bool(jacl_string_cmp(a, b) >= 0);
+        } else {
+          vm__set_error(vm,
+            "type error in '>=': expected matching types, got %s and %s",
+            vm__type_name(a), vm__type_name(b));
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, res); if (result != VM_OK) return result;
         break;
       }
 

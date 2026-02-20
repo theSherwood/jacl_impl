@@ -603,6 +603,202 @@ static int test_print_mixed_strings(void) {
   TEST_PASS();
 }
 
+/* ===== US-005: String equality and comparison in the VM ===== */
+
+/* Test: [== "abc" "abc"] returns true (inline-to-inline) */
+static int test_vm_eq_inline_inline(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [== \"abc\" \"abc\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [== "hello world" "hello world"] returns true (heap-to-heap) */
+static int test_vm_eq_heap_heap(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print [== \"hello world\" \"hello world\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [== "abc" "def"] returns false */
+static int test_vm_eq_different(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [== \"abc\" \"def\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "false\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [== "abc" 42] returns false (type mismatch, not error) */
+static int test_vm_eq_string_vs_int(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [== \"abc\" 42]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "false\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [< "abc" "def"] returns true (lexicographic) */
+static int test_vm_lt_strings(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [< \"abc\" \"def\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [> "def" "abc"] returns true */
+static int test_vm_gt_strings(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [> \"def\" \"abc\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: numeric comparisons still work after string support added */
+static int test_vm_numeric_cmp_unchanged(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print [< 1 2]]\n[print [> 5 3]]\n[print [== 7 7]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\ntrue\ntrue\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: heap string ordering [< "abc..." "xyz..."] */
+static int test_vm_lt_heap_strings(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print [< \"abcdefghij\" \"xyzxyzxyzx\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [<= "abc" "abc"] and [>= "abc" "abc"] both true */
+static int test_vm_le_ge_strings(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print [<= \"abc\" \"abc\"]]\n[print [>= \"abc\" \"abc\"]]",
+      &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\ntrue\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -638,6 +834,16 @@ int main(void) {
     { "print_long_heap_string",                test_print_long_heap_string },
     { "print_heap_string_via_variable",        test_print_heap_string_via_variable },
     { "print_mixed_strings",                   test_print_mixed_strings },
+    /* US-005: String equality and comparison in the VM */
+    { "vm_eq_inline_inline",                   test_vm_eq_inline_inline },
+    { "vm_eq_heap_heap",                        test_vm_eq_heap_heap },
+    { "vm_eq_different",                        test_vm_eq_different },
+    { "vm_eq_string_vs_int",                    test_vm_eq_string_vs_int },
+    { "vm_lt_strings",                          test_vm_lt_strings },
+    { "vm_gt_strings",                          test_vm_gt_strings },
+    { "vm_numeric_cmp_unchanged",               test_vm_numeric_cmp_unchanged },
+    { "vm_lt_heap_strings",                     test_vm_lt_heap_strings },
+    { "vm_le_ge_strings",                       test_vm_le_ge_strings },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
