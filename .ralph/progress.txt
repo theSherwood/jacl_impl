@@ -64,6 +64,14 @@
 - jacl_is_heap_string() / jacl_as_heap_string() extractors in src/string.c
 - FNV-1a hash: string__fnv1a(data, length) operates on byte data, length-aware (no null-terminator)
 - Intern table resizes at > 0.75 load factor, initial cap 16
+- Unified string API in src/string.c: jacl_string_len(), jacl_string_data(), jacl_string_eq(), jacl_string_cmp()
+- jacl_is_string() in value.c returns true for BOTH inline and heap strings; use jacl_is_heap_string() for heap-only check
+- jacl_string_data() copies into caller-provided buffer, returns actual length (may exceed buflen)
+- jacl_string_cmp() uses direct pointer to heap data, stack buffer for inline data
+- Compiler has JaclInternTable* intern_table field; compiler_compile() takes it as 3rd param
+- jacl_run() creates a JaclInternTable on the stack and passes it to compiler_compile()
+- Body compilers (proc) inherit the intern_table from the parent compiler
+- compile_source() test helper in test_compiler.c creates its own JaclInternTable
 
 ---
 
@@ -79,4 +87,34 @@
   - src/string.c is included between value.c and lexer.c in the pipeline
   - String intern table will need to be threaded through compiler and VM for later stories (US-003+)
   - Arena allocations don't need explicit cleanup, arena_destroy handles everything
+---
+
+## 2026-02-20 - US-002
+- Implemented unified string API in src/string.c: jacl_string_len, jacl_string_data, jacl_string_eq, jacl_string_cmp
+- Changed jacl_is_string() in value.c to return true for both JACL_TAG_INLINE_STRING and JACL_TAG_STRING
+- Updated test_value.c NxN predicate matrix to use jacl_is_heap_string for the 1:1 type-tag mapping test
+- Added 8 unit tests in test_string.c covering all representation combinations
+- Files changed: src/string.c, src/value.c, test/test_string.c, test/test_value.c
+- **Learnings for future iterations:**
+  - jacl_is_string() now means "any string" (inline or heap); use jacl_is_heap_string() for heap-only
+  - Cross-representation equality: if one is inline (<=7 bytes) and lengths match, both fit in 8-byte stack buffers
+  - jacl_string_cmp avoids copying heap data by using direct pointer to JaclHeapString.data
+  - When changing predicate semantics, check the NxN matrix tests in test_value.c
+---
+
+## 2026-02-20 - US-003
+- Added JaclInternTable* to Compiler struct and compiler__init
+- Changed compiler_compile() signature to accept JaclInternTable* as 3rd parameter
+- AST_LIT_STRING with length > 7 now interns via jacl_intern instead of erroring
+- Removed compile error "string literal exceeds 7-byte inline limit"
+- Updated jacl_run() to create intern table and pass to compiler
+- Body compilers (proc) inherit intern table from parent
+- Updated existing tests that expected long string errors (test_compiler.c, test_integration.c)
+- Added 5 unit tests in test_string.c: short still inline, long interns, dup share pointer, print/def compile
+- Files changed: src/compiler.c, src/vm.c, test/test_compiler.c, test/test_integration.c, test/test_string.c
+- **Learnings for future iterations:**
+  - When changing error behavior (removing errors), search ALL test files for the old error message
+  - Variable names still limited to 7 bytes (inline strings) — "greeting" is 8 chars, won't work as var name
+  - compile_source() helper in test_compiler.c needs its own JaclInternTable
+  - The intern table is stack-allocated in jacl_run() — it lives as long as the arena
 ---

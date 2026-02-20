@@ -6,7 +6,9 @@
 static CompileResult compile_source(const char* source, arena_t* arena) {
   LexResult tokens = lexer_lex(source, arena);
   ParseResult parse = parser_parse(tokens, arena);
-  return compiler_compile(parse, arena);
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, arena);
+  return compiler_compile(parse, arena, &intern_table);
 }
 
 /* ===== US-003: Compiler skeleton and literal compilation ===== */
@@ -116,14 +118,16 @@ static int test_compile_string_7_bytes(void) {
   TEST_PASS();
 }
 
-/* Test: string >7 bytes produces compile error */
-static int test_compile_long_string_error(void) {
+/* Test: string >7 bytes compiles as heap-interned string (no error) */
+static int test_compile_long_string_heap(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
 
   CompileResult cr = compile_source("abcdefgh", &arena);
 
-  ASSERT(cr.error_count > 0);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT(cr.chunk.const_count >= 1);
+  ASSERT(jacl_is_heap_string(cr.chunk.constants[0]));
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -1129,16 +1133,16 @@ static int test_runtime_error_unknown_command(void) {
   TEST_PASS();
 }
 
-/* Test: string >7 bytes produces compile error with message */
-static int test_compile_error_long_string_msg(void) {
+/* Test: string >7 bytes compiles as heap string (no error) */
+static int test_compile_long_string_no_error_msg(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
 
   CompileResult cr = compile_source("abcdefgh", &arena);
 
-  ASSERT(cr.error_count > 0);
-  ASSERT(cr.error_message != NULL);
-  ASSERT(strlen(cr.error_message) > 0);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT(cr.error_message == NULL);
+  ASSERT(jacl_is_heap_string(cr.chunk.constants[0]));
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -2166,7 +2170,7 @@ int main(void) {
     { "compile_float",               test_compile_float },
     { "compile_short_string",        test_compile_short_string },
     { "compile_string_7_bytes",      test_compile_string_7_bytes },
-    { "compile_long_string_error",   test_compile_long_string_error },
+    { "compile_long_string_heap",    test_compile_long_string_heap },
     { "compile_multi_statement",     test_compile_multi_statement },
     { "compile_multi_semicolons",    test_compile_multi_semicolons },
     { "compile_single_no_pop",       test_compile_single_no_pop },
@@ -2215,7 +2219,7 @@ int main(void) {
     { "runtime_error_print_undefined", test_runtime_error_print_undefined },
     { "runtime_error_line_number",   test_runtime_error_line_number },
     { "runtime_error_unknown_command", test_runtime_error_unknown_command },
-    { "compile_error_long_string_msg", test_compile_error_long_string_msg },
+    { "compile_long_string_no_error_msg", test_compile_long_string_no_error_msg },
     { "vm_returns_runtime_error",    test_vm_returns_runtime_error },
     /* US-004 (M4): Compiler local variable resolution */
     { "local_def_in_block",          test_local_def_in_block },

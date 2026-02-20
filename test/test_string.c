@@ -359,6 +359,125 @@ static int test_string_cmp_ordering(void) {
   TEST_PASS();
 }
 
+/* ===== US-003: Compiler support for heap string literals ===== */
+
+/* Helper: compile source with an intern table */
+static CompileResult compile_with_intern(const char* source, arena_t* arena,
+                                          JaclInternTable* table) {
+  LexResult tokens = lexer_lex(source, arena);
+  ParseResult parse = parser_parse(tokens, arena);
+  return compiler_compile(parse, arena, table);
+}
+
+/* Test: short string literal (<=7 bytes) still produces inline constant */
+static int test_compile_short_string_still_inline(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  CompileResult cr = compile_with_intern("\"hello\"", &arena, &table);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  /* Should have one constant: an inline string */
+  ASSERT(cr.chunk.const_count >= 1);
+  JaclVal val = cr.chunk.constants[0];
+  ASSERT(jacl_is_inline_string(val));
+  ASSERT_U32_EQ(jacl_string_len(val), 5);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: long string literal (>7 bytes) compiles without error, produces heap string */
+static int test_compile_long_string_interns(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  CompileResult cr = compile_with_intern("\"hello world\"", &arena, &table);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  /* Should have one constant: a heap string */
+  ASSERT(cr.chunk.const_count >= 1);
+  JaclVal val = cr.chunk.constants[0];
+  ASSERT(jacl_is_heap_string(val));
+
+  JaclHeapString* hs = jacl_as_heap_string(val);
+  ASSERT_U32_EQ(hs->length, 11);
+  ASSERT(memcmp(hs->data, "hello world", 11) == 0);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: duplicate long string literals share the same interned pointer */
+static int test_compile_dup_long_strings_share_pointer(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  /* Two statements using the same long literal */
+  CompileResult cr = compile_with_intern(
+      "[print \"hello world\"] [print \"hello world\"]", &arena, &table);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  /* Find the heap string constants — both should be the same JaclVal */
+  JaclVal first_heap = 0;
+  uint32_t heap_count = 0;
+  for (uint32_t i = 0; i < cr.chunk.const_count; i++) {
+    if (jacl_is_heap_string(cr.chunk.constants[i])) {
+      if (heap_count == 0) {
+        first_heap = cr.chunk.constants[i];
+      } else {
+        /* Same interned pointer: identical JaclVal (tag + pointer) */
+        ASSERT_U64_EQ(cr.chunk.constants[i], first_heap);
+      }
+      heap_count++;
+    }
+  }
+  ASSERT(heap_count >= 2);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [print "hello world"] compiles without error (previously rejected) */
+static int test_compile_print_long_string_no_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  CompileResult cr = compile_with_intern("[print \"hello world\"]", &arena, &table);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [def greeting "hello world"] compiles without error */
+static int test_compile_def_long_string_no_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  CompileResult cr = compile_with_intern(
+      "[def greet \"hello world\"]", &arena, &table);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -382,6 +501,12 @@ int main(void) {
     { "string_eq_short_long",      test_string_eq_short_long },
     { "string_eq_cross_rep",       test_string_eq_cross_rep },
     { "string_cmp_ordering",       test_string_cmp_ordering },
+    /* US-003: Compiler support for heap string literals */
+    { "compile_short_string_still_inline",     test_compile_short_string_still_inline },
+    { "compile_long_string_interns",           test_compile_long_string_interns },
+    { "compile_dup_long_strings_share_pointer", test_compile_dup_long_strings_share_pointer },
+    { "compile_print_long_string_no_error",    test_compile_print_long_string_no_error },
+    { "compile_def_long_string_no_error",      test_compile_def_long_string_no_error },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

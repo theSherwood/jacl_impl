@@ -130,10 +130,9 @@ static int test_deliberate_errors(void) {
   VM vm;
   vm_init(&vm, &arena);
 
-  /* String >7 bytes is a compile error */
+  /* String >7 bytes now compiles as heap-interned string (no error) */
   VMResult result = jacl_run("abcdefgh", &vm, &arena);
-  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
-  ASSERT(vm.error_message != NULL);
+  ASSERT_INT_EQ(result, VM_OK);
 
   /* Undefined variable */
   vm_init(&vm, &arena);
