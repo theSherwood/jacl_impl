@@ -977,6 +977,350 @@ static int test_concat_with_variable(void) {
   TEST_PASS();
 }
 
+/* ===== US-007: String builtins (length, slice, index) ===== */
+
+/* Test: [length "hello"] returns 5 */
+static int test_length_inline(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [length \"hello\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [length ""] returns 0 */
+static int test_length_empty(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [length \"\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "0\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [length "hello world this is long"] returns correct length for heap string */
+static int test_length_heap(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print [length \"hello world this is long\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "24\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [index "hello" 1] returns "e" */
+static int test_index_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [index \"hello\" 1]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "e\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [index "hello" 0] returns "h" */
+static int test_index_zero(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [index \"hello\" 0]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "h\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [index "hello" -1] returns nil (out of bounds) */
+static int test_index_negative(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [index \"hello\" [- 0 1]]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "nil\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [index "hello" 5] returns nil (out of bounds) */
+static int test_index_out_of_bounds(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [index \"hello\" 5]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "nil\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [slice "hello" 1 3] returns "el" */
+static int test_slice_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [slice \"hello\" 1 3]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "el\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [slice "hello" 2] returns "llo" (one-arg form: from start to end) */
+static int test_slice_one_arg(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [slice \"hello\" 2]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "llo\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [slice "hello world this is long" 6 11] returns "world" (heap string) */
+static int test_slice_heap_string(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print [slice \"hello world this is long\" 6 11]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "world\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [slice "" 0 0] returns "" (empty string) */
+static int test_slice_empty(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [slice \"\" 0 0]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [slice "hello" 0 5] returns "hello" (full slice) */
+static int test_slice_full(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [slice \"hello\" 0 5]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [slice "hello" 3 3] returns "" (zero-length slice) */
+static int test_slice_zero_length(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [slice \"hello\" 3 3]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: slice result is heap-interned when > 7 bytes */
+static int test_slice_heap_result(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Slice out 8 bytes → should be heap-interned */
+  VMResult result = jacl_run(
+      "[print [slice \"hello world this is long\" 0 8]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello wo\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: index works on heap strings */
+static int test_index_heap_string(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print [index \"hello world\" 6]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "w\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: boundary indices — slice clamping */
+static int test_slice_boundary(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* end > length is clamped to length */
+  VMResult result = jacl_run("[print [slice \"hello\" 3 99]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "lo\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1031,6 +1375,23 @@ int main(void) {
     { "concat_empty_empty",                       test_concat_empty_empty },
     { "concat_result_interned",                   test_concat_result_interned },
     { "concat_with_variable",                     test_concat_with_variable },
+    /* US-007: String builtins (length, slice, index) */
+    { "length_inline",                             test_length_inline },
+    { "length_empty",                              test_length_empty },
+    { "length_heap",                               test_length_heap },
+    { "index_basic",                               test_index_basic },
+    { "index_zero",                                test_index_zero },
+    { "index_negative",                            test_index_negative },
+    { "index_out_of_bounds",                       test_index_out_of_bounds },
+    { "index_heap_string",                         test_index_heap_string },
+    { "slice_basic",                               test_slice_basic },
+    { "slice_one_arg",                             test_slice_one_arg },
+    { "slice_heap_string",                         test_slice_heap_string },
+    { "slice_empty",                               test_slice_empty },
+    { "slice_full",                                test_slice_full },
+    { "slice_zero_length",                         test_slice_zero_length },
+    { "slice_heap_result",                         test_slice_heap_result },
+    { "slice_boundary",                            test_slice_boundary },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

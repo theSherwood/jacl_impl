@@ -737,6 +737,118 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         break;
       }
 
+      case OP_STR_LEN: {
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        if (!jacl_is_string(val)) {
+          vm__set_error(vm, "type error in 'length': expected string, got %s",
+                       vm__type_name(val));
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, jacl_i32((int32_t)jacl_string_len(val)));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_STR_INDEX: {
+        JaclVal idx_val, str_val;
+        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &str_val); if (result != VM_OK) return result;
+        if (!jacl_is_string(str_val)) {
+          vm__set_error(vm, "type error in 'index': expected string, got %s",
+                       vm__type_name(str_val));
+          return VM_RUNTIME_ERROR;
+        }
+        if (!jacl_is_i32(idx_val)) {
+          vm__set_error(vm, "type error in 'index': expected i32 index, got %s",
+                       vm__type_name(idx_val));
+          return VM_RUNTIME_ERROR;
+        }
+        int32_t idx = jacl_as_i32(idx_val);
+        uint32_t slen = jacl_string_len(str_val);
+        if (idx < 0 || (uint32_t)idx >= slen) {
+          result = vm__push(vm, JACL_NIL);
+        } else {
+          char ch;
+          if (jacl_is_heap_string(str_val)) {
+            ch = jacl_as_heap_string(str_val)->data[idx];
+          } else {
+            char buf[8];
+            jacl_string_data(str_val, buf, sizeof(buf));
+            ch = buf[idx];
+          }
+          result = vm__push(vm, jacl_inline_string(&ch, 1));
+        }
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_STR_SLICE: {
+        JaclVal end_val, start_val, str_val;
+        result = vm__pop(vm, &end_val);   if (result != VM_OK) return result;
+        result = vm__pop(vm, &start_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &str_val);   if (result != VM_OK) return result;
+        if (!jacl_is_string(str_val)) {
+          vm__set_error(vm, "type error in 'slice': expected string, got %s",
+                       vm__type_name(str_val));
+          return VM_RUNTIME_ERROR;
+        }
+        if (!jacl_is_i32(start_val)) {
+          vm__set_error(vm, "type error in 'slice': expected i32 start, got %s",
+                       vm__type_name(start_val));
+          return VM_RUNTIME_ERROR;
+        }
+        uint32_t slen = jacl_string_len(str_val);
+        int32_t start = jacl_as_i32(start_val);
+        int32_t end;
+        if (jacl_is_nil(end_val)) {
+          end = (int32_t)slen;  /* 2-arg form: slice to end */
+        } else if (jacl_is_i32(end_val)) {
+          end = jacl_as_i32(end_val);
+        } else {
+          vm__set_error(vm, "type error in 'slice': expected i32 end, got %s",
+                       vm__type_name(end_val));
+          return VM_RUNTIME_ERROR;
+        }
+        /* Clamp bounds */
+        if (start < 0) start = 0;
+        if (end < 0) end = 0;
+        if ((uint32_t)start > slen) start = (int32_t)slen;
+        if ((uint32_t)end > slen) end = (int32_t)slen;
+        if (end < start) end = start;
+        uint32_t slice_len = (uint32_t)(end - start);
+
+        JaclVal res;
+        if (slice_len == 0) {
+          res = jacl_inline_string("", 0);
+        } else if (slice_len <= 7) {
+          char buf[8];
+          /* Get pointer to source data */
+          if (jacl_is_heap_string(str_val)) {
+            memcpy(buf, jacl_as_heap_string(str_val)->data + start, slice_len);
+          } else {
+            char src[8];
+            jacl_string_data(str_val, src, sizeof(src));
+            memcpy(buf, src + start, slice_len);
+          }
+          res = jacl_inline_string(buf, slice_len);
+        } else {
+          /* Heap-interned slice */
+          const char* src_data;
+          char src_buf[8];
+          if (jacl_is_heap_string(str_val)) {
+            src_data = jacl_as_heap_string(str_val)->data;
+          } else {
+            jacl_string_data(str_val, src_buf, sizeof(src_buf));
+            src_data = src_buf;
+          }
+          res = jacl_intern(vm->arena, vm->intern_table,
+                            src_data + start, slice_len);
+        }
+        result = vm__push(vm, res); if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }

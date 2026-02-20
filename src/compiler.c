@@ -326,6 +326,47 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* length builtin */
+  if (compiler__head_matches(head, "length", 6)) {
+    if (argc != 1) {
+      compiler__error(c, line, col, "length requires 1 argument");
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_STR_LEN, line);
+    return;
+  }
+
+  /* index builtin */
+  if (compiler__head_matches(head, "index", 5)) {
+    if (argc != 2) {
+      compiler__error(c, line, col, "index requires 2 arguments");
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_STR_INDEX, line);
+    return;
+  }
+
+  /* slice builtin (2 or 3 args) */
+  if (compiler__head_matches(head, "slice", 5)) {
+    if (argc != 2 && argc != 3) {
+      compiler__error(c, line, col, "slice requires 2 or 3 arguments");
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    if (argc == 3) {
+      compiler__compile_node(c, args[2]);
+    } else {
+      /* 2-arg form: nil sentinel means "to end of string" */
+      compiler__emit_byte(c, OP_NIL, line);
+    }
+    compiler__emit_byte(c, OP_STR_SLICE, line);
+    return;
+  }
+
   /* concat builtin (variadic: 2+ args) */
   if (compiler__head_matches(head, "concat", 6)) {
     if (argc < 2) {
