@@ -43,6 +43,7 @@ typedef enum {
   OP_RETURN,        /* return from call */
   OP_CLOSURE,       /* create closure: followed by uint16_t const index, then N upvalue descriptors */
   OP_POP_N,         /* discard N values: followed by uint8_t count */
+  OP_CONCAT,        /* pop two strings, push concatenation */
   OP_HALT           /* stop execution */
 } OpCode;
 

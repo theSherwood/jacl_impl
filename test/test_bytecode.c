@@ -35,7 +35,9 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_RETURN,         26);
   ASSERT_INT_EQ(OP_CLOSURE,        27);
   ASSERT_INT_EQ(OP_POP_N,          28);
-  ASSERT_INT_EQ(OP_HALT,           29);
+  /* M5 opcodes */
+  ASSERT_INT_EQ(OP_CONCAT,         29);
+  ASSERT_INT_EQ(OP_HALT,           30);
   TEST_PASS();
 }
 

@@ -64,6 +64,7 @@ typedef struct {
   void*          print_ctx;  /* user context for print callback */
   Environment    env;
   arena_t*       arena;
+  JaclInternTable* intern_table;  /* shared intern table for concat/interning */
   const char*    error_message;  /* last error message, or NULL */
   uint32_t       error_line;     /* source line of last error */
 } VM;
@@ -129,6 +130,7 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->print_fn  = vm__default_print;
   vm->print_ctx = NULL;
   vm->arena         = arena;
+  vm->intern_table  = NULL;
   vm->frame_count   = 0;
   vm->error_message = NULL;
   vm->error_line    = 0;
@@ -698,6 +700,43 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         break;
       }
 
+      case OP_CONCAT: {
+        JaclVal b, a;
+        result = vm__pop(vm, &b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &a); if (result != VM_OK) return result;
+
+        if (!jacl_is_string(a) || !jacl_is_string(b)) {
+          vm__set_error(vm,
+            "type error in 'concat': expected strings, got %s and %s",
+            vm__type_name(a), vm__type_name(b));
+          return VM_RUNTIME_ERROR;
+        }
+
+        uint32_t len_a = jacl_string_len(a);
+        uint32_t len_b = jacl_string_len(b);
+        uint32_t total = len_a + len_b;
+
+        JaclVal res;
+        if (total <= 7) {
+          char buf[8];
+          jacl_string_data(a, buf, len_a);
+          jacl_string_data(b, buf + len_a, len_b);
+          res = jacl_inline_string(buf, total);
+        } else {
+          char stack_buf[256];
+          char* concat_buf = stack_buf;
+          if (total > sizeof(stack_buf)) {
+            concat_buf = (char*)arena_alloc(vm->arena, total);
+          }
+          jacl_string_data(a, concat_buf, len_a);
+          jacl_string_data(b, concat_buf + len_a, len_b);
+          res = jacl_intern(vm->arena, vm->intern_table, concat_buf, total);
+        }
+
+        result = vm__push(vm, res); if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }
@@ -736,6 +775,7 @@ static VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
     return VM_RUNTIME_ERROR;
   }
 
+  vm->intern_table = &intern_table;
   return vm_exec(vm, &cr.chunk);
 }
 

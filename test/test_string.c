@@ -799,6 +799,184 @@ static int test_vm_le_ge_strings(void) {
   TEST_PASS();
 }
 
+/* ===== US-006: String concatenation (OP_CONCAT and concat builtin) ===== */
+
+/* Test: [concat "he" "llo"] produces "hello" (short+short, inline result) */
+static int test_concat_short_short(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [concat \"he\" \"llo\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [concat "hello" " world"] produces "hello world" (short+short, heap result) */
+static int test_concat_short_short_heap_result(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print [concat \"hello\" \" world\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello world\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [concat "hello " "world this is long"] (short+long) */
+static int test_concat_short_long(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print [concat \"hello \" \"world this is long\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello world this is long\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [concat "hello world" " goodbye world"] (long+long) */
+static int test_concat_long_long(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print [concat \"hello world\" \" goodbye world\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello world goodbye world\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [concat "a" "b" "c"] variadic (3 args) */
+static int test_concat_variadic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[print [concat \"a\" \"b\" \"c\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "abc\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [concat "" ""] produces empty inline string */
+static int test_concat_empty_empty(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run("[print [concat \"\" \"\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: concat result is interned (same concat = same pointer) */
+static int test_concat_result_interned(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Two identical concats should produce equal strings (heap interned) */
+  VMResult result = jacl_run(
+      "[print [== [concat \"hello\" \" world\"] [concat \"hello\" \" world\"]]]",
+      &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: [def s "hello"] [print [concat $s " world"]] end-to-end with variable */
+static int test_concat_with_variable(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult result = jacl_run(
+      "[def s \"hello\"]\n[print [concat $s \" world\"]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello world\n");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -844,6 +1022,15 @@ int main(void) {
     { "vm_numeric_cmp_unchanged",               test_vm_numeric_cmp_unchanged },
     { "vm_lt_heap_strings",                     test_vm_lt_heap_strings },
     { "vm_le_ge_strings",                       test_vm_le_ge_strings },
+    /* US-006: String concatenation */
+    { "concat_short_short",                      test_concat_short_short },
+    { "concat_short_short_heap_result",           test_concat_short_short_heap_result },
+    { "concat_short_long",                        test_concat_short_long },
+    { "concat_long_long",                         test_concat_long_long },
+    { "concat_variadic",                          test_concat_variadic },
+    { "concat_empty_empty",                       test_concat_empty_empty },
+    { "concat_result_interned",                   test_concat_result_interned },
+    { "concat_with_variable",                     test_concat_with_variable },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

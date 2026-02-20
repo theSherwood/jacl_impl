@@ -326,6 +326,24 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* concat builtin (variadic: 2+ args) */
+  if (compiler__head_matches(head, "concat", 6)) {
+    if (argc < 2) {
+      compiler__error(c, line, col, "concat requires at least 2 arguments");
+      return;
+    }
+    /* Compile first two args, emit OP_CONCAT */
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_CONCAT, line);
+    /* Each subsequent arg: compile, emit OP_CONCAT (pairwise chain) */
+    for (uint32_t i = 2; i < argc; i++) {
+      compiler__compile_node(c, args[i]);
+      compiler__emit_byte(c, OP_CONCAT, line);
+    }
+    return;
+  }
+
   /* def builtin */
   if (compiler__head_matches(head, "def", 3)) {
     if (argc != 2) { compiler__error(c, line, col, "def requires 2 arguments"); return; }

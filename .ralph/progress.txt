@@ -40,6 +40,10 @@
 - Typed closure helpers jacl_closure()/jacl_as_closure() are in bytecode.c; generic pointer helpers in value.c
 - VM_FRAMES_MAX = 64; CallFrame struct: closure, return_ip, stack_base, chunk pointer
 - vm_exec wraps top-level code in implicit JaclClosure (stack-allocated) for uniform frame-based execution
+- OP_EQ dispatches to jacl_string_eq for strings, returns false for string-vs-non-string; OP_LT/GT/LE/GE dispatch to jacl_string_cmp for string-string
+- VM has JaclInternTable* intern_table field for runtime string creation (concat, to_string); set in jacl_run()
+- Adding new opcodes to the enum shifts OP_HALT — update test_bytecode.c opcode_enum test accordingly
+- Compiler variadic builtin pattern: compile first 2 args + OP, then loop remaining args each with OP (pairwise chain)
 - Truthiness: only nil and JACL_FALSE are falsy; 0, empty string, etc. are truthy
 - In JACL, bare `false` is a string (truthy); `$false` is the boolean false (falsy)
 - Jump patching: compiler__emit_jump emits placeholder 0xFFFF, compiler__patch_jump fills in actual offset
@@ -47,6 +51,7 @@
 - Block commands inside { } must be separated by `;` or `\n`
 - VM stack: JaclVal stack[256], stack_top is next free slot
 - PrintCapture test pattern: struct {buf[1024], len} with capture_print callback
+- Multiple top-level statements in jacl_run() MUST be separated by `\n`, not spaces — space-separated commands cause "cannot call nil value" runtime error
 
 ## M5-Specific Context
 - Lexer already fully handles string interpolation: TOKEN_STRING, TOKEN_STRING_BEGIN/PART/END, TOKEN_INTERP_VAR, TOKEN_INTERP_EXPR_START/END
@@ -117,4 +122,44 @@
   - Variable names still limited to 7 bytes (inline strings) — "greeting" is 8 chars, won't work as var name
   - compile_source() helper in test_compiler.c needs its own JaclInternTable
   - The intern table is stack-allocated in jacl_run() — it lives as long as the arena
+---
+
+## 2026-02-20 - US-004
+- Extended OP_PRINT handler in vm.c to support heap strings via unified string API (jacl_string_len + jacl_string_data)
+- Updated vm__type_name to use jacl_is_string() (recognizes both inline and heap) instead of just jacl_is_inline_string()
+- Enlarged OP_PRINT stack buffer from 64 to 256 bytes, with overflow path for very long strings
+- Added 5 end-to-end tests in test_string.c: heap string print, inline string print, long heap string, variable-stored heap string, mixed inline+heap sequence
+- Files changed: src/vm.c, test/test_string.c
+- **Learnings for future iterations:**
+  - Multiple top-level JACL statements must be separated by `\n` (not just space) — space-separated commands fail with "cannot call nil value"
+  - OP_PRINT now handles all string types uniformly; for strings > 255 bytes it falls through to direct print_fn calls
+  - vm__type_name should use jacl_is_string() not jacl_is_inline_string() to cover both representations
+---
+
+## 2026-02-20 - US-005
+- Modified OP_EQ in vm.c to dispatch to jacl_string_eq when either operand is a string; string vs non-string returns false (not error)
+- Replaced VM__BINARY_NUMERIC_OP macro usage for OP_LT, OP_GT, OP_LE, OP_GE with expanded inline code that adds string comparison via jacl_string_cmp
+- Added 9 end-to-end tests: inline-inline eq, heap-heap eq, different strings, string-vs-int mismatch, lt/gt ordering, heap string ordering, le/ge, and numeric-unchanged regression
+- Files changed: src/vm.c, test/test_string.c
+- **Learnings for future iterations:**
+  - OP_LT/GT/LE/GE can't use VM__BINARY_NUMERIC_OP macro when adding string support — must expand inline to add the third type branch
+  - For OP_EQ, string-vs-non-string should return false (not runtime error), matching dynamic language semantics
+  - jacl_string_cmp returns int for ordering (negative/zero/positive), wraps memcmp + length comparison
+  - Flag propagation is not needed for string comparison results since string JaclVals don't currently carry flags
+---
+
+## 2026-02-20 - US-006
+- Added OP_CONCAT opcode to OpCode enum in src/bytecode.c
+- Added JaclInternTable* intern_table field to VM struct for runtime string interning
+- Implemented OP_CONCAT handler in vm.c: pops two strings, concatenates, result is inline if <=7 bytes or heap-interned otherwise
+- Added `concat` builtin in compiler.c: variadic (2+ args), emits pairwise OP_CONCAT chain
+- Set vm->intern_table in jacl_run() after creating the intern table
+- Updated test_bytecode.c opcode enum assertions for OP_CONCAT (29) and OP_HALT (30)
+- Added 8 tests in test_string.c: short+short inline, short+short heap result, short+long, long+long, variadic, empty+empty, interned result equality, variable concat
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_string.c
+- **Learnings for future iterations:**
+  - Adding new opcodes shifts OP_HALT's enum value — always update test_bytecode.c opcode_enum test
+  - VM needs JaclInternTable* for any runtime string creation (concat, to_string, etc.) — threaded via vm->intern_table set in jacl_run()
+  - OP_CONCAT uses stack buffer (256 bytes) for concatenation; falls back to arena_alloc for very long strings
+  - Compiler variadic builtin pattern: compile first 2 args + OP, then loop remaining args each with OP (pairwise chain)
 ---
