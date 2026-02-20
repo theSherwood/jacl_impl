@@ -73,3 +73,13 @@
   - `def f $greet` correctly binds f to the greet closure (via VAR_REF arg), while `def f greet` binds f to the string "greet"
   - All 36 test suites pass after updates
 ---
+
+## 2026-02-20 - US-006
+- What was implemented: Verified full test suite passes with new bare-word and $var semantics — no additional fixes needed
+- Files changed: .ralph/prd.json (marked US-006 passes: true)
+- **Learnings for future iterations:**
+  - All test updates for bare-word/var semantics were already done incrementally in US-004 and US-005
+  - Full suite verified: 36/36 suites pass, 0 compiler warnings with -Wall -Wextra -std=c99
+  - Test suites verified: test_lexer, test_parser, test_compiler, test_vm, test_m4, test_m5, test_integration, test_value, test_string, test_bytecode + all lib tests
+  - When semantic changes are applied incrementally per-story with test fixes, the "verify everything" story becomes a verification pass rather than a fix pass
+---
