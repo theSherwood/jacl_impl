@@ -1,0 +1,12 @@
+# expect: hello
+# expect: 7
+# expect: 30
+# bare command with args
+print hello
+# nested brackets in line mode
+print [+ 1 [* 2 3]]
+# proc call as bare command (zero-arg)
+proc greet [] {
+  print 30
+}
+greet

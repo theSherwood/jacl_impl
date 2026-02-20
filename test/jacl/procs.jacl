@@ -1,0 +1,19 @@
+# expect: 20
+# expect: 3628800
+# expect: 15
+# expect: 100
+# proc definition and call
+proc double [n] { [* $n 2] }
+print [double 10]
+# recursion (factorial)
+proc fact [n] {
+  [if [== $n 0] { 1 } { [* $n [fact [- $n 1]]] }]
+}
+print [fact 10]
+# closures (make-adder)
+proc mkadd [x] {
+  proc inner [y] { [+ $x $y] }
+}
+def add10 [mkadd 10]
+print [add10 5]
+print [add10 90]

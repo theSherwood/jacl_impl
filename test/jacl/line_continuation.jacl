@@ -1,0 +1,9 @@
+# expect: 42
+# expect: 7
+# backslash continuation joins the next line
+def x \
+42
+print [+ $x 0]
+# continuation in command
+print [+ \
+3 4]

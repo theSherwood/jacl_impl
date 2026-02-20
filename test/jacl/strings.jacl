@@ -1,0 +1,19 @@
+# expect: hello world
+# expect: hello JACL
+# expect: hello world
+# expect: 5
+# expect: h
+# expect: world
+# string literal
+print "hello world"
+# string interpolation
+def name "JACL"
+print "hello $name"
+# concat
+print [concat "hello " "world"]
+# length
+print [length "hello"]
+# index
+print [index "hello" 0]
+# slice
+print [slice "hello world" 6 11]

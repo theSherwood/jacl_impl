@@ -1,0 +1,15 @@
+# expect: 3
+# expect: 30
+# expect: 9
+# expect: 15
+# semicolon separator
+def x 1; def y 2; print [+ $x $y]
+# comma separator
+def a 10, def b 20, print [+ $a $b]
+# newline separator
+def c 3
+def d 3
+print [* $c $d]
+# mixed separators
+def e 5; def f 5, def g 5
+print [+ [+ $e $f] $g]

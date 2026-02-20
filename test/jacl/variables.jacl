@@ -1,0 +1,14 @@
+# expect: 42
+# expect: 42
+# expect: 42
+# def and $var usage
+def x 42
+print [+ $x 0]
+# $var as command call
+proc get42 [] { 42 }
+def f $get42
+print [$f]
+# reassignment via def
+def y 10
+def y 42
+print [+ $y 0]
