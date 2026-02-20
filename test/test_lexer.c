@@ -1872,6 +1872,41 @@ static int test_integration_full_program(void) {
   TEST_PASS();
 }
 
+/* ---- M6 US-001: Comma token ---- */
+
+static int test_comma_separator(void) {
+  setup();
+  /* 'def x 1, def y 2' -> [WORD WORD INT COMMA WORD WORD INT EOF] */
+  LexResult r = lexer_lex("def x 1, def y 2", &test_arena);
+  ASSERT_U32_EQ(r.count, 8);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_COMMA);
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_WORD);
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_WORD);
+  ASSERT_INT_EQ(r.tokens[6].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[7].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_comma_inside_string(void) {
+  setup();
+  /* '"a,b"' -> [STRING EOF] — comma inside string is not tokenized */
+  LexResult r = lexer_lex("\"a,b\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[0].payload.text, "a,b");
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -1983,6 +2018,9 @@ int main(void) {
     {"error_count_total",           test_error_count_reflects_total},
     {"error_mixed_program",         test_error_mixed_program},
     {"integration_full_program",    test_integration_full_program},
+    /* M6 US-001 */
+    {"comma_separator",              test_comma_separator},
+    {"comma_inside_string",          test_comma_inside_string},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

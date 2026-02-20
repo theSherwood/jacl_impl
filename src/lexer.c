@@ -22,6 +22,7 @@ typedef enum {
   TOKEN_LPAREN,           /* ( */
   TOKEN_RPAREN,           /* ) */
   TOKEN_SEMICOLON,        /* ; */
+  TOKEN_COMMA,            /* , */
   TOKEN_WORD,             /* bare word: command names, arguments */
   TOKEN_OPERATOR,         /* symbolic operators: +, -, >=, etc. */
   TOKEN_INT,              /* integer literal: 42, 0xFF, 0b1010 */
@@ -887,7 +888,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
     }
 
     /* Single-character delimiters */
-    if (c == '[' || c == ']' || c == '{' || c == '}' || c == '(' || c == ')' || c == ';') {
+    if (c == '[' || c == ']' || c == '{' || c == '}' || c == '(' || c == ')' || c == ';' || c == ',') {
       uint32_t start = lex.pos;
       uint32_t sline = lex.line;
       uint32_t scol  = lex.col;
@@ -900,6 +901,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
         case '}': type = TOKEN_RBRACE;    break;
         case '(': type = TOKEN_LPAREN;    break;
         case ';': type = TOKEN_SEMICOLON; break;
+        case ',': type = TOKEN_COMMA;     break;
         default:  type = TOKEN_RPAREN;    break;
       }
       Token tok = lexer__make_token(&lex, type, start, sline, scol);
