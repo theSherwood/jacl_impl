@@ -817,6 +817,34 @@ static int test_multiline_program(void) {
   TEST_PASS();
 }
 
+/* ===== US-017: M8a design fixes test coverage ===== */
+
+static int test_map_construct_single_pair(void) {
+  PrintCapture cap;
+  /* [map "a" 1] creates a 1-pair map (was transform path pre-M8a) */
+  ASSERT(run_ok(
+    "def m [map \"a\" 1]\n"
+    "[print [map-len $m]]\n"
+    "[print [map-get $m \"a\"]]",
+    &cap, "1\n1\n"));
+  TEST_PASS();
+}
+
+static int test_transform_empty_map(void) {
+  PrintCapture cap;
+  /* Transforming an empty map returns an empty map */
+  ASSERT(run_ok(
+    "proc dbl [k v] { [vec $k [* $v 2]] }\n"
+    "[print [map-len [transform [map] $dbl]]]",
+    &cap, "0\n"));
+  TEST_PASS();
+}
+
+static int test_transform_arity(void) {
+  ASSERT(run_err("[transform [vec 1]]", "builtin 'transform' expects 2 arguments"));
+  TEST_PASS();
+}
+
 /* ===== US-016: Collections as map keys ===== */
 
 static int test_vec_as_map_key(void) {
@@ -971,6 +999,10 @@ int main(void) {
     /* Persistence comprehensive */
     { "persist_vec_comprehensive", test_persist_vec_comprehensive },
     { "persist_map_comprehensive", test_persist_map_comprehensive },
+    /* US-017: M8a design fixes */
+    { "map_construct_single_pair",  test_map_construct_single_pair },
+    { "transform_empty_map",        test_transform_empty_map },
+    { "transform_arity",            test_transform_arity },
     /* US-016: Collections as map keys */
     { "vec_as_map_key",            test_vec_as_map_key },
     { "map_as_map_key",            test_map_as_map_key },

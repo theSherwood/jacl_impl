@@ -1,0 +1,5 @@
+# expect: deep
+# nested collection as map key
+def k [vec [vec 1 2] [vec 3]]
+def m [map $k "deep"]
+print [map-get $m [vec [vec 1 2] [vec 3]]]

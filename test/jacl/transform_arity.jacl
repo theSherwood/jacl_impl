@@ -1,0 +1,2 @@
+# expect-error: builtin 'transform' expects 2 arguments
+transform [vec 1]

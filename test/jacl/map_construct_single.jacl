@@ -1,0 +1,6 @@
+# expect: 1
+# expect: 1
+# [map "a" 1] creates a 1-pair map (M8a fix)
+def m [map "a" 1]
+print [map-len $m]
+print [map-get $m "a"]
