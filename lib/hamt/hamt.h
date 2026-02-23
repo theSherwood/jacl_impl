@@ -50,6 +50,7 @@
 /* Generated function names */
 #define H_SET_KEY_HANDLERS    H_NS(_set_key_handlers)
 #define H_SET_LIFECYCLE_HOOKS H_NS(_set_lifecycle_hooks)
+#define H_SET_HASH_HANDLERS   H_NS(_set_hash_handlers)
 #define H_GET                 H_NS(_get)
 #define H_GET_OR_DEFAULT      H_NS(_get_or_default)
 #define H_HAS                 H_NS(_has)
@@ -65,6 +66,7 @@
 #define H_REF                 H_NS(_ref)
 #define H_UNREF               H_NS(_unref)
 #define H_REF_COUNT           H_NS(_ref_count)
+#define H_NODE_HASH           H_NS(_node_hash)
 
 /* Internal helpers */
 #define H_NODE_DESTROY       H_NS(_node_destroy)
@@ -77,11 +79,15 @@
 #define H_GET_LEAF           H_NS(_get_leaf)
 #define H_GET_NODE_COUNT     H_NS(_get_node_count)
 #define H_GET_INDEX          H_NS(_get_index)
+#define H_LEAF_REHASH        H_NS(_leaf_rehash)
+#define H_INTERNAL_REHASH    H_NS(_internal_rehash)
+#define H_COLLISION_REHASH   H_NS(_collision_rehash)
 
 /* Handler types */
 #define H_KEY_HASH_FN  H_NS(_key_hash_fn)
 #define H_KEY_EQ_FN    H_NS(_key_eq_fn)
 #define H_LEAF_HOOK_FN H_NS(_leaf_hook_fn)
+#define H_VAL_HASH_FN  H_NS(_val_hash_fn)
 
 /* Static state for this instantiation */
 #define H_HASH_FN    H_NS(_hash_fn)
@@ -89,6 +95,8 @@
 #define H_ON_CREATE  H_NS(_on_create)
 #define H_ON_DESTROY H_NS(_on_destroy)
 #define H_ALLOCATOR  H_NS(_allocator)
+#define H_STRUCT_KEY_HASH H_NS(_struct_key_hash)
+#define H_STRUCT_VAL_HASH H_NS(_struct_val_hash)
 
 #include <assert.h>
 #include <stdbool.h>
@@ -131,6 +139,7 @@ typedef enum { H_NODE_INTERNAL_VAL, H_NODE_LEAF_VAL, H_NODE_COLLISION_VAL } H_NO
 
 typedef struct H_NODE {
   H_NODE_TYPE type;
+  uint32_t    hash;  /* structural content hash */
 } H_NODE;
 
 typedef struct H_INTERNAL {
@@ -170,6 +179,7 @@ typedef struct H_ITER_RES {
 typedef uint32_t (*H_KEY_HASH_FN)(HAMT_KEY_T key);
 typedef bool (*H_KEY_EQ_FN)(HAMT_KEY_T a, HAMT_KEY_T b);
 typedef void (*H_LEAF_HOOK_FN)(HAMT_KEY_T key, HAMT_VAL_T value);
+typedef uint32_t (*H_VAL_HASH_FN)(HAMT_VAL_T value);
 
 /* --- Per-instantiation static state --- */
 
@@ -177,6 +187,8 @@ static H_KEY_HASH_FN  H_HASH_FN    = NULL;
 static H_KEY_EQ_FN    H_EQ_FN      = NULL;
 static H_LEAF_HOOK_FN H_ON_CREATE  = NULL;
 static H_LEAF_HOOK_FN H_ON_DESTROY = NULL;
+static H_KEY_HASH_FN  H_STRUCT_KEY_HASH = NULL;
+static H_VAL_HASH_FN  H_STRUCT_VAL_HASH = NULL;
 
 /* --- Public configuration functions --- */
 
@@ -188,6 +200,11 @@ static inline void H_SET_KEY_HANDLERS(H_KEY_HASH_FN hash, H_KEY_EQ_FN eq) {
 static inline void H_SET_LIFECYCLE_HOOKS(H_LEAF_HOOK_FN on_create, H_LEAF_HOOK_FN on_destroy) {
   H_ON_CREATE  = on_create;
   H_ON_DESTROY = on_destroy;
+}
+
+static inline void H_SET_HASH_HANDLERS(H_KEY_HASH_FN key_fn, H_VAL_HASH_FN val_fn) {
+  H_STRUCT_KEY_HASH = key_fn;
+  H_STRUCT_VAL_HASH = val_fn;
 }
 
 /* --- Public ref counting wrappers --- */
@@ -219,6 +236,36 @@ static inline size_t H_GET_NODE_COUNT(H_NODE* node) {
   return ((H_INTERNAL*)node)->count;
 }
 
+/* --- Structural hash: O(1) accessor --- */
+
+static inline uint32_t H_NODE_HASH(H_NODE* node) {
+  return node ? node->hash : 0;
+}
+
+/* --- Structural hash: rehash helpers --- */
+
+static inline void H_LEAF_REHASH(H_LEAF* leaf) {
+  if (!H_STRUCT_KEY_HASH || !H_STRUCT_VAL_HASH) { leaf->header.hash = 0; return; }
+  leaf->header.hash = H_STRUCT_KEY_HASH(leaf->key) ^ H_STRUCT_VAL_HASH(leaf->value);
+}
+
+static inline void H_INTERNAL_REHASH(H_INTERNAL* node) {
+  uint32_t h = 0;
+  int count = get_popcount(node->bitmap);
+  for (int i = 0; i < count; i++) {
+    h ^= node->children[i]->hash;
+  }
+  node->header.hash = h;
+}
+
+static inline void H_COLLISION_REHASH(H_COLLISION* col) {
+  uint32_t h = 0;
+  for (uint32_t i = 0; i < col->count; i++) {
+    h ^= col->items[i]->header.hash;
+  }
+  col->header.hash = h;
+}
+
 /* --- Forward declaration for destructor --- */
 
 static void H_NODE_DESTROY(void* arg);
@@ -236,6 +283,7 @@ static inline H_LEAF* H_MK_LEAF(HAMT_KEY_T key, HAMT_VAL_T val, uint32_t hash) {
     H_ON_CREATE(key, val);
   }
 
+  H_LEAF_REHASH(node);
   return node;
 }
 
@@ -278,6 +326,7 @@ static inline H_INTERNAL* H_MK_INTERNAL_COPY(H_INTERNAL* old, uint32_t new_bitma
   }
 
   node->count = total_count;
+  H_INTERNAL_REHASH(node);
   return node;
 }
 
@@ -329,6 +378,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
       col->count           = 2;
       col->items[0]        = (H_LEAF*)H_REF(node);
       col->items[1]        = H_MK_LEAF(key, value, hash);
+      H_COLLISION_REHASH(col);
       return (H_NODE*)col;
     }
 
@@ -348,6 +398,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
       internal->bitmap     = old_bit;
       internal->children[0] = child;
       internal->count      = H_GET_NODE_COUNT(child);
+      H_INTERNAL_REHASH(internal);
       return (H_NODE*)internal;
     } else {
       /* Different slots - create internal with both children */
@@ -365,6 +416,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
         internal->children[0] = (H_NODE*)new_leaf;
         internal->children[1] = H_REF(node);
       }
+      H_INTERNAL_REHASH(internal);
       return (H_NODE*)internal;
     }
   }
@@ -388,6 +440,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
         internal->bitmap      = col_bit;
         internal->children[0] = child;
         internal->count       = H_GET_NODE_COUNT(child);
+        H_INTERNAL_REHASH(internal);
         return (H_NODE*)internal;
       } else {
         size_t  size  = sizeof(H_INTERNAL) + sizeof(H_NODE*) * 2;
@@ -404,6 +457,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
           internal->children[0] = (H_NODE*)new_leaf;
           internal->children[1] = H_REF(node);
         }
+        H_INTERNAL_REHASH(internal);
         return (H_NODE*)internal;
       }
     }
@@ -425,6 +479,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
             H_RC_REF((H_NODE*)col->items[j]);
           }
         }
+        H_COLLISION_REHASH(new_col);
         return (H_NODE*)new_col;
       }
     }
@@ -440,6 +495,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
       H_RC_REF((H_NODE*)col->items[i]);
     }
     new_col->items[col->count] = H_MK_LEAF(key, value, hash);
+    H_COLLISION_REHASH(new_col);
     return (H_NODE*)new_col;
   }
 
@@ -509,6 +565,7 @@ static H_NODE* H_UNSET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, uint32_t hash, in
       new_col->items[k++] = col->items[i];
       H_RC_REF((H_NODE*)col->items[i]);
     }
+    H_COLLISION_REHASH(new_col);
     return (H_NODE*)new_col;
   }
 
@@ -542,6 +599,7 @@ static H_NODE* H_UNSET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, uint32_t hash, in
       H_RC_REF(internal->children[i]);
     }
     new_node->count = total_count;
+    H_INTERNAL_REHASH(new_node);
     return (H_NODE*)new_node;
   } else {
     if (result_child == internal->children[arr_idx]) {
@@ -741,6 +799,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
       col->count        = 2;
       col->items[0]     = (H_LEAF*)H_REF(node);
       col->items[1]     = H_MK_LEAF(key, value, hash);
+      H_COLLISION_REHASH(col);
       return (H_NODE*)col;
     }
 
@@ -759,6 +818,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
       internal->bitmap      = old_bit;
       internal->children[0] = child;
       internal->count       = H_GET_NODE_COUNT(child);
+      H_INTERNAL_REHASH(internal);
       return (H_NODE*)internal;
     } else {
       size_t      size     = sizeof(H_INTERNAL) + sizeof(H_NODE*) * 2;
@@ -775,6 +835,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
         internal->children[0] = (H_NODE*)new_leaf;
         internal->children[1] = H_REF(node);
       }
+      H_INTERNAL_REHASH(internal);
       return (H_NODE*)internal;
     }
   }
@@ -797,6 +858,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
         internal->bitmap      = col_bit;
         internal->children[0] = child;
         internal->count       = H_GET_NODE_COUNT(child);
+        H_INTERNAL_REHASH(internal);
         return (H_NODE*)internal;
       } else {
         size_t      size     = sizeof(H_INTERNAL) + sizeof(H_NODE*) * 2;
@@ -813,6 +875,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
           internal->children[0] = (H_NODE*)new_leaf;
           internal->children[1] = H_REF(node);
         }
+        H_INTERNAL_REHASH(internal);
         return (H_NODE*)internal;
       }
     }
@@ -825,6 +888,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
           H_LEAF* new_leaf = H_MK_LEAF(key, value, hash);
           H_RC_UNREF((H_NODE*)col->items[i]);
           col->items[i] = new_leaf;
+          H_COLLISION_REHASH(col);
           return node;
         } else {
           /* Shared — copy collision node */
@@ -841,6 +905,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
               H_RC_REF((H_NODE*)col->items[j]);
             }
           }
+          H_COLLISION_REHASH(new_col);
           return (H_NODE*)new_col;
         }
       }
@@ -858,6 +923,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
         H_RC_REF((H_NODE*)col->items[i]);
       }
       new_col->items[col->count] = H_MK_LEAF(key, value, hash);
+      H_COLLISION_REHASH(new_col);
       return (H_NODE*)new_col;
     }
   }
@@ -881,6 +947,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
         internal->children[arr_idx] = new_child;
       }
       internal->count = internal->count - old_child_count + H_GET_NODE_COUNT(internal->children[arr_idx]);
+      H_INTERNAL_REHASH(internal);
       return node;
     } else {
       /* Shared — copy first (top-down), then recurse on copy */
@@ -905,6 +972,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
         work->children[arr_idx] = new_child;
       }
       work->count = work->count - old_child_count + H_GET_NODE_COUNT(work->children[arr_idx]);
+      H_INTERNAL_REHASH(work);
       return (H_NODE*)work;
     }
   } else {
@@ -961,6 +1029,7 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
         new_col->items[k++] = col->items[i];
         H_RC_REF((H_NODE*)col->items[i]);
       }
+      H_COLLISION_REHASH(new_col);
       return (H_NODE*)new_col;
     } else {
       /* Shared — copy without removed item */
@@ -975,6 +1044,7 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
         new_col->items[k++] = col->items[i];
         H_RC_REF((H_NODE*)col->items[i]);
       }
+      H_COLLISION_REHASH(new_col);
       return (H_NODE*)new_col;
     }
   }
@@ -997,6 +1067,7 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
     if (result_child == child) {
       /* Child may have been modified in-place — update count */
       internal->count = internal->count - old_child_count + H_GET_NODE_COUNT(child);
+      H_INTERNAL_REHASH(internal);
       return node;
     }
 
@@ -1023,12 +1094,14 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
         k++;
       }
       new_node->count = total_count;
+      H_INTERNAL_REHASH(new_node);
       return (H_NODE*)new_node;
     } else {
       /* Child replaced — update in place */
       H_RC_UNREF(child);
       internal->children[arr_idx] = result_child;
       internal->count = internal->count - old_child_count + H_GET_NODE_COUNT(result_child);
+      H_INTERNAL_REHASH(internal);
       return node;
     }
   } else {
@@ -1082,6 +1155,7 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
         k++;
       }
       new_node->count = total_count;
+      H_INTERNAL_REHASH(new_node);
       H_RC_UNREF((H_NODE*)work);
       return (H_NODE*)new_node;
     } else {
@@ -1089,6 +1163,7 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
       H_RC_UNREF(child);
       work->children[arr_idx] = result_child;
       work->count = work->count - old_child_count + H_GET_NODE_COUNT(result_child);
+      H_INTERNAL_REHASH(work);
       return (H_NODE*)work;
     }
   }
@@ -1212,6 +1287,8 @@ static inline H_NODE* H_PERSISTENT_FN(H_TRANSIENT* t) {
 #undef H_REF
 #undef H_UNREF
 #undef H_REF_COUNT
+#undef H_NODE_HASH
+#undef H_SET_HASH_HANDLERS
 
 #undef H_NODE_DESTROY
 #undef H_MK_LEAF
@@ -1223,16 +1300,22 @@ static inline H_NODE* H_PERSISTENT_FN(H_TRANSIENT* t) {
 #undef H_GET_LEAF
 #undef H_GET_NODE_COUNT
 #undef H_GET_INDEX
+#undef H_LEAF_REHASH
+#undef H_INTERNAL_REHASH
+#undef H_COLLISION_REHASH
 
 #undef H_KEY_HASH_FN
 #undef H_KEY_EQ_FN
 #undef H_LEAF_HOOK_FN
+#undef H_VAL_HASH_FN
 
 #undef H_HASH_FN
 #undef H_EQ_FN
 #undef H_ON_CREATE
 #undef H_ON_DESTROY
 #undef H_ALLOCATOR
+#undef H_STRUCT_KEY_HASH
+#undef H_STRUCT_VAL_HASH
 
 #undef H_RC_ALLOC
 #undef H_RC_REF
