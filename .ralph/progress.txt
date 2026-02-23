@@ -56,7 +56,8 @@
 - OP_MAP uses uint8_t pair_count operand (argc/2); map constructor requires even arg count at compile time
 - Use jacl_map_has + jacl_map_get pattern for safe lookup (H_GET returns 0 for missing which equals JACL_NIL)
 - Equality operator is `==` (not `eq`) — compiles to OP_EQ; uses vm__deep_eq for recursive structural comparison of collections
-- `map` builtin is overloaded: 2 args = transform (OP_MAP_TRANSFORM), 0 or even >= 4 args = constructor (OP_MAP), odd = error — use `[map-set [map] "a" 1]` for single-pair maps
+- `map` builtin is always a constructor: 0 or any even number of args → OP_MAP, odd = error; `[map "a" 1]` creates a 1-pair map
+- `transform` builtin (exactly 2 args) replaces the old 2-arg map path → OP_TRANSFORM; use `[transform $coll $proc]` for higher-order transforms
 - vm__run(vm, min_frame) is the inner dispatch loop; vm_exec is a thin wrapper. OP_EACH calls vm__run recursively to execute closures inline (trampoline pattern)
 - Higher-order builtins (each, map-transform, filter) call closures via: push closure + args → set up CallFrame → call vm__run(vm, caller_frame_count) → pop return value
 - Proc definition syntax is `proc name [params] { body }` (params in brackets, body in braces) — `[proc name [x] { ... }]` at global scope defines globally and returns nil (not the closure)
@@ -199,4 +200,61 @@
   - OP_MAP_TRANSFORM reuses the same vm__run trampoline pattern as OP_EACH but collects return values into a new collection
   - Map transform proc must return a 2-element vector [key new-value] — runtime validation checks both type and length
   - The compiler handles `map` overloading entirely by argc dispatch: 2 → OP_MAP_TRANSFORM, 0/even>=4 → OP_MAP, odd → error
+---
+
+## 2026-02-23 - US-010
+- Implemented `filter` builtin for selecting elements from vectors and maps based on a predicate closure
+- Added OP_FILTER opcode in bytecode.c, compiler builtin in compiler.c, VM handler in vm.c
+- OP_FILTER reuses the same vm__run trampoline pattern as OP_EACH and OP_MAP_TRANSFORM
+- Vector: calls 1-arg proc per element, keeps element if return is truthy, builds new vector
+- Map: calls 2-arg proc per entry (key, value), keeps entry if return is truthy, builds new map
+- Updated test_bytecode.c (OP_HALT shifted from 51 to 52)
+- Created 4 .jacl test files: filter_vec, filter_empty, filter_map, filter_arity
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c
+- Files added: test/jacl/filter_vec.jacl, test/jacl/filter_empty.jacl, test/jacl/filter_map.jacl, test/jacl/filter_arity.jacl
+- **Learnings for future iterations:**
+  - `filter` (6 bytes) fits inline string limit — matched as compiler builtin before dynamic call section
+  - OP_FILTER follows the exact same trampoline pattern as OP_EACH/OP_MAP_TRANSFORM: push closure + args → set up CallFrame → vm__run → pop result → check truthiness
+  - Filter on vector keeps the original element values (not the proc return value) when truthy
+  - Filter on map uses vm__is_falsy (nil and $false are falsy, everything else is truthy) — same as if/while
+---
+
+## 2026-02-23 - US-011
+- Created test/test_collections.c with 73 comprehensive integration tests using test_helpers.h pattern
+- Tests exercise full JACL pipeline (source → lex → parse → compile → VM) for all collection operations
+- Coverage: vec construction, vec-get, vec-set, vec-push, vec-len, vec-concat, vec-slice
+- Coverage: map construction, map-get, map-set, map-remove, map-has, map-len, map-keys, map-vals
+- Coverage: structural equality (vectors, maps, nested, cross-type)
+- Coverage: print/to-string for both types including nested
+- Coverage: each, map (transform), filter on both vectors and maps
+- Coverage: error cases (wrong arity for all builtins, type errors)
+- Coverage: persistence (original collections unchanged after operations)
+- Coverage: end-to-end integration (nested collections, chained transforms)
+- Added test/test_collections.c to build.sh TESTS array
+- Used `run_ok` / `run_err` helper functions to reduce boilerplate across 73 tests
+- All tests pass with arena-tracked memory leak checks
+- Files changed: build.sh
+- Files added: test/test_collections.c
+- **Learnings for future iterations:**
+  - Helper functions `run_ok(source, cap, expected)` and `run_err(source, err_substr)` encapsulate the tracker_reset → arena → vm_init → jacl_run → assert → arena_destroy → check_no_leaks pattern — makes tests very concise
+  - 4096-byte PrintCapture buffer is sufficient for all collection integration tests (larger than test_integration.c's 1024 but smaller than harness's 8192)
+  - Single-entry maps used throughout to avoid HAMT hash-order nondeterminism in output assertions
+  - Collection node memory (libc malloc) is not tracked by tracked_allocator — only arena allocations are leak-checked; collection GC is deferred to M12
+---
+
+## 2026-02-23 - US-012
+- Renamed OP_MAP_TRANSFORM to OP_TRANSFORM in bytecode.c, compiler.c, vm.c
+- Changed `map` compiler builtin: now always constructor (0 or any even number of args), odd = error; removed the 2-arg transform path
+- Added `transform` compiler builtin (exactly 2 args) emitting OP_TRANSFORM
+- Updated VM error messages from 'map' to 'transform' in OP_TRANSFORM handler
+- Updated test_bytecode.c: OP_MAP_TRANSFORM → OP_TRANSFORM at position 50
+- Updated 3 .jacl test files: map_transform_vec, map_transform_map, map_transform_empty → use `transform` instead of `map`
+- Updated test_collections.c: renamed test functions, changed all 2-arg `[map $coll $proc]` to `[transform $coll $proc]`
+- `[map "a" 1]` now correctly creates a 1-pair map (previously was the transform path)
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_collections.c
+- Files modified: test/jacl/map_transform_vec.jacl, test/jacl/map_transform_map.jacl, test/jacl/map_transform_empty.jacl
+- **Learnings for future iterations:**
+  - `transform` (9 bytes) exceeds 7-byte inline limit — works fine for compiler__head_matches since it compares raw AST string data
+  - The opcode position (50) didn't change, only the name, so OP_HALT stayed at 52
+  - Splitting overloaded builtins is straightforward: remove the argc dispatch branch, add a new compiler builtin match
 ---

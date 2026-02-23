@@ -1,7 +1,7 @@
 {
   "project": "JACL",
   "branchName": "ralph/persistent-collections",
-  "description": "Persistent Collections (M8) - Add persistent vectors (RRB) and maps (HAMT) to JACL with construction, access, update, iteration, structural equality, and print support.",
+  "description": "Persistent Collections (M8/M8a) - Add persistent vectors (RRB) and maps (HAMT) to JACL with construction, access, update, iteration, structural equality, and print support. Includes design fixes: split map/transform, vec-set growth semantics, and cached structural hashing for collections-as-keys.",
   "userStories": [
     {
       "id": "US-001",
@@ -192,7 +192,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -212,6 +212,142 @@
         "Tests compile and run cleanly via build.sh"
       ],
       "priority": 11,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Rename map transform to transform builtin",
+      "description": "As a JACL user, I want map to always mean 'construct a map' so that [map \"name\" \"alice\"] creates a 1-pair map instead of being misinterpreted as a transform call.",
+      "acceptanceCriteria": [
+        "[map \"a\" 1] creates a 1-pair map (previously this was the transform path)",
+        "[map] still creates an empty map",
+        "[map \"a\" 1 \"b\" 2] still creates a 2-pair map",
+        "[map \"a\"] (odd args) still produces a compile-time arity error",
+        "[transform $v [proc {x} [+ $x 1]]] returns a new vector with each element incremented (2 args)",
+        "[transform $m [proc {k v} [vec $k [+ $v 1]]]] works on maps — proc receives key and value, returns 2-element vector [key new-value]",
+        "[transform [vec] [proc {x} $x]] on empty vector returns empty vector",
+        "Compiler emits OP_MAP for all map calls (argc / 2 = pair count), OP_TRANSFORM for all transform calls",
+        "Rename OP_MAP_TRANSFORM to OP_TRANSFORM in bytecode.c, compiler.c, and vm.c",
+        "Compile-time arity: transform requires exactly 2 args",
+        "Existing tests updated: all uses of 2-arg map changed to transform",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "vec-set grows vector on out-of-bounds, errors on negative index",
+      "description": "As a JACL user, I want vec-set to extend the vector when I set an index beyond its current length (filling gaps with nil), and to give me a clear error if I use a negative index.",
+      "acceptanceCriteria": [
+        "[vec-set [vec 1 2 3] 1 \"x\"] still returns [vec 1 \"x\" 3] (in-bounds unchanged)",
+        "[vec-set [vec 1 2 3] 5 \"x\"] returns [vec 1 2 3 $nil $nil \"x\"] — vector grows to length 6, gaps filled with nil",
+        "[vec-set [vec] 0 \"x\"] returns [vec \"x\"] — works on empty vector",
+        "[vec-set [vec] 3 \"x\"] returns [vec $nil $nil $nil \"x\"]",
+        "[vec-set [vec 1 2 3] -1 \"x\"] produces a runtime error (negative index)",
+        "Original vector unchanged after all operations (persistent semantics)",
+        "Update existing vec-set OOB tests to expect new behavior",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Eager node-level structural hashing for RRB vector",
+      "description": "As a library developer, I want every RRB vector node to maintain an eagerly-updated structural hash so that the root hash is always available in O(1) and vectors work correctly as map keys.",
+      "acceptanceCriteria": [
+        "RV_LEAF gains a uint32_t hash field — the rotate-XOR of its element hashes: hash ^= rotate_left(element_hash_fn(elem[i]), i % 32) for each slot i",
+        "RV_INTERNAL gains a uint32_t hash field — the XOR of its children's hash fields",
+        "RV_ROOT gains a uint32_t hash field — XOR of tree root node hash and tail node hash (or just tail hash if tree is NULL)",
+        "element_hash_fn is a function pointer uint32_t (*)(RRB_VEC_T) stored via a RV_SET_HASH_HANDLER(fn) call (similar to HAMT's key handler pattern), so the library stays generic",
+        "Hashes are computed eagerly: every RV_COPY_LEAF, RV_COPY_INTERNAL, and RV_MK_ROOT recomputes the hash from its children/elements at construction time",
+        "Path-copying on push_back/set naturally propagates hash updates — only the O(log n) copied nodes recompute",
+        "RV_HASH(root) is a simple field read returning root->hash in O(1)",
+        "rotate_left is a bitwise left rotation: (x << n) | (x >> (32 - n))",
+        "New tests added to lib/rrb_vec/test_rrb_vec.c (or a new test_rrb_vec_hash.c): verify hash is consistent across equal vectors built different ways, verify hash changes when elements change, verify hash differs for permuted elements (rotate-XOR order-dependence), verify empty vector hash is deterministic",
+        "If a new test file is created, add it to the TESTS array in build.sh",
+        "build.sh gains a --lib flag that runs only the lib/ tests (all entries with src paths starting with lib/). Running build.sh with no args still runs everything",
+        "All existing RRB vec tests still pass",
+        "Template instantiation in src/collections.c still compiles cleanly",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "Eager node-level structural hashing for HAMT with root wrapper",
+      "description": "As a library developer, I want every HAMT node to maintain an eagerly-updated structural hash and a root wrapper struct so that the map hash is always available in O(1) and maps work correctly as map keys.",
+      "acceptanceCriteria": [
+        "H_LEAF gains a uint32_t node_hash field (distinct from existing key hash) — computed as key_hash_fn(key) ^ val_hash_fn(value)",
+        "H_INTERNAL gains a uint32_t hash field — the XOR of its children's hash/node_hash fields",
+        "H_COLLISION gains a uint32_t node_hash field — the XOR of its items' node_hash fields",
+        "XOR combining is order-independent, which is correct for maps since two equal maps may have different internal trie structure",
+        "key_hash_fn and val_hash_fn are function pointers stored via H_SET_HASH_HANDLERS(key_fn, val_fn) call, so the library stays generic",
+        "Hashes are computed eagerly: every node allocation/copy recomputes from children at construction time",
+        "Path-copying on set/unset naturally propagates hash updates — only the O(log n) copied nodes recompute",
+        "New H_ROOT wrapper struct with fields: H_NODE* root, size_t count, uint32_t hash",
+        "H_ROOT is reference-counted via rc.h (same as other HAMT nodes)",
+        "H_ROOT hash field is the root node's hash (or 0 for empty map)",
+        "New functions H_ROOT_SET, H_ROOT_UNSET, H_ROOT_GET, H_ROOT_HAS wrap existing H_SET/H_UNSET/H_GET/H_HAS — take/return H_ROOT* and set hash from new root node",
+        "H_ROOT_EMPTY() creates an empty root with hash = 0",
+        "H_ROOT_HASH(root) is a simple field read returning root->hash in O(1)",
+        "H_ROOT_COUNT(root) returns the count",
+        "Existing HAMT iterator (H_ITER) works unchanged on root->root",
+        "New tests added to lib/hamt/test_hamt.c (or a new test_hamt_hash.c): verify hash is consistent for maps with same entries inserted in different order, verify hash changes when entries change, verify H_ROOT_SET/H_ROOT_UNSET/H_ROOT_GET/H_ROOT_HAS work correctly, verify empty map hash is 0",
+        "If a new test file is created, add it to the TESTS array in build.sh",
+        "All existing HAMT tests still pass",
+        "Template instantiation in src/collections.c still compiles cleanly",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Wire cached hashes into jacl_val_hash and update VM to use H_ROOT",
+      "description": "As a JACL developer, I want jacl_val_hash to use the cached structural hashes from vectors and maps so that collections work correctly as map keys.",
+      "acceptanceCriteria": [
+        "jacl_val_hash for JACL_TAG_VECTOR calls jacl_vec_hash(root) — O(1) field read from RRB root",
+        "jacl_val_hash for JACL_TAG_MAP calls jacl_map_root_hash(root) — O(1) field read from HAMT root",
+        "collections__init() calls RV_SET_HASH_HANDLER(jacl_val_hash) and H_SET_HASH_HANDLERS(jacl_val_hash, jacl_val_hash) to wire in the element/key/value hash functions",
+        "JACL VM code updated to use H_ROOT* (via jacl_map_root) instead of raw H_NODE* for all map operations",
+        "[map-get [map [vec 1] \"a\"] [vec 1]] returns \"a\" — structurally equal vectors as keys find same entry",
+        "[map-get [map [map \"x\" 1] \"nested\"] [map \"x\" 1]] returns \"nested\" — maps as keys work",
+        "[eq] still uses structural equality (verify no regression)",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Update test suite for all M8a fixes",
+      "description": "As a developer, I want the test suite updated to cover all the new behaviors introduced by the M8a design fixes.",
+      "acceptanceCriteria": [
+        "Tests for [map \"a\" 1] as 1-pair constructor",
+        "Tests for transform on vectors (replaces old 2-arg map tests)",
+        "Tests for transform on maps",
+        "Tests for vec-set growing vector with nil fill",
+        "Tests for vec-set negative index producing runtime error",
+        "Tests for vectors as map keys (structural hash correctness)",
+        "Tests for maps as map keys (structural hash correctness)",
+        "Tests for nested collections as map keys",
+        "All existing tests still pass (no regressions)",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All tests pass (build.sh)"
+      ],
+      "priority": 17,
       "passes": false,
       "notes": ""
     }

@@ -1539,14 +1539,14 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
-      case OP_MAP_TRANSFORM: {
+      case OP_TRANSFORM: {
         JaclVal closure_val, coll_val;
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
 
         if (!jacl_is_closure(closure_val)) {
           vm__set_error(vm,
-            "type error in 'map': expected closure as second argument, got %s",
+            "type error in 'transform': expected closure as second argument, got %s",
             vm__type_name(closure_val));
           return VM_RUNTIME_ERROR;
         }
@@ -1556,7 +1556,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_vector(coll_val)) {
           if (closure->param_count != 1) {
             vm__set_error(vm,
-              "map on vector requires a proc with 1 parameter, got %d",
+              "transform on vector requires a proc with 1 parameter, got %d",
               (int)closure->param_count);
             return VM_RUNTIME_ERROR;
           }
@@ -1616,7 +1616,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         } else if (jacl_is_map(coll_val)) {
           if (closure->param_count != 2) {
             vm__set_error(vm,
-              "map on map requires a proc with 2 parameters, got %d",
+              "transform on map requires a proc with 2 parameters, got %d",
               (int)closure->param_count);
             return VM_RUNTIME_ERROR;
           }
@@ -1669,14 +1669,14 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
             if (!jacl_is_vector(ret)) {
               vm__set_error(vm,
-                "map transform on map: proc must return a 2-element vector, got %s",
+                "transform on map: proc must return a 2-element vector, got %s",
                 vm__type_name(ret));
               return VM_RUNTIME_ERROR;
             }
             jacl_vec_root* pair = (jacl_vec_root*)jacl_as_ptr(ret);
             if (jacl_vec_count(pair) != 2) {
               vm__set_error(vm,
-                "map transform on map: proc must return a 2-element vector, got %d elements",
+                "transform on map: proc must return a 2-element vector, got %d elements",
                 (int)jacl_vec_count(pair));
               return VM_RUNTIME_ERROR;
             }
@@ -1697,7 +1697,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         } else {
           vm__set_error(vm,
-            "type error in 'map': expected vector or map as first argument, got %s",
+            "type error in 'transform': expected vector or map as first argument, got %s",
             vm__type_name(coll_val));
           return VM_RUNTIME_ERROR;
         }

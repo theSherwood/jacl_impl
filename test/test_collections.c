@@ -568,14 +568,14 @@ static int test_each_arity(void) {
   TEST_PASS();
 }
 
-/* ===== US-009: map transform ===== */
+/* ===== US-009/US-012: transform builtin ===== */
 
-static int test_map_transform_vec(void) {
+static int test_transform_vec(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "def v [vec 1 2 3]\n"
     "proc inc [x] { [+ $x 10] }\n"
-    "def v2 [map $v $inc]\n"
+    "def v2 [transform $v $inc]\n"
     "[print [vec-get $v2 0]]\n"
     "[print [vec-get $v2 1]]\n"
     "[print [vec-get $v2 2]]",
@@ -583,22 +583,22 @@ static int test_map_transform_vec(void) {
   TEST_PASS();
 }
 
-static int test_map_transform_empty(void) {
+static int test_transform_empty(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "proc inc [x] { [+ $x 1] }\n"
-    "[print [vec-len [map [vec] $inc]]]",
+    "[print [vec-len [transform [vec] $inc]]]",
     &cap, "0\n"));
   TEST_PASS();
 }
 
-static int test_map_transform_map(void) {
+static int test_transform_map(void) {
   PrintCapture cap;
   /* Single-entry for determinism */
   ASSERT(run_ok(
     "def m [map-set [map] \"a\" 5]\n"
     "proc dbl [k v] { [vec $k [* $v 2]] }\n"
-    "def m2 [map $m $dbl]\n"
+    "def m2 [transform $m $dbl]\n"
     "[print [map-get $m2 \"a\"]]",
     &cap, "10\n"));
   TEST_PASS();
@@ -753,7 +753,7 @@ static int test_chained_transforms(void) {
     "def v [vec 1 2 3 4 5]\n"
     "proc dbl [x] { [* $x 2] }\n"
     "proc gt5 [x] { [> $x 5] }\n"
-    "def v2 [filter [map $v $dbl] $gt5]\n"
+    "def v2 [filter [transform $v $dbl] $gt5]\n"
     "[print [vec-len $v2]]\n"
     "[print [vec-get $v2 0]]\n"
     "[print [vec-get $v2 1]]\n"
@@ -769,7 +769,7 @@ static int test_multiline_program(void) {
     "proc gt25 [x] { [> $x 25] }\n"
     "def big [filter $items $gt25]\n"
     "proc add1 [x] { [+ $x 1] }\n"
-    "def res [map $big $add1]\n"
+    "def res [transform $big $add1]\n"
     "[print [vec-get $res 0]]\n"
     "[print [vec-get $res 1]]\n"
     "[print [vec-get $res 2]]",
@@ -846,10 +846,10 @@ int main(void) {
     { "each_nil_return",           test_each_nil_return },
     { "each_empty",                test_each_empty },
     { "each_arity",                test_each_arity },
-    /* US-009: map transform */
-    { "map_transform_vec",         test_map_transform_vec },
-    { "map_transform_empty",       test_map_transform_empty },
-    { "map_transform_map",         test_map_transform_map },
+    /* US-009/US-012: transform */
+    { "transform_vec",             test_transform_vec },
+    { "transform_empty",           test_transform_empty },
+    { "transform_map",             test_transform_map },
     /* US-010: filter */
     { "filter_vec",                test_filter_vec },
     { "filter_empty",              test_filter_empty },
