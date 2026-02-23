@@ -1,0 +1,6 @@
+# expect: nil
+# expect: nil
+# vec-get out of bounds returns nil
+def v [vec 1 2 3]
+print [vec-get $v 99]
+print [vec-get $v 3]

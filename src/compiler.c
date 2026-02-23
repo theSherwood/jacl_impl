@@ -721,6 +721,39 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* vec constructor (variadic: 0+ args) */
+  if (compiler__head_matches(head, "vec", 3)) {
+    for (uint32_t i = 0; i < argc; i++) {
+      compiler__compile_node(c, args[i]);
+    }
+    compiler__emit_byte(c, OP_VEC, line);
+    compiler__emit_byte(c, (uint8_t)argc, line);
+    return;
+  }
+
+  /* vec-get builtin (exactly 2 args) */
+  if (compiler__head_matches(head, "vec-get", 7)) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "vec-get", "2 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_VEC_GET, line);
+    return;
+  }
+
+  /* vec-len builtin (exactly 1 arg) */
+  if (compiler__head_matches(head, "vec-len", 7)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "vec-len", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_VEC_LEN, line);
+    return;
+  }
+
   /* Dynamic call: unrecognized command head — look up and call */
   {
     if (head->type == AST_LIT_STRING) {

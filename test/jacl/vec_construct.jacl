@@ -1,0 +1,7 @@
+# expect: 0
+# expect: 3
+# expect: 0
+# vec constructor and vec-len
+print [vec-len [vec]]
+print [vec-len [vec 1 2 3]]
+print [vec-len [vec]]

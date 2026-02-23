@@ -41,7 +41,11 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_STR_INDEX,      31);
   ASSERT_INT_EQ(OP_STR_SLICE,      32);
   ASSERT_INT_EQ(OP_TO_STRING,      33);
-  ASSERT_INT_EQ(OP_HALT,           34);
+  /* M8 opcodes */
+  ASSERT_INT_EQ(OP_VEC,            34);
+  ASSERT_INT_EQ(OP_VEC_GET,        35);
+  ASSERT_INT_EQ(OP_VEC_LEN,        36);
+  ASSERT_INT_EQ(OP_HALT,           37);
   TEST_PASS();
 }
 

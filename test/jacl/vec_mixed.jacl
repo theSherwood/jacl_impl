@@ -1,0 +1,10 @@
+# expect: 42
+# expect: hello
+# expect: true
+# expect: 3
+# vec with mixed value types
+def v [vec 42 "hello" $true]
+print [vec-get $v 0]
+print [vec-get $v 1]
+print [vec-get $v 2]
+print [vec-len $v]

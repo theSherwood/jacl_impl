@@ -87,6 +87,8 @@ static const char* vm__type_name(JaclVal v) {
   if (jacl_is_f32(v))           return "f32";
   if (jacl_is_string(v))        return "string";
   if (jacl_is_closure(v))       return "closure";
+  if (jacl_is_vector(v))        return "vector";
+  if (jacl_is_map(v))           return "map";
   return "unknown";
 }
 
@@ -903,6 +905,61 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
           result = vm__push(vm, str);
           if (result != VM_OK) return result;
         }
+        break;
+      }
+
+      case OP_VEC: {
+        uint8_t count = vm__read_byte(vm);
+        jacl_vec_root* vec = jacl_vec_empty();
+        for (uint8_t i = 0; i < count; i++) {
+          JaclVal elem = vm->stack[vm->stack_top - count + i];
+          jacl_vec_root* new_vec = jacl_vec_push_back(vec, elem);
+          jacl_vec_unref(vec);
+          vec = new_vec;
+        }
+        vm->stack_top -= count;
+        result = vm__push(vm, jacl_vector_ptr(vec));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_VEC_GET: {
+        JaclVal idx_val, vec_val;
+        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
+        if (!jacl_is_vector(vec_val)) {
+          vm__set_error(vm, "type error in 'vec-get': expected vector, got %s",
+                       vm__type_name(vec_val));
+          return VM_RUNTIME_ERROR;
+        }
+        if (!jacl_is_i32(idx_val)) {
+          vm__set_error(vm, "type error in 'vec-get': expected i32 index, got %s",
+                       vm__type_name(idx_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
+        int32_t idx = jacl_as_i32(idx_val);
+        if (idx < 0) {
+          result = vm__push(vm, JACL_NIL);
+        } else {
+          jacl_vec_get_result gr = jacl_vec_get(vec, (uint32_t)idx);
+          result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
+        }
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_VEC_LEN: {
+        JaclVal vec_val;
+        result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
+        if (!jacl_is_vector(vec_val)) {
+          vm__set_error(vm, "type error in 'vec-len': expected vector, got %s",
+                       vm__type_name(vec_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
+        result = vm__push(vm, jacl_i32((int32_t)jacl_vec_count(vec)));
+        if (result != VM_OK) return result;
         break;
       }
 

@@ -35,88 +35,43 @@
 - Arity checking works for both bare word heads (AST_LIT_STRING) and $var heads (AST_VAR_REF) in dynamic call section
 - Global `def` propagates arity: `def g $f` or `def g procname` where the RHS has known arity → g gets that arity globally
 - Compile errors surface as VM_RUNTIME_ERROR from jacl_run — test harness `# expect-error:` works for both compile and runtime errors
+- Proc names must be <= 7 bytes (inline string limit) — longer names use heap strings
+- Test harness `# expect-error:` is substring match — only one error scenario per file
+- Value tags: JACL_TAG_VECTOR (0x06), JACL_TAG_MAP (0x07) already reserved in value.c
+- Value constructors jacl_vector_ptr() and jacl_map_ptr() already exist
+- RRB vec API: RV_EMPTY, RV_PUSH_BACK, RV_GET, RV_SET, RV_POP_BACK, RV_COUNT, RV_CONCAT, RV_SLICE, RV_REF/UNREF, RV_ITER_INIT/NEXT
+- HAMT API: H_SET_KEY_HANDLERS, H_GET, H_HAS, H_SET, H_UNSET, H_COUNT, H_ITER_INIT, H_NEXT_LEAF, H_KEY_FROM_LEAF, H_VALUE_FROM_LEAF, H_REF/UNREF
+- collections.c lives between bytecode.c and compiler.c in the pipeline include order
+- Template allocator: use `{ .alloc = libc_alloc, .free = libc_free, .ctx = NULL }` compound literal (NOT `libc_allocator` which is a function call, fails as C99 static initializer)
+- Must `#undef RC_ALLOCATOR` between RRB and HAMT template includes (rc.h doesn't clean up non-defaulted allocators)
+- collections__init() must be called before any HAMT operations to wire up hash/eq handlers
+- jacl_val_hash() dispatches on type tag: nil→constant, bool→constant, i32→murmur mix, f32→bit mix, inline string→FNV-1a, heap string→precomputed hash
+- jacl_val_eq() delegates to jacl_string_eq() for string types, bitwise compare for all others
+- Adding new opcodes before OP_HALT shifts its enum value — must update test_bytecode.c test_opcode_enum
+- OP_VEC uses uint8_t count operand; compiler pushes all args then emits OP_VEC + count; VM reads from stack in order
+- Collection nodes use libc malloc (not arena) — tracked_allocator won't detect leaks; no GC yet (M12)
 
-## 2026-02-20 - US-001
-Thread: N/A (first iteration)
-- Added `min_args` (uint8_t) and `variadic` (bool) fields to JaclClosure struct in bytecode.c
-- Compiler sets min_args = param_count, variadic = false when creating closures
-- OP_CLOSURE in vm.c copies both fields from template to runtime closure
-- memset on top_closure in vm_exec zeroes both fields correctly (min_args=0, variadic=false)
-- Files changed: src/bytecode.c, src/compiler.c, src/vm.c
+## 2026-02-23 - US-001
+- Implemented src/collections.c: JaclVal hash function, JaclVal equality function, RRB vec instantiation (jacl_vec), HAMT instantiation (jacl_map)
+- Updated src/jacl.c to include collections.c in the unity build pipeline
+- Files changed: src/collections.c (new), src/jacl.c
 - **Learnings for future iterations:**
-  - The top-level closure in vm_exec is zero-initialized via memset, so new fields default to 0/false
-  - OP_CLOSURE copies template fields to a new arena-allocated closure — new fields must be added to both compiler (template creation) and VM (runtime copy)
+  - libc_allocator macro expands to a function call — can't use as static initializer in C99
+  - RC_ALLOCATOR macro leaks across template includes — need manual #undef between instantiations
+  - collections.c must be included AFTER string.c (needs JaclHeapString) and BEFORE compiler.c
 ---
 
-## 2026-02-20 - US-002
-Thread: N/A
-- Added `known_arity` (int16_t) field to Local struct in compiler.c — defaults to -1 (unknown)
-- `proc` at local scope sets `known_arity = param_count` on the newly created local
-- `def` at local scope determines RHS arity via `compiler__node_known_arity()` and propagates to new local
-- `compiler__node_known_arity()` resolves AST_VAR_REF → local slot → known_arity (returns -1 for non-var-ref or unresolvable)
-- Arity scoping is correct: locals removed by `compiler__end_scope` take their arity info with them
-- Files changed: src/compiler.c
+## 2026-02-23 - US-002
+- Implemented vec, vec-get, vec-len builtins: new opcodes OP_VEC/OP_VEC_GET/OP_VEC_LEN in bytecode.c, compiler builtins in compiler.c, VM handlers in vm.c
+- Updated vm__type_name to handle vector and map types
+- Updated test_bytecode.c to account for new opcode enum values (OP_HALT shifted from 34 to 37)
+- Created 6 .jacl test files: vec_construct, vec_get, vec_get_oob, vec_mixed, vec_arity_get, vec_arity_len
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c
+- Files added: test/jacl/vec_construct.jacl, test/jacl/vec_get.jacl, test/jacl/vec_get_oob.jacl, test/jacl/vec_mixed.jacl, test/jacl/vec_arity_get.jacl, test/jacl/vec_arity_len.jacl
 - **Learnings for future iterations:**
-  - `def g f` binds to string "f", not proc — only `def g $f` (AST_VAR_REF) propagates arity
-  - known_arity must be computed BEFORE compiler__add_local since the new local would shadow the source variable in the same scope
-  - Proc params in body compiler get known_arity = -1 correctly (we don't know what callers will pass)
----
-
-## 2026-02-20 - US-003
-Thread: N/A
-- Added global arity tracking: `GlobalArity` struct + table (max 64) on Compiler, with `compiler__resolve_global_arity` and `compiler__set_global_arity` helpers
-- `compiler__resolve_global_arity` walks `enclosing` chain to root compiler (globals are always on the root)
-- `proc` at global scope now calls `compiler__set_global_arity(c, name_val, param_count)` after emitting OP_DEF_GLOBAL
-- Dynamic call section checks arity for bare word command heads: resolves local first, then global arity; emits compile error on mismatch
-- Error message format: "proc 'foo' expects 2 arguments but got 3" (compiler__error prepends line/col)
-- Arity checking works from nested proc bodies (e.g., `proc bar [x] { [foo $x 1 2] }` catches the error on foo)
-- Files changed: src/compiler.c
-- **Learnings for future iterations:**
-  - Global arity is recorded AFTER body compilation, so recursive calls to self are not arity-checked (correct: proc isn't defined yet)
-  - For calls from nested proc bodies, `compiler__resolve_global_arity` must walk `enclosing` chain since body_compiler has its own (empty) global_arities table
-  - Error handling in compiler returns early — arity check must happen BEFORE emitting GET_LOCAL/GET_GLOBAL and argument compilation
----
-
-## 2026-02-20 - US-004
-Thread: N/A
-- Extended `compiler__node_known_arity` to resolve global arity for AST_VAR_REF (when not found as local) and AST_LIT_STRING (bare word global proc names)
-- Added arity checking for AST_VAR_REF command heads (`[$f 1 2]`) in dynamic call else branch
-- Added global arity propagation through `def` at global scope: `def g $f` or `def g f` where f has known global arity → g gets that arity
-- Files changed: src/compiler.c
-- **Learnings for future iterations:**
-  - `compiler__node_known_arity` now handles 3 cases: AST_VAR_REF → local then global, AST_LIT_STRING → global only
-  - For `$var` command heads, the arity check pattern mirrors the bare-word check but uses `head->data.var_ref` fields
-  - Global def arity must be computed BEFORE emitting DEF_GLOBAL so the RHS node can still resolve its own references
----
-
-## 2026-02-20 - US-005
-Thread: N/A
-- Added `compiler__builtin_arity_error` helper for consistent builtin arity error messages
-- Updated all 19 builtin arity error messages to format: `builtin 'name' expects N arguments but got M`
-- Fixed builtins: +, -, *, /, %, ==, <, >, <=, >=, print, length, index, slice, concat, def, proc, if, while
-- Updated 2 compiler test assertions that checked old-format "while requires 2" message
-- Files changed: src/compiler.c, test/test_compiler.c
-- **Learnings for future iterations:**
-  - Compiler tests (test_compiler.c) use `strstr(cr.error_message, "...")` substring checks — must update these when changing error message formats
-  - The `%` builtin had `"%%"` in the old message (printf escape), but the new helper uses `%s` for the name so plain `"%"` is correct
-  - `-` is flexible-arity (1 or 2) — unary negation with 1 arg, subtraction with 2 — not fixed at 2 as the PRD suggests
----
-
-## 2026-02-20 - US-006
-Thread: N/A
-- Created 8 .jacl test files for comprehensive arity checking coverage:
-  - arity_direct.jacl — too few args on direct proc call (expect-error)
-  - arity_direct_many.jacl — too many args on direct proc call (expect-error)
-  - arity_correct.jacl — correct arg counts for 3-arg, 1-arg, 0-arg procs
-  - arity_alias.jacl — wrong arity through variable alias (expect-error)
-  - arity_alias_correct.jacl — correct arity through alias + alias chain propagation
-  - arity_unknown.jacl — unknown-arity variable (proc returned from another proc) compiles and runs
-  - arity_builtins.jacl — builtin `+` with wrong arity (expect-error)
-  - arity_nested.jacl — nested proc definitions with independent arities
-- All 17 harness tests pass (8 new + 9 existing); 38 total tests pass
-- Files changed: test/jacl/arity_*.jacl (8 new files)
-- **Learnings for future iterations:**
-  - Proc names must be <= 7 bytes (inline string limit) — `make_adder` (10 chars) fails, use `mkadd` instead
-  - Test harness `# expect-error:` is substring match — only one error scenario per file
-  - Error format for proc arity: "proc 'name' expects N arguments but got M" (note: "1 arguments" not "1 argument")
+  - Adding new opcodes before OP_HALT shifts its enum value — must update test_bytecode.c's test_opcode_enum test
+  - RRB vec nodes use libc malloc (not arena allocator) — tracked_allocator won't see them, no false leak positives but vectors leak without GC
+  - OP_VEC uses uint8_t count operand; compiler pushes all args then emits OP_VEC + count; VM reads elements from stack in order
+  - vec-get and vec-len are exactly 7 bytes each, fitting the inline string limit for builtin name matching
+  - Compiler builtin matching order matters: vec/vec-get/vec-len must be matched before the dynamic call section
 ---

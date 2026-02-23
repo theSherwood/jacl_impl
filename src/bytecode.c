@@ -48,6 +48,9 @@ typedef enum {
   OP_STR_INDEX,     /* pop index + string, push char or nil */
   OP_STR_SLICE,     /* pop end + start + string, push substring */
   OP_TO_STRING,     /* pop value, push string representation */
+  OP_VEC,           /* construct vector: followed by uint8_t element count */
+  OP_VEC_GET,       /* pop index + vec, push element or nil */
+  OP_VEC_LEN,       /* pop vec, push i32 count */
   OP_HALT           /* stop execution */
 } OpCode;
 

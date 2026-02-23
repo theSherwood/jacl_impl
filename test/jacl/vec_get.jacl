@@ -1,0 +1,8 @@
+# expect: 10
+# expect: 20
+# expect: 30
+# vec-get basic access
+def v [vec 10 20 30]
+print [vec-get $v 0]
+print [vec-get $v 1]
+print [vec-get $v 2]

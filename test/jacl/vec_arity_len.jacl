@@ -1,0 +1,2 @@
+# expect-error: builtin 'vec-len' expects 1 argument but got 2
+vec-len [vec 1] [vec 2]
