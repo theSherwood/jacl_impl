@@ -1181,11 +1181,27 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
         int32_t idx = jacl_as_i32(idx_val);
-        if (idx < 0 || (uint32_t)idx >= jacl_vec_count(vec)) {
-          result = vm__push(vm, JACL_NIL);
-        } else {
+        if (idx < 0) {
+          vm__set_error(vm, "vec-set: negative index %d", (int)idx);
+          return VM_RUNTIME_ERROR;
+        }
+        uint32_t count = jacl_vec_count(vec);
+        if ((uint32_t)idx < count) {
+          /* In-bounds: replace element at index */
           jacl_vec_root* new_vec = jacl_vec_set(vec, (uint32_t)idx, elem);
           result = vm__push(vm, jacl_vector_ptr(new_vec));
+        } else {
+          /* Out-of-bounds: grow vector with nil fill, then set element */
+          jacl_vec_root* new_vec = vec;
+          jacl_vec_ref(new_vec);
+          for (uint32_t i = count; i < (uint32_t)idx; i++) {
+            jacl_vec_root* tmp = jacl_vec_push_back(new_vec, JACL_NIL);
+            jacl_vec_unref(new_vec);
+            new_vec = tmp;
+          }
+          jacl_vec_root* final = jacl_vec_push_back(new_vec, elem);
+          jacl_vec_unref(new_vec);
+          result = vm__push(vm, jacl_vector_ptr(final));
         }
         if (result != VM_OK) return result;
         break;

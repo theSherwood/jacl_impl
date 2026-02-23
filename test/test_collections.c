@@ -169,10 +169,50 @@ static int test_vec_set(void) {
 
 static int test_vec_set_oob(void) {
   PrintCapture cap;
+  /* OOB grows vector with nil fill */
   ASSERT(run_ok(
     "def v [vec 1 2 3]\n"
-    "[print [vec-set $v 99 \"x\"]]",
-    &cap, "nil\n"));
+    "[print [vec-set $v 5 \"x\"]]",
+    &cap, "[vec 1 2 3 nil nil \"x\"]\n"));
+  TEST_PASS();
+}
+
+static int test_vec_set_empty(void) {
+  PrintCapture cap;
+  /* vec-set on empty vector at index 0 */
+  ASSERT(run_ok(
+    "[print [vec-set [vec] 0 \"x\"]]",
+    &cap, "[vec \"x\"]\n"));
+  TEST_PASS();
+}
+
+static int test_vec_set_empty_gap(void) {
+  PrintCapture cap;
+  /* vec-set on empty vector with gap fill */
+  ASSERT(run_ok(
+    "[print [vec-set [vec] 3 \"x\"]]",
+    &cap, "[vec nil nil nil \"x\"]\n"));
+  TEST_PASS();
+}
+
+static int test_vec_set_neg(void) {
+  ASSERT(run_err(
+    "def v [vec 1 2 3]\n"
+    "def i [- 0 1]\n"
+    "[vec-set $v $i \"x\"]",
+    "vec-set: negative index -1"));
+  TEST_PASS();
+}
+
+static int test_vec_set_oob_persist(void) {
+  PrintCapture cap;
+  /* Original unchanged after OOB vec-set */
+  ASSERT(run_ok(
+    "def v [vec 1 2 3]\n"
+    "def v2 [vec-set $v 5 \"x\"]\n"
+    "[print [vec-len $v]]\n"
+    "[print [vec-len $v2]]",
+    &cap, "3\n6\n"));
   TEST_PASS();
 }
 
@@ -796,6 +836,10 @@ int main(void) {
     { "vec_push",                  test_vec_push },
     { "vec_set",                   test_vec_set },
     { "vec_set_oob",               test_vec_set_oob },
+    { "vec_set_empty",             test_vec_set_empty },
+    { "vec_set_empty_gap",         test_vec_set_empty_gap },
+    { "vec_set_neg",               test_vec_set_neg },
+    { "vec_set_oob_persist",       test_vec_set_oob_persist },
     { "vec_persist",               test_vec_persist },
     { "vec_concat",                test_vec_concat },
     { "vec_slice",                 test_vec_slice },

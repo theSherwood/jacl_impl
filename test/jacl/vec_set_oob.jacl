@@ -1,4 +1,4 @@
-# expect: nil
-# vec-set out-of-bounds returns nil
+# expect: [vec 1 2 3 nil nil "x"]
+# vec-set out-of-bounds grows vector with nil fill
 def v [vec 1 2 3]
-print [vec-set $v 99 "x"]
+print [vec-set $v 5 "x"]

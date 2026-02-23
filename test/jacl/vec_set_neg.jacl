@@ -1,0 +1,5 @@
+# expect-error: vec-set: negative index -1
+# vec-set with negative index produces runtime error
+def v [vec 1 2 3]
+def i [- 0 1]
+vec-set $v $i "x"
