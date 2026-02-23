@@ -1,0 +1,8 @@
+# expect: true
+# expect: false
+# expect: false
+# map-has returns bool for key existence
+def m [map "a" 1 "b" 2]
+print [map-has $m "a"]
+print [map-has $m "missing"]
+print [map-has [map] "x"]

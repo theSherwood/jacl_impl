@@ -1,0 +1,3 @@
+# expect-error: builtin 'map-len' expects 1 argument but got 0
+# map-len arity error
+map-len

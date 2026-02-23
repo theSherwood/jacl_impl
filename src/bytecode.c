@@ -55,6 +55,10 @@ typedef enum {
   OP_VEC_SET,       /* pop elem + index + vec, push new vec or nil */
   OP_VEC_CONCAT,    /* pop vec2 + vec1, push concatenated vec */
   OP_VEC_SLICE,     /* pop end + start + vec, push sub-vector */
+  OP_MAP,           /* construct map: followed by uint8_t pair count */
+  OP_MAP_GET,       /* pop key + map, push value or nil */
+  OP_MAP_HAS,       /* pop key + map, push bool */
+  OP_MAP_LEN,       /* pop map, push i32 count */
   OP_HALT           /* stop execution */
 } OpCode;
 

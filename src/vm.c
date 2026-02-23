@@ -137,6 +137,9 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->error_message = NULL;
   vm->error_line    = 0;
 
+  /* Ensure HAMT key handlers are wired up */
+  collections__init();
+
   /* Initialize environment */
   vm->env.count  = 0;
   vm->env.cap    = VM_ENV_INIT_CAP;
@@ -1067,6 +1070,70 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
             result = vm__push(vm, jacl_vector_ptr(new_vec));
           }
         }
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_MAP: {
+        uint8_t pair_count = vm__read_byte(vm);
+        jacl_map_node* map = NULL;
+        for (uint8_t i = 0; i < pair_count; i++) {
+          JaclVal key   = vm->stack[vm->stack_top - 2 * pair_count + 2 * i];
+          JaclVal value = vm->stack[vm->stack_top - 2 * pair_count + 2 * i + 1];
+          jacl_map_node* new_map = jacl_map_set(map, key, value);
+          jacl_map_unref(map);
+          map = new_map;
+        }
+        vm->stack_top -= 2 * pair_count;
+        result = vm__push(vm, jacl_map_ptr(map));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_MAP_GET: {
+        JaclVal key_val, map_val;
+        result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
+        if (!jacl_is_map(map_val)) {
+          vm__set_error(vm, "type error in 'map-get': expected map, got %s",
+                       vm__type_name(map_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
+        if (jacl_map_has(map, key_val)) {
+          result = vm__push(vm, jacl_map_get(map, key_val));
+        } else {
+          result = vm__push(vm, JACL_NIL);
+        }
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_MAP_HAS: {
+        JaclVal key_val, map_val;
+        result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
+        if (!jacl_is_map(map_val)) {
+          vm__set_error(vm, "type error in 'map-has': expected map, got %s",
+                       vm__type_name(map_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
+        result = vm__push(vm, jacl_bool(jacl_map_has(map, key_val)));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_MAP_LEN: {
+        JaclVal map_val;
+        result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
+        if (!jacl_is_map(map_val)) {
+          vm__set_error(vm, "type error in 'map-len': expected map, got %s",
+                       vm__type_name(map_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
+        result = vm__push(vm, jacl_i32((int32_t)jacl_map_count(map)));
         if (result != VM_OK) return result;
         break;
       }

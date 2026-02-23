@@ -1,0 +1,3 @@
+# expect-error: builtin 'map' expects an even number of arguments but got 3
+# map with odd args is a compile-time arity error
+map "a" 1 "b"

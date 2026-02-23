@@ -1,0 +1,7 @@
+# expect: 0
+# expect: 2
+# expect: 0
+# map constructor and map-len
+print [map-len [map]]
+print [map-len [map "a" 1 "b" 2]]
+print [map-len [map]]

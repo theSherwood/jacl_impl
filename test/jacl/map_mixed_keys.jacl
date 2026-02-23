@@ -1,0 +1,8 @@
+# expect: one
+# expect: yes
+# expect: 3
+# non-string keys: integer and boolean keys
+def m [map 1 "one" $true "yes"]
+print [map-get $m 1]
+print [map-get $m $true]
+print [map-len [map 1 "a" 2 "b" 3 "c"]]

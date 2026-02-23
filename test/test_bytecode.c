@@ -49,7 +49,12 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_VEC_SET,        38);
   ASSERT_INT_EQ(OP_VEC_CONCAT,     39);
   ASSERT_INT_EQ(OP_VEC_SLICE,      40);
-  ASSERT_INT_EQ(OP_HALT,           41);
+  /* M8 map opcodes */
+  ASSERT_INT_EQ(OP_MAP,            41);
+  ASSERT_INT_EQ(OP_MAP_GET,        42);
+  ASSERT_INT_EQ(OP_MAP_HAS,        43);
+  ASSERT_INT_EQ(OP_MAP_LEN,        44);
+  ASSERT_INT_EQ(OP_HALT,           45);
   TEST_PASS();
 }
 

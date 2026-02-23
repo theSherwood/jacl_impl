@@ -1,0 +1,6 @@
+# expect: 1
+# expect: 2
+# map-get returns value for existing key
+def m [map "a" 1 "b" 2]
+print [map-get $m "a"]
+print [map-get $m "b"]

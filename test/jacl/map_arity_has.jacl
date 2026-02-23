@@ -1,0 +1,3 @@
+# expect-error: builtin 'map-has' expects 2 arguments but got 1
+# map-has arity error
+map-has [map]
