@@ -1138,6 +1138,89 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         break;
       }
 
+      case OP_MAP_SET: {
+        JaclVal val, key_val, map_val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
+        if (!jacl_is_map(map_val)) {
+          vm__set_error(vm, "type error in 'map-set': expected map, got %s",
+                       vm__type_name(map_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
+        jacl_map_node* new_map = jacl_map_set(map, key_val, val);
+        result = vm__push(vm, jacl_map_ptr(new_map));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_MAP_REMOVE: {
+        JaclVal key_val, map_val;
+        result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
+        if (!jacl_is_map(map_val)) {
+          vm__set_error(vm, "type error in 'map-remove': expected map, got %s",
+                       vm__type_name(map_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
+        jacl_map_node* new_map = jacl_map_unset(map, key_val);
+        result = vm__push(vm, jacl_map_ptr(new_map));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_MAP_KEYS: {
+        JaclVal map_val;
+        result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
+        if (!jacl_is_map(map_val)) {
+          vm__set_error(vm, "type error in 'map-keys': expected map, got %s",
+                       vm__type_name(map_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
+        jacl_vec_root* vec = jacl_vec_empty();
+        jacl_map_iter it = jacl_map_iter_init(map);
+        jacl_map_iter_result ir;
+        for (;;) {
+          ir = jacl_map_next_leaf(&it);
+          if (ir.done) break;
+          JaclVal key = jacl_map_key_from_leaf(ir.item);
+          jacl_vec_root* new_vec = jacl_vec_push_back(vec, key);
+          jacl_vec_unref(vec);
+          vec = new_vec;
+        }
+        result = vm__push(vm, jacl_vector_ptr(vec));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_MAP_VALS: {
+        JaclVal map_val;
+        result = vm__pop(vm, &map_val); if (result != VM_OK) return result;
+        if (!jacl_is_map(map_val)) {
+          vm__set_error(vm, "type error in 'map-vals': expected map, got %s",
+                       vm__type_name(map_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
+        jacl_vec_root* vec = jacl_vec_empty();
+        jacl_map_iter it = jacl_map_iter_init(map);
+        jacl_map_iter_result ir;
+        for (;;) {
+          ir = jacl_map_next_leaf(&it);
+          if (ir.done) break;
+          JaclVal val = jacl_map_value_from_leaf(ir.item);
+          jacl_vec_root* new_vec = jacl_vec_push_back(vec, val);
+          jacl_vec_unref(vec);
+          vec = new_vec;
+        }
+        result = vm__push(vm, jacl_vector_ptr(vec));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }

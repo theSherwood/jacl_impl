@@ -1,0 +1,10 @@
+# expect: 1
+# expect: nil
+# expect: 2
+# map-remove removes existing key, absent key returns map unchanged
+def m [map "a" 1 "b" 2]
+def m2 [map-remove $m "a"]
+print [map-len $m2]
+print [map-get $m2 "a"]
+def m3 [map-remove $m "missing"]
+print [map-len $m3]

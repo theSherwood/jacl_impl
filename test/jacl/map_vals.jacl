@@ -1,0 +1,6 @@
+# expect: 2
+# expect: 0
+# map-vals returns a vector of values
+def m [map "x" 10 "y" 20]
+print [vec-len [map-vals $m]]
+print [vec-len [map-vals [map]]]

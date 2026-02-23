@@ -59,6 +59,10 @@ typedef enum {
   OP_MAP_GET,       /* pop key + map, push value or nil */
   OP_MAP_HAS,       /* pop key + map, push bool */
   OP_MAP_LEN,       /* pop map, push i32 count */
+  OP_MAP_SET,       /* pop val + key + map, push new map */
+  OP_MAP_REMOVE,    /* pop key + map, push new map */
+  OP_MAP_KEYS,      /* pop map, push vector of keys */
+  OP_MAP_VALS,      /* pop map, push vector of values */
   OP_HALT           /* stop execution */
 } OpCode;
 

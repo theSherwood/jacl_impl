@@ -1,0 +1,6 @@
+# expect: 2
+# expect: 0
+# map-keys returns a vector of keys
+def m [map "x" 10 "y" 20]
+print [vec-len [map-keys $m]]
+print [vec-len [map-keys [map]]]

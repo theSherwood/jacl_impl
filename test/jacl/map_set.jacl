@@ -1,0 +1,8 @@
+# expect: 3
+# expect: 99
+# map-set adds new key and overwrites existing key
+def m [map "a" 1 "b" 2]
+def m2 [map-set $m "c" 3]
+print [map-get $m2 "c"]
+def m3 [map-set $m "a" 99]
+print [map-get $m3 "a"]

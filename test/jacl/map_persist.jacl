@@ -1,0 +1,10 @@
+# expect: 2
+# expect: 1
+# expect: 2
+# original map unchanged after set/remove (persistent semantics)
+def m [map "a" 1 "b" 2]
+def m2 [map-set $m "c" 3]
+def m3 [map-remove $m "a"]
+print [map-len $m]
+print [map-get $m "a"]
+print [map-len $m]

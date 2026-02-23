@@ -854,6 +854,53 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* map-set builtin (exactly 3 args) */
+  if (compiler__head_matches(head, "map-set", 7)) {
+    if (argc != 3) {
+      compiler__builtin_arity_error(c, line, col, "map-set", "3 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__compile_node(c, args[2]);
+    compiler__emit_byte(c, OP_MAP_SET, line);
+    return;
+  }
+
+  /* map-remove builtin (exactly 2 args) */
+  if (compiler__head_matches(head, "map-remove", 10)) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "map-remove", "2 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_MAP_REMOVE, line);
+    return;
+  }
+
+  /* map-keys builtin (exactly 1 arg) */
+  if (compiler__head_matches(head, "map-keys", 8)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "map-keys", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_MAP_KEYS, line);
+    return;
+  }
+
+  /* map-vals builtin (exactly 1 arg) */
+  if (compiler__head_matches(head, "map-vals", 8)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "map-vals", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_MAP_VALS, line);
+    return;
+  }
+
   /* Dynamic call: unrecognized command head — look up and call */
   {
     if (head->type == AST_LIT_STRING) {
