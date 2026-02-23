@@ -1,4 +1,4 @@
 # expect: a 1
 # each iterates over map key-value pairs
 proc cb [k v] { [print "$k $v"] }
-each [map "a" 1] $cb
+each [map-set [map] "a" 1] $cb

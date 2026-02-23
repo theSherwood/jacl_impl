@@ -804,8 +804,15 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* map constructor (variadic, must be even number of args) */
+  /* map: constructor (0 or even >= 4 args) or transform (2 args) */
   if (compiler__head_matches(head, "map", 3)) {
+    if (argc == 2) {
+      /* 2 args = map transform: [map $coll $proc] */
+      compiler__compile_node(c, args[0]);
+      compiler__compile_node(c, args[1]);
+      compiler__emit_byte(c, OP_MAP_TRANSFORM, line);
+      return;
+    }
     if (argc % 2 != 0) {
       compiler__builtin_arity_error(c, line, col, "map",
                                      "an even number of arguments", argc);

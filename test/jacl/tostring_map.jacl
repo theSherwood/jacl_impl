@@ -2,4 +2,4 @@
 # expect: [map "a" 1]
 # to-string returns constructor syntax for maps
 print [to-string [map]]
-print [to-string [map "a" 1]]
+print [to-string [map-set [map] "a" 1]]

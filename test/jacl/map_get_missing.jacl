@@ -1,6 +1,6 @@
 # expect: nil
 # expect: nil
 # map-get returns nil for missing keys
-def m [map "a" 1]
+def m [map-set [map] "a" 1]
 print [map-get $m "missing"]
 print [map-get [map] "x"]

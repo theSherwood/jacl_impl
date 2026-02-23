@@ -1,3 +1,3 @@
 # expect: [vec [vec 1] [map "x" 2]]
 # nested constructor syntax
-print [vec [vec 1] [map "x" 2]]
+print [vec [vec 1] [map-set [map] "x" 2]]
