@@ -6,6 +6,13 @@ PASS=0
 FAIL=0
 FAILED_TESTS=""
 
+LIB_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --lib) LIB_ONLY=1 ;;
+  esac
+done
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
@@ -29,6 +36,7 @@ TESTS=(
     "lib/rrb_vec/test_rrb_vec_concurrent.c|rrb_vec_concurrent|-Wall -Wextra -std=c99 -g -lpthread"
     "lib/rrb_vec/test_rrb_vec_transient_functional.c|rrb_vec_transient_functional|"
     "lib/rrb_vec/test_rrb_vec_transient_functional_ownership.c|rrb_vec_transient_functional_ownership|-Wall -Wextra -std=c99 -g -DNDEBUG -lpthread"
+    "lib/rrb_vec/test_rrb_vec_hash.c|rrb_vec_hash|"
     "lib/sum_tree/test_sum_tree.c|sum_tree|"
     "lib/sum_tree/test_utf8.c|utf8|"
     "lib/sum_tree/test_rope.c|rope|"
@@ -54,6 +62,16 @@ TESTS=(
     "test/test_collections.c|collections|"
     "test/test_jacl_harness.c|jacl_harness|"
 )
+
+# Filter tests if --lib flag is set
+if [ "$LIB_ONLY" -eq 1 ]; then
+  FILTERED=()
+  for entry in "${TESTS[@]}"; do
+    IFS='|' read -r src name extra_cflags <<< "$entry"
+    case "$src" in lib/*) FILTERED+=("$entry") ;; esac
+  done
+  TESTS=("${FILTERED[@]}")
+fi
 
 echo "=== ds test runner ==="
 echo ""

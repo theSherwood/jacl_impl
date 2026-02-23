@@ -254,7 +254,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -278,7 +278,7 @@
         "Compiles cleanly with -Wall -Wextra -std=c99 -g"
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

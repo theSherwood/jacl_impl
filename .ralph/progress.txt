@@ -65,6 +65,8 @@
 - VMFormatBuf pattern: arena-backed dynamic buffer for recursive collection formatting; vm__fmt_value handles all types
 - `to-string` is a compiler builtin (9 bytes, > 7-byte inline limit) — emits OP_TO_STRING directly
 - HAMT iteration order is hash-based, not insertion order — test maps with single entries or use indirect checks for multi-entry
+- Negative numbers: `-1` in JACL is parsed as two tokens (`-` and `1`); use `def i [- 0 1]` then `$i` for negative values in tests
+- vec-set OOB growth: out-of-bounds index grows vector with nil fill (push_back loop); negative index → runtime error
 
 ## 2026-02-23 - US-001
 - Implemented src/collections.c: JaclVal hash function, JaclVal equality function, RRB vec instantiation (jacl_vec), HAMT instantiation (jacl_map)
@@ -257,4 +259,44 @@
   - `transform` (9 bytes) exceeds 7-byte inline limit — works fine for compiler__head_matches since it compares raw AST string data
   - The opcode position (50) didn't change, only the name, so OP_HALT stayed at 52
   - Splitting overloaded builtins is straightforward: remove the argc dispatch branch, add a new compiler builtin match
+---
+
+## 2026-02-23 - US-013
+- Changed OP_VEC_SET handler in vm.c: negative index → runtime error; out-of-bounds → grow vector with nil fill via push_back loop
+- Updated test/jacl/vec_set_oob.jacl to expect growth behavior instead of nil
+- Created test/jacl/vec_set_neg.jacl for negative index error test
+- Added 4 new tests to test_collections.c: vec_set_empty, vec_set_empty_gap, vec_set_neg, vec_set_oob_persist
+- Updated test_vec_set_oob in test_collections.c to expect growth semantics
+- Files changed: src/vm.c, test/jacl/vec_set_oob.jacl, test/test_collections.c
+- Files added: test/jacl/vec_set_neg.jacl
+- **Learnings for future iterations:**
+  - `-1` in JACL is parsed as two tokens (`-` and `1`), not a negative literal — use `def i [- 0 1]` then `$i` to get a negative number in tests
+  - jacl_vec_ref(root) increments refcount — needed when building a new vector from an existing one via push_back loop to avoid premature free
+  - Growth via push_back loop: ref original, push nils for gap, push element, unref intermediate vectors
+---
+
+## 2026-02-23 - US-014
+- Added eager structural hashing to RRB vector template library (lib/rrb_vec/rrb_vec.h)
+- RV_NODE base struct gains uint32_t hash field (inherited by both RV_LEAF and RV_INTERNAL via header)
+- RV_ROOT gains uint32_t hash field — XOR of tree root node hash and tail node hash
+- Hash handler: typedef + static function pointer + RV_SET_HASH_HANDLER(fn) setter (follows HAMT pattern)
+- RV_LEAF_REHASH: rotate-XOR of element hashes — hash ^= rotate_left(element_hash_fn(elem[i]), i % 32)
+- RV_INTERNAL_REHASH: XOR of children's hash fields
+- RV_ROTATE_LEFT: bitwise left rotation (x << n) | (x >> ((32 - n) & 31))
+- RV_HASH(root): O(1) field read returning root->hash
+- Hashes computed eagerly at every node construction: COPY_LEAF/COPY_INTERNAL copy hash, all creation points call REHASH
+- All mutation operations (push_back, set, pop_back, concat, slice, from_array, transient ops) rehash affected nodes
+- Created lib/rrb_vec/test_rrb_vec_hash.c with 15 tests: empty hash, consistency (push, from_array, large), changes (set, push, pop), permutation sensitivity, concat, slice, transient consistency, null root, field read
+- Added test to build.sh TESTS array
+- Added --lib flag to build.sh: filters to only lib/ tests when set, runs everything when absent
+- All 40 tests pass (73 existing rrb_vec + 15 new hash + all other lib and app tests)
+- Files changed: lib/rrb_vec/rrb_vec.h, build.sh
+- Files added: lib/rrb_vec/test_rrb_vec_hash.c
+- **Learnings for future iterations:**
+  - Hash in base struct RV_NODE (not separate per leaf/internal) — RV_INTERNAL's children are RV_NODE* and need ->hash access
+  - When no hash handler is set, LEAF_REHASH sets hash to 0 — existing tests work without a handler
+  - COPY_LEAF/COPY_INTERNAL copy hash from source (O(1)); callers that modify after copy add explicit REHASH calls
+  - rotate_left with n=0: use n &= 31 and (32 - n) & 31 to avoid UB from shifting by 32
+  - Structural hash depends on tree layout — vectors built via concat may have different hashes than those built via push_back even with same logical contents (different tree structure)
+  - Transient persistent_fn doesn't free the transient — caller must int_vec_rc_unref(t) after int_vec_persistent_fn(t)
 ---
