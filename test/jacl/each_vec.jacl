@@ -1,0 +1,6 @@
+# expect: 1
+# expect: 2
+# expect: 3
+# each iterates over vector elements, calling proc with each element
+proc cb [x] { [print $x] }
+each [vec 1 2 3] $cb

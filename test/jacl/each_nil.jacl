@@ -1,0 +1,4 @@
+# expect: nil
+# each returns nil
+proc cb [x] { [+ $x 0] }
+print [each [vec 1 2 3] $cb]

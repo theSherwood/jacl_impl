@@ -58,7 +58,8 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_MAP_REMOVE,     46);
   ASSERT_INT_EQ(OP_MAP_KEYS,       47);
   ASSERT_INT_EQ(OP_MAP_VALS,       48);
-  ASSERT_INT_EQ(OP_HALT,           49);
+  ASSERT_INT_EQ(OP_EACH,           49);
+  ASSERT_INT_EQ(OP_HALT,           50);
   TEST_PASS();
 }
 
