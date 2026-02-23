@@ -1,0 +1,108 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/arity-checking",
+  "description": "Compile-time arity checking for JACL (M7). Catch wrong-argument-count errors at compile time for statically resolvable proc calls and builtins. Track arity through variable assignments. Extend JaclClosure with arity metadata.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Extend JaclClosure with arity metadata",
+      "description": "As a developer of the JACL runtime, I want JaclClosure to carry arity metadata so it is available for compile-time checking and future variadic support.",
+      "acceptanceCriteria": [
+        "JaclClosure struct in bytecode.c gains a 'variadic' bool field (set to false for now) and a 'min_args' uint8_t field (equal to param_count for fixed-arity procs)",
+        "Compiler populates variadic and min_args when creating closures in compiler.c",
+        "Existing runtime arity check in OP_CALL (vm.c) continues to function using param_count",
+        "No change to the JaclVal 64-bit tagged-value encoding — metadata lives on the heap JaclClosure struct",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Compiler local table arity tracking",
+      "description": "As a developer of the JACL compiler, I need the Local struct to optionally carry arity information so the compiler can check calls through variables.",
+      "acceptanceCriteria": [
+        "Local struct in compiler.c gains an arity tracking field (e.g., int16_t known_arity where -1 means unknown)",
+        "When a local is initialized from a proc definition, known_arity is set to that proc's param_count",
+        "When a local is initialized from another local with known arity (e.g., def g f where f has known arity), known_arity propagates",
+        "When a local's source arity is unknown (runtime expression, non-proc value), known_arity is -1",
+        "Arity information is scoped correctly — does not leak across scope boundaries",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Compile-time arity error for direct proc calls",
+      "description": "As a developer, I want the compiler to reject [foo 1 2 3] when foo is defined as [proc foo [a b] { ... }] so that I catch mistakes before running my program.",
+      "acceptanceCriteria": [
+        "Compiler emits an error when a command head resolves to a known proc and the argument count does not match param_count",
+        "Error message includes line, column, proc name, expected count, and actual count (e.g., 'line 5, col 1: proc 'foo' expects 2 arguments but got 3')",
+        "Compilation fails (non-zero error_count) and no bytecode is executed",
+        "Existing valid programs continue to compile and run unchanged",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Arity checking through variable assignments",
+      "description": "As a developer, I want arity checking to work when I bind a proc to a variable, so that [def f add3] [f 1 2] is caught at compile time.",
+      "acceptanceCriteria": [
+        "When def binds a local to a value whose arity is known (a proc literal or another local with known arity), calls through that local are checked",
+        "Calls through a local with known arity produce compile-time errors on mismatch",
+        "When the bound value's arity is unknown, no compile-time check occurs and the call compiles normally",
+        "Arity info propagates through simple alias chains: [def g f] inherits f's arity when f is known",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Builtin arity enforcement audit",
+      "description": "As a developer, I want consistent arity errors for all builtins so that typos and missing arguments are caught early.",
+      "acceptanceCriteria": [
+        "All existing builtins have arity constraints enforced in the compiler",
+        "Fixed-arity builtins (def: 2, proc: 3, print: 1, +: 2, -: 2, *: 2, /: 2, =: 2, <: 2, >: 2) produce compile-time errors on mismatch",
+        "Flexible-arity builtins (if: 2-3, slice: 2-3, concat: 2+) produce errors when outside their valid range",
+        "Error messages follow the same format as user proc arity errors (line, col, name, expected, got)",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Arity checking test suite",
+      "description": "As a developer, I want a comprehensive test suite that validates arity checking behavior so that regressions are caught.",
+      "acceptanceCriteria": [
+        "test/jacl/arity_direct.jacl — direct call with too few args produces compile error (# expect-error:)",
+        "test/jacl/arity_direct_many.jacl — direct call with too many args produces compile error",
+        "test/jacl/arity_correct.jacl — direct calls with correct arg counts compile and run",
+        "test/jacl/arity_alias.jacl — call through variable alias with wrong arity produces compile error",
+        "test/jacl/arity_alias_correct.jacl — call through alias with correct arity compiles and runs",
+        "test/jacl/arity_unknown.jacl — call through unknown-arity variable compiles without error",
+        "test/jacl/arity_builtins.jacl — builtin with wrong arity produces compile error (at least if, def, +)",
+        "test/jacl/arity_nested.jacl — nested proc definitions with separate arities checked independently",
+        "All new tests pass; entire existing test suite remains green",
+        "All tests pass as part of build.sh"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}

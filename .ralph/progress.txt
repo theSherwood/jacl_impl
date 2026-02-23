@@ -67,6 +67,12 @@
 - HAMT iteration order is hash-based, not insertion order — test maps with single entries or use indirect checks for multi-entry
 - Negative numbers: `-1` in JACL is parsed as two tokens (`-` and `1`); use `def i [- 0 1]` then `$i` for negative values in tests
 - vec-set OOB growth: out-of-bounds index grows vector with nil fill (push_back loop); negative index → runtime error
+- HAMT structural hash: `hash` field in H_NODE base struct; leaf.header.hash = key_hash ^ val_hash; internal.header.hash = XOR of children; collision.header.hash = XOR of items; 0 when no hash handlers set
+- HAMT hash handlers: H_SET_HASH_HANDLERS(key_fn, val_fn) — separate from H_SET_KEY_HANDLERS which sets trie navigation hash/eq; structural hash handlers can be NULL (hashes default to 0)
+- HAMT hash access: root->hash for O(1) structural hash; NULL root → check with H_NODE_HASH(root) which returns 0 for NULL
+- H_LEAF has two hash-related fields: `header.hash` (structural content hash) and `hash` (key hash for trie navigation) — don't confuse them
+- collections.c uses forward declarations for jacl_val_hash/jacl_val_eq to solve ordering: forward-declare → instantiate templates → define functions (functions can call template APIs)
+- jacl_val_eq is the single source of truth for structural equality (vm__deep_eq delegates to it); handles strings, vectors, maps recursively
 
 ## 2026-02-23 - US-001
 - Implemented src/collections.c: JaclVal hash function, JaclVal equality function, RRB vec instantiation (jacl_vec), HAMT instantiation (jacl_map)
@@ -299,4 +305,61 @@
   - rotate_left with n=0: use n &= 31 and (32 - n) & 31 to avoid UB from shifting by 32
   - Structural hash depends on tree layout — vectors built via concat may have different hashes than those built via push_back even with same logical contents (different tree structure)
   - Transient persistent_fn doesn't free the transient — caller must int_vec_rc_unref(t) after int_vec_persistent_fn(t)
+---
+
+## 2026-02-23 - US-015
+- Added eager structural hashing to HAMT template library (lib/hamt/hamt.h)
+- H_NODE base struct gains uint32_t hash field (inherited by all node types via header)
+- H_LEAF structural hash = key_hash_fn(key) ^ val_hash_fn(value) — distinct from existing `hash` field (trie navigation key hash)
+- H_INTERNAL structural hash = XOR of children's header.hash fields
+- H_COLLISION structural hash = XOR of items' header.hash fields
+- Hash handler: H_VAL_HASH_FN typedef + H_SET_HASH_HANDLERS(key_fn, val_fn) — stores key and value hash function pointers
+- Rehash helpers: H_LEAF_REHASH, H_INTERNAL_REHASH, H_COLLISION_REHASH called at every node construction point
+- All persistent (H_SET_RECURSIVE, H_UNSET_RECURSIVE) and transient (H_SET_RECURSIVE_T, H_UNSET_RECURSIVE_T) paths updated
+- H_NODE_HASH(node) accessor returns node->hash or 0 for NULL
+- NO H_ROOT wrapper — hash accessed directly via root->hash (avoids unnecessary indirection)
+- Created lib/hamt/test_hamt_hash.c with 15 tests: empty hash, single leaf, insertion order consistency, value update changes, key add changes, unset changes, unset+set restores, empty map zero, large map consistency (1000 entries), no handler gives zero, accessor, collision consistency, collision unset, transient consistency, transient unset
+- Added test to build.sh TESTS array
+- All 41 test suites pass (including all existing HAMT tests and collections tests)
+- Files changed: lib/hamt/hamt.h, build.sh, .ralph/prd.json
+- Files added: lib/hamt/test_hamt_hash.c
+- **Learnings for future iterations:**
+  - Hash in base H_NODE struct (like RRB vec) — children are H_NODE* and need uniform ->hash access for XOR computation
+  - H_LEAF has TWO hash-related fields: header.hash (structural) and hash (trie key hash) — don't confuse them
+  - XOR combining makes map hash order-independent: maps with same entries in different insertion orders get same hash
+  - When no hash handlers set, all structural hashes default to 0 — existing tests work unchanged
+  - H_ROOT wrapper unnecessary: root->hash gives O(1) access, H_NODE_HASH(NULL) handles empty map case
+  - Must add REHASH calls to both persistent and transient code paths — 20+ construction/modification points total
+  - Transient in-place modifications (owned nodes) need REHASH after mutation, not just new allocations
+---
+
+## 2026-02-23 - US-016
+- Wired cached structural hashes into jacl_val_hash for JACL_TAG_VECTOR and JACL_TAG_MAP — O(1) reads from RRB root and HAMT root node
+- Updated jacl_val_eq to do deep structural equality for vectors and maps (element-wise for vectors, key-value iteration for maps)
+- Restructured collections.c: forward-declare jacl_val_hash/jacl_val_eq → instantiate templates → define functions (so functions can call template APIs)
+- collections__init() now also calls jacl_vec_set_hash_handler(jacl_val_hash) and jacl_map_set_hash_handlers(jacl_val_hash, jacl_val_hash)
+- Simplified vm__deep_eq to delegate to jacl_val_eq (single source of truth for structural equality)
+- Created 2 .jacl test files: map_vec_key, map_map_key
+- Added 6 integration tests to test_collections.c: vec_as_map_key, map_as_map_key, nested_coll_as_key, vec_key_not_found, vec_key_has, eq_still_works
+- All 41 test suites pass (79 total tests in collections suite)
+- Files changed: src/collections.c, src/vm.c, test/test_collections.c
+- Files added: test/jacl/map_vec_key.jacl, test/jacl/map_map_key.jacl
+- **Learnings for future iterations:**
+  - Forward-declare static functions in collections.c to solve chicken-and-egg: hash/eq need template APIs, but templates need to exist before hash/eq are defined
+  - jacl_val_eq now handles collection structural equality — vm__deep_eq delegates to it, so there's a single equality implementation
+  - Collections as map keys work because: jacl_val_hash returns cached structural hash (O(1)), jacl_val_eq does recursive structural comparison
+  - The HAMT uses jacl_val_eq for key comparison — it naturally recurses for nested collection keys
+---
+
+## 2026-02-23 - US-017
+- Added test coverage for all M8a design fixes that were gaps in the existing test suite
+- Created 3 new .jacl test files: map_construct_single (1-pair map constructor), map_nested_key (nested collections as map keys), transform_arity (transform arity error)
+- Added 3 new tests to test_collections.c: test_map_construct_single_pair, test_transform_empty_map, test_transform_arity
+- Most M8a behaviors were already tested by US-012 through US-016 — this story fills the remaining gaps
+- All 41 test suites pass (79 tests in test_collections.c, 76 in jacl_harness)
+- Files changed: test/test_collections.c
+- Files added: test/jacl/map_construct_single.jacl, test/jacl/map_nested_key.jacl, test/jacl/transform_arity.jacl
+- **Learnings for future iterations:**
+  - When an "update test suite" story follows feature stories, most coverage already exists — audit existing tests before writing new ones
+  - .jacl harness test expected values must match actual output exactly — e.g. `[map "a" 1]` stores integer 1, not string "hello"
 ---

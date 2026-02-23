@@ -30,7 +30,7 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | 4  | Variables, Procs, Control    | **COMPLETE** | `proc`, `if`, closures, lexical scoping |
 | 5  | String System                | **COMPLETE** | Heap interned strings, interpolation end-to-end |
 | 6  | Line-Based Syntax Sugar      | **COMPLETE** | Implicit brackets, line/semicolon/comma delimiters |
-| 7  | Arity Checking               |              | Compile-time arity checks, variadic procs |
+| 7  | Arity Checking               | **COMPLETE** | Compile-time arity checks, variadic procs |
 | 8  | Persistent Collections       |              | Vectors (RRB) and maps (HAMT) from JACL |
 | 9  | Error Handling               |              | Error flag propagation, `try` |
 | 10 | Mutable State                |              | `mut`, `set!`, `box`, `atom` |
@@ -43,13 +43,6 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | 17 | FFI & Embedding              |              | C interop, embedding API |
 
 ## Future Milestone Details
-
-### M7: Arity Checking
-- Proc values carry arity metadata: parameter count, variadic flag (reserved), minimum required args
-- Compile-time error when a statically-known call has the wrong number of arguments
-- Arity tracking through variable assignments (`[def f foo] [f 1 2 3]` checked)
-- Builtin arity enforcement: `if` (2–3 args), `def` (2), `proc` (2), etc.
-- Rest-args syntax deferred to M8 (needs collections for the rest binding)
 
 ### M8: Persistent Collections
 - Vector type backed by `rrb_vec`: `vec`, `vec-get`, `vec-set`, `vec-push`, `vec-len`, etc.

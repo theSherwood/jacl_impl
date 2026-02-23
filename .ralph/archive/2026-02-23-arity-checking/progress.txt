@@ -1,0 +1,122 @@
+## Codebase Patterns
+- File-based test harness: test/test_jacl_harness.c reads .jacl files from test/jacl/, parses # expect: / # expect-error: headers, runs through jacl_run with PrintCapture
+- PrintCapture buffer in harness is 8192 bytes (larger than integration tests' 1024) to handle multi-line test output
+- Harness uses malloc/free for file I/O (not tracked_allocator) — tracked_allocator is only for the VM arena
+- Unity build: `src/jacl.c` #includes all pipeline .c files + lib headers as a single translation unit
+- JACL pipeline files in `src/`: plain .c with `#ifndef X_C` guards, no `#define X_IMPLEMENTATION` needed
+- Lib modules in `lib/`: single-header convention with `#ifdef X_IMPLEMENTATION`
+- Test files: `#include "test_helpers.h"` then `#include "../src/jacl.c"` — gets everything
+- Arena allocator: zero-init `arena_t arena = {0}`, uses libc by default
+- Test tracked allocator: `tracked_allocator` from `test/test_helpers.h`, plug into arena via `.allocator = tracked_allocator`
+- Build system: `build.sh` with `TESTS=()` array entries formatted as `"path/test.c|name|optional_extra_cflags"`
+- Compiler flags: `-Wall -Wextra -std=c99 -g`
+- Implementation language is C (C99)
+- Pipeline: src/value.c → src/string.c → src/lexer.c → src/ast.c → src/parser.c → src/bytecode.c → src/compiler.c → src/vm.c
+- Private/internal functions use double-underscore prefix: `module__function_name`
+- Public types use PascalCase (Token, LexResult, AstNode) or lower_t for system-level (arena_t)
+- Public functions use module_verb_noun pattern (lexer_lex, arena_alloc, parser_parse)
+- Constants and macros use ALL_CAPS (TOKEN_EOF, JACL_TAG_NIL)
+- Test functions are `static int test_name(void)` returning 0=fail, 1=pass
+- Test main() uses table-driven pattern: array of {name, fn} structs, iterates and counts pass/fail
+- Memory leak check pattern: setup() -> exercise -> teardown() -> ASSERT(check_no_leaks()) -> TEST_PASS()
+- Tests grouped by US-XXX story comments in the test table
+- Bare word semantics (M6): bare words at statement position desugar to zero-arg calls — use `{ "yes" }` not `{ yes }` for string-literal blocks
+- $var semantics (M6): `$var` at statement position desugars to `[$var]` (zero-arg call) — use `{ [+ $x 0] }` not `{ $x }` for non-callable values
+- `def g f` binds g to the string "f", NOT the proc — use `def g $f` to capture a proc value
+- Integration tests use PrintCapture pattern with `vm.print_fn`/`vm.print_ctx` — no `last_result` field on VM
+- The `print` builtin appends `\n` to output
+- Files sorted alphabetically for deterministic test ordering
+- JaclClosure has `min_args` (uint8_t) and `variadic` (bool) fields for arity metadata — set by compiler, copied in OP_CLOSURE
+- Local struct has `known_arity` (int16_t, -1 = unknown) — set by proc definition and propagated by def from var refs
+- `compiler__node_known_arity(c, node)` determines arity of an AST node at compile time: AST_VAR_REF → local then global, AST_LIT_STRING → global only
+- Global arity tracking: `GlobalArity` table on root Compiler, set by `proc` at global scope, resolved via `compiler__resolve_global_arity` (walks `enclosing` chain to root)
+- Arity error format: `compiler__error` prepends "line X, col Y: ", proc message is "proc 'name' expects N arguments but got M", builtin message is "builtin 'name' expects N arguments but got M"
+- Builtin arity errors use `compiler__builtin_arity_error(c, line, col, name, expected_desc, argc)` helper
+- Arity checking works for both bare word heads (AST_LIT_STRING) and $var heads (AST_VAR_REF) in dynamic call section
+- Global `def` propagates arity: `def g $f` or `def g procname` where the RHS has known arity → g gets that arity globally
+- Compile errors surface as VM_RUNTIME_ERROR from jacl_run — test harness `# expect-error:` works for both compile and runtime errors
+
+## 2026-02-20 - US-001
+Thread: N/A (first iteration)
+- Added `min_args` (uint8_t) and `variadic` (bool) fields to JaclClosure struct in bytecode.c
+- Compiler sets min_args = param_count, variadic = false when creating closures
+- OP_CLOSURE in vm.c copies both fields from template to runtime closure
+- memset on top_closure in vm_exec zeroes both fields correctly (min_args=0, variadic=false)
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c
+- **Learnings for future iterations:**
+  - The top-level closure in vm_exec is zero-initialized via memset, so new fields default to 0/false
+  - OP_CLOSURE copies template fields to a new arena-allocated closure — new fields must be added to both compiler (template creation) and VM (runtime copy)
+---
+
+## 2026-02-20 - US-002
+Thread: N/A
+- Added `known_arity` (int16_t) field to Local struct in compiler.c — defaults to -1 (unknown)
+- `proc` at local scope sets `known_arity = param_count` on the newly created local
+- `def` at local scope determines RHS arity via `compiler__node_known_arity()` and propagates to new local
+- `compiler__node_known_arity()` resolves AST_VAR_REF → local slot → known_arity (returns -1 for non-var-ref or unresolvable)
+- Arity scoping is correct: locals removed by `compiler__end_scope` take their arity info with them
+- Files changed: src/compiler.c
+- **Learnings for future iterations:**
+  - `def g f` binds to string "f", not proc — only `def g $f` (AST_VAR_REF) propagates arity
+  - known_arity must be computed BEFORE compiler__add_local since the new local would shadow the source variable in the same scope
+  - Proc params in body compiler get known_arity = -1 correctly (we don't know what callers will pass)
+---
+
+## 2026-02-20 - US-003
+Thread: N/A
+- Added global arity tracking: `GlobalArity` struct + table (max 64) on Compiler, with `compiler__resolve_global_arity` and `compiler__set_global_arity` helpers
+- `compiler__resolve_global_arity` walks `enclosing` chain to root compiler (globals are always on the root)
+- `proc` at global scope now calls `compiler__set_global_arity(c, name_val, param_count)` after emitting OP_DEF_GLOBAL
+- Dynamic call section checks arity for bare word command heads: resolves local first, then global arity; emits compile error on mismatch
+- Error message format: "proc 'foo' expects 2 arguments but got 3" (compiler__error prepends line/col)
+- Arity checking works from nested proc bodies (e.g., `proc bar [x] { [foo $x 1 2] }` catches the error on foo)
+- Files changed: src/compiler.c
+- **Learnings for future iterations:**
+  - Global arity is recorded AFTER body compilation, so recursive calls to self are not arity-checked (correct: proc isn't defined yet)
+  - For calls from nested proc bodies, `compiler__resolve_global_arity` must walk `enclosing` chain since body_compiler has its own (empty) global_arities table
+  - Error handling in compiler returns early — arity check must happen BEFORE emitting GET_LOCAL/GET_GLOBAL and argument compilation
+---
+
+## 2026-02-20 - US-004
+Thread: N/A
+- Extended `compiler__node_known_arity` to resolve global arity for AST_VAR_REF (when not found as local) and AST_LIT_STRING (bare word global proc names)
+- Added arity checking for AST_VAR_REF command heads (`[$f 1 2]`) in dynamic call else branch
+- Added global arity propagation through `def` at global scope: `def g $f` or `def g f` where f has known global arity → g gets that arity
+- Files changed: src/compiler.c
+- **Learnings for future iterations:**
+  - `compiler__node_known_arity` now handles 3 cases: AST_VAR_REF → local then global, AST_LIT_STRING → global only
+  - For `$var` command heads, the arity check pattern mirrors the bare-word check but uses `head->data.var_ref` fields
+  - Global def arity must be computed BEFORE emitting DEF_GLOBAL so the RHS node can still resolve its own references
+---
+
+## 2026-02-20 - US-005
+Thread: N/A
+- Added `compiler__builtin_arity_error` helper for consistent builtin arity error messages
+- Updated all 19 builtin arity error messages to format: `builtin 'name' expects N arguments but got M`
+- Fixed builtins: +, -, *, /, %, ==, <, >, <=, >=, print, length, index, slice, concat, def, proc, if, while
+- Updated 2 compiler test assertions that checked old-format "while requires 2" message
+- Files changed: src/compiler.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Compiler tests (test_compiler.c) use `strstr(cr.error_message, "...")` substring checks — must update these when changing error message formats
+  - The `%` builtin had `"%%"` in the old message (printf escape), but the new helper uses `%s` for the name so plain `"%"` is correct
+  - `-` is flexible-arity (1 or 2) — unary negation with 1 arg, subtraction with 2 — not fixed at 2 as the PRD suggests
+---
+
+## 2026-02-20 - US-006
+Thread: N/A
+- Created 8 .jacl test files for comprehensive arity checking coverage:
+  - arity_direct.jacl — too few args on direct proc call (expect-error)
+  - arity_direct_many.jacl — too many args on direct proc call (expect-error)
+  - arity_correct.jacl — correct arg counts for 3-arg, 1-arg, 0-arg procs
+  - arity_alias.jacl — wrong arity through variable alias (expect-error)
+  - arity_alias_correct.jacl — correct arity through alias + alias chain propagation
+  - arity_unknown.jacl — unknown-arity variable (proc returned from another proc) compiles and runs
+  - arity_builtins.jacl — builtin `+` with wrong arity (expect-error)
+  - arity_nested.jacl — nested proc definitions with independent arities
+- All 17 harness tests pass (8 new + 9 existing); 38 total tests pass
+- Files changed: test/jacl/arity_*.jacl (8 new files)
+- **Learnings for future iterations:**
+  - Proc names must be <= 7 bytes (inline string limit) — `make_adder` (10 chars) fails, use `mkadd` instead
+  - Test harness `# expect-error:` is substring match — only one error scenario per file
+  - Error format for proc arity: "proc 'name' expects N arguments but got M" (note: "1 arguments" not "1 argument")
+---
