@@ -920,6 +920,18 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* filter builtin (exactly 2 args) */
+  if (compiler__head_matches(head, "filter", 6)) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "filter", "2 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_FILTER, line);
+    return;
+  }
+
   /* to-string builtin (exactly 1 arg) */
   if (compiler__head_matches(head, "to-string", 9)) {
     if (argc != 1) {

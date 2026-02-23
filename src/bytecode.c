@@ -65,6 +65,7 @@ typedef enum {
   OP_MAP_VALS,      /* pop map, push vector of values */
   OP_EACH,          /* iterate: pop closure + collection, call closure per element */
   OP_MAP_TRANSFORM, /* transform: pop closure + collection, call closure per element, build new collection */
+  OP_FILTER,        /* filter: pop closure + collection, call closure per element, keep truthy results */
   OP_HALT           /* stop execution */
 } OpCode;
 

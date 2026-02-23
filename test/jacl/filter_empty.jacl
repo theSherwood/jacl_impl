@@ -1,0 +1,5 @@
+# expect: 0
+# filtering an empty vector returns an empty vector
+proc gt2 [x] { [> $x 2] }
+def v2 [filter [vec] $gt2]
+print [vec-len $v2]

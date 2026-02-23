@@ -1704,6 +1704,160 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_FILTER: {
+        JaclVal closure_val, coll_val;
+        result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
+
+        if (!jacl_is_closure(closure_val)) {
+          vm__set_error(vm,
+            "type error in 'filter': expected closure as second argument, got %s",
+            vm__type_name(closure_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        JaclClosure* closure = jacl_as_closure(closure_val);
+
+        if (jacl_is_vector(coll_val)) {
+          if (closure->param_count != 1) {
+            vm__set_error(vm,
+              "filter on vector requires a proc with 1 parameter, got %d",
+              (int)closure->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+
+          jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(coll_val);
+          uint32_t count = jacl_vec_count(vec);
+          jacl_vec_root* result_vec = jacl_vec_empty();
+
+          for (uint32_t i = 0; i < count; i++) {
+            jacl_vec_get_result gr = jacl_vec_get(vec, i);
+
+            /* Push closure as callee slot + argument */
+            result = vm__push(vm, closure_val);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, gr.value);
+            if (result != VM_OK) return result;
+
+            /* Set up call frame */
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+            uint32_t caller_frame_count = vm->frame_count;
+            CallFrame* cf = &vm->frames[vm->frame_count++];
+            cf->closure    = closure;
+            cf->return_ip  = vm->ip;
+            cf->stack_base = vm->stack_top - 1;
+            cf->chunk      = &closure->chunk;
+
+            /* Switch to closure code and execute */
+            uint8_t* saved_ip = vm->ip;
+            BytecodeChunk* saved_chunk = vm->chunk;
+            vm->ip    = closure->chunk.code;
+            vm->chunk = &closure->chunk;
+
+            VMResult call_result = vm__run(vm, caller_frame_count);
+            if (call_result != VM_OK) return call_result;
+
+            /* Collect return value — keep element if truthy */
+            JaclVal ret;
+            result = vm__pop(vm, &ret);
+            if (result != VM_OK) return result;
+
+            if (!vm__is_falsy(ret)) {
+              jacl_vec_root* new_result = jacl_vec_push_back(result_vec, gr.value);
+              jacl_vec_unref(result_vec);
+              result_vec = new_result;
+            }
+
+            /* Restore state for next iteration */
+            vm->ip    = saved_ip;
+            vm->chunk = saved_chunk;
+            frame = &vm->frames[vm->frame_count - 1];
+          }
+
+          result = vm__push(vm, jacl_vector_ptr(result_vec));
+          if (result != VM_OK) return result;
+
+        } else if (jacl_is_map(coll_val)) {
+          if (closure->param_count != 2) {
+            vm__set_error(vm,
+              "filter on map requires a proc with 2 parameters, got %d",
+              (int)closure->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+
+          jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(coll_val);
+          jacl_map_node* result_map = NULL;
+          jacl_map_iter it = jacl_map_iter_init(map);
+          jacl_map_iter_result ir;
+
+          for (;;) {
+            ir = jacl_map_next_leaf(&it);
+            if (ir.done) break;
+
+            JaclVal key = jacl_map_key_from_leaf(ir.item);
+            JaclVal value = jacl_map_value_from_leaf(ir.item);
+
+            /* Push closure as callee slot + key + value */
+            result = vm__push(vm, closure_val);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, key);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, value);
+            if (result != VM_OK) return result;
+
+            /* Set up call frame */
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+            uint32_t caller_frame_count = vm->frame_count;
+            CallFrame* cf = &vm->frames[vm->frame_count++];
+            cf->closure    = closure;
+            cf->return_ip  = vm->ip;
+            cf->stack_base = vm->stack_top - 2;
+            cf->chunk      = &closure->chunk;
+
+            /* Switch to closure code and execute */
+            uint8_t* saved_ip = vm->ip;
+            BytecodeChunk* saved_chunk = vm->chunk;
+            vm->ip    = closure->chunk.code;
+            vm->chunk = &closure->chunk;
+
+            VMResult call_result = vm__run(vm, caller_frame_count);
+            if (call_result != VM_OK) return call_result;
+
+            /* Collect return value — keep entry if truthy */
+            JaclVal ret;
+            result = vm__pop(vm, &ret);
+            if (result != VM_OK) return result;
+
+            if (!vm__is_falsy(ret)) {
+              jacl_map_node* new_map = jacl_map_set(result_map, key, value);
+              jacl_map_unref(result_map);
+              result_map = new_map;
+            }
+
+            /* Restore state for next iteration */
+            vm->ip    = saved_ip;
+            vm->chunk = saved_chunk;
+            frame = &vm->frames[vm->frame_count - 1];
+          }
+
+          result = vm__push(vm, jacl_map_ptr(result_map));
+          if (result != VM_OK) return result;
+
+        } else {
+          vm__set_error(vm,
+            "type error in 'filter': expected vector or map, got %s",
+            vm__type_name(coll_val));
+          return VM_RUNTIME_ERROR;
+        }
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }
