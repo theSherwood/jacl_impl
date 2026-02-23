@@ -248,6 +248,61 @@ static JaclVal vm__env_get(VM* vm, JaclVal name) {
     result = vm__push(vm, res); if (result != VM_OK) return result;           \
   } while (0)
 
+/* --- Deep structural equality for collections --- */
+
+static bool vm__deep_eq(JaclVal a, JaclVal b) {
+  uint64_t tag_a = jacl_type_tag(a);
+  uint64_t tag_b = jacl_type_tag(b);
+
+  /* String equality (inline vs heap) */
+  if ((tag_a == JACL_TAG_INLINE_STRING || tag_a == JACL_TAG_STRING) &&
+      (tag_b == JACL_TAG_INLINE_STRING || tag_b == JACL_TAG_STRING)) {
+    return jacl_string_eq(a, b);
+  }
+
+  /* Different type tags → not equal */
+  if (tag_a != tag_b) return false;
+
+  /* Vector structural equality */
+  if (tag_a == JACL_TAG_VECTOR) {
+    jacl_vec_root* va = (jacl_vec_root*)jacl_as_ptr(a);
+    jacl_vec_root* vb = (jacl_vec_root*)jacl_as_ptr(b);
+    if (va == vb) return true;
+    uint32_t len = jacl_vec_count(va);
+    if (len != jacl_vec_count(vb)) return false;
+    for (uint32_t i = 0; i < len; i++) {
+      jacl_vec_get_result ga = jacl_vec_get(va, i);
+      jacl_vec_get_result gb = jacl_vec_get(vb, i);
+      if (!vm__deep_eq(ga.value, gb.value)) return false;
+    }
+    return true;
+  }
+
+  /* Map structural equality */
+  if (tag_a == JACL_TAG_MAP) {
+    jacl_map_node* ma = (jacl_map_node*)jacl_as_ptr(a);
+    jacl_map_node* mb = (jacl_map_node*)jacl_as_ptr(b);
+    if (ma == mb) return true;
+    if (jacl_map_count(ma) != jacl_map_count(mb)) return false;
+    /* Every key in a must exist in b with deep-equal value */
+    jacl_map_iter it = jacl_map_iter_init(ma);
+    jacl_map_iter_result ir;
+    for (;;) {
+      ir = jacl_map_next_leaf(&it);
+      if (ir.done) break;
+      JaclVal key = jacl_map_key_from_leaf(ir.item);
+      JaclVal val_a = jacl_map_value_from_leaf(ir.item);
+      if (!jacl_map_has(mb, key)) return false;
+      JaclVal val_b = jacl_map_get(mb, key);
+      if (!vm__deep_eq(val_a, val_b)) return false;
+    }
+    return true;
+  }
+
+  /* All other types: bitwise payload comparison */
+  return (a & JACL_PAYLOAD_MASK) == (b & JACL_PAYLOAD_MASK);
+}
+
 /**
  * Execute a bytecode chunk.
  * Returns VM_OK on successful completion (OP_HALT),
@@ -378,15 +433,7 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
         result = vm__pop(vm, &a); if (result != VM_OK) return result;
-        JaclVal res;
-        if (jacl_is_string(a) || jacl_is_string(b)) {
-          /* String-aware equality: both must be strings for true */
-          bool eq = jacl_is_string(a) && jacl_is_string(b) &&
-                    jacl_string_eq(a, b);
-          res = jacl_bool(eq);
-        } else {
-          res = jacl_eq(a, b);
-        }
+        JaclVal res = jacl_bool(vm__deep_eq(a, b));
         result = vm__push(vm, res);
         if (result != VM_OK) return result;
         break;

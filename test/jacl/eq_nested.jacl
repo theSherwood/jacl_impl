@@ -1,0 +1,5 @@
+# expect: true
+# expect: false
+# nested/recursive structural equality
+print [== [vec [vec 1] [vec 2]] [vec [vec 1] [vec 2]]]
+print [== [vec [vec 1] [vec 2]] [vec [vec 1] [vec 3]]]
