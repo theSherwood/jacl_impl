@@ -23,6 +23,7 @@
 #include "ast.c"
 #include "parser.c"
 #include "bytecode.c"
+#include "collections.c"
 #include "compiler.c"
 #include "vm.c"
 
