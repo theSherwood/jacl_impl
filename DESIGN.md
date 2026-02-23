@@ -30,72 +30,80 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | 4  | Variables, Procs, Control    | **COMPLETE** | `proc`, `if`, closures, lexical scoping |
 | 5  | String System                | **COMPLETE** | Heap interned strings, interpolation end-to-end |
 | 6  | Line-Based Syntax Sugar      | **COMPLETE** | Implicit brackets, line/semicolon/comma delimiters |
-| 7  | Persistent Collections       |              | Vectors (RRB) and maps (HAMT) from JACL |
-| 8  | Error Handling               |              | Error flag propagation, `try` |
-| 9  | Mutable State                |              | `mut`, `set!`, `box`, `atom` |
-| 10 | Static Type System           |              | Typed/unboxed values, compile-time checking |
-| 11 | Garbage Collection           |              | Epoch-based tracing GC |
-| 12 | Concurrency                  |              | NxM scheduler, parallel/spawn/await |
-| 13 | Module System                |              | File modules, sandboxing |
-| 14 | Macro System                 |              | AST macros, hygiene |
-| 15 | Phase 2 Syntax               |              | Operators, assignment sugar |
-| 16 | FFI & Embedding              |              | C interop, embedding API |
+| 7  | Arity Checking               |              | Compile-time arity checks, variadic procs |
+| 8  | Persistent Collections       |              | Vectors (RRB) and maps (HAMT) from JACL |
+| 9  | Error Handling               |              | Error flag propagation, `try` |
+| 10 | Mutable State                |              | `mut`, `set!`, `box`, `atom` |
+| 11 | Static Type System           |              | Typed/unboxed values, compile-time checking |
+| 12 | Garbage Collection           |              | Epoch-based tracing GC |
+| 13 | Concurrency                  |              | NxM scheduler, parallel/spawn/await |
+| 14 | Module System                |              | File modules, sandboxing |
+| 15 | Macro System                 |              | AST macros, hygiene |
+| 16 | Phase 2 Syntax               |              | Operators, assignment sugar |
+| 17 | FFI & Embedding              |              | C interop, embedding API |
 
 ## Future Milestone Details
 
-### M7: Persistent Collections
+### M7: Arity Checking
+- Proc values carry arity metadata: parameter count, variadic flag (reserved), minimum required args
+- Compile-time error when a statically-known call has the wrong number of arguments
+- Arity tracking through variable assignments (`[def f foo] [f 1 2 3]` checked)
+- Builtin arity enforcement: `if` (2–3 args), `def` (2), `proc` (2), etc.
+- Rest-args syntax deferred to M8 (needs collections for the rest binding)
+
+### M8: Persistent Collections
 - Vector type backed by `rrb_vec`: `vec`, `vec-get`, `vec-set`, `vec-push`, `vec-len`, etc.
 - Map type backed by `hamt`: `map`, `map-get`, `map-set`, `map-has`, `map-keys`, etc.
 - Iteration via `each` builtin
 - Initially use constructor builtins: `[vec 1 2 3]`, `[map key val]`
 
-### M8: Error Handling
+### M9: Error Handling
 - `error` builtin creates error-flagged values with arbitrary payloads
 - Implicit propagation: operations on error-flagged values return the error unchanged
 - `try` builtin: evaluate block, use fallback if result is error-flagged
 - `error?` predicate
 
-### M9: Mutable State
+### M10: Mutable State
 - `mut` (mutable binding), `set!` (reassignment)
 - Closure capture of mutable bindings by reference
 - `box` — thread-local mutable container
-- `atom` — thread-safe CAS container (concurrency semantics in M12)
+- `atom` — thread-safe CAS container (concurrency semantics in M13)
 
-### M10: Static Type System
+### M11: Static Type System
 - Type annotations: `[def i64 x 42]`
 - Compiler emits typed (unboxed) instructions when type is known
 - Separate opcode variants for unboxed i64/f64 arithmetic
 - `to` builtin for explicit conversions: `[to dyn $x]`, `[to i64 $y]`
 
-### M11: Garbage Collection
+### M12: Garbage Collection
 - Epoch-based tracing GC with per-thread epoch tracking
 - Mark from roots (stack, frames, globals, scheduled tasks), sweep below waterline
 - Write barriers for mutable containers (box, atom)
 - Safe points at CPS suspension boundaries
 - Per-thread heaps
 
-### M12: Concurrency
+### M13: Concurrency
 - NxM thread pool with work-stealing (one chase_lev deque per thread)
 - CPS transform in compiler splits procedures at suspension points
 - `parallel` (join all), `race` (take first), `spawn`/`await`
 - Tasks mutating thread-local state pinned to their thread
 
-### M13: Module System
+### M14: Module System
 - File = module, everything public, `use` for imports
 - Module cache (compile/load once), circular import detection
 - Sandboxing: `[interpret $src $restriction-map]`
 
-### M14: Macro System
+### M15: Macro System
 - `defmacro` — receives unevaluated AST, returns transformed AST
 - AST quasiquoting, hygienic expansion
 - Rewrite builtins (`proc`, `if`, etc.) as macros where possible
 
-### M15: Phase 2 Syntax
+### M16: Phase 2 Syntax
 - Assignment: `foo = 3` → `[def foo 3]`, `bar : 4` → `[mut bar 4]`, `bar :: 5` → `[set! bar 5]`
 - Infix operators with precedence: `$x + $y * $z` → `[+ $x [* $y $z]]`
 - Parenthesized grouping: `($x + $y) * $z`
 
-### M16: FFI & Embedding
+### M17: FFI & Embedding
 - C embedding API: `jacl_vm_new()`, `jacl_eval()`, `jacl_call()`, `jacl_register_fn()`
 - FFI for calling C from JACL with automatic marshaling
 - Struct interop, callback support (closures as C function pointers)

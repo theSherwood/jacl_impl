@@ -1,0 +1,94 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/file-based-test-harness",
+  "description": "File-based JACL test harness: a small C program that reads .jacl test files from a directory, runs them through jacl_run, and compares actual output against expected output declared in # expect: header comments. Integrates with build.sh as a single test entry.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Test harness C program",
+      "description": "As a developer, I want a C test harness that discovers .jacl files in a directory and runs them so that I can write tests without touching C code.",
+      "acceptanceCriteria": [
+        "test/test_jacl_harness.c exists, includes ../src/jacl.c and test_helpers.h (standard unity build pattern)",
+        "Harness scans a directory for *.jacl files (use opendir/readdir from <dirent.h>)",
+        "Default directory is test/jacl/ (relative to the binary's working directory — build.sh runs from project root)",
+        "For each .jacl file: reads the file contents, parses # expect: / # expect-error: header comments, runs through jacl_run with PrintCapture, compares actual output to expected",
+        "Uses tracked_allocator and checks for memory leaks after each test file (same pattern as existing tests)",
+        "Prints per-file pass/fail with the filename, plus a summary line at the end",
+        "Exits with code 0 if all pass, 1 if any fail",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Comment-based expected output parsing",
+      "description": "As a test author, I want to declare expected output in # expect: comments so that each test file is self-contained.",
+      "acceptanceCriteria": [
+        "Lines starting with '# expect: ' (note trailing space) at the top of the file define expected stdout lines, in order",
+        "Lines starting with '# expect-error: ' define an expected runtime error — the program should return VM_RUNTIME_ERROR and the VM error message should contain the given substring",
+        "A file can have multiple # expect: lines (one per expected output line) OR a single # expect-error: line, but not both",
+        "Regular # comments that don't match # expect: or # expect-error: are ignored (they're just JACL comments)",
+        "Header comment parsing stops at the first non-comment, non-blank line (expectations must be at the top)",
+        "If a file has no # expect: or # expect-error: directives, it is treated as 'expect success with no output' (VM_OK, empty stdout)",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Individual test targeting",
+      "description": "As a developer, I want to run a single .jacl test file for debugging so that I can iterate quickly on failures.",
+      "acceptanceCriteria": [
+        "The harness accepts an optional command-line argument: a path to a single .jacl file",
+        "When given a path, it runs only that one file instead of scanning the directory",
+        "When given a filename without a path (e.g., basics.jacl), it looks in the default test/jacl/ directory",
+        "Output for single-file mode is the same format as multi-file mode (pass/fail + summary)",
+        "Example usage: ./test_jacl_harness test/jacl/bare_commands.jacl",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Build system integration",
+      "description": "As a developer, I want the file-based tests to run as part of build.sh so that they're always verified alongside existing tests.",
+      "acceptanceCriteria": [
+        "test/jacl/ directory exists",
+        "Entry added to build.sh TESTS array: test/test_jacl_harness.c|jacl_harness|",
+        "build.sh passes (harness compiles and runs successfully, even if test/jacl/ has zero test files initially)",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Initial test suite",
+      "description": "As a developer, I want a starter set of .jacl test files covering core functionality so that the harness is immediately useful.",
+      "acceptanceCriteria": [
+        "test/jacl/bare_commands.jacl — bare command with args (print hello), bare command no args (proc call), nested brackets in line mode",
+        "test/jacl/separators.jacl — semicolon, comma, newline, and mixed separators",
+        "test/jacl/line_continuation.jacl — backslash continuation",
+        "test/jacl/procs.jacl — proc definition, call, recursion (factorial), closures",
+        "test/jacl/variables.jacl — def, $var usage, $var as command call",
+        "test/jacl/control_flow.jacl — if/else, while loop",
+        "test/jacl/strings.jacl — string literals, interpolation, concat, length, index, slice",
+        "test/jacl/arithmetic.jacl — +, -, *, /, %, comparisons",
+        "test/jacl/error_basic.jacl — at least one # expect-error: test (e.g., calling a non-callable value)",
+        "All test files pass when run through the harness",
+        "Total suite passes as part of build.sh",
+        "Compiles cleanly with -Wall -Wextra -std=c99 -g"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
