@@ -1,0 +1,2 @@
+# expect: a
+print [map-get [map [vec 1] "a"] [vec 1]]

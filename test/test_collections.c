@@ -817,6 +817,70 @@ static int test_multiline_program(void) {
   TEST_PASS();
 }
 
+/* ===== US-016: Collections as map keys ===== */
+
+static int test_vec_as_map_key(void) {
+  PrintCapture cap;
+  /* Structurally equal vectors should find same entry */
+  ASSERT(run_ok(
+    "[print [map-get [map [vec 1] \"a\"] [vec 1]]]",
+    &cap, "a\n"));
+  TEST_PASS();
+}
+
+static int test_map_as_map_key(void) {
+  PrintCapture cap;
+  /* Structurally equal maps should find same entry */
+  ASSERT(run_ok(
+    "[print [map-get [map [map \"x\" 1] \"nested\"] [map \"x\" 1]]]",
+    &cap, "nested\n"));
+  TEST_PASS();
+}
+
+static int test_nested_coll_as_key(void) {
+  PrintCapture cap;
+  /* Nested collection as key */
+  ASSERT(run_ok(
+    "def k [vec [vec 1 2] [vec 3]]\n"
+    "def m [map $k \"deep\"]\n"
+    "[print [map-get $m [vec [vec 1 2] [vec 3]]]]",
+    &cap, "deep\n"));
+  TEST_PASS();
+}
+
+static int test_vec_key_not_found(void) {
+  PrintCapture cap;
+  /* Different vector should not match */
+  ASSERT(run_ok(
+    "def m [map [vec 1] \"a\"]\n"
+    "[print [map-get $m [vec 2]]]",
+    &cap, "nil\n"));
+  TEST_PASS();
+}
+
+static int test_vec_key_has(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "def m [map [vec 1 2] \"yes\"]\n"
+    "[print [map-has $m [vec 1 2]]]\n"
+    "[print [map-has $m [vec 1 3]]]",
+    &cap, "true\nfalse\n"));
+  TEST_PASS();
+}
+
+static int test_eq_still_works(void) {
+  PrintCapture cap;
+  /* Verify eq still uses structural equality (no regression) */
+  ASSERT(run_ok(
+    "[print [== [vec 1 2 3] [vec 1 2 3]]]\n"
+    "[print [== [vec 1] [vec 2]]]\n"
+    "[print [== [map \"a\" 1] [map \"a\" 1]]]\n"
+    "[print [== 42 42]]\n"
+    "[print [== \"hello\" \"hello\"]]",
+    &cap, "true\nfalse\ntrue\ntrue\ntrue\n"));
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -907,6 +971,13 @@ int main(void) {
     /* Persistence comprehensive */
     { "persist_vec_comprehensive", test_persist_vec_comprehensive },
     { "persist_map_comprehensive", test_persist_map_comprehensive },
+    /* US-016: Collections as map keys */
+    { "vec_as_map_key",            test_vec_as_map_key },
+    { "map_as_map_key",            test_map_as_map_key },
+    { "nested_coll_as_key",        test_nested_coll_as_key },
+    { "vec_key_not_found",         test_vec_key_not_found },
+    { "vec_key_has",               test_vec_key_has },
+    { "eq_still_works",            test_eq_still_works },
     /* End-to-end integration */
     { "vec_in_map",                test_vec_in_map },
     { "map_in_vec",                test_map_in_vec },

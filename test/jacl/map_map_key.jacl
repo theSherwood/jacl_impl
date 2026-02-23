@@ -1,0 +1,2 @@
+# expect: nested
+print [map-get [map [map "x" 1] "nested"] [map "x" 1]]

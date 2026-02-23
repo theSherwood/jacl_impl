@@ -8,6 +8,33 @@
 #ifndef COLLECTIONS_C
 #define COLLECTIONS_C
 
+/* --- Forward declarations (defined after template instantiation) --- */
+
+static uint32_t jacl_val_hash(JaclVal v);
+static bool jacl_val_eq(JaclVal a, JaclVal b);
+
+/* --- Allocator for collection templates (static compound literal) --- */
+
+#define JACL_COLL_ALLOCATOR { .alloc = libc_alloc, .free = libc_free, .ctx = NULL }
+
+/* --- Instantiate RRB vector template: jacl_vec --- */
+
+#define RRB_VEC_T         JaclVal
+#define RRB_VEC_NAME      jacl_vec
+#define RRB_VEC_ALLOCATOR JACL_COLL_ALLOCATOR
+#include "../lib/rrb_vec/rrb_vec.h"
+
+/* Clean up RC_ALLOCATOR leaked by rrb_vec.h's rc.h inclusion */
+#undef RC_ALLOCATOR
+
+/* --- Instantiate HAMT template: jacl_map --- */
+
+#define HAMT_KEY_T    JaclVal
+#define HAMT_VAL_T    JaclVal
+#define HAMT_NAME     jacl_map
+#define HAMT_ALLOCATOR JACL_COLL_ALLOCATOR
+#include "../lib/hamt/hamt.h"
+
 /* --- JaclVal hash function (dispatches on type tag) --- */
 
 static uint32_t jacl_val_hash(JaclVal v) {
@@ -55,6 +82,16 @@ static uint32_t jacl_val_hash(JaclVal v) {
     JaclHeapString* hs = jacl_as_heap_string(v);
     return hs->hash;
   }
+  if (tag == JACL_TAG_VECTOR) {
+    /* O(1) cached structural hash from RRB root */
+    jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(v);
+    return jacl_vec_hash(vec);
+  }
+  if (tag == JACL_TAG_MAP) {
+    /* O(1) cached structural hash from HAMT root node */
+    jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(v);
+    return jacl_map_node_hash(map);
+  }
 
   /* Fallback: hash the raw payload bits */
   uint64_t payload = v & JACL_PAYLOAD_MASK;
@@ -73,37 +110,54 @@ static bool jacl_val_eq(JaclVal a, JaclVal b) {
     return jacl_string_eq(a, b);
   }
 
-  /* For all other types: same tag + same payload = equal */
+  /* Different type tags → not equal */
   if (tag_a != tag_b) return false;
+
+  /* Vector structural equality */
+  if (tag_a == JACL_TAG_VECTOR) {
+    jacl_vec_root* va = (jacl_vec_root*)jacl_as_ptr(a);
+    jacl_vec_root* vb = (jacl_vec_root*)jacl_as_ptr(b);
+    if (va == vb) return true;
+    uint32_t len = jacl_vec_count(va);
+    if (len != jacl_vec_count(vb)) return false;
+    for (uint32_t i = 0; i < len; i++) {
+      jacl_vec_get_result ga = jacl_vec_get(va, i);
+      jacl_vec_get_result gb = jacl_vec_get(vb, i);
+      if (!jacl_val_eq(ga.value, gb.value)) return false;
+    }
+    return true;
+  }
+
+  /* Map structural equality */
+  if (tag_a == JACL_TAG_MAP) {
+    jacl_map_node* ma = (jacl_map_node*)jacl_as_ptr(a);
+    jacl_map_node* mb = (jacl_map_node*)jacl_as_ptr(b);
+    if (ma == mb) return true;
+    if (jacl_map_count(ma) != jacl_map_count(mb)) return false;
+    jacl_map_iter it = jacl_map_iter_init(ma);
+    jacl_map_iter_result ir;
+    for (;;) {
+      ir = jacl_map_next_leaf(&it);
+      if (ir.done) break;
+      JaclVal key = jacl_map_key_from_leaf(ir.item);
+      JaclVal val_a = jacl_map_value_from_leaf(ir.item);
+      if (!jacl_map_has(mb, key)) return false;
+      JaclVal val_b = jacl_map_get(mb, key);
+      if (!jacl_val_eq(val_a, val_b)) return false;
+    }
+    return true;
+  }
+
+  /* For all other types: same tag + same payload = equal */
   return (a & JACL_PAYLOAD_MASK) == (b & JACL_PAYLOAD_MASK);
 }
 
-/* --- Allocator for collection templates (static compound literal) --- */
-
-#define JACL_COLL_ALLOCATOR { .alloc = libc_alloc, .free = libc_free, .ctx = NULL }
-
-/* --- Instantiate RRB vector template: jacl_vec --- */
-
-#define RRB_VEC_T         JaclVal
-#define RRB_VEC_NAME      jacl_vec
-#define RRB_VEC_ALLOCATOR JACL_COLL_ALLOCATOR
-#include "../lib/rrb_vec/rrb_vec.h"
-
-/* Clean up RC_ALLOCATOR leaked by rrb_vec.h's rc.h inclusion */
-#undef RC_ALLOCATOR
-
-/* --- Instantiate HAMT template: jacl_map --- */
-
-#define HAMT_KEY_T    JaclVal
-#define HAMT_VAL_T    JaclVal
-#define HAMT_NAME     jacl_map
-#define HAMT_ALLOCATOR JACL_COLL_ALLOCATOR
-#include "../lib/hamt/hamt.h"
-
-/* --- Initialization: wire up HAMT key handlers --- */
+/* --- Initialization: wire up hash/eq handlers --- */
 
 static void collections__init(void) {
   jacl_map_set_key_handlers(jacl_val_hash, jacl_val_eq);
+  jacl_vec_set_hash_handler(jacl_val_hash);
+  jacl_map_set_hash_handlers(jacl_val_hash, jacl_val_hash);
 }
 
 #endif /* COLLECTIONS_C */
