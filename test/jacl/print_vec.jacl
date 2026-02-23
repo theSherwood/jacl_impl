@@ -1,0 +1,5 @@
+# expect: [vec 1 2 3]
+# expect: [vec]
+# print displays vectors in constructor syntax
+print [vec 1 2 3]
+print [vec]

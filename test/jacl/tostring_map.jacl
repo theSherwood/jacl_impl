@@ -1,0 +1,5 @@
+# expect: [map]
+# expect: [map "a" 1]
+# to-string returns constructor syntax for maps
+print [to-string [map]]
+print [to-string [map "a" 1]]

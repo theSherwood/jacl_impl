@@ -1,0 +1,5 @@
+# expect: [map]
+# expect: [map "a" 1]
+# print displays maps in constructor syntax with quoted string keys
+print [map]
+print [map "a" 1]

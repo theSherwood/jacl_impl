@@ -901,6 +901,17 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* to-string builtin (exactly 1 arg) */
+  if (compiler__head_matches(head, "to-string", 9)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "to-string", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_TO_STRING, line);
+    return;
+  }
+
   /* Dynamic call: unrecognized command head — look up and call */
   {
     if (head->type == AST_LIT_STRING) {

@@ -1,0 +1,5 @@
+# expect: [vec 1 2]
+# expect: [vec]
+# to-string returns constructor syntax for vectors
+print [to-string [vec 1 2]]
+print [to-string [vec]]

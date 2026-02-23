@@ -248,6 +248,104 @@ static JaclVal vm__env_get(VM* vm, JaclVal name) {
     result = vm__push(vm, res); if (result != VM_OK) return result;           \
   } while (0)
 
+/* --- Dynamic format buffer for collection display --- */
+
+typedef struct {
+  char*     data;
+  uint32_t  len;
+  uint32_t  cap;
+  arena_t*  arena;
+} VMFormatBuf;
+
+static void vm__fmt_init(VMFormatBuf* buf, arena_t* arena) {
+  buf->arena = arena;
+  buf->len   = 0;
+  buf->cap   = 128;
+  buf->data  = (char*)arena_alloc(arena, 128);
+}
+
+static void vm__fmt_ensure(VMFormatBuf* buf, uint32_t extra) {
+  if (buf->len + extra <= buf->cap) return;
+  uint32_t new_cap = buf->cap * 2;
+  while (new_cap < buf->len + extra) new_cap *= 2;
+  char* new_data = (char*)arena_alloc(buf->arena, new_cap);
+  memcpy(new_data, buf->data, buf->len);
+  buf->data = new_data;
+  buf->cap  = new_cap;
+}
+
+static void vm__fmt_append(VMFormatBuf* buf, const char* str, uint32_t len) {
+  vm__fmt_ensure(buf, len);
+  memcpy(buf->data + buf->len, str, len);
+  buf->len += len;
+}
+
+static void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
+  char tmp[64];
+  int n;
+
+  if (jacl_is_nil(val)) {
+    vm__fmt_append(buf, "nil", 3);
+  } else if (jacl_is_bool(val)) {
+    if (val == JACL_TRUE) vm__fmt_append(buf, "true", 4);
+    else vm__fmt_append(buf, "false", 5);
+  } else if (jacl_is_i32(val)) {
+    n = snprintf(tmp, sizeof(tmp), "%d", (int)jacl_as_i32(val));
+    vm__fmt_append(buf, tmp, (uint32_t)n);
+  } else if (jacl_is_f32(val)) {
+    n = snprintf(tmp, sizeof(tmp), "%g", (double)jacl_as_f32(val));
+    vm__fmt_append(buf, tmp, (uint32_t)n);
+  } else if (jacl_is_string(val)) {
+    uint32_t slen = jacl_string_len(val);
+    vm__fmt_append(buf, "\"", 1);
+    if (jacl_is_heap_string(val)) {
+      JaclHeapString* hs = jacl_as_heap_string(val);
+      vm__fmt_append(buf, hs->data, hs->length);
+    } else {
+      char sbuf[8];
+      jacl_string_data(val, sbuf, slen);
+      vm__fmt_append(buf, sbuf, slen);
+    }
+    vm__fmt_append(buf, "\"", 1);
+  } else if (jacl_is_vector(val)) {
+    jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(val);
+    uint32_t count = jacl_vec_count(vec);
+    vm__fmt_append(buf, "[vec", 4);
+    for (uint32_t i = 0; i < count; i++) {
+      vm__fmt_append(buf, " ", 1);
+      jacl_vec_get_result gr = jacl_vec_get(vec, i);
+      vm__fmt_value(buf, gr.value);
+    }
+    vm__fmt_append(buf, "]", 1);
+  } else if (jacl_is_map(val)) {
+    jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(val);
+    vm__fmt_append(buf, "[map", 4);
+    jacl_map_iter it = jacl_map_iter_init(map);
+    jacl_map_iter_result ir;
+    for (;;) {
+      ir = jacl_map_next_leaf(&it);
+      if (ir.done) break;
+      JaclVal key = jacl_map_key_from_leaf(ir.item);
+      JaclVal value = jacl_map_value_from_leaf(ir.item);
+      vm__fmt_append(buf, " ", 1);
+      vm__fmt_value(buf, key);
+      vm__fmt_append(buf, " ", 1);
+      vm__fmt_value(buf, value);
+    }
+    vm__fmt_append(buf, "]", 1);
+  } else if (jacl_is_closure(val)) {
+    JaclClosure* cl = jacl_as_closure(val);
+    if (cl->name) {
+      n = snprintf(tmp, sizeof(tmp), "<proc %s>", cl->name);
+      vm__fmt_append(buf, tmp, (uint32_t)n);
+    } else {
+      vm__fmt_append(buf, "<closure>", 9);
+    }
+  } else {
+    vm__fmt_append(buf, "<unknown>", 9);
+  }
+}
+
 /* --- Deep structural equality for collections --- */
 
 static bool vm__deep_eq(JaclVal a, JaclVal b) {
@@ -569,6 +667,15 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
             if (result != VM_OK) return result;
             break;
           }
+        } else if (jacl_is_vector(val) || jacl_is_map(val)) {
+          VMFormatBuf fmt;
+          vm__fmt_init(&fmt, vm->arena);
+          vm__fmt_value(&fmt, val);
+          vm__fmt_append(&fmt, "\n", 1);
+          vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
+          result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
+          break;
         } else {
           text = "<unknown>\n";
           len = 10;
@@ -911,6 +1018,18 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         if (jacl_is_string(val)) {
           /* Already a string — push back unchanged */
           result = vm__push(vm, val);
+          if (result != VM_OK) return result;
+        } else if (jacl_is_vector(val) || jacl_is_map(val)) {
+          VMFormatBuf fmt;
+          vm__fmt_init(&fmt, vm->arena);
+          vm__fmt_value(&fmt, val);
+          JaclVal str;
+          if (fmt.len <= 7) {
+            str = jacl_inline_string(fmt.data, fmt.len);
+          } else {
+            str = jacl_intern(vm->arena, vm->intern_table, fmt.data, fmt.len);
+          }
+          result = vm__push(vm, str);
           if (result != VM_OK) return result;
         } else {
           char buf[64];
