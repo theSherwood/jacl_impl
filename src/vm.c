@@ -963,6 +963,114 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
         break;
       }
 
+      case OP_VEC_PUSH: {
+        JaclVal elem, vec_val;
+        result = vm__pop(vm, &elem); if (result != VM_OK) return result;
+        result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
+        if (!jacl_is_vector(vec_val)) {
+          vm__set_error(vm, "type error in 'vec-push': expected vector, got %s",
+                       vm__type_name(vec_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
+        jacl_vec_root* new_vec = jacl_vec_push_back(vec, elem);
+        result = vm__push(vm, jacl_vector_ptr(new_vec));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_VEC_SET: {
+        JaclVal elem, idx_val, vec_val;
+        result = vm__pop(vm, &elem); if (result != VM_OK) return result;
+        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
+        if (!jacl_is_vector(vec_val)) {
+          vm__set_error(vm, "type error in 'vec-set': expected vector, got %s",
+                       vm__type_name(vec_val));
+          return VM_RUNTIME_ERROR;
+        }
+        if (!jacl_is_i32(idx_val)) {
+          vm__set_error(vm, "type error in 'vec-set': expected i32 index, got %s",
+                       vm__type_name(idx_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
+        int32_t idx = jacl_as_i32(idx_val);
+        if (idx < 0 || (uint32_t)idx >= jacl_vec_count(vec)) {
+          result = vm__push(vm, JACL_NIL);
+        } else {
+          jacl_vec_root* new_vec = jacl_vec_set(vec, (uint32_t)idx, elem);
+          result = vm__push(vm, jacl_vector_ptr(new_vec));
+        }
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_VEC_CONCAT: {
+        JaclVal b_val, a_val;
+        result = vm__pop(vm, &b_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &a_val); if (result != VM_OK) return result;
+        if (!jacl_is_vector(a_val)) {
+          vm__set_error(vm, "type error in 'vec-concat': expected vector, got %s",
+                       vm__type_name(a_val));
+          return VM_RUNTIME_ERROR;
+        }
+        if (!jacl_is_vector(b_val)) {
+          vm__set_error(vm, "type error in 'vec-concat': expected vector, got %s",
+                       vm__type_name(b_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_vec_root* va = (jacl_vec_root*)jacl_as_ptr(a_val);
+        jacl_vec_root* vb = (jacl_vec_root*)jacl_as_ptr(b_val);
+        jacl_vec_root* new_vec = jacl_vec_concat(va, vb);
+        result = vm__push(vm, jacl_vector_ptr(new_vec));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_VEC_SLICE: {
+        JaclVal end_val, start_val, vec_val;
+        result = vm__pop(vm, &end_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &start_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
+        if (!jacl_is_vector(vec_val)) {
+          vm__set_error(vm, "type error in 'vec-slice': expected vector, got %s",
+                       vm__type_name(vec_val));
+          return VM_RUNTIME_ERROR;
+        }
+        if (!jacl_is_i32(start_val)) {
+          vm__set_error(vm, "type error in 'vec-slice': expected i32 start, got %s",
+                       vm__type_name(start_val));
+          return VM_RUNTIME_ERROR;
+        }
+        if (!jacl_is_i32(end_val)) {
+          vm__set_error(vm, "type error in 'vec-slice': expected i32 end, got %s",
+                       vm__type_name(end_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
+        int32_t start = jacl_as_i32(start_val);
+        int32_t end = jacl_as_i32(end_val);
+        uint32_t count = jacl_vec_count(vec);
+        /* Clamp bounds */
+        if (start < 0) start = 0;
+        if (end < 0) end = 0;
+        if ((uint32_t)start > count) start = (int32_t)count;
+        if ((uint32_t)end > count) end = (int32_t)count;
+        if (end <= start) {
+          result = vm__push(vm, jacl_vector_ptr(jacl_vec_empty()));
+        } else {
+          jacl_vec_root* new_vec = jacl_vec_slice(vec, (uint32_t)start, (uint32_t)end);
+          if (new_vec == NULL) {
+            result = vm__push(vm, jacl_vector_ptr(jacl_vec_empty()));
+          } else {
+            result = vm__push(vm, jacl_vector_ptr(new_vec));
+          }
+        }
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }

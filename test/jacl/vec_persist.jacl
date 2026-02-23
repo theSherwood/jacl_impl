@@ -1,0 +1,12 @@
+# expect: 3
+# expect: 1
+# expect: 4
+# expect: 99
+# original vector unchanged after push/set (persistent semantics)
+def v [vec 1 2 3]
+def pushed [vec-push $v 4]
+def setted [vec-set $v 0 99]
+print [vec-len $v]
+print [vec-get $v 0]
+print [vec-len $pushed]
+print [vec-get $setted 0]

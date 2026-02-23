@@ -1,0 +1,6 @@
+# expect: 99
+# expect: 3
+# vec-set replaces element at index, other elements unchanged
+def v [vec 1 2 3]
+print [vec-get [vec-set $v 0 99] 0]
+print [vec-get [vec-set $v 1 99] 2]

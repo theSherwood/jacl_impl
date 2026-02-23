@@ -1,0 +1,4 @@
+# expect: nil
+# vec-set out-of-bounds returns nil
+def v [vec 1 2 3]
+print [vec-set $v 99 "x"]

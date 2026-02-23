@@ -754,6 +754,56 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* vec-push builtin (exactly 2 args) */
+  if (compiler__head_matches(head, "vec-push", 8)) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "vec-push", "2 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_VEC_PUSH, line);
+    return;
+  }
+
+  /* vec-set builtin (exactly 3 args) */
+  if (compiler__head_matches(head, "vec-set", 7)) {
+    if (argc != 3) {
+      compiler__builtin_arity_error(c, line, col, "vec-set", "3 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__compile_node(c, args[2]);
+    compiler__emit_byte(c, OP_VEC_SET, line);
+    return;
+  }
+
+  /* vec-concat builtin (exactly 2 args) */
+  if (compiler__head_matches(head, "vec-concat", 10)) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "vec-concat", "2 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_VEC_CONCAT, line);
+    return;
+  }
+
+  /* vec-slice builtin (exactly 3 args) */
+  if (compiler__head_matches(head, "vec-slice", 9)) {
+    if (argc != 3) {
+      compiler__builtin_arity_error(c, line, col, "vec-slice", "3 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__compile_node(c, args[2]);
+    compiler__emit_byte(c, OP_VEC_SLICE, line);
+    return;
+  }
+
   /* Dynamic call: unrecognized command head — look up and call */
   {
     if (head->type == AST_LIT_STRING) {

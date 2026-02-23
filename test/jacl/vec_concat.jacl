@@ -1,0 +1,10 @@
+# expect: 5
+# expect: 1
+# expect: 4
+# vec-concat concatenates two vectors
+def v1 [vec 1 2 3]
+def v2 [vec 4 5]
+def joined [vec-concat $v1 $v2]
+print [vec-len $joined]
+print [vec-get $joined 0]
+print [vec-get $joined 3]

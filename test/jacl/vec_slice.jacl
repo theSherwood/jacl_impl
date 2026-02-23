@@ -1,0 +1,12 @@
+# expect: 2
+# expect: 2
+# expect: 3
+# expect: 0
+# vec-slice returns sub-vector [start, end)
+def v [vec 1 2 3 4 5]
+def s [vec-slice $v 1 3]
+print [vec-len $s]
+print [vec-get $s 0]
+print [vec-get $s 1]
+# empty slice
+print [vec-len [vec-slice $v 3 3]]

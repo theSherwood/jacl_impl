@@ -51,6 +51,10 @@ typedef enum {
   OP_VEC,           /* construct vector: followed by uint8_t element count */
   OP_VEC_GET,       /* pop index + vec, push element or nil */
   OP_VEC_LEN,       /* pop vec, push i32 count */
+  OP_VEC_PUSH,      /* pop elem + vec, push new vec with elem appended */
+  OP_VEC_SET,       /* pop elem + index + vec, push new vec or nil */
+  OP_VEC_CONCAT,    /* pop vec2 + vec1, push concatenated vec */
+  OP_VEC_SLICE,     /* pop end + start + vec, push sub-vector */
   OP_HALT           /* stop execution */
 } OpCode;
 

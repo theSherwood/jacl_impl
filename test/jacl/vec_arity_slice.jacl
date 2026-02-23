@@ -1,0 +1,2 @@
+# expect-error: builtin 'vec-slice' expects 3 arguments but got 2
+[vec-slice [vec 1 2 3] 1]

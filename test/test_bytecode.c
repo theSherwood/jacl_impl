@@ -45,7 +45,11 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_VEC,            34);
   ASSERT_INT_EQ(OP_VEC_GET,        35);
   ASSERT_INT_EQ(OP_VEC_LEN,        36);
-  ASSERT_INT_EQ(OP_HALT,           37);
+  ASSERT_INT_EQ(OP_VEC_PUSH,       37);
+  ASSERT_INT_EQ(OP_VEC_SET,        38);
+  ASSERT_INT_EQ(OP_VEC_CONCAT,     39);
+  ASSERT_INT_EQ(OP_VEC_SLICE,      40);
+  ASSERT_INT_EQ(OP_HALT,           41);
   TEST_PASS();
 }
 
