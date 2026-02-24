@@ -1,0 +1,10 @@
+# expect: true
+# expect: true
+# expect: true
+# expect: true
+# Test: error propagation through string ops
+def e [error "x"]
+print [error? [concat $e "y"]]
+print [error? [length $e]]
+print [error? [to-string $e]]
+print [error? [concat "y" [error "z"]]]

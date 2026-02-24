@@ -1,0 +1,16 @@
+# expect: true
+# expect: true
+# expect: true
+# expect: true
+# expect: true
+# expect: true
+# expect: true
+# Test: error propagation through map ops
+def e [error "x"]
+print [error? [map-get $e "k"]]
+print [error? [map-has $e "k"]]
+print [error? [map-len $e]]
+print [error? [map-set $e "k" 1]]
+print [error? [map-remove $e "k"]]
+print [error? [map-keys $e]]
+print [error? [map-vals $e]]

@@ -1,0 +1,16 @@
+# expect: true
+# expect: true
+# expect: true
+# expect: true
+# expect: true
+# expect: true
+# expect: true
+# Test: error propagation through vector ops
+def e [error "x"]
+print [error? [vec-get $e 0]]
+print [error? [vec-len $e]]
+print [error? [vec-push $e 1]]
+print [error? [vec-set $e 0 1]]
+print [error? [vec-concat $e [vec]]]
+print [error? [vec-slice $e 0 1]]
+print [error? [vec-push [vec] [error "x"]]]
