@@ -61,6 +61,7 @@ TESTS=(
     "test/test_m5.c|m5|"
     "test/test_m6.c|m6|"
     "test/test_collections.c|collections|"
+    "test/test_m9.c|m9|"
     "test/test_jacl_harness.c|jacl_harness|"
 )
 
