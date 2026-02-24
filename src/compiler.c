@@ -634,47 +634,104 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* mut — mutable local binding with cell auto-boxing */
   if (compiler__head_matches(head, "mut", 3)) {
-    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "mut", "2 arguments", argc); return; }
-    if (args[0]->type != AST_LIT_STRING) {
-      compiler__error(c, line, col, "mut first argument must be a name");
+    JaclType declared_type = TYPE_DYN;
+    uint32_t name_arg_idx  = 0;
+    uint32_t value_arg_idx = 1;
+
+    if (argc == 3) {
+      /* Typed mut: [mut TYPE name value] */
+      if (args[0]->type != AST_LIT_STRING) {
+        compiler__error(c, line, col, "mut type must be a keyword");
+        return;
+      }
+      uint32_t first_len = args[0]->data.lit_string.length;
+      const char* first_str = args[0]->data.lit_string.value;
+      if (!is_type_keyword(first_str, first_len)) {
+        compiler__error(c, line, col, "mut with 3 arguments requires type keyword as first argument");
+        return;
+      }
+      declared_type  = type_from_keyword(first_str, first_len);
+      name_arg_idx   = 1;
+      value_arg_idx  = 2;
+    } else if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "mut", "2 or 3 arguments", argc);
       return;
     }
-    uint32_t name_len = args[0]->data.lit_string.length;
+
+    if (args[name_arg_idx]->type != AST_LIT_STRING) {
+      compiler__error(c, line, col, "mut name must be a string");
+      return;
+    }
+    uint32_t name_len = args[name_arg_idx]->data.lit_string.length;
     if (name_len > 7) {
       compiler__error(c, line, col, "variable name exceeds 7-byte inline limit");
       return;
     }
-    /* Compile the value expression */
-    compiler__compile_node(c, args[1]);
 
-    JaclVal name_val = jacl_inline_string(args[0]->data.lit_string.value, name_len);
+    /* Compile the value expression with type context */
+    c->expected_type = declared_type;
+    compiler__compile_node(c, args[value_arg_idx]);
+    c->expected_type = TYPE_DYN;
+    JaclType rhs_type = c->last_expr_type;
+
+    /* Type check for typed mut */
+    if (declared_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != declared_type) {
+      char err_msg[128];
+      snprintf(err_msg, sizeof(err_msg), "type error: expected %s, got %s",
+               type_name(declared_type), type_name(rhs_type));
+      compiler__error(c, line, col, err_msg);
+      return;
+    }
+
+    /* Determine effective type: declared type wins, else infer unboxed from RHS */
+    JaclType effective_type;
+    if (declared_type != TYPE_DYN) {
+      effective_type = declared_type;
+    } else if (is_unboxed_type(rhs_type)) {
+      effective_type = rhs_type;
+    } else {
+      effective_type = TYPE_DYN;
+    }
+
+    JaclVal name_val = jacl_inline_string(args[name_arg_idx]->data.lit_string.value, name_len);
 
     if (c->scope_depth > 0) {
-      /* Local scope: wrap in cell for mutable access */
+      /* Local scope: box unboxed types for cell storage, then wrap in cell */
+      if (is_unboxed_type(effective_type)) {
+        compiler__emit_byte(c, OP_TO_DYN, line);
+        compiler__emit_byte(c, (uint8_t)effective_type, line);
+      }
       compiler__emit_byte(c, OP_MAKE_CELL, line);
       compiler__add_local(c, name_val, line, col);
       c->locals[c->local_count - 1].is_mutable = true;
+      c->locals[c->local_count - 1].type = effective_type;
       /* mut returns nil */
       compiler__emit_byte(c, OP_NIL, line);
     } else {
-      /* Global scope: store directly (no cell needed) */
+      /* Global scope: box unboxed types before storage */
+      if (is_unboxed_type(effective_type)) {
+        compiler__emit_byte(c, OP_TO_DYN, line);
+        compiler__emit_byte(c, (uint8_t)effective_type, line);
+      }
       uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
-      /* Record as mutable in global info */
+      /* Record as mutable in global info with type */
       compiler__set_global_arity(c, name_val, -1);
-      /* Walk to the entry we just set and mark mutable */
+      /* Walk to the entry we just set and mark mutable + type */
       {
         Compiler* root = c;
         while (root->enclosing) root = root->enclosing;
         for (uint32_t i = 0; i < root->global_arity_count; i++) {
           if (root->global_arities[i].name == name_val) {
             root->global_arities[i].is_mutable = true;
+            root->global_arities[i].type = effective_type;
             break;
           }
         }
       }
     }
+    c->last_expr_type = TYPE_NIL;
     return;
   }
 
@@ -697,7 +754,33 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     int local_slot = compiler__resolve_local(c, name_val);
     if (local_slot != -1) {
       if (c->locals[local_slot].is_mutable) {
+        JaclType target_type = c->locals[local_slot].type;
+        c->expected_type = target_type;
         compiler__compile_node(c, args[1]);
+        c->expected_type = TYPE_DYN;
+        JaclType rhs_type = c->last_expr_type;
+        /* Type check */
+        if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
+          snprintf(err_msg, sizeof(err_msg),
+                   "type error: cannot assign %s to %s binding '%.*s'",
+                   type_name(rhs_type), type_name(target_type),
+                   (int)name_len, args[0]->data.lit_string.value);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        if (target_type != TYPE_DYN && rhs_type == TYPE_DYN) {
+          snprintf(err_msg, sizeof(err_msg),
+                   "type error: cannot assign dyn to %s binding '%.*s'",
+                   type_name(target_type),
+                   (int)name_len, args[0]->data.lit_string.value);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        /* Box unboxed types for cell storage */
+        if (is_unboxed_type(target_type)) {
+          compiler__emit_byte(c, OP_TO_DYN, line);
+          compiler__emit_byte(c, (uint8_t)target_type, line);
+        }
         compiler__emit_byte(c, OP_SET_CELL_LOCAL, line);
         compiler__emit_byte(c, (uint8_t)local_slot, line);
         return;
@@ -717,7 +800,33 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     int upvalue_idx = compiler__resolve_upvalue(c, name_val);
     if (upvalue_idx != -1) {
       if (c->upvalues[upvalue_idx].is_mutable) {
+        JaclType target_type = c->upvalues[upvalue_idx].type;
+        c->expected_type = target_type;
         compiler__compile_node(c, args[1]);
+        c->expected_type = TYPE_DYN;
+        JaclType rhs_type = c->last_expr_type;
+        /* Type check */
+        if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
+          snprintf(err_msg, sizeof(err_msg),
+                   "type error: cannot assign %s to %s binding '%.*s'",
+                   type_name(rhs_type), type_name(target_type),
+                   (int)name_len, args[0]->data.lit_string.value);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        if (target_type != TYPE_DYN && rhs_type == TYPE_DYN) {
+          snprintf(err_msg, sizeof(err_msg),
+                   "type error: cannot assign dyn to %s binding '%.*s'",
+                   type_name(target_type),
+                   (int)name_len, args[0]->data.lit_string.value);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        /* Box unboxed types for cell storage */
+        if (is_unboxed_type(target_type)) {
+          compiler__emit_byte(c, OP_TO_DYN, line);
+          compiler__emit_byte(c, (uint8_t)target_type, line);
+        }
         compiler__emit_byte(c, OP_SET_CELL_UPVALUE, line);
         compiler__emit_byte(c, (uint8_t)upvalue_idx, line);
         return;
@@ -732,7 +841,33 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     bool global_mutable = false;
     if (compiler__resolve_global_info(c, name_val, &global_mutable)) {
       if (global_mutable) {
+        JaclType target_type = compiler__resolve_global_type(c, name_val);
+        c->expected_type = target_type;
         compiler__compile_node(c, args[1]);
+        c->expected_type = TYPE_DYN;
+        JaclType rhs_type = c->last_expr_type;
+        /* Type check */
+        if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
+          snprintf(err_msg, sizeof(err_msg),
+                   "type error: cannot assign %s to %s binding '%.*s'",
+                   type_name(rhs_type), type_name(target_type),
+                   (int)name_len, args[0]->data.lit_string.value);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        if (target_type != TYPE_DYN && rhs_type == TYPE_DYN) {
+          snprintf(err_msg, sizeof(err_msg),
+                   "type error: cannot assign dyn to %s binding '%.*s'",
+                   type_name(target_type),
+                   (int)name_len, args[0]->data.lit_string.value);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        /* Box unboxed types for global storage */
+        if (is_unboxed_type(target_type)) {
+          compiler__emit_byte(c, OP_TO_DYN, line);
+          compiler__emit_byte(c, (uint8_t)target_type, line);
+        }
         uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
         compiler__emit_byte(c, OP_SET_GLOBAL, line);
         compiler__emit_u16(c, name_idx, line);
@@ -1671,20 +1806,52 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
       if (local_slot != -1) {
         if (c->locals[local_slot].is_mutable) {
           compiler__emit_byte(c, OP_GET_CELL_LOCAL, line);
+          compiler__emit_byte(c, (uint8_t)local_slot, line);
+          /* Cells store boxed values; unbox if typed */
+          JaclType local_type = c->locals[local_slot].type;
+          if (is_unboxed_type(local_type)) {
+            uint8_t to_op;
+            switch (local_type) {
+              case TYPE_I64: to_op = OP_TO_I64; break;
+              case TYPE_U64: to_op = OP_TO_U64; break;
+              case TYPE_F64: to_op = OP_TO_F64; break;
+              default: to_op = 0; break;
+            }
+            if (to_op) {
+              compiler__emit_byte(c, to_op, line);
+              compiler__emit_byte(c, (uint8_t)TYPE_DYN, line);
+            }
+          }
         } else {
           compiler__emit_byte(c, OP_GET_LOCAL, line);
+          compiler__emit_byte(c, (uint8_t)local_slot, line);
         }
-        compiler__emit_byte(c, (uint8_t)local_slot, line);
         c->last_expr_type = c->locals[local_slot].type;
       } else {
         int upvalue_idx = compiler__resolve_upvalue(c, name_val);
         if (upvalue_idx != -1) {
           if (c->upvalues[upvalue_idx].is_mutable) {
             compiler__emit_byte(c, OP_GET_CELL_UPVALUE, line);
+            compiler__emit_byte(c, (uint8_t)upvalue_idx, line);
+            /* Cells store boxed values; unbox if typed */
+            JaclType uv_type = c->upvalues[upvalue_idx].type;
+            if (is_unboxed_type(uv_type)) {
+              uint8_t to_op;
+              switch (uv_type) {
+                case TYPE_I64: to_op = OP_TO_I64; break;
+                case TYPE_U64: to_op = OP_TO_U64; break;
+                case TYPE_F64: to_op = OP_TO_F64; break;
+                default: to_op = 0; break;
+              }
+              if (to_op) {
+                compiler__emit_byte(c, to_op, line);
+                compiler__emit_byte(c, (uint8_t)TYPE_DYN, line);
+              }
+            }
           } else {
             compiler__emit_byte(c, OP_GET_UPVALUE, line);
+            compiler__emit_byte(c, (uint8_t)upvalue_idx, line);
           }
-          compiler__emit_byte(c, (uint8_t)upvalue_idx, line);
           c->last_expr_type = c->upvalues[upvalue_idx].type;
         } else {
           JaclType global_type = compiler__resolve_global_type(c, name_val);

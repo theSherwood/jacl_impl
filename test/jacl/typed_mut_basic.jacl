@@ -1,0 +1,4 @@
+# expect: 42
+mut i64 x 0
+set! x 42
+print [to-string $x]
