@@ -72,6 +72,19 @@ typedef enum {
   OP_CHECK_ERROR,   /* check error: uint16_t offset; 0=return from frame, nonzero=jump to handler */
   OP_JUMP_IF_ERROR, /* conditional error jump: uint16_t offset; peek top, jump if error-flagged */
   OP_STACK_TRACE,   /* push stack trace string of most recent error */
+  OP_MAKE_CELL,     /* pop value, wrap in JaclMutableRef cell, push cell */
+  OP_GET_CELL_LOCAL,    /* read cell from local slot, push inner value */
+  OP_SET_CELL_LOCAL,    /* pop value, store in cell at local slot, push nil */
+  OP_GET_CELL_UPVALUE,  /* read cell from upvalue, push inner value */
+  OP_SET_CELL_UPVALUE,  /* pop value, store in cell at upvalue, push nil */
+  OP_SET_GLOBAL,    /* pop value, set global by name index, push nil */
+  OP_BOX,           /* pop value, wrap in box, push box */
+  OP_ATOM,          /* pop value, wrap in atom, push atom */
+  OP_DEREF,         /* pop box/atom, push inner value */
+  OP_RESET,         /* pop value + box/atom, store value, push new value */
+  OP_SWAP,          /* pop closure + box/atom, apply closure to inner, store result */
+  OP_IS_BOX,        /* pop value, push true if box, else false */
+  OP_IS_ATOM,       /* pop value, push true if atom, else false */
   OP_HALT           /* stop execution */
 } OpCode;
 

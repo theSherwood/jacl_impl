@@ -49,6 +49,9 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_MAP            ((uint64_t)0x07 << JACL_TAG_SHIFT)
 #define JACL_TAG_CLOSURE        ((uint64_t)0x08 << JACL_TAG_SHIFT)
 #define JACL_TAG_BIGNUM         ((uint64_t)0x09 << JACL_TAG_SHIFT)
+#define JACL_TAG_CELL           ((uint64_t)0x0A << JACL_TAG_SHIFT)
+#define JACL_TAG_BOX            ((uint64_t)0x0B << JACL_TAG_SHIFT)
+#define JACL_TAG_ATOM           ((uint64_t)0x0C << JACL_TAG_SHIFT)
 
 /* --- Nil and boolean constants --- */
 
@@ -149,6 +152,51 @@ static inline bool jacl_is_closure(JaclVal v) {
 
 static inline bool jacl_is_bignum(JaclVal v) {
     return (v & JACL_TYPE_MASK) == JACL_TAG_BIGNUM;
+}
+
+/* --- Mutable reference (shared by cell, box, atom) --- */
+
+typedef struct {
+    JaclVal value;
+} JaclMutableRef;
+
+/* Cell: internal auto-boxing for mut locals */
+static inline JaclVal jacl_cell_ptr(JaclMutableRef *p) {
+    return JACL_TAG_CELL | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclMutableRef *jacl_as_cell(JaclVal v) {
+    return (JaclMutableRef *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+}
+
+static inline bool jacl_is_cell(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_CELL;
+}
+
+/* Box: user-facing thread-local mutable container */
+static inline JaclVal jacl_box_ptr(JaclMutableRef *p) {
+    return JACL_TAG_BOX | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclMutableRef *jacl_as_box(JaclVal v) {
+    return (JaclMutableRef *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+}
+
+static inline bool jacl_is_box(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_BOX;
+}
+
+/* Atom: user-facing CAS container (functionally same as box in M10) */
+static inline JaclVal jacl_atom_ptr(JaclMutableRef *p) {
+    return JACL_TAG_ATOM | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclMutableRef *jacl_as_atom(JaclVal v) {
+    return (JaclMutableRef *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+}
+
+static inline bool jacl_is_atom(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_ATOM;
 }
 
 /* --- Inline string constructor --- */

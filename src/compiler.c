@@ -32,6 +32,7 @@ typedef struct {
   JaclVal  name;         /* inline string name */
   int      depth;        /* scope depth when declared */
   int16_t  known_arity;  /* arity if bound to a proc, -1 = unknown */
+  bool     is_mutable;   /* true if declared with mut */
 } Local;
 
 /* --- Internal: Global arity tracking --- */
@@ -41,12 +42,14 @@ typedef struct {
 typedef struct {
   JaclVal name;
   int16_t known_arity;
+  bool    is_mutable;   /* true if declared with mut */
 } GlobalArity;
 
 typedef struct {
   uint8_t index;    /* local slot (if is_local) or parent upvalue index */
   uint8_t is_local; /* 1 = capture from enclosing locals, 0 = from parent upvalues */
   JaclVal name;     /* for debug/lookup */
+  bool    is_mutable; /* true if capturing a mut binding */
 } Upvalue;
 
 /* --- Internal: Compiler state --- */
@@ -148,6 +151,7 @@ static void compiler__add_local(Compiler* c, JaclVal name,
   local->name        = name;
   local->depth       = c->scope_depth;
   local->known_arity = -1;
+  local->is_mutable  = false;
 }
 
 static int compiler__resolve_local(Compiler* c, JaclVal name) {
@@ -183,6 +187,7 @@ static void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity)
   if (c->global_arity_count < COMPILER_GLOBAL_ARITIES_MAX) {
     c->global_arities[c->global_arity_count].name = name;
     c->global_arities[c->global_arity_count].known_arity = arity;
+    c->global_arities[c->global_arity_count].is_mutable = false;
     c->global_arity_count++;
   }
 }
@@ -201,9 +206,10 @@ static int compiler__add_upvalue(Compiler* c, uint8_t index, uint8_t is_local,
   if (c->upvalue_count >= COMPILER_UPVALUES_MAX) {
     return -1;
   }
-  c->upvalues[c->upvalue_count].index    = index;
-  c->upvalues[c->upvalue_count].is_local = is_local;
-  c->upvalues[c->upvalue_count].name     = name;
+  c->upvalues[c->upvalue_count].index      = index;
+  c->upvalues[c->upvalue_count].is_local   = is_local;
+  c->upvalues[c->upvalue_count].name       = name;
+  c->upvalues[c->upvalue_count].is_mutable = false;
   return (int)c->upvalue_count++;
 }
 

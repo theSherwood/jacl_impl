@@ -68,7 +68,21 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_CHECK_ERROR,    55);
   ASSERT_INT_EQ(OP_JUMP_IF_ERROR,  56);
   ASSERT_INT_EQ(OP_STACK_TRACE,    57);
-  ASSERT_INT_EQ(OP_HALT,           58);
+  /* M10 mutable state opcodes */
+  ASSERT_INT_EQ(OP_MAKE_CELL,       58);
+  ASSERT_INT_EQ(OP_GET_CELL_LOCAL,   59);
+  ASSERT_INT_EQ(OP_SET_CELL_LOCAL,   60);
+  ASSERT_INT_EQ(OP_GET_CELL_UPVALUE, 61);
+  ASSERT_INT_EQ(OP_SET_CELL_UPVALUE, 62);
+  ASSERT_INT_EQ(OP_SET_GLOBAL,      63);
+  ASSERT_INT_EQ(OP_BOX,             64);
+  ASSERT_INT_EQ(OP_ATOM,            65);
+  ASSERT_INT_EQ(OP_DEREF,           66);
+  ASSERT_INT_EQ(OP_RESET,           67);
+  ASSERT_INT_EQ(OP_SWAP,            68);
+  ASSERT_INT_EQ(OP_IS_BOX,          69);
+  ASSERT_INT_EQ(OP_IS_ATOM,         70);
+  ASSERT_INT_EQ(OP_HALT,            71);
   TEST_PASS();
 }
 
