@@ -1,0 +1,36 @@
+# expect: 42
+# expect: 255
+# expect: 1000000
+# expect: 99
+# expect: 3.14
+# expect: 2.718
+# expect: x is 42
+# expect: pi is 3.14
+
+# i64 via to-string and print
+def i64 a 42
+print [to-string $a]
+
+# u32 via to-string and print
+def u32 b 255
+print [to-string $b]
+
+# u64 via to-string and print
+def u64 c 1000000
+print [to-string $c]
+
+# i32 via to-string and print (existing, no regression)
+def i32 d 99
+print [to-string $d]
+
+# f64 via to-string and print
+def f64 e 3.14
+print [to-string $e]
+
+# f32 via to-string and print (existing, no regression)
+def f32 f 2.718
+print [to-string $f]
+
+# string interpolation with typed values
+print "x is $a"
+print "pi is $e"
