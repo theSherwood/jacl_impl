@@ -1,0 +1,13 @@
+# expect: true
+# expect: false
+# expect: false
+# expect: true
+# atom? on an atom returns true
+[print [atom? [atom 0]]]
+# atom? on a non-atom returns false
+[print [atom? 0]]
+# atom? on a box returns false
+[print [atom? [box 0]]]
+# atom creates an atom containing the value
+def a [atom 99]
+[print [atom? $a]]

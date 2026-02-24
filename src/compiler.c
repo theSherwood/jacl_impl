@@ -1247,6 +1247,50 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* box builtin (exactly 1 arg) */
+  if (compiler__head_matches(head, "box", 3)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "box", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_BOX, line);
+    return;
+  }
+
+  /* atom builtin (exactly 1 arg) */
+  if (compiler__head_matches(head, "atom", 4)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "atom", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_ATOM, line);
+    return;
+  }
+
+  /* box? builtin (exactly 1 arg) */
+  if (compiler__head_matches(head, "box?", 4)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "box?", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_IS_BOX, line);
+    return;
+  }
+
+  /* atom? builtin (exactly 1 arg) */
+  if (compiler__head_matches(head, "atom?", 5)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "atom?", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_IS_ATOM, line);
+    return;
+  }
+
   /* Dynamic call: unrecognized command head — look up and call */
   {
     if (head->type == AST_LIT_STRING) {

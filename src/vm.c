@@ -2122,6 +2122,50 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_BOX: {
+        JaclVal value;
+        result = vm__pop(vm, &value); if (result != VM_OK) return result;
+        if (jacl_is_error(value)) {
+          result = vm__push(vm, value); if (result != VM_OK) return result;
+          break;
+        }
+        JaclMutableRef* ref = (JaclMutableRef*)arena_alloc(vm->arena, sizeof(JaclMutableRef));
+        ref->value = value;
+        result = vm__push(vm, jacl_box_ptr(ref));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_ATOM: {
+        JaclVal value;
+        result = vm__pop(vm, &value); if (result != VM_OK) return result;
+        if (jacl_is_error(value)) {
+          result = vm__push(vm, value); if (result != VM_OK) return result;
+          break;
+        }
+        JaclMutableRef* ref = (JaclMutableRef*)arena_alloc(vm->arena, sizeof(JaclMutableRef));
+        ref->value = value;
+        result = vm__push(vm, jacl_atom_ptr(ref));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_IS_BOX: {
+        JaclVal value;
+        result = vm__pop(vm, &value); if (result != VM_OK) return result;
+        result = vm__push(vm, jacl_bool(jacl_is_box(value)));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_IS_ATOM: {
+        JaclVal value;
+        result = vm__pop(vm, &value); if (result != VM_OK) return result;
+        result = vm__push(vm, jacl_bool(jacl_is_atom(value)));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }
