@@ -61,7 +61,11 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_EACH,           49);
   ASSERT_INT_EQ(OP_TRANSFORM,      50);
   ASSERT_INT_EQ(OP_FILTER,         51);
-  ASSERT_INT_EQ(OP_HALT,           52);
+  /* M9 error handling opcodes */
+  ASSERT_INT_EQ(OP_ERROR,          52);
+  ASSERT_INT_EQ(OP_IS_ERROR,       53);
+  ASSERT_INT_EQ(OP_ERROR_VAL,      54);
+  ASSERT_INT_EQ(OP_HALT,           55);
   TEST_PASS();
 }
 

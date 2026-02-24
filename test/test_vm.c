@@ -1255,7 +1255,7 @@ static int test_op_print_error(void) {
   VMResult result = vm_exec(&vm, &chunk);
 
   ASSERT_INT_EQ(result, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "<error>\n");
+  ASSERT_STR_EQ(cap.buf, "<error: 0>\n");
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());

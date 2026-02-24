@@ -1,0 +1,3 @@
+# expect: true
+# Test: error creates error-flagged values
+print [error? [error "something went wrong"]]

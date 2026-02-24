@@ -1,0 +1,3 @@
+# expect: <error: oops>
+# Test: print formats error-flagged values with payload
+[print [error "oops"]]

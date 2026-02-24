@@ -1,0 +1,3 @@
+# expect: false
+# Test: error? returns false for nil
+print [error? $nil]

@@ -1,0 +1,3 @@
+# expect: true
+# Test: error with nil payload
+print [error? [error $nil]]

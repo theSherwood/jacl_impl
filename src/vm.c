@@ -593,8 +593,30 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint32_t len;
 
         if (jacl_is_error(val)) {
-          text = "<error>\n";
-          len = 8;
+          /* Format as <error: PAYLOAD> using the format buffer */
+          VMFormatBuf fmt;
+          vm__fmt_init(&fmt, vm->arena);
+          vm__fmt_append(&fmt, "<error: ", 8);
+          JaclVal payload = jacl_clear_error(val);
+          /* Print payload: strings without quotes, other types with fmt_value */
+          if (jacl_is_string(payload)) {
+            uint32_t slen = jacl_string_len(payload);
+            if (jacl_is_heap_string(payload)) {
+              JaclHeapString* hs = jacl_as_heap_string(payload);
+              vm__fmt_append(&fmt, hs->data, hs->length);
+            } else {
+              char sbuf[8];
+              jacl_string_data(payload, sbuf, slen);
+              vm__fmt_append(&fmt, sbuf, slen);
+            }
+          } else {
+            vm__fmt_value(&fmt, payload);
+          }
+          vm__fmt_append(&fmt, ">\n", 2);
+          vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
+          result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
+          break;
         } else if (jacl_is_nil(val)) {
           text = "nil\n";
           len = 4;
@@ -1822,6 +1844,35 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             vm__type_name(coll_val));
           return VM_RUNTIME_ERROR;
         }
+        break;
+      }
+
+      case OP_ERROR: {
+        /* Peek top-of-stack, set error flag, leave on stack */
+        if (vm->stack_top == 0) {
+          vm__set_error(vm, "stack underflow");
+          return VM_RUNTIME_ERROR;
+        }
+        vm->stack[vm->stack_top - 1] = jacl_set_error(vm->stack[vm->stack_top - 1]);
+        break;
+      }
+
+      case OP_IS_ERROR: {
+        /* Pop value, push true if error-flagged, else false */
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        result = vm__push(vm, jacl_bool(jacl_is_error(val)));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_ERROR_VAL: {
+        /* Peek top-of-stack, clear error flag, leave on stack */
+        if (vm->stack_top == 0) {
+          vm__set_error(vm, "stack underflow");
+          return VM_RUNTIME_ERROR;
+        }
+        vm->stack[vm->stack_top - 1] = jacl_clear_error(vm->stack[vm->stack_top - 1]);
         break;
       }
 

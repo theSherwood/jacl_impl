@@ -1,0 +1,3 @@
+# expect: 42
+# Test: error-val on non-error returns unchanged
+print [error-val 42]

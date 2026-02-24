@@ -66,6 +66,9 @@ typedef enum {
   OP_EACH,          /* iterate: pop closure + collection, call closure per element */
   OP_TRANSFORM,     /* transform: pop closure + collection, call closure per element, build new collection */
   OP_FILTER,        /* filter: pop closure + collection, call closure per element, keep truthy results */
+  OP_ERROR,         /* mark top-of-stack as error: peek value, set error flag, leave on stack */
+  OP_IS_ERROR,      /* error predicate: pop value, push true if error-flagged, else false */
+  OP_ERROR_VAL,     /* extract error payload: peek top-of-stack, clear error flag, leave on stack */
   OP_HALT           /* stop execution */
 } OpCode;
 

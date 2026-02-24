@@ -148,7 +148,7 @@ static int test_deliberate_errors(void) {
   vm.print_ctx = &cap;
   result = jacl_run("[print [/ 1 0]]", &vm, &arena);
   ASSERT_INT_EQ(result, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "<error>\n");
+  ASSERT_STR_EQ(cap.buf, "<error: 0>\n");
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());

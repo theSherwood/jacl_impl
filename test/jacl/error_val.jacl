@@ -1,0 +1,3 @@
+# expect: oops
+# Test: error-val extracts payload from error (clears error flag)
+print [error-val [error "oops"]]

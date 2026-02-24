@@ -1,0 +1,3 @@
+# expect: true
+# Test: error with integer payload
+print [error? [error 42]]

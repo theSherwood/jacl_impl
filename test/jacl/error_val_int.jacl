@@ -1,0 +1,3 @@
+# expect: 42
+# Test: error-val extracts integer payload from error
+print [error-val [error 42]]

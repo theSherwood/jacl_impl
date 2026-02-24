@@ -1,0 +1,3 @@
+# expect: false
+# Test: error? returns false for non-error values
+print [error? 42]

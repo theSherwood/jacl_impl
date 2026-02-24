@@ -937,6 +937,39 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* error builtin (exactly 1 arg) */
+  if (compiler__head_matches(head, "error", 5)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "error", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_ERROR, line);
+    return;
+  }
+
+  /* error? builtin (exactly 1 arg) */
+  if (compiler__head_matches(head, "error?", 6)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "error?", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_IS_ERROR, line);
+    return;
+  }
+
+  /* error-val builtin (exactly 1 arg) */
+  if (compiler__head_matches(head, "error-val", 9)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "error-val", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_ERROR_VAL, line);
+    return;
+  }
+
   /* to-string builtin (exactly 1 arg) */
   if (compiler__head_matches(head, "to-string", 9)) {
     if (argc != 1) {
