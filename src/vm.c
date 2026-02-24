@@ -1967,6 +1967,19 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_JUMP_IF_ERROR: {
+        uint16_t offset = vm__read_u16(vm);
+        if (vm->stack_top == 0) {
+          vm__set_error(vm, "stack underflow");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclVal top = vm->stack[vm->stack_top - 1];
+        if (jacl_is_error(top)) {
+          vm->ip += offset;
+        }
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }

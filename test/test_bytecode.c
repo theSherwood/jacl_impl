@@ -66,7 +66,8 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_IS_ERROR,       53);
   ASSERT_INT_EQ(OP_ERROR_VAL,      54);
   ASSERT_INT_EQ(OP_CHECK_ERROR,    55);
-  ASSERT_INT_EQ(OP_HALT,           56);
+  ASSERT_INT_EQ(OP_JUMP_IF_ERROR,  56);
+  ASSERT_INT_EQ(OP_HALT,           57);
   TEST_PASS();
 }
 

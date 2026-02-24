@@ -26,6 +26,7 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
 
 #define COMPILER_LOCALS_MAX 256
 #define COMPILER_UPVALUES_MAX 256
+#define COMPILER_TRY_PATCHES_MAX 128
 
 typedef struct {
   JaclVal  name;         /* inline string name */
@@ -65,6 +66,9 @@ struct Compiler {
   Compiler*        enclosing;  /* parent compiler for upvalue resolution */
   GlobalArity      global_arities[COMPILER_GLOBAL_ARITIES_MAX];
   uint32_t         global_arity_count;
+  uint32_t         try_patches[COMPILER_TRY_PATCHES_MAX];
+  uint32_t         try_patch_count;
+  bool             in_try_body;
 };
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -79,6 +83,8 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->upvalue_count = 0;
   c->enclosing     = NULL;
   c->global_arity_count = 0;
+  c->try_patch_count = 0;
+  c->in_try_body     = false;
 }
 
 /* --- Internal: Emit helpers --- */
@@ -242,7 +248,15 @@ static void compiler__patch_jump(Compiler* c, uint32_t offset) {
 
 static void compiler__emit_check_error(Compiler* c, uint32_t line) {
   compiler__emit_byte(c, OP_CHECK_ERROR, line);
-  compiler__emit_u16(c, 0, line);
+  if (c->in_try_body) {
+    /* Record position for later patching to jump to try handler */
+    if (c->try_patch_count < COMPILER_TRY_PATCHES_MAX) {
+      c->try_patches[c->try_patch_count++] = c->chunk->code_count;
+    }
+    compiler__emit_u16(c, 0xFFFF, line);  /* placeholder */
+  } else {
+    compiler__emit_u16(c, 0, line);
+  }
 }
 
 /* --- Internal: Compile block as expression (last stmt value stays on stack) --- */
@@ -725,6 +739,89 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* while returns nil */
     compiler__emit_byte(c, OP_NIL, line);
+    return;
+  }
+
+  /* try special form: [try { body } name { handler }] */
+  if (compiler__head_matches(head, "try", 3)) {
+    if (argc != 3) {
+      compiler__builtin_arity_error(c, line, col, "try", "3 arguments", argc);
+      return;
+    }
+    if (args[0]->type != AST_BLOCK) {
+      compiler__error(c, line, col, "try body must be a block");
+      return;
+    }
+    if (args[1]->type != AST_LIT_STRING) {
+      compiler__error(c, line, col, "try binding must be a name");
+      return;
+    }
+    if (args[2]->type != AST_BLOCK) {
+      compiler__error(c, line, col, "try handler must be a block");
+      return;
+    }
+
+    /* Get binding name */
+    uint32_t bind_len = args[1]->data.lit_string.length;
+    if (bind_len > 7) {
+      compiler__error(c, line, col, "try binding name exceeds 7-byte inline limit");
+      return;
+    }
+    JaclVal bind_name = jacl_inline_string(args[1]->data.lit_string.value, bind_len);
+
+    /* Save try context */
+    bool saved_in_try = c->in_try_body;
+    uint32_t saved_patch_start = c->try_patch_count;
+    c->in_try_body = true;
+
+    /* Compile try body as block expression */
+    compiler__compile_block_expr(c, args[0]);
+
+    /* Restore in_try_body (patches still need to be applied) */
+    c->in_try_body = saved_in_try;
+
+    /* After body: check if final result is an error */
+    uint32_t handler_jump = compiler__emit_jump(c, OP_JUMP_IF_ERROR, line);
+
+    /* Normal path: skip handler */
+    uint32_t skip_jump = compiler__emit_jump(c, OP_JUMP, line);
+
+    /* Handler entry point */
+    uint32_t handler_pos = c->chunk->code_count;
+
+    /* Patch OP_JUMP_IF_ERROR to handler */
+    compiler__patch_jump(c, handler_jump);
+
+    /* Patch all OP_CHECK_ERROR offsets from try body to handler */
+    for (uint32_t i = saved_patch_start; i < c->try_patch_count; i++) {
+      uint32_t patch_pos = c->try_patches[i];
+      uint32_t jump_dist = handler_pos - (patch_pos + 2);
+      c->chunk->code[patch_pos]     = (uint8_t)((jump_dist >> 8) & 0xFF);
+      c->chunk->code[patch_pos + 1] = (uint8_t)(jump_dist & 0xFF);
+    }
+    c->try_patch_count = saved_patch_start;
+
+    /* Handler: error value is on stack, bind as local */
+    uint32_t handler_scope_start = c->local_count;
+    compiler__begin_scope(c);
+    compiler__add_local(c, bind_name, line, col);
+
+    /* Compile handler block expression */
+    compiler__compile_block_expr(c, args[2]);
+
+    /* Clean up handler scope (pop binding while keeping result) */
+    uint32_t handler_pop = c->local_count - handler_scope_start;
+    c->scope_depth--;
+    c->local_count = handler_scope_start;
+    if (handler_pop > 0) {
+      compiler__emit_byte(c, OP_SET_LOCAL, line);
+      compiler__emit_byte(c, (uint8_t)handler_scope_start, line);
+      compiler__emit_byte(c, OP_POP_N, line);
+      compiler__emit_byte(c, (uint8_t)handler_pop, line);
+    }
+
+    /* Patch skip jump to here (end of try expression) */
+    compiler__patch_jump(c, skip_jump);
     return;
   }
 
