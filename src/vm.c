@@ -99,7 +99,11 @@ static const char* vm__type_name(JaclVal v) {
   if (jacl_is_nil(v))           return "nil";
   if (jacl_is_bool(v))          return "bool";
   if (jacl_is_i32(v))           return "i32";
+  if (jacl_is_u32(v))           return "u32";
+  if (jacl_is_i64(v))           return "i64";
+  if (jacl_is_u64(v))           return "u64";
   if (jacl_is_f32(v))           return "f32";
+  if (jacl_is_f64(v))           return "f64";
   if (jacl_is_string(v))        return "string";
   if (jacl_is_closure(v))       return "closure";
   if (jacl_is_vector(v))        return "vector";
@@ -273,7 +277,7 @@ static JaclVal vm__env_get(VM* vm, JaclVal name, bool* found) {
 
 /* --- Binary numeric operation macro --- */
 
-#define VM__BINARY_NUMERIC_OP(fn_i32, fn_f32, op_name)                       \
+#define VM__BINARY_NUMERIC_OP(fn_i32, fn_f32, fn_u32, op_name)               \
   do {                                                                        \
     JaclVal b, a;                                                             \
     result = vm__pop(vm, &b); if (result != VM_OK) return result;             \
@@ -283,6 +287,8 @@ static JaclVal vm__env_get(VM* vm, JaclVal name, bool* found) {
       res = fn_i32(a, b);                                                     \
     } else if (jacl_is_f32(a) && jacl_is_f32(b)) {                           \
       res = fn_f32(a, b);                                                     \
+    } else if (jacl_is_u32(a) && jacl_is_u32(b)) {                           \
+      res = fn_u32(a, b);                                                     \
     } else {                                                                  \
       vm__set_error(vm,                                                       \
         "type error in '%s': expected matching numeric types, got %s and %s", \
@@ -493,22 +499,22 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_ADD: {
-        VM__BINARY_NUMERIC_OP(jacl_add_i32, jacl_add_f32, "+");
+        VM__BINARY_NUMERIC_OP(jacl_add_i32, jacl_add_f32, jacl_u32_add, "+");
         break;
       }
 
       case OP_SUB: {
-        VM__BINARY_NUMERIC_OP(jacl_sub_i32, jacl_sub_f32, "-");
+        VM__BINARY_NUMERIC_OP(jacl_sub_i32, jacl_sub_f32, jacl_u32_sub, "-");
         break;
       }
 
       case OP_MUL: {
-        VM__BINARY_NUMERIC_OP(jacl_mul_i32, jacl_mul_f32, "*");
+        VM__BINARY_NUMERIC_OP(jacl_mul_i32, jacl_mul_f32, jacl_u32_mul, "*");
         break;
       }
 
       case OP_DIV: {
-        VM__BINARY_NUMERIC_OP(jacl_div_i32, jacl_div_f32, "/");
+        VM__BINARY_NUMERIC_OP(jacl_div_i32, jacl_div_f32, jacl_u32_div, "/");
         break;
       }
 
@@ -526,6 +532,12 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm__set_error(vm,
             "type error in '%%': modulo is not supported for f32");
           return VM_RUNTIME_ERROR;
+        } else if (jacl_is_u32(a) && jacl_is_u32(b)) {
+          JaclVal mod_res = jacl_u32_mod(a, b);
+          if (jacl_is_error(mod_res) && !jacl_is_error(a) && !jacl_is_error(b))
+            vm__capture_trace(vm);
+          result = vm__push(vm, mod_res);
+          if (result != VM_OK) return result;
         } else {
           vm__set_error(vm,
             "type error in '%%': expected matching numeric types, got %s and %s",
@@ -543,6 +555,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           res = jacl_neg_i32(a);
         } else if (jacl_is_f32(a)) {
           res = jacl_neg_f32(a);
+        } else if (jacl_is_u32(a)) {
+          res = jacl_u32_neg(a);
         } else {
           vm__set_error(vm,
             "type error in '-': expected numeric type, got %s",
@@ -572,6 +586,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           res = jacl_lt_i32(a, b);
         } else if (jacl_is_f32(a) && jacl_is_f32(b)) {
           res = jacl_lt_f32(a, b);
+        } else if (jacl_is_u32(a) && jacl_is_u32(b)) {
+          res = jacl_u32_lt(a, b);
         } else if (jacl_is_string(a) && jacl_is_string(b)) {
           res = jacl_bool(jacl_string_cmp(a, b) < 0);
         } else {
@@ -593,6 +609,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           res = jacl_gt_i32(a, b);
         } else if (jacl_is_f32(a) && jacl_is_f32(b)) {
           res = jacl_gt_f32(a, b);
+        } else if (jacl_is_u32(a) && jacl_is_u32(b)) {
+          res = jacl_u32_gt(a, b);
         } else if (jacl_is_string(a) && jacl_is_string(b)) {
           res = jacl_bool(jacl_string_cmp(a, b) > 0);
         } else {
@@ -614,6 +632,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           res = jacl_le_i32(a, b);
         } else if (jacl_is_f32(a) && jacl_is_f32(b)) {
           res = jacl_le_f32(a, b);
+        } else if (jacl_is_u32(a) && jacl_is_u32(b)) {
+          res = jacl_u32_le(a, b);
         } else if (jacl_is_string(a) && jacl_is_string(b)) {
           res = jacl_bool(jacl_string_cmp(a, b) <= 0);
         } else {
@@ -635,6 +655,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           res = jacl_ge_i32(a, b);
         } else if (jacl_is_f32(a) && jacl_is_f32(b)) {
           res = jacl_ge_f32(a, b);
+        } else if (jacl_is_u32(a) && jacl_is_u32(b)) {
+          res = jacl_u32_ge(a, b);
         } else if (jacl_is_string(a) && jacl_is_string(b)) {
           res = jacl_bool(jacl_string_cmp(a, b) >= 0);
         } else {
@@ -2593,6 +2615,307 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         memcpy(&a, &raw_a, sizeof(double));
         memcpy(&b, &raw_b, sizeof(double));
         result = vm__push(vm, a == b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      /* --- M11: u64 unsigned-specific opcodes --- */
+
+      case OP_DIV_U64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        uint64_t a = raw_a;
+        uint64_t b = raw_b;
+        if (b == 0) {
+          vm__set_error(vm, "division by zero");
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, a / b);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_MOD_U64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        uint64_t a = raw_a;
+        uint64_t b = raw_b;
+        if (b == 0) {
+          vm__set_error(vm, "division by zero");
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, a % b);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_LT_U64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        result = vm__push(vm, raw_a < raw_b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_GT_U64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        result = vm__push(vm, raw_a > raw_b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_LE_U64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        result = vm__push(vm, raw_a <= raw_b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_GE_U64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        result = vm__push(vm, raw_a >= raw_b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      /* --- M11: Type conversion opcodes --- */
+
+      case OP_TO_I32: {
+        uint8_t src_type = vm__read_byte(vm);
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        int32_t i;
+        switch ((JaclType)src_type) {
+          case TYPE_I32: { result = vm__push(vm, val); break; }
+          case TYPE_U32: { i = (int32_t)jacl_as_u32(val); result = vm__push(vm, jacl_i32(i)); break; }
+          case TYPE_I64: { i = (int32_t)(int64_t)val; result = vm__push(vm, jacl_i32(i)); break; }
+          case TYPE_U64: { i = (int32_t)(uint64_t)val; result = vm__push(vm, jacl_i32(i)); break; }
+          case TYPE_F32: { i = (int32_t)jacl_as_f32(val); result = vm__push(vm, jacl_i32(i)); break; }
+          case TYPE_F64: { double d; memcpy(&d, &val, sizeof(double)); i = (int32_t)d; result = vm__push(vm, jacl_i32(i)); break; }
+          case TYPE_DYN: {
+            if (jacl_is_i32(val)) { result = vm__push(vm, jacl_i32(jacl_as_i32(val))); }
+            else if (jacl_is_u32(val)) { result = vm__push(vm, jacl_i32((int32_t)jacl_as_u32(val))); }
+            else if (jacl_is_i64(val)) { result = vm__push(vm, jacl_i32((int32_t)jacl_as_i64(val))); }
+            else if (jacl_is_u64(val)) { result = vm__push(vm, jacl_i32((int32_t)jacl_as_u64(val))); }
+            else if (jacl_is_f32(val)) { result = vm__push(vm, jacl_i32((int32_t)jacl_as_f32(val))); }
+            else if (jacl_is_f64(val)) { result = vm__push(vm, jacl_i32((int32_t)jacl_as_f64(val))); }
+            else { vm__set_error(vm, "cannot convert %s to i32", vm__type_name(val)); return VM_RUNTIME_ERROR; }
+            break;
+          }
+          default: { vm__set_error(vm, "invalid source type for to-i32"); return VM_RUNTIME_ERROR; }
+        }
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TO_I64: {
+        uint8_t src_type = vm__read_byte(vm);
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        int64_t i;
+        switch ((JaclType)src_type) {
+          case TYPE_I32: { i = (int64_t)jacl_as_i32(val); result = vm__push(vm, (uint64_t)i); break; }
+          case TYPE_U32: { i = (int64_t)(uint32_t)jacl_as_u32(val); result = vm__push(vm, (uint64_t)i); break; }
+          case TYPE_I64: { result = vm__push(vm, val); break; }
+          case TYPE_U64: { result = vm__push(vm, val); break; }
+          case TYPE_F32: { i = (int64_t)jacl_as_f32(val); result = vm__push(vm, (uint64_t)i); break; }
+          case TYPE_F64: { double d; memcpy(&d, &val, sizeof(double)); i = (int64_t)d; result = vm__push(vm, (uint64_t)i); break; }
+          case TYPE_DYN: {
+            if (jacl_is_i32(val)) { i = (int64_t)jacl_as_i32(val); }
+            else if (jacl_is_u32(val)) { i = (int64_t)(uint32_t)jacl_as_u32(val); }
+            else if (jacl_is_i64(val)) { i = jacl_as_i64(val); }
+            else if (jacl_is_u64(val)) { i = (int64_t)jacl_as_u64(val); }
+            else if (jacl_is_f32(val)) { i = (int64_t)jacl_as_f32(val); }
+            else if (jacl_is_f64(val)) { i = (int64_t)jacl_as_f64(val); }
+            else { vm__set_error(vm, "cannot convert %s to i64", vm__type_name(val)); return VM_RUNTIME_ERROR; }
+            result = vm__push(vm, (uint64_t)i);
+            break;
+          }
+          default: { vm__set_error(vm, "invalid source type for to-i64"); return VM_RUNTIME_ERROR; }
+        }
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TO_U32: {
+        uint8_t src_type = vm__read_byte(vm);
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        uint32_t u;
+        switch ((JaclType)src_type) {
+          case TYPE_I32: { u = (uint32_t)jacl_as_i32(val); result = vm__push(vm, jacl_u32(u)); break; }
+          case TYPE_U32: { result = vm__push(vm, val); break; }
+          case TYPE_I64: { u = (uint32_t)(int64_t)val; result = vm__push(vm, jacl_u32(u)); break; }
+          case TYPE_U64: { u = (uint32_t)(uint64_t)val; result = vm__push(vm, jacl_u32(u)); break; }
+          case TYPE_F32: { u = (uint32_t)jacl_as_f32(val); result = vm__push(vm, jacl_u32(u)); break; }
+          case TYPE_F64: { double d; memcpy(&d, &val, sizeof(double)); u = (uint32_t)d; result = vm__push(vm, jacl_u32(u)); break; }
+          case TYPE_DYN: {
+            if (jacl_is_i32(val)) { u = (uint32_t)jacl_as_i32(val); }
+            else if (jacl_is_u32(val)) { u = jacl_as_u32(val); }
+            else if (jacl_is_i64(val)) { u = (uint32_t)jacl_as_i64(val); }
+            else if (jacl_is_u64(val)) { u = (uint32_t)jacl_as_u64(val); }
+            else if (jacl_is_f32(val)) { u = (uint32_t)jacl_as_f32(val); }
+            else if (jacl_is_f64(val)) { u = (uint32_t)jacl_as_f64(val); }
+            else { vm__set_error(vm, "cannot convert %s to u32", vm__type_name(val)); return VM_RUNTIME_ERROR; }
+            result = vm__push(vm, jacl_u32(u));
+            break;
+          }
+          default: { vm__set_error(vm, "invalid source type for to-u32"); return VM_RUNTIME_ERROR; }
+        }
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TO_U64: {
+        uint8_t src_type = vm__read_byte(vm);
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        uint64_t u;
+        switch ((JaclType)src_type) {
+          case TYPE_I32: { u = (uint64_t)(int64_t)jacl_as_i32(val); result = vm__push(vm, u); break; }
+          case TYPE_U32: { u = (uint64_t)jacl_as_u32(val); result = vm__push(vm, u); break; }
+          case TYPE_I64: { result = vm__push(vm, val); break; }
+          case TYPE_U64: { result = vm__push(vm, val); break; }
+          case TYPE_F32: { u = (uint64_t)jacl_as_f32(val); result = vm__push(vm, u); break; }
+          case TYPE_F64: { double d; memcpy(&d, &val, sizeof(double)); u = (uint64_t)d; result = vm__push(vm, u); break; }
+          case TYPE_DYN: {
+            if (jacl_is_i32(val)) { u = (uint64_t)(int64_t)jacl_as_i32(val); }
+            else if (jacl_is_u32(val)) { u = (uint64_t)jacl_as_u32(val); }
+            else if (jacl_is_i64(val)) { u = (uint64_t)jacl_as_i64(val); }
+            else if (jacl_is_u64(val)) { u = jacl_as_u64(val); }
+            else if (jacl_is_f32(val)) { u = (uint64_t)jacl_as_f32(val); }
+            else if (jacl_is_f64(val)) { u = (uint64_t)jacl_as_f64(val); }
+            else { vm__set_error(vm, "cannot convert %s to u64", vm__type_name(val)); return VM_RUNTIME_ERROR; }
+            result = vm__push(vm, u);
+            break;
+          }
+          default: { vm__set_error(vm, "invalid source type for to-u64"); return VM_RUNTIME_ERROR; }
+        }
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TO_F32: {
+        uint8_t src_type = vm__read_byte(vm);
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        float f;
+        switch ((JaclType)src_type) {
+          case TYPE_I32: { f = (float)jacl_as_i32(val); result = vm__push(vm, jacl_f32(f)); break; }
+          case TYPE_U32: { f = (float)jacl_as_u32(val); result = vm__push(vm, jacl_f32(f)); break; }
+          case TYPE_I64: { f = (float)(int64_t)val; result = vm__push(vm, jacl_f32(f)); break; }
+          case TYPE_U64: { f = (float)(uint64_t)val; result = vm__push(vm, jacl_f32(f)); break; }
+          case TYPE_F32: { result = vm__push(vm, val); break; }
+          case TYPE_F64: { double d; memcpy(&d, &val, sizeof(double)); f = (float)d; result = vm__push(vm, jacl_f32(f)); break; }
+          case TYPE_DYN: {
+            if (jacl_is_i32(val)) { f = (float)jacl_as_i32(val); }
+            else if (jacl_is_u32(val)) { f = (float)jacl_as_u32(val); }
+            else if (jacl_is_i64(val)) { f = (float)jacl_as_i64(val); }
+            else if (jacl_is_u64(val)) { f = (float)jacl_as_u64(val); }
+            else if (jacl_is_f32(val)) { f = jacl_as_f32(val); }
+            else if (jacl_is_f64(val)) { f = (float)jacl_as_f64(val); }
+            else { vm__set_error(vm, "cannot convert %s to f32", vm__type_name(val)); return VM_RUNTIME_ERROR; }
+            result = vm__push(vm, jacl_f32(f));
+            break;
+          }
+          default: { vm__set_error(vm, "invalid source type for to-f32"); return VM_RUNTIME_ERROR; }
+        }
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TO_F64: {
+        uint8_t src_type = vm__read_byte(vm);
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        double d = 0.0;
+        bool need_push = true;
+        switch ((JaclType)src_type) {
+          case TYPE_I32: { d = (double)jacl_as_i32(val); break; }
+          case TYPE_U32: { d = (double)jacl_as_u32(val); break; }
+          case TYPE_I64: { d = (double)(int64_t)val; break; }
+          case TYPE_U64: { d = (double)(uint64_t)val; break; }
+          case TYPE_F32: { d = (double)jacl_as_f32(val); break; }
+          case TYPE_F64: { result = vm__push(vm, val); need_push = false; break; }
+          case TYPE_DYN: {
+            if (jacl_is_i32(val)) { d = (double)jacl_as_i32(val); }
+            else if (jacl_is_u32(val)) { d = (double)jacl_as_u32(val); }
+            else if (jacl_is_i64(val)) { d = (double)jacl_as_i64(val); }
+            else if (jacl_is_u64(val)) { d = (double)jacl_as_u64(val); }
+            else if (jacl_is_f32(val)) { d = (double)jacl_as_f32(val); }
+            else if (jacl_is_f64(val)) { d = jacl_as_f64(val); }
+            else { vm__set_error(vm, "cannot convert %s to f64", vm__type_name(val)); return VM_RUNTIME_ERROR; }
+            break;
+          }
+          default: { vm__set_error(vm, "invalid source type for to-f64"); return VM_RUNTIME_ERROR; }
+        }
+        if (need_push) {
+          uint64_t raw;
+          memcpy(&raw, &d, sizeof(uint64_t));
+          result = vm__push(vm, raw);
+        }
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TO_DYN: {
+        uint8_t src_type = vm__read_byte(vm);
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        switch ((JaclType)src_type) {
+          case TYPE_I32:
+          case TYPE_U32:
+          case TYPE_F32:
+          case TYPE_BOOL:
+          case TYPE_NIL:
+          case TYPE_STR:
+          case TYPE_DYN: {
+            /* Already tagged — push as-is */
+            result = vm__push(vm, val);
+            break;
+          }
+          case TYPE_I64: {
+            int64_t i = (int64_t)val;
+            result = vm__push(vm, jacl_i64(vm->arena, i));
+            break;
+          }
+          case TYPE_U64: {
+            uint64_t u = val;
+            result = vm__push(vm, jacl_u64(vm->arena, u));
+            break;
+          }
+          case TYPE_F64: {
+            double d;
+            memcpy(&d, &val, sizeof(double));
+            result = vm__push(vm, jacl_f64(vm->arena, d));
+            break;
+          }
+          default: {
+            result = vm__push(vm, val);
+            break;
+          }
+        }
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      /* --- M11: Typed constant opcodes --- */
+
+      case OP_CONST_I64:
+      case OP_CONST_U64:
+      case OP_CONST_F64: {
+        uint16_t idx = vm__read_u16(vm);
+        /* Push raw 64-bit value from constant pool (no tag) */
+        result = vm__push(vm, vm->chunk->constants[idx]);
         if (result != VM_OK) return result;
         break;
       }
