@@ -85,6 +85,49 @@ typedef enum {
   OP_SWAP,          /* pop closure + box/atom, apply closure to inner, store result */
   OP_IS_BOX,        /* pop value, push true if box, else false */
   OP_IS_ATOM,       /* pop value, push true if atom, else false */
+  /* M11 typed opcodes — i64 arithmetic and comparisons */
+  OP_ADD_I64,       /* pop two raw i64, push sum */
+  OP_SUB_I64,       /* pop two raw i64, push difference */
+  OP_MUL_I64,       /* pop two raw i64, push product */
+  OP_DIV_I64,       /* pop two raw i64, push quotient (div by zero = VM error) */
+  OP_MOD_I64,       /* pop two raw i64, push remainder (div by zero = VM error) */
+  OP_NEG_I64,       /* negate raw i64 */
+  OP_LT_I64,        /* pop two raw i64, push bool */
+  OP_GT_I64,        /* pop two raw i64, push bool */
+  OP_LE_I64,        /* pop two raw i64, push bool */
+  OP_GE_I64,        /* pop two raw i64, push bool */
+  OP_EQ_I64,        /* pop two raw i64, push bool */
+  /* u64 ops (only unsigned-specific: div, mod, comparisons) */
+  OP_DIV_U64,       /* pop two raw u64, push quotient (unsigned) */
+  OP_MOD_U64,       /* pop two raw u64, push remainder (unsigned) */
+  OP_LT_U64,        /* pop two raw u64, push bool (unsigned) */
+  OP_GT_U64,        /* pop two raw u64, push bool (unsigned) */
+  OP_LE_U64,        /* pop two raw u64, push bool (unsigned) */
+  OP_GE_U64,        /* pop two raw u64, push bool (unsigned) */
+  /* f64 arithmetic and comparisons */
+  OP_ADD_F64,       /* pop two raw f64, push sum */
+  OP_SUB_F64,       /* pop two raw f64, push difference */
+  OP_MUL_F64,       /* pop two raw f64, push product */
+  OP_DIV_F64,       /* pop two raw f64, push quotient (div by zero = VM error) */
+  OP_MOD_F64,       /* pop two raw f64, push remainder via fmod */
+  OP_NEG_F64,       /* negate raw f64 */
+  OP_LT_F64,        /* pop two raw f64, push bool */
+  OP_GT_F64,        /* pop two raw f64, push bool */
+  OP_LE_F64,        /* pop two raw f64, push bool */
+  OP_GE_F64,        /* pop two raw f64, push bool */
+  OP_EQ_F64,        /* pop two raw f64, push bool */
+  /* Type conversion opcodes (each reads 1-byte source type operand) */
+  OP_TO_I32,        /* convert to i32 */
+  OP_TO_I64,        /* convert to raw i64 */
+  OP_TO_U32,        /* convert to u32 */
+  OP_TO_U64,        /* convert to raw u64 */
+  OP_TO_F32,        /* convert to f32 */
+  OP_TO_F64,        /* convert to raw f64 */
+  OP_TO_DYN,        /* box raw value into tagged JaclVal */
+  /* Typed constant opcodes (each reads uint16_t constant index) */
+  OP_CONST_I64,     /* push raw i64 from constant pool */
+  OP_CONST_U64,     /* push raw u64 from constant pool */
+  OP_CONST_F64,     /* push raw f64 from constant pool */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -208,6 +251,124 @@ static inline JaclVal jacl_closure(JaclClosure* cl) {
 
 static inline JaclClosure* jacl_as_closure(JaclVal v) {
   return (JaclClosure*)jacl_as_ptr(v);
+}
+
+/* --- Opcode name lookup (debug/error messages) --- */
+
+static const char* bytecode__opcode_name(uint8_t op) {
+  switch ((OpCode)op) {
+    case OP_CONST:           return "OP_CONST";
+    case OP_NIL:             return "OP_NIL";
+    case OP_TRUE:            return "OP_TRUE";
+    case OP_FALSE:           return "OP_FALSE";
+    case OP_POP:             return "OP_POP";
+    case OP_ADD:             return "OP_ADD";
+    case OP_SUB:             return "OP_SUB";
+    case OP_MUL:             return "OP_MUL";
+    case OP_DIV:             return "OP_DIV";
+    case OP_MOD:             return "OP_MOD";
+    case OP_NEG:             return "OP_NEG";
+    case OP_EQ:              return "OP_EQ";
+    case OP_LT:              return "OP_LT";
+    case OP_GT:              return "OP_GT";
+    case OP_LE:              return "OP_LE";
+    case OP_GE:              return "OP_GE";
+    case OP_PRINT:           return "OP_PRINT";
+    case OP_DEF_GLOBAL:      return "OP_DEF_GLOBAL";
+    case OP_GET_GLOBAL:      return "OP_GET_GLOBAL";
+    case OP_GET_LOCAL:       return "OP_GET_LOCAL";
+    case OP_SET_LOCAL:       return "OP_SET_LOCAL";
+    case OP_GET_UPVALUE:     return "OP_GET_UPVALUE";
+    case OP_JUMP:            return "OP_JUMP";
+    case OP_JUMP_IF_FALSE:   return "OP_JUMP_IF_FALSE";
+    case OP_LOOP:            return "OP_LOOP";
+    case OP_CALL:            return "OP_CALL";
+    case OP_RETURN:          return "OP_RETURN";
+    case OP_CLOSURE:         return "OP_CLOSURE";
+    case OP_POP_N:           return "OP_POP_N";
+    case OP_CONCAT:          return "OP_CONCAT";
+    case OP_STR_LEN:         return "OP_STR_LEN";
+    case OP_STR_INDEX:       return "OP_STR_INDEX";
+    case OP_STR_SLICE:       return "OP_STR_SLICE";
+    case OP_TO_STRING:       return "OP_TO_STRING";
+    case OP_VEC:             return "OP_VEC";
+    case OP_VEC_GET:         return "OP_VEC_GET";
+    case OP_VEC_LEN:         return "OP_VEC_LEN";
+    case OP_VEC_PUSH:        return "OP_VEC_PUSH";
+    case OP_VEC_SET:         return "OP_VEC_SET";
+    case OP_VEC_CONCAT:      return "OP_VEC_CONCAT";
+    case OP_VEC_SLICE:       return "OP_VEC_SLICE";
+    case OP_MAP:             return "OP_MAP";
+    case OP_MAP_GET:         return "OP_MAP_GET";
+    case OP_MAP_HAS:         return "OP_MAP_HAS";
+    case OP_MAP_LEN:         return "OP_MAP_LEN";
+    case OP_MAP_SET:         return "OP_MAP_SET";
+    case OP_MAP_REMOVE:      return "OP_MAP_REMOVE";
+    case OP_MAP_KEYS:        return "OP_MAP_KEYS";
+    case OP_MAP_VALS:        return "OP_MAP_VALS";
+    case OP_EACH:            return "OP_EACH";
+    case OP_TRANSFORM:       return "OP_TRANSFORM";
+    case OP_FILTER:          return "OP_FILTER";
+    case OP_ERROR:           return "OP_ERROR";
+    case OP_IS_ERROR:        return "OP_IS_ERROR";
+    case OP_ERROR_VAL:       return "OP_ERROR_VAL";
+    case OP_CHECK_ERROR:     return "OP_CHECK_ERROR";
+    case OP_JUMP_IF_ERROR:   return "OP_JUMP_IF_ERROR";
+    case OP_STACK_TRACE:     return "OP_STACK_TRACE";
+    case OP_MAKE_CELL:       return "OP_MAKE_CELL";
+    case OP_GET_CELL_LOCAL:  return "OP_GET_CELL_LOCAL";
+    case OP_SET_CELL_LOCAL:  return "OP_SET_CELL_LOCAL";
+    case OP_GET_CELL_UPVALUE: return "OP_GET_CELL_UPVALUE";
+    case OP_SET_CELL_UPVALUE: return "OP_SET_CELL_UPVALUE";
+    case OP_SET_GLOBAL:      return "OP_SET_GLOBAL";
+    case OP_BOX:             return "OP_BOX";
+    case OP_ATOM:            return "OP_ATOM";
+    case OP_DEREF:           return "OP_DEREF";
+    case OP_RESET:           return "OP_RESET";
+    case OP_SWAP:            return "OP_SWAP";
+    case OP_IS_BOX:          return "OP_IS_BOX";
+    case OP_IS_ATOM:         return "OP_IS_ATOM";
+    case OP_ADD_I64:         return "OP_ADD_I64";
+    case OP_SUB_I64:         return "OP_SUB_I64";
+    case OP_MUL_I64:         return "OP_MUL_I64";
+    case OP_DIV_I64:         return "OP_DIV_I64";
+    case OP_MOD_I64:         return "OP_MOD_I64";
+    case OP_NEG_I64:         return "OP_NEG_I64";
+    case OP_LT_I64:          return "OP_LT_I64";
+    case OP_GT_I64:          return "OP_GT_I64";
+    case OP_LE_I64:          return "OP_LE_I64";
+    case OP_GE_I64:          return "OP_GE_I64";
+    case OP_EQ_I64:          return "OP_EQ_I64";
+    case OP_DIV_U64:         return "OP_DIV_U64";
+    case OP_MOD_U64:         return "OP_MOD_U64";
+    case OP_LT_U64:          return "OP_LT_U64";
+    case OP_GT_U64:          return "OP_GT_U64";
+    case OP_LE_U64:          return "OP_LE_U64";
+    case OP_GE_U64:          return "OP_GE_U64";
+    case OP_ADD_F64:         return "OP_ADD_F64";
+    case OP_SUB_F64:         return "OP_SUB_F64";
+    case OP_MUL_F64:         return "OP_MUL_F64";
+    case OP_DIV_F64:         return "OP_DIV_F64";
+    case OP_MOD_F64:         return "OP_MOD_F64";
+    case OP_NEG_F64:         return "OP_NEG_F64";
+    case OP_LT_F64:          return "OP_LT_F64";
+    case OP_GT_F64:          return "OP_GT_F64";
+    case OP_LE_F64:          return "OP_LE_F64";
+    case OP_GE_F64:          return "OP_GE_F64";
+    case OP_EQ_F64:          return "OP_EQ_F64";
+    case OP_TO_I32:          return "OP_TO_I32";
+    case OP_TO_I64:          return "OP_TO_I64";
+    case OP_TO_U32:          return "OP_TO_U32";
+    case OP_TO_U64:          return "OP_TO_U64";
+    case OP_TO_F32:          return "OP_TO_F32";
+    case OP_TO_F64:          return "OP_TO_F64";
+    case OP_TO_DYN:          return "OP_TO_DYN";
+    case OP_CONST_I64:       return "OP_CONST_I64";
+    case OP_CONST_U64:       return "OP_CONST_U64";
+    case OP_CONST_F64:       return "OP_CONST_F64";
+    case OP_HALT:            return "OP_HALT";
+  }
+  return "OP_UNKNOWN";
 }
 
 #endif /* BYTECODE_C */

@@ -22,6 +22,84 @@ typedef struct {
 static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       JaclInternTable* intern_table);
 
+/* --- Type system --- */
+
+typedef enum {
+  TYPE_DYN = 0,
+  TYPE_BOOL,
+  TYPE_NIL,
+  TYPE_I32,
+  TYPE_I64,
+  TYPE_U32,
+  TYPE_U64,
+  TYPE_F32,
+  TYPE_F64,
+  TYPE_STR,
+  TYPE_VEC,
+  TYPE_MAP,
+  TYPE_CLOSURE
+} JaclType;
+
+static bool is_type_keyword(const char* word, size_t len) {
+  if (len == 3) {
+    if (memcmp(word, "i32", 3) == 0) return true;
+    if (memcmp(word, "i64", 3) == 0) return true;
+    if (memcmp(word, "u32", 3) == 0) return true;
+    if (memcmp(word, "u64", 3) == 0) return true;
+    if (memcmp(word, "f32", 3) == 0) return true;
+    if (memcmp(word, "f64", 3) == 0) return true;
+    if (memcmp(word, "str", 3) == 0) return true;
+    if (memcmp(word, "dyn", 3) == 0) return true;
+  } else if (len == 4) {
+    if (memcmp(word, "bool", 4) == 0) return true;
+  }
+  return false;
+}
+
+static JaclType type_from_keyword(const char* word, size_t len) {
+  if (len == 3) {
+    if (memcmp(word, "i32", 3) == 0) return TYPE_I32;
+    if (memcmp(word, "i64", 3) == 0) return TYPE_I64;
+    if (memcmp(word, "u32", 3) == 0) return TYPE_U32;
+    if (memcmp(word, "u64", 3) == 0) return TYPE_U64;
+    if (memcmp(word, "f32", 3) == 0) return TYPE_F32;
+    if (memcmp(word, "f64", 3) == 0) return TYPE_F64;
+    if (memcmp(word, "str", 3) == 0) return TYPE_STR;
+    if (memcmp(word, "dyn", 3) == 0) return TYPE_DYN;
+  } else if (len == 4) {
+    if (memcmp(word, "bool", 4) == 0) return TYPE_BOOL;
+  }
+  return TYPE_DYN;
+}
+
+static const char* type_name(JaclType t) {
+  switch (t) {
+    case TYPE_DYN:     return "dyn";
+    case TYPE_BOOL:    return "bool";
+    case TYPE_NIL:     return "nil";
+    case TYPE_I32:     return "i32";
+    case TYPE_I64:     return "i64";
+    case TYPE_U32:     return "u32";
+    case TYPE_U64:     return "u64";
+    case TYPE_F32:     return "f32";
+    case TYPE_F64:     return "f64";
+    case TYPE_STR:     return "str";
+    case TYPE_VEC:     return "vec";
+    case TYPE_MAP:     return "map";
+    case TYPE_CLOSURE: return "closure";
+  }
+  return "unknown";
+}
+
+static bool is_numeric_type(JaclType t) {
+  return t == TYPE_I32 || t == TYPE_I64 || t == TYPE_U32 ||
+         t == TYPE_U64 || t == TYPE_F32 || t == TYPE_F64;
+}
+
+static bool is_unboxed_type(JaclType t) {
+  return t == TYPE_I64 || t == TYPE_U64 || t == TYPE_F64;
+}
+
 /* --- Internal: Local variable tracking --- */
 
 #define COMPILER_LOCALS_MAX 256
@@ -29,11 +107,12 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
 #define COMPILER_TRY_PATCHES_MAX 128
 
 typedef struct {
-  JaclVal  name;         /* inline string name */
-  int      depth;        /* scope depth when declared */
-  int16_t  known_arity;  /* arity if bound to a proc, -1 = unknown */
-  bool     is_mutable;   /* true if declared with mut */
-  bool     is_param;     /* true if this is a function parameter */
+  JaclVal   name;         /* inline string name */
+  int       depth;        /* scope depth when declared */
+  int16_t   known_arity;  /* arity if bound to a proc, -1 = unknown */
+  bool      is_mutable;   /* true if declared with mut */
+  bool      is_param;     /* true if this is a function parameter */
+  JaclType  type;         /* compile-time type (default TYPE_DYN) */
 } Local;
 
 /* --- Internal: Global arity tracking --- */
@@ -41,16 +120,18 @@ typedef struct {
 #define COMPILER_GLOBAL_ARITIES_MAX 64
 
 typedef struct {
-  JaclVal name;
-  int16_t known_arity;
-  bool    is_mutable;   /* true if declared with mut */
+  JaclVal   name;
+  int16_t   known_arity;
+  bool      is_mutable;   /* true if declared with mut */
+  JaclType  type;         /* compile-time type (default TYPE_DYN) */
 } GlobalArity;
 
 typedef struct {
-  uint8_t index;    /* local slot (if is_local) or parent upvalue index */
-  uint8_t is_local; /* 1 = capture from enclosing locals, 0 = from parent upvalues */
-  JaclVal name;     /* for debug/lookup */
-  bool    is_mutable; /* true if capturing a mut binding */
+  uint8_t   index;    /* local slot (if is_local) or parent upvalue index */
+  uint8_t   is_local; /* 1 = capture from enclosing locals, 0 = from parent upvalues */
+  JaclVal   name;     /* for debug/lookup */
+  bool      is_mutable; /* true if capturing a mut binding */
+  JaclType  type;     /* compile-time type (default TYPE_DYN) */
 } Upvalue;
 
 /* --- Internal: Compiler state --- */
@@ -154,6 +235,7 @@ static void compiler__add_local(Compiler* c, JaclVal name,
   local->known_arity = -1;
   local->is_mutable  = false;
   local->is_param    = false;
+  local->type        = TYPE_DYN;
 }
 
 static int compiler__resolve_local(Compiler* c, JaclVal name) {
@@ -203,6 +285,7 @@ static void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity)
     c->global_arities[c->global_arity_count].name = name;
     c->global_arities[c->global_arity_count].known_arity = arity;
     c->global_arities[c->global_arity_count].is_mutable = false;
+    c->global_arities[c->global_arity_count].type = TYPE_DYN;
     c->global_arity_count++;
   }
 }
@@ -225,6 +308,7 @@ static int compiler__add_upvalue(Compiler* c, uint8_t index, uint8_t is_local,
   c->upvalues[c->upvalue_count].is_local   = is_local;
   c->upvalues[c->upvalue_count].name       = name;
   c->upvalues[c->upvalue_count].is_mutable = false;
+  c->upvalues[c->upvalue_count].type       = TYPE_DYN;
   return (int)c->upvalue_count++;
 }
 

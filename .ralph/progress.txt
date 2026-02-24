@@ -112,91 +112,51 @@
 - `compiler__resolve_global_info(c, name, &is_mutable)` checks global existence and mutability; returns true if found
 - `def` at global scope ALWAYS registers in GlobalArity (even non-proc values with arity -1) — needed for `set!` to distinguish "immutable binding" from "undefined variable"
 - OP_SET_CELL_LOCAL pops new value, writes through cell, pushes nil; OP_SET_GLOBAL pops value, calls vm__env_set, pushes nil
+- New value tags: JACL_TAG_U32 (0x0D inline), JACL_TAG_I64 (0x0E heap), JACL_TAG_U64 (0x0F heap), JACL_TAG_F64 (0x10 heap)
+- Heap structs: JaclHeapI64, JaclHeapU64, JaclHeapF64 — arena-allocated, single value field
+- u32 constructor jacl_u32(uint32_t) is inline (like i32); i64/u64/f64 constructors take arena_t* first param
+- Arithmetic/comparison functions: jacl_TYPE_OP pattern (e.g. jacl_u32_add, jacl_i64_mul, jacl_f64_div)
+- u32 arithmetic functions take no arena (inline type); i64/u64/f64 arithmetic functions take arena_t* as first param
+- u32_neg and u64_neg return error-flagged zero (unsigned can't negate)
+- f64_mod uses fmod() from math.h — jacl.c includes <math.h>
+- i64 div/mod have INT64_MIN / -1 overflow guard (same pattern as i32)
+- f64 div/mod check divisor == 0.0 for error flagging (consistent with f32 div behavior)
+- JaclType enum in compiler.c: TYPE_DYN(0), TYPE_BOOL, TYPE_NIL, TYPE_I32, TYPE_I64, TYPE_U32, TYPE_U64, TYPE_F32, TYPE_F64, TYPE_STR, TYPE_VEC, TYPE_MAP, TYPE_CLOSURE
+- Type helpers: is_type_keyword(), type_from_keyword(), type_name(), is_numeric_type(), is_unboxed_type() — all in compiler.c
+- Local, GlobalArity, Upvalue structs all have JaclType type field (default TYPE_DYN)
+- M11 opcodes: OP_ADD_I64(71)..OP_EQ_I64(81), OP_DIV_U64(82)..OP_GE_U64(87), OP_ADD_F64(88)..OP_EQ_F64(98), OP_TO_I32(99)..OP_TO_DYN(105), OP_CONST_I64(106)..OP_CONST_F64(108), OP_HALT now at 109
+- u64 reuses i64 opcodes for add/sub/mul/neg/eq (same bit patterns); only div/mod/comparisons are unsigned-specific (6 opcodes)
+- bytecode__opcode_name(uint8_t op) returns string name for any opcode — useful for debug/error messages
 
 ## 2026-02-24 - US-001
-- Implemented: JaclMutableRef struct, JACL_TAG_CELL/BOX/ATOM value tags, constructors/accessors/predicates for cell/box/atom, is_mutable fields on Local/GlobalArity/Upvalue, 13 new opcodes in bytecode.c
-- Files changed: src/value.c, src/bytecode.c, src/compiler.c, test/test_bytecode.c
+- Implemented value tags, heap types, constructors, accessors, predicates for u32/i64/u64/f64
+- Files changed: src/value.c
 - **Learnings for future iterations:**
-  - Adding opcodes before OP_HALT shifts its enum value — must update test_bytecode.c test_opcode_enum
-  - compiler__add_local, compiler__add_upvalue, compiler__set_global_arity all need is_mutable initialized to false
-  - JaclMutableRef uses same struct for all three tag types — only the tag byte differs
+  - u32 is inline (same layout as i32 — fits in 56-bit payload), i64/u64/f64 are heap-allocated
+  - Heap type constructors need arena_t* as first parameter for allocation
+  - No new opcodes added in this story — OP_HALT stays at 71
 ---
 
 ## 2026-02-24 - US-002
-- Implemented: `mut` special form in compiler__compile_command, OP_MAKE_CELL and OP_GET_CELL_LOCAL VM handlers, AST_VAR_REF and dynamic call head resolution updated for is_mutable check
-- Files changed: src/compiler.c, src/vm.c, test/jacl/mut_local_basic.jacl
+- Implemented arithmetic (add, sub, mul, div, mod, neg) and comparison (lt, gt, le, ge, eq) functions for u32, i64, u64, f64
+- Files changed: src/value.c, src/jacl.c (added math.h)
 - **Learnings for future iterations:**
-  - Proc names must be <= 7 bytes — `test-mut` (8 bytes) fails at compile time; use shorter names like `t-mut`
-  - `mut` at global scope uses OP_DEF_GLOBAL (no cell) since globals are in name→value table; cells only needed for local slots
-  - Dynamic call head for bare words (line ~1139 in compiler.c) also needs the is_mutable check for OP_GET_CELL_LOCAL
-  - compiler__resolve_local returns slot index; check c->locals[slot].is_mutable to decide OP_GET_LOCAL vs OP_GET_CELL_LOCAL
+  - u32 functions need no arena (inline type), i64/u64/f64 need arena_t* first param for heap result allocation
+  - u32_neg/u64_neg return error-flagged zero (unsigned negation is undefined)
+  - f64_mod uses fmod() requiring math.h include in jacl.c
+  - i64 div/mod need INT64_MIN / -1 overflow guard (mirrors i32 pattern)
+  - Comparisons for all types return JaclVal bools (jacl_bool) — no arena needed for comparison results
 ---
 
 ## 2026-02-24 - US-003
-- Implemented: `set!` special form with full resolution chain (local → upvalue → global → undefined), OP_SET_CELL_LOCAL and OP_SET_GLOBAL VM handlers, `is_param` field on Local struct, `!` added to lexer word chars, `compiler__resolve_global_info` helper
-- Files changed: src/lexer.c, src/compiler.c, src/vm.c, test/jacl/set_local.jacl, test/jacl/set_immutable_error.jacl, test/jacl/set_param_error.jacl
+- Implemented type system infrastructure: JaclType enum, type fields on Local/GlobalArity/Upvalue, helper functions, 38 new opcodes, bytecode__opcode_name()
+- Files changed: src/compiler.c (JaclType enum, helpers, type fields), src/bytecode.c (38 new opcodes + opcode name function), test/test_bytecode.c (updated OP_HALT value)
 - **Learnings for future iterations:**
-  - `!` was NOT a valid word continuation character before this story — it was only in `lexer__is_operator_char`. Had to add it to `lexer__is_word_char` for `set!`, `reset!`, `swap!` to tokenize as single words
-  - `is_param` on Local struct distinguishes function parameters from `def` bindings for error messages ("cannot mutate parameter" vs "cannot mutate immutable binding")
-  - The full set! resolution chain (local → upvalue → global → undefined) was implemented upfront even though US-004/US-005 will test the global/upvalue paths — avoids incorrect error messages for mutable globals
-  - OP_SET_GLOBAL VM handler was added in this story (trivial: pop value, env_set, push nil) since the compiler emits it for mutable globals
----
-
-## 2026-02-24 - US-004
-- Implemented: `mut`/`set!` for mutable globals — test files and a fix to always register `def` globals in GlobalArity table
-- Files changed: src/compiler.c, test/jacl/mut_global.jacl, test/jacl/set_global_immutable_error.jacl, .ralph/prd.json
-- **Learnings for future iterations:**
-  - `def` at global scope previously only registered in GlobalArity when RHS had known arity (proc). Changed to always register so `set!` can find immutable globals and give correct "cannot mutate immutable binding" error instead of "undefined variable"
-  - Most US-004 infrastructure (mut at global scope, set! global resolution, OP_SET_GLOBAL VM handler) was already implemented in US-003 — this story mainly needed the test files and the `def` global registration fix
-  - Global `mut` does NOT use cells (no OP_MAKE_CELL) — globals are stored in a name→value environment table, so OP_DEF_GLOBAL/OP_SET_GLOBAL suffice
----
-
-## 2026-02-24 - US-005
-- Implemented: Mutable closure capture via cells — `compiler__resolve_upvalue` now propagates `is_mutable` from enclosing locals/upvalues, AST_VAR_REF emits OP_GET_CELL_UPVALUE for mutable upvalues, VM handlers for OP_GET_CELL_UPVALUE and OP_SET_CELL_UPVALUE
-- Files changed: src/compiler.c, src/vm.c, test/jacl/mut_closure_shared.jacl, test/jacl/mut_closure_bidirectional.jacl
-- **Learnings for future iterations:**
-  - OP_CLOSURE capture is unchanged — cells are JaclVals copied by value, so both enclosing local slot and closure upvalue slot point to same heap JaclMutableRef
-  - `$var` at statement position in a block desugars to `[$var]` (zero-arg call) — for returning non-callable values from procs, use `[+ $x 0]` not `{ $x }`
-  - `proc name [] { body }` requires the empty params list `[]` even for zero-arg procs — omitting it gives arity error "proc expects 3 arguments but got 2"
-  - Transitive is_mutable propagation: when capturing from enclosing upvalue, copy is_mutable from `c->enclosing->upvalues[upvalue].is_mutable`
----
-
-## 2026-02-24 - US-006
-- Implemented: `box`, `atom`, `box?`, `atom?` compiler builtins + VM handlers for OP_BOX, OP_ATOM, OP_IS_BOX, OP_IS_ATOM
-- Files changed: src/compiler.c, src/vm.c, test/jacl/box_create.jacl, test/jacl/atom_create.jacl
-- **Learnings for future iterations:**
-  - JACL comments use `#` not `;` — semicolons are statement separators, using them as comments causes parse errors
-  - OP_BOX and OP_ATOM check for error-flagged input and propagate the error (don't allocate a box/atom)
-  - box/atom builtins follow same pattern as `error` builtin: 1-arg compile, emit single opcode
-  - `box?` and `atom?` follow same pattern as `error?` builtin: 1-arg compile, emit predicate opcode
----
-
-## 2026-02-24 - US-007
-- Implemented: `deref`, `reset!`, `swap!` compiler builtins + VM handlers for OP_DEREF, OP_RESET, OP_SWAP
-- Files changed: src/compiler.c, src/vm.c, test/jacl/deref_basic.jacl, test/jacl/reset_basic.jacl, test/jacl/swap_basic.jacl
-- **Learnings for future iterations:**
-  - OP_SWAP follows the same inline closure call pattern as OP_EACH/OP_TRANSFORM/OP_FILTER: push closure + arg, set up CallFrame, call vm__run(vm, caller_frame_count), pop return value, restore state
-  - `reset!` returns the new value (not nil) — different from `set!` which returns nil
-  - `swap!` validates closure param_count == 1 at runtime (not compile time, since the closure may be passed dynamically)
-  - `deref`, `reset!`, `swap!` all work on both box and atom types (check `jacl_is_box || jacl_is_atom`)
-  - Error propagation: check each arg left-to-right for error flag, push first error found
----
-
-## 2026-02-24 - US-008
-- Implemented: Print formatting for box (`<box: VALUE>`), atom (`<atom: VALUE>`), and cell (transparent dereference) in both OP_PRINT and vm__fmt_value; also updated OP_TO_STRING for cell/box/atom
-- Files changed: src/vm.c, test/jacl/print_box_atom.jacl
-- **Learnings for future iterations:**
-  - Cell transparency in OP_PRINT: dereference the cell right after popping val, before any type checks — this makes cells invisible at the print level
-  - vm__fmt_value wraps strings in quotes — so `<atom: "hello">` not `<atom: hello>` for string-containing containers
-  - Box/atom print use the VMFormatBuf path (same as vectors/maps) since they need recursive formatting
-  - OP_TO_STRING also needs cell/box/atom handling — cell is transparent (dereference before convert), box/atom use fmt_value path
----
-
-## 2026-02-24 - US-009
-- Implemented: Comprehensive M10 integration test file `test/test_m10.c` with 58 tests covering all mutable state features; registered in build.sh
-- Files changed: test/test_m10.c (new), build.sh
-- **Learnings for future iterations:**
-  - deref/reset!/swap! on wrong types produce VM runtime errors (VM_RUNTIME_ERROR), not error-flagged values — use run_err not run_ok for these tests
-  - Vec print format inside containers includes `vec` keyword: `<box: [vec 1 2 3]>` not `<box: [1 2 3]>`
-  - Test file follows exact test_m9.c pattern: PrintCapture(4096), run_ok/run_err helpers, TestEntry table grouped by US-XXX comments
+  - JaclType enum defined in compiler.c (before Local struct) since it's primarily a compile-time concept
+  - is_type_keyword recognizes: i32, i64, u32, u64, f32, f64, str, dyn, bool
+  - is_unboxed_type returns true only for i64/u64/f64 (types that live raw on VM stack)
+  - u64 reuses i64 opcodes for add/sub/mul/neg/eq — only 6 u64-specific opcodes (div, mod, 4 comparisons)
+  - Total 38 new opcodes: 11 i64 + 6 u64 + 11 f64 + 7 conversion + 3 typed constants
+  - OP_HALT shifted from 71 to 109 — always update test_bytecode.c opcode_enum
+  - compiler__add_local, compiler__add_upvalue, compiler__set_global_arity all init type = TYPE_DYN
 ---

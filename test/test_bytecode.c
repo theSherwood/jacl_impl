@@ -82,7 +82,46 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_SWAP,            68);
   ASSERT_INT_EQ(OP_IS_BOX,          69);
   ASSERT_INT_EQ(OP_IS_ATOM,         70);
-  ASSERT_INT_EQ(OP_HALT,            71);
+  /* M11 typed opcodes */
+  ASSERT_INT_EQ(OP_ADD_I64,         71);
+  ASSERT_INT_EQ(OP_SUB_I64,         72);
+  ASSERT_INT_EQ(OP_MUL_I64,         73);
+  ASSERT_INT_EQ(OP_DIV_I64,         74);
+  ASSERT_INT_EQ(OP_MOD_I64,         75);
+  ASSERT_INT_EQ(OP_NEG_I64,         76);
+  ASSERT_INT_EQ(OP_LT_I64,          77);
+  ASSERT_INT_EQ(OP_GT_I64,          78);
+  ASSERT_INT_EQ(OP_LE_I64,          79);
+  ASSERT_INT_EQ(OP_GE_I64,          80);
+  ASSERT_INT_EQ(OP_EQ_I64,          81);
+  ASSERT_INT_EQ(OP_DIV_U64,         82);
+  ASSERT_INT_EQ(OP_MOD_U64,         83);
+  ASSERT_INT_EQ(OP_LT_U64,          84);
+  ASSERT_INT_EQ(OP_GT_U64,          85);
+  ASSERT_INT_EQ(OP_LE_U64,          86);
+  ASSERT_INT_EQ(OP_GE_U64,          87);
+  ASSERT_INT_EQ(OP_ADD_F64,         88);
+  ASSERT_INT_EQ(OP_SUB_F64,         89);
+  ASSERT_INT_EQ(OP_MUL_F64,         90);
+  ASSERT_INT_EQ(OP_DIV_F64,         91);
+  ASSERT_INT_EQ(OP_MOD_F64,         92);
+  ASSERT_INT_EQ(OP_NEG_F64,         93);
+  ASSERT_INT_EQ(OP_LT_F64,          94);
+  ASSERT_INT_EQ(OP_GT_F64,          95);
+  ASSERT_INT_EQ(OP_LE_F64,          96);
+  ASSERT_INT_EQ(OP_GE_F64,          97);
+  ASSERT_INT_EQ(OP_EQ_F64,          98);
+  ASSERT_INT_EQ(OP_TO_I32,          99);
+  ASSERT_INT_EQ(OP_TO_I64,         100);
+  ASSERT_INT_EQ(OP_TO_U32,         101);
+  ASSERT_INT_EQ(OP_TO_U64,         102);
+  ASSERT_INT_EQ(OP_TO_F32,         103);
+  ASSERT_INT_EQ(OP_TO_F64,         104);
+  ASSERT_INT_EQ(OP_TO_DYN,         105);
+  ASSERT_INT_EQ(OP_CONST_I64,      106);
+  ASSERT_INT_EQ(OP_CONST_U64,      107);
+  ASSERT_INT_EQ(OP_CONST_F64,      108);
+  ASSERT_INT_EQ(OP_HALT,           109);
   TEST_PASS();
 }
 
