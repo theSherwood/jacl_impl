@@ -134,7 +134,7 @@ static int test_compile_long_string_heap(void) {
   TEST_PASS();
 }
 
-/* Test: multi-statement with OP_POP between */
+/* Test: multi-statement with OP_CHECK_ERROR between */
 static int test_compile_multi_statement(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -147,16 +147,18 @@ static int test_compile_multi_statement(void) {
   ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[0]), 42);
   ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[1]), 99);
 
-  /* Expected bytecode: OP_CONST u16(0) OP_POP OP_CONST u16(1) OP_HALT */
-  ASSERT_U32_EQ(cr.chunk.code_count, 8);
+  /* Expected bytecode: OP_CONST u16(0) OP_CHECK_ERROR u16(0) OP_CONST u16(1) OP_HALT */
+  ASSERT_U32_EQ(cr.chunk.code_count, 10);
   ASSERT_INT_EQ(cr.chunk.code[0], OP_CONST);
   ASSERT_INT_EQ(cr.chunk.code[1], 0);
   ASSERT_INT_EQ(cr.chunk.code[2], 0);
-  ASSERT_INT_EQ(cr.chunk.code[3], OP_POP);
-  ASSERT_INT_EQ(cr.chunk.code[4], OP_CONST);
+  ASSERT_INT_EQ(cr.chunk.code[3], OP_CHECK_ERROR);
+  ASSERT_INT_EQ(cr.chunk.code[4], 0);
   ASSERT_INT_EQ(cr.chunk.code[5], 0);
-  ASSERT_INT_EQ(cr.chunk.code[6], 1);
-  ASSERT_INT_EQ(cr.chunk.code[7], OP_HALT);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_CONST);
+  ASSERT_INT_EQ(cr.chunk.code[7], 0);
+  ASSERT_INT_EQ(cr.chunk.code[8], 1);
+  ASSERT_INT_EQ(cr.chunk.code[9], OP_HALT);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -173,15 +175,15 @@ static int test_compile_multi_semicolons(void) {
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 3);
 
-  /* Bytecode: CONST(0) POP CONST(1) POP CONST(2) HALT */
-  /* 3+1+3+1+3+1 = 12 bytes */
-  ASSERT_U32_EQ(cr.chunk.code_count, 12);
+  /* Bytecode: CONST(0) CHECK_ERROR u16(0) CONST(1) CHECK_ERROR u16(0) CONST(2) HALT */
+  /* 3+3+3+3+3+1 = 16 bytes */
+  ASSERT_U32_EQ(cr.chunk.code_count, 16);
   ASSERT_INT_EQ(cr.chunk.code[0], OP_CONST);
-  ASSERT_INT_EQ(cr.chunk.code[3], OP_POP);
-  ASSERT_INT_EQ(cr.chunk.code[4], OP_CONST);
-  ASSERT_INT_EQ(cr.chunk.code[7], OP_POP);
-  ASSERT_INT_EQ(cr.chunk.code[8], OP_CONST);
-  ASSERT_INT_EQ(cr.chunk.code[11], OP_HALT);
+  ASSERT_INT_EQ(cr.chunk.code[3], OP_CHECK_ERROR);
+  ASSERT_INT_EQ(cr.chunk.code[6], OP_CONST);
+  ASSERT_INT_EQ(cr.chunk.code[9], OP_CHECK_ERROR);
+  ASSERT_INT_EQ(cr.chunk.code[12], OP_CONST);
+  ASSERT_INT_EQ(cr.chunk.code[15], OP_HALT);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -257,12 +259,12 @@ static int test_compile_const_pool_indices(void) {
   /* Statement 0: code[0]=OP_CONST, code[1..2]=u16(0) */
   ASSERT_INT_EQ(cr.chunk.code[1], 0);
   ASSERT_INT_EQ(cr.chunk.code[2], 0);
-  /* Statement 1: code[4]=OP_CONST, code[5..6]=u16(1) */
-  ASSERT_INT_EQ(cr.chunk.code[5], 0);
-  ASSERT_INT_EQ(cr.chunk.code[6], 1);
-  /* Statement 2: code[8]=OP_CONST, code[9..10]=u16(2) */
-  ASSERT_INT_EQ(cr.chunk.code[9], 0);
-  ASSERT_INT_EQ(cr.chunk.code[10], 2);
+  /* Statement 1: code[6]=OP_CONST (after CHECK_ERROR u16), code[7..8]=u16(1) */
+  ASSERT_INT_EQ(cr.chunk.code[7], 0);
+  ASSERT_INT_EQ(cr.chunk.code[8], 1);
+  /* Statement 2: code[12]=OP_CONST, code[13..14]=u16(2) */
+  ASSERT_INT_EQ(cr.chunk.code[13], 0);
+  ASSERT_INT_EQ(cr.chunk.code[14], 2);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
@@ -280,10 +282,10 @@ static int test_compile_line_tracking(void) {
 
   /* First statement on line 1: OP_CONST(line 1), u16(line 1) */
   ASSERT_U32_EQ(cr.chunk.lines[0], 1);
-  /* OP_POP between statements */
+  /* OP_CHECK_ERROR between statements (line 1) */
   ASSERT_U32_EQ(cr.chunk.lines[3], 1);
-  /* Second statement on line 2: OP_CONST(line 2), u16(line 2) */
-  ASSERT_U32_EQ(cr.chunk.lines[4], 2);
+  /* Second statement on line 2: OP_CONST(line 2) after CHECK_ERROR u16 */
+  ASSERT_U32_EQ(cr.chunk.lines[6], 2);
 
   arena_destroy(&arena);
   ASSERT(check_no_leaks());

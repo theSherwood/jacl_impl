@@ -1,0 +1,11 @@
+# expect: true
+# Test: errors from nested function calls propagate up
+proc inner [] {
+  [error "deep"]
+}
+proc outer [] {
+  [inner]
+  [print "never"]
+  99
+}
+[print [error? [outer]]]

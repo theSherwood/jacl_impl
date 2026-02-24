@@ -238,6 +238,13 @@ static void compiler__patch_jump(Compiler* c, uint32_t offset) {
   c->chunk->code[offset + 1] = (uint8_t)(jump & 0xFF);
 }
 
+/* --- Internal: Emit OP_CHECK_ERROR with offset 0 (return from frame) --- */
+
+static void compiler__emit_check_error(Compiler* c, uint32_t line) {
+  compiler__emit_byte(c, OP_CHECK_ERROR, line);
+  compiler__emit_u16(c, 0, line);
+}
+
 /* --- Internal: Compile block as expression (last stmt value stays on stack) --- */
 
 static void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
@@ -255,7 +262,7 @@ static void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
 
   for (uint32_t i = 0; i < count - 1; i++) {
     compiler__compile_node(c, block_node->data.block.commands[i]);
-    compiler__emit_byte(c, OP_POP, line);
+    compiler__emit_check_error(c, line);
   }
   compiler__compile_node(c, block_node->data.block.commands[count - 1]);
 
@@ -704,7 +711,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     uint32_t body_count = args[1]->data.block.count;
     for (uint32_t i = 0; i < body_count; i++) {
       compiler__compile_node(c, args[1]->data.block.commands[i]);
-      compiler__emit_byte(c, OP_POP, line);
+      compiler__emit_check_error(c, line);
     }
 
     /* OP_LOOP back to loop_start */
@@ -1117,7 +1124,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
       uint32_t count = node->data.block.count;
       for (uint32_t i = 0; i < count; i++) {
         compiler__compile_node(c, node->data.block.commands[i]);
-        compiler__emit_byte(c, OP_POP, line);
+        compiler__emit_check_error(c, line);
       }
       compiler__end_scope(c, line);
       /* Block evaluates to nil */
@@ -1181,9 +1188,9 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   for (uint32_t i = 0; i < parse.count; i++) {
     compiler__compile_node(&c, parse.nodes[i]);
 
-    /* Emit OP_POP between statements to keep the stack clean */
+    /* Emit OP_CHECK_ERROR between statements: auto-return on error */
     if (i < parse.count - 1) {
-      compiler__emit_byte(&c, OP_POP, parse.nodes[i]->start.line);
+      compiler__emit_check_error(&c, parse.nodes[i]->start.line);
     }
   }
 

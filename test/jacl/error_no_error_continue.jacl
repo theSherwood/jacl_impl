@@ -1,0 +1,8 @@
+# expect: done
+# expect: 99
+# Test: non-error statements pop and continue normally
+proc foo [] {
+  [print "done"]
+  99
+}
+[print [foo]]

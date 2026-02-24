@@ -1919,6 +1919,54 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_CHECK_ERROR: {
+        uint16_t offset = vm__read_u16(vm);
+        if (vm->stack_top == 0) {
+          vm__set_error(vm, "stack underflow");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclVal top = vm->stack[vm->stack_top - 1];
+        if (jacl_is_error(top)) {
+          if (offset == 0) {
+            /* Return from current frame with the error value */
+            JaclVal return_value;
+            result = vm__pop(vm, &return_value);
+            if (result != VM_OK) return result;
+
+            uint32_t callee_base = frame->stack_base;
+            uint8_t* caller_ip   = frame->return_ip;
+
+            vm->frame_count--;
+
+            if (vm->frame_count == 0) {
+              /* Returning from top-level */
+              vm->stack[0] = return_value;
+              vm->stack_top = 1;
+              return VM_OK;
+            }
+
+            /* Place return value where the callee's closure was */
+            vm->stack[callee_base - 1] = return_value;
+            vm->stack_top = callee_base;
+
+            frame     = &vm->frames[vm->frame_count - 1];
+            vm->ip    = caller_ip;
+            vm->chunk = frame->chunk;
+
+            if (vm->frame_count <= min_frame) {
+              return VM_OK;
+            }
+          } else {
+            /* Jump to handler (for try, US-004) */
+            vm->ip += offset;
+          }
+        } else {
+          /* Not an error: pop and continue */
+          vm->stack_top--;
+        }
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }
