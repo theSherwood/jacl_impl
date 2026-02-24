@@ -2059,6 +2059,25 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_MAKE_CELL: {
+        JaclVal value;
+        result = vm__pop(vm, &value); if (result != VM_OK) return result;
+        JaclMutableRef* ref = (JaclMutableRef*)arena_alloc(vm->arena, sizeof(JaclMutableRef));
+        ref->value = value;
+        result = vm__push(vm, jacl_cell_ptr(ref));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_GET_CELL_LOCAL: {
+        uint8_t slot = vm__read_byte(vm);
+        JaclVal cell = vm->stack[frame->stack_base + slot];
+        JaclMutableRef* ref = jacl_as_cell(cell);
+        result = vm__push(vm, ref->value);
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }

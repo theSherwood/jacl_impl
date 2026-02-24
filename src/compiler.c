@@ -491,6 +491,52 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* mut — mutable local binding with cell auto-boxing */
+  if (compiler__head_matches(head, "mut", 3)) {
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "mut", "2 arguments", argc); return; }
+    if (args[0]->type != AST_LIT_STRING) {
+      compiler__error(c, line, col, "mut first argument must be a name");
+      return;
+    }
+    uint32_t name_len = args[0]->data.lit_string.length;
+    if (name_len > 7) {
+      compiler__error(c, line, col, "variable name exceeds 7-byte inline limit");
+      return;
+    }
+    /* Compile the value expression */
+    compiler__compile_node(c, args[1]);
+
+    JaclVal name_val = jacl_inline_string(args[0]->data.lit_string.value, name_len);
+
+    if (c->scope_depth > 0) {
+      /* Local scope: wrap in cell for mutable access */
+      compiler__emit_byte(c, OP_MAKE_CELL, line);
+      compiler__add_local(c, name_val, line, col);
+      c->locals[c->local_count - 1].is_mutable = true;
+      /* mut returns nil */
+      compiler__emit_byte(c, OP_NIL, line);
+    } else {
+      /* Global scope: store directly (no cell needed) */
+      uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+      compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+      compiler__emit_u16(c, name_idx, line);
+      /* Record as mutable in global info */
+      compiler__set_global_arity(c, name_val, -1);
+      /* Walk to the entry we just set and mark mutable */
+      {
+        Compiler* root = c;
+        while (root->enclosing) root = root->enclosing;
+        for (uint32_t i = 0; i < root->global_arity_count; i++) {
+          if (root->global_arities[i].name == name_val) {
+            root->global_arities[i].is_mutable = true;
+            break;
+          }
+        }
+      }
+    }
+    return;
+  }
+
   /* def builtin */
   if (compiler__head_matches(head, "def", 3)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "def", "2 arguments", argc); return; }
@@ -1137,7 +1183,11 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
 
       if (local_slot != -1) {
-        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        if (c->locals[local_slot].is_mutable) {
+          compiler__emit_byte(c, OP_GET_CELL_LOCAL, line);
+        } else {
+          compiler__emit_byte(c, OP_GET_LOCAL, line);
+        }
         compiler__emit_byte(c, (uint8_t)local_slot, line);
       } else {
         uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
@@ -1215,7 +1265,11 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
 
       int local_slot = compiler__resolve_local(c, name_val);
       if (local_slot != -1) {
-        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        if (c->locals[local_slot].is_mutable) {
+          compiler__emit_byte(c, OP_GET_CELL_LOCAL, line);
+        } else {
+          compiler__emit_byte(c, OP_GET_LOCAL, line);
+        }
         compiler__emit_byte(c, (uint8_t)local_slot, line);
       } else {
         int upvalue_idx = compiler__resolve_upvalue(c, name_val);

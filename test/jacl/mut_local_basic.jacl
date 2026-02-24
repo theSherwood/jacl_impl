@@ -1,0 +1,10 @@
+# expect: 42
+# expect: 0
+# mut local binding with cell auto-boxing
+proc t-mut [] {
+  mut x 42
+  print [+ $x 0]
+  mut y 0
+  print [+ $y 0]
+}
+[t-mut]
