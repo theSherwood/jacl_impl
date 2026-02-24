@@ -344,8 +344,20 @@ static void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
   } else if (jacl_is_i32(val)) {
     n = snprintf(tmp, sizeof(tmp), "%d", (int)jacl_as_i32(val));
     vm__fmt_append(buf, tmp, (uint32_t)n);
+  } else if (jacl_is_u32(val)) {
+    n = snprintf(tmp, sizeof(tmp), "%u", (unsigned)jacl_as_u32(val));
+    vm__fmt_append(buf, tmp, (uint32_t)n);
   } else if (jacl_is_f32(val)) {
     n = snprintf(tmp, sizeof(tmp), "%g", (double)jacl_as_f32(val));
+    vm__fmt_append(buf, tmp, (uint32_t)n);
+  } else if (jacl_is_i64(val)) {
+    n = snprintf(tmp, sizeof(tmp), "%" PRIi64, jacl_as_i64(val));
+    vm__fmt_append(buf, tmp, (uint32_t)n);
+  } else if (jacl_is_u64(val)) {
+    n = snprintf(tmp, sizeof(tmp), "%" PRIu64, jacl_as_u64(val));
+    vm__fmt_append(buf, tmp, (uint32_t)n);
+  } else if (jacl_is_f64(val)) {
+    n = snprintf(tmp, sizeof(tmp), "%g", jacl_as_f64(val));
     vm__fmt_append(buf, tmp, (uint32_t)n);
   } else if (jacl_is_string(val)) {
     uint32_t slen = jacl_string_len(val);
@@ -718,8 +730,24 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           int n = snprintf(buf, sizeof(buf), "%d\n", (int)jacl_as_i32(val));
           text = buf;
           len = (uint32_t)n;
+        } else if (jacl_is_u32(val)) {
+          int n = snprintf(buf, sizeof(buf), "%u\n", (unsigned)jacl_as_u32(val));
+          text = buf;
+          len = (uint32_t)n;
         } else if (jacl_is_f32(val)) {
           int n = snprintf(buf, sizeof(buf), "%g\n", (double)jacl_as_f32(val));
+          text = buf;
+          len = (uint32_t)n;
+        } else if (jacl_is_i64(val)) {
+          int n = snprintf(buf, sizeof(buf), "%" PRIi64 "\n", jacl_as_i64(val));
+          text = buf;
+          len = (uint32_t)n;
+        } else if (jacl_is_u64(val)) {
+          int n = snprintf(buf, sizeof(buf), "%" PRIu64 "\n", jacl_as_u64(val));
+          text = buf;
+          len = (uint32_t)n;
+        } else if (jacl_is_f64(val)) {
+          int n = snprintf(buf, sizeof(buf), "%g\n", jacl_as_f64(val));
           text = buf;
           len = (uint32_t)n;
         } else if (jacl_is_string(val)) {
@@ -1144,8 +1172,16 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             }
           } else if (jacl_is_i32(val)) {
             n = snprintf(buf, sizeof(buf), "%d", (int)jacl_as_i32(val));
+          } else if (jacl_is_u32(val)) {
+            n = snprintf(buf, sizeof(buf), "%u", (unsigned)jacl_as_u32(val));
           } else if (jacl_is_f32(val)) {
             n = snprintf(buf, sizeof(buf), "%g", (double)jacl_as_f32(val));
+          } else if (jacl_is_i64(val)) {
+            n = snprintf(buf, sizeof(buf), "%" PRIi64, jacl_as_i64(val));
+          } else if (jacl_is_u64(val)) {
+            n = snprintf(buf, sizeof(buf), "%" PRIu64, jacl_as_u64(val));
+          } else if (jacl_is_f64(val)) {
+            n = snprintf(buf, sizeof(buf), "%g", jacl_as_f64(val));
           } else if (jacl_is_closure(val)) {
             JaclClosure* cl = jacl_as_closure(val);
             if (cl->name) {

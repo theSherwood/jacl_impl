@@ -1,0 +1,2 @@
+# expect-error: type error: expected i64, got str
+def i64 x "hello"

@@ -96,7 +96,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Typed opcodes do NOT check tags — they assume the compiler verified types. Raw i64 values are stored as uint64_t on the stack and reinterpreted as int64_t via cast. Raw f64 values are stored as uint64_t via memcpy/union bit-cast. Division by zero produces a VM runtime error (vm.error_message), not an error-flagged value, since we don't have a tagged value to flag. Comparison results are always JACL_TRUE/JACL_FALSE (tagged booleans) since they may flow into dynamic code (if/while conditions)."
     },
     {
@@ -119,7 +119,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "u64 add/sub/mul/neg/eq reuse the i64 opcodes (identical bit patterns in two's complement — the compiler emits OP_ADD_I64 for u64 addition). Only div/mod/comparisons need unsigned-specific opcodes. Conversion opcodes need the source type as an operand byte because the VM doesn't know the type of unboxed stack values. The constant pool needs to support raw 64-bit entries alongside tagged JaclVal entries — either use a separate typed constant array or store raw bytes at indices. OP_TO_DYN requires arena for heap allocation — the VM should have access to the arena used during execution."
     },
     {
@@ -144,7 +144,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "The compiler needs a mechanism to thread 'expected type' through expression compilation. Add a JaclType expected_type field to the Compiler struct or pass it as a parameter to compiler__compile_node. When compiling literals, check expected_type to decide between tagged constant (OP_CONST) and typed constant (OP_CONST_I64/F64). Expression compilation should return a JaclType indicating the result type. For typed globals, the box/unbox on write/read is needed because the Environment table stores JaclVal. This is a pragmatic choice — optimization (typed global slots) can come later."
     },
     {

@@ -154,6 +154,8 @@ struct Compiler {
   uint32_t         try_patches[COMPILER_TRY_PATCHES_MAX];
   uint32_t         try_patch_count;
   bool             in_try_body;
+  JaclType         expected_type;   /* contextual type hint for RHS compilation */
+  JaclType         last_expr_type;  /* type of the last compiled expression */
 };
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -170,6 +172,8 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->global_arity_count = 0;
   c->try_patch_count = 0;
   c->in_try_body     = false;
+  c->expected_type   = TYPE_DYN;
+  c->last_expr_type  = TYPE_DYN;
 }
 
 /* --- Internal: Emit helpers --- */
@@ -274,6 +278,17 @@ static bool compiler__resolve_global_info(Compiler* c, JaclVal name,
   return false;
 }
 
+static JaclType compiler__resolve_global_type(Compiler* c, JaclVal name) {
+  Compiler* root = c;
+  while (root->enclosing) root = root->enclosing;
+  for (uint32_t i = 0; i < root->global_arity_count; i++) {
+    if (root->global_arities[i].name == name) {
+      return root->global_arities[i].type;
+    }
+  }
+  return TYPE_DYN;
+}
+
 static void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity) {
   for (uint32_t i = 0; i < c->global_arity_count; i++) {
     if (c->global_arities[i].name == name) {
@@ -319,8 +334,10 @@ static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
   int local = compiler__resolve_local(c->enclosing, name);
   if (local != -1) {
     int uv = compiler__add_upvalue(c, (uint8_t)local, 1, name);
-    if (uv != -1 && c->enclosing->locals[local].is_mutable) {
-      c->upvalues[uv].is_mutable = true;
+    if (uv != -1) {
+      if (c->enclosing->locals[local].is_mutable)
+        c->upvalues[uv].is_mutable = true;
+      c->upvalues[uv].type = c->enclosing->locals[local].type;
     }
     return uv;
   }
@@ -329,8 +346,10 @@ static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
   int upvalue = compiler__resolve_upvalue(c->enclosing, name);
   if (upvalue != -1) {
     int uv = compiler__add_upvalue(c, (uint8_t)upvalue, 0, name);
-    if (uv != -1 && c->enclosing->upvalues[upvalue].is_mutable) {
-      c->upvalues[uv].is_mutable = true;
+    if (uv != -1) {
+      if (c->enclosing->upvalues[upvalue].is_mutable)
+        c->upvalues[uv].is_mutable = true;
+      c->upvalues[uv].type = c->enclosing->upvalues[upvalue].type;
     }
     return uv;
   }
@@ -453,6 +472,16 @@ static void compiler__builtin_arity_error(Compiler* c, uint32_t line,
   compiler__error(c, line, col, err_msg);
 }
 
+/* --- Internal: Auto-box unboxed types (emit OP_TO_DYN if needed) --- */
+
+static void compiler__ensure_boxed(Compiler* c, uint32_t line) {
+  if (is_unboxed_type(c->last_expr_type)) {
+    compiler__emit_byte(c, OP_TO_DYN, line);
+    compiler__emit_byte(c, (uint8_t)c->last_expr_type, line);
+    c->last_expr_type = TYPE_DYN;
+  }
+}
+
 /* --- Internal: Compile a binary operation --- */
 
 static void compiler__compile_binary(Compiler* c, AstNode** args,
@@ -470,6 +499,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
   AstNode** args = node->data.command.args;
   uint32_t line = node->start.line;
   uint32_t col  = node->start.column;
+
+  /* Reset expected_type so sub-expressions don't inherit parent context.
+     Individual handlers (e.g. typed def) set it explicitly for their RHS. */
+  c->expected_type = TYPE_DYN;
 
   /* Arithmetic builtins */
   if (compiler__head_matches(head, "+", 1)) {
@@ -535,6 +568,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
   if (compiler__head_matches(head, "print", 5)) {
     if (argc != 1) { compiler__builtin_arity_error(c, line, col, "print", "1 argument", argc); return; }
     compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
     compiler__emit_byte(c, OP_PRINT, line);
     return;
   }
@@ -717,39 +751,102 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* def builtin */
+  /* def builtin — supports [def name value] and [def TYPE name value] */
   if (compiler__head_matches(head, "def", 3)) {
-    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "def", "2 arguments", argc); return; }
-    if (args[0]->type != AST_LIT_STRING) {
-      compiler__error(c, line, col, "def first argument must be a name");
+    JaclType declared_type = TYPE_DYN;
+    uint32_t name_arg_idx  = 0;
+    uint32_t value_arg_idx = 1;
+
+    if (argc == 3) {
+      /* Typed def: [def TYPE name value] */
+      if (args[0]->type != AST_LIT_STRING) {
+        compiler__error(c, line, col, "def type must be a keyword");
+        return;
+      }
+      uint32_t first_len = args[0]->data.lit_string.length;
+      const char* first_str = args[0]->data.lit_string.value;
+      if (!is_type_keyword(first_str, first_len)) {
+        compiler__error(c, line, col, "def with 3 arguments requires type keyword as first argument");
+        return;
+      }
+      declared_type  = type_from_keyword(first_str, first_len);
+      name_arg_idx   = 1;
+      value_arg_idx  = 2;
+    } else if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "def", "2 or 3 arguments", argc);
       return;
     }
-    uint32_t name_len = args[0]->data.lit_string.length;
+
+    if (args[name_arg_idx]->type != AST_LIT_STRING) {
+      compiler__error(c, line, col, "def name must be a string");
+      return;
+    }
+    uint32_t name_len = args[name_arg_idx]->data.lit_string.length;
     if (name_len > 7) {
       compiler__error(c, line, col, "variable name exceeds 7-byte inline limit");
       return;
     }
-    /* Compile the value expression */
-    compiler__compile_node(c, args[1]);
 
-    JaclVal name_val = jacl_inline_string(args[0]->data.lit_string.value, name_len);
+    /* Compile the value expression with type context */
+    c->expected_type = declared_type;
+    compiler__compile_node(c, args[value_arg_idx]);
+    c->expected_type = TYPE_DYN;
+    JaclType rhs_type = c->last_expr_type;
+
+    /* Type check for typed def */
+    if (declared_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != declared_type) {
+      char err_msg[128];
+      snprintf(err_msg, sizeof(err_msg), "type error: expected %s, got %s",
+               type_name(declared_type), type_name(rhs_type));
+      compiler__error(c, line, col, err_msg);
+      return;
+    }
+
+    JaclVal name_val = jacl_inline_string(args[name_arg_idx]->data.lit_string.value, name_len);
+
+    /* Determine effective type: declared type wins, else infer unboxed from RHS */
+    JaclType effective_type;
+    if (declared_type != TYPE_DYN) {
+      effective_type = declared_type;
+    } else if (is_unboxed_type(rhs_type)) {
+      /* Infer unboxed types from RHS — must track because stack holds raw values */
+      effective_type = rhs_type;
+    } else {
+      effective_type = TYPE_DYN;
+    }
+
+    int16_t rhs_arity = compiler__node_known_arity(c, args[value_arg_idx]);
 
     if (c->scope_depth > 0) {
       /* Local variable: value is on stack as the local slot */
-      int16_t rhs_arity = compiler__node_known_arity(c, args[1]);
       compiler__add_local(c, name_val, line, col);
       c->locals[c->local_count - 1].known_arity = rhs_arity;
+      c->locals[c->local_count - 1].type = effective_type;
       /* def returns nil */
       compiler__emit_byte(c, OP_NIL, line);
     } else {
-      /* Global variable */
-      int16_t rhs_arity = compiler__node_known_arity(c, args[1]);
+      /* Global variable: box unboxed types before storage */
+      if (is_unboxed_type(effective_type)) {
+        compiler__emit_byte(c, OP_TO_DYN, line);
+        compiler__emit_byte(c, (uint8_t)effective_type, line);
+      }
       uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
-      /* Always register global so set! can check mutability */
+      /* Register global with arity and type */
       compiler__set_global_arity(c, name_val, rhs_arity);
+      {
+        Compiler* root = c;
+        while (root->enclosing) root = root->enclosing;
+        for (uint32_t i = 0; i < root->global_arity_count; i++) {
+          if (root->global_arities[i].name == name_val) {
+            root->global_arities[i].type = effective_type;
+            break;
+          }
+        }
+      }
     }
+    c->last_expr_type = TYPE_NIL;
     return;
   }
 
@@ -1327,7 +1424,9 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
     compiler__emit_byte(c, OP_TO_STRING, line);
+    c->last_expr_type = TYPE_STR;
     return;
   }
 
@@ -1487,16 +1586,61 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
 static void compiler__compile_node(Compiler* c, AstNode* node) {
   uint32_t line = node->start.line;
+  c->last_expr_type = TYPE_DYN;  /* default; specific cases override */
 
   switch (node->type) {
 
     case AST_LIT_INT: {
-      compiler__emit_constant(c, jacl_i32(node->data.lit_int.value), line);
+      JaclType et = c->expected_type;
+      if (et == TYPE_I64) {
+        int64_t v = (int64_t)node->data.lit_int.value;
+        uint16_t idx = chunk_add_constant(c->chunk, (JaclVal)(uint64_t)v);
+        compiler__emit_byte(c, OP_CONST_I64, line);
+        compiler__emit_u16(c, idx, line);
+        c->last_expr_type = TYPE_I64;
+      } else if (et == TYPE_U64) {
+        uint64_t v = (uint64_t)(uint32_t)node->data.lit_int.value;
+        uint16_t idx = chunk_add_constant(c->chunk, (JaclVal)v);
+        compiler__emit_byte(c, OP_CONST_U64, line);
+        compiler__emit_u16(c, idx, line);
+        c->last_expr_type = TYPE_U64;
+      } else if (et == TYPE_F64) {
+        double d = (double)node->data.lit_int.value;
+        uint64_t raw;
+        memcpy(&raw, &d, sizeof(raw));
+        uint16_t idx = chunk_add_constant(c->chunk, (JaclVal)raw);
+        compiler__emit_byte(c, OP_CONST_F64, line);
+        compiler__emit_u16(c, idx, line);
+        c->last_expr_type = TYPE_F64;
+      } else if (et == TYPE_U32) {
+        compiler__emit_constant(c, jacl_u32((uint32_t)node->data.lit_int.value), line);
+        c->last_expr_type = TYPE_U32;
+      } else if (et == TYPE_F32) {
+        compiler__emit_constant(c, jacl_f32((float)node->data.lit_int.value), line);
+        c->last_expr_type = TYPE_F32;
+      } else {
+        /* Default: tagged i32 (works for expected TYPE_DYN or TYPE_I32) */
+        compiler__emit_constant(c, jacl_i32(node->data.lit_int.value), line);
+        c->last_expr_type = (et == TYPE_I32) ? TYPE_I32 : TYPE_I32;
+      }
       break;
     }
 
     case AST_LIT_FLOAT: {
-      compiler__emit_constant(c, jacl_f32(node->data.lit_float.value), line);
+      JaclType et = c->expected_type;
+      if (et == TYPE_F64) {
+        double d = (double)node->data.lit_float.value;
+        uint64_t raw;
+        memcpy(&raw, &d, sizeof(raw));
+        uint16_t idx = chunk_add_constant(c->chunk, (JaclVal)raw);
+        compiler__emit_byte(c, OP_CONST_F64, line);
+        compiler__emit_u16(c, idx, line);
+        c->last_expr_type = TYPE_F64;
+      } else {
+        /* Default: tagged f32 (works for expected TYPE_DYN or TYPE_F32) */
+        compiler__emit_constant(c, jacl_f32(node->data.lit_float.value), line);
+        c->last_expr_type = TYPE_F32;
+      }
       break;
     }
 
@@ -1510,6 +1654,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
         val = jacl_inline_string(node->data.lit_string.value, len);
       }
       compiler__emit_constant(c, val, line);
+      c->last_expr_type = TYPE_STR;
       break;
     }
 
@@ -1530,6 +1675,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, OP_GET_LOCAL, line);
         }
         compiler__emit_byte(c, (uint8_t)local_slot, line);
+        c->last_expr_type = c->locals[local_slot].type;
       } else {
         int upvalue_idx = compiler__resolve_upvalue(c, name_val);
         if (upvalue_idx != -1) {
@@ -1539,10 +1685,27 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, OP_GET_UPVALUE, line);
           }
           compiler__emit_byte(c, (uint8_t)upvalue_idx, line);
+          c->last_expr_type = c->upvalues[upvalue_idx].type;
         } else {
+          JaclType global_type = compiler__resolve_global_type(c, name_val);
           uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
           compiler__emit_byte(c, OP_GET_GLOBAL, line);
           compiler__emit_u16(c, name_idx, line);
+          /* Unbox typed globals: globals store tagged JaclVal, convert to raw */
+          if (is_unboxed_type(global_type)) {
+            uint8_t to_op;
+            switch (global_type) {
+              case TYPE_I64: to_op = OP_TO_I64; break;
+              case TYPE_U64: to_op = OP_TO_U64; break;
+              case TYPE_F64: to_op = OP_TO_F64; break;
+              default: to_op = 0; break;
+            }
+            if (to_op) {
+              compiler__emit_byte(c, to_op, line);
+              compiler__emit_byte(c, (uint8_t)TYPE_DYN, line);
+            }
+          }
+          c->last_expr_type = global_type;
         }
       }
       break;
@@ -1573,6 +1736,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
       if (seg_count == 0) {
         /* Empty interpolated string → empty string constant */
         compiler__emit_constant(c, jacl_inline_string("", 0), line);
+        c->last_expr_type = TYPE_STR;
         break;
       }
 
@@ -1583,6 +1747,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
           compiler__compile_node(c, seg);
         } else {
           compiler__compile_node(c, seg);
+          compiler__ensure_boxed(c, line);
           compiler__emit_byte(c, OP_TO_STRING, line);
         }
       }
@@ -1594,10 +1759,12 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
           compiler__compile_node(c, seg);
         } else {
           compiler__compile_node(c, seg);
+          compiler__ensure_boxed(c, line);
           compiler__emit_byte(c, OP_TO_STRING, line);
         }
         compiler__emit_byte(c, OP_CONCAT, line);
       }
+      c->last_expr_type = TYPE_STR;
       break;
     }
 

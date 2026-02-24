@@ -127,6 +127,19 @@
 - M11 opcodes: OP_ADD_I64(71)..OP_EQ_I64(81), OP_DIV_U64(82)..OP_GE_U64(87), OP_ADD_F64(88)..OP_EQ_F64(98), OP_TO_I32(99)..OP_TO_DYN(105), OP_CONST_I64(106)..OP_CONST_F64(108), OP_HALT now at 109
 - u64 reuses i64 opcodes for add/sub/mul/neg/eq (same bit patterns); only div/mod/comparisons are unsigned-specific (6 opcodes)
 - bytecode__opcode_name(uint8_t op) returns string name for any opcode — useful for debug/error messages
+- VM__BINARY_NUMERIC_OP(fn_i32, fn_f32, fn_u32, op_name) macro handles i32/f32/u32 dispatch for ADD/SUB/MUL/DIV
+- Conversion opcodes (OP_TO_*) read a 1-byte source type operand (JaclType enum) telling the VM the stack value's current type
+- OP_TO_DYN uses vm->arena for heap allocation when boxing i64/u64/f64; boxed types (i32/u32/f32) pass through as-is
+- Typed constants (OP_CONST_I64/U64/F64) push raw uint64_t from constant pool — no tag wrapping
+- vm__type_name includes all numeric types: i32, u32, i64, u64, f32, f64
+- Compiler has expected_type and last_expr_type fields for type tracking through expression compilation
+- compiler__ensure_boxed(c, line) emits OP_TO_DYN if last_expr_type is unboxed — use before opcodes that expect tagged values (OP_PRINT, OP_TO_STRING, etc.)
+- expected_type is reset to TYPE_DYN at the start of compiler__compile_command to prevent leaking into sub-expressions
+- Typed def: [def TYPE name value] — 3-arg form where first arg is type keyword; typed global stores boxed (OP_TO_DYN before OP_DEF_GLOBAL), typed global read unboxes (OP_TO_TYPE with TYPE_DYN source after OP_GET_GLOBAL)
+- compiler__resolve_global_type returns the declared type of a global; compiler__resolve_upvalue propagates types from locals/upvalues
+- Typed def type checking: rhs_type must match declared_type; TYPE_DYN passes (runtime compatibility)
+- Type inference for untyped def: only infers unboxed types (i64/u64/f64) from RHS — these MUST be tracked since stack holds raw values
+- vm__fmt_value, OP_PRINT, and OP_TO_STRING all handle u32/i64/u64/f64 tags (needed for US-006 test to work)
 
 ## 2026-02-24 - US-001
 - Implemented value tags, heap types, constructors, accessors, predicates for u32/i64/u64/f64
@@ -159,4 +172,43 @@
   - Total 38 new opcodes: 11 i64 + 6 u64 + 11 f64 + 7 conversion + 3 typed constants
   - OP_HALT shifted from 71 to 109 — always update test_bytecode.c opcode_enum
   - compiler__add_local, compiler__add_upvalue, compiler__set_global_arity all init type = TYPE_DYN
+---
+
+## 2026-02-24 - US-004
+- Implemented VM handlers for all 11 i64 opcodes (ADD/SUB/MUL/DIV/MOD/NEG/LT/GT/LE/GE/EQ) and all 11 f64 opcodes
+- Files changed: src/vm.c
+- **Learnings for future iterations:**
+  - i64 handlers: pop uint64_t values, cast to int64_t, compute, push result as uint64_t
+  - f64 handlers: use memcpy to/from double for type-punning (not cast — that violates strict aliasing)
+  - Division by zero in typed opcodes produces VM_RUNTIME_ERROR (vm->error_message), not error-flagged value — no tagged value to flag
+  - Comparison results are always JACL_TRUE/JACL_FALSE (tagged booleans) since they may flow into dynamic code (if/while)
+  - fmod() used for f64 modulo — math.h already included from US-002
+  - No test changes needed — these opcodes aren't emitted yet (compiler stories US-006+ will use them)
+---
+
+## 2026-02-24 - US-005
+- Implemented VM handlers for u64 unsigned ops, type conversions, typed constants, and u32 dynamic dispatch
+- Files changed: src/vm.c
+- **Learnings for future iterations:**
+  - u64 handlers are simpler than i64 — no signed cast needed, values already uint64_t
+  - Conversion opcodes read a 1-byte source type operand (JaclType enum value) after the opcode
+  - OP_TO_DYN needs vm->arena for heap allocation of i64/u64/f64 boxed values; i32/u32/f32/bool/nil/str/dyn are already tagged, push as-is
+  - Typed constant opcodes (CONST_I64/U64/F64) simply read raw uint64_t from constant pool — no tagging
+  - VM__BINARY_NUMERIC_OP macro extended with fn_u32 parameter for u32 dispatch
+  - vm__type_name updated with u32/i64/u64/f64 for better error messages in dynamic dispatch
+  - OP_EQ already works for u32 via vm__deep_eq (bitwise compare) — no changes needed
+  - Conversion from dyn→typed at runtime must check each possible tag and error for non-numeric
+---
+
+## 2026-02-24 - US-006
+- Implemented typed def: [def TYPE name value] with contextual literal typing, type tracking, and auto-boxing for globals
+- Also implemented partial US-011: vm__fmt_value, OP_PRINT, OP_TO_STRING now handle u32/i64/u64/f64 tags (needed for typed_def_basic.jacl test)
+- Files changed: src/compiler.c (expected_type/last_expr_type fields, typed def handler, contextual literal typing, var ref type tracking, ensure_boxed helper, global type resolution, upvalue type propagation), src/vm.c (new numeric type handlers in fmt_value, OP_PRINT, OP_TO_STRING), src/jacl.c (inttypes.h), test/jacl/typed_def_basic.jacl, test/jacl/typed_def_error.jacl
+- **Learnings for future iterations:**
+  - expected_type must be reset to TYPE_DYN at the start of compile_command to prevent leaking into sub-expressions (e.g. [def i64 x [+ 1 2]] would wrongly compile 1 and 2 as raw i64 if expected_type leaked)
+  - Typed globals need box/unbox: OP_TO_DYN before OP_DEF_GLOBAL, and OP_TO_TYPE(TYPE_DYN) after OP_GET_GLOBAL — because the Environment stores tagged JaclVal
+  - compiler__ensure_boxed is needed before any opcode that expects tagged values (OP_PRINT, OP_TO_STRING, OP_CONCAT, etc.) when the preceding expression may be unboxed
+  - Type inference for untyped def only infers unboxed types (i64/u64/f64) — boxed types (i32/u32/f32) stay TYPE_DYN since the tagged value works fine without type tracking
+  - String interpolation ($var in "...") also needs ensure_boxed before OP_TO_STRING for var refs
+  - PRIi64/PRIu64 from inttypes.h needed for portable 64-bit formatting
 ---
