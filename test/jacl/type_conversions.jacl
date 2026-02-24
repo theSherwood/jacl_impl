@@ -1,0 +1,4 @@
+# expect: 42
+def i32 n 42
+def i64 big [to i64 $n]
+print [to-string $big]

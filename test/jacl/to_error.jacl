@@ -1,0 +1,3 @@
+# expect-error: type error: cannot convert str to i64
+def str s "hello"
+def i64 x [to i64 $s]

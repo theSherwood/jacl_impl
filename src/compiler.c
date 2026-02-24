@@ -1739,6 +1739,90 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* to builtin — explicit type conversion: [to TYPE expr] */
+  if (compiler__head_matches(head, "to", 2)) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "to", "2 arguments", argc);
+      return;
+    }
+    /* First arg must be a bare word matching a type keyword */
+    AstNode* type_node = args[0];
+    if (type_node->type != AST_LIT_STRING) {
+      compiler__error(c, line, col, "to: first argument must be a type keyword (i32, i64, u32, u64, f32, f64, dyn)");
+      return;
+    }
+    const char* type_word = type_node->data.lit_string.value;
+    uint32_t type_len = type_node->data.lit_string.length;
+    if (!is_type_keyword(type_word, type_len)) {
+      char err[128];
+      snprintf(err, sizeof(err), "to: unknown type '%.*s'", (int)type_len, type_word);
+      compiler__error(c, line, col, err);
+      return;
+    }
+    JaclType target_type = type_from_keyword(type_word, type_len);
+
+    /* Compile the expression */
+    compiler__compile_node(c, args[1]);
+    JaclType src_type = c->last_expr_type;
+
+    /* Validate conversion at compile time */
+    if (src_type != TYPE_DYN && target_type != TYPE_DYN) {
+      /* Both concrete types — check if conversion is valid */
+      bool src_ok = is_numeric_type(src_type);
+      bool tgt_ok = is_numeric_type(target_type);
+      if (!src_ok || !tgt_ok) {
+        /* Allow same-type no-op (e.g. to str $s where s is str) */
+        if (src_type != target_type) {
+          char err[128];
+          snprintf(err, sizeof(err), "type error: cannot convert %s to %s",
+                   type_name(src_type), type_name(target_type));
+          compiler__error(c, line, col, err);
+          return;
+        }
+      }
+    }
+    /* Check dyn→non-numeric target (dyn can only convert to numeric or dyn at compile time) */
+    if (src_type != TYPE_DYN && target_type != TYPE_DYN &&
+        !is_numeric_type(src_type) && src_type != target_type) {
+      char err[128];
+      snprintf(err, sizeof(err), "type error: cannot convert %s to %s",
+               type_name(src_type), type_name(target_type));
+      compiler__error(c, line, col, err);
+      return;
+    }
+
+    /* Same type → no-op */
+    if (src_type == target_type) {
+      c->last_expr_type = target_type;
+      return;
+    }
+
+    /* dyn→dyn → no-op */
+    if (src_type == TYPE_DYN && target_type == TYPE_DYN) {
+      return;
+    }
+
+    /* Emit appropriate conversion opcode */
+    uint8_t opcode;
+    switch (target_type) {
+      case TYPE_I32: opcode = OP_TO_I32; break;
+      case TYPE_I64: opcode = OP_TO_I64; break;
+      case TYPE_U32: opcode = OP_TO_U32; break;
+      case TYPE_U64: opcode = OP_TO_U64; break;
+      case TYPE_F32: opcode = OP_TO_F32; break;
+      case TYPE_F64: opcode = OP_TO_F64; break;
+      case TYPE_DYN: opcode = OP_TO_DYN; break;
+      default: {
+        compiler__error(c, line, col, "to: unsupported target type");
+        return;
+      }
+    }
+    compiler__emit_byte(c, opcode, line);
+    compiler__emit_byte(c, (uint8_t)src_type, line);
+    c->last_expr_type = target_type;
+    return;
+  }
+
   /* Dynamic call: unrecognized command head — look up and call */
   {
     if (head->type == AST_LIT_STRING) {
