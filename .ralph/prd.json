@@ -114,7 +114,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "The existing OP_CLOSURE handler copies upvalue JaclVals by value. Since mut locals are cells (heap pointers), copying the cell JaclVal means both the enclosing scope's local slot and the closure's upvalue slot point to the same JaclMutableRef on the heap. No changes needed to OP_CLOSURE itself."
     },
     {
@@ -138,7 +138,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "In M10, atom is functionally identical to box at runtime. CAS semantics are added in M13 (Concurrency). The ! character is already valid in JACL words (lexer__is_word_char allows it)."
     },
     {
@@ -164,7 +164,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "OP_SWAP is the most complex opcode — it needs to invoke the closure using the VM's existing call frame machinery. The simplest approach: push closure and arg on stack, set up a CallFrame (like OP_CALL does), call vm__run(vm, current_frame_count) to execute, then read the return value from the stack, store in ref->value, and push result. Follow the same pattern as OP_EACH/OP_TRANSFORM/OP_FILTER for inline closure calls."
     },
     {

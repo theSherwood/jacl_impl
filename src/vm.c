@@ -2166,6 +2166,124 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_DEREF: {
+        JaclVal container;
+        result = vm__pop(vm, &container); if (result != VM_OK) return result;
+        if (jacl_is_error(container)) {
+          result = vm__push(vm, container); if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_box(container) && !jacl_is_atom(container)) {
+          vm__set_error(vm, "deref: expected box or atom, got %s",
+                       vm__type_name(container));
+          return VM_RUNTIME_ERROR;
+        }
+        JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
+        result = vm__push(vm, ref->value);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_RESET: {
+        JaclVal new_val, container;
+        result = vm__pop(vm, &new_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &container); if (result != VM_OK) return result;
+        if (jacl_is_error(container)) {
+          result = vm__push(vm, container); if (result != VM_OK) return result;
+          break;
+        }
+        if (jacl_is_error(new_val)) {
+          result = vm__push(vm, new_val); if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_box(container) && !jacl_is_atom(container)) {
+          vm__set_error(vm, "reset!: expected box or atom, got %s",
+                       vm__type_name(container));
+          return VM_RUNTIME_ERROR;
+        }
+        JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
+        ref->value = new_val;
+        result = vm__push(vm, new_val);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_SWAP: {
+        JaclVal closure_val, container;
+        result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &container); if (result != VM_OK) return result;
+        if (jacl_is_error(container)) {
+          result = vm__push(vm, container); if (result != VM_OK) return result;
+          break;
+        }
+        if (jacl_is_error(closure_val)) {
+          result = vm__push(vm, closure_val); if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_box(container) && !jacl_is_atom(container)) {
+          vm__set_error(vm, "swap!: expected box or atom, got %s",
+                       vm__type_name(container));
+          return VM_RUNTIME_ERROR;
+        }
+        if (!jacl_is_closure(closure_val)) {
+          vm__set_error(vm, "swap!: expected closure as second argument, got %s",
+                       vm__type_name(closure_val));
+          return VM_RUNTIME_ERROR;
+        }
+        JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
+        JaclClosure* closure = jacl_as_closure(closure_val);
+
+        if (closure->param_count != 1) {
+          vm__set_error(vm,
+            "swap!: closure must take 1 parameter, got %d",
+            (int)closure->param_count);
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Push closure as callee slot + current value as argument */
+        result = vm__push(vm, closure_val);
+        if (result != VM_OK) return result;
+        result = vm__push(vm, ref->value);
+        if (result != VM_OK) return result;
+
+        /* Set up call frame */
+        if (vm->frame_count >= VM_FRAMES_MAX) {
+          vm__set_error(vm, "stack overflow");
+          return VM_RUNTIME_ERROR;
+        }
+        uint32_t caller_frame_count = vm->frame_count;
+        CallFrame* cf = &vm->frames[vm->frame_count++];
+        cf->closure    = closure;
+        cf->return_ip  = vm->ip;
+        cf->stack_base = vm->stack_top - 1;
+        cf->chunk      = &closure->chunk;
+
+        /* Switch to closure code and execute */
+        uint8_t* saved_ip = vm->ip;
+        BytecodeChunk* saved_chunk = vm->chunk;
+        vm->ip    = closure->chunk.code;
+        vm->chunk = &closure->chunk;
+
+        VMResult call_result = vm__run(vm, caller_frame_count);
+        if (call_result != VM_OK) return call_result;
+
+        /* Pop return value, store in ref, push as result */
+        JaclVal swap_result;
+        result = vm__pop(vm, &swap_result);
+        if (result != VM_OK) return result;
+
+        ref->value = swap_result;
+
+        /* Restore state */
+        vm->ip    = saved_ip;
+        vm->chunk = saved_chunk;
+        frame = &vm->frames[vm->frame_count - 1];
+
+        result = vm__push(vm, swap_result);
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }

@@ -1,4 +1,5 @@
 ## Codebase Patterns
+- JACL comments use `#` not `;` — semicolons are statement separators; using `;` as a comment causes parse errors or unexpected bare-word calls
 - File-based test harness: test/test_jacl_harness.c reads .jacl files from test/jacl/, parses # expect: / # expect-error: headers, runs through jacl_run with PrintCapture
 - PrintCapture buffer in harness is 8192 bytes (larger than integration tests' 1024) to handle multi-line test output
 - Harness uses malloc/free for file I/O (not tracked_allocator) — tracked_allocator is only for the VM arena
@@ -64,6 +65,7 @@
 - vm__run(vm, min_frame) is the inner dispatch loop; vm_exec is a thin wrapper. OP_EACH calls vm__run recursively to execute closures inline (trampoline pattern)
 - Higher-order builtins (each, map-transform, filter) call closures via: push closure + args → set up CallFrame → call vm__run(vm, caller_frame_count) → pop return value
 - Proc definition syntax is `proc name [params] { body }` (params in brackets, body in braces) — `[proc name [x] { ... }]` at global scope defines globally and returns nil (not the closure)
+- Zero-arg procs require empty params list: `proc foo [] { ... }` — omitting `[]` gives "proc expects 3 arguments but got 2"
 - To pass a closure to a higher-order builtin: define first with `proc cb [x] { ... }` then reference with `$cb`
 - VMFormatBuf pattern: arena-backed dynamic buffer for recursive collection formatting; vm__fmt_value handles all types
 - `to-string` is a compiler builtin (9 bytes, > 7-byte inline limit) — emits OP_TO_STRING directly
@@ -83,6 +85,7 @@
 - OP_PRINT shows `<error: PAYLOAD>` for error-flagged values (strings unquoted, other types via vm__fmt_value)
 - VM has error_message (const char*) and error_line (uint32_t) for fatal runtime errors — separate from value-level error flags
 - `?` and `!` are valid word continuation characters in the lexer (enables `error?`, `set!`, `reset!`, `swap!`, `box?`, `atom?`) — `!` was added in US-003
+- `deref` (1 arg) emits OP_DEREF; `reset!` (2 args) emits OP_RESET; `swap!` (2 args) emits OP_SWAP — all work on both box and atom
 - `error` builtin (1 arg) emits OP_ERROR; `error?` (1 arg) emits OP_IS_ERROR; `error-val` (1 arg) emits OP_ERROR_VAL
 - OP_ERROR peeks stack top and sets error flag; OP_IS_ERROR pops and pushes bool; OP_ERROR_VAL peeks and clears error flag
 - vm__env_get uses bool* found out-param (not error-flagged nil) to signal undefined variables — error-flagged values can be stored in globals
@@ -142,4 +145,35 @@
   - `def` at global scope previously only registered in GlobalArity when RHS had known arity (proc). Changed to always register so `set!` can find immutable globals and give correct "cannot mutate immutable binding" error instead of "undefined variable"
   - Most US-004 infrastructure (mut at global scope, set! global resolution, OP_SET_GLOBAL VM handler) was already implemented in US-003 — this story mainly needed the test files and the `def` global registration fix
   - Global `mut` does NOT use cells (no OP_MAKE_CELL) — globals are stored in a name→value environment table, so OP_DEF_GLOBAL/OP_SET_GLOBAL suffice
+---
+
+## 2026-02-24 - US-005
+- Implemented: Mutable closure capture via cells — `compiler__resolve_upvalue` now propagates `is_mutable` from enclosing locals/upvalues, AST_VAR_REF emits OP_GET_CELL_UPVALUE for mutable upvalues, VM handlers for OP_GET_CELL_UPVALUE and OP_SET_CELL_UPVALUE
+- Files changed: src/compiler.c, src/vm.c, test/jacl/mut_closure_shared.jacl, test/jacl/mut_closure_bidirectional.jacl
+- **Learnings for future iterations:**
+  - OP_CLOSURE capture is unchanged — cells are JaclVals copied by value, so both enclosing local slot and closure upvalue slot point to same heap JaclMutableRef
+  - `$var` at statement position in a block desugars to `[$var]` (zero-arg call) — for returning non-callable values from procs, use `[+ $x 0]` not `{ $x }`
+  - `proc name [] { body }` requires the empty params list `[]` even for zero-arg procs — omitting it gives arity error "proc expects 3 arguments but got 2"
+  - Transitive is_mutable propagation: when capturing from enclosing upvalue, copy is_mutable from `c->enclosing->upvalues[upvalue].is_mutable`
+---
+
+## 2026-02-24 - US-006
+- Implemented: `box`, `atom`, `box?`, `atom?` compiler builtins + VM handlers for OP_BOX, OP_ATOM, OP_IS_BOX, OP_IS_ATOM
+- Files changed: src/compiler.c, src/vm.c, test/jacl/box_create.jacl, test/jacl/atom_create.jacl
+- **Learnings for future iterations:**
+  - JACL comments use `#` not `;` — semicolons are statement separators, using them as comments causes parse errors
+  - OP_BOX and OP_ATOM check for error-flagged input and propagate the error (don't allocate a box/atom)
+  - box/atom builtins follow same pattern as `error` builtin: 1-arg compile, emit single opcode
+  - `box?` and `atom?` follow same pattern as `error?` builtin: 1-arg compile, emit predicate opcode
+---
+
+## 2026-02-24 - US-007
+- Implemented: `deref`, `reset!`, `swap!` compiler builtins + VM handlers for OP_DEREF, OP_RESET, OP_SWAP
+- Files changed: src/compiler.c, src/vm.c, test/jacl/deref_basic.jacl, test/jacl/reset_basic.jacl, test/jacl/swap_basic.jacl
+- **Learnings for future iterations:**
+  - OP_SWAP follows the same inline closure call pattern as OP_EACH/OP_TRANSFORM/OP_FILTER: push closure + arg, set up CallFrame, call vm__run(vm, caller_frame_count), pop return value, restore state
+  - `reset!` returns the new value (not nil) — different from `set!` which returns nil
+  - `swap!` validates closure param_count == 1 at runtime (not compile time, since the closure may be passed dynamically)
+  - `deref`, `reset!`, `swap!` all work on both box and atom types (check `jacl_is_box || jacl_is_atom`)
+  - Error propagation: check each arg left-to-right for error flag, push first error found
 ---
