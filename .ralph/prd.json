@@ -222,7 +222,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "to is the bridge between typed and dynamic worlds. Key conversions: numeric widening (i32→i64, f32→f64), narrowing (i64→i32, truncates), int↔float, and boxing/unboxing (typed↔dyn). Invalid conversions (str↔numeric) are compile-time errors. The OP_TO_* opcodes read a source-type byte operand because the VM doesn't know the type of unboxed stack values. For dyn→typed conversions at runtime, the VM must examine the tagged value's actual tag and convert appropriately — runtime error if the value is not numeric."
     },
     {
@@ -250,7 +250,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Param type parsing walks the flat list from the param AST_COMMAND. The head and all children form a flat sequence. For each element: check if it's a bare word matching a type keyword (via is_type_keyword). If yes and next exists → typed param. If no → untyped param. The & for variadic is handled as before — skip it, next element is rest name (always dyn). Store param types alongside arity info in GlobalArity so compiler__resolve_global_arity can return them for call-site checking. Return type checking: the compiler knows the body's result type from the last compiled expression — compare with declared return type."
     },
     {

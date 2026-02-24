@@ -105,6 +105,7 @@ static bool is_unboxed_type(JaclType t) {
 #define COMPILER_LOCALS_MAX 256
 #define COMPILER_UPVALUES_MAX 256
 #define COMPILER_TRY_PATCHES_MAX 128
+#define COMPILER_MAX_PROC_PARAMS 16
 
 typedef struct {
   JaclVal   name;         /* inline string name */
@@ -113,6 +114,8 @@ typedef struct {
   bool      is_mutable;   /* true if declared with mut */
   bool      is_param;     /* true if this is a function parameter */
   JaclType  type;         /* compile-time type (default TYPE_DYN) */
+  JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
+  JaclType* param_types;  /* proc param types (NULL for non-procs, arena-allocated) */
 } Local;
 
 /* --- Internal: Global arity tracking --- */
@@ -124,6 +127,8 @@ typedef struct {
   int16_t   known_arity;
   bool      is_mutable;   /* true if declared with mut */
   JaclType  type;         /* compile-time type (default TYPE_DYN) */
+  JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
+  JaclType  param_types[COMPILER_MAX_PROC_PARAMS]; /* proc param types */
 } GlobalArity;
 
 typedef struct {
@@ -156,6 +161,7 @@ struct Compiler {
   bool             in_try_body;
   JaclType         expected_type;   /* contextual type hint for RHS compilation */
   JaclType         last_expr_type;  /* type of the last compiled expression */
+  JaclType         return_type;     /* declared return type for current function */
 };
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -174,6 +180,7 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->in_try_body     = false;
   c->expected_type   = TYPE_DYN;
   c->last_expr_type  = TYPE_DYN;
+  c->return_type     = TYPE_DYN;
 }
 
 /* --- Internal: Emit helpers --- */
@@ -240,6 +247,8 @@ static void compiler__add_local(Compiler* c, JaclVal name,
   local->is_mutable  = false;
   local->is_param    = false;
   local->type        = TYPE_DYN;
+  local->return_type = TYPE_DYN;
+  local->param_types = NULL;
 }
 
 static int compiler__resolve_local(Compiler* c, JaclVal name) {
@@ -289,6 +298,17 @@ static JaclType compiler__resolve_global_type(Compiler* c, JaclVal name) {
   return TYPE_DYN;
 }
 
+static GlobalArity* compiler__find_global_arity(Compiler* c, JaclVal name) {
+  Compiler* root = c;
+  while (root->enclosing) root = root->enclosing;
+  for (uint32_t i = 0; i < root->global_arity_count; i++) {
+    if (root->global_arities[i].name == name) {
+      return &root->global_arities[i];
+    }
+  }
+  return NULL;
+}
+
 static void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity) {
   for (uint32_t i = 0; i < c->global_arity_count; i++) {
     if (c->global_arities[i].name == name) {
@@ -297,10 +317,13 @@ static void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity)
     }
   }
   if (c->global_arity_count < COMPILER_GLOBAL_ARITIES_MAX) {
-    c->global_arities[c->global_arity_count].name = name;
-    c->global_arities[c->global_arity_count].known_arity = arity;
-    c->global_arities[c->global_arity_count].is_mutable = false;
-    c->global_arities[c->global_arity_count].type = TYPE_DYN;
+    GlobalArity* ga = &c->global_arities[c->global_arity_count];
+    ga->name = name;
+    ga->known_arity = arity;
+    ga->is_mutable = false;
+    ga->type = TYPE_DYN;
+    ga->return_type = TYPE_DYN;
+    memset(ga->param_types, 0, sizeof(ga->param_types));
     c->global_arity_count++;
   }
 }
@@ -409,6 +432,10 @@ static void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
   for (uint32_t i = 0; i < count - 1; i++) {
     compiler__compile_node(c, block_node->data.block.commands[i]);
     compiler__emit_check_error(c, line);
+  }
+  /* For the last statement, apply return type context if declared */
+  if (c->return_type != TYPE_DYN) {
+    c->expected_type = c->return_type;
   }
   compiler__compile_node(c, block_node->data.block.commands[count - 1]);
 
@@ -1082,42 +1109,148 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* proc definition */
   if (compiler__head_matches(head, "proc", 4)) {
-    if (argc != 3) {
-      compiler__builtin_arity_error(c, line, col, "proc", "3 arguments", argc);
+    /* Disambiguate: 4 args + first is type keyword → has return type.
+       3 args → no return type (existing). */
+    JaclType proc_return_type = TYPE_DYN;
+    uint32_t name_arg_idx, params_arg_idx, body_arg_idx;
+
+    if (argc == 4) {
+      /* [proc TYPE name params body] */
+      if (args[0]->type != AST_LIT_STRING ||
+          !is_type_keyword(args[0]->data.lit_string.value,
+                           args[0]->data.lit_string.length)) {
+        compiler__error(c, line, col,
+            "proc with 4 arguments requires type keyword as first argument");
+        return;
+      }
+      proc_return_type = type_from_keyword(args[0]->data.lit_string.value,
+                                           args[0]->data.lit_string.length);
+      name_arg_idx   = 1;
+      params_arg_idx = 2;
+      body_arg_idx   = 3;
+    } else if (argc == 3) {
+      name_arg_idx   = 0;
+      params_arg_idx = 1;
+      body_arg_idx   = 2;
+    } else {
+      compiler__builtin_arity_error(c, line, col, "proc", "3 or 4 arguments", argc);
       return;
     }
-    if (args[0]->type != AST_LIT_STRING) {
+
+    if (args[name_arg_idx]->type != AST_LIT_STRING) {
       compiler__error(c, line, col, "proc name must be a string");
       return;
     }
-    if (args[1]->type != AST_COMMAND) {
+    if (args[params_arg_idx]->type != AST_COMMAND) {
       compiler__error(c, line, col, "proc params must be a bracketed list");
       return;
     }
-    if (args[2]->type != AST_BLOCK) {
+    if (args[body_arg_idx]->type != AST_BLOCK) {
       compiler__error(c, line, col, "proc body must be a block");
       return;
     }
 
     /* Get proc name */
-    const char* proc_name = args[0]->data.lit_string.value;
-    uint32_t proc_name_len = args[0]->data.lit_string.length;
+    const char* proc_name = args[name_arg_idx]->data.lit_string.value;
+    uint32_t proc_name_len = args[name_arg_idx]->data.lit_string.length;
     if (proc_name_len > 7) {
       compiler__error(c, line, col, "proc name exceeds 7-byte inline limit");
       return;
     }
 
-    /* Parse parameters from command node [a b c] */
-    AstNode* params_node = args[1];
+    /* Parse parameters with optional types from command node.
+       Walk flat list: head + children. Type keywords interleaved:
+       [i64 a i64 b] → a:i64, b:i64. [a b] → a:dyn, b:dyn. */
+    AstNode* params_node = args[params_arg_idx];
     AstNode* params_head = params_node->data.command.head;
-    uint8_t param_count;
 
-    if (params_head->data.lit_string.length == 0) {
-      /* Empty params: [] */
-      param_count = 0;
-    } else {
-      param_count = 1 + (uint8_t)params_node->data.command.arg_count;
+    /* Build flat element list from head + args */
+    uint32_t flat_count = 0;
+    AstNode* flat_elems[COMPILER_MAX_PROC_PARAMS * 2 + 2]; /* generous */
+
+    if (params_head->data.lit_string.length > 0) {
+      flat_elems[flat_count++] = params_head;
+      for (uint32_t i = 0; i < params_node->data.command.arg_count; i++) {
+        if (flat_count < sizeof(flat_elems)/sizeof(flat_elems[0]))
+          flat_elems[flat_count++] = params_node->data.command.args[i];
+      }
     }
+
+    /* Walk flat list to extract (type, name) pairs */
+    JaclVal param_names_arr[COMPILER_MAX_PROC_PARAMS];
+    JaclType param_types_arr[COMPILER_MAX_PROC_PARAMS];
+    uint8_t param_count = 0;
+    bool is_variadic = false;
+
+    for (uint32_t fi = 0; fi < flat_count; fi++) {
+      AstNode* elem = flat_elems[fi];
+      if (elem->type != AST_LIT_STRING) {
+        compiler__error(c, line, col, "proc parameter must be a name or type keyword");
+        return;
+      }
+      const char* word = elem->data.lit_string.value;
+      uint32_t wlen = elem->data.lit_string.length;
+
+      /* Check for variadic marker & */
+      if (wlen == 1 && word[0] == '&') {
+        is_variadic = true;
+        /* Next element is the rest param name (always dyn) */
+        fi++;
+        if (fi >= flat_count) {
+          compiler__error(c, line, col, "expected parameter name after &");
+          return;
+        }
+        elem = flat_elems[fi];
+        if (elem->type != AST_LIT_STRING || elem->data.lit_string.length > 7) {
+          compiler__error(c, line, col, "proc parameter name invalid");
+          return;
+        }
+        if (param_count >= COMPILER_MAX_PROC_PARAMS) {
+          compiler__error(c, line, col, "too many proc parameters");
+          return;
+        }
+        param_names_arr[param_count] = jacl_inline_string(
+            elem->data.lit_string.value, elem->data.lit_string.length);
+        param_types_arr[param_count] = TYPE_DYN;
+        param_count++;
+        continue;
+      }
+
+      /* Check if current element is a type keyword */
+      if (is_type_keyword(word, wlen) && fi + 1 < flat_count) {
+        /* Type keyword followed by param name → typed param */
+        JaclType ptype = type_from_keyword(word, wlen);
+        fi++;
+        elem = flat_elems[fi];
+        if (elem->type != AST_LIT_STRING || elem->data.lit_string.length > 7) {
+          compiler__error(c, line, col, "proc parameter name invalid");
+          return;
+        }
+        if (param_count >= COMPILER_MAX_PROC_PARAMS) {
+          compiler__error(c, line, col, "too many proc parameters");
+          return;
+        }
+        param_names_arr[param_count] = jacl_inline_string(
+            elem->data.lit_string.value, elem->data.lit_string.length);
+        param_types_arr[param_count] = ptype;
+        param_count++;
+      } else {
+        /* Untyped param name */
+        if (wlen > 7) {
+          compiler__error(c, line, col, "proc parameter name invalid");
+          return;
+        }
+        if (param_count >= COMPILER_MAX_PROC_PARAMS) {
+          compiler__error(c, line, col, "too many proc parameters");
+          return;
+        }
+        param_names_arr[param_count] = jacl_inline_string(word, wlen);
+        param_types_arr[param_count] = TYPE_DYN;
+        param_count++;
+      }
+    }
+
+    uint8_t min_args = is_variadic ? (uint8_t)(param_count - 1) : param_count;
 
     /* Allocate closure */
     JaclClosure* closure = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
@@ -1130,35 +1263,15 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     memcpy(name_copy, proc_name, proc_name_len);
     name_copy[proc_name_len] = '\0';
     closure->name         = name_copy;
-    closure->min_args     = param_count;
-    closure->variadic     = false;
+    closure->min_args     = min_args;
+    closure->variadic     = is_variadic;
 
-    /* Allocate and fill param_names */
+    /* Allocate and fill param_names from parsed array */
     if (param_count > 0) {
-      closure->param_names = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * param_count);
-
-      /* First param is the head of the params command */
-      if (params_head->type != AST_LIT_STRING ||
-          params_head->data.lit_string.length > 7) {
-        compiler__error(c, line, col, "proc parameter name invalid");
-        return;
-      }
-      closure->param_names[0] = jacl_inline_string(
-          params_head->data.lit_string.value,
-          params_head->data.lit_string.length);
-
-      /* Remaining params are the args of the params command */
-      for (uint8_t i = 0; i < params_node->data.command.arg_count; i++) {
-        AstNode* param = params_node->data.command.args[i];
-        if (param->type != AST_LIT_STRING ||
-            param->data.lit_string.length > 7) {
-          compiler__error(c, line, col, "proc parameter name invalid");
-          return;
-        }
-        closure->param_names[1 + i] = jacl_inline_string(
-            param->data.lit_string.value,
-            param->data.lit_string.length);
-      }
+      closure->param_names = (JaclVal*)arena_alloc(c->arena,
+                                sizeof(JaclVal) * param_count);
+      memcpy(closure->param_names, param_names_arr,
+             sizeof(JaclVal) * param_count);
     } else {
       closure->param_names = NULL;
     }
@@ -1168,15 +1281,30 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__init(&body_compiler, &closure->chunk, c->arena, c->intern_table);
     body_compiler.scope_depth = 1;
     body_compiler.enclosing   = c;
+    body_compiler.return_type = proc_return_type;
 
-    /* Add params as locals in body compiler (slots 0..N-1) */
+    /* Add params as locals in body compiler (slots 0..N-1) with types */
     for (uint8_t i = 0; i < param_count; i++) {
       compiler__add_local(&body_compiler, closure->param_names[i], line, col);
       body_compiler.locals[body_compiler.local_count - 1].is_param = true;
+      body_compiler.locals[body_compiler.local_count - 1].type = param_types_arr[i];
     }
 
     /* Compile body as expression (last stmt value stays on stack) */
-    compiler__compile_block_expr(&body_compiler, args[2]);
+    compiler__compile_block_expr(&body_compiler, args[body_arg_idx]);
+
+    /* Return type checking: body's last expression type must match declared */
+    if (proc_return_type != TYPE_DYN) {
+      JaclType body_type = body_compiler.last_expr_type;
+      if (body_type != TYPE_DYN && body_type != proc_return_type) {
+        char err_msg[128];
+        snprintf(err_msg, sizeof(err_msg),
+                 "type error: proc %.*s declared return type %s, but body returns %s",
+                 (int)proc_name_len, proc_name,
+                 type_name(proc_return_type), type_name(body_type));
+        compiler__error(c, line, col, err_msg);
+      }
+    }
 
     /* Emit implicit return */
     compiler__emit_byte(&body_compiler, OP_RETURN, line);
@@ -1201,12 +1329,22 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, body_compiler.upvalues[i].index, line);
     }
 
+    /* Arena-allocate param_types array for binding */
+    JaclType* stored_param_types = NULL;
+    if (param_count > 0) {
+      stored_param_types = (JaclType*)arena_alloc(c->arena,
+                              sizeof(JaclType) * param_count);
+      memcpy(stored_param_types, param_types_arr, sizeof(JaclType) * param_count);
+    }
+
     /* Bind the name */
     JaclVal name_val = jacl_inline_string(proc_name, proc_name_len);
     if (c->scope_depth > 0) {
       /* Local scope: closure is on stack as local */
       compiler__add_local(c, name_val, line, col);
       c->locals[c->local_count - 1].known_arity = (int16_t)param_count;
+      c->locals[c->local_count - 1].return_type = proc_return_type;
+      c->locals[c->local_count - 1].param_types = stored_param_types;
       /* proc returns the closure value (enables make-adder pattern) */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
       compiler__emit_byte(c, (uint8_t)(c->local_count - 1), line);
@@ -1216,7 +1354,18 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
       compiler__set_global_arity(c, name_val, (int16_t)param_count);
+      /* Store param types and return type in GlobalArity */
+      {
+        GlobalArity* ga = compiler__find_global_arity(c, name_val);
+        if (ga) {
+          ga->return_type = proc_return_type;
+          for (uint8_t i = 0; i < param_count && i < COMPILER_MAX_PROC_PARAMS; i++) {
+            ga->param_types[i] = param_types_arr[i];
+          }
+        }
+      }
     }
+    c->last_expr_type = TYPE_CLOSURE;
     return;
   }
 
@@ -1825,6 +1974,13 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* Dynamic call: unrecognized command head — look up and call */
   {
+    /* Resolve callee param types for call-site type checking */
+    JaclType* call_param_types = NULL;
+    JaclType call_return_type = TYPE_DYN;
+    int16_t call_param_count = -1;
+    const char* callee_name_str = NULL;
+    uint32_t callee_name_len = 0;
+
     if (head->type == AST_LIT_STRING) {
       /* Look up bare word as a variable */
       uint32_t name_len = head->data.lit_string.length;
@@ -1834,14 +1990,25 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       JaclVal name_val = jacl_inline_string(head->data.lit_string.value, name_len);
       int local_slot = compiler__resolve_local(c, name_val);
+      callee_name_str = head->data.lit_string.value;
+      callee_name_len = name_len;
 
-      /* Compile-time arity check for known procs */
+      /* Compile-time arity check and param type resolution */
       {
         int16_t head_arity = -1;
         if (local_slot != -1) {
           head_arity = c->locals[local_slot].known_arity;
+          call_param_types = c->locals[local_slot].param_types;
+          call_return_type = c->locals[local_slot].return_type;
+          call_param_count = head_arity;
         } else {
           head_arity = compiler__resolve_global_arity(c, name_val);
+          GlobalArity* ga = compiler__find_global_arity(c, name_val);
+          if (ga) {
+            call_param_types = ga->param_types;
+            call_return_type = ga->return_type;
+            call_param_count = head_arity;
+          }
         }
         if (head_arity != -1 && (int16_t)argc != head_arity) {
           char err_msg[128];
@@ -1881,18 +2048,74 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, err_msg);
           return;
         }
+        /* Resolve param types for $var call-site checking */
+        callee_name_str = head->data.var_ref.name;
+        callee_name_len = head->data.var_ref.length;
+        if (head->data.var_ref.length <= 7) {
+          JaclVal vname = jacl_inline_string(head->data.var_ref.name,
+                                              head->data.var_ref.length);
+          int slot = compiler__resolve_local(c, vname);
+          if (slot != -1) {
+            call_param_types = c->locals[slot].param_types;
+            call_return_type = c->locals[slot].return_type;
+            call_param_count = c->locals[slot].known_arity;
+          } else {
+            GlobalArity* ga = compiler__find_global_arity(c, vname);
+            if (ga) {
+              call_param_types = ga->param_types;
+              call_return_type = ga->return_type;
+              call_param_count = ga->known_arity;
+            }
+          }
+        }
       }
       compiler__compile_node(c, head);
     }
 
-    /* Compile arguments */
+    /* Compile arguments with call-site type checking */
     for (uint32_t i = 0; i < argc; i++) {
+      JaclType expected_param_type = TYPE_DYN;
+      if (call_param_types && call_param_count > 0 && (int32_t)i < call_param_count) {
+        expected_param_type = call_param_types[i];
+      }
+
+      /* Set contextual type for argument */
+      if (expected_param_type != TYPE_DYN) {
+        c->expected_type = expected_param_type;
+      }
       compiler__compile_node(c, args[i]);
+      JaclType arg_type = c->last_expr_type;
+      c->expected_type = TYPE_DYN;
+
+      /* Type check: argument vs declared param type */
+      if (expected_param_type != TYPE_DYN) {
+        if (arg_type != TYPE_DYN && arg_type != expected_param_type) {
+          char err_msg[192];
+          snprintf(err_msg, sizeof(err_msg),
+                   "type error: argument %d of %.*s expected %s, got %s",
+                   (int)(i + 1), (int)callee_name_len, callee_name_str,
+                   type_name(expected_param_type), type_name(arg_type));
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        if (arg_type == TYPE_DYN) {
+          char err_msg[192];
+          snprintf(err_msg, sizeof(err_msg),
+                   "type error: argument %d of %.*s expected %s, got dyn (use [to %s $val])",
+                   (int)(i + 1), (int)callee_name_len, callee_name_str,
+                   type_name(expected_param_type), type_name(expected_param_type));
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+      }
     }
 
     /* Emit call */
     compiler__emit_byte(c, OP_CALL, line);
     compiler__emit_byte(c, (uint8_t)argc, line);
+
+    /* Set result type from callee's return type */
+    c->last_expr_type = call_return_type;
   }
 }
 

@@ -1,0 +1,3 @@
+# expect-error: type error: argument 1 of add expected i64, got str
+proc i64 add [i64 a i64 b] { [+ $a $b] }
+[add "x" 2]

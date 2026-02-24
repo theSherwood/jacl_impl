@@ -144,6 +144,14 @@
 - Typed def type checking: rhs_type must match declared_type; TYPE_DYN passes (runtime compatibility)
 - Type inference for untyped def: only infers unboxed types (i64/u64/f64) from RHS — these MUST be tracked since stack holds raw values
 - vm__fmt_value, OP_PRINT, and OP_TO_STRING all handle u32/i64/u64/f64 tags (needed for US-006 test to work)
+- `to` builtin: [to TYPE expr] emits OP_TO_* with source type byte; same-type is no-op; non-numeric↔numeric is compile error; dyn source always allowed (runtime check)
+- Typed proc: [proc TYPE name params body] (4 args); untyped: [proc name params body] (3 args)
+- Param type parsing: flat list walk, type keyword + next name → typed pair; `&` → variadic marker; bare word → untyped (TYPE_DYN)
+- GlobalArity has return_type and param_types[COMPILER_MAX_PROC_PARAMS]; Local has return_type and *param_types (arena)
+- compiler__find_global_arity(c, name) returns GlobalArity* pointer or NULL
+- Call-site type checking in dynamic call section: set expected_type per arg, check result type after compile; dyn→typed param is error
+- compile_block_expr applies c->return_type as expected_type for last statement
+- Dynamic call sets last_expr_type = call_return_type for return type propagation
 
 ## 2026-02-24 - US-001
 - Implemented value tags, heap types, constructors, accessors, predicates for u32/i64/u64/f64
@@ -238,4 +246,33 @@
   - Comparison result type is always TYPE_DYN (tagged JACL_TRUE/JACL_FALSE booleans), arithmetic result is the operand type
   - Unary negation: u64 → compile error, i64 → OP_NEG_I64, f64 → OP_NEG_F64, others → OP_NEG
   - expected_type is set for RHS from LHS type (any non-DYN), enabling contextual literal adoption in arithmetic
+---
+
+## 2026-02-24 - US-009
+- Implemented [to TYPE expr] builtin for explicit type conversions between numeric types and dyn
+- Files changed: src/compiler.c (to builtin handler), test/jacl/type_conversions.jacl, test/jacl/to_error.jacl
+- **Learnings for future iterations:**
+  - `to` is a compiler builtin matching via compiler__head_matches — exactly 2 args (type keyword + expression)
+  - First arg must be AST_LIT_STRING matching is_type_keyword; non-numeric→numeric and non-numeric→different-non-numeric conversions are compile errors
+  - Same-type conversions (including dyn→dyn) are no-ops — no opcode emitted
+  - dyn→typed and typed→dyn rely on the existing OP_TO_* opcodes with source type operand byte
+  - src_type == TYPE_DYN is always allowed at compile time (runtime will check); non-numeric→numeric is a compile error
+  - Result type of [to TYPE expr] is always the target TYPE
+---
+
+## 2026-02-24 - US-010
+- Implemented typed proc: [proc TYPE name params body] with return type, typed params [i64 a i64 b], call-site type checking, return type verification
+- Files changed: src/compiler.c (proc compilation rewrite, GlobalArity/Local extensions, dynamic call type checking, compile_block_expr return type context), test/jacl/typed_proc.jacl, test/jacl/typed_proc_error.jacl
+- **Learnings for future iterations:**
+  - Proc return type: 4-arg form [proc TYPE name params body]; 3-arg form unchanged
+  - Param type parsing walks flat list (head + children): type keyword + next → typed pair; bare word → untyped (TYPE_DYN); `&` → variadic marker
+  - Param types stored in GlobalArity.param_types[] for globals, Local.param_types (arena-allocated) for locals
+  - Return type stored in GlobalArity.return_type / Local.return_type
+  - compiler__find_global_arity returns GlobalArity* for direct field access
+  - compile_block_expr applies return_type context via expected_type for last statement (enables contextual literal typing in return position)
+  - Return type checking: body_type != TYPE_DYN && body_type != return_type → compile error
+  - Call-site checking: expected_type set per arg from param types; typed param + dyn arg → error with [to TYPE $val] suggestion; typed param + wrong typed arg → error
+  - proc compilation now sets last_expr_type = TYPE_CLOSURE (was implicit)
+  - Dynamic call sets last_expr_type = call_return_type for return type propagation to callers
+  - COMPILER_MAX_PROC_PARAMS = 16 — maximum number of typed parameters tracked
 ---
