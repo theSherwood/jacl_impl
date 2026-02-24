@@ -3,6 +3,7 @@
 #define JACL_C
 
 /* --- System headers --- */
+#include <math.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>

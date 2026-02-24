@@ -549,4 +549,404 @@ static inline JaclVal jacl_ge_f32(JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
+/* --- u32 arithmetic --- */
+
+static inline JaclVal jacl_u32_add(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_u32(jacl_as_u32(a) + jacl_as_u32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u32_sub(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_u32(jacl_as_u32(a) - jacl_as_u32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u32_mul(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_u32(jacl_as_u32(a) * jacl_as_u32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u32_div(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    uint32_t divisor = jacl_as_u32(b);
+    if (divisor == 0) {
+        return jacl_apply_flags(jacl_set_error(jacl_u32(0)), flags);
+    }
+    JaclVal result = jacl_u32(jacl_as_u32(a) / divisor);
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u32_mod(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    uint32_t divisor = jacl_as_u32(b);
+    if (divisor == 0) {
+        return jacl_apply_flags(jacl_set_error(jacl_u32(0)), flags);
+    }
+    JaclVal result = jacl_u32(jacl_as_u32(a) % divisor);
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u32_neg(JaclVal a) {
+    if (jacl_is_error(a)) return a;
+    uint64_t flags = a & JACL_FLAGS_MASK;
+    return jacl_apply_flags(jacl_set_error(jacl_u32(0)), flags);
+}
+
+/* --- u32 comparisons --- */
+
+static inline JaclVal jacl_u32_lt(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_u32(a) < jacl_as_u32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u32_gt(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_u32(a) > jacl_as_u32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u32_le(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_u32(a) <= jacl_as_u32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u32_ge(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_u32(a) >= jacl_as_u32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u32_eq(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_u32(a) == jacl_as_u32(b));
+    return jacl_apply_flags(result, flags);
+}
+
+/* --- i64 arithmetic --- */
+
+static inline JaclVal jacl_i64_add(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_i64(arena, jacl_as_i64(a) + jacl_as_i64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_sub(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_i64(arena, jacl_as_i64(a) - jacl_as_i64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_mul(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_i64(arena, jacl_as_i64(a) * jacl_as_i64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_div(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    int64_t divisor = jacl_as_i64(b);
+    if (divisor == 0) {
+        return jacl_apply_flags(jacl_set_error(jacl_i64(arena, 0)), flags);
+    }
+    int64_t dividend = jacl_as_i64(a);
+    int64_t quot = (dividend == INT64_MIN && divisor == -1)
+        ? INT64_MIN : (dividend / divisor);
+    JaclVal result = jacl_i64(arena, quot);
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_mod(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    int64_t divisor = jacl_as_i64(b);
+    if (divisor == 0) {
+        return jacl_apply_flags(jacl_set_error(jacl_i64(arena, 0)), flags);
+    }
+    int64_t dividend = jacl_as_i64(a);
+    int64_t rem = (dividend == INT64_MIN && divisor == -1)
+        ? 0 : (dividend % divisor);
+    JaclVal result = jacl_i64(arena, rem);
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_neg(arena_t *arena, JaclVal a) {
+    if (jacl_is_error(a)) return a;
+    uint64_t flags = a & JACL_FLAGS_MASK;
+    JaclVal result = jacl_i64(arena, -jacl_as_i64(a));
+    return jacl_apply_flags(result, flags);
+}
+
+/* --- i64 comparisons --- */
+
+static inline JaclVal jacl_i64_lt(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_i64(a) < jacl_as_i64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_gt(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_i64(a) > jacl_as_i64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_le(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_i64(a) <= jacl_as_i64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_ge(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_i64(a) >= jacl_as_i64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_eq(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_i64(a) == jacl_as_i64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+/* --- u64 arithmetic --- */
+
+static inline JaclVal jacl_u64_add(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_u64(arena, jacl_as_u64(a) + jacl_as_u64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_sub(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_u64(arena, jacl_as_u64(a) - jacl_as_u64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_mul(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_u64(arena, jacl_as_u64(a) * jacl_as_u64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_div(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    uint64_t divisor = jacl_as_u64(b);
+    if (divisor == 0) {
+        return jacl_apply_flags(jacl_set_error(jacl_u64(arena, 0)), flags);
+    }
+    JaclVal result = jacl_u64(arena, jacl_as_u64(a) / divisor);
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_mod(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    uint64_t divisor = jacl_as_u64(b);
+    if (divisor == 0) {
+        return jacl_apply_flags(jacl_set_error(jacl_u64(arena, 0)), flags);
+    }
+    JaclVal result = jacl_u64(arena, jacl_as_u64(a) % divisor);
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_neg(arena_t *arena, JaclVal a) {
+    if (jacl_is_error(a)) return a;
+    uint64_t flags = a & JACL_FLAGS_MASK;
+    return jacl_apply_flags(jacl_set_error(jacl_u64(arena, 0)), flags);
+}
+
+/* --- u64 comparisons --- */
+
+static inline JaclVal jacl_u64_lt(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_u64(a) < jacl_as_u64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_gt(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_u64(a) > jacl_as_u64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_le(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_u64(a) <= jacl_as_u64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_ge(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_u64(a) >= jacl_as_u64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_eq(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_u64(a) == jacl_as_u64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+/* --- f64 arithmetic --- */
+
+static inline JaclVal jacl_f64_add(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_f64(arena, jacl_as_f64(a) + jacl_as_f64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_sub(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_f64(arena, jacl_as_f64(a) - jacl_as_f64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_mul(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_f64(arena, jacl_as_f64(a) * jacl_as_f64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_div(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    double divisor = jacl_as_f64(b);
+    if (divisor == 0.0) {
+        return jacl_apply_flags(jacl_set_error(jacl_f64(arena, 0.0)), flags);
+    }
+    JaclVal result = jacl_f64(arena, jacl_as_f64(a) / divisor);
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_mod(arena_t *arena, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    double divisor = jacl_as_f64(b);
+    if (divisor == 0.0) {
+        return jacl_apply_flags(jacl_set_error(jacl_f64(arena, 0.0)), flags);
+    }
+    JaclVal result = jacl_f64(arena, fmod(jacl_as_f64(a), divisor));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_neg(arena_t *arena, JaclVal a) {
+    if (jacl_is_error(a)) return a;
+    uint64_t flags = a & JACL_FLAGS_MASK;
+    JaclVal result = jacl_f64(arena, -jacl_as_f64(a));
+    return jacl_apply_flags(result, flags);
+}
+
+/* --- f64 comparisons --- */
+
+static inline JaclVal jacl_f64_lt(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_f64(a) < jacl_as_f64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_gt(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_f64(a) > jacl_as_f64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_le(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_f64(a) <= jacl_as_f64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_ge(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_f64(a) >= jacl_as_f64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_eq(JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_bool(jacl_as_f64(a) == jacl_as_f64(b));
+    return jacl_apply_flags(result, flags);
+}
+
 #endif /* VALUE_C */
