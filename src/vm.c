@@ -2310,6 +2310,293 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      /* --- M11: i64 typed arithmetic/comparison opcodes --- */
+
+      case OP_ADD_I64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        int64_t a = (int64_t)raw_a;
+        int64_t b = (int64_t)raw_b;
+        result = vm__push(vm, (uint64_t)(a + b));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_SUB_I64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        int64_t a = (int64_t)raw_a;
+        int64_t b = (int64_t)raw_b;
+        result = vm__push(vm, (uint64_t)(a - b));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_MUL_I64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        int64_t a = (int64_t)raw_a;
+        int64_t b = (int64_t)raw_b;
+        result = vm__push(vm, (uint64_t)(a * b));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_DIV_I64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        int64_t a = (int64_t)raw_a;
+        int64_t b = (int64_t)raw_b;
+        if (b == 0) {
+          vm__set_error(vm, "division by zero");
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, (uint64_t)(a / b));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_MOD_I64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        int64_t a = (int64_t)raw_a;
+        int64_t b = (int64_t)raw_b;
+        if (b == 0) {
+          vm__set_error(vm, "division by zero");
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, (uint64_t)(a % b));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_NEG_I64: {
+        JaclVal raw_a;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        int64_t a = (int64_t)raw_a;
+        result = vm__push(vm, (uint64_t)(-a));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_LT_I64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        int64_t a = (int64_t)raw_a;
+        int64_t b = (int64_t)raw_b;
+        result = vm__push(vm, a < b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_GT_I64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        int64_t a = (int64_t)raw_a;
+        int64_t b = (int64_t)raw_b;
+        result = vm__push(vm, a > b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_LE_I64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        int64_t a = (int64_t)raw_a;
+        int64_t b = (int64_t)raw_b;
+        result = vm__push(vm, a <= b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_GE_I64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        int64_t a = (int64_t)raw_a;
+        int64_t b = (int64_t)raw_b;
+        result = vm__push(vm, a >= b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_EQ_I64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        int64_t a = (int64_t)raw_a;
+        int64_t b = (int64_t)raw_b;
+        result = vm__push(vm, a == b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      /* --- M11: f64 typed arithmetic/comparison opcodes --- */
+
+      case OP_ADD_F64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        double a, b;
+        memcpy(&a, &raw_a, sizeof(double));
+        memcpy(&b, &raw_b, sizeof(double));
+        double r = a + b;
+        uint64_t raw_r;
+        memcpy(&raw_r, &r, sizeof(uint64_t));
+        result = vm__push(vm, raw_r);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_SUB_F64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        double a, b;
+        memcpy(&a, &raw_a, sizeof(double));
+        memcpy(&b, &raw_b, sizeof(double));
+        double r = a - b;
+        uint64_t raw_r;
+        memcpy(&raw_r, &r, sizeof(uint64_t));
+        result = vm__push(vm, raw_r);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_MUL_F64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        double a, b;
+        memcpy(&a, &raw_a, sizeof(double));
+        memcpy(&b, &raw_b, sizeof(double));
+        double r = a * b;
+        uint64_t raw_r;
+        memcpy(&raw_r, &r, sizeof(uint64_t));
+        result = vm__push(vm, raw_r);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_DIV_F64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        double a, b;
+        memcpy(&a, &raw_a, sizeof(double));
+        memcpy(&b, &raw_b, sizeof(double));
+        if (b == 0.0) {
+          vm__set_error(vm, "division by zero");
+          return VM_RUNTIME_ERROR;
+        }
+        double r = a / b;
+        uint64_t raw_r;
+        memcpy(&raw_r, &r, sizeof(uint64_t));
+        result = vm__push(vm, raw_r);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_MOD_F64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        double a, b;
+        memcpy(&a, &raw_a, sizeof(double));
+        memcpy(&b, &raw_b, sizeof(double));
+        if (b == 0.0) {
+          vm__set_error(vm, "division by zero");
+          return VM_RUNTIME_ERROR;
+        }
+        double r = fmod(a, b);
+        uint64_t raw_r;
+        memcpy(&raw_r, &r, sizeof(uint64_t));
+        result = vm__push(vm, raw_r);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_NEG_F64: {
+        JaclVal raw_a;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        double a;
+        memcpy(&a, &raw_a, sizeof(double));
+        double r = -a;
+        uint64_t raw_r;
+        memcpy(&raw_r, &r, sizeof(uint64_t));
+        result = vm__push(vm, raw_r);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_LT_F64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        double a, b;
+        memcpy(&a, &raw_a, sizeof(double));
+        memcpy(&b, &raw_b, sizeof(double));
+        result = vm__push(vm, a < b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_GT_F64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        double a, b;
+        memcpy(&a, &raw_a, sizeof(double));
+        memcpy(&b, &raw_b, sizeof(double));
+        result = vm__push(vm, a > b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_LE_F64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        double a, b;
+        memcpy(&a, &raw_a, sizeof(double));
+        memcpy(&b, &raw_b, sizeof(double));
+        result = vm__push(vm, a <= b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_GE_F64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        double a, b;
+        memcpy(&a, &raw_a, sizeof(double));
+        memcpy(&b, &raw_b, sizeof(double));
+        result = vm__push(vm, a >= b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_EQ_F64: {
+        JaclVal raw_b, raw_a;
+        result = vm__pop(vm, &raw_b); if (result != VM_OK) return result;
+        result = vm__pop(vm, &raw_a); if (result != VM_OK) return result;
+        double a, b;
+        memcpy(&a, &raw_a, sizeof(double));
+        memcpy(&b, &raw_b, sizeof(double));
+        result = vm__push(vm, a == b ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }
