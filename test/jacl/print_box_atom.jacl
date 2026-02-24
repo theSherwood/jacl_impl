@@ -1,0 +1,19 @@
+# expect: <box: 42>
+# expect: <atom: 0>
+# expect: <box: [vec 1 2 3]>
+# expect: <atom: "hello">
+# expect: 99
+# Print box
+[print [box 42]]
+# Print atom
+[print [atom 0]]
+# Nested container: box holding a vector
+[print [box [vec 1 2 3]]]
+# Atom holding a string
+[print [atom "hello"]]
+# Cell transparency: mut local prints contained value directly
+proc t [] {
+  mut x 99
+  [print $x]
+}
+[t]

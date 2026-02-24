@@ -387,6 +387,20 @@ static void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
     } else {
       vm__fmt_append(buf, "<closure>", 9);
     }
+  } else if (jacl_is_cell(val)) {
+    /* Cells are transparent — print the contained value directly */
+    JaclMutableRef* ref = jacl_as_cell(val);
+    vm__fmt_value(buf, ref->value);
+  } else if (jacl_is_box(val)) {
+    JaclMutableRef* ref = jacl_as_box(val);
+    vm__fmt_append(buf, "<box: ", 6);
+    vm__fmt_value(buf, ref->value);
+    vm__fmt_append(buf, ">", 1);
+  } else if (jacl_is_atom(val)) {
+    JaclMutableRef* ref = jacl_as_atom(val);
+    vm__fmt_append(buf, "<atom: ", 7);
+    vm__fmt_value(buf, ref->value);
+    vm__fmt_append(buf, ">", 1);
   } else {
     vm__fmt_append(buf, "<unknown>", 9);
   }
@@ -637,6 +651,12 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
 
+        /* Cells are transparent — dereference before printing */
+        if (jacl_is_cell(val)) {
+          JaclMutableRef* ref = jacl_as_cell(val);
+          val = ref->value;
+        }
+
         char buf[256];
         const char* text;
         uint32_t len;
@@ -701,7 +721,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (result != VM_OK) return result;
             break;
           }
-        } else if (jacl_is_vector(val) || jacl_is_map(val)) {
+        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena);
           vm__fmt_value(&fmt, val);
@@ -1063,11 +1083,17 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
         if (jacl_is_error(val)) { result = vm__push(vm, val); if (result != VM_OK) return result; break; }
 
+        /* Cells are transparent — dereference before converting */
+        if (jacl_is_cell(val)) {
+          JaclMutableRef* ref = jacl_as_cell(val);
+          val = ref->value;
+        }
+
         if (jacl_is_string(val)) {
           /* Already a string — push back unchanged */
           result = vm__push(vm, val);
           if (result != VM_OK) return result;
-        } else if (jacl_is_vector(val) || jacl_is_map(val)) {
+        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena);
           vm__fmt_value(&fmt, val);
