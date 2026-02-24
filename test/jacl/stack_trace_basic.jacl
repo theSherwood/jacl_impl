@@ -1,0 +1,13 @@
+# expect: caught
+# expect:   at foo (line 6)
+# expect:   at <main> (line 9)
+# Test: stack-trace captures call chain at error creation
+proc foo [] {
+  [error "oops"]
+}
+[try {
+  [foo]
+} e {
+  [print "caught"]
+  [print [stack-trace]]
+}]

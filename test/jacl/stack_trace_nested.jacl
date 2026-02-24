@@ -1,0 +1,17 @@
+# expect: caught
+# expect:   at inner (line 7)
+# expect:   at outer (line 10)
+# expect:   at <main> (line 13)
+# Test: stack-trace from nested calls shows full call chain
+proc inner [] {
+  [error "deep"]
+}
+proc outer [] {
+  [inner]
+}
+[try {
+  [outer]
+} e {
+  [print "caught"]
+  [print [stack-trace]]
+}]

@@ -567,7 +567,11 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     closure->param_count  = param_count;
     closure->upvalue_count = 0;
     closure->upvalues     = NULL;
-    closure->name         = proc_name;
+    /* Copy proc name to a null-terminated arena string */
+    char* name_copy = (char*)arena_alloc(c->arena, proc_name_len + 1);
+    memcpy(name_copy, proc_name, proc_name_len);
+    name_copy[proc_name_len] = '\0';
+    closure->name         = name_copy;
     closure->min_args     = param_count;
     closure->variadic     = false;
 
@@ -1071,6 +1075,16 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_ERROR_VAL, line);
+    return;
+  }
+
+  /* stack-trace builtin (exactly 0 args) */
+  if (compiler__head_matches(head, "stack-trace", 11)) {
+    if (argc != 0) {
+      compiler__builtin_arity_error(c, line, col, "stack-trace", "0 arguments", argc);
+      return;
+    }
+    compiler__emit_byte(c, OP_STACK_TRACE, line);
     return;
   }
 

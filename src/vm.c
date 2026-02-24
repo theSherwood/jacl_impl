@@ -51,6 +51,20 @@ typedef struct {
   BytecodeChunk* chunk;       /* chunk being executed */
 } CallFrame;
 
+/* --- Stack trace --- */
+
+#define VM_STACK_TRACE_MAX 32
+
+typedef struct {
+  const char* function_name;
+  uint32_t    line_number;
+} StackTraceEntry;
+
+typedef struct {
+  StackTraceEntry entries[VM_STACK_TRACE_MAX];
+  uint32_t        count;
+} StackTrace;
+
 /* --- VM state --- */
 
 typedef struct {
@@ -67,6 +81,7 @@ typedef struct {
   JaclInternTable* intern_table;  /* shared intern table for concat/interning */
   const char*    error_message;  /* last error message, or NULL */
   uint32_t       error_line;     /* source line of last error */
+  StackTrace     stack_trace;    /* most recent error's trace */
 } VM;
 
 /* --- API --- */
@@ -120,6 +135,32 @@ static bool vm__is_falsy(JaclVal v) {
   return jacl_is_nil(v) || v == JACL_FALSE;
 }
 
+/* --- Stack trace capture --- */
+
+/**
+ * Capture the current call frame chain into the VM's stack trace.
+ * Walks frames from innermost to outermost.
+ */
+static void vm__capture_trace(VM* vm) {
+  vm->stack_trace.count = 0;
+  for (uint32_t i = vm->frame_count; i > 0 && vm->stack_trace.count < VM_STACK_TRACE_MAX; i--) {
+    CallFrame* f = &vm->frames[i - 1];
+    StackTraceEntry* entry = &vm->stack_trace.entries[vm->stack_trace.count++];
+    entry->function_name = f->closure ? f->closure->name : NULL;
+
+    if (i == vm->frame_count) {
+      /* Current (innermost) frame: use the tracked error_line */
+      entry->line_number = vm->error_line;
+    } else {
+      /* Parent frame: derive line from child's return_ip in this frame's chunk */
+      CallFrame* child = &vm->frames[i];
+      uint32_t offset = (uint32_t)(child->return_ip - f->chunk->code);
+      if (offset > 0) offset--;
+      entry->line_number = f->chunk->lines[offset];
+    }
+  }
+}
+
 /**
  * Initialize the VM to a clean state.
  * Arena is used for environment storage.
@@ -136,6 +177,7 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->frame_count   = 0;
   vm->error_message = NULL;
   vm->error_line    = 0;
+  vm->stack_trace.count = 0;
 
   /* Ensure HAMT key handlers are wired up */
   collections__init();
@@ -247,6 +289,8 @@ static JaclVal vm__env_get(VM* vm, JaclVal name, bool* found) {
         op_name, vm__type_name(a), vm__type_name(b));                         \
       return VM_RUNTIME_ERROR;                                                \
     }                                                                         \
+    if (jacl_is_error(res) && !jacl_is_error(a) && !jacl_is_error(b))        \
+      vm__capture_trace(vm);                                                  \
     result = vm__push(vm, res); if (result != VM_OK) return result;           \
   } while (0)
 
@@ -459,7 +503,10 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
         result = vm__pop(vm, &a); if (result != VM_OK) return result;
         if (jacl_is_i32(a) && jacl_is_i32(b)) {
-          result = vm__push(vm, jacl_mod_i32(a, b));
+          JaclVal mod_res = jacl_mod_i32(a, b);
+          if (jacl_is_error(mod_res) && !jacl_is_error(a) && !jacl_is_error(b))
+            vm__capture_trace(vm);
+          result = vm__push(vm, mod_res);
           if (result != VM_OK) return result;
         } else if (jacl_is_f32(a) && jacl_is_f32(b)) {
           vm__set_error(vm,
@@ -1897,6 +1944,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         vm->stack[vm->stack_top - 1] = jacl_set_error(vm->stack[vm->stack_top - 1]);
+        vm__capture_trace(vm);
         break;
       }
 
@@ -1976,6 +2024,37 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal top = vm->stack[vm->stack_top - 1];
         if (jacl_is_error(top)) {
           vm->ip += offset;
+        }
+        break;
+      }
+
+      case OP_STACK_TRACE: {
+        if (vm->stack_trace.count == 0) {
+          /* No error has been created yet — push empty string */
+          result = vm__push(vm, jacl_inline_string("", 0));
+          if (result != VM_OK) return result;
+        } else {
+          VMFormatBuf fmt;
+          vm__fmt_init(&fmt, vm->arena);
+          for (uint32_t i = 0; i < vm->stack_trace.count; i++) {
+            StackTraceEntry* e = &vm->stack_trace.entries[i];
+            char tmp[128];
+            const char* name = e->function_name ? e->function_name : "<main>";
+            int n = snprintf(tmp, sizeof(tmp), "  at %s (line %u)",
+                             name, (unsigned)e->line_number);
+            vm__fmt_append(&fmt, tmp, (uint32_t)n);
+            if (i + 1 < vm->stack_trace.count) {
+              vm__fmt_append(&fmt, "\n", 1);
+            }
+          }
+          JaclVal trace_str;
+          if (fmt.len <= 7) {
+            trace_str = jacl_inline_string(fmt.data, fmt.len);
+          } else {
+            trace_str = jacl_intern(vm->arena, vm->intern_table, fmt.data, fmt.len);
+          }
+          result = vm__push(vm, trace_str);
+          if (result != VM_OK) return result;
         }
         break;
       }

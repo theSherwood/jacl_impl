@@ -71,6 +71,7 @@ typedef enum {
   OP_ERROR_VAL,     /* extract error payload: peek top-of-stack, clear error flag, leave on stack */
   OP_CHECK_ERROR,   /* check error: uint16_t offset; 0=return from frame, nonzero=jump to handler */
   OP_JUMP_IF_ERROR, /* conditional error jump: uint16_t offset; peek top, jump if error-flagged */
+  OP_STACK_TRACE,   /* push stack trace string of most recent error */
   OP_HALT           /* stop execution */
 } OpCode;
 

@@ -1,0 +1,4 @@
+# expect: empty
+# Test: stack-trace returns empty string when no error created
+def t [stack-trace]
+[if [== [length $t] 0] { [print "empty"] } { [print "not empty"] }]
