@@ -82,7 +82,7 @@
 - Division/mod by zero produces error-flagged result value (not VM abort)
 - OP_PRINT shows `<error: PAYLOAD>` for error-flagged values (strings unquoted, other types via vm__fmt_value)
 - VM has error_message (const char*) and error_line (uint32_t) for fatal runtime errors — separate from value-level error flags
-- `?` and `!` are valid word continuation characters in the lexer (enables `error?`, `set!`, `reset!`, `swap!`, `box?`, `atom?`)
+- `?` and `!` are valid word continuation characters in the lexer (enables `error?`, `set!`, `reset!`, `swap!`, `box?`, `atom?`) — `!` was added in US-003
 - `error` builtin (1 arg) emits OP_ERROR; `error?` (1 arg) emits OP_IS_ERROR; `error-val` (1 arg) emits OP_ERROR_VAL
 - OP_ERROR peeks stack top and sets error flag; OP_IS_ERROR pops and pushes bool; OP_ERROR_VAL peeks and clears error flag
 - vm__env_get uses bool* found out-param (not error-flagged nil) to signal undefined variables — error-flagged values can be stored in globals
@@ -100,6 +100,11 @@
 - `mut` at local scope: compile RHS → OP_MAKE_CELL → add_local(is_mutable=true) → OP_NIL; reading emits OP_GET_CELL_LOCAL
 - `mut` at global scope: compile RHS → OP_DEF_GLOBAL + set is_mutable=true in GlobalArity; no cell needed
 - Every place that emits OP_GET_LOCAL for a resolved local must check is_mutable and emit OP_GET_CELL_LOCAL instead (AST_VAR_REF + dynamic call head)
+- `set!` resolves local → upvalue → global. Local mutable: compile RHS → OP_SET_CELL_LOCAL. Upvalue mutable: OP_SET_CELL_UPVALUE. Global mutable: OP_SET_GLOBAL.
+- Local struct has `is_param` field (bool, default false) — set true for proc parameters; enables "cannot mutate parameter" vs "cannot mutate immutable binding" error messages
+- `compiler__resolve_global_info(c, name, &is_mutable)` checks global existence and mutability; returns true if found
+- `def` at global scope ALWAYS registers in GlobalArity (even non-proc values with arity -1) — needed for `set!` to distinguish "immutable binding" from "undefined variable"
+- OP_SET_CELL_LOCAL pops new value, writes through cell, pushes nil; OP_SET_GLOBAL pops value, calls vm__env_set, pushes nil
 
 ## 2026-02-24 - US-001
 - Implemented: JaclMutableRef struct, JACL_TAG_CELL/BOX/ATOM value tags, constructors/accessors/predicates for cell/box/atom, is_mutable fields on Local/GlobalArity/Upvalue, 13 new opcodes in bytecode.c
@@ -118,4 +123,23 @@
   - `mut` at global scope uses OP_DEF_GLOBAL (no cell) since globals are in name→value table; cells only needed for local slots
   - Dynamic call head for bare words (line ~1139 in compiler.c) also needs the is_mutable check for OP_GET_CELL_LOCAL
   - compiler__resolve_local returns slot index; check c->locals[slot].is_mutable to decide OP_GET_LOCAL vs OP_GET_CELL_LOCAL
+---
+
+## 2026-02-24 - US-003
+- Implemented: `set!` special form with full resolution chain (local → upvalue → global → undefined), OP_SET_CELL_LOCAL and OP_SET_GLOBAL VM handlers, `is_param` field on Local struct, `!` added to lexer word chars, `compiler__resolve_global_info` helper
+- Files changed: src/lexer.c, src/compiler.c, src/vm.c, test/jacl/set_local.jacl, test/jacl/set_immutable_error.jacl, test/jacl/set_param_error.jacl
+- **Learnings for future iterations:**
+  - `!` was NOT a valid word continuation character before this story — it was only in `lexer__is_operator_char`. Had to add it to `lexer__is_word_char` for `set!`, `reset!`, `swap!` to tokenize as single words
+  - `is_param` on Local struct distinguishes function parameters from `def` bindings for error messages ("cannot mutate parameter" vs "cannot mutate immutable binding")
+  - The full set! resolution chain (local → upvalue → global → undefined) was implemented upfront even though US-004/US-005 will test the global/upvalue paths — avoids incorrect error messages for mutable globals
+  - OP_SET_GLOBAL VM handler was added in this story (trivial: pop value, env_set, push nil) since the compiler emits it for mutable globals
+---
+
+## 2026-02-24 - US-004
+- Implemented: `mut`/`set!` for mutable globals — test files and a fix to always register `def` globals in GlobalArity table
+- Files changed: src/compiler.c, test/jacl/mut_global.jacl, test/jacl/set_global_immutable_error.jacl, .ralph/prd.json
+- **Learnings for future iterations:**
+  - `def` at global scope previously only registered in GlobalArity when RHS had known arity (proc). Changed to always register so `set!` can find immutable globals and give correct "cannot mutate immutable binding" error instead of "undefined variable"
+  - Most US-004 infrastructure (mut at global scope, set! global resolution, OP_SET_GLOBAL VM handler) was already implemented in US-003 — this story mainly needed the test files and the `def` global registration fix
+  - Global `mut` does NOT use cells (no OP_MAKE_CELL) — globals are stored in a name→value environment table, so OP_DEF_GLOBAL/OP_SET_GLOBAL suffice
 ---

@@ -69,7 +69,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "set! only resolves locals in this story. Upvalue and global resolution is added in US-004 and US-005. When resolve_local fails, the story should fall through to upvalue and global checks (which will error for now until those stories are implemented)."
     },
     {
@@ -89,7 +89,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "The GlobalArity struct already tracks global names and arity info. Adding is_mutable to it is straightforward. The compiler's global tracking functions (compiler__resolve_global_arity etc.) need to propagate the is_mutable flag."
     },
     {

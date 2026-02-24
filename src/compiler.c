@@ -655,9 +655,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
-      if (rhs_arity != -1) {
-        compiler__set_global_arity(c, name_val, rhs_arity);
-      }
+      /* Always register global so set! can check mutability */
+      compiler__set_global_arity(c, name_val, rhs_arity);
     }
     return;
   }
