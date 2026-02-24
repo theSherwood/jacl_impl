@@ -35,6 +35,8 @@
 - Arity checking works for both bare word heads (AST_LIT_STRING) and $var heads (AST_VAR_REF) in dynamic call section
 - Global `def` propagates arity: `def g $f` or `def g procname` where the RHS has known arity → g gets that arity globally
 - Compile errors surface as VM_RUNTIME_ERROR from jacl_run — test harness `# expect-error:` works for both compile and runtime errors
+- closure->name is null-terminated (arena-allocated copy) — safe to use with %s format specifiers
+- StackTrace on VM: fixed-size array of {function_name, line_number}, max 32 frames; captured at error-creation time (OP_ERROR and div-by-zero); accessed via OP_STACK_TRACE
 - Proc names must be <= 7 bytes (inline string limit) — longer names use heap strings
 - Test harness `# expect-error:` is substring match — only one error scenario per file
 - Value tags: JACL_TAG_VECTOR (0x06), JACL_TAG_MAP (0x07) already reserved in value.c
@@ -55,6 +57,7 @@
 - HAMT empty map is NULL root; jacl_map_ptr(NULL) creates a valid MAP-tagged JaclVal; jacl_map_count(NULL) returns 0; jacl_map_unref(NULL) is safe
 - OP_MAP uses uint8_t pair_count operand (argc/2); map constructor requires even arg count at compile time
 - Use jacl_map_has + jacl_map_get pattern for safe lookup (H_GET returns 0 for missing which equals JACL_NIL)
+- Arithmetic error propagation requires matching types: `[+ [error 0] 1]` works (both i32), `[+ [error "x"] 1]` is a type error — VM type-checks before value.c error short-circuit
 - Equality operator is `==` (not `eq`) — compiles to OP_EQ; uses vm__deep_eq for recursive structural comparison of collections
 - `map` builtin is always a constructor: 0 or any even number of args → OP_MAP, odd = error; `[map "a" 1]` creates a 1-pair map
 - `transform` builtin (exactly 2 args) replaces the old 2-arg map path → OP_TRANSFORM; use `[transform $coll $proc]` for higher-order transforms
@@ -85,6 +88,12 @@
 - vm__env_get uses bool* found out-param (not error-flagged nil) to signal undefined variables — error-flagged values can be stored in globals
 - Error propagation pattern in VM ops: after popping args, check each arg (leftmost first) for jacl_is_error(); if error, push it back and break
 - Multi-line .jacl test output uses multiple `# expect:` lines (one per line), NOT `\n` in a single expect line
+- OP_CHECK_ERROR (uint16_t operand) replaces OP_POP for non-final statement disposal; operand 0 = return from frame, nonzero = jump to handler (try)
+- compiler__emit_check_error(c, line) is the helper to emit OP_CHECK_ERROR + u16(0 or placeholder) — used in compiler__compile_block_expr, compiler_compile (top-level), AST_BLOCK, and while loop bodies; when in_try_body=true, emits 0xFFFF placeholder and records position in try_patches for later patching
+- try compilation pattern: save try context (in_try_body, try_patch_count) → compile body as block_expr → OP_JUMP_IF_ERROR(handler) → OP_JUMP(skip) → patch all OP_CHECK_ERROR offsets + OP_JUMP_IF_ERROR to handler_pos → handler scope with error binding as local → compile handler block_expr → scope cleanup (SET_LOCAL/POP_N) → patch skip_jump
+- OP_JUMP_IF_ERROR peeks stack top (no pop): if error, jump forward; else continue — error value stays on stack for handler binding
+- Nested try works via save/restore of try_patch_count: inner try patches are applied and cleaned up before outer try sees them
+- Handler scope cleanup uses the same SET_LOCAL/POP_N pattern as compile_block_expr: save result over binding slot, pop binding
 
 ## 2026-02-24 - US-001
 - What was implemented: Core error builtins (error, error?, error-val) with opcodes OP_ERROR, OP_IS_ERROR, OP_ERROR_VAL. Updated OP_PRINT to display error-flagged values as `<error: PAYLOAD>`. Added `?` as valid word continuation char in lexer.
@@ -103,4 +112,48 @@
   - vm__env_get previously used jacl_set_error(JACL_NIL) as sentinel for "undefined" — this collided with storing error-flagged values via `def`. Changed to bool* found out-param pattern.
   - Error check order matters: check leftmost argument first (vec/map/string before index/key before value) to return the "first" error encountered
   - Higher-order ops (each, transform, filter) need error checks on both the collection AND the closure arguments
+---
+
+## 2026-02-24 - US-003
+- What was implemented: OP_CHECK_ERROR opcode with uint16_t operand (0=return-from-frame, nonzero=jump-to-handler for future try). Compiler emits OP_CHECK_ERROR instead of OP_POP after non-final statements in proc bodies, top-level, standalone blocks, and while loop bodies. VM handler peeks stack top: if error-flagged, returns from current frame (replicating OP_RETURN logic); if not, pops and continues.
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_compiler.c, 5 new test/jacl/error_*.jacl files
+- **Learnings for future iterations:**
+  - OP_CHECK_ERROR replaces OP_POP in ALL non-final statement positions (not just proc bodies) — block expressions, standalone blocks, while loops, and top-level all emit it
+  - OP_CHECK_ERROR is 3 bytes (opcode + uint16_t operand) vs OP_POP's 1 byte — existing compiler tests needed offset adjustments
+  - The return-from-frame logic in OP_CHECK_ERROR must replicate OP_RETURN exactly: pop value, restore frame, set stack_top=callee_base, handle frame_count==0 (top-level) and min_frame (each/transform/filter)
+  - For US-004 (try), the nonzero offset path is already wired: `vm->ip += offset` to jump to handler
+---
+
+## 2026-02-24 - US-004
+- What was implemented: try special form `[try { body } name { handler }]` with OP_JUMP_IF_ERROR opcode, compiler try context tracking (in_try_body, try_patches array), and handler scope with error binding as local variable.
+- Files changed: src/bytecode.c (OP_JUMP_IF_ERROR), src/compiler.c (try special form, try_patches, emit_check_error update), src/vm.c (OP_JUMP_IF_ERROR handler), test/test_bytecode.c (shifted OP_HALT), 5 new test/jacl/try_*.jacl files
+- **Learnings for future iterations:**
+  - The try compilation uses the same jump-patching pattern as if/while — emit placeholder offsets, record positions, patch after handler position is known
+  - compiler__emit_check_error now checks c->in_try_body to decide between 0 (return-from-frame) and placeholder 0xFFFF (to be patched to handler offset)
+  - Nested try context: save/restore try_patch_count around inner try compilation so patches are correctly scoped
+  - OP_JUMP_IF_ERROR peeks (doesn't pop) so the error value stays on stack for the handler to bind as a local
+  - Handler scope cleanup follows the same SET_LOCAL/POP_N pattern used by compile_block_expr for preserving results across scope exit
+  - Known limitation: `def` inside try body leaves locals on stack when OP_CHECK_ERROR jumps to handler mid-body (not tested by current ACs)
+---
+
+## 2026-02-24 - US-005
+- What was implemented: StackTrace struct on VM (fixed-size array of {function_name, line_number}, max 32 frames), vm__capture_trace() helper that walks the call frame chain, OP_STACK_TRACE opcode and `stack-trace` builtin (0 args), trace capture in OP_ERROR and in VM__BINARY_NUMERIC_OP / OP_MOD for div-by-zero errors. Also fixed a latent bug where closure->name was not null-terminated (pointed into raw source string).
+- Files changed: src/bytecode.c (OP_STACK_TRACE), src/compiler.c (stack-trace builtin + null-terminated proc name fix), src/vm.c (StackTrace struct, vm__capture_trace, OP_STACK_TRACE handler, trace capture in OP_ERROR/arithmetic), test/test_bytecode.c (shifted OP_HALT), 3 new test/jacl/stack_trace_*.jacl files
+- **Learnings for future iterations:**
+  - closure->name was NOT null-terminated — it pointed into the raw source string. Fixed by arena-allocating a null-terminated copy in the compiler. This was a latent bug that only manifested when printing function names with %s format.
+  - Stack trace line numbers: for the current (innermost) frame, use vm->error_line; for parent frames, derive from child's return_ip offset in the parent's chunk lines array (offset - 1 to back up past the OP_CALL instruction bytes)
+  - vm__capture_trace walks frames from innermost to outermost (frame_count-1 down to 0), matching the "innermost first" format requirement
+  - Arithmetic div-by-zero trace capture: check `jacl_is_error(res) && !jacl_is_error(a) && !jacl_is_error(b)` to distinguish newly created errors from propagated ones
+  - `stack-trace` is 11 bytes (> 7-byte inline limit) — works fine as a builtin because compiler__head_matches uses raw AST string data, not inline strings
+  - Test .jacl file line numbers must account for comment/header lines at the top of the file
+---
+
+## 2026-02-24 - US-006
+- What was implemented: Comprehensive M9 integration test file (test/test_m9.c) with 68 tests covering all error handling features end-to-end. Added to build.sh TESTS array. All 42 test suites pass (0 failures).
+- Files changed: test/test_m9.c (new), build.sh (added test_m9 entry)
+- **Learnings for future iterations:**
+  - Arithmetic error propagation only works for same-type operands: `[+ [error 0] 1]` works (both i32), but `[+ [error "x"] 1]` is a type error (string vs i32) — the VM_BINARY_NUMERIC_OP macro checks type compatibility before the value.c error-flag short-circuit runs
+  - PrintCapture buffer size should be 4096 for integration tests (matches test_collections.c pattern, larger than test_integration.c's 1024)
+  - Stack trace content tests should use strstr for substring matching rather than exact string comparison (line numbers depend on source layout)
+  - The test_m9.c file follows the same run_ok/run_err helper pattern as test_collections.c
 ---

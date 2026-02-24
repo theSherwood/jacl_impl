@@ -31,8 +31,8 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | 5  | String System                | **COMPLETE** | Heap interned strings, interpolation end-to-end |
 | 6  | Line-Based Syntax Sugar      | **COMPLETE** | Implicit brackets, line/semicolon/comma delimiters |
 | 7  | Arity Checking               | **COMPLETE** | Compile-time arity checks, variadic procs |
-| 8  | Persistent Collections       |              | Vectors (RRB) and maps (HAMT) from JACL |
-| 9  | Error Handling               |              | Error flag propagation, `try` |
+| 8  | Persistent Collections       | **COMPLETE** | Vectors (RRB) and maps (HAMT) from JACL |
+| 9  | Error Handling               | **COMPLETE** | Error flag propagation, `try` |
 | 10 | Mutable State                |              | `mut`, `set!`, `box`, `atom` |
 | 11 | Static Type System           |              | Typed/unboxed values, compile-time checking |
 | 12 | Garbage Collection           |              | Epoch-based tracing GC |
@@ -43,18 +43,6 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | 17 | FFI & Embedding              |              | C interop, embedding API |
 
 ## Future Milestone Details
-
-### M8: Persistent Collections
-- Vector type backed by `rrb_vec`: `vec`, `vec-get`, `vec-set`, `vec-push`, `vec-len`, etc.
-- Map type backed by `hamt`: `map`, `map-get`, `map-set`, `map-has`, `map-keys`, etc.
-- Iteration via `each` builtin
-- Initially use constructor builtins: `[vec 1 2 3]`, `[map key val]`
-
-### M9: Error Handling
-- `error` builtin creates error-flagged values with arbitrary payloads
-- Implicit propagation: operations on error-flagged values return the error unchanged
-- `try` builtin: evaluate block, use fallback if result is error-flagged
-- `error?` predicate
 
 ### M10: Mutable State
 - `mut` (mutable binding), `set!` (reassignment)

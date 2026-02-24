@@ -1,0 +1,365 @@
+## Codebase Patterns
+- File-based test harness: test/test_jacl_harness.c reads .jacl files from test/jacl/, parses # expect: / # expect-error: headers, runs through jacl_run with PrintCapture
+- PrintCapture buffer in harness is 8192 bytes (larger than integration tests' 1024) to handle multi-line test output
+- Harness uses malloc/free for file I/O (not tracked_allocator) — tracked_allocator is only for the VM arena
+- Unity build: `src/jacl.c` #includes all pipeline .c files + lib headers as a single translation unit
+- JACL pipeline files in `src/`: plain .c with `#ifndef X_C` guards, no `#define X_IMPLEMENTATION` needed
+- Lib modules in `lib/`: single-header convention with `#ifdef X_IMPLEMENTATION`
+- Test files: `#include "test_helpers.h"` then `#include "../src/jacl.c"` — gets everything
+- Arena allocator: zero-init `arena_t arena = {0}`, uses libc by default
+- Test tracked allocator: `tracked_allocator` from `test/test_helpers.h`, plug into arena via `.allocator = tracked_allocator`
+- Build system: `build.sh` with `TESTS=()` array entries formatted as `"path/test.c|name|optional_extra_cflags"`
+- Compiler flags: `-Wall -Wextra -std=c99 -g`
+- Implementation language is C (C99)
+- Pipeline: src/value.c → src/string.c → src/lexer.c → src/ast.c → src/parser.c → src/bytecode.c → src/compiler.c → src/vm.c
+- Private/internal functions use double-underscore prefix: `module__function_name`
+- Public types use PascalCase (Token, LexResult, AstNode) or lower_t for system-level (arena_t)
+- Public functions use module_verb_noun pattern (lexer_lex, arena_alloc, parser_parse)
+- Constants and macros use ALL_CAPS (TOKEN_EOF, JACL_TAG_NIL)
+- Test functions are `static int test_name(void)` returning 0=fail, 1=pass
+- Test main() uses table-driven pattern: array of {name, fn} structs, iterates and counts pass/fail
+- Memory leak check pattern: setup() -> exercise -> teardown() -> ASSERT(check_no_leaks()) -> TEST_PASS()
+- Tests grouped by US-XXX story comments in the test table
+- Bare word semantics (M6): bare words at statement position desugar to zero-arg calls — use `{ "yes" }` not `{ yes }` for string-literal blocks
+- $var semantics (M6): `$var` at statement position desugars to `[$var]` (zero-arg call) — use `{ [+ $x 0] }` not `{ $x }` for non-callable values
+- `def g f` binds g to the string "f", NOT the proc — use `def g $f` to capture a proc value
+- Integration tests use PrintCapture pattern with `vm.print_fn`/`vm.print_ctx` — no `last_result` field on VM
+- The `print` builtin appends `\n` to output
+- Files sorted alphabetically for deterministic test ordering
+- JaclClosure has `min_args` (uint8_t) and `variadic` (bool) fields for arity metadata — set by compiler, copied in OP_CLOSURE
+- Local struct has `known_arity` (int16_t, -1 = unknown) — set by proc definition and propagated by def from var refs
+- `compiler__node_known_arity(c, node)` determines arity of an AST node at compile time: AST_VAR_REF → local then global, AST_LIT_STRING → global only
+- Global arity tracking: `GlobalArity` table on root Compiler, set by `proc` at global scope, resolved via `compiler__resolve_global_arity` (walks `enclosing` chain to root)
+- Arity error format: `compiler__error` prepends "line X, col Y: ", proc message is "proc 'name' expects N arguments but got M", builtin message is "builtin 'name' expects N arguments but got M"
+- Builtin arity errors use `compiler__builtin_arity_error(c, line, col, name, expected_desc, argc)` helper
+- Arity checking works for both bare word heads (AST_LIT_STRING) and $var heads (AST_VAR_REF) in dynamic call section
+- Global `def` propagates arity: `def g $f` or `def g procname` where the RHS has known arity → g gets that arity globally
+- Compile errors surface as VM_RUNTIME_ERROR from jacl_run — test harness `# expect-error:` works for both compile and runtime errors
+- Proc names must be <= 7 bytes (inline string limit) — longer names use heap strings
+- Test harness `# expect-error:` is substring match — only one error scenario per file
+- Value tags: JACL_TAG_VECTOR (0x06), JACL_TAG_MAP (0x07) already reserved in value.c
+- Value constructors jacl_vector_ptr() and jacl_map_ptr() already exist
+- RRB vec API: RV_EMPTY, RV_PUSH_BACK, RV_GET, RV_SET, RV_POP_BACK, RV_COUNT, RV_CONCAT, RV_SLICE, RV_REF/UNREF, RV_ITER_INIT/NEXT
+- HAMT API: H_SET_KEY_HANDLERS, H_GET, H_HAS, H_SET, H_UNSET, H_COUNT, H_ITER_INIT, H_NEXT_LEAF, H_KEY_FROM_LEAF, H_VALUE_FROM_LEAF, H_REF/UNREF
+- collections.c lives between bytecode.c and compiler.c in the pipeline include order
+- Template allocator: use `{ .alloc = libc_alloc, .free = libc_free, .ctx = NULL }` compound literal (NOT `libc_allocator` which is a function call, fails as C99 static initializer)
+- Must `#undef RC_ALLOCATOR` between RRB and HAMT template includes (rc.h doesn't clean up non-defaulted allocators)
+- collections__init() is called from vm_init() to wire up HAMT hash/eq handlers — must happen before any HAMT operations
+- jacl_val_hash() dispatches on type tag: nil→constant, bool→constant, i32→murmur mix, f32→bit mix, inline string→FNV-1a, heap string→precomputed hash
+- jacl_val_eq() delegates to jacl_string_eq() for string types, bitwise compare for all others
+- Adding new opcodes before OP_HALT shifts its enum value — must update test_bytecode.c test_opcode_enum
+- OP_VEC uses uint8_t count operand; compiler pushes all args then emits OP_VEC + count; VM reads from stack in order
+- Collection nodes use libc malloc (not arena) — tracked_allocator won't detect leaks; no GC yet (M12)
+- Builtin names can exceed 7 bytes (e.g. vec-push=8, vec-concat=10) — compiler__head_matches uses raw AST string data, not inline strings
+- RRB vec SET returns NULL for out-of-bounds; SLICE returns NULL if start >= end || end > count — VM must handle these
+- HAMT empty map is NULL root; jacl_map_ptr(NULL) creates a valid MAP-tagged JaclVal; jacl_map_count(NULL) returns 0; jacl_map_unref(NULL) is safe
+- OP_MAP uses uint8_t pair_count operand (argc/2); map constructor requires even arg count at compile time
+- Use jacl_map_has + jacl_map_get pattern for safe lookup (H_GET returns 0 for missing which equals JACL_NIL)
+- Equality operator is `==` (not `eq`) — compiles to OP_EQ; uses vm__deep_eq for recursive structural comparison of collections
+- `map` builtin is always a constructor: 0 or any even number of args → OP_MAP, odd = error; `[map "a" 1]` creates a 1-pair map
+- `transform` builtin (exactly 2 args) replaces the old 2-arg map path → OP_TRANSFORM; use `[transform $coll $proc]` for higher-order transforms
+- vm__run(vm, min_frame) is the inner dispatch loop; vm_exec is a thin wrapper. OP_EACH calls vm__run recursively to execute closures inline (trampoline pattern)
+- Higher-order builtins (each, map-transform, filter) call closures via: push closure + args → set up CallFrame → call vm__run(vm, caller_frame_count) → pop return value
+- Proc definition syntax is `proc name [params] { body }` (params in brackets, body in braces) — `[proc name [x] { ... }]` at global scope defines globally and returns nil (not the closure)
+- To pass a closure to a higher-order builtin: define first with `proc cb [x] { ... }` then reference with `$cb`
+- VMFormatBuf pattern: arena-backed dynamic buffer for recursive collection formatting; vm__fmt_value handles all types
+- `to-string` is a compiler builtin (9 bytes, > 7-byte inline limit) — emits OP_TO_STRING directly
+- HAMT iteration order is hash-based, not insertion order — test maps with single entries or use indirect checks for multi-entry
+- Negative numbers: `-1` in JACL is parsed as two tokens (`-` and `1`); use `def i [- 0 1]` then `$i` for negative values in tests
+- vec-set OOB growth: out-of-bounds index grows vector with nil fill (push_back loop); negative index → runtime error
+- HAMT structural hash: `hash` field in H_NODE base struct; leaf.header.hash = key_hash ^ val_hash; internal.header.hash = XOR of children; collision.header.hash = XOR of items; 0 when no hash handlers set
+- HAMT hash handlers: H_SET_HASH_HANDLERS(key_fn, val_fn) — separate from H_SET_KEY_HANDLERS which sets trie navigation hash/eq; structural hash handlers can be NULL (hashes default to 0)
+- HAMT hash access: root->hash for O(1) structural hash; NULL root → check with H_NODE_HASH(root) which returns 0 for NULL
+- H_LEAF has two hash-related fields: `header.hash` (structural content hash) and `hash` (key hash for trie navigation) — don't confuse them
+- collections.c uses forward declarations for jacl_val_hash/jacl_val_eq to solve ordering: forward-declare → instantiate templates → define functions (functions can call template APIs)
+- jacl_val_eq is the single source of truth for structural equality (vm__deep_eq delegates to it); handles strings, vectors, maps recursively
+
+## 2026-02-23 - US-001
+- Implemented src/collections.c: JaclVal hash function, JaclVal equality function, RRB vec instantiation (jacl_vec), HAMT instantiation (jacl_map)
+- Updated src/jacl.c to include collections.c in the unity build pipeline
+- Files changed: src/collections.c (new), src/jacl.c
+- **Learnings for future iterations:**
+  - libc_allocator macro expands to a function call — can't use as static initializer in C99
+  - RC_ALLOCATOR macro leaks across template includes — need manual #undef between instantiations
+  - collections.c must be included AFTER string.c (needs JaclHeapString) and BEFORE compiler.c
+---
+
+## 2026-02-23 - US-002
+- Implemented vec, vec-get, vec-len builtins: new opcodes OP_VEC/OP_VEC_GET/OP_VEC_LEN in bytecode.c, compiler builtins in compiler.c, VM handlers in vm.c
+- Updated vm__type_name to handle vector and map types
+- Updated test_bytecode.c to account for new opcode enum values (OP_HALT shifted from 34 to 37)
+- Created 6 .jacl test files: vec_construct, vec_get, vec_get_oob, vec_mixed, vec_arity_get, vec_arity_len
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c
+- Files added: test/jacl/vec_construct.jacl, test/jacl/vec_get.jacl, test/jacl/vec_get_oob.jacl, test/jacl/vec_mixed.jacl, test/jacl/vec_arity_get.jacl, test/jacl/vec_arity_len.jacl
+- **Learnings for future iterations:**
+  - Adding new opcodes before OP_HALT shifts its enum value — must update test_bytecode.c's test_opcode_enum test
+  - RRB vec nodes use libc malloc (not arena allocator) — tracked_allocator won't see them, no false leak positives but vectors leak without GC
+  - OP_VEC uses uint8_t count operand; compiler pushes all args then emits OP_VEC + count; VM reads elements from stack in order
+  - vec-get and vec-len are exactly 7 bytes each, fitting the inline string limit for builtin name matching
+  - Compiler builtin matching order matters: vec/vec-get/vec-len must be matched before the dynamic call section
+---
+
+## 2026-02-23 - US-003
+- Implemented vec-push, vec-set, vec-concat, vec-slice builtins: new opcodes OP_VEC_PUSH/OP_VEC_SET/OP_VEC_CONCAT/OP_VEC_SLICE in bytecode.c, compiler builtins in compiler.c, VM handlers in vm.c
+- Updated test_bytecode.c to account for new opcode enum values (OP_HALT shifted from 37 to 41)
+- Created 10 .jacl test files: vec_push, vec_set, vec_set_oob, vec_persist, vec_concat, vec_slice, vec_arity_push, vec_arity_set, vec_arity_concat, vec_arity_slice
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c
+- Files added: test/jacl/vec_push.jacl, test/jacl/vec_set.jacl, test/jacl/vec_set_oob.jacl, test/jacl/vec_persist.jacl, test/jacl/vec_concat.jacl, test/jacl/vec_slice.jacl, test/jacl/vec_arity_push.jacl, test/jacl/vec_arity_set.jacl, test/jacl/vec_arity_concat.jacl, test/jacl/vec_arity_slice.jacl
+- **Learnings for future iterations:**
+  - Builtin names > 7 bytes (vec-push=8, vec-concat=10, vec-slice=9) work fine for compiler builtin matching since compiler__head_matches compares raw AST string data, not inline strings — the 7-byte limit only applies to variable names
+  - RRB vec SET returns NULL for out-of-bounds — VM maps this to JACL_NIL
+  - RRB vec SLICE returns NULL if start >= end || end > count — VM clamps bounds before calling, falls back to empty vec
+  - vec-slice with clamped empty range (end <= start after clamping) produces empty vector via jacl_vec_empty()
+---
+
+## 2026-02-23 - US-004
+- Implemented map, map-get, map-has, map-len builtins: new opcodes OP_MAP/OP_MAP_GET/OP_MAP_HAS/OP_MAP_LEN in bytecode.c, compiler builtins in compiler.c, VM handlers in vm.c
+- Added collections__init() call to vm_init() to wire up HAMT hash/eq handlers (was missing, caused hang)
+- Updated test_bytecode.c to account for new opcode enum values (OP_HALT shifted from 41 to 45)
+- Created 9 .jacl test files: map_construct, map_get, map_get_missing, map_has, map_mixed_keys, map_arity_get, map_arity_has, map_arity_len, map_arity_odd
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c
+- Files added: test/jacl/map_construct.jacl, test/jacl/map_get.jacl, test/jacl/map_get_missing.jacl, test/jacl/map_has.jacl, test/jacl/map_mixed_keys.jacl, test/jacl/map_arity_get.jacl, test/jacl/map_arity_has.jacl, test/jacl/map_arity_len.jacl, test/jacl/map_arity_odd.jacl
+- **Learnings for future iterations:**
+  - collections__init() MUST be called before any HAMT operations — was defined in US-001 but never called, causing null function pointer dereference in jacl_map_set; now called from vm_init()
+  - OP_MAP uses uint8_t pair_count operand (not element count); compiler emits argc/2 as the operand
+  - map constructor enforces even arg count at compile time; odd args produce arity error "expects an even number of arguments"
+  - HAMT empty map is NULL root; jacl_map_ptr(NULL) creates a valid MAP-tagged JaclVal; jacl_map_count(NULL) returns 0
+  - jacl_map_has + jacl_map_get pattern for safe lookup (H_GET returns {0} for missing keys which equals JACL_NIL=0, but use H_HAS first to distinguish nil values from absent keys)
+  - jacl_map_unref(NULL) is safe — RC_UNREF has null check
+  - HAMT iteration API: jacl_map_iter_init(root), jacl_map_next_leaf(&it) returns {.done, .item}, jacl_map_key_from_leaf(leaf), jacl_map_value_from_leaf(leaf)
+  - jacl_map_unset(map, key) returns new map without key; absent key returns structurally shared copy
+  - map-keys/map-vals names are 8 bytes — exceeds inline string limit but works for compiler builtin matching (same as vec-push, map-keys, etc.)
+---
+
+## 2026-02-23 - US-005
+- Implemented map-set, map-remove, map-keys, map-vals builtins: new opcodes OP_MAP_SET/OP_MAP_REMOVE/OP_MAP_KEYS/OP_MAP_VALS in bytecode.c, compiler builtins in compiler.c, VM handlers in vm.c
+- Updated test_bytecode.c to account for new opcode enum values (OP_HALT shifted from 45 to 49)
+- Created 9 .jacl test files: map_set, map_remove, map_persist, map_keys, map_vals, map_arity_set, map_arity_remove, map_arity_keys, map_arity_vals
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c
+- Files added: test/jacl/map_set.jacl, test/jacl/map_remove.jacl, test/jacl/map_persist.jacl, test/jacl/map_keys.jacl, test/jacl/map_vals.jacl, test/jacl/map_arity_set.jacl, test/jacl/map_arity_remove.jacl, test/jacl/map_arity_keys.jacl, test/jacl/map_arity_vals.jacl
+- **Learnings for future iterations:**
+  - HAMT iteration: jacl_map_iter_init(node*) → jacl_map_iter; jacl_map_next_leaf(&it) → {.done, .item}; jacl_map_key_from_leaf(leaf) / jacl_map_value_from_leaf(leaf) to extract key/value
+  - jacl_map_unset returns a new map; for absent keys the map is structurally shared (unchanged)
+  - map-keys and map-vals return vectors built by iterating the HAMT and pushing into an RRB vec
+  - map-remove (10 bytes) and map-keys/map-vals (8 bytes each) are > 7 bytes — works fine for compiler__head_matches as confirmed in US-003
+---
+
+## 2026-02-23 - US-006
+- Implemented structural equality for vectors and maps via vm__deep_eq() in vm.c
+- Replaced OP_EQ handler's string-special-case + bitwise compare with unified vm__deep_eq recursive comparison
+- vm__deep_eq handles: strings (jacl_string_eq), vectors (element-wise recursive), maps (count + key-value recursive), all others (bitwise payload)
+- Created 4 .jacl test files: eq_vec, eq_map, eq_nested, eq_cross_type
+- Files changed: src/vm.c
+- Files added: test/jacl/eq_vec.jacl, test/jacl/eq_map.jacl, test/jacl/eq_nested.jacl, test/jacl/eq_cross_type.jacl
+- **Learnings for future iterations:**
+  - The equality builtin is `==`, not `eq` — test files must use `[== a b]` syntax
+  - vm__deep_eq is a static helper placed before vm_exec; it recurses for nested collections
+  - Map equality iterates all keys of map A and checks each exists in B with deep-equal value; same count ensures B has no extra keys
+  - Vector equality short-circuits on pointer equality (same root) and length mismatch
+---
+
+## 2026-02-23 - US-007
+- Implemented print and to-string support for vectors and maps via VMFormatBuf dynamic format buffer and vm__fmt_value recursive formatter in vm.c
+- Added `to-string` as a compiler builtin in compiler.c (emits OP_TO_STRING) — previously only used internally by interpolated strings
+- Updated OP_PRINT to handle vector/map types with constructor syntax: `[vec 1 2 3]`, `[map "a" 1]`
+- Updated OP_TO_STRING to handle vector/map types, returning the constructor syntax as a JaclVal string
+- Created 5 .jacl test files: print_vec, print_map, print_nested, tostring_vec, tostring_map
+- Files changed: src/vm.c, src/compiler.c
+- Files added: test/jacl/print_vec.jacl, test/jacl/print_map.jacl, test/jacl/print_nested.jacl, test/jacl/tostring_vec.jacl, test/jacl/tostring_map.jacl
+- **Learnings for future iterations:**
+  - `to-string` (9 bytes) exceeds the 7-byte inline string limit — must be a compiler builtin, not a dynamic call
+  - VMFormatBuf pattern: init with arena, grow by doubling, vm__fmt_value recurses for nested collections
+  - Strings inside collection display are always quoted with `"..."` — top-level print remains unquoted
+  - HAMT iteration order is hash-based (not insertion order) — avoid multi-entry map tests with exact expected output; use single-entry maps or indirect checks
+  - `to-string` was only emittable via interpolated string AST nodes before; now has its own compiler builtin matching
+---
+
+## 2026-02-23 - US-008
+- Implemented `each` builtin for iterating over vectors and maps with a closure callback
+- Refactored vm_exec: extracted dispatch loop into vm__run(vm, min_frame) to enable recursive closure execution from OP_EACH
+- Added OP_EACH opcode in bytecode.c, compiler builtin in compiler.c, VM handler in vm.c
+- OP_EACH pops closure + collection, validates types, calls closure per element via vm__run trampoline
+- Vector: calls 1-arg proc with each element; Map: calls 2-arg proc with key + value; returns nil
+- Runtime arity check: vector requires 1-param proc, map requires 2-param proc
+- Updated test_bytecode.c (OP_HALT shifted from 49 to 50)
+- Created 6 .jacl test files: each_vec, each_map, each_nil, each_empty, each_empty_map, each_arity
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c
+- Files added: test/jacl/each_vec.jacl, test/jacl/each_map.jacl, test/jacl/each_nil.jacl, test/jacl/each_empty.jacl, test/jacl/each_empty_map.jacl, test/jacl/each_arity.jacl
+- **Learnings for future iterations:**
+  - vm__run(vm, min_frame) trampoline pattern: OP_RETURN checks `frame_count <= min_frame` to exit inner dispatch, enabling higher-order builtins to call closures synchronously in C loops
+  - Proc at global scope defines globally and pushes nil — can't use inline `[proc ...]` as argument to higher-order builtins; must define first then reference via `$name`
+  - For map iteration tests, use single-entry maps to avoid HAMT hash-order nondeterminism
+  - `each` is 4 bytes, fits inline string limit — matched as compiler builtin before dynamic call section
+  - The vm__run refactoring is reusable for US-009 (map-transform) and US-010 (filter)
+---
+
+## 2026-02-23 - US-009
+- Implemented `map` overloading: 2 args = transform (OP_MAP_TRANSFORM), 0 or even >= 4 args = constructor (OP_MAP), odd args = arity error
+- Added OP_MAP_TRANSFORM opcode in bytecode.c, updated compiler in compiler.c, added VM handler in vm.c
+- VM handler: vector transform calls 1-arg proc per element, builds new vector; map transform calls 2-arg proc per entry, expects 2-element [key value] vector back, builds new map
+- Updated test_bytecode.c (OP_HALT shifted from 50 to 51)
+- Updated 7 existing .jacl test files that used 2-arg `[map "a" 1]` as constructor → changed to `[map-set [map] "a" 1]`
+- Created 3 new .jacl test files: map_transform_vec, map_transform_empty, map_transform_map
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c
+- Files modified: test/jacl/eq_map.jacl, test/jacl/eq_cross_type.jacl, test/jacl/print_nested.jacl, test/jacl/each_map.jacl, test/jacl/print_map.jacl, test/jacl/tostring_map.jacl, test/jacl/map_get_missing.jacl
+- Files added: test/jacl/map_transform_vec.jacl, test/jacl/map_transform_empty.jacl, test/jacl/map_transform_map.jacl
+- **Learnings for future iterations:**
+  - `map` with 2 args is now the transform function — single-pair map constructor `[map "a" 1]` no longer works; use `[map-set [map] "a" 1]` instead
+  - OP_MAP_TRANSFORM reuses the same vm__run trampoline pattern as OP_EACH but collects return values into a new collection
+  - Map transform proc must return a 2-element vector [key new-value] — runtime validation checks both type and length
+  - The compiler handles `map` overloading entirely by argc dispatch: 2 → OP_MAP_TRANSFORM, 0/even>=4 → OP_MAP, odd → error
+---
+
+## 2026-02-23 - US-010
+- Implemented `filter` builtin for selecting elements from vectors and maps based on a predicate closure
+- Added OP_FILTER opcode in bytecode.c, compiler builtin in compiler.c, VM handler in vm.c
+- OP_FILTER reuses the same vm__run trampoline pattern as OP_EACH and OP_MAP_TRANSFORM
+- Vector: calls 1-arg proc per element, keeps element if return is truthy, builds new vector
+- Map: calls 2-arg proc per entry (key, value), keeps entry if return is truthy, builds new map
+- Updated test_bytecode.c (OP_HALT shifted from 51 to 52)
+- Created 4 .jacl test files: filter_vec, filter_empty, filter_map, filter_arity
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c
+- Files added: test/jacl/filter_vec.jacl, test/jacl/filter_empty.jacl, test/jacl/filter_map.jacl, test/jacl/filter_arity.jacl
+- **Learnings for future iterations:**
+  - `filter` (6 bytes) fits inline string limit — matched as compiler builtin before dynamic call section
+  - OP_FILTER follows the exact same trampoline pattern as OP_EACH/OP_MAP_TRANSFORM: push closure + args → set up CallFrame → vm__run → pop result → check truthiness
+  - Filter on vector keeps the original element values (not the proc return value) when truthy
+  - Filter on map uses vm__is_falsy (nil and $false are falsy, everything else is truthy) — same as if/while
+---
+
+## 2026-02-23 - US-011
+- Created test/test_collections.c with 73 comprehensive integration tests using test_helpers.h pattern
+- Tests exercise full JACL pipeline (source → lex → parse → compile → VM) for all collection operations
+- Coverage: vec construction, vec-get, vec-set, vec-push, vec-len, vec-concat, vec-slice
+- Coverage: map construction, map-get, map-set, map-remove, map-has, map-len, map-keys, map-vals
+- Coverage: structural equality (vectors, maps, nested, cross-type)
+- Coverage: print/to-string for both types including nested
+- Coverage: each, map (transform), filter on both vectors and maps
+- Coverage: error cases (wrong arity for all builtins, type errors)
+- Coverage: persistence (original collections unchanged after operations)
+- Coverage: end-to-end integration (nested collections, chained transforms)
+- Added test/test_collections.c to build.sh TESTS array
+- Used `run_ok` / `run_err` helper functions to reduce boilerplate across 73 tests
+- All tests pass with arena-tracked memory leak checks
+- Files changed: build.sh
+- Files added: test/test_collections.c
+- **Learnings for future iterations:**
+  - Helper functions `run_ok(source, cap, expected)` and `run_err(source, err_substr)` encapsulate the tracker_reset → arena → vm_init → jacl_run → assert → arena_destroy → check_no_leaks pattern — makes tests very concise
+  - 4096-byte PrintCapture buffer is sufficient for all collection integration tests (larger than test_integration.c's 1024 but smaller than harness's 8192)
+  - Single-entry maps used throughout to avoid HAMT hash-order nondeterminism in output assertions
+  - Collection node memory (libc malloc) is not tracked by tracked_allocator — only arena allocations are leak-checked; collection GC is deferred to M12
+---
+
+## 2026-02-23 - US-012
+- Renamed OP_MAP_TRANSFORM to OP_TRANSFORM in bytecode.c, compiler.c, vm.c
+- Changed `map` compiler builtin: now always constructor (0 or any even number of args), odd = error; removed the 2-arg transform path
+- Added `transform` compiler builtin (exactly 2 args) emitting OP_TRANSFORM
+- Updated VM error messages from 'map' to 'transform' in OP_TRANSFORM handler
+- Updated test_bytecode.c: OP_MAP_TRANSFORM → OP_TRANSFORM at position 50
+- Updated 3 .jacl test files: map_transform_vec, map_transform_map, map_transform_empty → use `transform` instead of `map`
+- Updated test_collections.c: renamed test functions, changed all 2-arg `[map $coll $proc]` to `[transform $coll $proc]`
+- `[map "a" 1]` now correctly creates a 1-pair map (previously was the transform path)
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_collections.c
+- Files modified: test/jacl/map_transform_vec.jacl, test/jacl/map_transform_map.jacl, test/jacl/map_transform_empty.jacl
+- **Learnings for future iterations:**
+  - `transform` (9 bytes) exceeds 7-byte inline limit — works fine for compiler__head_matches since it compares raw AST string data
+  - The opcode position (50) didn't change, only the name, so OP_HALT stayed at 52
+  - Splitting overloaded builtins is straightforward: remove the argc dispatch branch, add a new compiler builtin match
+---
+
+## 2026-02-23 - US-013
+- Changed OP_VEC_SET handler in vm.c: negative index → runtime error; out-of-bounds → grow vector with nil fill via push_back loop
+- Updated test/jacl/vec_set_oob.jacl to expect growth behavior instead of nil
+- Created test/jacl/vec_set_neg.jacl for negative index error test
+- Added 4 new tests to test_collections.c: vec_set_empty, vec_set_empty_gap, vec_set_neg, vec_set_oob_persist
+- Updated test_vec_set_oob in test_collections.c to expect growth semantics
+- Files changed: src/vm.c, test/jacl/vec_set_oob.jacl, test/test_collections.c
+- Files added: test/jacl/vec_set_neg.jacl
+- **Learnings for future iterations:**
+  - `-1` in JACL is parsed as two tokens (`-` and `1`), not a negative literal — use `def i [- 0 1]` then `$i` to get a negative number in tests
+  - jacl_vec_ref(root) increments refcount — needed when building a new vector from an existing one via push_back loop to avoid premature free
+  - Growth via push_back loop: ref original, push nils for gap, push element, unref intermediate vectors
+---
+
+## 2026-02-23 - US-014
+- Added eager structural hashing to RRB vector template library (lib/rrb_vec/rrb_vec.h)
+- RV_NODE base struct gains uint32_t hash field (inherited by both RV_LEAF and RV_INTERNAL via header)
+- RV_ROOT gains uint32_t hash field — XOR of tree root node hash and tail node hash
+- Hash handler: typedef + static function pointer + RV_SET_HASH_HANDLER(fn) setter (follows HAMT pattern)
+- RV_LEAF_REHASH: rotate-XOR of element hashes — hash ^= rotate_left(element_hash_fn(elem[i]), i % 32)
+- RV_INTERNAL_REHASH: XOR of children's hash fields
+- RV_ROTATE_LEFT: bitwise left rotation (x << n) | (x >> ((32 - n) & 31))
+- RV_HASH(root): O(1) field read returning root->hash
+- Hashes computed eagerly at every node construction: COPY_LEAF/COPY_INTERNAL copy hash, all creation points call REHASH
+- All mutation operations (push_back, set, pop_back, concat, slice, from_array, transient ops) rehash affected nodes
+- Created lib/rrb_vec/test_rrb_vec_hash.c with 15 tests: empty hash, consistency (push, from_array, large), changes (set, push, pop), permutation sensitivity, concat, slice, transient consistency, null root, field read
+- Added test to build.sh TESTS array
+- Added --lib flag to build.sh: filters to only lib/ tests when set, runs everything when absent
+- All 40 tests pass (73 existing rrb_vec + 15 new hash + all other lib and app tests)
+- Files changed: lib/rrb_vec/rrb_vec.h, build.sh
+- Files added: lib/rrb_vec/test_rrb_vec_hash.c
+- **Learnings for future iterations:**
+  - Hash in base struct RV_NODE (not separate per leaf/internal) — RV_INTERNAL's children are RV_NODE* and need ->hash access
+  - When no hash handler is set, LEAF_REHASH sets hash to 0 — existing tests work without a handler
+  - COPY_LEAF/COPY_INTERNAL copy hash from source (O(1)); callers that modify after copy add explicit REHASH calls
+  - rotate_left with n=0: use n &= 31 and (32 - n) & 31 to avoid UB from shifting by 32
+  - Structural hash depends on tree layout — vectors built via concat may have different hashes than those built via push_back even with same logical contents (different tree structure)
+  - Transient persistent_fn doesn't free the transient — caller must int_vec_rc_unref(t) after int_vec_persistent_fn(t)
+---
+
+## 2026-02-23 - US-015
+- Added eager structural hashing to HAMT template library (lib/hamt/hamt.h)
+- H_NODE base struct gains uint32_t hash field (inherited by all node types via header)
+- H_LEAF structural hash = key_hash_fn(key) ^ val_hash_fn(value) — distinct from existing `hash` field (trie navigation key hash)
+- H_INTERNAL structural hash = XOR of children's header.hash fields
+- H_COLLISION structural hash = XOR of items' header.hash fields
+- Hash handler: H_VAL_HASH_FN typedef + H_SET_HASH_HANDLERS(key_fn, val_fn) — stores key and value hash function pointers
+- Rehash helpers: H_LEAF_REHASH, H_INTERNAL_REHASH, H_COLLISION_REHASH called at every node construction point
+- All persistent (H_SET_RECURSIVE, H_UNSET_RECURSIVE) and transient (H_SET_RECURSIVE_T, H_UNSET_RECURSIVE_T) paths updated
+- H_NODE_HASH(node) accessor returns node->hash or 0 for NULL
+- NO H_ROOT wrapper — hash accessed directly via root->hash (avoids unnecessary indirection)
+- Created lib/hamt/test_hamt_hash.c with 15 tests: empty hash, single leaf, insertion order consistency, value update changes, key add changes, unset changes, unset+set restores, empty map zero, large map consistency (1000 entries), no handler gives zero, accessor, collision consistency, collision unset, transient consistency, transient unset
+- Added test to build.sh TESTS array
+- All 41 test suites pass (including all existing HAMT tests and collections tests)
+- Files changed: lib/hamt/hamt.h, build.sh, .ralph/prd.json
+- Files added: lib/hamt/test_hamt_hash.c
+- **Learnings for future iterations:**
+  - Hash in base H_NODE struct (like RRB vec) — children are H_NODE* and need uniform ->hash access for XOR computation
+  - H_LEAF has TWO hash-related fields: header.hash (structural) and hash (trie key hash) — don't confuse them
+  - XOR combining makes map hash order-independent: maps with same entries in different insertion orders get same hash
+  - When no hash handlers set, all structural hashes default to 0 — existing tests work unchanged
+  - H_ROOT wrapper unnecessary: root->hash gives O(1) access, H_NODE_HASH(NULL) handles empty map case
+  - Must add REHASH calls to both persistent and transient code paths — 20+ construction/modification points total
+  - Transient in-place modifications (owned nodes) need REHASH after mutation, not just new allocations
+---
+
+## 2026-02-23 - US-016
+- Wired cached structural hashes into jacl_val_hash for JACL_TAG_VECTOR and JACL_TAG_MAP — O(1) reads from RRB root and HAMT root node
+- Updated jacl_val_eq to do deep structural equality for vectors and maps (element-wise for vectors, key-value iteration for maps)
+- Restructured collections.c: forward-declare jacl_val_hash/jacl_val_eq → instantiate templates → define functions (so functions can call template APIs)
+- collections__init() now also calls jacl_vec_set_hash_handler(jacl_val_hash) and jacl_map_set_hash_handlers(jacl_val_hash, jacl_val_hash)
+- Simplified vm__deep_eq to delegate to jacl_val_eq (single source of truth for structural equality)
+- Created 2 .jacl test files: map_vec_key, map_map_key
+- Added 6 integration tests to test_collections.c: vec_as_map_key, map_as_map_key, nested_coll_as_key, vec_key_not_found, vec_key_has, eq_still_works
+- All 41 test suites pass (79 total tests in collections suite)
+- Files changed: src/collections.c, src/vm.c, test/test_collections.c
+- Files added: test/jacl/map_vec_key.jacl, test/jacl/map_map_key.jacl
+- **Learnings for future iterations:**
+  - Forward-declare static functions in collections.c to solve chicken-and-egg: hash/eq need template APIs, but templates need to exist before hash/eq are defined
+  - jacl_val_eq now handles collection structural equality — vm__deep_eq delegates to it, so there's a single equality implementation
+  - Collections as map keys work because: jacl_val_hash returns cached structural hash (O(1)), jacl_val_eq does recursive structural comparison
+  - The HAMT uses jacl_val_eq for key comparison — it naturally recurses for nested collection keys
+---
+
+## 2026-02-23 - US-017
+- Added test coverage for all M8a design fixes that were gaps in the existing test suite
+- Created 3 new .jacl test files: map_construct_single (1-pair map constructor), map_nested_key (nested collections as map keys), transform_arity (transform arity error)
+- Added 3 new tests to test_collections.c: test_map_construct_single_pair, test_transform_empty_map, test_transform_arity
+- Most M8a behaviors were already tested by US-012 through US-016 — this story fills the remaining gaps
+- All 41 test suites pass (79 tests in test_collections.c, 76 in jacl_harness)
+- Files changed: test/test_collections.c
+- Files added: test/jacl/map_construct_single.jacl, test/jacl/map_nested_key.jacl, test/jacl/transform_arity.jacl
+- **Learnings for future iterations:**
+  - When an "update test suite" story follows feature stories, most coverage already exists — audit existing tests before writing new ones
+  - .jacl harness test expected values must match actual output exactly — e.g. `[map "a" 1]` stores integer 1, not string "hello"
+---

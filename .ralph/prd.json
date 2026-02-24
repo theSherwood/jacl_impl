@@ -80,7 +80,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "OP_CHECK_ERROR takes a uint16_t operand: 0 means return-from-frame, nonzero means jump-to-handler (used by US-004 try). The compiler always emits 0 for now; US-004 will emit nonzero offsets inside try bodies."
     },
     {
@@ -105,7 +105,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "try compilation follows the same jump-patching pattern as if. The key difference from if is that OP_CHECK_ERROR inside the try body uses nonzero offsets pointing to the handler, while outside try it uses 0 (return from frame). The compiler needs to track the current try handler jump target."
     },
     {
@@ -130,7 +130,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Stack trace is stored on the VM, not on the error value itself (since error values are just flagged regular values with no room for metadata). Only one trace is active at a time. The trace is captured at error-creation time, not at propagation time."
     },
     {
@@ -158,7 +158,7 @@
         "All tests pass (build.sh)"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ]
