@@ -482,13 +482,96 @@ static void compiler__ensure_boxed(Compiler* c, uint32_t line) {
   }
 }
 
-/* --- Internal: Compile a binary operation --- */
+/* --- Internal: Map dynamic opcode to typed opcode for a given type --- */
+
+static uint8_t compiler__typed_op(uint8_t dyn_op, JaclType type) {
+  if (type == TYPE_I64) {
+    switch (dyn_op) {
+      case OP_ADD: return OP_ADD_I64;
+      case OP_SUB: return OP_SUB_I64;
+      case OP_MUL: return OP_MUL_I64;
+      case OP_DIV: return OP_DIV_I64;
+      case OP_MOD: return OP_MOD_I64;
+      case OP_LT:  return OP_LT_I64;
+      case OP_GT:  return OP_GT_I64;
+      case OP_LE:  return OP_LE_I64;
+      case OP_GE:  return OP_GE_I64;
+      case OP_EQ:  return OP_EQ_I64;
+      default: return dyn_op;
+    }
+  }
+  if (type == TYPE_U64) {
+    switch (dyn_op) {
+      case OP_ADD: return OP_ADD_I64;  /* u64 reuses i64 add */
+      case OP_SUB: return OP_SUB_I64;
+      case OP_MUL: return OP_MUL_I64;
+      case OP_DIV: return OP_DIV_U64;
+      case OP_MOD: return OP_MOD_U64;
+      case OP_LT:  return OP_LT_U64;
+      case OP_GT:  return OP_GT_U64;
+      case OP_LE:  return OP_LE_U64;
+      case OP_GE:  return OP_GE_U64;
+      case OP_EQ:  return OP_EQ_I64;  /* u64 reuses i64 eq */
+      default: return dyn_op;
+    }
+  }
+  if (type == TYPE_F64) {
+    switch (dyn_op) {
+      case OP_ADD: return OP_ADD_F64;
+      case OP_SUB: return OP_SUB_F64;
+      case OP_MUL: return OP_MUL_F64;
+      case OP_DIV: return OP_DIV_F64;
+      case OP_MOD: return OP_MOD_F64;
+      case OP_LT:  return OP_LT_F64;
+      case OP_GT:  return OP_GT_F64;
+      case OP_LE:  return OP_LE_F64;
+      case OP_GE:  return OP_GE_F64;
+      case OP_EQ:  return OP_EQ_F64;
+      default: return dyn_op;
+    }
+  }
+  return dyn_op;
+}
+
+/* --- Internal: Compile a typed binary operation --- */
 
 static void compiler__compile_binary(Compiler* c, AstNode** args,
-                                     uint8_t op, uint32_t line) {
+                                     uint8_t op, const char* op_verb,
+                                     uint32_t line, uint32_t col) {
+  /* Compile LHS */
   compiler__compile_node(c, args[0]);
+  JaclType lhs_type = c->last_expr_type;
+
+  /* Set contextual type for RHS (enables literal typing like [+ $a 1]) */
+  if (lhs_type != TYPE_DYN) {
+    c->expected_type = lhs_type;
+  }
+
+  /* Compile RHS */
   compiler__compile_node(c, args[1]);
-  compiler__emit_byte(c, op, line);
+  JaclType rhs_type = c->last_expr_type;
+  c->expected_type = TYPE_DYN;
+
+  /* Type checking — only enforced when unboxed types (i64/u64/f64) are involved,
+     since unboxed values can't go through dynamic dispatch */
+  if (is_unboxed_type(lhs_type) || is_unboxed_type(rhs_type)) {
+    if (lhs_type != rhs_type) {
+      char err[128];
+      snprintf(err, sizeof(err), "type error: cannot %s %s and %s",
+               op_verb, type_name(lhs_type), type_name(rhs_type));
+      compiler__error(c, line, col, err);
+      return;
+    }
+    /* Both same unboxed type — emit typed opcode */
+    compiler__emit_byte(c, compiler__typed_op(op, lhs_type), line);
+    bool is_cmp = (op == OP_EQ || op == OP_LT || op == OP_GT ||
+                   op == OP_LE || op == OP_GE);
+    c->last_expr_type = is_cmp ? TYPE_DYN : lhs_type;
+  } else {
+    /* Both boxed/dyn — generic dispatch */
+    compiler__emit_byte(c, op, line);
+    c->last_expr_type = TYPE_DYN;
+  }
 }
 
 /* --- Internal: Compile a command invocation --- */
@@ -507,15 +590,27 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
   /* Arithmetic builtins */
   if (compiler__head_matches(head, "+", 1)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "+", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_ADD, line);
+    compiler__compile_binary(c, args, OP_ADD, "add", line, col);
     return;
   }
   if (compiler__head_matches(head, "-", 1)) {
     if (argc == 1) {
       compiler__compile_node(c, args[0]);
-      compiler__emit_byte(c, OP_NEG, line);
+      JaclType arg_type = c->last_expr_type;
+      if (arg_type == TYPE_U64) {
+        compiler__error(c, line, col, "type error: cannot negate u64");
+        return;
+      }
+      if (arg_type == TYPE_I64) {
+        compiler__emit_byte(c, OP_NEG_I64, line);
+      } else if (arg_type == TYPE_F64) {
+        compiler__emit_byte(c, OP_NEG_F64, line);
+      } else {
+        compiler__emit_byte(c, OP_NEG, line);
+      }
+      c->last_expr_type = arg_type;
     } else if (argc == 2) {
-      compiler__compile_binary(c, args, OP_SUB, line);
+      compiler__compile_binary(c, args, OP_SUB, "subtract", line, col);
     } else {
       compiler__builtin_arity_error(c, line, col, "-", "1 or 2 arguments", argc);
     }
@@ -523,44 +618,44 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
   }
   if (compiler__head_matches(head, "*", 1)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "*", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_MUL, line);
+    compiler__compile_binary(c, args, OP_MUL, "multiply", line, col);
     return;
   }
   if (compiler__head_matches(head, "/", 1)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "/", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_DIV, line);
+    compiler__compile_binary(c, args, OP_DIV, "divide", line, col);
     return;
   }
   if (compiler__head_matches(head, "%", 1)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "%", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_MOD, line);
+    compiler__compile_binary(c, args, OP_MOD, "modulo", line, col);
     return;
   }
 
   /* Comparison builtins */
   if (compiler__head_matches(head, "==", 2)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "==", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_EQ, line);
+    compiler__compile_binary(c, args, OP_EQ, "compare", line, col);
     return;
   }
   if (compiler__head_matches(head, "<", 1)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "<", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_LT, line);
+    compiler__compile_binary(c, args, OP_LT, "compare", line, col);
     return;
   }
   if (compiler__head_matches(head, ">", 1)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, ">", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_GT, line);
+    compiler__compile_binary(c, args, OP_GT, "compare", line, col);
     return;
   }
   if (compiler__head_matches(head, "<=", 2)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "<=", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_LE, line);
+    compiler__compile_binary(c, args, OP_LE, "compare", line, col);
     return;
   }
   if (compiler__head_matches(head, ">=", 2)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, ">=", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_GE, line);
+    compiler__compile_binary(c, args, OP_GE, "compare", line, col);
     return;
   }
 

@@ -1,0 +1,4 @@
+# expect: 30
+def i64 a 10
+def i64 b 20
+print [to-string [+ $a $b]]

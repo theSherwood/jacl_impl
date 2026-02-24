@@ -135,7 +135,11 @@
 - Compiler has expected_type and last_expr_type fields for type tracking through expression compilation
 - compiler__ensure_boxed(c, line) emits OP_TO_DYN if last_expr_type is unboxed — use before opcodes that expect tagged values (OP_PRINT, OP_TO_STRING, etc.)
 - expected_type is reset to TYPE_DYN at the start of compiler__compile_command to prevent leaking into sub-expressions
+- Typed mut cells: cells always store BOXED values — must emit OP_TO_DYN before OP_MAKE_CELL/OP_SET_CELL, and unbox (OP_TO_I64 etc.) after OP_GET_CELL_LOCAL/UPVALUE for typed mutable bindings
+- set! type checking: target typed + RHS different typed → error; target typed + RHS dyn → error (must use [to TYPE $y]); target dyn → no checking
 - Typed def: [def TYPE name value] — 3-arg form where first arg is type keyword; typed global stores boxed (OP_TO_DYN before OP_DEF_GLOBAL), typed global read unboxes (OP_TO_TYPE with TYPE_DYN source after OP_GET_GLOBAL)
+- compiler__typed_op(dyn_op, JaclType) maps dynamic opcodes to typed equivalents; u64 reuses i64 for add/sub/mul/eq
+- Type checking in arithmetic only applies to unboxed types (i64/u64/f64) — boxed types and dyn pass through to dynamic dispatch unchecked
 - compiler__resolve_global_type returns the declared type of a global; compiler__resolve_upvalue propagates types from locals/upvalues
 - Typed def type checking: rhs_type must match declared_type; TYPE_DYN passes (runtime compatibility)
 - Type inference for untyped def: only infers unboxed types (i64/u64/f64) from RHS — these MUST be tracked since stack holds raw values
@@ -211,4 +215,27 @@
   - Type inference for untyped def only infers unboxed types (i64/u64/f64) — boxed types (i32/u32/f32) stay TYPE_DYN since the tagged value works fine without type tracking
   - String interpolation ($var in "...") also needs ensure_boxed before OP_TO_STRING for var refs
   - PRIi64/PRIu64 from inttypes.h needed for portable 64-bit formatting
+---
+
+## 2026-02-24 - US-007
+- Implemented typed mut [mut TYPE name value] and type-checked set! with compile-time type enforcement
+- Files changed: src/compiler.c (typed mut handler, set! type checking, AST_VAR_REF unboxing for mutable typed locals/upvalues), test/jacl/typed_mut_basic.jacl, test/jacl/typed_set_error.jacl
+- **Learnings for future iterations:**
+  - Cells always store BOXED (tagged JaclVal) values — typed mut locals need OP_TO_DYN before OP_MAKE_CELL and OP_SET_CELL, and unbox conversion (OP_TO_I64 etc. with TYPE_DYN source) after OP_GET_CELL_LOCAL/UPVALUE
+  - set! type checking follows same pattern for local/upvalue/global: resolve target type, compile RHS with expected_type, check rhs_type against target_type
+  - Two separate type error cases: typed↔typed mismatch ("cannot assign X to Y binding") and dyn→typed ("cannot assign dyn to Y binding")
+  - Box before OP_SET_CELL_LOCAL/UPVALUE and OP_SET_GLOBAL for unboxed typed targets
+  - Upvalue type propagation was already done in US-006 (resolve_upvalue copies type from enclosing locals/upvalues)
+---
+
+## 2026-02-24 - US-008
+- Implemented typed arithmetic: compiler emits typed opcodes (OP_ADD_I64, OP_MUL_F64, etc.) when both operands have matching unboxed types, with compile-time type checking and contextual literal typing
+- Files changed: src/compiler.c (compiler__typed_op helper, typed compiler__compile_binary, typed negation handler), test/jacl/typed_arithmetic.jacl, test/jacl/typed_arith_error.jacl
+- **Learnings for future iterations:**
+  - Type checking only enforced for unboxed types (i64/u64/f64) — boxed types (i32/u32/f32) and dyn go through dynamic dispatch without compile-time checking
+  - Contextual typing flows left-to-right: [+ $a 1] where a:i64 types literal 1 as i64, but [+ 1 $a] where a:i64 fails (literal defaults to i32, mismatches i64)
+  - compiler__typed_op maps (dynamic_op, JaclType) → typed_opcode; u64 reuses i64 opcodes for add/sub/mul/eq
+  - Comparison result type is always TYPE_DYN (tagged JACL_TRUE/JACL_FALSE booleans), arithmetic result is the operand type
+  - Unary negation: u64 → compile error, i64 → OP_NEG_I64, f64 → OP_NEG_F64, others → OP_NEG
+  - expected_type is set for RHS from LHS type (any non-DYN), enabling contextual literal adoption in arithmetic
 ---

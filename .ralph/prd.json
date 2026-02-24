@@ -167,7 +167,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "set! already resolves local → upvalue → global from M10. The new work is: after resolving the target, check the target's declared type against the RHS expression's type. If both are concrete and different → compile error. If target is typed and RHS is dyn → compile error (must use [to TYPE $y] to convert). If target is dyn → no checking (existing behavior). The compiler already has the expected_type mechanism from US-006 — set! passes the target's type as expected_type when compiling the RHS."
     },
     {
@@ -195,7 +195,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "The key compiler change: in the arithmetic/comparison compilation section of compiler__compile_command, after compiling both operands, check their result types. If both are the same unboxed type (i64/u64/f64) → emit typed opcode. If both are the same boxed type (i32/u32/f32) → emit existing opcode. If both are dyn → emit existing opcode. If they differ → compile error. Contextual typing: when compiling the second operand, if the first operand's type is known and the second is a literal, pass the first's type as expected_type. The compiler__compile_node function should return a JaclType result — thread this through all expression compilation paths."
     },
     {
