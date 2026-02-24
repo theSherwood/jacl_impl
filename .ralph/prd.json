@@ -184,7 +184,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Cell transparency in print: when OP_PRINT encounters a cell-tagged value, it should dereference it and print the inner value. This matches the user-facing behavior where cells are invisible. The vm__fmt_value function should do the same for to-string and nested formatting contexts."
     },
     {
@@ -215,7 +215,7 @@
         "All tests pass (build.sh)"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "Follow the same test_collections.c / test_m9.c pattern: run_ok and run_err helpers, PrintCapture buffer (4096 bytes), tests grouped by US-XXX story comments in the test table."
     }
   ]
