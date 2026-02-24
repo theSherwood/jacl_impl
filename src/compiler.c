@@ -234,13 +234,21 @@ static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
   /* Check if the variable is a local in the enclosing scope */
   int local = compiler__resolve_local(c->enclosing, name);
   if (local != -1) {
-    return compiler__add_upvalue(c, (uint8_t)local, 1, name);
+    int uv = compiler__add_upvalue(c, (uint8_t)local, 1, name);
+    if (uv != -1 && c->enclosing->locals[local].is_mutable) {
+      c->upvalues[uv].is_mutable = true;
+    }
+    return uv;
   }
 
   /* Check if it's an upvalue in the enclosing scope (transitive capture) */
   int upvalue = compiler__resolve_upvalue(c->enclosing, name);
   if (upvalue != -1) {
-    return compiler__add_upvalue(c, (uint8_t)upvalue, 0, name);
+    int uv = compiler__add_upvalue(c, (uint8_t)upvalue, 0, name);
+    if (uv != -1 && c->enclosing->upvalues[upvalue].is_mutable) {
+      c->upvalues[uv].is_mutable = true;
+    }
+    return uv;
   }
 
   return -1;
@@ -1362,7 +1370,11 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
       } else {
         int upvalue_idx = compiler__resolve_upvalue(c, name_val);
         if (upvalue_idx != -1) {
-          compiler__emit_byte(c, OP_GET_UPVALUE, line);
+          if (c->upvalues[upvalue_idx].is_mutable) {
+            compiler__emit_byte(c, OP_GET_CELL_UPVALUE, line);
+          } else {
+            compiler__emit_byte(c, OP_GET_UPVALUE, line);
+          }
           compiler__emit_byte(c, (uint8_t)upvalue_idx, line);
         } else {
           uint16_t name_idx = chunk_add_constant(c->chunk, name_val);

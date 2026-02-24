@@ -1,0 +1,10 @@
+# expect: 2
+proc make [] {
+  mut n 0
+  proc inc [] { set! n [+ $n 1] }
+  proc get [] { [+ $n 0] }
+  [inc]
+  [inc]
+  [get]
+}
+print [make]

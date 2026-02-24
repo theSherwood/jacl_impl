@@ -2090,6 +2090,27 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_GET_CELL_UPVALUE: {
+        uint8_t index = vm__read_byte(vm);
+        JaclVal cell = frame->closure->upvalues[index];
+        JaclMutableRef* ref = jacl_as_cell(cell);
+        result = vm__push(vm, ref->value);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_SET_CELL_UPVALUE: {
+        uint8_t index = vm__read_byte(vm);
+        JaclVal new_value;
+        result = vm__pop(vm, &new_value); if (result != VM_OK) return result;
+        JaclVal cell = frame->closure->upvalues[index];
+        JaclMutableRef* ref = jacl_as_cell(cell);
+        ref->value = new_value;
+        result = vm__push(vm, JACL_NIL);
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_SET_GLOBAL: {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal name = frame->chunk->constants[name_idx];
