@@ -33,6 +33,7 @@ typedef struct {
   int      depth;        /* scope depth when declared */
   int16_t  known_arity;  /* arity if bound to a proc, -1 = unknown */
   bool     is_mutable;   /* true if declared with mut */
+  bool     is_param;     /* true if this is a function parameter */
 } Local;
 
 /* --- Internal: Global arity tracking --- */
@@ -152,6 +153,7 @@ static void compiler__add_local(Compiler* c, JaclVal name,
   local->depth       = c->scope_depth;
   local->known_arity = -1;
   local->is_mutable  = false;
+  local->is_param    = false;
 }
 
 static int compiler__resolve_local(Compiler* c, JaclVal name) {
@@ -175,6 +177,19 @@ static int16_t compiler__resolve_global_arity(Compiler* c, JaclVal name) {
     }
   }
   return -1;
+}
+
+static bool compiler__resolve_global_info(Compiler* c, JaclVal name,
+                                           bool* is_mutable) {
+  Compiler* root = c;
+  while (root->enclosing) root = root->enclosing;
+  for (uint32_t i = 0; i < root->global_arity_count; i++) {
+    if (root->global_arities[i].name == name) {
+      *is_mutable = root->global_arities[i].is_mutable;
+      return true;
+    }
+  }
+  return false;
 }
 
 static void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity) {
@@ -537,6 +552,79 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* set! — reassign mutable binding */
+  if (compiler__head_matches(head, "set!", 4)) {
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "set!", "2 arguments", argc); return; }
+    if (args[0]->type != AST_LIT_STRING) {
+      compiler__error(c, line, col, "set! first argument must be a name");
+      return;
+    }
+    uint32_t name_len = args[0]->data.lit_string.length;
+    if (name_len > 7) {
+      compiler__error(c, line, col, "variable name exceeds 7-byte inline limit");
+      return;
+    }
+    JaclVal name_val = jacl_inline_string(args[0]->data.lit_string.value, name_len);
+    char err_msg[128];
+
+    /* Resolve local */
+    int local_slot = compiler__resolve_local(c, name_val);
+    if (local_slot != -1) {
+      if (c->locals[local_slot].is_mutable) {
+        compiler__compile_node(c, args[1]);
+        compiler__emit_byte(c, OP_SET_CELL_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)local_slot, line);
+        return;
+      }
+      if (c->locals[local_slot].is_param) {
+        snprintf(err_msg, sizeof(err_msg), "cannot mutate parameter '%.*s'",
+                 (int)name_len, args[0]->data.lit_string.value);
+      } else {
+        snprintf(err_msg, sizeof(err_msg), "cannot mutate immutable binding '%.*s'",
+                 (int)name_len, args[0]->data.lit_string.value);
+      }
+      compiler__error(c, line, col, err_msg);
+      return;
+    }
+
+    /* Resolve upvalue */
+    int upvalue_idx = compiler__resolve_upvalue(c, name_val);
+    if (upvalue_idx != -1) {
+      if (c->upvalues[upvalue_idx].is_mutable) {
+        compiler__compile_node(c, args[1]);
+        compiler__emit_byte(c, OP_SET_CELL_UPVALUE, line);
+        compiler__emit_byte(c, (uint8_t)upvalue_idx, line);
+        return;
+      }
+      snprintf(err_msg, sizeof(err_msg), "cannot mutate immutable binding '%.*s'",
+               (int)name_len, args[0]->data.lit_string.value);
+      compiler__error(c, line, col, err_msg);
+      return;
+    }
+
+    /* Resolve global */
+    bool global_mutable = false;
+    if (compiler__resolve_global_info(c, name_val, &global_mutable)) {
+      if (global_mutable) {
+        compiler__compile_node(c, args[1]);
+        uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+        compiler__emit_byte(c, OP_SET_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+        return;
+      }
+      snprintf(err_msg, sizeof(err_msg), "cannot mutate immutable binding '%.*s'",
+               (int)name_len, args[0]->data.lit_string.value);
+      compiler__error(c, line, col, err_msg);
+      return;
+    }
+
+    /* Not found anywhere */
+    snprintf(err_msg, sizeof(err_msg), "undefined variable '%.*s'",
+             (int)name_len, args[0]->data.lit_string.value);
+    compiler__error(c, line, col, err_msg);
+    return;
+  }
+
   /* def builtin */
   if (compiler__head_matches(head, "def", 3)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "def", "2 arguments", argc); return; }
@@ -666,6 +754,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Add params as locals in body compiler (slots 0..N-1) */
     for (uint8_t i = 0; i < param_count; i++) {
       compiler__add_local(&body_compiler, closure->param_names[i], line, col);
+      body_compiler.locals[body_compiler.local_count - 1].is_param = true;
     }
 
     /* Compile body as expression (last stmt value stays on stack) */

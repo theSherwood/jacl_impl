@@ -1,0 +1,6 @@
+# expect-error: cannot mutate parameter 'x'
+# set! on a function parameter is a compile error
+proc t-par [x] {
+  set! x 42
+}
+[t-par 10]

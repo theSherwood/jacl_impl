@@ -234,7 +234,7 @@ static int lexer__is_word_start(char c) {
 
 static int lexer__is_word_char(char c) {
   return lexer__is_word_start(c) || (c >= '0' && c <= '9') || c == '-'
-         || c == '?';
+         || c == '?' || c == '!';
 }
 
 static int lexer__is_operator_char(char c) {
