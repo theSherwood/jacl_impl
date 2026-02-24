@@ -52,6 +52,16 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_CELL           ((uint64_t)0x0A << JACL_TAG_SHIFT)
 #define JACL_TAG_BOX            ((uint64_t)0x0B << JACL_TAG_SHIFT)
 #define JACL_TAG_ATOM           ((uint64_t)0x0C << JACL_TAG_SHIFT)
+#define JACL_TAG_U32            ((uint64_t)0x0D << JACL_TAG_SHIFT)
+#define JACL_TAG_I64            ((uint64_t)0x0E << JACL_TAG_SHIFT)
+#define JACL_TAG_U64            ((uint64_t)0x0F << JACL_TAG_SHIFT)
+#define JACL_TAG_F64            ((uint64_t)0x10 << JACL_TAG_SHIFT)
+
+/* --- Heap structs for 64-bit numeric types --- */
+
+typedef struct { int64_t value; } JaclHeapI64;
+typedef struct { uint64_t value; } JaclHeapU64;
+typedef struct { double value; } JaclHeapF64;
 
 /* --- Nil and boolean constants --- */
 
@@ -73,6 +83,28 @@ static inline JaclVal jacl_f32(float f) {
     uint32_t bits;
     memcpy(&bits, &f, sizeof(bits));
     return JACL_TAG_F32 | ((uint64_t)bits & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclVal jacl_u32(uint32_t n) {
+    return JACL_TAG_U32 | ((uint64_t)n & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclVal jacl_i64(arena_t *arena, int64_t n) {
+    JaclHeapI64 *h = (JaclHeapI64 *)arena_alloc(arena, sizeof(JaclHeapI64));
+    h->value = n;
+    return JACL_TAG_I64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclVal jacl_u64(arena_t *arena, uint64_t n) {
+    JaclHeapU64 *h = (JaclHeapU64 *)arena_alloc(arena, sizeof(JaclHeapU64));
+    h->value = n;
+    return JACL_TAG_U64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclVal jacl_f64(arena_t *arena, double d) {
+    JaclHeapF64 *h = (JaclHeapF64 *)arena_alloc(arena, sizeof(JaclHeapF64));
+    h->value = d;
+    return JACL_TAG_F64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
 }
 
 /* --- Type tag extractor --- */
@@ -97,6 +129,22 @@ static inline bool jacl_is_i32(JaclVal v) {
 
 static inline bool jacl_is_f32(JaclVal v) {
     return (v & JACL_TYPE_MASK) == JACL_TAG_F32;
+}
+
+static inline bool jacl_is_u32(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_U32;
+}
+
+static inline bool jacl_is_i64(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_I64;
+}
+
+static inline bool jacl_is_u64(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_U64;
+}
+
+static inline bool jacl_is_f64(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_F64;
 }
 
 /* --- Compile-time pointer size check --- */
@@ -303,6 +351,25 @@ static inline float jacl_as_f32(JaclVal v) {
     float f;
     memcpy(&f, &bits, sizeof(f));
     return f;
+}
+
+static inline uint32_t jacl_as_u32(JaclVal v) {
+    return (uint32_t)(v & JACL_PAYLOAD_MASK);
+}
+
+static inline int64_t jacl_as_i64(JaclVal v) {
+    JaclHeapI64 *h = (JaclHeapI64 *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+    return h->value;
+}
+
+static inline uint64_t jacl_as_u64(JaclVal v) {
+    JaclHeapU64 *h = (JaclHeapU64 *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+    return h->value;
+}
+
+static inline double jacl_as_f64(JaclVal v) {
+    JaclHeapF64 *h = (JaclHeapF64 *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+    return h->value;
 }
 
 /* --- i32 arithmetic --- */
