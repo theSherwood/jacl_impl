@@ -30,5 +30,6 @@
 #include "compiler.c"
 #include "vm.c"
 #include "gc_collect.c"
+#include "runtime.c"
 
 #endif /* JACL_C */

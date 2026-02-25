@@ -65,6 +65,7 @@ TESTS=(
     "test/test_m10.c|m10|"
     "test/test_m11.c|m11|"
     "test/test_gc.c|gc|"
+    "test/test_runtime.c|runtime|-Wall -Wextra -std=c99 -g -lpthread"
     "test/test_jacl_harness.c|jacl_harness|"
 )
 
