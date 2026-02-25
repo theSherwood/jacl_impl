@@ -82,6 +82,8 @@ typedef struct {
   ThreadHeap     heap;          /* GC heap for runtime allocations */
   JaclInternTable* intern_table;  /* shared intern table for concat/interning */
   BytecodeChunk* top_chunk;       /* top-level chunk for GC root scanning */
+  GreyBuffer*    grey_buf;       /* write barrier target (NULL in single-threaded) */
+  volatile uint32_t *gc_active_ptr; /* pointer to runtime's gc_active (NULL in single-threaded) */
   const char*    error_message;  /* last error message, or NULL */
   uint32_t       error_line;     /* source line of last error */
   StackTrace     stack_trace;    /* most recent error's trace */
@@ -187,6 +189,8 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->arena         = arena;
   vm->intern_table  = NULL;
   vm->top_chunk     = NULL;
+  vm->grey_buf      = NULL;
+  vm->gc_active_ptr = NULL;
   vm->frame_count   = 0;
   vm->error_message = NULL;
   vm->error_line    = 0;
@@ -2198,6 +2202,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &new_value); if (result != VM_OK) return result;
         JaclVal cell = vm->stack[frame->stack_base + slot];
         JaclMutableRef* ref = jacl_as_cell(cell);
+        gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                         ref->value, new_value);
         ref->value = new_value;
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
@@ -2219,6 +2225,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &new_value); if (result != VM_OK) return result;
         JaclVal cell = frame->closure->upvalues[index];
         JaclMutableRef* ref = jacl_as_cell(cell);
+        gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                         ref->value, new_value);
         ref->value = new_value;
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
@@ -2316,6 +2324,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
+        gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                         ref->value, new_val);
         ref->value = new_val;
         result = vm__push(vm, new_val);
         if (result != VM_OK) return result;
@@ -2354,6 +2364,9 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
 
+        /* Capture pre-swap value for write barrier */
+        JaclVal swap_old_val = ref->value;
+
         /* Push closure as callee slot + current value as argument */
         result = vm__push(vm, closure_val);
         if (result != VM_OK) return result;
@@ -2386,6 +2399,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &swap_result);
         if (result != VM_OK) return result;
 
+        gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                         swap_old_val, swap_result);
         ref->value = swap_result;
 
         /* Restore state */

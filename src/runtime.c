@@ -40,42 +40,8 @@ typedef struct {
 #define WORKER_IDLE ((uintptr_t)0)
 #define WORKER_BUSY ((uintptr_t)1)
 
-/* ======================================================================
- * GreyBuffer: per-thread append-only buffer for write barrier entries.
- * Thread-local writes only (no contention). GC reads a snapshot of count
- * during mark phase draining.
- * ====================================================================== */
-
-#define GREY_BUF_INIT_CAP 256
-
-typedef struct {
-    JaclVal  *entries;
-    uint32_t  count;
-    uint32_t  cap;
-} GreyBuffer;
-
-static void grey_buf_init(GreyBuffer *gb) {
-    gb->entries = (JaclVal *)malloc(GREY_BUF_INIT_CAP * sizeof(JaclVal));
-    gb->count   = 0;
-    gb->cap     = GREY_BUF_INIT_CAP;
-}
-
-static void grey_buf_push(GreyBuffer *gb, JaclVal v) {
-    if (gb->count >= gb->cap) {
-        uint32_t new_cap = gb->cap * 2;
-        gb->entries = (JaclVal *)realloc(gb->entries,
-                                          (size_t)new_cap * sizeof(JaclVal));
-        gb->cap = new_cap;
-    }
-    gb->entries[gb->count++] = v;
-}
-
-static void grey_buf_destroy(GreyBuffer *gb) {
-    free(gb->entries);
-    gb->entries = NULL;
-    gb->count   = 0;
-    gb->cap     = 0;
-}
+/* GreyBuffer is defined in gc.c (part of the GC subsystem, before vm.c in
+ * the unity build). grey_buf_init/push/destroy are available here. */
 
 /* ======================================================================
  * WorkerThread and Runtime structures
@@ -133,6 +99,8 @@ static void runtime__init_worker_vm(WorkerThread *w) {
     vm->arena         = arena;
     vm->intern_table  = NULL;
     vm->top_chunk     = NULL;
+    vm->grey_buf      = &w->grey_buf;
+    vm->gc_active_ptr = &w->runtime->gc_active;
     vm->frame_count   = 0;
     vm->error_message = NULL;
     vm->error_line    = 0;

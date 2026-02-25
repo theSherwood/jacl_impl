@@ -494,4 +494,71 @@ static inline JaclVal jacl_f64_neg(ThreadHeap *heap, JaclVal a) {
 
 static __thread ThreadHeap *gc__current_heap = NULL;
 
+/* ======================================================================
+ * GreyBuffer: per-thread append-only buffer for write barrier entries.
+ * Thread-local writes only (no contention). GC reads a snapshot of count
+ * during mark phase draining.
+ * ====================================================================== */
+
+#define GREY_BUF_INIT_CAP 256
+
+typedef struct {
+    JaclVal  *entries;
+    uint32_t  count;
+    uint32_t  cap;
+} GreyBuffer;
+
+static void grey_buf_init(GreyBuffer *gb) {
+    gb->entries = (JaclVal *)malloc(GREY_BUF_INIT_CAP * sizeof(JaclVal));
+    gb->count   = 0;
+    gb->cap     = GREY_BUF_INIT_CAP;
+}
+
+static void grey_buf_push(GreyBuffer *gb, JaclVal v) {
+    if (gb->count >= gb->cap) {
+        uint32_t new_cap = gb->cap * 2;
+        gb->entries = (JaclVal *)realloc(gb->entries,
+                                          (size_t)new_cap * sizeof(JaclVal));
+        gb->cap = new_cap;
+    }
+    gb->entries[gb->count++] = v;
+}
+
+static void grey_buf_destroy(GreyBuffer *gb) {
+    free(gb->entries);
+    gb->entries = NULL;
+    gb->count   = 0;
+    gb->cap     = 0;
+}
+
+/* ======================================================================
+ * Write barrier: hybrid SATB (deletion) + insertion barrier.
+ *
+ * Fires on mutable container mutations (reset!, swap!, set! on cells)
+ * during an active concurrent GC cycle. Both the old value (evicted from
+ * the container) and the new value (stored into the container) are pushed
+ * to the thread-local grey buffer for the GC to process during marking.
+ *
+ * Fast path: single relaxed atomic load of gc_active flag — no overhead
+ * when GC is not running or when running in single-threaded mode (NULL).
+ * ====================================================================== */
+
+static inline void gc_write_barrier(GreyBuffer *gb,
+                                     volatile uint32_t *gc_active_ptr,
+                                     JaclVal old_val, JaclVal new_val) {
+    /* Single-threaded mode: no gc_active flag → no barrier needed */
+    if (!gc_active_ptr) return;
+
+    /* Fast path: GC not running → skip */
+    if (!ATOMIC_LOAD_EXPLICIT(gc_active_ptr, MEM_RELAXED)) return;
+
+    /* SATB deletion barrier: protect old value still on some VM stack */
+    if (jacl_is_heap_type(old_val))
+        grey_buf_push(gb, old_val);
+
+    /* Insertion barrier: protect new value stored after GC scanned container */
+    if (jacl_is_heap_type(new_val))
+        grey_buf_push(gb, new_val);
+}
+
 #endif /* GC_C */
