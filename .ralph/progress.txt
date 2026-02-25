@@ -95,6 +95,11 @@
 - Worker threads need `-lpthread` in build.sh for test compilation
 - __thread keyword works with -std=c99 on GCC/Clang as an extension (project already uses __typeof__)
 - rt__worker_id: static __thread int, set in worker loop — identifies current worker thread
+- RuntimeTask has gc_root field (JaclVal) for GC root scanning — JACL_NIL for non-GC tasks, tagged value for closure tasks
+- gc_enumerate_roots(Runtime*, GCMarkStack*) scans all root sources: currently_executing, deque snapshots, VM stacks, frames, env, intern table, inbox
+- BUSY sentinel spin: fast tight spin (10000 loads), then slow yield loop (SLEEP_MILLISECONDS(1)) — handles both nanosecond real-world and test scheduling delays
+- Deque snapshot for GC: read top/bottom with acquire ordering + seq_cst fence, then read buffer contents — conservative (may trace dead, harmless)
+- rt_test__init_no_threads / rt_test__destroy_no_threads: test helpers for deterministic root enumeration testing without running worker threads
 
 ## 2026-02-25 - US-002
 - Implemented block-based heap allocator with Immix-style line granularity in src/gc.c
@@ -263,5 +268,35 @@ Thread: (inline)
   - Progressive backoff: idle workers sleep 1→10ms to reduce CPU waste; reset to 0 on task execution
   - Thief registration: each worker registers on every other worker's public deque during init; steal_ids[j] = thief ID on workers[j].public_deque
   - runtime_submit_task is a stub — closure execution on worker VMs requires concurrent GC infrastructure (US-011)
+  - All 46 test suites pass (0 failures) including 131 harness tests
+---
+
+## 2026-02-25 - US-009
+Thread: (inline)
+- Implemented root enumeration protocol for concurrent GC with BUSY sentinel handling
+- Added gc_root field to RuntimeTask (JaclVal) for tracing task closures during GC
+- Updated runtime_submit to set gc_root = JACL_NIL for non-GC tasks
+- Updated runtime_submit_task to set gc_root = tagged closure value and submit directly to inbox
+- Added gc__scan_deque: snapshots Chase-Lev deque [top, bottom) range, reads buffer contents, pushes gc_root values onto mark stack
+- Added gc_enumerate_roots(Runtime*, GCMarkStack*): scans all root sources across all workers:
+  1. currently_executing slot (BUSY spin protocol: fast 10K-spin + slow yield fallback)
+  2. Public deque snapshot (conservative — may include stale tasks)
+  3. Private deque snapshot
+  4. VM stack values
+  5. Call frame closures
+  6. Call frame chunk constants (skip arena closure templates)
+  7. Global environment values
+  8. Intern table entries (Phase 1: immortal strings)
+  9. Inbox tasks (mutex-protected)
+- BUSY sentinel protocol: two-phase spin — fast tight loop of 10000 atomic loads (handles nanosecond real-world case), then slow yield loop with SLEEP_MILLISECONDS(1) (handles test/scheduling edge cases)
+- Added 7 tests to test/test_runtime.c: vm_stack, env, deque, currently_executing, inbox, busy_sentinel (threaded race simulation), multi_worker
+- Added rt_test__init_no_threads / rt_test__destroy_no_threads helpers for deterministic testing without running worker threads
+- Files changed: src/runtime.c, test/test_runtime.c
+- **Learnings for future iterations:**
+  - RuntimeTask.gc_root enables GC to trace task closures without knowing task function semantics
+  - Deque snapshot accesses internal fields (top, bottom, buffer->data[i & mask]) — safe after acquire fencing
+  - BUSY spin fast path (10K loads at ~5ns each = ~50µs) covers all real-world scenarios; slow yield path is defensive only
+  - rt_test__init_no_threads avoids thread scheduling nondeterminism — use for all GC/root enumeration unit tests
+  - rt_test__ms_contains drains/restores mark stack to search — destructive but re-fills entries for further inspection
   - All 46 test suites pass (0 failures) including 131 harness tests
 ---

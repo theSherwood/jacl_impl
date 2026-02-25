@@ -172,7 +172,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "The BUSY sentinel protocol closes the only gap in root enumeration: between a thread popping a task from its deque and publishing it to currently_executing. The window is ~3 instructions. GC spins for nanoseconds at most. This replaces the single-threaded root enumeration from US-006 when running in multi-threaded mode."
     },
     {
