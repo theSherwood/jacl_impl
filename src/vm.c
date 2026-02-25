@@ -1229,12 +1229,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
       case OP_VEC: {
         uint8_t count = vm__read_byte(vm);
+        gc__current_heap = &vm->heap;
         jacl_vec_root* vec = jacl_vec_empty();
         for (uint8_t i = 0; i < count; i++) {
           JaclVal elem = vm->stack[vm->stack_top - count + i];
-          jacl_vec_root* new_vec = jacl_vec_push_back(vec, elem);
-          jacl_vec_unref(vec);
-          vec = new_vec;
+          vec = jacl_vec_push_back(vec, elem);
         }
         vm->stack_top -= count;
         result = vm__push(vm, jacl_vector_ptr(vec));
@@ -1297,6 +1296,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
+        gc__current_heap = &vm->heap;
         jacl_vec_root* new_vec = jacl_vec_push_back(vec, elem);
         result = vm__push(vm, jacl_vector_ptr(new_vec));
         if (result != VM_OK) return result;
@@ -1328,6 +1328,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         uint32_t count = jacl_vec_count(vec);
+        gc__current_heap = &vm->heap;
         if ((uint32_t)idx < count) {
           /* In-bounds: replace element at index */
           jacl_vec_root* new_vec = jacl_vec_set(vec, (uint32_t)idx, elem);
@@ -1335,14 +1336,10 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         } else {
           /* Out-of-bounds: grow vector with nil fill, then set element */
           jacl_vec_root* new_vec = vec;
-          jacl_vec_ref(new_vec);
           for (uint32_t i = count; i < (uint32_t)idx; i++) {
-            jacl_vec_root* tmp = jacl_vec_push_back(new_vec, JACL_NIL);
-            jacl_vec_unref(new_vec);
-            new_vec = tmp;
+            new_vec = jacl_vec_push_back(new_vec, JACL_NIL);
           }
           jacl_vec_root* final = jacl_vec_push_back(new_vec, elem);
-          jacl_vec_unref(new_vec);
           result = vm__push(vm, jacl_vector_ptr(final));
         }
         if (result != VM_OK) return result;
@@ -1367,6 +1364,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         jacl_vec_root* va = (jacl_vec_root*)jacl_as_ptr(a_val);
         jacl_vec_root* vb = (jacl_vec_root*)jacl_as_ptr(b_val);
+        gc__current_heap = &vm->heap;
         jacl_vec_root* new_vec = jacl_vec_concat(va, vb);
         result = vm__push(vm, jacl_vector_ptr(new_vec));
         if (result != VM_OK) return result;
@@ -1405,6 +1403,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (end < 0) end = 0;
         if ((uint32_t)start > count) start = (int32_t)count;
         if ((uint32_t)end > count) end = (int32_t)count;
+        gc__current_heap = &vm->heap;
         if (end <= start) {
           result = vm__push(vm, jacl_vector_ptr(jacl_vec_empty()));
         } else {
@@ -1538,6 +1537,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
+        gc__current_heap = &vm->heap;
         jacl_vec_root* vec = jacl_vec_empty();
         jacl_map_iter it = jacl_map_iter_init(map);
         jacl_map_iter_result ir;
@@ -1545,9 +1545,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           ir = jacl_map_next_leaf(&it);
           if (ir.done) break;
           JaclVal key = jacl_map_key_from_leaf(ir.item);
-          jacl_vec_root* new_vec = jacl_vec_push_back(vec, key);
-          jacl_vec_unref(vec);
-          vec = new_vec;
+          vec = jacl_vec_push_back(vec, key);
         }
         result = vm__push(vm, jacl_vector_ptr(vec));
         if (result != VM_OK) return result;
@@ -1564,6 +1562,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
+        gc__current_heap = &vm->heap;
         jacl_vec_root* vec = jacl_vec_empty();
         jacl_map_iter it = jacl_map_iter_init(map);
         jacl_map_iter_result ir;
@@ -1571,9 +1570,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           ir = jacl_map_next_leaf(&it);
           if (ir.done) break;
           JaclVal val = jacl_map_value_from_leaf(ir.item);
-          jacl_vec_root* new_vec = jacl_vec_push_back(vec, val);
-          jacl_vec_unref(vec);
-          vec = new_vec;
+          vec = jacl_vec_push_back(vec, val);
         }
         result = vm__push(vm, jacl_vector_ptr(vec));
         if (result != VM_OK) return result;
@@ -1744,6 +1741,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
           jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(coll_val);
           uint32_t count = jacl_vec_count(vec);
+          gc__current_heap = &vm->heap;
           jacl_vec_root* result_vec = jacl_vec_empty();
 
           for (uint32_t i = 0; i < count; i++) {
@@ -1781,9 +1779,9 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             result = vm__pop(vm, &ret);
             if (result != VM_OK) return result;
 
-            jacl_vec_root* new_result = jacl_vec_push_back(result_vec, ret);
-            jacl_vec_unref(result_vec);
-            result_vec = new_result;
+            gc__current_heap = &vm->heap;
+
+            result_vec = jacl_vec_push_back(result_vec, ret);
 
             /* Restore state for next iteration */
             vm->ip    = saved_ip;
@@ -1911,6 +1909,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
           jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(coll_val);
           uint32_t count = jacl_vec_count(vec);
+          gc__current_heap = &vm->heap;
           jacl_vec_root* result_vec = jacl_vec_empty();
 
           for (uint32_t i = 0; i < count; i++) {
@@ -1949,9 +1948,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (result != VM_OK) return result;
 
             if (!vm__is_falsy(ret)) {
-              jacl_vec_root* new_result = jacl_vec_push_back(result_vec, gr.value);
-              jacl_vec_unref(result_vec);
-              result_vec = new_result;
+              gc__current_heap = &vm->heap;
+              result_vec = jacl_vec_push_back(result_vec, gr.value);
             }
 
             /* Restore state for next iteration */

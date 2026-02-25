@@ -112,6 +112,29 @@
 #define RRB_VEC_ALLOC_DEFAULTED 1
 #endif
 
+#ifdef RRB_VEC_GC_MODE
+/* --- GC mode: nodes allocated via gc_alloc, no reference counting ---
+ * Caller must define RRB_VEC_GC_ALLOC(obj_type, payload_size),
+ * RRB_VEC_GC_OBJ_INTERNAL, RRB_VEC_GC_OBJ_LEAF, RRB_VEC_GC_OBJ_ROOT. */
+
+/* Auxiliary allocator for size tables, temp arrays (NOT nodes) */
+static Allocator RV_NS(_allocator) = RRB_VEC_ALLOCATOR;
+
+/* Node allocation via GC */
+#define RV_ALLOC_LEAF(sz)      RRB_VEC_GC_ALLOC(RRB_VEC_GC_OBJ_LEAF, (sz))
+#define RV_ALLOC_INTERNAL(sz)  RRB_VEC_GC_ALLOC(RRB_VEC_GC_OBJ_INTERNAL, (sz))
+#define RV_ALLOC_ROOT(sz)      RRB_VEC_GC_ALLOC(RRB_VEC_GC_OBJ_ROOT, (sz))
+
+/* No-op reference counting */
+#define RV_RC_REF(p)   (p)
+#define RV_RC_UNREF(p) ((void)0)
+#define RV_RC_COUNT(p) ((intptr_t)2)
+
+/* Unused in GC mode but kept for cleanup section */
+#define RV_RC_ALLOC RV_NS(_rc_alloc_unused)
+
+#else /* !RRB_VEC_GC_MODE */
+
 static Allocator RV_NS(_allocator) = RRB_VEC_ALLOCATOR;
 
 /* Wire into rc.h template */
@@ -124,6 +147,13 @@ static Allocator RV_NS(_allocator) = RRB_VEC_ALLOCATOR;
 #define RV_RC_REF   RV_NS(_rc_ref)
 #define RV_RC_UNREF RV_NS(_rc_unref)
 #define RV_RC_COUNT RV_NS(_rc_count)
+
+/* Allocation wrappers delegate to RC */
+#define RV_ALLOC_LEAF(sz)      RV_RC_ALLOC((sz), RV_NODE_DESTROY)
+#define RV_ALLOC_INTERNAL(sz)  RV_RC_ALLOC((sz), RV_NODE_DESTROY)
+#define RV_ALLOC_ROOT(sz)      RV_RC_ALLOC((sz), RV_ROOT_DESTROY)
+
+#endif /* RRB_VEC_GC_MODE */
 
 /* --- Constants --- */
 
@@ -245,22 +275,24 @@ static inline uint32_t RV_HASH(RV_ROOT* root) {
   return root ? root->hash : 0;
 }
 
-/* --- Forward declarations --- */
+/* --- Forward declarations (RC mode only) --- */
 
+#ifndef RRB_VEC_GC_MODE
 static void RV_NODE_DESTROY(void* arg);
 static void RV_ROOT_DESTROY(void* arg);
+#endif
 
 /* --- Node construction --- */
 
 static inline RV_LEAF* RV_MK_LEAF(void) {
-  RV_LEAF* leaf = (RV_LEAF*)RV_RC_ALLOC(sizeof(RV_LEAF), RV_NODE_DESTROY);
+  RV_LEAF* leaf = (RV_LEAF*)RV_ALLOC_LEAF(sizeof(RV_LEAF));
   leaf->header  = (RV_NODE){.type = RV_NODE_LEAF_VAL};
   leaf->count   = 0;
   return leaf;
 }
 
 static inline RV_INTERNAL* RV_MK_INTERNAL(void) {
-  RV_INTERNAL* node = (RV_INTERNAL*)RV_RC_ALLOC(sizeof(RV_INTERNAL), RV_NODE_DESTROY);
+  RV_INTERNAL* node = (RV_INTERNAL*)RV_ALLOC_INTERNAL(sizeof(RV_INTERNAL));
   node->header      = (RV_NODE){.type = RV_NODE_INTERNAL_VAL};
   node->child_count = 0;
   node->size_table  = NULL;
@@ -269,7 +301,7 @@ static inline RV_INTERNAL* RV_MK_INTERNAL(void) {
 }
 
 static inline RV_ROOT* RV_MK_ROOT(RV_NODE* root, RV_LEAF* tail, uint32_t count, uint32_t shift) {
-  RV_ROOT* r = (RV_ROOT*)RV_RC_ALLOC(sizeof(RV_ROOT), RV_ROOT_DESTROY);
+  RV_ROOT* r = (RV_ROOT*)RV_ALLOC_ROOT(sizeof(RV_ROOT));
   r->root    = root;
   r->tail    = tail;
   r->count   = count;
@@ -278,8 +310,9 @@ static inline RV_ROOT* RV_MK_ROOT(RV_NODE* root, RV_LEAF* tail, uint32_t count, 
   return r;
 }
 
-/* --- Node destruction --- */
+/* --- Node destruction (RC mode only — GC handles lifecycle) --- */
 
+#ifndef RRB_VEC_GC_MODE
 static void RV_NODE_DESTROY(void* arg) {
   RV_NODE* node = (RV_NODE*)arg;
   if (!node) return;
@@ -302,6 +335,7 @@ static void RV_ROOT_DESTROY(void* arg) {
   if (r->root) RV_RC_UNREF(r->root);
   if (r->tail) RV_RC_UNREF((RV_NODE*)r->tail);
 }
+#endif /* !RRB_VEC_GC_MODE */
 
 /* --- Internal helpers for push_back / get --- */
 
@@ -1239,7 +1273,9 @@ static inline RV_ROOT* RV_SORT(RV_ROOT* r, RV_CMP_FN cmp) {
   return result;
 }
 
-/* --- Transient (mutable batch operations) --- */
+/* --- Transient API (RC mode only — requires ref counting for ownership checks) --- */
+
+#ifndef RRB_VEC_GC_MODE
 
 #define RV_TRANSIENT           RV_NS(_transient)
 #define RV_TRANSIENT_FN        RV_NS(_transient_fn)
@@ -1776,6 +1812,8 @@ static inline RV_TRANSIENT_POP_RESULT_T RV_TRANSIENT_POP_FRONT(RV_TRANSIENT* t) 
   return (RV_TRANSIENT_POP_RESULT_T){.transient = t, .value = popped, .found = true};
 }
 
+#endif /* !RRB_VEC_GC_MODE — end of transient API */
+
 /* --- Map into (cross-type) --- */
 
 #ifdef RRB_VEC_MAP_INTO_DEST_NAME
@@ -1815,7 +1853,43 @@ static inline RV_MAP_INTO_DEST_ROOT* RV_MAP_INTO(RV_ROOT* r, RV_MAP_INTO_FN fn) 
 
 #endif /* RRB_VEC_MAP_INTO_DEST_NAME */
 
-/* --- Map and filter (via transient push_back) --- */
+/* --- Map and filter --- */
+
+#ifdef RRB_VEC_GC_MODE
+/* GC mode: use persistent push_back (no transients available) */
+
+static inline RV_ROOT* RV_MAP(RV_ROOT* r, RV_MAP_FN fn) {
+  if (!r || r->count == 0) return RV_EMPTY();
+
+  RV_ROOT* result = RV_EMPTY();
+  RV_ITER_T it = RV_ITER_INIT(r);
+  while (1) {
+    RV_ITER_RESULT ir = RV_ITER_NEXT(&it);
+    if (ir.done) break;
+    RV_ROOT* next = RV_PUSH_BACK(result, fn(ir.value));
+    result = next;
+  }
+  return result;
+}
+
+static inline RV_ROOT* RV_FILTER(RV_ROOT* r, RV_PRED_FN pred) {
+  if (!r || r->count == 0) return RV_EMPTY();
+
+  RV_ROOT* result = RV_EMPTY();
+  RV_ITER_T it = RV_ITER_INIT(r);
+  while (1) {
+    RV_ITER_RESULT ir = RV_ITER_NEXT(&it);
+    if (ir.done) break;
+    if (pred(ir.value)) {
+      RV_ROOT* next = RV_PUSH_BACK(result, ir.value);
+      result = next;
+    }
+  }
+  return result;
+}
+
+#else /* !RRB_VEC_GC_MODE */
+/* RC mode: use transient push_back for efficiency */
 
 static inline RV_ROOT* RV_MAP(RV_ROOT* r, RV_MAP_FN fn) {
   RV_ROOT* empty = RV_EMPTY();
@@ -1857,7 +1931,11 @@ static inline RV_ROOT* RV_FILTER(RV_ROOT* r, RV_PRED_FN pred) {
   return result;
 }
 
-/* --- Transient iterator --- */
+#endif /* RRB_VEC_GC_MODE */
+
+/* --- Transient iterator (RC mode only) --- */
+
+#ifndef RRB_VEC_GC_MODE
 
 #define RV_TRANSIENT_ITER_T    RV_NS(_transient_iter)
 #define RV_TRANSIENT_ITER_INIT RV_NS(_transient_iter_init)
@@ -2023,6 +2101,8 @@ static inline RV_TRANSIENT* RV_TRANSIENT_FILTER(RV_TRANSIENT* t, RV_PRED_FN pred
   return result;
 }
 
+#endif /* !RRB_VEC_GC_MODE — end of transient iterator/map/filter */
+
 /* --- Cleanup all internal macros --- */
 
 #undef RRB_VEC_T
@@ -2068,8 +2148,10 @@ static inline RV_TRANSIENT* RV_TRANSIENT_FILTER(RV_TRANSIENT* t, RV_PRED_FN pred
 #undef RV_ITER_INIT
 #undef RV_ITER_NEXT
 
+#ifndef RRB_VEC_GC_MODE
 #undef RV_NODE_DESTROY
 #undef RV_ROOT_DESTROY
+#endif
 #undef RV_MK_LEAF
 #undef RV_MK_INTERNAL
 #undef RV_MK_ROOT
@@ -2102,6 +2184,7 @@ static inline RV_TRANSIENT* RV_TRANSIENT_FILTER(RV_TRANSIENT* t, RV_PRED_FN pred
 #undef RV_EQ_FN
 #undef RV_CMP_FN
 
+#ifndef RRB_VEC_GC_MODE
 #undef RV_TRANSIENT
 #undef RV_TRANSIENT_FN
 #undef RV_PERSISTENT_FN
@@ -2120,6 +2203,7 @@ static inline RV_TRANSIENT* RV_TRANSIENT_FILTER(RV_TRANSIENT* t, RV_PRED_FN pred
 #undef RV_TRANSIENT_FOR_EACH
 #undef RV_TRANSIENT_MAP
 #undef RV_TRANSIENT_FILTER
+#endif
 
 #undef RV_NODE_INTERNAL_VAL
 #undef RV_NODE_LEAF_VAL
@@ -2129,9 +2213,21 @@ static inline RV_TRANSIENT* RV_TRANSIENT_FILTER(RV_TRANSIENT* t, RV_PRED_FN pred
 #undef RV_RC_UNREF
 #undef RV_RC_COUNT
 
+#undef RV_ALLOC_LEAF
+#undef RV_ALLOC_INTERNAL
+#undef RV_ALLOC_ROOT
+
 #undef RV_BITS
 #undef RV_BRANCH
 #undef RV_MASK
+
+#ifdef RRB_VEC_GC_MODE
+#undef RRB_VEC_GC_MODE
+#undef RRB_VEC_GC_ALLOC
+#undef RRB_VEC_GC_OBJ_INTERNAL
+#undef RRB_VEC_GC_OBJ_LEAF
+#undef RRB_VEC_GC_OBJ_ROOT
+#endif
 
 #ifdef RRB_VEC_ALLOC_DEFAULTED
 #undef RRB_VEC_ALLOCATOR

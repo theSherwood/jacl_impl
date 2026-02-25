@@ -13,19 +13,21 @@
 static uint32_t jacl_val_hash(JaclVal v);
 static bool jacl_val_eq(JaclVal a, JaclVal b);
 
-/* --- Allocator for collection templates (static compound literal) --- */
+/* --- Allocator for collection auxiliary allocations (size tables, temp arrays) --- */
 
 #define JACL_COLL_ALLOCATOR { .alloc = libc_alloc, .free = libc_free, .ctx = NULL }
 
-/* --- Instantiate RRB vector template: jacl_vec --- */
+/* --- Instantiate RRB vector template: jacl_vec (GC mode) --- */
 
-#define RRB_VEC_T         JaclVal
-#define RRB_VEC_NAME      jacl_vec
-#define RRB_VEC_ALLOCATOR JACL_COLL_ALLOCATOR
+#define RRB_VEC_T                JaclVal
+#define RRB_VEC_NAME             jacl_vec
+#define RRB_VEC_ALLOCATOR        JACL_COLL_ALLOCATOR
+#define RRB_VEC_GC_MODE
+#define RRB_VEC_GC_ALLOC(t, sz)  gc_alloc(gc__current_heap, (t), (sz))
+#define RRB_VEC_GC_OBJ_INTERNAL  OBJ_RRB_INTERNAL
+#define RRB_VEC_GC_OBJ_LEAF      OBJ_RRB_LEAF
+#define RRB_VEC_GC_OBJ_ROOT      OBJ_RRB_ROOT
 #include "../lib/rrb_vec/rrb_vec.h"
-
-/* Clean up RC_ALLOCATOR leaked by rrb_vec.h's rc.h inclusion */
-#undef RC_ALLOCATOR
 
 /* --- Instantiate HAMT template: jacl_map (GC mode) --- */
 
