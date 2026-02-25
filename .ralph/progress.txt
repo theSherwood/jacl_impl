@@ -53,7 +53,10 @@
 - Sweep criteria: marked → live; not marked + epoch >= watermark → live; not marked + epoch < watermark → reclaim
 - String interning Phase 1: immortal (never collected); Phase 2 deferred (weak-reference intern table)
 - Generational collection (sticky mark-bit) deferred to future PRD
-- gc.c is inserted after value.c and before string.c in the unity build chain
+- gc.c is inserted after value.c and before string.c in the unity build chain; gc_collect.c is after vm.c (needs collection types + VM struct)
+- Mark/sweep code lives in gc_collect.c (not gc.c) because it needs HAMT/RRB types from collections.c and VM struct from vm.c
+- GCMarkStack uses void* entries (raw payload pointers), not JaclVal — handles both tagged values and raw node pointers uniformly
+- jacl_map_set takes 3 args (root, key, value) — hash computed internally, not passed separately
 - GCHeader is 8 bytes: { uint32_t epoch; uint8_t mark, obj_type, gen, _pad; }
 - gc_header_of(payload) returns (GCHeader*)payload - 1
 - jacl_is_heap_type checks 11 tags: STRING, VECTOR, MAP, CLOSURE, BIGNUM, CELL, BOX, ATOM, I64, U64, F64
@@ -165,5 +168,25 @@ Thread: (inline)
   - gc__current_heap must be set before ANY allocating RRB operation (push_back, set, concat, slice, empty)
   - Read-only RRB ops (get, count, iter) do not allocate — no gc__current_heap needed
   - Transient API can't work with GC (needs ref_count for ownership) — wrapped in #ifndef
+  - All 45 test suites pass (0 failures) including 131 harness tests
+---
+
+## 2026-02-25 - US-006
+Thread: (inline)
+- Implemented single-threaded mark phase with explicit mark stack and root enumeration
+- Created src/gc_collect.c (new file after vm.c in unity build) with GCMarkStack, gc__trace_object, and gc_mark
+- GCMarkStack: fixed 4096-entry array + dynamic overflow list for pathological cases; uses void* entries
+- Root enumeration: VM stack, call frame closures, global environment values
+- Trace strategies for all 13 obj_types: leaf types skip; closures trace upvalues; mutable refs trace value; HAMT internal traces children via popcount(bitmap); HAMT leaf traces key+value; HAMT collision traces items; RRB internal traces children; RRB leaf traces elements; RRB root traces root+tail
+- Added current_mark field to ThreadHeap (initialized to 1; toggles 0/1 each cycle)
+- Added 10 mark phase tests to test/test_gc.c: leaf objects, closure upvalues, mutable refs, HAMT maps, RRB vectors, global env, unreachable objects, mark alternation, deep closure chains, mixed object graph
+- Files changed: src/gc.c (added current_mark), src/gc_collect.c (new), src/jacl.c (added include), test/test_gc.c (10 new tests)
+- **Learnings for future iterations:**
+  - gc_collect.c must come after vm.c in unity build (needs VM struct + collection types from collections.c)
+  - Mark stack uses void* not JaclVal — HAMT/RRB child pointers are raw node pointers, not tagged JaclVals
+  - gc__ms_push_val(ms, v) checks jacl_is_heap_type and pushes jacl_as_ptr(v) — use for JaclVal entries
+  - gc__ms_push(ms, ptr) pushes raw pointer — use for HAMT/RRB child node pointers
+  - jacl_map_set takes (root, key, value) not (root, hash, key, value) — hash computed internally
+  - get_popcount is in platform.h (available everywhere), used to count HAMT internal children from bitmap
   - All 45 test suites pass (0 failures) including 131 harness tests
 ---

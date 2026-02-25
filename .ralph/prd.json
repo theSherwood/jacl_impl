@@ -115,7 +115,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "This is mark only — sweep comes in US-007. The mark phase is the same algorithm whether single-threaded or concurrent; the difference is grey buffer draining (added in US-010/US-011). Keep it clean and testable in isolation."
     },
     {
