@@ -1,5 +1,6 @@
 ## Codebase Patterns
 - JACL comments use `#` not `;` — semicolons are statement separators; using `;` as a comment causes parse errors or unexpected bare-word calls
+- String interpolation syntax: `$var` or `$[expr]` inside double-quoted strings — `[expr]` without `$` prefix is literal text, not interpolation
 - File-based test harness: test/test_jacl_harness.c reads .jacl files from test/jacl/, parses # expect: / # expect-error: headers, runs through jacl_run with PrintCapture
 - PrintCapture buffer in harness is 8192 bytes (larger than integration tests' 1024) to handle multi-line test output
 - Harness uses malloc/free for file I/O (not tracked_allocator) — tracked_allocator is only for the VM arena
@@ -152,6 +153,10 @@
 - Call-site type checking in dynamic call section: set expected_type per arg, check result type after compile; dyn→typed param is error
 - compile_block_expr applies c->return_type as expected_type for last statement
 - Dynamic call sets last_expr_type = call_return_type for return type propagation
+- Untyped procs returning unboxed values produce raw stack values — always declare return type for procs that return i64/u64/f64
+- Contextual typing flows left-to-right only: [- 0 $a] where a:i64 fails (literal 0 is i32), use [- $z $a] with typed z instead
+- try/catch operates on tagged values — box unboxed results (to-string or to dyn) before try boundary
+- Recursive typed procs can't reference own return type during body compilation — avoid recursive typed arithmetic without explicit [to TYPE ...]
 
 ## 2026-02-24 - US-001
 - Implemented value tags, heap types, constructors, accessors, predicates for u32/i64/u64/f64
@@ -275,4 +280,27 @@
   - proc compilation now sets last_expr_type = TYPE_CLOSURE (was implicit)
   - Dynamic call sets last_expr_type = call_return_type for return type propagation to callers
   - COMPILER_MAX_PROC_PARAMS = 16 — maximum number of typed parameters tracked
+---
+
+## 2026-02-24 - US-011
+- Added test/jacl/print_typed.jacl covering print/to-string for all new numeric types (i64, u32, u64, f64) plus string interpolation
+- Core implementation was already done in US-006 (vm__fmt_value, OP_PRINT, OP_TO_STRING all handle u32/i64/u64/f64 tags; compiler__ensure_boxed emits OP_TO_DYN before OP_PRINT/OP_TO_STRING)
+- Files changed: test/jacl/print_typed.jacl (new)
+- **Learnings for future iterations:**
+  - JACL string interpolation uses `$var` or `$[expr]` syntax, NOT `[expr]` inside strings — `[...]` inside a string is literal text
+  - Most of US-011 was effectively done during US-006 since typed_def_basic.jacl required print/to-string support for typed values
+  - f32/f64 format via `%g` — no trailing zeros, switches to scientific notation for very large/small values
+---
+
+## 2026-02-25 - US-012
+- Created test/test_m11.c with 91 comprehensive integration tests covering all M11 type system features
+- Tests cover: value representation (u32/i64/u64/f64), typed def for all numeric types, typed mut and set!, typed arithmetic (i64/f64/u64), compile errors for type mismatches, to builtin conversions, typed proc, contextual typing, type inference, nested typed expressions, typed closures, print/to-string, interaction with existing features (try, collections, if, while), edge cases
+- Added test/test_m11.c to build.sh TESTS array
+- Files changed: test/test_m11.c (new), build.sh (added test entry), .ralph/prd.json (US-012 passes: true)
+- **Learnings for future iterations:**
+  - Untyped procs returning unboxed values (i64/u64/f64) produce raw stack values that callers treat as tagged — always use typed return types for procs returning unboxed types
+  - Literal `0` in `[- 0 $a]` where a:i64 defaults to i32 causing type mismatch — contextual typing only flows left-to-right (first operand to second), not from second to first
+  - try/catch operates on tagged values — unboxed results must be boxed (e.g. via to-string or to dyn) before crossing try boundary
+  - Recursive typed procs can't reference their own return type during body compilation — GlobalArity return_type not set until after body compilation completes
+  - Dynamic dispatch (OP_ADD etc.) only handles same-type pairs (i32+i32, f32+f32, u32+u32) — mixing boxed types (e.g. i64+i32 as tagged values) produces runtime error
 ---

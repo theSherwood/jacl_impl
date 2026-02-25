@@ -272,7 +272,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "Print always operates on tagged JaclVal. For typed (unboxed) values on the stack, the compiler must emit OP_TO_DYN before OP_PRINT to box them. This means the print path in the compiler needs to check the expression's type: if unboxed, emit conversion first. The vm__fmt_value function already has a switch on type tags — add cases for U32, I64, U64, F64. Use PRIi64/PRIu64 format specifiers for 64-bit types. F64 formatting should match existing f32 formatting style."
     },
     {
@@ -300,7 +300,7 @@
         "All tests pass (build.sh)"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "Follow the same test_m10.c pattern: PrintCapture(4096), run_ok/run_err helpers, TestEntry table grouped by US-XXX comments. run_err tests should cover both compile-time type errors and runtime errors (e.g. to dyn→i64 conversion of non-numeric value). Test edge cases: overflow on narrow (i64→i32), division by zero in typed ops, max/min values for each type."
     }
   ]
