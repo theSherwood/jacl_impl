@@ -13,7 +13,7 @@
 - Build system: `build.sh` with `TESTS=()` array entries formatted as `"path/test.c|name|optional_extra_cflags"`
 - Compiler flags: `-Wall -Wextra -std=c99 -g`
 - Implementation language is C (C99)
-- Pipeline: src/value.c → src/gc.c → src/string.c → src/lexer.c → src/ast.c → src/parser.c → src/bytecode.c → src/compiler.c → src/vm.c
+- Pipeline: src/value.c → src/gc.c → src/string.c → src/lexer.c → src/ast.c → src/parser.c → src/bytecode.c → src/compiler.c → src/vm.c → src/gc_collect.c → src/runtime.c
 - Private/internal functions use double-underscore prefix: `module__function_name`
 - Public types use PascalCase (Token, LexResult, AstNode) or lower_t for system-level (arena_t)
 - Public functions use module_verb_noun pattern (lexer_lex, arena_alloc, parser_parse)
@@ -65,7 +65,7 @@
 - BlockPool is thread-safe (mutex); gc_block_pool_get/return for block recycling
 - Allocation total aligned to 8 bytes; max single allocation = GC_BLOCK_SIZE (64KB)
 - HAMT GC mode: define HAMT_GC_MODE + HAMT_GC_ALLOC(obj_type, sz) + HAMT_GC_OBJ_* before including hamt.h — replaces RC with gc_alloc, no-op ref/unref
-- gc__current_heap: file-static ThreadHeap* in gc.c (unity-build visible), set before any HAMT mutation; will become __thread in US-008
+- gc__current_heap: static __thread ThreadHeap* in gc.c — each worker thread sets its own copy in the task execution loop; main thread sets it in vm_init
 - HAMT transient API requires RC (ownership checks via ref_count==1); wrapped in #ifndef HAMT_GC_MODE — unused by JACL
 - Library-level HAMT tests (lib/hamt/test_hamt*.c) still use RC mode — HAMT_GC_MODE is only for jacl_map in collections.c
 - jacl_map_unref is now a no-op (H_RC_UNREF(p) expands to ((void)0) in GC mode) — callers don't need to call it
@@ -84,6 +84,17 @@
 - Closure tracing now includes chunk constants (heap i64/u64/f64 literals, skip JACL_TAG_CLOSURE entries = arena templates)
 - jacl_vec_get returns jacl_vec_get_result struct with .value field — not a raw JaclVal
 - vm_exec wraps top-level code in implicit closure frame (frame_count starts at 1), sets vm->top_chunk for GC root scanning
+- Runtime (src/runtime.c) provides worker thread pool with Chase-Lev work-stealing deques, task inbox, BUSY sentinel protocol
+- Chase-Lev deque instantiated as rt_deque (uintptr_t elements = RuntimeTask pointers) in runtime.c
+- RuntimeTask = { void (*fn)(void*), void* data } — native function + data; workers pop, execute, free
+- External task submission goes to mutex-protected inbox (LIFO stack); workers drain inbox before checking deques
+- WORKER_IDLE=0, WORKER_BUSY=1 sentinels on currently_executing; any other value = RuntimeTask pointer
+- GreyBuffer = { JaclVal* entries, uint32_t count, cap } — per-thread, append-only, GC drains during mark
+- Worker VMs use shared BlockPool (rt->block_pool) via gc_heap_init(&vm->heap, &rt->block_pool); local vm.block_pool initialized but unused
+- runtime__init_worker_vm duplicates vm_init but overrides heap.pool to shared pool; vm_destroy works for cleanup (empty local pool is harmless)
+- Worker threads need `-lpthread` in build.sh for test compilation
+- __thread keyword works with -std=c99 on GCC/Clang as an extension (project already uses __typeof__)
+- rt__worker_id: static __thread int, set in worker loop — identifies current worker thread
 
 ## 2026-02-25 - US-002
 - Implemented block-based heap allocator with Immix-style line granularity in src/gc.c
@@ -224,4 +235,33 @@ Thread: (inline)
   - jacl_vec_get returns jacl_vec_get_result struct, not raw JaclVal — use .value field
   - Sweep invalidates cursor/limit/current_block — gc_alloc rescans blocks for free runs on next allocation
   - All 45 test suites pass (0 failures) including 131 harness tests
+---
+
+## 2026-02-25 - US-008
+Thread: (inline)
+- Implemented worker thread pool with Chase-Lev work-stealing deques and task execution loop
+- Created src/runtime.c (new file after gc_collect.c in unity build) with:
+  - Chase-Lev deque instantiation (rt_deque, uintptr_t elements)
+  - RuntimeTask struct (function pointer + data) for native task execution
+  - GreyBuffer struct (per-thread append-only JaclVal buffer for write barriers)
+  - WorkerThread struct: public/private deques, grey_buf, currently_executing (BUSY sentinel), thread_epoch, VM, arena
+  - Runtime struct: workers array, global_epoch, gc_running/gc_active flags, shared BlockPool, task inbox (mutex-protected)
+  - Task execution loop: BUSY → inbox → private deque → public deque → steal → execute → idle (with progressive backoff)
+  - runtime_init: creates workers, inits deques/heaps/VMs, registers thieves, starts threads
+  - runtime_destroy: signals shutdown, joins threads, drains deques/inbox, frees resources
+  - runtime_submit: external task submission to inbox (mutex-protected LIFO)
+  - runtime_submit_task: JaclClosure API (stub execution, full in US-011)
+- Changed gc__current_heap from `static` to `static __thread` for per-thread heap access
+- Created test/test_runtime.c with 8 tests: init/destroy, submit 100/50/1000 tasks, epoch verification, closure API, grey buffer ops and growth
+- Added test/test_runtime.c to build.sh with `-lpthread` flag
+- Files changed: src/gc.c, src/runtime.c (new), src/jacl.c, test/test_runtime.c (new), build.sh
+- **Learnings for future iterations:**
+  - Chase-Lev deque push/take are owner-only operations — external task submission uses a mutex-protected inbox instead
+  - Worker VMs use shared BlockPool via gc_heap_init(&vm->heap, &rt->block_pool); local vm.block_pool is init'd but unused (safe for vm_destroy)
+  - __thread works with -std=c99 on GCC/Clang as an extension; already precedent for extensions (e.g., __typeof__)
+  - WORKER_IDLE=0, WORKER_BUSY=1 as uintptr_t sentinels; real task pointers are heap addresses (never 0 or 1)
+  - Progressive backoff: idle workers sleep 1→10ms to reduce CPU waste; reset to 0 on task execution
+  - Thief registration: each worker registers on every other worker's public deque during init; steal_ids[j] = thief ID on workers[j].public_deque
+  - runtime_submit_task is a stub — closure execution on worker VMs requires concurrent GC infrastructure (US-011)
+  - All 46 test suites pass (0 failures) including 131 harness tests
 ---

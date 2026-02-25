@@ -153,7 +153,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Each worker owns a separate VM instance with its own stack and frames. Global environment is shared (read-mostly). The BUSY sentinel is a special pointer value ((void*)1 or similar) — not NULL and not a valid task pointer. Workers that find no tasks should spin-wait with backoff (start with busy spin, add usleep for idle). Idle workers check all other workers' public deques for stealing."
     },
     {
