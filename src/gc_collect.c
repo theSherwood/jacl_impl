@@ -1,5 +1,5 @@
 /*
- * JACL Garbage Collector — Mark and sweep phases.
+ * JACL Garbage Collector — Mark, sweep, and collection trigger.
  *
  * This file is included after vm.c in the unity build so it has access
  * to all type definitions: GCHeader/gc_alloc (gc.c), collection node
@@ -72,6 +72,13 @@ static inline void gc__ms_push_val(GCMarkStack *ms, JaclVal v) {
     }
 }
 
+/* Push a constant pool entry — skip closures (arena-allocated templates) */
+static inline void gc__ms_push_const(GCMarkStack *ms, JaclVal v) {
+    if (jacl_is_heap_type(v) && !jacl_is_closure(v)) {
+        gc__ms_push(ms, jacl_as_ptr(v));
+    }
+}
+
 /* ======================================================================
  * Object tracing: push an object's children onto the mark stack
  * ====================================================================== */
@@ -89,11 +96,16 @@ static void gc__trace_object(void *payload, GCMarkStack *ms) {
     case OBJ_BIGNUM:
         break;
 
-    /* --- Closure: trace captured upvalues --- */
+    /* --- Closure: trace captured upvalues + chunk constants --- */
     case OBJ_CLOSURE: {
         JaclClosure *cl = (JaclClosure *)payload;
         for (uint8_t i = 0; i < cl->upvalue_count; i++) {
             gc__ms_push_val(ms, cl->upvalues[i]);
+        }
+        /* Trace chunk constants to keep heap literals alive.
+         * Skip closures (arena-allocated templates, not GC objects). */
+        for (uint32_t i = 0; i < cl->chunk.const_count; i++) {
+            gc__ms_push_const(ms, cl->chunk.constants[i]);
         }
         break;
     }
@@ -192,6 +204,25 @@ static void gc_mark(ThreadHeap *heap, VM *vm) {
         gc__ms_push_val(&ms, vm->env.values[i]);
     }
 
+    /* 4. Intern table entries (Phase 1: immortal — never collected) */
+    if (vm->intern_table) {
+        for (uint32_t i = 0; i < vm->intern_table->cap; i++) {
+            if (vm->intern_table->entries[i]) {
+                gc__ms_push(&ms, vm->intern_table->entries[i]);
+            }
+        }
+    }
+
+    /* 5. Call frame chunk constants (heap i64/u64/f64 literals) */
+    for (uint32_t i = 0; i < vm->frame_count; i++) {
+        BytecodeChunk *ch = vm->frames[i].chunk;
+        if (ch) {
+            for (uint32_t j = 0; j < ch->const_count; j++) {
+                gc__ms_push_const(&ms, ch->constants[j]);
+            }
+        }
+    }
+
     /* --- Mark loop --- */
     void *ptr;
     while (gc__ms_pop(&ms, &ptr)) {
@@ -202,6 +233,100 @@ static void gc_mark(ThreadHeap *heap, VM *vm) {
     }
 
     gc__ms_destroy(&ms);
+}
+
+/* ======================================================================
+ * gc_sweep: reclaim dead objects at line granularity
+ *
+ * Algorithm:
+ * 1. For each block, clear all line marks to LINE_FREE
+ * 2. Walk objects linearly (using alloc_total to advance)
+ * 3. Live objects (mark == current_mark): re-mark their lines as OCCUPIED
+ * 4. Dead objects: zero their memory (enables safe walking on future cycles)
+ * 5. All-free blocks returned to global pool
+ * ====================================================================== */
+
+static void gc_sweep(ThreadHeap *heap) {
+    uint8_t  current_mark = heap->current_mark;
+    GCBlock *block = heap->blocks;
+    GCBlock *prev  = NULL;
+
+    while (block) {
+        GCBlock *next = block->next;
+
+        /* Phase 1: clear all line marks to FREE */
+        memset(block->line_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
+
+        /* Phase 2: walk all objects, re-mark live objects' lines */
+        uint8_t *ptr = block->payload;
+        uint8_t *end = block->payload + GC_BLOCK_SIZE;
+
+        while (ptr < end) {
+            GCHeader *hdr   = (GCHeader *)ptr;
+            uint16_t  total = hdr->alloc_total;
+
+            if (total == 0) {
+                /* No object here — skip to next line boundary */
+                size_t offset = (size_t)(ptr - block->payload);
+                size_t next_line = ((offset / GC_LINE_SIZE) + 1) * GC_LINE_SIZE;
+                if (next_line >= GC_BLOCK_SIZE) break;
+                ptr = block->payload + next_line;
+                continue;
+            }
+
+            if (hdr->mark == current_mark) {
+                /* Live object — mark all its lines as OCCUPIED */
+                size_t offset = (size_t)(ptr - block->payload);
+                int first_line = (int)(offset / GC_LINE_SIZE);
+                int last_line  = (int)((offset + total - 1) / GC_LINE_SIZE);
+                for (int i = first_line; i <= last_line; i++) {
+                    block->line_map[i] = GC_LINE_OCCUPIED;
+                }
+            } else {
+                /* Dead object — zero its memory for safe future walking */
+                memset(ptr, 0, total);
+            }
+
+            ptr += total;
+        }
+
+        /* Phase 3: check if block is entirely free */
+        bool all_free = true;
+        for (int i = 0; i < GC_LINES_PER_BLOCK; i++) {
+            if (block->line_map[i] != GC_LINE_FREE) {
+                all_free = false;
+                break;
+            }
+        }
+
+        if (all_free) {
+            /* Remove from heap's block list and return to pool */
+            if (prev) prev->next = next;
+            else      heap->blocks = next;
+            gc_block_pool_return(heap->pool, block);
+        } else {
+            prev = block;
+        }
+
+        block = next;
+    }
+
+    /* Invalidate cursor — gc_alloc will rescan for free runs */
+    heap->cursor        = NULL;
+    heap->limit         = NULL;
+    heap->current_block = NULL;
+}
+
+/* ======================================================================
+ * gc_collect: full mark-sweep cycle
+ * ====================================================================== */
+
+static void gc_collect(ThreadHeap *heap, VM *vm) {
+    gc_mark(heap, vm);
+    gc_sweep(heap);
+    heap->current_mark  = 1 - heap->current_mark;
+    heap->bytes_since_gc = 0;
+    heap->needs_gc       = false;
 }
 
 #endif /* GC_COLLECT_C */

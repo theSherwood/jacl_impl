@@ -81,6 +81,7 @@ typedef struct {
   BlockPool      block_pool;    /* GC block pool (owned by VM) */
   ThreadHeap     heap;          /* GC heap for runtime allocations */
   JaclInternTable* intern_table;  /* shared intern table for concat/interning */
+  BytecodeChunk* top_chunk;       /* top-level chunk for GC root scanning */
   const char*    error_message;  /* last error message, or NULL */
   uint32_t       error_line;     /* source line of last error */
   StackTrace     stack_trace;    /* most recent error's trace */
@@ -95,6 +96,10 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk);
 /* --- Pipeline convenience --- */
 
 static VMResult jacl_run(const char* source, VM* vm, arena_t* arena);
+
+/* --- GC collect (defined in gc_collect.c, after vm.c in unity build) --- */
+
+static void gc_collect(ThreadHeap *heap, VM *vm);
 
 /* --- Type name helper for error messages --- */
 
@@ -181,6 +186,7 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->print_ctx = NULL;
   vm->arena         = arena;
   vm->intern_table  = NULL;
+  vm->top_chunk     = NULL;
   vm->frame_count   = 0;
   vm->error_message = NULL;
   vm->error_line    = 0;
@@ -472,8 +478,9 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
   vm->frames[0].chunk      = chunk;
   vm->frame_count   = 1;
 
-  vm->chunk = chunk;
-  vm->ip    = chunk->code;
+  vm->chunk     = chunk;
+  vm->top_chunk = chunk;
+  vm->ip        = chunk->code;
 
   return vm__run(vm, 0);
 }
@@ -486,6 +493,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
   CallFrame* frame = &vm->frames[vm->frame_count - 1];
 
   for (;;) {
+    /* GC safepoint: collect if threshold exceeded */
+    if (vm->heap.needs_gc) {
+      gc_collect(&vm->heap, vm);
+    }
+
     /* Track source line for error reporting */
     uint32_t instr_offset = (uint32_t)(vm->ip - vm->chunk->code);
     vm->error_line = vm->chunk->lines[instr_offset];

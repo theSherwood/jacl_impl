@@ -49,7 +49,8 @@ static int test_gc_alloc_small(void) {
     ASSERT_U32_EQ(hdr->epoch, 0);
     ASSERT_INT_EQ(hdr->mark, 0);
     ASSERT_INT_EQ(hdr->obj_type, OBJ_HEAP_I64);
-    ASSERT_INT_EQ(hdr->gen, 0);
+    /* total = 8 (header) + 8 (payload) = 16, aligned = 16 */
+    ASSERT(hdr->alloc_total == 16);
 
     /* total = 8 + 8 = 16, aligned = 16 — fits in one line */
     ASSERT_INT_EQ(heap.current_block->line_map[0], GC_LINE_OCCUPIED);
@@ -606,6 +607,349 @@ static int test_gc_mark_mixed_graph(void) {
     TEST_PASS();
 }
 
+/* ===== US-007: Sweep phase and GC trigger ===== */
+
+static int test_gc_sweep_dead_objects_freed(void) {
+    /* Dead objects' lines should become FREE after sweep */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Allocate objects but don't root them */
+    gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    gc_alloc(&vm.heap, OBJ_HEAP_U64, sizeof(JaclHeapU64));
+    gc_alloc(&vm.heap, OBJ_HEAP_F64, sizeof(JaclHeapF64));
+    vm.stack_top = 0;
+
+    /* Mark (nothing reachable) then sweep */
+    gc_mark(&vm.heap, &vm);
+    gc_sweep(&vm.heap);
+
+    /* All lines should be free (all objects were dead) */
+    /* Block should have been returned to pool since it's all-free */
+    ASSERT(vm.heap.blocks == NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_sweep_live_objects_survive(void) {
+    /* Live objects' lines remain OCCUPIED after sweep */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal vi = jacl_i64(&vm.heap, 42);
+    JaclVal vu = jacl_u64(&vm.heap, 99);
+    vm.stack[0] = vi;
+    vm.stack[1] = vu;
+    vm.stack_top = 2;
+
+    /* Also allocate a dead object */
+    gc_alloc(&vm.heap, OBJ_HEAP_F64, sizeof(JaclHeapF64));
+
+    gc_mark(&vm.heap, &vm);
+    gc_sweep(&vm.heap);
+
+    /* Block still exists (has live objects) */
+    ASSERT(vm.heap.blocks != NULL);
+
+    /* Live objects' data intact */
+    ASSERT(jacl_as_i64(vi) == 42);
+    ASSERT(jacl_as_u64(vu) == 99);
+
+    /* Lines for live objects are OCCUPIED */
+    GCBlock *block = vm.heap.blocks;
+    ASSERT_INT_EQ(block->line_map[0], GC_LINE_OCCUPIED);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_sweep_line_granularity(void) {
+    /* Single live object in a block doesn't prevent reclaiming other lines */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Allocate objects across multiple lines */
+    JaclVal live_val = jacl_i64(&vm.heap, 1);  /* line 0 */
+    gc_alloc(&vm.heap, OBJ_STRING, GC_LINE_SIZE - sizeof(GCHeader)); /* fills rest of line 0 + line 1 */
+    gc_alloc(&vm.heap, OBJ_STRING, GC_LINE_SIZE * 2);  /* lines 2-3+ */
+
+    /* Only root the first small object */
+    vm.stack[0] = live_val;
+    vm.stack_top = 1;
+
+    gc_mark(&vm.heap, &vm);
+    gc_sweep(&vm.heap);
+
+    GCBlock *block = vm.heap.blocks;
+    ASSERT(block != NULL);
+
+    /* Line 0 should be OCCUPIED (live object) */
+    ASSERT_INT_EQ(block->line_map[0], GC_LINE_OCCUPIED);
+
+    /* Lines further out should be FREE (dead objects reclaimed) */
+    int free_count = 0;
+    for (int i = 1; i < GC_LINES_PER_BLOCK; i++) {
+        if (block->line_map[i] == GC_LINE_FREE) free_count++;
+    }
+    ASSERT(free_count > 0);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_sweep_block_recycling(void) {
+    /* Fully dead blocks are returned to the global pool */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Allocate enough to use two blocks */
+    for (int i = 0; i < GC_LINES_PER_BLOCK; i++) {
+        gc_alloc(&vm.heap, OBJ_HEAP_I64, GC_LINE_SIZE - sizeof(GCHeader));
+    }
+    /* This triggers a second block */
+    JaclVal live = jacl_i64(&vm.heap, 999);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    /* Two blocks in the heap */
+    ASSERT(vm.heap.blocks != NULL);
+    ASSERT(vm.heap.blocks->next != NULL);
+
+    gc_mark(&vm.heap, &vm);
+    gc_sweep(&vm.heap);
+
+    /* Only one block should remain (the one with the live object) */
+    ASSERT(vm.heap.blocks != NULL);
+    ASSERT(vm.heap.blocks->next == NULL);
+
+    /* The live value is intact */
+    ASSERT(jacl_as_i64(live) == 999);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_collect_full_cycle(void) {
+    /* gc_collect runs mark + sweep + toggles mark + resets counter */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    ASSERT_INT_EQ(vm.heap.current_mark, 1);
+
+    JaclVal live = jacl_i64(&vm.heap, 42);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    /* Allocate dead objects to increase byte counter */
+    for (int i = 0; i < 100; i++) {
+        gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    }
+    size_t before_bytes = vm.heap.bytes_since_gc;
+    ASSERT(before_bytes > 0);
+
+    gc_collect(&vm.heap, &vm);
+
+    /* Mark toggled */
+    ASSERT_INT_EQ(vm.heap.current_mark, 0);
+    /* Byte counter reset */
+    ASSERT_SIZE_EQ(vm.heap.bytes_since_gc, 0);
+    /* needs_gc cleared */
+    ASSERT(!vm.heap.needs_gc);
+    /* Live value survives */
+    ASSERT(jacl_as_i64(live) == 42);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_collect_multiple_cycles(void) {
+    /* Multiple GC cycles: objects allocated between cycles survive if rooted */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Cycle 1 */
+    JaclVal v1 = jacl_i64(&vm.heap, 100);
+    vm.stack[0] = v1;
+    vm.stack_top = 1;
+    gc_collect(&vm.heap, &vm);
+    ASSERT(jacl_as_i64(v1) == 100);
+
+    /* Cycle 2: allocate more, root some */
+    JaclVal v2 = jacl_i64(&vm.heap, 200);
+    gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64)); /* dead */
+    vm.stack[1] = v2;
+    vm.stack_top = 2;
+    gc_collect(&vm.heap, &vm);
+    ASSERT(jacl_as_i64(v1) == 100);
+    ASSERT(jacl_as_i64(v2) == 200);
+
+    /* Cycle 3: drop v1 from roots */
+    vm.stack[0] = v2;
+    vm.stack_top = 1;
+    gc_collect(&vm.heap, &vm);
+    ASSERT(jacl_as_i64(v2) == 200);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_collect_closure_with_upvalues(void) {
+    /* Closure survives GC, its upvalues and chunk constants survive too */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Create a captured value */
+    JaclVal captured = jacl_i64(&vm.heap, 777);
+
+    /* Create closure with 1 upvalue */
+    size_t uv_bytes = sizeof(JaclVal) * 1;
+    JaclClosure *cl = (JaclClosure *)gc_alloc(&vm.heap, OBJ_CLOSURE,
+                                               sizeof(JaclClosure) + uv_bytes);
+    memset(cl, 0, sizeof(JaclClosure));
+    cl->upvalue_count = 1;
+    cl->upvalues = (JaclVal *)(cl + 1);
+    cl->upvalues[0] = captured;
+
+    vm.stack[0] = jacl_closure(cl);
+    vm.stack_top = 1;
+
+    /* Run 3 GC cycles */
+    for (int i = 0; i < 3; i++) {
+        gc_collect(&vm.heap, &vm);
+    }
+
+    /* Both closure and captured value survive */
+    JaclClosure *cl2 = jacl_as_closure(vm.stack[0]);
+    ASSERT(cl2 == cl);
+    ASSERT(jacl_as_i64(cl2->upvalues[0]) == 777);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_collect_map_survives(void) {
+    /* HAMT map and its values survive GC */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    gc__current_heap = &vm.heap;
+
+    JaclVal key = jacl_inline_string("k", 1);
+    JaclVal val = jacl_i64(&vm.heap, 42);
+
+    jacl_map_node *map = NULL;
+    map = jacl_map_set(map, key, val);
+
+    JaclVal map_val = JACL_TAG_MAP | ((uint64_t)(uintptr_t)map & JACL_PAYLOAD_MASK);
+    vm.stack[0] = map_val;
+    vm.stack_top = 1;
+
+    gc_collect(&vm.heap, &vm);
+
+    /* Map survived — can still look up the value */
+    jacl_map_node *map2 = (jacl_map_node *)(uintptr_t)(vm.stack[0] & JACL_PAYLOAD_MASK);
+    JaclVal got = jacl_map_get(map2, key);
+    ASSERT(jacl_as_i64(got) == 42);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_collect_vec_survives(void) {
+    /* RRB vector and its elements survive GC */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    gc__current_heap = &vm.heap;
+
+    JaclVal e1 = jacl_i64(&vm.heap, 10);
+    JaclVal e2 = jacl_i64(&vm.heap, 20);
+    jacl_vec_root *vec = jacl_vec_empty();
+    vec = jacl_vec_push_back(vec, e1);
+    vec = jacl_vec_push_back(vec, e2);
+
+    JaclVal vec_val = JACL_TAG_VECTOR | ((uint64_t)(uintptr_t)vec & JACL_PAYLOAD_MASK);
+    vm.stack[0] = vec_val;
+    vm.stack_top = 1;
+
+    gc_collect(&vm.heap, &vm);
+
+    /* Vector survived — elements accessible */
+    jacl_vec_root *vec2 = (jacl_vec_root *)(uintptr_t)(vm.stack[0] & JACL_PAYLOAD_MASK);
+    ASSERT(jacl_as_i64(jacl_vec_get(vec2, 0).value) == 10);
+    ASSERT(jacl_as_i64(jacl_vec_get(vec2, 1).value) == 20);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_trigger_threshold(void) {
+    /* needs_gc flag is set when bytes_since_gc exceeds threshold */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    ASSERT(!vm.heap.needs_gc);
+
+    /* Allocate until threshold is exceeded */
+    while (vm.heap.bytes_since_gc <= GC_THRESHOLD) {
+        void *p = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+        ASSERT(p != NULL);
+    }
+
+    ASSERT(vm.heap.needs_gc);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_alloc_after_sweep(void) {
+    /* Allocation into freed lines after sweep works correctly */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Allocate some objects, root only one */
+    JaclVal live = jacl_i64(&vm.heap, 1);
+    gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64)); /* dead */
+    gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64)); /* dead */
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    gc_collect(&vm.heap, &vm);
+
+    /* Now allocate again — should use freed lines */
+    JaclVal v2 = jacl_i64(&vm.heap, 2);
+    JaclVal v3 = jacl_i64(&vm.heap, 3);
+    ASSERT(jacl_as_i64(v2) == 2);
+    ASSERT(jacl_as_i64(v3) == 3);
+
+    /* Original live value still intact */
+    ASSERT(jacl_as_i64(live) == 1);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -634,6 +978,18 @@ int main(void) {
         { "gc_mark_alternation",        test_gc_mark_alternation },
         { "gc_mark_deep_closure_chain", test_gc_mark_deep_closure_chain },
         { "gc_mark_mixed_graph",        test_gc_mark_mixed_graph },
+        /* US-007: Sweep phase and GC trigger */
+        { "gc_sweep_dead_freed",        test_gc_sweep_dead_objects_freed },
+        { "gc_sweep_live_survive",      test_gc_sweep_live_objects_survive },
+        { "gc_sweep_line_granularity",  test_gc_sweep_line_granularity },
+        { "gc_sweep_block_recycling",   test_gc_sweep_block_recycling },
+        { "gc_collect_full_cycle",      test_gc_collect_full_cycle },
+        { "gc_collect_multiple_cycles", test_gc_collect_multiple_cycles },
+        { "gc_collect_closure_upvalues",test_gc_collect_closure_with_upvalues },
+        { "gc_collect_map_survives",    test_gc_collect_map_survives },
+        { "gc_collect_vec_survives",    test_gc_collect_vec_survives },
+        { "gc_trigger_threshold",       test_gc_trigger_threshold },
+        { "gc_alloc_after_sweep",       test_gc_alloc_after_sweep },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -30,11 +30,10 @@ typedef enum {
 /* --- GC object header (8 bytes, prepended before payload) --- */
 
 typedef struct {
-    uint32_t epoch;     /* allocation epoch for watermark protection */
-    uint8_t  mark;      /* mark bit (alternates 0/1 each GC cycle) */
-    uint8_t  obj_type;  /* GCObjType — tells GC how to trace */
-    uint8_t  gen;       /* generation (0 = young, 1 = old) */
-    uint8_t  _pad;      /* alignment padding */
+    uint32_t epoch;        /* allocation epoch for watermark protection */
+    uint8_t  mark;         /* mark bit (alternates 0/1 each GC cycle) */
+    uint8_t  obj_type;     /* GCObjType — tells GC how to trace */
+    uint16_t alloc_total;  /* total aligned allocation size (header + payload + padding) */
 } GCHeader;
 
 /* --- Header access --- */
@@ -106,6 +105,7 @@ static GCBlock *gc_block_pool_get(BlockPool *pool) {
         block = (GCBlock *)malloc(sizeof(GCBlock));
         if (!block) return NULL;
     }
+    memset(block->payload, 0, GC_BLOCK_SIZE);
     memset(block->line_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
     block->next = NULL;
     return block;
@@ -129,6 +129,10 @@ static void gc_block_pool_destroy(BlockPool *pool) {
     MUTEX_DESTROY(pool->mutex);
 }
 
+/* --- GC trigger threshold --- */
+
+#define GC_THRESHOLD (1024 * 1024) /* 1MB default */
+
 /* --- ThreadHeap: per-thread heap state --- */
 
 typedef struct {
@@ -139,6 +143,7 @@ typedef struct {
     size_t     bytes_since_gc; /* allocation counter for GC trigger */
     BlockPool *pool;           /* shared block pool */
     uint8_t    current_mark;   /* alternates 0/1 each GC cycle */
+    bool       needs_gc;       /* set by gc_alloc when threshold exceeded */
 } ThreadHeap;
 
 static void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
@@ -149,6 +154,7 @@ static void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
     heap->bytes_since_gc = 0;
     heap->pool = pool;
     heap->current_mark = 1; /* first GC marks with 1 (initial mark on objects is 0) */
+    heap->needs_gc = false;
 }
 
 static void gc_heap_destroy(ThreadHeap *heap) {
@@ -225,15 +231,19 @@ static void *gc__bump_alloc(ThreadHeap *heap, size_t total, uint8_t obj_type) {
     heap->cursor += total;
     heap->bytes_since_gc += total;
 
+    /* Flag GC if threshold exceeded (checked by VM at next safepoint) */
+    if (heap->bytes_since_gc > GC_THRESHOLD) {
+        heap->needs_gc = true;
+    }
+
     gc__mark_lines(heap->current_block,
                    (size_t)(ptr - heap->current_block->payload), total);
 
     hdr = (GCHeader *)ptr;
-    hdr->epoch    = 0;
-    hdr->mark     = 0;
-    hdr->obj_type = obj_type;
-    hdr->gen      = 0;
-    hdr->_pad     = 0;
+    hdr->epoch       = 0;
+    hdr->mark        = 0;
+    hdr->obj_type    = obj_type;
+    hdr->alloc_total = (uint16_t)total;
 
     return hdr + 1; /* payload pointer */
 }
