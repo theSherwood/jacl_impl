@@ -96,7 +96,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Same pattern as US-004 but for RRB. After this story, rc.h should no longer be needed by any JACL runtime code (it may still exist in lib/ for other users). The #undef RC_ALLOCATOR between template includes may no longer be needed. Verify that concurrent collection tests still pass (test_hamt_concurrent.c, test_rrb_vec_concurrent.c) — these test read-only sharing which should still work."
     },
     {

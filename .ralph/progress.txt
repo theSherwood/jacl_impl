@@ -67,6 +67,10 @@
 - Library-level HAMT tests (lib/hamt/test_hamt*.c) still use RC mode — HAMT_GC_MODE is only for jacl_map in collections.c
 - jacl_map_unref is now a no-op (H_RC_UNREF(p) expands to ((void)0) in GC mode) — callers don't need to call it
 - H_ALLOC_LEAF/INTERNAL/COLLISION macros abstract allocation per node type — same pattern available for RRB migration (US-005)
+- RRB_VEC_GC_MODE: same opt-in pattern as HAMT — define RRB_VEC_GC_MODE + RRB_VEC_GC_ALLOC + RRB_VEC_GC_OBJ_* before including rrb_vec.h
+- RRB auxiliary allocator (size tables, temp arrays) remains libc-backed even in GC mode — only node allocation routes through gc_alloc
+- RRB transient API + map/filter via transient wrapped in #ifndef RRB_VEC_GC_MODE; GC-mode map/filter use persistent push_back
+- rc.h no longer included by collections.c — both HAMT and RRB use GC mode
 
 ## 2026-02-25 - US-002
 - Implemented block-based heap allocator with Immix-style line granularity in src/gc.c
@@ -138,4 +142,28 @@ Thread: (inline)
   - Test teardown order matters: vm_destroy → (gc_heap_destroy → gc_block_pool_destroy if standalone) → arena_destroy
   - GC blocks use malloc directly (not tracked_allocator), so tracked_allocator leak checks don't see GC memory — vm_destroy handles GC cleanup
   - All 45 test suites pass (0 failures) including 131 harness tests — GC allocates but doesn't collect yet
+---
+
+## 2026-02-25 - US-005
+Thread: (inline)
+- Migrated RRB persistent vector nodes from RC (reference counting) to GC heap allocation
+- Added RRB_VEC_GC_MODE to lib/rrb_vec/rrb_vec.h: when defined, node allocation routes through gc_alloc with per-node-type obj_type (OBJ_RRB_INTERNAL, OBJ_RRB_LEAF, OBJ_RRB_ROOT), RV_RC_REF/UNREF become no-ops, RV_RC_COUNT returns 2 (always "shared")
+- Added RV_ALLOC_LEAF/INTERNAL/ROOT macros to abstract allocation regardless of GC/RC mode
+- Node destructors (RV_NODE_DESTROY, RV_ROOT_DESTROY) wrapped in #ifndef RRB_VEC_GC_MODE — GC handles lifecycle
+- Transient API + transient iterator/map/filter wrapped in #ifndef RRB_VEC_GC_MODE — requires RC for ownership checks
+- GC-mode map/filter use persistent push_back instead of transient (slower but correct without RC)
+- Auxiliary allocator (size tables, temp arrays in build_tree/slice/concat) remains libc-backed even in GC mode
+- collections.c: RRB instantiated with RRB_VEC_GC_MODE, RRB_VEC_GC_ALLOC routes to gc_alloc(gc__current_heap, ...)
+- vm.c: removed all 8 jacl_vec_ref/unref calls (OP_VEC loop, OP_VEC_SET, OP_MAP_KEYS, OP_MAP_VALS, map-vec, filter-vec) — old nodes become GC garbage
+- vm.c: added gc__current_heap = &vm->heap before vector-allocating operations (OP_VEC, OP_VEC_PUSH, OP_VEC_SET, OP_VEC_CONCAT, OP_VEC_SLICE, OP_MAP_KEYS, OP_MAP_VALS, map-vec, filter-vec)
+- rc.h no longer included by collections.c (both HAMT and RRB now use GC mode)
+- Library-level RRB tests (lib/rrb_vec/test_rrb_vec*.c) unaffected — they don't define RRB_VEC_GC_MODE, still use RC
+- Files changed: lib/rrb_vec/rrb_vec.h, src/collections.c, src/vm.c
+- **Learnings for future iterations:**
+  - RRB_VEC_GC_MODE is opt-in per template instantiation — same rrb_vec.h supports both GC and RC modes
+  - Size tables are NOT GC objects — they use libc alloc/free even in GC mode (not traced by GC)
+  - gc__current_heap must be set before ANY allocating RRB operation (push_back, set, concat, slice, empty)
+  - Read-only RRB ops (get, count, iter) do not allocate — no gc__current_heap needed
+  - Transient API can't work with GC (needs ref_count for ownership) — wrapped in #ifndef
+  - All 45 test suites pass (0 failures) including 131 harness tests
 ---
