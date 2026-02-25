@@ -115,7 +115,8 @@ typedef struct {
     uint32_t epoch;      // allocation epoch
     uint8_t  mark;       // mark bit (alternates 0/1 each cycle to avoid clearing)
     uint8_t  obj_type;   // tells GC how to trace this object's references
-    uint16_t _pad;       // alignment
+    uint8_t  gen;        // generation (0 = young, 1 = old)
+    uint8_t  _pad;       // alignment
 } GCHeader;
 ```
 
@@ -143,35 +144,50 @@ Currently HAMT/RRB nodes use `RCHeader { intptr_t ref_count; void (*destructor)(
 
 ### Structure
 
-Each thread owns a heap composed of fixed-size blocks:
+Each thread owns a heap composed of fixed-size blocks. Each block is subdivided into **lines** (Immix-style):
 
 ```
 Thread Heap:
   [Block 0: 64KB] → [Block 1: 64KB] → [Block 2: 64KB] → ...
                                               ↑ current (allocation target)
+
+Block layout (64KB = 512 lines × 128 bytes):
+  [line 0][line 1][line 2]...[line 511]
+  Each line: 128 bytes of object data
+
+Block metadata (out-of-band, one byte per line):
+  [F][F][O][O][O][F][F][F][O][F]...   F = free, O = occupied
 ```
+
+The line map is stored separately from the block payload (one byte per line = 512 bytes per block). During allocation, the allocator bumps through contiguous sequences of free lines. During sweep, lines containing any live object are marked occupied; lines with no live objects are marked free.
+
+**Why lines instead of whole-block reclamation**: With pure bump allocation into blocks, a single long-lived object pins an entire 64KB block. Line marking allows partial reclamation — if 400 of 512 lines are free, those lines are available for new allocations. This dramatically reduces fragmentation without requiring compaction or object movement.
 
 ### Bump Allocation
 
-Within a block, allocate by bumping a pointer. When full, allocate a new block. Fast path is a pointer bump + epoch stamp — no locks, no contention.
+Allocation bumps a pointer through contiguous free lines. When the current run of free lines is exhausted, the allocator scans the line map for the next free run. When no free runs remain in any block, allocate a new block (all lines free).
 
 ```c
 static inline void* gc_alloc(WorkerThread* t, uint8_t obj_type, size_t payload_size) {
     size_t total = sizeof(GCHeader) + payload_size;
-    // ... bump allocator, get new block if needed ...
+    // Bump within current free-line run; find next run or new block if exhausted
     GCHeader* hdr = (GCHeader*)ptr;
     hdr->epoch    = t->thread_epoch;
     hdr->mark     = 0;
     hdr->obj_type = obj_type;
+    hdr->gen      = 0;  // young
     return hdr + 1;  // return pointer past header (the payload)
 }
 ```
+
+Objects may span multiple lines. An object's "anchor line" is the line containing its header. All lines touched by an object are marked occupied if the object is live.
 
 ### Cross-Thread Access
 
 - **Allocate**: only into own heap (no contention)
 - **Read**: any thread can read any heap (immutables are shared freely)
 - **GC sweep**: GC reads all heaps; only sweeps completed blocks (not the active allocation block of any thread)
+- **Block recycling**: A block with all lines free is returned to a global block pool. Blocks with some free lines stay in the owning thread's heap for bump allocation through the free runs.
 
 ## 7. Root Enumeration
 
@@ -216,7 +232,7 @@ When storing a value into a mutable container (box/atom), update the stored valu
 The epoch bump protects the directly stored value but **not its transitive references**.
 
 ```
-Failure scenario:
+Failure scenario (new value lost):
 
 1. GC scans atom A → sees nil → nothing to trace
 2. Thread T executes continuation C (captures map M, epoch 5, with HAMT children at epoch 3-5)
@@ -232,29 +248,82 @@ Failure scenario:
 
 The bump saves M but not the object graph hanging off it. For leaf values (numbers, strings) it's fine. For closures, vectors, maps — anything with outgoing references — it breaks.
 
-### Solution: Grey Buffer
+### Why an Insertion-Only Barrier Is Also Insufficient
 
-When storing value V into a mutable container during an active GC cycle, push V onto the current thread's grey buffer. The GC drains grey buffers during the mark phase, tracing V and all objects reachable from V.
+An insertion barrier (grey-buffer the new value on store) protects the new value and its transitive references. But it does **not** protect the old value being replaced. The old value can be lost if GC scans the container after the mutation:
+
+```
+Failure scenario (old value lost):
+
+Thread T                         GC (on another worker)
+─────────────────────────────    ─────────────────────────────
+pop continuation C from deque
+  C captures {atom A, fn F}
+  (C does NOT capture V_old)
+                                   ... scanning other roots ...
+read atom A → V_old on VM stack
+compute V_new = [F $V_old]
+swap! A V_new
+  → insertion barrier: grey-buffer V_new ✓
+  → V_old is no longer in A
+                                 scan atom A → see V_new → already grey-buffered ✓
+                                 V_old: NOT marked, NOT grey-buffered
+                                 V_old.epoch < watermark
+                                 sweep: V_old is RECLAIMED
+T still has V_old on VM stack → use-after-free
+```
+
+The root cause: between CPS suspension points, the VM stack is **not** a GC root — only continuation closures are. A value read from a mutable container onto the VM stack, then evicted from the container by another thread's mutation, becomes invisible to the collector.
+
+A deletion-only barrier (SATB) would protect V_old here. But a deletion-only barrier does NOT protect the new value in the first scenario (the old value was `nil`, so grey-buffering `nil` is useless). JACL needs **both** barriers.
+
+### Solution: Hybrid SATB + Insertion Barrier
+
+When overwriting a mutable container during an active GC cycle, grey-buffer **both** the old value (SATB / deletion barrier) and the new value (insertion barrier):
 
 ```c
-static inline void gc_write_barrier(WorkerThread* t, JaclVal new_val) {
+static inline void gc_write_barrier(WorkerThread* t, JaclVal old_val, JaclVal new_val) {
     if (!atomic_load_relaxed(&gc_active)) return;   // fast path: no GC in progress
-    if (!jacl_is_heap_type(new_val)) return;         // inline values need no barrier
-    grey_buffer_push(&t->grey_buf, new_val);
+
+    // SATB deletion barrier: protect the old value and its transitive references.
+    // Prevents use-after-free when a thread holds V_old on its VM stack
+    // and another thread overwrites the container.
+    if (jacl_is_heap_type(old_val)) {
+        grey_buffer_push(&t->grey_buf, old_val);
+    }
+
+    // Insertion barrier: protect the new value and its transitive references.
+    // Prevents collection of a value stored into a container after GC has
+    // already scanned that container, and the source continuation is consumed.
+    if (jacl_is_heap_type(new_val)) {
+        grey_buffer_push(&t->grey_buf, new_val);
+    }
 }
 ```
+
+**Why both are needed:**
+
+| Barrier | Protects against | Example |
+|---------|-----------------|---------|
+| Deletion (SATB) | Old value evicted from container, still held on a VM stack | Thread reads atom, another thread swaps it — old value is invisible to GC |
+| Insertion | New value stored into container after its source continuation is consumed | Continuation stores a map into an atom, continuation is consumed, GC scans atom but never saw the continuation |
+
+Neither barrier alone covers both cases. The hybrid covers both.
 
 **Properties:**
 - Thread-local writes → no contention
 - Only fires on box/atom mutation during GC → rare in mostly-functional code
 - Fast path (no GC active) is a single relaxed atomic load
+- Two conditional pushes per mutation instead of one — negligible cost given mutation rarity
 - GC drains all grey buffers periodically during mark phase + one final drain after mark completes
 
 ### What About Atoms Specifically?
 
 `swap!` applies a function and CAS-es the result. The write barrier fires only on **successful** CAS. Failed CAS attempts don't change the container, so no barrier needed.
 
-For `swap!`, the old value was either already traced by GC (if GC scanned the atom) or will be traced (if GC hasn't scanned it yet). The new value may not be traced → write barrier handles it.
+On successful CAS, the barrier receives both the old value (the value that was replaced) and the new value (the value that was stored). Both are grey-buffered if GC is active. This ensures:
+- The old value (which other threads may have read before the swap) stays live
+- The new value (which may have come from a now-consumed continuation) stays live
 
 ## 9. Mark Phase Details
 
@@ -285,19 +354,131 @@ GC reads each thread's grey buffer. Since grey buffers are thread-local (only th
 
 ## 10. Sweep Phase Details
 
-For each thread's heap, iterate completed blocks:
+### Line-Granularity Sweep
+
+For each thread's heap, iterate completed blocks. Instead of maintaining per-object free lists, sweep updates each block's **line map**:
 
 ```
 for each block in thread->heap->completed_blocks:
+    clear all line marks to FREE
     for each object in block:
-        if (obj->mark == current_mark) → live, do nothing
-        else if (obj->epoch >= watermark) → live (too new), do nothing
-        else → dead, add to free list / reclaim
+        alive = (obj->mark == current_mark) || (obj->epoch >= watermark)
+        if alive:
+            mark all lines touched by this object as OCCUPIED
+    // Lines with no live objects are now FREE — available for bump allocation
 ```
+
+After sweep, each block's line map reflects which 128-byte regions are available. The allocator bumps through contiguous runs of free lines, preserving the fast-path allocation speed.
+
+### Block-Level Outcomes
+
+| Outcome | Action |
+|---------|--------|
+| All lines free | Return block to global pool |
+| Some lines free | Keep in thread's heap; allocator uses free runs |
+| All lines occupied | Skip during allocation (no space) |
+
+**Why this works**: Objects are never moved — live objects remain at their original addresses. Only the line map metadata changes. Worker threads reading live objects see no disruption because the payload bytes of live objects are untouched by the sweep.
 
 **Concurrency**: GC sweeps completed blocks only. The active allocation block (where the owning thread is bump-allocating) is not swept — all objects in it are from the current epoch and are protected by the watermark.
 
-## 11. Collection Migration (HAMT, RRB)
+## 11. Generational Collection (Sticky Mark-Bit)
+
+### Why Generational?
+
+Large persistent data structures (e.g., a 10-million-entry HAMT with ~1.5M internal nodes) are expensive to re-trace every GC cycle if they're long-lived and rarely modified. Generational collection avoids this: promote long-lived objects to an old generation, trace them less often.
+
+### Why No Compaction Is Needed
+
+Classic generational GCs use a copying nursery — young objects are allocated in a semi-space and survivors are copied to the old generation. This requires compaction (moving objects, updating pointers). The **sticky-mark-bit** technique avoids this entirely:
+
+- Objects are promoted **in-place**. "Generation" is a metadata flag (`gen` field in `GCHeader`), not a physical location.
+- Minor collections skip old-generation objects during sweep. No copying, no pointer updates, no forwarding addresses.
+- Major collections trace and sweep everything, same as today's algorithm.
+
+This is the approach used by Immix in generational mode. It pairs naturally with line-based sweep: old objects occupy their lines just like young objects do.
+
+### Algorithm
+
+**Promotion**: An object that survives N minor collections (initially N=1) is promoted: set `header->gen = 1`. The promotion threshold can be tuned — higher values keep objects young longer (better for short-lived bursts), lower values promote faster (less re-tracing).
+
+**Minor GC** (frequent):
+```
+1. Increment global_epoch
+2. Root enumeration (same as full GC)
+3. Mark: trace from roots, but STOP at old-generation objects (don't trace their children)
+   - Also trace from remembered set entries (old→young pointers)
+4. Sweep: only sweep young objects (gen == 0)
+   - marked → live; promote if survival count exceeded
+   - not marked, epoch ≥ watermark → live (too new)
+   - not marked, epoch < watermark → dead, update line map
+5. Update line maps for affected blocks
+```
+
+**Major GC** (infrequent — triggered by old-generation growth threshold):
+```
+Same as current full GC algorithm. Trace everything, sweep everything.
+All objects reset to gen = 0 if they die; survivors keep gen = 1.
+```
+
+### Remembered Set
+
+The critical invariant: minor GC must know about all pointers from old-generation objects to young-generation objects (old→young pointers). Without this, minor GC would miss young objects only reachable through old objects.
+
+**For JACL, the remembered set is naturally tiny:**
+
+- **Immutable values** (the vast majority): Once promoted, an immutable object's references are fixed. All its referents were alive when it was promoted, so they'll be promoted too (same or earlier epoch). An old immutable **can never point to a young object** — it would have had to be mutated, which can't happen. These never need remembered set entries.
+
+- **Mutable containers** (`box`, `atom`): These can store new (young) values into old containers. The existing hybrid write barrier (Section 8) already fires on mutation — extend it to also record a remembered set entry when an old container stores a young value:
+
+```c
+static inline void gc_write_barrier(WorkerThread* t, JaclVal container,
+                                    JaclVal old_val, JaclVal new_val) {
+    // Generational barrier: old container → young value (always active)
+    if (jacl_is_heap_type(new_val)) {
+        GCHeader* container_hdr = gc_header_of(container);
+        if (container_hdr->gen == 1) {
+            GCHeader* val_hdr = gc_header_of(new_val);
+            if (val_hdr->gen == 0) {
+                remembered_set_add(&t->remembered_set, container);
+            }
+        }
+    }
+
+    // Concurrent GC hybrid barrier (SATB + insertion, from Section 8)
+    if (!atomic_load_relaxed(&gc_active)) return;
+    if (jacl_is_heap_type(old_val)) {
+        grey_buffer_push(&t->grey_buf, old_val);
+    }
+    if (jacl_is_heap_type(new_val)) {
+        grey_buffer_push(&t->grey_buf, new_val);
+    }
+}
+```
+
+The remembered set is per-thread (no contention) and only grows when mutable containers are mutated — which is rare in mostly-functional JACL code. The generational check runs unconditionally (not gated on `gc_active`) because the remembered set must be maintained between GC cycles for the next minor collection.
+
+### Scheduling
+
+| Trigger | Collection Type |
+|---------|----------------|
+| Young allocation threshold exceeded (e.g., 1MB) | Minor GC |
+| Old generation grown by >50% since last major | Major GC |
+| Emergency (OOM) | Full STW major GC |
+
+Minor GC is fast because it skips tracing old objects and only sweeps young lines. Major GC is the same as today's full collection. The ratio of minor-to-major collections depends on allocation patterns — mostly-functional code with short-lived intermediates will rarely trigger major GC.
+
+### Implementation Ordering
+
+Generational collection is an optimization on top of the base GC. Implement the base (non-generational) concurrent GC first, then add:
+
+1. `gen` field to `GCHeader` (already included above)
+2. Promotion logic in sweep phase
+3. Remembered set data structure (per-thread append buffer, deduplicated on drain)
+4. Minor GC mode that skips old objects
+5. Scheduling heuristics for minor vs. major
+
+## 12. Collection Migration (HAMT, RRB)
 
 ### Current: Reference Counting
 
@@ -315,7 +496,7 @@ HAMT and RRB nodes use `RCHeader` (refcount + destructor). COW operations `RC_RE
 - No atomic refcount operations
 - Simpler collection code
 
-## 12. Arena Migration
+## 13. Arena Migration
 
 ### Keep on Arena (compile-time only)
 - AST nodes
@@ -337,7 +518,7 @@ Currently strings are interned forever in an arena-backed table. With GC:
 - **Phase 1**: Keep immortal interning (simple, strings are usually long-lived)
 - **Phase 2** (if needed): Weak-reference intern table — GC can reclaim unused strings
 
-## 13. Concurrency Primitives
+## 14. Concurrency Primitives
 
 Built on top of the task/deque infrastructure:
 
@@ -350,7 +531,7 @@ Built on top of the task/deque infrastructure:
 
 Each of these is a **CPS suspension point** — the compiler splits the code here, creating a continuation closure for "what happens after."
 
-## 14. Open Questions
+## 15. Open Questions
 
 ### Root Enumeration
 - Is the `BUSY` sentinel + spin sufficient, or do we need a more robust protocol?
@@ -408,7 +589,7 @@ For atoms: `swap!` is CAS-based and completes within a single CPS segment, so ca
 2. **Heap growth**: If emergency GC doesn't reclaim enough, request more blocks from the OS up to a configurable maximum heap size.
 3. **Panic**: If the OS refuses allocation (or max heap size is reached), raise an unrecoverable OOM error with a diagnostic message (current heap size, allocation request size, survival rate).
 
-## 15. Implementation Ordering
+## 16. Implementation Ordering
 
 These must be interleaved, not sequential:
 
