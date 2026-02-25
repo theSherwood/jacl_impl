@@ -20,7 +20,8 @@ typedef struct {
 /* --- API --- */
 
 static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
-                                      JaclInternTable* intern_table);
+                                      JaclInternTable* intern_table,
+                                      ThreadHeap* heap);
 
 /* --- Type system --- */
 
@@ -145,6 +146,7 @@ typedef struct Compiler Compiler;
 struct Compiler {
   BytecodeChunk*   chunk;
   arena_t*         arena;
+  ThreadHeap*      heap;          /* GC heap for string interning */
   JaclInternTable* intern_table;  /* shared intern table for heap strings */
   uint32_t         error_count;
   const char*      first_error;
@@ -165,9 +167,10 @@ struct Compiler {
 };
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
-                           JaclInternTable* intern_table) {
+                           JaclInternTable* intern_table, ThreadHeap* heap) {
   c->chunk         = chunk;
   c->arena         = arena;
+  c->heap          = heap;
   c->intern_table  = intern_table;
   c->error_count   = 0;
   c->first_error   = NULL;
@@ -1278,7 +1281,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Create body compiler with function-level scope */
     Compiler body_compiler;
-    compiler__init(&body_compiler, &closure->chunk, c->arena, c->intern_table);
+    compiler__init(&body_compiler, &closure->chunk, c->arena, c->intern_table, c->heap);
     body_compiler.scope_depth = 1;
     body_compiler.enclosing   = c;
     body_compiler.return_type = proc_return_type;
@@ -2185,7 +2188,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
       uint32_t len = node->data.lit_string.length;
       JaclVal val;
       if (len > 7) {
-        val = jacl_intern(c->arena, c->intern_table,
+        val = jacl_intern(c->heap, c->intern_table,
                           node->data.lit_string.value, len);
       } else {
         val = jacl_inline_string(node->data.lit_string.value, len);
@@ -2347,13 +2350,14 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
 /* --- Public API --- */
 
 static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
-                                      JaclInternTable* intern_table) {
+                                      JaclInternTable* intern_table,
+                                      ThreadHeap* heap) {
   CompileResult result;
   chunk_init(&result.chunk, arena);
   result.error_count = parse.error_count;
 
   Compiler c;
-  compiler__init(&c, &result.chunk, arena, intern_table);
+  compiler__init(&c, &result.chunk, arena, intern_table, heap);
 
   for (uint32_t i = 0; i < parse.count; i++) {
     compiler__compile_node(&c, parse.nodes[i]);

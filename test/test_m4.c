@@ -40,6 +40,7 @@ static int test_proc_call_pipeline(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "20\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -67,6 +68,7 @@ static int test_factorial(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3628800\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -94,6 +96,7 @@ static int test_fibonacci(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "55\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -123,6 +126,7 @@ static int test_closure_capture(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "15\n100\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -151,6 +155,7 @@ static int test_truthy_falsy(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "yes\nno\nno\nyes\nyes\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -182,6 +187,7 @@ static int test_nested_procs(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "123\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -205,6 +211,7 @@ static int test_error_wrong_argc(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "argument") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -228,6 +235,7 @@ static int test_error_call_non_function(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "cannot call") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -251,6 +259,7 @@ static int test_error_undefined_in_proc(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "nope") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -281,6 +290,7 @@ static int test_while_iterative_sum(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "55\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();

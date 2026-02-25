@@ -94,8 +94,10 @@ static void intern__resize(JaclInternTable* table) {
   table->cap     = new_cap;
 }
 
-/* Intern a string: returns JaclVal with JACL_TAG_STRING tag */
-static JaclVal jacl_intern(arena_t* arena, JaclInternTable* table,
+/* Intern a string: returns JaclVal with JACL_TAG_STRING tag.
+ * String data is allocated on the GC heap (Phase 1: immortal).
+ * Intern table bookkeeping (entries array) remains arena-backed. */
+static JaclVal jacl_intern(ThreadHeap* heap, JaclInternTable* table,
                             const char* data, uint32_t length) {
   uint32_t hash = string__fnv1a(data, length);
 
@@ -115,9 +117,9 @@ static JaclVal jacl_intern(arena_t* arena, JaclInternTable* table,
     slot = intern__find_slot(table->entries, table->cap, data, length, hash);
   }
 
-  /* Allocate new heap string */
-  JaclHeapString* str = (JaclHeapString*)arena_alloc(
-      arena, sizeof(JaclHeapString) + length);
+  /* Allocate new heap string on GC heap */
+  JaclHeapString* str = (JaclHeapString*)gc_alloc(
+      heap, OBJ_STRING, sizeof(JaclHeapString) + length);
   str->length = length;
   str->hash   = hash;
   memcpy(str->data, data, length);

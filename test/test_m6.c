@@ -29,6 +29,7 @@ static void capture_print(const char* text, uint32_t len, void* ctx) {
   vm.print_ctx = &cap
 
 #define TEST_TEARDOWN()            \
+  vm_destroy(&vm);                 \
   arena_destroy(&arena);           \
   ASSERT(check_no_leaks());        \
   TEST_PASS()

@@ -169,6 +169,7 @@ static int run_jacl_test(const char* filepath) {
   }
 
   /* Check for memory leaks */
+  vm_destroy(&vm);
   arena_destroy(&arena);
   if (!check_no_leaks()) {
     fprintf(stderr, "  Memory leak detected!\n");

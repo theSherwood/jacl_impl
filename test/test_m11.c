@@ -34,6 +34,7 @@ static int run_ok(const char* source, PrintCapture* cap, const char* expected) {
   if (result != VM_OK) {
     fprintf(stderr, "  Expected VM_OK but got error: %s\n",
             vm.error_message ? vm.error_message : "(null)");
+    vm_destroy(&vm);
     arena_destroy(&arena);
     return 0;
   }
@@ -41,11 +42,13 @@ static int run_ok(const char* source, PrintCapture* cap, const char* expected) {
     if (strcmp(cap->buf, expected) != 0) {
       fprintf(stderr, "  Output mismatch:\n  Actual:   '%s'\n  Expected: '%s'\n",
               cap->buf, expected);
+      vm_destroy(&vm);
       arena_destroy(&arena);
       return 0;
     }
   }
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   if (!check_no_leaks()) return 0;
   return 1;
@@ -62,16 +65,19 @@ static int run_err(const char* source, const char* err_substr) {
   VMResult result = jacl_run(source, &vm, &arena);
   if (result != VM_RUNTIME_ERROR) {
     fprintf(stderr, "  Expected VM_RUNTIME_ERROR but got VM_OK\n");
+    vm_destroy(&vm);
     arena_destroy(&arena);
     return 0;
   }
   if (err_substr && (!vm.error_message || !strstr(vm.error_message, err_substr))) {
     fprintf(stderr, "  Error message '%s' does not contain '%s'\n",
             vm.error_message ? vm.error_message : "(null)", err_substr);
+    vm_destroy(&vm);
     arena_destroy(&arena);
     return 0;
   }
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   if (!check_no_leaks()) return 0;
   return 1;
@@ -110,12 +116,16 @@ static int test_val_u32_max(void) {
 static int test_val_i64_roundtrip(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  JaclVal v = jacl_i64(&arena, 123456789LL);
+  JaclVal v = jacl_i64(&heap, 123456789LL);
   ASSERT(jacl_is_i64(v));
   ASSERT(!jacl_is_i32(v));
   ASSERT_I64_EQ(jacl_as_i64(v), 123456789LL);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   if (!check_no_leaks()) return 0;
   TEST_PASS();
@@ -124,11 +134,15 @@ static int test_val_i64_roundtrip(void) {
 static int test_val_i64_negative(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  JaclVal v = jacl_i64(&arena, -987654321LL);
+  JaclVal v = jacl_i64(&heap, -987654321LL);
   ASSERT(jacl_is_i64(v));
   ASSERT_I64_EQ(jacl_as_i64(v), -987654321LL);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   if (!check_no_leaks()) return 0;
   TEST_PASS();
@@ -137,12 +151,16 @@ static int test_val_i64_negative(void) {
 static int test_val_u64_roundtrip(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  JaclVal v = jacl_u64(&arena, 999999999999ULL);
+  JaclVal v = jacl_u64(&heap, 999999999999ULL);
   ASSERT(jacl_is_u64(v));
   ASSERT(!jacl_is_i64(v));
   ASSERT_U64_EQ(jacl_as_u64(v), 999999999999ULL);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   if (!check_no_leaks()) return 0;
   TEST_PASS();
@@ -151,12 +169,16 @@ static int test_val_u64_roundtrip(void) {
 static int test_val_f64_roundtrip(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  JaclVal v = jacl_f64(&arena, 3.14159);
+  JaclVal v = jacl_f64(&heap, 3.14159);
   ASSERT(jacl_is_f64(v));
   ASSERT(!jacl_is_f32(v));
   ASSERT(jacl_as_f64(v) == 3.14159);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   if (!check_no_leaks()) return 0;
   TEST_PASS();
@@ -165,11 +187,13 @@ static int test_val_f64_roundtrip(void) {
 static int test_val_predicates_exclusive(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   JaclVal u32v = jacl_u32(1);
-  JaclVal i64v = jacl_i64(&arena, 1);
-  JaclVal u64v = jacl_u64(&arena, 1);
-  JaclVal f64v = jacl_f64(&arena, 1.0);
+  JaclVal i64v = jacl_i64(&heap, 1);
+  JaclVal u64v = jacl_u64(&heap, 1);
+  JaclVal f64v = jacl_f64(&heap, 1.0);
 
   /* u32 should only be u32 */
   ASSERT(jacl_is_u32(u32v));
@@ -195,6 +219,8 @@ static int test_val_predicates_exclusive(void) {
   ASSERT(!jacl_is_u64(f64v));
   ASSERT(jacl_is_f64(f64v));
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   if (!check_no_leaks()) return 0;
   TEST_PASS();

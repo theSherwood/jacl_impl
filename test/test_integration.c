@@ -35,6 +35,7 @@ static int test_jacl_run_basic(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "42\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -56,6 +57,7 @@ static int test_motivating_example(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -76,6 +78,7 @@ static int test_parse_error_reported(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "parse") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -96,6 +99,7 @@ static int test_compile_error_reported(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "7-byte") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -117,6 +121,7 @@ static int test_runtime_error_with_line(void) {
   ASSERT(vm.error_line == 2);
   ASSERT(strstr(vm.error_message, "bool") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -150,6 +155,7 @@ static int test_deliberate_errors(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "<error: 0>\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -192,6 +198,7 @@ static int test_comprehensive_program(void) {
     "205\n"
     "175\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -213,6 +220,7 @@ static int test_f32_pipeline(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "4\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -235,6 +243,7 @@ static int test_semicolons_pipeline(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -252,6 +261,7 @@ static int test_empty_program(void) {
 
   ASSERT_INT_EQ(result, VM_OK);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -275,6 +285,7 @@ static int test_comma_separator_toplevel(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -296,6 +307,7 @@ static int test_comma_separator_block(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "30\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -325,6 +337,7 @@ static int test_var_ref_command_call(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "42\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();

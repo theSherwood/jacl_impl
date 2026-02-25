@@ -78,6 +78,8 @@ typedef struct {
   void*          print_ctx;  /* user context for print callback */
   Environment    env;
   arena_t*       arena;
+  BlockPool      block_pool;    /* GC block pool (owned by VM) */
+  ThreadHeap     heap;          /* GC heap for runtime allocations */
   JaclInternTable* intern_table;  /* shared intern table for concat/interning */
   const char*    error_message;  /* last error message, or NULL */
   uint32_t       error_line;     /* source line of last error */
@@ -87,6 +89,7 @@ typedef struct {
 /* --- API --- */
 
 static void     vm_init(VM* vm, arena_t* arena);
+static void     vm_destroy(VM* vm);
 static VMResult vm_exec(VM* vm, BytecodeChunk* chunk);
 
 /* --- Pipeline convenience --- */
@@ -183,6 +186,10 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->error_line    = 0;
   vm->stack_trace.count = 0;
 
+  /* Initialize GC heap */
+  gc_block_pool_init(&vm->block_pool);
+  gc_heap_init(&vm->heap, &vm->block_pool);
+
   /* Ensure HAMT key handlers are wired up */
   collections__init();
 
@@ -200,6 +207,15 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->env.names[2]  = jacl_inline_string("nil", 3);
   vm->env.values[2] = JACL_NIL;
   vm->env.count = 3;
+}
+
+/**
+ * Destroy the VM's GC heap and block pool.
+ * Call before arena_destroy().
+ */
+static void vm_destroy(VM* vm) {
+  gc_heap_destroy(&vm->heap);
+  gc_block_pool_destroy(&vm->block_pool);
 }
 
 /* --- Stack helpers --- */
@@ -930,8 +946,10 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint16_t index = vm__read_u16(vm);
         JaclClosure* template = jacl_as_closure(vm->chunk->constants[index]);
 
-        /* Allocate a new closure instance with its own upvalue array */
-        JaclClosure* cl = (JaclClosure*)arena_alloc(vm->arena, sizeof(JaclClosure));
+        /* Allocate closure + inline upvalue array on GC heap */
+        size_t uv_bytes = sizeof(JaclVal) * template->upvalue_count;
+        JaclClosure* cl = (JaclClosure*)gc_alloc(&vm->heap, OBJ_CLOSURE,
+                              sizeof(JaclClosure) + uv_bytes);
         cl->chunk        = template->chunk;
         cl->param_count  = template->param_count;
         cl->param_names  = template->param_names;
@@ -941,8 +959,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         cl->variadic     = template->variadic;
 
         if (cl->upvalue_count > 0) {
-          cl->upvalues = (JaclVal*)arena_alloc(vm->arena,
-                            sizeof(JaclVal) * cl->upvalue_count);
+          cl->upvalues = (JaclVal*)(cl + 1); /* trailing array */
           for (uint8_t i = 0; i < cl->upvalue_count; i++) {
             uint8_t is_local = vm__read_byte(vm);
             uint8_t uv_index = vm__read_byte(vm);
@@ -1003,7 +1020,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
           jacl_string_data(a, concat_buf, len_a);
           jacl_string_data(b, concat_buf + len_a, len_b);
-          res = jacl_intern(vm->arena, vm->intern_table, concat_buf, total);
+          res = jacl_intern(&vm->heap, vm->intern_table, concat_buf, total);
         }
 
         result = vm__push(vm, res); if (result != VM_OK) return result;
@@ -1121,7 +1138,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             jacl_string_data(str_val, src_buf, sizeof(src_buf));
             src_data = src_buf;
           }
-          res = jacl_intern(vm->arena, vm->intern_table,
+          res = jacl_intern(&vm->heap, vm->intern_table,
                             src_data + start, slice_len);
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
@@ -1151,7 +1168,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (fmt.len <= 7) {
             str = jacl_inline_string(fmt.data, fmt.len);
           } else {
-            str = jacl_intern(vm->arena, vm->intern_table, fmt.data, fmt.len);
+            str = jacl_intern(&vm->heap, vm->intern_table, fmt.data, fmt.len);
           }
           result = vm__push(vm, str);
           if (result != VM_OK) return result;
@@ -1201,7 +1218,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (slen <= 7) {
             str = jacl_inline_string(buf, slen);
           } else {
-            str = jacl_intern(vm->arena, vm->intern_table, buf, slen);
+            str = jacl_intern(&vm->heap, vm->intern_table, buf, slen);
           }
           result = vm__push(vm, str);
           if (result != VM_OK) return result;
@@ -2135,7 +2152,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (fmt.len <= 7) {
             trace_str = jacl_inline_string(fmt.data, fmt.len);
           } else {
-            trace_str = jacl_intern(vm->arena, vm->intern_table, fmt.data, fmt.len);
+            trace_str = jacl_intern(&vm->heap, vm->intern_table, fmt.data, fmt.len);
           }
           result = vm__push(vm, trace_str);
           if (result != VM_OK) return result;
@@ -2146,7 +2163,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
       case OP_MAKE_CELL: {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
-        JaclMutableRef* ref = (JaclMutableRef*)arena_alloc(vm->arena, sizeof(JaclMutableRef));
+        JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
         ref->value = value;
         result = vm__push(vm, jacl_cell_ptr(ref));
         if (result != VM_OK) return result;
@@ -2213,7 +2230,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, value); if (result != VM_OK) return result;
           break;
         }
-        JaclMutableRef* ref = (JaclMutableRef*)arena_alloc(vm->arena, sizeof(JaclMutableRef));
+        JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
         ref->value = value;
         result = vm__push(vm, jacl_box_ptr(ref));
         if (result != VM_OK) return result;
@@ -2227,7 +2244,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, value); if (result != VM_OK) return result;
           break;
         }
-        JaclMutableRef* ref = (JaclMutableRef*)arena_alloc(vm->arena, sizeof(JaclMutableRef));
+        JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
         ref->value = value;
         result = vm__push(vm, jacl_atom_ptr(ref));
         if (result != VM_OK) return result;
@@ -2921,18 +2938,18 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
           case TYPE_I64: {
             int64_t i = (int64_t)val;
-            result = vm__push(vm, jacl_i64(vm->arena, i));
+            result = vm__push(vm, jacl_i64(&vm->heap, i));
             break;
           }
           case TYPE_U64: {
             uint64_t u = val;
-            result = vm__push(vm, jacl_u64(vm->arena, u));
+            result = vm__push(vm, jacl_u64(&vm->heap, u));
             break;
           }
           case TYPE_F64: {
             double d;
             memcpy(&d, &val, sizeof(double));
-            result = vm__push(vm, jacl_f64(vm->arena, d));
+            result = vm__push(vm, jacl_f64(&vm->heap, d));
             break;
           }
           default: {
@@ -2988,7 +3005,7 @@ static VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   JaclInternTable intern_table;
   intern_table_init(&intern_table, arena);
 
-  CompileResult cr = compiler_compile(parse, arena, &intern_table);
+  CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap);
   if (cr.error_count > 0) {
     vm->error_message = cr.error_message ? cr.error_message : "compile error";
     return VM_RUNTIME_ERROR;

@@ -7,11 +7,13 @@
 static int test_intern_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
-  JaclVal v = jacl_intern(&arena, &table, "hello world", 11);
+  JaclVal v = jacl_intern(&heap, &table, "hello world", 11);
 
   ASSERT(jacl_is_heap_string(v));
   ASSERT(jacl_is_string(v));
@@ -20,6 +22,8 @@ static int test_intern_basic(void) {
   ASSERT_U32_EQ(hs->length, 11);
   ASSERT(memcmp(hs->data, "hello world", 11) == 0);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -29,12 +33,14 @@ static int test_intern_basic(void) {
 static int test_intern_dedup(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
-  JaclVal v1 = jacl_intern(&arena, &table, "hello world", 11);
-  JaclVal v2 = jacl_intern(&arena, &table, "hello world", 11);
+  JaclVal v1 = jacl_intern(&heap, &table, "hello world", 11);
+  JaclVal v2 = jacl_intern(&heap, &table, "hello world", 11);
 
   /* Pointer equality guaranteed by interning */
   ASSERT_U64_EQ(v1, v2);
@@ -43,6 +49,8 @@ static int test_intern_dedup(void) {
   JaclHeapString* hs2 = jacl_as_heap_string(v2);
   ASSERT_PTR_EQ(hs1, hs2);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -52,12 +60,14 @@ static int test_intern_dedup(void) {
 static int test_intern_different(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
-  JaclVal v1 = jacl_intern(&arena, &table, "hello world", 11);
-  JaclVal v2 = jacl_intern(&arena, &table, "goodbye world", 13);
+  JaclVal v1 = jacl_intern(&heap, &table, "hello world", 11);
+  JaclVal v2 = jacl_intern(&heap, &table, "goodbye world", 13);
 
   ASSERT(v1 != v2);
 
@@ -67,6 +77,8 @@ static int test_intern_different(void) {
   ASSERT_U32_EQ(hs1->length, 11);
   ASSERT_U32_EQ(hs2->length, 13);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -76,6 +88,8 @@ static int test_intern_different(void) {
 static int test_intern_embedded_nul(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   JaclInternTable table;
   intern_table_init(&table, &arena);
@@ -83,8 +97,8 @@ static int test_intern_embedded_nul(void) {
   const char data_with_nul[] = "hel\0lo w\0rld";
   uint32_t len = 12;  /* includes the NUL bytes */
 
-  JaclVal v1 = jacl_intern(&arena, &table, data_with_nul, len);
-  JaclVal v2 = jacl_intern(&arena, &table, data_with_nul, len);
+  JaclVal v1 = jacl_intern(&heap, &table, data_with_nul, len);
+  JaclVal v2 = jacl_intern(&heap, &table, data_with_nul, len);
 
   /* Should still deduplicate correctly */
   ASSERT_U64_EQ(v1, v2);
@@ -94,9 +108,11 @@ static int test_intern_embedded_nul(void) {
   ASSERT(memcmp(hs->data, data_with_nul, 12) == 0);
 
   /* Different string without NUL should be different */
-  JaclVal v3 = jacl_intern(&arena, &table, "hello world!", 12);
+  JaclVal v3 = jacl_intern(&heap, &table, "hello world!", 12);
   ASSERT(v1 != v3);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -122,6 +138,8 @@ static int test_fnv1a_hash(void) {
 static int test_intern_resize(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   JaclInternTable table;
   intern_table_init(&table, &arena);
@@ -131,7 +149,7 @@ static int test_intern_resize(void) {
   JaclVal values[20];
   for (int i = 0; i < 20; i++) {
     int n = snprintf(buf, sizeof(buf), "string number %02d", i);
-    values[i] = jacl_intern(&arena, &table, buf, (uint32_t)n);
+    values[i] = jacl_intern(&heap, &table, buf, (uint32_t)n);
     ASSERT(jacl_is_heap_string(values[i]));
   }
 
@@ -141,10 +159,12 @@ static int test_intern_resize(void) {
   /* Verify all strings are still findable after resize */
   for (int i = 0; i < 20; i++) {
     int n = snprintf(buf, sizeof(buf), "string number %02d", i);
-    JaclVal v = jacl_intern(&arena, &table, buf, (uint32_t)n);
+    JaclVal v = jacl_intern(&heap, &table, buf, (uint32_t)n);
     ASSERT_U64_EQ(v, values[i]);  /* pointer equality */
   }
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -154,11 +174,13 @@ static int test_intern_resize(void) {
 static int test_is_heap_string_predicate(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
-  JaclVal heap_str = jacl_intern(&arena, &table, "long string here", 16);
+  JaclVal heap_str = jacl_intern(&heap, &table, "long string here", 16);
   JaclVal inline_str = jacl_inline_string("short", 5);
   JaclVal integer = jacl_i32(42);
   JaclVal nil = JACL_NIL;
@@ -168,6 +190,8 @@ static int test_is_heap_string_predicate(void) {
   ASSERT(jacl_is_heap_string(integer) == false);
   ASSERT(jacl_is_heap_string(nil) == false);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -179,17 +203,21 @@ static int test_is_heap_string_predicate(void) {
 static int test_string_len(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
   JaclVal short_s = jacl_inline_string("hello", 5);
   JaclVal empty_s = jacl_inline_string("", 0);
-  JaclVal long_s = jacl_intern(&arena, &table, "hello world!", 12);
+  JaclVal long_s = jacl_intern(&heap, &table, "hello world!", 12);
 
   ASSERT_U32_EQ(jacl_string_len(short_s), 5);
   ASSERT_U32_EQ(jacl_string_len(empty_s), 0);
   ASSERT_U32_EQ(jacl_string_len(long_s), 12);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -199,11 +227,13 @@ static int test_string_len(void) {
 static int test_string_data(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
   JaclVal short_s = jacl_inline_string("abc", 3);
-  JaclVal long_s = jacl_intern(&arena, &table, "hello world!", 12);
+  JaclVal long_s = jacl_intern(&heap, &table, "hello world!", 12);
 
   char buf[32];
 
@@ -222,6 +252,8 @@ static int test_string_data(void) {
   ASSERT_U32_EQ(len, 12);  /* returns actual length */
   ASSERT(memcmp(buf, "hello", 5) == 0);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -231,11 +263,13 @@ static int test_string_data(void) {
 static int test_is_string_unified(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
   JaclVal short_s = jacl_inline_string("hi", 2);
-  JaclVal long_s = jacl_intern(&arena, &table, "hello world!", 12);
+  JaclVal long_s = jacl_intern(&heap, &table, "hello world!", 12);
   JaclVal integer = jacl_i32(42);
   JaclVal nil = JACL_NIL;
 
@@ -244,6 +278,8 @@ static int test_is_string_unified(void) {
   ASSERT(jacl_is_string(integer) == false);
   ASSERT(jacl_is_string(nil) == false);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -264,16 +300,20 @@ static int test_string_eq_short_short(void) {
 static int test_string_eq_long_long(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
-  JaclVal a = jacl_intern(&arena, &table, "hello world!", 12);
-  JaclVal b = jacl_intern(&arena, &table, "hello world!", 12);
-  JaclVal c = jacl_intern(&arena, &table, "goodbye world", 13);
+  JaclVal a = jacl_intern(&heap, &table, "hello world!", 12);
+  JaclVal b = jacl_intern(&heap, &table, "hello world!", 12);
+  JaclVal c = jacl_intern(&heap, &table, "goodbye world", 13);
 
   ASSERT(jacl_string_eq(a, b) == true);
   ASSERT(jacl_string_eq(a, c) == false);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -283,14 +323,18 @@ static int test_string_eq_long_long(void) {
 static int test_string_eq_short_long(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
   JaclVal short_s = jacl_inline_string("hello", 5);
-  JaclVal long_s = jacl_intern(&arena, &table, "hello world!", 12);
+  JaclVal long_s = jacl_intern(&heap, &table, "hello world!", 12);
 
   ASSERT(jacl_string_eq(short_s, long_s) == false);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -300,11 +344,13 @@ static int test_string_eq_short_long(void) {
 static int test_string_eq_cross_rep(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
   /* Intern a short string (<=7 bytes) as heap string */
-  JaclVal heap_hi = jacl_intern(&arena, &table, "hi", 2);
+  JaclVal heap_hi = jacl_intern(&heap, &table, "hi", 2);
   JaclVal inline_hi = jacl_inline_string("hi", 2);
 
   /* Different representations, same content */
@@ -317,6 +363,8 @@ static int test_string_eq_cross_rep(void) {
   JaclVal inline_no = jacl_inline_string("no", 2);
   ASSERT(jacl_string_eq(heap_hi, inline_no) == false);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -326,6 +374,8 @@ static int test_string_eq_cross_rep(void) {
 static int test_string_cmp_ordering(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
@@ -333,8 +383,8 @@ static int test_string_cmp_ordering(void) {
   JaclVal def = jacl_inline_string("def", 3);
   JaclVal ab = jacl_inline_string("ab", 2);
   JaclVal abc2 = jacl_inline_string("abc", 3);
-  JaclVal long_abc = jacl_intern(&arena, &table, "abcdefghij", 10);
-  JaclVal long_xyz = jacl_intern(&arena, &table, "xyzxyzxyzx", 10);
+  JaclVal long_abc = jacl_intern(&heap, &table, "abcdefghij", 10);
+  JaclVal long_xyz = jacl_intern(&heap, &table, "xyzxyzxyzx", 10);
 
   /* short < short */
   ASSERT(jacl_string_cmp(abc, def) < 0);
@@ -354,6 +404,8 @@ static int test_string_cmp_ordering(void) {
   /* short < long (cross-rep) */
   ASSERT(jacl_string_cmp(abc, long_xyz) < 0);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -363,20 +415,23 @@ static int test_string_cmp_ordering(void) {
 
 /* Helper: compile source with an intern table */
 static CompileResult compile_with_intern(const char* source, arena_t* arena,
-                                          JaclInternTable* table) {
+                                          JaclInternTable* table,
+                                          ThreadHeap* heap) {
   LexResult tokens = lexer_lex(source, arena);
   ParseResult parse = parser_parse(tokens, arena);
-  return compiler_compile(parse, arena, table);
+  return compiler_compile(parse, arena, table, heap);
 }
 
 /* Test: short string literal (<=7 bytes) still produces inline constant */
 static int test_compile_short_string_still_inline(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
-  CompileResult cr = compile_with_intern("\"hello\"", &arena, &table);
+  CompileResult cr = compile_with_intern("\"hello\"", &arena, &table, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   /* Should have one constant: an inline string */
@@ -385,6 +440,8 @@ static int test_compile_short_string_still_inline(void) {
   ASSERT(jacl_is_inline_string(val));
   ASSERT_U32_EQ(jacl_string_len(val), 5);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -394,10 +451,12 @@ static int test_compile_short_string_still_inline(void) {
 static int test_compile_long_string_interns(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
-  CompileResult cr = compile_with_intern("\"hello world\"", &arena, &table);
+  CompileResult cr = compile_with_intern("\"hello world\"", &arena, &table, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   /* Should have one constant: a heap string */
@@ -409,6 +468,8 @@ static int test_compile_long_string_interns(void) {
   ASSERT_U32_EQ(hs->length, 11);
   ASSERT(memcmp(hs->data, "hello world", 11) == 0);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -418,12 +479,14 @@ static int test_compile_long_string_interns(void) {
 static int test_compile_dup_long_strings_share_pointer(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
   /* Two statements using the same long literal */
   CompileResult cr = compile_with_intern(
-      "[print \"hello world\"] [print \"hello world\"]", &arena, &table);
+      "[print \"hello world\"] [print \"hello world\"]", &arena, &table, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   /* Find the heap string constants — both should be the same JaclVal */
@@ -442,6 +505,8 @@ static int test_compile_dup_long_strings_share_pointer(void) {
   }
   ASSERT(heap_count >= 2);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -451,12 +516,16 @@ static int test_compile_dup_long_strings_share_pointer(void) {
 static int test_compile_print_long_string_no_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
-  CompileResult cr = compile_with_intern("[print \"hello world\"]", &arena, &table);
+  CompileResult cr = compile_with_intern("[print \"hello world\"]", &arena, &table, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -466,13 +535,17 @@ static int test_compile_print_long_string_no_error(void) {
 static int test_compile_def_long_string_no_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
   JaclInternTable table;
   intern_table_init(&table, &arena);
 
   CompileResult cr = compile_with_intern(
-      "[def greet \"hello world\"]", &arena, &table);
+      "[def greet \"hello world\"]", &arena, &table, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -511,6 +584,7 @@ static int test_print_heap_string(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello world\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -532,6 +606,7 @@ static int test_print_inline_string(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "short\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -554,6 +629,7 @@ static int test_print_long_heap_string(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello world this is a long string\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -576,6 +652,7 @@ static int test_print_heap_string_via_variable(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello world\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -598,6 +675,7 @@ static int test_print_mixed_strings(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hi\nhello world\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -621,6 +699,7 @@ static int test_vm_eq_inline_inline(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "true\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -643,6 +722,7 @@ static int test_vm_eq_heap_heap(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "true\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -664,6 +744,7 @@ static int test_vm_eq_different(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "false\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -685,6 +766,7 @@ static int test_vm_eq_string_vs_int(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "false\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -706,6 +788,7 @@ static int test_vm_lt_strings(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "true\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -727,6 +810,7 @@ static int test_vm_gt_strings(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "true\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -749,6 +833,7 @@ static int test_vm_numeric_cmp_unchanged(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "true\ntrue\ntrue\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -771,6 +856,7 @@ static int test_vm_lt_heap_strings(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "true\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -794,6 +880,7 @@ static int test_vm_le_ge_strings(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "true\ntrue\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -817,6 +904,7 @@ static int test_concat_short_short(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -839,6 +927,7 @@ static int test_concat_short_short_heap_result(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello world\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -861,6 +950,7 @@ static int test_concat_short_long(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello world this is long\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -883,6 +973,7 @@ static int test_concat_long_long(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello world goodbye world\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -905,6 +996,7 @@ static int test_concat_variadic(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "abc\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -926,6 +1018,7 @@ static int test_concat_empty_empty(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -950,6 +1043,7 @@ static int test_concat_result_interned(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "true\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -972,6 +1066,7 @@ static int test_concat_with_variable(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello world\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -995,6 +1090,7 @@ static int test_length_inline(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "5\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1016,6 +1112,7 @@ static int test_length_empty(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "0\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1038,6 +1135,7 @@ static int test_length_heap(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "24\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1059,6 +1157,7 @@ static int test_index_basic(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "e\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1080,6 +1179,7 @@ static int test_index_zero(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "h\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1101,6 +1201,7 @@ static int test_index_negative(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "nil\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1122,6 +1223,7 @@ static int test_index_out_of_bounds(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "nil\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1143,6 +1245,7 @@ static int test_slice_basic(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "el\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1164,6 +1267,7 @@ static int test_slice_one_arg(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "llo\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1186,6 +1290,7 @@ static int test_slice_heap_string(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "world\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1207,6 +1312,7 @@ static int test_slice_empty(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1228,6 +1334,7 @@ static int test_slice_full(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1249,6 +1356,7 @@ static int test_slice_zero_length(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1272,6 +1380,7 @@ static int test_slice_heap_result(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello wo\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1294,6 +1403,7 @@ static int test_index_heap_string(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "w\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1316,6 +1426,7 @@ static int test_slice_boundary(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "lo\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1362,6 +1473,7 @@ static int test_to_string_integer(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "42\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1397,6 +1509,7 @@ static int test_to_string_negative_int(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "-7\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1432,6 +1545,7 @@ static int test_to_string_float(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3.14\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1464,6 +1578,7 @@ static int test_to_string_true(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "true\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1496,6 +1611,7 @@ static int test_to_string_false(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "false\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1528,6 +1644,7 @@ static int test_to_string_nil(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "nil\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1564,6 +1681,7 @@ static int test_to_string_string_noop(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1609,6 +1727,7 @@ static int test_to_string_closure(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "<proc foo>\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1647,6 +1766,7 @@ static int test_to_string_inline_result(void) {
   jacl_string_data(top, buf, sizeof(buf));
   ASSERT(memcmp(buf, "42", 2) == 0);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1690,6 +1810,7 @@ static int test_to_string_heap_result(void) {
   JaclHeapString* hs = jacl_as_heap_string(top);
   ASSERT(memcmp(hs->data, "<proc my_long_proc>", hs->length) == 0);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1714,6 +1835,7 @@ static int test_interp_variable(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello world\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1736,6 +1858,7 @@ static int test_interp_int_variable(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "x is 42\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1758,6 +1881,7 @@ static int test_interp_command(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "sum is 3\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1780,6 +1904,7 @@ static int test_interp_multiple_commands(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3 plus 7\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1802,6 +1927,7 @@ static int test_interp_adjacent(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "xy\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1824,6 +1950,7 @@ static int test_interp_mixed(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "n=10, n+1=11\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1846,6 +1973,7 @@ static int test_interp_only_var(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hi\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1868,6 +1996,7 @@ static int test_interp_heap_result(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello JACL world\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();

@@ -277,4 +277,202 @@ static void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
     return gc__bump_alloc(heap, total, obj_type);
 }
 
+/* ======================================================================
+ * Heap-allocating value constructors (moved from value.c — need ThreadHeap)
+ * ====================================================================== */
+
+static inline JaclVal jacl_i64(ThreadHeap *heap, int64_t n) {
+    JaclHeapI64 *h = (JaclHeapI64 *)gc_alloc(heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    h->value = n;
+    return JACL_TAG_I64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclVal jacl_u64(ThreadHeap *heap, uint64_t n) {
+    JaclHeapU64 *h = (JaclHeapU64 *)gc_alloc(heap, OBJ_HEAP_U64, sizeof(JaclHeapU64));
+    h->value = n;
+    return JACL_TAG_U64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclVal jacl_f64(ThreadHeap *heap, double d) {
+    JaclHeapF64 *h = (JaclHeapF64 *)gc_alloc(heap, OBJ_HEAP_F64, sizeof(JaclHeapF64));
+    h->value = d;
+    return JACL_TAG_F64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
+}
+
+/* --- i64 arithmetic --- */
+
+static inline JaclVal jacl_i64_add(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_i64(heap, jacl_as_i64(a) + jacl_as_i64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_sub(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_i64(heap, jacl_as_i64(a) - jacl_as_i64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_mul(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_i64(heap, jacl_as_i64(a) * jacl_as_i64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_div(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    int64_t divisor = jacl_as_i64(b);
+    if (divisor == 0) {
+        return jacl_apply_flags(jacl_set_error(jacl_i64(heap, 0)), flags);
+    }
+    int64_t dividend = jacl_as_i64(a);
+    int64_t quot = (dividend == INT64_MIN && divisor == -1)
+        ? INT64_MIN : (dividend / divisor);
+    JaclVal result = jacl_i64(heap, quot);
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_mod(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    int64_t divisor = jacl_as_i64(b);
+    if (divisor == 0) {
+        return jacl_apply_flags(jacl_set_error(jacl_i64(heap, 0)), flags);
+    }
+    int64_t dividend = jacl_as_i64(a);
+    int64_t rem = (dividend == INT64_MIN && divisor == -1)
+        ? 0 : (dividend % divisor);
+    JaclVal result = jacl_i64(heap, rem);
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_i64_neg(ThreadHeap *heap, JaclVal a) {
+    if (jacl_is_error(a)) return a;
+    uint64_t flags = a & JACL_FLAGS_MASK;
+    JaclVal result = jacl_i64(heap, -jacl_as_i64(a));
+    return jacl_apply_flags(result, flags);
+}
+
+/* --- u64 arithmetic --- */
+
+static inline JaclVal jacl_u64_add(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_u64(heap, jacl_as_u64(a) + jacl_as_u64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_sub(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_u64(heap, jacl_as_u64(a) - jacl_as_u64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_mul(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_u64(heap, jacl_as_u64(a) * jacl_as_u64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_div(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    uint64_t divisor = jacl_as_u64(b);
+    if (divisor == 0) {
+        return jacl_apply_flags(jacl_set_error(jacl_u64(heap, 0)), flags);
+    }
+    JaclVal result = jacl_u64(heap, jacl_as_u64(a) / divisor);
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_mod(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    uint64_t divisor = jacl_as_u64(b);
+    if (divisor == 0) {
+        return jacl_apply_flags(jacl_set_error(jacl_u64(heap, 0)), flags);
+    }
+    JaclVal result = jacl_u64(heap, jacl_as_u64(a) % divisor);
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_u64_neg(ThreadHeap *heap, JaclVal a) {
+    if (jacl_is_error(a)) return a;
+    uint64_t flags = a & JACL_FLAGS_MASK;
+    return jacl_apply_flags(jacl_set_error(jacl_u64(heap, 0)), flags);
+}
+
+/* --- f64 arithmetic --- */
+
+static inline JaclVal jacl_f64_add(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_f64(heap, jacl_as_f64(a) + jacl_as_f64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_sub(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_f64(heap, jacl_as_f64(a) - jacl_as_f64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_mul(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    JaclVal result = jacl_f64(heap, jacl_as_f64(a) * jacl_as_f64(b));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_div(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    double divisor = jacl_as_f64(b);
+    if (divisor == 0.0) {
+        return jacl_apply_flags(jacl_set_error(jacl_f64(heap, 0.0)), flags);
+    }
+    JaclVal result = jacl_f64(heap, jacl_as_f64(a) / divisor);
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_mod(ThreadHeap *heap, JaclVal a, JaclVal b) {
+    if (jacl_is_error(a)) return a;
+    if (jacl_is_error(b)) return b;
+    uint64_t flags = jacl_propagate_flags(a, b);
+    double divisor = jacl_as_f64(b);
+    if (divisor == 0.0) {
+        return jacl_apply_flags(jacl_set_error(jacl_f64(heap, 0.0)), flags);
+    }
+    JaclVal result = jacl_f64(heap, fmod(jacl_as_f64(a), divisor));
+    return jacl_apply_flags(result, flags);
+}
+
+static inline JaclVal jacl_f64_neg(ThreadHeap *heap, JaclVal a) {
+    if (jacl_is_error(a)) return a;
+    uint64_t flags = a & JACL_FLAGS_MASK;
+    JaclVal result = jacl_f64(heap, -jacl_as_f64(a));
+    return jacl_apply_flags(result, flags);
+}
+
 #endif /* GC_C */

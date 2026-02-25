@@ -89,23 +89,7 @@ static inline JaclVal jacl_u32(uint32_t n) {
     return JACL_TAG_U32 | ((uint64_t)n & JACL_PAYLOAD_MASK);
 }
 
-static inline JaclVal jacl_i64(arena_t *arena, int64_t n) {
-    JaclHeapI64 *h = (JaclHeapI64 *)arena_alloc(arena, sizeof(JaclHeapI64));
-    h->value = n;
-    return JACL_TAG_I64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
-}
-
-static inline JaclVal jacl_u64(arena_t *arena, uint64_t n) {
-    JaclHeapU64 *h = (JaclHeapU64 *)arena_alloc(arena, sizeof(JaclHeapU64));
-    h->value = n;
-    return JACL_TAG_U64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
-}
-
-static inline JaclVal jacl_f64(arena_t *arena, double d) {
-    JaclHeapF64 *h = (JaclHeapF64 *)arena_alloc(arena, sizeof(JaclHeapF64));
-    h->value = d;
-    return JACL_TAG_F64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
-}
+/* jacl_i64, jacl_u64, jacl_f64 constructors moved to gc.c (need ThreadHeap) */
 
 /* --- Type tag extractor --- */
 
@@ -647,68 +631,7 @@ static inline JaclVal jacl_u32_eq(JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-/* --- i64 arithmetic --- */
-
-static inline JaclVal jacl_i64_add(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    JaclVal result = jacl_i64(arena, jacl_as_i64(a) + jacl_as_i64(b));
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_i64_sub(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    JaclVal result = jacl_i64(arena, jacl_as_i64(a) - jacl_as_i64(b));
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_i64_mul(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    JaclVal result = jacl_i64(arena, jacl_as_i64(a) * jacl_as_i64(b));
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_i64_div(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    int64_t divisor = jacl_as_i64(b);
-    if (divisor == 0) {
-        return jacl_apply_flags(jacl_set_error(jacl_i64(arena, 0)), flags);
-    }
-    int64_t dividend = jacl_as_i64(a);
-    int64_t quot = (dividend == INT64_MIN && divisor == -1)
-        ? INT64_MIN : (dividend / divisor);
-    JaclVal result = jacl_i64(arena, quot);
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_i64_mod(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    int64_t divisor = jacl_as_i64(b);
-    if (divisor == 0) {
-        return jacl_apply_flags(jacl_set_error(jacl_i64(arena, 0)), flags);
-    }
-    int64_t dividend = jacl_as_i64(a);
-    int64_t rem = (dividend == INT64_MIN && divisor == -1)
-        ? 0 : (dividend % divisor);
-    JaclVal result = jacl_i64(arena, rem);
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_i64_neg(arena_t *arena, JaclVal a) {
-    if (jacl_is_error(a)) return a;
-    uint64_t flags = a & JACL_FLAGS_MASK;
-    JaclVal result = jacl_i64(arena, -jacl_as_i64(a));
-    return jacl_apply_flags(result, flags);
-}
+/* i64 arithmetic (jacl_i64_add .. jacl_i64_neg) moved to gc.c (need ThreadHeap) */
 
 /* --- i64 comparisons --- */
 
@@ -752,61 +675,7 @@ static inline JaclVal jacl_i64_eq(JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-/* --- u64 arithmetic --- */
-
-static inline JaclVal jacl_u64_add(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    JaclVal result = jacl_u64(arena, jacl_as_u64(a) + jacl_as_u64(b));
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_u64_sub(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    JaclVal result = jacl_u64(arena, jacl_as_u64(a) - jacl_as_u64(b));
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_u64_mul(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    JaclVal result = jacl_u64(arena, jacl_as_u64(a) * jacl_as_u64(b));
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_u64_div(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    uint64_t divisor = jacl_as_u64(b);
-    if (divisor == 0) {
-        return jacl_apply_flags(jacl_set_error(jacl_u64(arena, 0)), flags);
-    }
-    JaclVal result = jacl_u64(arena, jacl_as_u64(a) / divisor);
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_u64_mod(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    uint64_t divisor = jacl_as_u64(b);
-    if (divisor == 0) {
-        return jacl_apply_flags(jacl_set_error(jacl_u64(arena, 0)), flags);
-    }
-    JaclVal result = jacl_u64(arena, jacl_as_u64(a) % divisor);
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_u64_neg(arena_t *arena, JaclVal a) {
-    if (jacl_is_error(a)) return a;
-    uint64_t flags = a & JACL_FLAGS_MASK;
-    return jacl_apply_flags(jacl_set_error(jacl_u64(arena, 0)), flags);
-}
+/* u64 arithmetic (jacl_u64_add .. jacl_u64_neg) moved to gc.c (need ThreadHeap) */
 
 /* --- u64 comparisons --- */
 
@@ -850,62 +719,7 @@ static inline JaclVal jacl_u64_eq(JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-/* --- f64 arithmetic --- */
-
-static inline JaclVal jacl_f64_add(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    JaclVal result = jacl_f64(arena, jacl_as_f64(a) + jacl_as_f64(b));
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_f64_sub(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    JaclVal result = jacl_f64(arena, jacl_as_f64(a) - jacl_as_f64(b));
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_f64_mul(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    JaclVal result = jacl_f64(arena, jacl_as_f64(a) * jacl_as_f64(b));
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_f64_div(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    double divisor = jacl_as_f64(b);
-    if (divisor == 0.0) {
-        return jacl_apply_flags(jacl_set_error(jacl_f64(arena, 0.0)), flags);
-    }
-    JaclVal result = jacl_f64(arena, jacl_as_f64(a) / divisor);
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_f64_mod(arena_t *arena, JaclVal a, JaclVal b) {
-    if (jacl_is_error(a)) return a;
-    if (jacl_is_error(b)) return b;
-    uint64_t flags = jacl_propagate_flags(a, b);
-    double divisor = jacl_as_f64(b);
-    if (divisor == 0.0) {
-        return jacl_apply_flags(jacl_set_error(jacl_f64(arena, 0.0)), flags);
-    }
-    JaclVal result = jacl_f64(arena, fmod(jacl_as_f64(a), divisor));
-    return jacl_apply_flags(result, flags);
-}
-
-static inline JaclVal jacl_f64_neg(arena_t *arena, JaclVal a) {
-    if (jacl_is_error(a)) return a;
-    uint64_t flags = a & JACL_FLAGS_MASK;
-    JaclVal result = jacl_f64(arena, -jacl_as_f64(a));
-    return jacl_apply_flags(result, flags);
-}
+/* f64 arithmetic (jacl_f64_add .. jacl_f64_neg) moved to gc.c (need ThreadHeap) */
 
 /* --- f64 comparisons --- */
 

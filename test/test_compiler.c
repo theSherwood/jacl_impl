@@ -3,12 +3,12 @@
 
 /* ===== Helper: parse source and compile ===== */
 
-static CompileResult compile_source(const char* source, arena_t* arena) {
+static CompileResult compile_source(const char* source, arena_t* arena, ThreadHeap* heap) {
   LexResult tokens = lexer_lex(source, arena);
   ParseResult parse = parser_parse(tokens, arena);
   JaclInternTable intern_table;
   intern_table_init(&intern_table, arena);
-  return compiler_compile(parse, arena, &intern_table);
+  return compiler_compile(parse, arena, &intern_table, heap);
 }
 
 /* ===== US-003: Compiler skeleton and literal compilation ===== */
@@ -17,8 +17,10 @@ static CompileResult compile_source(const char* source, arena_t* arena) {
 static int test_compile_int(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("42", &arena);
+  CompileResult cr = compile_source("42", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 1);
@@ -32,6 +34,8 @@ static int test_compile_int(void) {
   ASSERT_INT_EQ(cr.chunk.code[2], 0); /* low byte */
   ASSERT_INT_EQ(cr.chunk.code[3], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -41,14 +45,18 @@ static int test_compile_int(void) {
 static int test_compile_zero_int(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("0", &arena);
+  CompileResult cr = compile_source("0", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 1);
   ASSERT(jacl_is_i32(cr.chunk.constants[0]));
   ASSERT_INT_EQ(jacl_as_i32(cr.chunk.constants[0]), 0);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -58,8 +66,10 @@ static int test_compile_zero_int(void) {
 static int test_compile_float(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("3.14", &arena);
+  CompileResult cr = compile_source("3.14", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 1);
@@ -73,6 +83,8 @@ static int test_compile_float(void) {
   ASSERT_INT_EQ(cr.chunk.code[0], OP_CONST);
   ASSERT_INT_EQ(cr.chunk.code[3], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -82,8 +94,10 @@ static int test_compile_float(void) {
 static int test_compile_short_string(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("hello", &arena);
+  CompileResult cr = compile_source("hello", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 1);
@@ -93,6 +107,8 @@ static int test_compile_short_string(void) {
   jacl_inline_string_get(cr.chunk.constants[0], buf, sizeof(buf));
   ASSERT_STR_EQ(buf, "hello");
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -102,8 +118,10 @@ static int test_compile_short_string(void) {
 static int test_compile_string_7_bytes(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("abcdefg", &arena);
+  CompileResult cr = compile_source("abcdefg", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 1);
@@ -113,6 +131,8 @@ static int test_compile_string_7_bytes(void) {
   jacl_inline_string_get(cr.chunk.constants[0], buf, sizeof(buf));
   ASSERT_STR_EQ(buf, "abcdefg");
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -122,13 +142,17 @@ static int test_compile_string_7_bytes(void) {
 static int test_compile_long_string_heap(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("\"abcdefgh\"", &arena);
+  CompileResult cr = compile_source("\"abcdefgh\"", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT(cr.chunk.const_count >= 1);
   ASSERT(jacl_is_heap_string(cr.chunk.constants[0]));
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -138,9 +162,11 @@ static int test_compile_long_string_heap(void) {
 static int test_compile_multi_statement(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* Two statements separated by newline: "42\n99" */
-  CompileResult cr = compile_source("42\n99", &arena);
+  CompileResult cr = compile_source("42\n99", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 2);
@@ -160,6 +186,8 @@ static int test_compile_multi_statement(void) {
   ASSERT_INT_EQ(cr.chunk.code[8], 1);
   ASSERT_INT_EQ(cr.chunk.code[9], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -169,8 +197,10 @@ static int test_compile_multi_statement(void) {
 static int test_compile_multi_semicolons(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("1; 2; 3", &arena);
+  CompileResult cr = compile_source("1; 2; 3", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 3);
@@ -185,6 +215,8 @@ static int test_compile_multi_semicolons(void) {
   ASSERT_INT_EQ(cr.chunk.code[12], OP_CONST);
   ASSERT_INT_EQ(cr.chunk.code[15], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -194,8 +226,10 @@ static int test_compile_multi_semicolons(void) {
 static int test_compile_single_no_pop(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("100", &arena);
+  CompileResult cr = compile_source("100", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -205,6 +239,8 @@ static int test_compile_single_no_pop(void) {
     ASSERT(cr.chunk.code[i] != OP_POP);
   }
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -214,13 +250,17 @@ static int test_compile_single_no_pop(void) {
 static int test_compile_halt_at_end(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("1; 2", &arena);
+  CompileResult cr = compile_source("1; 2", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT(cr.chunk.code_count > 0);
   ASSERT_INT_EQ(cr.chunk.code[cr.chunk.code_count - 1], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -230,13 +270,17 @@ static int test_compile_halt_at_end(void) {
 static int test_compile_empty(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("", &arena);
+  CompileResult cr = compile_source("", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.code_count, 1);
   ASSERT_INT_EQ(cr.chunk.code[0], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -246,8 +290,10 @@ static int test_compile_empty(void) {
 static int test_compile_const_pool_indices(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("10\n20\n30", &arena);
+  CompileResult cr = compile_source("10\n20\n30", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 3);
@@ -266,6 +312,8 @@ static int test_compile_const_pool_indices(void) {
   ASSERT_INT_EQ(cr.chunk.code[13], 0);
   ASSERT_INT_EQ(cr.chunk.code[14], 2);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -275,8 +323,10 @@ static int test_compile_const_pool_indices(void) {
 static int test_compile_line_tracking(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("42\n99", &arena);
+  CompileResult cr = compile_source("42\n99", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -287,6 +337,8 @@ static int test_compile_line_tracking(void) {
   /* Second statement on line 2: OP_CONST(line 2) after CHECK_ERROR u16 */
   ASSERT_U32_EQ(cr.chunk.lines[6], 2);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -296,12 +348,16 @@ static int test_compile_line_tracking(void) {
 static int test_compile_parse_error_propagated(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* "[" is an unclosed bracket, should produce parse error */
-  CompileResult cr = compile_source("[", &arena);
+  CompileResult cr = compile_source("[", &arena, &heap);
 
   ASSERT(cr.error_count > 0);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -313,8 +369,10 @@ static int test_compile_parse_error_propagated(void) {
 static int test_compile_add(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[+ 1 2]", &arena);
+  CompileResult cr = compile_source("[+ 1 2]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 2);
@@ -332,6 +390,8 @@ static int test_compile_add(void) {
   ASSERT_INT_EQ(cr.chunk.code[6], OP_ADD);
   ASSERT_INT_EQ(cr.chunk.code[7], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -341,8 +401,10 @@ static int test_compile_add(void) {
 static int test_compile_sub(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[- 10 3]", &arena);
+  CompileResult cr = compile_source("[- 10 3]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 2);
@@ -353,6 +415,8 @@ static int test_compile_sub(void) {
   ASSERT_INT_EQ(cr.chunk.code[6], OP_SUB);
   ASSERT_INT_EQ(cr.chunk.code[7], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -362,29 +426,41 @@ static int test_compile_sub(void) {
 static int test_compile_mul_div_mod(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* Test * */
-  CompileResult cr = compile_source("[* 4 5]", &arena);
+  CompileResult cr = compile_source("[* 4 5]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_INT_EQ(cr.chunk.code[6], OP_MUL);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
   /* Test / */
   tracker_reset();
   arena = (arena_t){ .allocator = tracked_allocator };
-  cr = compile_source("[/ 10 2]", &arena);
+  gc_block_pool_init(&pool);
+  gc_heap_init(&heap, &pool);
+  cr = compile_source("[/ 10 2]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_INT_EQ(cr.chunk.code[6], OP_DIV);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
   /* Test % */
   tracker_reset();
   arena = (arena_t){ .allocator = tracked_allocator };
-  cr = compile_source("[% 7 3]", &arena);
+  gc_block_pool_init(&pool);
+  gc_heap_init(&heap, &pool);
+  cr = compile_source("[% 7 3]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_INT_EQ(cr.chunk.code[6], OP_MOD);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
@@ -395,8 +471,10 @@ static int test_compile_mul_div_mod(void) {
 static int test_compile_unary_neg(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[- 5]", &arena);
+  CompileResult cr = compile_source("[- 5]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 1);
@@ -408,6 +486,8 @@ static int test_compile_unary_neg(void) {
   ASSERT_INT_EQ(cr.chunk.code[3], OP_NEG);
   ASSERT_INT_EQ(cr.chunk.code[4], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -417,8 +497,10 @@ static int test_compile_unary_neg(void) {
 static int test_compile_nested_arithmetic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[+ 1 [* 2 3]]", &arena);
+  CompileResult cr = compile_source("[+ 1 [* 2 3]]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 3);
@@ -436,6 +518,8 @@ static int test_compile_nested_arithmetic(void) {
   ASSERT_INT_EQ(cr.chunk.code[10], OP_ADD);
   ASSERT_INT_EQ(cr.chunk.code[11], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -445,8 +529,10 @@ static int test_compile_nested_arithmetic(void) {
 static int test_compile_f32_arithmetic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[+ 1.5 2.5]", &arena);
+  CompileResult cr = compile_source("[+ 1.5 2.5]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 2);
@@ -454,6 +540,8 @@ static int test_compile_f32_arithmetic(void) {
   ASSERT(jacl_is_f32(cr.chunk.constants[1]));
   ASSERT_INT_EQ(cr.chunk.code[6], OP_ADD);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -465,8 +553,10 @@ static int test_compile_f32_arithmetic(void) {
 static int test_compile_eq(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[== 1 2]", &arena);
+  CompileResult cr = compile_source("[== 1 2]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 2);
@@ -478,6 +568,8 @@ static int test_compile_eq(void) {
   ASSERT_INT_EQ(cr.chunk.code[6], OP_EQ);
   ASSERT_INT_EQ(cr.chunk.code[7], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -487,38 +579,54 @@ static int test_compile_eq(void) {
 static int test_compile_lt_gt_le_ge(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* Test < */
-  CompileResult cr = compile_source("[< 1 2]", &arena);
+  CompileResult cr = compile_source("[< 1 2]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_INT_EQ(cr.chunk.code[6], OP_LT);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
   /* Test > */
   tracker_reset();
   arena = (arena_t){ .allocator = tracked_allocator };
-  cr = compile_source("[> 5 3]", &arena);
+  gc_block_pool_init(&pool);
+  gc_heap_init(&heap, &pool);
+  cr = compile_source("[> 5 3]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_INT_EQ(cr.chunk.code[6], OP_GT);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
   /* Test <= */
   tracker_reset();
   arena = (arena_t){ .allocator = tracked_allocator };
-  cr = compile_source("[<= 3 3]", &arena);
+  gc_block_pool_init(&pool);
+  gc_heap_init(&heap, &pool);
+  cr = compile_source("[<= 3 3]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_INT_EQ(cr.chunk.code[6], OP_LE);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
   /* Test >= */
   tracker_reset();
   arena = (arena_t){ .allocator = tracked_allocator };
-  cr = compile_source("[>= 2 5]", &arena);
+  gc_block_pool_init(&pool);
+  gc_heap_init(&heap, &pool);
+  cr = compile_source("[>= 2 5]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_INT_EQ(cr.chunk.code[6], OP_GE);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
@@ -529,8 +637,10 @@ static int test_compile_lt_gt_le_ge(void) {
 static int test_compile_f32_comparison(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[< 1.5 2.5]", &arena);
+  CompileResult cr = compile_source("[< 1.5 2.5]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 2);
@@ -538,6 +648,8 @@ static int test_compile_f32_comparison(void) {
   ASSERT(jacl_is_f32(cr.chunk.constants[1]));
   ASSERT_INT_EQ(cr.chunk.code[6], OP_LT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -549,8 +661,10 @@ static int test_compile_f32_comparison(void) {
 static int test_compile_print(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[print 42]", &arena);
+  CompileResult cr = compile_source("[print 42]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 1);
@@ -564,6 +678,8 @@ static int test_compile_print(void) {
   ASSERT_INT_EQ(cr.chunk.code[3], OP_PRINT);
   ASSERT_INT_EQ(cr.chunk.code[4], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -573,25 +689,33 @@ static int test_compile_print(void) {
 static int test_compile_print_no_args(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* Bare "print" has no args - parser wraps as AST_COMMAND{head: "print", args: [], argc: 0}
      which goes to the bare-expression path, not compile_command.
      We need to use [print] to force a command with 0 args. */
-  CompileResult cr = compile_source("[print]", &arena);
+  CompileResult cr = compile_source("[print]", &arena, &heap);
 
   /* This is actually a 0-arg command, which takes the bare expression path.
      But print with 0 args in brackets should error. Let's check. */
   /* Actually, [print] parses as command with head "print" and 0 args.
      The bare expression path compiles head only. This doesn't call compile_command.
      So to test "print requires 1 argument", we need [print 1 2] (too many args). */
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
   /* Test with 2 arguments */
   tracker_reset();
   arena = (arena_t){ .allocator = tracked_allocator };
-  cr = compile_source("[print 1 2]", &arena);
+  gc_block_pool_init(&pool);
+  gc_heap_init(&heap, &pool);
+  cr = compile_source("[print 1 2]", &arena, &heap);
   ASSERT(cr.error_count > 0);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
@@ -602,8 +726,10 @@ static int test_compile_print_no_args(void) {
 static int test_compile_print_nested(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[print [+ 1 2]]", &arena);
+  CompileResult cr = compile_source("[print [+ 1 2]]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 2);
@@ -619,6 +745,8 @@ static int test_compile_print_nested(void) {
   ASSERT_INT_EQ(cr.chunk.code[7], OP_PRINT);
   ASSERT_INT_EQ(cr.chunk.code[8], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -630,8 +758,10 @@ static int test_compile_print_nested(void) {
 static int test_compile_def(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x 42]", &arena);
+  CompileResult cr = compile_source("[def x 42]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 2);
@@ -650,6 +780,8 @@ static int test_compile_def(void) {
   ASSERT_INT_EQ(cr.chunk.code[5], 1);
   ASSERT_INT_EQ(cr.chunk.code[6], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -659,8 +791,10 @@ static int test_compile_def(void) {
 static int test_compile_def_expr(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x [+ 1 2]]", &arena);
+  CompileResult cr = compile_source("[def x [+ 1 2]]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   /* constants: 1, 2, "x" */
@@ -678,6 +812,8 @@ static int test_compile_def_expr(void) {
   ASSERT_INT_EQ(cr.chunk.code[7], OP_DEF_GLOBAL);
   ASSERT_INT_EQ(cr.chunk.code[10], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -687,18 +823,26 @@ static int test_compile_def_expr(void) {
 static int test_compile_def_wrong_argc(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* Too few args: [def x] */
-  CompileResult cr = compile_source("[def x]", &arena);
+  CompileResult cr = compile_source("[def x]", &arena, &heap);
   ASSERT(cr.error_count > 0);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
   /* Too many args: [def x 1 2] */
   tracker_reset();
   arena = (arena_t){ .allocator = tracked_allocator };
-  cr = compile_source("[def x 1 2]", &arena);
+  gc_block_pool_init(&pool);
+  gc_heap_init(&heap, &pool);
+  cr = compile_source("[def x 1 2]", &arena, &heap);
   ASSERT(cr.error_count > 0);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
@@ -709,11 +853,15 @@ static int test_compile_def_wrong_argc(void) {
 static int test_compile_def_non_string_name(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* [def 42 10] - first arg is int, not string */
-  CompileResult cr = compile_source("[def 42 10]", &arena);
+  CompileResult cr = compile_source("[def 42 10]", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -723,8 +871,10 @@ static int test_compile_def_non_string_name(void) {
 static int test_compile_var_ref(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("$x", &arena);
+  CompileResult cr = compile_source("$x", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 1);
@@ -740,6 +890,8 @@ static int test_compile_var_ref(void) {
   ASSERT_INT_EQ(cr.chunk.code[4], 0);
   ASSERT_INT_EQ(cr.chunk.code[5], OP_HALT);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -766,8 +918,10 @@ static void capture_print(const char* text, uint32_t len, void* ctx) {
 static int test_def_print_var(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x 42]\n[print $x]", &arena);
+  CompileResult cr = compile_source("[def x 42]\n[print $x]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -780,6 +934,9 @@ static int test_def_print_var(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "42\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -789,8 +946,10 @@ static int test_def_print_var(void) {
 static int test_def_expr_print_var(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x [+ 1 2]]\n[print $x]", &arena);
+  CompileResult cr = compile_source("[def x [+ 1 2]]\n[print $x]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -803,6 +962,9 @@ static int test_def_expr_print_var(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -814,6 +976,8 @@ static int test_def_expr_print_var(void) {
 static int test_var_true_false_nil(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -849,6 +1013,9 @@ static int test_var_true_false_nil(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "0\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -858,8 +1025,10 @@ static int test_var_true_false_nil(void) {
 static int test_var_undefined(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("$nope", &arena);
+  CompileResult cr = compile_source("$nope", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   VM vm;
@@ -870,6 +1039,9 @@ static int test_var_undefined(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "nope") != NULL);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -881,8 +1053,10 @@ static int test_var_undefined(void) {
 static int test_nested_print_add_mul(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[print [+ 1 [* 2 3]]]", &arena);
+  CompileResult cr = compile_source("[print [+ 1 [* 2 3]]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -895,6 +1069,9 @@ static int test_nested_print_add_mul(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "7\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -904,8 +1081,10 @@ static int test_nested_print_add_mul(void) {
 static int test_nested_both_args(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[+ [* 2 3] [- 10 4]]", &arena);
+  CompileResult cr = compile_source("[+ [* 2 3] [- 10 4]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   VM vm;
@@ -917,6 +1096,9 @@ static int test_nested_both_args(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 12);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -926,8 +1108,10 @@ static int test_nested_both_args(void) {
 static int test_deeply_nested(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[+ 1 [+ 2 [+ 3 4]]]", &arena);
+  CompileResult cr = compile_source("[+ 1 [+ 2 [+ 3 4]]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   VM vm;
@@ -939,6 +1123,9 @@ static int test_deeply_nested(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 10);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -948,8 +1135,10 @@ static int test_deeply_nested(void) {
 static int test_multi_def_print(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x 10]\n[def y 20]\n[print [+ $x $y]]", &arena);
+  CompileResult cr = compile_source("[def x 10]\n[def y 20]\n[print [+ $x $y]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -962,6 +1151,9 @@ static int test_multi_def_print(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "30\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -971,8 +1163,10 @@ static int test_multi_def_print(void) {
 static int test_multi_semicolons_def_print(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def a 1]; [def b 2]; [print [+ $a $b]]", &arena);
+  CompileResult cr = compile_source("[def a 1]; [def b 2]; [print [+ $a $b]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -985,6 +1179,9 @@ static int test_multi_semicolons_def_print(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -994,9 +1191,11 @@ static int test_multi_semicolons_def_print(void) {
 static int test_intermediate_results_popped(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* Three statements: 10, 20, 30 — only the last should remain on stack */
-  CompileResult cr = compile_source("10\n20\n30", &arena);
+  CompileResult cr = compile_source("10\n20\n30", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   VM vm;
@@ -1008,6 +1207,9 @@ static int test_intermediate_results_popped(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 30);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1017,8 +1219,10 @@ static int test_intermediate_results_popped(void) {
 static int test_final_result_available(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x 5]\n[+ $x 10]", &arena);
+  CompileResult cr = compile_source("[def x 5]\n[+ $x 10]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   VM vm;
@@ -1030,6 +1234,9 @@ static int test_final_result_available(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 15);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1041,8 +1248,10 @@ static int test_final_result_available(void) {
 static int test_runtime_error_add_bool_i32(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[+ $true 1]", &arena);
+  CompileResult cr = compile_source("[+ $true 1]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   VM vm;
@@ -1055,6 +1264,9 @@ static int test_runtime_error_add_bool_i32(void) {
   ASSERT(strstr(vm.error_message, "bool") != NULL);
   ASSERT(strstr(vm.error_message, "i32") != NULL);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1064,8 +1276,10 @@ static int test_runtime_error_add_bool_i32(void) {
 static int test_runtime_error_lt_bool_i32(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[< $true 1]", &arena);
+  CompileResult cr = compile_source("[< $true 1]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   VM vm;
@@ -1076,6 +1290,9 @@ static int test_runtime_error_lt_bool_i32(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "bool") != NULL);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1085,8 +1302,10 @@ static int test_runtime_error_lt_bool_i32(void) {
 static int test_runtime_error_print_undefined(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[print $undef]", &arena);
+  CompileResult cr = compile_source("[print $undef]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -1100,6 +1319,9 @@ static int test_runtime_error_print_undefined(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "undef") != NULL);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1109,9 +1331,11 @@ static int test_runtime_error_print_undefined(void) {
 static int test_runtime_error_line_number(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* Error on line 2: def x $true; [+ $x 1] */
-  CompileResult cr = compile_source("[def x $true]\n[+ $x 1]", &arena);
+  CompileResult cr = compile_source("[def x $true]\n[+ $x 1]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   VM vm;
@@ -1122,6 +1346,9 @@ static int test_runtime_error_line_number(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT_U32_EQ(vm.error_line, 2);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1131,6 +1358,8 @@ static int test_runtime_error_line_number(void) {
 static int test_runtime_error_unknown_command(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* [foo 42] compiles to GET_GLOBAL("foo"), CONST(42), CALL(1) */
   VM vm;
@@ -1141,6 +1370,9 @@ static int test_runtime_error_unknown_command(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "foo") != NULL);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1150,13 +1382,17 @@ static int test_runtime_error_unknown_command(void) {
 static int test_compile_long_string_no_error_msg(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("\"abcdefgh\"", &arena);
+  CompileResult cr = compile_source("\"abcdefgh\"", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT(cr.error_message == NULL);
   ASSERT(jacl_is_heap_string(cr.chunk.constants[0]));
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1166,22 +1402,27 @@ static int test_compile_long_string_no_error_msg(void) {
 static int test_vm_returns_runtime_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* Multiple error types all return VM_RUNTIME_ERROR */
 
   /* Type mismatch */
-  CompileResult cr = compile_source("[* $true $false]", &arena);
+  CompileResult cr = compile_source("[* $true $false]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   VM vm;
   vm_init(&vm, &arena);
   ASSERT_INT_EQ(vm_exec(&vm, &cr.chunk), VM_RUNTIME_ERROR);
 
   /* Undefined var */
-  cr = compile_source("$xyz", &arena);
+  cr = compile_source("$xyz", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   vm_init(&vm, &arena);
   ASSERT_INT_EQ(vm_exec(&vm, &cr.chunk), VM_RUNTIME_ERROR);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1193,6 +1434,8 @@ static int test_vm_returns_runtime_error(void) {
 static int test_local_def_in_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* { [def x 42]; [print $x] } should print "42\n" */
   PrintCapture cap = { .len = 0 };
@@ -1205,6 +1448,9 @@ static int test_local_def_in_block(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "42\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1214,6 +1460,8 @@ static int test_local_def_in_block(void) {
 static int test_local_not_visible_outside(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1223,6 +1471,9 @@ static int test_local_not_visible_outside(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "x") != NULL);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1232,6 +1483,8 @@ static int test_local_not_visible_outside(void) {
 static int test_local_shadowing(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1245,6 +1498,9 @@ static int test_local_shadowing(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "2\n1\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1254,6 +1510,8 @@ static int test_local_shadowing(void) {
 static int test_local_nested_scopes(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1267,6 +1525,9 @@ static int test_local_nested_scopes(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "30\n10\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1276,6 +1537,8 @@ static int test_local_nested_scopes(void) {
 static int test_local_same_scope_shadow(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1290,6 +1553,9 @@ static int test_local_same_scope_shadow(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "2\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1299,14 +1565,18 @@ static int test_local_same_scope_shadow(void) {
 static int test_local_top_level_still_global(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* At top level, def should use OP_DEF_GLOBAL */
-  CompileResult cr = compile_source("[def x 42]", &arena);
+  CompileResult cr = compile_source("[def x 42]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   /* Bytecode: OP_CONST u16(0) OP_DEF_GLOBAL u16(1) OP_HALT */
   ASSERT_INT_EQ(cr.chunk.code[3], OP_DEF_GLOBAL);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1316,13 +1586,17 @@ static int test_local_top_level_still_global(void) {
 static int test_local_top_level_var_ref_global(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("$x", &arena);
+  CompileResult cr = compile_source("$x", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   /* Bytecode: OP_GET_GLOBAL u16(0) OP_HALT */
   ASSERT_INT_EQ(cr.chunk.code[0], OP_GET_GLOBAL);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1332,6 +1606,8 @@ static int test_local_top_level_var_ref_global(void) {
 static int test_local_max_exceeded(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* Build source: { [def x 0]; [def x 1]; ...; [def x 256] } — 257 defs */
   char source[8192];
@@ -1345,12 +1621,14 @@ static int test_local_max_exceeded(void) {
   }
   pos += snprintf(source + pos, sizeof(source) - (size_t)pos, " }");
 
-  CompileResult cr = compile_source(source, &arena);
+  CompileResult cr = compile_source(source, &arena, &heap);
 
   ASSERT(cr.error_count > 0);
   ASSERT(cr.error_message != NULL);
   ASSERT(strstr(cr.error_message, "too many local") != NULL);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1360,6 +1638,8 @@ static int test_local_max_exceeded(void) {
 static int test_local_empty_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1369,6 +1649,9 @@ static int test_local_empty_block(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT(jacl_is_nil(vm.stack[0]));
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1380,6 +1663,8 @@ static int test_local_empty_block(void) {
 static int test_if_then_branch(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1390,6 +1675,9 @@ static int test_if_then_branch(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1399,6 +1687,8 @@ static int test_if_then_branch(void) {
 static int test_if_else_branch(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1409,6 +1699,9 @@ static int test_if_else_branch(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1418,6 +1711,8 @@ static int test_if_else_branch(void) {
 static int test_if_no_else_nil(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1427,6 +1722,9 @@ static int test_if_no_else_nil(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT(jacl_is_nil(vm.stack[0]));
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1436,6 +1734,8 @@ static int test_if_no_else_nil(void) {
 static int test_if_nested(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1446,6 +1746,9 @@ static int test_if_nested(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1455,6 +1758,8 @@ static int test_if_nested(void) {
 static int test_if_nil_falsy(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1464,6 +1769,9 @@ static int test_if_nil_falsy(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1473,6 +1781,8 @@ static int test_if_nil_falsy(void) {
 static int test_if_zero_truthy(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1482,6 +1792,9 @@ static int test_if_zero_truthy(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1491,6 +1804,8 @@ static int test_if_zero_truthy(void) {
 static int test_if_empty_string_truthy(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1501,6 +1816,9 @@ static int test_if_empty_string_truthy(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1510,6 +1828,8 @@ static int test_if_empty_string_truthy(void) {
 static int test_if_as_expression(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1519,6 +1839,9 @@ static int test_if_as_expression(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 15);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1528,6 +1851,8 @@ static int test_if_as_expression(void) {
 static int test_if_wrong_argc_1(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1536,6 +1861,9 @@ static int test_if_wrong_argc_1(void) {
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1545,6 +1873,8 @@ static int test_if_wrong_argc_1(void) {
 static int test_if_wrong_argc_4(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1553,6 +1883,9 @@ static int test_if_wrong_argc_4(void) {
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1562,6 +1895,8 @@ static int test_if_wrong_argc_4(void) {
 static int test_if_then_not_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1570,6 +1905,9 @@ static int test_if_then_not_block(void) {
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1579,6 +1917,8 @@ static int test_if_then_not_block(void) {
 static int test_if_else_not_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1587,6 +1927,9 @@ static int test_if_else_not_block(void) {
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1598,6 +1941,8 @@ static int test_if_else_not_block(void) {
 static int test_proc_basic_call(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1609,6 +1954,9 @@ static int test_proc_basic_call(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 3);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1618,6 +1966,8 @@ static int test_proc_basic_call(void) {
 static int test_proc_print_param(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1630,6 +1980,9 @@ static int test_proc_print_param(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1639,6 +1992,8 @@ static int test_proc_print_param(void) {
 static int test_proc_zero_params(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1650,6 +2005,9 @@ static int test_proc_zero_params(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1659,6 +2017,8 @@ static int test_proc_zero_params(void) {
 static int test_proc_implicit_return(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1669,6 +2029,9 @@ static int test_proc_implicit_return(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 10);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1678,6 +2041,8 @@ static int test_proc_implicit_return(void) {
 static int test_proc_multi_stmt_body(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1692,6 +2057,9 @@ static int test_proc_multi_stmt_body(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 11);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1701,6 +2069,8 @@ static int test_proc_multi_stmt_body(void) {
 static int test_proc_redefine(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1711,6 +2081,9 @@ static int test_proc_redefine(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1720,6 +2093,8 @@ static int test_proc_redefine(void) {
 static int test_proc_wrong_argc(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* Too few args */
   VM vm;
@@ -1732,6 +2107,9 @@ static int test_proc_wrong_argc(void) {
   result = jacl_run("[proc foo [a] { 1 } extra]", &vm, &arena);
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1741,6 +2119,8 @@ static int test_proc_wrong_argc(void) {
 static int test_proc_call_arg_mismatch(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1751,6 +2131,9 @@ static int test_proc_call_arg_mismatch(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "argument") != NULL);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1760,6 +2143,8 @@ static int test_proc_call_arg_mismatch(void) {
 static int test_proc_def_returns_nil(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1770,6 +2155,9 @@ static int test_proc_def_returns_nil(void) {
   /* proc definition at global scope returns nil (from DEF_GLOBAL) */
   ASSERT(jacl_is_nil(vm.stack[0]));
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1781,6 +2169,8 @@ static int test_proc_def_returns_nil(void) {
 static int test_while_zero_iterations(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1790,6 +2180,9 @@ static int test_while_zero_iterations(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT(jacl_is_nil(vm.stack[0]));
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1799,6 +2192,8 @@ static int test_while_zero_iterations(void) {
 static int test_while_nil_falsy(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1808,6 +2203,9 @@ static int test_while_nil_falsy(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT(jacl_is_nil(vm.stack[0]));
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1817,6 +2215,8 @@ static int test_while_nil_falsy(void) {
 static int test_while_iterative_sum(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1839,6 +2239,9 @@ static int test_while_iterative_sum(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "15\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1848,6 +2251,8 @@ static int test_while_iterative_sum(void) {
 static int test_while_returns_nil(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1867,6 +2272,9 @@ static int test_while_returns_nil(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "nil\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1876,11 +2284,15 @@ static int test_while_returns_nil(void) {
 static int test_while_wrong_argc_1(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[while $true]", &arena);
+  CompileResult cr = compile_source("[while $true]", &arena, &heap);
   ASSERT(cr.error_count > 0);
   ASSERT(strstr(cr.error_message, "builtin 'while' expects 2 arguments but got 1") != NULL);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1890,11 +2302,15 @@ static int test_while_wrong_argc_1(void) {
 static int test_while_wrong_argc_3(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[while $true { 1 } { 2 }]", &arena);
+  CompileResult cr = compile_source("[while $true { 1 } { 2 }]", &arena, &heap);
   ASSERT(cr.error_count > 0);
   ASSERT(strstr(cr.error_message, "builtin 'while' expects 2 arguments but got 3") != NULL);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1904,11 +2320,15 @@ static int test_while_wrong_argc_3(void) {
 static int test_while_body_not_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[while $true 42]", &arena);
+  CompileResult cr = compile_source("[while $true 42]", &arena, &heap);
   ASSERT(cr.error_count > 0);
   ASSERT(strstr(cr.error_message, "while body must be a block") != NULL);
 
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1918,6 +2338,8 @@ static int test_while_body_not_block(void) {
 static int test_while_countdown(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1937,6 +2359,9 @@ static int test_while_countdown(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3\n2\n1\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1948,6 +2373,8 @@ static int test_while_countdown(void) {
 static int test_closure_capture_local(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1967,6 +2394,9 @@ static int test_closure_capture_local(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "15\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1976,6 +2406,8 @@ static int test_closure_capture_local(void) {
 static int test_closure_independent_captures(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1997,6 +2429,9 @@ static int test_closure_independent_captures(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "6\n21\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2006,6 +2441,8 @@ static int test_closure_independent_captures(void) {
 static int test_closure_nested_3_levels(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2028,6 +2465,9 @@ static int test_closure_nested_3_levels(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "123\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2037,6 +2477,8 @@ static int test_closure_nested_3_levels(void) {
 static int test_closure_capture_multiple(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2056,6 +2498,9 @@ static int test_closure_capture_multiple(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "33\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2065,6 +2510,8 @@ static int test_closure_capture_multiple(void) {
 static int test_closure_not_global(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2086,6 +2533,9 @@ static int test_closure_not_global(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "5\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2097,6 +2547,8 @@ static int test_closure_not_global(void) {
 static int test_recursion_factorial(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2115,6 +2567,9 @@ static int test_recursion_factorial(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3628800\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2124,6 +2579,8 @@ static int test_recursion_factorial(void) {
 static int test_recursion_fibonacci(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2142,6 +2599,9 @@ static int test_recursion_fibonacci(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "55\n");
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2151,6 +2611,8 @@ static int test_recursion_fibonacci(void) {
 static int test_recursion_depth_limit(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2166,6 +2628,9 @@ static int test_recursion_depth_limit(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "stack overflow") != NULL);
 
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();

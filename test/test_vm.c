@@ -20,6 +20,7 @@ static int test_vm_init(void) {
   /* env is pre-populated with 3 entries: true, false, nil */
   ASSERT_U32_EQ(vm.env.count, 3);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -49,6 +50,7 @@ static int test_op_halt(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 0);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -75,6 +77,7 @@ static int test_op_const(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -110,6 +113,7 @@ static int test_op_const_multiple(void) {
   ASSERT(jacl_is_f32(vm.stack[1]));
   ASSERT(jacl_is_inline_string(vm.stack[2]));
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -133,6 +137,7 @@ static int test_op_nil(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT(jacl_is_nil(vm.stack[0]));
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -157,6 +162,7 @@ static int test_op_true(void) {
   ASSERT(jacl_is_bool(vm.stack[0]));
   ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -181,6 +187,7 @@ static int test_op_false(void) {
   ASSERT(jacl_is_bool(vm.stack[0]));
   ASSERT_U64_EQ(vm.stack[0], JACL_FALSE);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -211,6 +218,7 @@ static int test_op_pop(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 100);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -237,6 +245,7 @@ static int test_stack_overflow(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strlen(vm.error_message) > 0);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -261,6 +270,7 @@ static int test_stack_underflow(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strlen(vm.error_message) > 0);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -285,6 +295,7 @@ static int test_custom_print_fn(void) {
   ASSERT(vm.print_fn == NULL);
   ASSERT(vm.print_ctx == &ctx_data);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -319,6 +330,7 @@ static int test_literal_push_sequence(void) {
   ASSERT(jacl_is_i32(vm.stack[3]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[3]), 99);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -354,6 +366,7 @@ static int test_push_pop_interleaved(void) {
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[1]), 3);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -386,6 +399,7 @@ static int test_op_add_i32(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -417,6 +431,7 @@ static int test_op_add_f32(void) {
   float f = jacl_as_f32(vm.stack[0]);
   ASSERT(f > 3.9f && f < 4.1f);  /* 1.5 + 2.5 = 4.0 */
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -445,6 +460,7 @@ static int test_op_sub_i32(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 7);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -473,6 +489,7 @@ static int test_op_mul_i32(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 20);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -501,6 +518,7 @@ static int test_op_div_i32(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 5);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -529,6 +547,7 @@ static int test_op_mod_i32(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -555,6 +574,7 @@ static int test_op_neg_i32(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), -42);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -582,6 +602,7 @@ static int test_op_neg_f32(void) {
   float f = jacl_as_f32(vm.stack[0]);
   ASSERT(f < -3.13f && f > -3.15f);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -611,6 +632,7 @@ static int test_op_div_by_zero(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT(jacl_is_error(vm.stack[0]));
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -640,6 +662,7 @@ static int test_op_mod_f32_error(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strlen(vm.error_message) > 0);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -670,6 +693,7 @@ static int test_op_add_mixed_type_error(void) {
   ASSERT(strstr(vm.error_message, "i32") != NULL);
   ASSERT(strstr(vm.error_message, "f32") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -706,6 +730,7 @@ static int test_op_nested_arithmetic(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 7);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -737,6 +762,7 @@ static int test_op_f32_arithmetic(void) {
   float f = jacl_as_f32(vm.stack[0]);
   ASSERT(f > 6.9f && f < 7.1f);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -768,6 +794,7 @@ static int test_op_eq_i32_true(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -797,6 +824,7 @@ static int test_op_eq_i32_false(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_U64_EQ(vm.stack[0], JACL_FALSE);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -826,6 +854,7 @@ static int test_op_eq_different_types(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_U64_EQ(vm.stack[0], JACL_FALSE);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -871,6 +900,7 @@ static int test_op_lt_i32(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U64_EQ(vm.stack[0], JACL_FALSE);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -899,6 +929,7 @@ static int test_op_gt_i32(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -927,6 +958,7 @@ static int test_op_le_i32(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -955,6 +987,7 @@ static int test_op_ge_i32(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U64_EQ(vm.stack[0], JACL_FALSE);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -983,6 +1016,7 @@ static int test_op_lt_f32(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1011,6 +1045,7 @@ static int test_op_gt_f32(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1041,6 +1076,7 @@ static int test_op_lt_mixed_type_error(void) {
   ASSERT(strstr(vm.error_message, "i32") != NULL);
   ASSERT(strstr(vm.error_message, "f32") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1069,6 +1105,7 @@ static int test_op_eq_f32(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U64_EQ(vm.stack[0], JACL_TRUE);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1117,6 +1154,7 @@ static int test_op_print_i32(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT(jacl_is_nil(vm.stack[0]));
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1146,6 +1184,7 @@ static int test_op_print_f32(void) {
   ASSERT_STR_EQ(cap.buf, "3.14\n");
   ASSERT(jacl_is_nil(vm.stack[0]));
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1172,6 +1211,7 @@ static int test_op_print_nil(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "nil\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1201,6 +1241,7 @@ static int test_op_print_bool(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "true\nfalse\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1229,6 +1270,7 @@ static int test_op_print_string(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1257,6 +1299,7 @@ static int test_op_print_error(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "<error: 0>\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1290,6 +1333,7 @@ static int test_op_print_add_result(void) {
   ASSERT_STR_EQ(cap.buf, "3\n");
   ASSERT(jacl_is_nil(vm.stack[0]));
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1318,6 +1362,7 @@ static int test_op_print_negative(void) {
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "-7\n");
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1356,6 +1401,7 @@ static int test_op_def_get_global(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1385,6 +1431,7 @@ static int test_op_def_global_returns_nil(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT(jacl_is_nil(vm.stack[0]));
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1427,6 +1474,7 @@ static int test_op_def_global_redefine(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 20);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1453,6 +1501,7 @@ static int test_op_get_global_undefined(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "nope") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1487,6 +1536,7 @@ static int test_env_prepopulated(void) {
   ASSERT_U64_EQ(vm.stack[1], JACL_FALSE);
   ASSERT(jacl_is_nil(vm.stack[2]));
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1517,6 +1567,7 @@ static int test_runtime_error_bool_add_i32(void) {
   ASSERT(strstr(vm.error_message, "bool") != NULL);
   ASSERT(strstr(vm.error_message, "i32") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1545,6 +1596,7 @@ static int test_runtime_error_bool_lt_i32(void) {
   ASSERT(strstr(vm.error_message, "bool") != NULL);
   ASSERT(strstr(vm.error_message, "i32") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1572,6 +1624,7 @@ static int test_runtime_error_line_tracking(void) {
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT_U32_EQ(vm.error_line, 5);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1597,6 +1650,7 @@ static int test_stack_overflow_line(void) {
   ASSERT_U32_EQ(vm.error_line, 7);
   ASSERT(vm.error_message != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1613,6 +1667,7 @@ static int test_vm_frame_count_init(void) {
   vm_init(&vm, &arena);
   ASSERT_U32_EQ(vm.frame_count, 0);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1650,6 +1705,7 @@ static int test_op_get_local(void) {
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[2]), 10);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[3]), 20);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1688,6 +1744,7 @@ static int test_op_set_local(void) {
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 99);  /* local 0 was overwritten */
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[1]), 99);  /* GET_LOCAL pushed copy */
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1732,6 +1789,7 @@ static int test_op_get_upvalue(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1766,6 +1824,7 @@ static int test_op_jump(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1819,6 +1878,7 @@ static int test_op_jump_if_false_falsy(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1868,6 +1928,7 @@ static int test_op_jump_if_false_truthy(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);  /* i32(0) is truthy, did not jump */
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1911,6 +1972,7 @@ static int test_op_loop(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1949,6 +2011,7 @@ static int test_op_pop_n(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1992,6 +2055,7 @@ static int test_basic_call_return(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2045,6 +2109,7 @@ static int test_call_with_args(void) {
   ASSERT(jacl_is_i32(vm.stack[0]));
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 30);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2072,6 +2137,7 @@ static int test_call_non_closure(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "cannot call") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2112,6 +2178,7 @@ static int test_call_arg_mismatch(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "expected") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2157,6 +2224,7 @@ static int test_call_frame_overflow(void) {
   ASSERT(vm.error_message != NULL);
   ASSERT(strstr(vm.error_message, "stack overflow") != NULL);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2189,6 +2257,7 @@ static int test_truthiness(void) {
   ASSERT_U32_EQ(vm.stack_top, 1);
   ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
   TEST_PASS();

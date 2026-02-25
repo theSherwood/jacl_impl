@@ -34,6 +34,7 @@ static int run_ok(const char* source, PrintCapture* cap, const char* expected) {
   if (result != VM_OK) {
     fprintf(stderr, "  Expected VM_OK but got error: %s\n",
             vm.error_message ? vm.error_message : "(null)");
+    vm_destroy(&vm);
     arena_destroy(&arena);
     return 0;
   }
@@ -41,11 +42,13 @@ static int run_ok(const char* source, PrintCapture* cap, const char* expected) {
     if (strcmp(cap->buf, expected) != 0) {
       fprintf(stderr, "  Output mismatch:\n  Actual:   '%s'\n  Expected: '%s'\n",
               cap->buf, expected);
+      vm_destroy(&vm);
       arena_destroy(&arena);
       return 0;
     }
   }
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   if (!check_no_leaks()) return 0;
   return 1;
@@ -62,16 +65,19 @@ static int run_err(const char* source, const char* err_substr) {
   VMResult result = jacl_run(source, &vm, &arena);
   if (result != VM_RUNTIME_ERROR) {
     fprintf(stderr, "  Expected VM_RUNTIME_ERROR but got VM_OK\n");
+    vm_destroy(&vm);
     arena_destroy(&arena);
     return 0;
   }
   if (err_substr && (!vm.error_message || !strstr(vm.error_message, err_substr))) {
     fprintf(stderr, "  Error message '%s' does not contain '%s'\n",
             vm.error_message ? vm.error_message : "(null)", err_substr);
+    vm_destroy(&vm);
     arena_destroy(&arena);
     return 0;
   }
 
+  vm_destroy(&vm);
   arena_destroy(&arena);
   if (!check_no_leaks()) return 0;
   return 1;
