@@ -186,9 +186,10 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->error_line    = 0;
   vm->stack_trace.count = 0;
 
-  /* Initialize GC heap */
+  /* Initialize GC heap and make it available for collection templates */
   gc_block_pool_init(&vm->block_pool);
   gc_heap_init(&vm->heap, &vm->block_pool);
+  gc__current_heap = &vm->heap;
 
   /* Ensure HAMT key handlers are wired up */
   collections__init();
@@ -1421,11 +1422,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
       case OP_MAP: {
         uint8_t pair_count = vm__read_byte(vm);
         jacl_map_node* map = NULL;
+        gc__current_heap = &vm->heap;
         for (uint8_t i = 0; i < pair_count; i++) {
           JaclVal key   = vm->stack[vm->stack_top - 2 * pair_count + 2 * i];
           JaclVal value = vm->stack[vm->stack_top - 2 * pair_count + 2 * i + 1];
           jacl_map_node* new_map = jacl_map_set(map, key, value);
-          jacl_map_unref(map);
           map = new_map;
         }
         vm->stack_top -= 2 * pair_count;
@@ -1501,6 +1502,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
+        gc__current_heap = &vm->heap;
         jacl_map_node* new_map = jacl_map_set(map, key_val, val);
         result = vm__push(vm, jacl_map_ptr(new_map));
         if (result != VM_OK) return result;
@@ -1519,6 +1521,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(map_val);
+        gc__current_heap = &vm->heap;
         jacl_map_node* new_map = jacl_map_unset(map, key_val);
         result = vm__push(vm, jacl_map_ptr(new_map));
         if (result != VM_OK) return result;
@@ -1801,6 +1804,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
           jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(coll_val);
           jacl_map_node* result_map = NULL;
+          gc__current_heap = &vm->heap;
           jacl_map_iter it = jacl_map_iter_init(map);
           jacl_map_iter_result ir;
 
@@ -1861,7 +1865,6 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             JaclVal new_key = jacl_vec_get(pair, 0).value;
             JaclVal new_val = jacl_vec_get(pair, 1).value;
             jacl_map_node* new_map = jacl_map_set(result_map, new_key, new_val);
-            jacl_map_unref(result_map);
             result_map = new_map;
 
             /* Restore state for next iteration */
@@ -1970,6 +1973,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
           jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(coll_val);
           jacl_map_node* result_map = NULL;
+          gc__current_heap = &vm->heap;
           jacl_map_iter it = jacl_map_iter_init(map);
           jacl_map_iter_result ir;
 
@@ -2016,7 +2020,6 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
             if (!vm__is_falsy(ret)) {
               jacl_map_node* new_map = jacl_map_set(result_map, key, value);
-              jacl_map_unref(result_map);
               result_map = new_map;
             }
 

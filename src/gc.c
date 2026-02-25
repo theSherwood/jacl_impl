@@ -475,4 +475,11 @@ static inline JaclVal jacl_f64_neg(ThreadHeap *heap, JaclVal a) {
     return jacl_apply_flags(result, flags);
 }
 
+/* --- Thread-local heap pointer for collection templates (HAMT, RRB) ---
+ * Set this before calling any collection mutation (set, unset, etc.)
+ * so the template allocator can reach the current thread's GC heap.
+ * Single static pointer for now; becomes __thread in US-008. */
+
+static ThreadHeap *gc__current_heap = NULL;
+
 #endif /* GC_C */

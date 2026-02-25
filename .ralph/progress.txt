@@ -28,7 +28,14 @@
 - Integration tests use PrintCapture pattern with `vm.print_fn`/`vm.print_ctx` — no `last_result` field on VM
 - The `print` builtin appends `\n` to output
 - Files sorted alphabetically for deterministic test ordering
-- Collection nodes use libc malloc (not arena) — tracked_allocator won't detect leaks; no GC yet (M12)
+- Collection nodes use libc malloc (not arena) — tracked_allocator won't detect leaks; will migrate to gc_alloc in US-004/US-005
+- VM now owns BlockPool + ThreadHeap; vm_init initializes, vm_destroy cleans up — must call vm_destroy before arena_destroy
+- Test teardown order: vm_destroy → gc_heap_destroy → gc_block_pool_destroy → arena_destroy
+- Heap-allocating value constructors (jacl_i64, jacl_u64, jacl_f64 + arithmetic) live in gc.c not value.c (dependency order)
+- jacl_intern takes ThreadHeap* (not arena_t*) — strings allocated on GC heap via gc_alloc(heap, OBJ_STRING, ...)
+- compiler_compile takes ThreadHeap* as 4th parameter for string interning
+- OP_CLOSURE allocates closure + inline upvalue array as single gc_alloc (trailing array pattern)
+- OP_MAKE_CELL, OP_BOX, OP_ATOM allocate JaclMutableRef via gc_alloc(heap, OBJ_MUTABLE_REF, ...)
 - Template allocator: use `{ .alloc = libc_alloc, .free = libc_free, .ctx = NULL }` compound literal (NOT `libc_allocator` which is a function call, fails as C99 static initializer)
 - Must `#undef RC_ALLOCATOR` between RRB and HAMT template includes (rc.h doesn't clean up non-defaulted allocators)
 
@@ -54,6 +61,12 @@
 - ThreadHeap stores BlockPool* pointer; gc_heap_init(heap, pool) links them
 - BlockPool is thread-safe (mutex); gc_block_pool_get/return for block recycling
 - Allocation total aligned to 8 bytes; max single allocation = GC_BLOCK_SIZE (64KB)
+- HAMT GC mode: define HAMT_GC_MODE + HAMT_GC_ALLOC(obj_type, sz) + HAMT_GC_OBJ_* before including hamt.h — replaces RC with gc_alloc, no-op ref/unref
+- gc__current_heap: file-static ThreadHeap* in gc.c (unity-build visible), set before any HAMT mutation; will become __thread in US-008
+- HAMT transient API requires RC (ownership checks via ref_count==1); wrapped in #ifndef HAMT_GC_MODE — unused by JACL
+- Library-level HAMT tests (lib/hamt/test_hamt*.c) still use RC mode — HAMT_GC_MODE is only for jacl_map in collections.c
+- jacl_map_unref is now a no-op (H_RC_UNREF(p) expands to ((void)0) in GC mode) — callers don't need to call it
+- H_ALLOC_LEAF/INTERNAL/COLLISION macros abstract allocation per node type — same pattern available for RRB migration (US-005)
 
 ## 2026-02-25 - US-002
 - Implemented block-based heap allocator with Immix-style line granularity in src/gc.c
@@ -82,4 +95,47 @@
   - gc.c must come after value.c (needs JaclVal, JACL_TYPE_MASK, tag constants) and before string.c (first heap allocator consumer)
   - GCHeader uses same prepend-before-payload pattern as RCHeader but at 8 bytes vs 16
   - All existing tests (44 suites, 131 harness tests) pass unchanged — purely additive change
+---
+
+## 2026-02-25 - US-004
+Thread: (inline)
+- Migrated HAMT persistent map nodes from RC (reference counting) to GC heap allocation
+- Added HAMT_GC_MODE to lib/hamt/hamt.h: when defined, allocation routes through gc_alloc with per-node-type obj_type, H_RC_REF/UNREF become no-ops, H_RC_COUNT always returns 2 (always "shared")
+- Added H_ALLOC_LEAF/INTERNAL/COLLISION macros to abstract allocation regardless of GC/RC mode
+- Node destructor (H_NODE_DESTROY) wrapped in #ifndef HAMT_GC_MODE — GC handles lifecycle
+- Transient API (requires ref_count==1 ownership check) wrapped in #ifndef HAMT_GC_MODE — unused by JACL
+- Added gc__current_heap static pointer in gc.c for threading ThreadHeap* to collection templates
+- collections.c: HAMT instantiated with HAMT_GC_MODE, HAMT_GC_ALLOC routes to gc_alloc(gc__current_heap, ...)
+- vm.c: gc__current_heap set in vm_init and before each map mutation (OP_MAP, OP_MAP_SET, OP_MAP_REMOVE, into-map, filter-map)
+- vm.c: removed all 3 jacl_map_unref() calls (OP_MAP loop, into-map loop, filter-map loop) — old nodes become GC garbage
+- Library-level HAMT tests (lib/hamt/test_hamt*.c) unaffected — they don't define HAMT_GC_MODE, still use RC
+- Files changed: lib/hamt/hamt.h, src/gc.c, src/collections.c, src/vm.c
+- **Learnings for future iterations:**
+  - HAMT_GC_MODE is opt-in per template instantiation — same hamt.h supports both GC and RC modes
+  - gc__current_heap must be set before ANY allocating HAMT operation (set, unset, map construction)
+  - Read-only HAMT ops (get, has, count, iter) do not allocate — no gc__current_heap needed
+  - H_ALLOC_LEAF/INTERNAL/COLLISION pattern is reusable: RRB can follow same approach (US-005)
+  - Transient API can't work with GC (needs ref_count for ownership) — must use persistent API only
+  - All 45 test suites pass (0 failures) including 131 harness tests
+---
+
+## 2026-02-25 - US-003
+Thread: (inline)
+- Migrated all runtime heap-allocated types from arena_alloc to gc_alloc with GCHeader
+- VM struct gains BlockPool + ThreadHeap fields; vm_init initializes them; vm_destroy cleans up
+- JaclClosure: allocated via gc_alloc(OBJ_CLOSURE) with inline upvalue array (trailing array pattern)
+- JaclMutableRef (cell, box, atom): allocated via gc_alloc(OBJ_MUTABLE_REF)
+- JaclHeapI64/U64/F64: allocated via gc_alloc(OBJ_HEAP_I64/U64/F64)
+- JaclHeapString: allocated via gc_alloc(OBJ_STRING) through jacl_intern
+- Moved jacl_i64/u64/f64 constructors and all 64-bit arithmetic from value.c to gc.c (dependency order: value.c → gc.c)
+- compiler_compile gains ThreadHeap* parameter for string interning
+- jacl_intern signature: arena_t* → ThreadHeap* for string allocation; intern table bookkeeping stays arena-backed
+- Arena still used for: AST nodes, bytecode chunks, constant pools, compiler temporaries, param_names, error messages, environment arrays, format buffers
+- Files changed: src/value.c, src/gc.c, src/string.c, src/compiler.c, src/vm.c, 12 test files
+- **Learnings for future iterations:**
+  - Heap-allocating value constructors MUST live in gc.c (after value.c in unity build) due to ThreadHeap/gc_alloc dependency
+  - Closure upvalues use trailing-array pattern: gc_alloc(sizeof(JaclClosure) + sizeof(JaclVal) * uv_count), cl->upvalues = (JaclVal*)(cl + 1)
+  - Test teardown order matters: vm_destroy → (gc_heap_destroy → gc_block_pool_destroy if standalone) → arena_destroy
+  - GC blocks use malloc directly (not tracked_allocator), so tracked_allocator leak checks don't see GC memory — vm_destroy handles GC cleanup
+  - All 45 test suites pass (0 failures) including 131 harness tests — GC allocates but doesn't collect yet
 ---

@@ -1,9 +1,14 @@
 /* hamt.h - Hash Array Mapped Trie (include-as-template)
  *
- * Persistent, immutable HAMT with reference counting.
+ * Persistent, immutable HAMT with optional reference counting or GC.
  *
  * Define HAMT_KEY_T (key type), HAMT_VAL_T (value type), and HAMT_NAME (prefix)
  * before including. Can be included multiple times with different values.
+ *
+ * RC mode (default): include with HAMT_ALLOCATOR for reference-counted nodes.
+ * GC mode: define HAMT_GC_MODE and provide:
+ *   HAMT_GC_ALLOC(obj_type, payload_size) — allocation function
+ *   HAMT_GC_OBJ_INTERNAL, HAMT_GC_OBJ_LEAF, HAMT_GC_OBJ_COLLISION — obj types
  *
  * Example:
  *   #define HAMT_KEY_T    const char*
@@ -106,7 +111,26 @@
 
 #include "../platform/platform.h"
 
-/* Allocation hooks */
+#ifdef HAMT_GC_MODE
+/* --- GC mode: nodes allocated via gc_alloc, no reference counting ---
+ * Caller must define HAMT_GC_ALLOC(obj_type, payload_size),
+ * HAMT_GC_OBJ_INTERNAL, HAMT_GC_OBJ_LEAF, HAMT_GC_OBJ_COLLISION. */
+
+#define H_ALLOC_LEAF(sz)       HAMT_GC_ALLOC(HAMT_GC_OBJ_LEAF, (sz))
+#define H_ALLOC_INTERNAL(sz)   HAMT_GC_ALLOC(HAMT_GC_OBJ_INTERNAL, (sz))
+#define H_ALLOC_COLLISION(sz)  HAMT_GC_ALLOC(HAMT_GC_OBJ_COLLISION, (sz))
+
+/* No-op reference counting */
+#define H_RC_REF(p)   (p)
+#define H_RC_UNREF(p) ((void)0)
+#define H_RC_COUNT(p) ((intptr_t)2)
+
+/* Unused in GC mode but kept for cleanup section */
+#define H_RC_ALLOC H_NS(_rc_alloc_unused)
+
+#else /* !HAMT_GC_MODE */
+
+/* --- RC mode: traditional reference-counted nodes --- */
 #ifndef HAMT_ALLOCATOR
 #define HAMT_ALLOCATOR    libc_allocator
 #define HAMT_ALLOC_DEFAULTED 1
@@ -124,6 +148,13 @@ static Allocator H_ALLOCATOR = HAMT_ALLOCATOR;
 #define H_RC_REF   H_NS(_rc_ref)
 #define H_RC_UNREF H_NS(_rc_unref)
 #define H_RC_COUNT H_NS(_rc_count)
+
+/* Allocation wrappers delegate to RC */
+#define H_ALLOC_LEAF(sz)       H_RC_ALLOC((sz), H_NODE_DESTROY)
+#define H_ALLOC_INTERNAL(sz)   H_RC_ALLOC((sz), H_NODE_DESTROY)
+#define H_ALLOC_COLLISION(sz)  H_RC_ALLOC((sz), H_NODE_DESTROY)
+
+#endif /* HAMT_GC_MODE */
 
 /* Iterator max depth */
 #ifndef HAMT_ITER_MAX_DEPTH
@@ -266,14 +297,16 @@ static inline void H_COLLISION_REHASH(H_COLLISION* col) {
   col->header.hash = h;
 }
 
-/* --- Forward declaration for destructor --- */
+/* --- Forward declaration for destructor (RC mode only) --- */
 
+#ifndef HAMT_GC_MODE
 static void H_NODE_DESTROY(void* arg);
+#endif
 
 /* --- Node construction --- */
 
 static inline H_LEAF* H_MK_LEAF(HAMT_KEY_T key, HAMT_VAL_T val, uint32_t hash) {
-  H_LEAF* node    = (H_LEAF*)H_RC_ALLOC(sizeof(H_LEAF), H_NODE_DESTROY);
+  H_LEAF* node    = (H_LEAF*)H_ALLOC_LEAF(sizeof(H_LEAF));
   node->header    = (H_NODE){.type = H_NODE_LEAF_VAL};
   node->hash      = hash;
   node->key       = key;
@@ -292,7 +325,7 @@ static inline H_INTERNAL* H_MK_INTERNAL_COPY(H_INTERNAL* old, uint32_t new_bitma
   int    new_count = get_popcount(new_bitmap);
   size_t size      = sizeof(H_INTERNAL) + sizeof(H_NODE*) * (size_t)new_count;
 
-  H_INTERNAL* node = (H_INTERNAL*)H_RC_ALLOC(size, H_NODE_DESTROY);
+  H_INTERNAL* node = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
   node->header     = (H_NODE){.type = H_NODE_INTERNAL_VAL};
   node->bitmap     = new_bitmap;
 
@@ -330,8 +363,9 @@ static inline H_INTERNAL* H_MK_INTERNAL_COPY(H_INTERNAL* old, uint32_t new_bitma
   return node;
 }
 
-/* --- Node destruction --- */
+/* --- Node destruction (RC mode only — GC handles lifecycle) --- */
 
+#ifndef HAMT_GC_MODE
 static void H_NODE_DESTROY(void* arg) {
   H_NODE* node = (H_NODE*)arg;
   if (!node) return;
@@ -354,6 +388,7 @@ static void H_NODE_DESTROY(void* arg) {
     }
   }
 }
+#endif /* !HAMT_GC_MODE */
 
 /* --- Recursive set --- */
 
@@ -372,7 +407,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
     if (leaf->hash == hash) {
       /* Collision - create collision node */
       size_t       size    = sizeof(H_COLLISION) + sizeof(H_LEAF*) * 2;
-      H_COLLISION* col     = (H_COLLISION*)H_RC_ALLOC(size, H_NODE_DESTROY);
+      H_COLLISION* col     = (H_COLLISION*)H_ALLOC_COLLISION(size);
       col->header          = (H_NODE){.type = H_NODE_COLLISION_VAL};
       col->hash            = hash;
       col->count           = 2;
@@ -393,7 +428,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
       H_NODE* child = H_SET_RECURSIVE(node, key, value, hash, shift + 5);
       size_t  size  = sizeof(H_INTERNAL) + sizeof(H_NODE*);
 
-      H_INTERNAL* internal = (H_INTERNAL*)H_RC_ALLOC(size, H_NODE_DESTROY);
+      H_INTERNAL* internal = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
       internal->header     = (H_NODE){.type = H_NODE_INTERNAL_VAL};
       internal->bitmap     = old_bit;
       internal->children[0] = child;
@@ -403,7 +438,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
     } else {
       /* Different slots - create internal with both children */
       size_t  size  = sizeof(H_INTERNAL) + sizeof(H_NODE*) * 2;
-      H_INTERNAL* internal = (H_INTERNAL*)H_RC_ALLOC(size, H_NODE_DESTROY);
+      H_INTERNAL* internal = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
       internal->header = (H_NODE){.type = H_NODE_INTERNAL_VAL};
       internal->bitmap = old_bit | new_bit;
       internal->count  = 2;
@@ -435,7 +470,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
         H_NODE* child = H_SET_RECURSIVE(node, key, value, hash, shift + 5);
         size_t  size  = sizeof(H_INTERNAL) + sizeof(H_NODE*);
 
-        H_INTERNAL* internal  = (H_INTERNAL*)H_RC_ALLOC(size, H_NODE_DESTROY);
+        H_INTERNAL* internal  = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
         internal->header      = (H_NODE){.type = H_NODE_INTERNAL_VAL};
         internal->bitmap      = col_bit;
         internal->children[0] = child;
@@ -444,7 +479,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
         return (H_NODE*)internal;
       } else {
         size_t  size  = sizeof(H_INTERNAL) + sizeof(H_NODE*) * 2;
-        H_INTERNAL* internal = (H_INTERNAL*)H_RC_ALLOC(size, H_NODE_DESTROY);
+        H_INTERNAL* internal = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
         internal->header = (H_NODE){.type = H_NODE_INTERNAL_VAL};
         internal->bitmap = col_bit | new_bit;
         internal->count  = col->count + 1;
@@ -467,7 +502,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
       if (H_EQ_FN(col->items[i]->key, key)) {
         /* Update existing entry */
         size_t       size    = sizeof(H_COLLISION) + sizeof(H_LEAF*) * col->count;
-        H_COLLISION* new_col = (H_COLLISION*)H_RC_ALLOC(size, H_NODE_DESTROY);
+        H_COLLISION* new_col = (H_COLLISION*)H_ALLOC_COLLISION(size);
         new_col->header      = (H_NODE){.type = H_NODE_COLLISION_VAL};
         new_col->hash        = hash;
         new_col->count       = col->count;
@@ -486,7 +521,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value, u
 
     /* Add new entry to collision */
     size_t       size    = sizeof(H_COLLISION) + sizeof(H_LEAF*) * (col->count + 1);
-    H_COLLISION* new_col = (H_COLLISION*)H_RC_ALLOC(size, H_NODE_DESTROY);
+    H_COLLISION* new_col = (H_COLLISION*)H_ALLOC_COLLISION(size);
     new_col->header      = (H_NODE){.type = H_NODE_COLLISION_VAL};
     new_col->hash        = hash;
     new_col->count       = col->count + 1;
@@ -555,7 +590,7 @@ static H_NODE* H_UNSET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, uint32_t hash, in
 
     /* Shrink collision node */
     size_t       size    = sizeof(H_COLLISION) + sizeof(H_LEAF*) * (col->count - 1);
-    H_COLLISION* new_col = (H_COLLISION*)H_RC_ALLOC(size, H_NODE_DESTROY);
+    H_COLLISION* new_col = (H_COLLISION*)H_ALLOC_COLLISION(size);
     new_col->header      = (H_NODE){.type = H_NODE_COLLISION_VAL};
     new_col->hash        = hash;
     new_col->count       = col->count - 1;
@@ -586,7 +621,7 @@ static H_NODE* H_UNSET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, uint32_t hash, in
     int    new_count = get_popcount(new_bitmap);
     size_t size      = sizeof(H_INTERNAL) + sizeof(H_NODE*) * (size_t)new_count;
 
-    H_INTERNAL* new_node = (H_INTERNAL*)H_RC_ALLOC(size, H_NODE_DESTROY);
+    H_INTERNAL* new_node = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
     new_node->header     = (H_NODE){.type = H_NODE_INTERNAL_VAL};
     new_node->bitmap     = new_bitmap;
 
@@ -744,7 +779,9 @@ static inline H_ITER_RES H_NEXT_VALUE(H_ITER* it) {
   return (H_ITER_RES){.done = result.done, .item = result.item};
 }
 
-/* --- Transient API --- */
+/* --- Transient API (RC mode only — requires ref counting for ownership checks) --- */
+
+#ifndef HAMT_GC_MODE
 
 #define H_TRANSIENT          H_NS(_transient)
 #define H_TRANSIENT_SET      H_NS(_transient_set)
@@ -793,7 +830,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
     if (leaf->hash == hash) {
       /* Collision — create collision node */
       size_t       size = sizeof(H_COLLISION) + sizeof(H_LEAF*) * 2;
-      H_COLLISION* col  = (H_COLLISION*)H_RC_ALLOC(size, H_NODE_DESTROY);
+      H_COLLISION* col  = (H_COLLISION*)H_ALLOC_COLLISION(size);
       col->header       = (H_NODE){.type = H_NODE_COLLISION_VAL};
       col->hash         = hash;
       col->count        = 2;
@@ -813,7 +850,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
       H_NODE* child = H_SET_RECURSIVE_T(node, key, value, hash, shift + 5);
       size_t  size  = sizeof(H_INTERNAL) + sizeof(H_NODE*);
 
-      H_INTERNAL* internal  = (H_INTERNAL*)H_RC_ALLOC(size, H_NODE_DESTROY);
+      H_INTERNAL* internal  = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
       internal->header      = (H_NODE){.type = H_NODE_INTERNAL_VAL};
       internal->bitmap      = old_bit;
       internal->children[0] = child;
@@ -822,7 +859,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
       return (H_NODE*)internal;
     } else {
       size_t      size     = sizeof(H_INTERNAL) + sizeof(H_NODE*) * 2;
-      H_INTERNAL* internal = (H_INTERNAL*)H_RC_ALLOC(size, H_NODE_DESTROY);
+      H_INTERNAL* internal = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
       internal->header     = (H_NODE){.type = H_NODE_INTERNAL_VAL};
       internal->bitmap     = old_bit | new_bit;
       internal->count      = 2;
@@ -853,7 +890,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
         H_NODE* child = H_SET_RECURSIVE_T(node, key, value, hash, shift + 5);
         size_t  size  = sizeof(H_INTERNAL) + sizeof(H_NODE*);
 
-        H_INTERNAL* internal  = (H_INTERNAL*)H_RC_ALLOC(size, H_NODE_DESTROY);
+        H_INTERNAL* internal  = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
         internal->header      = (H_NODE){.type = H_NODE_INTERNAL_VAL};
         internal->bitmap      = col_bit;
         internal->children[0] = child;
@@ -862,7 +899,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
         return (H_NODE*)internal;
       } else {
         size_t      size     = sizeof(H_INTERNAL) + sizeof(H_NODE*) * 2;
-        H_INTERNAL* internal = (H_INTERNAL*)H_RC_ALLOC(size, H_NODE_DESTROY);
+        H_INTERNAL* internal = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
         internal->header     = (H_NODE){.type = H_NODE_INTERNAL_VAL};
         internal->bitmap     = col_bit | new_bit;
         internal->count      = col->count + 1;
@@ -893,7 +930,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
         } else {
           /* Shared — copy collision node */
           size_t       size    = sizeof(H_COLLISION) + sizeof(H_LEAF*) * col->count;
-          H_COLLISION* new_col = (H_COLLISION*)H_RC_ALLOC(size, H_NODE_DESTROY);
+          H_COLLISION* new_col = (H_COLLISION*)H_ALLOC_COLLISION(size);
           new_col->header      = (H_NODE){.type = H_NODE_COLLISION_VAL};
           new_col->hash        = hash;
           new_col->count       = col->count;
@@ -914,7 +951,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
     /* Add new entry to collision — always allocate new (size changes) */
     {
       size_t       size    = sizeof(H_COLLISION) + sizeof(H_LEAF*) * (col->count + 1);
-      H_COLLISION* new_col = (H_COLLISION*)H_RC_ALLOC(size, H_NODE_DESTROY);
+      H_COLLISION* new_col = (H_COLLISION*)H_ALLOC_COLLISION(size);
       new_col->header      = (H_NODE){.type = H_NODE_COLLISION_VAL};
       new_col->hash        = hash;
       new_col->count       = col->count + 1;
@@ -954,7 +991,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, HAMT_VAL_T value,
       int    cnt  = get_popcount(internal->bitmap);
       size_t size = sizeof(H_INTERNAL) + sizeof(H_NODE*) * (size_t)cnt;
 
-      H_INTERNAL* work = (H_INTERNAL*)H_RC_ALLOC(size, H_NODE_DESTROY);
+      H_INTERNAL* work = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
       work->header     = (H_NODE){.type = H_NODE_INTERNAL_VAL};
       work->bitmap     = internal->bitmap;
       work->count      = internal->count;
@@ -1019,7 +1056,7 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
     if (H_RC_COUNT(node) == 1) {
       /* Owned — allocate new smaller collision, free old */
       size_t       size    = sizeof(H_COLLISION) + sizeof(H_LEAF*) * (col->count - 1);
-      H_COLLISION* new_col = (H_COLLISION*)H_RC_ALLOC(size, H_NODE_DESTROY);
+      H_COLLISION* new_col = (H_COLLISION*)H_ALLOC_COLLISION(size);
       new_col->header      = (H_NODE){.type = H_NODE_COLLISION_VAL};
       new_col->hash        = hash;
       new_col->count       = col->count - 1;
@@ -1034,7 +1071,7 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
     } else {
       /* Shared — copy without removed item */
       size_t       size    = sizeof(H_COLLISION) + sizeof(H_LEAF*) * (col->count - 1);
-      H_COLLISION* new_col = (H_COLLISION*)H_RC_ALLOC(size, H_NODE_DESTROY);
+      H_COLLISION* new_col = (H_COLLISION*)H_ALLOC_COLLISION(size);
       new_col->header      = (H_NODE){.type = H_NODE_COLLISION_VAL};
       new_col->hash        = hash;
       new_col->count       = col->count - 1;
@@ -1079,7 +1116,7 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
       int    new_count = get_popcount(new_bitmap);
       size_t size      = sizeof(H_INTERNAL) + sizeof(H_NODE*) * (size_t)new_count;
 
-      H_INTERNAL* new_node = (H_INTERNAL*)H_RC_ALLOC(size, H_NODE_DESTROY);
+      H_INTERNAL* new_node = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
       new_node->header     = (H_NODE){.type = H_NODE_INTERNAL_VAL};
       new_node->bitmap     = new_bitmap;
 
@@ -1109,7 +1146,7 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
     int    cnt  = get_popcount(internal->bitmap);
     size_t size = sizeof(H_INTERNAL) + sizeof(H_NODE*) * (size_t)cnt;
 
-    H_INTERNAL* work = (H_INTERNAL*)H_RC_ALLOC(size, H_NODE_DESTROY);
+    H_INTERNAL* work = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
     work->header     = (H_NODE){.type = H_NODE_INTERNAL_VAL};
     work->bitmap     = internal->bitmap;
     work->count      = internal->count;
@@ -1141,7 +1178,7 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
       int    new_count = get_popcount(new_bitmap);
       size_t new_size  = sizeof(H_INTERNAL) + sizeof(H_NODE*) * (size_t)new_count;
 
-      H_INTERNAL* new_node = (H_INTERNAL*)H_RC_ALLOC(new_size, H_NODE_DESTROY);
+      H_INTERNAL* new_node = (H_INTERNAL*)H_ALLOC_INTERNAL(new_size);
       new_node->header     = (H_NODE){.type = H_NODE_INTERNAL_VAL};
       new_node->bitmap     = new_bitmap;
 
@@ -1248,6 +1285,8 @@ static inline H_NODE* H_PERSISTENT_FN(H_TRANSIENT* t) {
   return root;
 }
 
+#endif /* !HAMT_GC_MODE (transient API) */
+
 /* --- Cleanup all internal macros --- */
 
 #undef HAMT_KEY_T
@@ -1294,9 +1333,13 @@ static inline H_NODE* H_PERSISTENT_FN(H_TRANSIENT* t) {
 #undef H_MK_LEAF
 #undef H_MK_INTERNAL_COPY
 #undef H_SET_RECURSIVE
+#ifndef HAMT_GC_MODE
 #undef H_SET_RECURSIVE_T
+#endif
 #undef H_UNSET_RECURSIVE
+#ifndef HAMT_GC_MODE
 #undef H_UNSET_RECURSIVE_T
+#endif
 #undef H_GET_LEAF
 #undef H_GET_NODE_COUNT
 #undef H_GET_INDEX
@@ -1313,7 +1356,9 @@ static inline H_NODE* H_PERSISTENT_FN(H_TRANSIENT* t) {
 #undef H_EQ_FN
 #undef H_ON_CREATE
 #undef H_ON_DESTROY
+#ifndef HAMT_GC_MODE
 #undef H_ALLOCATOR
+#endif
 #undef H_STRUCT_KEY_HASH
 #undef H_STRUCT_VAL_HASH
 
@@ -1322,12 +1367,26 @@ static inline H_NODE* H_PERSISTENT_FN(H_TRANSIENT* t) {
 #undef H_RC_UNREF
 #undef H_RC_COUNT
 
+#undef H_ALLOC_LEAF
+#undef H_ALLOC_INTERNAL
+#undef H_ALLOC_COLLISION
+
+#ifndef HAMT_GC_MODE
 #undef H_TRANSIENT
 #undef H_TRANSIENT_SET
 #undef H_TRANSIENT_UNSET
 #undef H_TRANSIENT_FN
 #undef H_PERSISTENT_FN
 #undef H_TRANSIENT_ITER_INIT
+#endif
+
+#ifdef HAMT_GC_MODE
+#undef HAMT_GC_MODE
+#undef HAMT_GC_ALLOC
+#undef HAMT_GC_OBJ_INTERNAL
+#undef HAMT_GC_OBJ_LEAF
+#undef HAMT_GC_OBJ_COLLISION
+#endif
 
 #ifdef HAMT_ALLOC_DEFAULTED
 #undef HAMT_ALLOCATOR

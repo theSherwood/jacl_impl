@@ -27,12 +27,16 @@ static bool jacl_val_eq(JaclVal a, JaclVal b);
 /* Clean up RC_ALLOCATOR leaked by rrb_vec.h's rc.h inclusion */
 #undef RC_ALLOCATOR
 
-/* --- Instantiate HAMT template: jacl_map --- */
+/* --- Instantiate HAMT template: jacl_map (GC mode) --- */
 
-#define HAMT_KEY_T    JaclVal
-#define HAMT_VAL_T    JaclVal
-#define HAMT_NAME     jacl_map
-#define HAMT_ALLOCATOR JACL_COLL_ALLOCATOR
+#define HAMT_KEY_T             JaclVal
+#define HAMT_VAL_T             JaclVal
+#define HAMT_NAME              jacl_map
+#define HAMT_GC_MODE
+#define HAMT_GC_ALLOC(t, sz)   gc_alloc(gc__current_heap, (t), (sz))
+#define HAMT_GC_OBJ_INTERNAL   OBJ_HAMT_INTERNAL
+#define HAMT_GC_OBJ_LEAF       OBJ_HAMT_LEAF
+#define HAMT_GC_OBJ_COLLISION  OBJ_HAMT_COLLISION
 #include "../lib/hamt/hamt.h"
 
 /* --- JaclVal hash function (dispatches on type tag) --- */

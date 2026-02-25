@@ -58,7 +58,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "This is the big migration story — touching value.c, string.c, vm.c, and all callers. The key insight: change arena_alloc → gc_alloc for runtime objects, keeping arena for compile-time. GC is not active yet so objects are allocated but never collected. The ThreadHeap is initialized in vm_init() or equivalent setup. BigNum heap data can be deferred to a later story if complex."
     },
     {
@@ -77,7 +77,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "The HAMT template (lib/hamt/hamt.h) uses #define-based include-as-template. HAMT_ALLOCATOR is currently a function pointer macro. Threading ThreadHeap* through is the main challenge — consider adding a context/heap parameter to every HAMT function, or use a thread-local. The RC template (lib/rc/rc.h) functions (_rc_alloc, _rc_ref, _rc_unref) are all generated via macros — remove all references."
     },
     {
