@@ -696,6 +696,280 @@ static int test_write_barrier_vm_set_cell(void) {
     TEST_PASS();
 }
 
+/* ===== US-011: Concurrent mark-sweep GC with epoch watermark ===== */
+
+static int test_epoch_stamping(void) {
+    /* gc_alloc stamps objects with gc__thread_epoch */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+
+    /* Set thread epoch and allocate */
+    gc__thread_epoch = 5;
+    JaclVal val = jacl_i64(&w->vm.heap, 42);
+    GCHeader *hdr = gc_header_of(jacl_as_ptr(val));
+    ASSERT_INT_EQ(hdr->epoch, 5);
+
+    gc__thread_epoch = 99;
+    JaclVal val2 = jacl_i64(&w->vm.heap, 100);
+    GCHeader *hdr2 = gc_header_of(jacl_as_ptr(val2));
+    ASSERT_INT_EQ(hdr2->epoch, 99);
+
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+static int test_epoch_watermark_protect(void) {
+    /* Objects with epoch >= watermark survive even if unmarked */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+
+    /* Allocate with epoch 5 */
+    gc__thread_epoch = 5;
+    JaclVal val = jacl_i64(&w->vm.heap, 111);
+
+    /* Allocate with epoch 10 */
+    gc__thread_epoch = 10;
+    JaclVal val2 = jacl_i64(&w->vm.heap, 222);
+
+    uint8_t mark = w->vm.heap.current_mark;
+
+    /* Neither object is marked. Watermark = 5.
+     * val (epoch=5): 5 >= 5 → immune (survives)
+     * val2 (epoch=10): 10 >= 5 → immune (survives) */
+    gc_sweep_concurrent(&w->vm.heap, NULL, 5, mark);
+
+    GCHeader *h1 = gc_header_of(jacl_as_ptr(val));
+    GCHeader *h2 = gc_header_of(jacl_as_ptr(val2));
+    ASSERT(h1->alloc_total > 0); /* survived */
+    ASSERT(h2->alloc_total > 0); /* survived */
+
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+static int test_epoch_watermark_collect(void) {
+    /* Objects with epoch < watermark AND not marked are collected */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+
+    /* Allocate old object (epoch 3) */
+    gc__thread_epoch = 3;
+    JaclVal old_val = jacl_i64(&w->vm.heap, 111);
+
+    /* Allocate new object (epoch 10) */
+    gc__thread_epoch = 10;
+    JaclVal new_val = jacl_i64(&w->vm.heap, 222);
+
+    uint8_t mark = w->vm.heap.current_mark;
+
+    /* Watermark = 5. old_val (epoch=3 < 5): dead. new_val (epoch=10 >= 5): immune. */
+    gc_sweep_concurrent(&w->vm.heap, NULL, 5, mark);
+
+    GCHeader *h_old = gc_header_of(jacl_as_ptr(old_val));
+    GCHeader *h_new = gc_header_of(jacl_as_ptr(new_val));
+    ASSERT(h_old->alloc_total == 0); /* collected (zeroed) */
+    ASSERT(h_new->alloc_total > 0);  /* survived (epoch-protected) */
+
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+static int test_concurrent_gc_full_cycle(void) {
+    /* Full concurrent GC cycle: mark live objects, sweep dead ones.
+     * We force a new block so the old block (with test objects) is not
+     * current_block and can be swept. */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 2);
+    WorkerThread *w0 = &rt.workers[0];
+
+    /* Set thread epochs so allocations have epoch < watermark */
+    ATOMIC_STORE_EXPLICIT(&w0->thread_epoch, 5, MEM_RELEASE);
+    ATOMIC_STORE_EXPLICIT(&rt.workers[1].thread_epoch, 5, MEM_RELEASE);
+    gc__thread_epoch = 1;
+
+    /* Allocate live and dead objects on worker 0's heap */
+    JaclVal live_val = jacl_i64(&w0->vm.heap, 42);
+    JaclVal dead_val = jacl_i64(&w0->vm.heap, 99);
+
+    /* Force current_block to change by making the current block appear
+     * full (all lines occupied) then exhausting cursor.  gc_alloc's slow
+     * path will skip this block and acquire a fresh one from the pool. */
+    GCBlock *obj_block = w0->vm.heap.current_block;
+    memset(obj_block->line_map, GC_LINE_OCCUPIED, GC_LINES_PER_BLOCK);
+    w0->vm.heap.cursor = w0->vm.heap.limit;
+    (void)jacl_i64(&w0->vm.heap, 0);  /* dummy alloc forces new block */
+    /* Restore the object block's line map so sweep can see free vs occupied */
+    memset(obj_block->line_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
+
+    /* Push live_val onto VM stack (root) — dead_val is unreachable */
+    w0->vm.stack[w0->vm.stack_top++] = live_val;
+
+    /* Run concurrent GC */
+    gc_concurrent_collect(&rt);
+
+    /* Verify live_val survived (marked by tracing) */
+    GCHeader *hdr_live = gc_header_of(jacl_as_ptr(live_val));
+    ASSERT(hdr_live->alloc_total > 0);
+
+    /* Verify dead_val was collected (unmarked, epoch 1 < watermark 5) */
+    GCHeader *hdr_dead = gc_header_of(jacl_as_ptr(dead_val));
+    ASSERT(hdr_dead->alloc_total == 0);
+
+    w0->vm.stack_top = 0;
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+static int test_concurrent_gc_mark_toggle(void) {
+    /* current_mark toggles after each GC cycle */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+
+    ATOMIC_STORE_EXPLICIT(&rt.workers[0].thread_epoch, 1, MEM_RELEASE);
+    gc__thread_epoch = 1;
+
+    uint8_t mark_before = rt.workers[0].vm.heap.current_mark;
+    gc_concurrent_collect(&rt);
+    uint8_t mark_after = rt.workers[0].vm.heap.current_mark;
+
+    ASSERT(mark_before != mark_after);
+    ASSERT(mark_after == (1 - mark_before));
+
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+static int test_concurrent_gc_mutual_exclusion(void) {
+    /* gc_running prevents concurrent GC triggers */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+
+    /* Simulate gc_running = true */
+    ATOMIC_STORE_EXPLICIT(&rt.gc_running, 1, MEM_RELEASE);
+
+    /* gc_concurrent_trigger should fail the CAS and not submit a task */
+    gc_concurrent_trigger(&rt);
+    ASSERT_I64_EQ(rt.inbox_count, 0);
+
+    /* Reset gc_running, now trigger should succeed */
+    ATOMIC_STORE_EXPLICIT(&rt.gc_running, 0, MEM_RELEASE);
+    gc_concurrent_trigger(&rt);
+    ASSERT_I64_EQ(rt.inbox_count, 1);
+
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+/* Stress test helpers */
+static volatile intptr_t stress_gc_done = 0;
+
+static void stress__alloc_discard(void *data) {
+    /* Allocate and discard heap objects to generate garbage.
+     * Some objects are kept alive on the VM stack. */
+    WorkerThread *self = rt__current_worker;
+    ThreadHeap *heap = &self->vm.heap;
+    VM *vm = &self->vm;
+    intptr_t count = (intptr_t)data;
+
+    vm->stack_top = 0;
+
+    for (intptr_t i = 0; i < count; i++) {
+        JaclHeapI64 *obj = (JaclHeapI64 *)gc_alloc(heap, OBJ_HEAP_I64,
+                                                      sizeof(JaclHeapI64));
+        if (obj) obj->value = i;
+
+        /* Keep first 5 alive on stack, rest is garbage */
+        if (i < 5 && vm->stack_top < VM_STACK_MAX && obj) {
+            JaclVal v = JACL_TAG_I64
+                      | ((uint64_t)(uintptr_t)obj & JACL_PAYLOAD_MASK);
+            vm->stack[vm->stack_top++] = v;
+        }
+    }
+
+    /* Verify alive objects survived */
+    for (uint32_t i = 0; i < vm->stack_top; i++) {
+        JaclVal v = vm->stack[i];
+        if (jacl_is_heap_type(v)) {
+            GCHeader *h = gc_header_of(jacl_as_ptr(v));
+            /* If object was collected, alloc_total would be 0 */
+            if (h->alloc_total == 0) {
+                /* Object collected while still on stack — this is a GC bug */
+                ATOMIC_STORE_EXPLICIT(&stress_gc_done, -1, MEM_RELEASE);
+                return;
+            }
+        }
+    }
+    vm->stack_top = 0;
+
+    ATOMIC_INC(&stress_gc_done);
+}
+
+static int test_concurrent_gc_stress(void) {
+    /* 4 workers allocating and discarding objects concurrently.
+     * GC runs repeatedly as allocation thresholds are exceeded. */
+    Runtime rt;
+    runtime_init(&rt, 4);
+
+    ATOMIC_STORE_EXPLICIT(&stress_gc_done, 0, MEM_RELEASE);
+    int num_tasks = 20;
+    intptr_t alloc_count = 50000; /* ~800KB per task → triggers GC */
+
+    for (int i = 0; i < num_tasks; i++) {
+        runtime_submit(&rt, stress__alloc_discard, (void *)alloc_count);
+    }
+
+    /* Wait for completion (max 30 seconds) */
+    for (int ms = 0; ms < 30000; ms++) {
+        intptr_t done = ATOMIC_LOAD_EXPLICIT(&stress_gc_done, MEM_ACQUIRE);
+        if (done >= (intptr_t)num_tasks || done < 0) break;
+        SLEEP_MILLISECONDS(1);
+    }
+
+    intptr_t done = ATOMIC_LOAD_EXPLICIT(&stress_gc_done, MEM_ACQUIRE);
+    ASSERT(done >= 0); /* no GC bug detected */
+    ASSERT_I64_EQ(done, (int64_t)num_tasks);
+
+    runtime_destroy(&rt);
+    TEST_PASS();
+}
+
+static int test_concurrent_gc_multi_cycle(void) {
+    /* Run enough allocation to trigger 10+ GC cycles.
+     * Verifies GC is stable over many cycles. */
+    Runtime rt;
+    runtime_init(&rt, 2);
+
+    ATOMIC_STORE_EXPLICIT(&stress_gc_done, 0, MEM_RELEASE);
+    /* 40 tasks × 50K allocs = ~32MB total → many GC cycles */
+    int num_tasks = 40;
+    intptr_t alloc_count = 50000;
+
+    for (int i = 0; i < num_tasks; i++) {
+        runtime_submit(&rt, stress__alloc_discard, (void *)alloc_count);
+    }
+
+    for (int ms = 0; ms < 60000; ms++) {
+        intptr_t done = ATOMIC_LOAD_EXPLICIT(&stress_gc_done, MEM_ACQUIRE);
+        if (done >= (intptr_t)num_tasks || done < 0) break;
+        SLEEP_MILLISECONDS(1);
+    }
+
+    intptr_t done = ATOMIC_LOAD_EXPLICIT(&stress_gc_done, MEM_ACQUIRE);
+    ASSERT(done >= 0);
+    ASSERT_I64_EQ(done, (int64_t)num_tasks);
+
+    runtime_destroy(&rt);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -727,6 +1001,15 @@ int main(void) {
         { "write_barrier_mixed_types",       test_write_barrier_mixed_types },
         { "write_barrier_vm_reset",          test_write_barrier_vm_reset },
         { "write_barrier_vm_set_cell",       test_write_barrier_vm_set_cell },
+        /* US-011: Concurrent mark-sweep GC with epoch watermark */
+        { "epoch_stamping",                 test_epoch_stamping },
+        { "epoch_watermark_protect",        test_epoch_watermark_protect },
+        { "epoch_watermark_collect",        test_epoch_watermark_collect },
+        { "concurrent_gc_full_cycle",       test_concurrent_gc_full_cycle },
+        { "concurrent_gc_mark_toggle",      test_concurrent_gc_mark_toggle },
+        { "concurrent_gc_mutual_exclusion", test_concurrent_gc_mutual_exclusion },
+        { "concurrent_gc_stress",           test_concurrent_gc_stress },
+        { "concurrent_gc_multi_cycle",      test_concurrent_gc_multi_cycle },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

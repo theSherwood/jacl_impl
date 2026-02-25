@@ -79,8 +79,15 @@ struct Runtime {
     platform_mutex_t    inbox_mutex;
 };
 
+/* Forward declarations for functions used in the worker loop */
+static void gc__concurrent_task(void *data);
+static void runtime_submit(Runtime *rt, void (*fn)(void *), void *data);
+
 /* Thread-local worker ID (set in worker loop, -1 for non-worker threads) */
 static __thread int rt__worker_id = -1;
+
+/* Thread-local pointer to current worker (set in worker loop) */
+static __thread WorkerThread *rt__current_worker = NULL;
 
 /* ======================================================================
  * Worker VM initialization — uses the shared block pool
@@ -101,6 +108,7 @@ static void runtime__init_worker_vm(WorkerThread *w) {
     vm->top_chunk     = NULL;
     vm->grey_buf      = &w->grey_buf;
     vm->gc_active_ptr = &w->runtime->gc_active;
+    vm->runtime       = (void *)w->runtime;
     vm->frame_count   = 0;
     vm->error_message = NULL;
     vm->error_line    = 0;
@@ -193,8 +201,11 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
                 ATOMIC_LOAD_EXPLICIT(&rt->global_epoch, MEM_ACQUIRE),
                 MEM_RELEASE);
 
-            /* Set thread-local heap for collection template allocations */
+            /* Set thread-local state for this task */
             gc__current_heap = &self->vm.heap;
+            rt__current_worker = self;
+            gc__thread_epoch = (uint32_t)ATOMIC_LOAD_EXPLICIT(
+                &self->thread_epoch, MEM_RELAXED);
 
             /* Execute the task */
             task->fn(task->data);
@@ -205,6 +216,20 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
             /* Mark idle */
             ATOMIC_STORE_EXPLICIT(&self->currently_executing, WORKER_IDLE,
                                   MEM_RELEASE);
+
+            /* GC trigger: if allocation threshold exceeded, try to start GC */
+            if (self->vm.heap.bytes_since_gc > GC_THRESHOLD) {
+                self->vm.heap.bytes_since_gc = 0;
+                self->vm.heap.needs_gc = false;
+                {
+                    uint32_t gc_expected = 0;
+                    if (ATOMIC_CAS(&rt->gc_running, &gc_expected, 1,
+                                   MEM_ACQ_REL, MEM_RELAXED)) {
+                        runtime_submit(rt, gc__concurrent_task, rt);
+                    }
+                }
+            }
+
             backoff = 0;
         } else {
             /* No work found — go idle with progressive backoff */
@@ -295,6 +320,17 @@ static void runtime_destroy(Runtime *rt) {
     for (i = 0; i < rt->num_workers; i++)
         THREAD_JOIN(rt->workers[i].thread, NULL);
 
+    /* Unregister all thieves BEFORE freeing any deques (avoids use-after-free
+     * when worker i's thief slot references worker j's already-freed deque) */
+    for (i = 0; i < rt->num_workers; i++) {
+        WorkerThread *w = &rt->workers[i];
+        for (j = 0; j < rt->num_workers; j++) {
+            if (j != i && w->steal_ids[j] >= 0)
+                rt_deque_deque_unregister_thief(
+                    rt->workers[j].public_deque, w->steal_ids[j]);
+        }
+    }
+
     /* Cleanup each worker */
     for (i = 0; i < rt->num_workers; i++) {
         WorkerThread *w = &rt->workers[i];
@@ -306,12 +342,6 @@ static void runtime_destroy(Runtime *rt) {
         while (rt_deque_deque_take(w->private_deque, &task_val))
             free((RuntimeTask *)task_val);
 
-        /* Unregister thieves */
-        for (j = 0; j < rt->num_workers; j++) {
-            if (j != i && w->steal_ids[j] >= 0)
-                rt_deque_deque_unregister_thief(
-                    rt->workers[j].public_deque, w->steal_ids[j]);
-        }
         free(w->steal_ids);
 
         rt_deque_deque_free(w->public_deque);
@@ -357,12 +387,35 @@ static void runtime_submit(Runtime *rt, void (*fn)(void *), void *data) {
 }
 
 /* ======================================================================
- * Closure task submission (stub — full execution in US-011)
+ * Closure task execution on worker VMs
  * ====================================================================== */
 
 static void runtime__exec_closure(void *data) {
-    /* Placeholder: closure execution on worker VMs requires concurrent GC */
-    (void)data;
+    JaclClosure *cl = (JaclClosure *)data;
+    WorkerThread *self = rt__current_worker;
+    VM *vm = &self->vm;
+
+    /* Safety: skip if closure has no valid bytecode */
+    if (!cl || !cl->chunk.code) return;
+
+    /* Reset VM state for this task */
+    vm->stack_top   = 0;
+    vm->frame_count = 0;
+    vm->error_message = NULL;
+    vm->error_line    = 0;
+    vm->stack_trace.count = 0;
+
+    /* Set up closure frame */
+    vm->frames[0].closure    = cl;
+    vm->frames[0].return_ip  = NULL;
+    vm->frames[0].stack_base = 0;
+    vm->frames[0].chunk      = &cl->chunk;
+    vm->frame_count = 1;
+    vm->chunk     = &cl->chunk;
+    vm->top_chunk = &cl->chunk;
+    vm->ip        = cl->chunk.code;
+
+    vm__run(vm, 0);
 }
 
 static void runtime_submit_task(Runtime *rt, JaclClosure *closure,
@@ -505,6 +558,141 @@ static void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
         gc__ms_push_val(ms, task->gc_root);
     }
     MUTEX_UNLOCK(rt->inbox_mutex);
+}
+
+/* ======================================================================
+ * Concurrent mark-sweep GC with epoch watermark
+ *
+ * Runs as a task on any worker thread. Other threads continue executing
+ * during mark and sweep phases (non-stop-the-world).
+ *
+ * Algorithm:
+ *   1. Increment global_epoch
+ *   2. Set gc_active = true (enables write barriers)
+ *   3. Compute watermark = min(all thread_epochs)
+ *   4. Enumerate roots (BUSY sentinel protocol)
+ *   5. Mark phase with periodic grey buffer draining
+ *   6. Final grey buffer drain + process remaining entries
+ *   7. Set gc_active = false
+ *   8. Sweep all workers' heaps (concurrent-safe, epoch watermark)
+ *   9. Toggle current_mark on all heaps, reset counters
+ *  10. Set gc_running = false
+ * ====================================================================== */
+
+/* Drain grey buffers from all workers, pushing new entries onto mark stack.
+ * `drained` tracks how far each worker's buffer has been processed. */
+static void gc__drain_grey_bufs(Runtime *rt, GCMarkStack *ms,
+                                 uint32_t *drained) {
+    for (int i = 0; i < rt->num_workers; i++) {
+        GreyBuffer *gb = &rt->workers[i].grey_buf;
+        uint32_t current = gb->count;
+        for (uint32_t j = drained[i]; j < current; j++) {
+            gc__ms_push_val(ms, gb->entries[j]);
+        }
+        drained[i] = current;
+    }
+}
+
+static void gc_concurrent_collect(Runtime *rt) {
+    int i;
+    GCMarkStack ms;
+    gc__ms_init(&ms);
+
+    /* 1. Increment global epoch */
+    uint64_t new_epoch = ATOMIC_LOAD_EXPLICIT(&rt->global_epoch,
+                                               MEM_RELAXED) + 1;
+    ATOMIC_STORE_EXPLICIT(&rt->global_epoch, new_epoch, MEM_RELEASE);
+
+    /* 2. Set gc_active = true (enables write barriers on all workers) */
+    ATOMIC_STORE_EXPLICIT(&rt->gc_active, 1, MEM_RELEASE);
+
+    /* 3. Compute watermark = min(all thread_epochs) */
+    uint64_t watermark64 = UINT64_MAX;
+    for (i = 0; i < rt->num_workers; i++) {
+        uint64_t te = ATOMIC_LOAD_EXPLICIT(&rt->workers[i].thread_epoch,
+                                            MEM_ACQUIRE);
+        if (te < watermark64) watermark64 = te;
+    }
+    uint32_t watermark = (uint32_t)watermark64;
+
+    /* 4. Enumerate roots across all workers */
+    gc_enumerate_roots(rt, &ms);
+
+    /* Use a consistent current_mark from worker 0 (all heaps share same value) */
+    uint8_t mark = rt->workers[0].vm.heap.current_mark;
+
+    /* 5. Mark phase with periodic grey buffer draining */
+    uint32_t *drained = (uint32_t *)calloc((size_t)rt->num_workers,
+                                            sizeof(uint32_t));
+    int mark_steps = 0;
+    void *ptr;
+
+    while (gc__ms_pop(&ms, &ptr)) {
+        GCHeader *hdr = gc_header_of(ptr);
+        if (hdr->mark == mark) continue; /* already marked this cycle */
+        hdr->mark = mark;
+        gc__trace_object(ptr, &ms);
+
+        /* Periodic grey buffer drain every 256 objects */
+        if (++mark_steps % 256 == 0) {
+            gc__drain_grey_bufs(rt, &ms, drained);
+        }
+    }
+
+    /* 6. Final grey buffer drain */
+    gc__drain_grey_bufs(rt, &ms, drained);
+
+    /* Process any entries from the final drain */
+    while (gc__ms_pop(&ms, &ptr)) {
+        GCHeader *hdr = gc_header_of(ptr);
+        if (hdr->mark == mark) continue;
+        hdr->mark = mark;
+        gc__trace_object(ptr, &ms);
+    }
+
+    free(drained);
+
+    /* 7. Set gc_active = false (disables write barriers) */
+    ATOMIC_STORE_EXPLICIT(&rt->gc_active, 0, MEM_RELEASE);
+
+    /* 8. Sweep all workers' heaps with epoch watermark.
+     * Skip each worker's active allocation block (current_block). */
+    for (i = 0; i < rt->num_workers; i++) {
+        ThreadHeap *heap = &rt->workers[i].vm.heap;
+        gc_sweep_concurrent(heap, heap->current_block, watermark, mark);
+    }
+
+    /* 9. Toggle current_mark on all heaps, reset allocation counters
+     * and grey buffers */
+    uint8_t next_mark = 1 - mark;
+    for (i = 0; i < rt->num_workers; i++) {
+        rt->workers[i].vm.heap.current_mark   = next_mark;
+        rt->workers[i].vm.heap.bytes_since_gc = 0;
+        rt->workers[i].vm.heap.needs_gc       = false;
+        rt->workers[i].grey_buf.count         = 0;
+    }
+
+    gc__ms_destroy(&ms);
+
+    /* 10. Set gc_running = false (allow next GC cycle) */
+    ATOMIC_STORE_EXPLICIT(&rt->gc_running, 0, MEM_RELEASE);
+}
+
+/* Task function for concurrent GC — submitted to the inbox */
+static void gc__concurrent_task(void *data) {
+    Runtime *rt = (Runtime *)data;
+    gc_concurrent_collect(rt);
+}
+
+/* Trigger concurrent GC from vm.c's safepoint.
+ * Attempts to CAS gc_running from 0 to 1; if successful, submits a GC task. */
+static void gc_concurrent_trigger(void *runtime_ptr) {
+    Runtime *rt = (Runtime *)runtime_ptr;
+    uint32_t expected = 0;
+    if (ATOMIC_CAS(&rt->gc_running, &expected, 1,
+                    MEM_ACQ_REL, MEM_RELAXED)) {
+        runtime_submit(rt, gc__concurrent_task, rt);
+    }
 }
 
 #endif /* RUNTIME_C */

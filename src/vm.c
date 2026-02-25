@@ -84,6 +84,7 @@ typedef struct {
   BytecodeChunk* top_chunk;       /* top-level chunk for GC root scanning */
   GreyBuffer*    grey_buf;       /* write barrier target (NULL in single-threaded) */
   volatile uint32_t *gc_active_ptr; /* pointer to runtime's gc_active (NULL in single-threaded) */
+  void*          runtime;        /* Runtime pointer for concurrent GC trigger (NULL in single-threaded) */
   const char*    error_message;  /* last error message, or NULL */
   uint32_t       error_line;     /* source line of last error */
   StackTrace     stack_trace;    /* most recent error's trace */
@@ -102,6 +103,10 @@ static VMResult jacl_run(const char* source, VM* vm, arena_t* arena);
 /* --- GC collect (defined in gc_collect.c, after vm.c in unity build) --- */
 
 static void gc_collect(ThreadHeap *heap, VM *vm);
+
+/* --- Concurrent GC trigger (defined in runtime.c, after gc_collect.c) --- */
+
+static void gc_concurrent_trigger(void *runtime_ptr);
 
 /* --- Type name helper for error messages --- */
 
@@ -191,6 +196,7 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->top_chunk     = NULL;
   vm->grey_buf      = NULL;
   vm->gc_active_ptr = NULL;
+  vm->runtime       = NULL;
   vm->frame_count   = 0;
   vm->error_message = NULL;
   vm->error_line    = 0;
@@ -499,7 +505,13 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
   for (;;) {
     /* GC safepoint: collect if threshold exceeded */
     if (vm->heap.needs_gc) {
-      gc_collect(&vm->heap, vm);
+      if (!vm->runtime) {
+        gc_collect(&vm->heap, vm);
+      } else {
+        vm->heap.needs_gc = false;
+        vm->heap.bytes_since_gc = 0;
+        gc_concurrent_trigger(vm->runtime);
+      }
     }
 
     /* Track source line for error reporting */

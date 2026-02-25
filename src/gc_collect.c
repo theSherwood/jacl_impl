@@ -318,7 +318,7 @@ static void gc_sweep(ThreadHeap *heap) {
 }
 
 /* ======================================================================
- * gc_collect: full mark-sweep cycle
+ * gc_collect: full single-threaded mark-sweep cycle
  * ====================================================================== */
 
 static void gc_collect(ThreadHeap *heap, VM *vm) {
@@ -327,6 +327,93 @@ static void gc_collect(ThreadHeap *heap, VM *vm) {
     heap->current_mark  = 1 - heap->current_mark;
     heap->bytes_since_gc = 0;
     heap->needs_gc       = false;
+}
+
+/* ======================================================================
+ * gc_sweep_concurrent: concurrent-safe sweep with epoch watermark
+ *
+ * Unlike gc_sweep (single-threaded), this function:
+ * - Skips `skip_block` (the owning thread's active allocation block)
+ * - Respects the epoch watermark: objects with epoch >= watermark are
+ *   immune to collection regardless of mark state (too new to judge)
+ * - Uses a two-phase per-block approach to avoid exposing intermediate
+ *   line map state to concurrent allocators:
+ *     Phase 1: Zero dead objects (keeping old line map intact)
+ *     Phase 2: Build new line map from surviving objects, then memcpy
+ * - Does NOT modify the block list (no block recycling — avoids racing
+ *   with gc_alloc's slow path iterating the list)
+ * - Does NOT invalidate cursor/limit (owning worker may be allocating)
+ * ====================================================================== */
+
+static void gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
+                                 uint32_t watermark, uint8_t current_mark) {
+    GCBlock *block = heap->blocks;
+
+    while (block) {
+        if (block == skip_block) {
+            block = block->next;
+            continue;
+        }
+
+        uint8_t *ptr = block->payload;
+        uint8_t *end = block->payload + GC_BLOCK_SIZE;
+
+        /* Phase 1: zero dead objects (old line map still intact) */
+        while (ptr < end) {
+            GCHeader *hdr   = (GCHeader *)ptr;
+            uint16_t  total = hdr->alloc_total;
+
+            if (total == 0) {
+                size_t offset    = (size_t)(ptr - block->payload);
+                size_t next_line = ((offset / GC_LINE_SIZE) + 1) * GC_LINE_SIZE;
+                if (next_line >= GC_BLOCK_SIZE) break;
+                ptr = block->payload + next_line;
+                continue;
+            }
+
+            bool is_live = (hdr->mark == current_mark) ||
+                           (hdr->epoch >= watermark);
+
+            if (!is_live) {
+                memset(ptr, 0, total);
+            }
+
+            ptr += total;
+        }
+
+        /* Phase 2: build new line map from surviving objects */
+        uint8_t new_map[GC_LINES_PER_BLOCK];
+        memset(new_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
+
+        ptr = block->payload;
+        while (ptr < end) {
+            GCHeader *hdr   = (GCHeader *)ptr;
+            uint16_t  total = hdr->alloc_total;
+
+            if (total == 0) {
+                size_t offset    = (size_t)(ptr - block->payload);
+                size_t next_line = ((offset / GC_LINE_SIZE) + 1) * GC_LINE_SIZE;
+                if (next_line >= GC_BLOCK_SIZE) break;
+                ptr = block->payload + next_line;
+                continue;
+            }
+
+            /* Live object — mark its lines in the new map */
+            size_t offset     = (size_t)(ptr - block->payload);
+            int    first_line = (int)(offset / GC_LINE_SIZE);
+            int    last_line  = (int)((offset + total - 1) / GC_LINE_SIZE);
+            for (int i = first_line; i <= last_line; i++) {
+                new_map[i] = GC_LINE_OCCUPIED;
+            }
+
+            ptr += total;
+        }
+
+        /* Phase 3: atomically swap line map */
+        memcpy(block->line_map, new_map, GC_LINES_PER_BLOCK);
+
+        block = block->next;
+    }
 }
 
 #endif /* GC_COLLECT_C */

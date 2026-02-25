@@ -133,6 +133,11 @@ static void gc_block_pool_destroy(BlockPool *pool) {
 
 #define GC_THRESHOLD (1024 * 1024) /* 1MB default */
 
+/* Thread-local epoch for gc_alloc stamping. Workers set this from their
+ * thread_epoch at the start of each task. Main thread leaves it at 0
+ * (single-threaded mode doesn't use epoch watermarking). */
+static __thread uint32_t gc__thread_epoch = 0;
+
 /* --- ThreadHeap: per-thread heap state --- */
 
 typedef struct {
@@ -240,7 +245,7 @@ static void *gc__bump_alloc(ThreadHeap *heap, size_t total, uint8_t obj_type) {
                    (size_t)(ptr - heap->current_block->payload), total);
 
     hdr = (GCHeader *)ptr;
-    hdr->epoch       = 0;
+    hdr->epoch       = gc__thread_epoch;
     hdr->mark        = 0;
     hdr->obj_type    = obj_type;
     hdr->alloc_total = (uint16_t)total;
