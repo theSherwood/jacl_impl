@@ -57,7 +57,7 @@
 - Mark/sweep code lives in gc_collect.c (not gc.c) because it needs HAMT/RRB types from collections.c and VM struct from vm.c
 - GCMarkStack uses void* entries (raw payload pointers), not JaclVal — handles both tagged values and raw node pointers uniformly
 - jacl_map_set takes 3 args (root, key, value) — hash computed internally, not passed separately
-- GCHeader is 8 bytes: { uint32_t epoch; uint8_t mark, obj_type, gen, _pad; }
+- GCHeader is 8 bytes: { uint32_t epoch; uint8_t mark, obj_type; uint16_t alloc_total; }
 - gc_header_of(payload) returns (GCHeader*)payload - 1
 - jacl_is_heap_type checks 11 tags: STRING, VECTOR, MAP, CLOSURE, BIGNUM, CELL, BOX, ATOM, I64, U64, F64
 - gc_alloc(ThreadHeap* heap, uint8_t obj_type, size_t payload_size) — bump-allocates with GCHeader prepended, returns payload pointer
@@ -74,6 +74,16 @@
 - RRB auxiliary allocator (size tables, temp arrays) remains libc-backed even in GC mode — only node allocation routes through gc_alloc
 - RRB transient API + map/filter via transient wrapped in #ifndef RRB_VEC_GC_MODE; GC-mode map/filter use persistent push_back
 - rc.h no longer included by collections.c — both HAMT and RRB use GC mode
+- GCHeader.alloc_total stores the full aligned allocation size (header+payload+padding) — enables object walking during sweep
+- Block payload zeroed on acquisition (gc_block_pool_get memsets to 0) — alloc_total==0 is sentinel for "no object here" during sweep
+- gc_sweep walks objects using alloc_total, zeros dead objects, recycles all-free blocks to pool
+- gc_collect(heap, vm): mark + sweep + toggle current_mark + reset bytes_since_gc + reset needs_gc
+- GC trigger: gc__bump_alloc sets heap->needs_gc when bytes_since_gc > GC_THRESHOLD; vm__run checks needs_gc at top of dispatch loop
+- Forward-declare gc_collect in vm.c (before definition in gc_collect.c) to call from vm__run — valid C99 in unity build
+- gc_mark scans intern table entries as roots (Phase 1: immortal strings), plus chunk constants (skip closures = arena templates)
+- Closure tracing now includes chunk constants (heap i64/u64/f64 literals, skip JACL_TAG_CLOSURE entries = arena templates)
+- jacl_vec_get returns jacl_vec_get_result struct with .value field — not a raw JaclVal
+- vm_exec wraps top-level code in implicit closure frame (frame_count starts at 1), sets vm->top_chunk for GC root scanning
 
 ## 2026-02-25 - US-002
 - Implemented block-based heap allocator with Immix-style line granularity in src/gc.c
@@ -188,5 +198,30 @@ Thread: (inline)
   - gc__ms_push(ms, ptr) pushes raw pointer — use for HAMT/RRB child node pointers
   - jacl_map_set takes (root, key, value) not (root, hash, key, value) — hash computed internally
   - get_popcount is in platform.h (available everywhere), used to count HAMT internal children from bitmap
+  - All 45 test suites pass (0 failures) including 131 harness tests
+---
+
+## 2026-02-25 - US-007
+Thread: (inline)
+- Implemented single-threaded sweep phase with Immix-style line-granularity reclamation and GC trigger
+- Modified GCHeader: replaced `gen` + `_pad` with `alloc_total` (uint16_t) — enables walking objects during sweep
+- Block payload zeroed on acquisition (gc_block_pool_get) — alloc_total==0 as sentinel for empty space
+- gc_sweep: clears all line marks to FREE, walks objects via alloc_total, re-marks live lines as OCCUPIED, zeros dead objects, recycles all-free blocks to pool
+- gc_collect: calls gc_mark + gc_sweep, toggles current_mark, resets bytes_since_gc + needs_gc
+- GC trigger: gc__bump_alloc sets needs_gc flag when bytes_since_gc > GC_THRESHOLD (1MB); vm__run checks at top of dispatch loop
+- Forward-declared gc_collect in vm.c for cross-file call in unity build
+- Fixed root enumeration: added intern table scanning (Phase 1 immortal strings) and chunk constant scanning (skip arena closure templates)
+- Closure tracing now includes chunk constants (heap i64/u64/f64 literals kept alive)
+- VM struct gained top_chunk field; vm_exec sets it for root scanning
+- Added 11 new tests to test_gc.c: sweep dead/live/line-granularity/block-recycling, collect full-cycle/multi-cycle/closure/map/vec, trigger threshold, alloc-after-sweep
+- Files changed: src/gc.c, src/gc_collect.c, src/vm.c, test/test_gc.c
+- **Learnings for future iterations:**
+  - alloc_total enables sweep object walking — dead objects zeroed, alloc_total==0 = safe skip sentinel
+  - GC trigger uses flag (needs_gc) checked in vm__run, not direct gc_collect call from gc_alloc (avoids unity-build forward reference issues)
+  - Forward-declaring static functions across unity-build files works in C99 — gc_collect declared in vm.c, defined in gc_collect.c
+  - Constant pool entries may include arena-allocated closure templates — skip JACL_TAG_CLOSURE when scanning constants as GC roots
+  - vm_exec wraps top-level code in implicit frame (frame_count starts at 1), so frame chunk scanning covers top-level constants
+  - jacl_vec_get returns jacl_vec_get_result struct, not raw JaclVal — use .value field
+  - Sweep invalidates cursor/limit/current_block — gc_alloc rescans blocks for free runs on next allocation
   - All 45 test suites pass (0 failures) including 131 harness tests
 ---

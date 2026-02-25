@@ -134,7 +134,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "This is the validation checkpoint — after this story, the GC is fully functional in single-threaded mode. Every existing test exercises the GC. If any test fails, it indicates a tracing bug (missing root, wrong obj_type trace strategy). The sweep never moves objects — live objects stay at their original addresses. Only the line map metadata changes."
     },
     {
