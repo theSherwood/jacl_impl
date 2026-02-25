@@ -33,8 +33,8 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | 7  | Arity Checking               | **COMPLETE** | Compile-time arity checks, variadic procs |
 | 8  | Persistent Collections       | **COMPLETE** | Vectors (RRB) and maps (HAMT) from JACL |
 | 9  | Error Handling               | **COMPLETE** | Error flag propagation, `try` |
-| 10 | Mutable State                |              | `mut`, `set!`, `box`, `atom` |
-| 11 | Static Type System           |              | Typed/unboxed values, compile-time checking |
+| 10 | Mutable State                | **COMPLETE** | `mut`, `set!`, `box`, `atom` |
+| 11 | Static Type System           | **COMPLETE** | Typed/unboxed values, compile-time checking |
 | 12 | Garbage Collection           |              | Epoch-based tracing GC |
 | 13 | Concurrency                  |              | NxM scheduler, parallel/spawn/await |
 | 14 | Module System                |              | File modules, sandboxing |
@@ -43,18 +43,6 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | 17 | FFI & Embedding              |              | C interop, embedding API |
 
 ## Future Milestone Details
-
-### M10: Mutable State
-- `mut` (mutable binding), `set!` (reassignment)
-- Closure capture of mutable bindings by reference
-- `box` — thread-local mutable container
-- `atom` — thread-safe CAS container (concurrency semantics in M13)
-
-### M11: Static Type System
-- Type annotations: `[def i64 x 42]`
-- Compiler emits typed (unboxed) instructions when type is known
-- Separate opcode variants for unboxed i64/f64 arithmetic
-- `to` builtin for explicit conversions: `[to dyn $x]`, `[to i64 $y]`
 
 ### M12: Garbage Collection
 - Epoch-based tracing GC with per-thread epoch tracking

@@ -1,0 +1,202 @@
+## Codebase Patterns
+- JACL comments use `#` not `;` — semicolons are statement separators; using `;` as a comment causes parse errors or unexpected bare-word calls
+- File-based test harness: test/test_jacl_harness.c reads .jacl files from test/jacl/, parses # expect: / # expect-error: headers, runs through jacl_run with PrintCapture
+- PrintCapture buffer in harness is 8192 bytes (larger than integration tests' 1024) to handle multi-line test output
+- Harness uses malloc/free for file I/O (not tracked_allocator) — tracked_allocator is only for the VM arena
+- Unity build: `src/jacl.c` #includes all pipeline .c files + lib headers as a single translation unit
+- JACL pipeline files in `src/`: plain .c with `#ifndef X_C` guards, no `#define X_IMPLEMENTATION` needed
+- Lib modules in `lib/`: single-header convention with `#ifdef X_IMPLEMENTATION`
+- Test files: `#include "test_helpers.h"` then `#include "../src/jacl.c"` — gets everything
+- Arena allocator: zero-init `arena_t arena = {0}`, uses libc by default
+- Test tracked allocator: `tracked_allocator` from `test/test_helpers.h`, plug into arena via `.allocator = tracked_allocator`
+- Build system: `build.sh` with `TESTS=()` array entries formatted as `"path/test.c|name|optional_extra_cflags"`
+- Compiler flags: `-Wall -Wextra -std=c99 -g`
+- Implementation language is C (C99)
+- Pipeline: src/value.c → src/string.c → src/lexer.c → src/ast.c → src/parser.c → src/bytecode.c → src/compiler.c → src/vm.c
+- Private/internal functions use double-underscore prefix: `module__function_name`
+- Public types use PascalCase (Token, LexResult, AstNode) or lower_t for system-level (arena_t)
+- Public functions use module_verb_noun pattern (lexer_lex, arena_alloc, parser_parse)
+- Constants and macros use ALL_CAPS (TOKEN_EOF, JACL_TAG_NIL)
+- Test functions are `static int test_name(void)` returning 0=fail, 1=pass
+- Test main() uses table-driven pattern: array of {name, fn} structs, iterates and counts pass/fail
+- Memory leak check pattern: setup() -> exercise -> teardown() -> ASSERT(check_no_leaks()) -> TEST_PASS()
+- Tests grouped by US-XXX story comments in the test table
+- Bare word semantics (M6): bare words at statement position desugar to zero-arg calls — use `{ "yes" }` not `{ yes }` for string-literal blocks
+- $var semantics (M6): `$var` at statement position desugars to `[$var]` (zero-arg call) — use `{ [+ $x 0] }` not `{ $x }` for non-callable values
+- `def g f` binds g to the string "f", NOT the proc — use `def g $f` to capture a proc value
+- Integration tests use PrintCapture pattern with `vm.print_fn`/`vm.print_ctx` — no `last_result` field on VM
+- The `print` builtin appends `\n` to output
+- Files sorted alphabetically for deterministic test ordering
+- JaclClosure has `min_args` (uint8_t) and `variadic` (bool) fields for arity metadata — set by compiler, copied in OP_CLOSURE
+- Local struct has `known_arity` (int16_t, -1 = unknown) — set by proc definition and propagated by def from var refs
+- `compiler__node_known_arity(c, node)` determines arity of an AST node at compile time: AST_VAR_REF → local then global, AST_LIT_STRING → global only
+- Global arity tracking: `GlobalArity` table on root Compiler, set by `proc` at global scope, resolved via `compiler__resolve_global_arity` (walks `enclosing` chain to root)
+- Arity error format: `compiler__error` prepends "line X, col Y: ", proc message is "proc 'name' expects N arguments but got M", builtin message is "builtin 'name' expects N arguments but got M"
+- Builtin arity errors use `compiler__builtin_arity_error(c, line, col, name, expected_desc, argc)` helper
+- Arity checking works for both bare word heads (AST_LIT_STRING) and $var heads (AST_VAR_REF) in dynamic call section
+- Global `def` propagates arity: `def g $f` or `def g procname` where the RHS has known arity → g gets that arity globally
+- Compile errors surface as VM_RUNTIME_ERROR from jacl_run — test harness `# expect-error:` works for both compile and runtime errors
+- closure->name is null-terminated (arena-allocated copy) — safe to use with %s format specifiers
+- StackTrace on VM: fixed-size array of {function_name, line_number}, max 32 frames; captured at error-creation time (OP_ERROR and div-by-zero); accessed via OP_STACK_TRACE
+- Proc names must be <= 7 bytes (inline string limit) — longer names use heap strings
+- Test harness `# expect-error:` is substring match — only one error scenario per file
+- Value tags: JACL_TAG_VECTOR (0x06), JACL_TAG_MAP (0x07), JACL_TAG_CLOSURE (0x08), JACL_TAG_BIGNUM (0x09)
+- Value constructors jacl_vector_ptr() and jacl_map_ptr() already exist
+- RRB vec API: RV_EMPTY, RV_PUSH_BACK, RV_GET, RV_SET, RV_POP_BACK, RV_COUNT, RV_CONCAT, RV_SLICE, RV_REF/UNREF, RV_ITER_INIT/NEXT
+- HAMT API: H_SET_KEY_HANDLERS, H_GET, H_HAS, H_SET, H_UNSET, H_COUNT, H_ITER_INIT, H_NEXT_LEAF, H_KEY_FROM_LEAF, H_VALUE_FROM_LEAF, H_REF/UNREF
+- collections.c lives between bytecode.c and compiler.c in the pipeline include order
+- Template allocator: use `{ .alloc = libc_alloc, .free = libc_free, .ctx = NULL }` compound literal (NOT `libc_allocator` which is a function call, fails as C99 static initializer)
+- Must `#undef RC_ALLOCATOR` between RRB and HAMT template includes (rc.h doesn't clean up non-defaulted allocators)
+- collections__init() is called from vm_init() to wire up HAMT hash/eq handlers — must happen before any HAMT operations
+- jacl_val_hash() dispatches on type tag: nil→constant, bool→constant, i32→murmur mix, f32→bit mix, inline string→FNV-1a, heap string→precomputed hash
+- jacl_val_eq() delegates to jacl_string_eq() for string types, bitwise compare for all others
+- Adding new opcodes before OP_HALT shifts its enum value — must update test_bytecode.c test_opcode_enum
+- OP_VEC uses uint8_t count operand; compiler pushes all args then emits OP_VEC + count; VM reads from stack in order
+- Collection nodes use libc malloc (not arena) — tracked_allocator won't detect leaks; no GC yet (M12)
+- Builtin names can exceed 7 bytes (e.g. vec-push=8, vec-concat=10) — compiler__head_matches uses raw AST string data, not inline strings
+- RRB vec SET returns NULL for out-of-bounds; SLICE returns NULL if start >= end || end > count — VM must handle these
+- HAMT empty map is NULL root; jacl_map_ptr(NULL) creates a valid MAP-tagged JaclVal; jacl_map_count(NULL) returns 0; jacl_map_unref(NULL) is safe
+- OP_MAP uses uint8_t pair_count operand (argc/2); map constructor requires even arg count at compile time
+- Use jacl_map_has + jacl_map_get pattern for safe lookup (H_GET returns 0 for missing which equals JACL_NIL)
+- Arithmetic error propagation requires matching types: `[+ [error 0] 1]` works (both i32), `[+ [error "x"] 1]` is a type error — VM type-checks before value.c error short-circuit
+- Equality operator is `==` (not `eq`) — compiles to OP_EQ; uses vm__deep_eq for recursive structural comparison of collections
+- `map` builtin is always a constructor: 0 or any even number of args → OP_MAP, odd = error; `[map "a" 1]` creates a 1-pair map
+- `transform` builtin (exactly 2 args) replaces the old 2-arg map path → OP_TRANSFORM; use `[transform $coll $proc]` for higher-order transforms
+- vm__run(vm, min_frame) is the inner dispatch loop; vm_exec is a thin wrapper. OP_EACH calls vm__run recursively to execute closures inline (trampoline pattern)
+- Higher-order builtins (each, map-transform, filter) call closures via: push closure + args → set up CallFrame → call vm__run(vm, caller_frame_count) → pop return value
+- Proc definition syntax is `proc name [params] { body }` (params in brackets, body in braces) — `[proc name [x] { ... }]` at global scope defines globally and returns nil (not the closure)
+- Zero-arg procs require empty params list: `proc foo [] { ... }` — omitting `[]` gives "proc expects 3 arguments but got 2"
+- To pass a closure to a higher-order builtin: define first with `proc cb [x] { ... }` then reference with `$cb`
+- VMFormatBuf pattern: arena-backed dynamic buffer for recursive collection formatting; vm__fmt_value handles all types
+- `to-string` is a compiler builtin (9 bytes, > 7-byte inline limit) — emits OP_TO_STRING directly
+- HAMT iteration order is hash-based, not insertion order — test maps with single entries or use indirect checks for multi-entry
+- Negative numbers: `-1` in JACL is parsed as two tokens (`-` and `1`); use `def i [- 0 1]` then `$i` for negative values in tests
+- vec-set OOB growth: out-of-bounds index grows vector with nil fill (push_back loop); negative index → runtime error
+- HAMT structural hash: `hash` field in H_NODE base struct; leaf.header.hash = key_hash ^ val_hash; internal.header.hash = XOR of children; collision.header.hash = XOR of items; 0 when no hash handlers set
+- HAMT hash handlers: H_SET_HASH_HANDLERS(key_fn, val_fn) — separate from H_SET_KEY_HANDLERS which sets trie navigation hash/eq; structural hash handlers can be NULL (hashes default to 0)
+- HAMT hash access: root->hash for O(1) structural hash; NULL root → check with H_NODE_HASH(root) which returns 0 for NULL
+- H_LEAF has two hash-related fields: `header.hash` (structural content hash) and `hash` (key hash for trie navigation) — don't confuse them
+- collections.c uses forward declarations for jacl_val_hash/jacl_val_eq to solve ordering: forward-declare → instantiate templates → define functions (functions can call template APIs)
+- jacl_val_eq is the single source of truth for structural equality (vm__deep_eq delegates to it); handles strings, vectors, maps recursively
+- Error flag infrastructure: JACL_FLAG_ERROR bit (bit 61), jacl_is_error(), jacl_set_error(), jacl_clear_error() already implemented in value.c
+- jacl_propagate_flags() ORs flags from both operands; jacl_apply_flags() applies saved flags mask to result
+- Arithmetic/comparison ops already short-circuit on error inputs and propagate flags
+- Division/mod by zero produces error-flagged result value (not VM abort)
+- OP_PRINT shows `<error: PAYLOAD>` for error-flagged values (strings unquoted, other types via vm__fmt_value)
+- OP_PRINT and vm__fmt_value handle cell (transparent dereference), box (`<box: VALUE>`), atom (`<atom: VALUE>`) — OP_TO_STRING also handles these
+- vm__fmt_value quotes strings — container formatting shows `<box: "hello">` not `<box: hello>`
+- deref/reset!/swap! on wrong types produce VM runtime errors (VM_RUNTIME_ERROR with vm.error_message), not error-flagged values
+- Vec print format inside containers includes `vec` keyword: `<box: [vec 1 2 3]>` not `<box: [1 2 3]>`
+- VM has error_message (const char*) and error_line (uint32_t) for fatal runtime errors — separate from value-level error flags
+- `?` and `!` are valid word continuation characters in the lexer (enables `error?`, `set!`, `reset!`, `swap!`, `box?`, `atom?`) — `!` was added in US-003
+- `deref` (1 arg) emits OP_DEREF; `reset!` (2 args) emits OP_RESET; `swap!` (2 args) emits OP_SWAP — all work on both box and atom
+- `error` builtin (1 arg) emits OP_ERROR; `error?` (1 arg) emits OP_IS_ERROR; `error-val` (1 arg) emits OP_ERROR_VAL
+- OP_ERROR peeks stack top and sets error flag; OP_IS_ERROR pops and pushes bool; OP_ERROR_VAL peeks and clears error flag
+- vm__env_get uses bool* found out-param (not error-flagged nil) to signal undefined variables — error-flagged values can be stored in globals
+- Error propagation pattern in VM ops: after popping args, check each arg (leftmost first) for jacl_is_error(); if error, push it back and break
+- Multi-line .jacl test output uses multiple `# expect:` lines (one per line), NOT `\n` in a single expect line
+- OP_CHECK_ERROR (uint16_t operand) replaces OP_POP for non-final statement disposal; operand 0 = return from frame, nonzero = jump to handler (try)
+- compiler__emit_check_error(c, line) is the helper to emit OP_CHECK_ERROR + u16(0 or placeholder) — used in compiler__compile_block_expr, compiler_compile (top-level), AST_BLOCK, and while loop bodies; when in_try_body=true, emits 0xFFFF placeholder and records position in try_patches for later patching
+- try compilation pattern: save try context (in_try_body, try_patch_count) → compile body as block_expr → OP_JUMP_IF_ERROR(handler) → OP_JUMP(skip) → patch all OP_CHECK_ERROR offsets + OP_JUMP_IF_ERROR to handler_pos → handler scope with error binding as local → compile handler block_expr → scope cleanup (SET_LOCAL/POP_N) → patch skip_jump
+- OP_JUMP_IF_ERROR peeks stack top (no pop): if error, jump forward; else continue — error value stays on stack for handler binding
+- Nested try works via save/restore of try_patch_count: inner try patches are applied and cleaned up before outer try sees them
+- Handler scope cleanup uses the same SET_LOCAL/POP_N pattern as compile_block_expr: save result over binding slot, pop binding
+- JaclMutableRef struct shared by cell (0x0A), box (0x0B), atom (0x0C) tags — only tag differs
+- is_mutable field added to Local, GlobalArity, and Upvalue structs — default false
+- M10 opcodes: OP_MAKE_CELL(58), OP_GET_CELL_LOCAL(59), OP_SET_CELL_LOCAL(60), OP_GET_CELL_UPVALUE(61), OP_SET_CELL_UPVALUE(62), OP_SET_GLOBAL(63), OP_BOX(64), OP_ATOM(65), OP_DEREF(66), OP_RESET(67), OP_SWAP(68), OP_IS_BOX(69), OP_IS_ATOM(70), OP_HALT now at 71
+- `mut` at local scope: compile RHS → OP_MAKE_CELL → add_local(is_mutable=true) → OP_NIL; reading emits OP_GET_CELL_LOCAL
+- `mut` at global scope: compile RHS → OP_DEF_GLOBAL + set is_mutable=true in GlobalArity; no cell needed
+- Every place that emits OP_GET_LOCAL for a resolved local must check is_mutable and emit OP_GET_CELL_LOCAL instead (AST_VAR_REF + dynamic call head)
+- `set!` resolves local → upvalue → global. Local mutable: compile RHS → OP_SET_CELL_LOCAL. Upvalue mutable: OP_SET_CELL_UPVALUE. Global mutable: OP_SET_GLOBAL.
+- Local struct has `is_param` field (bool, default false) — set true for proc parameters; enables "cannot mutate parameter" vs "cannot mutate immutable binding" error messages
+- `compiler__resolve_global_info(c, name, &is_mutable)` checks global existence and mutability; returns true if found
+- `def` at global scope ALWAYS registers in GlobalArity (even non-proc values with arity -1) — needed for `set!` to distinguish "immutable binding" from "undefined variable"
+- OP_SET_CELL_LOCAL pops new value, writes through cell, pushes nil; OP_SET_GLOBAL pops value, calls vm__env_set, pushes nil
+
+## 2026-02-24 - US-001
+- Implemented: JaclMutableRef struct, JACL_TAG_CELL/BOX/ATOM value tags, constructors/accessors/predicates for cell/box/atom, is_mutable fields on Local/GlobalArity/Upvalue, 13 new opcodes in bytecode.c
+- Files changed: src/value.c, src/bytecode.c, src/compiler.c, test/test_bytecode.c
+- **Learnings for future iterations:**
+  - Adding opcodes before OP_HALT shifts its enum value — must update test_bytecode.c test_opcode_enum
+  - compiler__add_local, compiler__add_upvalue, compiler__set_global_arity all need is_mutable initialized to false
+  - JaclMutableRef uses same struct for all three tag types — only the tag byte differs
+---
+
+## 2026-02-24 - US-002
+- Implemented: `mut` special form in compiler__compile_command, OP_MAKE_CELL and OP_GET_CELL_LOCAL VM handlers, AST_VAR_REF and dynamic call head resolution updated for is_mutable check
+- Files changed: src/compiler.c, src/vm.c, test/jacl/mut_local_basic.jacl
+- **Learnings for future iterations:**
+  - Proc names must be <= 7 bytes — `test-mut` (8 bytes) fails at compile time; use shorter names like `t-mut`
+  - `mut` at global scope uses OP_DEF_GLOBAL (no cell) since globals are in name→value table; cells only needed for local slots
+  - Dynamic call head for bare words (line ~1139 in compiler.c) also needs the is_mutable check for OP_GET_CELL_LOCAL
+  - compiler__resolve_local returns slot index; check c->locals[slot].is_mutable to decide OP_GET_LOCAL vs OP_GET_CELL_LOCAL
+---
+
+## 2026-02-24 - US-003
+- Implemented: `set!` special form with full resolution chain (local → upvalue → global → undefined), OP_SET_CELL_LOCAL and OP_SET_GLOBAL VM handlers, `is_param` field on Local struct, `!` added to lexer word chars, `compiler__resolve_global_info` helper
+- Files changed: src/lexer.c, src/compiler.c, src/vm.c, test/jacl/set_local.jacl, test/jacl/set_immutable_error.jacl, test/jacl/set_param_error.jacl
+- **Learnings for future iterations:**
+  - `!` was NOT a valid word continuation character before this story — it was only in `lexer__is_operator_char`. Had to add it to `lexer__is_word_char` for `set!`, `reset!`, `swap!` to tokenize as single words
+  - `is_param` on Local struct distinguishes function parameters from `def` bindings for error messages ("cannot mutate parameter" vs "cannot mutate immutable binding")
+  - The full set! resolution chain (local → upvalue → global → undefined) was implemented upfront even though US-004/US-005 will test the global/upvalue paths — avoids incorrect error messages for mutable globals
+  - OP_SET_GLOBAL VM handler was added in this story (trivial: pop value, env_set, push nil) since the compiler emits it for mutable globals
+---
+
+## 2026-02-24 - US-004
+- Implemented: `mut`/`set!` for mutable globals — test files and a fix to always register `def` globals in GlobalArity table
+- Files changed: src/compiler.c, test/jacl/mut_global.jacl, test/jacl/set_global_immutable_error.jacl, .ralph/prd.json
+- **Learnings for future iterations:**
+  - `def` at global scope previously only registered in GlobalArity when RHS had known arity (proc). Changed to always register so `set!` can find immutable globals and give correct "cannot mutate immutable binding" error instead of "undefined variable"
+  - Most US-004 infrastructure (mut at global scope, set! global resolution, OP_SET_GLOBAL VM handler) was already implemented in US-003 — this story mainly needed the test files and the `def` global registration fix
+  - Global `mut` does NOT use cells (no OP_MAKE_CELL) — globals are stored in a name→value environment table, so OP_DEF_GLOBAL/OP_SET_GLOBAL suffice
+---
+
+## 2026-02-24 - US-005
+- Implemented: Mutable closure capture via cells — `compiler__resolve_upvalue` now propagates `is_mutable` from enclosing locals/upvalues, AST_VAR_REF emits OP_GET_CELL_UPVALUE for mutable upvalues, VM handlers for OP_GET_CELL_UPVALUE and OP_SET_CELL_UPVALUE
+- Files changed: src/compiler.c, src/vm.c, test/jacl/mut_closure_shared.jacl, test/jacl/mut_closure_bidirectional.jacl
+- **Learnings for future iterations:**
+  - OP_CLOSURE capture is unchanged — cells are JaclVals copied by value, so both enclosing local slot and closure upvalue slot point to same heap JaclMutableRef
+  - `$var` at statement position in a block desugars to `[$var]` (zero-arg call) — for returning non-callable values from procs, use `[+ $x 0]` not `{ $x }`
+  - `proc name [] { body }` requires the empty params list `[]` even for zero-arg procs — omitting it gives arity error "proc expects 3 arguments but got 2"
+  - Transitive is_mutable propagation: when capturing from enclosing upvalue, copy is_mutable from `c->enclosing->upvalues[upvalue].is_mutable`
+---
+
+## 2026-02-24 - US-006
+- Implemented: `box`, `atom`, `box?`, `atom?` compiler builtins + VM handlers for OP_BOX, OP_ATOM, OP_IS_BOX, OP_IS_ATOM
+- Files changed: src/compiler.c, src/vm.c, test/jacl/box_create.jacl, test/jacl/atom_create.jacl
+- **Learnings for future iterations:**
+  - JACL comments use `#` not `;` — semicolons are statement separators, using them as comments causes parse errors
+  - OP_BOX and OP_ATOM check for error-flagged input and propagate the error (don't allocate a box/atom)
+  - box/atom builtins follow same pattern as `error` builtin: 1-arg compile, emit single opcode
+  - `box?` and `atom?` follow same pattern as `error?` builtin: 1-arg compile, emit predicate opcode
+---
+
+## 2026-02-24 - US-007
+- Implemented: `deref`, `reset!`, `swap!` compiler builtins + VM handlers for OP_DEREF, OP_RESET, OP_SWAP
+- Files changed: src/compiler.c, src/vm.c, test/jacl/deref_basic.jacl, test/jacl/reset_basic.jacl, test/jacl/swap_basic.jacl
+- **Learnings for future iterations:**
+  - OP_SWAP follows the same inline closure call pattern as OP_EACH/OP_TRANSFORM/OP_FILTER: push closure + arg, set up CallFrame, call vm__run(vm, caller_frame_count), pop return value, restore state
+  - `reset!` returns the new value (not nil) — different from `set!` which returns nil
+  - `swap!` validates closure param_count == 1 at runtime (not compile time, since the closure may be passed dynamically)
+  - `deref`, `reset!`, `swap!` all work on both box and atom types (check `jacl_is_box || jacl_is_atom`)
+  - Error propagation: check each arg left-to-right for error flag, push first error found
+---
+
+## 2026-02-24 - US-008
+- Implemented: Print formatting for box (`<box: VALUE>`), atom (`<atom: VALUE>`), and cell (transparent dereference) in both OP_PRINT and vm__fmt_value; also updated OP_TO_STRING for cell/box/atom
+- Files changed: src/vm.c, test/jacl/print_box_atom.jacl
+- **Learnings for future iterations:**
+  - Cell transparency in OP_PRINT: dereference the cell right after popping val, before any type checks — this makes cells invisible at the print level
+  - vm__fmt_value wraps strings in quotes — so `<atom: "hello">` not `<atom: hello>` for string-containing containers
+  - Box/atom print use the VMFormatBuf path (same as vectors/maps) since they need recursive formatting
+  - OP_TO_STRING also needs cell/box/atom handling — cell is transparent (dereference before convert), box/atom use fmt_value path
+---
+
+## 2026-02-24 - US-009
+- Implemented: Comprehensive M10 integration test file `test/test_m10.c` with 58 tests covering all mutable state features; registered in build.sh
+- Files changed: test/test_m10.c (new), build.sh
+- **Learnings for future iterations:**
+  - deref/reset!/swap! on wrong types produce VM runtime errors (VM_RUNTIME_ERROR), not error-flagged values — use run_err not run_ok for these tests
+  - Vec print format inside containers includes `vec` keyword: `<box: [vec 1 2 3]>` not `<box: [1 2 3]>`
+  - Test file follows exact test_m9.c pattern: PrintCapture(4096), run_ok/run_err helpers, TestEntry table grouped by US-XXX comments
+---
