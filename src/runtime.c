@@ -25,6 +25,7 @@
 typedef struct {
     void (*fn)(void *data);
     void *data;
+    JaclVal gc_root;  /* Tagged value for GC root scanning, JACL_NIL if none */
 } RuntimeTask;
 
 /* ======================================================================
@@ -372,8 +373,9 @@ static void runtime_destroy(Runtime *rt) {
 
 static void runtime_submit(Runtime *rt, void (*fn)(void *), void *data) {
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
-    task->fn   = fn;
-    task->data = data;
+    task->fn      = fn;
+    task->data    = data;
+    task->gc_root = JACL_NIL;
 
     MUTEX_LOCK(rt->inbox_mutex);
     if (rt->inbox_count >= rt->inbox_cap) {
@@ -397,8 +399,144 @@ static void runtime__exec_closure(void *data) {
 
 static void runtime_submit_task(Runtime *rt, JaclClosure *closure,
                                  bool thread_local) {
+    RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
+    task->fn      = runtime__exec_closure;
+    task->data    = closure;
+    task->gc_root = JACL_TAG_CLOSURE
+                  | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
+
+    MUTEX_LOCK(rt->inbox_mutex);
+    if (rt->inbox_count >= rt->inbox_cap) {
+        intptr_t new_cap = rt->inbox_cap * 2;
+        rt->inbox = (uintptr_t *)realloc(rt->inbox,
+                                          (size_t)new_cap * sizeof(uintptr_t));
+        rt->inbox_cap = new_cap;
+    }
+    rt->inbox[rt->inbox_count++] = (uintptr_t)task;
+    MUTEX_UNLOCK(rt->inbox_mutex);
+
     (void)thread_local;
-    runtime_submit(rt, runtime__exec_closure, closure);
+}
+
+/* ======================================================================
+ * Root enumeration for concurrent GC (US-009)
+ *
+ * Scans all GC roots across all worker threads without stopping the world.
+ * Uses the BUSY sentinel protocol to handle the pop-in-transit race.
+ * ====================================================================== */
+
+/* Maximum spins when waiting for BUSY sentinel to resolve */
+#define GC_BUSY_SPIN_MAX 10000
+
+/* Snapshot a Chase-Lev deque's contents and push task gc_roots onto mark stack.
+ * Conservative: may include already-completed or stolen tasks (harmless). */
+static void gc__scan_deque(rt_deque_deque *dq, GCMarkStack *ms) {
+    uint64_t t = ATOMIC_LOAD_EXPLICIT(&dq->top, MEM_ACQUIRE);
+    ATOMIC_FENCE(MEM_SEQ_CST);
+    uint64_t b = ATOMIC_LOAD_EXPLICIT(&dq->bottom, MEM_ACQUIRE);
+
+    if ((int64_t)(b - t) <= 0) return; /* empty */
+
+    /* Read buffer pointer — visible after acquire on top/bottom */
+    rt_deque_buffer *buf = dq->buffer;
+
+    for (uint64_t i = t; i < b; i++) {
+        uintptr_t val = buf->data[i & buf->mask];
+        if (val > WORKER_BUSY) {
+            RuntimeTask *task = (RuntimeTask *)val;
+            gc__ms_push_val(ms, task->gc_root);
+        }
+    }
+}
+
+/* Enumerate all GC roots across the runtime and push onto mark stack.
+ *
+ * Root sources per worker:
+ *   1. currently_executing slot (BUSY spin protocol)
+ *   2. Public deque snapshot
+ *   3. Private deque snapshot
+ *   4. VM stack values
+ *   5. Call frame closures
+ *   6. Call frame chunk constants (heap literals)
+ *   7. Global environment values
+ *   8. Intern table entries (Phase 1: immortal strings)
+ *
+ * Plus global inbox tasks. */
+static void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
+    for (int w_idx = 0; w_idx < rt->num_workers; w_idx++) {
+        WorkerThread *w = &rt->workers[w_idx];
+
+        /* 1. Currently executing task (BUSY sentinel protocol)
+         *    Fast spin first — BUSY typically resolves in nanoseconds (3–5
+         *    instructions between setting BUSY and publishing the task ptr).
+         *    Slow path yields to handle scheduling delays defensively. */
+        uintptr_t ce = ATOMIC_LOAD_EXPLICIT(&w->currently_executing,
+                                             MEM_ACQUIRE);
+        if (ce == WORKER_BUSY) {
+            for (int spin = 0; spin < GC_BUSY_SPIN_MAX; spin++) {
+                ce = ATOMIC_LOAD_EXPLICIT(&w->currently_executing,
+                                           MEM_ACQUIRE);
+                if (ce != WORKER_BUSY) break;
+            }
+            while (ce == WORKER_BUSY) {
+                SLEEP_MILLISECONDS(1);
+                ce = ATOMIC_LOAD_EXPLICIT(&w->currently_executing,
+                                           MEM_ACQUIRE);
+            }
+        }
+        if (ce != WORKER_IDLE && ce != WORKER_BUSY) {
+            RuntimeTask *task = (RuntimeTask *)ce;
+            gc__ms_push_val(ms, task->gc_root);
+        }
+
+        /* 2–3. Deque snapshots (public + private) */
+        gc__scan_deque(w->public_deque, ms);
+        gc__scan_deque(w->private_deque, ms);
+
+        /* 4. VM stack values */
+        for (uint32_t i = 0; i < w->vm.stack_top; i++) {
+            gc__ms_push_val(ms, w->vm.stack[i]);
+        }
+
+        /* 5. Call frame closures */
+        for (uint32_t i = 0; i < w->vm.frame_count; i++) {
+            if (w->vm.frames[i].closure) {
+                gc__ms_push(ms, w->vm.frames[i].closure);
+            }
+        }
+
+        /* 6. Call frame chunk constants (heap i64/u64/f64 literals) */
+        for (uint32_t i = 0; i < w->vm.frame_count; i++) {
+            BytecodeChunk *ch = w->vm.frames[i].chunk;
+            if (ch) {
+                for (uint32_t j = 0; j < ch->const_count; j++) {
+                    gc__ms_push_const(ms, ch->constants[j]);
+                }
+            }
+        }
+
+        /* 7. Global environment values */
+        for (uint32_t i = 0; i < w->vm.env.count; i++) {
+            gc__ms_push_val(ms, w->vm.env.values[i]);
+        }
+
+        /* 8. Intern table entries (Phase 1: immortal strings) */
+        if (w->vm.intern_table) {
+            for (uint32_t i = 0; i < w->vm.intern_table->cap; i++) {
+                if (w->vm.intern_table->entries[i]) {
+                    gc__ms_push(ms, w->vm.intern_table->entries[i]);
+                }
+            }
+        }
+    }
+
+    /* 9. Inbox tasks (external submissions awaiting pickup) */
+    MUTEX_LOCK(rt->inbox_mutex);
+    for (intptr_t i = 0; i < rt->inbox_count; i++) {
+        RuntimeTask *task = (RuntimeTask *)rt->inbox[i];
+        gc__ms_push_val(ms, task->gc_root);
+    }
+    MUTEX_UNLOCK(rt->inbox_mutex);
 }
 
 #endif /* RUNTIME_C */
