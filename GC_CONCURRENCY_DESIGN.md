@@ -356,31 +356,57 @@ Each of these is a **CPS suspension point** — the compiler splits the code her
 - Is the `BUSY` sentinel + spin sufficient, or do we need a more robust protocol?
 - Should we add a separate task registry (append-only log) as a secondary root source?
 
+**Answer**: BUSY sentinel + spin is sufficient. The vulnerability window is ~3 instructions (pop from deque, store to `currently_executing`). The spin resolves in nanoseconds. A separate task registry would add overhead to every enqueue/dequeue operation for no practical gain — the deque snapshot already provides conservative coverage, and `currently_executing` with the BUSY protocol closes the only gap.
+
 ### Sweep Concurrency
 - Can GC sweep a thread's completed blocks while that thread reads from them? (Objects are only freed, not moved — reads of live objects remain valid.)
 - Should sweep be distributed (each thread sweeps its own heap at a safe point)?
+
+**Answer**: Yes, concurrent sweep of completed blocks is safe. The GC sweep writes only to object metadata (mark bits, free lists); worker threads read object payloads. Since objects are never moved, reads of live objects remain valid throughout the sweep. Distributed sweep (each thread sweeps its own heap) adds synchronization complexity for little benefit — a single GC worker sweeping all completed blocks is simpler and sufficient.
 
 ### GC Scheduling Heuristics
 - Allocation-byte threshold? Heap growth rate? Fixed interval?
 - Should GC be higher priority than regular tasks?
 
+**Answer**: Allocation-byte threshold as the primary trigger, adaptive based on survival rate. High survival rate (most objects live) → increase the threshold (GC is doing wasted work). Low survival rate (lots of garbage) → decrease the threshold (collect more often). Start with a reasonable default (e.g., 1MB of new allocations since last GC) and tune from there. GC should run at normal task priority — not elevated. If GC falls behind allocation rate, the watermark mechanism naturally bounds memory growth: new objects are epoch-protected and can't be collected until threads advance, so the system self-regulates without priority escalation.
+
 ### Mark Stack Overflow
 - Deep object graphs (long linked lists, deep trees) could overflow the mark stack
 - Iterative deepening? Overflow buffer?
+
+**Answer**: Overflow buffer. In practice, object graphs are shallow: HAMT depth caps at ~7 levels (5-bit hashing, 32-bit keys), RRB depth caps at ~7 levels (32-way branching), and closure nesting is bounded by `VM_FRAMES_MAX` (64). A fixed-size mark stack of 4096 entries handles all realistic workloads. For pathological cases (deeply nested user-constructed linked lists), use a dynamically-growing overflow list: when the mark stack is full, spill entries to the overflow list; after draining the main stack, process the overflow list. Simple and bounded.
 
 ### Finalization / FFI Resources
 - File handles, network sockets, etc. need deterministic cleanup
 - Weak references? Destructor callbacks on GCHeader? Explicit `close` discipline?
 
+**Answer**: Explicit `close` discipline as the primary mechanism. GC finalization is fundamentally non-deterministic — relying on it for resource cleanup leads to leaks under pressure and unpredictable behavior. JACL should provide a `with-open` or `defer` construct that guarantees deterministic cleanup at scope exit, even on error paths. Destructor callbacks on `GCHeader` may be added later as a safety net (log a warning if a resource is GC'd without being closed), but never as the primary cleanup path. No weak references in phase 1 — add them only if string interning or caching demonstrates a concrete need.
+
 ### Deque Enumeration
 - The snapshot approach (read top/bottom, read all elements) is conservative. Is that acceptable, or do we need exact enumeration?
+
+**Answer**: Conservative snapshot is acceptable. The worst case is that GC traces a task that has already completed (still visible in the deque snapshot between index reads and element reads). This keeps some garbage alive for one extra GC cycle — harmless. Exact enumeration would require pausing all workers or adding per-element metadata, neither of which is worth the cost for a marginal reduction in floating garbage.
 
 ### Cancellation Semantics
 - When `race` picks a winner, how are losing tasks cancelled?
 - Can a cancelled task leave mutable state in an inconsistent state?
 
+**Answer**: Cooperative cancellation. Each task has an `is_cancelled` atomic flag. When `race` picks a winner, it sets `is_cancelled` on all losing tasks. A running task checks this flag only at CPS suspension points (the same points where `spawn`, `await`, `parallel`, `race`, and channel operations occur). Between suspension points, a CPS segment executes as uninterruptible bytecode. This means:
+
+- A task that hasn't started yet (still on a deque) is simply discarded when popped and found cancelled.
+- A task that is mid-execution runs to its next suspension point, then is discarded.
+- A CPS segment is therefore atomic with respect to cancellation — mutable state cannot be left inconsistent, because the segment either completes fully or never started.
+
+For atoms: `swap!` is CAS-based and completes within a single CPS segment, so cancellation cannot interrupt it mid-operation.
+
 ### OOM Handling
 - Thread can't allocate a new block: trigger emergency GC? Grow heap limit? Panic?
+
+**Answer**: Three-tier escalation:
+
+1. **Emergency synchronous GC**: Stop-the-world, full collection. Acceptable because this only fires under extreme memory pressure — the normal concurrent GC should prevent this in practice.
+2. **Heap growth**: If emergency GC doesn't reclaim enough, request more blocks from the OS up to a configurable maximum heap size.
+3. **Panic**: If the OS refuses allocation (or max heap size is reached), raise an unrecoverable OOM error with a diagnostic message (current heap size, allocation request size, survival rate).
 
 ## 15. Implementation Ordering
 
