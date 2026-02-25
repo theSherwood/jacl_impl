@@ -60,4 +60,221 @@ static inline bool jacl_is_heap_type(JaclVal v) {
         || tag == JACL_TAG_F64;
 }
 
+/* ======================================================================
+ * Block-based heap allocator (Immix-style line granularity)
+ * ====================================================================== */
+
+/* --- Constants --- */
+
+#define GC_BLOCK_SIZE       65536   /* 64KB per block */
+#define GC_LINE_SIZE        128     /* bytes per line */
+#define GC_LINES_PER_BLOCK  512     /* GC_BLOCK_SIZE / GC_LINE_SIZE */
+
+#define GC_LINE_FREE     0
+#define GC_LINE_OCCUPIED 1
+
+/* --- GCBlock: one 64KB heap block with out-of-band line map --- */
+
+typedef struct GCBlock {
+    uint8_t         payload[GC_BLOCK_SIZE];       /* allocation area */
+    uint8_t         line_map[GC_LINES_PER_BLOCK]; /* one byte per line */
+    struct GCBlock *next;                          /* linked list */
+} GCBlock;
+
+/* --- BlockPool: thread-safe pool of free blocks --- */
+
+typedef struct {
+    GCBlock         *free_list;
+    platform_mutex_t mutex;
+} BlockPool;
+
+static void gc_block_pool_init(BlockPool *pool) {
+    pool->free_list = NULL;
+    MUTEX_INIT(pool->mutex);
+}
+
+static GCBlock *gc_block_pool_get(BlockPool *pool) {
+    GCBlock *block;
+    MUTEX_LOCK(pool->mutex);
+    block = pool->free_list;
+    if (block) {
+        pool->free_list = block->next;
+    }
+    MUTEX_UNLOCK(pool->mutex);
+
+    if (!block) {
+        block = (GCBlock *)malloc(sizeof(GCBlock));
+        if (!block) return NULL;
+    }
+    memset(block->line_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
+    block->next = NULL;
+    return block;
+}
+
+static void gc_block_pool_return(BlockPool *pool, GCBlock *block) {
+    MUTEX_LOCK(pool->mutex);
+    block->next = pool->free_list;
+    pool->free_list = block;
+    MUTEX_UNLOCK(pool->mutex);
+}
+
+static void gc_block_pool_destroy(BlockPool *pool) {
+    GCBlock *b = pool->free_list;
+    while (b) {
+        GCBlock *n = b->next;
+        free(b);
+        b = n;
+    }
+    pool->free_list = NULL;
+    MUTEX_DESTROY(pool->mutex);
+}
+
+/* --- ThreadHeap: per-thread heap state --- */
+
+typedef struct {
+    GCBlock   *blocks;         /* linked list of all owned blocks */
+    GCBlock   *current_block;  /* block being allocated into */
+    uint8_t   *cursor;         /* next allocation position */
+    uint8_t   *limit;          /* end of current free-line run */
+    size_t     bytes_since_gc; /* allocation counter for GC trigger */
+    BlockPool *pool;           /* shared block pool */
+} ThreadHeap;
+
+static void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
+    heap->blocks = NULL;
+    heap->current_block = NULL;
+    heap->cursor = NULL;
+    heap->limit = NULL;
+    heap->bytes_since_gc = 0;
+    heap->pool = pool;
+}
+
+static void gc_heap_destroy(ThreadHeap *heap) {
+    GCBlock *b = heap->blocks;
+    while (b) {
+        GCBlock *n = b->next;
+        if (heap->pool) {
+            gc_block_pool_return(heap->pool, b);
+        } else {
+            free(b);
+        }
+        b = n;
+    }
+    heap->blocks = NULL;
+    heap->current_block = NULL;
+    heap->cursor = NULL;
+    heap->limit = NULL;
+}
+
+/* --- Internal helpers --- */
+
+/* Mark all lines touched by an allocation at [offset, offset+size) */
+static void gc__mark_lines(GCBlock *block, size_t offset, size_t size) {
+    int first_line = (int)(offset / GC_LINE_SIZE);
+    int last_line  = (int)((offset + size - 1) / GC_LINE_SIZE);
+    int i;
+    for (i = first_line; i <= last_line; i++) {
+        block->line_map[i] = GC_LINE_OCCUPIED;
+    }
+}
+
+/* Find next run of free lines starting from line index `from`.
+ * Returns true if found, writing start index and length to out params. */
+static bool gc__find_free_run(GCBlock *block, int from,
+                              int *out_start, int *out_len) {
+    int i = from;
+    while (i < GC_LINES_PER_BLOCK && block->line_map[i] != GC_LINE_FREE)
+        i++;
+    if (i >= GC_LINES_PER_BLOCK) return false;
+
+    *out_start = i;
+    while (i < GC_LINES_PER_BLOCK && block->line_map[i] == GC_LINE_FREE)
+        i++;
+    *out_len = i - *out_start;
+    return true;
+}
+
+/* Search a block (from line `from`) for a free run >= needed_lines.
+ * On success, sets heap cursor/limit/current_block and returns true. */
+static bool gc__find_fit_in_block(ThreadHeap *heap, GCBlock *block,
+                                  int needed_lines, int from) {
+    int run_start, run_len;
+    int scan = from;
+    while (gc__find_free_run(block, scan, &run_start, &run_len)) {
+        if (run_len >= needed_lines) {
+            heap->current_block = block;
+            heap->cursor = block->payload
+                         + ((size_t)run_start * GC_LINE_SIZE);
+            heap->limit  = block->payload
+                         + ((size_t)(run_start + run_len) * GC_LINE_SIZE);
+            return true;
+        }
+        scan = run_start + run_len;
+    }
+    return false;
+}
+
+/* Bump-allocate at the current cursor position.
+ * Caller must ensure cursor + total <= limit. */
+static void *gc__bump_alloc(ThreadHeap *heap, size_t total, uint8_t obj_type) {
+    uint8_t  *ptr = heap->cursor;
+    GCHeader *hdr;
+
+    heap->cursor += total;
+    heap->bytes_since_gc += total;
+
+    gc__mark_lines(heap->current_block,
+                   (size_t)(ptr - heap->current_block->payload), total);
+
+    hdr = (GCHeader *)ptr;
+    hdr->epoch    = 0;
+    hdr->mark     = 0;
+    hdr->obj_type = obj_type;
+    hdr->gen      = 0;
+    hdr->_pad     = 0;
+
+    return hdr + 1; /* payload pointer */
+}
+
+/* --- gc_alloc: bump-allocate with Immix-style line scanning --- */
+
+static void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
+    size_t   total = sizeof(GCHeader) + payload_size;
+    int      needed_lines;
+    GCBlock *b;
+    GCBlock *new_block;
+
+    /* Align total to 8 bytes so next header stays aligned */
+    total = (total + 7) & ~(size_t)7;
+
+    if (total > GC_BLOCK_SIZE) return NULL;
+
+    /* Fast path: bump within current free-line run */
+    if (heap->cursor && heap->cursor + total <= heap->limit) {
+        return gc__bump_alloc(heap, total, obj_type);
+    }
+
+    /* Slow path: scan all blocks from line 0 for a large-enough free run */
+    needed_lines = (int)((total + GC_LINE_SIZE - 1) / GC_LINE_SIZE);
+    b = heap->blocks;
+    while (b) {
+        if (gc__find_fit_in_block(heap, b, needed_lines, 0)) {
+            return gc__bump_alloc(heap, total, obj_type);
+        }
+        b = b->next;
+    }
+
+    /* No room in any existing block — acquire a new one from the pool */
+    new_block = gc_block_pool_get(heap->pool);
+    if (!new_block) return NULL;
+
+    new_block->next = heap->blocks;
+    heap->blocks = new_block;
+    heap->current_block = new_block;
+    heap->cursor = new_block->payload;
+    heap->limit  = new_block->payload + GC_BLOCK_SIZE;
+
+    return gc__bump_alloc(heap, total, obj_type);
+}
+
 #endif /* GC_C */
