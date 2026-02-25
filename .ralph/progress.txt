@@ -100,6 +100,9 @@
 - BUSY sentinel spin: fast tight spin (10000 loads), then slow yield loop (SLEEP_MILLISECONDS(1)) — handles both nanosecond real-world and test scheduling delays
 - Deque snapshot for GC: read top/bottom with acquire ordering + seq_cst fence, then read buffer contents — conservative (may trace dead, harmless)
 - rt_test__init_no_threads / rt_test__destroy_no_threads: test helpers for deterministic root enumeration testing without running worker threads
+- GreyBuffer defined in gc.c (not runtime.c) — available to vm.c in unity build order; gc_write_barrier takes GreyBuffer* + gc_active_ptr directly
+- VM struct has grey_buf and gc_active_ptr fields (NULL in single-threaded, set by runtime__init_worker_vm) — write barrier is zero-overhead when NULL
+- Write barrier fires BEFORE assignment in OP_SET_CELL_LOCAL/UPVALUE, OP_RESET, OP_SWAP — captures old value first for SATB correctness
 
 ## 2026-02-25 - US-002
 - Implemented block-based heap allocator with Immix-style line granularity in src/gc.c
@@ -298,5 +301,34 @@ Thread: (inline)
   - BUSY spin fast path (10K loads at ~5ns each = ~50µs) covers all real-world scenarios; slow yield path is defensive only
   - rt_test__init_no_threads avoids thread scheduling nondeterminism — use for all GC/root enumeration unit tests
   - rt_test__ms_contains drains/restores mark stack to search — destructive but re-fills entries for further inspection
+  - All 46 test suites pass (0 failures) including 131 harness tests
+---
+
+## 2026-02-25 - US-010
+Thread: (inline)
+- Implemented hybrid SATB + insertion write barriers for concurrent GC correctness
+- Moved GreyBuffer definition from runtime.c to gc.c (GC data structure, needed before vm.c in unity build)
+- Added gc_write_barrier() static inline in gc.c:
+  - Takes (GreyBuffer*, volatile uint32_t* gc_active_ptr, JaclVal old_val, JaclVal new_val)
+  - Fast path: NULL gc_active_ptr → no-op (single-threaded mode)
+  - Fast path: !ATOMIC_LOAD_EXPLICIT(gc_active_ptr, MEM_RELAXED) → no-op (GC not running)
+  - SATB deletion barrier: pushes old_val to grey buffer if heap type
+  - Insertion barrier: pushes new_val to grey buffer if heap type
+- Added grey_buf and gc_active_ptr fields to VM struct (NULL in single-threaded, set by runtime)
+- Wired write barrier into four OP handlers in vm.c:
+  - OP_SET_CELL_LOCAL: barrier(old=ref->value, new=new_value) before assignment
+  - OP_SET_CELL_UPVALUE: barrier(old=ref->value, new=new_value) before assignment
+  - OP_RESET: barrier(old=ref->value, new=new_val) before assignment
+  - OP_SWAP: captures pre-swap value, barrier(old=swap_old_val, new=swap_result) after closure call, before assignment
+- Updated runtime__init_worker_vm to set vm->grey_buf and vm->gc_active_ptr from worker/runtime
+- Added 7 write barrier tests to test/test_runtime.c: gc_active, gc_inactive, null fast path, inline types skipped, mixed types, vm_reset integration, vm_set_cell integration
+- Files changed: src/gc.c, src/runtime.c, src/vm.c, test/test_runtime.c
+- **Learnings for future iterations:**
+  - GreyBuffer is a GC data structure — lives in gc.c, not runtime.c, so it's available to vm.c in unity build order
+  - gc_write_barrier takes GreyBuffer* + gc_active_ptr directly (not WorkerThread*) — decoupled from threading model
+  - VM struct gains grey_buf/gc_active_ptr pointers: NULL in single-threaded, set by runtime init — clean zero-overhead abstraction
+  - Write barrier fires BEFORE the actual assignment (capture old value, then barrier, then store) — important for SATB correctness
+  - OP_SWAP captures swap_old_val before closure call, fires barrier after — old value preserved across closure execution
+  - $var at statement position desugars to [$var] (zero-arg call) — don't use bare `$x` as last statement in test JACL programs
   - All 46 test suites pass (0 failures) including 131 harness tests
 ---

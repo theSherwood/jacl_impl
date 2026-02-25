@@ -190,7 +190,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Both barriers are needed: SATB protects old values still held on a VM stack after being evicted from a container; insertion protects new values stored after GC has already scanned the container. Neither alone covers both cases. Grey buffers are per-thread, append-only — no contention. GC drains them during mark phase."
     },
     {
