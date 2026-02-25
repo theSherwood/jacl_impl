@@ -138,6 +138,7 @@ typedef struct {
     uint8_t   *limit;          /* end of current free-line run */
     size_t     bytes_since_gc; /* allocation counter for GC trigger */
     BlockPool *pool;           /* shared block pool */
+    uint8_t    current_mark;   /* alternates 0/1 each GC cycle */
 } ThreadHeap;
 
 static void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
@@ -147,6 +148,7 @@ static void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
     heap->limit = NULL;
     heap->bytes_since_gc = 0;
     heap->pool = pool;
+    heap->current_mark = 1; /* first GC marks with 1 (initial mark on objects is 0) */
 }
 
 static void gc_heap_destroy(ThreadHeap *heap) {

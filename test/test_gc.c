@@ -256,6 +256,356 @@ static int test_gc_alloc_too_large(void) {
     TEST_PASS();
 }
 
+/* ===== US-006: Single-threaded mark phase ===== */
+
+/* Helper: check if an object (by payload pointer) is marked with the given mark */
+static int gc__is_marked(void *payload, uint8_t mark) {
+    return gc_header_of(payload)->mark == mark;
+}
+
+static int test_gc_mark_leaf_objects(void) {
+    /* Leaf-type objects on the stack should be marked; unreachable should not */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    uint8_t mark = vm.heap.current_mark;
+
+    /* Allocate reachable leaf objects — push onto VM stack */
+    JaclVal vi = jacl_i64(&vm.heap, 42);
+    JaclVal vu = jacl_u64(&vm.heap, 99);
+    JaclVal vf = jacl_f64(&vm.heap, 3.14);
+    vm.stack[0] = vi;
+    vm.stack[1] = vu;
+    vm.stack[2] = vf;
+    vm.stack_top = 3;
+
+    /* Allocate unreachable object (not on stack, not in env) */
+    void *dead = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+
+    gc_mark(&vm.heap, &vm);
+
+    /* Reachable objects marked */
+    ASSERT(gc__is_marked(jacl_as_ptr(vi), mark));
+    ASSERT(gc__is_marked(jacl_as_ptr(vu), mark));
+    ASSERT(gc__is_marked(jacl_as_ptr(vf), mark));
+
+    /* Unreachable object NOT marked */
+    ASSERT(!gc__is_marked(dead, mark));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_mark_closure_upvalues(void) {
+    /* Closure on stack with upvalue pointing to a heap object — both survive */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    uint8_t mark = vm.heap.current_mark;
+
+    /* Create an i64 as the upvalue */
+    JaclVal captured = jacl_i64(&vm.heap, 100);
+
+    /* Create closure with 1 upvalue */
+    size_t uv_bytes = sizeof(JaclVal) * 1;
+    JaclClosure *cl = (JaclClosure *)gc_alloc(&vm.heap, OBJ_CLOSURE,
+                                               sizeof(JaclClosure) + uv_bytes);
+    memset(cl, 0, sizeof(JaclClosure));
+    cl->upvalue_count = 1;
+    cl->upvalues = (JaclVal *)(cl + 1);
+    cl->upvalues[0] = captured;
+
+    /* Push closure onto VM stack */
+    vm.stack[0] = jacl_closure(cl);
+    vm.stack_top = 1;
+
+    gc_mark(&vm.heap, &vm);
+
+    /* Closure is marked */
+    ASSERT(gc__is_marked(cl, mark));
+    /* Upvalue (i64) is also marked */
+    ASSERT(gc__is_marked(jacl_as_ptr(captured), mark));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_mark_mutable_ref(void) {
+    /* MutableRef (box) on stack referencing a heap value — both survive */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    uint8_t mark = vm.heap.current_mark;
+
+    JaclVal inner = jacl_i64(&vm.heap, 55);
+
+    JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(&vm.heap, OBJ_MUTABLE_REF,
+                                                      sizeof(JaclMutableRef));
+    ref->value = inner;
+
+    vm.stack[0] = jacl_box_ptr(ref);
+    vm.stack_top = 1;
+
+    gc_mark(&vm.heap, &vm);
+
+    ASSERT(gc__is_marked(ref, mark));
+    ASSERT(gc__is_marked(jacl_as_ptr(inner), mark));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_mark_hamt(void) {
+    /* HAMT map on stack — all reachable nodes survive */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    uint8_t mark = vm.heap.current_mark;
+
+    /* Create a map with a couple entries using the HAMT API */
+    gc__current_heap = &vm.heap;
+    JaclVal key1 = jacl_inline_string("a", 1);
+    JaclVal val1 = jacl_i64(&vm.heap, 10);
+    JaclVal key2 = jacl_inline_string("b", 1);
+    JaclVal val2 = jacl_i64(&vm.heap, 20);
+
+    jacl_map_node *map = NULL;
+    map = jacl_map_set(map, key1, val1);
+    map = jacl_map_set(map, key2, val2);
+
+    /* Push map onto stack as a JaclVal */
+    JaclVal map_val = JACL_TAG_MAP | ((uint64_t)(uintptr_t)map & JACL_PAYLOAD_MASK);
+    vm.stack[0] = map_val;
+    vm.stack_top = 1;
+
+    gc_mark(&vm.heap, &vm);
+
+    /* Map root node is marked */
+    ASSERT(gc__is_marked(map, mark));
+    /* The values stored in the map are marked */
+    ASSERT(gc__is_marked(jacl_as_ptr(val1), mark));
+    ASSERT(gc__is_marked(jacl_as_ptr(val2), mark));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_mark_rrb_vec(void) {
+    /* RRB vector on stack — root, tail, and elements survive */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    uint8_t mark = vm.heap.current_mark;
+
+    gc__current_heap = &vm.heap;
+    JaclVal elem1 = jacl_i64(&vm.heap, 1);
+    JaclVal elem2 = jacl_i64(&vm.heap, 2);
+    JaclVal elem3 = jacl_i64(&vm.heap, 3);
+
+    jacl_vec_root *vec = jacl_vec_empty();
+    vec = jacl_vec_push_back(vec, elem1);
+    vec = jacl_vec_push_back(vec, elem2);
+    vec = jacl_vec_push_back(vec, elem3);
+
+    JaclVal vec_val = JACL_TAG_VECTOR | ((uint64_t)(uintptr_t)vec & JACL_PAYLOAD_MASK);
+    vm.stack[0] = vec_val;
+    vm.stack_top = 1;
+
+    gc_mark(&vm.heap, &vm);
+
+    /* Root struct is marked */
+    ASSERT(gc__is_marked(vec, mark));
+    /* Elements are marked */
+    ASSERT(gc__is_marked(jacl_as_ptr(elem1), mark));
+    ASSERT(gc__is_marked(jacl_as_ptr(elem2), mark));
+    ASSERT(gc__is_marked(jacl_as_ptr(elem3), mark));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_mark_global_env(void) {
+    /* Values in the global environment are roots */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    uint8_t mark = vm.heap.current_mark;
+
+    /* Put a heap value into the global env */
+    JaclVal gval = jacl_i64(&vm.heap, 777);
+    JaclVal gname = jacl_inline_string("myvar", 5);
+    vm__env_set(&vm, gname, gval);
+
+    /* Nothing on the stack */
+    vm.stack_top = 0;
+
+    gc_mark(&vm.heap, &vm);
+
+    ASSERT(gc__is_marked(jacl_as_ptr(gval), mark));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_mark_unreachable_not_marked(void) {
+    /* Objects not reachable from any root should NOT be marked */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    uint8_t mark = vm.heap.current_mark;
+
+    /* Allocate several objects but don't push any onto stack or env */
+    void *dead1 = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    void *dead2 = gc_alloc(&vm.heap, OBJ_STRING, 32);
+    void *dead3 = gc_alloc(&vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+    ((JaclMutableRef *)dead3)->value = JACL_NIL;
+
+    vm.stack_top = 0;
+
+    gc_mark(&vm.heap, &vm);
+
+    ASSERT(!gc__is_marked(dead1, mark));
+    ASSERT(!gc__is_marked(dead2, mark));
+    ASSERT(!gc__is_marked(dead3, mark));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_mark_alternation(void) {
+    /* Mark bit toggles each cycle — second mark uses different bit */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* First mark cycle: current_mark == 1 */
+    ASSERT_INT_EQ(vm.heap.current_mark, 1);
+
+    JaclVal vi = jacl_i64(&vm.heap, 42);
+    vm.stack[0] = vi;
+    vm.stack_top = 1;
+
+    gc_mark(&vm.heap, &vm);
+    ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(vi))->mark, 1);
+
+    /* Toggle mark for next cycle */
+    vm.heap.current_mark = 1 - vm.heap.current_mark;
+    ASSERT_INT_EQ(vm.heap.current_mark, 0);
+
+    /* Second mark cycle: should overwrite with 0 */
+    gc_mark(&vm.heap, &vm);
+    ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(vi))->mark, 0);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_mark_deep_closure_chain(void) {
+    /* Chain of closures: cl1 captures cl2 which captures an i64 */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    uint8_t mark = vm.heap.current_mark;
+
+    /* Inner value */
+    JaclVal leaf = jacl_i64(&vm.heap, 9999);
+
+    /* cl2: captures the leaf */
+    size_t uv2_bytes = sizeof(JaclVal) * 1;
+    JaclClosure *cl2 = (JaclClosure *)gc_alloc(&vm.heap, OBJ_CLOSURE,
+                                                sizeof(JaclClosure) + uv2_bytes);
+    memset(cl2, 0, sizeof(JaclClosure));
+    cl2->upvalue_count = 1;
+    cl2->upvalues = (JaclVal *)(cl2 + 1);
+    cl2->upvalues[0] = leaf;
+
+    /* cl1: captures cl2 */
+    size_t uv1_bytes = sizeof(JaclVal) * 1;
+    JaclClosure *cl1 = (JaclClosure *)gc_alloc(&vm.heap, OBJ_CLOSURE,
+                                                sizeof(JaclClosure) + uv1_bytes);
+    memset(cl1, 0, sizeof(JaclClosure));
+    cl1->upvalue_count = 1;
+    cl1->upvalues = (JaclVal *)(cl1 + 1);
+    cl1->upvalues[0] = jacl_closure(cl2);
+
+    /* Only cl1 is on the stack */
+    vm.stack[0] = jacl_closure(cl1);
+    vm.stack_top = 1;
+
+    gc_mark(&vm.heap, &vm);
+
+    ASSERT(gc__is_marked(cl1, mark));
+    ASSERT(gc__is_marked(cl2, mark));
+    ASSERT(gc__is_marked(jacl_as_ptr(leaf), mark));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_mark_mixed_graph(void) {
+    /* Closure with upvalue pointing to a map containing a vector */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    uint8_t mark = vm.heap.current_mark;
+    gc__current_heap = &vm.heap;
+
+    /* Build a vector with one element */
+    JaclVal velem = jacl_i64(&vm.heap, 42);
+    jacl_vec_root *vec = jacl_vec_empty();
+    vec = jacl_vec_push_back(vec, velem);
+    JaclVal vec_val = JACL_TAG_VECTOR | ((uint64_t)(uintptr_t)vec & JACL_PAYLOAD_MASK);
+
+    /* Build a map with key "x" → the vector */
+    JaclVal mkey = jacl_inline_string("x", 1);
+    jacl_map_node *map = NULL;
+    map = jacl_map_set(map, mkey, vec_val);
+    JaclVal map_val = JACL_TAG_MAP | ((uint64_t)(uintptr_t)map & JACL_PAYLOAD_MASK);
+
+    /* Build a closure that captures the map */
+    size_t uv_bytes = sizeof(JaclVal) * 1;
+    JaclClosure *cl = (JaclClosure *)gc_alloc(&vm.heap, OBJ_CLOSURE,
+                                               sizeof(JaclClosure) + uv_bytes);
+    memset(cl, 0, sizeof(JaclClosure));
+    cl->upvalue_count = 1;
+    cl->upvalues = (JaclVal *)(cl + 1);
+    cl->upvalues[0] = map_val;
+
+    /* Only the closure is a root */
+    vm.stack[0] = jacl_closure(cl);
+    vm.stack_top = 1;
+
+    gc_mark(&vm.heap, &vm);
+
+    /* The entire chain is reachable */
+    ASSERT(gc__is_marked(cl, mark));
+    ASSERT(gc__is_marked(map, mark));
+    ASSERT(gc__is_marked(vec, mark));
+    ASSERT(gc__is_marked(jacl_as_ptr(velem), mark));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -273,6 +623,17 @@ int main(void) {
         { "gc_alloc_fills_block",  test_gc_alloc_fills_block },
         { "gc_alloc_various_sizes", test_gc_alloc_various_sizes },
         { "gc_alloc_too_large",    test_gc_alloc_too_large },
+        /* US-006: Single-threaded mark phase */
+        { "gc_mark_leaf_objects",       test_gc_mark_leaf_objects },
+        { "gc_mark_closure_upvalues",   test_gc_mark_closure_upvalues },
+        { "gc_mark_mutable_ref",        test_gc_mark_mutable_ref },
+        { "gc_mark_hamt",               test_gc_mark_hamt },
+        { "gc_mark_rrb_vec",            test_gc_mark_rrb_vec },
+        { "gc_mark_global_env",         test_gc_mark_global_env },
+        { "gc_mark_unreachable",        test_gc_mark_unreachable_not_marked },
+        { "gc_mark_alternation",        test_gc_mark_alternation },
+        { "gc_mark_deep_closure_chain", test_gc_mark_deep_closure_chain },
+        { "gc_mark_mixed_graph",        test_gc_mark_mixed_graph },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -29,5 +29,6 @@
 #include "collections.c"
 #include "compiler.c"
 #include "vm.c"
+#include "gc_collect.c"
 
 #endif /* JACL_C */
