@@ -211,7 +211,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "This replaces the single-threaded GC from US-006/US-007 as the production GC. The single-threaded path can remain as a fallback for single-worker configurations. The watermark mechanism naturally bounds memory: if a slow thread holds back the watermark, new objects are epoch-protected but old garbage is still collected. Grey buffer draining during mark: periodically read each thread's grey_buf up to a snapshot of its count, push entries onto mark stack, continue marking."
     },
     {

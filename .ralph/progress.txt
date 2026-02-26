@@ -332,3 +332,50 @@ Thread: (inline)
   - $var at statement position desugars to [$var] (zero-arg call) — don't use bare `$x` as last statement in test JACL programs
   - All 46 test suites pass (0 failures) including 131 harness tests
 ---
+
+## 2026-02-26 - US-011
+Thread: (inline)
+- Implemented full concurrent mark-sweep GC with epoch watermark protection
+- **gc.c changes:**
+  - Added `gc__thread_epoch` thread-local (static __thread uint32_t) before gc__bump_alloc
+  - Changed gc__bump_alloc epoch stamping from `hdr->epoch = 0` to `hdr->epoch = gc__thread_epoch`
+  - Workers set gc__thread_epoch from their thread_epoch at task execution start
+- **gc_collect.c changes:**
+  - Added gc_sweep_concurrent(ThreadHeap*, GCBlock* skip_block, uint32_t watermark, uint8_t current_mark)
+  - Two-phase concurrent-safe sweep: Phase 1 zeros dead objects (old line map intact), Phase 2 builds new line map from survivors, Phase 3 memcpy new map
+  - Epoch watermark immunity: objects with epoch >= watermark survive regardless of mark state
+  - Skips skip_block (active allocation block of owning thread)
+  - Does NOT modify block list or invalidate cursor/limit (safe for concurrent allocators)
+- **vm.c changes:**
+  - Added `void* runtime` field to VM struct (NULL in single-threaded, set by runtime)
+  - GC safepoint dispatches: single-threaded → gc_collect; multi-threaded → gc_concurrent_trigger
+  - Forward-declared gc_concurrent_trigger(void* runtime_ptr)
+- **runtime.c changes:**
+  - Added gc_concurrent_collect(Runtime*): 10-step algorithm (epoch increment → gc_active → watermark → roots → mark with grey drain → final drain → gc_active off → sweep all heaps → toggle mark → gc_running off)
+  - Added gc__concurrent_task wrapper and gc_concurrent_trigger (CAS gc_running, submit task)
+  - Added gc__drain_grey_bufs helper for periodic grey buffer draining during mark phase
+  - Implemented runtime__exec_closure (was stub): resets VM, sets up closure frame, runs vm__run
+  - Added null-check safety for dummy/invalid closures (chunk.code == NULL)
+  - Worker loop: sets rt__current_worker, gc__thread_epoch from thread_epoch, triggers GC after task execution
+  - Fixed pre-existing use-after-free in runtime_destroy: separated thief unregistration into own loop before deque freeing
+- **Tests (8 new, 30/30 runtime):**
+  - test_epoch_stamping: verifies gc__thread_epoch stamps allocations correctly
+  - test_epoch_watermark_protect: objects with epoch >= watermark survive sweep
+  - test_epoch_watermark_collect: objects with epoch < watermark are collected
+  - test_concurrent_gc_full_cycle: full mark+sweep cycle with live/dead objects
+  - test_concurrent_gc_mark_toggle: current_mark alternates after each cycle
+  - test_concurrent_gc_mutual_exclusion: gc_running CAS prevents concurrent GC
+  - test_concurrent_gc_stress: 4 workers, 20 tasks, 50K allocs each
+  - test_concurrent_gc_multi_cycle: 40 tasks triggering many GC cycles
+- Files changed: src/gc.c, src/gc_collect.c, src/vm.c, src/runtime.c, test/test_runtime.c
+- **Learnings for future iterations:**
+  - gc__thread_epoch must be declared BEFORE gc__bump_alloc in gc.c (unity build order — used before definition otherwise)
+  - runtime_submit must be forward-declared if used in worker loop before its definition
+  - gc_sweep_concurrent uses two-phase approach: zero dead objects first (keeping old line map intact for concurrent allocators), then build+memcpy new line map — avoids exposing intermediate state
+  - gc_sweep_concurrent does NOT recycle blocks or invalidate cursor/limit — concurrent allocators may be using them
+  - Test block forcing: to test sweep on a specific block, must mark all lines OCCUPIED + exhaust cursor + force alloc to get a new block — just exhausting cursor doesn't change current_block (slow path finds free lines in same block)
+  - runtime_destroy must unregister all thieves BEFORE freeing any deques — interleaving causes use-after-free
+  - runtime__exec_closure needs null-check for cl->chunk.code — test helpers create dummy zeroed closures
+  - vm->runtime = (void*)w->runtime enables VM safepoint to dispatch to concurrent GC trigger without forward-declaring Runtime in vm.c
+  - All 46 test suites pass (0 failures) including 131 harness tests
+---
