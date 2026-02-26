@@ -1,0 +1,262 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/gc-concurrency",
+  "description": "M12 — Epoch-Based Tracing GC: Replace arena/RC memory management with concurrent epoch-based tracing GC, per-thread Immix-style heaps, worker thread pool with Chase-Lev work-stealing, hybrid write barriers, and line-granularity sweep.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "GCHeader and object type system",
+      "description": "As a developer, I need the GC object header struct and object type enumeration so the collector can identify, trace, and manage every heap-allocated object uniformly.",
+      "acceptanceCriteria": [
+        "Define GCHeader struct (8 bytes) in a new src/gc.c: { uint32_t epoch; uint8_t mark; uint8_t obj_type; uint8_t gen; uint8_t _pad; }",
+        "Define GCObjType enum: OBJ_CLOSURE, OBJ_STRING, OBJ_HEAP_I64, OBJ_HEAP_U64, OBJ_HEAP_F64, OBJ_MUTABLE_REF, OBJ_BIGNUM, OBJ_HAMT_INTERNAL, OBJ_HAMT_LEAF, OBJ_HAMT_COLLISION, OBJ_RRB_INTERNAL, OBJ_RRB_LEAF, OBJ_RRB_ROOT",
+        "Helper gc_header_of(void* payload) returns pointer to GCHeader prepended before payload ((GCHeader*)payload - 1)",
+        "Helper jacl_is_heap_type(JaclVal v) returns true for tags: STRING, VECTOR, MAP, CLOSURE, BIGNUM, CELL, BOX, ATOM, I64, U64, F64",
+        "Include gc.c in the jacl.c unity build chain (after value.c, before string.c)",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "GCHeader replaces RCHeader (16 bytes) with 8 bytes. Same position — prepended to payload. No destructor field needed since GC handles lifecycle. The gc.c file will grow to contain the allocator, mark, and sweep logic in later stories."
+    },
+    {
+      "id": "US-002",
+      "title": "Block-based heap allocator",
+      "description": "As a developer, I need a per-thread block-based heap allocator with Immix-style line granularity so each worker can bump-allocate without contention and the GC can reclaim at line granularity.",
+      "acceptanceCriteria": [
+        "Define GC_BLOCK_SIZE (64KB), GC_LINE_SIZE (128 bytes), GC_LINES_PER_BLOCK (512) constants",
+        "Define GCBlock struct: 64KB payload, out-of-band line map (512 bytes, one byte per line with LINE_FREE/LINE_OCCUPIED values), next pointer for linked list",
+        "Define ThreadHeap struct: linked list of blocks, current block pointer, bump cursor (pointer within current free-line run), bytes_since_gc counter",
+        "Define BlockPool struct: thread-safe pool of free blocks with mutex protection. gc_block_pool_get() and gc_block_pool_return() functions",
+        "Implement gc_alloc(ThreadHeap* heap, uint8_t obj_type, size_t payload_size): bump-allocate within free-line run, scan line map for next free run when exhausted, acquire new block from pool when no free runs remain",
+        "gc_alloc stamps GCHeader: epoch=0 (placeholder until epoch tracking in US-011), mark=0, obj_type=obj_type, gen=0",
+        "gc_alloc returns pointer past header (the payload pointer)",
+        "Objects spanning multiple lines handled correctly (all touched lines tracked)",
+        "Unit test: allocate objects of various sizes (small, line-sized, multi-line), verify header fields and line map state",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "gc_alloc is NOT thread-safe — only the owning thread calls it (no contention by design). Block pool IS thread-safe (mutex). Start epoch at 0; real epoch stamping comes when the thread pool and global epoch are introduced. Use platform.h MUTEX_* macros for the block pool."
+    },
+    {
+      "id": "US-003",
+      "title": "Migrate runtime heap types to GC heap",
+      "description": "As a developer, I need all runtime heap-allocated types (closures, strings, numerics, mutable refs) allocated via gc_alloc with prepended GCHeader so the GC can manage their lifecycle.",
+      "acceptanceCriteria": [
+        "VM struct gains a ThreadHeap field (replaces arena for runtime allocations — arena kept for compile-time objects)",
+        "JaclClosure allocated via gc_alloc(heap, OBJ_CLOSURE, ...) instead of arena_alloc — update OP_CLOSURE handler",
+        "Closure upvalue arrays allocated via gc_alloc or as part of closure payload",
+        "JaclHeapString allocated via gc_alloc(heap, OBJ_STRING, sizeof(JaclHeapString) + length) — update string intern path",
+        "String intern table remains arena-backed but interned strings now live on GC heap (Phase 1: immortal — never collected)",
+        "JaclHeapI64/U64/F64 allocated via gc_alloc(heap, OBJ_HEAP_I64/U64/F64, sizeof(...))",
+        "JaclMutableRef (cell, box, atom) allocated via gc_alloc(heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef))",
+        "All constructors (jacl_i64, jacl_u64, jacl_f64, jacl_heap_string, etc.) updated to take ThreadHeap* instead of arena_t*",
+        "OP_TO_DYN handler updated to use ThreadHeap* for boxing i64/u64/f64",
+        "Arena still used for: AST nodes, bytecode chunks, constant pools, compiler temporaries, param_names arrays",
+        "All existing M0-M11 tests compile and pass (objects allocated on GC heap but GC not yet active)",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "This is the big migration story — touching value.c, string.c, vm.c, and all callers. The key insight: change arena_alloc → gc_alloc for runtime objects, keeping arena for compile-time. GC is not active yet so objects are allocated but never collected. The ThreadHeap is initialized in vm_init() or equivalent setup. BigNum heap data can be deferred to a later story if complex."
+    },
+    {
+      "id": "US-004",
+      "title": "Migrate HAMT nodes from RC to GC heap",
+      "description": "As a developer, I need HAMT persistent map nodes allocated via gc_alloc with GCHeader instead of rc_alloc with RCHeader, eliminating reference counting and cascading decrements for maps.",
+      "acceptanceCriteria": [
+        "HAMT_ALLOCATOR macro updated to route through gc_alloc instead of libc_allocator — requires ThreadHeap* context threaded through HAMT operations",
+        "GCHeader (8 bytes) replaces RCHeader (16 bytes) on all HAMT node types (internal, leaf, collision)",
+        "All jacl_map_rc_ref() calls removed from COW operations (assoc, dissoc, update, etc.)",
+        "All jacl_map_rc_unref() calls removed — old nodes become garbage when unreachable",
+        "Destructors removed from all HAMT node types",
+        "COW operations simplified: just create new nodes, no ref management",
+        "ThreadHeap* threaded through collection operation API (via context parameter or thread-local)",
+        "All existing HAMT tests pass (test_hamt*.c, M8 collection tests)",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "The HAMT template (lib/hamt/hamt.h) uses #define-based include-as-template. HAMT_ALLOCATOR is currently a function pointer macro. Threading ThreadHeap* through is the main challenge — consider adding a context/heap parameter to every HAMT function, or use a thread-local. The RC template (lib/rc/rc.h) functions (_rc_alloc, _rc_ref, _rc_unref) are all generated via macros — remove all references."
+    },
+    {
+      "id": "US-005",
+      "title": "Migrate RRB vector nodes from RC to GC heap",
+      "description": "As a developer, I need RRB persistent vector nodes allocated via gc_alloc with GCHeader instead of rc_alloc with RCHeader, completing the collection migration.",
+      "acceptanceCriteria": [
+        "RRB_VEC_ALLOCATOR macro updated to route through gc_alloc — same ThreadHeap* threading pattern as HAMT (US-004)",
+        "GCHeader replaces RCHeader on all RRB node types (internal, leaf, root)",
+        "All jacl_vec_rc_ref() calls removed from COW operations (push, pop, set, concat, slice)",
+        "All jacl_vec_rc_unref() calls removed",
+        "Destructors removed from all RRB node types",
+        "Size tables for relaxed radix nodes allocated via gc_alloc or inline",
+        "rc.h is no longer included by collections.c",
+        "All existing RRB tests pass (test_rrb_vec*.c, M8 collection tests)",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Same pattern as US-004 but for RRB. After this story, rc.h should no longer be needed by any JACL runtime code (it may still exist in lib/ for other users). The #undef RC_ALLOCATOR between template includes may no longer be needed. Verify that concurrent collection tests still pass (test_hamt_concurrent.c, test_rrb_vec_concurrent.c) — these test read-only sharing which should still work."
+    },
+    {
+      "id": "US-006",
+      "title": "Single-threaded mark phase",
+      "description": "As a developer, I need a mark phase that traces from GC roots through the object graph and marks all reachable objects, validating the GCHeader tracing logic before adding concurrency.",
+      "acceptanceCriteria": [
+        "Root enumeration (single-threaded): scan VM stack (stack[0..stack_top]) and all global environment values, pushing heap-type JaclVals onto mark stack",
+        "Also scan call frame closures as roots",
+        "Mark stack: fixed-size array (4096 entries) of JaclVal, with dynamically-growing overflow list for pathological cases",
+        "Mark algorithm: pop from mark stack, skip inline types and already-marked objects, set header->mark = current_mark, push children based on obj_type",
+        "Trace strategies by obj_type: OBJ_CLOSURE traces upvalues array; OBJ_MUTABLE_REF traces the contained value; OBJ_HAMT_INTERNAL traces children array; OBJ_HAMT_LEAF traces key and value; OBJ_HAMT_COLLISION traces items array; OBJ_RRB_INTERNAL traces children array; OBJ_RRB_LEAF traces elements array; OBJ_RRB_ROOT traces root and tail pointers; leaf types (STRING, HEAP_I64/U64/F64, BIGNUM) have no outgoing refs — skip",
+        "Mark bit alternation: current_mark toggles 0/1 each GC cycle (avoids clearing all marks)",
+        "gc_mark(ThreadHeap* heap, VM* vm) function callable from GC trigger",
+        "Unit test: allocate objects with references (closure with upvalue pointing to map), run mark, verify reachable objects are marked and unreachable are not",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "This is mark only — sweep comes in US-007. The mark phase is the same algorithm whether single-threaded or concurrent; the difference is grey buffer draining (added in US-010/US-011). Keep it clean and testable in isolation."
+    },
+    {
+      "id": "US-007",
+      "title": "Single-threaded sweep phase and GC trigger",
+      "description": "As a developer, I need a sweep phase that reclaims unreachable objects at line granularity and a GC trigger mechanism, completing the single-threaded GC.",
+      "acceptanceCriteria": [
+        "Sweep phase iterates all blocks in the heap, clears all line marks to LINE_FREE, then for each live object (header->mark == current_mark) marks all lines it touches as LINE_OCCUPIED",
+        "Dead objects: lines containing only dead objects remain LINE_FREE — available for future allocation",
+        "Block recycling: blocks with all lines free returned to global BlockPool; blocks with some free lines stay in heap for allocation into free runs; all-occupied blocks skipped during allocation",
+        "GC trigger: when ThreadHeap.bytes_since_gc exceeds GC_THRESHOLD (default 1MB), run gc_collect() synchronously",
+        "gc_collect(ThreadHeap* heap, VM* vm): calls gc_mark then gc_sweep, toggles current_mark, resets bytes_since_gc",
+        "gc_alloc increments bytes_since_gc and checks threshold after each allocation",
+        "All existing M0-M11 tests pass with GC ACTIVE (objects allocated AND collected during test execution)",
+        "No use-after-free under any existing test (verify with -fsanitize=address if available)",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "This is the validation checkpoint — after this story, the GC is fully functional in single-threaded mode. Every existing test exercises the GC. If any test fails, it indicates a tracing bug (missing root, wrong obj_type trace strategy). The sweep never moves objects — live objects stay at their original addresses. Only the line map metadata changes."
+    },
+    {
+      "id": "US-008",
+      "title": "Worker thread pool and task execution loop",
+      "description": "As a developer, I need a fixed-size worker thread pool with Chase-Lev work-stealing deques so multiple threads can execute tasks concurrently, forming the runtime foundation for concurrent GC.",
+      "acceptanceCriteria": [
+        "Define WorkerThread struct: public_deque (Chase-Lev, stealable), private_deque (Chase-Lev, not stolen), ThreadHeap heap, GreyBuffer grey_buf, atomic currently_executing pointer (NULL/BUSY/task), atomic uint64 thread_epoch, VM vm (per-thread VM instance)",
+        "Define GreyBuffer struct: per-thread append-only buffer of JaclVal entries with count and capacity",
+        "Define Runtime struct (global): WorkerThread workers[N] (N = configurable, default = num cores), atomic uint64 global_epoch, atomic bool gc_running, atomic bool gc_active, BlockPool block_pool, Environment globals (shared)",
+        "Task execution loop per worker: set currently_executing=BUSY, pop from private then public deque or steal from another worker, set currently_executing=task, set thread_epoch=global_epoch, execute closure on worker's VM, set currently_executing=NULL, repeat",
+        "runtime_init(int num_workers) creates workers and starts threads; runtime_destroy() signals shutdown and joins all threads",
+        "runtime_submit_task(Runtime*, JaclClosure*, bool thread_local) pushes task onto a worker's public or private deque",
+        "Use existing chase_lev.h for deques and platform.h for threads/atomics",
+        "Unit test: submit 100 independent closures that each increment a shared atomic counter, verify counter == 100 after all complete",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "Each worker owns a separate VM instance with its own stack and frames. Global environment is shared (read-mostly). The BUSY sentinel is a special pointer value ((void*)1 or similar) — not NULL and not a valid task pointer. Workers that find no tasks should spin-wait with backoff (start with busy spin, add usleep for idle). Idle workers check all other workers' public deques for stealing."
+    },
+    {
+      "id": "US-009",
+      "title": "Root enumeration protocol with BUSY sentinel",
+      "description": "As a developer, I need a correct root enumeration protocol that finds all GC roots across all worker threads without stopping the world, handling the pop-in-transit race condition.",
+      "acceptanceCriteria": [
+        "gc_enumerate_roots(Runtime* rt, MarkStack* stack) pushes all live root JaclVals onto the mark stack",
+        "Scans all tasks on all deques: for each deque, read top and bottom indices, read all elements in [top, bottom) range",
+        "Scans each worker's currently_executing slot — if BUSY, spins briefly until resolved to real task or NULL",
+        "Scans each worker's VM stack (stack[0..stack_top]) for heap-type JaclVals",
+        "Scans each worker's call frame closures",
+        "Scans global environment values",
+        "Conservative deque snapshot: stolen/completed tasks may be redundantly traced (harmless); new tasks are epoch-protected",
+        "Unit test: simulate pop-in-transit race — verify GC sees the task either on the deque or in currently_executing after BUSY resolves",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "The BUSY sentinel protocol closes the only gap in root enumeration: between a thread popping a task from its deque and publishing it to currently_executing. The window is ~3 instructions. GC spins for nanoseconds at most. This replaces the single-threaded root enumeration from US-006 when running in multi-threaded mode."
+    },
+    {
+      "id": "US-010",
+      "title": "Write barriers (hybrid SATB + insertion)",
+      "description": "As a developer, I need hybrid write barriers on mutable container mutations so the concurrent GC correctly handles values evicted from and stored into containers during an active GC cycle.",
+      "acceptanceCriteria": [
+        "Implement gc_write_barrier(WorkerThread* t, JaclVal old_val, JaclVal new_val): fast path returns immediately if !atomic_load_relaxed(&gc_active); SATB barrier pushes old_val to grey_buf if heap type; insertion barrier pushes new_val to grey_buf if heap type",
+        "Write barrier fires in OP_RESET handler (reset! on box/atom): old=current container value, new=replacement",
+        "Write barrier fires in OP_SWAP handler (swap! on box/atom): old=pre-swap value, new=post-swap value",
+        "Write barrier fires in OP_SET_CELL_LOCAL and OP_SET_CELL_UPVALUE handlers (set! on mut locals/upvalues): old=cell's current value, new=replacement",
+        "Write barrier does NOT fire on reads (deref, OP_GET_CELL_LOCAL), failed CAS attempts, or immutable operations",
+        "Fast path (gc_active == false) is a single relaxed atomic load — no overhead when GC is not running",
+        "Unit test: set gc_active=true, perform box reset!, verify both old and new values appear in grey buffer; set gc_active=false, verify grey buffer is not touched",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "Both barriers are needed: SATB protects old values still held on a VM stack after being evicted from a container; insertion protects new values stored after GC has already scanned the container. Neither alone covers both cases. Grey buffers are per-thread, append-only — no contention. GC drains them during mark phase."
+    },
+    {
+      "id": "US-011",
+      "title": "Concurrent mark-sweep GC with epoch watermark",
+      "description": "As a developer, I need the full concurrent mark-sweep GC that runs as a task on a worker thread while other threads continue executing, using epoch-based watermarking to protect recently-allocated objects.",
+      "acceptanceCriteria": [
+        "GC is a task submitted to a worker's public deque — any worker can execute it",
+        "GC trigger: when bytes_since_gc > GC_THRESHOLD, CAS gc_running from false to true. If CAS succeeds, enqueue GC task. Reset byte counter regardless",
+        "gc_alloc stamps objects with current thread_epoch (not 0 — replaces placeholder from US-002)",
+        "GC algorithm: increment global_epoch, set gc_active=true, compute watermark=min(all thread_epochs), enumerate roots (US-009), mark phase with periodic grey buffer draining, final grey buffer drain, set gc_active=false, sweep completed blocks with line granularity, recycle all-free blocks, toggle current_mark, set gc_running=false",
+        "Sweep criteria: marked → live; not marked + epoch >= watermark → live (too new); not marked + epoch < watermark → dead (reclaim)",
+        "Sweep only touches completed blocks — never the active allocation block of any thread",
+        "Mark stack overflow handled: 4096-entry fixed stack with overflow list",
+        "Mutual exclusion: only one GC at a time via gc_running atomic CAS",
+        "All existing M0-M11 tests pass under concurrent GC (run via Runtime with multiple workers)",
+        "Stress test: 4+ workers allocating and discarding closures/maps concurrently, GC runs repeatedly, no crashes or use-after-free over 10+ GC cycles",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "This replaces the single-threaded GC from US-006/US-007 as the production GC. The single-threaded path can remain as a fallback for single-worker configurations. The watermark mechanism naturally bounds memory: if a slow thread holds back the watermark, new objects are epoch-protected but old garbage is still collected. Grey buffer draining during mark: periodically read each thread's grey_buf up to a snapshot of its count, push entries onto mark stack, continue marking."
+    },
+    {
+      "id": "US-012",
+      "title": "Atom CAS semantics",
+      "description": "As a developer, I need swap! on atoms to use a proper CAS loop so concurrent modifications to atoms are safe, replacing the single-threaded read-modify-write from M10.",
+      "acceptanceCriteria": [
+        "OP_SWAP on atoms uses CAS loop: atomically read current value, call closure with current value, CAS result back — retry if CAS fails",
+        "Write barrier fires on successful CAS only (old=pre-CAS value, new=post-CAS value), not on failed attempts",
+        "OP_RESET on atoms uses atomic store (unconditional replace)",
+        "OP_DEREF on atoms uses atomic load",
+        "Box operations remain non-atomic (box is thread-local, used only via private deque)",
+        "JaclMutableRef.value field marked as volatile or accessed via atomic operations for atoms",
+        "Unit test: 4 workers each swap! an atom 1000 times with an incrementing function, verify final value == 4000",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "Use ATOMIC_CAS from platform.h for the CAS loop. The CAS operates on the JaclVal (uint64_t) inside JaclMutableRef. The closure call within the CAS loop allocates on the calling thread's heap — normal gc_alloc path. If CAS fails, the closure result is discarded (becomes garbage, collected by GC). This completes the M10 atom stub that deferred CAS to M13."
+    },
+    {
+      "id": "US-013",
+      "title": "Integration tests and stress testing",
+      "description": "As a developer, I need comprehensive integration and stress tests validating the entire GC system under concurrent load.",
+      "acceptanceCriteria": [
+        "Create test/test_m12.c with GC correctness tests: allocate multiple object types, trigger GC, verify live objects survive and dead objects are collected",
+        "Test tracing through closures: closure with upvalue pointing to map — both survive GC",
+        "Test tracing through HAMT: map with nested values — all reachable values survive",
+        "Test tracing through RRB: vector with closure elements — all survive",
+        "Test write barrier (SATB): old value swapped out of atom during active GC survives",
+        "Test write barrier (insertion): new value stored into atom after GC scans it survives",
+        "Test epoch watermark: recently-allocated but unreachable objects survive current cycle",
+        "Test line-granularity reclamation: single live object in block doesn't prevent reclaiming other lines",
+        "Test block recycling: fully-dead block returned to global pool",
+        "Multi-threaded stress: N workers allocating short-lived closures in loop with concurrent GC — no crashes, no leaks",
+        "Multi-threaded stress: N workers performing COW map operations on shared immutable maps — correct values",
+        "Multi-threaded stress: N workers performing swap! on shared atoms — final values consistent",
+        "Memory bounded: allocation-heavy workload triggering many GC cycles — heap size stabilizes, doesn't grow without bound",
+        "All existing M0-M11 C unit tests and .jacl harness tests pass (no regressions)",
+        "Add test/test_m12.c to build.sh TESTS array",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 13,
+      "passes": true,
+      "notes": "Follow existing test pattern: test_helpers.h, PrintCapture, run_ok/run_err helpers, TestEntry table grouped by US-XXX comments. Stress tests may need longer timeouts or iteration counts. Use -fsanitize=thread for data race detection and -fsanitize=address for use-after-free detection during development. The multi-threaded tests submit tasks via runtime_submit_task and wait for completion."
+    }
+  ]
+}
