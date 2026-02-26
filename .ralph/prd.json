@@ -229,7 +229,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "Use ATOMIC_CAS from platform.h for the CAS loop. The CAS operates on the JaclVal (uint64_t) inside JaclMutableRef. The closure call within the CAS loop allocates on the calling thread's heap — normal gc_alloc path. If CAS fails, the closure result is discarded (becomes garbage, collected by GC). This completes the M10 atom stub that deferred CAS to M13."
     },
     {

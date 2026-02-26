@@ -379,3 +379,27 @@ Thread: (inline)
   - vm->runtime = (void*)w->runtime enables VM safepoint to dispatch to concurrent GC trigger without forward-declaring Runtime in vm.c
   - All 46 test suites pass (0 failures) including 131 harness tests
 ---
+
+## 2026-02-26 - US-012
+Thread: (inline)
+- Implemented atomic CAS semantics for atoms while keeping boxes non-atomic
+- **vm.c OP_DEREF:** atom path uses ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE); box path unchanged (plain read)
+- **vm.c OP_RESET:** atom path uses ATOMIC_LOAD (read old for write barrier) + ATOMIC_STORE_EXPLICIT(&ref->value, new_val, MEM_RELEASE); box path unchanged
+- **vm.c OP_SWAP:** atom path uses CAS loop — read current atomically, call closure, ATOMIC_CAS result back, retry on failure; write barrier fires only on successful CAS. Box path unchanged (plain store, no retry)
+- CAS loop structure: for(;;) { read → call closure → CAS → break on success, loop on failure }. Failed CAS means closure result is discarded (becomes GC garbage)
+- ATOMIC_CAS operates on JaclVal (uint64_t) inside JaclMutableRef — platform.h macro uses __typeof__ to handle any type
+- **Tests (6 new, 36/36 runtime):**
+  - test_atom_deref_atomic: atomic load on atom ref
+  - test_atom_reset_atomic: atomic store on atom ref
+  - test_atom_cas_basic: CAS succeed/fail with expected value checking
+  - test_atom_swap_write_barrier: barrier fires on successful CAS only
+  - test_atom_cas_concurrent: 4 workers × 1000 CAS increments → final = 4000
+  - test_box_non_atomic: box operations remain plain store/load
+- Files changed: src/vm.c, test/test_runtime.c
+- **Learnings for future iterations:**
+  - ATOMIC_CAS(&ref->value, &expected, desired, ...) — expected is passed by pointer, updated to actual value on failure
+  - CAS loop in OP_SWAP saves/restores ip and chunk outside the loop (only need to save once), but closure call frame setup happens inside loop (each retry needs fresh frame)
+  - jacl_is_atom(container) check before the CAS loop determines atom vs box path — simple branch, no overhead for boxes
+  - Concurrent CAS stress test uses gc__current_heap thread-local for worker heap access (same pattern as gc_alloc)
+  - All 46 test suites pass (0 failures) including 131 harness tests
+---
