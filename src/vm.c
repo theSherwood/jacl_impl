@@ -123,6 +123,7 @@ static const char* vm__type_name(JaclVal v) {
   if (jacl_is_closure(v))       return "closure";
   if (jacl_is_vector(v))        return "vector";
   if (jacl_is_map(v))           return "map";
+  if (jacl_is_future(v))        return "future";
   return "unknown";
 }
 
@@ -452,6 +453,20 @@ static void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
     vm__fmt_append(buf, "<atom: ", 7);
     vm__fmt_value(buf, ref->value);
     vm__fmt_append(buf, ">", 1);
+  } else if (jacl_is_future(val)) {
+    JaclFuture* fut = jacl_as_future(val);
+    uint32_t state = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_ACQUIRE);
+    if (state == FUTURE_PENDING) {
+      vm__fmt_append(buf, "<future: pending>", 17);
+    } else if (state == FUTURE_RESOLVED) {
+      vm__fmt_append(buf, "<future: resolved ", 18);
+      vm__fmt_value(buf, (JaclVal)fut->result);
+      vm__fmt_append(buf, ">", 1);
+    } else {
+      vm__fmt_append(buf, "<future: error ", 15);
+      vm__fmt_value(buf, (JaclVal)fut->result);
+      vm__fmt_append(buf, ">", 1);
+    }
   } else {
     vm__fmt_append(buf, "<unknown>", 9);
   }
@@ -816,7 +831,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (result != VM_OK) return result;
             break;
           }
-        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val)) {
+        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena);
           vm__fmt_value(&fmt, val);
@@ -1189,7 +1204,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           /* Already a string — push back unchanged */
           result = vm__push(vm, val);
           if (result != VM_OK) return result;
-        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val)) {
+        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena);
           vm__fmt_value(&fmt, val);
@@ -2296,6 +2311,14 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
         result = vm__push(vm, jacl_bool(jacl_is_atom(value)));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_IS_FUTURE: {
+        JaclVal value;
+        result = vm__pop(vm, &value); if (result != VM_OK) return result;
+        result = vm__push(vm, jacl_bool(jacl_is_future(value)));
         if (result != VM_OK) return result;
         break;
       }

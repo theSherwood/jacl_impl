@@ -24,7 +24,9 @@ typedef enum {
     OBJ_HAMT_COLLISION,
     OBJ_RRB_INTERNAL,
     OBJ_RRB_LEAF,
-    OBJ_RRB_ROOT
+    OBJ_RRB_ROOT,
+    OBJ_FUTURE,
+    OBJ_FUTURE_WAITER
 } GCObjType;
 
 /* --- GC object header (8 bytes, prepended before payload) --- */
@@ -56,7 +58,8 @@ static inline bool jacl_is_heap_type(JaclVal v) {
         || tag == JACL_TAG_ATOM
         || tag == JACL_TAG_I64
         || tag == JACL_TAG_U64
-        || tag == JACL_TAG_F64;
+        || tag == JACL_TAG_F64
+        || tag == JACL_TAG_FUTURE;
 }
 
 /* ======================================================================
@@ -564,6 +567,107 @@ static inline void gc_write_barrier(GreyBuffer *gb,
     /* Insertion barrier: protect new value stored after GC scanned container */
     if (jacl_is_heap_type(new_val))
         grey_buf_push(gb, new_val);
+}
+
+/* ======================================================================
+ * Future type: concurrent task handle for spawn/await
+ *
+ * JaclFuture is a mutable container like atom — uses atomic state/result.
+ * Waiter list is GC-managed (no malloc). The spinlock only contends
+ * during the resolve-vs-add_waiter race window.
+ * ====================================================================== */
+
+/* Future states */
+#define FUTURE_PENDING  0
+#define FUTURE_RESOLVED 1
+#define FUTURE_ERROR    2
+
+/* FutureWaiter: singly-linked list node for continuations waiting on a future */
+typedef struct FutureWaiter {
+    JaclVal               continuation; /* closure to call with result */
+    struct FutureWaiter  *next;
+} FutureWaiter;
+
+/* JaclFuture: the future value itself */
+typedef struct {
+    volatile uint32_t   state;       /* FUTURE_PENDING / RESOLVED / ERROR */
+    volatile uint64_t   result;      /* JaclVal result (valid when resolved/errored) */
+    FutureWaiter       *waiters;     /* linked list of waiting continuations */
+    platform_mutex_t    lock;        /* protects state/waiters race */
+} JaclFuture;
+
+/* --- Pointer tag/untag for futures --- */
+
+static inline JaclVal jacl_future_ptr(JaclFuture *p) {
+    return JACL_TAG_FUTURE | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclFuture *jacl_as_future(JaclVal v) {
+    return (JaclFuture *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+}
+
+/* --- Constructor: create a pending future --- */
+
+static JaclVal jacl_future(ThreadHeap *heap) {
+    JaclFuture *f = (JaclFuture *)gc_alloc(heap, OBJ_FUTURE, sizeof(JaclFuture));
+    f->state   = FUTURE_PENDING;
+    f->result  = (uint64_t)JACL_NIL;
+    f->waiters = NULL;
+    MUTEX_INIT(f->lock);
+    return jacl_future_ptr(f);
+}
+
+/* --- Resolve: set result + RESOLVED state, return waiter list.
+ *     Fires write barrier (old=NIL, new=result) for concurrent GC. --- */
+
+static FutureWaiter *jacl_future_resolve(JaclFuture *f, JaclVal result,
+                                          GreyBuffer *gb,
+                                          volatile uint32_t *gc_active_ptr) {
+    FutureWaiter *waiters;
+    gc_write_barrier(gb, gc_active_ptr, JACL_NIL, result);
+    MUTEX_LOCK(f->lock);
+    f->result = (uint64_t)result;
+    ATOMIC_STORE_EXPLICIT(&f->state, FUTURE_RESOLVED, MEM_RELEASE);
+    waiters = f->waiters;
+    f->waiters = NULL;
+    MUTEX_UNLOCK(f->lock);
+    return waiters;
+}
+
+/* --- Error: set error result + ERROR state, return waiter list.
+ *     Fires write barrier (old=NIL, new=error) for concurrent GC. --- */
+
+static FutureWaiter *jacl_future_error(JaclFuture *f, JaclVal error,
+                                        GreyBuffer *gb,
+                                        volatile uint32_t *gc_active_ptr) {
+    FutureWaiter *waiters;
+    gc_write_barrier(gb, gc_active_ptr, JACL_NIL, error);
+    MUTEX_LOCK(f->lock);
+    f->result = (uint64_t)error;
+    ATOMIC_STORE_EXPLICIT(&f->state, FUTURE_ERROR, MEM_RELEASE);
+    waiters = f->waiters;
+    f->waiters = NULL;
+    MUTEX_UNLOCK(f->lock);
+    return waiters;
+}
+
+/* --- Add waiter: if pending, prepend waiter and return true.
+ *     If already resolved/errored, return false (caller schedules immediately). --- */
+
+static bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
+                                    ThreadHeap *heap) {
+    bool added = false;
+    MUTEX_LOCK(f->lock);
+    if (ATOMIC_LOAD_EXPLICIT(&f->state, MEM_RELAXED) == FUTURE_PENDING) {
+        FutureWaiter *w = (FutureWaiter *)gc_alloc(heap, OBJ_FUTURE_WAITER,
+                                                     sizeof(FutureWaiter));
+        w->continuation = continuation;
+        w->next = f->waiters;
+        f->waiters = w;
+        added = true;
+    }
+    MUTEX_UNLOCK(f->lock);
+    return added;
 }
 
 #endif /* GC_C */

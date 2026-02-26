@@ -170,6 +170,31 @@ static void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
+    /* --- Future: trace result (if resolved/errored) and waiter list --- */
+    case OBJ_FUTURE: {
+        JaclFuture *fut = (JaclFuture *)payload;
+        uint32_t state = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_ACQUIRE);
+        if (state == FUTURE_RESOLVED || state == FUTURE_ERROR) {
+            gc__ms_push_val(ms, (JaclVal)fut->result);
+        }
+        FutureWaiter *w = fut->waiters;
+        while (w) {
+            gc__ms_push(ms, w); /* trace the waiter node itself */
+            w = w->next;
+        }
+        break;
+    }
+
+    /* --- FutureWaiter: trace continuation closure + next pointer --- */
+    case OBJ_FUTURE_WAITER: {
+        FutureWaiter *fw = (FutureWaiter *)payload;
+        gc__ms_push_val(ms, fw->continuation);
+        if (fw->next) {
+            gc__ms_push(ms, fw->next);
+        }
+        break;
+    }
+
     default:
         break;
     }

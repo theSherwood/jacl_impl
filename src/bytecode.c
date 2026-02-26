@@ -85,6 +85,7 @@ typedef enum {
   OP_SWAP,          /* pop closure + box/atom, apply closure to inner, store result */
   OP_IS_BOX,        /* pop value, push true if box, else false */
   OP_IS_ATOM,       /* pop value, push true if atom, else false */
+  OP_IS_FUTURE,     /* pop value, push true if future, else false */
   /* M11 typed opcodes — i64 arithmetic and comparisons */
   OP_ADD_I64,       /* pop two raw i64, push sum */
   OP_SUB_I64,       /* pop two raw i64, push difference */
@@ -328,6 +329,7 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_SWAP:            return "OP_SWAP";
     case OP_IS_BOX:          return "OP_IS_BOX";
     case OP_IS_ATOM:         return "OP_IS_ATOM";
+    case OP_IS_FUTURE:       return "OP_IS_FUTURE";
     case OP_ADD_I64:         return "OP_ADD_I64";
     case OP_SUB_I64:         return "OP_SUB_I64";
     case OP_MUL_I64:         return "OP_MUL_I64";

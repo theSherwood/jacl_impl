@@ -1856,6 +1856,17 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* future? builtin (exactly 1 arg) */
+  if (compiler__head_matches(head, "future?", 7)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "future?", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_IS_FUTURE, line);
+    return;
+  }
+
   /* deref builtin (exactly 1 arg) */
   if (compiler__head_matches(head, "deref", 5)) {
     if (argc != 1) {

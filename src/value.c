@@ -56,6 +56,7 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_I64            ((uint64_t)0x0E << JACL_TAG_SHIFT)
 #define JACL_TAG_U64            ((uint64_t)0x0F << JACL_TAG_SHIFT)
 #define JACL_TAG_F64            ((uint64_t)0x10 << JACL_TAG_SHIFT)
+#define JACL_TAG_FUTURE         ((uint64_t)0x11 << JACL_TAG_SHIFT)
 
 /* --- Heap structs for 64-bit numeric types --- */
 
@@ -229,6 +230,11 @@ static inline JaclMutableRef *jacl_as_atom(JaclVal v) {
 
 static inline bool jacl_is_atom(JaclVal v) {
     return (v & JACL_TYPE_MASK) == JACL_TAG_ATOM;
+}
+
+/* Future: concurrent task handle */
+static inline bool jacl_is_future(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_FUTURE;
 }
 
 /* --- Inline string constructor --- */
