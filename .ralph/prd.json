@@ -255,7 +255,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "Follow existing test pattern: test_helpers.h, PrintCapture, run_ok/run_err helpers, TestEntry table grouped by US-XXX comments. Stress tests may need longer timeouts or iteration counts. Use -fsanitize=thread for data race detection and -fsanitize=address for use-after-free detection during development. The multi-threaded tests submit tasks via runtime_submit_task and wait for completion."
     }
   ]

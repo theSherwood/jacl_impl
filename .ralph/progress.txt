@@ -403,3 +403,51 @@ Thread: (inline)
   - Concurrent CAS stress test uses gc__current_heap thread-local for worker heap access (same pattern as gc_alloc)
   - All 46 test suites pass (0 failures) including 131 harness tests
 ---
+
+## 2026-02-26 - US-013
+Thread: (inline)
+- Created test/test_m12.c with 14 comprehensive integration and stress tests for M12
+- **GC correctness tests:**
+  - test_gc_multi_type_survive: i64, u64, f64, mutable ref all survive when rooted
+  - test_gc_dead_collected: unreachable objects are zeroed by GC
+- **Object graph tracing:**
+  - test_trace_closure_upvalue_map: closure → upvalue → map chain survives
+  - test_trace_hamt_nested: map with 5 entries, all values survive, lookup works post-GC
+  - test_trace_rrb_closure_elements: vector containing closures, all survive
+- **Write barriers:**
+  - test_wb_satb_old_survives: old value evicted from atom during GC stays marked
+  - test_wb_insertion_new_survives: new value stored after GC scan survives (simulated grey buf drain)
+- **Epoch watermark:**
+  - test_epoch_watermark_recent_survives: epoch >= watermark → immune to collection
+- **Line-granularity and block recycling:**
+  - test_line_granularity_reclamation: single live object, other lines reclaimed
+  - test_block_recycling: fully dead block returned to pool
+- **Multi-threaded stress:**
+  - test_mt_stress_closures: 8 tasks × 50K short-lived closures, concurrent GC
+  - test_mt_stress_cow_maps: 8 tasks × 5K COW map operations, concurrent GC
+  - test_mt_stress_atom_swap: 4 workers × 1000 CAS increments → final = 4000
+  - test_memory_bounded: 8 tasks × 100K allocs, verify heap block count stays bounded
+- Added test/test_m12.c to build.sh with -lpthread
+- Duplicated rt_test__init_no_threads / rt_test__destroy_no_threads helpers into test_m12.c
+- Files changed: test/test_m12.c (new), build.sh
+- **Learnings for future iterations:**
+  - vm_init sets intern_table = NULL; jacl_intern crashes on NULL table — use jacl_inline_string for test strings or init the table
+  - rt_test__init_no_threads is test infrastructure, not in the main source — must duplicate into each test file that needs it
+  - Multi-threaded stress tests need generous timeout (60s+) for CI environments
+  - Memory bounded test: 800K allocs × 24 bytes = ~19MB unmanaged; with GC expect < 200 blocks (generous bound)
+  - All 47 test suites pass (0 failures) including 131 harness tests
+
+## M12 PRD COMPLETE
+All 13 user stories (US-001 through US-013) now pass. The epoch-based tracing GC is fully implemented with:
+- GCHeader and object type system
+- Block-based Immix-style heap allocator
+- All runtime types migrated from arena/RC to GC heap
+- HAMT and RRB persistent collections migrated from RC to GC
+- Single-threaded mark and sweep phases
+- Worker thread pool with Chase-Lev work-stealing
+- Root enumeration with BUSY sentinel protocol
+- Hybrid SATB + insertion write barriers
+- Concurrent mark-sweep GC with epoch watermark
+- Atom CAS semantics (lock-free compare-and-swap)
+- Comprehensive integration and stress tests
+---
