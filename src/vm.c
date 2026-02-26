@@ -2313,7 +2313,13 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
-        result = vm__push(vm, ref->value);
+        JaclVal deref_val;
+        if (jacl_is_atom(container)) {
+          deref_val = ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE);
+        } else {
+          deref_val = ref->value;
+        }
+        result = vm__push(vm, deref_val);
         if (result != VM_OK) return result;
         break;
       }
@@ -2336,9 +2342,16 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
-        gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
-                         ref->value, new_val);
-        ref->value = new_val;
+        if (jacl_is_atom(container)) {
+          JaclVal reset_old = ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE);
+          gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                           reset_old, new_val);
+          ATOMIC_STORE_EXPLICIT(&ref->value, new_val, MEM_RELEASE);
+        } else {
+          gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                           ref->value, new_val);
+          ref->value = new_val;
+        }
         result = vm__push(vm, new_val);
         if (result != VM_OK) return result;
         break;
@@ -2376,44 +2389,65 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
 
-        /* Capture pre-swap value for write barrier */
-        JaclVal swap_old_val = ref->value;
-
-        /* Push closure as callee slot + current value as argument */
-        result = vm__push(vm, closure_val);
-        if (result != VM_OK) return result;
-        result = vm__push(vm, ref->value);
-        if (result != VM_OK) return result;
-
-        /* Set up call frame */
-        if (vm->frame_count >= VM_FRAMES_MAX) {
-          vm__set_error(vm, "stack overflow");
-          return VM_RUNTIME_ERROR;
-        }
-        uint32_t caller_frame_count = vm->frame_count;
-        CallFrame* cf = &vm->frames[vm->frame_count++];
-        cf->closure    = closure;
-        cf->return_ip  = vm->ip;
-        cf->stack_base = vm->stack_top - 1;
-        cf->chunk      = &closure->chunk;
-
-        /* Switch to closure code and execute */
+        bool swap_is_atom = jacl_is_atom(container);
         uint8_t* saved_ip = vm->ip;
         BytecodeChunk* saved_chunk = vm->chunk;
-        vm->ip    = closure->chunk.code;
-        vm->chunk = &closure->chunk;
-
-        VMResult call_result = vm__run(vm, caller_frame_count);
-        if (call_result != VM_OK) return call_result;
-
-        /* Pop return value, store in ref, push as result */
         JaclVal swap_result;
-        result = vm__pop(vm, &swap_result);
-        if (result != VM_OK) return result;
 
-        gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
-                         swap_old_val, swap_result);
-        ref->value = swap_result;
+        for (;;) {
+          /* Read current value (atomic for atoms, plain for boxes) */
+          JaclVal swap_old_val = swap_is_atom
+            ? ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE)
+            : ref->value;
+
+          /* Push closure as callee slot + current value as argument */
+          result = vm__push(vm, closure_val);
+          if (result != VM_OK) return result;
+          result = vm__push(vm, swap_old_val);
+          if (result != VM_OK) return result;
+
+          /* Set up call frame */
+          if (vm->frame_count >= VM_FRAMES_MAX) {
+            vm__set_error(vm, "stack overflow");
+            return VM_RUNTIME_ERROR;
+          }
+          uint32_t caller_frame_count = vm->frame_count;
+          CallFrame* cf = &vm->frames[vm->frame_count++];
+          cf->closure    = closure;
+          cf->return_ip  = vm->ip;
+          cf->stack_base = vm->stack_top - 1;
+          cf->chunk      = &closure->chunk;
+
+          /* Switch to closure code and execute */
+          vm->ip    = closure->chunk.code;
+          vm->chunk = &closure->chunk;
+
+          VMResult call_result = vm__run(vm, caller_frame_count);
+          if (call_result != VM_OK) return call_result;
+
+          /* Pop return value */
+          result = vm__pop(vm, &swap_result);
+          if (result != VM_OK) return result;
+
+          if (swap_is_atom) {
+            /* CAS loop: try to store result, retry if value changed */
+            JaclVal expected = swap_old_val;
+            if (ATOMIC_CAS(&ref->value, &expected, swap_result,
+                           MEM_ACQ_REL, MEM_ACQUIRE)) {
+              /* CAS succeeded — fire write barrier */
+              gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                               swap_old_val, swap_result);
+              break; /* exit retry loop */
+            }
+            /* CAS failed — swap_result becomes garbage, retry */
+          } else {
+            /* Box: non-atomic store, write barrier always fires */
+            gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                             swap_old_val, swap_result);
+            ref->value = swap_result;
+            break; /* no retry for boxes */
+          }
+        }
 
         /* Restore state */
         vm->ip    = saved_ip;

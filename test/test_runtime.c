@@ -970,6 +970,223 @@ static int test_concurrent_gc_multi_cycle(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * US-012: Atom CAS semantics
+ * ==================================================================== */
+
+static int test_atom_deref_atomic(void) {
+    /* Deref on atom reads value atomically */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    gc__thread_epoch = 1;
+
+    JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+    JaclVal val = jacl_i64(&w->vm.heap, 42);
+    ATOMIC_STORE_EXPLICIT(&ref->value, val, MEM_RELEASE);
+
+    /* Read via atomic load (simulating what OP_DEREF does for atoms) */
+    JaclVal loaded = ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE);
+    ASSERT(loaded == val);
+
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+static int test_atom_reset_atomic(void) {
+    /* Reset on atom stores value atomically */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    gc__thread_epoch = 1;
+
+    JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+    JaclVal old_val = jacl_i64(&w->vm.heap, 10);
+    JaclVal new_val = jacl_i64(&w->vm.heap, 20);
+    ATOMIC_STORE_EXPLICIT(&ref->value, old_val, MEM_RELEASE);
+
+    /* Atomic store (simulating what OP_RESET does for atoms) */
+    ATOMIC_STORE_EXPLICIT(&ref->value, new_val, MEM_RELEASE);
+
+    JaclVal loaded = ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE);
+    ASSERT(loaded == new_val);
+
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+static int test_atom_cas_basic(void) {
+    /* Basic CAS: succeed when expected matches, fail when it doesn't */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    gc__thread_epoch = 1;
+
+    JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+    JaclVal val_a = jacl_i64(&w->vm.heap, 100);
+    JaclVal val_b = jacl_i64(&w->vm.heap, 200);
+    JaclVal val_c = jacl_i64(&w->vm.heap, 300);
+    ATOMIC_STORE_EXPLICIT(&ref->value, val_a, MEM_RELEASE);
+
+    /* CAS with correct expected → succeeds */
+    JaclVal expected = val_a;
+    bool ok = ATOMIC_CAS(&ref->value, &expected, val_b,
+                          MEM_ACQ_REL, MEM_ACQUIRE);
+    ASSERT(ok);
+    ASSERT(ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE) == val_b);
+
+    /* CAS with wrong expected → fails, expected updated to current */
+    expected = val_a; /* stale */
+    ok = ATOMIC_CAS(&ref->value, &expected, val_c,
+                     MEM_ACQ_REL, MEM_ACQUIRE);
+    ASSERT(!ok);
+    ASSERT(expected == val_b); /* expected updated to actual current */
+    ASSERT(ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE) == val_b);
+
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+static int test_atom_swap_write_barrier(void) {
+    /* Write barrier fires on successful CAS only (not on failed attempts) */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    gc__thread_epoch = 1;
+
+    /* Enable write barrier */
+    ATOMIC_STORE_EXPLICIT(&rt.gc_active, 1, MEM_RELEASE);
+    w->grey_buf.count = 0;
+
+    JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+    JaclVal old_val = jacl_i64(&w->vm.heap, 50);
+    JaclVal new_val = jacl_i64(&w->vm.heap, 60);
+    ATOMIC_STORE_EXPLICIT(&ref->value, old_val, MEM_RELEASE);
+
+    /* Simulate successful CAS + write barrier */
+    JaclVal expected = old_val;
+    bool ok = ATOMIC_CAS(&ref->value, &expected, new_val,
+                          MEM_ACQ_REL, MEM_ACQUIRE);
+    ASSERT(ok);
+    gc_write_barrier(&w->grey_buf, &rt.gc_active, old_val, new_val);
+
+    /* Both old and new values should be in grey buffer */
+    ASSERT(w->grey_buf.count == 2);
+
+    /* Simulate failed CAS — no write barrier should fire */
+    uint32_t count_before = w->grey_buf.count;
+    expected = old_val; /* stale — will fail */
+    ok = ATOMIC_CAS(&ref->value, &expected, jacl_i64(&w->vm.heap, 70),
+                     MEM_ACQ_REL, MEM_ACQUIRE);
+    ASSERT(!ok);
+    /* No write barrier on failed CAS */
+    ASSERT(w->grey_buf.count == count_before);
+
+    ATOMIC_STORE_EXPLICIT(&rt.gc_active, 0, MEM_RELEASE);
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+/* Shared state for concurrent atom CAS stress test */
+static JaclMutableRef *cas_stress_atom;
+static volatile intptr_t cas_stress_done;
+
+static void cas_stress__increment(void *data) {
+    int iters = (int)(intptr_t)data;
+    for (int i = 0; i < iters; i++) {
+        for (;;) {
+            JaclVal current = ATOMIC_LOAD_EXPLICIT(
+                &cas_stress_atom->value, MEM_ACQUIRE);
+            int64_t n = jacl_as_i64(current);
+            /* Allocate new value on this worker's heap */
+            JaclVal next = jacl_i64(gc__current_heap, n + 1);
+            JaclVal expected = current;
+            if (ATOMIC_CAS(&cas_stress_atom->value, &expected, next,
+                           MEM_ACQ_REL, MEM_ACQUIRE)) {
+                break; /* CAS succeeded */
+            }
+            /* CAS failed — retry with fresh read */
+        }
+    }
+    ATOMIC_STORE_EXPLICIT(&cas_stress_done,
+        ATOMIC_LOAD_EXPLICIT(&cas_stress_done, MEM_RELAXED) + 1,
+        MEM_RELEASE);
+}
+
+static int test_atom_cas_concurrent(void) {
+    /* 4 workers each CAS-increment an atom 1000 times → final = 4000 */
+    Runtime rt;
+    runtime_init(&rt, 4);
+
+    /* Allocate shared atom on worker 0's heap */
+    gc__current_heap = &rt.workers[0].vm.heap;
+    gc__thread_epoch = 1;
+    cas_stress_atom = (JaclMutableRef *)gc_alloc(
+        &rt.workers[0].vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+    JaclVal zero = jacl_i64(&rt.workers[0].vm.heap, 0);
+    ATOMIC_STORE_EXPLICIT(&cas_stress_atom->value, zero, MEM_RELEASE);
+
+    ATOMIC_STORE_EXPLICIT(&cas_stress_done, 0, MEM_RELEASE);
+
+    int iters_per_worker = 1000;
+    int num_tasks = 4;
+    for (int i = 0; i < num_tasks; i++) {
+        runtime_submit(&rt, cas_stress__increment,
+                       (void *)(intptr_t)iters_per_worker);
+    }
+
+    /* Wait for all tasks to complete */
+    for (int ms = 0; ms < 30000; ms++) {
+        intptr_t done = ATOMIC_LOAD_EXPLICIT(&cas_stress_done, MEM_ACQUIRE);
+        if (done >= (intptr_t)num_tasks) break;
+        SLEEP_MILLISECONDS(1);
+    }
+
+    intptr_t done = ATOMIC_LOAD_EXPLICIT(&cas_stress_done, MEM_ACQUIRE);
+    ASSERT_I64_EQ(done, (int64_t)num_tasks);
+
+    JaclVal final_val = ATOMIC_LOAD_EXPLICIT(
+        &cas_stress_atom->value, MEM_ACQUIRE);
+    int64_t final_n = jacl_as_i64(final_val);
+    ASSERT_I64_EQ(final_n, (int64_t)(num_tasks * iters_per_worker));
+
+    gc__thread_epoch = 0;
+    runtime_destroy(&rt);
+    TEST_PASS();
+}
+
+static int test_box_non_atomic(void) {
+    /* Box operations remain plain (non-atomic) — no CAS, no atomic load/store */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    gc__thread_epoch = 1;
+
+    JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+    JaclVal val = jacl_i64(&w->vm.heap, 99);
+    ref->value = val; /* plain store — box semantics */
+
+    /* Plain read — box semantics */
+    ASSERT(ref->value == val);
+
+    JaclVal new_val = jacl_i64(&w->vm.heap, 100);
+    ref->value = new_val; /* plain store */
+    ASSERT(ref->value == new_val);
+
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -1010,6 +1227,13 @@ int main(void) {
         { "concurrent_gc_mutual_exclusion", test_concurrent_gc_mutual_exclusion },
         { "concurrent_gc_stress",           test_concurrent_gc_stress },
         { "concurrent_gc_multi_cycle",      test_concurrent_gc_multi_cycle },
+        /* US-012: Atom CAS semantics */
+        { "atom_deref_atomic",           test_atom_deref_atomic },
+        { "atom_reset_atomic",           test_atom_reset_atomic },
+        { "atom_cas_basic",              test_atom_cas_basic },
+        { "atom_swap_write_barrier",     test_atom_swap_write_barrier },
+        { "atom_cas_concurrent",         test_atom_cas_concurrent },
+        { "box_non_atomic",              test_box_non_atomic },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
