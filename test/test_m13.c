@@ -1217,6 +1217,236 @@ static int test_cps_if_no_suspension_ok(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * US-005: spawn primitive
+ * ==================================================================== */
+
+/* Test: spawn returns a future */
+static int test_spawn_returns_future(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run("print [future? [spawn { 42 }]]", &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "true\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: spawn with non-suspending closure resolves future with return value */
+static int test_spawn_nonsuspending_resolves(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Compile and run: spawn { 42 } */
+    VMResult r = jacl_run("def f [spawn { 42 }]", &vm, &arena);
+    ASSERT(r == VM_OK);
+
+    /* Look up $f in the environment and check the future state */
+    JaclVal f_name = jacl_inline_string("f", 1);
+    JaclVal f_val = JACL_NIL;
+    for (uint32_t i = 0; i < vm.env.count; i++) {
+        if (vm.env.names[i] == f_name) { f_val = vm.env.values[i]; break; }
+    }
+    ASSERT(jacl_is_future(f_val));
+    JaclFuture *fut = jacl_as_future(f_val);
+    ASSERT_U32_EQ(ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED), FUTURE_RESOLVED);
+    ASSERT_U64_EQ((JaclVal)fut->result, jacl_i32(42));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: spawn with suspending closure (containing await) resolves correctly */
+static int test_spawn_suspending_resolves(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Create a pre-resolved future in the environment */
+    JaclVal pre_fut = jacl_future(&vm.heap);
+    JaclFuture *pre = jacl_as_future(pre_fut);
+    jacl_future_resolve(pre, jacl_i32(99), NULL, NULL);
+    vm.env.names[vm.env.count]  = jacl_inline_string("pf", 2);
+    vm.env.values[vm.env.count] = pre_fut;
+    vm.env.count++;
+
+    /* spawn a closure that awaits the pre-resolved future */
+    VMResult r = jacl_run("def f [spawn { await $pf }]", &vm, &arena);
+    ASSERT(r == VM_OK);
+
+    /* Look up $f */
+    JaclVal f_name = jacl_inline_string("f", 1);
+    JaclVal f_val = JACL_NIL;
+    for (uint32_t i = 0; i < vm.env.count; i++) {
+        if (vm.env.names[i] == f_name) { f_val = vm.env.values[i]; break; }
+    }
+    ASSERT(jacl_is_future(f_val));
+    JaclFuture *fut = jacl_as_future(f_val);
+    ASSERT_U32_EQ(ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED), FUTURE_RESOLVED);
+    ASSERT_U64_EQ((JaclVal)fut->result, jacl_i32(99));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: spawn with error propagation */
+static int test_spawn_error_propagation(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Create a future that resolved with an error */
+    JaclVal err_fut = jacl_future(&vm.heap);
+    JaclFuture *efut = jacl_as_future(err_fut);
+    JaclVal err_val = jacl_set_error(jacl_i32(404));
+    jacl_future_resolve(efut, err_val, NULL, NULL);
+    vm.env.names[vm.env.count]  = jacl_inline_string("ef", 2);
+    vm.env.values[vm.env.count] = err_fut;
+    vm.env.count++;
+
+    /* spawn a closure that awaits the errored future — error propagates */
+    VMResult r = jacl_run("def f [spawn { await $ef }]", &vm, &arena);
+    ASSERT(r == VM_OK);
+
+    /* The spawn future should be resolved (the error value from await
+       flows through the CPS chain into resolve_k, which resolves the
+       spawn future with the error value). */
+    JaclVal f_name = jacl_inline_string("f", 1);
+    JaclVal f_val = JACL_NIL;
+    for (uint32_t i = 0; i < vm.env.count; i++) {
+        if (vm.env.names[i] == f_name) { f_val = vm.env.values[i]; break; }
+    }
+    ASSERT(jacl_is_future(f_val));
+    JaclFuture *fut = jacl_as_future(f_val);
+    ASSERT_U32_EQ(ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED), FUTURE_RESOLVED);
+    /* The result should be the error value (with error flag set) */
+    ASSERT(jacl_is_error((JaclVal)fut->result));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: spawned closure executes on worker thread (runtime mode) */
+static int test_spawn_worker_execution(void) {
+    Runtime rt;
+    runtime_init(&rt, 2);
+
+    /* Create a non-suspending closure manually:
+       bytecode: OP_CONST <42>, OP_RETURN */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile("proc task [] { 42 }", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+    ASSERT_INT_EQ(task_cl->param_count, 0);
+
+    /* Create future and submit spawn task */
+    JaclVal f = jacl_future(&rt.workers[0].vm.heap);
+    runtime__submit_spawn_task(&rt, task_cl, f, false);
+
+    /* Wait for the future to resolve */
+    JaclFuture *fut = jacl_as_future(f);
+    for (int ms = 0; ms < 5000; ms++) {
+        uint32_t state = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_ACQUIRE);
+        if (state != FUTURE_PENDING) break;
+        SLEEP_MILLISECONDS(1);
+    }
+
+    ASSERT_U32_EQ(ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED), FUTURE_RESOLVED);
+    ASSERT_U64_EQ((JaclVal)fut->result, jacl_i32(42));
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: top-level suspending code is CPS-transformed */
+static int test_top_level_cps(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Source with top-level await → compiler should produce suspending chunk */
+    LexResult tokens = lexer_lex("def f [spawn { 42 }]; await $f", &arena);
+    ParseResult parse = parser_parse(tokens, &arena);
+    JaclInternTable intern_table;
+    intern_table_init(&intern_table, &arena);
+    CompileResult cr = compiler_compile(parse, &arena, &intern_table, &vm.heap);
+
+    ASSERT_U32_EQ(cr.error_count, 0);
+    ASSERT(cr.suspending); /* top-level should be detected as suspending */
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: rt_run_to_completion blocks until future resolves */
+static int test_rt_run_to_completion(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Compile a non-suspending closure we can submit */
+    CompileResult cr = test__compile("proc task [] { 42 }", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+
+    Runtime rt;
+    runtime_init(&rt, 2);
+
+    VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
+    ASSERT(r == VM_OK);
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: existing non-suspending code still works after spawn changes */
+static int test_spawn_existing_code_ok(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc fib [n] {\n"
+        "  if [< $n 2] { [+ $n 0] } {\n"
+        "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
+        "  }\n"
+        "}\n"
+        "print [fib 10]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "55\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -1279,6 +1509,15 @@ int main(void) {
         { "cps_let_block_susp",        test_cps_let_block_suspension },
         { "cps_if_last_stmt",          test_cps_if_last_stmt },
         { "cps_if_no_suspension_ok",   test_cps_if_no_suspension_ok },
+        /* US-005: spawn primitive */
+        { "spawn_returns_future",      test_spawn_returns_future },
+        { "spawn_nonsuspend_resolves", test_spawn_nonsuspending_resolves },
+        { "spawn_suspend_resolves",    test_spawn_suspending_resolves },
+        { "spawn_error_propagation",   test_spawn_error_propagation },
+        { "spawn_worker_execution",    test_spawn_worker_execution },
+        { "top_level_cps",            test_top_level_cps },
+        { "rt_run_to_completion",     test_rt_run_to_completion },
+        { "spawn_existing_code_ok",   test_spawn_existing_code_ok },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

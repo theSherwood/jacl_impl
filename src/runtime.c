@@ -695,4 +695,188 @@ static void gc_concurrent_trigger(void *runtime_ptr) {
     }
 }
 
+/* ======================================================================
+ * Resolve closure: dynamically-created JaclClosure that resolves a future.
+ *
+ * The resolve_k closure takes 1 parameter (the result value) and has
+ * 1 upvalue (the future to resolve). Bytecode:
+ *   OP_GET_LOCAL  0   ; get result parameter
+ *   OP_GET_UPVALUE 0  ; get the future (captured)
+ *   OP_RESOLVE_FUTURE ; resolve(future, result), push nil
+ *   OP_RETURN         ; return nil
+ * ====================================================================== */
+
+/* Static bytecode for resolve_k closures (shared by all instances) */
+static uint8_t resolve_k_code[] = {
+    OP_GET_UPVALUE, 0,    /* push future (below) */
+    OP_GET_LOCAL, 0,      /* push result param (top) */
+    OP_RESOLVE_FUTURE,    /* pop result, pop future, resolve */
+    OP_RETURN
+};
+static uint32_t resolve_k_lines[] = { 0, 0, 0, 0, 0, 0 };
+
+static JaclVal runtime__create_resolve_closure(ThreadHeap *heap, arena_t *arena,
+                                                JaclVal future_val) {
+    /* Allocate closure + 1 upvalue slot */
+    size_t cl_size = sizeof(JaclClosure) + sizeof(JaclVal);
+    JaclClosure *cl = (JaclClosure *)gc_alloc(heap, OBJ_CLOSURE, cl_size);
+
+    /* Set up the bytecode chunk (points to static arrays) */
+    cl->chunk.code        = resolve_k_code;
+    cl->chunk.code_count  = (uint32_t)(sizeof(resolve_k_code));
+    cl->chunk.lines       = resolve_k_lines;
+    cl->chunk.constants   = NULL;
+    cl->chunk.const_count = 0;
+    cl->chunk.arena       = arena;
+
+    cl->param_count   = 1;
+    cl->upvalue_count = 1;
+    cl->upvalues      = (JaclVal *)(cl + 1); /* trailing array */
+    cl->upvalues[0]   = future_val;
+    cl->name          = "__resolve_k";
+    cl->param_names   = NULL;
+    cl->min_args      = 1;
+    cl->variadic      = false;
+
+    return jacl_closure(cl);
+}
+
+/* ======================================================================
+ * Spawn task data and execution
+ * ====================================================================== */
+
+typedef struct {
+    JaclClosure *closure;
+    JaclVal      future_val;
+    bool         is_cps;
+} SpawnTaskData;
+
+static void runtime__spawn_task_exec(void *data) {
+    SpawnTaskData *std = (SpawnTaskData *)data;
+    WorkerThread *self = rt__current_worker;
+    VM *vm = &self->vm;
+    JaclClosure *cl = std->closure;
+    JaclFuture *fut = jacl_as_future(std->future_val);
+
+    /* Reset VM state for this task */
+    vm->stack_top   = 0;
+    vm->frame_count = 0;
+    vm->error_message = NULL;
+    vm->error_line    = 0;
+    vm->stack_trace.count = 0;
+
+    if (std->is_cps) {
+        /* CPS closure: create resolve_k and pass as __k argument */
+        JaclVal resolve_k = runtime__create_resolve_closure(
+            &vm->heap, &self->arena, std->future_val);
+
+        vm->stack[0] = jacl_closure_ptr(cl);
+        vm->stack[1] = resolve_k;
+        vm->stack_top = 2;
+
+        vm->frames[0].closure    = cl;
+        vm->frames[0].return_ip  = NULL;
+        vm->frames[0].stack_base = 1; /* 1 arg (resolve_k at slot 1) */
+        vm->frames[0].chunk      = &cl->chunk;
+        vm->frame_count = 1;
+        vm->ip        = cl->chunk.code;
+        vm->chunk     = &cl->chunk;
+        vm->top_chunk = &cl->chunk;
+
+        VMResult r = vm__run(vm, 0);
+        /* For CPS, the resolve_k closure resolves the future during execution.
+           If vm__run returned with an error before __k was called, error the future. */
+        if (r != VM_OK) {
+            uint32_t state = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED);
+            if (state == FUTURE_PENDING) {
+                JaclVal err = jacl_set_error(jacl_inline_string("error", 5));
+                jacl_future_error(fut, err,
+                                  &self->grey_buf, &self->runtime->gc_active);
+            }
+        }
+    } else {
+        /* Non-CPS closure: call directly, resolve future with return value */
+        vm->stack[0] = jacl_closure_ptr(cl);
+        vm->stack_top = 1;
+
+        vm->frames[0].closure    = cl;
+        vm->frames[0].return_ip  = NULL;
+        vm->frames[0].stack_base = 1; /* 0 args */
+        vm->frames[0].chunk      = &cl->chunk;
+        vm->frame_count = 1;
+        vm->ip        = cl->chunk.code;
+        vm->chunk     = &cl->chunk;
+        vm->top_chunk = &cl->chunk;
+
+        VMResult r = vm__run(vm, 0);
+
+        if (r == VM_OK && vm->stack_top > 0) {
+            JaclVal spawn_result = vm->stack[vm->stack_top - 1];
+            jacl_future_resolve(fut, spawn_result,
+                                &self->grey_buf, &self->runtime->gc_active);
+        } else {
+            JaclVal err = jacl_set_error(jacl_inline_string("error", 5));
+            jacl_future_error(fut, err,
+                              &self->grey_buf, &self->runtime->gc_active);
+        }
+    }
+
+    free(std);
+}
+
+static void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
+                                        JaclVal future_val, bool is_cps) {
+    Runtime *rt = (Runtime *)runtime_ptr;
+
+    SpawnTaskData *std = (SpawnTaskData *)malloc(sizeof(SpawnTaskData));
+    std->closure    = closure;
+    std->future_val = future_val;
+    std->is_cps     = is_cps;
+
+    RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
+    task->fn      = runtime__spawn_task_exec;
+    task->data    = std;
+    task->gc_root = future_val; /* Future is the GC root for this task */
+
+    MUTEX_LOCK(rt->inbox_mutex);
+    if (rt->inbox_count >= rt->inbox_cap) {
+        intptr_t new_cap = rt->inbox_cap * 2;
+        rt->inbox = (uintptr_t *)realloc(rt->inbox,
+                                          (size_t)new_cap * sizeof(uintptr_t));
+        rt->inbox_cap = new_cap;
+    }
+    rt->inbox[rt->inbox_count++] = (uintptr_t)task;
+    MUTEX_UNLOCK(rt->inbox_mutex);
+}
+
+/* ======================================================================
+ * rt_run_to_completion: submit a CPS closure as a task and block until
+ * its completion future resolves.
+ * ====================================================================== */
+
+static VMResult rt_run_to_completion(Runtime *rt, JaclClosure *closure,
+                                      arena_t *arena) {
+    /* Create a completion future on worker 0's heap */
+    JaclVal completion = jacl_future(&rt->workers[0].vm.heap);
+    JaclFuture *cfut = jacl_as_future(completion);
+
+    bool is_cps = (closure->param_count == 1);
+    runtime__submit_spawn_task(rt, closure, completion, is_cps);
+
+    /* Block until the completion future resolves (spin/yield) */
+    for (;;) {
+        uint32_t state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_ACQUIRE);
+        if (state == FUTURE_RESOLVED || state == FUTURE_ERROR) break;
+        SLEEP_MILLISECONDS(1);
+    }
+
+    uint32_t state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_RELAXED);
+    if (state == FUTURE_ERROR) {
+        return VM_RUNTIME_ERROR;
+    }
+    return VM_OK;
+
+    (void)arena;
+}
+
 #endif /* RUNTIME_C */
