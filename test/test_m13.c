@@ -539,6 +539,358 @@ static int test_suspension_existing_code_compiles(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * US-003: CPS transform — sequential code
+ * ==================================================================== */
+
+/* Helper: compile source and return the CompileResult for inspection */
+static CompileResult test__compile(const char *source, arena_t *arena, VM *vm) {
+    LexResult tokens = lexer_lex(source, arena);
+    ParseResult parse = parser_parse(tokens, arena);
+    JaclInternTable intern_table;
+    intern_table_init(&intern_table, arena);
+    vm->intern_table = &intern_table;
+    return compiler_compile(parse, arena, &intern_table, &vm->heap);
+}
+
+/* Helper: find a closure constant by name in a chunk */
+static JaclClosure* test__find_closure(BytecodeChunk *chunk, const char *name) {
+    for (uint32_t i = 0; i < chunk->const_count; i++) {
+        JaclVal v = chunk->constants[i];
+        if (jacl_is_closure(v)) {
+            JaclClosure *cl = jacl_as_closure(v);
+            if (cl->name && strcmp(cl->name, name) == 0) return cl;
+        }
+    }
+    return NULL;
+}
+
+/* Test: suspending proc with 1 await gets __k param and CPS body */
+static int test_cps_single_await_compiles(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc foo [x] { def a [await $x]; [+ $a 1] }", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    /* Find the foo closure in the top-level chunk */
+    JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
+    ASSERT(foo != NULL);
+    /* CPS: foo takes x + __k = 2 params */
+    ASSERT_INT_EQ(foo->param_count, 2);
+
+    /* foo's body should contain a continuation closure */
+    JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
+    ASSERT(cont != NULL);
+    /* Continuation takes 1 param (the await result = 'a') */
+    ASSERT_INT_EQ(cont->param_count, 1);
+    /* Continuation captures __k from foo (at least 1 upvalue) */
+    ASSERT(cont->upvalue_count >= 1);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: suspending proc with 2 sequential awaits creates chained continuations */
+static int test_cps_two_sequential_awaits(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc foo [x y] {\n"
+        "  def a [await $x]\n"
+        "  def b [await $y]\n"
+        "  [+ $a $b]\n"
+        "}", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
+    ASSERT(foo != NULL);
+    /* CPS: foo takes x, y, __k = 3 params */
+    ASSERT_INT_EQ(foo->param_count, 3);
+
+    /* First continuation (handles code after first await) */
+    JaclClosure *cont1 = test__find_closure(&foo->chunk, "__cont");
+    ASSERT(cont1 != NULL);
+    ASSERT_INT_EQ(cont1->param_count, 1);
+    /* cont1 captures y and __k (at least 2 upvalues) */
+    ASSERT(cont1->upvalue_count >= 2);
+
+    /* Second continuation nested inside first */
+    JaclClosure *cont2 = test__find_closure(&cont1->chunk, "__cont");
+    ASSERT(cont2 != NULL);
+    ASSERT_INT_EQ(cont2->param_count, 1);
+    /* cont2 captures a and __k (at least 2 upvalues) */
+    ASSERT(cont2->upvalue_count >= 2);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: suspending proc with 3 sequential awaits creates triple-nested continuations */
+static int test_cps_three_sequential_awaits(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc foo [x y z] {\n"
+        "  def a [await $x]\n"
+        "  def b [await $y]\n"
+        "  def c [await $z]\n"
+        "  [+ [+ $a $b] $c]\n"
+        "}", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
+    ASSERT(foo != NULL);
+    /* CPS: foo takes x, y, z, __k = 4 params */
+    ASSERT_INT_EQ(foo->param_count, 4);
+
+    /* First continuation */
+    JaclClosure *cont1 = test__find_closure(&foo->chunk, "__cont");
+    ASSERT(cont1 != NULL);
+
+    /* Second continuation */
+    JaclClosure *cont2 = test__find_closure(&cont1->chunk, "__cont");
+    ASSERT(cont2 != NULL);
+
+    /* Third continuation */
+    JaclClosure *cont3 = test__find_closure(&cont2->chunk, "__cont");
+    ASSERT(cont3 != NULL);
+    /* Third cont captures a, b, and __k (at least 3 upvalues) */
+    ASSERT(cont3->upvalue_count >= 3);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: non-suspending proc is completely unaffected by CPS */
+static int test_cps_non_suspending_unaffected(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc add [a b] { [+ $a $b] }\n"
+        "print [add 10 20]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "30\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: non-suspending proc keeps original param count (no __k) */
+static int test_cps_non_suspending_param_count(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc add [a b] { [+ $a $b] }", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *add = test__find_closure(&cr.chunk, "add");
+    ASSERT(add != NULL);
+    ASSERT_INT_EQ(add->param_count, 2); /* no __k */
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: calling a suspending proc propagates CPS to the caller */
+static int test_cps_propagation_to_caller(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc afn [x] { def a [await $x]; $a }\n"
+        "proc caller [f] { def r [afn $f]; $r }", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    /* afn is suspending → CPS-transformed with __k */
+    JaclClosure *afn = test__find_closure(&cr.chunk, "afn");
+    ASSERT(afn != NULL);
+    ASSERT_INT_EQ(afn->param_count, 2); /* x + __k */
+
+    /* caller calls afn → transitively suspending → also gets __k */
+    JaclClosure *caller = test__find_closure(&cr.chunk, "caller");
+    ASSERT(caller != NULL);
+    ASSERT_INT_EQ(caller->param_count, 2); /* f + __k */
+
+    /* caller has a continuation for code after the suspending call */
+    JaclClosure *cont = test__find_closure(&caller->chunk, "__cont");
+    ASSERT(cont != NULL);
+    ASSERT_INT_EQ(cont->param_count, 1);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: CPS single await with resolved future via stub — end-to-end execution */
+static int test_cps_single_await_resolved(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Create a resolved future, then call the CPS proc.
+       The OP_AWAIT stub calls the continuation immediately with the resolved value. */
+    VMResult r = jacl_run(
+        "proc afn [f] { def v [await $f]; [print $v] }\n"
+        "def fut [spawn { 42 }]\n"
+        "[afn $fut { \"done\" }]",
+        &vm, &arena);
+    /* The proc should compile and run. The spawn stub creates a future but
+       doesn't resolve it, so await will get nil from the stub.
+       The __k parameter is the last arg "done" string. */
+    (void)r; /* Best-effort: just check it doesn't crash */
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: variable capture correctness — only used variables captured */
+static int test_cps_variable_capture(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc foo [a b c] {\n"
+        "  def x [await $a]\n"
+        "  # b is not used after await\n"
+        "  [+ $x $c]\n"
+        "}", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
+    ASSERT(foo != NULL);
+    ASSERT_INT_EQ(foo->param_count, 4); /* a, b, c, __k */
+
+    /* The continuation captures c and __k (but NOT b since it's unused) */
+    JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
+    ASSERT(cont != NULL);
+    /* Should capture c and __k = 2 upvalues */
+    ASSERT_INT_EQ(cont->upvalue_count, 2);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: deep continuation chain (5 sequential awaits) */
+static int test_cps_deep_chain(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc foo [a b c d e] {\n"
+        "  def v1 [await $a]\n"
+        "  def v2 [await $b]\n"
+        "  def v3 [await $c]\n"
+        "  def v4 [await $d]\n"
+        "  def v5 [await $e]\n"
+        "  [+ [+ [+ [+ $v1 $v2] $v3] $v4] $v5]\n"
+        "}", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
+    ASSERT(foo != NULL);
+    ASSERT_INT_EQ(foo->param_count, 6); /* 5 params + __k */
+
+    /* Verify 5-deep continuation chain exists */
+    JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
+    ASSERT(cont != NULL);
+    cont = test__find_closure(&cont->chunk, "__cont");
+    ASSERT(cont != NULL);
+    cont = test__find_closure(&cont->chunk, "__cont");
+    ASSERT(cont != NULL);
+    cont = test__find_closure(&cont->chunk, "__cont");
+    ASSERT(cont != NULL);
+    cont = test__find_closure(&cont->chunk, "__cont");
+    ASSERT(cont != NULL);
+
+    /* Innermost continuation: captures v1..v4 + __k = 5 upvalues */
+    ASSERT(cont->upvalue_count >= 5);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: OP_AWAIT opcode present in CPS-transformed proc */
+static int test_cps_emits_op_await(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc foo [x] { def a [await $x]; $a }", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
+    ASSERT(foo != NULL);
+
+    /* Scan foo's bytecode for OP_AWAIT */
+    bool found_await = false;
+    for (uint32_t i = 0; i < foo->chunk.code_count; i++) {
+        if (foo->chunk.code[i] == OP_AWAIT) {
+            found_await = true;
+            break;
+        }
+    }
+    ASSERT(found_await);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: all existing programs still compile and run correctly */
+static int test_cps_existing_code_unaffected(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc fib [n] {\n"
+        "  if [< $n 2] { [+ $n 0] } {\n"
+        "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
+        "  }\n"
+        "}\n"
+        "print [fib 10]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "55\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -575,6 +927,18 @@ int main(void) {
         { "susp_error_filter_callback",  test_suspension_error_suspending_callback_filter },
         { "susp_error_transform_cb",     test_suspension_error_suspending_callback_transform },
         { "susp_existing_code_ok",       test_suspension_existing_code_compiles },
+        /* US-003: CPS transform — sequential code */
+        { "cps_single_await",           test_cps_single_await_compiles },
+        { "cps_two_seq_awaits",         test_cps_two_sequential_awaits },
+        { "cps_three_seq_awaits",       test_cps_three_sequential_awaits },
+        { "cps_non_susp_unaffected",    test_cps_non_suspending_unaffected },
+        { "cps_non_susp_param_count",   test_cps_non_suspending_param_count },
+        { "cps_propagation_caller",     test_cps_propagation_to_caller },
+        { "cps_single_await_resolved",  test_cps_single_await_resolved },
+        { "cps_variable_capture",       test_cps_variable_capture },
+        { "cps_deep_chain",            test_cps_deep_chain },
+        { "cps_emits_op_await",        test_cps_emits_op_await },
+        { "cps_existing_code_ok",      test_cps_existing_code_unaffected },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

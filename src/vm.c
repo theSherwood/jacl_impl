@@ -2323,6 +2323,99 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_AWAIT: {
+        /* CPS await stub: pop continuation, pop future.
+           In the stub implementation, immediately call the continuation
+           with the future's result (if resolved) or nil (if pending).
+           Full implementation in US-006 will suspend and resume via waiter. */
+        JaclVal continuation;
+        result = vm__pop(vm, &continuation); if (result != VM_OK) return result;
+        JaclVal future_val;
+        result = vm__pop(vm, &future_val); if (result != VM_OK) return result;
+
+        if (!jacl_is_closure(continuation)) {
+          vm__set_error(vm, "OP_AWAIT: continuation is not a closure");
+          return VM_RUNTIME_ERROR;
+        }
+        if (!jacl_is_future(future_val)) {
+          vm__set_error(vm, "await requires a future value, got %s",
+                       vm__type_name(future_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Determine result: resolved → result value, else nil */
+        JaclVal await_result = JACL_NIL;
+        JaclFuture *fut = jacl_as_future(future_val);
+        uint32_t state = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED);
+        if (state == FUTURE_RESOLVED || state == FUTURE_ERROR) {
+          await_result = (JaclVal)fut->result;
+        }
+
+        /* Call continuation(await_result) */
+        result = vm__push(vm, continuation);
+        if (result != VM_OK) return result;
+        result = vm__push(vm, await_result);
+        if (result != VM_OK) return result;
+
+        JaclClosure *cont_cl = jacl_as_closure(continuation);
+        if (cont_cl->param_count != 1) {
+          vm__set_error(vm, "OP_AWAIT: continuation expects %d args, need 1",
+                       (int)cont_cl->param_count);
+          return VM_RUNTIME_ERROR;
+        }
+        if (vm->frame_count >= VM_FRAMES_MAX) {
+          vm__set_error(vm, "stack overflow");
+          return VM_STACK_OVERFLOW;
+        }
+        CallFrame* new_frame = &vm->frames[vm->frame_count++];
+        new_frame->closure    = cont_cl;
+        new_frame->return_ip  = vm->ip;
+        new_frame->stack_base = vm->stack_top - 1;
+        new_frame->chunk      = &cont_cl->chunk;
+        frame     = new_frame;
+        vm->ip    = frame->chunk->code;
+        vm->chunk = frame->chunk;
+        break;
+      }
+
+      case OP_SPAWN: {
+        /* Stub: pop closure, create future, push future.
+           Full implementation in US-005. */
+        JaclVal closure;
+        result = vm__pop(vm, &closure); if (result != VM_OK) return result;
+        if (!jacl_is_closure(closure)) {
+          vm__set_error(vm, "spawn requires a closure, got %s",
+                       vm__type_name(closure));
+          return VM_RUNTIME_ERROR;
+        }
+        /* Create a pending future */
+        JaclVal f = jacl_future(&vm->heap);
+        result = vm__push(vm, f);
+        if (result != VM_OK) return result;
+        /* Stub: immediately execute the closure and resolve the future */
+        JaclClosure *cl = jacl_as_closure(closure);
+        if (cl->param_count == 0) {
+          /* Call the closure synchronously for testing */
+          result = vm__push(vm, closure);
+          if (result != VM_OK) return result;
+          if (vm->frame_count >= VM_FRAMES_MAX) {
+            vm__set_error(vm, "stack overflow");
+            return VM_STACK_OVERFLOW;
+          }
+          CallFrame* new_frame = &vm->frames[vm->frame_count++];
+          new_frame->closure    = cl;
+          new_frame->return_ip  = vm->ip;
+          new_frame->stack_base = vm->stack_top;
+          new_frame->chunk      = &cl->chunk;
+          frame     = new_frame;
+          vm->ip    = frame->chunk->code;
+          vm->chunk = frame->chunk;
+          /* After the closure returns, the future stays unresolved in the stub.
+             Full resolution happens in US-005 runtime. */
+        }
+        break;
+      }
+
       case OP_DEREF: {
         JaclVal container;
         result = vm__pop(vm, &container); if (result != VM_OK) return result;
