@@ -186,3 +186,22 @@
   - JACL `[abs -5]` parses as 2 args (bare word `-` and int `5`), not negative literal — use `[abs [- 0 5]]`
   - JACL has no `cond` or `match` builtins — chained if (nested if-else) covers the cond pattern
 ---
+
+## 2026-02-27 - US-005
+- What was implemented: spawn primitive — OP_SPAWN opcode full implementation (replaces stub), OP_RESOLVE_FUTURE opcode, resolve_k closure infrastructure, spawn block compilation as closure (non-CPS and CPS), single-threaded spawn (recursive vm__run + future resolution), runtime spawn (submit SpawnTaskData to worker pool), top-level CPS transformation, rt_run_to_completion, tail-await optimization (pass __k directly when no remaining stmts), 8 unit tests
+- Files changed:
+  - src/bytecode.c — OP_RESOLVE_FUTURE opcode added after OP_SPAWN; opcode_name updated
+  - src/compiler.c — CompileResult.suspending field; Compiler.force_global_procs for top-level CPS; spawn compilation rewritten to compile block as closure (non-CPS: compile_block_expr, CPS: compile_cps_stmts with __k param); compiler__top_level_suspends detection; compiler_compile handles top-level CPS (wrap in __main closure); ast__contains_suspension and analyze__walk_node skip spawn blocks; tail-await optimization in compile_cps_stmts Case 1
+  - src/runtime.c — resolve_k static bytecode (GET_UPVALUE 0, GET_LOCAL 0, RESOLVE_FUTURE, RETURN); runtime__create_resolve_closure (GC-allocated, 1 upvalue = future); SpawnTaskData struct; runtime__spawn_task_exec (CPS: with resolve_k, non-CPS: direct call + resolve); runtime__submit_spawn_task; rt_run_to_completion
+  - src/vm.c — OP_SPAWN full implementation (single-threaded: recursive vm__run with frame save/restore; runtime: submit task); OP_RESOLVE_FUTURE handler (pop result + future, resolve, push nil); jacl_run handles cr.suspending (execute chunk to get CPS closure, create completion future + resolve_k, call main closure)
+  - test/test_bytecode.c — opcode enum assertions shifted by +1 for OP_RESOLVE_FUTURE
+  - test/test_m13.c — 8 new tests: spawn_returns_future, spawn_nonsuspending_resolves, spawn_suspending_resolves, spawn_error_propagation, spawn_worker_execution, top_level_cps, rt_run_to_completion, spawn_existing_code_ok
+- **Learnings for future iterations:**
+  - spawn { body } requires compiling the block as a CLOSURE (not inline code) — compiler__compile_node on a block compiles inline; must create JaclClosure with chunk, body compiler, OP_CLOSURE emission
+  - CPS spawn closures need __k param (param_count=1); non-CPS have param_count=0; OP_SPAWN uses param_count to detect CPS
+  - resolve_k bytecode stack order matters: GET_UPVALUE (future) first, GET_LOCAL (result) on top — OP_RESOLVE_FUTURE pops top as result, below as future
+  - Tail-await optimization: when await is the last expression (remaining_count == 0), pass __k directly as continuation instead of creating an intermediate wrapper that calls __k(nil) — avoids losing the await result
+  - Top-level CPS: compiler detects top-level suspension via compiler__top_level_suspends, wraps code in __main closure with __k; jacl_run creates completion future + resolve_k as __k
+  - force_global_procs flag ensures proc definitions inside CPS-wrapped top-level remain globals (not locals)
+  - Single-threaded spawn uses recursive vm__run with saved ip/chunk/frame_count; restores after completion
+---

@@ -104,7 +104,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "spawn creates a task wrapper (RuntimeTask) that wraps the user closure + future reference. For suspending closures, the wrapper provides __k = resolve_future(F) as the hidden continuation parameter. For non-suspending closures, the wrapper calls the closure directly and resolves the future with the return value. No run primitive — suspension propagates automatically through calls (direct style). Top-level async code just works."
     },
     {
