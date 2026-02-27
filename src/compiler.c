@@ -1037,6 +1037,362 @@ static void compiler__compile_suspending_call_cps(Compiler* c,
 }
 
 /**
+ * Check if an AST node is an [if ...] command with suspension in any branch.
+ * Does NOT check the condition — only the then/else blocks.
+ */
+static bool compiler__is_if_with_suspension(Compiler* c, AstNode* node) {
+  if (node->type != AST_COMMAND) return false;
+  AstNode* head = node->data.command.head;
+  if (!compiler__head_matches(head, "if", 2)) return false;
+  uint32_t argc = node->data.command.arg_count;
+  AstNode** args = node->data.command.args;
+  if (argc < 2) return false;
+  if (args[1]->type == AST_BLOCK && compiler__node_is_suspension(c, args[1]))
+    return true;
+  if (argc >= 3 && args[2]->type == AST_BLOCK &&
+      compiler__node_is_suspension(c, args[2]))
+    return true;
+  return false;
+}
+
+/**
+ * Compile one branch of a CPS if statement.
+ * If need_join is true, jk_name is a local holding the join continuation;
+ * branches that suspend use it as __k, non-suspending branches call it directly.
+ * If need_join is false, branches use the enclosing __k.
+ */
+static void compiler__compile_cps_branch(Compiler* c, AstNode* block,
+                                          bool need_join, JaclVal jk_name,
+                                          uint32_t line) {
+  uint32_t bcount = block->data.block.count;
+  AstNode** bstmts = block->data.block.commands;
+  bool branch_suspends = compiler__node_is_suspension(c, block);
+
+  if (branch_suspends) {
+    uint32_t saved_local_count = c->local_count;
+    if (need_join) {
+      /* Shadow __k with join continuation so CPS stmts route through it */
+      int jk = compiler__resolve_local(c, jk_name);
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, (uint8_t)jk, line);
+      compiler__add_local(c, jacl_inline_string("__k", 3), line, 0);
+    }
+    compiler__compile_cps_stmts(c, bstmts, bcount, line);
+    /* Remove shadow __k from compiler tracking without emitting POP.
+       The stack slot is cleaned up by the eventual OP_RETURN. */
+    c->local_count = saved_local_count;
+  } else {
+    /* Non-suspending: compile stmts normally, then call k(result) */
+    for (uint32_t i = 0; i + 1 < bcount; i++) {
+      compiler__compile_node(c, bstmts[i]);
+      compiler__emit_check_error(c, line);
+    }
+    /* Push the continuation to call */
+    if (need_join) {
+      int jk = compiler__resolve_local(c, jk_name);
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, (uint8_t)jk, line);
+    } else {
+      compiler__emit_get_k(c, line);
+    }
+    /* Push result value */
+    if (bcount > 0) {
+      compiler__compile_node(c, bstmts[bcount - 1]);
+    } else {
+      compiler__emit_byte(c, OP_NIL, line);
+    }
+    /* Call k(result) */
+    compiler__emit_byte(c, OP_CALL, line);
+    compiler__emit_byte(c, 1, line);
+  }
+}
+
+/**
+ * Compile an if-with-suspension in CPS mode.
+ * Creates a join continuation for remaining_stmts (if any) and routes
+ * each branch's result through it. Non-suspending branches tail-call
+ * the join continuation directly.
+ *
+ * join_param is the parameter name for the join continuation
+ * (e.g., "__if_r" for anonymous, or the def name when used for def-with-if).
+ */
+static void compiler__compile_cps_if(Compiler* c, AstNode* if_node,
+                                      JaclVal join_param,
+                                      AstNode** remaining_stmts,
+                                      uint32_t remaining_count,
+                                      uint32_t line) {
+  AstNode** args = if_node->data.command.args;
+  uint32_t argc = if_node->data.command.arg_count;
+
+  bool need_join = (remaining_count > 0);
+  JaclVal jk_name = jacl_inline_string("__jk", 4);
+
+  if (need_join) {
+    /* Create join continuation for remaining stmts */
+    compiler__emit_continuation(c, join_param, remaining_stmts,
+                                 remaining_count, line);
+    compiler__add_local(c, jk_name, line, 0);
+  }
+
+  /* Compile condition */
+  compiler__compile_node(c, args[0]);
+
+  /* JUMP_IF_FALSE -> else */
+  uint32_t then_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+
+  /* Then branch */
+  compiler__compile_cps_branch(c, args[1], need_join, jk_name, line);
+
+  /* JUMP -> end (skip else) */
+  uint32_t else_jump = compiler__emit_jump(c, OP_JUMP, line);
+
+  /* Patch JUMP_IF_FALSE to here */
+  compiler__patch_jump(c, then_jump);
+
+  /* Else branch */
+  if (argc >= 3) {
+    compiler__compile_cps_branch(c, args[2], need_join, jk_name, line);
+  } else {
+    /* No else: call k(nil) */
+    if (need_join) {
+      int jk = compiler__resolve_local(c, jk_name);
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, (uint8_t)jk, line);
+    } else {
+      compiler__emit_get_k(c, line);
+    }
+    compiler__emit_byte(c, OP_NIL, line);
+    compiler__emit_byte(c, OP_CALL, line);
+    compiler__emit_byte(c, 1, line);
+  }
+
+  /* Patch JUMP to here */
+  compiler__patch_jump(c, else_jump);
+}
+
+/**
+ * Check if a command has non-block arguments that contain suspension points.
+ * Used to determine if argument extraction is needed.
+ */
+static bool compiler__has_suspending_non_block_args(Compiler* c, AstNode* node) {
+  if (node->type != AST_COMMAND) return false;
+  AstNode** args = node->data.command.args;
+  uint32_t argc = node->data.command.arg_count;
+  for (uint32_t i = 0; i < argc; i++) {
+    if (args[i]->type != AST_BLOCK &&
+        compiler__node_is_suspension(c, args[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Extract suspending non-block arguments from a command into temp defs.
+ * Creates synthetic AST: [def __a0 susp_arg0]; [def __a1 susp_arg1]; ...;
+ * [modified_cmd with $__a0 $__a1 ...]; remaining_stmts.
+ * Then compiles the full list through compiler__compile_cps_stmts.
+ */
+static void compiler__compile_cps_extract_args(Compiler* c, AstNode* cmd_node,
+                                                AstNode** remaining_stmts,
+                                                uint32_t remaining_count,
+                                                uint32_t line) {
+  uint32_t argc = cmd_node->data.command.arg_count;
+  AstNode** args = cmd_node->data.command.args;
+
+  /* Count extractable suspending args */
+  uint32_t susp_count = 0;
+  for (uint32_t i = 0; i < argc; i++) {
+    if (args[i]->type != AST_BLOCK &&
+        compiler__node_is_suspension(c, args[i])) {
+      susp_count++;
+    }
+  }
+
+  /* Build synthetic statement list: defs + modified_cmd + remaining */
+  uint32_t total = susp_count + 1 + remaining_count;
+  AstNode** new_stmts = ast_alloc_array(c->arena, total);
+
+  /* Create modified args array */
+  AstNode** new_args = ast_alloc_array(c->arena, argc);
+  memcpy(new_args, args, sizeof(AstNode*) * argc);
+
+  uint32_t def_idx = 0;
+  for (uint32_t i = 0; i < argc; i++) {
+    if (args[i]->type != AST_BLOCK &&
+        compiler__node_is_suspension(c, args[i])) {
+      /* Generate temp name __a0, __a1, etc. */
+      char tmp_name[8];
+      snprintf(tmp_name, sizeof(tmp_name), "__a%u", def_idx);
+      uint32_t name_len = (uint32_t)strlen(tmp_name);
+
+      char* name_copy = (char*)arena_alloc(c->arena, name_len + 1);
+      memcpy(name_copy, tmp_name, name_len + 1);
+
+      /* Create var ref node to replace the suspending arg */
+      AstNode* var_ref = ast_alloc(c->arena);
+      var_ref->type = AST_VAR_REF;
+      var_ref->start = args[i]->start;
+      var_ref->end = args[i]->end;
+      var_ref->data.var_ref.name = name_copy;
+      var_ref->data.var_ref.length = name_len;
+
+      /* Create name literal node for def */
+      AstNode* name_node = ast_alloc(c->arena);
+      name_node->type = AST_LIT_STRING;
+      name_node->start = args[i]->start;
+      name_node->end = args[i]->end;
+      name_node->data.lit_string.value = name_copy;
+      name_node->data.lit_string.length = name_len;
+
+      /* Create def head */
+      AstNode* def_head = ast_alloc(c->arena);
+      def_head->type = AST_LIT_STRING;
+      def_head->start = args[i]->start;
+      def_head->end = args[i]->end;
+      def_head->data.lit_string.value = "def";
+      def_head->data.lit_string.length = 3;
+
+      /* Create def args: [name, value] */
+      AstNode** def_args = ast_alloc_array(c->arena, 2);
+      def_args[0] = name_node;
+      def_args[1] = args[i]; /* original suspending expression */
+
+      /* Create def command node */
+      AstNode* def_cmd = ast_alloc(c->arena);
+      def_cmd->type = AST_COMMAND;
+      def_cmd->start = args[i]->start;
+      def_cmd->end = args[i]->end;
+      def_cmd->data.command.head = def_head;
+      def_cmd->data.command.args = def_args;
+      def_cmd->data.command.arg_count = 2;
+
+      new_stmts[def_idx] = def_cmd;
+      new_args[i] = var_ref;
+      def_idx++;
+    }
+  }
+
+  /* Create modified command with extracted args replaced by var refs */
+  AstNode* mod_cmd = ast_alloc(c->arena);
+  *mod_cmd = *cmd_node;
+  mod_cmd->data.command.args = new_args;
+
+  new_stmts[susp_count] = mod_cmd;
+
+  /* Append remaining statements */
+  for (uint32_t i = 0; i < remaining_count; i++) {
+    new_stmts[susp_count + 1 + i] = remaining_stmts[i];
+  }
+
+  /* Compile the expanded sequence through CPS */
+  compiler__compile_cps_stmts(c, new_stmts, total, line);
+}
+
+/**
+ * Extract suspending args from a def's value expression and compile via CPS.
+ * Turns [def x [f [await $a] [await $b]]] into:
+ *   [def __a0 [await $a]]; [def __a1 [await $b]]; [def x [f $__a0 $__a1]]
+ */
+static void compiler__compile_cps_extract_def_value(
+    Compiler* c, AstNode* def_stmt, JaclVal def_name, AstNode* value_node,
+    AstNode** remaining_stmts, uint32_t remaining_count, uint32_t line) {
+  uint32_t v_argc = value_node->data.command.arg_count;
+  AstNode** v_args = value_node->data.command.args;
+
+  /* Count extractable suspending args in value */
+  uint32_t susp_count = 0;
+  for (uint32_t i = 0; i < v_argc; i++) {
+    if (v_args[i]->type != AST_BLOCK &&
+        compiler__node_is_suspension(c, v_args[i])) {
+      susp_count++;
+    }
+  }
+
+  /* Build: defs + modified_def_stmt + remaining */
+  uint32_t total = susp_count + 1 + remaining_count;
+  AstNode** new_stmts = ast_alloc_array(c->arena, total);
+
+  /* Create modified value args */
+  AstNode** new_v_args = ast_alloc_array(c->arena, v_argc);
+  memcpy(new_v_args, v_args, sizeof(AstNode*) * v_argc);
+
+  uint32_t def_idx = 0;
+  for (uint32_t i = 0; i < v_argc; i++) {
+    if (v_args[i]->type != AST_BLOCK &&
+        compiler__node_is_suspension(c, v_args[i])) {
+      char tmp_name[8];
+      snprintf(tmp_name, sizeof(tmp_name), "__a%u", def_idx);
+      uint32_t name_len = (uint32_t)strlen(tmp_name);
+
+      char* name_copy = (char*)arena_alloc(c->arena, name_len + 1);
+      memcpy(name_copy, tmp_name, name_len + 1);
+
+      AstNode* var_ref = ast_alloc(c->arena);
+      var_ref->type = AST_VAR_REF;
+      var_ref->start = v_args[i]->start;
+      var_ref->end = v_args[i]->end;
+      var_ref->data.var_ref.name = name_copy;
+      var_ref->data.var_ref.length = name_len;
+
+      AstNode* name_node = ast_alloc(c->arena);
+      name_node->type = AST_LIT_STRING;
+      name_node->start = v_args[i]->start;
+      name_node->end = v_args[i]->end;
+      name_node->data.lit_string.value = name_copy;
+      name_node->data.lit_string.length = name_len;
+
+      AstNode* def_head = ast_alloc(c->arena);
+      def_head->type = AST_LIT_STRING;
+      def_head->start = v_args[i]->start;
+      def_head->end = v_args[i]->end;
+      def_head->data.lit_string.value = "def";
+      def_head->data.lit_string.length = 3;
+
+      AstNode** def_args_arr = ast_alloc_array(c->arena, 2);
+      def_args_arr[0] = name_node;
+      def_args_arr[1] = v_args[i];
+
+      AstNode* def_cmd = ast_alloc(c->arena);
+      def_cmd->type = AST_COMMAND;
+      def_cmd->start = v_args[i]->start;
+      def_cmd->end = v_args[i]->end;
+      def_cmd->data.command.head = def_head;
+      def_cmd->data.command.args = def_args_arr;
+      def_cmd->data.command.arg_count = 2;
+
+      new_stmts[def_idx] = def_cmd;
+      new_v_args[i] = var_ref;
+      def_idx++;
+    }
+  }
+
+  /* Create modified value node */
+  AstNode* mod_value = ast_alloc(c->arena);
+  *mod_value = *value_node;
+  mod_value->data.command.args = new_v_args;
+
+  /* Create modified def stmt */
+  AstNode* mod_def = ast_alloc(c->arena);
+  *mod_def = *def_stmt;
+  AstNode** mod_def_args = ast_alloc_array(c->arena, def_stmt->data.command.arg_count);
+  memcpy(mod_def_args, def_stmt->data.command.args,
+         sizeof(AstNode*) * def_stmt->data.command.arg_count);
+  /* Replace the value node in def args */
+  uint32_t d_argc = def_stmt->data.command.arg_count;
+  mod_def_args[d_argc - 1] = mod_value;
+  mod_def->data.command.args = mod_def_args;
+
+  new_stmts[susp_count] = mod_def;
+
+  for (uint32_t i = 0; i < remaining_count; i++) {
+    new_stmts[susp_count + 1 + i] = remaining_stmts[i];
+  }
+
+  compiler__compile_cps_stmts(c, new_stmts, total, line);
+}
+
+/**
  * CPS-aware compilation of a statement list.
  * Finds the first suspension point, compiles code before it normally,
  * creates a continuation for code after it, and emits OP_AWAIT or CPS call.
@@ -1131,11 +1487,25 @@ static void compiler__compile_cps_stmts(Compiler* c, AstNode** stmts,
       return;
     }
 
-    /* The value node contains a suspension point but not at top level.
-       For US-003 (sequential only), compile normally — US-004 handles nested. */
+    /* Value is an if-with-suspension — compile CPS if with def name as param */
+    if (compiler__is_if_with_suspension(c, value_node)) {
+      compiler__compile_cps_if(c, value_node, def_name, remaining,
+                                remaining_count, susp_stmt->start.line);
+      return;
+    }
+
+    /* Value has extractable suspending arguments — extract and retry */
+    if (value_node->type == AST_COMMAND &&
+        compiler__has_suspending_non_block_args(c, value_node)) {
+      compiler__compile_cps_extract_def_value(c, susp_stmt, def_name,
+                                               value_node, remaining,
+                                               remaining_count, line);
+      return;
+    }
+
+    /* Fallback: compile def normally and continue with remaining stmts */
     compiler__compile_node(c, susp_stmt);
     compiler__emit_check_error(c, line);
-    /* Continue with remaining as if no suspension (fallback) */
     compiler__compile_cps_stmts(c, remaining, remaining_count, line);
     return;
   }
@@ -1148,8 +1518,21 @@ static void compiler__compile_cps_stmts(Compiler* c, AstNode** stmts,
     return;
   }
 
-  /* Case 4: Statement contains suspension point in nested position.
-     For US-003, only handle sequential code. Compile normally and continue. */
+  /* Case 4: if-with-suspension in branches */
+  if (compiler__is_if_with_suspension(c, susp_stmt)) {
+    compiler__compile_cps_if(c, susp_stmt, cont_param, remaining,
+                              remaining_count, susp_stmt->start.line);
+    return;
+  }
+
+  /* Case 5: Statement has extractable suspending arguments */
+  if (compiler__has_suspending_non_block_args(c, susp_stmt)) {
+    compiler__compile_cps_extract_args(c, susp_stmt, remaining,
+                                        remaining_count, line);
+    return;
+  }
+
+  /* Case 6: Fallback — compile normally and continue */
   compiler__compile_node(c, susp_stmt);
   compiler__emit_check_error(c, line);
   compiler__compile_cps_stmts(c, remaining, remaining_count, line);
