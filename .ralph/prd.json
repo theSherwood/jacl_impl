@@ -67,7 +67,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "The CPS transform creates nested Compiler contexts for continuations — same mechanism as fn/proc body compilation. This means CPS doesn't require new runtime concepts, it produces ordinary closures. OP_AWAIT is emitted at suspension points (runtime behavior implemented in US-006). The __k parameter is a regular local variable at the bytecode level. Direct-style: calling a suspending proc is itself a suspension point — the CPS transform splits around the call and passes __k through."
     },
     {

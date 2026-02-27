@@ -150,3 +150,21 @@
   - in_non_suspending_callback flag catches inline suspension in block callbacks; var_ref checks catch passing known suspending procs
   - Proc names >7 chars are skipped by analysis (inline string limit) — not an issue in practice
 ---
+
+## 2026-02-27 - US-003
+- What was implemented: CPS transform for sequential suspending procs — hidden __k continuation parameter, suspension point splitting into continuation closures, chained continuations for multiple awaits, variable liveness via upvalue capture, direct-style suspension propagation (calling a suspending proc CPS-transforms the caller), OP_AWAIT and OP_SPAWN opcodes with VM stubs, 11 unit tests
+- Files changed:
+  - src/bytecode.c — OP_AWAIT, OP_SPAWN opcodes added after OP_IS_FUTURE; opcode_name switch updated
+  - src/compiler.c — `bool is_cps` on Compiler struct; CPS helper functions: compiler__node_is_suspension (recursive AST check), compiler__emit_get_k (__k resolution as local/upvalue), compiler__emit_continuation (creates continuation closure with nested Compiler), compiler__is_def_with_suspension, compiler__is_direct_await, compiler__is_suspending_call, compiler__compile_suspending_call_cps (passes __k as extra arg), compiler__compile_cps_stmts (main CPS driver: finds first suspension point, splits, creates continuation chain); proc compilation modified to check suspension_map, add __k param, use CPS body compilation for suspending procs, copy global arities to body compiler; spawn changed from placeholder to OP_SPAWN
+  - src/vm.c — OP_AWAIT handler (stub: pops continuation + future, calls continuation with result or nil), OP_SPAWN handler (stub: pops closure, creates future, attempts sync execution, pushes future)
+  - test/test_bytecode.c — opcode enum assertions shifted by +2 for OP_AWAIT/OP_SPAWN insertion
+  - test/test_m13.c — 11 new tests: cps_single_await, cps_two_seq_awaits, cps_three_seq_awaits, cps_non_susp_unaffected, cps_non_susp_param_count, cps_propagation_caller, cps_single_await_resolved, cps_variable_capture, cps_deep_chain, cps_emits_op_await, cps_existing_code_ok
+- **Learnings for future iterations:**
+  - CPS continuation closures use the same nested Compiler mechanism as regular closures — enclosing pointer chain, upvalue resolution, OP_CLOSURE emission
+  - user_param_count vs param_count: user_param_count excludes hidden __k for arity checks, param_count includes it for actual compilation
+  - compiler__compile_cps_stmts scans for first suspension point, compiles non-suspending prefix normally, then handles the suspension point (await/def-await/suspending-call), and wraps remaining stmts in a continuation closure
+  - Global arities must be copied from root compiler to body compiler so CPS stmts can identify suspending call targets
+  - OP_AWAIT VM stub immediately calls continuation with future result (or nil if pending) — full async behavior in US-006
+  - OP_SPAWN VM stub creates future, attempts sync call, resolves future with result — full async scheduling in US-005
+  - JACL `$var` at statement position desugars to `[$var]` (zero-arg call) — test fibonacci must use `{ [+ $n 0] }` not `{ $n }` for non-callable values
+---
