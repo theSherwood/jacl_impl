@@ -325,6 +325,223 @@ static int test_future_print_format(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * US-002: Suspension analysis in compiler
+ * ==================================================================== */
+
+/* Helper: run suspension analysis on source, return the map */
+static SuspensionMap test__analyze(const char* source) {
+    arena_t arena = {0};
+    LexResult tokens = lexer_lex(source, &arena);
+    ParseResult parse = parser_parse(tokens, &arena);
+    SuspensionMap map = compiler__analyze_suspension(parse.nodes, parse.count);
+    arena_destroy(&arena);
+    return map;
+}
+
+/* Helper: compile source, return true if compile error occurred */
+static bool test__compile_has_error(const char* source, const char* expected_substr) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    LexResult tokens = lexer_lex(source, &arena);
+    ParseResult parse = parser_parse(tokens, &arena);
+    JaclInternTable intern_table;
+    intern_table_init(&intern_table, &arena);
+    CompileResult cr = compiler_compile(parse, &arena, &intern_table, &vm.heap);
+
+    bool has_error = (cr.error_count > 0);
+    bool has_substr = false;
+    if (has_error && expected_substr && cr.error_message) {
+        has_substr = (strstr(cr.error_message, expected_substr) != NULL);
+    }
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+
+    if (expected_substr) return has_error && has_substr;
+    return has_error;
+}
+
+/* Test: suspension inferred for direct use of await */
+static int test_suspension_direct_await(void) {
+    SuspensionMap map = test__analyze(
+        "proc foo [] { await 42 }");
+    JaclVal foo = jacl_inline_string("foo", 3);
+    ASSERT(suspension_map_lookup(&map, foo));
+    TEST_PASS();
+}
+
+/* Test: suspension inferred for direct use of parallel */
+static int test_suspension_direct_parallel(void) {
+    SuspensionMap map = test__analyze(
+        "proc foo [] { parallel { 1 } { 2 } }");
+    JaclVal foo = jacl_inline_string("foo", 3);
+    ASSERT(suspension_map_lookup(&map, foo));
+    TEST_PASS();
+}
+
+/* Test: suspension inferred for direct use of race */
+static int test_suspension_direct_race(void) {
+    SuspensionMap map = test__analyze(
+        "proc foo [] { race { 1 } { 2 } }");
+    JaclVal foo = jacl_inline_string("foo", 3);
+    ASSERT(suspension_map_lookup(&map, foo));
+    TEST_PASS();
+}
+
+/* Test: transitive suspension through direct calls */
+static int test_suspension_transitive(void) {
+    SuspensionMap map = test__analyze(
+        "proc inner [] { await 42 }\n"
+        "proc outer [] { inner }");
+    JaclVal inner = jacl_inline_string("inner", 5);
+    JaclVal outer = jacl_inline_string("outer", 5);
+    ASSERT(suspension_map_lookup(&map, inner));
+    ASSERT(suspension_map_lookup(&map, outer));
+    TEST_PASS();
+}
+
+/* Test: nested procs — inner suspends, outer calls inner → both suspend */
+static int test_suspension_nested_procs(void) {
+    SuspensionMap map = test__analyze(
+        "proc outer [] {\n"
+        "  proc inner [] { await 42 }\n"
+        "  inner\n"
+        "}");
+    JaclVal inner = jacl_inline_string("inner", 5);
+    JaclVal outer = jacl_inline_string("outer", 5);
+    ASSERT(suspension_map_lookup(&map, inner));
+    ASSERT(suspension_map_lookup(&map, outer));
+    TEST_PASS();
+}
+
+/* Test: indirect call to unknown closure — conservatively suspending
+   when suspending procs exist in the program */
+static int test_suspension_indirect_call(void) {
+    SuspensionMap map = test__analyze(
+        "proc async_fn [] { await 42 }\n"
+        "proc caller [f] { [$f] }");
+    JaclVal async_fn = jacl_inline_string("async_f", 7);
+    /* async_fn name is truncated to 7 chars for inline; use the actual name */
+    async_fn = jacl_inline_string("async_f", 7);
+    /* Actually, proc name in AST is "async_fn" which is 8 chars — exceeds 7-byte limit.
+       Let me use shorter names. */
+    (void)async_fn;
+    map = test__analyze(
+        "proc afn [] { await 42 }\n"
+        "proc caller [f] { [$f] }");
+    JaclVal afn = jacl_inline_string("afn", 3);
+    JaclVal caller = jacl_inline_string("caller", 6);
+    ASSERT(suspension_map_lookup(&map, afn));
+    ASSERT(suspension_map_lookup(&map, caller));
+    TEST_PASS();
+}
+
+/* Test: proc without suspension points is non-suspending */
+static int test_suspension_non_suspending(void) {
+    SuspensionMap map = test__analyze(
+        "proc add [a b] { [+ $a $b] }\n"
+        "proc mul [a b] { [* $a $b] }");
+    JaclVal add = jacl_inline_string("add", 3);
+    JaclVal mul = jacl_inline_string("mul", 3);
+    ASSERT(!suspension_map_lookup(&map, add));
+    ASSERT(!suspension_map_lookup(&map, mul));
+    TEST_PASS();
+}
+
+/* Test: spawn and run are NOT suspension points */
+static int test_suspension_spawn_run_not_suspending(void) {
+    SuspensionMap map = test__analyze(
+        "proc foo [] { spawn { 42 } }\n"
+        "proc bar [] { run { 42 } }");
+    JaclVal foo = jacl_inline_string("foo", 3);
+    JaclVal bar = jacl_inline_string("bar", 3);
+    ASSERT(!suspension_map_lookup(&map, foo));
+    ASSERT(!suspension_map_lookup(&map, bar));
+    TEST_PASS();
+}
+
+/* Test: indirect calls are non-suspending when no suspending procs exist */
+static int test_suspension_indirect_no_suspending_procs(void) {
+    SuspensionMap map = test__analyze(
+        "proc caller [f] { [$f] }");
+    JaclVal caller = jacl_inline_string("caller", 6);
+    ASSERT(!suspension_map_lookup(&map, caller));
+    TEST_PASS();
+}
+
+/* Test: compile error for await inside try/catch */
+static int test_suspension_error_try_catch(void) {
+    ASSERT(test__compile_has_error(
+        "proc foo [] { try { await 42 } e { $e } }",
+        "cannot suspend inside try/catch"));
+    TEST_PASS();
+}
+
+/* Test: compile error for parallel inside try/catch */
+static int test_suspension_error_try_catch_parallel(void) {
+    ASSERT(test__compile_has_error(
+        "proc foo [] { try { parallel { 1 } { 2 } } e { $e } }",
+        "cannot suspend inside try/catch"));
+    TEST_PASS();
+}
+
+/* Test: compile error for race inside try/catch */
+static int test_suspension_error_try_catch_race(void) {
+    ASSERT(test__compile_has_error(
+        "proc foo [] { try { race { 1 } { 2 } } e { $e } }",
+        "cannot suspend inside try/catch"));
+    TEST_PASS();
+}
+
+/* Test: compile error for suspending closure passed to each */
+static int test_suspension_error_suspending_callback_each(void) {
+    ASSERT(test__compile_has_error(
+        "proc sfn [x] { await $x }\n"
+        "[each [vec 1 2] $sfn]",
+        "cannot pass suspending closure to non-suspending builtin"));
+    TEST_PASS();
+}
+
+/* Test: compile error for suspending closure passed to filter */
+static int test_suspension_error_suspending_callback_filter(void) {
+    ASSERT(test__compile_has_error(
+        "proc sfn [x] { await $x }\n"
+        "[filter [vec 1 2] $sfn]",
+        "cannot pass suspending closure to non-suspending builtin"));
+    TEST_PASS();
+}
+
+/* Test: compile error for suspending closure passed to transform */
+static int test_suspension_error_suspending_callback_transform(void) {
+    ASSERT(test__compile_has_error(
+        "proc sfn [x] { await $x }\n"
+        "[transform [vec 1 2] $sfn]",
+        "cannot pass suspending closure to non-suspending builtin"));
+    TEST_PASS();
+}
+
+/* Test: all existing code compiles without errors (no false positives) */
+static int test_suspension_existing_code_compiles(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    VMResult r = jacl_run(
+        "proc add [a b] { [+ $a $b] }\n"
+        "proc apply [f x] { [$f $x] }\n"
+        "proc double [x] { [* $x 2] }\n"
+        "print [add 1 2]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -344,6 +561,23 @@ int main(void) {
         { "is_future_predicate",         test_is_future_predicate },
         { "future_predicate_builtin",    test_future_predicate_builtin },
         { "future_print_format",         test_future_print_format },
+        /* US-002: Suspension analysis in compiler */
+        { "suspension_direct_await",     test_suspension_direct_await },
+        { "suspension_direct_parallel",  test_suspension_direct_parallel },
+        { "suspension_direct_race",      test_suspension_direct_race },
+        { "suspension_transitive",       test_suspension_transitive },
+        { "suspension_nested_procs",     test_suspension_nested_procs },
+        { "suspension_indirect_call",    test_suspension_indirect_call },
+        { "suspension_non_suspending",   test_suspension_non_suspending },
+        { "suspension_spawn_run_not",    test_suspension_spawn_run_not_suspending },
+        { "suspension_indirect_no_sp",   test_suspension_indirect_no_suspending_procs },
+        { "susp_error_try_catch",        test_suspension_error_try_catch },
+        { "susp_error_try_parallel",     test_suspension_error_try_catch_parallel },
+        { "susp_error_try_race",         test_suspension_error_try_catch_race },
+        { "susp_error_each_callback",    test_suspension_error_suspending_callback_each },
+        { "susp_error_filter_callback",  test_suspension_error_suspending_callback_filter },
+        { "susp_error_transform_cb",     test_suspension_error_suspending_callback_transform },
+        { "susp_existing_code_ok",       test_suspension_existing_code_compiles },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -114,6 +114,7 @@ typedef struct {
   int16_t   known_arity;  /* arity if bound to a proc, -1 = unknown */
   bool      is_mutable;   /* true if declared with mut */
   bool      is_param;     /* true if this is a function parameter */
+  bool      suspends;     /* true if bound to a suspending proc */
   JaclType  type;         /* compile-time type (default TYPE_DYN) */
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
   JaclType* param_types;  /* proc param types (NULL for non-procs, arena-allocated) */
@@ -127,6 +128,7 @@ typedef struct {
   JaclVal   name;
   int16_t   known_arity;
   bool      is_mutable;   /* true if declared with mut */
+  bool      suspends;     /* true if this is a suspending proc */
   JaclType  type;         /* compile-time type (default TYPE_DYN) */
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
   JaclType  param_types[COMPILER_MAX_PROC_PARAMS]; /* proc param types */
@@ -137,8 +139,288 @@ typedef struct {
   uint8_t   is_local; /* 1 = capture from enclosing locals, 0 = from parent upvalues */
   JaclVal   name;     /* for debug/lookup */
   bool      is_mutable; /* true if capturing a mut binding */
+  bool      suspends;   /* true if capturing a suspending proc */
   JaclType  type;     /* compile-time type (default TYPE_DYN) */
 } Upvalue;
+
+/* --- Internal: Suspension analysis --- */
+
+#define SUSPENSION_MAP_MAX 256
+#define SUSPENSION_CALLEES_MAX 64
+
+typedef struct {
+  JaclVal name;
+  bool    suspends;
+} SuspensionEntry;
+
+typedef struct {
+  SuspensionEntry entries[SUSPENSION_MAP_MAX];
+  uint32_t count;
+} SuspensionMap;
+
+static bool suspension_map_lookup(SuspensionMap* map, JaclVal name) {
+  for (uint32_t i = 0; i < map->count; i++) {
+    if (map->entries[i].name == name) {
+      return map->entries[i].suspends;
+    }
+  }
+  return false;
+}
+
+static void suspension_map_set(SuspensionMap* map, JaclVal name, bool suspends) {
+  for (uint32_t i = 0; i < map->count; i++) {
+    if (map->entries[i].name == name) {
+      map->entries[i].suspends = suspends;
+      return;
+    }
+  }
+  if (map->count < SUSPENSION_MAP_MAX) {
+    map->entries[map->count].name = name;
+    map->entries[map->count].suspends = suspends;
+    map->count++;
+  }
+}
+
+/* Info collected per proc during suspension analysis */
+typedef struct {
+  JaclVal  name;
+  bool     direct_suspends;   /* directly contains await/parallel/race */
+  bool     has_indirect_call; /* calls through $var (unknown closure) */
+  JaclVal  callees[SUSPENSION_CALLEES_MAX];
+  uint32_t callee_count;
+} ProcSuspendInfo;
+
+#define MAX_PROC_INFOS 256
+
+typedef struct {
+  ProcSuspendInfo procs[MAX_PROC_INFOS];
+  uint32_t count;
+} ProcSuspendInfoList;
+
+/* Walk an AST subtree within a proc body to find suspension points and callees.
+   Does NOT recurse into nested proc definitions (they have their own scope). */
+static void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
+  if (!node) return;
+
+  switch (node->type) {
+    case AST_COMMAND: {
+      AstNode* head = node->data.command.head;
+      if (head->type == AST_LIT_STRING) {
+        const char* name = head->data.lit_string.value;
+        uint32_t len = head->data.lit_string.length;
+
+        /* Direct suspension points */
+        if ((len == 5 && memcmp(name, "await", 5) == 0) ||
+            (len == 8 && memcmp(name, "parallel", 8) == 0) ||
+            (len == 4 && memcmp(name, "race", 4) == 0)) {
+          info->direct_suspends = true;
+          /* Still recurse into args (they might contain calls) */
+          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            analyze__walk_body(node->data.command.args[i], info);
+          }
+          return;
+        }
+
+        /* Skip recursion INTO nested proc bodies (they have their own scope) */
+        if (len == 4 && memcmp(name, "proc", 4) == 0) {
+          return;
+        }
+
+        /* spawn and run are NOT suspension points — just recurse into args */
+
+        /* Record callee name for named calls (for transitive propagation) */
+        if (len <= 7) {
+          JaclVal callee_name = jacl_inline_string(name, len);
+          if (info->callee_count < SUSPENSION_CALLEES_MAX) {
+            info->callees[info->callee_count++] = callee_name;
+          }
+        }
+      } else if (head->type == AST_VAR_REF) {
+        /* Indirect call through variable ($f ...) */
+        info->has_indirect_call = true;
+      }
+
+      /* Recurse into arguments */
+      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+        analyze__walk_body(node->data.command.args[i], info);
+      }
+      break;
+    }
+    case AST_BLOCK: {
+      for (uint32_t i = 0; i < node->data.block.count; i++) {
+        analyze__walk_body(node->data.block.commands[i], info);
+      }
+      break;
+    }
+    case AST_INTERP_STRING: {
+      for (uint32_t i = 0; i < node->data.interp_string.count; i++) {
+        analyze__walk_body(node->data.interp_string.segments[i], info);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+/* Recursively collect proc definitions from AST, analyzing each body */
+static void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list) {
+  if (!node) return;
+
+  switch (node->type) {
+    case AST_COMMAND: {
+      AstNode* head = node->data.command.head;
+      uint32_t argc = node->data.command.arg_count;
+      AstNode** args = node->data.command.args;
+
+      if (head->type == AST_LIT_STRING &&
+          head->data.lit_string.length == 4 &&
+          memcmp(head->data.lit_string.value, "proc", 4) == 0) {
+
+        /* Determine name and body indices based on argc */
+        uint32_t name_idx, body_idx;
+        if (argc == 4)      { name_idx = 1; body_idx = 3; }
+        else if (argc == 3) { name_idx = 0; body_idx = 2; }
+        else goto recurse_args;
+
+        if (args[name_idx]->type != AST_LIT_STRING) goto recurse_args;
+        uint32_t name_len = args[name_idx]->data.lit_string.length;
+        if (name_len > 7) goto recurse_args;
+
+        JaclVal proc_name = jacl_inline_string(
+            args[name_idx]->data.lit_string.value, name_len);
+
+        if (list->count < MAX_PROC_INFOS) {
+          ProcSuspendInfo* info = &list->procs[list->count++];
+          info->name = proc_name;
+          info->direct_suspends = false;
+          info->has_indirect_call = false;
+          info->callee_count = 0;
+
+          /* Walk the body to find suspension points and callees */
+          if (args[body_idx]->type == AST_BLOCK) {
+            analyze__walk_body(args[body_idx], info);
+          }
+        }
+
+        /* Recurse into body to find nested procs */
+        if (args[body_idx]->type == AST_BLOCK) {
+          analyze__collect_procs(args[body_idx], list);
+        }
+        return;
+      }
+
+      recurse_args:
+      for (uint32_t i = 0; i < argc; i++) {
+        analyze__collect_procs(args[i], list);
+      }
+      break;
+    }
+    case AST_BLOCK: {
+      for (uint32_t i = 0; i < node->data.block.count; i++) {
+        analyze__collect_procs(node->data.block.commands[i], list);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+/* Pre-compilation suspension analysis: walk AST to determine which procs suspend.
+   Returns a SuspensionMap that the compiler consults during code generation. */
+static SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t count) {
+  SuspensionMap map;
+  ProcSuspendInfoList proc_list;
+  memset(&map, 0, sizeof(map));
+  memset(&proc_list, 0, sizeof(proc_list));
+
+  /* Step 1: Collect all proc definitions and analyze bodies */
+  for (uint32_t i = 0; i < count; i++) {
+    analyze__collect_procs(nodes[i], &proc_list);
+  }
+
+  /* Step 2: Initialize suspension map from direct suspension */
+  for (uint32_t i = 0; i < proc_list.count; i++) {
+    suspension_map_set(&map, proc_list.procs[i].name,
+                       proc_list.procs[i].direct_suspends);
+  }
+
+  /* Step 3: Fixpoint propagation.
+     Rule 1: proc calling a suspending proc becomes suspending.
+     Rule 2: if any suspending proc exists in program, a proc with
+             indirect calls ($var) is conservatively suspending. */
+  bool changed = true;
+  while (changed) {
+    changed = false;
+
+    bool any_suspending = false;
+    for (uint32_t i = 0; i < map.count; i++) {
+      if (map.entries[i].suspends) { any_suspending = true; break; }
+    }
+
+    for (uint32_t i = 0; i < proc_list.count; i++) {
+      if (suspension_map_lookup(&map, proc_list.procs[i].name)) continue;
+
+      /* Rule 1: direct call to suspending proc */
+      for (uint32_t j = 0; j < proc_list.procs[i].callee_count; j++) {
+        if (suspension_map_lookup(&map, proc_list.procs[i].callees[j])) {
+          suspension_map_set(&map, proc_list.procs[i].name, true);
+          changed = true;
+          break;
+        }
+      }
+
+      /* Rule 2: indirect call when suspending procs exist */
+      if (any_suspending &&
+          !suspension_map_lookup(&map, proc_list.procs[i].name) &&
+          proc_list.procs[i].has_indirect_call) {
+        suspension_map_set(&map, proc_list.procs[i].name, true);
+        changed = true;
+      }
+    }
+  }
+
+  return map;
+}
+
+/* Check if an AST subtree contains any suspension points (for callback checking) */
+static bool ast__contains_suspension(AstNode* node) {
+  if (!node) return false;
+
+  switch (node->type) {
+    case AST_COMMAND: {
+      AstNode* head = node->data.command.head;
+      if (head->type == AST_LIT_STRING) {
+        const char* name = head->data.lit_string.value;
+        uint32_t len = head->data.lit_string.length;
+        if ((len == 5 && memcmp(name, "await", 5) == 0) ||
+            (len == 8 && memcmp(name, "parallel", 8) == 0) ||
+            (len == 4 && memcmp(name, "race", 4) == 0)) {
+          return true;
+        }
+        /* Don't recurse into nested proc definitions */
+        if (len == 4 && memcmp(name, "proc", 4) == 0) {
+          return false;
+        }
+      }
+      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+        if (ast__contains_suspension(node->data.command.args[i]))
+          return true;
+      }
+      return false;
+    }
+    case AST_BLOCK: {
+      for (uint32_t i = 0; i < node->data.block.count; i++) {
+        if (ast__contains_suspension(node->data.block.commands[i]))
+          return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
 
 /* --- Internal: Compiler state --- */
 
@@ -161,6 +443,8 @@ struct Compiler {
   uint32_t         try_patches[COMPILER_TRY_PATCHES_MAX];
   uint32_t         try_patch_count;
   bool             in_try_body;
+  bool             in_non_suspending_callback; /* error if suspension inside */
+  SuspensionMap*   suspension_map;  /* pre-computed suspension analysis */
   JaclType         expected_type;   /* contextual type hint for RHS compilation */
   JaclType         last_expr_type;  /* type of the last compiled expression */
   JaclType         return_type;     /* declared return type for current function */
@@ -181,6 +465,8 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->global_arity_count = 0;
   c->try_patch_count = 0;
   c->in_try_body     = false;
+  c->in_non_suspending_callback = false;
+  c->suspension_map  = NULL;
   c->expected_type   = TYPE_DYN;
   c->last_expr_type  = TYPE_DYN;
   c->return_type     = TYPE_DYN;
@@ -249,6 +535,7 @@ static void compiler__add_local(Compiler* c, JaclVal name,
   local->known_arity = -1;
   local->is_mutable  = false;
   local->is_param    = false;
+  local->suspends    = false;
   local->type        = TYPE_DYN;
   local->return_type = TYPE_DYN;
   local->param_types = NULL;
@@ -324,6 +611,7 @@ static void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity)
     ga->name = name;
     ga->known_arity = arity;
     ga->is_mutable = false;
+    ga->suspends = false;
     ga->type = TYPE_DYN;
     ga->return_type = TYPE_DYN;
     memset(ga->param_types, 0, sizeof(ga->param_types));
@@ -349,6 +637,7 @@ static int compiler__add_upvalue(Compiler* c, uint8_t index, uint8_t is_local,
   c->upvalues[c->upvalue_count].is_local   = is_local;
   c->upvalues[c->upvalue_count].name       = name;
   c->upvalues[c->upvalue_count].is_mutable = false;
+  c->upvalues[c->upvalue_count].suspends   = false;
   c->upvalues[c->upvalue_count].type       = TYPE_DYN;
   return (int)c->upvalue_count++;
 }
@@ -363,6 +652,7 @@ static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
     if (uv != -1) {
       if (c->enclosing->locals[local].is_mutable)
         c->upvalues[uv].is_mutable = true;
+      c->upvalues[uv].suspends = c->enclosing->locals[local].suspends;
       c->upvalues[uv].type = c->enclosing->locals[local].type;
     }
     return uv;
@@ -375,6 +665,7 @@ static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
     if (uv != -1) {
       if (c->enclosing->upvalues[upvalue].is_mutable)
         c->upvalues[uv].is_mutable = true;
+      c->upvalues[uv].suspends = c->enclosing->upvalues[upvalue].suspends;
       c->upvalues[uv].type = c->enclosing->upvalues[upvalue].type;
     }
     return uv;
@@ -1282,9 +1573,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Create body compiler with function-level scope */
     Compiler body_compiler;
     compiler__init(&body_compiler, &closure->chunk, c->arena, c->intern_table, c->heap);
-    body_compiler.scope_depth = 1;
-    body_compiler.enclosing   = c;
-    body_compiler.return_type = proc_return_type;
+    body_compiler.scope_depth    = 1;
+    body_compiler.enclosing      = c;
+    body_compiler.return_type    = proc_return_type;
+    body_compiler.suspension_map = c->suspension_map;
 
     /* Add params as locals in body compiler (slots 0..N-1) with types */
     for (uint8_t i = 0; i < param_count; i++) {
@@ -1340,14 +1632,21 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       memcpy(stored_param_types, param_types_arr, sizeof(JaclType) * param_count);
     }
 
-    /* Bind the name */
+    /* Look up suspension status from analysis map */
     JaclVal name_val = jacl_inline_string(proc_name, proc_name_len);
+    bool proc_suspends = false;
+    if (c->suspension_map) {
+      proc_suspends = suspension_map_lookup(c->suspension_map, name_val);
+    }
+
+    /* Bind the name */
     if (c->scope_depth > 0) {
       /* Local scope: closure is on stack as local */
       compiler__add_local(c, name_val, line, col);
       c->locals[c->local_count - 1].known_arity = (int16_t)param_count;
       c->locals[c->local_count - 1].return_type = proc_return_type;
       c->locals[c->local_count - 1].param_types = stored_param_types;
+      c->locals[c->local_count - 1].suspends    = proc_suspends;
       /* proc returns the closure value (enables make-adder pattern) */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
       compiler__emit_byte(c, (uint8_t)(c->local_count - 1), line);
@@ -1357,11 +1656,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
       compiler__set_global_arity(c, name_val, (int16_t)param_count);
-      /* Store param types and return type in GlobalArity */
+      /* Store param types, return type, and suspension in GlobalArity */
       {
         GlobalArity* ga = compiler__find_global_arity(c, name_val);
         if (ga) {
           ga->return_type = proc_return_type;
+          ga->suspends    = proc_suspends;
           for (uint8_t i = 0; i < param_count && i < COMPILER_MAX_PROC_PARAMS; i++) {
             ga->param_types[i] = param_types_arr[i];
           }
@@ -1720,38 +2020,122 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* transform builtin (exactly 2 args) */
+  /* transform builtin (exactly 2 args — non-suspending callback) */
   if (compiler__head_matches(head, "transform", 9)) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "transform", "2 arguments", argc);
       return;
     }
+    /* Check if callback is a known suspending proc ($var reference) */
+    if (args[1]->type == AST_VAR_REF && args[1]->data.var_ref.length <= 7) {
+      JaclVal cb_name = jacl_inline_string(args[1]->data.var_ref.name,
+                                            args[1]->data.var_ref.length);
+      int slot = compiler__resolve_local(c, cb_name);
+      if (slot != -1 && c->locals[slot].suspends) {
+        compiler__error(c, line, col,
+            "cannot pass suspending closure to non-suspending builtin 'transform'");
+        return;
+      }
+      GlobalArity* ga = compiler__find_global_arity(c, cb_name);
+      if (ga && ga->suspends) {
+        compiler__error(c, line, col,
+            "cannot pass suspending closure to non-suspending builtin 'transform'");
+        return;
+      }
+    }
+    /* Check if callback block contains suspension points */
+    if (ast__contains_suspension(args[1])) {
+      compiler__error(c, line, col,
+          "cannot suspend inside non-suspending callback");
+      return;
+    }
     compiler__compile_node(c, args[0]);
-    compiler__compile_node(c, args[1]);
+    {
+      bool saved = c->in_non_suspending_callback;
+      c->in_non_suspending_callback = true;
+      compiler__compile_node(c, args[1]);
+      c->in_non_suspending_callback = saved;
+    }
     compiler__emit_byte(c, OP_TRANSFORM, line);
     return;
   }
 
-  /* each builtin (exactly 2 args) */
+  /* each builtin (exactly 2 args — non-suspending callback) */
   if (compiler__head_matches(head, "each", 4)) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "each", "2 arguments", argc);
       return;
     }
+    /* Check if callback is a known suspending proc ($var reference) */
+    if (args[1]->type == AST_VAR_REF && args[1]->data.var_ref.length <= 7) {
+      JaclVal cb_name = jacl_inline_string(args[1]->data.var_ref.name,
+                                            args[1]->data.var_ref.length);
+      int slot = compiler__resolve_local(c, cb_name);
+      if (slot != -1 && c->locals[slot].suspends) {
+        compiler__error(c, line, col,
+            "cannot pass suspending closure to non-suspending builtin 'each'");
+        return;
+      }
+      GlobalArity* ga = compiler__find_global_arity(c, cb_name);
+      if (ga && ga->suspends) {
+        compiler__error(c, line, col,
+            "cannot pass suspending closure to non-suspending builtin 'each'");
+        return;
+      }
+    }
+    /* Check if callback block contains suspension points */
+    if (ast__contains_suspension(args[1])) {
+      compiler__error(c, line, col,
+          "cannot suspend inside non-suspending callback");
+      return;
+    }
     compiler__compile_node(c, args[0]);
-    compiler__compile_node(c, args[1]);
+    {
+      bool saved = c->in_non_suspending_callback;
+      c->in_non_suspending_callback = true;
+      compiler__compile_node(c, args[1]);
+      c->in_non_suspending_callback = saved;
+    }
     compiler__emit_byte(c, OP_EACH, line);
     return;
   }
 
-  /* filter builtin (exactly 2 args) */
+  /* filter builtin (exactly 2 args — non-suspending callback) */
   if (compiler__head_matches(head, "filter", 6)) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "filter", "2 arguments", argc);
       return;
     }
+    /* Check if callback is a known suspending proc ($var reference) */
+    if (args[1]->type == AST_VAR_REF && args[1]->data.var_ref.length <= 7) {
+      JaclVal cb_name = jacl_inline_string(args[1]->data.var_ref.name,
+                                            args[1]->data.var_ref.length);
+      int slot = compiler__resolve_local(c, cb_name);
+      if (slot != -1 && c->locals[slot].suspends) {
+        compiler__error(c, line, col,
+            "cannot pass suspending closure to non-suspending builtin 'filter'");
+        return;
+      }
+      GlobalArity* ga = compiler__find_global_arity(c, cb_name);
+      if (ga && ga->suspends) {
+        compiler__error(c, line, col,
+            "cannot pass suspending closure to non-suspending builtin 'filter'");
+        return;
+      }
+    }
+    /* Check if callback block contains suspension points */
+    if (ast__contains_suspension(args[1])) {
+      compiler__error(c, line, col,
+          "cannot suspend inside non-suspending callback");
+      return;
+    }
     compiler__compile_node(c, args[0]);
-    compiler__compile_node(c, args[1]);
+    {
+      bool saved = c->in_non_suspending_callback;
+      c->in_non_suspending_callback = true;
+      compiler__compile_node(c, args[1]);
+      c->in_non_suspending_callback = saved;
+    }
     compiler__emit_byte(c, OP_FILTER, line);
     return;
   }
@@ -1983,6 +2367,109 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_byte(c, opcode, line);
     compiler__emit_byte(c, (uint8_t)src_type, line);
     c->last_expr_type = target_type;
+    return;
+  }
+
+  /* await — suspension point (CPS transform in US-003+, context checks now) */
+  if (compiler__head_matches(head, "await", 5)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "await", "1 argument", argc);
+      return;
+    }
+    if (c->in_try_body) {
+      compiler__error(c, line, col,
+          "cannot suspend inside try/catch; use error capture on futures instead");
+      return;
+    }
+    if (c->in_non_suspending_callback) {
+      compiler__error(c, line, col,
+          "cannot suspend inside non-suspending callback");
+      return;
+    }
+    /* Placeholder: compile arg then replace with nil (OP_AWAIT in US-006) */
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_POP, line);
+    compiler__emit_byte(c, OP_NIL, line);
+    return;
+  }
+
+  /* parallel — suspension point (CPS transform in US-003+, context checks now) */
+  if (compiler__head_matches(head, "parallel", 8)) {
+    if (argc < 2) {
+      compiler__builtin_arity_error(c, line, col, "parallel",
+                                     "at least 2 arguments", argc);
+      return;
+    }
+    if (c->in_try_body) {
+      compiler__error(c, line, col,
+          "cannot suspend inside try/catch; use error capture on futures instead");
+      return;
+    }
+    if (c->in_non_suspending_callback) {
+      compiler__error(c, line, col,
+          "cannot suspend inside non-suspending callback");
+      return;
+    }
+    /* Placeholder: compile args then discard (OP_PARALLEL in US-007) */
+    for (uint32_t i = 0; i < argc; i++) {
+      compiler__compile_node(c, args[i]);
+    }
+    compiler__emit_byte(c, OP_POP_N, line);
+    compiler__emit_byte(c, (uint8_t)argc, line);
+    compiler__emit_byte(c, OP_NIL, line);
+    return;
+  }
+
+  /* race — suspension point (CPS transform in US-003+, context checks now) */
+  if (compiler__head_matches(head, "race", 4)) {
+    if (argc < 2) {
+      compiler__builtin_arity_error(c, line, col, "race",
+                                     "at least 2 arguments", argc);
+      return;
+    }
+    if (c->in_try_body) {
+      compiler__error(c, line, col,
+          "cannot suspend inside try/catch; use error capture on futures instead");
+      return;
+    }
+    if (c->in_non_suspending_callback) {
+      compiler__error(c, line, col,
+          "cannot suspend inside non-suspending callback");
+      return;
+    }
+    /* Placeholder: compile args then discard (OP_RACE in US-008) */
+    for (uint32_t i = 0; i < argc; i++) {
+      compiler__compile_node(c, args[i]);
+    }
+    compiler__emit_byte(c, OP_POP_N, line);
+    compiler__emit_byte(c, (uint8_t)argc, line);
+    compiler__emit_byte(c, OP_NIL, line);
+    return;
+  }
+
+  /* spawn — NOT a suspension point (runtime task submission) */
+  if (compiler__head_matches(head, "spawn", 5)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "spawn", "1 argument", argc);
+      return;
+    }
+    /* Placeholder: compile arg, pop, push nil (OP_SPAWN in US-005) */
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_POP, line);
+    compiler__emit_byte(c, OP_NIL, line);
+    return;
+  }
+
+  /* run — NOT a suspension point (sync-to-async bridge) */
+  if (compiler__head_matches(head, "run", 3)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "run", "1 argument", argc);
+      return;
+    }
+    /* Placeholder: compile arg, pop, push nil (OP_RUN in US-005) */
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_POP, line);
+    compiler__emit_byte(c, OP_NIL, line);
     return;
   }
 
@@ -2367,8 +2854,13 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   chunk_init(&result.chunk, arena);
   result.error_count = parse.error_count;
 
+  /* Pre-compilation suspension analysis */
+  SuspensionMap suspension_map = compiler__analyze_suspension(
+      parse.nodes, parse.count);
+
   Compiler c;
   compiler__init(&c, &result.chunk, arena, intern_table, heap);
+  c.suspension_map = &suspension_map;
 
   for (uint32_t i = 0; i < parse.count; i++) {
     compiler__compile_node(&c, parse.nodes[i]);
