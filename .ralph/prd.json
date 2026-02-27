@@ -87,7 +87,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "The join continuation pattern ensures all branches of a control flow construct converge on the same continuation, regardless of whether individual branches suspend. This is the standard CPS transform for conditionals. The key insight: non-suspending branches become tail calls to the join continuation."
     },
     {

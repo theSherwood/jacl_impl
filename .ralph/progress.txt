@@ -117,6 +117,10 @@
 - No `run` primitive — suspension propagates automatically through calls (direct style)
 - each/filter/transform check for suspending callbacks: AST suspension scan + var_ref suspension status lookup
 - Proc names must be ≤7 chars for inline string representation — analysis skips longer names
+- CPS if branches use join continuation pattern: shadow __k with join_k, compile_cps_stmts routes through it
+- A-normalization: extract suspending args into synthetic def AST nodes, pass expanded stmts through compile_cps_stmts
+- Different stack depths in if branches are safe — OP_RETURN normalizes stack_top to callee_base
+- JACL `[cmd -5]` parses as 2 args (`-` and `5`), not negative literal — use `[cmd [- 0 5]]`
 
 ## 2026-02-26 - US-001
 - What was implemented: Future type (JaclFuture, FutureWaiter structs), GC integration (OBJ_FUTURE, OBJ_FUTURE_WAITER tracing), jacl_future constructor, resolve/error/add_waiter APIs with write barrier, JACL_TAG_FUTURE value tag, future? builtin predicate (OP_IS_FUTURE opcode), future formatting in print/to_string, 12 unit tests
@@ -167,4 +171,18 @@
   - OP_AWAIT VM stub immediately calls continuation with future result (or nil if pending) — full async behavior in US-006
   - OP_SPAWN VM stub creates future, attempts sync call, resolves future with result — full async scheduling in US-005
   - JACL `$var` at statement position desugars to `[$var]` (zero-arg call) — test fibonacci must use `{ [+ $n 0] }` not `{ $n }` for non-callable values
+---
+
+## 2026-02-27 - US-004
+- What was implemented: CPS transform for suspension points inside control flow constructs — join continuation pattern for if branches, non-suspending branches tail-call join continuation directly, A-normalization (argument extraction) for nested await in call arguments, def-with-if-suspension support, 13 unit tests
+- Files changed:
+  - src/compiler.c — New CPS helpers: compiler__is_if_with_suspension (detects if with suspending branches), compiler__compile_cps_branch (compiles one branch: suspending via shadow __k, non-suspending via direct call to join_k), compiler__compile_cps_if (join continuation pattern — creates join cont for remaining stmts, routes branches through it), compiler__has_suspending_non_block_args (detects extractable suspending args), compiler__compile_cps_extract_args (creates synthetic AST defs for suspending args and modified command), compiler__compile_cps_extract_def_value (same for def value nodes); modified compiler__compile_cps_stmts Cases 2 and 4 to use new handlers before fallback
+  - test/test_m13.c — 13 new tests: cps_if_then_suspends, cps_if_else_suspends, cps_if_both_suspend, cps_nested_if, cps_chained_if, cps_nested_await_args, cps_def_if_suspension, cps_if_then_runtime, cps_if_nonsuspend_branch, cps_try_catch_error, cps_let_block_susp, cps_if_last_stmt, cps_if_no_suspension_ok
+- **Learnings for future iterations:**
+  - Join continuation pattern: code after if becomes a continuation closure; branches call it (directly for non-suspending, via CPS for suspending)
+  - Shadow __k trick: push join_k as local named __k to make CPS stmts route through it. Restore local_count without POP after CPS compilation (stack cleanup by OP_RETURN)
+  - Different stack depths in if branches are safe — OP_RETURN normalizes stack_top to callee_base regardless of current depth
+  - A-normalization for suspending args: create synthetic AST def nodes + var refs, pass expanded stmt list through compile_cps_stmts recursively. Compiler arena available for allocation
+  - JACL `[abs -5]` parses as 2 args (bare word `-` and int `5`), not negative literal — use `[abs [- 0 5]]`
+  - JACL has no `cond` or `match` builtins — chained if (nested if-else) covers the cond pattern
 ---
