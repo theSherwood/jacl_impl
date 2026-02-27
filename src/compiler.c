@@ -226,7 +226,7 @@ static void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
           return;
         }
 
-        /* spawn and run are NOT suspension points — just recurse into args */
+        /* spawn is NOT a suspension point — just recurse into args */
 
         /* Record callee name for named calls (for transitive propagation) */
         if (len <= 7) {
@@ -2454,19 +2454,6 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     /* Placeholder: compile arg, pop, push nil (OP_SPAWN in US-005) */
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_POP, line);
-    compiler__emit_byte(c, OP_NIL, line);
-    return;
-  }
-
-  /* run — NOT a suspension point (sync-to-async bridge) */
-  if (compiler__head_matches(head, "run", 3)) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "run", "1 argument", argc);
-      return;
-    }
-    /* Placeholder: compile arg, pop, push nil (OP_RUN in US-005) */
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_POP, line);
     compiler__emit_byte(c, OP_NIL, line);

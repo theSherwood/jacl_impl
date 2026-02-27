@@ -1,7 +1,7 @@
 {
   "project": "JACL",
   "branchName": "ralph/cps-concurrency",
-  "description": "M13 — CPS Transform & Concurrency Primitives: Full CPS compiler transform with suspension inference, user-facing spawn/await/parallel/race primitives, Future type, sync-to-async run bridge, VM stack root removal, adaptive GC threshold, and OOM escalation.",
+  "description": "M13 — CPS Transform & Concurrency Primitives: Full CPS compiler transform with suspension inference, user-facing spawn/await/parallel/race primitives, Future type, direct-style suspension propagation, VM stack root removal, adaptive GC threshold, and OOM escalation.",
   "userStories": [
     {
       "id": "US-001",
@@ -24,7 +24,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "JaclFuture is a mutable container like atom — uses atomic state/result fields. Waiter list is GC-managed (no malloc). The mutex/spinlock per future only contends during the resolve-vs-add_waiter race window. Most futures have 0-1 waiters."
     },
     {
@@ -40,12 +40,12 @@
         "Compile-time error: suspension point inside a closure passed to non-suspending higher-order builtin (map, filter, reduce, each) — 'cannot suspend inside non-suspending callback'",
         "Compile-time error: suspending closure passed as argument to non-suspending higher-order builtin",
         "Compile-time error: suspension point inside try/catch block — 'cannot suspend inside try/catch; use error capture on futures instead'",
-        "spawn and run are NOT suspension points — can appear in any proc",
+        "spawn is NOT a suspension point — can appear in any proc. Calling a suspending proc automatically propagates suspension to the caller (direct style)",
         "Unit tests: suspension inferred for direct use, transitive calls, nested procs; indirect call to unknown closure conservatively suspending; compile errors for illegal contexts (try/catch, non-suspending callback)",
         "All existing tests pass (build.sh) — no existing code uses suspension points, all procs inferred non-suspending"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "The fixpoint analysis is a separate pass before full compilation. It walks AST command nodes looking for await/parallel/race head strings, then propagates. Convergence is fast — most procs don't suspend. Worst case O(N^2) for N proc definitions, acceptable for typical program sizes."
     },
     {
@@ -61,13 +61,14 @@
         "Continuation closures use existing closure/upvalue compilation mechanism (nested Compiler context, upvalue resolution)",
         "Non-suspending code before the first suspension point executes normally (no CPS overhead)",
         "The __k continuation parameter is passed through: callers of suspending procs pass their own continuation",
-        "For calls from non-suspending to suspending procs via run: run provides __k = resolve_future",
-        "Unit tests: compile suspending procs with 1, 2, 3 sequential awaits; verify correct continuation closures with correct upvalue counts; verify non-suspending procs unaffected",
+        "Direct-style suspension propagation: calling a suspending proc from any proc automatically makes the caller suspending and CPS-transformed — the call site passes the caller's __k to the callee. No explicit bridge needed",
+        "When top-level code is suspending (calls suspending procs or uses await/parallel/race directly), the compiler CPS-transforms it; the runtime provides __k = program completion handler",
+        "Unit tests: compile suspending procs with 1, 2, 3 sequential awaits; verify correct continuation closures with correct upvalue counts; verify non-suspending procs unaffected; verify call to suspending proc propagates CPS to caller",
         "All existing tests pass (build.sh)"
       ],
       "priority": 3,
       "passes": false,
-      "notes": "The CPS transform creates nested Compiler contexts for continuations — same mechanism as fn/proc body compilation. This means CPS doesn't require new runtime concepts, it produces ordinary closures. OP_AWAIT is emitted at suspension points (runtime behavior implemented in US-006). The __k parameter is a regular local variable at the bytecode level."
+      "notes": "The CPS transform creates nested Compiler contexts for continuations — same mechanism as fn/proc body compilation. This means CPS doesn't require new runtime concepts, it produces ordinary closures. OP_AWAIT is emitted at suspension points (runtime behavior implemented in US-006). The __k parameter is a regular local variable at the bytecode level. Direct-style: calling a suspending proc is itself a suspension point — the CPS transform splits around the call and passes __k through."
     },
     {
       "id": "US-004",
@@ -91,22 +92,20 @@
     },
     {
       "id": "US-005",
-      "title": "spawn and run primitives",
-      "description": "As a developer, I need spawn to launch a closure as a concurrent task and return a future, and run to bridge synchronous code into the async world.",
+      "title": "spawn primitive",
+      "description": "As a developer, I need spawn to launch a closure as a concurrent task and return a future handle.",
       "acceptanceCriteria": [
         "spawn recognized as builtin command by compiler; takes exactly 1 arg (zero-arg closure, suspending or non-suspending); NOT a suspension point",
         "Add OP_SPAWN opcode: pop closure, create pending JaclFuture via gc_alloc, create task wrapper that executes closure on worker VM (passes __k=resolve_future if suspending, calls normally if non-suspending, catches errors via jacl_future_error), push task onto deque/inbox, push future onto stack",
-        "run recognized as builtin command by compiler; takes exactly 1 arg (zero-arg closure); NOT a suspension point — blocks calling thread",
-        "Add OP_RUN opcode: pop closure, internally spawn (create future + submit task), block calling thread via mutex+condvar until future resolves/errors, push result or error value onto stack",
-        "JaclFuture gains optional blocking_sync field (NULL for normal futures, allocated by run) — condvar overhead only for run futures",
-        "Future resolution signals blocking waiters: if blocking_sync non-NULL, signal condvar on resolve/error",
-        "If run receives error result, pushes M9 error value (checkable with error?)",
-        "Unit tests: spawn returns future, spawned closure executes on worker, run blocks until result, run with non-suspending closure, run with suspending closure (spawn+await inside), run with error propagation",
+        "Calling a suspending proc directly propagates suspension to the caller via CPS transform — no explicit sync-to-async bridge needed (direct style)",
+        "Top-level suspending code (calls suspending procs or uses await/parallel/race) is CPS-transformed by the compiler; the runtime provides an implicit __k = program completion handler that signals the main thread",
+        "Runtime provides rt_run_to_completion(Runtime*, JaclClosure*, arena_t*) — submits the (possibly CPS'd) top-level closure as a task and blocks until the program completion future resolves. Used by vm_exec when top-level chunk is suspending",
+        "Unit tests: spawn returns future, spawned closure executes on worker, spawn with non-suspending closure resolves future with return value, spawn with suspending closure (closure containing await) resolves future correctly, spawn with error propagation",
         "All existing tests pass (build.sh)"
       ],
       "priority": 5,
       "passes": false,
-      "notes": "spawn creates a task wrapper (RuntimeTask) that wraps the user closure + future reference. For suspending closures, the wrapper provides __k = resolve_future(F) as the hidden continuation parameter. For non-suspending closures, the wrapper calls the closure directly and resolves the future with the return value. run is the sync-to-async bridge — the only way to use concurrency from top-level non-suspending code."
+      "notes": "spawn creates a task wrapper (RuntimeTask) that wraps the user closure + future reference. For suspending closures, the wrapper provides __k = resolve_future(F) as the hidden continuation parameter. For non-suspending closures, the wrapper calls the closure directly and resolves the future with the return value. No run primitive — suspension propagates automatically through calls (direct style). Top-level async code just works."
     },
     {
       "id": "US-006",
@@ -227,11 +226,11 @@
       "description": "As a developer, I need comprehensive integration and stress tests validating the CPS transform, concurrency primitives, and GC under concurrent load.",
       "acceptanceCriteria": [
         "Create test/test_m13.c with integration tests grouped by feature",
-        "CPS correctness (via run): single await, multiple sequential awaits (chain of 3), await in if branches (suspending + non-suspending), await in nested expressions, deep continuation chain (5+ awaits), variable capture correctness",
+        "CPS correctness (direct style): single await, multiple sequential awaits (chain of 3), await in if branches (suspending + non-suspending), await in nested expressions, deep continuation chain (5+ awaits), variable capture correctness, calling suspending proc from another proc (suspension propagation)",
         "spawn+await integration: spawn+await returns correct value, multiple spawn+sequential await, spawn with heavy allocation (GC triggers), await already-resolved future (no deadlock), await errored future (error? checkable), multiple awaiters on same future",
         "parallel integration: parallel 2 tasks results in order, parallel 5 tasks all correct, parallel with one error propagated, parallel with heavy allocation per task",
         "race integration: race 2 tasks faster wins, losers complete without crash or leak",
-        "run integration: run with spawn+await blocks until result, run with parallel, run with error returns error value",
+        "Direct-style integration: top-level code calling suspending procs runs to completion, nested suspending proc calls (A calls B calls await) propagate correctly, error propagation through CPS chain",
         "Multi-threaded stress: 4+ workers spawning recursive tasks, heavy allocation with concurrent GC, parallel 20+ tasks, race 10+ tasks, mixed spawn/await/parallel/race workload",
         "Memory bounded: sustained spawn/await workload with GC — heap block count stabilizes, doesn't grow without bound",
         "Regression: all M0-M12 C unit tests and .jacl harness tests pass",
@@ -240,7 +239,7 @@
       ],
       "priority": 12,
       "passes": false,
-      "notes": "Follow existing test pattern: test_helpers.h, PrintCapture, TestEntry table grouped by US-XXX comments. Concurrency tests use run to block the test thread for deterministic output. Stress tests need generous timeout (60s+) for CI. Use -fsanitize=thread for data race detection and -fsanitize=address for use-after-free during development."
+      "notes": "Follow existing test pattern: test_helpers.h, PrintCapture, TestEntry table grouped by US-XXX comments. Concurrency tests use rt_run_to_completion to block the test thread for deterministic output. Stress tests need generous timeout (60s+) for CI. Use -fsanitize=thread for data race detection and -fsanitize=address for use-after-free during development."
     }
   ]
 }

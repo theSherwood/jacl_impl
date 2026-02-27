@@ -102,3 +102,51 @@
 - GreyBuffer defined in gc.c (not runtime.c) — available to vm.c in unity build order; gc_write_barrier takes GreyBuffer* + gc_active_ptr directly
 - VM struct has grey_buf and gc_active_ptr fields (NULL in single-threaded, set by runtime__init_worker_vm) — write barrier is zero-overhead when NULL
 - Write barrier fires BEFORE assignment in OP_SET_CELL_LOCAL/UPVALUE, OP_RESET, OP_SWAP — captures old value first for SATB correctness
+- JaclFuture allocated via gc_alloc(OBJ_FUTURE) — has atomic state, result, waiter list, and mutex lock
+- FutureWaiter nodes allocated via gc_alloc(OBJ_FUTURE_WAITER) — singly linked, GC-traced
+- jacl_future_resolve / jacl_future_error take GreyBuffer* + gc_active_ptr for write barrier on resolution
+- JACL_TAG_FUTURE = 0x11, jacl_is_future / jacl_as_future / jacl_future_ptr follow existing pattern
+- OP_IS_FUTURE opcode + future? builtin in compiler — same pattern as atom?
+- Adding new opcodes shifts the enum; test_bytecode.c opcode_enum test must be updated
+- Suspension analysis: compiler__analyze_suspension walks AST, builds SuspensionMap (proc name → suspends bool), used by compiler during code gen
+- SuspensionMap type + suspension_map_lookup/set in compiler.c — pre-compilation pass data
+- Local, GlobalArity, Upvalue structs have `bool suspends` field for tracking suspending proc bindings
+- Compiler struct has `suspension_map` pointer and `in_non_suspending_callback` flag
+- await/parallel/race recognized as builtins in compiler (placeholder: pop args, push nil) — actual opcodes deferred to US-003+
+- spawn recognized as builtin (placeholder: pop arg, push nil) — NOT a suspension point
+- No `run` primitive — suspension propagates automatically through calls (direct style)
+- each/filter/transform check for suspending callbacks: AST suspension scan + var_ref suspension status lookup
+- Proc names must be ≤7 chars for inline string representation — analysis skips longer names
+
+## 2026-02-26 - US-001
+- What was implemented: Future type (JaclFuture, FutureWaiter structs), GC integration (OBJ_FUTURE, OBJ_FUTURE_WAITER tracing), jacl_future constructor, resolve/error/add_waiter APIs with write barrier, JACL_TAG_FUTURE value tag, future? builtin predicate (OP_IS_FUTURE opcode), future formatting in print/to_string, 12 unit tests
+- Files changed:
+  - src/value.c — JACL_TAG_FUTURE tag, jacl_is_future predicate
+  - src/gc.c — OBJ_FUTURE/OBJ_FUTURE_WAITER enum, jacl_is_heap_type update, JaclFuture/FutureWaiter structs, constructor/resolve/error/add_waiter APIs
+  - src/gc_collect.c — GC tracing for OBJ_FUTURE and OBJ_FUTURE_WAITER
+  - src/bytecode.c — OP_IS_FUTURE opcode, disassembly name
+  - src/compiler.c — future? builtin compilation
+  - src/vm.c — OP_IS_FUTURE handler, future formatting, type name
+  - test/test_bytecode.c — opcode enum offsets updated
+  - test/test_m13.c — 12 new tests for future type
+  - build.sh — test_m13 entry with -lpthread
+- **Learnings for future iterations:**
+  - Adding new opcodes to the enum shifts all subsequent values — must update test/test_bytecode.c opcode_enum assertions
+  - Use jacl_run() convenience function in tests (not raw lexer_lex/parser_parse/compiler_compile which have different signatures)
+  - Future mutex uses platform_mutex_t from lib/platform/platform.h — same as BlockPool, compatible with MUTEX_INIT/LOCK/UNLOCK macros
+  - jacl_future_resolve/error fire write barrier BEFORE storing result (SATB correctness) via gc_write_barrier with NULL-safe check
+---
+
+## 2026-02-27 - US-002
+- What was implemented: Pre-compilation suspension analysis pass (compiler__analyze_suspension), SuspensionMap type with lookup/set helpers, `bool suspends` field on Local/GlobalArity/Upvalue structs, Compiler fields for suspension_map and in_non_suspending_callback, recognition of await/parallel/race as builtins with context checking (try/catch error, non-suspending callback error), recognition of spawn/run as non-suspending builtins, suspension checking in each/filter/transform for suspending callbacks (var_ref lookup + AST scan), propagation of suspends through upvalue resolution, 16 unit tests
+- Files changed:
+  - src/compiler.c — SuspensionMap type, analysis functions (analyze__walk_body, analyze__collect_procs, compiler__analyze_suspension, ast__contains_suspension), suspends field on structs, suspension_map/in_non_suspending_callback on Compiler, await/parallel/race/spawn/run builtin recognition, each/filter/transform callback suspension checking, proc binding stores suspends from map, compiler_compile runs analysis
+  - test/test_m13.c — 16 new tests for suspension analysis
+- **Learnings for future iterations:**
+  - Suspension analysis is two-phase: (1) AST walk collects ProcSuspendInfo, (2) fixpoint propagation with Rule 1 (named calls) + Rule 2 (indirect calls conservatively suspending when any suspending procs exist)
+  - await/parallel/race compile as placeholders (pop args + push nil) — actual opcodes need to be added in US-003-008
+  - spawn/run also placeholders — their opcodes come in US-005
+  - ast__contains_suspension helper walks AST subtrees for suspension point checking (skips nested proc definitions)
+  - in_non_suspending_callback flag catches inline suspension in block callbacks; var_ref checks catch passing known suspending procs
+  - Proc names >7 chars are skipped by analysis (inline string limit) — not an issue in practice
+---

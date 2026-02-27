@@ -451,15 +451,12 @@ static int test_suspension_non_suspending(void) {
     TEST_PASS();
 }
 
-/* Test: spawn and run are NOT suspension points */
-static int test_suspension_spawn_run_not_suspending(void) {
+/* Test: spawn is NOT a suspension point */
+static int test_suspension_spawn_not_suspending(void) {
     SuspensionMap map = test__analyze(
-        "proc foo [] { spawn { 42 } }\n"
-        "proc bar [] { run { 42 } }");
+        "proc foo [] { spawn { 42 } }");
     JaclVal foo = jacl_inline_string("foo", 3);
-    JaclVal bar = jacl_inline_string("bar", 3);
     ASSERT(!suspension_map_lookup(&map, foo));
-    ASSERT(!suspension_map_lookup(&map, bar));
     TEST_PASS();
 }
 
@@ -569,7 +566,7 @@ int main(void) {
         { "suspension_nested_procs",     test_suspension_nested_procs },
         { "suspension_indirect_call",    test_suspension_indirect_call },
         { "suspension_non_suspending",   test_suspension_non_suspending },
-        { "suspension_spawn_run_not",    test_suspension_spawn_run_not_suspending },
+        { "suspension_spawn_not",        test_suspension_spawn_not_suspending },
         { "suspension_indirect_no_sp",   test_suspension_indirect_no_suspending_procs },
         { "susp_error_try_catch",        test_suspension_error_try_catch },
         { "susp_error_try_parallel",     test_suspension_error_try_catch_parallel },
