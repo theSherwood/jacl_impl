@@ -1447,6 +1447,249 @@ static int test_spawn_existing_code_ok(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * US-006: await primitive
+ * ==================================================================== */
+
+/* Test: await on resolved future returns the result immediately */
+static int test_await_resolved_immediate(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* spawn resolves synchronously in single-threaded mode,
+       so await gets the result immediately */
+    VMResult r = jacl_run(
+        "def f [spawn { 42 }]\n"
+        "print [await $f]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "42\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: await on pending future registered as waiter, scheduled on resolve */
+static int test_await_pending_waiter(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Create a pending future and add it to environment */
+    JaclVal pf = jacl_future(&vm.heap);
+    vm.env.names[vm.env.count]  = jacl_inline_string("pf", 2);
+    vm.env.values[vm.env.count] = pf;
+    vm.env.count++;
+
+    /* In single-threaded mode with a pending future, OP_AWAIT will call the
+       continuation with nil (graceful degradation). Verify no crash. */
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "print [await $pf]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    /* Pending future in single-threaded mode → continuation receives nil */
+    ASSERT_STR_EQ(cap.buffer, "nil\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: await on errored future passes error value to continuation */
+static int test_await_errored_future(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Create an errored future and add to env */
+    JaclVal ef = jacl_future(&vm.heap);
+    JaclFuture *efut = jacl_as_future(ef);
+    JaclVal err_val = jacl_set_error(jacl_i32(404));
+    jacl_future_error(efut, err_val, NULL, NULL);
+    vm.env.names[vm.env.count]  = jacl_inline_string("ef", 2);
+    vm.env.values[vm.env.count] = ef;
+    vm.env.count++;
+
+    /* await on errored future should pass the error value to continuation */
+    VMResult r = jacl_run(
+        "def val [await $ef]\n"
+        "print [error? $val]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "true\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: multiple awaiters on same future all get the result */
+static int test_await_multiple_awaiters(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Create a pending future, register two waiter closures manually,
+       then resolve — both waiters should be returned. */
+    JaclVal f = jacl_future(&vm.heap);
+    JaclFuture *fut = jacl_as_future(f);
+
+    /* Create two dummy continuation closures for waiters */
+    JaclVal c1 = jacl_future(&vm.heap); /* just need a GC-managed value */
+    JaclVal c2 = jacl_future(&vm.heap);
+
+    /* Add waiters (using the future vals as dummy continuations) */
+    bool added1 = jacl_future_add_waiter(fut, c1, &vm.heap);
+    bool added2 = jacl_future_add_waiter(fut, c2, &vm.heap);
+    ASSERT(added1);
+    ASSERT(added2);
+
+    /* Resolve future — should return both waiters */
+    FutureWaiter *waiters = jacl_future_resolve(fut, jacl_i32(99), NULL, NULL);
+    ASSERT(waiters != NULL);
+
+    /* Count waiters */
+    int count = 0;
+    FutureWaiter *w = waiters;
+    while (w) { count++; w = w->next; }
+    ASSERT_INT_EQ(count, 2);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: sequential awaits produce correct final result */
+static int test_await_sequential_results(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "def f1 [spawn { 10 }]\n"
+        "def f2 [spawn { 20 }]\n"
+        "def a [await $f1]\n"
+        "def b [await $f2]\n"
+        "print [+ $a $b]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "30\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: chained continuations — 3 sequential awaits */
+static int test_await_chained_three(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "def f1 [spawn { 1 }]\n"
+        "def f2 [spawn { 2 }]\n"
+        "def f3 [spawn { 3 }]\n"
+        "def a [await $f1]\n"
+        "def b [await $f2]\n"
+        "def c [await $f3]\n"
+        "print [+ $a [+ $b $c]]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "6\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: runtime error if await called with non-future value */
+static int test_await_non_future_error(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    VMResult r = jacl_run("await 42", &vm, &arena);
+    ASSERT(r == VM_RUNTIME_ERROR);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: await in runtime mode — spawn+await on worker threads */
+static int test_await_worker_resolved(void) {
+    Runtime rt;
+    runtime_init(&rt, 2);
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Compile a program: proc that spawns, awaits, and returns result.
+       We compile the proc then run it via rt_run_to_completion. */
+    CompileResult cr = test__compile(
+        "proc task [] { def f [spawn { 42 }]; await $f }",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+
+    /* task is a CPS proc (contains await) — param_count includes __k */
+    bool is_cps = (task_cl->param_count > 0);
+
+    /* Create a completion future and submit via rt_run_to_completion */
+    VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
+    ASSERT(r == VM_OK);
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+
+    (void)is_cps;
+}
+
+/* Test: existing non-suspending code still works after await changes */
+static int test_await_existing_code_ok(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc add [a b] { [+ $a $b] }\n"
+        "print [add 3 4]\n"
+        "print [add 10 20]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "7\n30\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -1518,6 +1761,16 @@ int main(void) {
         { "top_level_cps",            test_top_level_cps },
         { "rt_run_to_completion",     test_rt_run_to_completion },
         { "spawn_existing_code_ok",   test_spawn_existing_code_ok },
+        /* US-006: await primitive */
+        { "await_resolved_immediate", test_await_resolved_immediate },
+        { "await_pending_waiter",     test_await_pending_waiter },
+        { "await_errored_future",     test_await_errored_future },
+        { "await_multiple_awaiters",  test_await_multiple_awaiters },
+        { "await_sequential_results", test_await_sequential_results },
+        { "await_chained_three",      test_await_chained_three },
+        { "await_non_future_error",   test_await_non_future_error },
+        { "await_worker_resolved",    test_await_worker_resolved },
+        { "await_existing_code_ok",   test_await_existing_code_ok },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -742,6 +742,84 @@ static JaclVal runtime__create_resolve_closure(ThreadHeap *heap, arena_t *arena,
 }
 
 /* ======================================================================
+ * Continuation scheduling — used by OP_AWAIT and future resolution
+ *
+ * When a future resolves, registered waiter continuations need to be
+ * scheduled as tasks so workers can execute them.
+ * ====================================================================== */
+
+typedef struct {
+    JaclClosure *continuation;
+    JaclVal      result;
+} ContinuationTaskData;
+
+static void runtime__continuation_task_exec(void *data) {
+    ContinuationTaskData *ctd = (ContinuationTaskData *)data;
+    WorkerThread *self = rt__current_worker;
+    VM *vm = &self->vm;
+
+    /* Reset VM state for this task */
+    vm->stack_top   = 0;
+    vm->frame_count = 0;
+    vm->error_message = NULL;
+    vm->error_line    = 0;
+    vm->stack_trace.count = 0;
+
+    /* Set up: call continuation(result) */
+    vm->stack[0] = jacl_closure_ptr(ctd->continuation);
+    vm->stack[1] = ctd->result;
+    vm->stack_top = 2;
+
+    vm->frames[0].closure    = ctd->continuation;
+    vm->frames[0].return_ip  = NULL;
+    vm->frames[0].stack_base = 1; /* 1 arg (result) */
+    vm->frames[0].chunk      = &ctd->continuation->chunk;
+    vm->frame_count = 1;
+    vm->ip        = ctd->continuation->chunk.code;
+    vm->chunk     = &ctd->continuation->chunk;
+    vm->top_chunk = &ctd->continuation->chunk;
+
+    vm__run(vm, 0);
+    free(ctd);
+}
+
+static void runtime__schedule_continuation(void *runtime_ptr,
+                                            JaclClosure *continuation,
+                                            JaclVal result) {
+    Runtime *rt = (Runtime *)runtime_ptr;
+
+    ContinuationTaskData *ctd = (ContinuationTaskData *)malloc(
+        sizeof(ContinuationTaskData));
+    ctd->continuation = continuation;
+    ctd->result       = result;
+
+    RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
+    task->fn      = runtime__continuation_task_exec;
+    task->data    = ctd;
+    task->gc_root = jacl_closure_ptr(continuation);
+
+    MUTEX_LOCK(rt->inbox_mutex);
+    if (rt->inbox_count >= rt->inbox_cap) {
+        intptr_t new_cap = rt->inbox_cap * 2;
+        rt->inbox = (uintptr_t *)realloc(rt->inbox,
+                                          (size_t)new_cap * sizeof(uintptr_t));
+        rt->inbox_cap = new_cap;
+    }
+    rt->inbox[rt->inbox_count++] = (uintptr_t)task;
+    MUTEX_UNLOCK(rt->inbox_mutex);
+}
+
+static void runtime__schedule_waiters(void *runtime_ptr,
+                                       FutureWaiter *waiters,
+                                       JaclVal result) {
+    while (waiters) {
+        JaclClosure *cont = jacl_as_closure(waiters->continuation);
+        runtime__schedule_continuation(runtime_ptr, cont, result);
+        waiters = waiters->next;
+    }
+}
+
+/* ======================================================================
  * Spawn task data and execution
  * ====================================================================== */
 
@@ -784,14 +862,16 @@ static void runtime__spawn_task_exec(void *data) {
         vm->top_chunk = &cl->chunk;
 
         VMResult r = vm__run(vm, 0);
-        /* For CPS, the resolve_k closure resolves the future during execution.
+        /* For CPS, the resolve_k closure resolves the future during execution
+           (via OP_RESOLVE_FUTURE which also schedules waiters).
            If vm__run returned with an error before __k was called, error the future. */
         if (r != VM_OK) {
             uint32_t state = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED);
             if (state == FUTURE_PENDING) {
                 JaclVal err = jacl_set_error(jacl_inline_string("error", 5));
-                jacl_future_error(fut, err,
+                FutureWaiter *waiters = jacl_future_error(fut, err,
                                   &self->grey_buf, &self->runtime->gc_active);
+                runtime__schedule_waiters(self->runtime, waiters, err);
             }
         }
     } else {
@@ -812,12 +892,14 @@ static void runtime__spawn_task_exec(void *data) {
 
         if (r == VM_OK && vm->stack_top > 0) {
             JaclVal spawn_result = vm->stack[vm->stack_top - 1];
-            jacl_future_resolve(fut, spawn_result,
+            FutureWaiter *waiters = jacl_future_resolve(fut, spawn_result,
                                 &self->grey_buf, &self->runtime->gc_active);
+            runtime__schedule_waiters(self->runtime, waiters, spawn_result);
         } else {
             JaclVal err = jacl_set_error(jacl_inline_string("error", 5));
-            jacl_future_error(fut, err,
+            FutureWaiter *waiters = jacl_future_error(fut, err,
                               &self->grey_buf, &self->runtime->gc_active);
+            runtime__schedule_waiters(self->runtime, waiters, err);
         }
     }
 

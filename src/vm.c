@@ -114,6 +114,12 @@ static JaclVal runtime__create_resolve_closure(ThreadHeap *heap, arena_t *arena,
                                                 JaclVal future_val);
 static void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
                                         JaclVal future_val, bool is_cps);
+static void runtime__schedule_continuation(void *runtime_ptr,
+                                            JaclClosure *continuation,
+                                            JaclVal result);
+static void runtime__schedule_waiters(void *runtime_ptr,
+                                       FutureWaiter *waiters,
+                                       JaclVal result);
 
 /* --- Type name helper for error messages --- */
 
@@ -2331,10 +2337,9 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_AWAIT: {
-        /* CPS await stub: pop continuation, pop future.
-           In the stub implementation, immediately call the continuation
-           with the future's result (if resolved) or nil (if pending).
-           Full implementation in US-006 will suspend and resume via waiter. */
+        /* CPS await: pop continuation closure, pop future.
+           Runtime mode: register waiter or schedule continuation, return.
+           Single-threaded: call continuation inline (future must be resolved). */
         JaclVal continuation;
         result = vm__pop(vm, &continuation); if (result != VM_OK) return result;
         JaclVal future_val;
@@ -2350,38 +2355,66 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
 
-        /* Determine result: resolved → result value, else nil */
-        JaclVal await_result = JACL_NIL;
         JaclFuture *fut = jacl_as_future(future_val);
-        uint32_t state = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED);
-        if (state == FUTURE_RESOLVED || state == FUTURE_ERROR) {
-          await_result = (JaclVal)fut->result;
-        }
-
-        /* Call continuation(await_result) */
-        result = vm__push(vm, continuation);
-        if (result != VM_OK) return result;
-        result = vm__push(vm, await_result);
-        if (result != VM_OK) return result;
-
         JaclClosure *cont_cl = jacl_as_closure(continuation);
-        if (cont_cl->param_count != 1) {
-          vm__set_error(vm, "OP_AWAIT: continuation expects %d args, need 1",
-                       (int)cont_cl->param_count);
-          return VM_RUNTIME_ERROR;
+        uint32_t state = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_ACQUIRE);
+
+        if (vm->runtime) {
+          /* Runtime mode: suspend by returning from vm__run.
+             Schedule or register the continuation depending on future state. */
+          if (state == FUTURE_RESOLVED || state == FUTURE_ERROR) {
+            /* Already settled — schedule continuation with result as task */
+            JaclVal await_result = (JaclVal)fut->result;
+            runtime__schedule_continuation(vm->runtime, cont_cl, await_result);
+          } else {
+            /* PENDING — register continuation as waiter; will be scheduled
+               when the future resolves (via runtime__schedule_waiters). */
+            bool added = jacl_future_add_waiter(fut, continuation, &vm->heap);
+            if (!added) {
+              /* Race: future resolved between our check and add_waiter.
+                 Schedule continuation immediately. */
+              JaclVal await_result = (JaclVal)fut->result;
+              runtime__schedule_continuation(vm->runtime, cont_cl, await_result);
+            }
+          }
+          /* Return from vm__run — current CPS segment is done.
+             Worker task loop will pick up the next available task. */
+          return VM_OK;
         }
-        if (vm->frame_count >= VM_FRAMES_MAX) {
-          vm__set_error(vm, "stack overflow");
-          return VM_STACK_OVERFLOW;
+
+        /* Single-threaded mode: call continuation inline.
+           Future should be resolved (spawn runs synchronously). */
+        {
+          JaclVal await_result = JACL_NIL;
+          if (state == FUTURE_RESOLVED || state == FUTURE_ERROR) {
+            await_result = (JaclVal)fut->result;
+          }
+          /* If still PENDING in single-threaded mode, pass nil (shouldn't happen
+             with well-formed programs since spawn resolves synchronously). */
+
+          result = vm__push(vm, continuation);
+          if (result != VM_OK) return result;
+          result = vm__push(vm, await_result);
+          if (result != VM_OK) return result;
+
+          if (cont_cl->param_count != 1) {
+            vm__set_error(vm, "OP_AWAIT: continuation expects %d args, need 1",
+                         (int)cont_cl->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+          if (vm->frame_count >= VM_FRAMES_MAX) {
+            vm__set_error(vm, "stack overflow");
+            return VM_STACK_OVERFLOW;
+          }
+          CallFrame* new_frame = &vm->frames[vm->frame_count++];
+          new_frame->closure    = cont_cl;
+          new_frame->return_ip  = vm->ip;
+          new_frame->stack_base = vm->stack_top - 1;
+          new_frame->chunk      = &cont_cl->chunk;
+          frame     = new_frame;
+          vm->ip    = frame->chunk->code;
+          vm->chunk = frame->chunk;
         }
-        CallFrame* new_frame = &vm->frames[vm->frame_count++];
-        new_frame->closure    = cont_cl;
-        new_frame->return_ip  = vm->ip;
-        new_frame->stack_base = vm->stack_top - 1;
-        new_frame->chunk      = &cont_cl->chunk;
-        frame     = new_frame;
-        vm->ip    = frame->chunk->code;
-        vm->chunk = frame->chunk;
         break;
       }
 
@@ -2477,7 +2510,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
       case OP_RESOLVE_FUTURE: {
         /* Pop result value, pop future, resolve the future, push nil.
-           Used by the resolve_k closure generated for CPS spawn. */
+           Used by the resolve_k closure generated for CPS spawn.
+           Schedules any registered waiters as tasks (runtime mode). */
         JaclVal resolve_result;
         result = vm__pop(vm, &resolve_result); if (result != VM_OK) return result;
         JaclVal future_val;
@@ -2488,8 +2522,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         JaclFuture *rfut = jacl_as_future(future_val);
-        jacl_future_resolve(rfut, resolve_result,
+        FutureWaiter *waiters = jacl_future_resolve(rfut, resolve_result,
                             vm->grey_buf, vm->gc_active_ptr);
+        if (waiters && vm->runtime) {
+          runtime__schedule_waiters(vm->runtime, waiters, resolve_result);
+        }
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
         break;
