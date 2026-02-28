@@ -123,7 +123,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "OP_AWAIT is the suspension mechanism — it causes vm__run to return, abandoning the current VM stack. All live state has already been captured in the continuation closure by the CPS transform. The worker's task loop then picks up the next available task. This integrates naturally with the existing Chase-Lev work-stealing infrastructure from M12."
     },
     {

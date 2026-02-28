@@ -121,6 +121,8 @@
 - A-normalization: extract suspending args into synthetic def AST nodes, pass expanded stmts through compile_cps_stmts
 - Different stack depths in if branches are safe — OP_RETURN normalizes stack_top to callee_base
 - JACL `[cmd -5]` parses as 2 args (`-` and `5`), not negative literal — use `[cmd [- 0 5]]`
+- jacl_future_resolve/error return FutureWaiter* list — callers MUST schedule waiters via runtime__schedule_waiters (runtime mode) or handle inline (single-threaded)
+- OP_AWAIT returns VM_OK in runtime mode (exits vm__run); single-threaded mode calls continuation inline via new call frame
 
 ## 2026-02-26 - US-001
 - What was implemented: Future type (JaclFuture, FutureWaiter structs), GC integration (OBJ_FUTURE, OBJ_FUTURE_WAITER tracing), jacl_future constructor, resolve/error/add_waiter APIs with write barrier, JACL_TAG_FUTURE value tag, future? builtin predicate (OP_IS_FUTURE opcode), future formatting in print/to_string, 12 unit tests
@@ -204,4 +206,19 @@
   - Top-level CPS: compiler detects top-level suspension via compiler__top_level_suspends, wraps code in __main closure with __k; jacl_run creates completion future + resolve_k as __k
   - force_global_procs flag ensures proc definitions inside CPS-wrapped top-level remain globals (not locals)
   - Single-threaded spawn uses recursive vm__run with saved ip/chunk/frame_count; restores after completion
+---
+
+## 2026-02-28 - US-006
+- What was implemented: Full OP_AWAIT implementation replacing stub — runtime mode (register waiter on pending future, schedule continuation on resolved/errored future, return from vm__run), single-threaded mode (call continuation inline), continuation scheduling infrastructure (ContinuationTaskData, runtime__continuation_task_exec, runtime__schedule_continuation, runtime__schedule_waiters), waiter scheduling on future resolution (OP_RESOLVE_FUTURE schedules waiters, runtime__spawn_task_exec schedules waiters on resolve/error), 9 unit tests
+- Files changed:
+  - src/vm.c — OP_AWAIT rewritten with runtime/single-threaded branches, OP_RESOLVE_FUTURE now captures waiter list and schedules them, forward declarations for runtime__schedule_continuation and runtime__schedule_waiters
+  - src/runtime.c — ContinuationTaskData struct, runtime__continuation_task_exec (sets up VM to call continuation with result), runtime__schedule_continuation (creates RuntimeTask and submits to inbox), runtime__schedule_waiters (iterates waiter list and schedules each), runtime__spawn_task_exec updated to schedule waiters after resolve/error
+  - test/test_m13.c — 9 new tests: await_resolved_immediate, await_pending_waiter, await_errored_future, await_multiple_awaiters, await_sequential_results, await_chained_three, await_non_future_error, await_worker_resolved, await_existing_code_ok
+- **Learnings for future iterations:**
+  - OP_AWAIT in runtime mode must return VM_OK to exit vm__run — worker task loop picks up next task; continuation resumes as a separate RuntimeTask
+  - OP_AWAIT in single-threaded mode keeps inline call behavior (new frame) since there's no task scheduler
+  - jacl_future_resolve/error return FutureWaiter* list — ALL callers must now handle scheduling waiters (OP_RESOLVE_FUTURE, runtime__spawn_task_exec both paths)
+  - jacl_future_add_waiter can fail (return false) if future resolved between state check and lock — must schedule continuation immediately in that case (race condition handling)
+  - runtime__schedule_continuation creates ContinuationTaskData with closure+result, submits as RuntimeTask to inbox — same pattern as spawn task submission
+  - Forward-declare runtime functions in vm.c (before runtime.c in unity build): runtime__schedule_continuation and runtime__schedule_waiters take void* runtime_ptr for consistency
 ---
