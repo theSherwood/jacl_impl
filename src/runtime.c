@@ -638,10 +638,13 @@ static void gc_concurrent_collect(Runtime *rt) {
     ATOMIC_STORE_EXPLICIT(&rt->gc_active, 0, MEM_RELEASE);
 
     /* 8. Sweep all workers' heaps with epoch watermark.
-     * Skip each worker's active allocation block (current_block). */
+     * Skip each worker's active allocation block (current_block).
+     * Track bytes_survived for adaptive threshold adjustment. */
     for (i = 0; i < rt->num_workers; i++) {
         ThreadHeap *heap = &rt->workers[i].vm.heap;
-        gc_sweep_concurrent(heap, heap->current_block, watermark, mark);
+        size_t survived = gc_sweep_concurrent(heap, heap->current_block,
+                                               watermark, mark);
+        gc__adjust_threshold(heap, survived);
     }
 
     /* 9. Toggle current_mark on all heaps, reset allocation counters

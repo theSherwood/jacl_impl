@@ -136,7 +136,9 @@ static void gc_block_pool_destroy(BlockPool *pool) {
 
 /* --- GC trigger threshold --- */
 
-#define GC_THRESHOLD (1024 * 1024) /* 1MB default */
+#define GC_THRESHOLD     (1024 * 1024)        /* 1MB default */
+#define GC_THRESHOLD_MIN (256 * 1024)         /* 256KB minimum */
+#define GC_THRESHOLD_MAX (16 * 1024 * 1024)   /* 16MB maximum */
 
 /* Thread-local epoch for gc_alloc stamping. Workers set this from their
  * thread_epoch at the start of each task. Main thread leaves it at 0
@@ -151,6 +153,7 @@ typedef struct {
     uint8_t   *cursor;         /* next allocation position */
     uint8_t   *limit;          /* end of current free-line run */
     size_t     bytes_since_gc; /* allocation counter for GC trigger */
+    size_t     gc_threshold;   /* adaptive threshold (starts at GC_THRESHOLD) */
     BlockPool *pool;           /* shared block pool */
     uint8_t    current_mark;   /* alternates 0/1 each GC cycle */
     bool       needs_gc;       /* set by gc_alloc when threshold exceeded */
@@ -162,6 +165,7 @@ static void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
     heap->cursor = NULL;
     heap->limit = NULL;
     heap->bytes_since_gc = 0;
+    heap->gc_threshold   = GC_THRESHOLD;
     heap->pool = pool;
     heap->current_mark = 1; /* first GC marks with 1 (initial mark on objects is 0) */
     heap->needs_gc = false;
@@ -241,8 +245,8 @@ static void *gc__bump_alloc(ThreadHeap *heap, size_t total, uint8_t obj_type) {
     heap->cursor += total;
     heap->bytes_since_gc += total;
 
-    /* Flag GC if threshold exceeded (checked by VM at next safepoint) */
-    if (heap->bytes_since_gc > GC_THRESHOLD) {
+    /* Flag GC if adaptive threshold exceeded (checked by VM at next safepoint) */
+    if (heap->bytes_since_gc > heap->gc_threshold) {
         heap->needs_gc = true;
     }
 

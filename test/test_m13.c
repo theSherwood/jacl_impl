@@ -2172,6 +2172,103 @@ static int test_st_gc_still_works(void) {
     TEST_PASS();
 }
 
+/* ================================================================
+ * US-010: Adaptive GC threshold
+ * ================================================================ */
+
+/* Test: threshold increases after high-survival GC */
+static int test_adaptive_threshold_increase(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    size_t initial = vm.heap.gc_threshold;
+    ASSERT(initial == GC_THRESHOLD);
+
+    /* Allocate objects that will ALL survive (rooted on stack) */
+    for (int i = 0; i < 100; i++) {
+        JaclVal v = jacl_i64(&vm.heap, (int64_t)i);
+        vm.stack[vm.stack_top++] = v;
+    }
+    /* All objects survive → survival rate ~100% → threshold should increase */
+    gc_collect(&vm.heap, &vm);
+
+    ASSERT(vm.heap.gc_threshold > initial);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: threshold decreases after low-survival GC */
+static int test_adaptive_threshold_decrease(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    size_t initial = vm.heap.gc_threshold;
+
+    /* Allocate many objects but DON'T root them (all die) */
+    for (int i = 0; i < 100; i++) {
+        (void)jacl_i64(&vm.heap, (int64_t)i);
+    }
+    /* No roots on stack → survival rate ~0% → threshold should decrease */
+    gc_collect(&vm.heap, &vm);
+
+    ASSERT(vm.heap.gc_threshold < initial);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: threshold respects minimum bound */
+static int test_adaptive_threshold_min_bound(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Set threshold to minimum */
+    vm.heap.gc_threshold = GC_THRESHOLD_MIN;
+
+    /* Allocate unrooted objects (low survival) */
+    for (int i = 0; i < 50; i++) {
+        (void)jacl_i64(&vm.heap, (int64_t)i);
+    }
+    gc_collect(&vm.heap, &vm);
+
+    /* Should not go below minimum */
+    ASSERT(vm.heap.gc_threshold >= GC_THRESHOLD_MIN);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: threshold respects maximum bound */
+static int test_adaptive_threshold_max_bound(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Set threshold to maximum */
+    vm.heap.gc_threshold = GC_THRESHOLD_MAX;
+
+    /* Allocate rooted objects (high survival) */
+    for (int i = 0; i < 50; i++) {
+        JaclVal v = jacl_i64(&vm.heap, (int64_t)i);
+        vm.stack[vm.stack_top++] = v;
+    }
+    gc_collect(&vm.heap, &vm);
+
+    /* Should not exceed maximum */
+    ASSERT(vm.heap.gc_threshold <= GC_THRESHOLD_MAX);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -2275,6 +2372,11 @@ int main(void) {
         { "no_stack_scan_spawn",     test_no_stack_scan_spawn },
         { "no_stack_scan_parallel",  test_no_stack_scan_parallel },
         { "st_gc_still_works",       test_st_gc_still_works },
+        /* US-010: Adaptive GC threshold */
+        { "adaptive_gc_increase",   test_adaptive_threshold_increase },
+        { "adaptive_gc_decrease",   test_adaptive_threshold_decrease },
+        { "adaptive_gc_min_bound",  test_adaptive_threshold_min_bound },
+        { "adaptive_gc_max_bound",  test_adaptive_threshold_max_bound },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

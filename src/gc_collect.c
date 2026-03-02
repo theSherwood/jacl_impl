@@ -289,10 +289,11 @@ static void gc_mark(ThreadHeap *heap, VM *vm) {
  * 5. All-free blocks returned to global pool
  * ====================================================================== */
 
-static void gc_sweep(ThreadHeap *heap) {
+static size_t gc_sweep(ThreadHeap *heap) {
     uint8_t  current_mark = heap->current_mark;
     GCBlock *block = heap->blocks;
     GCBlock *prev  = NULL;
+    size_t   bytes_survived = 0;
 
     while (block) {
         GCBlock *next = block->next;
@@ -325,6 +326,7 @@ static void gc_sweep(ThreadHeap *heap) {
                 for (int i = first_line; i <= last_line; i++) {
                     block->line_map[i] = GC_LINE_OCCUPIED;
                 }
+                bytes_survived += total;
             } else {
                 /* Dead object — zero its memory for safe future walking */
                 memset(ptr, 0, total);
@@ -358,15 +360,42 @@ static void gc_sweep(ThreadHeap *heap) {
     heap->cursor        = NULL;
     heap->limit         = NULL;
     heap->current_block = NULL;
+
+    return bytes_survived;
 }
 
 /* ======================================================================
  * gc_collect: full single-threaded mark-sweep cycle
  * ====================================================================== */
 
+/* Adjust gc_threshold based on survival rate after a GC cycle.
+ * High survival (>80%) → increase threshold by 50% (too much live data).
+ * Low survival (<20%) → decrease threshold by 25% (lots of garbage).
+ * Clamped to [GC_THRESHOLD_MIN, GC_THRESHOLD_MAX]. */
+static void gc__adjust_threshold(ThreadHeap *heap, size_t bytes_survived) {
+    size_t allocated = heap->bytes_since_gc;
+    if (allocated == 0) return;
+
+    /* survival_rate = bytes_survived / bytes_allocated (percentage * 100) */
+    size_t rate_pct = (bytes_survived * 100) / allocated;
+
+    if (rate_pct > 80) {
+        /* High survival — back off, increase threshold by 50% */
+        heap->gc_threshold = heap->gc_threshold + heap->gc_threshold / 2;
+    } else if (rate_pct < 20) {
+        /* Low survival — collect more often, decrease threshold by 25% */
+        heap->gc_threshold = heap->gc_threshold - heap->gc_threshold / 4;
+    }
+
+    /* Clamp to bounds */
+    if (heap->gc_threshold < GC_THRESHOLD_MIN) heap->gc_threshold = GC_THRESHOLD_MIN;
+    if (heap->gc_threshold > GC_THRESHOLD_MAX) heap->gc_threshold = GC_THRESHOLD_MAX;
+}
+
 static void gc_collect(ThreadHeap *heap, VM *vm) {
     gc_mark(heap, vm);
-    gc_sweep(heap);
+    size_t bytes_survived = gc_sweep(heap);
+    gc__adjust_threshold(heap, bytes_survived);
     heap->current_mark  = 1 - heap->current_mark;
     heap->bytes_since_gc = 0;
     heap->needs_gc       = false;
@@ -388,9 +417,10 @@ static void gc_collect(ThreadHeap *heap, VM *vm) {
  * - Does NOT invalidate cursor/limit (owning worker may be allocating)
  * ====================================================================== */
 
-static void gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
-                                 uint32_t watermark, uint8_t current_mark) {
+static size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
+                                   uint32_t watermark, uint8_t current_mark) {
     GCBlock *block = heap->blocks;
+    size_t   bytes_survived = 0;
 
     while (block) {
         if (block == skip_block) {
@@ -448,6 +478,7 @@ static void gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
             for (int i = first_line; i <= last_line; i++) {
                 new_map[i] = GC_LINE_OCCUPIED;
             }
+            bytes_survived += total;
 
             ptr += total;
         }
@@ -457,6 +488,8 @@ static void gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
 
         block = block->next;
     }
+
+    return bytes_survived;
 }
 
 #endif /* GC_COLLECT_C */
