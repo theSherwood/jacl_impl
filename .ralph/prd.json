@@ -256,7 +256,7 @@
         "All tests pass (build.sh)"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "rt_run_to_completion takes (Runtime*, JaclClosure*, arena_t*) and blocks until the program completion future resolves. The harness needs to compile the source, detect if the top-level is suspending (via CompileResult.suspending), wrap in the CPS closure pattern, and submit. Look at how jacl_run in vm.c handles cr.suspending for the pattern to replicate. Worker VM initialization uses runtime__init_worker_vm which is internal to the runtime — the harness should use the public runtime_init / runtime_destroy API and let workers self-initialize."
     },
     {

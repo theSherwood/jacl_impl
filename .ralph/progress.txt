@@ -1,7 +1,9 @@
 ## Codebase Patterns
 - JACL comments use `#` not `;` — semicolons are statement separators; using `;` as a comment causes parse errors or unexpected bare-word calls
 - String interpolation syntax: `$var` or `$[expr]` inside double-quoted strings — `[expr]` without `$` prefix is literal text, not interpolation
-- File-based test harness: test/test_jacl_harness.c reads .jacl files from test/jacl/, parses # expect: / # expect-error: headers, runs through jacl_run with PrintCapture
+- File-based test harness: test/test_jacl_harness.c reads .jacl files from test/jacl/, parses # expect: / # expect-error: / # mode: concurrent headers, runs through jacl_run (single-threaded) or runtime worker pool (concurrent)
+- Concurrent mode (`# mode: concurrent`): compiles with temp VM, extracts CPS closure (if suspending) or wraps chunk in closure, copies env to workers, submits to runtime via runtime__submit_spawn_task, mutex-protected PrintCapture for thread-safe output
+- JACL vector print format is `[vec 10 20]` not `[10, 20]` — use this in `# expect:` headers
 - PrintCapture buffer in harness is 8192 bytes (larger than integration tests' 1024) to handle multi-line test output
 - Harness uses malloc/free for file I/O (not tracked_allocator) — tracked_allocator is only for the VM arena
 - Unity build: `src/jacl.c` #includes all pipeline .c files + lib headers as a single translation unit
@@ -326,4 +328,20 @@
   - To trigger Tier 3 in tests: use large payloads (248 bytes) to fill blocks with rooted objects — small i64s (24 bytes) leave too much free space for 256 stack slots
   - gc_block_pool_get checks max_blocks before malloc; free-list recycling bypasses limit check (recycled blocks don't increase total_blocks_allocated)
   - runtime__emergency_gc needs forward declaration of gc_concurrent_collect (defined later in runtime.c)
+---
+
+## 2026-03-02 - US-013
+- What was implemented: Extended .jacl test harness with `# mode: concurrent` support. When this header directive is present, the harness uses runtime_init + runtime worker pool instead of plain jacl_run(). Added ThreadSafePrintCapture with mutex for thread-safe output capture from worker threads. Added harness__copy_env to transfer user-defined proc definitions from the compilation VM to all worker VMs. Concurrent mode handles both suspending (CPS closure extraction + rt_run_to_completion) and non-suspending code (chunk wrapped in closure). Updated build.sh harness entry with -lpthread flag. All 131 existing .jacl tests pass unchanged, all 48 test suites pass.
+- Files changed:
+  - test/test_jacl_harness.c — ThreadSafePrintCapture struct with mutex, capture_print_threadsafe callback, harness__copy_env helper, run_jacl_test_concurrent function (compile → CPS extract → runtime_init → configure workers → submit → wait → check), Expectations struct gains concurrent field, parse_expectations handles `# mode: concurrent`, run_jacl_test dispatches to concurrent path
+  - build.sh — Added `-lpthread` flag to jacl_harness entry
+- **Learnings for future iterations:**
+  - Concurrent mode must copy env from temp VM to all worker VMs — otherwise user-defined procs (defined via vm_exec on temp VM) aren't available to workers
+  - Worker VMs need print_fn/print_ctx AND intern_table set after runtime_init — intern_table is needed for OP_CONCAT, string operations at runtime
+  - CPS closure allocated on temp VM's heap is safe for runtime use as long as temp VM stays alive — runtime GC only sweeps its own block pool
+  - Non-suspending concurrent code: wrap chunk in gc_alloc'd JaclClosure (param_count=0), submit to runtime — worker executes full chunk including proc definitions
+  - For suspending code: vm_exec extracts CPS closure (stack[0]), submit to runtime with param_count=1 (detected as CPS by runtime__submit_spawn_task)
+  - runtime__submit_spawn_task takes void* runtime_ptr (not Runtime*) — cast internally
+  - JACL vector print format: `[vec 10 20]` — must match in `# expect:` headers
+  - Concurrent mode skips tracked_allocator (uses plain arena) since runtime manages its own memory outside the arena
 ---
