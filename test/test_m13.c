@@ -768,7 +768,10 @@ static int test_cps_single_await_resolved(void) {
     TEST_PASS();
 }
 
-/* Test: variable capture correctness — only used variables captured */
+/* Test: eager upvalue capture — continuation captures ALL live locals,
+   including those not directly referenced by the continuation body.
+   This ensures nested closures (parallel bodies, etc.) can access any
+   parent variable through the transitive upvalue chain. */
 static int test_cps_variable_capture(void) {
     arena_t arena = {0};
     VM vm;
@@ -777,7 +780,7 @@ static int test_cps_variable_capture(void) {
     CompileResult cr = test__compile(
         "proc foo [a b c] {\n"
         "  def x [await $a]\n"
-        "  # b is not used after await\n"
+        "  # b is not used after await, but still captured eagerly\n"
         "  [+ $x $c]\n"
         "}", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
@@ -786,11 +789,45 @@ static int test_cps_variable_capture(void) {
     ASSERT(foo != NULL);
     ASSERT_INT_EQ(foo->param_count, 4); /* a, b, c, __k */
 
-    /* The continuation captures c and __k (but NOT b since it's unused) */
+    /* Continuation eagerly captures ALL parent locals: a, b, c, __k = 4 */
     JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
     ASSERT(cont != NULL);
-    /* Should capture c and __k = 2 upvalues */
-    ASSERT_INT_EQ(cont->upvalue_count, 2);
+    ASSERT_INT_EQ(cont->upvalue_count, 4);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: continuation captures all live locals including unreferenced ones
+   (US-001: verify that unreferenced-by-continuation but potentially
+   referenced-by-nested-closure variables are still captured) */
+static int test_cps_eager_capture(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* 'unused' is not referenced in the continuation body at all,
+       but a parallel body inside the continuation references it.
+       With eager capture, the continuation still captures it. */
+    CompileResult cr = test__compile(
+        "proc foo [unused] {\n"
+        "  def f [spawn { 1 }]\n"
+        "  def x [await $f]\n"
+        "  [+ $x 0]\n"
+        "}", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
+    ASSERT(foo != NULL);
+
+    /* Continuation for await: should eagerly capture ALL parent locals,
+       including 'unused' which the continuation body doesn't reference */
+    JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
+    ASSERT(cont != NULL);
+    /* Parent locals: unused (slot 0), __k (slot 1), f (slot 2) = 3 locals.
+       All 3 should be captured as upvalues in the continuation. */
+    ASSERT(cont->upvalue_count >= 3);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
@@ -3431,6 +3468,7 @@ int main(void) {
         { "cps_propagation_caller",     test_cps_propagation_to_caller },
         { "cps_single_await_resolved",  test_cps_single_await_resolved },
         { "cps_variable_capture",       test_cps_variable_capture },
+        { "cps_eager_capture",         test_cps_eager_capture },
         { "cps_deep_chain",            test_cps_deep_chain },
         { "cps_emits_op_await",        test_cps_emits_op_await },
         { "cps_existing_code_ok",      test_cps_existing_code_unaffected },

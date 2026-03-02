@@ -2617,6 +2617,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             uint8_t *saved_ip = vm->ip;
             BytecodeChunk *saved_chunk = vm->chunk;
             uint32_t saved_frame_count = vm->frame_count;
+            uint32_t saved_stack_top = vm->stack_top;
 
             if (body_cps) {
               /* CPS: create future + resolve_k, call closure(resolve_k) */
@@ -2643,12 +2644,13 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
               VMResult sub = vm__run(vm, saved_frame_count);
 
+              /* Restore VM state: frame_count and stack may not have been
+                 properly unwound if the body errored before OP_RETURN */
+              vm->frame_count = saved_frame_count;
+              vm->stack_top   = saved_stack_top;
               frame = &vm->frames[vm->frame_count - 1];
               vm->ip    = saved_ip;
               vm->chunk = saved_chunk;
-
-              /* Pop leftover CPS return value */
-              if (vm->stack_top > 0) vm->stack_top--;
 
               JaclFuture *fut = jacl_as_future(fut_val);
               uint32_t fstate = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED);
@@ -2682,12 +2684,23 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
               VMResult sub = vm__run(vm, saved_frame_count);
 
+              /* Capture result before restoring stack */
+              JaclVal body_result = JACL_NIL;
+              bool body_ok = (sub == VM_OK && vm->stack_top > saved_stack_top);
+              if (body_ok) {
+                body_result = vm->stack[vm->stack_top - 1];
+              }
+
+              /* Restore VM state: frame_count and stack may not have been
+                 properly unwound if the body errored before OP_RETURN */
+              vm->frame_count = saved_frame_count;
+              vm->stack_top   = saved_stack_top;
               frame = &vm->frames[vm->frame_count - 1];
               vm->ip    = saved_ip;
               vm->chunk = saved_chunk;
 
-              if (sub == VM_OK && vm->stack_top > 0) {
-                results[i] = vm->stack[--vm->stack_top];
+              if (body_ok) {
+                results[i] = body_result;
                 if (jacl_is_error(results[i]) && !has_error) {
                   has_error = true;
                   first_error = results[i];

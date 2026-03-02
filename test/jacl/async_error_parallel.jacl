@@ -1,9 +1,10 @@
 # expect: true
 # expect: par-err
 # expect: 99
-# parallel error in async context — parallel error followed by spawn+await
+# parallel error in async context — pre-await variable used in parallel body
 proc main [] {
-  def r [parallel { 42 } { error "par-err" }]
+  def x 42
+  def r [parallel { [+ $x 0] } { error "par-err" }]
   print [error? $r]
   print [error-val $r]
   def f [spawn { 99 }]

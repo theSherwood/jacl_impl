@@ -879,6 +879,33 @@ static void compiler__emit_continuation(Compiler* c,
     c->first_error = cont_compiler.first_error;
   }
 
+  /* Eagerly capture all live locals (depth >= 1) from parent scope into the
+     continuation's upvalue array. This ensures nested closures (parallel bodies,
+     race bodies, spawn bodies) compiled inside the continuation can access
+     any parent variable through the transitive upvalue chain, even if the
+     continuation body doesn't directly reference it. */
+  for (uint32_t i = 0; i < c->local_count; i++) {
+    if (c->locals[i].depth < 1) continue;
+    int uv = compiler__add_upvalue(&cont_compiler, (uint8_t)i, 1,
+                                    c->locals[i].name);
+    if (uv != -1) {
+      cont_compiler.upvalues[uv].is_mutable = c->locals[i].is_mutable;
+      cont_compiler.upvalues[uv].suspends   = c->locals[i].suspends;
+      cont_compiler.upvalues[uv].type       = c->locals[i].type;
+    }
+  }
+  /* Also capture parent's upvalues transitively, so variables from
+     grandparent+ scopes are available to nested closures. */
+  for (uint32_t i = 0; i < c->upvalue_count; i++) {
+    int uv = compiler__add_upvalue(&cont_compiler, (uint8_t)i, 0,
+                                    c->upvalues[i].name);
+    if (uv != -1) {
+      cont_compiler.upvalues[uv].is_mutable = c->upvalues[i].is_mutable;
+      cont_compiler.upvalues[uv].suspends   = c->upvalues[i].suspends;
+      cont_compiler.upvalues[uv].type       = c->upvalues[i].type;
+    }
+  }
+
   /* Set upvalue count on closure */
   cont->upvalue_count = (uint8_t)cont_compiler.upvalue_count;
 

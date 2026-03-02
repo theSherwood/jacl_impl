@@ -1,0 +1,12 @@
+# expect: 52
+# expect: 10
+# pre-await variable used in parallel body after await
+proc main [] {
+  def x 42
+  def f [spawn { 10 }]
+  def y [await $f]
+  def r [parallel { [+ $x $y] } { [+ $y 0] }]
+  print [vec-get $r 0]
+  print [vec-get $r 1]
+}
+main
