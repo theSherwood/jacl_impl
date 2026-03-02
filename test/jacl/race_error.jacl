@@ -1,0 +1,9 @@
+# expect: true
+# expect: boom
+# race where the winning body errors, result is error
+proc main [] {
+  def r [race { error "boom" } { 42 }]
+  print [error? $r]
+  print [error-val $r]
+}
+main
