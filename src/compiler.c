@@ -952,6 +952,12 @@ static bool compiler__is_direct_parallel(AstNode* node) {
   return compiler__head_matches(head, "parallel", 8);
 }
 
+static bool compiler__is_direct_race(AstNode* node) {
+  if (node->type != AST_COMMAND) return false;
+  AstNode* head = node->data.command.head;
+  return compiler__head_matches(head, "race", 4);
+}
+
 /**
  * Compile a parallel body block as a closure (same pattern as spawn body).
  * Each body becomes a zero-arg closure (non-CPS) or 1-arg closure (CPS with __k).
@@ -1607,6 +1613,28 @@ static void compiler__compile_cps_stmts(Compiler* c, AstNode** stmts,
     return;
   }
 
+  /* Case 1c: Direct [race body1 body2 ...] */
+  if (compiler__is_direct_race(susp_stmt)) {
+    uint32_t race_argc = susp_stmt->data.command.arg_count;
+    AstNode** race_args = susp_stmt->data.command.args;
+
+    for (uint32_t i = 0; i < race_argc; i++) {
+      compiler__compile_parallel_body(c, race_args[i],
+                                       susp_stmt->start.line,
+                                       susp_stmt->start.column);
+    }
+
+    if (remaining_count == 0) {
+      compiler__emit_get_k(c, line);
+    } else {
+      compiler__emit_continuation(c, cont_param, remaining, remaining_count, line);
+    }
+
+    compiler__emit_byte(c, OP_RACE, susp_stmt->start.line);
+    compiler__emit_byte(c, (uint8_t)race_argc, susp_stmt->start.line);
+    return;
+  }
+
   /* Case 2: [def name [await expr]] */
   JaclVal def_name;
   AstNode* value_node = NULL;
@@ -1633,6 +1661,21 @@ static void compiler__compile_cps_stmts(Compiler* c, AstNode** stmts,
       compiler__emit_continuation(c, def_name, remaining, remaining_count, line);
       compiler__emit_byte(c, OP_PARALLEL, susp_stmt->start.line);
       compiler__emit_byte(c, (uint8_t)par_argc, susp_stmt->start.line);
+      return;
+    }
+
+    /* [def name [race ...]] — name becomes continuation param */
+    if (compiler__is_direct_race(value_node)) {
+      uint32_t race_argc = value_node->data.command.arg_count;
+      AstNode** race_args = value_node->data.command.args;
+      for (uint32_t i = 0; i < race_argc; i++) {
+        compiler__compile_parallel_body(c, race_args[i],
+                                         susp_stmt->start.line,
+                                         susp_stmt->start.column);
+      }
+      compiler__emit_continuation(c, def_name, remaining, remaining_count, line);
+      compiler__emit_byte(c, OP_RACE, susp_stmt->start.line);
+      compiler__emit_byte(c, (uint8_t)race_argc, susp_stmt->start.line);
       return;
     }
 
@@ -3480,13 +3523,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           "cannot suspend inside non-suspending callback");
       return;
     }
-    /* Placeholder: compile args then discard (OP_RACE in US-008) */
+    /* Race bodies compiled as closures (same as parallel) */
     for (uint32_t i = 0; i < argc; i++) {
-      compiler__compile_node(c, args[i]);
+      compiler__compile_parallel_body(c, args[i], line, col);
     }
-    compiler__emit_byte(c, OP_POP_N, line);
+    compiler__emit_byte(c, OP_RACE, line);
     compiler__emit_byte(c, (uint8_t)argc, line);
-    compiler__emit_byte(c, OP_NIL, line);
     return;
   }
 

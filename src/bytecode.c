@@ -91,6 +91,7 @@ typedef enum {
   OP_SPAWN,         /* pop closure, create future + task, push future */
   OP_RESOLVE_FUTURE,/* pop result + future, resolve future, push nil */
   OP_PARALLEL,      /* parallel: uint8_t N; pop continuation + N closures, fork N tasks */
+  OP_RACE,          /* race: uint8_t N; pop continuation + N closures, first-to-complete wins */
   /* M11 typed opcodes — i64 arithmetic and comparisons */
   OP_ADD_I64,       /* pop two raw i64, push sum */
   OP_SUB_I64,       /* pop two raw i64, push difference */
@@ -339,6 +340,7 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_SPAWN:           return "OP_SPAWN";
     case OP_RESOLVE_FUTURE:  return "OP_RESOLVE_FUTURE";
     case OP_PARALLEL:        return "OP_PARALLEL";
+    case OP_RACE:            return "OP_RACE";
     case OP_ADD_I64:         return "OP_ADD_I64";
     case OP_SUB_I64:         return "OP_SUB_I64";
     case OP_MUL_I64:         return "OP_MUL_I64";

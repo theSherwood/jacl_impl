@@ -125,6 +125,10 @@ static void runtime__submit_parallel_task(void *runtime_ptr,
                                            JaclVal agg_val,
                                            uint32_t index,
                                            bool is_cps);
+static void runtime__submit_race_task(void *runtime_ptr,
+                                       JaclClosure *closure,
+                                       JaclVal agg_val,
+                                       bool is_cps);
 
 /* --- Type name helper for error messages --- */
 
@@ -2720,6 +2724,172 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           } else {
             /* nil continuation — push result directly */
             result = vm__push(vm, cont_arg);
+            if (result != VM_OK) return result;
+          }
+        }
+        break;
+      }
+
+      case OP_RACE: {
+        /* Race: read uint8_t N, pop continuation + N closures.
+           Fork N tasks, first to complete wins, continuation receives
+           winner's result (or error). */
+        uint8_t n = vm__read_byte(vm);
+
+        /* Pop continuation (top of stack) */
+        JaclVal continuation;
+        result = vm__pop(vm, &continuation); if (result != VM_OK) return result;
+
+        /* Pop N closures (in reverse stack order to get original order) */
+        JaclVal closures[256];
+        for (int i = (int)n - 1; i >= 0; i--) {
+          result = vm__pop(vm, &closures[i]);
+          if (result != VM_OK) return result;
+        }
+
+        /* Validate types */
+        if (!jacl_is_closure(continuation) && !jacl_is_nil(continuation)) {
+          vm__set_error(vm, "OP_RACE: continuation is not a closure");
+          return VM_RUNTIME_ERROR;
+        }
+        for (uint8_t i = 0; i < n; i++) {
+          if (!jacl_is_closure(closures[i])) {
+            vm__set_error(vm, "race requires closures, arg %d is %s",
+                         (int)i, vm__type_name(closures[i]));
+            return VM_RUNTIME_ERROR;
+          }
+        }
+
+        if (vm->runtime) {
+          /* Runtime mode: create race aggregate, submit N tasks, suspend */
+          JaclVal agg_val = jacl_race_agg(&vm->heap, continuation);
+
+          for (uint8_t i = 0; i < n; i++) {
+            JaclClosure *cl = jacl_as_closure(closures[i]);
+            bool body_cps = (cl->param_count == 1);
+            runtime__submit_race_task(vm->runtime, cl, agg_val, body_cps);
+          }
+
+          /* Suspend: return from vm__run, worker picks up next task */
+          return VM_OK;
+        }
+
+        /* Single-threaded mode: run each closure sequentially, first result wins */
+        {
+          JaclVal winner_result = JACL_NIL;
+          bool have_winner = false;
+
+          for (uint8_t i = 0; i < n; i++) {
+            JaclClosure *cl = jacl_as_closure(closures[i]);
+            bool body_cps = (cl->param_count == 1);
+
+            uint8_t *saved_ip = vm->ip;
+            BytecodeChunk *saved_chunk = vm->chunk;
+            uint32_t saved_frame_count = vm->frame_count;
+
+            if (body_cps) {
+              /* CPS: create future + resolve_k, call closure(resolve_k) */
+              JaclVal fut_val = jacl_future(&vm->heap);
+              JaclVal resolve_k = runtime__create_resolve_closure(
+                  &vm->heap, vm->arena, fut_val);
+
+              result = vm__push(vm, closures[i]);
+              if (result != VM_OK) return result;
+              result = vm__push(vm, resolve_k);
+              if (result != VM_OK) return result;
+
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_STACK_OVERFLOW;
+              }
+              CallFrame *sf = &vm->frames[vm->frame_count++];
+              sf->closure    = cl;
+              sf->return_ip  = saved_ip;
+              sf->stack_base = vm->stack_top - 1;
+              sf->chunk      = &cl->chunk;
+              vm->ip    = cl->chunk.code;
+              vm->chunk = &cl->chunk;
+
+              vm__run(vm, saved_frame_count);
+
+              frame = &vm->frames[vm->frame_count - 1];
+              vm->ip    = saved_ip;
+              vm->chunk = saved_chunk;
+
+              if (vm->stack_top > 0) vm->stack_top--;
+
+              JaclFuture *fut = jacl_as_future(fut_val);
+              uint32_t fstate = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED);
+              if (!have_winner) {
+                have_winner = true;
+                if (fstate == FUTURE_RESOLVED) {
+                  winner_result = (JaclVal)fut->result;
+                } else if (fstate == FUTURE_ERROR) {
+                  winner_result = (JaclVal)fut->result;
+                } else {
+                  winner_result = JACL_NIL;
+                }
+              }
+            } else {
+              /* Non-CPS: call directly */
+              result = vm__push(vm, closures[i]);
+              if (result != VM_OK) return result;
+
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_STACK_OVERFLOW;
+              }
+              CallFrame *sf = &vm->frames[vm->frame_count++];
+              sf->closure    = cl;
+              sf->return_ip  = saved_ip;
+              sf->stack_base = vm->stack_top;
+              sf->chunk      = &cl->chunk;
+              vm->ip    = cl->chunk.code;
+              vm->chunk = &cl->chunk;
+
+              VMResult sub = vm__run(vm, saved_frame_count);
+
+              frame = &vm->frames[vm->frame_count - 1];
+              vm->ip    = saved_ip;
+              vm->chunk = saved_chunk;
+
+              if (!have_winner) {
+                have_winner = true;
+                if (sub == VM_OK && vm->stack_top > 0) {
+                  winner_result = vm->stack[--vm->stack_top];
+                } else {
+                  winner_result = jacl_set_error(jacl_inline_string("error", 5));
+                }
+              } else {
+                /* Loser: discard result */
+                if (sub == VM_OK && vm->stack_top > 0) vm->stack_top--;
+              }
+            }
+          }
+
+          /* Call continuation(winner_result) */
+          if (jacl_is_closure(continuation)) {
+            JaclClosure *cont_cl = jacl_as_closure(continuation);
+            result = vm__push(vm, continuation);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, winner_result);
+            if (result != VM_OK) return result;
+
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_STACK_OVERFLOW;
+            }
+            CallFrame *cf = &vm->frames[vm->frame_count++];
+            cf->closure    = cont_cl;
+            cf->return_ip  = vm->ip;
+            cf->stack_base = vm->stack_top - 1;
+            cf->chunk      = &cont_cl->chunk;
+            frame     = cf;
+            vm->ip    = frame->chunk->code;
+            vm->chunk = frame->chunk;
+          } else {
+            /* nil continuation — push result directly */
+            result = vm__push(vm, winner_result);
             if (result != VM_OK) return result;
           }
         }

@@ -27,7 +27,8 @@ typedef enum {
     OBJ_RRB_ROOT,
     OBJ_FUTURE,
     OBJ_FUTURE_WAITER,
-    OBJ_PARALLEL_AGG
+    OBJ_PARALLEL_AGG,
+    OBJ_RACE_AGG
 } GCObjType;
 
 /* --- GC object header (8 bytes, prepended before payload) --- */
@@ -714,6 +715,35 @@ static JaclVal jacl_parallel_agg(ThreadHeap *heap, uint32_t count,
         agg->results[i] = JACL_NIL;
     }
     return parallel_agg_ptr(agg);
+}
+
+/* ===================================================================
+ *  RaceAgg — GC-managed race tracking structure
+ * =================================================================== */
+
+/* RaceAgg tracks a first-to-complete race among N tasks.
+ * Uses CAS on settled flag to determine the single winner. */
+typedef struct {
+    volatile uint32_t settled;       /* 0 = not settled, 1 = winner determined */
+    JaclVal           continuation;  /* race continuation closure */
+} RaceAgg;
+
+/* Tag/untag helpers — same tagging scheme as ParallelAgg */
+
+static inline JaclVal race_agg_ptr(RaceAgg *r) {
+    return JACL_TAG_FUTURE | ((uint64_t)(uintptr_t)r & JACL_PAYLOAD_MASK);
+}
+
+static inline RaceAgg *as_race_agg(JaclVal v) {
+    return (RaceAgg *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+}
+
+/* Constructor: allocate a pending race aggregate */
+static JaclVal jacl_race_agg(ThreadHeap *heap, JaclVal continuation) {
+    RaceAgg *agg = (RaceAgg *)gc_alloc(heap, OBJ_RACE_AGG, sizeof(RaceAgg));
+    agg->settled      = 0;
+    agg->continuation = continuation;
+    return race_agg_ptr(agg);
 }
 
 #endif /* GC_C */

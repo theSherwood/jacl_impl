@@ -1105,6 +1105,126 @@ static void runtime__submit_parallel_task(void *runtime_ptr,
 }
 
 /* ======================================================================
+ * Race task data and execution
+ *
+ * Each race body becomes a task referencing a shared RaceAgg.
+ * First task to complete (CAS settled 0->1) is the winner and
+ * schedules the race continuation. Losers silently discard results.
+ * ====================================================================== */
+
+typedef struct {
+    JaclClosure  *closure;
+    JaclVal       agg_val;      /* tagged pointer to RaceAgg */
+    bool          is_cps;
+} RaceTaskData;
+
+static void runtime__race_task_exec(void *data) {
+    RaceTaskData *rtd = (RaceTaskData *)data;
+    WorkerThread *self = rt__current_worker;
+    VM *vm = &self->vm;
+    JaclClosure *cl = rtd->closure;
+    RaceAgg *agg = as_race_agg(rtd->agg_val);
+
+    /* Reset VM state for this task */
+    vm->stack_top   = 0;
+    vm->frame_count = 0;
+    vm->error_message = NULL;
+    vm->error_line    = 0;
+    vm->stack_trace.count = 0;
+
+    JaclVal task_result = JACL_NIL;
+
+    if (rtd->is_cps) {
+        JaclVal fut_val = jacl_future(&vm->heap);
+        JaclFuture *fut = jacl_as_future(fut_val);
+        JaclVal resolve_k = runtime__create_resolve_closure(
+            &vm->heap, &self->arena, fut_val);
+
+        vm->stack[0] = jacl_closure_ptr(cl);
+        vm->stack[1] = resolve_k;
+        vm->stack_top = 2;
+
+        vm->frames[0].closure    = cl;
+        vm->frames[0].return_ip  = NULL;
+        vm->frames[0].stack_base = 1;
+        vm->frames[0].chunk      = &cl->chunk;
+        vm->frame_count = 1;
+        vm->ip        = cl->chunk.code;
+        vm->chunk     = &cl->chunk;
+        vm->top_chunk = &cl->chunk;
+
+        vm__run(vm, 0);
+
+        uint32_t fstate = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_ACQUIRE);
+        if (fstate == FUTURE_RESOLVED) {
+            task_result = (JaclVal)fut->result;
+        } else if (fstate == FUTURE_ERROR) {
+            task_result = (JaclVal)fut->result;
+        } else {
+            task_result = JACL_NIL;
+        }
+    } else {
+        vm->stack[0] = jacl_closure_ptr(cl);
+        vm->stack_top = 1;
+
+        vm->frames[0].closure    = cl;
+        vm->frames[0].return_ip  = NULL;
+        vm->frames[0].stack_base = 1;
+        vm->frames[0].chunk      = &cl->chunk;
+        vm->frame_count = 1;
+        vm->ip        = cl->chunk.code;
+        vm->chunk     = &cl->chunk;
+        vm->top_chunk = &cl->chunk;
+
+        VMResult r = vm__run(vm, 0);
+
+        if (r == VM_OK && vm->stack_top > 0) {
+            task_result = vm->stack[vm->stack_top - 1];
+        } else {
+            task_result = jacl_set_error(jacl_inline_string("error", 5));
+        }
+    }
+
+    /* CAS settled: winner (0->1) schedules continuation, losers discard */
+    uint32_t expected = 0;
+    if (ATOMIC_CAS(&agg->settled, &expected, 1, MEM_ACQ_REL, MEM_RELAXED)) {
+        /* We are the winner */
+        JaclClosure *cont = jacl_as_closure(agg->continuation);
+        runtime__schedule_continuation(self->runtime, cont, task_result);
+    }
+    /* Losers: result silently discarded */
+
+    free(rtd);
+}
+
+static void runtime__submit_race_task(void *runtime_ptr,
+                                       JaclClosure *closure,
+                                       JaclVal agg_val,
+                                       bool is_cps) {
+    Runtime *rt = (Runtime *)runtime_ptr;
+
+    RaceTaskData *rtd = (RaceTaskData *)malloc(sizeof(RaceTaskData));
+    rtd->closure  = closure;
+    rtd->agg_val  = agg_val;
+    rtd->is_cps   = is_cps;
+
+    RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
+    task->fn      = runtime__race_task_exec;
+    task->data    = rtd;
+    task->gc_root = agg_val;
+
+    MUTEX_LOCK(rt->inbox_mutex);
+    if (rt->inbox_count >= rt->inbox_cap) {
+        intptr_t new_cap = rt->inbox_cap * 2;
+        rt->inbox = (uintptr_t *)realloc(rt->inbox,
+                                          (size_t)new_cap * sizeof(uintptr_t));
+        rt->inbox_cap = new_cap;
+    }
+    rt->inbox[rt->inbox_count++] = (uintptr_t)task;
+    MUTEX_UNLOCK(rt->inbox_mutex);
+}
+
+/* ======================================================================
  * rt_run_to_completion: submit a CPS closure as a task and block until
  * its completion future resolves.
  * ====================================================================== */

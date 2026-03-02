@@ -1917,6 +1917,181 @@ static int test_parallel_existing_code_ok(void) {
     TEST_PASS();
 }
 
+/* ================================================================
+ * US-008: race primitive
+ * ================================================================ */
+
+/* Test: race 2 tasks — first result wins (single-threaded: body 0 wins) */
+static int test_race_two_tasks(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def winner [race { 42 } { 99 }]\n"
+        "  print $winner\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    /* Single-threaded: first body executes first, wins */
+    ASSERT_STR_EQ(cap.buffer, "42\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: race returns winner's value (3 tasks) */
+static int test_race_three_tasks(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def winner [race { 10 } { 20 } { 30 }]\n"
+        "  print $winner\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "10\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: race with winning error — error propagated */
+static int test_race_error_propagation(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def result [race { error \"fail\" } { 42 }]\n"
+        "  if [error? $result] {\n"
+        "    print \"got-error\"\n"
+        "  } {\n"
+        "    print \"no-error\"\n"
+        "  }\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "got-error\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: race compiles correctly (emits OP_RACE) */
+static int test_race_compiles(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc main [] { race { 1 } { 2 } }",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    /* Find the main closure — it should be CPS (contains race) */
+    JaclClosure *main_cl = test__find_closure(&cr.chunk, "main");
+    ASSERT(main_cl != NULL);
+    /* CPS procs have __k param: param_count = 1 */
+    ASSERT_U32_EQ(main_cl->param_count, 1);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: race with worker threads (runtime mode) */
+static int test_race_worker_execution(void) {
+    Runtime rt;
+    runtime_init(&rt, 2);
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc task [] { race { 10 } { 20 } }",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+
+    VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
+    ASSERT(r == VM_OK);
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: race with continuation — code after race runs */
+static int test_race_with_continuation(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def w [race { 5 } { 10 }]\n"
+        "  print [+ $w 100]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "105\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: race existing code still works (regression) */
+static int test_race_existing_code_ok(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc fib [n] {\n"
+        "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
+        "}\n"
+        "print [fib 10]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "55\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -2008,6 +2183,14 @@ int main(void) {
         { "parallel_result_vector",   test_parallel_result_vector },
         { "parallel_continuation",    test_parallel_with_continuation },
         { "parallel_existing_ok",     test_parallel_existing_code_ok },
+        /* US-008: race primitive */
+        { "race_two_tasks",          test_race_two_tasks },
+        { "race_three_tasks",        test_race_three_tasks },
+        { "race_error_prop",         test_race_error_propagation },
+        { "race_compiles",           test_race_compiles },
+        { "race_worker_exec",        test_race_worker_execution },
+        { "race_continuation",       test_race_with_continuation },
+        { "race_existing_ok",        test_race_existing_code_ok },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
