@@ -278,7 +278,9 @@ static bool rt_test__ms_contains(GCMarkStack *ms, void *target) {
 }
 
 static int test_enumerate_roots_vm_stack(void) {
-    /* Root enumeration finds values on a worker's VM stack */
+    /* US-009: VM stack scanning removed from concurrent GC path.
+     * CPS continuations capture all live state as task roots.
+     * VM stack values should NOT appear in gc_enumerate_roots output. */
     Runtime rt;
     rt_test__init_no_threads(&rt, 1);
     WorkerThread *w = &rt.workers[0];
@@ -291,7 +293,8 @@ static int test_enumerate_roots_vm_stack(void) {
     gc__ms_init(&ms);
     gc_enumerate_roots(&rt, &ms);
 
-    ASSERT(rt_test__ms_contains(&ms, jacl_as_ptr(i64_val)));
+    /* VM stack is no longer scanned — value should NOT be found */
+    ASSERT(!rt_test__ms_contains(&ms, jacl_as_ptr(i64_val)));
 
     gc__ms_destroy(&ms);
     w->vm.stack_top = 0;
@@ -477,15 +480,16 @@ static int test_enumerate_roots_busy_sentinel(void) {
 }
 
 static int test_enumerate_roots_multi_worker(void) {
-    /* Root enumeration across multiple workers finds all roots */
+    /* US-009: VM stack scanning removed. Root enumeration across
+     * multiple workers finds deque/env roots but NOT VM stack values. */
     Runtime rt;
     rt_test__init_no_threads(&rt, 3);
 
-    /* Worker 0: value on VM stack */
+    /* Worker 0: value on VM stack (should NOT be found) */
     JaclVal val0 = jacl_i64(&rt.workers[0].vm.heap, 111);
     rt.workers[0].vm.stack[rt.workers[0].vm.stack_top++] = val0;
 
-    /* Worker 1: task on public deque */
+    /* Worker 1: task on public deque (should be found) */
     JaclClosure *cl1 = (JaclClosure *)gc_alloc(&rt.workers[1].vm.heap,
                                                  OBJ_CLOSURE,
                                                  sizeof(JaclClosure));
@@ -498,23 +502,28 @@ static int test_enumerate_roots_multi_worker(void) {
     task1->gc_root = cl1_val;
     rt_deque_deque_push(rt.workers[1].public_deque, (uintptr_t)task1);
 
-    /* Worker 2: value on VM stack */
+    /* Worker 2: value in environment (should be found) */
     JaclVal val2 = jacl_i64(&rt.workers[2].vm.heap, 222);
-    rt.workers[2].vm.stack[rt.workers[2].vm.stack_top++] = val2;
+    rt.workers[2].vm.env.names[rt.workers[2].vm.env.count]  = jacl_inline_string("test", 4);
+    rt.workers[2].vm.env.values[rt.workers[2].vm.env.count] = val2;
+    rt.workers[2].vm.env.count++;
 
     GCMarkStack ms;
     gc__ms_init(&ms);
     gc_enumerate_roots(&rt, &ms);
 
-    ASSERT(rt_test__ms_contains(&ms, jacl_as_ptr(val0)));
+    /* VM stack NOT scanned (US-009) */
+    ASSERT(!rt_test__ms_contains(&ms, jacl_as_ptr(val0)));
+    /* Deque tasks still scanned */
     ASSERT(rt_test__ms_contains(&ms, (void *)cl1));
+    /* Environment values still scanned */
     ASSERT(rt_test__ms_contains(&ms, jacl_as_ptr(val2)));
 
     gc__ms_destroy(&ms);
 
     /* Cleanup */
     rt.workers[0].vm.stack_top = 0;
-    rt.workers[2].vm.stack_top = 0;
+    rt.workers[2].vm.env.count--;
     uintptr_t taken;
     rt_deque_deque_take(rt.workers[1].public_deque, &taken);
     free((RuntimeTask *)taken);
@@ -807,8 +816,11 @@ static int test_concurrent_gc_full_cycle(void) {
     /* Restore the object block's line map so sweep can see free vs occupied */
     memset(obj_block->line_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
 
-    /* Push live_val onto VM stack (root) — dead_val is unreachable */
-    w0->vm.stack[w0->vm.stack_top++] = live_val;
+    /* Add live_val to environment (root) — dead_val is unreachable.
+     * US-009: VM stack no longer scanned, use env as root instead. */
+    w0->vm.env.names[w0->vm.env.count]  = jacl_inline_string("live", 4);
+    w0->vm.env.values[w0->vm.env.count] = live_val;
+    w0->vm.env.count++;
 
     /* Run concurrent GC */
     gc_concurrent_collect(&rt);
@@ -821,7 +833,7 @@ static int test_concurrent_gc_full_cycle(void) {
     GCHeader *hdr_dead = gc_header_of(jacl_as_ptr(dead_val));
     ASSERT(hdr_dead->alloc_total == 0);
 
-    w0->vm.stack_top = 0;
+    w0->vm.env.count--;
     gc__thread_epoch = 0;
     rt_test__destroy_no_threads(&rt);
     TEST_PASS();

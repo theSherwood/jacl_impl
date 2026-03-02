@@ -514,34 +514,16 @@ static void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
         gc__scan_deque(w->public_deque, ms);
         gc__scan_deque(w->private_deque, ms);
 
-        /* 4. VM stack values */
-        for (uint32_t i = 0; i < w->vm.stack_top; i++) {
-            gc__ms_push_val(ms, w->vm.stack[i]);
-        }
+        /* CPS continuations capture all live state as task roots (per
+         * GC_CONCURRENCY_DESIGN.md Section 7). VM stack scanning removed —
+         * not thread-safe and unnecessary with CPS transform. */
 
-        /* 5. Call frame closures */
-        for (uint32_t i = 0; i < w->vm.frame_count; i++) {
-            if (w->vm.frames[i].closure) {
-                gc__ms_push(ms, w->vm.frames[i].closure);
-            }
-        }
-
-        /* 6. Call frame chunk constants (heap i64/u64/f64 literals) */
-        for (uint32_t i = 0; i < w->vm.frame_count; i++) {
-            BytecodeChunk *ch = w->vm.frames[i].chunk;
-            if (ch) {
-                for (uint32_t j = 0; j < ch->const_count; j++) {
-                    gc__ms_push_const(ms, ch->constants[j]);
-                }
-            }
-        }
-
-        /* 7. Global environment values */
+        /* 4. Global environment values */
         for (uint32_t i = 0; i < w->vm.env.count; i++) {
             gc__ms_push_val(ms, w->vm.env.values[i]);
         }
 
-        /* 8. Intern table entries (Phase 1: immortal strings) */
+        /* 5. Intern table entries (Phase 1: immortal strings) */
         if (w->vm.intern_table) {
             for (uint32_t i = 0; i < w->vm.intern_table->cap; i++) {
                 if (w->vm.intern_table->entries[i]) {
@@ -551,7 +533,7 @@ static void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
         }
     }
 
-    /* 9. Inbox tasks (external submissions awaiting pickup) */
+    /* 6. Inbox tasks (external submissions awaiting pickup) */
     MUTEX_LOCK(rt->inbox_mutex);
     for (intptr_t i = 0; i < rt->inbox_count; i++) {
         RuntimeTask *task = (RuntimeTask *)rt->inbox[i];

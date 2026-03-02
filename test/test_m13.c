@@ -2092,6 +2092,86 @@ static int test_race_existing_code_ok(void) {
     TEST_PASS();
 }
 
+/* ================================================================
+ * US-009: Remove VM stack root scanning from concurrent GC
+ * ================================================================ */
+
+/* Test: concurrent tasks still work after removing VM stack scanning
+ * (CPS continuations capture all live state as task roots) */
+static int test_no_stack_scan_spawn(void) {
+    Runtime rt;
+    runtime_init(&rt, 2);
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc task [] { def f [spawn { 42 }]; await $f }",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+
+    VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
+    ASSERT(r == VM_OK);
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: concurrent parallel still works without stack scanning */
+static int test_no_stack_scan_parallel(void) {
+    Runtime rt;
+    runtime_init(&rt, 2);
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc task [] { parallel { 10 } { 20 } }",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+
+    VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
+    ASSERT(r == VM_OK);
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: single-threaded GC still works (retains stack scanning) */
+static int test_st_gc_still_works(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* This test runs without runtime — single-threaded GC should
+     * still scan VM stack for backward compatibility. */
+    VMResult r = jacl_run(
+        "proc fib [n] {\n"
+        "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
+        "}\n"
+        "print [fib 10]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "55\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -2191,6 +2271,10 @@ int main(void) {
         { "race_worker_exec",        test_race_worker_execution },
         { "race_continuation",       test_race_with_continuation },
         { "race_existing_ok",        test_race_existing_code_ok },
+        /* US-009: Remove VM stack root scanning */
+        { "no_stack_scan_spawn",     test_no_stack_scan_spawn },
+        { "no_stack_scan_parallel",  test_no_stack_scan_parallel },
+        { "st_gc_still_works",       test_st_gc_still_works },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
