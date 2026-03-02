@@ -1,4 +1,8 @@
 ## Codebase Patterns
+- JACL has no `fn`/`lambda` keyword — use nested `proc` definitions for closures/lambdas
+- Comparison operators: `==` for equality, not `=` — using `=` causes "undefined variable '$='" error
+- Proc names must be <= 7 bytes (inline string limit) — e.g., use `comp` not `compute-value`
+- Bare-word calls to suspending procs at tail position may return `nil` — use `def r [call]; [+ $r 0]` pattern for reliable CPS return value propagation
 - JACL comments use `#` not `;` — semicolons are statement separators; using `;` as a comment causes parse errors or unexpected bare-word calls
 - String interpolation syntax: `$var` or `$[expr]` inside double-quoted strings — `[expr]` without `$` prefix is literal text, not interpolation
 - File-based test harness: test/test_jacl_harness.c reads .jacl files from test/jacl/, parses # expect: / # expect-error: / # mode: concurrent headers, runs through jacl_run (single-threaded) or runtime worker pool (concurrent)
@@ -391,4 +395,23 @@
   - Single-threaded race: first body always wins (sequential execution) — test output is deterministic
   - Concurrent race: non-deterministic winner — use same return value in all bodies for deterministic `# expect:` output, or make one body trivially faster
   - Race tests follow same `proc main [] { ... }; main` pattern as parallel/spawn tests
+---
+
+## 2026-03-02 - US-017
+Thread: (current session)
+- Implemented 7 CPS transform correctness e2e test files in test/jacl/
+- Files created:
+  - cps_variable_capture.jacl — variables defined before await accessible after await
+  - cps_sequential.jacl — multiple sequential awaits with intermediate results building on each other
+  - cps_if_suspend.jacl — await inside if branches with join continuation
+  - cps_deep_chain.jacl — 6 chained awaits building a running sum
+  - cps_propagation.jacl — transitive CPS: proc A calls suspending proc B which calls suspending proc C
+  - cps_closure_capture.jacl — closure (nested proc) capturing variables across suspension points
+  - cps_nested_expr.jacl — await nested inside expression arguments: [+ [await $f1] [await $f2]]
+- All 153/153 harness tests pass, 48/48 total test suites pass
+- **Learnings for future iterations:**
+  - JACL has no `fn` keyword for lambdas — use nested `proc` definitions for closures
+  - Comparison operator is `==` not `=` — using `=` causes "undefined variable '$='" error
+  - Proc names must be <= 7 bytes (inline string limit) — e.g., use `comp` not `compute-value`
+  - Bare-word calls to suspending procs at tail position may return `nil` instead of the CPS result — use explicit `def r [proc-call]; [+ $r 0]` pattern to ensure return value propagation through CPS chain
 ---

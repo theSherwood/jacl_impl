@@ -326,7 +326,7 @@
         "All tests pass (build.sh)"
       ],
       "priority": 17,
-      "passes": false,
+      "passes": true,
       "notes": "These tests validate the compiler's CPS transform correctness rather than the runtime. All should work in single-threaded mode via jacl_run(). Use the 'proc main [] { ... }; main' wrapper for top-level suspending code. Remember: JACL true/false are bare words (strings, both truthy) — use comparison operators for boolean conditions."
     },
     {
