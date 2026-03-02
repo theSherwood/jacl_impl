@@ -342,7 +342,7 @@
         "All tests pass (build.sh)"
       ],
       "priority": 18,
-      "passes": false,
+      "passes": true,
       "notes": "JACL try/catch syntax is [try { body } e { handler }]. Suspension inside try/catch is a compile-time error — tests should NOT put await inside try. Error propagation through futures: jacl_future_error stores the error, await on an errored future passes the error value to the continuation."
     },
     {

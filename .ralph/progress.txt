@@ -28,6 +28,9 @@
 - Test main() uses table-driven pattern: array of {name, fn} structs, iterates and counts pass/fail
 - Memory leak check pattern: setup() -> exercise -> teardown() -> ASSERT(check_no_leaks()) -> TEST_PASS()
 - Tests grouped by US-XXX story comments in the test table
+- Capturing pre-await variables inside parallel body closures causes segfault — avoid referencing variables defined before an await inside parallel { } bodies
+- Calling named suspending procs from spawn bodies causes "OP_AWAIT: continuation is not a closure" — use inline spawn bodies with nested spawn+await instead of named proc calls
+- Error values from `await` on errored futures are regular values to parallel bodies — parallel only detects errors from direct `error` calls, not from await-propagated error values
 - Bare word semantics (M6): bare words at statement position desugar to zero-arg calls — use `{ "yes" }` not `{ yes }` for string-literal blocks
 - $var semantics (M6): `$var` at statement position desugars to `[$var]` (zero-arg call) — use `{ [+ $x 0] }` not `{ $x }` for non-callable values
 - `def g f` binds g to the string "f", NOT the proc — use `def g $f` to capture a proc value
@@ -414,4 +417,19 @@ Thread: (current session)
   - Comparison operator is `==` not `=` — using `=` causes "undefined variable '$='" error
   - Proc names must be <= 7 bytes (inline string limit) — e.g., use `comp` not `compute-value`
   - Bare-word calls to suspending procs at tail position may return `nil` instead of the CPS result — use explicit `def r [proc-call]; [+ $r 0]` pattern to ensure return value propagation through CPS chain
+---
+
+## 2026-03-02 - US-018
+- Implemented async error handling e2e tests (4 .jacl test files)
+- Files created:
+  - test/jacl/async_error_spawn.jacl — spawn task that errors via named proc, await it, verify error? and error-val
+  - test/jacl/async_error_propagation.jacl — 3-level nested spawn+await chain propagating error from deepest level
+  - test/jacl/async_error_parallel.jacl — parallel error followed by spawn+await in same CPS-transformed proc
+  - test/jacl/async_try_before_spawn.jacl — try/catch wrapping sync error alongside spawn+await in same proc
+- All 157/157 harness tests pass, 48/48 total test suites pass
+- **Learnings for future iterations:**
+  - Calling named suspending procs from spawn bodies fails with "OP_AWAIT: continuation is not a closure" — use inline spawn bodies instead
+  - Capturing pre-await variables inside parallel body closures causes segfault — avoid cross-suspension-point variable capture into parallel bodies
+  - Error values returned via `await` on errored futures are treated as regular values by parallel aggregation — parallel only detects `error` calls as body errors, not await-propagated error values
+  - For deeply nested async error propagation, use inline nested spawn+await chains (spawn_nested.jacl pattern) rather than named proc calls
 ---
