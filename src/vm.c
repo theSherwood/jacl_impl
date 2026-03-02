@@ -120,6 +120,11 @@ static void runtime__schedule_continuation(void *runtime_ptr,
 static void runtime__schedule_waiters(void *runtime_ptr,
                                        FutureWaiter *waiters,
                                        JaclVal result);
+static void runtime__submit_parallel_task(void *runtime_ptr,
+                                           JaclClosure *closure,
+                                           JaclVal agg_val,
+                                           uint32_t index,
+                                           bool is_cps);
 
 /* --- Type name helper for error messages --- */
 
@@ -187,9 +192,17 @@ static void vm__capture_trace(VM* vm) {
     } else {
       /* Parent frame: derive line from child's return_ip in this frame's chunk */
       CallFrame* child = &vm->frames[i];
-      uint32_t offset = (uint32_t)(child->return_ip - f->chunk->code);
-      if (offset > 0) offset--;
-      entry->line_number = f->chunk->lines[offset];
+      if (child->return_ip == NULL || f->chunk == NULL) {
+        entry->line_number = 0;
+      } else {
+        uint32_t offset = (uint32_t)(child->return_ip - f->chunk->code);
+        if (offset > 0) offset--;
+        if (offset < f->chunk->code_count) {
+          entry->line_number = f->chunk->lines[offset];
+        } else {
+          entry->line_number = 0;
+        }
+      }
     }
   }
 }
@@ -2529,6 +2542,187 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_PARALLEL: {
+        /* Parallel: read uint8_t N, pop continuation + N closures.
+           Fork N tasks, suspend until all complete, continuation receives
+           result vector [r0, r1, ..., r_{N-1}] in input order. */
+        uint8_t n = vm__read_byte(vm);
+
+        /* Pop continuation (top of stack) */
+        JaclVal continuation;
+        result = vm__pop(vm, &continuation); if (result != VM_OK) return result;
+
+        /* Pop N closures (in reverse stack order to get original order) */
+        JaclVal closures[256];
+        for (int i = (int)n - 1; i >= 0; i--) {
+          result = vm__pop(vm, &closures[i]);
+          if (result != VM_OK) return result;
+        }
+
+        /* Validate types */
+        if (!jacl_is_closure(continuation) && !jacl_is_nil(continuation)) {
+          vm__set_error(vm, "OP_PARALLEL: continuation is not a closure");
+          return VM_RUNTIME_ERROR;
+        }
+        for (uint8_t i = 0; i < n; i++) {
+          if (!jacl_is_closure(closures[i])) {
+            vm__set_error(vm, "parallel requires closures, arg %d is %s",
+                         (int)i, vm__type_name(closures[i]));
+            return VM_RUNTIME_ERROR;
+          }
+        }
+
+        if (vm->runtime) {
+          /* Runtime mode: create aggregate, submit N tasks, suspend */
+          JaclVal agg_val = jacl_parallel_agg(&vm->heap, n, continuation);
+
+          for (uint8_t i = 0; i < n; i++) {
+            JaclClosure *cl = jacl_as_closure(closures[i]);
+            bool body_cps = (cl->param_count == 1);
+            runtime__submit_parallel_task(vm->runtime, cl, agg_val, i, body_cps);
+          }
+
+          /* Suspend: return from vm__run, worker picks up next task */
+          return VM_OK;
+        }
+
+        /* Single-threaded mode: run each closure sequentially */
+        {
+          JaclVal results[256];
+          bool has_error = false;
+          JaclVal first_error = JACL_NIL;
+
+          for (uint8_t i = 0; i < n; i++) {
+            JaclClosure *cl = jacl_as_closure(closures[i]);
+            bool body_cps = (cl->param_count == 1);
+
+            uint8_t *saved_ip = vm->ip;
+            BytecodeChunk *saved_chunk = vm->chunk;
+            uint32_t saved_frame_count = vm->frame_count;
+
+            if (body_cps) {
+              /* CPS: create future + resolve_k, call closure(resolve_k) */
+              JaclVal fut_val = jacl_future(&vm->heap);
+              JaclVal resolve_k = runtime__create_resolve_closure(
+                  &vm->heap, vm->arena, fut_val);
+
+              result = vm__push(vm, closures[i]);
+              if (result != VM_OK) return result;
+              result = vm__push(vm, resolve_k);
+              if (result != VM_OK) return result;
+
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_STACK_OVERFLOW;
+              }
+              CallFrame *sf = &vm->frames[vm->frame_count++];
+              sf->closure    = cl;
+              sf->return_ip  = saved_ip;
+              sf->stack_base = vm->stack_top - 1;
+              sf->chunk      = &cl->chunk;
+              vm->ip    = cl->chunk.code;
+              vm->chunk = &cl->chunk;
+
+              VMResult sub = vm__run(vm, saved_frame_count);
+
+              frame = &vm->frames[vm->frame_count - 1];
+              vm->ip    = saved_ip;
+              vm->chunk = saved_chunk;
+
+              /* Pop leftover CPS return value */
+              if (vm->stack_top > 0) vm->stack_top--;
+
+              JaclFuture *fut = jacl_as_future(fut_val);
+              uint32_t fstate = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED);
+              if (fstate == FUTURE_RESOLVED) {
+                results[i] = (JaclVal)fut->result;
+              } else if (fstate == FUTURE_ERROR) {
+                results[i] = (JaclVal)fut->result;
+                if (!has_error) { has_error = true; first_error = results[i]; }
+              } else if (sub != VM_OK) {
+                results[i] = jacl_set_error(jacl_inline_string("error", 5));
+                if (!has_error) { has_error = true; first_error = results[i]; }
+              } else {
+                results[i] = JACL_NIL;
+              }
+            } else {
+              /* Non-CPS: call directly */
+              result = vm__push(vm, closures[i]);
+              if (result != VM_OK) return result;
+
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_STACK_OVERFLOW;
+              }
+              CallFrame *sf = &vm->frames[vm->frame_count++];
+              sf->closure    = cl;
+              sf->return_ip  = saved_ip;
+              sf->stack_base = vm->stack_top;
+              sf->chunk      = &cl->chunk;
+              vm->ip    = cl->chunk.code;
+              vm->chunk = &cl->chunk;
+
+              VMResult sub = vm__run(vm, saved_frame_count);
+
+              frame = &vm->frames[vm->frame_count - 1];
+              vm->ip    = saved_ip;
+              vm->chunk = saved_chunk;
+
+              if (sub == VM_OK && vm->stack_top > 0) {
+                results[i] = vm->stack[--vm->stack_top];
+                if (jacl_is_error(results[i]) && !has_error) {
+                  has_error = true;
+                  first_error = results[i];
+                }
+              } else {
+                results[i] = jacl_set_error(jacl_inline_string("error", 5));
+                if (!has_error) { has_error = true; first_error = results[i]; }
+              }
+            }
+          }
+
+          /* Build continuation argument */
+          JaclVal cont_arg;
+          if (has_error) {
+            cont_arg = first_error;
+          } else {
+            gc__current_heap = &vm->heap;
+            jacl_vec_root *vec = jacl_vec_empty();
+            for (uint8_t i = 0; i < n; i++) {
+              vec = jacl_vec_push_back(vec, results[i]);
+            }
+            cont_arg = jacl_vector_ptr(vec);
+          }
+
+          /* Call continuation(cont_arg) — set up inline frame */
+          if (jacl_is_closure(continuation)) {
+            JaclClosure *cont_cl = jacl_as_closure(continuation);
+            result = vm__push(vm, continuation);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, cont_arg);
+            if (result != VM_OK) return result;
+
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_STACK_OVERFLOW;
+            }
+            CallFrame *cf = &vm->frames[vm->frame_count++];
+            cf->closure    = cont_cl;
+            cf->return_ip  = vm->ip;
+            cf->stack_base = vm->stack_top - 1;
+            cf->chunk      = &cont_cl->chunk;
+            frame     = cf;
+            vm->ip    = frame->chunk->code;
+            vm->chunk = frame->chunk;
+          } else {
+            /* nil continuation — push result directly */
+            result = vm__push(vm, cont_arg);
+            if (result != VM_OK) return result;
+          }
+        }
         break;
       }
 

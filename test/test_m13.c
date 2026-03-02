@@ -1690,6 +1690,233 @@ static int test_await_existing_code_ok(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * US-007: parallel primitive
+ * ==================================================================== */
+
+/* Test: parallel 2 tasks — results in input order */
+static int test_parallel_two_tasks_order(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def results [parallel { 10 } { 20 }]\n"
+        "  print [vec-get $results 0]\n"
+        "  print [vec-get $results 1]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "10\n20\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parallel 3 tasks — all correct results */
+static int test_parallel_three_tasks(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def results [parallel { [+ 1 2] } { [* 3 4] } { [- 10 5] }]\n"
+        "  print [vec-get $results 0]\n"
+        "  print [vec-get $results 1]\n"
+        "  print [vec-get $results 2]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "3\n12\n5\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parallel with one error — error propagated */
+static int test_parallel_error_propagation(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def results [parallel { 42 } { error \"fail\" }]\n"
+        "  if [error? $results] {\n"
+        "    print \"got-error\"\n"
+        "  } {\n"
+        "    print \"no-error\"\n"
+        "  }\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "got-error\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parallel compiles correctly (emits OP_PARALLEL) */
+static int test_parallel_compiles(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc main [] { parallel { 1 } { 2 } }",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    /* Find the main closure — it should be CPS (contains parallel) */
+    JaclClosure *main_cl = test__find_closure(&cr.chunk, "main");
+    ASSERT(main_cl != NULL);
+    /* CPS proc: original 0 params + hidden __k = 1 */
+    ASSERT_INT_EQ(main_cl->param_count, 1);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parallel with spawn+await inside bodies (suspending bodies) */
+static int test_parallel_suspending_bodies(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def results [parallel { def f [spawn { 100 }]; await $f } { def g [spawn { 200 }]; await $g }]\n"
+        "  print [vec-get $results 0]\n"
+        "  print [vec-get $results 1]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "100\n200\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parallel with worker threads (runtime mode) */
+static int test_parallel_worker_execution(void) {
+    Runtime rt;
+    runtime_init(&rt, 2);
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    CompileResult cr = test__compile(
+        "proc task [] { parallel { 10 } { 20 } }",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+
+    VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
+    ASSERT(r == VM_OK);
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parallel result is a vector with correct length */
+static int test_parallel_result_vector(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def results [parallel { 1 } { 2 } { 3 } { 4 }]\n"
+        "  print [vec-len $results]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "4\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parallel followed by more code (continuation works) */
+static int test_parallel_with_continuation(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def results [parallel { 5 } { 10 }]\n"
+        "  def sum [+ [vec-get $results 0] [vec-get $results 1]]\n"
+        "  print $sum\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "15\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: existing non-suspending code still works after parallel changes */
+static int test_parallel_existing_code_ok(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc fib [n] {\n"
+        "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
+        "}\n"
+        "print [fib 10]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "55\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -1771,6 +1998,16 @@ int main(void) {
         { "await_non_future_error",   test_await_non_future_error },
         { "await_worker_resolved",    test_await_worker_resolved },
         { "await_existing_code_ok",   test_await_existing_code_ok },
+        /* US-007: parallel primitive */
+        { "parallel_two_order",       test_parallel_two_tasks_order },
+        { "parallel_three_tasks",     test_parallel_three_tasks },
+        { "parallel_error_prop",      test_parallel_error_propagation },
+        { "parallel_compiles",        test_parallel_compiles },
+        { "parallel_susp_bodies",     test_parallel_suspending_bodies },
+        { "parallel_worker_exec",     test_parallel_worker_execution },
+        { "parallel_result_vector",   test_parallel_result_vector },
+        { "parallel_continuation",    test_parallel_with_continuation },
+        { "parallel_existing_ok",     test_parallel_existing_code_ok },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -932,6 +932,179 @@ static void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
 }
 
 /* ======================================================================
+ * Parallel task data and execution
+ *
+ * Each parallel body becomes a task referencing a shared ParallelAgg.
+ * When all tasks complete, the last one builds a result vector and
+ * schedules the join continuation.
+ * ====================================================================== */
+
+typedef struct {
+    JaclClosure  *closure;
+    JaclVal       agg_val;      /* tagged pointer to ParallelAgg */
+    uint32_t      index;        /* position in results array */
+    bool          is_cps;
+} ParallelTaskData;
+
+static void runtime__parallel_task_exec(void *data) {
+    ParallelTaskData *ptd = (ParallelTaskData *)data;
+    WorkerThread *self = rt__current_worker;
+    VM *vm = &self->vm;
+    JaclClosure *cl = ptd->closure;
+    ParallelAgg *agg = as_parallel_agg(ptd->agg_val);
+
+    /* Reset VM state for this task */
+    vm->stack_top   = 0;
+    vm->frame_count = 0;
+    vm->error_message = NULL;
+    vm->error_line    = 0;
+    vm->stack_trace.count = 0;
+
+    JaclVal task_result = JACL_NIL;
+    bool task_errored = false;
+
+    if (ptd->is_cps) {
+        /* CPS closure: create a future + resolve_k, call closure(resolve_k).
+           After execution, result is in the future. */
+        JaclVal fut_val = jacl_future(&vm->heap);
+        JaclFuture *fut = jacl_as_future(fut_val);
+        JaclVal resolve_k = runtime__create_resolve_closure(
+            &vm->heap, &self->arena, fut_val);
+
+        vm->stack[0] = jacl_closure_ptr(cl);
+        vm->stack[1] = resolve_k;
+        vm->stack_top = 2;
+
+        vm->frames[0].closure    = cl;
+        vm->frames[0].return_ip  = NULL;
+        vm->frames[0].stack_base = 1;
+        vm->frames[0].chunk      = &cl->chunk;
+        vm->frame_count = 1;
+        vm->ip        = cl->chunk.code;
+        vm->chunk     = &cl->chunk;
+        vm->top_chunk = &cl->chunk;
+
+        VMResult r = vm__run(vm, 0);
+
+        uint32_t fstate = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_ACQUIRE);
+        if (fstate == FUTURE_RESOLVED) {
+            task_result = (JaclVal)fut->result;
+        } else if (fstate == FUTURE_ERROR) {
+            task_result = (JaclVal)fut->result;
+            task_errored = true;
+        } else if (r != VM_OK) {
+            task_result = jacl_set_error(jacl_inline_string("error", 5));
+            task_errored = true;
+        }
+    } else {
+        /* Non-CPS closure: call directly */
+        vm->stack[0] = jacl_closure_ptr(cl);
+        vm->stack_top = 1;
+
+        vm->frames[0].closure    = cl;
+        vm->frames[0].return_ip  = NULL;
+        vm->frames[0].stack_base = 1;
+        vm->frames[0].chunk      = &cl->chunk;
+        vm->frame_count = 1;
+        vm->ip        = cl->chunk.code;
+        vm->chunk     = &cl->chunk;
+        vm->top_chunk = &cl->chunk;
+
+        VMResult r = vm__run(vm, 0);
+
+        if (r == VM_OK && vm->stack_top > 0) {
+            task_result = vm->stack[vm->stack_top - 1];
+        } else {
+            task_result = jacl_set_error(jacl_inline_string("error", 5));
+            task_errored = true;
+        }
+    }
+
+    /* Store result at our index (no contention — unique index per task) */
+    gc_write_barrier(&self->grey_buf, &self->runtime->gc_active,
+                     agg->results[ptd->index], task_result);
+    agg->results[ptd->index] = task_result;
+
+    /* Handle error: first error wins via CAS */
+    if (task_errored) {
+        uint32_t expected = 0;
+        if (ATOMIC_CAS(&agg->errored, &expected, 1,
+                        MEM_ACQ_REL, MEM_RELAXED)) {
+            gc_write_barrier(&self->grey_buf, &self->runtime->gc_active,
+                             JACL_NIL, task_result);
+            ATOMIC_STORE_EXPLICIT(&agg->error_val, (uint64_t)task_result,
+                                   MEM_RELEASE);
+        }
+    }
+
+    /* Atomically increment completion counter */
+    uint32_t prev = 0;
+    uint32_t desired = 1;
+    /* Manual atomic increment via CAS loop */
+    for (;;) {
+        prev = ATOMIC_LOAD_EXPLICIT(&agg->completed, MEM_ACQUIRE);
+        desired = prev + 1;
+        if (ATOMIC_CAS(&agg->completed, &prev, desired,
+                        MEM_ACQ_REL, MEM_RELAXED)) {
+            break;
+        }
+    }
+
+    /* If we're the last task to complete, schedule the join continuation */
+    if (desired == agg->count) {
+        JaclClosure *cont = jacl_as_closure(agg->continuation);
+        JaclVal cont_arg;
+
+        if (ATOMIC_LOAD_EXPLICIT(&agg->errored, MEM_ACQUIRE)) {
+            /* Pass first error to continuation */
+            cont_arg = (JaclVal)ATOMIC_LOAD_EXPLICIT(&agg->error_val,
+                                                      MEM_ACQUIRE);
+        } else {
+            /* Build result vector from slots (in order) */
+            gc__current_heap = &vm->heap;
+            jacl_vec_root *vec = jacl_vec_empty();
+            for (uint32_t i = 0; i < agg->count; i++) {
+                vec = jacl_vec_push_back(vec, agg->results[i]);
+            }
+            cont_arg = jacl_vector_ptr(vec);
+        }
+
+        runtime__schedule_continuation(self->runtime, cont, cont_arg);
+    }
+
+    free(ptd);
+}
+
+static void runtime__submit_parallel_task(void *runtime_ptr,
+                                           JaclClosure *closure,
+                                           JaclVal agg_val,
+                                           uint32_t index,
+                                           bool is_cps) {
+    Runtime *rt = (Runtime *)runtime_ptr;
+
+    ParallelTaskData *ptd = (ParallelTaskData *)malloc(sizeof(ParallelTaskData));
+    ptd->closure  = closure;
+    ptd->agg_val  = agg_val;
+    ptd->index    = index;
+    ptd->is_cps   = is_cps;
+
+    RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
+    task->fn      = runtime__parallel_task_exec;
+    task->data    = ptd;
+    task->gc_root = agg_val; /* Aggregate is the GC root — traces continuation + results */
+
+    MUTEX_LOCK(rt->inbox_mutex);
+    if (rt->inbox_count >= rt->inbox_cap) {
+        intptr_t new_cap = rt->inbox_cap * 2;
+        rt->inbox = (uintptr_t *)realloc(rt->inbox,
+                                          (size_t)new_cap * sizeof(uintptr_t));
+        rt->inbox_cap = new_cap;
+    }
+    rt->inbox[rt->inbox_count++] = (uintptr_t)task;
+    MUTEX_UNLOCK(rt->inbox_mutex);
+}
+
+/* ======================================================================
  * rt_run_to_completion: submit a CPS closure as a task and block until
  * its completion future resolves.
  * ====================================================================== */

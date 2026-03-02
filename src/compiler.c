@@ -728,6 +728,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node);
 static int  compiler__head_matches(AstNode* head, const char* name, uint32_t len);
 static void compiler__emit_check_error(Compiler* c, uint32_t line);
 static void compiler__compile_command(Compiler* c, AstNode* node);
+static void compiler__compile_block_expr(Compiler* c, AstNode* block_node);
 
 /**
  * Check if an AST node IS a suspension point or CONTAINS one.
@@ -940,6 +941,108 @@ static bool compiler__is_direct_await(AstNode* node, AstNode** out_future_expr) 
   if (node->data.command.arg_count != 1) return false;
   *out_future_expr = node->data.command.args[0];
   return true;
+}
+
+/**
+ * Check if a statement is a direct [parallel body1 body2 ...] call.
+ */
+static bool compiler__is_direct_parallel(AstNode* node) {
+  if (node->type != AST_COMMAND) return false;
+  AstNode* head = node->data.command.head;
+  return compiler__head_matches(head, "parallel", 8);
+}
+
+/**
+ * Compile a parallel body block as a closure (same pattern as spawn body).
+ * Each body becomes a zero-arg closure (non-CPS) or 1-arg closure (CPS with __k).
+ * Pushes the closure onto the stack.
+ */
+static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
+                                             uint32_t line, uint32_t col) {
+  if (body_block->type != AST_BLOCK) {
+    compiler__error(c, line, col, "parallel body must be a block");
+    return;
+  }
+
+  uint32_t stmt_count = body_block->data.block.count;
+  AstNode** stmts = body_block->data.block.commands;
+
+  /* Check if the body contains suspension points */
+  bool body_suspends = ast__contains_suspension(body_block);
+
+  /* Allocate anonymous closure for the parallel body */
+  JaclClosure* closure = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
+  chunk_init(&closure->chunk, c->arena);
+  closure->name         = "<parallel>";
+  closure->upvalue_count = 0;
+  closure->upvalues     = NULL;
+  closure->param_names  = NULL;
+  closure->min_args     = 0;
+  closure->variadic     = false;
+
+  if (body_suspends) {
+    /* CPS parallel body: hidden __k parameter */
+    closure->param_count = 1;
+    JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal));
+    pnames[0] = jacl_inline_string("__k", 3);
+    closure->param_names = pnames;
+  } else {
+    closure->param_count = 0;
+  }
+
+  /* Create body compiler */
+  Compiler body_compiler;
+  compiler__init(&body_compiler, &closure->chunk, c->arena, c->intern_table, c->heap);
+  body_compiler.scope_depth    = 1;
+  body_compiler.enclosing      = c;
+  body_compiler.suspension_map = c->suspension_map;
+
+  /* Copy global arities for suspension lookups */
+  {
+    Compiler* root = c;
+    while (root->enclosing) root = root->enclosing;
+    memcpy(body_compiler.global_arities, root->global_arities,
+           sizeof(GlobalArity) * root->global_arity_count);
+    body_compiler.global_arity_count = root->global_arity_count;
+  }
+
+  if (body_suspends) {
+    /* Add __k as local (slot 0) */
+    compiler__add_local(&body_compiler, jacl_inline_string("__k", 3), line, col);
+    body_compiler.locals[body_compiler.local_count - 1].is_param = true;
+    body_compiler.is_cps = true;
+
+    if (stmt_count == 0) {
+      compiler__emit_get_k(&body_compiler, line);
+      compiler__emit_byte(&body_compiler, OP_NIL, line);
+      compiler__emit_byte(&body_compiler, OP_CALL, line);
+      compiler__emit_byte(&body_compiler, 1, line);
+    } else {
+      compiler__compile_cps_stmts(&body_compiler, stmts, stmt_count, line);
+    }
+    compiler__emit_byte(&body_compiler, OP_RETURN, line);
+  } else {
+    /* Non-suspending body: compile as block expression */
+    compiler__compile_block_expr(&body_compiler, body_block);
+    compiler__emit_byte(&body_compiler, OP_RETURN, line);
+  }
+
+  /* Propagate errors */
+  c->error_count += body_compiler.error_count;
+  if (!c->first_error && body_compiler.first_error) {
+    c->first_error = body_compiler.first_error;
+  }
+
+  closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
+
+  /* Emit OP_CLOSURE + upvalue descriptors */
+  uint16_t closure_idx = chunk_add_constant(c->chunk, jacl_closure(closure));
+  compiler__emit_byte(c, OP_CLOSURE, line);
+  compiler__emit_u16(c, closure_idx, line);
+  for (uint32_t i = 0; i < body_compiler.upvalue_count; i++) {
+    compiler__emit_byte(c, body_compiler.upvalues[i].is_local, line);
+    compiler__emit_byte(c, body_compiler.upvalues[i].index, line);
+  }
 }
 
 /**
@@ -1480,6 +1583,30 @@ static void compiler__compile_cps_stmts(Compiler* c, AstNode** stmts,
     return;
   }
 
+  /* Case 1b: Direct [parallel body1 body2 ...] */
+  if (compiler__is_direct_parallel(susp_stmt)) {
+    uint32_t par_argc = susp_stmt->data.command.arg_count;
+    AstNode** par_args = susp_stmt->data.command.args;
+
+    /* Compile each body as a closure (like spawn bodies) */
+    for (uint32_t i = 0; i < par_argc; i++) {
+      compiler__compile_parallel_body(c, par_args[i],
+                                       susp_stmt->start.line,
+                                       susp_stmt->start.column);
+    }
+
+    /* Emit continuation or __k */
+    if (remaining_count == 0) {
+      compiler__emit_get_k(c, line);
+    } else {
+      compiler__emit_continuation(c, cont_param, remaining, remaining_count, line);
+    }
+
+    compiler__emit_byte(c, OP_PARALLEL, susp_stmt->start.line);
+    compiler__emit_byte(c, (uint8_t)par_argc, susp_stmt->start.line);
+    return;
+  }
+
   /* Case 2: [def name [await expr]] */
   JaclVal def_name;
   AstNode* value_node = NULL;
@@ -1491,6 +1618,21 @@ static void compiler__compile_cps_stmts(Compiler* c, AstNode** stmts,
       compiler__compile_node(c, def_future_expr);
       compiler__emit_continuation(c, def_name, remaining, remaining_count, line);
       compiler__emit_byte(c, OP_AWAIT, susp_stmt->start.line);
+      return;
+    }
+
+    /* [def name [parallel ...]] — name becomes continuation param */
+    if (compiler__is_direct_parallel(value_node)) {
+      uint32_t par_argc = value_node->data.command.arg_count;
+      AstNode** par_args = value_node->data.command.args;
+      for (uint32_t i = 0; i < par_argc; i++) {
+        compiler__compile_parallel_body(c, par_args[i],
+                                         susp_stmt->start.line,
+                                         susp_stmt->start.column);
+      }
+      compiler__emit_continuation(c, def_name, remaining, remaining_count, line);
+      compiler__emit_byte(c, OP_PARALLEL, susp_stmt->start.line);
+      compiler__emit_byte(c, (uint8_t)par_argc, susp_stmt->start.line);
       return;
     }
 
@@ -3307,13 +3449,17 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           "cannot suspend inside non-suspending callback");
       return;
     }
-    /* Placeholder: compile args then discard (OP_PARALLEL in US-007) */
+    /* Compile each body as a closure, emit OP_PARALLEL.
+       In CPS context: handled by compile_cps_stmts Case 1b.
+       This path is reached only for non-CPS compilation (shouldn't happen
+       with well-formed programs, but compile defensively). */
     for (uint32_t i = 0; i < argc; i++) {
-      compiler__compile_node(c, args[i]);
+      compiler__compile_parallel_body(c, args[i], line, col);
     }
-    compiler__emit_byte(c, OP_POP_N, line);
-    compiler__emit_byte(c, (uint8_t)argc, line);
+    /* Non-CPS: no continuation available, push nil as placeholder */
     compiler__emit_byte(c, OP_NIL, line);
+    compiler__emit_byte(c, OP_PARALLEL, line);
+    compiler__emit_byte(c, (uint8_t)argc, line);
     return;
   }
 

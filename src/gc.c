@@ -26,7 +26,8 @@ typedef enum {
     OBJ_RRB_LEAF,
     OBJ_RRB_ROOT,
     OBJ_FUTURE,
-    OBJ_FUTURE_WAITER
+    OBJ_FUTURE_WAITER,
+    OBJ_PARALLEL_AGG
 } GCObjType;
 
 /* --- GC object header (8 bytes, prepended before payload) --- */
@@ -668,6 +669,51 @@ static bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
     }
     MUTEX_UNLOCK(f->lock);
     return added;
+}
+
+/* ======================================================================
+ * ParallelAgg: aggregate tracker for [parallel] primitive
+ *
+ * Tracks N concurrent tasks, collects results in input order, and
+ * schedules the join continuation when all tasks complete.
+ * Uses atomic counter for lock-free completion tracking.
+ * ====================================================================== */
+
+typedef struct {
+    volatile uint32_t completed;     /* atomic completion counter */
+    volatile uint32_t errored;       /* 0 or 1 (first-error-wins CAS) */
+    volatile uint64_t error_val;     /* first error value (JaclVal) */
+    uint32_t          count;         /* total N */
+    JaclVal           continuation;  /* join continuation closure */
+    JaclVal           results[];     /* trailing array of N result slots */
+} ParallelAgg;
+
+/* Tag/untag helpers — reuses JACL_TAG_FUTURE for pointer tagging since
+ * ParallelAgg is an internal GC object (OBJ_PARALLEL_AGG obj_type in
+ * GCHeader ensures correct tracing). Never exposed to user code. */
+
+static inline JaclVal parallel_agg_ptr(ParallelAgg *p) {
+    return JACL_TAG_FUTURE | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+static inline ParallelAgg *as_parallel_agg(JaclVal v) {
+    return (ParallelAgg *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+}
+
+/* Constructor: allocate a pending parallel aggregate with N result slots */
+static JaclVal jacl_parallel_agg(ThreadHeap *heap, uint32_t count,
+                                  JaclVal continuation) {
+    size_t sz = sizeof(ParallelAgg) + count * sizeof(JaclVal);
+    ParallelAgg *agg = (ParallelAgg *)gc_alloc(heap, OBJ_PARALLEL_AGG, sz);
+    agg->completed    = 0;
+    agg->errored      = 0;
+    agg->error_val    = (uint64_t)JACL_NIL;
+    agg->count        = count;
+    agg->continuation = continuation;
+    for (uint32_t i = 0; i < count; i++) {
+        agg->results[i] = JACL_NIL;
+    }
+    return parallel_agg_ptr(agg);
 }
 
 #endif /* GC_C */
