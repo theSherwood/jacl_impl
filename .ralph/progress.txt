@@ -222,3 +222,23 @@
   - runtime__schedule_continuation creates ContinuationTaskData with closure+result, submits as RuntimeTask to inbox — same pattern as spawn task submission
   - Forward-declare runtime functions in vm.c (before runtime.c in unity build): runtime__schedule_continuation and runtime__schedule_waiters take void* runtime_ptr for consistency
 ---
+
+## 2026-03-02 - US-007
+- What was implemented: parallel primitive — OP_PARALLEL opcode, OBJ_PARALLEL_AGG GC type with atomic completion tracking, ParallelAgg struct (atomic counter, errored flag, error_val, result slots, join continuation), CPS compilation of parallel bodies as closures (same pattern as spawn), single-threaded execution via recursive vm__run, runtime mode via task submission to worker pool, result vector construction, first-error-wins error propagation, 9 unit tests
+- Files changed:
+  - src/bytecode.c — OP_PARALLEL opcode added after OP_RESOLVE_FUTURE; opcode_name updated
+  - src/gc.c — OBJ_PARALLEL_AGG enum value, ParallelAgg struct with trailing results array, jacl_parallel_agg constructor, parallel_agg_ptr/as_parallel_agg helpers (reuse JACL_TAG_FUTURE for internal tagging)
+  - src/gc_collect.c — GC tracing for OBJ_PARALLEL_AGG (trace continuation, error_val, all result slots)
+  - src/compiler.c — compiler__is_direct_parallel helper, compiler__compile_parallel_body (compiles each body block as closure, CPS or non-CPS), Case 1b in compile_cps_stmts for direct [parallel ...], Case 2 parallel handling for [def name [parallel ...]], forward declaration for compiler__compile_block_expr
+  - src/vm.c — OP_PARALLEL handler (runtime mode: create aggregate + submit N tasks; single-threaded: sequential vm__run per body, build result vector, call continuation), vm__capture_trace hardened against NULL return_ip and out-of-bounds offsets, forward declaration for runtime__submit_parallel_task
+  - src/runtime.c — ParallelTaskData struct, runtime__parallel_task_exec (execute closure, store result at index, atomic CAS for first-error-wins, atomic counter increment, build vector + schedule join continuation on last completion), runtime__submit_parallel_task
+  - test/test_bytecode.c — opcode enum assertions shifted by +1 for OP_PARALLEL insertion
+  - test/test_m13.c — 9 new tests: parallel_two_order, parallel_three_tasks, parallel_error_prop, parallel_compiles, parallel_susp_bodies, parallel_worker_exec, parallel_result_vector, parallel_continuation, parallel_existing_ok
+- **Learnings for future iterations:**
+  - vm__capture_trace must guard against NULL return_ip (set by jacl_run for initial frames) and out-of-bounds chunk offsets — BUS/segfault otherwise
+  - Non-CPS body results must be checked for error flag (jacl_is_error) after popping from stack — OP_ERROR sets flag but doesn't stop execution (VM returns OK)
+  - JACL parser treats newlines inside [...] command forms as statement separators — multi-line parallel `[parallel\n{...}\n{...}]` causes parse errors; use single-line format
+  - ParallelAgg reuses JACL_TAG_FUTURE for pointer tagging (internal only) — GC dispatches on GCHeader.obj_type not the value tag
+  - BytecodeChunk uses code_count (not count) for byte count field
+  - SourcePos uses column (not col) for column number field
+---
