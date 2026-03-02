@@ -366,3 +366,17 @@
   - Single-threaded spawn resolves immediately — `future?` returns true and `await` on resolved future works without deadlock
   - Error in spawn body → `jacl_future_error` → `await` returns error-flagged value checkable with `error?` and `error-val`
 ---
+
+## 2026-03-02 - US-015
+- What was implemented: 5 .jacl e2e tests for the parallel primitive covering basic 2-body parallel with vector output, input-order preservation with 3 bodies (including heavy fib computation), error propagation with error?/error-val checking, parallel bodies with internal spawn+await, and concurrent mode execution with real worker threads.
+- Files changed:
+  - test/jacl/parallel_two.jacl — 2 bodies, prints result vector directly (`[vec 10 20]`)
+  - test/jacl/parallel_order.jacl — 3 bodies with fib(10) computation, verifies input order preservation via vec-get
+  - test/jacl/parallel_error.jacl — one body errors, checks error? and error-val on result
+  - test/jacl/parallel_with_await.jacl — parallel bodies containing spawn+await (suspending bodies)
+  - test/jacl/parallel_concurrent.jacl — `# mode: concurrent` for real worker pool execution
+- **Learnings for future iterations:**
+  - Parallel result vector can be printed directly (`print $r`) showing `[vec ...]` format, or accessed element-by-element via vec-get
+  - Parallel bodies with spawn+await work correctly: `{ def f [spawn { val }]; await $f }` pattern using semicolons for multi-statement blocks
+  - All parallel tests pass in both single-threaded and concurrent modes without modification to runtime
+---

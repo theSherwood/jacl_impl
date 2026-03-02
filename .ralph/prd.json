@@ -292,7 +292,7 @@
         "All tests pass (build.sh)"
       ],
       "priority": 15,
-      "passes": false,
+      "passes": true,
       "notes": "Parallel returns a JACL vector of results. [parallel { expr1 } { expr2 }] is a single-line command form — JACL parser treats newlines inside [...] as statement separators, so multi-line parallel may cause parse errors. Use single-line format or the 'proc main' wrapper pattern."
     },
     {
