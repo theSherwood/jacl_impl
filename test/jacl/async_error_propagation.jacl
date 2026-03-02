@@ -1,0 +1,16 @@
+# expect: true
+# expect: deep-err
+# error in a deeply nested async call chain propagates to the top-level awaiter
+proc main [] {
+  def f1 [spawn {
+    def f2 [spawn {
+      def f3 [spawn { error "deep-err" }]
+      await $f3
+    }]
+    await $f2
+  }]
+  def r [await $f1]
+  print [error? $r]
+  print [error-val $r]
+}
+main

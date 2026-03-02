@@ -1,0 +1,13 @@
+# expect: true
+# expect: par-err
+# expect: 99
+# parallel error in async context — parallel error followed by spawn+await
+proc main [] {
+  def r [parallel { 42 } { error "par-err" }]
+  print [error? $r]
+  print [error-val $r]
+  def f [spawn { 99 }]
+  def v [await $f]
+  print $v
+}
+main
