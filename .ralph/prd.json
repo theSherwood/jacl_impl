@@ -275,7 +275,7 @@
         "All tests pass (build.sh)"
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": "JACL concurrency works single-threaded via jacl_run() (recursive vm__run for spawn) and multi-threaded via runtime. Tests without '# mode: concurrent' exercise single-threaded path; tests with it exercise the worker pool. Include a mix. Remember: suspending code at top level must be wrapped in 'proc main [] { ... }; main' pattern. Use to-string for typed numeric output. Helper procs must be defined at top level (not inside CPS-transformed proc bodies)."
     },
     {

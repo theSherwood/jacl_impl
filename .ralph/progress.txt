@@ -137,6 +137,9 @@
 - Top-level CPS pre-registration: must count head + args from param list AST (head has length > 0 → pcount = 1 + arg_count)
 - Defining `proc inner [params]` INSIDE a CPS-transformed proc body segfaults — keep helper procs at top level
 - Recursive CPS tail calls (e.g., suspending proc calling itself) don't correctly propagate return values — result is nil instead of expected value
+- `ast__contains_suspension` only detects direct await/parallel/race keywords — does NOT detect calls to suspending procs; spawn body `{ [suspending_proc] }` won't be CPS'd → put suspension points directly in spawn bodies
+- While loop `def` shadowing accumulates locals on stack (~2 per iteration) — exceeds 256-slot stack limit around 100 iterations; use recursion or fewer iterations for heavy allocation tests
+- For heavy allocation in e2e tests, fibonacci recursion is reliable (`[fib 15]` = 610) — works in both single-threaded and concurrent modes
 
 ## 2026-03-02 - US-012
 - What was implemented: 37 comprehensive integration and stress tests covering CPS correctness, spawn+await, parallel, race, direct-style, multi-threaded stress, memory bounded, and M0-M12 regressions. Fixed a compiler bug in top-level CPS pre-registration param counting (head + args, not just args). Documented several CPS runtime limitations.
@@ -344,4 +347,22 @@
   - runtime__submit_spawn_task takes void* runtime_ptr (not Runtime*) — cast internally
   - JACL vector print format: `[vec 10 20]` — must match in `# expect:` headers
   - Concurrent mode skips tracked_allocator (uses plain arena) since runtime manages its own memory outside the arena
+---
+
+## 2026-03-02 - US-014
+- What was implemented: 7 .jacl e2e tests for spawn and await primitives covering basic spawn+await, future type checking, multiple sequential spawns, nested spawn (inner spawn+await inside outer spawn), heavy allocation via fibonacci under concurrent GC, await on already-resolved future, and error propagation through spawn+await.
+- Files changed:
+  - test/jacl/spawn_basic.jacl — concurrent mode spawn+await returning computed value
+  - test/jacl/spawn_value.jacl — future? predicate + await extraction
+  - test/jacl/spawn_multi.jacl — 3 spawned tasks awaited sequentially in order
+  - test/jacl/spawn_nested.jacl — outer spawn containing inner spawn+await
+  - test/jacl/spawn_heavy.jacl — concurrent mode fibonacci computation for GC stress
+  - test/jacl/await_resolved.jacl — await on already-resolved future (single-threaded)
+  - test/jacl/await_error.jacl — error propagation via error? and error-val
+- **Learnings for future iterations:**
+  - `ast__contains_suspension` only detects literal await/parallel/race — spawn body calling a suspending proc is NOT detected as suspending; put suspend points directly in spawn blocks
+  - While loop `def` shadowing creates new locals per iteration (~2/iter), overflows 256-slot stack at ~100 iterations — use recursion or fewer iterations
+  - Fibonacci recursion (`[fib 15]` = 610) is the reliable pattern for heavy allocation in e2e tests
+  - Single-threaded spawn resolves immediately — `future?` returns true and `await` on resolved future works without deadlock
+  - Error in spawn body → `jacl_future_error` → `await` returns error-flagged value checkable with `error?` and `error-val`
 ---
