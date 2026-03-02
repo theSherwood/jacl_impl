@@ -1,0 +1,15 @@
+# expect: 100
+# proc A calls suspending proc B which calls suspending proc C (transitive CPS)
+proc comp [] {
+  def f [spawn { 10 }]
+  [* [await $f] 10]
+}
+proc relay [] {
+  def r [comp]
+  [+ $r 0]
+}
+proc main [] {
+  def result [relay]
+  print $result
+}
+main

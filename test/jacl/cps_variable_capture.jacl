@@ -1,0 +1,14 @@
+# expect: 10
+# expect: 20
+# expect: 30
+# variables defined before await are accessible after await
+proc main [] {
+  def a 10
+  def b 20
+  def f [spawn { 30 }]
+  def c [await $f]
+  print $a
+  print $b
+  print $c
+}
+main

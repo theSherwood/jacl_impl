@@ -1,0 +1,16 @@
+# expect: 10
+# expect: 30
+# expect: 60
+# multiple sequential awaits produce correct intermediate results
+proc main [] {
+  def f1 [spawn { 10 }]
+  def a [await $f1]
+  print $a
+  def f2 [spawn { [+ $a 20] }]
+  def b [await $f2]
+  print $b
+  def f3 [spawn { [+ $b 30] }]
+  def c [await $f3]
+  print $c
+}
+main
