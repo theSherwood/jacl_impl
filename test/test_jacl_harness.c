@@ -19,6 +19,20 @@ static void capture_print(const char* text, uint32_t len, void* ctx) {
   cap->buf[cap->len] = '\0';
 }
 
+/* ===== Thread-safe print capture for concurrent mode ===== */
+
+typedef struct {
+  PrintCapture     cap;
+  platform_mutex_t mutex;
+} ThreadSafePrintCapture;
+
+static void capture_print_threadsafe(const char* text, uint32_t len, void* ctx) {
+  ThreadSafePrintCapture* tspc = (ThreadSafePrintCapture*)ctx;
+  MUTEX_LOCK(tspc->mutex);
+  capture_print(text, len, &tspc->cap);
+  MUTEX_UNLOCK(tspc->mutex);
+}
+
 /* ===== Expected output parsing ===== */
 
 #define MAX_EXPECT_LINES 256
@@ -29,9 +43,10 @@ typedef struct {
   int      count;
   char     error_substr[MAX_LINE_LEN];
   int      expect_error;
+  int      concurrent;   /* 1 if '# mode: concurrent' header present */
 } Expectations;
 
-/* Parse # expect: and # expect-error: header comments from file contents.
+/* Parse # expect:, # expect-error:, and # mode: concurrent header comments.
    Returns 1 on success, 0 on parse error (e.g., mixing expect and expect-error). */
 static int parse_expectations(const char* source, Expectations* exp) {
   memset(exp, 0, sizeof(*exp));
@@ -74,6 +89,10 @@ static int parse_expectations(const char* source, Expectations* exp) {
       exp->lines[exp->count][len] = '\0';
       exp->count++;
       p = end ? end + 1 : p + len;
+    } else if (strncmp(p, "# mode: concurrent", 18) == 0) {
+      exp->concurrent = 1;
+      const char* end = strchr(p, '\n');
+      p = end ? end + 1 : p + strlen(p);
     } else {
       /* Regular comment — skip to end of line */
       const char* end = strchr(p, '\n');
@@ -102,6 +121,211 @@ static char* read_file(const char* path) {
   return buf;
 }
 
+/* ===== Copy environment from source VM to destination VM ===== */
+
+static void harness__copy_env(VM* dest, VM* src) {
+  uint32_t i;
+  for (i = 0; i < src->env.count; i++) {
+    /* Check if we need to grow dest env */
+    if (dest->env.count >= dest->env.cap) {
+      uint32_t new_cap = dest->env.cap * 2;
+      JaclVal* new_names = (JaclVal*)arena_alloc(dest->arena, new_cap * sizeof(JaclVal));
+      JaclVal* new_values = (JaclVal*)arena_alloc(dest->arena, new_cap * sizeof(JaclVal));
+      memcpy(new_names, dest->env.names, dest->env.count * sizeof(JaclVal));
+      memcpy(new_values, dest->env.values, dest->env.count * sizeof(JaclVal));
+      dest->env.names = new_names;
+      dest->env.values = new_values;
+      dest->env.cap = new_cap;
+    }
+    /* Check if entry already exists (overwrite) */
+    uint32_t j;
+    int found = 0;
+    for (j = 0; j < dest->env.count; j++) {
+      if (dest->env.names[j] == src->env.names[i]) {
+        dest->env.values[j] = src->env.values[i];
+        found = 1;
+        break;
+      }
+    }
+    if (!found) {
+      dest->env.names[dest->env.count] = src->env.names[i];
+      dest->env.values[dest->env.count] = src->env.values[i];
+      dest->env.count++;
+    }
+  }
+}
+
+/* ===== Concurrent test runner ===== */
+
+/* Runs a .jacl test using the runtime worker pool (# mode: concurrent).
+   Returns 1 if pass, 0 if fail. */
+static int run_jacl_test_concurrent(const char* source, Expectations* exp) {
+  int ok = 1;
+  int i;
+
+  /* Use plain arena (no tracked_allocator) — runtime manages its own memory */
+  arena_t arena = {0};
+  VM vm;
+  vm_init(&vm, &arena);
+
+  /* Step 1: Compile */
+  LexResult tokens = lexer_lex(source, &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  if (parse.error_count > 0) {
+    if (exp->expect_error && strstr("parse error", exp->error_substr)) {
+      vm_destroy(&vm);
+      arena_destroy(&arena);
+      return 1;
+    }
+    fprintf(stderr, "  Parse error in concurrent test\n");
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    return 0;
+  }
+
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  CompileResult cr = compiler_compile(parse, &arena, &intern_table, &vm.heap);
+  if (cr.error_count > 0) {
+    if (exp->expect_error) {
+      int match = cr.error_message && strstr(cr.error_message, exp->error_substr);
+      vm_destroy(&vm);
+      arena_destroy(&arena);
+      return match != 0;
+    }
+    fprintf(stderr, "  Compile error: %s\n",
+            cr.error_message ? cr.error_message : "(unknown)");
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    return 0;
+  }
+
+  vm.intern_table = &intern_table;
+
+  /* Step 2: Get the closure to submit */
+  JaclClosure *closure = NULL;
+
+  if (cr.suspending) {
+    /* Execute chunk on temp VM to define procs and extract CPS closure */
+    VMResult r = vm_exec(&vm, &cr.chunk);
+    if (r != VM_OK) {
+      fprintf(stderr, "  Error extracting CPS closure: %s\n",
+              vm.error_message ? vm.error_message : "(unknown)");
+      vm_destroy(&vm);
+      arena_destroy(&arena);
+      return 0;
+    }
+    if (vm.stack_top == 0 || !jacl_is_closure(vm.stack[0])) {
+      fprintf(stderr, "  Top-level CPS did not produce closure\n");
+      vm_destroy(&vm);
+      arena_destroy(&arena);
+      return 0;
+    }
+    closure = jacl_as_closure(vm.stack[0]);
+  } else {
+    /* Non-suspending: wrap chunk in a closure for runtime submission */
+    closure = (JaclClosure*)gc_alloc(&vm.heap, OBJ_CLOSURE, sizeof(JaclClosure));
+    memset(closure, 0, sizeof(JaclClosure));
+    closure->chunk = cr.chunk;
+    closure->param_count = 0;
+    closure->upvalue_count = 0;
+  }
+
+  /* Step 3: Set up runtime */
+  Runtime rt;
+  runtime_init(&rt, 2);
+
+  /* Thread-safe print capture */
+  ThreadSafePrintCapture tspc;
+  memset(&tspc, 0, sizeof(tspc));
+  MUTEX_INIT(tspc.mutex);
+
+  /* Configure all worker VMs: print capture, intern table, env */
+  for (i = 0; i < rt.num_workers; i++) {
+    rt.workers[i].vm.print_fn = capture_print_threadsafe;
+    rt.workers[i].vm.print_ctx = &tspc;
+    rt.workers[i].vm.intern_table = &intern_table;
+    /* Copy env from temp VM so workers have user-defined procs */
+    harness__copy_env(&rt.workers[i].vm, &vm);
+  }
+
+  /* Step 4: Submit closure and wait for completion */
+  JaclVal completion = jacl_future(&rt.workers[0].vm.heap);
+  JaclFuture *cfut = jacl_as_future(completion);
+  bool is_cps = (closure->param_count == 1);
+  runtime__submit_spawn_task(&rt, closure, completion, is_cps);
+
+  /* Block until completion future resolves */
+  for (;;) {
+    uint32_t state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_ACQUIRE);
+    if (state == FUTURE_RESOLVED || state == FUTURE_ERROR) break;
+    SLEEP_MILLISECONDS(1);
+  }
+
+  uint32_t final_state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_RELAXED);
+  VMResult result = (final_state == FUTURE_ERROR) ? VM_RUNTIME_ERROR : VM_OK;
+
+  /* Step 5: Check output */
+  if (exp->expect_error) {
+    if (result != VM_RUNTIME_ERROR) {
+      fprintf(stderr, "  Expected runtime error, got VM_OK\n");
+      ok = 0;
+    } else {
+      /* Try to find error message from worker VMs */
+      const char* err_msg = NULL;
+      for (i = 0; i < rt.num_workers; i++) {
+        if (rt.workers[i].vm.error_message) {
+          err_msg = rt.workers[i].vm.error_message;
+          break;
+        }
+      }
+      if (err_msg && !strstr(err_msg, exp->error_substr)) {
+        fprintf(stderr, "  Expected error containing \"%s\", got: \"%s\"\n",
+                exp->error_substr, err_msg);
+        ok = 0;
+      }
+    }
+  } else {
+    if (result != VM_OK) {
+      /* Find error message from workers for diagnostics */
+      const char* err_msg = NULL;
+      for (i = 0; i < rt.num_workers; i++) {
+        if (rt.workers[i].vm.error_message) {
+          err_msg = rt.workers[i].vm.error_message;
+          break;
+        }
+      }
+      fprintf(stderr, "  Expected VM_OK, got runtime error: %s\n",
+              err_msg ? err_msg : "(unknown)");
+      ok = 0;
+    } else {
+      /* Build expected output string */
+      char expected[8192];
+      expected[0] = '\0';
+      for (i = 0; i < exp->count; i++) {
+        strcat(expected, exp->lines[i]);
+        strcat(expected, "\n");
+      }
+
+      if (strcmp(tspc.cap.buf, expected) != 0) {
+        fprintf(stderr, "  Output mismatch:\n");
+        fprintf(stderr, "    Expected: \"%s\"\n", expected);
+        fprintf(stderr, "    Actual:   \"%s\"\n", tspc.cap.buf);
+        ok = 0;
+      }
+    }
+  }
+
+  /* Step 6: Cleanup */
+  runtime_destroy(&rt);
+  MUTEX_DESTROY(tspc.mutex);
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+
+  return ok;
+}
+
 /* ===== Single test file runner ===== */
 
 /* Runs a single .jacl test file. Returns 1 if pass, 0 if fail. */
@@ -117,6 +341,13 @@ static int run_jacl_test(const char* filepath) {
   if (!parse_expectations(source, &exp)) {
     free(source);
     return 0;
+  }
+
+  /* Dispatch to concurrent runner if requested */
+  if (exp.concurrent) {
+    int result = run_jacl_test_concurrent(source, &exp);
+    free(source);
+    return result;
   }
 
   /* Set up VM with tracked allocator */
