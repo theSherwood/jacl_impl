@@ -4062,11 +4062,15 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
           if (name_node->type == AST_LIT_STRING && name_node->data.lit_string.length <= 7) {
             JaclVal pname = jacl_inline_string(
                 name_node->data.lit_string.value, name_node->data.lit_string.length);
-            /* Count user params from the param list */
+            /* Count user params from the param list (head + args) */
             AstNode* param_list = pargs[1];
             int16_t pcount = 0;
             if (param_list->type == AST_COMMAND) {
-              pcount = (int16_t)param_list->data.command.arg_count;
+              AstNode* phead = param_list->data.command.head;
+              if (phead && phead->type == AST_LIT_STRING &&
+                  phead->data.lit_string.length > 0) {
+                pcount = 1 + (int16_t)param_list->data.command.arg_count;
+              }
             }
             compiler__set_global_arity(&c, pname, pcount);
             GlobalArity* ga = compiler__find_global_arity(&c, pname);

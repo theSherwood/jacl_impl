@@ -2473,6 +2473,919 @@ static int test_oom_existing_code_ok(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * US-012: Integration tests and stress testing
+ * ==================================================================== */
+
+/* --- CPS correctness (direct style) --- */
+
+/* Test: single await returns correct value */
+static int test_integ_single_await(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "def f [spawn { 42 }]\n"
+        "print [await $f]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "42\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: multiple sequential awaits — chain of 3 */
+static int test_integ_three_seq_awaits(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "def f1 [spawn { 10 }]\n"
+        "def f2 [spawn { 20 }]\n"
+        "def f3 [spawn { 30 }]\n"
+        "def a [await $f1]\n"
+        "def b [await $f2]\n"
+        "def c [await $f3]\n"
+        "print [+ $a [+ $b $c]]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "60\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: await in if branches — suspending branch taken */
+static int test_integ_await_in_if(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  if [> 2 1] {\n"
+        "    def f [spawn { 100 }]\n"
+        "    print [await $f]\n"
+        "  } {\n"
+        "    print 42\n"
+        "  }\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "100\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: await in nested expressions */
+static int test_integ_await_nested_expr(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "def f1 [spawn { 3 }]\n"
+        "def f2 [spawn { 4 }]\n"
+        "print [+ [await $f1] [await $f2]]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "7\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: deep continuation chain (5+ awaits) */
+static int test_integ_deep_chain(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "def f1 [spawn { 1 }]\n"
+        "def f2 [spawn { 2 }]\n"
+        "def f3 [spawn { 3 }]\n"
+        "def f4 [spawn { 4 }]\n"
+        "def f5 [spawn { 5 }]\n"
+        "def a [await $f1]\n"
+        "def b [await $f2]\n"
+        "def c [await $f3]\n"
+        "def d [await $f4]\n"
+        "def e [await $f5]\n"
+        "print [+ $a [+ $b [+ $c [+ $d $e]]]]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "15\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: variable capture correctness across suspension */
+static int test_integ_variable_capture(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "def x 100\n"
+        "def y 200\n"
+        "def f [spawn { 5 }]\n"
+        "def r [await $f]\n"
+        "print [+ $x [+ $y $r]]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "305\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: calling suspending proc from another proc (suspension propagation) */
+static int test_integ_suspension_propagation(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc inner [] {\n"
+        "  def f [spawn { 99 }]\n"
+        "  await $f\n"
+        "}\n"
+        "proc outer [] {\n"
+        "  def val [inner]\n"
+        "  [+ $val 1]\n"
+        "}\n"
+        "proc main [] { print [outer] }\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "100\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* --- spawn+await integration --- */
+
+/* Test: spawn+await returns correct value */
+static int test_integ_spawn_await_value(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "def f [spawn { [+ 20 22] }]\n"
+        "print [await $f]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "42\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: multiple spawn + sequential await */
+static int test_integ_multi_spawn_await(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def f1 [spawn { 10 }]\n"
+        "  def f2 [spawn { 20 }]\n"
+        "  def f3 [spawn { 30 }]\n"
+        "  def a [await $f1]\n"
+        "  def b [await $f2]\n"
+        "  def c [await $f3]\n"
+        "  print [+ $a [+ $b $c]]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "60\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: spawn with heavy allocation (GC triggers) */
+static int test_integ_spawn_heavy_alloc(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Spawn a task that does recursive fibonacci — heavy allocation */
+    VMResult r = jacl_run(
+        "proc fib [n] {\n"
+        "  if [< $n 2] { [+ $n 0] } {\n"
+        "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
+        "  }\n"
+        "}\n"
+        "proc main [] {\n"
+        "  def f [spawn { [fib 15] }]\n"
+        "  print [await $f]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "610\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: await already-resolved future (no deadlock) */
+static int test_integ_await_already_resolved(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* spawn resolves synchronously in single-threaded mode,
+       so by the time we await, future is already resolved */
+    VMResult r = jacl_run(
+        "def f [spawn { 77 }]\n"
+        "def dummy [+ 1 1]\n"
+        "print [await $f]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "77\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: await errored future — error? checkable */
+static int test_integ_await_errored(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "def f [spawn { error \"oops\" }]\n"
+        "def val [await $f]\n"
+        "print [error? $val]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "true\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: multiple awaiters on same future (API-level) */
+static int test_integ_multi_awaiter_same(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Create a pending future, register multiple waiters, resolve */
+    JaclVal f = jacl_future(&vm.heap);
+    JaclFuture *fut = jacl_as_future(f);
+
+    JaclVal c1 = jacl_future(&vm.heap);
+    JaclVal c2 = jacl_future(&vm.heap);
+    JaclVal c3 = jacl_future(&vm.heap);
+
+    ASSERT(jacl_future_add_waiter(fut, c1, &vm.heap));
+    ASSERT(jacl_future_add_waiter(fut, c2, &vm.heap));
+    ASSERT(jacl_future_add_waiter(fut, c3, &vm.heap));
+
+    FutureWaiter *waiters = jacl_future_resolve(fut, jacl_i32(42), NULL, NULL);
+    int count = 0;
+    FutureWaiter *w = waiters;
+    while (w) { count++; w = w->next; }
+    ASSERT_INT_EQ(count, 3);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* --- parallel integration --- */
+
+/* Test: parallel 2 tasks results in order */
+static int test_integ_parallel_two(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def r [parallel { [+ 1 2] } { [* 3 4] }]\n"
+        "  print [vec-get $r 0]\n"
+        "  print [vec-get $r 1]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "3\n12\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parallel 5 tasks all correct */
+static int test_integ_parallel_five(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def r [parallel { 10 } { 20 } { 30 } { 40 } { 50 }]\n"
+        "  print [vec-get $r 0]\n"
+        "  print [vec-get $r 1]\n"
+        "  print [vec-get $r 2]\n"
+        "  print [vec-get $r 3]\n"
+        "  print [vec-get $r 4]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "10\n20\n30\n40\n50\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parallel with one error propagated */
+static int test_integ_parallel_error(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def r [parallel { 42 } { error \"bad\" }]\n"
+        "  if [error? $r] { print \"error\" } { print \"ok\" }\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "error\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parallel with heavy allocation per task */
+static int test_integ_parallel_heavy_alloc(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* fib at top-level, main uses parallel with fib calls */
+    VMResult r = jacl_run(
+        "proc fib [n] {\n"
+        "  if [< $n 2] { [+ $n 0] } {\n"
+        "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
+        "  }\n"
+        "}\n"
+        "proc main [] {\n"
+        "  def r [parallel { [fib 10] } { [fib 8] }]\n"
+        "  print [vec-get $r 0]\n"
+        "  print [vec-get $r 1]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "55\n21\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* --- race integration --- */
+
+/* Test: race 2 tasks — faster wins */
+static int test_integ_race_two(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def w [race { 42 } { 99 }]\n"
+        "  print $w\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    /* Single-threaded: first body wins */
+    ASSERT_STR_EQ(cap.buffer, "42\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: losers complete without crash */
+static int test_integ_race_losers_ok(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* 3 tasks, first wins, losers complete silently */
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def w [race { 1 } { 2 } { 3 }]\n"
+        "  print $w\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "1\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* --- Direct-style integration --- */
+
+/* Test: top-level code calling suspending procs runs to completion */
+static int test_integ_toplevel_suspending(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc aadd [a b] {\n"
+        "  def fa [spawn { [+ $a 0] }]\n"
+        "  def fb [spawn { [+ $b 0] }]\n"
+        "  [+ [await $fa] [await $fb]]\n"
+        "}\n"
+        "proc main [] { print [aadd 15 27] }\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "42\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: nested suspending proc calls (A calls B calls await) */
+static int test_integ_nested_suspending(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc inner [x] {\n"
+        "  def f [spawn { [+ $x 10] }]\n"
+        "  await $f\n"
+        "}\n"
+        "proc mid [x] {\n"
+        "  def v [inner $x]\n"
+        "  [+ $v 5]\n"
+        "}\n"
+        "proc main [] {\n"
+        "  print [mid 100]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "115\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: error propagation through CPS chain */
+static int test_integ_error_through_cps(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc bad [] {\n"
+        "  def f [spawn { error \"oops\" }]\n"
+        "  await $f\n"
+        "}\n"
+        "proc main [] {\n"
+        "  def result [bad]\n"
+        "  print [error? $result]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "true\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* --- Multi-threaded stress --- */
+
+/* Test: 4 workers spawning tasks via runtime */
+static int test_stress_workers_spawn(void) {
+    Runtime rt;
+    runtime_init(&rt, 4);
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Compile a proc that spawns a sub-task and awaits it */
+    CompileResult cr = test__compile(
+        "proc task [] { def f [spawn { [+ 20 22] }]; await $f }",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+
+    VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
+    ASSERT(r == VM_OK);
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: heavy allocation with concurrent GC */
+static int test_stress_heavy_alloc_gc(void) {
+    Runtime rt;
+    runtime_init(&rt, 4);
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* fib(15) does heavy allocation — exercises GC under concurrent load */
+    CompileResult cr = test__compile(
+        "proc fib [n] {\n"
+        "  if [< $n 2] { [+ $n 0] } {\n"
+        "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
+        "  }\n"
+        "}\n"
+        "proc task [] { def f [spawn { [fib 15] }]; await $f }",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+
+    VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
+    ASSERT(r == VM_OK);
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parallel with many tasks on workers */
+static int test_stress_parallel_many(void) {
+    Runtime rt;
+    runtime_init(&rt, 4);
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* parallel 4 tasks on 4 workers */
+    CompileResult cr = test__compile(
+        "proc task [] { parallel { 1 } { 2 } { 3 } { 4 } }",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+
+    VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
+    ASSERT(r == VM_OK);
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: race with many tasks on workers */
+static int test_stress_race_many(void) {
+    Runtime rt;
+    runtime_init(&rt, 4);
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* race 4 tasks on 4 workers */
+    CompileResult cr = test__compile(
+        "proc task [] { race { 10 } { 20 } { 30 } { 40 } }",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+
+    VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
+    ASSERT(r == VM_OK);
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: mixed spawn/await/parallel/race workload on workers */
+static int test_stress_mixed_workload(void) {
+    Runtime rt;
+    runtime_init(&rt, 4);
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* A proc that uses spawn+await then returns result */
+    CompileResult cr = test__compile(
+        "proc task [] {\n"
+        "  def f [spawn { [+ 10 20] }]\n"
+        "  def a [await $f]\n"
+        "  def r [parallel { [+ $a 1] } { [+ $a 2] }]\n"
+        "  [+ [vec-get $r 0] [vec-get $r 1]]\n"
+        "}",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+
+    VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
+    ASSERT(r == VM_OK);
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* --- Memory bounded --- */
+
+/* Test: sustained spawn/await workload — heap doesn't grow without bound */
+static int test_integ_memory_bounded(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Multiple sequential spawn+await — each creates futures and closures
+       that become garbage. GC should keep heap bounded. */
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def f1 [spawn { 1 }]\n"
+        "  def a [await $f1]\n"
+        "  def f2 [spawn { [+ $a 2] }]\n"
+        "  def b [await $f2]\n"
+        "  def f3 [spawn { [+ $b 3] }]\n"
+        "  def c [await $f3]\n"
+        "  def f4 [spawn { [+ $c 4] }]\n"
+        "  def d [await $f4]\n"
+        "  def f5 [spawn { [+ $d 5] }]\n"
+        "  print [await $f5]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    /* 1+2+3+4+5 = 15 */
+    ASSERT_STR_EQ(cap.buffer, "15\n");
+
+    /* Heap should have a bounded number of blocks */
+    uint32_t total_blocks = vm.block_pool.total_blocks_allocated;
+    ASSERT(total_blocks < 20);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* --- Regression --- */
+
+/* Test: M0-M12 fibonacci still works */
+static int test_regression_fib(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc fib [n] {\n"
+        "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
+        "}\n"
+        "print [fib 10]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "55\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: M0-M12 closures and upvalues still work */
+static int test_regression_closures(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc mkadd [x] {\n"
+        "  proc inner [y] { [+ $x $y] }\n"
+        "}\n"
+        "def add5 [mkadd 5]\n"
+        "print [$add5 10]\n"
+        "print [$add5 20]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "15\n25\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: M0-M12 vectors and maps still work */
+static int test_regression_collections(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "def v [vec 1 2 3]\n"
+        "print [vec-len $v]\n"
+        "print [vec-get $v 1]\n"
+        "def m [map \"a\" 1 \"b\" 2]\n"
+        "print [map-get $m \"a\"]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "3\n2\n1\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: M0-M12 error handling still works */
+static int test_regression_error_handling(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "def result [try { [+ 1 2] } e { \"failed\" }]\n"
+        "print $result",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "3\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: M0-M12 mutable state still works */
+static int test_regression_mutable_state(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "def a [atom 0]\n"
+        "reset! $a 42\n"
+        "print [deref $a]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "42\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: M0-M12 string operations still work */
+static int test_regression_strings(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "def name \"world\"\n"
+        "print \"hello $name\"",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "hello world\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -2588,6 +3501,49 @@ int main(void) {
         { "oom_max_blocks_limit",   test_oom_max_blocks_limit },
         { "oom_panic_diagnostic",   test_oom_panic_diagnostic },
         { "oom_existing_code_ok",   test_oom_existing_code_ok },
+        /* US-012: Integration tests and stress testing */
+        /* CPS correctness (direct style) */
+        { "integ_single_await",       test_integ_single_await },
+        { "integ_three_seq_awaits",   test_integ_three_seq_awaits },
+        { "integ_await_in_if",        test_integ_await_in_if },
+        { "integ_await_nested_expr",  test_integ_await_nested_expr },
+        { "integ_deep_chain",         test_integ_deep_chain },
+        { "integ_var_capture",        test_integ_variable_capture },
+        { "integ_susp_propagation",   test_integ_suspension_propagation },
+        /* spawn+await integration */
+        { "integ_spawn_await_val",    test_integ_spawn_await_value },
+        { "integ_multi_spawn_await",  test_integ_multi_spawn_await },
+        { "integ_spawn_heavy_alloc",  test_integ_spawn_heavy_alloc },
+        { "integ_await_resolved",     test_integ_await_already_resolved },
+        { "integ_await_errored",      test_integ_await_errored },
+        { "integ_multi_awaiter",      test_integ_multi_awaiter_same },
+        /* parallel integration */
+        { "integ_parallel_two",       test_integ_parallel_two },
+        { "integ_parallel_five",      test_integ_parallel_five },
+        { "integ_parallel_error",     test_integ_parallel_error },
+        { "integ_parallel_alloc",     test_integ_parallel_heavy_alloc },
+        /* race integration */
+        { "integ_race_two",           test_integ_race_two },
+        { "integ_race_losers_ok",     test_integ_race_losers_ok },
+        /* Direct-style integration */
+        { "integ_toplevel_susp",      test_integ_toplevel_suspending },
+        { "integ_nested_susp",        test_integ_nested_suspending },
+        { "integ_error_thru_cps",     test_integ_error_through_cps },
+        /* Multi-threaded stress */
+        { "stress_workers_spawn",     test_stress_workers_spawn },
+        { "stress_heavy_alloc_gc",    test_stress_heavy_alloc_gc },
+        { "stress_parallel_many",     test_stress_parallel_many },
+        { "stress_race_many",         test_stress_race_many },
+        { "stress_mixed_workload",    test_stress_mixed_workload },
+        /* Memory bounded */
+        { "integ_memory_bounded",     test_integ_memory_bounded },
+        /* Regression (M0-M12) */
+        { "regression_fib",           test_regression_fib },
+        { "regression_closures",      test_regression_closures },
+        { "regression_collections",   test_regression_collections },
+        { "regression_error_handling",test_regression_error_handling },
+        { "regression_mutable_state", test_regression_mutable_state },
+        { "regression_strings",       test_regression_strings },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
