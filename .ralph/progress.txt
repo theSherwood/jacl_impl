@@ -271,3 +271,16 @@
   - Removing VM stack scanning from concurrent GC requires updating all tests that used VM stack as roots — switch to env values or task deque entries
   - Single-threaded GC path (gc_collect in gc_collect.c) retains stack scanning for M0-M12 backward compatibility
 ---
+
+## 2026-03-02 - US-010
+- What was implemented: Adaptive GC threshold — per-heap gc_threshold field replacing fixed GC_THRESHOLD constant, survival-rate-based adjustment after each GC cycle (>80% survival → grow 50%, <20% survival → shrink 25%), GC_THRESHOLD_MIN (256KB) and GC_THRESHOLD_MAX (16MB) bounds, works for both single-threaded and concurrent GC paths, 4 unit tests
+- Files changed:
+  - src/gc.c — GC_THRESHOLD_MIN/MAX constants, gc_threshold field on ThreadHeap initialized to GC_THRESHOLD, gc__bump_alloc uses heap->gc_threshold
+  - src/gc_collect.c — gc_sweep returns bytes_survived, gc_sweep_concurrent returns bytes_survived, gc__adjust_threshold helper, gc_collect and gc_concurrent_collect call gc__adjust_threshold after sweep
+  - src/runtime.c — gc_concurrent_collect calls gc__adjust_threshold per worker after sweep
+  - test/test_m13.c — 4 new tests: adaptive_gc_increase, adaptive_gc_decrease, adaptive_gc_min_bound, adaptive_gc_max_bound
+- **Learnings for future iterations:**
+  - gc_sweep already walks all live objects — computing bytes_survived is just summing alloc_total during the walk
+  - Survival rate calculation uses integer arithmetic (bytes_survived * 100 / allocated) to avoid floating point
+  - Both gc_collect (single-threaded) and gc_concurrent_collect (runtime) need the threshold update
+---

@@ -200,7 +200,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "This replaces the fixed 1MB threshold from M12. High survival rate means GC is wasting time re-tracing live objects — back off. Low survival rate means lots of garbage — collect more often. The adaptive heuristic is simple and effective; more sophisticated approaches (e.g., targeting a heap occupancy ratio) can be added later."
     },
     {
