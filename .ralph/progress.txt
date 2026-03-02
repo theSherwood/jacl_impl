@@ -260,3 +260,14 @@
   - rt_run_to_completion takes 3 args (Runtime*, JaclClosure*, arena_t*), not 4
   - Single-threaded race: first body always wins (sequential execution); in runtime mode, CAS on settled determines winner
 ---
+
+## 2026-03-02 - US-009
+- What was implemented: Removed VM stack scanning (stack[0..stack_top]), call frame closure scanning, and call frame chunk constant scanning from gc_enumerate_roots in runtime.c. Concurrent GC roots now: (1) currently_executing with BUSY sentinel, (2) deque snapshots, (3) global environment values, (4) intern table entries, (5) inbox tasks. Single-threaded GC path (gc_mark in gc_collect.c) unchanged. Updated existing tests that relied on VM stack roots. Added 3 new tests verifying concurrent path works without stack scanning.
+- Files changed:
+  - src/runtime.c — Removed items 4-6 from gc_enumerate_roots (VM stack, call frame closures, chunk constants), renumbered remaining items
+  - test/test_runtime.c — Updated test_enumerate_roots_vm_stack to verify stack values NOT found, updated test_enumerate_roots_multi_worker to use env roots instead of stack, updated test_concurrent_gc_full_cycle to use env root instead of stack
+  - test/test_m13.c — 3 new tests: no_stack_scan_spawn, no_stack_scan_parallel, st_gc_still_works
+- **Learnings for future iterations:**
+  - Removing VM stack scanning from concurrent GC requires updating all tests that used VM stack as roots — switch to env values or task deque entries
+  - Single-threaded GC path (gc_collect in gc_collect.c) retains stack scanning for M0-M12 backward compatibility
+---

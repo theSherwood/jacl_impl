@@ -181,7 +181,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "This completes the GC_CONCURRENCY_DESIGN.md Section 3 contract: continuation closures capture all live state, continuations are tasks on deques, GC scans deques. VM stack scanning was an M12 implementation shortcut that the CPS transform makes unnecessary and unsafe for the concurrent path."
     },
     {
