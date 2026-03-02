@@ -82,6 +82,7 @@ struct Runtime {
 /* Forward declarations for functions used in the worker loop */
 static void gc__concurrent_task(void *data);
 static void runtime_submit(Runtime *rt, void (*fn)(void *), void *data);
+static void gc_concurrent_collect(Runtime *rt);
 
 /* Thread-local worker ID (set in worker loop, -1 for non-worker threads) */
 static __thread int rt__worker_id = -1;
@@ -135,6 +136,28 @@ static void runtime__init_worker_vm(WorkerThread *w) {
     vm->env.names[2]  = jacl_inline_string("nil", 3);
     vm->env.values[2] = JACL_NIL;
     vm->env.count = 3;
+}
+
+/* ======================================================================
+ * Emergency GC callback for concurrent mode (OOM escalation Tier 1)
+ *
+ * Attempts to run a full concurrent GC cycle inline. If another GC is
+ * already running, waits for it to complete.
+ * ====================================================================== */
+
+static void runtime__emergency_gc(void *ctx) {
+    Runtime *rt = (Runtime *)ctx;
+    uint32_t expected = 0;
+    if (ATOMIC_CAS(&rt->gc_running, &expected, 1,
+                    MEM_ACQ_REL, MEM_RELAXED)) {
+        gc_concurrent_collect(rt);
+        /* gc_concurrent_collect sets gc_running = 0 */
+    } else {
+        /* Another GC is already running — wait for it to finish */
+        while (ATOMIC_LOAD_EXPLICIT(&rt->gc_running, MEM_ACQUIRE)) {
+            SLEEP_MILLISECONDS(1);
+        }
+    }
 }
 
 /* ======================================================================
@@ -206,6 +229,8 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
             rt__current_worker = self;
             gc__thread_epoch = (uint32_t)ATOMIC_LOAD_EXPLICIT(
                 &self->thread_epoch, MEM_RELAXED);
+            gc__emergency_gc_fn  = runtime__emergency_gc;
+            gc__emergency_gc_ctx = self->runtime;
 
             /* Execute the task */
             task->fn(task->data);

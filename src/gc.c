@@ -74,6 +74,12 @@ static inline bool jacl_is_heap_type(JaclVal v) {
 #define GC_LINE_SIZE        128     /* bytes per line */
 #define GC_LINES_PER_BLOCK  512     /* GC_BLOCK_SIZE / GC_LINE_SIZE */
 
+/* --- OOM escalation: maximum heap blocks (compile-time configurable) --- */
+
+#ifndef GC_MAX_HEAP_BLOCKS
+#define GC_MAX_HEAP_BLOCKS 4096   /* 4096 * 64KB = 256MB */
+#endif
+
 #define GC_LINE_FREE     0
 #define GC_LINE_OCCUPIED 1
 
@@ -90,11 +96,15 @@ typedef struct GCBlock {
 typedef struct {
     GCBlock         *free_list;
     platform_mutex_t mutex;
+    uint32_t         total_blocks_allocated;  /* blocks malloc'd from OS */
+    uint32_t         max_blocks;              /* limit (default GC_MAX_HEAP_BLOCKS) */
 } BlockPool;
 
 static void gc_block_pool_init(BlockPool *pool) {
     pool->free_list = NULL;
     MUTEX_INIT(pool->mutex);
+    pool->total_blocks_allocated = 0;
+    pool->max_blocks = GC_MAX_HEAP_BLOCKS;
 }
 
 static GCBlock *gc_block_pool_get(BlockPool *pool) {
@@ -107,8 +117,18 @@ static GCBlock *gc_block_pool_get(BlockPool *pool) {
     MUTEX_UNLOCK(pool->mutex);
 
     if (!block) {
+        /* Check limit before allocating from OS */
+        MUTEX_LOCK(pool->mutex);
+        uint32_t count = pool->total_blocks_allocated;
+        MUTEX_UNLOCK(pool->mutex);
+        if (count >= pool->max_blocks) return NULL;
+
         block = (GCBlock *)malloc(sizeof(GCBlock));
         if (!block) return NULL;
+
+        MUTEX_LOCK(pool->mutex);
+        pool->total_blocks_allocated++;
+        MUTEX_UNLOCK(pool->mutex);
     }
     memset(block->payload, 0, GC_BLOCK_SIZE);
     memset(block->line_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
@@ -187,6 +207,27 @@ static void gc_heap_destroy(ThreadHeap *heap) {
     heap->cursor = NULL;
     heap->limit = NULL;
 }
+
+/* --- Emergency GC callback (set by vm.c or runtime.c) --- */
+
+static __thread void (*gc__emergency_gc_fn)(void *ctx) = NULL;
+static __thread void *gc__emergency_gc_ctx = NULL;
+
+/* --- OOM panic handler --- */
+
+static void gc__oom_panic_default(ThreadHeap *heap, size_t request_size) {
+    fprintf(stderr, "JACL OOM PANIC:\n");
+    fprintf(stderr, "  Heap blocks: %u / %u\n",
+            heap->pool->total_blocks_allocated, heap->pool->max_blocks);
+    fprintf(stderr, "  Heap size: %zuKB\n",
+            (size_t)heap->pool->total_blocks_allocated * (GC_BLOCK_SIZE / 1024));
+    fprintf(stderr, "  Allocation request: %zu bytes\n", request_size);
+    fprintf(stderr, "  GC threshold: %zu bytes\n", heap->gc_threshold);
+    abort();
+}
+
+/* Override for testing (set to non-NULL to intercept panic) */
+static void (*gc__oom_handler)(ThreadHeap *, size_t) = gc__oom_panic_default;
 
 /* --- Internal helpers --- */
 
@@ -292,8 +333,55 @@ static void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
 
     /* No room in any existing block — acquire a new one from the pool */
     new_block = gc_block_pool_get(heap->pool);
-    if (!new_block) return NULL;
+    if (new_block) goto got_block;
 
+    /* ============================================================
+     * OOM Escalation (3-tier: GC_CONCURRENCY_DESIGN.md Section 15)
+     * ============================================================ */
+
+    /* Tier 1: Emergency synchronous GC */
+    if (gc__emergency_gc_fn) {
+        gc__emergency_gc_fn(gc__emergency_gc_ctx);
+    }
+
+    /* After emergency GC: rescan existing blocks (GC may have freed runs) */
+    b = heap->blocks;
+    while (b) {
+        if (gc__find_fit_in_block(heap, b, needed_lines, 0)) {
+            return gc__bump_alloc(heap, total, obj_type);
+        }
+        b = b->next;
+    }
+
+    /* After emergency GC: retry pool (GC may have recycled blocks) */
+    new_block = gc_block_pool_get(heap->pool);
+    if (new_block) goto got_block;
+
+    /* Tier 2: Heap growth up to limit */
+    {
+        MUTEX_LOCK(heap->pool->mutex);
+        uint32_t count = heap->pool->total_blocks_allocated;
+        MUTEX_UNLOCK(heap->pool->mutex);
+
+        if (count < heap->pool->max_blocks) {
+            new_block = (GCBlock *)malloc(sizeof(GCBlock));
+            if (new_block) {
+                MUTEX_LOCK(heap->pool->mutex);
+                heap->pool->total_blocks_allocated++;
+                MUTEX_UNLOCK(heap->pool->mutex);
+                memset(new_block->payload, 0, GC_BLOCK_SIZE);
+                memset(new_block->line_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
+                new_block->next = NULL;
+                goto got_block;
+            }
+        }
+    }
+
+    /* Tier 3: Panic */
+    gc__oom_handler(heap, total);
+    return NULL; /* unreachable (handler aborts) */
+
+got_block:
     new_block->next = heap->blocks;
     heap->blocks = new_block;
     heap->current_block = new_block;

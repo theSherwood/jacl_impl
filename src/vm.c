@@ -104,6 +104,13 @@ static VMResult jacl_run(const char* source, VM* vm, arena_t* arena);
 
 static void gc_collect(ThreadHeap *heap, VM *vm);
 
+/* --- Emergency GC callback for single-threaded mode --- */
+
+static void vm__emergency_gc_single(void *ctx) {
+    VM *vm = (VM *)ctx;
+    gc_collect(&vm->heap, vm);
+}
+
 /* --- Concurrent GC trigger (defined in runtime.c, after gc_collect.c) --- */
 
 static void gc_concurrent_trigger(void *runtime_ptr);
@@ -237,6 +244,10 @@ static void vm_init(VM* vm, arena_t* arena) {
   gc_block_pool_init(&vm->block_pool);
   gc_heap_init(&vm->heap, &vm->block_pool);
   gc__current_heap = &vm->heap;
+
+  /* Set emergency GC callback for single-threaded OOM escalation */
+  gc__emergency_gc_fn  = vm__emergency_gc_single;
+  gc__emergency_gc_ctx = vm;
 
   /* Ensure HAMT key handlers are wired up */
   collections__init();

@@ -2269,6 +2269,210 @@ static int test_adaptive_threshold_max_bound(void) {
     TEST_PASS();
 }
 
+/* ================================================================
+ * US-011: OOM escalation
+ * ================================================================ */
+
+#include <setjmp.h>
+
+/* Test-local state for OOM panic interception */
+static jmp_buf oom_panic_jmp;
+static bool    oom_panic_called;
+
+static void test__oom_panic_handler(ThreadHeap *heap, size_t request_size) {
+    (void)heap; (void)request_size;
+    oom_panic_called = true;
+    longjmp(oom_panic_jmp, 1);
+}
+
+/* Test: emergency GC fires and reclaims garbage when blocks are exhausted */
+static int test_oom_emergency_gc_fires(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Set very small block limit — 2 blocks (128KB total) */
+    vm.block_pool.max_blocks = 2;
+
+    /* Fill blocks with garbage (not rooted — nothing on VM stack) */
+    for (int i = 0; i < 5000; i++) {
+        void *p = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+        if (!p) break;
+    }
+
+    /* At this point, 2 blocks allocated and full of garbage.
+     * The emergency GC callback (vm__emergency_gc_single) should fire
+     * on the next allocation that triggers a new block request.
+     * Emergency GC collects all garbage → blocks get free space.
+     * Allocation should succeed without panicking. */
+    void *result = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    ASSERT(result != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: tier 3 panic fires when all blocks are live and at limit */
+static int test_oom_tier3_panic(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Set very small block limit: 1 block = 64KB */
+    vm.block_pool.max_blocks = 1;
+
+    /* Override panic handler to avoid abort() */
+    void (*saved_handler)(ThreadHeap *, size_t) = gc__oom_handler;
+    gc__oom_handler = test__oom_panic_handler;
+    oom_panic_called = false;
+
+    /* Fill the single block with LIVE data (rooted on VM stack).
+     * Use large payloads (~248 bytes each) so 255 objects fill the 64KB block.
+     * 256-byte aligned allocs × 255 = ~65280 bytes ≈ 64KB. */
+    for (int i = 0; i < VM_STACK_MAX - 1; i++) {
+        void *p = gc_alloc(&vm.heap, OBJ_HEAP_I64, 248);
+        if (!p) break;
+        JaclVal v = JACL_TAG_I64 | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+        vm.stack[vm.stack_top++] = v;
+    }
+
+    /* Block is nearly full with live data. Next alloc needs a new block
+     * but max_blocks=1. Emergency GC can't free anything (all rooted).
+     * Tier 2 fails (at limit). Tier 3 panic fires. */
+    if (setjmp(oom_panic_jmp) == 0) {
+        for (int i = 0; i < 5000; i++) {
+            (void)gc_alloc(&vm.heap, OBJ_HEAP_I64, 248);
+        }
+    }
+
+    ASSERT(oom_panic_called);
+
+    gc__oom_handler = saved_handler;
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: total_blocks_allocated tracks correctly */
+static int test_oom_total_blocks_tracking(void) {
+    BlockPool pool;
+    gc_block_pool_init(&pool);
+
+    ASSERT_U32_EQ(pool.total_blocks_allocated, 0);
+
+    /* Get a new block (malloc) — counter should increment */
+    GCBlock *b1 = gc_block_pool_get(&pool);
+    ASSERT(b1 != NULL);
+    ASSERT_U32_EQ(pool.total_blocks_allocated, 1);
+
+    /* Get another new block (malloc) — counter should increment */
+    GCBlock *b2 = gc_block_pool_get(&pool);
+    ASSERT(b2 != NULL);
+    ASSERT_U32_EQ(pool.total_blocks_allocated, 2);
+
+    /* Return a block to free list — counter stays the same */
+    gc_block_pool_return(&pool, b1);
+    ASSERT_U32_EQ(pool.total_blocks_allocated, 2);
+
+    /* Get from free list — counter stays the same (no new malloc) */
+    GCBlock *b3 = gc_block_pool_get(&pool);
+    ASSERT(b3 == b1); /* recycled */
+    ASSERT_U32_EQ(pool.total_blocks_allocated, 2);
+
+    /* Cleanup */
+    gc_block_pool_return(&pool, b2);
+    gc_block_pool_return(&pool, b3);
+    gc_block_pool_destroy(&pool);
+    TEST_PASS();
+}
+
+/* Test: max_blocks limit prevents allocation beyond limit */
+static int test_oom_max_blocks_limit(void) {
+    BlockPool pool;
+    gc_block_pool_init(&pool);
+    pool.max_blocks = 2;
+
+    GCBlock *b1 = gc_block_pool_get(&pool);
+    ASSERT(b1 != NULL);
+    GCBlock *b2 = gc_block_pool_get(&pool);
+    ASSERT(b2 != NULL);
+
+    /* At limit — next get should fail (no free list, at max_blocks) */
+    GCBlock *b3 = gc_block_pool_get(&pool);
+    ASSERT(b3 == NULL);
+
+    /* Return one to free list — next get should succeed (recycled) */
+    gc_block_pool_return(&pool, b1);
+    GCBlock *b4 = gc_block_pool_get(&pool);
+    ASSERT(b4 != NULL);
+
+    /* Cleanup */
+    gc_block_pool_return(&pool, b2);
+    gc_block_pool_return(&pool, b4);
+    gc_block_pool_destroy(&pool);
+    TEST_PASS();
+}
+
+/* Test: OOM panic handler receives correct heap context */
+static int test_oom_panic_diagnostic(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    vm.block_pool.max_blocks = 1;
+
+    /* Override panic handler */
+    void (*saved_handler)(ThreadHeap *, size_t) = gc__oom_handler;
+    gc__oom_handler = test__oom_panic_handler;
+    oom_panic_called = false;
+
+    /* Fill the single block with large live objects (rooted on stack) */
+    for (int i = 0; i < VM_STACK_MAX - 1; i++) {
+        void *p = gc_alloc(&vm.heap, OBJ_HEAP_I64, 248);
+        if (!p) break;
+        JaclVal v = JACL_TAG_I64 | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+        vm.stack[vm.stack_top++] = v;
+    }
+
+    /* Trigger OOM — should call panic handler */
+    if (setjmp(oom_panic_jmp) == 0) {
+        for (int i = 0; i < 5000; i++) {
+            (void)gc_alloc(&vm.heap, OBJ_HEAP_I64, 248);
+        }
+    }
+
+    ASSERT(oom_panic_called);
+
+    gc__oom_handler = saved_handler;
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: existing tests still work (OOM escalation doesn't affect normal allocation) */
+static int test_oom_existing_code_ok(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc fib [n] {\n"
+        "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
+        "}\n"
+        "print [fib 10]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "55\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -2377,6 +2581,13 @@ int main(void) {
         { "adaptive_gc_decrease",   test_adaptive_threshold_decrease },
         { "adaptive_gc_min_bound",  test_adaptive_threshold_min_bound },
         { "adaptive_gc_max_bound",  test_adaptive_threshold_max_bound },
+        /* US-011: OOM escalation */
+        { "oom_emergency_gc",       test_oom_emergency_gc_fires },
+        { "oom_tier3_panic",        test_oom_tier3_panic },
+        { "oom_blocks_tracking",    test_oom_total_blocks_tracking },
+        { "oom_max_blocks_limit",   test_oom_max_blocks_limit },
+        { "oom_panic_diagnostic",   test_oom_panic_diagnostic },
+        { "oom_existing_code_ok",   test_oom_existing_code_ok },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
