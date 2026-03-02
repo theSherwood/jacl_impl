@@ -163,7 +163,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "The CAS on settled ensures exactly one winner. Losers run to completion — their results become GC garbage. No cancellation in M13 (deferred to future PRD). The race continuation is scheduled by the winning task's wrapper, on the winning worker's public deque."
     },
     {

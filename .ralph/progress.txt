@@ -242,3 +242,21 @@
   - BytecodeChunk uses code_count (not count) for byte count field
   - SourcePos uses column (not col) for column number field
 ---
+
+## 2026-03-02 - US-008
+- What was implemented: race primitive — OP_RACE opcode, OBJ_RACE_AGG GC type with CAS settled flag, RaceAgg struct (settled flag, continuation), CPS compilation of race bodies (reuses compiler__compile_parallel_body), single-threaded execution (first body wins), runtime mode via RaceTaskData with CAS settled 0→1 (winner schedules continuation, losers discard), 7 unit tests
+- Files changed:
+  - src/bytecode.c — OP_RACE opcode added after OP_PARALLEL; opcode_name updated
+  - src/gc.c — OBJ_RACE_AGG enum value, RaceAgg struct (settled + continuation), jacl_race_agg constructor, race_agg_ptr/as_race_agg helpers
+  - src/gc_collect.c — GC tracing for OBJ_RACE_AGG (trace continuation)
+  - src/compiler.c — compiler__is_direct_race helper, Case 1c in compile_cps_stmts for direct [race ...], Case 2 race handling for [def name [race ...]], replaced placeholder with OP_RACE emission
+  - src/vm.c — OP_RACE handler (runtime mode: create RaceAgg + submit N tasks; single-threaded: sequential execution, first result wins), forward declaration for runtime__submit_race_task
+  - src/runtime.c — RaceTaskData struct, runtime__race_task_exec (CAS settled for winner determination, schedule continuation), runtime__submit_race_task
+  - test/test_bytecode.c — opcode enum assertions shifted by +1 for OP_RACE insertion
+  - test/test_m13.c — 7 new tests: race_two_tasks, race_three_tasks, race_error_prop, race_compiles, race_worker_exec, race_continuation, race_existing_ok
+- **Learnings for future iterations:**
+  - Race reuses compiler__compile_parallel_body for body compilation — same closure pattern works for both
+  - RaceAgg is simpler than ParallelAgg — no result slots needed, just settled flag + continuation
+  - rt_run_to_completion takes 3 args (Runtime*, JaclClosure*, arena_t*), not 4
+  - Single-threaded race: first body always wins (sequential execution); in runtime mode, CAS on settled determines winner
+---
