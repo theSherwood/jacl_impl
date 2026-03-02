@@ -123,6 +123,10 @@
 - JACL `[cmd -5]` parses as 2 args (`-` and `5`), not negative literal — use `[cmd [- 0 5]]`
 - jacl_future_resolve/error return FutureWaiter* list — callers MUST schedule waiters via runtime__schedule_waiters (runtime mode) or handle inline (single-threaded)
 - OP_AWAIT returns VM_OK in runtime mode (exits vm__run); single-threaded mode calls continuation inline via new call frame
+- OOM escalation: 3-tier in gc_alloc — Tier 1 emergency GC (thread-local callback), Tier 2 heap growth (max_blocks check), Tier 3 panic (gc__oom_handler)
+- Emergency GC callbacks: gc__emergency_gc_fn/ctx are __thread locals, set by vm_init (single-threaded) and runtime worker loop (concurrent)
+- BlockPool.total_blocks_allocated tracks OS mallocs; BlockPool.max_blocks = configurable limit (default GC_MAX_HEAP_BLOCKS = 4096)
+- gc__oom_handler function pointer: defaults to gc__oom_panic_default (stderr + abort), overridable for testing via longjmp
 
 ## 2026-02-26 - US-001
 - What was implemented: Future type (JaclFuture, FutureWaiter structs), GC integration (OBJ_FUTURE, OBJ_FUTURE_WAITER tracing), jacl_future constructor, resolve/error/add_waiter APIs with write barrier, JACL_TAG_FUTURE value tag, future? builtin predicate (OP_IS_FUTURE opcode), future formatting in print/to_string, 12 unit tests
@@ -283,4 +287,20 @@
   - gc_sweep already walks all live objects — computing bytes_survived is just summing alloc_total during the walk
   - Survival rate calculation uses integer arithmetic (bytes_survived * 100 / allocated) to avoid floating point
   - Both gc_collect (single-threaded) and gc_concurrent_collect (runtime) need the threshold update
+---
+
+## 2026-03-02 - US-011
+- What was implemented: 3-tier OOM escalation in gc_alloc when block allocation fails. Tier 1: emergency synchronous GC via thread-local callback (single-threaded: gc_collect, concurrent: gc_concurrent_collect with CAS gc_running). Tier 2: heap growth up to configurable max_blocks limit. Tier 3: panic with diagnostic message (heap blocks, heap size, allocation request, GC threshold). BlockPool tracks total_blocks_allocated with per-pool max_blocks limit. gc_block_pool_get enforces limit before OS malloc. Emergency GC callbacks set by vm_init (single-threaded) and worker loop (concurrent). Overridable gc__oom_handler for test interception.
+- Files changed:
+  - src/gc.c — GC_MAX_HEAP_BLOCKS constant, total_blocks_allocated + max_blocks on BlockPool, gc_block_pool_get limit enforcement, gc__emergency_gc_fn/ctx thread-local callbacks, gc__oom_panic_default + gc__oom_handler, gc_alloc 3-tier escalation (Tier 1 emergency GC + rescan, Tier 2 growth check, Tier 3 panic)
+  - src/vm.c — vm__emergency_gc_single callback (forward-declares gc_collect, calls gc_collect on current heap/VM), vm_init sets gc__emergency_gc_fn/ctx
+  - src/runtime.c — runtime__emergency_gc callback (CAS gc_running, inline gc_concurrent_collect or wait for running GC), forward declaration of gc_concurrent_collect, worker loop sets gc__emergency_gc_fn/ctx
+  - test/test_m13.c — 6 new tests: oom_emergency_gc (verify GC reclaims garbage under pressure), oom_tier3_panic (verify abort intercepted via longjmp), oom_blocks_tracking (counter increments/stays on recycle), oom_max_blocks_limit (limit enforced, recycled blocks bypass limit), oom_panic_diagnostic (panic handler called), oom_existing_code_ok (regression)
+- **Learnings for future iterations:**
+  - Emergency GC from gc_alloc requires function pointer callbacks since gc.c is early in the unity build (before vm.c and runtime.c)
+  - Thread-local gc__emergency_gc_fn/ctx pattern: vm_init sets single-threaded callback, runtime worker loop sets concurrent callback
+  - To test OOM panic without aborting: use longjmp from a custom gc__oom_handler + setjmp in the test
+  - To trigger Tier 3 in tests: use large payloads (248 bytes) to fill blocks with rooted objects — small i64s (24 bytes) leave too much free space for 256 stack slots
+  - gc_block_pool_get checks max_blocks before malloc; free-list recycling bypasses limit check (recycled blocks don't increase total_blocks_allocated)
+  - runtime__emergency_gc needs forward declaration of gc_concurrent_collect (defined later in runtime.c)
 ---

@@ -217,7 +217,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "Emergency GC is rare — only fires under extreme memory pressure when the normal concurrent GC hasn't kept up. The 3-tier design from GC_CONCURRENCY_DESIGN.md Section 15: emergency GC → heap growth → panic. Most programs never hit tier 2 or 3."
     },
     {
