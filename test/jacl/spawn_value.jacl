@@ -1,0 +1,9 @@
+# expect: true
+# expect: 10
+# spawn returns a future; await extracts the value
+proc main [] {
+  def f [spawn { 10 }]
+  print [future? $f]
+  print [await $f]
+}
+main
