@@ -307,7 +307,7 @@
         "All tests pass (build.sh)"
       ],
       "priority": 16,
-      "passes": false,
+      "passes": true,
       "notes": "In single-threaded mode, the first body always wins (sequential execution). In concurrent mode, the actual faster body wins — tests should account for non-deterministic winner by either making one body trivially faster or checking that the result is one of the expected values. The '# expect:' header is line-exact, so non-deterministic output needs careful test design."
     },
     {

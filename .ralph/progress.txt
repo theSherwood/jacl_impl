@@ -380,3 +380,15 @@
   - Parallel bodies with spawn+await work correctly: `{ def f [spawn { val }]; await $f }` pattern using semicolons for multi-statement blocks
   - All parallel tests pass in both single-threaded and concurrent modes without modification to runtime
 ---
+
+## 2026-03-02 - US-016
+- What was implemented: 3 .jacl e2e tests for the race primitive covering basic two-body race (first body wins in single-threaded), error propagation when winning body errors (error?/error-val), and concurrent mode execution with real worker threads (both bodies return same value for deterministic output).
+- Files changed:
+  - test/jacl/race_basic.jacl — 2 bodies, first wins in single-threaded mode (prints 10)
+  - test/jacl/race_error.jacl — winning body errors, checks error? and error-val
+  - test/jacl/race_concurrent.jacl — `# mode: concurrent`, both bodies return 42 for deterministic output
+- **Learnings for future iterations:**
+  - Single-threaded race: first body always wins (sequential execution) — test output is deterministic
+  - Concurrent race: non-deterministic winner — use same return value in all bodies for deterministic `# expect:` output, or make one body trivially faster
+  - Race tests follow same `proc main [] { ... }; main` pattern as parallel/spawn tests
+---
