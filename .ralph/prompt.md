@@ -82,6 +82,7 @@ Only update AGENTS.md if you have **genuinely reusable knowledge** that would he
 - Do NOT commit broken code
 - Keep changes focused and minimal
 - Follow existing code patterns
+- Prioritize e2e tests
 
 ## Stop Condition
 
