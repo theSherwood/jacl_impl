@@ -127,6 +127,29 @@
 - Emergency GC callbacks: gc__emergency_gc_fn/ctx are __thread locals, set by vm_init (single-threaded) and runtime worker loop (concurrent)
 - BlockPool.total_blocks_allocated tracks OS mallocs; BlockPool.max_blocks = configurable limit (default GC_MAX_HEAP_BLOCKS = 4096)
 - gc__oom_handler function pointer: defaults to gc__oom_panic_default (stderr + abort), overridable for testing via longjmp
+- JACL `true`/`false` are bare words (strings), both TRUTHY — use `[> $n 0]` or `[== $x 1]` for boolean conditions, NOT `true`/`false` literals
+- JACL has no `fn` keyword — closures use inner `proc name [params] { body }` definitions (see test/jacl/procs.jacl for `mkadd` pattern)
+- JACL `try` syntax: `[try { body } e { handler }]` — NOT `[try { body } catch [e] { handler }]`
+- Top-level CPS transform: `compiler__top_level_suspends` only detects (1) direct await/parallel/race in subtree and (2) suspending proc as HEAD of top-level command — does NOT detect suspending calls nested inside non-suspending call args (e.g., `print [suspending_proc]` won't trigger CPS)
+- Workaround for top-level CPS: wrap suspending code in `proc main [] { ... }; main` — then `main` is recognized as suspending head
+- Top-level CPS pre-registration: must count head + args from param list AST (head has length > 0 → pcount = 1 + arg_count)
+- Defining `proc inner [params]` INSIDE a CPS-transformed proc body segfaults — keep helper procs at top level
+- Recursive CPS tail calls (e.g., suspending proc calling itself) don't correctly propagate return values — result is nil instead of expected value
+
+## 2026-03-02 - US-012
+- What was implemented: 37 comprehensive integration and stress tests covering CPS correctness, spawn+await, parallel, race, direct-style, multi-threaded stress, memory bounded, and M0-M12 regressions. Fixed a compiler bug in top-level CPS pre-registration param counting (head + args, not just args). Documented several CPS runtime limitations.
+- Files changed:
+  - test/test_m13.c — 37 new integration/stress tests (956 lines added): 7 CPS correctness, 6 spawn+await, 4 parallel, 2 race, 3 direct-style, 5 multi-threaded stress, 1 memory bounded, 6 regression + existing 3 placeholder tests updated
+  - src/compiler.c — Fixed top-level CPS pre-registration param counting: pcount = 1 + arg_count when head has length > 0 (was missing head element, causing `proc fib [n]` to register as 0 params)
+- **Learnings for future iterations:**
+  - Top-level CPS pre-registration must count head + args from param list AST (head element is first param, args are subsequent)
+  - `compiler__top_level_suspends` only detects suspending calls as HEAD of top-level commands — wrap in `proc main [] { ... }; main` pattern for nested suspending calls
+  - Inner proc definitions inside CPS-transformed proc bodies segfault — keep helpers at top level
+  - Recursive CPS tail calls don't propagate return values — use sequential spawn+await chains instead
+  - JACL true/false are bare words (strings), both truthy — use comparison operators for boolean conditions
+  - JACL has no `fn` keyword — use `proc name [params] { body }` for closures
+  - JACL try syntax: `[try { body } e { handler }]` — no `catch` keyword
+---
 
 ## 2026-02-26 - US-001
 - What was implemented: Future type (JaclFuture, FutureWaiter structs), GC integration (OBJ_FUTURE, OBJ_FUTURE_WAITER tracing), jacl_future constructor, resolve/error/add_waiter APIs with write barrier, JACL_TAG_FUTURE value tag, future? builtin predicate (OP_IS_FUTURE opcode), future formatting in print/to_string, 12 unit tests
