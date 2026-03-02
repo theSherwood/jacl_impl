@@ -1,7 +1,7 @@
 {
   "project": "JACL",
   "branchName": "ralph/cps-concurrency",
-  "description": "M13 — CPS Transform & Concurrency Primitives: Full CPS compiler transform with suspension inference, user-facing spawn/await/parallel/race primitives, Future type, direct-style suspension propagation, VM stack root removal, adaptive GC threshold, and OOM escalation.",
+  "description": "M13 — CPS Transform & Concurrency Primitives: Full CPS compiler transform with suspension inference, user-facing spawn/await/parallel/race primitives, Future type, direct-style suspension propagation, VM stack root removal, adaptive GC threshold, OOM escalation, plus comprehensive .jacl e2e test coverage for M13 concurrency and M11 type system gaps.",
   "userStories": [
     {
       "id": "US-001",
@@ -240,6 +240,130 @@
       "priority": 12,
       "passes": true,
       "notes": "Follow existing test pattern: test_helpers.h, PrintCapture, TestEntry table grouped by US-XXX comments. Concurrency tests use rt_run_to_completion to block the test thread for deterministic output. Stress tests need generous timeout (60s+) for CI. Use -fsanitize=thread for data race detection and -fsanitize=address for use-after-free during development."
+    },
+    {
+      "id": "US-013",
+      "title": "Extend harness for multi-threaded execution",
+      "description": "As a developer, I need the .jacl test harness to support running tests with the runtime worker pool so that concurrency tests exercise real multi-threaded execution via rt_run_to_completion.",
+      "acceptanceCriteria": [
+        "Add '# mode: concurrent' header directive to .jacl file format — when present, the harness uses runtime_init + rt_run_to_completion instead of plain jacl_run()",
+        "Without '# mode: concurrent', behavior is unchanged (uses jacl_run() for single-threaded execution)",
+        "The concurrent mode must: initialize a Runtime with worker threads, compile the source to get a CompileResult, handle top-level CPS (suspending code produces a closure), submit via rt_run_to_completion, capture print output via the same PrintCapture mechanism, and clean up with runtime_destroy",
+        "Print capture must work from worker threads — worker VMs must have print_fn / print_ctx set to the shared PrintCapture (with mutex protection since output from concurrent tasks may interleave)",
+        "The '# mode: concurrent' directive is parsed alongside existing '# expect:' / '# expect-error:' headers",
+        "Update build.sh harness entry to include -lpthread flag",
+        "All existing .jacl tests continue to pass unchanged",
+        "All tests pass (build.sh)"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": "rt_run_to_completion takes (Runtime*, JaclClosure*, arena_t*) and blocks until the program completion future resolves. The harness needs to compile the source, detect if the top-level is suspending (via CompileResult.suspending), wrap in the CPS closure pattern, and submit. Look at how jacl_run in vm.c handles cr.suspending for the pattern to replicate. Worker VM initialization uses runtime__init_worker_vm which is internal to the runtime — the harness should use the public runtime_init / runtime_destroy API and let workers self-initialize."
+    },
+    {
+      "id": "US-014",
+      "title": "Spawn and await e2e tests",
+      "description": "As a developer, I need .jacl e2e tests for spawn and await so that the full pipeline from JACL source to concurrent execution is validated.",
+      "acceptanceCriteria": [
+        "spawn_basic.jacl — spawn a simple computation, await it, print result (# mode: concurrent)",
+        "spawn_value.jacl — spawn returns a future, await extracts the value",
+        "spawn_multi.jacl — spawn multiple tasks, await each sequentially, print all results in order",
+        "spawn_nested.jacl — spawn a task that itself spawns and awaits an inner task",
+        "spawn_heavy.jacl — spawn a task with heavy allocation (vector/map construction) to exercise GC under concurrency (# mode: concurrent)",
+        "await_resolved.jacl — await a future that has already resolved (no deadlock)",
+        "await_error.jacl — spawn a task that errors, await it, check with error? predicate",
+        "All files in test/jacl/, all use '# expect:' headers, all pass via harness",
+        "All tests pass (build.sh)"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": "JACL concurrency works single-threaded via jacl_run() (recursive vm__run for spawn) and multi-threaded via runtime. Tests without '# mode: concurrent' exercise single-threaded path; tests with it exercise the worker pool. Include a mix. Remember: suspending code at top level must be wrapped in 'proc main [] { ... }; main' pattern. Use to-string for typed numeric output. Helper procs must be defined at top level (not inside CPS-transformed proc bodies)."
+    },
+    {
+      "id": "US-015",
+      "title": "Parallel primitive e2e tests",
+      "description": "As a developer, I need .jacl e2e tests for the parallel primitive so that fork-join semantics are validated end-to-end.",
+      "acceptanceCriteria": [
+        "parallel_two.jacl — parallel with 2 bodies, print result vector",
+        "parallel_order.jacl — parallel preserves input order in result vector (not completion order)",
+        "parallel_error.jacl — one parallel body errors, result is error (first-error-wins), check with error?",
+        "parallel_with_await.jacl — parallel bodies that internally use spawn+await",
+        "parallel_concurrent.jacl — parallel with '# mode: concurrent' to verify real worker execution",
+        "All files in test/jacl/, all use '# expect:' or '# expect-error:' headers, all pass",
+        "All tests pass (build.sh)"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": "Parallel returns a JACL vector of results. [parallel { expr1 } { expr2 }] is a single-line command form — JACL parser treats newlines inside [...] as statement separators, so multi-line parallel may cause parse errors. Use single-line format or the 'proc main' wrapper pattern."
+    },
+    {
+      "id": "US-016",
+      "title": "Race primitive e2e tests",
+      "description": "As a developer, I need .jacl e2e tests for the race primitive so that first-wins semantics are validated end-to-end.",
+      "acceptanceCriteria": [
+        "race_basic.jacl — race two bodies, print the winner's result",
+        "race_error.jacl — race where the winning body errors, result is error",
+        "race_concurrent.jacl — race with '# mode: concurrent' for real parallel execution",
+        "All files in test/jacl/, all use '# expect:' headers, all pass",
+        "All tests pass (build.sh)"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": "In single-threaded mode, the first body always wins (sequential execution). In concurrent mode, the actual faster body wins — tests should account for non-deterministic winner by either making one body trivially faster or checking that the result is one of the expected values. The '# expect:' header is line-exact, so non-deterministic output needs careful test design."
+    },
+    {
+      "id": "US-017",
+      "title": "CPS transform correctness e2e tests",
+      "description": "As a developer, I need .jacl e2e tests for CPS transform edge cases so that variable capture, suspension propagation, and control flow through continuations are validated end-to-end.",
+      "acceptanceCriteria": [
+        "cps_variable_capture.jacl — variables defined before await are accessible after await",
+        "cps_sequential.jacl — multiple sequential awaits produce correct intermediate results",
+        "cps_if_suspend.jacl — await inside if branch, code after if uses result",
+        "cps_deep_chain.jacl — 5+ chained awaits (deep continuation chain)",
+        "cps_propagation.jacl — proc A calls suspending proc B which calls suspending proc C (transitive CPS)",
+        "cps_closure_capture.jacl — closures capturing variables across suspension points",
+        "cps_nested_expr.jacl — await nested inside expression arguments: [+ [await $f1] [await $f2]]",
+        "All files in test/jacl/, all use '# expect:' headers, all pass",
+        "All tests pass (build.sh)"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": "These tests validate the compiler's CPS transform correctness rather than the runtime. All should work in single-threaded mode via jacl_run(). Use the 'proc main [] { ... }; main' wrapper for top-level suspending code. Remember: JACL true/false are bare words (strings, both truthy) — use comparison operators for boolean conditions."
+    },
+    {
+      "id": "US-018",
+      "title": "Async error handling e2e tests",
+      "description": "As a developer, I need .jacl e2e tests for error handling through async code paths so that error propagation via futures and CPS continuations is validated.",
+      "acceptanceCriteria": [
+        "async_error_spawn.jacl — spawn a task that calls [error \"msg\"], await it, verify error? is true and error-val returns the message",
+        "async_error_propagation.jacl — error in a deeply nested async call chain propagates to the top-level awaiter",
+        "async_error_parallel.jacl — one body in parallel errors, entire parallel result is error",
+        "async_try_before_spawn.jacl — try/catch wrapping non-async code works alongside spawn/await (try/catch cannot contain suspension points, but can wrap sync code in an async program)",
+        "All files in test/jacl/, all use '# expect:' headers, all pass",
+        "All tests pass (build.sh)"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": "JACL try/catch syntax is [try { body } e { handler }]. Suspension inside try/catch is a compile-time error — tests should NOT put await inside try. Error propagation through futures: jacl_future_error stores the error, await on an errored future passes the error value to the continuation."
+    },
+    {
+      "id": "US-019",
+      "title": "M11 type system e2e gap coverage",
+      "description": "As a developer, I need additional .jacl e2e tests for the M11 static type system to cover numeric types, typed closures, and type conversion edge cases not covered by existing tests.",
+      "acceptanceCriteria": [
+        "typed_i32.jacl — i32 arithmetic, overflow behavior, type checking",
+        "typed_u64.jacl — u64 arithmetic, type checking, large values",
+        "typed_f64.jacl — f64 arithmetic, decimal output, type checking",
+        "typed_f32.jacl — f32 arithmetic, type checking",
+        "typed_conversion_chain.jacl — chained type conversions: i32 → i64 → f64",
+        "typed_conversion_error.jacl — invalid type conversion produces error",
+        "typed_closure.jacl — closure capturing typed values, return type checking",
+        "typed_collection.jacl — typed values stored in and retrieved from vectors/maps",
+        "All files in test/jacl/, all use '# expect:' or '# expect-error:' headers, all pass",
+        "All tests pass (build.sh)"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": "Existing M11 .jacl tests cover: typed_def_basic (i64 def), typed_def_error (type mismatch), typed_mut_basic (i64 mut), typed_proc (typed proc), typed_proc_error (arg type mismatch), typed_arithmetic (i64 addition), typed_arith_error (i64+f64 error), typed_set_error (set! type mismatch), type_conversions (i32 to i64). Gaps: no f64/f32/u64 coverage, no typed closures, no type conversion errors, no chained conversions, no typed values in collections."
     }
   ]
 }
