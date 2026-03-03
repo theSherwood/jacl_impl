@@ -9,6 +9,7 @@ Progress log for ralph/gc-concurrency-hardening branch.
 - Use `rt_test__init_no_threads` / `rt_test__destroy_no_threads` for unit tests that don't need real worker threads
 - `rt_test__ms_contains` destructively drains the mark stack but restores entries — safe for multiple checks on same stack
 - `test__compile` + `rt_run_to_completion` does NOT register user procs in worker VMs — parallel body closures that call user procs will hang. Use `.jacl` tests with `# mode: concurrent` for tests that need proc calls in parallel bodies (the harness copies env to workers)
+- GreyBuffer.count uses release/acquire ordering: release-store in grey_buf_push (after writing entry), acquire-load in gc__drain_grey_bufs. Use ATOMIC_STORE_EXPLICIT/ATOMIC_LOAD_EXPLICIT from platform.h — they work on non-atomic types
 
 ---
 
@@ -46,4 +47,19 @@ Thread: (local)
   - Use `.jacl` tests with `# mode: concurrent` for tests that need proc calls in concurrent parallel/spawn bodies — the harness copies env from temp VM to all workers
   - Multi-line JACL expressions in C string literals can cause parse errors — keep expressions on single lines
   - The parallel join result vector rooting chain: ParallelAgg traces results[] → last-completing task builds vec → `runtime__schedule_continuation(rt, cont, vec)` → continuation task gc_root2 = vec → GC scans inbox/deque gc_root2
+---
+
+## 2026-03-03 - US-003
+Thread: (local)
+- Added release/acquire memory ordering to GreyBuffer.count for cross-thread consistency
+- `grey_buf_push` (gc.c:619): reads count into local, writes entry first (plain store, thread-local), then release-stores count+1 via ATOMIC_STORE_EXPLICIT
+- `gc__drain_grey_bufs` (runtime.c:597): acquire-loads count via ATOMIC_LOAD_EXPLICIT, ensuring all entries[0..count-1] are visible
+- `gc_concurrent_collect` (runtime.c:681): grey_buf.count=0 reset kept as plain store with comment documenting ordering guarantee from gc_active=0 (release) → gc_running=0 (release) chain
+- Added documenting comments in both grey_buf_push and gc__drain_grey_bufs explaining the release/acquire pairing
+- Files changed: src/gc.c, src/runtime.c
+- **Learnings for future iterations:**
+  - GreyBuffer is per-worker (thread-local writes) but GC thread reads count cross-thread — classic release/acquire pattern
+  - The ATOMIC macros in platform.h work on non-atomic types by casting (C11 path) or using __atomic builtins (GCC path)
+  - Grey buffer reset after gc_active=0 is safe as plain store: gc_active=0 (release) ensures workers stop pushing, gc_running=0 (release) publishes reset before next cycle
+  - On x86/TSO, the plain stores were already safe in practice, but C11 formally requires atomic operations for cross-thread access to avoid UB
 ---

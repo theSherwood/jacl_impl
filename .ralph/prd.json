@@ -55,7 +55,7 @@
         "Compiles without warnings"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Under C11, concurrent non-atomic access where at least one is a write is undefined behavior. On ARM/POWER, the GC could see incremented count but stale entries[] data. The fix uses release/acquire on count to establish happens-before between the worker's entry write and the GC's entry read. Uses platform.h ATOMIC macros (not raw C11) for cross-platform support."
     },
     {
