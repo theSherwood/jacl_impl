@@ -10,6 +10,7 @@ Progress log for ralph/gc-concurrency-hardening branch.
 - `rt_test__ms_contains` destructively drains the mark stack but restores entries — safe for multiple checks on same stack
 - `test__compile` + `rt_run_to_completion` does NOT register user procs in worker VMs — parallel body closures that call user procs will hang. Use `.jacl` tests with `# mode: concurrent` for tests that need proc calls in parallel bodies (the harness copies env to workers)
 - GreyBuffer.count uses release/acquire ordering: release-store in grey_buf_push (after writing entry), acquire-load in gc__drain_grey_bufs. Use ATOMIC_STORE_EXPLICIT/ATOMIC_LOAD_EXPLICIT from platform.h — they work on non-atomic types
+- Worker inbox drain: lockless volatile read of inbox_count first, then batched drain under single mutex acquisition — overflow tasks go to worker's private_deque via rt_deque_deque_push
 
 ---
 
@@ -62,4 +63,20 @@ Thread: (local)
   - The ATOMIC macros in platform.h work on non-atomic types by casting (C11 path) or using __atomic builtins (GCC path)
   - Grey buffer reset after gc_active=0 is safe as plain store: gc_active=0 (release) ensures workers stop pushing, gc_running=0 (release) publishes reset before next cycle
   - On x86/TSO, the plain stores were already safe in practice, but C11 formally requires atomic operations for cross-thread access to avoid UB
+---
+
+## 2026-03-03 - US-004
+Thread: (local)
+- Replaced mutex-locked inbox check with lockless volatile read + batched drain
+- Worker loop now checks `rt->inbox_count > 0` (volatile read, no lock) before acquiring inbox_mutex
+- When non-empty, single lock acquisition drains ALL pending tasks: first goes to task_val, rest pushed to worker's private_deque via rt_deque_deque_push
+- Producer side (runtime_submit, runtime_submit_task, and 4 other submission functions) unchanged
+- ~10 line change in runtime__worker_loop (src/runtime.c lines 189-202)
+- All 48 test suites pass, 172/172 .jacl tests pass, zero compiler warnings
+- Files changed: src/runtime.c
+- **Learnings for future iterations:**
+  - inbox_count is volatile intptr_t — safe for lockless reads without atomics on all platforms
+  - Overflow tasks from batched drain go to private_deque, which is checked at step 2 of the worker loop — natural load balancing
+  - The inbox is a LIFO stack (pop from end), so batched drain reverses submission order for overflow tasks — acceptable since task ordering is non-deterministic in concurrent mode
+  - This is a pure optimization with no behavioral change — all existing tests pass without modification
 ---

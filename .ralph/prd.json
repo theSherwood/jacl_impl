@@ -72,7 +72,7 @@
         "Compiles without warnings"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "inbox_count is already volatile intptr_t. The lockless check eliminates ~99% of mutex acquisitions (inbox is usually empty). Batched drain reduces per-drain cost from O(tasks) lock acquisitions to O(1). This is a ~15 line change that eliminates the main contention point without new data structures."
     },
     {

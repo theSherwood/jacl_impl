@@ -186,13 +186,20 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
         uintptr_t task_val = 0;
         bool found = false;
 
-        /* 1. Check global inbox */
-        MUTEX_LOCK(rt->inbox_mutex);
+        /* 1. Check global inbox (lockless empty check, batched drain) */
         if (rt->inbox_count > 0) {
-            task_val = rt->inbox[--rt->inbox_count];
-            found = true;
+            MUTEX_LOCK(rt->inbox_mutex);
+            while (rt->inbox_count > 0) {
+                uintptr_t tv = rt->inbox[--rt->inbox_count];
+                if (!found) {
+                    task_val = tv;
+                    found = true;
+                } else {
+                    rt_deque_deque_push(self->private_deque, tv);
+                }
+            }
+            MUTEX_UNLOCK(rt->inbox_mutex);
         }
-        MUTEX_UNLOCK(rt->inbox_mutex);
 
         /* 2. Check own private deque (priority for thread-local tasks) */
         if (!found)
