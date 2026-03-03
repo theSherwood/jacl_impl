@@ -114,7 +114,7 @@
         "All tests pass (build.sh)"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Currently only 4 of ~20 concurrent .jacl tests use real worker threads. The rest test CPS compiler output but not actual concurrent execution. Error propagation paths are especially undertested. Failures found during enablement are real concurrency bugs — fix them as part of this story."
     },
     {

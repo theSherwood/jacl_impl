@@ -12,6 +12,9 @@ Progress log for ralph/gc-concurrency-hardening branch.
 - GreyBuffer.count uses release/acquire ordering: release-store in grey_buf_push (after writing entry), acquire-load in gc__drain_grey_bufs. Use ATOMIC_STORE_EXPLICIT/ATOMIC_LOAD_EXPLICIT from platform.h — they work on non-atomic types
 - Worker inbox drain: lockless volatile read of inbox_count first, then batched drain under single mutex acquisition — overflow tasks go to worker's private_deque via rt_deque_deque_push
 - JaclFuture uses a CAS spinlock (volatile uint32_t), not a platform mutex — no MUTEX_DESTROY needed on GC. future_lock/future_unlock in gc.c
+- CPS parallel/race bodies must use parallel_k/race_k closures (OP_COMPLETE_PARALLEL/OP_COMPLETE_RACE), NOT resolve_k + internal future — the internal-future-poll pattern breaks when bodies suspend at inner awaits
+- Race tests with `# mode: concurrent` must use identical return values in both bodies for determinism (see race_concurrent.jacl pattern)
+- Adding new opcodes to bytecode.c requires updating the hardcoded opcode index assertions in test/test_bytecode.c
 
 ---
 
@@ -101,4 +104,22 @@ Thread: (local)
   - ATOMIC_CAS takes a pointer to expected (not a value) — reset expected=0 on each retry iteration
   - The spinlock eliminates platform_mutex_t from JaclFuture, removing the need for MUTEX_DESTROY on GC collection — on Windows this avoids leaking CRITICAL_SECTION resources
   - Block pool mutex in gc.c still uses platform_mutex_t (coarse-grained, different use case) — only future locks were converted
+---
+
+## 2026-03-03 - US-006
+Thread: (local)
+- Added `# mode: concurrent` to 10 .jacl test files: spawn_multi, spawn_nested, parallel_error, parallel_with_await, parallel_await_error, race_basic, race_error, async_error_spawn, async_error_propagation, async_error_parallel
+- Discovered and fixed concurrency bug: CPS parallel/race bodies with inner `spawn + await` returned nil in concurrent mode
+  - Root cause: `runtime__parallel_task_exec` used resolve_k + internal future, polled the future after `vm__run`. When the body suspended at an `await`, `vm__run` returned early with the future still PENDING → `JACL_NIL` stored as result
+  - Fix: introduced `parallel_k` and `race_k` closures with new opcodes `OP_COMPLETE_PARALLEL` and `OP_COMPLETE_RACE` that directly complete the aggregation slot (store result, handle error, increment counter, schedule join). Works whether the body completes synchronously or suspends and resumes asynchronously
+- Race tests (race_basic, race_error) adjusted for deterministic concurrent output: both bodies return the same value (matching race_concurrent.jacl pattern)
+- Updated opcode index assertions in test_bytecode.c (+2 offset for new opcodes)
+- All 48 test suites pass, 172/172 .jacl tests pass, zero new compiler warnings
+- Files changed: src/bytecode.c, src/vm.c, src/runtime.c, test/test_bytecode.c, 10 .jacl test files
+- **Learnings for future iterations:**
+  - The resolve_k + internal future pattern works for spawn tasks (where the future is the final output) but NOT for parallel/race bodies (where the result must feed back into an aggregation)
+  - When a CPS body suspends at an inner await, `vm__run` returns `VM_OK` but the CPS chain is not complete — the continuation (`__k`) hasn't been called yet
+  - The fix is to make `__k` itself do the completion work (parallel_k/race_k), not wrap __k in resolve_k and poll the result
+  - Race tests are inherently non-deterministic in concurrent mode — both bodies may complete in any order. Use identical return values for determinism
+  - New opcodes require updating test_bytecode.c's hardcoded enum value assertions
 ---
