@@ -3187,6 +3187,41 @@ static int test_stress_parallel_many(void) {
     TEST_PASS();
 }
 
+/* US-002 (M14): parallel join result vector survives GC.
+ * 4 parallel tasks on 4 workers — the continuation accesses
+ * the result vector after all tasks complete. gc_root2 on the
+ * continuation task roots the result vector.
+ * (Heavy GC pressure variant is tested via parallel_gc_pressure.jacl
+ *  with # mode: concurrent, which properly initializes worker envs.) */
+static int test_stress_parallel_join_gc(void) {
+    Runtime rt;
+    runtime_init(&rt, 4);
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Parallel with 4 bodies + result vector access in continuation.
+     * Verifies the result vector is intact after parallel completion. */
+    CompileResult cr = test__compile(
+        "proc task [] {\n"
+        "  def r [parallel { [+ 10 20] } { [+ 30 40] } { [+ 50 60] } { [+ 70 80] }]\n"
+        "  [+ [+ [vec-get $r 0] [vec-get $r 1]] [+ [vec-get $r 2] [vec-get $r 3]]]\n"
+        "}",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+
+    VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
+    ASSERT(r == VM_OK);
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* Test: race with many tasks on workers */
 static int test_stress_race_many(void) {
     Runtime rt;
@@ -3727,6 +3762,7 @@ int main(void) {
         { "stress_workers_spawn",     test_stress_workers_spawn },
         { "stress_heavy_alloc_gc",    test_stress_heavy_alloc_gc },
         { "stress_parallel_many",     test_stress_parallel_many },
+        { "stress_par_join_gc",       test_stress_parallel_join_gc },
         { "stress_race_many",         test_stress_race_many },
         { "stress_mixed_workload",    test_stress_mixed_workload },
         /* Memory bounded */

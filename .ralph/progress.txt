@@ -2,5 +2,48 @@
 
 Progress log for ralph/gc-concurrency-hardening branch.
 
+## Codebase Patterns
+- RuntimeTask gc_root/gc_root2 must always be initialized (JACL_NIL if unused) — test code that creates RuntimeTask manually must set both fields
+- GC root scanning has three paths: currently_executing, deque snapshot, and inbox — all three must be updated in sync
+- Tests that create RuntimeTask manually must be updated when the struct changes
+- Use `rt_test__init_no_threads` / `rt_test__destroy_no_threads` for unit tests that don't need real worker threads
+- `rt_test__ms_contains` destructively drains the mark stack but restores entries — safe for multiple checks on same stack
+- `test__compile` + `rt_run_to_completion` does NOT register user procs in worker VMs — parallel body closures that call user procs will hang. Use `.jacl` tests with `# mode: concurrent` for tests that need proc calls in parallel bodies (the harness copies env to workers)
+
 ---
 
+## 2026-03-03 - US-001
+Thread: (local)
+- Added `gc_root2` field to RuntimeTask struct for multi-root GC scanning
+- Set gc_root2 in all 6 task submission functions:
+  - `runtime_submit`: JACL_NIL
+  - `runtime_submit_task`: JACL_NIL
+  - `runtime__schedule_continuation`: result value
+  - `runtime__submit_spawn_task`: closure tagged value
+  - `runtime__submit_parallel_task`: closure tagged value
+  - `runtime__submit_race_task`: closure tagged value
+- Updated GC scanning in 3 locations to scan gc_root2:
+  - `gc__scan_deque`: deque task scanning
+  - `gc_enumerate_roots`: currently_executing task + inbox tasks
+- Added `test_enumerate_roots_gc_root2` test verifying gc_root2 is found via all three scanning paths (deque, currently_executing, inbox)
+- Updated 4 existing tests that create RuntimeTask manually to set gc_root2 = JACL_NIL
+- Files changed: src/runtime.c, test/test_runtime.c
+- **Learnings for future iterations:**
+  - RuntimeTask is created in 6 different places in runtime.c — all must be updated in sync
+  - 4 tests in test_runtime.c create RuntimeTask manually and need struct field updates
+  - gc__ms_push_val silently ignores JACL_NIL (inline values), so pushing gc_root2=JACL_NIL is harmless
+---
+
+## 2026-03-03 - US-002
+Thread: (local)
+- Confirmed `runtime__schedule_continuation` sets `gc_root2 = result` (line 816 of runtime.c) — the parallel join result vector is rooted through the continuation task's gc_root2 field
+- Added `.jacl` integration test: `test/jacl/parallel_gc_pressure.jacl` with `# mode: concurrent` — 4 parallel tasks running `fib(12..6)` on 4 workers, verifies result vector elements (144, 55, 21, 8) survive GC
+- Added C stress test `test_stress_parallel_join_gc` in test_m13.c — 4 parallel tasks on 4 workers with result vector access in continuation
+- All existing parallel tests pass (parallel_order, parallel_two, parallel_concurrent, etc.)
+- Files changed: test/test_m13.c, test/jacl/parallel_gc_pressure.jacl
+- **Learnings for future iterations:**
+  - `test__compile` + `rt_run_to_completion` does NOT register user-defined procs in worker VMs — parallel body closures that call user procs (like `fib`) hang because the proc isn't in the worker's environment
+  - Use `.jacl` tests with `# mode: concurrent` for tests that need proc calls in concurrent parallel/spawn bodies — the harness copies env from temp VM to all workers
+  - Multi-line JACL expressions in C string literals can cause parse errors — keep expressions on single lines
+  - The parallel join result vector rooting chain: ParallelAgg traces results[] → last-completing task builds vec → `runtime__schedule_continuation(rt, cont, vec)` → continuation task gc_root2 = vec → GC scans inbox/deque gc_root2
+---

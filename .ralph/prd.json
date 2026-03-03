@@ -23,7 +23,7 @@
         "Compiles without warnings"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "Critical soundness fix. RuntimeTask.gc_root holds a single JaclVal, but continuation tasks need to root the result, spawn tasks need to root the closure, and parallel/race tasks need to root body closures. Without this, GC can collect unrooted values between task submission and execution if no other reference exists. Epoch watermarking and eager CPS capture mitigate this in practice, but the design is unsound."
     },
     {
@@ -37,7 +37,7 @@
         "Compiles without warnings"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-001. After all parallel tasks complete, the result vector is built from agg->results[] and passed to runtime__schedule_continuation. With US-001's gc_root2, the result is rooted through the continuation task. This story verifies that the fix is sufficient and adds a targeted regression test."
     },
     {
