@@ -1,0 +1,9 @@
+# expect: true
+# expect: par-err
+# parallel body with spawn+await+error — CPS error propagation (US-004)
+proc main [] {
+  def r [parallel { 30 } { def f [spawn { error "par-err" }]; await $f }]
+  print [error? $r]
+  print [error-val $r]
+}
+main

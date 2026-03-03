@@ -2670,6 +2670,9 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
               uint32_t fstate = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED);
               if (fstate == FUTURE_RESOLVED) {
                 results[i] = (JaclVal)fut->result;
+                if (jacl_is_error(results[i]) && !has_error) {
+                  has_error = true; first_error = results[i];
+                }
               } else if (fstate == FUTURE_ERROR) {
                 results[i] = (JaclVal)fut->result;
                 if (!has_error) { has_error = true; first_error = results[i]; }

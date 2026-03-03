@@ -999,6 +999,7 @@ static void runtime__parallel_task_exec(void *data) {
         uint32_t fstate = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_ACQUIRE);
         if (fstate == FUTURE_RESOLVED) {
             task_result = (JaclVal)fut->result;
+            if (jacl_is_error(task_result)) task_errored = true;
         } else if (fstate == FUTURE_ERROR) {
             task_result = (JaclVal)fut->result;
             task_errored = true;
