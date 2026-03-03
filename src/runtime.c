@@ -795,7 +795,24 @@ static void runtime__continuation_task_exec(void *data) {
     vm->chunk     = &ctd->continuation->chunk;
     vm->top_chunk = &ctd->continuation->chunk;
 
-    vm__run(vm, 0);
+    VMResult r = vm__run(vm, 0);
+
+    /* If continuation failed, __k was not called. Forward error to __k
+       to prevent completion future from hanging. __k is upvalue 0. */
+    bool errored = (r != VM_OK) ||
+        (vm->stack_top > 0 && jacl_is_error(vm->stack[vm->stack_top - 1]));
+    if (errored && ctd->continuation->upvalue_count > 0) {
+        JaclVal k_val = ctd->continuation->upvalues[0];
+        if (jacl_is_closure(k_val)) {
+            JaclClosure *k_cl = jacl_as_closure(k_val);
+            JaclVal err;
+            if (vm->stack_top > 0 && jacl_is_error(vm->stack[vm->stack_top - 1]))
+                err = vm->stack[vm->stack_top - 1];
+            else
+                err = jacl_set_error(jacl_inline_string("error", 5));
+            runtime__schedule_continuation(self->runtime, k_cl, err);
+        }
+    }
     free(ctd);
 }
 
@@ -1034,6 +1051,7 @@ static void runtime__parallel_task_exec(void *data) {
 
         if (r == VM_OK && vm->stack_top > 0) {
             task_result = vm->stack[vm->stack_top - 1];
+            if (jacl_is_error(task_result)) task_errored = true;
         } else {
             task_result = jacl_set_error(jacl_inline_string("error", 5));
             task_errored = true;

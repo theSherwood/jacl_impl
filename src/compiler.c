@@ -873,6 +873,12 @@ static void compiler__emit_continuation(Compiler* c,
   compiler__add_local(&cont_compiler, param_name, line, 0);
   cont_compiler.locals[cont_compiler.local_count - 1].is_param = true;
 
+  /* Pre-resolve __k as upvalue 0 so runtime can find it for error recovery */
+  {
+    JaclVal k_name = jacl_inline_string("__k", 3);
+    compiler__resolve_upvalue(&cont_compiler, k_name);
+  }
+
   /* Compile remaining statements with CPS */
   compiler__compile_cps_stmts(&cont_compiler, remaining_stmts, remaining_count, line);
 

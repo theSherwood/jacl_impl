@@ -3614,6 +3614,33 @@ static int test_susp_callback_reject_via_map(void) {
     TEST_PASS();
 }
 
+/* US-004 (bugfix): CPS continuation error propagation hang */
+
+/* Test: parallel body error + continuation accessing result doesn't hang */
+static int test_cont_error_propagation(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc main [] {\n"
+        "  def r [parallel { 42 } { error \"fail\" }]\n"
+        "  print [error? $r]\n"
+        "  print [error-val $r]\n"
+        "}\n"
+        "main",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "true\nfail\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -3781,6 +3808,8 @@ int main(void) {
         { "contains_susp_named",     test_contains_susp_named_proc },
         { "spawn_calls_susp_proc",   test_spawn_calls_susp_proc },
         { "susp_cb_reject_via_map",  test_susp_callback_reject_via_map },
+        /* US-004 (bugfix): CPS continuation error propagation hang */
+        { "cont_error_propagation",  test_cont_error_propagation },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
