@@ -1,3 +1,4 @@
+# mode: concurrent
 # expect: true
 # expect: task failure
 # spawn a task that calls [error "msg"], await it, verify error? is true and error-val returns the message

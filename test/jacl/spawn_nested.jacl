@@ -1,3 +1,4 @@
+# mode: concurrent
 # expect: 100
 # spawn a task that itself spawns and awaits an inner task
 proc main [] {

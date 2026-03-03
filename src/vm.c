@@ -136,6 +136,15 @@ static void runtime__submit_race_task(void *runtime_ptr,
                                        JaclClosure *closure,
                                        JaclVal agg_val,
                                        bool is_cps);
+static void runtime__complete_parallel_slot(void *runtime_ptr,
+                                             VM *vm,
+                                             JaclVal agg_val,
+                                             uint32_t index,
+                                             JaclVal result);
+static void runtime__complete_race_slot(void *runtime_ptr,
+                                         VM *vm,
+                                         JaclVal agg_val,
+                                         JaclVal result);
 
 /* --- Type name helper for error messages --- */
 
@@ -2569,6 +2578,47 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (waiters && vm->runtime) {
           runtime__schedule_waiters(vm->runtime, waiters, resolve_result);
         }
+        result = vm__push(vm, JACL_NIL);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_COMPLETE_PARALLEL: {
+        /* Pop result, index (i32), agg_val. Complete parallel slot:
+           store result, handle error, increment counter, maybe schedule join.
+           Used by parallel_k closures for CPS parallel bodies. */
+        JaclVal par_result;
+        result = vm__pop(vm, &par_result); if (result != VM_OK) return result;
+        JaclVal idx_val;
+        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
+        JaclVal par_agg_val;
+        result = vm__pop(vm, &par_agg_val); if (result != VM_OK) return result;
+
+        uint32_t par_index = (uint32_t)(idx_val & JACL_PAYLOAD_MASK);
+
+        if (vm->runtime) {
+          runtime__complete_parallel_slot(vm->runtime, vm, par_agg_val,
+                                          par_index, par_result);
+        }
+
+        result = vm__push(vm, JACL_NIL);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_COMPLETE_RACE: {
+        /* Pop result, agg_val. CAS-settle race, winner schedules join.
+           Used by race_k closures for CPS race bodies. */
+        JaclVal race_result;
+        result = vm__pop(vm, &race_result); if (result != VM_OK) return result;
+        JaclVal race_agg_val;
+        result = vm__pop(vm, &race_agg_val); if (result != VM_OK) return result;
+
+        if (vm->runtime) {
+          runtime__complete_race_slot(vm->runtime, vm, race_agg_val,
+                                      race_result);
+        }
+
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
         break;

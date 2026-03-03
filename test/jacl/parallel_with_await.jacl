@@ -1,3 +1,4 @@
+# mode: concurrent
 # expect: 100
 # expect: 200
 # parallel bodies that internally use spawn+await

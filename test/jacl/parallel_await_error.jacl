@@ -1,3 +1,4 @@
+# mode: concurrent
 # expect: true
 # expect: par-err
 # parallel body with spawn+await+error — CPS error propagation (US-004)

@@ -771,6 +771,181 @@ static JaclVal runtime__create_resolve_closure(ThreadHeap *heap, arena_t *arena,
 }
 
 /* ======================================================================
+ * Parallel-slot completion closure (parallel_k)
+ *
+ * Replaces resolve_k for CPS parallel bodies. When called with the
+ * body's result, directly completes the parallel aggregation slot
+ * (stores result, handles errors, increments counter, schedules join).
+ * This avoids the internal-future-poll that breaks when CPS bodies
+ * suspend at inner awaits.
+ *
+ * Bytecode:
+ *   OP_GET_UPVALUE  0   ; push agg_val
+ *   OP_GET_UPVALUE  1   ; push index (as i32)
+ *   OP_GET_LOCAL    0   ; push result parameter
+ *   OP_COMPLETE_PARALLEL ; complete slot, push nil
+ *   OP_RETURN
+ * ====================================================================== */
+
+static uint8_t parallel_k_code[] = {
+    OP_GET_UPVALUE, 0,    /* push agg_val */
+    OP_GET_UPVALUE, 1,    /* push index */
+    OP_GET_LOCAL, 0,      /* push result param */
+    OP_COMPLETE_PARALLEL, /* complete parallel slot */
+    OP_RETURN
+};
+static uint32_t parallel_k_lines[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+static JaclVal runtime__create_parallel_k(ThreadHeap *heap, arena_t *arena,
+                                           JaclVal agg_val, uint32_t index) {
+    /* Allocate closure + 2 upvalue slots */
+    size_t cl_size = sizeof(JaclClosure) + 2 * sizeof(JaclVal);
+    JaclClosure *cl = (JaclClosure *)gc_alloc(heap, OBJ_CLOSURE, cl_size);
+
+    cl->chunk.code        = parallel_k_code;
+    cl->chunk.code_count  = (uint32_t)(sizeof(parallel_k_code));
+    cl->chunk.lines       = parallel_k_lines;
+    cl->chunk.constants   = NULL;
+    cl->chunk.const_count = 0;
+    cl->chunk.arena       = arena;
+
+    cl->param_count   = 1;
+    cl->upvalue_count = 2;
+    cl->upvalues      = (JaclVal *)(cl + 1);
+    cl->upvalues[0]   = agg_val;
+    cl->upvalues[1]   = jacl_i32((int32_t)index);
+    cl->name          = "__parallel_k";
+    cl->param_names   = NULL;
+    cl->min_args      = 1;
+    cl->variadic      = false;
+
+    return jacl_closure(cl);
+}
+
+/* --- Parallel slot completion logic (called from OP_COMPLETE_PARALLEL) --- */
+
+static void runtime__complete_parallel_slot(void *runtime_ptr, VM *vm,
+                                             JaclVal agg_val,
+                                             uint32_t index,
+                                             JaclVal task_result) {
+    Runtime *rt = (Runtime *)runtime_ptr;
+    ParallelAgg *agg = as_parallel_agg(agg_val);
+    bool task_errored = jacl_is_error(task_result);
+
+    /* Store result at our index (no contention — unique index per task) */
+    gc_write_barrier(vm->grey_buf, &rt->gc_active,
+                     agg->results[index], task_result);
+    agg->results[index] = task_result;
+
+    /* Handle error: first error wins via CAS */
+    if (task_errored) {
+        uint32_t expected = 0;
+        if (ATOMIC_CAS(&agg->errored, &expected, 1,
+                        MEM_ACQ_REL, MEM_RELAXED)) {
+            gc_write_barrier(vm->grey_buf, &rt->gc_active,
+                             JACL_NIL, task_result);
+            ATOMIC_STORE_EXPLICIT(&agg->error_val, (uint64_t)task_result,
+                                   MEM_RELEASE);
+        }
+    }
+
+    /* Atomically increment completion counter */
+    uint32_t prev = 0;
+    uint32_t desired = 1;
+    for (;;) {
+        prev = ATOMIC_LOAD_EXPLICIT(&agg->completed, MEM_ACQUIRE);
+        desired = prev + 1;
+        if (ATOMIC_CAS(&agg->completed, &prev, desired,
+                        MEM_ACQ_REL, MEM_RELAXED)) {
+            break;
+        }
+    }
+
+    /* If we're the last task to complete, schedule the join continuation */
+    if (desired == agg->count) {
+        JaclClosure *cont = jacl_as_closure(agg->continuation);
+        JaclVal cont_arg;
+
+        if (ATOMIC_LOAD_EXPLICIT(&agg->errored, MEM_ACQUIRE)) {
+            cont_arg = (JaclVal)ATOMIC_LOAD_EXPLICIT(&agg->error_val,
+                                                      MEM_ACQUIRE);
+        } else {
+            gc__current_heap = &vm->heap;
+            jacl_vec_root *vec = jacl_vec_empty();
+            for (uint32_t i = 0; i < agg->count; i++) {
+                vec = jacl_vec_push_back(vec, agg->results[i]);
+            }
+            cont_arg = jacl_vector_ptr(vec);
+        }
+
+        runtime__schedule_continuation(rt, cont, cont_arg);
+    }
+}
+
+/* ======================================================================
+ * Race-slot completion closure (race_k)
+ *
+ * Replaces resolve_k for CPS race bodies. When called with the
+ * body's result, CAS-settles the race and schedules the winner.
+ *
+ * Bytecode:
+ *   OP_GET_UPVALUE  0   ; push agg_val
+ *   OP_GET_LOCAL    0   ; push result parameter
+ *   OP_COMPLETE_RACE    ; settle race, push nil
+ *   OP_RETURN
+ * ====================================================================== */
+
+static uint8_t race_k_code[] = {
+    OP_GET_UPVALUE, 0,    /* push agg_val */
+    OP_GET_LOCAL, 0,      /* push result param */
+    OP_COMPLETE_RACE,     /* settle race */
+    OP_RETURN
+};
+static uint32_t race_k_lines[] = { 0, 0, 0, 0, 0, 0, 0 };
+
+static JaclVal runtime__create_race_k(ThreadHeap *heap, arena_t *arena,
+                                       JaclVal agg_val) {
+    /* Allocate closure + 1 upvalue slot */
+    size_t cl_size = sizeof(JaclClosure) + sizeof(JaclVal);
+    JaclClosure *cl = (JaclClosure *)gc_alloc(heap, OBJ_CLOSURE, cl_size);
+
+    cl->chunk.code        = race_k_code;
+    cl->chunk.code_count  = (uint32_t)(sizeof(race_k_code));
+    cl->chunk.lines       = race_k_lines;
+    cl->chunk.constants   = NULL;
+    cl->chunk.const_count = 0;
+    cl->chunk.arena       = arena;
+
+    cl->param_count   = 1;
+    cl->upvalue_count = 1;
+    cl->upvalues      = (JaclVal *)(cl + 1);
+    cl->upvalues[0]   = agg_val;
+    cl->name          = "__race_k";
+    cl->param_names   = NULL;
+    cl->min_args      = 1;
+    cl->variadic      = false;
+
+    return jacl_closure(cl);
+}
+
+/* --- Race slot completion logic (called from OP_COMPLETE_RACE) --- */
+
+static void runtime__complete_race_slot(void *runtime_ptr, VM *vm,
+                                         JaclVal agg_val,
+                                         JaclVal task_result) {
+    (void)vm;
+    Runtime *rt = (Runtime *)runtime_ptr;
+    RaceAgg *agg = as_race_agg(agg_val);
+
+    /* CAS settled: winner (0->1) schedules continuation, losers discard */
+    uint32_t expected = 0;
+    if (ATOMIC_CAS(&agg->settled, &expected, 1, MEM_ACQ_REL, MEM_RELAXED)) {
+        JaclClosure *cont = jacl_as_closure(agg->continuation);
+        runtime__schedule_continuation(rt, cont, task_result);
+    }
+}
+
+/* ======================================================================
  * Continuation scheduling — used by OP_AWAIT and future resolution
  *
  * When a future resolves, registered waiter continuations need to be
@@ -1009,19 +1184,16 @@ static void runtime__parallel_task_exec(void *data) {
     vm->error_line    = 0;
     vm->stack_trace.count = 0;
 
-    JaclVal task_result = JACL_NIL;
-    bool task_errored = false;
-
     if (ptd->is_cps) {
-        /* CPS closure: create a future + resolve_k, call closure(resolve_k).
-           After execution, result is in the future. */
-        JaclVal fut_val = jacl_future(&vm->heap);
-        JaclFuture *fut = jacl_as_future(fut_val);
-        JaclVal resolve_k = runtime__create_resolve_closure(
-            &vm->heap, &self->arena, fut_val);
+        /* CPS closure: create parallel_k that directly completes the slot.
+           This handles both synchronous completion (body returns without
+           suspending) and asynchronous completion (body suspends at an
+           inner await — parallel_k runs later when the future resolves). */
+        JaclVal parallel_k = runtime__create_parallel_k(
+            &vm->heap, &self->arena, ptd->agg_val, ptd->index);
 
         vm->stack[0] = jacl_closure_ptr(cl);
-        vm->stack[1] = resolve_k;
+        vm->stack[1] = parallel_k;
         vm->stack_top = 2;
 
         vm->frames[0].closure    = cl;
@@ -1035,19 +1207,20 @@ static void runtime__parallel_task_exec(void *data) {
 
         VMResult r = vm__run(vm, 0);
 
-        uint32_t fstate = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_ACQUIRE);
-        if (fstate == FUTURE_RESOLVED) {
-            task_result = (JaclVal)fut->result;
-            if (jacl_is_error(task_result)) task_errored = true;
-        } else if (fstate == FUTURE_ERROR) {
-            task_result = (JaclVal)fut->result;
-            task_errored = true;
-        } else if (r != VM_OK) {
-            task_result = jacl_set_error(jacl_inline_string("error", 5));
-            task_errored = true;
+        /* If VM errored before __k was called, complete slot with error */
+        if (r != VM_OK) {
+            JaclVal err = jacl_set_error(jacl_inline_string("error", 5));
+            runtime__complete_parallel_slot(self->runtime, vm,
+                                             ptd->agg_val, ptd->index, err);
         }
+        /* If VM_OK: either parallel_k already ran (synchronous completion)
+           or the body suspended and parallel_k will run later. Either way,
+           the slot completion is handled by parallel_k. */
     } else {
-        /* Non-CPS closure: call directly */
+        /* Non-CPS closure: call directly, complete slot inline */
+        JaclVal task_result = JACL_NIL;
+        bool task_errored = false;
+
         vm->stack[0] = jacl_closure_ptr(cl);
         vm->stack_top = 1;
 
@@ -1069,58 +1242,55 @@ static void runtime__parallel_task_exec(void *data) {
             task_result = jacl_set_error(jacl_inline_string("error", 5));
             task_errored = true;
         }
-    }
 
-    /* Store result at our index (no contention — unique index per task) */
-    gc_write_barrier(&self->grey_buf, &self->runtime->gc_active,
-                     agg->results[ptd->index], task_result);
-    agg->results[ptd->index] = task_result;
+        /* Store result at our index (no contention — unique index per task) */
+        gc_write_barrier(&self->grey_buf, &self->runtime->gc_active,
+                         agg->results[ptd->index], task_result);
+        agg->results[ptd->index] = task_result;
 
-    /* Handle error: first error wins via CAS */
-    if (task_errored) {
-        uint32_t expected = 0;
-        if (ATOMIC_CAS(&agg->errored, &expected, 1,
-                        MEM_ACQ_REL, MEM_RELAXED)) {
-            gc_write_barrier(&self->grey_buf, &self->runtime->gc_active,
-                             JACL_NIL, task_result);
-            ATOMIC_STORE_EXPLICIT(&agg->error_val, (uint64_t)task_result,
-                                   MEM_RELEASE);
-        }
-    }
-
-    /* Atomically increment completion counter */
-    uint32_t prev = 0;
-    uint32_t desired = 1;
-    /* Manual atomic increment via CAS loop */
-    for (;;) {
-        prev = ATOMIC_LOAD_EXPLICIT(&agg->completed, MEM_ACQUIRE);
-        desired = prev + 1;
-        if (ATOMIC_CAS(&agg->completed, &prev, desired,
-                        MEM_ACQ_REL, MEM_RELAXED)) {
-            break;
-        }
-    }
-
-    /* If we're the last task to complete, schedule the join continuation */
-    if (desired == agg->count) {
-        JaclClosure *cont = jacl_as_closure(agg->continuation);
-        JaclVal cont_arg;
-
-        if (ATOMIC_LOAD_EXPLICIT(&agg->errored, MEM_ACQUIRE)) {
-            /* Pass first error to continuation */
-            cont_arg = (JaclVal)ATOMIC_LOAD_EXPLICIT(&agg->error_val,
-                                                      MEM_ACQUIRE);
-        } else {
-            /* Build result vector from slots (in order) */
-            gc__current_heap = &vm->heap;
-            jacl_vec_root *vec = jacl_vec_empty();
-            for (uint32_t i = 0; i < agg->count; i++) {
-                vec = jacl_vec_push_back(vec, agg->results[i]);
+        /* Handle error: first error wins via CAS */
+        if (task_errored) {
+            uint32_t expected = 0;
+            if (ATOMIC_CAS(&agg->errored, &expected, 1,
+                            MEM_ACQ_REL, MEM_RELAXED)) {
+                gc_write_barrier(&self->grey_buf, &self->runtime->gc_active,
+                                 JACL_NIL, task_result);
+                ATOMIC_STORE_EXPLICIT(&agg->error_val, (uint64_t)task_result,
+                                       MEM_RELEASE);
             }
-            cont_arg = jacl_vector_ptr(vec);
         }
 
-        runtime__schedule_continuation(self->runtime, cont, cont_arg);
+        /* Atomically increment completion counter */
+        uint32_t prev = 0;
+        uint32_t desired = 1;
+        for (;;) {
+            prev = ATOMIC_LOAD_EXPLICIT(&agg->completed, MEM_ACQUIRE);
+            desired = prev + 1;
+            if (ATOMIC_CAS(&agg->completed, &prev, desired,
+                            MEM_ACQ_REL, MEM_RELAXED)) {
+                break;
+            }
+        }
+
+        /* If we're the last task to complete, schedule the join continuation */
+        if (desired == agg->count) {
+            JaclClosure *cont = jacl_as_closure(agg->continuation);
+            JaclVal cont_arg;
+
+            if (ATOMIC_LOAD_EXPLICIT(&agg->errored, MEM_ACQUIRE)) {
+                cont_arg = (JaclVal)ATOMIC_LOAD_EXPLICIT(&agg->error_val,
+                                                          MEM_ACQUIRE);
+            } else {
+                gc__current_heap = &vm->heap;
+                jacl_vec_root *vec = jacl_vec_empty();
+                for (uint32_t i = 0; i < agg->count; i++) {
+                    vec = jacl_vec_push_back(vec, agg->results[i]);
+                }
+                cont_arg = jacl_vector_ptr(vec);
+            }
+
+            runtime__schedule_continuation(self->runtime, cont, cont_arg);
+        }
     }
 
     free(ptd);
@@ -1185,16 +1355,14 @@ static void runtime__race_task_exec(void *data) {
     vm->error_line    = 0;
     vm->stack_trace.count = 0;
 
-    JaclVal task_result = JACL_NIL;
-
     if (rtd->is_cps) {
-        JaclVal fut_val = jacl_future(&vm->heap);
-        JaclFuture *fut = jacl_as_future(fut_val);
-        JaclVal resolve_k = runtime__create_resolve_closure(
-            &vm->heap, &self->arena, fut_val);
+        /* CPS closure: create race_k that directly settles the race.
+           Handles both synchronous and asynchronous (suspend) completion. */
+        JaclVal race_k = runtime__create_race_k(
+            &vm->heap, &self->arena, rtd->agg_val);
 
         vm->stack[0] = jacl_closure_ptr(cl);
-        vm->stack[1] = resolve_k;
+        vm->stack[1] = race_k;
         vm->stack_top = 2;
 
         vm->frames[0].closure    = cl;
@@ -1206,17 +1374,17 @@ static void runtime__race_task_exec(void *data) {
         vm->chunk     = &cl->chunk;
         vm->top_chunk = &cl->chunk;
 
-        vm__run(vm, 0);
+        VMResult r = vm__run(vm, 0);
 
-        uint32_t fstate = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_ACQUIRE);
-        if (fstate == FUTURE_RESOLVED) {
-            task_result = (JaclVal)fut->result;
-        } else if (fstate == FUTURE_ERROR) {
-            task_result = (JaclVal)fut->result;
-        } else {
-            task_result = JACL_NIL;
+        /* If VM errored before __k was called, try to settle with error */
+        if (r != VM_OK) {
+            JaclVal err = jacl_set_error(jacl_inline_string("error", 5));
+            runtime__complete_race_slot(self->runtime, vm,
+                                         rtd->agg_val, err);
         }
     } else {
+        JaclVal task_result = JACL_NIL;
+
         vm->stack[0] = jacl_closure_ptr(cl);
         vm->stack_top = 1;
 
@@ -1236,16 +1404,15 @@ static void runtime__race_task_exec(void *data) {
         } else {
             task_result = jacl_set_error(jacl_inline_string("error", 5));
         }
-    }
 
-    /* CAS settled: winner (0->1) schedules continuation, losers discard */
-    uint32_t expected = 0;
-    if (ATOMIC_CAS(&agg->settled, &expected, 1, MEM_ACQ_REL, MEM_RELAXED)) {
-        /* We are the winner */
-        JaclClosure *cont = jacl_as_closure(agg->continuation);
-        runtime__schedule_continuation(self->runtime, cont, task_result);
+        /* CAS settled: winner (0->1) schedules continuation, losers discard */
+        uint32_t expected = 0;
+        if (ATOMIC_CAS(&agg->settled, &expected, 1,
+                        MEM_ACQ_REL, MEM_RELAXED)) {
+            JaclClosure *cont = jacl_as_closure(agg->continuation);
+            runtime__schedule_continuation(self->runtime, cont, task_result);
+        }
     }
-    /* Losers: result silently discarded */
 
     free(rtd);
 }

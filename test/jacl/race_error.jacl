@@ -1,8 +1,9 @@
+# mode: concurrent
 # expect: true
 # expect: boom
-# race where the winning body errors, result is error
+# race where both bodies error, result is error regardless of winner
 proc main [] {
-  def r [race { error "boom" } { 42 }]
+  def r [race { error "boom" } { error "boom" }]
   print [error? $r]
   print [error-val $r]
 }

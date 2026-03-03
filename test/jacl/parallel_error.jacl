@@ -1,3 +1,4 @@
+# mode: concurrent
 # expect: true
 # expect: fail
 # one parallel body errors, result is error (first-error-wins)

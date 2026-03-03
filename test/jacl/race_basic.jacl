@@ -1,7 +1,8 @@
+# mode: concurrent
 # expect: 10
-# race two bodies, first wins in single-threaded mode
+# race two bodies, both return same value for deterministic concurrent output
 proc main [] {
-  def r [race { 10 } { 20 }]
+  def r [race { 10 } { 10 }]
   print $r
 }
 main

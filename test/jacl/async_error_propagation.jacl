@@ -1,3 +1,4 @@
+# mode: concurrent
 # expect: true
 # expect: deep-err
 # error in a deeply nested async call chain propagates to the top-level awaiter
