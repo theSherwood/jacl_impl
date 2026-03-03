@@ -11,6 +11,7 @@ Progress log for ralph/gc-concurrency-hardening branch.
 - `test__compile` + `rt_run_to_completion` does NOT register user procs in worker VMs — parallel body closures that call user procs will hang. Use `.jacl` tests with `# mode: concurrent` for tests that need proc calls in parallel bodies (the harness copies env to workers)
 - GreyBuffer.count uses release/acquire ordering: release-store in grey_buf_push (after writing entry), acquire-load in gc__drain_grey_bufs. Use ATOMIC_STORE_EXPLICIT/ATOMIC_LOAD_EXPLICIT from platform.h — they work on non-atomic types
 - Worker inbox drain: lockless volatile read of inbox_count first, then batched drain under single mutex acquisition — overflow tasks go to worker's private_deque via rt_deque_deque_push
+- JaclFuture uses a CAS spinlock (volatile uint32_t), not a platform mutex — no MUTEX_DESTROY needed on GC. future_lock/future_unlock in gc.c
 
 ---
 
@@ -79,4 +80,25 @@ Thread: (local)
   - Overflow tasks from batched drain go to private_deque, which is checked at step 2 of the worker loop — natural load balancing
   - The inbox is a LIFO stack (pop from end), so batched drain reverses submission order for overflow tasks — acceptable since task ordering is non-deterministic in concurrent mode
   - This is a pure optimization with no behavioral change — all existing tests pass without modification
+---
+
+## 2026-03-03 - US-005
+Thread: (local)
+- Replaced platform_mutex_t with CAS-based spinlock (volatile uint32_t) in JaclFuture
+- Added `future_lock()` using ATOMIC_CAS(&f->lock, &expected, 1, MEM_ACQUIRE, MEM_RELAXED) spin loop
+- Added `future_unlock()` using ATOMIC_STORE_EXPLICIT(&f->lock, 0, MEM_RELEASE)
+- Changed JaclFuture.lock field from `platform_mutex_t` to `volatile uint32_t`
+- Replaced MUTEX_INIT with `f->lock = 0` in `jacl_future()`
+- Replaced MUTEX_LOCK/UNLOCK with future_lock/future_unlock in 3 functions:
+  - `jacl_future_resolve` (resolve path)
+  - `jacl_future_error` (error path)
+  - `jacl_future_add_waiter` (waiter registration)
+- No MUTEX_DESTROY needed — spinlock is just memory, no OS resource to finalize
+- 20 lines added, 8 removed in src/gc.c — all 48 test suites pass, 172/172 .jacl tests pass, zero warnings
+- Files changed: src/gc.c
+- **Learnings for future iterations:**
+  - Future lock hold time is ~10 instructions — spinning is appropriate, no need for yield/sleep backoff
+  - ATOMIC_CAS takes a pointer to expected (not a value) — reset expected=0 on each retry iteration
+  - The spinlock eliminates platform_mutex_t from JaclFuture, removing the need for MUTEX_DESTROY on GC collection — on Windows this avoids leaking CRITICAL_SECTION resources
+  - Block pool mutex in gc.c still uses platform_mutex_t (coarse-grained, different use case) — only future locks were converted
 ---

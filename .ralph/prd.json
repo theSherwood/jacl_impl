@@ -91,7 +91,7 @@
         "Compiles without warnings"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "The lock is held for ~10 instructions during the resolve-vs-add_waiter race window. Spinning is appropriate at this hold time. The spinlock has no OS resource — when the future is GC'd, the uint32_t is just memory. Eliminates the resource leak on Windows where CRITICAL_SECTION requires DeleteCriticalSection."
     },
     {
