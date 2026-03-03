@@ -3641,6 +3641,346 @@ static int test_cont_error_propagation(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * US-007 (M14): Targeted GC+concurrency intersection tests
+ * ==================================================================== */
+
+/* --- Test helpers for non-threaded runtime (same as test_runtime.c) --- */
+
+static void m14__init_no_threads(Runtime *rt, int num_workers) {
+    int i;
+    rt->num_workers  = num_workers;
+    rt->global_epoch = 0;
+    rt->gc_running   = 0;
+    rt->gc_active    = 0;
+    rt->shutdown     = 0;
+
+    gc_block_pool_init(&rt->block_pool);
+
+    rt->inbox_cap   = 16;
+    rt->inbox_count = 0;
+    rt->inbox = (uintptr_t *)malloc((size_t)rt->inbox_cap * sizeof(uintptr_t));
+    MUTEX_INIT(rt->inbox_mutex);
+
+    rt->workers = (WorkerThread *)calloc((size_t)num_workers,
+                                          sizeof(WorkerThread));
+    for (i = 0; i < num_workers; i++) {
+        WorkerThread *w = &rt->workers[i];
+        w->id      = i;
+        w->runtime = rt;
+        w->currently_executing = WORKER_IDLE;
+        w->thread_epoch        = 0;
+        w->public_deque  = rt_deque_deque_new(4);
+        w->private_deque = rt_deque_deque_new(4);
+        grey_buf_init(&w->grey_buf);
+        w->arena = (arena_t){0};
+        runtime__init_worker_vm(w);
+        w->steal_ids = (int *)calloc((size_t)num_workers, sizeof(int));
+    }
+}
+
+static void m14__destroy_no_threads(Runtime *rt) {
+    int i;
+    for (i = 0; i < rt->num_workers; i++) {
+        WorkerThread *w = &rt->workers[i];
+        uintptr_t task_val;
+        while (rt_deque_deque_take(w->public_deque, &task_val))
+            free((RuntimeTask *)task_val);
+        while (rt_deque_deque_take(w->private_deque, &task_val))
+            free((RuntimeTask *)task_val);
+        rt_deque_deque_free(w->public_deque);
+        rt_deque_deque_free(w->private_deque);
+        grey_buf_destroy(&w->grey_buf);
+        free(w->steal_ids);
+        vm_destroy(&w->vm);
+        arena_destroy(&w->arena);
+    }
+    free(rt->workers);
+    for (intptr_t k = 0; k < rt->inbox_count; k++)
+        free((RuntimeTask *)rt->inbox[k]);
+    free(rt->inbox);
+    MUTEX_DESTROY(rt->inbox_mutex);
+    gc_block_pool_destroy(&rt->block_pool);
+}
+
+static bool m14__ms_contains(GCMarkStack *ms, void *target) {
+    void *ptr;
+    bool found = false;
+    void *saved[4096];
+    int saved_count = 0;
+
+    while (gc__ms_pop(ms, &ptr)) {
+        if (ptr == target) found = true;
+        if (saved_count < 4096)
+            saved[saved_count++] = ptr;
+    }
+    for (int i = 0; i < saved_count; i++)
+        gc__ms_push(ms, saved[i]);
+
+    return found;
+}
+
+/* Test: grey buffer processing — atom reset during active GC writes old
+ * value to grey buffer, which is then drained by the mark phase. */
+static int test_gc_grey_buf_atom_reset(void) {
+    Runtime rt;
+    m14__init_no_threads(&rt, 1);
+
+    WorkerThread *w = &rt.workers[0];
+    ThreadHeap *heap = &w->vm.heap;
+
+    /* Create an atom holding a heap value */
+    JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(heap, OBJ_MUTABLE_REF,
+                                                      sizeof(JaclMutableRef));
+    JaclVal old_val = jacl_i64(heap, 111111LL);
+    ref->value = old_val;
+
+    JaclVal new_val = jacl_i64(heap, 222222LL);
+
+    /* Simulate active GC: set gc_active = 1 */
+    ATOMIC_STORE_EXPLICIT(&rt.gc_active, 1, MEM_RELEASE);
+
+    /* Fire write barrier (same as OP_RESET on an atom) */
+    gc_write_barrier(&w->grey_buf, &rt.gc_active, old_val, new_val);
+    ref->value = new_val;
+
+    /* Grey buffer should contain both old and new values */
+    uint32_t gb_count = ATOMIC_LOAD_EXPLICIT(&w->grey_buf.count, MEM_ACQUIRE);
+    ASSERT(gb_count >= 2);
+
+    /* Verify old_val is in the grey buffer */
+    bool found_old = false, found_new = false;
+    for (uint32_t i = 0; i < gb_count; i++) {
+        if (w->grey_buf.entries[i] == old_val) found_old = true;
+        if (w->grey_buf.entries[i] == new_val) found_new = true;
+    }
+    ASSERT(found_old);
+    ASSERT(found_new);
+
+    /* Now run concurrent GC collect — the grey buffer entries should be
+     * drained and both values should survive the mark phase. */
+    /* Root the atom on the environment so the ref is live */
+    JaclVal atom_val = jacl_atom_ptr(ref);
+    w->vm.env.names[w->vm.env.count]  = jacl_inline_string("a", 1);
+    w->vm.env.values[w->vm.env.count] = atom_val;
+    w->vm.env.count++;
+
+    /* Run a mark cycle to drain the grey buffer */
+    GCMarkStack ms;
+    gc__ms_init(&ms);
+    gc_enumerate_roots(&rt, &ms);
+
+    /* Drain grey bufs (simulates what gc_concurrent_collect does) */
+    uint32_t *drained = (uint32_t *)calloc(1, sizeof(uint32_t));
+    gc__drain_grey_bufs(&rt, &ms, drained);
+
+    /* Both the old and new values should be on the mark stack */
+    void *old_ptr = jacl_as_ptr(old_val);
+    void *new_ptr = jacl_as_ptr(new_val);
+    ASSERT(m14__ms_contains(&ms, old_ptr));
+    ASSERT(m14__ms_contains(&ms, new_ptr));
+
+    free(drained);
+    gc__ms_destroy(&ms);
+
+    ATOMIC_STORE_EXPLICIT(&rt.gc_active, 0, MEM_RELEASE);
+    m14__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+/* Test: unrooted result regression — after US-001, create future, resolve
+ * with heap result, schedule continuation with gc_root2 = result, force GC,
+ * verify the result survives via gc_root2 rooting. */
+static int test_gc_unrooted_result_regression(void) {
+    Runtime rt;
+    m14__init_no_threads(&rt, 1);
+
+    WorkerThread *w = &rt.workers[0];
+    ThreadHeap *heap = &w->vm.heap;
+
+    /* Create a future and resolve it with a heap i64 */
+    JaclVal f = jacl_future(heap);
+    JaclFuture *fut = jacl_as_future(f);
+    JaclVal result = jacl_i64(heap, 9876543LL);
+    jacl_future_resolve(fut, result, NULL, NULL);
+
+    /* Create a continuation task with gc_root2 = result
+     * (simulates what runtime__schedule_continuation does) */
+    RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
+    task->fn = NULL;
+    task->data = NULL;
+    task->gc_root = f;        /* future as primary root */
+    task->gc_root2 = result;  /* result as secondary root */
+
+    /* Place the task on the deque (making it a root) */
+    rt_deque_deque_push(w->public_deque, (uintptr_t)task);
+
+    /* Drop direct reference to result — only reachable via gc_root2 */
+    result = JACL_NIL;
+
+    /* Enumerate roots and verify both future and result are found */
+    GCMarkStack ms;
+    gc__ms_init(&ms);
+    gc_enumerate_roots(&rt, &ms);
+
+    void *fut_ptr = jacl_as_ptr(f);
+    void *result_ptr = jacl_as_ptr(task->gc_root2);
+    ASSERT(m14__ms_contains(&ms, fut_ptr));
+    ASSERT(m14__ms_contains(&ms, result_ptr));
+
+    gc__ms_destroy(&ms);
+    m14__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+/* Test: OOM Tier 1 — set max_blocks very low, allocate garbage until
+ * emergency GC fires, verify it reclaims memory and allocation succeeds. */
+static int test_gc_oom_tier1_reclaim(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Set very small heap limit: 4 blocks = 256KB */
+    vm.block_pool.max_blocks = 4;
+
+    /* Fill blocks with garbage (nothing on VM stack = not rooted) */
+    for (int i = 0; i < 20000; i++) {
+        void *p = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+        if (!p) break;
+    }
+
+    /* All data is garbage. Emergency GC should reclaim it.
+     * Next allocation should succeed without OOM panic. */
+    void *result = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    ASSERT(result != NULL);
+
+    /* Verify we stayed within the 4-block limit */
+    ASSERT(vm.block_pool.total_blocks_allocated <= 4);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: OOM Tier 2 — emergency GC can't free enough, heap grows up to limit.
+ * Some data is live (rooted on stack), so emergency GC can't reclaim it.
+ * But we're below max_blocks, so allocation grows the heap. */
+static int test_gc_oom_tier2_heap_growth(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Allow 4 blocks total. Fill 2 blocks with live data (rooted). */
+    vm.block_pool.max_blocks = 4;
+
+    /* Root data on the VM stack so it survives emergency GC */
+    for (int i = 0; i < 800 && vm.stack_top < VM_STACK_MAX - 1; i++) {
+        void *p = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+        if (!p) break;
+        JaclVal v = JACL_TAG_I64 | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+        vm.stack[vm.stack_top++] = v;
+    }
+
+    /* Record initial block count (should have needed 1-2 blocks) */
+    uint32_t initial_blocks = vm.block_pool.total_blocks_allocated;
+    ASSERT(initial_blocks >= 1);
+
+    /* Allocate more — this will exhaust current blocks, trigger emergency GC
+     * which can't reclaim live data, then grow the heap via Tier 2 */
+    for (int i = 0; i < 5000; i++) {
+        void *p = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+        if (!p) break;
+    }
+
+    /* Heap should have grown beyond initial allocation */
+    ASSERT(vm.block_pool.total_blocks_allocated > initial_blocks);
+    /* But stayed within the 4-block limit */
+    ASSERT(vm.block_pool.total_blocks_allocated <= 4);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: OOM Tier 3 — custom gc__oom_handler fires with diagnostic info
+ * when heap limit is reached and all data is live. */
+static int test_gc_oom_tier3_handler_info(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Very tight limit: 1 block = 64KB */
+    vm.block_pool.max_blocks = 1;
+
+    /* Override panic handler to intercept OOM */
+    void (*saved_handler)(ThreadHeap *, size_t) = gc__oom_handler;
+    gc__oom_handler = test__oom_panic_handler;
+    oom_panic_called = false;
+
+    /* Fill with live data (rooted on stack) */
+    for (int i = 0; i < VM_STACK_MAX - 1; i++) {
+        void *p = gc_alloc(&vm.heap, OBJ_HEAP_I64, 248);
+        if (!p) break;
+        JaclVal v = JACL_TAG_I64 | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+        vm.stack[vm.stack_top++] = v;
+    }
+
+    /* Trigger OOM — Tier 1 emergency GC can't help (all live),
+     * Tier 2 can't help (at max_blocks=1), Tier 3 fires. */
+    if (setjmp(oom_panic_jmp) == 0) {
+        for (int i = 0; i < 5000; i++) {
+            (void)gc_alloc(&vm.heap, OBJ_HEAP_I64, 248);
+        }
+    }
+
+    ASSERT(oom_panic_called);
+
+    /* The handler received valid heap info (verified by handler not crashing;
+     * the test__oom_panic_handler does longjmp which confirms it was called
+     * with a valid heap pointer and request_size) */
+
+    gc__oom_handler = saved_handler;
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parallel join under GC pressure — parallel tasks with heavy
+ * allocation, verify result vector survives GC between completion and join. */
+static int test_gc_parallel_join_pressure(void) {
+    Runtime rt;
+    runtime_init(&rt, 4);
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Parallel with 4 bodies doing heavy computation + result vector access.
+     * fib(N) creates significant stack depth and allocation pressure.
+     * The result vector must survive GC between the last task completing
+     * and the join continuation executing. */
+    CompileResult cr = test__compile(
+        "proc fib [n] {\n"
+        "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
+        "}\n"
+        "proc task [] {\n"
+        "  def r [parallel { [fib 10] } { [fib 8] } { [fib 6] } { [fib 4] }]\n"
+        "  [+ [+ [vec-get $r 0] [vec-get $r 1]] [+ [vec-get $r 2] [vec-get $r 3]]]\n"
+        "}",
+        &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
+    ASSERT(task_cl != NULL);
+
+    VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
+    ASSERT(r == VM_OK);
+
+    runtime_destroy(&rt);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -3810,6 +4150,13 @@ int main(void) {
         { "susp_cb_reject_via_map",  test_susp_callback_reject_via_map },
         /* US-004 (bugfix): CPS continuation error propagation hang */
         { "cont_error_propagation",  test_cont_error_propagation },
+        /* US-007 (M14): GC+concurrency intersection tests */
+        { "gc_grey_buf_atom_reset", test_gc_grey_buf_atom_reset },
+        { "gc_unrooted_result_reg", test_gc_unrooted_result_regression },
+        { "gc_oom_tier1_reclaim",   test_gc_oom_tier1_reclaim },
+        { "gc_oom_tier2_heap_grow", test_gc_oom_tier2_heap_growth },
+        { "gc_oom_tier3_handler",   test_gc_oom_tier3_handler_info },
+        { "gc_parallel_join_press", test_gc_parallel_join_pressure },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

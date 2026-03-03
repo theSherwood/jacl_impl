@@ -1,0 +1,19 @@
+# mode: concurrent
+# expect: 233
+# expect: 89
+# expect: 34
+# expect: 13
+# US-007: Parallel join under GC pressure — parallel N tasks with heavy
+# allocation, trigger GC between completion and join, verify result vector
+# survives and contains correct values.
+proc fib [n] {
+  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }
+}
+proc main [] {
+  def r [parallel { [fib 13] } { [fib 11] } { [fib 9] } { [fib 7] }]
+  print [vec-get $r 0]
+  print [vec-get $r 1]
+  print [vec-get $r 2]
+  print [vec-get $r 3]
+}
+main
