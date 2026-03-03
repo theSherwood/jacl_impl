@@ -72,7 +72,7 @@
         "build.sh passes"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Trivial 2-line fix. Add jacl_is_error() check after retrieving fut->result in the FUTURE_RESOLVED case of runtime__parallel_task_exec(). The non-CPS path already handles this correctly."
     }
   ]

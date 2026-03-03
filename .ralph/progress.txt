@@ -1,4 +1,5 @@
 ## Codebase Patterns
+- Tests without `# mode: concurrent` run in single-threaded mode (vm->runtime == NULL) — CPS parallel error handling must be fixed in BOTH vm.c (single-threaded OP_PARALLEL) AND runtime.c (runtime__parallel_task_exec)
 - JACL has no `fn`/`lambda` keyword — use nested `proc` definitions for closures/lambdas
 - Comparison operators: `==` for equality, not `=` — using `=` causes "undefined variable '$='" error
 - Proc names must be <= 7 bytes (inline string limit) — e.g., use `comp` not `compute-value`
@@ -477,4 +478,17 @@ Thread: (current session)
   - When a CPS suspending call has 0 remaining statements, must pass __k directly (not create a wrapper continuation that returns nil) — same pattern as direct await tail optimization
   - spawn { proc_name } doesn't make the enclosing proc suspending — spawn returns a future, only await makes a proc suspend
   - The CPS call path (compiler__compile_suspending_call_cps) pushes callee, args, then continuation, and calls with argc+1
+---
+
+## 2026-03-03 - US-004
+- What was implemented: Parallel CPS error propagation — when a CPS parallel body (spawn+await) returns an error value through a FUTURE_RESOLVED future, the error flag is now detected and the parallel aggregation treats it as an error (first-error-wins)
+- Fix in two places: src/vm.c single-threaded OP_PARALLEL CPS path (line ~2672) and src/runtime.c runtime__parallel_task_exec CPS path (line ~1001) — both now check jacl_is_error() on FUTURE_RESOLVED results
+- Updated test/jacl/async_error_parallel.jacl — parallel body now uses spawn+await+error pattern instead of direct error
+- Added test/jacl/parallel_await_error.jacl — dedicated e2e test for parallel body with spawn+await+error
+- Files changed: src/runtime.c, src/vm.c, test/jacl/async_error_parallel.jacl, test/jacl/parallel_await_error.jacl (new)
+- **Learnings for future iterations:**
+  - The JACL test harness runs tests in single-threaded mode by default (vm->runtime is NULL). The `# mode: concurrent` header must be explicitly present for runtime-mode testing. Always verify which mode a test runs in before debugging.
+  - jacl_future_resolve() always sets state to FUTURE_RESOLVED regardless of whether the value has the error flag — error detection must happen at the consumer (parallel aggregation, await handler, etc.)
+  - In single-threaded CPS parallel, spawn runs synchronously so the chain (spawn → await → resolve_k) completes within vm__run, making the local future RESOLVED by the time it's checked. In concurrent mode, the future may still be PENDING.
+  - The non-CPS parallel path already had jacl_is_error() checking (vm.c:2718), but the CPS path was missing it — a subtle oversight since both paths handle FUTURE_RESOLVED differently
 ---
