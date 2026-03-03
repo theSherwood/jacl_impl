@@ -362,7 +362,7 @@
         "All tests pass (build.sh)"
       ],
       "priority": 19,
-      "passes": false,
+      "passes": true,
       "notes": "Existing M11 .jacl tests cover: typed_def_basic (i64 def), typed_def_error (type mismatch), typed_mut_basic (i64 mut), typed_proc (typed proc), typed_proc_error (arg type mismatch), typed_arithmetic (i64 addition), typed_arith_error (i64+f64 error), typed_set_error (set! type mismatch), type_conversions (i32 to i64). Gaps: no f64/f32/u64 coverage, no typed closures, no type conversion errors, no chained conversions, no typed values in collections."
     }
   ]

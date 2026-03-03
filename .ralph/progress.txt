@@ -492,3 +492,24 @@ Thread: (current session)
   - In single-threaded CPS parallel, spawn runs synchronously so the chain (spawn → await → resolve_k) completes within vm__run, making the local future RESOLVED by the time it's checked. In concurrent mode, the future may still be PENDING.
   - The non-CPS parallel path already had jacl_is_error() checking (vm.c:2718), but the CPS path was missing it — a subtle oversight since both paths handle FUTURE_RESOLVED differently
 ---
+
+## 2026-03-03 - US-019
+- Implemented 8 .jacl e2e tests covering M11 type system gaps
+- Files created:
+  - test/jacl/typed_i32.jacl — i32 arithmetic (add/sub/mul/div), negation, INT32_MAX boundary
+  - test/jacl/typed_u64.jacl — u64 arithmetic, large value via multiplication (10^12)
+  - test/jacl/typed_f64.jacl — f64 arithmetic, decimal output via %g formatting
+  - test/jacl/typed_f32.jacl — f32 arithmetic, division producing decimal
+  - test/jacl/typed_conversion_chain.jacl — chained i32 → i64 → f64 → i32 round-trip
+  - test/jacl/typed_conversion_error.jacl — compile-time error for str→i32 conversion
+  - test/jacl/typed_closure.jacl — proc capturing i64 outer variable, typed params, typed return
+  - test/jacl/typed_collection.jacl — i32 values in vec, map-get retrieval
+- **Learnings for future iterations:**
+  - Integer literals in AST are int32_t (max 2147483647) — for large u64 values, construct via arithmetic (e.g., 1000000 * 1000000)
+  - Float literals in AST are float (f32) — promoted to f64 via (double) cast in compiler when expected_type=TYPE_F64
+  - %g formatting strips trailing zeros: 3.0 → "3", 2.5 → "2.5", 4.0 → "4"
+  - Unboxed types (i64/u64/f64) in vectors are NOT automatically boxed — use tagged types (i32/f32) or explicit [to dyn $x] for collection storage
+  - compiler__ensure_boxed is called before to-string/interpolation but NOT before vec/map operations
+  - [to TYPE expr] is the conversion syntax, not [to-TYPE expr]
+  - Compile-time type conversion errors: "type error: cannot convert str to i32" (non-numeric source)
+---
