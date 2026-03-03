@@ -1,0 +1,79 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/cps-bugfixes",
+  "description": "CPS Edge Case Bugfixes — Fix three bugs in the JACL compiler/runtime: segfault from pre-await variable capture in parallel body closures, incorrect compilation of spawn bodies calling named suspending procs, and silent error swallowing in parallel CPS completion path. Add VM upvalue bounds checking for future safety.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Eager upvalue capture in CPS continuations",
+      "description": "As a JACL developer, I want variables defined before an await to be accessible inside parallel/race body closures after that await, so that CPS-transformed code behaves like regular lexical scoping.",
+      "acceptanceCriteria": [
+        "compiler__emit_continuation() in src/compiler.c proactively captures all live locals (depth >= 1) from the parent scope into the continuation closure's upvalue array",
+        "Variables defined before a suspension point are available as upvalues in nested closures (parallel bodies, race bodies, spawn bodies) compiled inside the continuation",
+        "The pattern: def x [await $f]; [parallel { $x } { error \"fail\" }] no longer segfaults",
+        "Upvalue indices in nested closures correctly reference the continuation's upvalue array (transitive capture chain is valid)",
+        "Update test/jacl/async_error_parallel.jacl to use $x (pre-await variable) inside a parallel body, replacing the workaround pattern",
+        "Add unit test in test/test_m13.c: continuation captures all live locals (verify upvalue count includes unreferenced-by-continuation but referenced-by-nested-closure variables)",
+        "Add e2e test: test/jacl/cps_capture_parallel.jacl — pre-await variable used in parallel body after await",
+        "Existing CPS tests still pass (cps_variable_capture, cps_closure_capture, cps_propagation, parallel_with_await, etc.)",
+        "build.sh passes (all test suites green)"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Hardest bug. The nesting chain is: Main compiler (locals: f, x) -> Continuation compiler (x becomes upvalue) -> Parallel body compiler (x is upvalue-of-upvalue). Fix by making compiler__emit_continuation() eagerly capture ALL live locals, not just those directly referenced by the continuation body. Include A-normalization temporaries — optimize later if needed."
+    },
+    {
+      "id": "US-002",
+      "title": "VM upvalue bounds checking",
+      "description": "As a JACL developer, I want the VM to produce a clear error message instead of a segfault when the compiler emits an invalid upvalue index, so that future compiler bugs are diagnosable.",
+      "acceptanceCriteria": [
+        "OP_CLOSURE handler in src/vm.c validates uv_index against frame->closure->upvalue_count when is_local == 0 (upvalue-from-parent path)",
+        "OP_CLOSURE handler validates uv_index against frame->stack_base + local_count when is_local == 1 (local capture path)",
+        "Invalid index produces a VM_RUNTIME_ERROR with message like 'OP_CLOSURE: upvalue index %d out of bounds (parent has %d upvalues)' instead of a segfault",
+        "Add unit test in test/test_m13.c: crafted bytecode with out-of-bounds upvalue index triggers error (not crash)",
+        "Add e2e test: test/jacl/upvalue_deep_chain.jacl — 3+ levels of nested closures across suspension points with variable capture at each level, verifies bounds checks don't false-positive on valid deep upvalue chains",
+        "Add e2e test: test/jacl/upvalue_multi_capture.jacl — multiple pre-await variables captured by different parallel/spawn body closures in the same continuation, verifies all upvalue indices resolve correctly",
+        "No performance impact on valid bytecode (checks are simple integer comparisons)",
+        "build.sh passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Defensive hardening. Simple integer comparison guards in OP_CLOSURE handler. Ensures any future upvalue bugs produce clear errors instead of segfaults."
+    },
+    {
+      "id": "US-003",
+      "title": "Suspension detection for named proc calls",
+      "description": "As a JACL developer, I want spawn { suspending_proc } to correctly compile the spawn body as CPS when suspending_proc is a known suspending procedure, so that spawn bodies calling suspending procs work correctly.",
+      "acceptanceCriteria": [
+        "ast__contains_suspension() in src/compiler.c accepts a SuspensionMap* parameter",
+        "When the head of an AST_COMMAND is a string (<= 7 bytes) that matches a suspending proc in the map (via suspension_map_lookup()), the function returns true",
+        "All call sites updated to pass c->suspension_map (~4 sites: spawn body check, parallel body check, callback validation in transform/each/filter, top-level suspension check)",
+        "The pattern: proc deep [] { await ... }; proc mid [] { spawn { deep } } no longer errors with 'OP_AWAIT: continuation is not a closure'",
+        "Update test/jacl/async_error_propagation.jacl to use named suspending proc calls from spawn bodies, replacing the inline nested spawn workaround",
+        "Add e2e test: test/jacl/spawn_susp_proc.jacl — spawn body calling a named suspending proc",
+        "Callback validation (transform/each/filter) still correctly rejects suspending callbacks",
+        "build.sh passes"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "The SuspensionMap infrastructure already exists on the Compiler struct and is populated by compiler__analyze_suspension(). Just need to thread it into ast__contains_suspension() and add the lookup. Skip proc names > 7 bytes (inline string limit — cannot be in the map)."
+    },
+    {
+      "id": "US-004",
+      "title": "Parallel CPS error propagation",
+      "description": "As a JACL developer, I want error values returned through await inside parallel bodies to be detected as errors by the parallel aggregation, so that error? returns true on the parallel result.",
+      "acceptanceCriteria": [
+        "In runtime__parallel_task_exec() in src/runtime.c, the CPS path checks jacl_is_error(task_result) after retrieving fut->result in the FUTURE_RESOLVED case",
+        "If the result is an error value, task_errored is set to true (triggering the existing first-error-wins aggregation)",
+        "The pattern: [parallel { 30 } { def f [spawn { error \"par-err\" }]; await $f }] now returns an error value (error? is true, error-val is par-err)",
+        "Update test/jacl/async_error_parallel.jacl to use a parallel body with spawn+await that errors, replacing the workaround",
+        "Add e2e test: test/jacl/parallel_await_error.jacl — parallel body with spawn+await+error, verifies error? and error-val",
+        "Non-CPS parallel error behavior unchanged (parallel_error.jacl still passes)",
+        "build.sh passes"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "Trivial 2-line fix. Add jacl_is_error() check after retrieving fut->result in the FUTURE_RESOLVED case of runtime__parallel_task_exec(). The non-CPS path already handles this correctly."
+    }
+  ]
+}
