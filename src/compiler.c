@@ -4115,7 +4115,26 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
       }
     }
 
-    /* Phase 2: Create __main CPS closure */
+    /* Phase 2: Hoist top-level proc definitions into the outer chunk so
+       they are defined via OP_SET_GLOBAL before the CPS closure executes.
+       This ensures all workers have proc definitions in their env when
+       running in concurrent mode. */
+    uint32_t non_proc_count = 0;
+    AstNode** non_proc_stmts = (AstNode**)arena_alloc(arena,
+        parse.count * sizeof(AstNode*));
+    for (uint32_t i = 0; i < parse.count; i++) {
+      AstNode* node = parse.nodes[i];
+      if (node->type == AST_COMMAND &&
+          compiler__head_matches(node->data.command.head, "proc", 4)) {
+        /* Compile proc definition into outer (top-level) chunk */
+        compiler__compile_node(&c, node);
+        compiler__emit_check_error(&c, node->start.line);
+      } else {
+        non_proc_stmts[non_proc_count++] = node;
+      }
+    }
+
+    /* Phase 3: Create __main CPS closure (only non-proc statements) */
     JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
     chunk_init(&main_cl->chunk, arena);
     main_cl->param_count   = 1; /* __k */
@@ -4145,8 +4164,8 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     compiler__add_local(&body, jacl_inline_string("__k", 3), 1, 0);
     body.locals[body.local_count - 1].is_param = true;
 
-    /* Compile all stmts through CPS */
-    compiler__compile_cps_stmts(&body, parse.nodes, parse.count, 1);
+    /* Compile non-proc stmts through CPS */
+    compiler__compile_cps_stmts(&body, non_proc_stmts, non_proc_count, 1);
     compiler__emit_byte(&body, OP_RETURN, 1);
 
     /* Propagate errors */
