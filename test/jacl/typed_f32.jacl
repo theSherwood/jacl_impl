@@ -1,0 +1,12 @@
+# expect: 4
+# expect: 1
+# expect: 3.75
+# expect: 0.5
+def f32 a 2.5
+def f32 b 1.5
+print [to-string [+ $a $b]]
+print [to-string [- $a $b]]
+print [to-string [* $a $b]]
+def f32 c 1.0
+def f32 d 2.0
+print [to-string [/ $c $d]]

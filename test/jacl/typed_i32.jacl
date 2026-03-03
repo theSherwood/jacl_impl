@@ -1,0 +1,15 @@
+# expect: 15
+# expect: 5
+# expect: 50
+# expect: 2
+# expect: -10
+# expect: 2147483647
+def i32 a 10
+def i32 b 5
+print [to-string [+ $a $b]]
+print [to-string [- $a $b]]
+print [to-string [* $a $b]]
+print [to-string [/ $a $b]]
+print [to-string [- $a]]
+def i32 big 2147483647
+print [to-string $big]

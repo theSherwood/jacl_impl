@@ -1,0 +1,10 @@
+# expect: 42
+# expect: 42
+# expect: 42
+def i32 x 42
+def i64 y [to i64 $x]
+print [to-string $y]
+def f64 z [to f64 $y]
+print [to-string $z]
+def i32 back [to i32 $z]
+print [to-string $back]

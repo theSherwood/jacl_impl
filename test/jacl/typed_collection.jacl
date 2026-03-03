@@ -1,0 +1,11 @@
+# expect: [vec 10 20 30]
+# expect: 20
+# expect: 42
+def i32 a 10
+def i32 b 20
+def i32 c 30
+def v [vec $a $b $c]
+print [to-string $v]
+print [to-string [vec-get $v 1]]
+def m [map "key" 42]
+print [to-string [map-get $m "key"]]

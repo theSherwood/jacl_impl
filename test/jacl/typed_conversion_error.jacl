@@ -1,0 +1,3 @@
+# expect-error: type error: cannot convert str to i32
+def str s "hello"
+def i32 n [to i32 $s]

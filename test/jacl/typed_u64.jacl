@@ -1,0 +1,12 @@
+# expect: 300
+# expect: 100
+# expect: 20000
+# expect: 1000000000000
+def u64 a 200
+def u64 b 100
+print [to-string [+ $a $b]]
+print [to-string [- $a $b]]
+print [to-string [* $a $b]]
+def u64 big 1000000
+def u64 huge [* $big $big]
+print [to-string $huge]

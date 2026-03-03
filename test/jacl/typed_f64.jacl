@@ -1,0 +1,12 @@
+# expect: 4
+# expect: 1
+# expect: 3.75
+# expect: 1.25
+def f64 a 2.5
+def f64 b 1.5
+print [to-string [+ $a $b]]
+print [to-string [- $a $b]]
+print [to-string [* $a $b]]
+def f64 c 5.0
+def f64 d 4.0
+print [to-string [/ $c $d]]
