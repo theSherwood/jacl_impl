@@ -1,147 +1,24 @@
-## M14 — GC/Concurrency Hardening
+## M15 — GC/Concurrency Hardening Phase 2
 
-Progress log for ralph/gc-concurrency-hardening branch.
+Progress log for ralph/gc-concurrency-hardening-2 branch.
 
 ## Codebase Patterns
-- RuntimeTask gc_root/gc_root2 must always be initialized (JACL_NIL if unused) — test code that creates RuntimeTask manually must set both fields
-- GC root scanning has three paths: currently_executing, deque snapshot, and inbox — all three must be updated in sync
-- Tests that create RuntimeTask manually must be updated when the struct changes
-- Use `rt_test__init_no_threads` / `rt_test__destroy_no_threads` for unit tests that don't need real worker threads
-- `rt_test__ms_contains` destructively drains the mark stack but restores entries — safe for multiple checks on same stack
-- `test__compile` + `rt_run_to_completion` does NOT register user procs in worker VMs — parallel body closures that call user procs will hang. Use `.jacl` tests with `# mode: concurrent` for tests that need proc calls in parallel bodies (the harness copies env to workers)
-- GreyBuffer.count uses release/acquire ordering: release-store in grey_buf_push (after writing entry), acquire-load in gc__drain_grey_bufs. Use ATOMIC_STORE_EXPLICIT/ATOMIC_LOAD_EXPLICIT from platform.h — they work on non-atomic types
-- Worker inbox drain: lockless volatile read of inbox_count first, then batched drain under single mutex acquisition — overflow tasks go to worker's private_deque via rt_deque_deque_push
-- JaclFuture uses a CAS spinlock (volatile uint32_t), not a platform mutex — no MUTEX_DESTROY needed on GC. future_lock/future_unlock in gc.c
-- CPS parallel/race bodies must use parallel_k/race_k closures (OP_COMPLETE_PARALLEL/OP_COMPLETE_RACE), NOT resolve_k + internal future — the internal-future-poll pattern breaks when bodies suspend at inner awaits
-- Race tests with `# mode: concurrent` must use identical return values in both bodies for determinism (see race_concurrent.jacl pattern)
-- Adding new opcodes to bytecode.c requires updating the hardcoded opcode index assertions in test/test_bytecode.c
+- Build and test with `bash build.sh` from project root. Individual test files compile via `gcc -Wall -Wextra -std=c99 -g test/test_gc.c -o /tmp/test_gc`
+- test_gc.c includes `../src/jacl.c` directly (unity build pattern) — no separate .o linking needed
+- GCHeader is 8 bytes: uint32_t epoch + uint8_t mark + uint8_t obj_type + uint16_t alloc_total
+- GC_BLOCK_SIZE = 65536 (64KB), GC_LINE_SIZE = 128, GC_LINES_PER_BLOCK = 512
+- Tests use BlockPool + ThreadHeap directly; some tests use VM via `vm_init(&vm, &arena)`
+- Pre-existing compiler warnings in hamt.h, rrb_vec.h, etc. are expected — only check for new warnings from changed files
 
 ---
 
 ## 2026-03-03 - US-001
-Thread: (local)
-- Added `gc_root2` field to RuntimeTask struct for multi-root GC scanning
-- Set gc_root2 in all 6 task submission functions:
-  - `runtime_submit`: JACL_NIL
-  - `runtime_submit_task`: JACL_NIL
-  - `runtime__schedule_continuation`: result value
-  - `runtime__submit_spawn_task`: closure tagged value
-  - `runtime__submit_parallel_task`: closure tagged value
-  - `runtime__submit_race_task`: closure tagged value
-- Updated GC scanning in 3 locations to scan gc_root2:
-  - `gc__scan_deque`: deque task scanning
-  - `gc_enumerate_roots`: currently_executing task + inbox tasks
-- Added `test_enumerate_roots_gc_root2` test verifying gc_root2 is found via all three scanning paths (deque, currently_executing, inbox)
-- Updated 4 existing tests that create RuntimeTask manually to set gc_root2 = JACL_NIL
-- Files changed: src/runtime.c, test/test_runtime.c
+- Changed `total > GC_BLOCK_SIZE` to `total >= GC_BLOCK_SIZE` in gc_alloc (gc.c:317) to prevent uint16_t overflow when total == 65536
+- Added 3 boundary tests: exact boundary (65528 payload → NULL), just under (65520 → succeeds), well within (65512 → succeeds)
+- Files changed: src/gc.c, test/test_gc.c
 - **Learnings for future iterations:**
-  - RuntimeTask is created in 6 different places in runtime.c — all must be updated in sync
-  - 4 tests in test_runtime.c create RuntimeTask manually and need struct field updates
-  - gc__ms_push_val silently ignores JACL_NIL (inline values), so pushing gc_root2=JACL_NIL is harmless
+  - sizeof(GCHeader) = 8, so payload of 65528 + 8 = 65536 exactly hits the boundary
+  - Test registration in main() at bottom of test_gc.c — add new entries in the TestEntry array
+  - All 48 test targets pass (including 174 .jacl integration tests)
 ---
 
-## 2026-03-03 - US-002
-Thread: (local)
-- Confirmed `runtime__schedule_continuation` sets `gc_root2 = result` (line 816 of runtime.c) — the parallel join result vector is rooted through the continuation task's gc_root2 field
-- Added `.jacl` integration test: `test/jacl/parallel_gc_pressure.jacl` with `# mode: concurrent` — 4 parallel tasks running `fib(12..6)` on 4 workers, verifies result vector elements (144, 55, 21, 8) survive GC
-- Added C stress test `test_stress_parallel_join_gc` in test_m13.c — 4 parallel tasks on 4 workers with result vector access in continuation
-- All existing parallel tests pass (parallel_order, parallel_two, parallel_concurrent, etc.)
-- Files changed: test/test_m13.c, test/jacl/parallel_gc_pressure.jacl
-- **Learnings for future iterations:**
-  - `test__compile` + `rt_run_to_completion` does NOT register user-defined procs in worker VMs — parallel body closures that call user procs (like `fib`) hang because the proc isn't in the worker's environment
-  - Use `.jacl` tests with `# mode: concurrent` for tests that need proc calls in concurrent parallel/spawn bodies — the harness copies env from temp VM to all workers
-  - Multi-line JACL expressions in C string literals can cause parse errors — keep expressions on single lines
-  - The parallel join result vector rooting chain: ParallelAgg traces results[] → last-completing task builds vec → `runtime__schedule_continuation(rt, cont, vec)` → continuation task gc_root2 = vec → GC scans inbox/deque gc_root2
----
-
-## 2026-03-03 - US-003
-Thread: (local)
-- Added release/acquire memory ordering to GreyBuffer.count for cross-thread consistency
-- `grey_buf_push` (gc.c:619): reads count into local, writes entry first (plain store, thread-local), then release-stores count+1 via ATOMIC_STORE_EXPLICIT
-- `gc__drain_grey_bufs` (runtime.c:597): acquire-loads count via ATOMIC_LOAD_EXPLICIT, ensuring all entries[0..count-1] are visible
-- `gc_concurrent_collect` (runtime.c:681): grey_buf.count=0 reset kept as plain store with comment documenting ordering guarantee from gc_active=0 (release) → gc_running=0 (release) chain
-- Added documenting comments in both grey_buf_push and gc__drain_grey_bufs explaining the release/acquire pairing
-- Files changed: src/gc.c, src/runtime.c
-- **Learnings for future iterations:**
-  - GreyBuffer is per-worker (thread-local writes) but GC thread reads count cross-thread — classic release/acquire pattern
-  - The ATOMIC macros in platform.h work on non-atomic types by casting (C11 path) or using __atomic builtins (GCC path)
-  - Grey buffer reset after gc_active=0 is safe as plain store: gc_active=0 (release) ensures workers stop pushing, gc_running=0 (release) publishes reset before next cycle
-  - On x86/TSO, the plain stores were already safe in practice, but C11 formally requires atomic operations for cross-thread access to avoid UB
----
-
-## 2026-03-03 - US-004
-Thread: (local)
-- Replaced mutex-locked inbox check with lockless volatile read + batched drain
-- Worker loop now checks `rt->inbox_count > 0` (volatile read, no lock) before acquiring inbox_mutex
-- When non-empty, single lock acquisition drains ALL pending tasks: first goes to task_val, rest pushed to worker's private_deque via rt_deque_deque_push
-- Producer side (runtime_submit, runtime_submit_task, and 4 other submission functions) unchanged
-- ~10 line change in runtime__worker_loop (src/runtime.c lines 189-202)
-- All 48 test suites pass, 172/172 .jacl tests pass, zero compiler warnings
-- Files changed: src/runtime.c
-- **Learnings for future iterations:**
-  - inbox_count is volatile intptr_t — safe for lockless reads without atomics on all platforms
-  - Overflow tasks from batched drain go to private_deque, which is checked at step 2 of the worker loop — natural load balancing
-  - The inbox is a LIFO stack (pop from end), so batched drain reverses submission order for overflow tasks — acceptable since task ordering is non-deterministic in concurrent mode
-  - This is a pure optimization with no behavioral change — all existing tests pass without modification
----
-
-## 2026-03-03 - US-005
-Thread: (local)
-- Replaced platform_mutex_t with CAS-based spinlock (volatile uint32_t) in JaclFuture
-- Added `future_lock()` using ATOMIC_CAS(&f->lock, &expected, 1, MEM_ACQUIRE, MEM_RELAXED) spin loop
-- Added `future_unlock()` using ATOMIC_STORE_EXPLICIT(&f->lock, 0, MEM_RELEASE)
-- Changed JaclFuture.lock field from `platform_mutex_t` to `volatile uint32_t`
-- Replaced MUTEX_INIT with `f->lock = 0` in `jacl_future()`
-- Replaced MUTEX_LOCK/UNLOCK with future_lock/future_unlock in 3 functions:
-  - `jacl_future_resolve` (resolve path)
-  - `jacl_future_error` (error path)
-  - `jacl_future_add_waiter` (waiter registration)
-- No MUTEX_DESTROY needed — spinlock is just memory, no OS resource to finalize
-- 20 lines added, 8 removed in src/gc.c — all 48 test suites pass, 172/172 .jacl tests pass, zero warnings
-- Files changed: src/gc.c
-- **Learnings for future iterations:**
-  - Future lock hold time is ~10 instructions — spinning is appropriate, no need for yield/sleep backoff
-  - ATOMIC_CAS takes a pointer to expected (not a value) — reset expected=0 on each retry iteration
-  - The spinlock eliminates platform_mutex_t from JaclFuture, removing the need for MUTEX_DESTROY on GC collection — on Windows this avoids leaking CRITICAL_SECTION resources
-  - Block pool mutex in gc.c still uses platform_mutex_t (coarse-grained, different use case) — only future locks were converted
----
-
-## 2026-03-03 - US-006
-Thread: (local)
-- Added `# mode: concurrent` to 10 .jacl test files: spawn_multi, spawn_nested, parallel_error, parallel_with_await, parallel_await_error, race_basic, race_error, async_error_spawn, async_error_propagation, async_error_parallel
-- Discovered and fixed concurrency bug: CPS parallel/race bodies with inner `spawn + await` returned nil in concurrent mode
-  - Root cause: `runtime__parallel_task_exec` used resolve_k + internal future, polled the future after `vm__run`. When the body suspended at an `await`, `vm__run` returned early with the future still PENDING → `JACL_NIL` stored as result
-  - Fix: introduced `parallel_k` and `race_k` closures with new opcodes `OP_COMPLETE_PARALLEL` and `OP_COMPLETE_RACE` that directly complete the aggregation slot (store result, handle error, increment counter, schedule join). Works whether the body completes synchronously or suspends and resumes asynchronously
-- Race tests (race_basic, race_error) adjusted for deterministic concurrent output: both bodies return the same value (matching race_concurrent.jacl pattern)
-- Updated opcode index assertions in test_bytecode.c (+2 offset for new opcodes)
-- All 48 test suites pass, 172/172 .jacl tests pass, zero new compiler warnings
-- Files changed: src/bytecode.c, src/vm.c, src/runtime.c, test/test_bytecode.c, 10 .jacl test files
-- **Learnings for future iterations:**
-  - The resolve_k + internal future pattern works for spawn tasks (where the future is the final output) but NOT for parallel/race bodies (where the result must feed back into an aggregation)
-  - When a CPS body suspends at an inner await, `vm__run` returns `VM_OK` but the CPS chain is not complete — the continuation (`__k`) hasn't been called yet
-  - The fix is to make `__k` itself do the completion work (parallel_k/race_k), not wrap __k in resolve_k and poll the result
-  - Race tests are inherently non-deterministic in concurrent mode — both bodies may complete in any order. Use identical return values for determinism
-  - New opcodes require updating test_bytecode.c's hardcoded enum value assertions
----
-
-## 2026-03-03 - US-007
-Thread: (local)
-- Added 6 targeted GC+concurrency intersection C tests to test_m13.c:
-  - `test_gc_grey_buf_atom_reset`: grey buffer processing during atom reset with gc_active=1, verifies old+new values are pushed and drained during mark
-  - `test_gc_unrooted_result_regression`: verifies gc_root2 roots the result value through deque scanning, preventing premature collection
-  - `test_gc_oom_tier1_reclaim`: 4-block heap limit, fills with garbage, emergency GC reclaims it, allocation succeeds
-  - `test_gc_oom_tier2_heap_growth`: live data survives emergency GC, heap grows to accommodate more allocations within limit
-  - `test_gc_oom_tier3_handler_info`: all blocks live + at limit, custom oom handler fires
-  - `test_gc_parallel_join_pressure`: 4 parallel fib tasks on 4 workers, result vector access in continuation
-- Added 2 .jacl integration tests with `# mode: concurrent`:
-  - `gc_mid_cps_chain.jacl`: chain of 5 sequential spawn+await with fib(10-13), intermediate values only alive as CPS upvalues
-  - `gc_parallel_join.jacl`: parallel 4 fib tasks, verifies result vector elements survive GC
-- Added `m14__init_no_threads`, `m14__destroy_no_threads`, `m14__ms_contains` helper functions (copied from test_runtime.c pattern)
-- All 48 test suites pass, 174/174 .jacl tests pass, zero compiler warnings
-- Files changed: test/test_m13.c, test/jacl/gc_mid_cps_chain.jacl, test/jacl/gc_parallel_join.jacl
-- **Learnings for future iterations:**
-  - test_m13.c does NOT include test_runtime.c, so rt_test__* helpers must be duplicated (prefixed m14__ to avoid collision)
-  - The oom_panic_jmp / oom_panic_called / test__oom_panic_handler infrastructure is reusable across OOM tests — already present in test_m13.c from US-010
-  - For grey buffer tests, manually set gc_active=1 on the runtime, fire gc_write_barrier, then call gc__drain_grey_bufs to verify entries land on the mark stack
-  - For OOM Tier 2 testing: root data on vm.stack to keep it alive through emergency GC, then allocate more to force heap growth
----
