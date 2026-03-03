@@ -55,7 +55,7 @@
         "build.sh passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "The SuspensionMap infrastructure already exists on the Compiler struct and is populated by compiler__analyze_suspension(). Just need to thread it into ast__contains_suspension() and add the lookup. Skip proc names > 7 bytes (inline string limit — cannot be in the map)."
     },
     {

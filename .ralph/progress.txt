@@ -31,7 +31,7 @@
 - Tests grouped by US-XXX story comments in the test table
 - Pre-await variables can now be captured in parallel body closures (fixed in US-001: eager upvalue capture + VM frame restoration)
 - OP_PARALLEL single-threaded path: MUST restore frame_count and stack_top after each body's vm__run call (error path leaves orphan frames)
-- Calling named suspending procs from spawn bodies causes "OP_AWAIT: continuation is not a closure" — use inline spawn bodies with nested spawn+await instead of named proc calls
+- Named suspending proc calls from spawn/parallel bodies are now correctly detected and CPS-compiled (fixed in US-003: ast__contains_suspension takes SuspensionMap* param)
 - Error values from `await` on errored futures are regular values to parallel bodies — parallel only detects errors from direct `error` calls, not from await-propagated error values
 - Bare word semantics (M6): bare words at statement position desugar to zero-arg calls — use `{ "yes" }` not `{ yes }` for string-literal blocks
 - $var semantics (M6): `$var` at statement position desugars to `[$var]` (zero-arg call) — use `{ [+ $x 0] }` not `{ $x }` for non-callable values
@@ -460,4 +460,21 @@ Thread: (current session)
   - vm_exec() can be called directly with hand-crafted BytecodeChunk for testing VM edge cases that the compiler wouldn't normally produce
   - The top-level implicit closure in vm_exec has upvalue_count=0 and upvalues=NULL, making it ideal for testing OOB parent upvalue access
   - Bounds checks are simple integer comparisons with no performance impact on valid bytecode
+---
+
+## 2026-03-03 - US-003
+- Implemented suspension detection for named proc calls in ast__contains_suspension()
+- Added SuspensionMap* parameter to ast__contains_suspension() — when map is non-NULL, named proc calls with names <= 7 bytes are looked up in the map
+- Updated all 7 call sites (parallel body, spawn body, transform/each/filter callback validation, top-level suspension check) to pass the map
+- Fixed compiler__compile_suspending_call_cps to pass __k directly when remaining_count == 0 (tail call optimization), fixing nil return values from spawn bodies calling named suspending procs
+- Simplified compiler__top_level_suspends since ast__contains_suspension now handles map lookups
+- Updated test/jacl/async_error_propagation.jacl to use named suspending proc calls from spawn bodies
+- Added test/jacl/spawn_susp_proc.jacl — spawn body calling a named suspending proc
+- Added 3 unit tests in test/test_m13.c: contains_susp_named, spawn_calls_susp_proc, susp_cb_reject_via_map
+- Files changed: src/compiler.c, test/test_m13.c, test/jacl/async_error_propagation.jacl, test/jacl/spawn_susp_proc.jacl (new)
+- **Learnings for future iterations:**
+  - ast__contains_suspension and compiler__node_is_suspension are two separate functions — the former is for pre-compilation checks (parallel/spawn body detection), the latter is for CPS statement splitting
+  - When a CPS suspending call has 0 remaining statements, must pass __k directly (not create a wrapper continuation that returns nil) — same pattern as direct await tail optimization
+  - spawn { proc_name } doesn't make the enclosing proc suspending — spawn returns a future, only await makes a proc suspend
+  - The CPS call path (compiler__compile_suspending_call_cps) pushes callee, args, then continuation, and calls with argc+1
 ---
