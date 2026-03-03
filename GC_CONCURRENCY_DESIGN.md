@@ -112,13 +112,14 @@ Every GC-managed heap object gets a header prepended:
 
 ```c
 typedef struct {
-    uint32_t epoch;      // allocation epoch
-    uint8_t  mark;       // mark bit (alternates 0/1 each cycle to avoid clearing)
-    uint8_t  obj_type;   // tells GC how to trace this object's references
-    uint8_t  gen;        // generation (0 = young, 1 = old)
-    uint8_t  _pad;       // alignment
+    uint32_t epoch;        // allocation epoch
+    uint8_t  mark;         // mark bit (alternates 0/1 each cycle to avoid clearing)
+    uint8_t  obj_type;     // tells GC how to trace this object's references
+    uint16_t alloc_total;  // total aligned allocation size (header + payload + padding)
 } GCHeader;
 ```
+
+Note: The `gen` and `_pad` fields from the original design were replaced by `alloc_total` during implementation. The sweep phase uses `alloc_total` to walk objects linearly through blocks without maintaining a separate object list. Generational collection (Section 11) will reclaim 2 bytes from `alloc_total` (switching to a line count) or expand the header when implemented.
 
 ### Object Types for Tracing
 
@@ -175,7 +176,7 @@ static inline void* gc_alloc(WorkerThread* t, uint8_t obj_type, size_t payload_s
     hdr->epoch    = t->thread_epoch;
     hdr->mark     = 0;
     hdr->obj_type = obj_type;
-    hdr->gen      = 0;  // young
+    hdr->alloc_total = total;
     return hdr + 1;  // return pointer past header (the payload)
 }
 ```
@@ -605,3 +606,44 @@ These must be interleaved, not sequential:
 10. **Concurrency primitives** — `spawn`, `await`, `parallel`, `race`
 
 Steps 1-2 can be prototyped single-threaded. Step 3 is a compiler change (independent). Steps 4-8 bring up the concurrent GC. Step 9 removes the old RC system. Step 10 adds the user-facing API.
+
+## 17. M14 Amendments (Post-Audit)
+
+An audit of the M12/M13 implementation identified several issues requiring design amendments.
+
+### 17.1 Multi-Root Task Scanning
+
+**Problem**: `RuntimeTask.gc_root` holds a single `JaclVal`, but several task types need two roots:
+
+| Task type | gc_root (rooted) | Unrooted value |
+|-----------|-----------------|----------------|
+| Continuation scheduling | continuation closure | result value |
+| Spawn submission | future | spawn closure |
+| Parallel task | parallel agg | task body closure |
+| Race task | race agg | task body closure |
+
+If GC runs between task submission and execution, the unrooted value can be collected when no other reference keeps it alive. Epoch watermarking and eager CPS capture mitigate this in practice, but the design is unsound.
+
+**Amendment**: Add `gc_root2` to `RuntimeTask`. All task submission sites populate both slots. Root enumeration (`gc_enumerate_roots`, `gc__scan_deque`, inbox scanning) scans both roots. This is a minimal change that covers all current cases without over-engineering.
+
+### 17.2 Grey Buffer Memory Ordering
+
+**Problem**: Section 9 states "GC can safely read entries up to a snapshot of the count." This is true on x86 (TSO), but under C11 and on weakly-ordered architectures (ARM, POWER), the plain store to `entries[count]` and plain increment of `count` in `grey_buf_push` can be reordered relative to the plain loads in `gc__drain_grey_bufs`. This is undefined behavior.
+
+**Amendment**: `GreyBuffer.count` must use release semantics on write (ensuring the entry store is visible before the count increment) and acquire semantics on read (ensuring the GC sees all entries up to the read count). The `entries[]` array itself remains plain stores (single-writer, the owning thread), but the release on `count` provides the necessary ordering guarantee.
+
+### 17.3 Future Locking
+
+**Problem**: `JaclFuture` contains a `platform_mutex_t` that is never destroyed when the future is garbage collected. No finalizer mechanism exists.
+
+**Amendment**: Replace the mutex with a CAS-based spinlock (`volatile uint32_t lock`). The lock is held for ~10 instructions during the resolve-vs-add_waiter race window, making spinning appropriate. A spinlock has no OS resource to finalize, eliminating the leak. This also slightly reduces `JaclFuture`'s size (mutex → uint32).
+
+### 17.4 Inbox Contention
+
+**Problem**: Every worker acquires `inbox_mutex` on every loop iteration to check for tasks. The inbox is empty ~99% of the time, creating unnecessary contention.
+
+**Amendment**: Two changes:
+1. **Lockless empty check**: Read `inbox_count` (volatile) without the lock. Only acquire the mutex if non-zero.
+2. **Batched drain**: When non-empty, drain all pending tasks in one lock acquisition, pushing them to the worker's private deque.
+
+This eliminates lock acquisition for the common case (empty inbox) and reduces per-drain cost from O(tasks) lock acquisitions to O(1).

@@ -1,0 +1,515 @@
+## Codebase Patterns
+- Tests without `# mode: concurrent` run in single-threaded mode (vm->runtime == NULL) — CPS parallel error handling must be fixed in BOTH vm.c (single-threaded OP_PARALLEL) AND runtime.c (runtime__parallel_task_exec)
+- JACL has no `fn`/`lambda` keyword — use nested `proc` definitions for closures/lambdas
+- Comparison operators: `==` for equality, not `=` — using `=` causes "undefined variable '$='" error
+- Proc names must be <= 7 bytes (inline string limit) — e.g., use `comp` not `compute-value`
+- Bare-word calls to suspending procs at tail position may return `nil` — use `def r [call]; [+ $r 0]` pattern for reliable CPS return value propagation
+- JACL comments use `#` not `;` — semicolons are statement separators; using `;` as a comment causes parse errors or unexpected bare-word calls
+- String interpolation syntax: `$var` or `$[expr]` inside double-quoted strings — `[expr]` without `$` prefix is literal text, not interpolation
+- File-based test harness: test/test_jacl_harness.c reads .jacl files from test/jacl/, parses # expect: / # expect-error: / # mode: concurrent headers, runs through jacl_run (single-threaded) or runtime worker pool (concurrent)
+- Concurrent mode (`# mode: concurrent`): compiles with temp VM, extracts CPS closure (if suspending) or wraps chunk in closure, copies env to workers, submits to runtime via runtime__submit_spawn_task, mutex-protected PrintCapture for thread-safe output
+- JACL vector print format is `[vec 10 20]` not `[10, 20]` — use this in `# expect:` headers
+- PrintCapture buffer in harness is 8192 bytes (larger than integration tests' 1024) to handle multi-line test output
+- Harness uses malloc/free for file I/O (not tracked_allocator) — tracked_allocator is only for the VM arena
+- Unity build: `src/jacl.c` #includes all pipeline .c files + lib headers as a single translation unit
+- JACL pipeline files in `src/`: plain .c with `#ifndef X_C` guards, no `#define X_IMPLEMENTATION` needed
+- Lib modules in `lib/`: single-header convention with `#ifdef X_IMPLEMENTATION`
+- Test files: `#include "test_helpers.h"` then `#include "../src/jacl.c"` — gets everything
+- Arena allocator: zero-init `arena_t arena = {0}`, uses libc by default
+- Test tracked allocator: `tracked_allocator` from `test/test_helpers.h`, plug into arena via `.allocator = tracked_allocator`
+- Build system: `build.sh` with `TESTS=()` array entries formatted as `"path/test.c|name|optional_extra_cflags"`
+- Compiler flags: `-Wall -Wextra -std=c99 -g`
+- Implementation language is C (C99)
+- Pipeline: src/value.c → src/gc.c → src/string.c → src/lexer.c → src/ast.c → src/parser.c → src/bytecode.c → src/compiler.c → src/vm.c → src/gc_collect.c → src/runtime.c
+- Private/internal functions use double-underscore prefix: `module__function_name`
+- Public types use PascalCase (Token, LexResult, AstNode) or lower_t for system-level (arena_t)
+- Public functions use module_verb_noun pattern (lexer_lex, arena_alloc, parser_parse)
+- Constants and macros use ALL_CAPS (TOKEN_EOF, JACL_TAG_NIL)
+- Test functions are `static int test_name(void)` returning 0=fail, 1=pass
+- Test main() uses table-driven pattern: array of {name, fn} structs, iterates and counts pass/fail
+- Unit tests can craft raw bytecode for VM edge cases: create BytecodeChunk + JaclClosure template on arena, use chunk_write/chunk_add_constant, then call vm_exec() directly
+- Memory leak check pattern: setup() -> exercise -> teardown() -> ASSERT(check_no_leaks()) -> TEST_PASS()
+- Tests grouped by US-XXX story comments in the test table
+- Pre-await variables can now be captured in parallel body closures (fixed in US-001: eager upvalue capture + VM frame restoration)
+- OP_PARALLEL single-threaded path: MUST restore frame_count and stack_top after each body's vm__run call (error path leaves orphan frames)
+- Named suspending proc calls from spawn/parallel bodies are now correctly detected and CPS-compiled (fixed in US-003: ast__contains_suspension takes SuspensionMap* param)
+- Error values from `await` on errored futures are regular values to parallel bodies — parallel only detects errors from direct `error` calls, not from await-propagated error values
+- Bare word semantics (M6): bare words at statement position desugar to zero-arg calls — use `{ "yes" }` not `{ yes }` for string-literal blocks
+- $var semantics (M6): `$var` at statement position desugars to `[$var]` (zero-arg call) — use `{ [+ $x 0] }` not `{ $x }` for non-callable values
+- `def g f` binds g to the string "f", NOT the proc — use `def g $f` to capture a proc value
+- Integration tests use PrintCapture pattern with `vm.print_fn`/`vm.print_ctx` — no `last_result` field on VM
+- The `print` builtin appends `\n` to output
+- Files sorted alphabetically for deterministic test ordering
+- VM now owns BlockPool + ThreadHeap; vm_init initializes, vm_destroy cleans up — must call vm_destroy before arena_destroy
+- Test teardown order: vm_destroy → gc_heap_destroy → gc_block_pool_destroy → arena_destroy
+- Heap-allocating value constructors (jacl_i64, jacl_u64, jacl_f64 + arithmetic) live in gc.c not value.c (dependency order)
+- jacl_intern takes ThreadHeap* (not arena_t*) — strings allocated on GC heap via gc_alloc(heap, OBJ_STRING, ...)
+- compiler_compile takes ThreadHeap* as 4th parameter for string interning
+- OP_CLOSURE allocates closure + inline upvalue array as single gc_alloc (trailing array pattern)
+- OP_MAKE_CELL, OP_BOX, OP_ATOM allocate JaclMutableRef via gc_alloc(heap, OBJ_MUTABLE_REF, ...)
+- Template allocator: use `{ .alloc = libc_alloc, .free = libc_free, .ctx = NULL }` compound literal (NOT `libc_allocator` which is a function call, fails as C99 static initializer)
+- Must `#undef RC_ALLOCATOR` between RRB and HAMT template includes (rc.h doesn't clean up non-defaulted allocators)
+
+## GC & Concurrency Architecture (from GC_CONCURRENCY_DESIGN.md)
+- GCHeader (8 bytes) replaces RCHeader (16 bytes): { epoch, mark, obj_type, gen, _pad }
+- Per-thread heaps: 64KB blocks, 512 lines × 128 bytes, Immix-style bump allocation
+- Epoch-based watermark: objects at or after watermark = min(thread_epochs) are immune to collection
+- Hybrid write barrier: SATB (old value) + insertion (new value) on mutable container mutation during active GC
+- Mark bit alternation: current_mark toggles 0/1 each cycle (avoids clearing all marks)
+- BUSY sentinel: workers publish BUSY before popping from deque, GC spins until resolved
+- Grey buffer: per-thread append-only buffer, drained periodically during mark + final drain
+- GC is a task on a deque — any worker can execute it; mutual exclusion via gc_running atomic CAS
+- Chase-Lev deque already implemented at lib/chase_lev/chase_lev.h
+- Platform atomics already at lib/platform/platform.h (ATOMIC_CAS, ATOMIC_LOAD, ATOMIC_STORE, etc.)
+- Sweep criteria: marked → live; not marked + epoch >= watermark → live; not marked + epoch < watermark → reclaim
+- String interning Phase 1: immortal (never collected); Phase 2 deferred (weak-reference intern table)
+- Generational collection (sticky mark-bit) deferred to future PRD
+- gc.c is inserted after value.c and before string.c in the unity build chain; gc_collect.c is after vm.c (needs collection types + VM struct)
+- Mark/sweep code lives in gc_collect.c (not gc.c) because it needs HAMT/RRB types from collections.c and VM struct from vm.c
+- GCMarkStack uses void* entries (raw payload pointers), not JaclVal — handles both tagged values and raw node pointers uniformly
+- jacl_map_set takes 3 args (root, key, value) — hash computed internally, not passed separately
+- GCHeader is 8 bytes: { uint32_t epoch; uint8_t mark, obj_type; uint16_t alloc_total; }
+- gc_header_of(payload) returns (GCHeader*)payload - 1
+- jacl_is_heap_type checks 11 tags: STRING, VECTOR, MAP, CLOSURE, BIGNUM, CELL, BOX, ATOM, I64, U64, F64
+- gc_alloc(ThreadHeap* heap, uint8_t obj_type, size_t payload_size) — bump-allocates with GCHeader prepended, returns payload pointer
+- ThreadHeap stores BlockPool* pointer; gc_heap_init(heap, pool) links them
+- BlockPool is thread-safe (mutex); gc_block_pool_get/return for block recycling
+- Allocation total aligned to 8 bytes; max single allocation = GC_BLOCK_SIZE (64KB)
+- HAMT GC mode: define HAMT_GC_MODE + HAMT_GC_ALLOC(obj_type, sz) + HAMT_GC_OBJ_* before including hamt.h — replaces RC with gc_alloc, no-op ref/unref
+- gc__current_heap: static __thread ThreadHeap* in gc.c — each worker thread sets its own copy in the task execution loop; main thread sets it in vm_init
+- HAMT transient API requires RC (ownership checks via ref_count==1); wrapped in #ifndef HAMT_GC_MODE — unused by JACL
+- Library-level HAMT tests (lib/hamt/test_hamt*.c) still use RC mode — HAMT_GC_MODE is only for jacl_map in collections.c
+- jacl_map_unref is now a no-op (H_RC_UNREF(p) expands to ((void)0) in GC mode) — callers don't need to call it
+- H_ALLOC_LEAF/INTERNAL/COLLISION macros abstract allocation per node type — same pattern available for RRB migration (US-005)
+- RRB_VEC_GC_MODE: same opt-in pattern as HAMT — define RRB_VEC_GC_MODE + RRB_VEC_GC_ALLOC + RRB_VEC_GC_OBJ_* before including rrb_vec.h
+- RRB auxiliary allocator (size tables, temp arrays) remains libc-backed even in GC mode — only node allocation routes through gc_alloc
+- RRB transient API + map/filter via transient wrapped in #ifndef RRB_VEC_GC_MODE; GC-mode map/filter use persistent push_back
+- rc.h no longer included by collections.c — both HAMT and RRB use GC mode
+- GCHeader.alloc_total stores the full aligned allocation size (header+payload+padding) — enables object walking during sweep
+- Block payload zeroed on acquisition (gc_block_pool_get memsets to 0) — alloc_total==0 is sentinel for "no object here" during sweep
+- gc_sweep walks objects using alloc_total, zeros dead objects, recycles all-free blocks to pool
+- gc_collect(heap, vm): mark + sweep + toggle current_mark + reset bytes_since_gc + reset needs_gc
+- GC trigger: gc__bump_alloc sets heap->needs_gc when bytes_since_gc > GC_THRESHOLD; vm__run checks needs_gc at top of dispatch loop
+- Forward-declare gc_collect in vm.c (before definition in gc_collect.c) to call from vm__run — valid C99 in unity build
+- gc_mark scans intern table entries as roots (Phase 1: immortal strings), plus chunk constants (skip closures = arena templates)
+- Closure tracing now includes chunk constants (heap i64/u64/f64 literals, skip JACL_TAG_CLOSURE entries = arena templates)
+- jacl_vec_get returns jacl_vec_get_result struct with .value field — not a raw JaclVal
+- vm_exec wraps top-level code in implicit closure frame (frame_count starts at 1), sets vm->top_chunk for GC root scanning
+- Runtime (src/runtime.c) provides worker thread pool with Chase-Lev work-stealing deques, task inbox, BUSY sentinel protocol
+- Chase-Lev deque instantiated as rt_deque (uintptr_t elements = RuntimeTask pointers) in runtime.c
+- RuntimeTask = { void (*fn)(void*), void* data } — native function + data; workers pop, execute, free
+- External task submission goes to mutex-protected inbox (LIFO stack); workers drain inbox before checking deques
+- WORKER_IDLE=0, WORKER_BUSY=1 sentinels on currently_executing; any other value = RuntimeTask pointer
+- GreyBuffer = { JaclVal* entries, uint32_t count, cap } — per-thread, append-only, GC drains during mark
+- Worker VMs use shared BlockPool (rt->block_pool) via gc_heap_init(&vm->heap, &rt->block_pool); local vm.block_pool initialized but unused
+- runtime__init_worker_vm duplicates vm_init but overrides heap.pool to shared pool; vm_destroy works for cleanup (empty local pool is harmless)
+- Worker threads need `-lpthread` in build.sh for test compilation
+- __thread keyword works with -std=c99 on GCC/Clang as an extension (project already uses __typeof__)
+- rt__worker_id: static __thread int, set in worker loop — identifies current worker thread
+- RuntimeTask has gc_root field (JaclVal) for GC root scanning — JACL_NIL for non-GC tasks, tagged value for closure tasks
+- gc_enumerate_roots(Runtime*, GCMarkStack*) scans all root sources: currently_executing, deque snapshots, VM stacks, frames, env, intern table, inbox
+- BUSY sentinel spin: fast tight spin (10000 loads), then slow yield loop (SLEEP_MILLISECONDS(1)) — handles both nanosecond real-world and test scheduling delays
+- Deque snapshot for GC: read top/bottom with acquire ordering + seq_cst fence, then read buffer contents — conservative (may trace dead, harmless)
+- rt_test__init_no_threads / rt_test__destroy_no_threads: test helpers for deterministic root enumeration testing without running worker threads
+- GreyBuffer defined in gc.c (not runtime.c) — available to vm.c in unity build order; gc_write_barrier takes GreyBuffer* + gc_active_ptr directly
+- VM struct has grey_buf and gc_active_ptr fields (NULL in single-threaded, set by runtime__init_worker_vm) — write barrier is zero-overhead when NULL
+- Write barrier fires BEFORE assignment in OP_SET_CELL_LOCAL/UPVALUE, OP_RESET, OP_SWAP — captures old value first for SATB correctness
+- JaclFuture allocated via gc_alloc(OBJ_FUTURE) — has atomic state, result, waiter list, and mutex lock
+- FutureWaiter nodes allocated via gc_alloc(OBJ_FUTURE_WAITER) — singly linked, GC-traced
+- jacl_future_resolve / jacl_future_error take GreyBuffer* + gc_active_ptr for write barrier on resolution
+- JACL_TAG_FUTURE = 0x11, jacl_is_future / jacl_as_future / jacl_future_ptr follow existing pattern
+- OP_IS_FUTURE opcode + future? builtin in compiler — same pattern as atom?
+- Adding new opcodes shifts the enum; test_bytecode.c opcode_enum test must be updated
+- Suspension analysis: compiler__analyze_suspension walks AST, builds SuspensionMap (proc name → suspends bool), used by compiler during code gen
+- SuspensionMap type + suspension_map_lookup/set in compiler.c — pre-compilation pass data
+- Local, GlobalArity, Upvalue structs have `bool suspends` field for tracking suspending proc bindings
+- Compiler struct has `suspension_map` pointer and `in_non_suspending_callback` flag
+- await/parallel/race recognized as builtins in compiler (placeholder: pop args, push nil) — actual opcodes deferred to US-003+
+- spawn recognized as builtin (placeholder: pop arg, push nil) — NOT a suspension point
+- No `run` primitive — suspension propagates automatically through calls (direct style)
+- each/filter/transform check for suspending callbacks: AST suspension scan + var_ref suspension status lookup
+- Proc names must be ≤7 chars for inline string representation — analysis skips longer names
+- CPS if branches use join continuation pattern: shadow __k with join_k, compile_cps_stmts routes through it
+- A-normalization: extract suspending args into synthetic def AST nodes, pass expanded stmts through compile_cps_stmts
+- Different stack depths in if branches are safe — OP_RETURN normalizes stack_top to callee_base
+- JACL `[cmd -5]` parses as 2 args (`-` and `5`), not negative literal — use `[cmd [- 0 5]]`
+- jacl_future_resolve/error return FutureWaiter* list — callers MUST schedule waiters via runtime__schedule_waiters (runtime mode) or handle inline (single-threaded)
+- OP_AWAIT returns VM_OK in runtime mode (exits vm__run); single-threaded mode calls continuation inline via new call frame
+- OOM escalation: 3-tier in gc_alloc — Tier 1 emergency GC (thread-local callback), Tier 2 heap growth (max_blocks check), Tier 3 panic (gc__oom_handler)
+- Emergency GC callbacks: gc__emergency_gc_fn/ctx are __thread locals, set by vm_init (single-threaded) and runtime worker loop (concurrent)
+- BlockPool.total_blocks_allocated tracks OS mallocs; BlockPool.max_blocks = configurable limit (default GC_MAX_HEAP_BLOCKS = 4096)
+- gc__oom_handler function pointer: defaults to gc__oom_panic_default (stderr + abort), overridable for testing via longjmp
+- JACL `true`/`false` are bare words (strings), both TRUTHY — use `[> $n 0]` or `[== $x 1]` for boolean conditions, NOT `true`/`false` literals
+- JACL has no `fn` keyword — closures use inner `proc name [params] { body }` definitions (see test/jacl/procs.jacl for `mkadd` pattern)
+- JACL `try` syntax: `[try { body } e { handler }]` — NOT `[try { body } catch [e] { handler }]`
+- Top-level CPS transform: `compiler__top_level_suspends` only detects (1) direct await/parallel/race in subtree and (2) suspending proc as HEAD of top-level command — does NOT detect suspending calls nested inside non-suspending call args (e.g., `print [suspending_proc]` won't trigger CPS)
+- Workaround for top-level CPS: wrap suspending code in `proc main [] { ... }; main` — then `main` is recognized as suspending head
+- Top-level CPS pre-registration: must count head + args from param list AST (head has length > 0 → pcount = 1 + arg_count)
+- Defining `proc inner [params]` INSIDE a CPS-transformed proc body segfaults — keep helper procs at top level
+- Recursive CPS tail calls (e.g., suspending proc calling itself) don't correctly propagate return values — result is nil instead of expected value
+- `ast__contains_suspension` only detects direct await/parallel/race keywords — does NOT detect calls to suspending procs; spawn body `{ [suspending_proc] }` won't be CPS'd → put suspension points directly in spawn bodies
+- While loop `def` shadowing accumulates locals on stack (~2 per iteration) — exceeds 256-slot stack limit around 100 iterations; use recursion or fewer iterations for heavy allocation tests
+- For heavy allocation in e2e tests, fibonacci recursion is reliable (`[fib 15]` = 610) — works in both single-threaded and concurrent modes
+
+## 2026-03-02 - US-012
+- What was implemented: 37 comprehensive integration and stress tests covering CPS correctness, spawn+await, parallel, race, direct-style, multi-threaded stress, memory bounded, and M0-M12 regressions. Fixed a compiler bug in top-level CPS pre-registration param counting (head + args, not just args). Documented several CPS runtime limitations.
+- Files changed:
+  - test/test_m13.c — 37 new integration/stress tests (956 lines added): 7 CPS correctness, 6 spawn+await, 4 parallel, 2 race, 3 direct-style, 5 multi-threaded stress, 1 memory bounded, 6 regression + existing 3 placeholder tests updated
+  - src/compiler.c — Fixed top-level CPS pre-registration param counting: pcount = 1 + arg_count when head has length > 0 (was missing head element, causing `proc fib [n]` to register as 0 params)
+- **Learnings for future iterations:**
+  - Top-level CPS pre-registration must count head + args from param list AST (head element is first param, args are subsequent)
+  - `compiler__top_level_suspends` only detects suspending calls as HEAD of top-level commands — wrap in `proc main [] { ... }; main` pattern for nested suspending calls
+  - Inner proc definitions inside CPS-transformed proc bodies segfault — keep helpers at top level
+  - Recursive CPS tail calls don't propagate return values — use sequential spawn+await chains instead
+  - JACL true/false are bare words (strings), both truthy — use comparison operators for boolean conditions
+  - JACL has no `fn` keyword — use `proc name [params] { body }` for closures
+  - JACL try syntax: `[try { body } e { handler }]` — no `catch` keyword
+---
+
+## 2026-02-26 - US-001
+- What was implemented: Future type (JaclFuture, FutureWaiter structs), GC integration (OBJ_FUTURE, OBJ_FUTURE_WAITER tracing), jacl_future constructor, resolve/error/add_waiter APIs with write barrier, JACL_TAG_FUTURE value tag, future? builtin predicate (OP_IS_FUTURE opcode), future formatting in print/to_string, 12 unit tests
+- Files changed:
+  - src/value.c — JACL_TAG_FUTURE tag, jacl_is_future predicate
+  - src/gc.c — OBJ_FUTURE/OBJ_FUTURE_WAITER enum, jacl_is_heap_type update, JaclFuture/FutureWaiter structs, constructor/resolve/error/add_waiter APIs
+  - src/gc_collect.c — GC tracing for OBJ_FUTURE and OBJ_FUTURE_WAITER
+  - src/bytecode.c — OP_IS_FUTURE opcode, disassembly name
+  - src/compiler.c — future? builtin compilation
+  - src/vm.c — OP_IS_FUTURE handler, future formatting, type name
+  - test/test_bytecode.c — opcode enum offsets updated
+  - test/test_m13.c — 12 new tests for future type
+  - build.sh — test_m13 entry with -lpthread
+- **Learnings for future iterations:**
+  - Adding new opcodes to the enum shifts all subsequent values — must update test/test_bytecode.c opcode_enum assertions
+  - Use jacl_run() convenience function in tests (not raw lexer_lex/parser_parse/compiler_compile which have different signatures)
+  - Future mutex uses platform_mutex_t from lib/platform/platform.h — same as BlockPool, compatible with MUTEX_INIT/LOCK/UNLOCK macros
+  - jacl_future_resolve/error fire write barrier BEFORE storing result (SATB correctness) via gc_write_barrier with NULL-safe check
+---
+
+## 2026-02-27 - US-002
+- What was implemented: Pre-compilation suspension analysis pass (compiler__analyze_suspension), SuspensionMap type with lookup/set helpers, `bool suspends` field on Local/GlobalArity/Upvalue structs, Compiler fields for suspension_map and in_non_suspending_callback, recognition of await/parallel/race as builtins with context checking (try/catch error, non-suspending callback error), recognition of spawn/run as non-suspending builtins, suspension checking in each/filter/transform for suspending callbacks (var_ref lookup + AST scan), propagation of suspends through upvalue resolution, 16 unit tests
+- Files changed:
+  - src/compiler.c — SuspensionMap type, analysis functions (analyze__walk_body, analyze__collect_procs, compiler__analyze_suspension, ast__contains_suspension), suspends field on structs, suspension_map/in_non_suspending_callback on Compiler, await/parallel/race/spawn/run builtin recognition, each/filter/transform callback suspension checking, proc binding stores suspends from map, compiler_compile runs analysis
+  - test/test_m13.c — 16 new tests for suspension analysis
+- **Learnings for future iterations:**
+  - Suspension analysis is two-phase: (1) AST walk collects ProcSuspendInfo, (2) fixpoint propagation with Rule 1 (named calls) + Rule 2 (indirect calls conservatively suspending when any suspending procs exist)
+  - await/parallel/race compile as placeholders (pop args + push nil) — actual opcodes need to be added in US-003-008
+  - spawn/run also placeholders — their opcodes come in US-005
+  - ast__contains_suspension helper walks AST subtrees for suspension point checking (skips nested proc definitions)
+  - in_non_suspending_callback flag catches inline suspension in block callbacks; var_ref checks catch passing known suspending procs
+  - Proc names >7 chars are skipped by analysis (inline string limit) — not an issue in practice
+---
+
+## 2026-02-27 - US-003
+- What was implemented: CPS transform for sequential suspending procs — hidden __k continuation parameter, suspension point splitting into continuation closures, chained continuations for multiple awaits, variable liveness via upvalue capture, direct-style suspension propagation (calling a suspending proc CPS-transforms the caller), OP_AWAIT and OP_SPAWN opcodes with VM stubs, 11 unit tests
+- Files changed:
+  - src/bytecode.c — OP_AWAIT, OP_SPAWN opcodes added after OP_IS_FUTURE; opcode_name switch updated
+  - src/compiler.c — `bool is_cps` on Compiler struct; CPS helper functions: compiler__node_is_suspension (recursive AST check), compiler__emit_get_k (__k resolution as local/upvalue), compiler__emit_continuation (creates continuation closure with nested Compiler), compiler__is_def_with_suspension, compiler__is_direct_await, compiler__is_suspending_call, compiler__compile_suspending_call_cps (passes __k as extra arg), compiler__compile_cps_stmts (main CPS driver: finds first suspension point, splits, creates continuation chain); proc compilation modified to check suspension_map, add __k param, use CPS body compilation for suspending procs, copy global arities to body compiler; spawn changed from placeholder to OP_SPAWN
+  - src/vm.c — OP_AWAIT handler (stub: pops continuation + future, calls continuation with result or nil), OP_SPAWN handler (stub: pops closure, creates future, attempts sync execution, pushes future)
+  - test/test_bytecode.c — opcode enum assertions shifted by +2 for OP_AWAIT/OP_SPAWN insertion
+  - test/test_m13.c — 11 new tests: cps_single_await, cps_two_seq_awaits, cps_three_seq_awaits, cps_non_susp_unaffected, cps_non_susp_param_count, cps_propagation_caller, cps_single_await_resolved, cps_variable_capture, cps_deep_chain, cps_emits_op_await, cps_existing_code_ok
+- **Learnings for future iterations:**
+  - CPS continuation closures use the same nested Compiler mechanism as regular closures — enclosing pointer chain, upvalue resolution, OP_CLOSURE emission
+  - user_param_count vs param_count: user_param_count excludes hidden __k for arity checks, param_count includes it for actual compilation
+  - compiler__compile_cps_stmts scans for first suspension point, compiles non-suspending prefix normally, then handles the suspension point (await/def-await/suspending-call), and wraps remaining stmts in a continuation closure
+  - Global arities must be copied from root compiler to body compiler so CPS stmts can identify suspending call targets
+  - OP_AWAIT VM stub immediately calls continuation with future result (or nil if pending) — full async behavior in US-006
+  - OP_SPAWN VM stub creates future, attempts sync call, resolves future with result — full async scheduling in US-005
+  - JACL `$var` at statement position desugars to `[$var]` (zero-arg call) — test fibonacci must use `{ [+ $n 0] }` not `{ $n }` for non-callable values
+---
+
+## 2026-02-27 - US-004
+- What was implemented: CPS transform for suspension points inside control flow constructs — join continuation pattern for if branches, non-suspending branches tail-call join continuation directly, A-normalization (argument extraction) for nested await in call arguments, def-with-if-suspension support, 13 unit tests
+- Files changed:
+  - src/compiler.c — New CPS helpers: compiler__is_if_with_suspension (detects if with suspending branches), compiler__compile_cps_branch (compiles one branch: suspending via shadow __k, non-suspending via direct call to join_k), compiler__compile_cps_if (join continuation pattern — creates join cont for remaining stmts, routes branches through it), compiler__has_suspending_non_block_args (detects extractable suspending args), compiler__compile_cps_extract_args (creates synthetic AST defs for suspending args and modified command), compiler__compile_cps_extract_def_value (same for def value nodes); modified compiler__compile_cps_stmts Cases 2 and 4 to use new handlers before fallback
+  - test/test_m13.c — 13 new tests: cps_if_then_suspends, cps_if_else_suspends, cps_if_both_suspend, cps_nested_if, cps_chained_if, cps_nested_await_args, cps_def_if_suspension, cps_if_then_runtime, cps_if_nonsuspend_branch, cps_try_catch_error, cps_let_block_susp, cps_if_last_stmt, cps_if_no_suspension_ok
+- **Learnings for future iterations:**
+  - Join continuation pattern: code after if becomes a continuation closure; branches call it (directly for non-suspending, via CPS for suspending)
+  - Shadow __k trick: push join_k as local named __k to make CPS stmts route through it. Restore local_count without POP after CPS compilation (stack cleanup by OP_RETURN)
+  - Different stack depths in if branches are safe — OP_RETURN normalizes stack_top to callee_base regardless of current depth
+  - A-normalization for suspending args: create synthetic AST def nodes + var refs, pass expanded stmt list through compile_cps_stmts recursively. Compiler arena available for allocation
+  - JACL `[abs -5]` parses as 2 args (bare word `-` and int `5`), not negative literal — use `[abs [- 0 5]]`
+  - JACL has no `cond` or `match` builtins — chained if (nested if-else) covers the cond pattern
+---
+
+## 2026-02-27 - US-005
+- What was implemented: spawn primitive — OP_SPAWN opcode full implementation (replaces stub), OP_RESOLVE_FUTURE opcode, resolve_k closure infrastructure, spawn block compilation as closure (non-CPS and CPS), single-threaded spawn (recursive vm__run + future resolution), runtime spawn (submit SpawnTaskData to worker pool), top-level CPS transformation, rt_run_to_completion, tail-await optimization (pass __k directly when no remaining stmts), 8 unit tests
+- Files changed:
+  - src/bytecode.c — OP_RESOLVE_FUTURE opcode added after OP_SPAWN; opcode_name updated
+  - src/compiler.c — CompileResult.suspending field; Compiler.force_global_procs for top-level CPS; spawn compilation rewritten to compile block as closure (non-CPS: compile_block_expr, CPS: compile_cps_stmts with __k param); compiler__top_level_suspends detection; compiler_compile handles top-level CPS (wrap in __main closure); ast__contains_suspension and analyze__walk_node skip spawn blocks; tail-await optimization in compile_cps_stmts Case 1
+  - src/runtime.c — resolve_k static bytecode (GET_UPVALUE 0, GET_LOCAL 0, RESOLVE_FUTURE, RETURN); runtime__create_resolve_closure (GC-allocated, 1 upvalue = future); SpawnTaskData struct; runtime__spawn_task_exec (CPS: with resolve_k, non-CPS: direct call + resolve); runtime__submit_spawn_task; rt_run_to_completion
+  - src/vm.c — OP_SPAWN full implementation (single-threaded: recursive vm__run with frame save/restore; runtime: submit task); OP_RESOLVE_FUTURE handler (pop result + future, resolve, push nil); jacl_run handles cr.suspending (execute chunk to get CPS closure, create completion future + resolve_k, call main closure)
+  - test/test_bytecode.c — opcode enum assertions shifted by +1 for OP_RESOLVE_FUTURE
+  - test/test_m13.c — 8 new tests: spawn_returns_future, spawn_nonsuspending_resolves, spawn_suspending_resolves, spawn_error_propagation, spawn_worker_execution, top_level_cps, rt_run_to_completion, spawn_existing_code_ok
+- **Learnings for future iterations:**
+  - spawn { body } requires compiling the block as a CLOSURE (not inline code) — compiler__compile_node on a block compiles inline; must create JaclClosure with chunk, body compiler, OP_CLOSURE emission
+  - CPS spawn closures need __k param (param_count=1); non-CPS have param_count=0; OP_SPAWN uses param_count to detect CPS
+  - resolve_k bytecode stack order matters: GET_UPVALUE (future) first, GET_LOCAL (result) on top — OP_RESOLVE_FUTURE pops top as result, below as future
+  - Tail-await optimization: when await is the last expression (remaining_count == 0), pass __k directly as continuation instead of creating an intermediate wrapper that calls __k(nil) — avoids losing the await result
+  - Top-level CPS: compiler detects top-level suspension via compiler__top_level_suspends, wraps code in __main closure with __k; jacl_run creates completion future + resolve_k as __k
+  - force_global_procs flag ensures proc definitions inside CPS-wrapped top-level remain globals (not locals)
+  - Single-threaded spawn uses recursive vm__run with saved ip/chunk/frame_count; restores after completion
+---
+
+## 2026-02-28 - US-006
+- What was implemented: Full OP_AWAIT implementation replacing stub — runtime mode (register waiter on pending future, schedule continuation on resolved/errored future, return from vm__run), single-threaded mode (call continuation inline), continuation scheduling infrastructure (ContinuationTaskData, runtime__continuation_task_exec, runtime__schedule_continuation, runtime__schedule_waiters), waiter scheduling on future resolution (OP_RESOLVE_FUTURE schedules waiters, runtime__spawn_task_exec schedules waiters on resolve/error), 9 unit tests
+- Files changed:
+  - src/vm.c — OP_AWAIT rewritten with runtime/single-threaded branches, OP_RESOLVE_FUTURE now captures waiter list and schedules them, forward declarations for runtime__schedule_continuation and runtime__schedule_waiters
+  - src/runtime.c — ContinuationTaskData struct, runtime__continuation_task_exec (sets up VM to call continuation with result), runtime__schedule_continuation (creates RuntimeTask and submits to inbox), runtime__schedule_waiters (iterates waiter list and schedules each), runtime__spawn_task_exec updated to schedule waiters after resolve/error
+  - test/test_m13.c — 9 new tests: await_resolved_immediate, await_pending_waiter, await_errored_future, await_multiple_awaiters, await_sequential_results, await_chained_three, await_non_future_error, await_worker_resolved, await_existing_code_ok
+- **Learnings for future iterations:**
+  - OP_AWAIT in runtime mode must return VM_OK to exit vm__run — worker task loop picks up next task; continuation resumes as a separate RuntimeTask
+  - OP_AWAIT in single-threaded mode keeps inline call behavior (new frame) since there's no task scheduler
+  - jacl_future_resolve/error return FutureWaiter* list — ALL callers must now handle scheduling waiters (OP_RESOLVE_FUTURE, runtime__spawn_task_exec both paths)
+  - jacl_future_add_waiter can fail (return false) if future resolved between state check and lock — must schedule continuation immediately in that case (race condition handling)
+  - runtime__schedule_continuation creates ContinuationTaskData with closure+result, submits as RuntimeTask to inbox — same pattern as spawn task submission
+  - Forward-declare runtime functions in vm.c (before runtime.c in unity build): runtime__schedule_continuation and runtime__schedule_waiters take void* runtime_ptr for consistency
+---
+
+## 2026-03-02 - US-007
+- What was implemented: parallel primitive — OP_PARALLEL opcode, OBJ_PARALLEL_AGG GC type with atomic completion tracking, ParallelAgg struct (atomic counter, errored flag, error_val, result slots, join continuation), CPS compilation of parallel bodies as closures (same pattern as spawn), single-threaded execution via recursive vm__run, runtime mode via task submission to worker pool, result vector construction, first-error-wins error propagation, 9 unit tests
+- Files changed:
+  - src/bytecode.c — OP_PARALLEL opcode added after OP_RESOLVE_FUTURE; opcode_name updated
+  - src/gc.c — OBJ_PARALLEL_AGG enum value, ParallelAgg struct with trailing results array, jacl_parallel_agg constructor, parallel_agg_ptr/as_parallel_agg helpers (reuse JACL_TAG_FUTURE for internal tagging)
+  - src/gc_collect.c — GC tracing for OBJ_PARALLEL_AGG (trace continuation, error_val, all result slots)
+  - src/compiler.c — compiler__is_direct_parallel helper, compiler__compile_parallel_body (compiles each body block as closure, CPS or non-CPS), Case 1b in compile_cps_stmts for direct [parallel ...], Case 2 parallel handling for [def name [parallel ...]], forward declaration for compiler__compile_block_expr
+  - src/vm.c — OP_PARALLEL handler (runtime mode: create aggregate + submit N tasks; single-threaded: sequential vm__run per body, build result vector, call continuation), vm__capture_trace hardened against NULL return_ip and out-of-bounds offsets, forward declaration for runtime__submit_parallel_task
+  - src/runtime.c — ParallelTaskData struct, runtime__parallel_task_exec (execute closure, store result at index, atomic CAS for first-error-wins, atomic counter increment, build vector + schedule join continuation on last completion), runtime__submit_parallel_task
+  - test/test_bytecode.c — opcode enum assertions shifted by +1 for OP_PARALLEL insertion
+  - test/test_m13.c — 9 new tests: parallel_two_order, parallel_three_tasks, parallel_error_prop, parallel_compiles, parallel_susp_bodies, parallel_worker_exec, parallel_result_vector, parallel_continuation, parallel_existing_ok
+- **Learnings for future iterations:**
+  - vm__capture_trace must guard against NULL return_ip (set by jacl_run for initial frames) and out-of-bounds chunk offsets — BUS/segfault otherwise
+  - Non-CPS body results must be checked for error flag (jacl_is_error) after popping from stack — OP_ERROR sets flag but doesn't stop execution (VM returns OK)
+  - JACL parser treats newlines inside [...] command forms as statement separators — multi-line parallel `[parallel\n{...}\n{...}]` causes parse errors; use single-line format
+  - ParallelAgg reuses JACL_TAG_FUTURE for pointer tagging (internal only) — GC dispatches on GCHeader.obj_type not the value tag
+  - BytecodeChunk uses code_count (not count) for byte count field
+  - SourcePos uses column (not col) for column number field
+---
+
+## 2026-03-02 - US-008
+- What was implemented: race primitive — OP_RACE opcode, OBJ_RACE_AGG GC type with CAS settled flag, RaceAgg struct (settled flag, continuation), CPS compilation of race bodies (reuses compiler__compile_parallel_body), single-threaded execution (first body wins), runtime mode via RaceTaskData with CAS settled 0→1 (winner schedules continuation, losers discard), 7 unit tests
+- Files changed:
+  - src/bytecode.c — OP_RACE opcode added after OP_PARALLEL; opcode_name updated
+  - src/gc.c — OBJ_RACE_AGG enum value, RaceAgg struct (settled + continuation), jacl_race_agg constructor, race_agg_ptr/as_race_agg helpers
+  - src/gc_collect.c — GC tracing for OBJ_RACE_AGG (trace continuation)
+  - src/compiler.c — compiler__is_direct_race helper, Case 1c in compile_cps_stmts for direct [race ...], Case 2 race handling for [def name [race ...]], replaced placeholder with OP_RACE emission
+  - src/vm.c — OP_RACE handler (runtime mode: create RaceAgg + submit N tasks; single-threaded: sequential execution, first result wins), forward declaration for runtime__submit_race_task
+  - src/runtime.c — RaceTaskData struct, runtime__race_task_exec (CAS settled for winner determination, schedule continuation), runtime__submit_race_task
+  - test/test_bytecode.c — opcode enum assertions shifted by +1 for OP_RACE insertion
+  - test/test_m13.c — 7 new tests: race_two_tasks, race_three_tasks, race_error_prop, race_compiles, race_worker_exec, race_continuation, race_existing_ok
+- **Learnings for future iterations:**
+  - Race reuses compiler__compile_parallel_body for body compilation — same closure pattern works for both
+  - RaceAgg is simpler than ParallelAgg — no result slots needed, just settled flag + continuation
+  - rt_run_to_completion takes 3 args (Runtime*, JaclClosure*, arena_t*), not 4
+  - Single-threaded race: first body always wins (sequential execution); in runtime mode, CAS on settled determines winner
+---
+
+## 2026-03-02 - US-009
+- What was implemented: Removed VM stack scanning (stack[0..stack_top]), call frame closure scanning, and call frame chunk constant scanning from gc_enumerate_roots in runtime.c. Concurrent GC roots now: (1) currently_executing with BUSY sentinel, (2) deque snapshots, (3) global environment values, (4) intern table entries, (5) inbox tasks. Single-threaded GC path (gc_mark in gc_collect.c) unchanged. Updated existing tests that relied on VM stack roots. Added 3 new tests verifying concurrent path works without stack scanning.
+- Files changed:
+  - src/runtime.c — Removed items 4-6 from gc_enumerate_roots (VM stack, call frame closures, chunk constants), renumbered remaining items
+  - test/test_runtime.c — Updated test_enumerate_roots_vm_stack to verify stack values NOT found, updated test_enumerate_roots_multi_worker to use env roots instead of stack, updated test_concurrent_gc_full_cycle to use env root instead of stack
+  - test/test_m13.c — 3 new tests: no_stack_scan_spawn, no_stack_scan_parallel, st_gc_still_works
+- **Learnings for future iterations:**
+  - Removing VM stack scanning from concurrent GC requires updating all tests that used VM stack as roots — switch to env values or task deque entries
+  - Single-threaded GC path (gc_collect in gc_collect.c) retains stack scanning for M0-M12 backward compatibility
+---
+
+## 2026-03-02 - US-010
+- What was implemented: Adaptive GC threshold — per-heap gc_threshold field replacing fixed GC_THRESHOLD constant, survival-rate-based adjustment after each GC cycle (>80% survival → grow 50%, <20% survival → shrink 25%), GC_THRESHOLD_MIN (256KB) and GC_THRESHOLD_MAX (16MB) bounds, works for both single-threaded and concurrent GC paths, 4 unit tests
+- Files changed:
+  - src/gc.c — GC_THRESHOLD_MIN/MAX constants, gc_threshold field on ThreadHeap initialized to GC_THRESHOLD, gc__bump_alloc uses heap->gc_threshold
+  - src/gc_collect.c — gc_sweep returns bytes_survived, gc_sweep_concurrent returns bytes_survived, gc__adjust_threshold helper, gc_collect and gc_concurrent_collect call gc__adjust_threshold after sweep
+  - src/runtime.c — gc_concurrent_collect calls gc__adjust_threshold per worker after sweep
+  - test/test_m13.c — 4 new tests: adaptive_gc_increase, adaptive_gc_decrease, adaptive_gc_min_bound, adaptive_gc_max_bound
+- **Learnings for future iterations:**
+  - gc_sweep already walks all live objects — computing bytes_survived is just summing alloc_total during the walk
+  - Survival rate calculation uses integer arithmetic (bytes_survived * 100 / allocated) to avoid floating point
+  - Both gc_collect (single-threaded) and gc_concurrent_collect (runtime) need the threshold update
+---
+
+## 2026-03-02 - US-011
+- What was implemented: 3-tier OOM escalation in gc_alloc when block allocation fails. Tier 1: emergency synchronous GC via thread-local callback (single-threaded: gc_collect, concurrent: gc_concurrent_collect with CAS gc_running). Tier 2: heap growth up to configurable max_blocks limit. Tier 3: panic with diagnostic message (heap blocks, heap size, allocation request, GC threshold). BlockPool tracks total_blocks_allocated with per-pool max_blocks limit. gc_block_pool_get enforces limit before OS malloc. Emergency GC callbacks set by vm_init (single-threaded) and worker loop (concurrent). Overridable gc__oom_handler for test interception.
+- Files changed:
+  - src/gc.c — GC_MAX_HEAP_BLOCKS constant, total_blocks_allocated + max_blocks on BlockPool, gc_block_pool_get limit enforcement, gc__emergency_gc_fn/ctx thread-local callbacks, gc__oom_panic_default + gc__oom_handler, gc_alloc 3-tier escalation (Tier 1 emergency GC + rescan, Tier 2 growth check, Tier 3 panic)
+  - src/vm.c — vm__emergency_gc_single callback (forward-declares gc_collect, calls gc_collect on current heap/VM), vm_init sets gc__emergency_gc_fn/ctx
+  - src/runtime.c — runtime__emergency_gc callback (CAS gc_running, inline gc_concurrent_collect or wait for running GC), forward declaration of gc_concurrent_collect, worker loop sets gc__emergency_gc_fn/ctx
+  - test/test_m13.c — 6 new tests: oom_emergency_gc (verify GC reclaims garbage under pressure), oom_tier3_panic (verify abort intercepted via longjmp), oom_blocks_tracking (counter increments/stays on recycle), oom_max_blocks_limit (limit enforced, recycled blocks bypass limit), oom_panic_diagnostic (panic handler called), oom_existing_code_ok (regression)
+- **Learnings for future iterations:**
+  - Emergency GC from gc_alloc requires function pointer callbacks since gc.c is early in the unity build (before vm.c and runtime.c)
+  - Thread-local gc__emergency_gc_fn/ctx pattern: vm_init sets single-threaded callback, runtime worker loop sets concurrent callback
+  - To test OOM panic without aborting: use longjmp from a custom gc__oom_handler + setjmp in the test
+  - To trigger Tier 3 in tests: use large payloads (248 bytes) to fill blocks with rooted objects — small i64s (24 bytes) leave too much free space for 256 stack slots
+  - gc_block_pool_get checks max_blocks before malloc; free-list recycling bypasses limit check (recycled blocks don't increase total_blocks_allocated)
+  - runtime__emergency_gc needs forward declaration of gc_concurrent_collect (defined later in runtime.c)
+---
+
+## 2026-03-02 - US-013
+- What was implemented: Extended .jacl test harness with `# mode: concurrent` support. When this header directive is present, the harness uses runtime_init + runtime worker pool instead of plain jacl_run(). Added ThreadSafePrintCapture with mutex for thread-safe output capture from worker threads. Added harness__copy_env to transfer user-defined proc definitions from the compilation VM to all worker VMs. Concurrent mode handles both suspending (CPS closure extraction + rt_run_to_completion) and non-suspending code (chunk wrapped in closure). Updated build.sh harness entry with -lpthread flag. All 131 existing .jacl tests pass unchanged, all 48 test suites pass.
+- Files changed:
+  - test/test_jacl_harness.c — ThreadSafePrintCapture struct with mutex, capture_print_threadsafe callback, harness__copy_env helper, run_jacl_test_concurrent function (compile → CPS extract → runtime_init → configure workers → submit → wait → check), Expectations struct gains concurrent field, parse_expectations handles `# mode: concurrent`, run_jacl_test dispatches to concurrent path
+  - build.sh — Added `-lpthread` flag to jacl_harness entry
+- **Learnings for future iterations:**
+  - Concurrent mode must copy env from temp VM to all worker VMs — otherwise user-defined procs (defined via vm_exec on temp VM) aren't available to workers
+  - Worker VMs need print_fn/print_ctx AND intern_table set after runtime_init — intern_table is needed for OP_CONCAT, string operations at runtime
+  - CPS closure allocated on temp VM's heap is safe for runtime use as long as temp VM stays alive — runtime GC only sweeps its own block pool
+  - Non-suspending concurrent code: wrap chunk in gc_alloc'd JaclClosure (param_count=0), submit to runtime — worker executes full chunk including proc definitions
+  - For suspending code: vm_exec extracts CPS closure (stack[0]), submit to runtime with param_count=1 (detected as CPS by runtime__submit_spawn_task)
+  - runtime__submit_spawn_task takes void* runtime_ptr (not Runtime*) — cast internally
+  - JACL vector print format: `[vec 10 20]` — must match in `# expect:` headers
+  - Concurrent mode skips tracked_allocator (uses plain arena) since runtime manages its own memory outside the arena
+---
+
+## 2026-03-02 - US-014
+- What was implemented: 7 .jacl e2e tests for spawn and await primitives covering basic spawn+await, future type checking, multiple sequential spawns, nested spawn (inner spawn+await inside outer spawn), heavy allocation via fibonacci under concurrent GC, await on already-resolved future, and error propagation through spawn+await.
+- Files changed:
+  - test/jacl/spawn_basic.jacl — concurrent mode spawn+await returning computed value
+  - test/jacl/spawn_value.jacl — future? predicate + await extraction
+  - test/jacl/spawn_multi.jacl — 3 spawned tasks awaited sequentially in order
+  - test/jacl/spawn_nested.jacl — outer spawn containing inner spawn+await
+  - test/jacl/spawn_heavy.jacl — concurrent mode fibonacci computation for GC stress
+  - test/jacl/await_resolved.jacl — await on already-resolved future (single-threaded)
+  - test/jacl/await_error.jacl — error propagation via error? and error-val
+- **Learnings for future iterations:**
+  - `ast__contains_suspension` only detects literal await/parallel/race — spawn body calling a suspending proc is NOT detected as suspending; put suspend points directly in spawn blocks
+  - While loop `def` shadowing creates new locals per iteration (~2/iter), overflows 256-slot stack at ~100 iterations — use recursion or fewer iterations
+  - Fibonacci recursion (`[fib 15]` = 610) is the reliable pattern for heavy allocation in e2e tests
+  - Single-threaded spawn resolves immediately — `future?` returns true and `await` on resolved future works without deadlock
+  - Error in spawn body → `jacl_future_error` → `await` returns error-flagged value checkable with `error?` and `error-val`
+---
+
+## 2026-03-02 - US-015
+- What was implemented: 5 .jacl e2e tests for the parallel primitive covering basic 2-body parallel with vector output, input-order preservation with 3 bodies (including heavy fib computation), error propagation with error?/error-val checking, parallel bodies with internal spawn+await, and concurrent mode execution with real worker threads.
+- Files changed:
+  - test/jacl/parallel_two.jacl — 2 bodies, prints result vector directly (`[vec 10 20]`)
+  - test/jacl/parallel_order.jacl — 3 bodies with fib(10) computation, verifies input order preservation via vec-get
+  - test/jacl/parallel_error.jacl — one body errors, checks error? and error-val on result
+  - test/jacl/parallel_with_await.jacl — parallel bodies containing spawn+await (suspending bodies)
+  - test/jacl/parallel_concurrent.jacl — `# mode: concurrent` for real worker pool execution
+- **Learnings for future iterations:**
+  - Parallel result vector can be printed directly (`print $r`) showing `[vec ...]` format, or accessed element-by-element via vec-get
+  - Parallel bodies with spawn+await work correctly: `{ def f [spawn { val }]; await $f }` pattern using semicolons for multi-statement blocks
+  - All parallel tests pass in both single-threaded and concurrent modes without modification to runtime
+---
+
+## 2026-03-02 - US-016
+- What was implemented: 3 .jacl e2e tests for the race primitive covering basic two-body race (first body wins in single-threaded), error propagation when winning body errors (error?/error-val), and concurrent mode execution with real worker threads (both bodies return same value for deterministic output).
+- Files changed:
+  - test/jacl/race_basic.jacl — 2 bodies, first wins in single-threaded mode (prints 10)
+  - test/jacl/race_error.jacl — winning body errors, checks error? and error-val
+  - test/jacl/race_concurrent.jacl — `# mode: concurrent`, both bodies return 42 for deterministic output
+- **Learnings for future iterations:**
+  - Single-threaded race: first body always wins (sequential execution) — test output is deterministic
+  - Concurrent race: non-deterministic winner — use same return value in all bodies for deterministic `# expect:` output, or make one body trivially faster
+  - Race tests follow same `proc main [] { ... }; main` pattern as parallel/spawn tests
+---
+
+## 2026-03-02 - US-017
+Thread: (current session)
+- Implemented 7 CPS transform correctness e2e test files in test/jacl/
+- Files created:
+  - cps_variable_capture.jacl — variables defined before await accessible after await
+  - cps_sequential.jacl — multiple sequential awaits with intermediate results building on each other
+  - cps_if_suspend.jacl — await inside if branches with join continuation
+  - cps_deep_chain.jacl — 6 chained awaits building a running sum
+  - cps_propagation.jacl — transitive CPS: proc A calls suspending proc B which calls suspending proc C
+  - cps_closure_capture.jacl — closure (nested proc) capturing variables across suspension points
+  - cps_nested_expr.jacl — await nested inside expression arguments: [+ [await $f1] [await $f2]]
+- All 153/153 harness tests pass, 48/48 total test suites pass
+- **Learnings for future iterations:**
+  - JACL has no `fn` keyword for lambdas — use nested `proc` definitions for closures
+  - Comparison operator is `==` not `=` — using `=` causes "undefined variable '$='" error
+  - Proc names must be <= 7 bytes (inline string limit) — e.g., use `comp` not `compute-value`
+  - Bare-word calls to suspending procs at tail position may return `nil` instead of the CPS result — use explicit `def r [proc-call]; [+ $r 0]` pattern to ensure return value propagation through CPS chain
+---
+
+## 2026-03-02 - US-018
+- Implemented async error handling e2e tests (4 .jacl test files)
+- Files created:
+  - test/jacl/async_error_spawn.jacl — spawn task that errors via named proc, await it, verify error? and error-val
+  - test/jacl/async_error_propagation.jacl — 3-level nested spawn+await chain propagating error from deepest level
+  - test/jacl/async_error_parallel.jacl — parallel error followed by spawn+await in same CPS-transformed proc
+  - test/jacl/async_try_before_spawn.jacl — try/catch wrapping sync error alongside spawn+await in same proc
+- All 157/157 harness tests pass, 48/48 total test suites pass
+- **Learnings for future iterations:**
+  - Calling named suspending procs from spawn bodies fails with "OP_AWAIT: continuation is not a closure" — use inline spawn bodies instead
+  - Capturing pre-await variables inside parallel body closures causes segfault — avoid cross-suspension-point variable capture into parallel bodies
+  - Error values returned via `await` on errored futures are treated as regular values by parallel aggregation — parallel only detects `error` calls as body errors, not await-propagated error values
+  - For deeply nested async error propagation, use inline nested spawn+await chains (spawn_nested.jacl pattern) rather than named proc calls
+---
+
+## 2026-03-02 - US-001
+- Implemented eager upvalue capture in CPS continuations
+- Fixed segfault in OP_PARALLEL single-threaded path: VM frame_count and stack_top were not restored after body vm__run errors, causing subsequent bodies to execute with corrupted frame chain
+- Added eager capture in compiler__emit_continuation(): continuations now proactively capture ALL parent locals and upvalues, not just those directly referenced
+- Files changed: src/vm.c, src/compiler.c, test/test_m13.c, test/jacl/async_error_parallel.jacl, test/jacl/cps_capture_parallel.jacl (new)
+- **Learnings for future iterations:**
+  - The real segfault cause was VM frame management in OP_PARALLEL, not upvalue resolution — when a parallel body errors, its frame stays on the stack, causing the next body's OP_RETURN to fall back to the wrong frame
+  - Always restore frame_count and stack_top after nested vm__run calls in the single-threaded parallel path
+  - ASAN is the fastest way to debug segfaults in this codebase: `cc -fsanitize=address ...` gives stack traces immediately
+  - `$x` at statement position desugars to `[$x]` (zero-arg call) via the parser — this can cause "cannot call i32" errors, not just value lookups
+  - compiler__add_upvalue deduplicates on (index, is_local) so eager capture is safe to call even if the body already captured the variable
+---
+
+## 2026-03-03 - US-002
+- Implemented VM upvalue bounds checking in OP_CLOSURE handler (src/vm.c)
+- Added bounds validation for both is_local=1 (local capture: checks frame->stack_base + uv_index < stack_top) and is_local=0 (parent upvalue: checks uv_index < frame->closure->upvalue_count)
+- Invalid indices now produce clear VM_RUNTIME_ERROR messages instead of segfaults
+- Added 2 unit tests in test/test_m13.c: test_closure_oob_parent_upvalue (crafted bytecode with OOB parent upvalue index) and test_closure_oob_local_capture (OOB local capture index)
+- Added 2 e2e tests: test/jacl/upvalue_deep_chain.jacl (3+ suspension points with deep variable capture + parallel bodies) and test/jacl/upvalue_multi_capture.jacl (multiple pre-await variables captured by different parallel body closures)
+- Files changed: src/vm.c, test/test_m13.c, test/jacl/upvalue_deep_chain.jacl (new), test/jacl/upvalue_multi_capture.jacl (new)
+- **Learnings for future iterations:**
+  - vm_exec() can be called directly with hand-crafted BytecodeChunk for testing VM edge cases that the compiler wouldn't normally produce
+  - The top-level implicit closure in vm_exec has upvalue_count=0 and upvalues=NULL, making it ideal for testing OOB parent upvalue access
+  - Bounds checks are simple integer comparisons with no performance impact on valid bytecode
+---
+
+## 2026-03-03 - US-003
+- Implemented suspension detection for named proc calls in ast__contains_suspension()
+- Added SuspensionMap* parameter to ast__contains_suspension() — when map is non-NULL, named proc calls with names <= 7 bytes are looked up in the map
+- Updated all 7 call sites (parallel body, spawn body, transform/each/filter callback validation, top-level suspension check) to pass the map
+- Fixed compiler__compile_suspending_call_cps to pass __k directly when remaining_count == 0 (tail call optimization), fixing nil return values from spawn bodies calling named suspending procs
+- Simplified compiler__top_level_suspends since ast__contains_suspension now handles map lookups
+- Updated test/jacl/async_error_propagation.jacl to use named suspending proc calls from spawn bodies
+- Added test/jacl/spawn_susp_proc.jacl — spawn body calling a named suspending proc
+- Added 3 unit tests in test/test_m13.c: contains_susp_named, spawn_calls_susp_proc, susp_cb_reject_via_map
+- Files changed: src/compiler.c, test/test_m13.c, test/jacl/async_error_propagation.jacl, test/jacl/spawn_susp_proc.jacl (new)
+- **Learnings for future iterations:**
+  - ast__contains_suspension and compiler__node_is_suspension are two separate functions — the former is for pre-compilation checks (parallel/spawn body detection), the latter is for CPS statement splitting
+  - When a CPS suspending call has 0 remaining statements, must pass __k directly (not create a wrapper continuation that returns nil) — same pattern as direct await tail optimization
+  - spawn { proc_name } doesn't make the enclosing proc suspending — spawn returns a future, only await makes a proc suspend
+  - The CPS call path (compiler__compile_suspending_call_cps) pushes callee, args, then continuation, and calls with argc+1
+---
+
+## 2026-03-03 - US-004
+- What was implemented: Parallel CPS error propagation — when a CPS parallel body (spawn+await) returns an error value through a FUTURE_RESOLVED future, the error flag is now detected and the parallel aggregation treats it as an error (first-error-wins)
+- Fix in two places: src/vm.c single-threaded OP_PARALLEL CPS path (line ~2672) and src/runtime.c runtime__parallel_task_exec CPS path (line ~1001) — both now check jacl_is_error() on FUTURE_RESOLVED results
+- Updated test/jacl/async_error_parallel.jacl — parallel body now uses spawn+await+error pattern instead of direct error
+- Added test/jacl/parallel_await_error.jacl — dedicated e2e test for parallel body with spawn+await+error
+- Files changed: src/runtime.c, src/vm.c, test/jacl/async_error_parallel.jacl, test/jacl/parallel_await_error.jacl (new)
+- **Learnings for future iterations:**
+  - The JACL test harness runs tests in single-threaded mode by default (vm->runtime is NULL). The `# mode: concurrent` header must be explicitly present for runtime-mode testing. Always verify which mode a test runs in before debugging.
+  - jacl_future_resolve() always sets state to FUTURE_RESOLVED regardless of whether the value has the error flag — error detection must happen at the consumer (parallel aggregation, await handler, etc.)
+  - In single-threaded CPS parallel, spawn runs synchronously so the chain (spawn → await → resolve_k) completes within vm__run, making the local future RESOLVED by the time it's checked. In concurrent mode, the future may still be PENDING.
+  - The non-CPS parallel path already had jacl_is_error() checking (vm.c:2718), but the CPS path was missing it — a subtle oversight since both paths handle FUTURE_RESOLVED differently
+---
+
+## 2026-03-03 - US-019
+- Implemented 8 .jacl e2e tests covering M11 type system gaps
+- Files created:
+  - test/jacl/typed_i32.jacl — i32 arithmetic (add/sub/mul/div), negation, INT32_MAX boundary
+  - test/jacl/typed_u64.jacl — u64 arithmetic, large value via multiplication (10^12)
+  - test/jacl/typed_f64.jacl — f64 arithmetic, decimal output via %g formatting
+  - test/jacl/typed_f32.jacl — f32 arithmetic, division producing decimal
+  - test/jacl/typed_conversion_chain.jacl — chained i32 → i64 → f64 → i32 round-trip
+  - test/jacl/typed_conversion_error.jacl — compile-time error for str→i32 conversion
+  - test/jacl/typed_closure.jacl — proc capturing i64 outer variable, typed params, typed return
+  - test/jacl/typed_collection.jacl — i32 values in vec, map-get retrieval
+- **Learnings for future iterations:**
+  - Integer literals in AST are int32_t (max 2147483647) — for large u64 values, construct via arithmetic (e.g., 1000000 * 1000000)
+  - Float literals in AST are float (f32) — promoted to f64 via (double) cast in compiler when expected_type=TYPE_F64
+  - %g formatting strips trailing zeros: 3.0 → "3", 2.5 → "2.5", 4.0 → "4"
+  - Unboxed types (i64/u64/f64) in vectors are NOT automatically boxed — use tagged types (i32/f32) or explicit [to dyn $x] for collection storage
+  - compiler__ensure_boxed is called before to-string/interpolation but NOT before vec/map operations
+  - [to TYPE expr] is the conversion syntax, not [to-TYPE expr]
+  - Compile-time type conversion errors: "type error: cannot convert str to i32" (non-numeric source)
+---
