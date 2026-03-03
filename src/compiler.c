@@ -389,8 +389,9 @@ static SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t coun
   return map;
 }
 
-/* Check if an AST subtree contains any suspension points (for callback checking) */
-static bool ast__contains_suspension(AstNode* node) {
+/* Check if an AST subtree contains any suspension points.
+   When map is non-NULL, also checks if named proc calls are suspending. */
+static bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
   if (!node) return false;
 
   switch (node->type) {
@@ -410,16 +411,21 @@ static bool ast__contains_suspension(AstNode* node) {
             (len == 5 && memcmp(name, "spawn", 5) == 0)) {
           return false;
         }
+        /* Check if this is a call to a known suspending proc */
+        if (map && len <= 7) {
+          JaclVal name_val = jacl_inline_string(name, len);
+          if (suspension_map_lookup(map, name_val)) return true;
+        }
       }
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        if (ast__contains_suspension(node->data.command.args[i]))
+        if (ast__contains_suspension(node->data.command.args[i], map))
           return true;
       }
       return false;
     }
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
-        if (ast__contains_suspension(node->data.block.commands[i]))
+        if (ast__contains_suspension(node->data.block.commands[i], map))
           return true;
       }
       return false;
@@ -1001,7 +1007,7 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   AstNode** stmts = body_block->data.block.commands;
 
   /* Check if the body contains suspension points */
-  bool body_suspends = ast__contains_suspension(body_block);
+  bool body_suspends = ast__contains_suspension(body_block, c->suspension_map);
 
   /* Allocate anonymous closure for the parallel body */
   JaclClosure* closure = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
@@ -1173,8 +1179,13 @@ static void compiler__compile_suspending_call_cps(Compiler* c,
     compiler__compile_node(c, args[i]);
   }
 
-  /* Create and push continuation as __k */
-  compiler__emit_continuation(c, param_name, remaining_stmts, remaining_count, line);
+  /* Push continuation as __k (or pass parent __k directly for tail calls) */
+  if (remaining_count == 0) {
+    /* Tail call: pass __k directly so callee returns result to parent __k */
+    compiler__emit_get_k(c, line);
+  } else {
+    compiler__emit_continuation(c, param_name, remaining_stmts, remaining_count, line);
+  }
 
   /* Call with argc + 1 (extra __k param) */
   compiler__emit_byte(c, OP_CALL, line);
@@ -3153,7 +3164,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
     /* Check if callback block contains suspension points */
-    if (ast__contains_suspension(args[1])) {
+    if (ast__contains_suspension(args[1], c->suspension_map)) {
       compiler__error(c, line, col,
           "cannot suspend inside non-suspending callback");
       return;
@@ -3193,7 +3204,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
     /* Check if callback block contains suspension points */
-    if (ast__contains_suspension(args[1])) {
+    if (ast__contains_suspension(args[1], c->suspension_map)) {
       compiler__error(c, line, col,
           "cannot suspend inside non-suspending callback");
       return;
@@ -3233,7 +3244,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
     /* Check if callback block contains suspension points */
-    if (ast__contains_suspension(args[1])) {
+    if (ast__contains_suspension(args[1], c->suspension_map)) {
       compiler__error(c, line, col,
           "cannot suspend inside non-suspending callback");
       return;
@@ -3575,7 +3586,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     AstNode** stmts = body_block->data.block.commands;
 
     /* Check if the spawn body contains await → needs CPS transform */
-    bool spawn_suspends = ast__contains_suspension(body_block);
+    bool spawn_suspends = ast__contains_suspension(body_block, c->suspension_map);
 
     /* Allocate anonymous closure for the spawn body */
     JaclClosure* closure = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
@@ -4036,18 +4047,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
 static bool compiler__top_level_suspends(AstNode** stmts, uint32_t count,
                                           SuspensionMap* map) {
   for (uint32_t i = 0; i < count; i++) {
-    AstNode* node = stmts[i];
-    /* Check for direct suspension points in subtree */
-    if (ast__contains_suspension(node)) return true;
-    /* Check for top-level call to a suspending proc */
-    if (node->type == AST_COMMAND) {
-      AstNode* head = node->data.command.head;
-      if (head->type == AST_LIT_STRING && head->data.lit_string.length <= 7) {
-        JaclVal name_val = jacl_inline_string(
-            head->data.lit_string.value, head->data.lit_string.length);
-        if (suspension_map_lookup(map, name_val)) return true;
-      }
-    }
+    if (ast__contains_suspension(stmts[i], map)) return true;
   }
   return false;
 }

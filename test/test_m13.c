@@ -3516,6 +3516,69 @@ static int test_closure_oob_local_capture(void) {
     TEST_PASS();
 }
 
+/* --- US-003 (bugfix): Suspension detection for named proc calls --- */
+
+/* Test: ast__contains_suspension with map detects named suspending proc */
+static int test_contains_susp_named_proc(void) {
+    SuspensionMap map = test__analyze(
+        "proc deep [] { await 42 }\n"
+        "proc mid [] { def f [spawn { deep }]; await $f }");
+    JaclVal deep = jacl_inline_string("deep", 4);
+    JaclVal mid = jacl_inline_string("mid", 3);
+    ASSERT(suspension_map_lookup(&map, deep));
+    ASSERT(suspension_map_lookup(&map, mid));
+
+    /* Verify ast__contains_suspension with map detects "deep" as suspending */
+    arena_t arena = {0};
+    LexResult tokens = lexer_lex("deep", &arena);
+    ParseResult parse = parser_parse(tokens, &arena);
+    ASSERT(parse.count == 1);
+    ASSERT(ast__contains_suspension(parse.nodes[0], &map) == true);
+    /* Without map, "deep" is not detected as suspension */
+    ASSERT(ast__contains_suspension(parse.nodes[0], NULL) == false);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: spawn body calling named suspending proc compiles without error */
+static int test_spawn_calls_susp_proc(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc slow [] {\n"
+        "  def f [spawn { 42 }]\n"
+        "  await $f\n"
+        "}\n"
+        "proc main [] {\n"
+        "  def f [spawn { slow }]\n"
+        "  def r [await $f]\n"
+        "  print $r\n"
+        "}\n"
+        "main", &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "42\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: callback validation still rejects suspending callbacks via map */
+static int test_susp_callback_reject_via_map(void) {
+    /* A block containing a call to a suspending proc should be
+       detected by ast__contains_suspension with map */
+    ASSERT(test__compile_has_error(
+        "proc sfn [] { await 42 }\n"
+        "[each [vec 1 2] { sfn }]",
+        "cannot suspend inside non-suspending callback"));
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -3678,6 +3741,10 @@ int main(void) {
         /* US-002 (bugfix): VM upvalue bounds checking */
         { "closure_oob_parent_uv",   test_closure_oob_parent_upvalue },
         { "closure_oob_local_cap",   test_closure_oob_local_capture },
+        /* US-003 (bugfix): Suspension detection for named proc calls */
+        { "contains_susp_named",     test_contains_susp_named_proc },
+        { "spawn_calls_susp_proc",   test_spawn_calls_susp_proc },
+        { "susp_cb_reject_via_map",  test_susp_callback_reject_via_map },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
