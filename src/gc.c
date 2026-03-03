@@ -617,13 +617,17 @@ static void grey_buf_init(GreyBuffer *gb) {
 }
 
 static void grey_buf_push(GreyBuffer *gb, JaclVal v) {
-    if (gb->count >= gb->cap) {
+    uint32_t c = gb->count;
+    if (c >= gb->cap) {
         uint32_t new_cap = gb->cap * 2;
         gb->entries = (JaclVal *)realloc(gb->entries,
                                           (size_t)new_cap * sizeof(JaclVal));
         gb->cap = new_cap;
     }
-    gb->entries[gb->count++] = v;
+    gb->entries[c] = v;
+    /* Release on count ensures entries[0..count-1] are visible to GC thread
+     * after acquire load of count */
+    ATOMIC_STORE_EXPLICIT(&gb->count, c + 1, MEM_RELEASE);
 }
 
 static void grey_buf_destroy(GreyBuffer *gb) {

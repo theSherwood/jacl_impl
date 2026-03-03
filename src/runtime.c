@@ -598,7 +598,9 @@ static void gc__drain_grey_bufs(Runtime *rt, GCMarkStack *ms,
                                  uint32_t *drained) {
     for (int i = 0; i < rt->num_workers; i++) {
         GreyBuffer *gb = &rt->workers[i].grey_buf;
-        uint32_t current = gb->count;
+        /* Acquire on count ensures we see all entries written before the
+         * release store */
+        uint32_t current = ATOMIC_LOAD_EXPLICIT(&gb->count, MEM_ACQUIRE);
         for (uint32_t j = drained[i]; j < current; j++) {
             gc__ms_push_val(ms, gb->entries[j]);
         }
@@ -679,7 +681,11 @@ static void gc_concurrent_collect(Runtime *rt) {
     }
 
     /* 9. Toggle current_mark on all heaps, reset allocation counters
-     * and grey buffers */
+     * and grey buffers.
+     * Plain store on grey_buf.count is safe: gc_active=0 (release, step 7)
+     * ensures workers have stopped calling grey_buf_push. The subsequent
+     * gc_running=0 (release, step 10) publishes the reset before the next
+     * cycle's gc_active=1 (release) re-enables write barriers. */
     uint8_t next_mark = 1 - mark;
     for (i = 0; i < rt->num_workers; i++) {
         rt->workers[i].vm.heap.current_mark   = next_mark;
