@@ -19,7 +19,7 @@
         "build.sh passes (all test suites green)"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "Hardest bug. The nesting chain is: Main compiler (locals: f, x) -> Continuation compiler (x becomes upvalue) -> Parallel body compiler (x is upvalue-of-upvalue). Fix by making compiler__emit_continuation() eagerly capture ALL live locals, not just those directly referenced by the continuation body. Include A-normalization temporaries — optimize later if needed."
     },
     {
@@ -37,7 +37,7 @@
         "build.sh passes"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Defensive hardening. Simple integer comparison guards in OP_CLOSURE handler. Ensures any future upvalue bugs produce clear errors instead of segfaults."
     },
     {

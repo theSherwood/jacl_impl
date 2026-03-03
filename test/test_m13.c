@@ -3423,6 +3423,99 @@ static int test_regression_strings(void) {
     TEST_PASS();
 }
 
+/* --- US-002: VM upvalue bounds checking --- */
+
+/* Test: OP_CLOSURE with out-of-bounds parent upvalue index triggers error */
+static int test_closure_oob_parent_upvalue(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /*
+     * Craft bytecode by hand:
+     *   1. A closure template in the constant pool with upvalue_count=1
+     *   2. Top-level code: OP_CLOSURE <template_idx> is_local=0 uv_index=5
+     *      The top-level closure has 0 upvalues, so index 5 is out of bounds.
+     *   3. OP_HALT
+     */
+    BytecodeChunk body;
+    chunk_init(&body, &arena);
+    chunk_write(&body, OP_NIL, 1);
+    chunk_write(&body, OP_RETURN, 1);
+
+    /* Create a closure template with 1 upvalue */
+    size_t cl_size = sizeof(JaclClosure) + sizeof(JaclVal) * 1;
+    JaclClosure *tmpl = (JaclClosure *)arena_alloc(&arena, cl_size);
+    memset(tmpl, 0, cl_size);
+    tmpl->chunk = body;
+    tmpl->upvalue_count = 1;
+    tmpl->upvalues = NULL;
+    tmpl->name = "oob_test";
+
+    BytecodeChunk main_chunk;
+    chunk_init(&main_chunk, &arena);
+    uint16_t ci = chunk_add_constant(&main_chunk, jacl_closure(tmpl));
+    chunk_write(&main_chunk, OP_CLOSURE, 1);
+    chunk_write_u16(&main_chunk, ci, 1);
+    chunk_write(&main_chunk, 0, 1);  /* is_local = 0 (parent upvalue) */
+    chunk_write(&main_chunk, 5, 1);  /* uv_index = 5 (out of bounds) */
+    chunk_write(&main_chunk, OP_POP, 1);
+    chunk_write(&main_chunk, OP_HALT, 1);
+
+    VMResult r = vm_exec(&vm, &main_chunk);
+    ASSERT(r == VM_RUNTIME_ERROR);
+    ASSERT(vm.error_message != NULL);
+    ASSERT(strstr(vm.error_message, "upvalue index 5 out of bounds") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: OP_CLOSURE with out-of-bounds local capture index triggers error */
+static int test_closure_oob_local_capture(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /*
+     * Craft bytecode:
+     *   Top-level code pushes no locals onto the stack, then tries to
+     *   create a closure capturing local slot 200 — well beyond stack_top.
+     */
+    BytecodeChunk body;
+    chunk_init(&body, &arena);
+    chunk_write(&body, OP_NIL, 1);
+    chunk_write(&body, OP_RETURN, 1);
+
+    size_t cl_size = sizeof(JaclClosure) + sizeof(JaclVal) * 1;
+    JaclClosure *tmpl = (JaclClosure *)arena_alloc(&arena, cl_size);
+    memset(tmpl, 0, cl_size);
+    tmpl->chunk = body;
+    tmpl->upvalue_count = 1;
+    tmpl->upvalues = NULL;
+    tmpl->name = "oob_local";
+
+    BytecodeChunk main_chunk;
+    chunk_init(&main_chunk, &arena);
+    uint16_t ci = chunk_add_constant(&main_chunk, jacl_closure(tmpl));
+    chunk_write(&main_chunk, OP_CLOSURE, 1);
+    chunk_write_u16(&main_chunk, ci, 1);
+    chunk_write(&main_chunk, 1, 1);    /* is_local = 1 (local capture) */
+    chunk_write(&main_chunk, 200, 1);  /* uv_index = 200 (way beyond stack) */
+    chunk_write(&main_chunk, OP_POP, 1);
+    chunk_write(&main_chunk, OP_HALT, 1);
+
+    VMResult r = vm_exec(&vm, &main_chunk);
+    ASSERT(r == VM_RUNTIME_ERROR);
+    ASSERT(vm.error_message != NULL);
+    ASSERT(strstr(vm.error_message, "local upvalue index 200 out of bounds") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -3582,6 +3675,9 @@ int main(void) {
         { "regression_error_handling",test_regression_error_handling },
         { "regression_mutable_state", test_regression_mutable_state },
         { "regression_strings",       test_regression_strings },
+        /* US-002 (bugfix): VM upvalue bounds checking */
+        { "closure_oob_parent_uv",   test_closure_oob_parent_upvalue },
+        { "closure_oob_local_cap",   test_closure_oob_local_capture },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

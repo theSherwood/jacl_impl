@@ -1049,8 +1049,22 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             uint8_t is_local = vm__read_byte(vm);
             uint8_t uv_index = vm__read_byte(vm);
             if (is_local) {
+              if (frame->stack_base + uv_index >= vm->stack_top) {
+                vm__set_error(vm,
+                  "OP_CLOSURE: local upvalue index %d out of bounds "
+                  "(frame stack_base=%u, stack_top=%u)",
+                  uv_index, frame->stack_base, vm->stack_top);
+                return VM_RUNTIME_ERROR;
+              }
               cl->upvalues[i] = vm->stack[frame->stack_base + uv_index];
             } else {
+              if (uv_index >= frame->closure->upvalue_count) {
+                vm__set_error(vm,
+                  "OP_CLOSURE: upvalue index %d out of bounds "
+                  "(parent has %d upvalues)",
+                  uv_index, frame->closure->upvalue_count);
+                return VM_RUNTIME_ERROR;
+              }
               cl->upvalues[i] = frame->closure->upvalues[uv_index];
             }
           }

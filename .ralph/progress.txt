@@ -26,9 +26,11 @@
 - Constants and macros use ALL_CAPS (TOKEN_EOF, JACL_TAG_NIL)
 - Test functions are `static int test_name(void)` returning 0=fail, 1=pass
 - Test main() uses table-driven pattern: array of {name, fn} structs, iterates and counts pass/fail
+- Unit tests can craft raw bytecode for VM edge cases: create BytecodeChunk + JaclClosure template on arena, use chunk_write/chunk_add_constant, then call vm_exec() directly
 - Memory leak check pattern: setup() -> exercise -> teardown() -> ASSERT(check_no_leaks()) -> TEST_PASS()
 - Tests grouped by US-XXX story comments in the test table
-- Capturing pre-await variables inside parallel body closures causes segfault — avoid referencing variables defined before an await inside parallel { } bodies
+- Pre-await variables can now be captured in parallel body closures (fixed in US-001: eager upvalue capture + VM frame restoration)
+- OP_PARALLEL single-threaded path: MUST restore frame_count and stack_top after each body's vm__run call (error path leaves orphan frames)
 - Calling named suspending procs from spawn bodies causes "OP_AWAIT: continuation is not a closure" — use inline spawn bodies with nested spawn+await instead of named proc calls
 - Error values from `await` on errored futures are regular values to parallel bodies — parallel only detects errors from direct `error` calls, not from await-propagated error values
 - Bare word semantics (M6): bare words at statement position desugar to zero-arg calls — use `{ "yes" }` not `{ yes }` for string-literal blocks
@@ -432,4 +434,30 @@ Thread: (current session)
   - Capturing pre-await variables inside parallel body closures causes segfault — avoid cross-suspension-point variable capture into parallel bodies
   - Error values returned via `await` on errored futures are treated as regular values by parallel aggregation — parallel only detects `error` calls as body errors, not await-propagated error values
   - For deeply nested async error propagation, use inline nested spawn+await chains (spawn_nested.jacl pattern) rather than named proc calls
+---
+
+## 2026-03-02 - US-001
+- Implemented eager upvalue capture in CPS continuations
+- Fixed segfault in OP_PARALLEL single-threaded path: VM frame_count and stack_top were not restored after body vm__run errors, causing subsequent bodies to execute with corrupted frame chain
+- Added eager capture in compiler__emit_continuation(): continuations now proactively capture ALL parent locals and upvalues, not just those directly referenced
+- Files changed: src/vm.c, src/compiler.c, test/test_m13.c, test/jacl/async_error_parallel.jacl, test/jacl/cps_capture_parallel.jacl (new)
+- **Learnings for future iterations:**
+  - The real segfault cause was VM frame management in OP_PARALLEL, not upvalue resolution — when a parallel body errors, its frame stays on the stack, causing the next body's OP_RETURN to fall back to the wrong frame
+  - Always restore frame_count and stack_top after nested vm__run calls in the single-threaded parallel path
+  - ASAN is the fastest way to debug segfaults in this codebase: `cc -fsanitize=address ...` gives stack traces immediately
+  - `$x` at statement position desugars to `[$x]` (zero-arg call) via the parser — this can cause "cannot call i32" errors, not just value lookups
+  - compiler__add_upvalue deduplicates on (index, is_local) so eager capture is safe to call even if the body already captured the variable
+---
+
+## 2026-03-03 - US-002
+- Implemented VM upvalue bounds checking in OP_CLOSURE handler (src/vm.c)
+- Added bounds validation for both is_local=1 (local capture: checks frame->stack_base + uv_index < stack_top) and is_local=0 (parent upvalue: checks uv_index < frame->closure->upvalue_count)
+- Invalid indices now produce clear VM_RUNTIME_ERROR messages instead of segfaults
+- Added 2 unit tests in test/test_m13.c: test_closure_oob_parent_upvalue (crafted bytecode with OOB parent upvalue index) and test_closure_oob_local_capture (OOB local capture index)
+- Added 2 e2e tests: test/jacl/upvalue_deep_chain.jacl (3+ suspension points with deep variable capture + parallel bodies) and test/jacl/upvalue_multi_capture.jacl (multiple pre-await variables captured by different parallel body closures)
+- Files changed: src/vm.c, test/test_m13.c, test/jacl/upvalue_deep_chain.jacl (new), test/jacl/upvalue_multi_capture.jacl (new)
+- **Learnings for future iterations:**
+  - vm_exec() can be called directly with hand-crafted BytecodeChunk for testing VM edge cases that the compiler wouldn't normally produce
+  - The top-level implicit closure in vm_exec has upvalue_count=0 and upvalues=NULL, making it ideal for testing OOB parent upvalue access
+  - Bounds checks are simple integer comparisons with no performance impact on valid bytecode
 ---
