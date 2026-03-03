@@ -340,9 +340,10 @@ static int test_enumerate_roots_deque(void) {
                    | ((uint64_t)(uintptr_t)cl & JACL_PAYLOAD_MASK);
 
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
-    task->fn      = NULL;
-    task->data    = cl;
-    task->gc_root = cl_val;
+    task->fn       = NULL;
+    task->data     = cl;
+    task->gc_root  = cl_val;
+    task->gc_root2 = JACL_NIL;
 
     /* Push onto public deque */
     rt_deque_deque_push(w->public_deque, (uintptr_t)task);
@@ -376,9 +377,10 @@ static int test_enumerate_roots_currently_executing(void) {
                    | ((uint64_t)(uintptr_t)cl & JACL_PAYLOAD_MASK);
 
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
-    task->fn      = NULL;
-    task->data    = cl;
-    task->gc_root = cl_val;
+    task->fn       = NULL;
+    task->data     = cl;
+    task->gc_root  = cl_val;
+    task->gc_root2 = JACL_NIL;
 
     /* Simulate a task being executed */
     ATOMIC_STORE_EXPLICIT(&w->currently_executing, (uintptr_t)task,
@@ -448,9 +450,10 @@ static int test_enumerate_roots_busy_sentinel(void) {
                    | ((uint64_t)(uintptr_t)cl & JACL_PAYLOAD_MASK);
 
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
-    task->fn      = NULL;
-    task->data    = cl;
-    task->gc_root = cl_val;
+    task->fn       = NULL;
+    task->data     = cl;
+    task->gc_root  = cl_val;
+    task->gc_root2 = JACL_NIL;
 
     /* Set BUSY — simulating the pop-in-transit window */
     ATOMIC_STORE_EXPLICIT(&w->currently_executing, WORKER_BUSY, MEM_RELEASE);
@@ -497,9 +500,10 @@ static int test_enumerate_roots_multi_worker(void) {
     JaclVal cl1_val = JACL_TAG_CLOSURE
                     | ((uint64_t)(uintptr_t)cl1 & JACL_PAYLOAD_MASK);
     RuntimeTask *task1 = (RuntimeTask *)malloc(sizeof(RuntimeTask));
-    task1->fn      = NULL;
-    task1->data    = cl1;
-    task1->gc_root = cl1_val;
+    task1->fn       = NULL;
+    task1->data     = cl1;
+    task1->gc_root  = cl1_val;
+    task1->gc_root2 = JACL_NIL;
     rt_deque_deque_push(rt.workers[1].public_deque, (uintptr_t)task1);
 
     /* Worker 2: value in environment (should be found) */
@@ -528,6 +532,82 @@ static int test_enumerate_roots_multi_worker(void) {
     rt_deque_deque_take(rt.workers[1].public_deque, &taken);
     free((RuntimeTask *)taken);
 
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+/* ===== US-001 (M14): Multi-root GC scanning for RuntimeTask ===== */
+
+static int test_enumerate_roots_gc_root2(void) {
+    /* gc_root2 is scanned by gc_enumerate_roots across all root sources:
+     * currently_executing, deque, and inbox. */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+
+    /* Allocate two distinct heap objects */
+    JaclClosure *cl = (JaclClosure *)gc_alloc(&w->vm.heap, OBJ_CLOSURE,
+                                                sizeof(JaclClosure));
+    memset(cl, 0, sizeof(JaclClosure));
+    JaclVal cl_val = JACL_TAG_CLOSURE
+                   | ((uint64_t)(uintptr_t)cl & JACL_PAYLOAD_MASK);
+
+    JaclVal heap_val = jacl_i64(&w->vm.heap, 99999);
+
+    /* Create a task with gc_root2 set to the heap value */
+    RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
+    task->fn       = NULL;
+    task->data     = cl;
+    task->gc_root  = cl_val;
+    task->gc_root2 = heap_val;
+
+    /* Test 1: gc_root2 found via deque scanning */
+    rt_deque_deque_push(w->public_deque, (uintptr_t)task);
+
+    GCMarkStack ms;
+    gc__ms_init(&ms);
+    gc_enumerate_roots(&rt, &ms);
+
+    ASSERT(rt_test__ms_contains(&ms, (void *)cl));
+    ASSERT(rt_test__ms_contains(&ms, jacl_as_ptr(heap_val)));
+
+    gc__ms_destroy(&ms);
+    uintptr_t taken;
+    rt_deque_deque_take(w->public_deque, &taken);
+
+    /* Test 2: gc_root2 found via currently_executing */
+    ATOMIC_STORE_EXPLICIT(&w->currently_executing, (uintptr_t)task,
+                          MEM_RELEASE);
+
+    gc__ms_init(&ms);
+    gc_enumerate_roots(&rt, &ms);
+
+    ASSERT(rt_test__ms_contains(&ms, (void *)cl));
+    ASSERT(rt_test__ms_contains(&ms, jacl_as_ptr(heap_val)));
+
+    gc__ms_destroy(&ms);
+    ATOMIC_STORE_EXPLICIT(&w->currently_executing, WORKER_IDLE, MEM_RELEASE);
+
+    /* Test 3: gc_root2 found via inbox scanning */
+    MUTEX_LOCK(rt.inbox_mutex);
+    if (rt.inbox_count >= rt.inbox_cap) {
+        intptr_t new_cap = rt.inbox_cap * 2;
+        rt.inbox = (uintptr_t *)realloc(rt.inbox,
+                                          (size_t)new_cap * sizeof(uintptr_t));
+        rt.inbox_cap = new_cap;
+    }
+    rt.inbox[rt.inbox_count++] = (uintptr_t)task;
+    MUTEX_UNLOCK(rt.inbox_mutex);
+
+    gc__ms_init(&ms);
+    gc_enumerate_roots(&rt, &ms);
+
+    ASSERT(rt_test__ms_contains(&ms, (void *)cl));
+    ASSERT(rt_test__ms_contains(&ms, jacl_as_ptr(heap_val)));
+
+    gc__ms_destroy(&ms);
+
+    /* Inbox cleanup happens in rt_test__destroy_no_threads */
     rt_test__destroy_no_threads(&rt);
     TEST_PASS();
 }
@@ -1222,6 +1302,8 @@ int main(void) {
         { "enumerate_roots_inbox",              test_enumerate_roots_inbox },
         { "enumerate_roots_busy_sentinel",      test_enumerate_roots_busy_sentinel },
         { "enumerate_roots_multi_worker",       test_enumerate_roots_multi_worker },
+        /* US-001 (M14): Multi-root GC scanning */
+        { "enumerate_roots_gc_root2",           test_enumerate_roots_gc_root2 },
         /* US-010: Write barriers (hybrid SATB + insertion) */
         { "write_barrier_gc_active",         test_write_barrier_gc_active },
         { "write_barrier_gc_inactive",       test_write_barrier_gc_inactive },

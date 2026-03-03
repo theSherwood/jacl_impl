@@ -25,7 +25,8 @@
 typedef struct {
     void (*fn)(void *data);
     void *data;
-    JaclVal gc_root;  /* Tagged value for GC root scanning, JACL_NIL if none */
+    JaclVal gc_root;   /* Tagged value for GC root scanning, JACL_NIL if none */
+    JaclVal gc_root2;  /* Second GC root: result for continuations, closure for spawn/parallel/race */
 } RuntimeTask;
 
 /* ======================================================================
@@ -396,9 +397,10 @@ static void runtime_destroy(Runtime *rt) {
 
 static void runtime_submit(Runtime *rt, void (*fn)(void *), void *data) {
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
-    task->fn      = fn;
-    task->data    = data;
-    task->gc_root = JACL_NIL;
+    task->fn       = fn;
+    task->data     = data;
+    task->gc_root  = JACL_NIL;
+    task->gc_root2 = JACL_NIL;
 
     MUTEX_LOCK(rt->inbox_mutex);
     if (rt->inbox_count >= rt->inbox_cap) {
@@ -446,10 +448,11 @@ static void runtime__exec_closure(void *data) {
 static void runtime_submit_task(Runtime *rt, JaclClosure *closure,
                                  bool thread_local) {
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
-    task->fn      = runtime__exec_closure;
-    task->data    = closure;
-    task->gc_root = JACL_TAG_CLOSURE
-                  | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
+    task->fn       = runtime__exec_closure;
+    task->data     = closure;
+    task->gc_root  = JACL_TAG_CLOSURE
+                   | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
+    task->gc_root2 = JACL_NIL;
 
     MUTEX_LOCK(rt->inbox_mutex);
     if (rt->inbox_count >= rt->inbox_cap) {
@@ -491,6 +494,7 @@ static void gc__scan_deque(rt_deque_deque *dq, GCMarkStack *ms) {
         if (val > WORKER_BUSY) {
             RuntimeTask *task = (RuntimeTask *)val;
             gc__ms_push_val(ms, task->gc_root);
+            gc__ms_push_val(ms, task->gc_root2);
         }
     }
 }
@@ -533,6 +537,7 @@ static void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
         if (ce != WORKER_IDLE && ce != WORKER_BUSY) {
             RuntimeTask *task = (RuntimeTask *)ce;
             gc__ms_push_val(ms, task->gc_root);
+            gc__ms_push_val(ms, task->gc_root2);
         }
 
         /* 2–3. Deque snapshots (public + private) */
@@ -563,6 +568,7 @@ static void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
     for (intptr_t i = 0; i < rt->inbox_count; i++) {
         RuntimeTask *task = (RuntimeTask *)rt->inbox[i];
         gc__ms_push_val(ms, task->gc_root);
+        gc__ms_push_val(ms, task->gc_root2);
     }
     MUTEX_UNLOCK(rt->inbox_mutex);
 }
@@ -804,9 +810,10 @@ static void runtime__schedule_continuation(void *runtime_ptr,
     ctd->result       = result;
 
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
-    task->fn      = runtime__continuation_task_exec;
-    task->data    = ctd;
-    task->gc_root = jacl_closure_ptr(continuation);
+    task->fn       = runtime__continuation_task_exec;
+    task->data     = ctd;
+    task->gc_root  = jacl_closure_ptr(continuation);
+    task->gc_root2 = result;
 
     MUTEX_LOCK(rt->inbox_mutex);
     if (rt->inbox_count >= rt->inbox_cap) {
@@ -926,9 +933,11 @@ static void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
     std->is_cps     = is_cps;
 
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
-    task->fn      = runtime__spawn_task_exec;
-    task->data    = std;
-    task->gc_root = future_val; /* Future is the GC root for this task */
+    task->fn       = runtime__spawn_task_exec;
+    task->data     = std;
+    task->gc_root  = future_val; /* Future is the GC root for this task */
+    task->gc_root2 = JACL_TAG_CLOSURE
+                   | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
 
     MUTEX_LOCK(rt->inbox_mutex);
     if (rt->inbox_count >= rt->inbox_cap) {
@@ -1100,9 +1109,11 @@ static void runtime__submit_parallel_task(void *runtime_ptr,
     ptd->is_cps   = is_cps;
 
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
-    task->fn      = runtime__parallel_task_exec;
-    task->data    = ptd;
-    task->gc_root = agg_val; /* Aggregate is the GC root — traces continuation + results */
+    task->fn       = runtime__parallel_task_exec;
+    task->data     = ptd;
+    task->gc_root  = agg_val; /* Aggregate is the GC root — traces continuation + results */
+    task->gc_root2 = JACL_TAG_CLOSURE
+                   | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
 
     MUTEX_LOCK(rt->inbox_mutex);
     if (rt->inbox_count >= rt->inbox_cap) {
@@ -1220,9 +1231,11 @@ static void runtime__submit_race_task(void *runtime_ptr,
     rtd->is_cps   = is_cps;
 
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
-    task->fn      = runtime__race_task_exec;
-    task->data    = rtd;
-    task->gc_root = agg_val;
+    task->fn       = runtime__race_task_exec;
+    task->data     = rtd;
+    task->gc_root  = agg_val;
+    task->gc_root2 = JACL_TAG_CLOSURE
+                   | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
 
     MUTEX_LOCK(rt->inbox_mutex);
     if (rt->inbox_count >= rt->inbox_cap) {
