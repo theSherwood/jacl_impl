@@ -133,7 +133,7 @@
         "All existing tests pass (build.sh)"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Use allocation pressure and low GC_THRESHOLD to force GC at desired points rather than relying on timing. Set GC_MAX_HEAP_BLOCKS via compile-time override for OOM tests. The gc__oom_handler function pointer is already overridable for testing. These tests specifically target the audit findings to prevent regression."
     }
   ]

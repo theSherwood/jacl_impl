@@ -123,3 +123,25 @@ Thread: (local)
   - Race tests are inherently non-deterministic in concurrent mode — both bodies may complete in any order. Use identical return values for determinism
   - New opcodes require updating test_bytecode.c's hardcoded enum value assertions
 ---
+
+## 2026-03-03 - US-007
+Thread: (local)
+- Added 6 targeted GC+concurrency intersection C tests to test_m13.c:
+  - `test_gc_grey_buf_atom_reset`: grey buffer processing during atom reset with gc_active=1, verifies old+new values are pushed and drained during mark
+  - `test_gc_unrooted_result_regression`: verifies gc_root2 roots the result value through deque scanning, preventing premature collection
+  - `test_gc_oom_tier1_reclaim`: 4-block heap limit, fills with garbage, emergency GC reclaims it, allocation succeeds
+  - `test_gc_oom_tier2_heap_growth`: live data survives emergency GC, heap grows to accommodate more allocations within limit
+  - `test_gc_oom_tier3_handler_info`: all blocks live + at limit, custom oom handler fires
+  - `test_gc_parallel_join_pressure`: 4 parallel fib tasks on 4 workers, result vector access in continuation
+- Added 2 .jacl integration tests with `# mode: concurrent`:
+  - `gc_mid_cps_chain.jacl`: chain of 5 sequential spawn+await with fib(10-13), intermediate values only alive as CPS upvalues
+  - `gc_parallel_join.jacl`: parallel 4 fib tasks, verifies result vector elements survive GC
+- Added `m14__init_no_threads`, `m14__destroy_no_threads`, `m14__ms_contains` helper functions (copied from test_runtime.c pattern)
+- All 48 test suites pass, 174/174 .jacl tests pass, zero compiler warnings
+- Files changed: test/test_m13.c, test/jacl/gc_mid_cps_chain.jacl, test/jacl/gc_parallel_join.jacl
+- **Learnings for future iterations:**
+  - test_m13.c does NOT include test_runtime.c, so rt_test__* helpers must be duplicated (prefixed m14__ to avoid collision)
+  - The oom_panic_jmp / oom_panic_called / test__oom_panic_handler infrastructure is reusable across OOM tests — already present in test_m13.c from US-010
+  - For grey buffer tests, manually set gc_active=1 on the runtime, fire gc_write_barrier, then call gc__drain_grey_bufs to verify entries land on the mark stack
+  - For OOM Tier 2 testing: root data on vm.stack to keep it alive through emergency GC, then allocate more to force heap growth
+---
