@@ -691,7 +691,7 @@ typedef struct {
     volatile uint32_t   state;       /* FUTURE_PENDING / RESOLVED / ERROR */
     volatile uint64_t   result;      /* JaclVal result (valid when resolved/errored) */
     FutureWaiter       *waiters;     /* linked list of waiting continuations */
-    platform_mutex_t    lock;        /* protects state/waiters race */
+    volatile uint32_t   lock;        /* CAS spinlock: 0=unlocked, 1=locked */
 } JaclFuture;
 
 /* --- Pointer tag/untag for futures --- */
@@ -704,6 +704,18 @@ static inline JaclFuture *jacl_as_future(JaclVal v) {
     return (JaclFuture *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
 }
 
+/* --- Spinlock for futures: CAS-based, no OS resource to leak on GC --- */
+
+static inline void future_lock(JaclFuture *f) {
+    uint32_t expected = 0;
+    while (!ATOMIC_CAS(&f->lock, &expected, 1, MEM_ACQUIRE, MEM_RELAXED))
+        expected = 0;
+}
+
+static inline void future_unlock(JaclFuture *f) {
+    ATOMIC_STORE_EXPLICIT(&f->lock, 0, MEM_RELEASE);
+}
+
 /* --- Constructor: create a pending future --- */
 
 static JaclVal jacl_future(ThreadHeap *heap) {
@@ -711,7 +723,7 @@ static JaclVal jacl_future(ThreadHeap *heap) {
     f->state   = FUTURE_PENDING;
     f->result  = (uint64_t)JACL_NIL;
     f->waiters = NULL;
-    MUTEX_INIT(f->lock);
+    f->lock = 0;
     return jacl_future_ptr(f);
 }
 
@@ -723,12 +735,12 @@ static FutureWaiter *jacl_future_resolve(JaclFuture *f, JaclVal result,
                                           volatile uint32_t *gc_active_ptr) {
     FutureWaiter *waiters;
     gc_write_barrier(gb, gc_active_ptr, JACL_NIL, result);
-    MUTEX_LOCK(f->lock);
+    future_lock(f);
     f->result = (uint64_t)result;
     ATOMIC_STORE_EXPLICIT(&f->state, FUTURE_RESOLVED, MEM_RELEASE);
     waiters = f->waiters;
     f->waiters = NULL;
-    MUTEX_UNLOCK(f->lock);
+    future_unlock(f);
     return waiters;
 }
 
@@ -740,12 +752,12 @@ static FutureWaiter *jacl_future_error(JaclFuture *f, JaclVal error,
                                         volatile uint32_t *gc_active_ptr) {
     FutureWaiter *waiters;
     gc_write_barrier(gb, gc_active_ptr, JACL_NIL, error);
-    MUTEX_LOCK(f->lock);
+    future_lock(f);
     f->result = (uint64_t)error;
     ATOMIC_STORE_EXPLICIT(&f->state, FUTURE_ERROR, MEM_RELEASE);
     waiters = f->waiters;
     f->waiters = NULL;
-    MUTEX_UNLOCK(f->lock);
+    future_unlock(f);
     return waiters;
 }
 
@@ -755,7 +767,7 @@ static FutureWaiter *jacl_future_error(JaclFuture *f, JaclVal error,
 static bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
                                     ThreadHeap *heap) {
     bool added = false;
-    MUTEX_LOCK(f->lock);
+    future_lock(f);
     if (ATOMIC_LOAD_EXPLICIT(&f->state, MEM_RELAXED) == FUTURE_PENDING) {
         FutureWaiter *w = (FutureWaiter *)gc_alloc(heap, OBJ_FUTURE_WAITER,
                                                      sizeof(FutureWaiter));
@@ -764,7 +776,7 @@ static bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
         f->waiters = w;
         added = true;
     }
-    MUTEX_UNLOCK(f->lock);
+    future_unlock(f);
     return added;
 }
 
