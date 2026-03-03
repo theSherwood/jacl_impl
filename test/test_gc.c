@@ -257,6 +257,55 @@ static int test_gc_alloc_too_large(void) {
     TEST_PASS();
 }
 
+/* ===== US-001 (M15): alloc_total uint16_t overflow boundary ===== */
+
+static int test_gc_alloc_overflow_exact_boundary(void) {
+    /* 65528 payload + 8 header = 65536 = GC_BLOCK_SIZE → would overflow uint16_t to 0 */
+    BlockPool pool;
+    gc_block_pool_init(&pool);
+    ThreadHeap heap;
+    gc_heap_init(&heap, &pool);
+
+    void *p = gc_alloc(&heap, OBJ_STRING, 65528);
+    ASSERT(p == NULL);
+
+    gc_heap_destroy(&heap);
+    gc_block_pool_destroy(&pool);
+    TEST_PASS();
+}
+
+static int test_gc_alloc_just_under_boundary(void) {
+    /* 65520 payload + 8 header = 65528 < 65536 → should succeed, alloc_total > 0 */
+    BlockPool pool;
+    gc_block_pool_init(&pool);
+    ThreadHeap heap;
+    gc_heap_init(&heap, &pool);
+
+    void *p = gc_alloc(&heap, OBJ_STRING, 65520);
+    ASSERT(p != NULL);
+    ASSERT(gc_header_of(p)->alloc_total > 0);
+
+    gc_heap_destroy(&heap);
+    gc_block_pool_destroy(&pool);
+    TEST_PASS();
+}
+
+static int test_gc_alloc_well_within_bounds(void) {
+    /* 65512 payload + 8 header = 65520 → well within bounds */
+    BlockPool pool;
+    gc_block_pool_init(&pool);
+    ThreadHeap heap;
+    gc_heap_init(&heap, &pool);
+
+    void *p = gc_alloc(&heap, OBJ_STRING, 65512);
+    ASSERT(p != NULL);
+    ASSERT(gc_header_of(p)->alloc_total > 0);
+
+    gc_heap_destroy(&heap);
+    gc_block_pool_destroy(&pool);
+    TEST_PASS();
+}
+
 /* ===== US-006: Single-threaded mark phase ===== */
 
 /* Helper: check if an object (by payload pointer) is marked with the given mark */
@@ -967,6 +1016,10 @@ int main(void) {
         { "gc_alloc_fills_block",  test_gc_alloc_fills_block },
         { "gc_alloc_various_sizes", test_gc_alloc_various_sizes },
         { "gc_alloc_too_large",    test_gc_alloc_too_large },
+        /* US-001 (M15): alloc_total overflow boundary */
+        { "gc_alloc_overflow_exact", test_gc_alloc_overflow_exact_boundary },
+        { "gc_alloc_just_under",     test_gc_alloc_just_under_boundary },
+        { "gc_alloc_well_within",    test_gc_alloc_well_within_bounds },
         /* US-006: Single-threaded mark phase */
         { "gc_mark_leaf_objects",       test_gc_mark_leaf_objects },
         { "gc_mark_closure_upvalues",   test_gc_mark_closure_upvalues },

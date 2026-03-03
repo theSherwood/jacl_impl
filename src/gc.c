@@ -314,7 +314,7 @@ static void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
     /* Align total to 8 bytes so next header stays aligned */
     total = (total + 7) & ~(size_t)7;
 
-    if (total > GC_BLOCK_SIZE) return NULL;
+    if (total >= GC_BLOCK_SIZE) return NULL;
 
     /* Fast path: bump within current free-line run */
     if (heap->cursor && heap->cursor + total <= heap->limit) {
