@@ -599,20 +599,32 @@ static void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
  *  10. Set gc_running = false
  * ====================================================================== */
 
+/* Maximum convergence loop rounds for final grey buffer drain.
+ * Prevents unbounded looping under pathological mutation rates. */
+#ifndef GC_FINAL_DRAIN_MAX_ROUNDS
+#define GC_FINAL_DRAIN_MAX_ROUNDS 8
+#endif
+
 /* Drain grey buffers from all workers, pushing new entries onto mark stack.
- * `drained` tracks how far each worker's buffer has been processed. */
-static void gc__drain_grey_bufs(Runtime *rt, GCMarkStack *ms,
+ * `drained` tracks how far each worker's buffer has been processed.
+ * Returns true if any new entries were found. */
+static bool gc__drain_grey_bufs(Runtime *rt, GCMarkStack *ms,
                                  uint32_t *drained) {
+    bool found_new = false;
     for (int i = 0; i < rt->num_workers; i++) {
         GreyBuffer *gb = &rt->workers[i].grey_buf;
         /* Acquire on count ensures we see all entries written before the
          * release store */
         uint32_t current = ATOMIC_LOAD_EXPLICIT(&gb->count, MEM_ACQUIRE);
-        for (uint32_t j = drained[i]; j < current; j++) {
-            gc__ms_push_val(ms, gb->entries[j]);
+        if (current > drained[i]) {
+            found_new = true;
+            for (uint32_t j = drained[i]; j < current; j++) {
+                gc__ms_push_val(ms, gb->entries[j]);
+            }
+            drained[i] = current;
         }
-        drained[i] = current;
     }
+    return found_new;
 }
 
 static void gc_concurrent_collect(Runtime *rt) {
@@ -661,15 +673,24 @@ static void gc_concurrent_collect(Runtime *rt) {
         }
     }
 
-    /* 6. Final grey buffer drain */
-    gc__drain_grey_bufs(rt, &ms, drained);
-
-    /* Process any entries from the final drain */
-    while (gc__ms_pop(&ms, &ptr)) {
-        GCHeader *hdr = gc_header_of(ptr);
-        if (hdr->mark == mark) continue;
-        hdr->mark = mark;
-        gc__trace_object(ptr, &ms);
+    /* 6. Final grey buffer drain — convergence loop.
+     * Repeatedly drain grey buffers and process the mark stack until no new
+     * entries are found, or we hit the maximum round cap. This closes the
+     * window where workers push to grey buffers between the final drain and
+     * gc_active being set to false. */
+    {
+        int rounds = 0;
+        bool has_new;
+        do {
+            has_new = gc__drain_grey_bufs(rt, &ms, drained);
+            while (gc__ms_pop(&ms, &ptr)) {
+                GCHeader *hdr = gc_header_of(ptr);
+                if (hdr->mark == mark) continue;
+                hdr->mark = mark;
+                gc__trace_object(ptr, &ms);
+            }
+            rounds++;
+        } while (has_new && rounds < GC_FINAL_DRAIN_MAX_ROUNDS);
     }
 
     free(drained);
