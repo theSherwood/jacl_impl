@@ -43,3 +43,15 @@ Progress log for ralph/gc-concurrency-hardening-2 branch.
   - All 48 test targets pass (35 unit tests in test_gc.c, 174 .jacl integration tests)
 ---
 
+## 2026-03-04 - US-004
+- Modified `gc__drain_grey_bufs` to return `bool` indicating whether new entries were found (compares drained counts before/after for each worker)
+- Replaced single final drain + mark-loop in `gc_concurrent_collect` (step 6) with a convergence loop: repeatedly drain grey buffers and process mark stack until no new entries found, capped at `GC_FINAL_DRAIN_MAX_ROUNDS` (8)
+- `gc_active` set to false after the convergence loop exits (step 7, position unchanged)
+- Added `GC_FINAL_DRAIN_MAX_ROUNDS` define (configurable via #ifndef, default 8)
+- Files changed: src/runtime.c
+- **Learnings for future iterations:**
+  - The convergence loop uses a block scope `{ int rounds; ... }` to avoid adding variables to the outer function scope (C99 compatibility with declaration after statement)
+  - The periodic drain in the main mark loop (step 5) still uses the return value from `gc__drain_grey_bufs` — it's compatible since the call site just ignores the return value
+  - All 48 test targets pass (35 unit tests in test_gc.c, 174 .jacl integration tests)
+---
+
