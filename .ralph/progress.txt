@@ -32,3 +32,14 @@ Progress log for ralph/gc-concurrency-hardening-3 branch.
   - test_gc_deferred_block_recycling test verifies blocks are returned to pool by checking heap block count decreased and pool free list grew
 ---
 
+## 2026-03-04 - US-002
+- Added detailed comment block above grey_buf_push in gc.c documenting the race scenario (worker realloc vs GC reader), why it's safe (release/acquire on count), and the critical invariant
+- Added matching comment in gc__drain_grey_bufs in runtime.c referencing the acquire-on-count invariant
+- Added test_gc_grey_buffer_drain_after_realloc in test_gc.c: pushes GREY_BUF_INIT_CAP * 3 real heap-allocated i64 objects, verifies cap grew, count matches, and all entries decode correctly
+- Files changed: src/gc.c, src/runtime.c, test/test_gc.c
+- **Learnings for future iterations:**
+  - GreyBuffer is defined in gc.c (not a header), so test_gc.c can use it directly via unity build
+  - grey_buf_init/push/destroy are static functions in gc.c — accessible from tests that include jacl.c
+  - Use jacl_i64(&vm.heap, value) to create real heap-allocated objects for grey buffer tests (not sentinel values)
+---
+
