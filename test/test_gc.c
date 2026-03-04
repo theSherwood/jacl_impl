@@ -1230,6 +1230,47 @@ static int test_gc_deferred_block_recycling(void) {
     TEST_PASS();
 }
 
+/* US-002 (M16): Grey buffer realloc safety regression test */
+static int test_gc_grey_buffer_drain_after_realloc(void) {
+    /* Push GREY_BUF_INIT_CAP * 3 entries to force at least one realloc,
+     * then verify all entries are readable and correct, and cap grew. */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    GreyBuffer gb;
+    grey_buf_init(&gb);
+
+    uint32_t total = GREY_BUF_INIT_CAP * 3;
+    uint32_t orig_cap = gb.cap;
+
+    /* Allocate real GC heap objects and push them into the grey buffer */
+    for (uint32_t i = 0; i < total; i++) {
+        JaclVal v = jacl_i64(&vm.heap, (int64_t)i);
+        grey_buf_push(&gb, v);
+    }
+
+    /* Verify cap grew (at least one realloc occurred) */
+    ASSERT(gb.cap > orig_cap);
+
+    /* Verify count matches */
+    ASSERT(gb.count == total);
+
+    /* Verify all entries are readable and point to correct heap objects */
+    for (uint32_t i = 0; i < total; i++) {
+        JaclVal v = gb.entries[i];
+        ASSERT(jacl_is_heap_type(v));
+        /* Decode the heap i64 and verify its value */
+        JaclHeapI64 *h = (JaclHeapI64 *)jacl_as_ptr(v);
+        ASSERT(h->value == (int64_t)i);
+    }
+
+    grey_buf_destroy(&gb);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1281,6 +1322,8 @@ int main(void) {
         { "gc_multi_cycle_mixed",        test_gc_multi_cycle_mixed_lifetimes },
         { "gc_alloc_pool_exhaustion",    test_gc_alloc_pool_exhaustion },
         { "gc_deferred_recycling",       test_gc_deferred_block_recycling },
+        /* US-002 (M16): Grey buffer realloc safety */
+        { "gc_grey_buf_drain_realloc",   test_gc_grey_buffer_drain_after_realloc },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

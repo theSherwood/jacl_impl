@@ -628,6 +628,31 @@ static void grey_buf_init(GreyBuffer *gb) {
     gb->cap     = GREY_BUF_INIT_CAP;
 }
 
+/* grey_buf_push — Thread-local push with concurrent GC reader safety.
+ *
+ * Race scenario: A worker thread calls grey_buf_push (which may realloc the
+ * entries array) while the GC thread concurrently reads entries via
+ * gc__drain_grey_bufs.
+ *
+ * Why this is safe:
+ *   1. realloc() copies all existing entries to the new buffer before
+ *      returning, so entries[0..c-1] are valid in the new allocation.
+ *   2. gb->entries[c] = v writes the new entry into the (possibly new) buffer.
+ *   3. The release store to gb->count (below) happens-after both the realloc
+ *      (which updated gb->entries) and the entry write (gb->entries[c] = v).
+ *   4. In gc__drain_grey_bufs, the acquire load of gb->count sees the new
+ *      count only after the release store, which transitively makes both the
+ *      new gb->entries pointer and all entries[0..count-1] visible.
+ *
+ * Critical invariant: the gb->entries pointer store (from realloc) and the
+ * gb->entries[c] store MUST both happen-before the release store to count.
+ * This is guaranteed because they are all plain stores in the same thread,
+ * and the release fence on count prevents reordering past them.
+ *
+ * Note: the GC thread only reads entries[drained[i]..count-1], never the
+ * entries pointer directly through a load — it reads gb->entries once per
+ * drain call, and the acquire on count ensures it sees the post-realloc
+ * pointer if count reflects post-realloc entries. */
 static void grey_buf_push(GreyBuffer *gb, JaclVal v) {
     uint32_t c = gb->count;
     if (c >= gb->cap) {

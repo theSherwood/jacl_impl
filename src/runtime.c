@@ -607,14 +607,23 @@ static void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
 
 /* Drain grey buffers from all workers, pushing new entries onto mark stack.
  * `drained` tracks how far each worker's buffer has been processed.
- * Returns true if any new entries were found. */
+ * Returns true if any new entries were found.
+ *
+ * Memory-ordering invariant (pairs with grey_buf_push in gc.c):
+ * The acquire load of gb->count below synchronizes-with the release store
+ * in grey_buf_push. This ensures visibility of:
+ *   - All entry writes gb->entries[0..count-1]
+ *   - The gb->entries pointer itself (which may have changed due to realloc)
+ * Therefore reading gb->entries[j] for j < current is safe even if the
+ * worker reallocated the buffer between our previous and current drain. */
 static bool gc__drain_grey_bufs(Runtime *rt, GCMarkStack *ms,
                                  uint32_t *drained) {
     bool found_new = false;
     for (int i = 0; i < rt->num_workers; i++) {
         GreyBuffer *gb = &rt->workers[i].grey_buf;
-        /* Acquire on count ensures we see all entries written before the
-         * release store */
+        /* Acquire on count: synchronizes-with release in grey_buf_push.
+         * Ensures we see the post-realloc entries pointer and all written
+         * entries up to count. */
         uint32_t current = ATOMIC_LOAD_EXPLICIT(&gb->count, MEM_ACQUIRE);
         if (current > drained[i]) {
             found_new = true;
