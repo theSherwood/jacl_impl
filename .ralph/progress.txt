@@ -9,6 +9,8 @@ Progress log for ralph/gc-concurrency-hardening-2 branch.
 - GC_BLOCK_SIZE = 65536 (64KB), GC_LINE_SIZE = 128, GC_LINES_PER_BLOCK = 512
 - Tests use BlockPool + ThreadHeap directly; some tests use VM via `vm_init(&vm, &arena)`
 - Pre-existing compiler warnings in hamt.h, rrb_vec.h, etc. are expected — only check for new warnings from changed files
+- `gc__emergency_gc_fn` is `__thread` — clear it in tests using raw BlockPool/ThreadHeap to avoid stale callbacks from prior VM tests
+- `gc_sweep_concurrent` watermark: use `UINT32_MAX` to sweep all objects; `0` makes everything immune (epoch >= 0 always true)
 
 ---
 
@@ -69,5 +71,18 @@ Progress log for ralph/gc-concurrency-hardening-2 branch.
   - The deferred recycling happens after `gc_running=false` (step 10) which is safe because workers are between tasks and no concurrent GC is modifying block lists
   - Using `GCBlock **pp = &heap->blocks` pointer-to-pointer pattern for singly-linked list unlinking avoids special-casing the head
   - All 48 test targets pass (35 unit tests in test_gc.c, 174 .jacl integration tests)
+---
+
+## 2026-03-04 - US-006
+- Added 4 unit tests to test_gc.c for GC edge cases:
+  1. `test_gc_fragmentation_reuse`: allocates mixed-size objects (small, medium, multi-line), frees some via GC, re-allocates — verifies freed line runs are reused without block growth
+  2. `test_gc_multi_cycle_mixed_lifetimes`: runs 12 GC cycles with 3 survivors and 50 dead objects per cycle — verifies mark-bit alternation, value survival, and heap stability (stays 1 block)
+  3. `test_gc_alloc_pool_exhaustion`: sets max_blocks=2, fills both blocks via gc_alloc, verifies next allocation returns NULL and triggers OOM handler
+  4. `test_gc_deferred_block_recycling`: fills 3 blocks, marks only 1 object on the third block, runs gc_sweep_concurrent — verifies deferred_count >= 2 and blocks are returned to pool
+- Files changed: test/test_gc.c
+- **Learnings for future iterations:**
+  - `gc__emergency_gc_fn` is a `__thread` variable set by `vm_init`. In tests using raw BlockPool/ThreadHeap (no VM), it may be stale from prior VM-based tests. Must clear it before triggering OOM paths.
+  - `gc_sweep_concurrent` watermark parameter: use `UINT32_MAX` to make no objects immune (watermark=0 makes ALL objects immune since epoch >= 0 is always true for uint32_t)
+  - All 48 test targets pass (39 unit tests in test_gc.c, 174 .jacl integration tests)
 ---
 
