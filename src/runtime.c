@@ -399,6 +399,22 @@ static void runtime_destroy(Runtime *rt) {
 }
 
 /* ======================================================================
+ * Inbox push helper — all task submission funnels through here
+ * ====================================================================== */
+
+static void runtime__push_inbox(Runtime *rt, RuntimeTask *task) {
+    MUTEX_LOCK(rt->inbox_mutex);
+    if (rt->inbox_count >= rt->inbox_cap) {
+        intptr_t new_cap = rt->inbox_cap * 2;
+        rt->inbox = (uintptr_t *)realloc(rt->inbox,
+                                          (size_t)new_cap * sizeof(uintptr_t));
+        rt->inbox_cap = new_cap;
+    }
+    rt->inbox[rt->inbox_count++] = (uintptr_t)task;
+    MUTEX_UNLOCK(rt->inbox_mutex);
+}
+
+/* ======================================================================
  * Task submission — external callers push to the global inbox
  * ====================================================================== */
 
@@ -409,15 +425,7 @@ static void runtime_submit(Runtime *rt, void (*fn)(void *), void *data) {
     task->gc_root  = JACL_NIL;
     task->gc_root2 = JACL_NIL;
 
-    MUTEX_LOCK(rt->inbox_mutex);
-    if (rt->inbox_count >= rt->inbox_cap) {
-        intptr_t new_cap = rt->inbox_cap * 2;
-        rt->inbox = (uintptr_t *)realloc(rt->inbox,
-                                          (size_t)new_cap * sizeof(uintptr_t));
-        rt->inbox_cap = new_cap;
-    }
-    rt->inbox[rt->inbox_count++] = (uintptr_t)task;
-    MUTEX_UNLOCK(rt->inbox_mutex);
+    runtime__push_inbox(rt, task);
 }
 
 /* ======================================================================
@@ -461,15 +469,7 @@ static void runtime_submit_task(Runtime *rt, JaclClosure *closure,
                    | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
     task->gc_root2 = JACL_NIL;
 
-    MUTEX_LOCK(rt->inbox_mutex);
-    if (rt->inbox_count >= rt->inbox_cap) {
-        intptr_t new_cap = rt->inbox_cap * 2;
-        rt->inbox = (uintptr_t *)realloc(rt->inbox,
-                                          (size_t)new_cap * sizeof(uintptr_t));
-        rt->inbox_cap = new_cap;
-    }
-    rt->inbox[rt->inbox_count++] = (uintptr_t)task;
-    MUTEX_UNLOCK(rt->inbox_mutex);
+    runtime__push_inbox(rt, task);
 
     (void)thread_local;
 }
@@ -1054,15 +1054,7 @@ static void runtime__schedule_continuation(void *runtime_ptr,
     task->gc_root  = jacl_closure_ptr(continuation);
     task->gc_root2 = result;
 
-    MUTEX_LOCK(rt->inbox_mutex);
-    if (rt->inbox_count >= rt->inbox_cap) {
-        intptr_t new_cap = rt->inbox_cap * 2;
-        rt->inbox = (uintptr_t *)realloc(rt->inbox,
-                                          (size_t)new_cap * sizeof(uintptr_t));
-        rt->inbox_cap = new_cap;
-    }
-    rt->inbox[rt->inbox_count++] = (uintptr_t)task;
-    MUTEX_UNLOCK(rt->inbox_mutex);
+    runtime__push_inbox(rt, task);
 }
 
 static void runtime__schedule_waiters(void *runtime_ptr,
@@ -1178,15 +1170,7 @@ static void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
     task->gc_root2 = JACL_TAG_CLOSURE
                    | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
 
-    MUTEX_LOCK(rt->inbox_mutex);
-    if (rt->inbox_count >= rt->inbox_cap) {
-        intptr_t new_cap = rt->inbox_cap * 2;
-        rt->inbox = (uintptr_t *)realloc(rt->inbox,
-                                          (size_t)new_cap * sizeof(uintptr_t));
-        rt->inbox_cap = new_cap;
-    }
-    rt->inbox[rt->inbox_count++] = (uintptr_t)task;
-    MUTEX_UNLOCK(rt->inbox_mutex);
+    runtime__push_inbox(rt, task);
 }
 
 /* ======================================================================
@@ -1350,15 +1334,7 @@ static void runtime__submit_parallel_task(void *runtime_ptr,
     task->gc_root2 = JACL_TAG_CLOSURE
                    | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
 
-    MUTEX_LOCK(rt->inbox_mutex);
-    if (rt->inbox_count >= rt->inbox_cap) {
-        intptr_t new_cap = rt->inbox_cap * 2;
-        rt->inbox = (uintptr_t *)realloc(rt->inbox,
-                                          (size_t)new_cap * sizeof(uintptr_t));
-        rt->inbox_cap = new_cap;
-    }
-    rt->inbox[rt->inbox_count++] = (uintptr_t)task;
-    MUTEX_UNLOCK(rt->inbox_mutex);
+    runtime__push_inbox(rt, task);
 }
 
 /* ======================================================================
@@ -1469,15 +1445,7 @@ static void runtime__submit_race_task(void *runtime_ptr,
     task->gc_root2 = JACL_TAG_CLOSURE
                    | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
 
-    MUTEX_LOCK(rt->inbox_mutex);
-    if (rt->inbox_count >= rt->inbox_cap) {
-        intptr_t new_cap = rt->inbox_cap * 2;
-        rt->inbox = (uintptr_t *)realloc(rt->inbox,
-                                          (size_t)new_cap * sizeof(uintptr_t));
-        rt->inbox_cap = new_cap;
-    }
-    rt->inbox[rt->inbox_count++] = (uintptr_t)task;
-    MUTEX_UNLOCK(rt->inbox_mutex);
+    runtime__push_inbox(rt, task);
 }
 
 /* ======================================================================
