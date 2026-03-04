@@ -701,21 +701,14 @@ static void gc_concurrent_collect(Runtime *rt) {
     /* 8. Sweep all workers' heaps with epoch watermark.
      * Skip each worker's active allocation block (current_block).
      * Track bytes_survived for adaptive threshold adjustment.
-     * Collect fully-empty blocks into per-worker deferred lists for
-     * recycling after gc_running is set to false (step 10). */
+     * Fully-empty blocks are unlinked and returned to the pool inline. */
     int nw = rt->num_workers;
-    GCBlock **deferred_blocks = (GCBlock **)calloc(
-        (size_t)nw * MAX_DEFERRED_BLOCKS, sizeof(GCBlock *));
-    int *deferred_counts = (int *)calloc((size_t)nw, sizeof(int));
 
     for (i = 0; i < nw; i++) {
         ThreadHeap *heap = &rt->workers[i].vm.heap;
-        int count = 0;
         size_t survived = gc_sweep_concurrent(heap, heap->current_block,
                                                watermark, mark,
-                                               deferred_blocks + i * MAX_DEFERRED_BLOCKS,
-                                               &count);
-        deferred_counts[i] = count;
+                                               &rt->block_pool);
         gc__adjust_threshold(heap, survived);
     }
 
@@ -737,32 +730,6 @@ static void gc_concurrent_collect(Runtime *rt) {
 
     /* 10. Set gc_running = false (allow next GC cycle) */
     ATOMIC_STORE_EXPLICIT(&rt->gc_running, 0, MEM_RELEASE);
-
-    /* 11. Recycle deferred blocks: unlink from heap block lists and return
-     * to the shared pool. Safe because gc_running==false means no concurrent
-     * GC is modifying block lists, and workers are between tasks. */
-    for (i = 0; i < nw; i++) {
-        if (deferred_counts[i] == 0) continue;
-        ThreadHeap *heap = &rt->workers[i].vm.heap;
-        int j;
-        for (j = 0; j < deferred_counts[i]; j++) {
-            GCBlock *target = deferred_blocks[i * MAX_DEFERRED_BLOCKS + j];
-            /* Unlink target from heap's singly-linked block list */
-            GCBlock **pp = &heap->blocks;
-            while (*pp) {
-                if (*pp == target) {
-                    *pp = target->next;
-                    target->next = NULL;
-                    gc_block_pool_return(&rt->block_pool, target);
-                    break;
-                }
-                pp = &(*pp)->next;
-            }
-        }
-    }
-
-    free(deferred_blocks);
-    free(deferred_counts);
 }
 
 /* Task function for concurrent GC — submitted to the inbox */

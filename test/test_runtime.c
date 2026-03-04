@@ -828,9 +828,7 @@ static int test_epoch_watermark_protect(void) {
     /* Neither object is marked. Watermark = 5.
      * val (epoch=5): 5 >= 5 → immune (survives)
      * val2 (epoch=10): 10 >= 5 → immune (survives) */
-    GCBlock *deferred[MAX_DEFERRED_BLOCKS];
-    int deferred_n = 0;
-    gc_sweep_concurrent(&w->vm.heap, NULL, 5, mark, deferred, &deferred_n);
+    gc_sweep_concurrent(&w->vm.heap, NULL, 5, mark, NULL);
 
     GCHeader *h1 = gc_header_of(jacl_as_ptr(val));
     GCHeader *h2 = gc_header_of(jacl_as_ptr(val2));
@@ -859,9 +857,7 @@ static int test_epoch_watermark_collect(void) {
     uint8_t mark = w->vm.heap.current_mark;
 
     /* Watermark = 5. old_val (epoch=3 < 5): dead. new_val (epoch=10 >= 5): immune. */
-    GCBlock *deferred2[MAX_DEFERRED_BLOCKS];
-    int deferred2_n = 0;
-    gc_sweep_concurrent(&w->vm.heap, NULL, 5, mark, deferred2, &deferred2_n);
+    gc_sweep_concurrent(&w->vm.heap, NULL, 5, mark, NULL);
 
     GCHeader *h_old = gc_header_of(jacl_as_ptr(old_val));
     GCHeader *h_new = gc_header_of(jacl_as_ptr(new_val));

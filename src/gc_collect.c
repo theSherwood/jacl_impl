@@ -417,21 +417,17 @@ static void gc_collect(ThreadHeap *heap, VM *vm) {
  * - Does NOT invalidate cursor/limit (owning worker may be allocating)
  * ====================================================================== */
 
-/* Maximum deferred blocks per worker per GC cycle (stack-allocated) */
-#ifndef MAX_DEFERRED_BLOCKS
-#define MAX_DEFERRED_BLOCKS 64
-#endif
-
 static size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
                                    uint32_t watermark, uint8_t current_mark,
-                                   GCBlock **deferred_out, int *deferred_count_out) {
-    GCBlock *block = heap->blocks;
-    size_t   bytes_survived = 0;
-    int      deferred_count = 0;
+                                   BlockPool *pool) {
+    GCBlock **pp = &heap->blocks;
+    size_t    bytes_survived = 0;
 
-    while (block) {
+    while (*pp) {
+        GCBlock *block = *pp;
+
         if (block == skip_block) {
-            block = block->next;
+            pp = &block->next;
             continue;
         }
 
@@ -508,24 +504,23 @@ static size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
          */
         memcpy(block->line_map, new_map, GC_LINES_PER_BLOCK);
 
-        /* Check if block is fully empty — candidate for deferred recycling */
-        if (deferred_count < MAX_DEFERRED_BLOCKS) {
-            bool all_free = true;
-            for (int line = 0; line < GC_LINES_PER_BLOCK; line++) {
-                if (new_map[line] != GC_LINE_FREE) {
-                    all_free = false;
-                    break;
-                }
-            }
-            if (all_free) {
-                deferred_out[deferred_count++] = block;
+        /* If block is fully empty, unlink it and return to pool immediately */
+        bool all_free = true;
+        for (int line = 0; line < GC_LINES_PER_BLOCK; line++) {
+            if (new_map[line] != GC_LINE_FREE) {
+                all_free = false;
+                break;
             }
         }
-
-        block = block->next;
+        if (all_free && pool) {
+            *pp = block->next;
+            block->next = NULL;
+            gc_block_pool_return(pool, block);
+        } else {
+            pp = &block->next;
+        }
     }
 
-    *deferred_count_out = deferred_count;
     return bytes_survived;
 }
 

@@ -1178,8 +1178,8 @@ static int test_gc_alloc_pool_exhaustion(void) {
 
 static int test_gc_deferred_block_recycling(void) {
     /* Allocate objects across 3 blocks, let blocks 1-2 die entirely,
-     * run gc_sweep_concurrent — verify deferred count > 0 and blocks
-     * can be returned to the pool. */
+     * run gc_sweep_concurrent — verify empty blocks are unlinked inline
+     * and returned to the pool. */
     arena_t arena = {0};
     VM vm;
     vm_init(&vm, &arena);
@@ -1205,29 +1205,19 @@ static int test_gc_deferred_block_recycling(void) {
     vm.stack_top = 1;
     gc_mark(&vm.heap, &vm);
 
-    /* Run concurrent sweep, skipping current_block (block 3) */
-    GCBlock *deferred[MAX_DEFERRED_BLOCKS];
-    int deferred_count = 0;
+    /* Run concurrent sweep — empty blocks are unlinked and returned to
+     * the pool inline (no deferred phase needed). */
     gc_sweep_concurrent(&vm.heap, vm.heap.current_block, UINT32_MAX,
-                        vm.heap.current_mark, deferred, &deferred_count);
+                        vm.heap.current_mark, vm.heap.pool);
 
-    /* Should have deferred at least 2 fully-empty blocks */
-    ASSERT(deferred_count >= 2);
-
-    /* Recycle deferred blocks: unlink from heap list, return to pool */
-    for (int i = 0; i < deferred_count; i++) {
-        GCBlock **pp = &vm.heap.blocks;
-        while (*pp) {
-            if (*pp == deferred[i]) {
-                *pp = deferred[i]->next;
-                gc_block_pool_return(vm.heap.pool, deferred[i]);
-                break;
-            }
-            pp = &(*pp)->next;
-        }
+    /* Heap should have only 1 block remaining (the current_block with live) */
+    {
+        int count = 0;
+        for (GCBlock *b = vm.heap.blocks; b; b = b->next) count++;
+        ASSERT(count == 1);
     }
 
-    /* Pool free list should have grown */
+    /* Pool free list should have grown by at least 2 */
     {
         int free_count = 0;
         for (GCBlock *f = vm.heap.pool->free_list; f; f = f->next)
