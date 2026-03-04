@@ -14,8 +14,21 @@ Progress log for ralph/gc-concurrency-hardening-3 branch.
 - Pre-existing compiler warnings in hamt.h, rrb_vec.h, etc. are expected — only check for new warnings from changed files
 - `gc__emergency_gc_fn` is `__thread` — clear it in tests using raw BlockPool/ThreadHeap to avoid stale callbacks from prior VM tests
 - `gc_sweep_concurrent` watermark: use `UINT32_MAX` to sweep all objects; `0` makes everything immune (epoch >= 0 always true)
+- gc_sweep_concurrent signature: (ThreadHeap*, GCBlock *skip, uint32_t watermark, uint8_t mark, BlockPool *pool). Pass pool=NULL in tests that don't need block recycling
 - gc_sweep_concurrent is called from 3 places: gc_concurrent_collect (runtime.c), test_runtime.c, test_m12.c — all need updating when signature changes
 - runtime__push_inbox and runtime__setup_call must be defined before all functions that call them (C declaration order in unity build)
 
+---
+
+## 2026-03-04 - US-001
+- Eliminated deferred block recycling pattern: gc_sweep_concurrent now unlinks fully-empty blocks inline and returns them to the BlockPool directly
+- Removed MAX_DEFERRED_BLOCKS constant, deferred arrays allocation in gc_concurrent_collect, and post-sweep unlinking loop
+- New signature: gc_sweep_concurrent(heap, skip_block, watermark, current_mark, pool) — pool=NULL for test callers that don't need recycling
+- Used pointer-to-pointer iteration pattern to safely unlink from singly-linked list while traversing
+- Files changed: src/gc_collect.c, src/runtime.c, test/test_runtime.c, test/test_m12.c, test/test_gc.c
+- **Learnings for future iterations:**
+  - When modifying gc_sweep_concurrent, use `pool=NULL` in test callers that don't need actual block recycling (test_runtime.c, test_m12.c)
+  - Pointer-to-pointer (`GCBlock **pp = &heap->blocks`) pattern is essential for safe inline unlinking during linked list traversal
+  - test_gc_deferred_block_recycling test verifies blocks are returned to pool by checking heap block count decreased and pool free list grew
 ---
 
