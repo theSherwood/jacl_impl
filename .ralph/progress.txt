@@ -22,3 +22,15 @@ Progress log for ralph/gc-concurrency-hardening-2 branch.
   - All 48 test targets pass (including 174 .jacl integration tests)
 ---
 
+## 2026-03-04 - US-002
+- Restructured `gc_block_pool_get` to hold the lock from free list check through counter increment, eliminating the TOCTOU window where two threads could both pass the limit check
+- Fixed the same TOCTOU pattern in the Tier 2 OOM path of `gc_alloc` (lines 361-377)
+- Malloc remains outside the lock; if malloc fails after incrementing, the counter is decremented under lock
+- Added `test_gc_block_pool_limit` test: sets max_blocks=2, verifies third allocation returns NULL, and verifies recycled blocks don't count as new allocations
+- Files changed: src/gc.c, test/test_gc.c
+- **Learnings for future iterations:**
+  - The Tier 2 OOM path in gc_alloc (emergency heap growth) duplicates block allocation logic from gc_block_pool_get — both need to be kept in sync
+  - The `need_malloc` / `reserved` bool pattern cleanly separates the locked reservation from the unlocked malloc
+  - All 48 test targets pass (33 unit tests in test_gc.c, 174 .jacl integration tests)
+---
+
