@@ -1,0 +1,115 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/gc-concurrency-hardening-2",
+  "description": "M15 — GC/Concurrency Hardening Phase 2: Fix alloc_total uint16_t overflow bug, close grey buffer final drain gap, add deferred block recycling for concurrent sweep, fix TOCTOU in block pool limit, document benign line map data race, and add targeted tests for all edge cases.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Fix alloc_total uint16_t overflow at block boundary",
+      "description": "As a runtime developer, I need the GC allocator to reject allocations where total size equals GC_BLOCK_SIZE (65536) so that alloc_total never wraps to 0 and objects are always visible to the sweep phase.",
+      "acceptanceCriteria": [
+        "In gc.c, change the guard `total > GC_BLOCK_SIZE` to `total >= GC_BLOCK_SIZE` so that total==65536 is rejected",
+        "New unit test in test_gc.c: gc_alloc(heap, OBJ_STRING, 65528) returns NULL (65528 + 8 header = 65536 which would overflow uint16_t)",
+        "New unit test: gc_alloc(heap, OBJ_STRING, 65520) succeeds and gc_header_of(result)->alloc_total > 0",
+        "New unit test: gc_alloc(heap, OBJ_STRING, 65512) succeeds (well within bounds)",
+        "All existing tests pass",
+        "Compiles without warnings"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Fix TOCTOU in gc_block_pool_get",
+      "description": "As a runtime developer, I need the block pool limit check and counter increment to be atomic so that concurrent workers cannot exceed max_blocks.",
+      "acceptanceCriteria": [
+        "gc_block_pool_get restructured: read total_blocks_allocated under lock, if at limit unlock and return NULL, otherwise increment counter then unlock, then malloc outside the lock",
+        "If malloc fails after incrementing: re-lock, decrement counter, unlock, return NULL",
+        "The malloc call remains outside the lock to avoid blocking other threads",
+        "New unit test: set max_blocks = 2, allocate 3 blocks — verify third returns NULL",
+        "All existing tests pass",
+        "Compiles without warnings"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Document benign line map memcpy data race",
+      "description": "As a runtime developer, I need the concurrent sweep's line map memcpy to be clearly documented as a benign data race so that future maintainers understand the safety argument.",
+      "acceptanceCriteria": [
+        "In gc_collect.c gc_sweep_concurrent, replace comment `/* Phase 3: atomically swap line map */` with a detailed safety argument explaining: (1) sweep only transitions OCCUPIED->FREE, (2) Phase 1 already zeroed dead memory, (3) gc_alloc seeing partial update either misses free space (harmless) or finds freed line (correct since memory zeroed), (4) no incorrect allocation or use-after-free can result, (5) note about TSan suppression",
+        "All existing tests pass",
+        "Compiles without warnings"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Close grey buffer final drain gap with convergence loop",
+      "description": "As a runtime developer, I need the concurrent GC mark phase to fully drain all grey buffer entries before disabling write barriers so that no write barrier entries pushed during the final mark are lost.",
+      "acceptanceCriteria": [
+        "gc__drain_grey_bufs modified to return a boolean indicating whether any new entries were found (compare drained counts before and after)",
+        "In gc_concurrent_collect, replace the single final drain + mark-loop (lines 665-673) with a convergence loop: repeatedly drain grey buffers and process mark stack until no new entries found",
+        "Convergence loop has a maximum iteration cap defined as GC_FINAL_DRAIN_MAX_ROUNDS (default 8) to prevent unbounded looping",
+        "After convergence loop exits, gc_active set to false (line 678 position unchanged)",
+        "All existing tests pass",
+        "Compiles without warnings"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Add deferred block recycling to concurrent sweep",
+      "description": "As a runtime developer, I need concurrent GC to collect fully-empty blocks during sweep and return them to the shared pool after the GC cycle completes, so long-running programs don't leak memory per worker.",
+      "acceptanceCriteria": [
+        "gc_sweep_concurrent gains output parameters: array of GCBlock pointers for fully-empty blocks and a count",
+        "During Phase 2 line map rebuild, if all lines in new_map are GC_LINE_FREE, add the block to the output array (do NOT unlink from heap block list yet)",
+        "Ensure current_block (skip_block) is never added to deferred list",
+        "In gc_concurrent_collect, after gc_running is set to false (step 10), iterate deferred blocks per worker: unlink each from heap's block list, call gc_block_pool_return",
+        "Deferred list is stack-allocated with cap of 64 per worker (MAX_DEFERRED_BLOCKS define). If exceeded, remaining empty blocks are left in-place for next cycle",
+        "All existing tests pass",
+        "Compiles without warnings"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Add unit tests for GC edge cases",
+      "description": "As a runtime developer, I need unit tests covering fragmentation, multi-cycle GC, and block pool limits so that regressions are caught immediately.",
+      "acceptanceCriteria": [
+        "Fragmentation test in test_gc.c: allocate objects of mixed sizes (small, medium, multi-line), run GC to free some, allocate again — verify new allocations reuse freed line runs without unnecessary block growth",
+        "Multi-cycle GC test: run 10+ GC cycles where each cycle some objects survive and others die — verify heap doesn't grow unboundedly and mark-bit alternation works correctly",
+        "Block pool limit test: with max_blocks=N, exhaust pool, verify (N+1)th allocation returns NULL or triggers emergency GC path",
+        "Deferred recycling test: allocate many objects on a heap, let them all die, trigger gc_sweep_concurrent, verify deferred block count > 0 and blocks are returned to pool",
+        "All tests pass"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Add .jacl integration tests for concurrent GC scenarios",
+      "description": "As a runtime developer, I need .jacl integration tests that exercise write barriers under concurrent mutation, memory boundedness with block recycling, and multi-cycle GC correctness.",
+      "acceptanceCriteria": [
+        "barrier_stress.jacl: spawn N workers that concurrently swap! atoms in a tight loop while other workers allocate heavily (forcing GC). Verify final atom values are consistent. Use `# mode: concurrent`",
+        "gc_memory_bounded.jacl: loop 50+ iterations where each spawns tasks that allocate and discard large vectors. Verify program completes without OOM. Use `# mode: concurrent`",
+        "gc_multi_cycle.jacl: chain 10+ sequential spawn/await calls with intermediate heap allocations forcing multiple GC cycles. Verify all intermediate values survive. Use `# mode: concurrent`",
+        "All new test files have `# mode: concurrent` and `# expect:` comments with expected output",
+        "All tests pass via the test harness"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}

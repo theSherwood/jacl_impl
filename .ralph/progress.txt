@@ -1,6 +1,6 @@
-## M15 — GC/Concurrency Hardening Phase 2
+## M16 — GC/Concurrency Hardening Phase 3
 
-Progress log for ralph/gc-concurrency-hardening-2 branch.
+Progress log for ralph/gc-concurrency-hardening-3 branch.
 
 ## Codebase Patterns
 - Build and test with `bash build.sh` from project root. Individual test files compile via `gcc -Wall -Wextra -std=c99 -g test/test_gc.c -o /tmp/test_gc`
@@ -14,92 +14,8 @@ Progress log for ralph/gc-concurrency-hardening-2 branch.
 - Pre-existing compiler warnings in hamt.h, rrb_vec.h, etc. are expected — only check for new warnings from changed files
 - `gc__emergency_gc_fn` is `__thread` — clear it in tests using raw BlockPool/ThreadHeap to avoid stale callbacks from prior VM tests
 - `gc_sweep_concurrent` watermark: use `UINT32_MAX` to sweep all objects; `0` makes everything immune (epoch >= 0 always true)
+- gc_sweep_concurrent is called from 3 places: gc_concurrent_collect (runtime.c), test_runtime.c, test_m12.c — all need updating when signature changes
+- runtime__push_inbox and runtime__setup_call must be defined before all functions that call them (C declaration order in unity build)
 
----
-
-## 2026-03-03 - US-001
-- Changed `total > GC_BLOCK_SIZE` to `total >= GC_BLOCK_SIZE` in gc_alloc (gc.c:317) to prevent uint16_t overflow when total == 65536
-- Added 3 boundary tests: exact boundary (65528 payload → NULL), just under (65520 → succeeds), well within (65512 → succeeds)
-- Files changed: src/gc.c, test/test_gc.c
-- **Learnings for future iterations:**
-  - sizeof(GCHeader) = 8, so payload of 65528 + 8 = 65536 exactly hits the boundary
-  - Test registration in main() at bottom of test_gc.c — add new entries in the TestEntry array
-  - All 48 test targets pass (including 174 .jacl integration tests)
----
-
-## 2026-03-04 - US-002
-- Restructured `gc_block_pool_get` to hold the lock from free list check through counter increment, eliminating the TOCTOU window where two threads could both pass the limit check
-- Fixed the same TOCTOU pattern in the Tier 2 OOM path of `gc_alloc` (lines 361-377)
-- Malloc remains outside the lock; if malloc fails after incrementing, the counter is decremented under lock
-- Added `test_gc_block_pool_limit` test: sets max_blocks=2, verifies third allocation returns NULL, and verifies recycled blocks don't count as new allocations
-- Files changed: src/gc.c, test/test_gc.c
-- **Learnings for future iterations:**
-  - The Tier 2 OOM path in gc_alloc (emergency heap growth) duplicates block allocation logic from gc_block_pool_get — both need to be kept in sync
-  - The `need_malloc` / `reserved` bool pattern cleanly separates the locked reservation from the unlocked malloc
-  - All 48 test targets pass (33 unit tests in test_gc.c, 174 .jacl integration tests)
----
-
-## 2026-03-04 - US-003
-- Replaced `/* Phase 3: atomically swap line map */` comment in gc_collect.c:486 with detailed safety argument documenting the benign data race between concurrent sweep's memcpy and gc_alloc's slow path
-- Comment covers: sweep only transitions OCCUPIED→FREE, Phase 1 zeroes dead memory first, partial map visibility is harmless, TSan suppression guidance
-- Files changed: src/gc_collect.c
-- **Learnings for future iterations:**
-  - Documentation-only changes are straightforward — just the comment replacement, no code logic changes
-  - All 48 test targets pass (35 unit tests in test_gc.c, 174 .jacl integration tests)
----
-
-## 2026-03-04 - US-004
-- Modified `gc__drain_grey_bufs` to return `bool` indicating whether new entries were found (compares drained counts before/after for each worker)
-- Replaced single final drain + mark-loop in `gc_concurrent_collect` (step 6) with a convergence loop: repeatedly drain grey buffers and process mark stack until no new entries found, capped at `GC_FINAL_DRAIN_MAX_ROUNDS` (8)
-- `gc_active` set to false after the convergence loop exits (step 7, position unchanged)
-- Added `GC_FINAL_DRAIN_MAX_ROUNDS` define (configurable via #ifndef, default 8)
-- Files changed: src/runtime.c
-- **Learnings for future iterations:**
-  - The convergence loop uses a block scope `{ int rounds; ... }` to avoid adding variables to the outer function scope (C99 compatibility with declaration after statement)
-  - The periodic drain in the main mark loop (step 5) still uses the return value from `gc__drain_grey_bufs` — it's compatible since the call site just ignores the return value
-  - All 48 test targets pass (35 unit tests in test_gc.c, 174 .jacl integration tests)
----
-
-## 2026-03-04 - US-005
-- Added `MAX_DEFERRED_BLOCKS` define (64, configurable via `#ifndef`) to gc_collect.c
-- Extended `gc_sweep_concurrent` with two new output parameters: `GCBlock **deferred_out` and `int *deferred_count_out`
-- After building the new line map (Phase 2), checks if all lines are `GC_LINE_FREE` and adds the block to the deferred output array (capped at MAX_DEFERRED_BLOCKS)
-- `skip_block` (current_block) is never added — already skipped at top of sweep loop
-- In `gc_concurrent_collect`, after step 10 (`gc_running = false`), iterates per-worker deferred lists: unlinks each block from the heap's singly-linked block list and returns it to the shared pool via `gc_block_pool_return`
-- Deferred arrays are heap-allocated (calloc) to support arbitrary worker counts, freed after recycling
-- Updated all existing callers of `gc_sweep_concurrent` in test_runtime.c and test_m12.c to pass the new parameters
-- Files changed: src/gc_collect.c, src/runtime.c, test/test_m12.c, test/test_runtime.c
-- **Learnings for future iterations:**
-  - `gc_sweep_concurrent` is called from 3 places: gc_concurrent_collect (runtime.c), test_runtime.c (2 tests), test_m12.c (1 test) — all need updating when signature changes
-  - The deferred recycling happens after `gc_running=false` (step 10) which is safe because workers are between tasks and no concurrent GC is modifying block lists
-  - Using `GCBlock **pp = &heap->blocks` pointer-to-pointer pattern for singly-linked list unlinking avoids special-casing the head
-  - All 48 test targets pass (35 unit tests in test_gc.c, 174 .jacl integration tests)
----
-
-## 2026-03-04 - US-006
-- Added 4 unit tests to test_gc.c for GC edge cases:
-  1. `test_gc_fragmentation_reuse`: allocates mixed-size objects (small, medium, multi-line), frees some via GC, re-allocates — verifies freed line runs are reused without block growth
-  2. `test_gc_multi_cycle_mixed_lifetimes`: runs 12 GC cycles with 3 survivors and 50 dead objects per cycle — verifies mark-bit alternation, value survival, and heap stability (stays 1 block)
-  3. `test_gc_alloc_pool_exhaustion`: sets max_blocks=2, fills both blocks via gc_alloc, verifies next allocation returns NULL and triggers OOM handler
-  4. `test_gc_deferred_block_recycling`: fills 3 blocks, marks only 1 object on the third block, runs gc_sweep_concurrent — verifies deferred_count >= 2 and blocks are returned to pool
-- Files changed: test/test_gc.c
-- **Learnings for future iterations:**
-  - `gc__emergency_gc_fn` is a `__thread` variable set by `vm_init`. In tests using raw BlockPool/ThreadHeap (no VM), it may be stale from prior VM-based tests. Must clear it before triggering OOM paths.
-  - `gc_sweep_concurrent` watermark parameter: use `UINT32_MAX` to make no objects immune (watermark=0 makes ALL objects immune since epoch >= 0 is always true for uint32_t)
-  - All 48 test targets pass (39 unit tests in test_gc.c, 174 .jacl integration tests)
----
-
-## 2026-03-04 - US-007
-- Added 3 .jacl integration tests for concurrent GC scenarios:
-  1. `barrier_stress.jacl`: 4 workers concurrently swap! atoms 50 times each while 2 workers allocate heavily (forcing GC). Verifies final atom values are correct (no use-after-free or corruption).
-  2. `gc_memory_bounded.jacl`: 50 iterations of spawning 3 tasks that allocate and discard vectors. Verifies program completes without OOM (block recycling keeps memory bounded).
-  3. `gc_multi_cycle.jacl`: 10 sequential spawn/await calls computing fib(10), printing each result. Forces multiple GC cycles and verifies all intermediate values survive across cycles.
-- All tests use `# mode: concurrent` and `# expect:` headers
-- Files changed: test/jacl/barrier_stress.jacl, test/jacl/gc_memory_bounded.jacl, test/jacl/gc_multi_cycle.jacl
-- **Learnings for future iterations:**
-  - JACL proc names must be <= 7 bytes due to inline string limit. Compiler error: "proc name exceeds 7-byte inline limit"
-  - `while` loops with `set` don't work correctly inside spawned CPS closures. Use tail recursion instead for loops in concurrent mode.
-  - Deep recursion in CPS mode has limits (~62 levels observed for swap!-heavy workloads). Keep iteration counts conservative for tests.
-  - All 48 test targets pass (39 unit tests in test_gc.c, 177 .jacl integration tests)
 ---
 
