@@ -55,3 +55,19 @@ Progress log for ralph/gc-concurrency-hardening-2 branch.
   - All 48 test targets pass (35 unit tests in test_gc.c, 174 .jacl integration tests)
 ---
 
+## 2026-03-04 - US-005
+- Added `MAX_DEFERRED_BLOCKS` define (64, configurable via `#ifndef`) to gc_collect.c
+- Extended `gc_sweep_concurrent` with two new output parameters: `GCBlock **deferred_out` and `int *deferred_count_out`
+- After building the new line map (Phase 2), checks if all lines are `GC_LINE_FREE` and adds the block to the deferred output array (capped at MAX_DEFERRED_BLOCKS)
+- `skip_block` (current_block) is never added — already skipped at top of sweep loop
+- In `gc_concurrent_collect`, after step 10 (`gc_running = false`), iterates per-worker deferred lists: unlinks each block from the heap's singly-linked block list and returns it to the shared pool via `gc_block_pool_return`
+- Deferred arrays are heap-allocated (calloc) to support arbitrary worker counts, freed after recycling
+- Updated all existing callers of `gc_sweep_concurrent` in test_runtime.c and test_m12.c to pass the new parameters
+- Files changed: src/gc_collect.c, src/runtime.c, test/test_m12.c, test/test_runtime.c
+- **Learnings for future iterations:**
+  - `gc_sweep_concurrent` is called from 3 places: gc_concurrent_collect (runtime.c), test_runtime.c (2 tests), test_m12.c (1 test) — all need updating when signature changes
+  - The deferred recycling happens after `gc_running=false` (step 10) which is safe because workers are between tasks and no concurrent GC is modifying block lists
+  - Using `GCBlock **pp = &heap->blocks` pointer-to-pointer pattern for singly-linked list unlinking avoids special-casing the head
+  - All 48 test targets pass (35 unit tests in test_gc.c, 174 .jacl integration tests)
+---
+
