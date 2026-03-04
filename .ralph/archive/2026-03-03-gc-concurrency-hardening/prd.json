@@ -1,0 +1,140 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/gc-concurrency-hardening",
+  "description": "M14 — GC/Concurrency Hardening: Fix soundness bugs where GC can prematurely collect live objects (multi-root task scanning, parallel join result vector), eliminate undefined behavior in grey buffer concurrent access, reduce inbox mutex contention via batched drain, replace future mutex with spinlock, and expand test coverage to exercise real concurrent GC scenarios.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Multi-root GC scanning for RuntimeTask",
+      "description": "As a runtime developer, I need RuntimeTask to root multiple GC values so that all task-referenced objects survive garbage collection.",
+      "acceptanceCriteria": [
+        "RuntimeTask struct has gc_root and gc_root2 fields (both JaclVal)",
+        "runtime__schedule_continuation sets gc_root = jacl_closure_ptr(continuation), gc_root2 = result value",
+        "runtime__submit_spawn_task sets gc_root = future_val, gc_root2 = closure tagged value (JACL_TAG_CLOSURE | pointer)",
+        "runtime__submit_parallel_task sets gc_root = agg_val, gc_root2 = closure tagged value",
+        "runtime__submit_race_task sets gc_root = agg_val, gc_root2 = closure tagged value",
+        "runtime_submit (generic) sets gc_root2 = JACL_NIL",
+        "runtime_submit_task sets gc_root2 = JACL_NIL",
+        "gc_enumerate_roots scans both gc_root and gc_root2 for currently_executing task",
+        "gc__scan_deque scans both gc_root and gc_root2 for each deque task",
+        "Inbox scanning in gc_enumerate_roots scans both gc_root and gc_root2",
+        "New unit test: submit a task with gc_root2 set to a heap value, force GC, verify the heap value survives",
+        "All existing tests pass (build.sh)",
+        "Compiles without warnings"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Critical soundness fix. RuntimeTask.gc_root holds a single JaclVal, but continuation tasks need to root the result, spawn tasks need to root the closure, and parallel/race tasks need to root body closures. Without this, GC can collect unrooted values between task submission and execution if no other reference exists. Epoch watermarking and eager CPS capture mitigate this in practice, but the design is unsound."
+    },
+    {
+      "id": "US-002",
+      "title": "Root the parallel join result vector",
+      "description": "As a runtime developer, I need the parallel join result vector to be GC-rooted between construction and continuation execution so it is not prematurely collected.",
+      "acceptanceCriteria": [
+        "Confirm runtime__schedule_continuation sets gc_root2 = cont_arg (the result vector) after US-001 changes",
+        "New test: parallel with N tasks that allocate heavily, force GC after all tasks complete but before join continuation runs, verify result vector is intact and contains correct values",
+        "All existing parallel tests pass in concurrent mode",
+        "Compiles without warnings"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Depends on US-001. After all parallel tasks complete, the result vector is built from agg->results[] and passed to runtime__schedule_continuation. With US-001's gc_root2, the result is rooted through the continuation task. This story verifies that the fix is sufficient and adds a targeted regression test."
+    },
+    {
+      "id": "US-003",
+      "title": "Grey buffer memory ordering",
+      "description": "As a runtime developer, I need grey buffer writes and reads to use proper memory ordering so that the GC always sees consistent entries on all architectures.",
+      "acceptanceCriteria": [
+        "GreyBuffer.count uses atomic operations: ATOMIC_STORE_EXPLICIT with MEM_RELEASE on write in grey_buf_push, ATOMIC_LOAD_EXPLICIT with MEM_ACQUIRE on read in gc__drain_grey_bufs",
+        "grey_buf_push writes entries[count] first (plain store, thread-local), then increments count with release semantics",
+        "gc__drain_grey_bufs reads count with acquire semantics, ensuring all entries up to the read count are visible",
+        "Grey buffer count reset in gc_concurrent_collect (grey_buf.count = 0) uses appropriate ordering (release store, or plain store after gc_active=0 which provides the ordering)",
+        "Comment in grey_buf_push documenting: 'Release on count ensures entries[0..count-1] are visible to GC thread after acquire load of count'",
+        "Comment in gc__drain_grey_bufs documenting: 'Acquire on count ensures we see all entries written before the release store'",
+        "All existing GC and write barrier tests pass",
+        "Compiles without warnings"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Under C11, concurrent non-atomic access where at least one is a write is undefined behavior. On ARM/POWER, the GC could see incremented count but stale entries[] data. The fix uses release/acquire on count to establish happens-before between the worker's entry write and the GC's entry read. Uses platform.h ATOMIC macros (not raw C11) for cross-platform support."
+    },
+    {
+      "id": "US-004",
+      "title": "Batched inbox drain with lockless empty check",
+      "description": "As a runtime developer, I want to reduce inbox mutex contention so that workers spend less time blocked on lock acquisition when the inbox is empty.",
+      "acceptanceCriteria": [
+        "Worker loop checks rt->inbox_count > 0 (volatile read, no lock) before acquiring inbox_mutex",
+        "When inbox is non-empty, worker acquires lock once and drains ALL pending tasks in a single acquisition",
+        "Drained tasks are pushed to the worker's private deque (not executed inline under the lock)",
+        "runtime_submit and runtime_submit_task continue to use mutex-protected push (no change to producer side)",
+        "All existing concurrent tests pass",
+        "Stress tests (test_concurrent_gc_stress, test_memory_bounded, test_concurrent_gc_multi_cycle) show no regression",
+        "Compiles without warnings"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "inbox_count is already volatile intptr_t. The lockless check eliminates ~99% of mutex acquisitions (inbox is usually empty). Batched drain reduces per-drain cost from O(tasks) lock acquisitions to O(1). This is a ~15 line change that eliminates the main contention point without new data structures."
+    },
+    {
+      "id": "US-005",
+      "title": "Replace future mutex with spinlock",
+      "description": "As a runtime developer, I want futures to use a spinlock instead of a platform mutex so there is no OS resource to leak when futures are garbage collected.",
+      "acceptanceCriteria": [
+        "JaclFuture.lock changed from platform_mutex_t to volatile uint32_t",
+        "Add future_lock(JaclFuture*) using CAS-based spin: while(!ATOMIC_CAS(&f->lock, 0, 1, MEM_ACQUIRE, MEM_RELAXED)) spin",
+        "Add future_unlock(JaclFuture*) using ATOMIC_STORE_EXPLICIT(&f->lock, 0, MEM_RELEASE)",
+        "MUTEX_INIT(f->lock) in jacl_future() replaced with f->lock = 0",
+        "MUTEX_LOCK/UNLOCK calls in jacl_future_resolve, jacl_future_error, jacl_future_add_waiter replaced with future_lock/future_unlock",
+        "No MUTEX_DESTROY needed anywhere for futures",
+        "All existing future, spawn, await, parallel, and race tests pass",
+        "Concurrent stress tests pass (spinlock correct under contention)",
+        "Compiles without warnings"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "The lock is held for ~10 instructions during the resolve-vs-add_waiter race window. Spinning is appropriate at this hold time. The spinlock has no OS resource — when the future is GC'd, the uint32_t is just memory. Eliminates the resource leak on Windows where CRITICAL_SECTION requires DeleteCriticalSection."
+    },
+    {
+      "id": "US-006",
+      "title": "Enable concurrent mode for existing .jacl tests",
+      "description": "As a developer, I want more .jacl integration tests to run in true concurrent mode so they exercise real worker threads, work-stealing, and GC interaction.",
+      "acceptanceCriteria": [
+        "spawn_multi.jacl has # mode: concurrent added and passes",
+        "spawn_nested.jacl has # mode: concurrent added and passes",
+        "parallel_error.jacl has # mode: concurrent added and passes",
+        "parallel_with_await.jacl has # mode: concurrent added and passes",
+        "parallel_await_error.jacl has # mode: concurrent added and passes",
+        "race_basic.jacl has # mode: concurrent added and passes",
+        "race_error.jacl has # mode: concurrent added and passes",
+        "async_error_spawn.jacl has # mode: concurrent added and passes",
+        "async_error_propagation.jacl has # mode: concurrent added and passes",
+        "async_error_parallel.jacl has # mode: concurrent added and passes",
+        "Any bugs discovered during enablement are fixed and documented in notes",
+        "All existing tests continue to pass (no regressions)",
+        "All tests pass (build.sh)"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Currently only 4 of ~20 concurrent .jacl tests use real worker threads. The rest test CPS compiler output but not actual concurrent execution. Error propagation paths are especially undertested. Failures found during enablement are real concurrency bugs — fix them as part of this story."
+    },
+    {
+      "id": "US-007",
+      "title": "Add targeted GC+concurrency intersection tests",
+      "description": "As a developer, I need tests that exercise the specific GC+concurrency failure scenarios identified in the audit to prevent regressions.",
+      "acceptanceCriteria": [
+        "Test: mid-CPS-chain GC — create chain of 3+ continuations where intermediate upvalues are only reference to certain objects, trigger GC mid-chain, verify objects survive",
+        "Test: grey buffer processing — atom reset during active GC (gc_active=1), verify grey buffer entry is processed during mark phase and the old value survives",
+        "Test: unrooted result regression — after US-001 fix, create future, resolve with heap result, drop future reference, trigger GC, execute continuation, verify result intact",
+        "Test: OOM Tier 1 — set GC_MAX_HEAP_BLOCKS very low (e.g. 4), allocate until emergency GC fires, verify it reclaims memory and allocation succeeds",
+        "Test: OOM Tier 2 — after Tier 1 insufficient, verify heap growth up to limit",
+        "Test: OOM Tier 3 — set custom gc__oom_handler, verify it fires with diagnostic info when limit reached",
+        "Test: parallel join under GC pressure — parallel N tasks with heavy allocation, trigger GC between completion and join, verify result vector survives",
+        "All new tests added to test suite and run as part of build.sh",
+        "All existing tests pass (build.sh)"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "Use allocation pressure and low GC_THRESHOLD to force GC at desired points rather than relying on timing. Set GC_MAX_HEAP_BLOCKS via compile-time override for OOM tests. The gc__oom_handler function pointer is already overridable for testing. These tests specifically target the audit findings to prevent regression."
+    }
+  ]
+}
