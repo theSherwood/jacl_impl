@@ -4,6 +4,9 @@ Progress log for ralph/gc-concurrency-hardening-2 branch.
 
 ## Codebase Patterns
 - Build and test with `bash build.sh` from project root. Individual test files compile via `gcc -Wall -Wextra -std=c99 -g test/test_gc.c -o /tmp/test_gc`
+- JACL proc names must be <= 7 bytes (inline string limit). Use short names: `bump`, `trash`, `batch`, `loop`, `run`, etc.
+- `while` loops with `set` don't work correctly inside spawned CPS closures (concurrent mode). Use tail recursion instead.
+- .jacl integration tests use `# mode: concurrent` and `# expect:` headers. Test harness does exact string comparison on output.
 - test_gc.c includes `../src/jacl.c` directly (unity build pattern) — no separate .o linking needed
 - GCHeader is 8 bytes: uint32_t epoch + uint8_t mark + uint8_t obj_type + uint16_t alloc_total
 - GC_BLOCK_SIZE = 65536 (64KB), GC_LINE_SIZE = 128, GC_LINES_PER_BLOCK = 512
@@ -84,5 +87,19 @@ Progress log for ralph/gc-concurrency-hardening-2 branch.
   - `gc__emergency_gc_fn` is a `__thread` variable set by `vm_init`. In tests using raw BlockPool/ThreadHeap (no VM), it may be stale from prior VM-based tests. Must clear it before triggering OOM paths.
   - `gc_sweep_concurrent` watermark parameter: use `UINT32_MAX` to make no objects immune (watermark=0 makes ALL objects immune since epoch >= 0 is always true for uint32_t)
   - All 48 test targets pass (39 unit tests in test_gc.c, 174 .jacl integration tests)
+---
+
+## 2026-03-04 - US-007
+- Added 3 .jacl integration tests for concurrent GC scenarios:
+  1. `barrier_stress.jacl`: 4 workers concurrently swap! atoms 50 times each while 2 workers allocate heavily (forcing GC). Verifies final atom values are correct (no use-after-free or corruption).
+  2. `gc_memory_bounded.jacl`: 50 iterations of spawning 3 tasks that allocate and discard vectors. Verifies program completes without OOM (block recycling keeps memory bounded).
+  3. `gc_multi_cycle.jacl`: 10 sequential spawn/await calls computing fib(10), printing each result. Forces multiple GC cycles and verifies all intermediate values survive across cycles.
+- All tests use `# mode: concurrent` and `# expect:` headers
+- Files changed: test/jacl/barrier_stress.jacl, test/jacl/gc_memory_bounded.jacl, test/jacl/gc_multi_cycle.jacl
+- **Learnings for future iterations:**
+  - JACL proc names must be <= 7 bytes due to inline string limit. Compiler error: "proc name exceeds 7-byte inline limit"
+  - `while` loops with `set` don't work correctly inside spawned CPS closures. Use tail recursion instead for loops in concurrent mode.
+  - Deep recursion in CPS mode has limits (~62 levels observed for swap!-heavy workloads). Keep iteration counts conservative for tests.
+  - All 48 test targets pass (39 unit tests in test_gc.c, 177 .jacl integration tests)
 ---
 
