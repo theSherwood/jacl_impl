@@ -412,15 +412,22 @@ static void gc_collect(ThreadHeap *heap, VM *vm) {
  *   line map state to concurrent allocators:
  *     Phase 1: Zero dead objects (keeping old line map intact)
  *     Phase 2: Build new line map from surviving objects, then memcpy
- * - Does NOT modify the block list (no block recycling — avoids racing
- *   with gc_alloc's slow path iterating the list)
+ * - Collects fully-empty blocks into a deferred list (caller recycles
+ *   them after gc_running is set to false)
  * - Does NOT invalidate cursor/limit (owning worker may be allocating)
  * ====================================================================== */
 
+/* Maximum deferred blocks per worker per GC cycle (stack-allocated) */
+#ifndef MAX_DEFERRED_BLOCKS
+#define MAX_DEFERRED_BLOCKS 64
+#endif
+
 static size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
-                                   uint32_t watermark, uint8_t current_mark) {
+                                   uint32_t watermark, uint8_t current_mark,
+                                   GCBlock **deferred_out, int *deferred_count_out) {
     GCBlock *block = heap->blocks;
     size_t   bytes_survived = 0;
+    int      deferred_count = 0;
 
     while (block) {
         if (block == skip_block) {
@@ -501,9 +508,24 @@ static size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
          */
         memcpy(block->line_map, new_map, GC_LINES_PER_BLOCK);
 
+        /* Check if block is fully empty — candidate for deferred recycling */
+        if (deferred_count < MAX_DEFERRED_BLOCKS) {
+            bool all_free = true;
+            for (int line = 0; line < GC_LINES_PER_BLOCK; line++) {
+                if (new_map[line] != GC_LINE_FREE) {
+                    all_free = false;
+                    break;
+                }
+            }
+            if (all_free) {
+                deferred_out[deferred_count++] = block;
+            }
+        }
+
         block = block->next;
     }
 
+    *deferred_count_out = deferred_count;
     return bytes_survived;
 }
 

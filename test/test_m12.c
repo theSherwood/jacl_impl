@@ -372,7 +372,9 @@ static int test_epoch_watermark_recent_survives(void) {
 
     /* Sweep with watermark=5: epoch 10 >= 5 → immune */
     uint8_t mark = w->vm.heap.current_mark;
-    gc_sweep_concurrent(&w->vm.heap, NULL, 5, mark);
+    GCBlock *deferred[MAX_DEFERRED_BLOCKS];
+    int deferred_n = 0;
+    gc_sweep_concurrent(&w->vm.heap, NULL, 5, mark, deferred, &deferred_n);
 
     /* Object survived (epoch-protected) */
     GCHeader *hdr = gc_header_of(jacl_as_ptr(recent));
