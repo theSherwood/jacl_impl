@@ -109,27 +109,34 @@ static void gc_block_pool_init(BlockPool *pool) {
 
 static GCBlock *gc_block_pool_get(BlockPool *pool) {
     GCBlock *block;
+    bool need_malloc = false;
+
     MUTEX_LOCK(pool->mutex);
     block = pool->free_list;
     if (block) {
         pool->free_list = block->next;
+    } else {
+        /* No free block — check limit and reserve a slot atomically */
+        if (pool->total_blocks_allocated >= pool->max_blocks) {
+            MUTEX_UNLOCK(pool->mutex);
+            return NULL;
+        }
+        pool->total_blocks_allocated++;
+        need_malloc = true;
     }
     MUTEX_UNLOCK(pool->mutex);
 
-    if (!block) {
-        /* Check limit before allocating from OS */
-        MUTEX_LOCK(pool->mutex);
-        uint32_t count = pool->total_blocks_allocated;
-        MUTEX_UNLOCK(pool->mutex);
-        if (count >= pool->max_blocks) return NULL;
-
+    if (need_malloc) {
         block = (GCBlock *)malloc(sizeof(GCBlock));
-        if (!block) return NULL;
-
-        MUTEX_LOCK(pool->mutex);
-        pool->total_blocks_allocated++;
-        MUTEX_UNLOCK(pool->mutex);
+        if (!block) {
+            /* malloc failed — release the reserved slot */
+            MUTEX_LOCK(pool->mutex);
+            pool->total_blocks_allocated--;
+            MUTEX_UNLOCK(pool->mutex);
+            return NULL;
+        }
     }
+
     memset(block->payload, 0, GC_BLOCK_SIZE);
     memset(block->line_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
     block->next = NULL;
@@ -357,23 +364,28 @@ static void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
     new_block = gc_block_pool_get(heap->pool);
     if (new_block) goto got_block;
 
-    /* Tier 2: Heap growth up to limit */
+    /* Tier 2: Heap growth up to limit (atomic check + reserve) */
     {
+        bool reserved = false;
         MUTEX_LOCK(heap->pool->mutex);
-        uint32_t count = heap->pool->total_blocks_allocated;
+        if (heap->pool->total_blocks_allocated < heap->pool->max_blocks) {
+            heap->pool->total_blocks_allocated++;
+            reserved = true;
+        }
         MUTEX_UNLOCK(heap->pool->mutex);
 
-        if (count < heap->pool->max_blocks) {
+        if (reserved) {
             new_block = (GCBlock *)malloc(sizeof(GCBlock));
             if (new_block) {
-                MUTEX_LOCK(heap->pool->mutex);
-                heap->pool->total_blocks_allocated++;
-                MUTEX_UNLOCK(heap->pool->mutex);
                 memset(new_block->payload, 0, GC_BLOCK_SIZE);
                 memset(new_block->line_map, GC_LINE_FREE, GC_LINES_PER_BLOCK);
                 new_block->next = NULL;
                 goto got_block;
             }
+            /* malloc failed — release the reserved slot */
+            MUTEX_LOCK(heap->pool->mutex);
+            heap->pool->total_blocks_allocated--;
+            MUTEX_UNLOCK(heap->pool->mutex);
         }
     }
 

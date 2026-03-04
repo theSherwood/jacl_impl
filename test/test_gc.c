@@ -257,6 +257,40 @@ static int test_gc_alloc_too_large(void) {
     TEST_PASS();
 }
 
+/* ===== US-002 (M15): TOCTOU fix in gc_block_pool_get ===== */
+
+static int test_gc_block_pool_limit(void) {
+    /* With max_blocks = 2, exactly 2 blocks can be allocated, third returns NULL */
+    BlockPool pool;
+    gc_block_pool_init(&pool);
+    pool.max_blocks = 2;
+
+    GCBlock *b1 = gc_block_pool_get(&pool);
+    ASSERT(b1 != NULL);
+
+    GCBlock *b2 = gc_block_pool_get(&pool);
+    ASSERT(b2 != NULL);
+
+    /* Third allocation should fail — limit enforced */
+    GCBlock *b3 = gc_block_pool_get(&pool);
+    ASSERT(b3 == NULL);
+
+    /* Returning a block to the pool and re-getting should work (recycle, not new alloc) */
+    gc_block_pool_return(&pool, b1);
+    GCBlock *b4 = gc_block_pool_get(&pool);
+    ASSERT(b4 != NULL);
+    ASSERT(b4 == b1); /* recycled from free list */
+
+    /* Counter should still be 2 (no new allocation) */
+    ASSERT(pool.total_blocks_allocated == 2);
+
+    /* Clean up: return blocks to pool then destroy */
+    gc_block_pool_return(&pool, b2);
+    gc_block_pool_return(&pool, b4);
+    gc_block_pool_destroy(&pool);
+    TEST_PASS();
+}
+
 /* ===== US-001 (M15): alloc_total uint16_t overflow boundary ===== */
 
 static int test_gc_alloc_overflow_exact_boundary(void) {
@@ -1016,6 +1050,8 @@ int main(void) {
         { "gc_alloc_fills_block",  test_gc_alloc_fills_block },
         { "gc_alloc_various_sizes", test_gc_alloc_various_sizes },
         { "gc_alloc_too_large",    test_gc_alloc_too_large },
+        /* US-002 (M15): TOCTOU fix in block pool limit */
+        { "gc_block_pool_limit",     test_gc_block_pool_limit },
         /* US-001 (M15): alloc_total overflow boundary */
         { "gc_alloc_overflow_exact", test_gc_alloc_overflow_exact_boundary },
         { "gc_alloc_just_under",     test_gc_alloc_just_under_boundary },
