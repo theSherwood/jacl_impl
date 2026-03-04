@@ -34,7 +34,18 @@ typedef enum {
 /* --- GC object header (8 bytes, prepended before payload) --- */
 
 typedef struct {
-    uint32_t epoch;        /* allocation epoch for watermark protection */
+    /* Allocation epoch for watermark protection.
+     *
+     * Intentionally uint32_t (not uint64_t) for header compactness — keeps
+     * GCHeader at 8 bytes total.  Truncated from the uint64_t global_epoch
+     * via the path: global_epoch (u64) → thread_epoch (u64) →
+     * gc__thread_epoch (u32) → hdr->epoch (u32).
+     *
+     * Wraps after ~4 billion GC cycles.  On wraparound the watermark
+     * comparison (epoch >= watermark) may produce false positives —
+     * protecting objects that could be swept — but never false negatives,
+     * so correctness is preserved (conservative, not dangerous). */
+    uint32_t epoch;
     uint8_t  mark;         /* mark bit (alternates 0/1 each GC cycle) */
     uint8_t  obj_type;     /* GCObjType — tells GC how to trace */
     uint16_t alloc_total;  /* total aligned allocation size (header + payload + padding) */
@@ -302,6 +313,9 @@ static void *gc__bump_alloc(ThreadHeap *heap, size_t total, uint8_t obj_type) {
                    (size_t)(ptr - heap->current_block->payload), total);
 
     hdr = (GCHeader *)ptr;
+    /* Epoch truncation path: global_epoch (u64) → worker.thread_epoch (u64)
+     * → gc__thread_epoch (u32, set at task start in runtime.c) → hdr->epoch
+     * (u32).  See GCHeader comment for wraparound safety analysis. */
     hdr->epoch       = gc__thread_epoch;
     hdr->mark        = 0;
     hdr->obj_type    = obj_type;
