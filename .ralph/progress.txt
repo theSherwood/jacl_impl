@@ -53,3 +53,12 @@ Progress log for ralph/gc-concurrency-hardening-3 branch.
   - Line map values are only 0x00 (FREE) or 0x01 (OCCUPIED) — no other values exist in the protocol
 ---
 
+## 2026-03-04 - US-004
+- Added detailed comment on GCHeader.epoch field in gc.c documenting: intentional uint32_t for 8-byte header compactness, truncation from uint64_t global_epoch, wraparound safety (false positives protect too many objects, never false negatives)
+- Added comment at gc__bump_alloc where hdr->epoch = gc__thread_epoch documenting the full truncation path: global_epoch (u64) → thread_epoch (u64) → gc__thread_epoch (u32) → hdr->epoch (u32)
+- Files changed: src/gc.c
+- **Learnings for future iterations:**
+  - GCHeader.epoch truncation is safe because wraparound only causes false positives in watermark comparison (conservative protection), never false negatives
+  - The truncation chain crosses 3 boundaries: Runtime → WorkerThread → __thread TLS → GCHeader
+---
+
