@@ -62,3 +62,13 @@ Progress log for ralph/gc-concurrency-hardening-3 branch.
   - The truncation chain crosses 3 boundaries: Runtime → WorkerThread → __thread TLS → GCHeader
 ---
 
+## 2026-03-04 - US-005
+- Extracted static `runtime__push_inbox(Runtime *rt, RuntimeTask *task)` helper in runtime.c
+- Refactored all 6 inbox push call sites: runtime_submit, runtime_submit_task, runtime__schedule_continuation, runtime__submit_spawn_task, runtime__submit_parallel_task, runtime__submit_race_task
+- Net change: +21 lines, -53 lines (removed ~32 lines of duplication)
+- Files changed: src/runtime.c
+- **Learnings for future iterations:**
+  - The inbox push pattern (lock, grow-if-needed, store, unlock) was duplicated 6 times — now centralized in runtime__push_inbox
+  - runtime__push_inbox must be defined before all callers (C declaration order in unity build) — placed right before runtime_submit
+---
+
