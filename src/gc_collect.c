@@ -492,15 +492,48 @@ static size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
          * on the owning worker thread reading line_map entries. This is technically
          * a data race under C11, but is benign in practice:
          *
-         * - Sweep only transitions lines OCCUPIED -> FREE (never FREE -> OCCUPIED)
-         * - Phase 1 already zeroed dead object memory before line map changes
+         * One-directional invariant:
+         * - Sweep only transitions lines OCCUPIED (0x01) -> FREE (0x00), never
+         *   the reverse. gc_alloc marks lines OCCUPIED only *after* choosing a
+         *   free run and bump-allocating into it, which cannot conflict with
+         *   sweep (sweep skips the owning thread's skip_block / active block).
+         *
+         * Phase 1 zeroing guarantee:
+         * - Phase 1 (above) zeroes all dead object memory *before* we update
+         *   the line map here. So by the time any line transitions to FREE,
+         *   the underlying payload is already zeroed. An allocator that sees
+         *   FREE will bump-allocate into safely zeroed memory.
+         *
+         * Partially-updated map outcomes:
          * - gc_alloc seeing a partially-updated map either:
          *   (a) sees OCCUPIED for a now-free line -> misses free space (harmless)
          *   (b) sees FREE for a freed line -> allocates into zeroed memory (correct)
-         * - No incorrect allocation or use-after-free can result
+         * - No incorrect allocation or use-after-free can result.
          *
-         * If TSan reports this, suppress with an annotation or
-         * __attribute__((no_sanitize("thread"))).
+         * ARM/RISC-V (weakly-ordered) analysis:
+         * - On x86, memcpy typically uses wide stores (rep movsb, AVX) that
+         *   are byte-granular and TSO-ordered. On ARM/RISC-V, memcpy may use
+         *   wide stores (e.g., stp for 16-byte pairs on AArch64, or SIMD
+         *   stores) that write multiple line_map bytes in a single store.
+         * - A concurrent reader (gc__find_free_run) doing byte-sized loads
+         *   may observe a torn read from a partially-written wide store.
+         *   However, line_map values are only 0x00 (FREE) or 0x01 (OCCUPIED).
+         *   A torn byte from a wide store that writes 0x00 over a former 0x01
+         *   can only produce intermediate values with some bits set (non-zero),
+         *   which gc__find_free_run treats as OCCUPIED (it checks != 0x00).
+         *   This is equivalent to outcome (a) above: missing free space, which
+         *   is harmless — the allocator will find it on the next scan.
+         * - The one-directional invariant (0x01 -> 0x00 only) ensures no torn
+         *   read can produce 0x00 from a byte that should be 0x01, because
+         *   the store is writing 0x00 (all bits clear) — partial completion
+         *   of clearing bits can only leave some bits still set (non-zero).
+         *
+         * TSan suppression:
+         * - TSan will report this memcpy as a data race since there is no
+         *   synchronization between the GC thread's write and the worker
+         *   thread's read. This is a known benign race. Suppress with
+         *   __attribute__((no_sanitize("thread"))) on gc_sweep_concurrent,
+         *   or add a file-level suppression in the TSan suppressions file.
          */
         memcpy(block->line_map, new_map, GC_LINES_PER_BLOCK);
 
