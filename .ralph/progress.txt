@@ -43,3 +43,13 @@ Progress log for ralph/gc-concurrency-hardening-3 branch.
   - Use jacl_i64(&vm.heap, value) to create real heap-allocated objects for grey buffer tests (not sentinel values)
 ---
 
+## 2026-03-04 - US-003
+- Expanded the Phase 3 memcpy comment in gc_sweep_concurrent (gc_collect.c) to cover ARM/RISC-V weakly-ordered analysis
+- Documented: one-directional invariant (OCCUPIED->FREE only), Phase 1 zeroing guarantee, torn byte read analysis for wide stores on ARM/AArch64, and TSan suppression guidance
+- Key insight: torn bytes from wide stores clearing 0x01->0x00 can only produce non-zero intermediate values, which gc__find_free_run treats as OCCUPIED (harmless)
+- Files changed: src/gc_collect.c
+- **Learnings for future iterations:**
+  - gc__find_free_run checks `!= GC_LINE_FREE` (i.e., `!= 0x00`), so any non-zero byte is treated as OCCUPIED — this is the key property that makes torn reads safe
+  - Line map values are only 0x00 (FREE) or 0x01 (OCCUPIED) — no other values exist in the protocol
+---
+
