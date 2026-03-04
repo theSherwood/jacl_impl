@@ -1033,6 +1033,213 @@ static int test_gc_alloc_after_sweep(void) {
     TEST_PASS();
 }
 
+/* ===== US-006 (M15): GC edge case tests ===== */
+
+static int test_gc_fragmentation_reuse(void) {
+    /* Allocate mixed sizes, free some via GC, re-allocate — verify
+     * freed line runs are reused without unnecessary block growth. */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Phase 1: allocate mixed sizes — 1 rooted, rest dead */
+    JaclVal live = jacl_i64(&vm.heap, 42);            /* small (1 line) */
+    gc_alloc(&vm.heap, OBJ_STRING, 248);              /* medium: 256 bytes = 2 lines, dead */
+    gc_alloc(&vm.heap, OBJ_STRING, 504);              /* multi-line: 512 = 4 lines, dead */
+    gc_alloc(&vm.heap, OBJ_STRING, GC_LINE_SIZE * 3); /* 3 lines, dead */
+    gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64)); /* small, dead */
+
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    ASSERT(vm.heap.blocks != NULL);
+    ASSERT(vm.heap.blocks->next == NULL); /* single block */
+
+    gc_collect(&vm.heap, &vm);
+
+    /* After GC: only the live i64's line is OCCUPIED, rest free */
+    ASSERT(vm.heap.blocks != NULL);
+    ASSERT(vm.heap.blocks->next == NULL);
+
+    /* Phase 2: re-allocate mixed sizes — should fit in freed lines */
+    void *r1 = gc_alloc(&vm.heap, OBJ_STRING, 504);              /* 4 lines */
+    void *r2 = gc_alloc(&vm.heap, OBJ_STRING, 248);              /* 2 lines */
+    void *r3 = gc_alloc(&vm.heap, OBJ_STRING, GC_LINE_SIZE * 3); /* 3 lines */
+    void *r4 = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    ASSERT(r1 != NULL);
+    ASSERT(r2 != NULL);
+    ASSERT(r3 != NULL);
+    ASSERT(r4 != NULL);
+
+    /* Still single block — freed space was reused, no block growth */
+    ASSERT(vm.heap.blocks != NULL);
+    ASSERT(vm.heap.blocks->next == NULL);
+
+    /* Original value survived */
+    ASSERT(jacl_as_i64(live) == 42);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_multi_cycle_mixed_lifetimes(void) {
+    /* Run 12 GC cycles where each cycle some objects survive and others die.
+     * Verify heap doesn't grow unboundedly and mark-bit alternation works. */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    for (int cycle = 0; cycle < 12; cycle++) {
+        /* 3 survivors per cycle (replace previous cycle's survivors) */
+        JaclVal s1 = jacl_i64(&vm.heap, (int64_t)(cycle * 3 + 1));
+        JaclVal s2 = jacl_i64(&vm.heap, (int64_t)(cycle * 3 + 2));
+        JaclVal s3 = jacl_i64(&vm.heap, (int64_t)(cycle * 3 + 3));
+
+        /* 50 dead objects per cycle */
+        for (int j = 0; j < 50; j++) {
+            gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+        }
+
+        vm.stack[0] = s1;
+        vm.stack[1] = s2;
+        vm.stack[2] = s3;
+        vm.stack_top = 3;
+
+        gc_collect(&vm.heap, &vm);
+
+        /* Verify mark bit alternation (initial mark=1, toggles each cycle) */
+        ASSERT_INT_EQ(vm.heap.current_mark, cycle % 2);
+
+        /* Verify all survivors intact */
+        ASSERT(jacl_as_i64(vm.stack[0]) == (int64_t)(cycle * 3 + 1));
+        ASSERT(jacl_as_i64(vm.stack[1]) == (int64_t)(cycle * 3 + 2));
+        ASSERT(jacl_as_i64(vm.stack[2]) == (int64_t)(cycle * 3 + 3));
+
+        /* bytes_since_gc reset each cycle */
+        ASSERT_SIZE_EQ(vm.heap.bytes_since_gc, 0);
+    }
+
+    /* After 12 cycles with only 3 live objects, heap should be 1 block */
+    ASSERT(vm.heap.blocks != NULL);
+    ASSERT(vm.heap.blocks->next == NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static bool test_oom_handler_called = false;
+static void test_oom_noop_handler(ThreadHeap *heap, size_t size) {
+    (void)heap; (void)size;
+    test_oom_handler_called = true;
+}
+
+static int test_gc_alloc_pool_exhaustion(void) {
+    /* With max_blocks=2, fill both blocks via gc_alloc, then verify
+     * the next allocation returns NULL (hits OOM path). */
+    BlockPool pool;
+    gc_block_pool_init(&pool);
+    pool.max_blocks = 2;
+
+    ThreadHeap heap;
+    gc_heap_init(&heap, &pool);
+
+    /* Override OOM handler to avoid abort */
+    void (*saved)(ThreadHeap *, size_t) = gc__oom_handler;
+    gc__oom_handler = test_oom_noop_handler;
+    test_oom_handler_called = false;
+
+    /* Clear emergency GC callback (may be stale from prior VM-based tests) */
+    void (*saved_gc_fn)(void *) = gc__emergency_gc_fn;
+    void *saved_gc_ctx = gc__emergency_gc_ctx;
+    gc__emergency_gc_fn = NULL;
+    gc__emergency_gc_ctx = NULL;
+
+    /* Fill exactly 2 blocks with line-sized allocations */
+    for (int i = 0; i < GC_LINES_PER_BLOCK * 2; i++) {
+        void *p = gc_alloc(&heap, OBJ_HEAP_I64,
+                           GC_LINE_SIZE - sizeof(GCHeader));
+        ASSERT(p != NULL);
+    }
+
+    /* Next allocation should trigger OOM — no blocks available */
+    void *p = gc_alloc(&heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    ASSERT(p == NULL);
+    ASSERT(test_oom_handler_called);
+
+    gc__oom_handler = saved;
+    gc__emergency_gc_fn = saved_gc_fn;
+    gc__emergency_gc_ctx = saved_gc_ctx;
+    gc_heap_destroy(&heap);
+    gc_block_pool_destroy(&pool);
+    TEST_PASS();
+}
+
+static int test_gc_deferred_block_recycling(void) {
+    /* Allocate objects across 3 blocks, let blocks 1-2 die entirely,
+     * run gc_sweep_concurrent — verify deferred count > 0 and blocks
+     * can be returned to the pool. */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Fill 2 full blocks with line-sized objects */
+    for (int i = 0; i < GC_LINES_PER_BLOCK * 2; i++) {
+        gc_alloc(&vm.heap, OBJ_HEAP_I64,
+                 GC_LINE_SIZE - sizeof(GCHeader));
+    }
+
+    /* Allocate 1 object in a third block — this is the only survivor */
+    JaclVal live = jacl_i64(&vm.heap, 999);
+
+    /* Verify 3 blocks */
+    {
+        int count = 0;
+        for (GCBlock *b = vm.heap.blocks; b; b = b->next) count++;
+        ASSERT(count == 3);
+    }
+
+    /* Mark with only 'live' rooted — blocks 1 and 2 are fully dead */
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+    gc_mark(&vm.heap, &vm);
+
+    /* Run concurrent sweep, skipping current_block (block 3) */
+    GCBlock *deferred[MAX_DEFERRED_BLOCKS];
+    int deferred_count = 0;
+    gc_sweep_concurrent(&vm.heap, vm.heap.current_block, UINT32_MAX,
+                        vm.heap.current_mark, deferred, &deferred_count);
+
+    /* Should have deferred at least 2 fully-empty blocks */
+    ASSERT(deferred_count >= 2);
+
+    /* Recycle deferred blocks: unlink from heap list, return to pool */
+    for (int i = 0; i < deferred_count; i++) {
+        GCBlock **pp = &vm.heap.blocks;
+        while (*pp) {
+            if (*pp == deferred[i]) {
+                *pp = deferred[i]->next;
+                gc_block_pool_return(vm.heap.pool, deferred[i]);
+                break;
+            }
+            pp = &(*pp)->next;
+        }
+    }
+
+    /* Pool free list should have grown */
+    {
+        int free_count = 0;
+        for (GCBlock *f = vm.heap.pool->free_list; f; f = f->next)
+            free_count++;
+        ASSERT(free_count >= 2);
+    }
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1079,6 +1286,11 @@ int main(void) {
         { "gc_collect_vec_survives",    test_gc_collect_vec_survives },
         { "gc_trigger_threshold",       test_gc_trigger_threshold },
         { "gc_alloc_after_sweep",       test_gc_alloc_after_sweep },
+        /* US-006 (M15): GC edge case tests */
+        { "gc_fragmentation_reuse",      test_gc_fragmentation_reuse },
+        { "gc_multi_cycle_mixed",        test_gc_multi_cycle_mixed_lifetimes },
+        { "gc_alloc_pool_exhaustion",    test_gc_alloc_pool_exhaustion },
+        { "gc_deferred_recycling",       test_gc_deferred_block_recycling },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
