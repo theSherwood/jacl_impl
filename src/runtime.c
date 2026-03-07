@@ -432,6 +432,33 @@ static void runtime_submit(Runtime *rt, void (*fn)(void *), void *data) {
  * Closure task execution on worker VMs
  * ====================================================================== */
 
+/* Reset VM state and set up a single closure call frame.
+ * argc is the number of arguments (0 for no-arg calls, 1 for single-arg
+ * like continuation/CPS calls). argv points to argument values (NULL if
+ * argc==0). */
+static void runtime__setup_call(VM *vm, JaclClosure *cl,
+                                int argc, JaclVal *argv) {
+    vm->stack_top   = 0;
+    vm->frame_count = 0;
+    vm->error_message = NULL;
+    vm->error_line    = 0;
+    vm->stack_trace.count = 0;
+
+    vm->stack[0] = jacl_closure_ptr(cl);
+    for (int i = 0; i < argc; i++)
+        vm->stack[1 + i] = argv[i];
+    vm->stack_top = 1 + argc;
+
+    vm->frames[0].closure    = cl;
+    vm->frames[0].return_ip  = NULL;
+    vm->frames[0].stack_base = 1;
+    vm->frames[0].chunk      = &cl->chunk;
+    vm->frame_count = 1;
+    vm->ip        = cl->chunk.code;
+    vm->chunk     = &cl->chunk;
+    vm->top_chunk = &cl->chunk;
+}
+
 static void runtime__exec_closure(void *data) {
     JaclClosure *cl = (JaclClosure *)data;
     WorkerThread *self = rt__current_worker;
@@ -440,23 +467,7 @@ static void runtime__exec_closure(void *data) {
     /* Safety: skip if closure has no valid bytecode */
     if (!cl || !cl->chunk.code) return;
 
-    /* Reset VM state for this task */
-    vm->stack_top   = 0;
-    vm->frame_count = 0;
-    vm->error_message = NULL;
-    vm->error_line    = 0;
-    vm->stack_trace.count = 0;
-
-    /* Set up closure frame */
-    vm->frames[0].closure    = cl;
-    vm->frames[0].return_ip  = NULL;
-    vm->frames[0].stack_base = 0;
-    vm->frames[0].chunk      = &cl->chunk;
-    vm->frame_count = 1;
-    vm->chunk     = &cl->chunk;
-    vm->top_chunk = &cl->chunk;
-    vm->ip        = cl->chunk.code;
-
+    runtime__setup_call(vm, cl, 0, NULL);
     vm__run(vm, 0);
 }
 
@@ -996,26 +1007,8 @@ static void runtime__continuation_task_exec(void *data) {
     WorkerThread *self = rt__current_worker;
     VM *vm = &self->vm;
 
-    /* Reset VM state for this task */
-    vm->stack_top   = 0;
-    vm->frame_count = 0;
-    vm->error_message = NULL;
-    vm->error_line    = 0;
-    vm->stack_trace.count = 0;
-
     /* Set up: call continuation(result) */
-    vm->stack[0] = jacl_closure_ptr(ctd->continuation);
-    vm->stack[1] = ctd->result;
-    vm->stack_top = 2;
-
-    vm->frames[0].closure    = ctd->continuation;
-    vm->frames[0].return_ip  = NULL;
-    vm->frames[0].stack_base = 1; /* 1 arg (result) */
-    vm->frames[0].chunk      = &ctd->continuation->chunk;
-    vm->frame_count = 1;
-    vm->ip        = ctd->continuation->chunk.code;
-    vm->chunk     = &ctd->continuation->chunk;
-    vm->top_chunk = &ctd->continuation->chunk;
+    runtime__setup_call(vm, ctd->continuation, 1, &ctd->result);
 
     VMResult r = vm__run(vm, 0);
 
@@ -1084,30 +1077,12 @@ static void runtime__spawn_task_exec(void *data) {
     JaclClosure *cl = std->closure;
     JaclFuture *fut = jacl_as_future(std->future_val);
 
-    /* Reset VM state for this task */
-    vm->stack_top   = 0;
-    vm->frame_count = 0;
-    vm->error_message = NULL;
-    vm->error_line    = 0;
-    vm->stack_trace.count = 0;
-
     if (std->is_cps) {
         /* CPS closure: create resolve_k and pass as __k argument */
         JaclVal resolve_k = runtime__create_resolve_closure(
             &vm->heap, &self->arena, std->future_val);
 
-        vm->stack[0] = jacl_closure_ptr(cl);
-        vm->stack[1] = resolve_k;
-        vm->stack_top = 2;
-
-        vm->frames[0].closure    = cl;
-        vm->frames[0].return_ip  = NULL;
-        vm->frames[0].stack_base = 1; /* 1 arg (resolve_k at slot 1) */
-        vm->frames[0].chunk      = &cl->chunk;
-        vm->frame_count = 1;
-        vm->ip        = cl->chunk.code;
-        vm->chunk     = &cl->chunk;
-        vm->top_chunk = &cl->chunk;
+        runtime__setup_call(vm, cl, 1, &resolve_k);
 
         VMResult r = vm__run(vm, 0);
         /* For CPS, the resolve_k closure resolves the future during execution
@@ -1124,17 +1099,7 @@ static void runtime__spawn_task_exec(void *data) {
         }
     } else {
         /* Non-CPS closure: call directly, resolve future with return value */
-        vm->stack[0] = jacl_closure_ptr(cl);
-        vm->stack_top = 1;
-
-        vm->frames[0].closure    = cl;
-        vm->frames[0].return_ip  = NULL;
-        vm->frames[0].stack_base = 1; /* 0 args */
-        vm->frames[0].chunk      = &cl->chunk;
-        vm->frame_count = 1;
-        vm->ip        = cl->chunk.code;
-        vm->chunk     = &cl->chunk;
-        vm->top_chunk = &cl->chunk;
+        runtime__setup_call(vm, cl, 0, NULL);
 
         VMResult r = vm__run(vm, 0);
 
@@ -1195,13 +1160,6 @@ static void runtime__parallel_task_exec(void *data) {
     JaclClosure *cl = ptd->closure;
     ParallelAgg *agg = as_parallel_agg(ptd->agg_val);
 
-    /* Reset VM state for this task */
-    vm->stack_top   = 0;
-    vm->frame_count = 0;
-    vm->error_message = NULL;
-    vm->error_line    = 0;
-    vm->stack_trace.count = 0;
-
     if (ptd->is_cps) {
         /* CPS closure: create parallel_k that directly completes the slot.
            This handles both synchronous completion (body returns without
@@ -1210,18 +1168,7 @@ static void runtime__parallel_task_exec(void *data) {
         JaclVal parallel_k = runtime__create_parallel_k(
             &vm->heap, &self->arena, ptd->agg_val, ptd->index);
 
-        vm->stack[0] = jacl_closure_ptr(cl);
-        vm->stack[1] = parallel_k;
-        vm->stack_top = 2;
-
-        vm->frames[0].closure    = cl;
-        vm->frames[0].return_ip  = NULL;
-        vm->frames[0].stack_base = 1;
-        vm->frames[0].chunk      = &cl->chunk;
-        vm->frame_count = 1;
-        vm->ip        = cl->chunk.code;
-        vm->chunk     = &cl->chunk;
-        vm->top_chunk = &cl->chunk;
+        runtime__setup_call(vm, cl, 1, &parallel_k);
 
         VMResult r = vm__run(vm, 0);
 
@@ -1239,17 +1186,7 @@ static void runtime__parallel_task_exec(void *data) {
         JaclVal task_result = JACL_NIL;
         bool task_errored = false;
 
-        vm->stack[0] = jacl_closure_ptr(cl);
-        vm->stack_top = 1;
-
-        vm->frames[0].closure    = cl;
-        vm->frames[0].return_ip  = NULL;
-        vm->frames[0].stack_base = 1;
-        vm->frames[0].chunk      = &cl->chunk;
-        vm->frame_count = 1;
-        vm->ip        = cl->chunk.code;
-        vm->chunk     = &cl->chunk;
-        vm->top_chunk = &cl->chunk;
+        runtime__setup_call(vm, cl, 0, NULL);
 
         VMResult r = vm__run(vm, 0);
 
@@ -1358,31 +1295,13 @@ static void runtime__race_task_exec(void *data) {
     JaclClosure *cl = rtd->closure;
     RaceAgg *agg = as_race_agg(rtd->agg_val);
 
-    /* Reset VM state for this task */
-    vm->stack_top   = 0;
-    vm->frame_count = 0;
-    vm->error_message = NULL;
-    vm->error_line    = 0;
-    vm->stack_trace.count = 0;
-
     if (rtd->is_cps) {
         /* CPS closure: create race_k that directly settles the race.
            Handles both synchronous and asynchronous (suspend) completion. */
         JaclVal race_k = runtime__create_race_k(
             &vm->heap, &self->arena, rtd->agg_val);
 
-        vm->stack[0] = jacl_closure_ptr(cl);
-        vm->stack[1] = race_k;
-        vm->stack_top = 2;
-
-        vm->frames[0].closure    = cl;
-        vm->frames[0].return_ip  = NULL;
-        vm->frames[0].stack_base = 1;
-        vm->frames[0].chunk      = &cl->chunk;
-        vm->frame_count = 1;
-        vm->ip        = cl->chunk.code;
-        vm->chunk     = &cl->chunk;
-        vm->top_chunk = &cl->chunk;
+        runtime__setup_call(vm, cl, 1, &race_k);
 
         VMResult r = vm__run(vm, 0);
 
@@ -1395,17 +1314,7 @@ static void runtime__race_task_exec(void *data) {
     } else {
         JaclVal task_result = JACL_NIL;
 
-        vm->stack[0] = jacl_closure_ptr(cl);
-        vm->stack_top = 1;
-
-        vm->frames[0].closure    = cl;
-        vm->frames[0].return_ip  = NULL;
-        vm->frames[0].stack_base = 1;
-        vm->frames[0].chunk      = &cl->chunk;
-        vm->frame_count = 1;
-        vm->ip        = cl->chunk.code;
-        vm->chunk     = &cl->chunk;
-        vm->top_chunk = &cl->chunk;
+        runtime__setup_call(vm, cl, 0, NULL);
 
         VMResult r = vm__run(vm, 0);
 
