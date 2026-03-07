@@ -70,5 +70,16 @@ Progress log for ralph/gc-concurrency-hardening-3 branch.
 - **Learnings for future iterations:**
   - The inbox push pattern (lock, grow-if-needed, store, unlock) was duplicated 6 times — now centralized in runtime__push_inbox
   - runtime__push_inbox must be defined before all callers (C declaration order in unity build) — placed right before runtime_submit
+
+## 2026-03-07 - US-006
+- Extracted static `runtime__setup_call(VM *vm, JaclClosure *cl, int argc, JaclVal *argv)` helper in runtime.c
+- Centralizes: VM state reset (stack_top, frame_count, error_message, error_line, stack_trace), push closure + args to stack, set up frames[0], set ip/chunk/top_chunk
+- Refactored all 5 task execution functions: runtime__exec_closure, runtime__continuation_task_exec, runtime__spawn_task_exec (CPS + non-CPS), runtime__parallel_task_exec (CPS + non-CPS), runtime__race_task_exec (CPS + non-CPS)
+- Net change: +30 lines, -121 lines (removed ~91 lines of duplication)
+- Files changed: src/runtime.c
+- **Learnings for future iterations:**
+  - stack_base is always 1 in the helper (closure at slot 0, args start at slot 1) — consistent across all call paths including 0-arg calls
+  - runtime__exec_closure previously had stack_base=0 (unique among the 5 functions); changed to stack_base=1 to match all other paths — all tests pass
+  - The helper must be defined before runtime__exec_closure (C declaration order in unity build)
 ---
 
