@@ -121,3 +121,17 @@ Progress log for ralph/gc-concurrency-hardening-3 branch.
   - The test harness auto-discovers .jacl files in test/jacl/ — no explicit registration needed
 ---
 
+## 2026-03-07 - US-010
+- Added 3 OOM escalation tier tests in test_gc.c:
+  - test_gc_oom_tier1_emergency_gc: fills 2 blocks (max_blocks=2), installs emergency GC callback that calls gc_sweep to free dead objects, verifies next allocation succeeds via reclaimed space
+  - test_gc_oom_tier2_heap_growth: fills 2 blocks (max_blocks=2), raises max_blocks to 3, verifies next allocation succeeds via pool_get growth path, total_blocks_allocated increases to 3
+  - test_gc_oom_tier3_panic: fills 1 block (max_blocks=1), installs custom OOM handler, verifies handler called with correct heap pointer and request size (sizeof(GCHeader) + payload, aligned to 8)
+- All tests clear gc__emergency_gc_fn before each test to avoid stale __thread callbacks
+- Files changed: test/test_gc.c
+- **Learnings for future iterations:**
+  - gc_sweep frees dead objects (mark != current_mark) and returns fully-empty blocks to the pool — after sweep, pool_get retry succeeds
+  - Objects allocated via gc_alloc get mark=0; heap->current_mark defaults to 1, so all objects are "dead" from sweep's perspective unless explicitly marked
+  - The OOM handler receives `total` (sizeof(GCHeader) + payload_size, aligned to 8), not the raw payload_size
+  - Tier-2 code (explicit growth check) and pool_get have the same limit check — in single-threaded tests, tier-2 is only reachable if max_blocks changes between the two checks (e.g. via emergency GC callback)
+---
+
