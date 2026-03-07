@@ -1380,6 +1380,142 @@ static int test_gc_concurrent_alloc_stress(void) {
     TEST_PASS();
 }
 
+/* ===== US-010: OOM escalation tier tests ===== */
+
+/* Tier 1: Emergency GC callback that sweeps dead objects, freeing space */
+static ThreadHeap *tier1_sweep_heap = NULL;
+
+static void tier1_emergency_sweep(void *ctx) {
+    (void)ctx;
+    gc_sweep(tier1_sweep_heap);
+}
+
+static int test_gc_oom_tier1_emergency_gc(void) {
+    BlockPool pool;
+    gc_block_pool_init(&pool);
+    pool.max_blocks = 2;
+
+    ThreadHeap heap;
+    gc_heap_init(&heap, &pool);
+
+    /* Clear stale callbacks */
+    gc__emergency_gc_fn  = NULL;
+    gc__emergency_gc_ctx = NULL;
+
+    /* Fill both blocks with line-sized allocations.
+     * All objects get mark=0; heap->current_mark=1, so all are "dead"
+     * from sweep's perspective. */
+    for (int i = 0; i < GC_LINES_PER_BLOCK * 2; i++) {
+        void *p = gc_alloc(&heap, OBJ_HEAP_I64,
+                           GC_LINE_SIZE - sizeof(GCHeader));
+        ASSERT(p != NULL);
+    }
+
+    /* Install emergency GC callback that sweeps (frees all dead objects) */
+    tier1_sweep_heap     = &heap;
+    gc__emergency_gc_fn  = tier1_emergency_sweep;
+    gc__emergency_gc_ctx = NULL;
+
+    /* Next alloc triggers: pool_get fails → emergency GC sweeps →
+     * sweep returns blocks to pool → pool_get retry succeeds */
+    void *p = gc_alloc(&heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    ASSERT(p != NULL);
+
+    gc__emergency_gc_fn = NULL;
+    tier1_sweep_heap    = NULL;
+    gc_heap_destroy(&heap);
+    gc_block_pool_destroy(&pool);
+    TEST_PASS();
+}
+
+/* Tier 2: Heap growth — raise max_blocks to allow a third block */
+static int test_gc_oom_tier2_heap_growth(void) {
+    BlockPool pool;
+    gc_block_pool_init(&pool);
+    pool.max_blocks = 2;
+
+    ThreadHeap heap;
+    gc_heap_init(&heap, &pool);
+
+    /* Clear stale callbacks — no emergency GC for this test */
+    gc__emergency_gc_fn  = NULL;
+    gc__emergency_gc_ctx = NULL;
+
+    /* Fill both blocks */
+    for (int i = 0; i < GC_LINES_PER_BLOCK * 2; i++) {
+        void *p = gc_alloc(&heap, OBJ_HEAP_I64,
+                           GC_LINE_SIZE - sizeof(GCHeader));
+        ASSERT(p != NULL);
+    }
+
+    ASSERT_U32_EQ(pool.total_blocks_allocated, 2);
+
+    /* Raise limit to allow growth — simulates runtime increasing the cap */
+    pool.max_blocks = 3;
+
+    /* Next alloc: existing blocks full, pool_get succeeds (2 < 3),
+     * allocates a third block */
+    void *p = gc_alloc(&heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    ASSERT(p != NULL);
+    ASSERT_U32_EQ(pool.total_blocks_allocated, 3);
+
+    gc_heap_destroy(&heap);
+    gc_block_pool_destroy(&pool);
+    TEST_PASS();
+}
+
+/* Tier 3: OOM panic handler — verify it's called with correct args */
+static ThreadHeap *tier3_received_heap = NULL;
+static size_t      tier3_received_size = 0;
+static bool        tier3_handler_called = false;
+
+static void tier3_oom_handler(ThreadHeap *heap, size_t size) {
+    tier3_received_heap = heap;
+    tier3_received_size = size;
+    tier3_handler_called = true;
+}
+
+static int test_gc_oom_tier3_panic(void) {
+    BlockPool pool;
+    gc_block_pool_init(&pool);
+    pool.max_blocks = 1;
+
+    ThreadHeap heap;
+    gc_heap_init(&heap, &pool);
+
+    /* Clear stale callbacks */
+    gc__emergency_gc_fn  = NULL;
+    gc__emergency_gc_ctx = NULL;
+
+    /* Override OOM handler */
+    void (*saved)(ThreadHeap *, size_t) = gc__oom_handler;
+    gc__oom_handler      = tier3_oom_handler;
+    tier3_handler_called = false;
+
+    /* Fill the single block */
+    for (int i = 0; i < GC_LINES_PER_BLOCK; i++) {
+        void *p = gc_alloc(&heap, OBJ_HEAP_I64,
+                           GC_LINE_SIZE - sizeof(GCHeader));
+        ASSERT(p != NULL);
+    }
+
+    /* Compute expected request size: sizeof(GCHeader) + payload, aligned to 8 */
+    size_t payload = sizeof(JaclHeapI64);
+    size_t expected_total = (sizeof(GCHeader) + payload + 7) & ~(size_t)7;
+
+    /* Next alloc should hit tier-3 OOM handler */
+    void *p = gc_alloc(&heap, OBJ_HEAP_I64, payload);
+    ASSERT(p == NULL);
+    ASSERT(tier3_handler_called);
+    ASSERT(tier3_received_heap == &heap);
+    ASSERT_SIZE_EQ(tier3_received_size, expected_total);
+
+    gc__oom_handler = saved;
+    gc_heap_destroy(&heap);
+    gc_block_pool_destroy(&pool);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1435,6 +1571,10 @@ int main(void) {
         { "gc_grey_buf_drain_realloc",   test_gc_grey_buffer_drain_after_realloc },
         /* US-008 (M16): Concurrent allocation stress */
         { "gc_concurrent_alloc_stress",  test_gc_concurrent_alloc_stress },
+        /* US-010 (M16): OOM escalation tiers */
+        { "gc_oom_tier1_emergency_gc",   test_gc_oom_tier1_emergency_gc },
+        { "gc_oom_tier2_heap_growth",    test_gc_oom_tier2_heap_growth },
+        { "gc_oom_tier3_panic",          test_gc_oom_tier3_panic },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
