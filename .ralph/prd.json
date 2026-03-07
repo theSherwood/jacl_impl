@@ -116,7 +116,7 @@
         "Compiles without warnings"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

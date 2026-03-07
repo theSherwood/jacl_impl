@@ -83,3 +83,13 @@ Progress log for ralph/gc-concurrency-hardening-3 branch.
   - The helper must be defined before runtime__exec_closure (C declaration order in unity build)
 ---
 
+## 2026-03-07 - US-007
+- Non-CPS branch of runtime__parallel_task_exec now calls runtime__complete_parallel_slot instead of duplicating ~50 lines of completion logic inline
+- Removed unused task_errored variable (runtime__complete_parallel_slot checks jacl_is_error internally)
+- Net change: +4 lines, -53 lines
+- Files changed: src/runtime.c
+- **Learnings for future iterations:**
+  - runtime__complete_parallel_slot handles everything: store result, CAS error, atomic increment, last-task check, build vector, schedule continuation
+  - vm->grey_buf == &self->grey_buf (set in worker init at line 111), so passing vm to the helper is equivalent to using &self->grey_buf directly
+---
+
