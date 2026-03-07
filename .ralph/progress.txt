@@ -93,3 +93,14 @@ Progress log for ralph/gc-concurrency-hardening-3 branch.
   - vm->grey_buf == &self->grey_buf (set in worker init at line 111), so passing vm to the helper is equivalent to using &self->grey_buf directly
 ---
 
+## 2026-03-07 - US-008
+- Added test_gc_concurrent_alloc_stress in test_gc.c: 4 pthreads sharing a single BlockPool, each with its own ThreadHeap
+- Each thread performs 12500 allocations (50000 total) of varying sizes (16 to 2048 bytes), writing thread_id pattern to each payload
+- After join, verifies all patterns intact and block pool accounting correct (total_blocks_allocated == heap blocks + free list)
+- Files changed: test/test_gc.c
+- **Learnings for future iterations:**
+  - gc__emergency_gc_fn is __thread — must clear it at start of each pthread to avoid stale callbacks from prior VM tests
+  - Each thread needs its own ThreadHeap but can share a BlockPool safely (BlockPool has its own mutex)
+  - Use OBJ_HEAP_I64 as a generic object type for raw allocation tests — payload size is independent of the type enum
+---
+
