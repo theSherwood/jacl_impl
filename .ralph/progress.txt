@@ -6,6 +6,8 @@ Progress log for ralph/gc-concurrency-hardening-3 branch.
 - Build and test with `bash build.sh` from project root. Individual test files compile via `gcc -Wall -Wextra -std=c99 -g test/test_gc.c -o /tmp/test_gc`
 - JACL proc names must be <= 7 bytes (inline string limit). Use short names: `bump`, `trash`, `batch`, `loop`, `run`, etc.
 - `while` loops with `set` don't work correctly inside spawned CPS closures (concurrent mode). Use tail recursion instead.
+- CPS recursion + suspending calls (parallel/spawn/await) in the recursive body produces `<error: error>`. Use flat sequential calls instead.
+- `==` is the equality operator (not `=`, which is treated as a variable name)
 - .jacl integration tests use `# mode: concurrent` and `# expect:` headers. Test harness does exact string comparison on output.
 - test_gc.c includes `../src/jacl.c` directly (unity build pattern) — no separate .o linking needed
 - GCHeader is 8 bytes: uint32_t epoch + uint8_t mark + uint8_t obj_type + uint16_t alloc_total
@@ -102,5 +104,20 @@ Progress log for ralph/gc-concurrency-hardening-3 branch.
   - gc__emergency_gc_fn is __thread — must clear it at start of each pthread to avoid stale callbacks from prior VM tests
   - Each thread needs its own ThreadHeap but can share a BlockPool safely (BlockPool has its own mutex)
   - Use OBJ_HEAP_I64 as a generic object type for raw allocation tests — payload size is independent of the type enum
+---
+
+## 2026-03-07 - US-009
+- Added test/jacl/gc_high_churn.jacl: 510 parallel tasks across 5 rounds of parallel calls
+- Each task computes fib(8)=21, results summed and verified via # expect: headers
+- Uses `# mode: concurrent` for real worker thread execution
+- 51 p10 calls × 10 parallel branches = 510 task executions
+- Test auto-discovered by harness (no explicit list needed)
+- Files changed: test/jacl/gc_high_churn.jacl
+- **Learnings for future iterations:**
+  - CPS recursion + suspending calls (parallel/spawn/await) inside the recursive body does NOT work — produces `<error: error>`. Avoid recursive loops that call suspending operations.
+  - `set` does not work in CPS concurrent mode — use `def` instead and avoid mutation
+  - `==` is the equality operator, not `=` (which is treated as a variable name)
+  - To achieve 500+ tasks without recursion, use flat sequential calls to a helper proc that wraps `parallel`
+  - The test harness auto-discovers .jacl files in test/jacl/ — no explicit registration needed
 ---
 

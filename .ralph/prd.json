@@ -152,7 +152,7 @@
         "Add test to test harness expected-output list"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
