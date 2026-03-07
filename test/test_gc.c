@@ -1271,6 +1271,115 @@ static int test_gc_grey_buffer_drain_after_realloc(void) {
     TEST_PASS();
 }
 
+/* US-008 (M16): Concurrent allocation stress test */
+
+#define STRESS_THREADS      4
+#define STRESS_ALLOCS       12500   /* per thread, 50000 total */
+
+typedef struct {
+    BlockPool  *pool;
+    ThreadHeap  heap;
+    int         thread_id;
+    void      **ptrs;       /* saved payload pointers */
+    size_t     *sizes;      /* saved payload sizes */
+    int         alloc_count;
+} StressThreadCtx;
+
+static void *stress_alloc_thread(void *arg) {
+    StressThreadCtx *ctx = (StressThreadCtx *)arg;
+    gc__emergency_gc_fn = NULL;  /* clear __thread stale callbacks */
+
+    /* Vary sizes: 16, 32, 64, 128, 256, 512, 1024, 2048 */
+    static const size_t size_table[] = {16, 32, 64, 128, 256, 512, 1024, 2048};
+    int n_sizes = (int)(sizeof(size_table) / sizeof(size_table[0]));
+
+    for (int i = 0; i < STRESS_ALLOCS; i++) {
+        size_t payload_sz = size_table[i % n_sizes];
+        void *p = gc_alloc(&ctx->heap, OBJ_HEAP_I64, payload_sz);
+        if (!p) break;
+
+        /* Write known pattern: thread_id repeated across the payload */
+        memset(p, (uint8_t)(ctx->thread_id + 1), payload_sz);
+
+        ctx->ptrs[i]  = p;
+        ctx->sizes[i] = payload_sz;
+        ctx->alloc_count++;
+    }
+    return NULL;
+}
+
+static int test_gc_concurrent_alloc_stress(void) {
+    BlockPool pool;
+    gc_block_pool_init(&pool);
+
+    StressThreadCtx ctxs[STRESS_THREADS];
+    pthread_t threads[STRESS_THREADS];
+
+    for (int t = 0; t < STRESS_THREADS; t++) {
+        ctxs[t].pool = &pool;
+        gc_heap_init(&ctxs[t].heap, &pool);
+        ctxs[t].thread_id   = t;
+        ctxs[t].ptrs         = (void **)malloc(STRESS_ALLOCS * sizeof(void *));
+        ctxs[t].sizes        = (size_t *)malloc(STRESS_ALLOCS * sizeof(size_t));
+        ctxs[t].alloc_count  = 0;
+    }
+
+    /* Launch threads */
+    for (int t = 0; t < STRESS_THREADS; t++) {
+        THREAD_CREATE(&threads[t], NULL, stress_alloc_thread, &ctxs[t]);
+    }
+
+    /* Join all */
+    for (int t = 0; t < STRESS_THREADS; t++) {
+        THREAD_JOIN(threads[t], NULL);
+    }
+
+    /* Verify all allocations succeeded */
+    int total_allocs = 0;
+    for (int t = 0; t < STRESS_THREADS; t++) {
+        ASSERT(ctxs[t].alloc_count == STRESS_ALLOCS);
+        total_allocs += ctxs[t].alloc_count;
+    }
+    ASSERT(total_allocs == STRESS_THREADS * STRESS_ALLOCS);
+
+    /* Verify known patterns are intact for all live objects */
+    for (int t = 0; t < STRESS_THREADS; t++) {
+        uint8_t expected = (uint8_t)(t + 1);
+        for (int i = 0; i < ctxs[t].alloc_count; i++) {
+            uint8_t *payload = (uint8_t *)ctxs[t].ptrs[i];
+            size_t sz = ctxs[t].sizes[i];
+            for (size_t b = 0; b < sz; b++) {
+                if (payload[b] != expected) {
+                    fprintf(stderr, "FAIL: thread %d, alloc %d, byte %zu: "
+                            "got %u, expected %u\n",
+                            t, i, b, payload[b], expected);
+                    return 0;
+                }
+            }
+        }
+    }
+
+    /* Verify block pool accounting: total_blocks_allocated matches
+     * actual blocks across all heaps plus free list */
+    uint32_t counted_blocks = 0;
+    for (int t = 0; t < STRESS_THREADS; t++) {
+        for (GCBlock *b = ctxs[t].heap.blocks; b; b = b->next)
+            counted_blocks++;
+    }
+    for (GCBlock *f = pool.free_list; f; f = f->next)
+        counted_blocks++;
+    ASSERT_U32_EQ(pool.total_blocks_allocated, counted_blocks);
+
+    /* Cleanup */
+    for (int t = 0; t < STRESS_THREADS; t++) {
+        gc_heap_destroy(&ctxs[t].heap);
+        free(ctxs[t].ptrs);
+        free(ctxs[t].sizes);
+    }
+    gc_block_pool_destroy(&pool);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1324,6 +1433,8 @@ int main(void) {
         { "gc_deferred_recycling",       test_gc_deferred_block_recycling },
         /* US-002 (M16): Grey buffer realloc safety */
         { "gc_grey_buf_drain_realloc",   test_gc_grey_buffer_drain_after_realloc },
+        /* US-008 (M16): Concurrent allocation stress */
+        { "gc_concurrent_alloc_stress",  test_gc_concurrent_alloc_stress },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
