@@ -1,0 +1,84 @@
+# mode: concurrent
+# expect: 2100
+# expect: 2100
+# expect: 2100
+# expect: 2100
+# expect: 2310
+# High-churn GC stress: 510 parallel tasks across 5 rounds of
+# parallel calls, each computing fib(8). Exercises timing-sensitive
+# race windows in the concurrent GC.
+proc fib [n] {
+  if [< $n 2] { [+ $n 0] } {
+    [+ [fib [- $n 1]] [fib [- $n 2]]]
+  }
+}
+
+proc p10 [] {
+  def r [parallel { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] }]
+  [+ [+ [+ [+ [vec-get $r 0] [vec-get $r 1]] [+ [vec-get $r 2] [vec-get $r 3]]] [+ [+ [vec-get $r 4] [vec-get $r 5]] [+ [vec-get $r 6] [vec-get $r 7]]]] [+ [vec-get $r 8] [vec-get $r 9]]]
+}
+
+proc main [] {
+  def a1 [p10]
+  def a2 [p10]
+  def a3 [p10]
+  def a4 [p10]
+  def a5 [p10]
+  def a6 [p10]
+  def a7 [p10]
+  def a8 [p10]
+  def a9 [p10]
+  def a0 [p10]
+  def b1 [+ [+ [+ [+ $a1 $a2] [+ $a3 $a4]] [+ $a5 $a6]] [+ [+ $a7 $a8] [+ $a9 $a0]]]
+  print $b1
+  def c1 [p10]
+  def c2 [p10]
+  def c3 [p10]
+  def c4 [p10]
+  def c5 [p10]
+  def c6 [p10]
+  def c7 [p10]
+  def c8 [p10]
+  def c9 [p10]
+  def c0 [p10]
+  def b2 [+ [+ [+ [+ $c1 $c2] [+ $c3 $c4]] [+ $c5 $c6]] [+ [+ $c7 $c8] [+ $c9 $c0]]]
+  print $b2
+  def d1 [p10]
+  def d2 [p10]
+  def d3 [p10]
+  def d4 [p10]
+  def d5 [p10]
+  def d6 [p10]
+  def d7 [p10]
+  def d8 [p10]
+  def d9 [p10]
+  def d0 [p10]
+  def b3 [+ [+ [+ [+ $d1 $d2] [+ $d3 $d4]] [+ $d5 $d6]] [+ [+ $d7 $d8] [+ $d9 $d0]]]
+  print $b3
+  def e1 [p10]
+  def e2 [p10]
+  def e3 [p10]
+  def e4 [p10]
+  def e5 [p10]
+  def e6 [p10]
+  def e7 [p10]
+  def e8 [p10]
+  def e9 [p10]
+  def e0 [p10]
+  def b4 [+ [+ [+ [+ $e1 $e2] [+ $e3 $e4]] [+ $e5 $e6]] [+ [+ $e7 $e8] [+ $e9 $e0]]]
+  print $b4
+  def f1 [p10]
+  def f2 [p10]
+  def f3 [p10]
+  def f4 [p10]
+  def f5 [p10]
+  def f6 [p10]
+  def f7 [p10]
+  def f8 [p10]
+  def f9 [p10]
+  def f0 [p10]
+  def fx [p10]
+  def b5 [+ [+ [+ [+ [+ $f1 $f2] [+ $f3 $f4]] [+ $f5 $f6]] [+ [+ $f7 $f8] [+ $f9 $f0]]] $fx]
+  print $b5
+}
+main
