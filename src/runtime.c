@@ -1182,9 +1182,8 @@ static void runtime__parallel_task_exec(void *data) {
            or the body suspended and parallel_k will run later. Either way,
            the slot completion is handled by parallel_k. */
     } else {
-        /* Non-CPS closure: call directly, complete slot inline */
-        JaclVal task_result = JACL_NIL;
-        bool task_errored = false;
+        /* Non-CPS closure: call directly, complete slot via shared helper */
+        JaclVal task_result;
 
         runtime__setup_call(vm, cl, 0, NULL);
 
@@ -1192,60 +1191,12 @@ static void runtime__parallel_task_exec(void *data) {
 
         if (r == VM_OK && vm->stack_top > 0) {
             task_result = vm->stack[vm->stack_top - 1];
-            if (jacl_is_error(task_result)) task_errored = true;
         } else {
             task_result = jacl_set_error(jacl_inline_string("error", 5));
-            task_errored = true;
         }
 
-        /* Store result at our index (no contention — unique index per task) */
-        gc_write_barrier(&self->grey_buf, &self->runtime->gc_active,
-                         agg->results[ptd->index], task_result);
-        agg->results[ptd->index] = task_result;
-
-        /* Handle error: first error wins via CAS */
-        if (task_errored) {
-            uint32_t expected = 0;
-            if (ATOMIC_CAS(&agg->errored, &expected, 1,
-                            MEM_ACQ_REL, MEM_RELAXED)) {
-                gc_write_barrier(&self->grey_buf, &self->runtime->gc_active,
-                                 JACL_NIL, task_result);
-                ATOMIC_STORE_EXPLICIT(&agg->error_val, (uint64_t)task_result,
-                                       MEM_RELEASE);
-            }
-        }
-
-        /* Atomically increment completion counter */
-        uint32_t prev = 0;
-        uint32_t desired = 1;
-        for (;;) {
-            prev = ATOMIC_LOAD_EXPLICIT(&agg->completed, MEM_ACQUIRE);
-            desired = prev + 1;
-            if (ATOMIC_CAS(&agg->completed, &prev, desired,
-                            MEM_ACQ_REL, MEM_RELAXED)) {
-                break;
-            }
-        }
-
-        /* If we're the last task to complete, schedule the join continuation */
-        if (desired == agg->count) {
-            JaclClosure *cont = jacl_as_closure(agg->continuation);
-            JaclVal cont_arg;
-
-            if (ATOMIC_LOAD_EXPLICIT(&agg->errored, MEM_ACQUIRE)) {
-                cont_arg = (JaclVal)ATOMIC_LOAD_EXPLICIT(&agg->error_val,
-                                                          MEM_ACQUIRE);
-            } else {
-                gc__current_heap = &vm->heap;
-                jacl_vec_root *vec = jacl_vec_empty();
-                for (uint32_t i = 0; i < agg->count; i++) {
-                    vec = jacl_vec_push_back(vec, agg->results[i]);
-                }
-                cont_arg = jacl_vector_ptr(vec);
-            }
-
-            runtime__schedule_continuation(self->runtime, cont, cont_arg);
-        }
+        runtime__complete_parallel_slot(self->runtime, vm,
+                                         ptd->agg_val, ptd->index, task_result);
     }
 
     free(ptd);
