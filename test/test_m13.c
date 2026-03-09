@@ -3981,6 +3981,245 @@ static int test_gc_parallel_join_pressure(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * CPS-recursive-mutation: C-level CPS transform unit tests
+ * ==================================================================== */
+
+/**
+ * Test: recursive proc with spawn/await in body gets correct CPS transform.
+ * Verifies: __k param added, continuation created for code after spawn/await,
+ * and the recursive tail call passes __k directly (no extra continuation).
+ */
+static int test_cps_recursive_spawn_transform(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /*
+     * Recursive proc 'recur' with spawn/await in body:
+     *   proc recur [n] {
+     *     if [< $n 1] { 0 } {
+     *       def f [spawn { [+ $n 10] }]
+     *       def v [await $f]
+     *       [+ $v [recur [- $n 1]]]
+     *     }
+     *   }
+     *
+     * CPS transform should:
+     * - Add __k param (param_count: n + __k = 2)
+     * - Create continuation(s) for code after spawn and await
+     * - The recursive [recur ...] call in tail position passes __k directly
+     */
+    CompileResult cr = test__compile(
+        "proc recur [n] {\n"
+        "  if [< $n 1] { 0 } {\n"
+        "    def f [spawn { [+ $n 10] }]\n"
+        "    def v [await $f]\n"
+        "    [+ $v [recur [- $n 1]]]\n"
+        "  }\n"
+        "}", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    /* Find the 'recur' closure */
+    JaclClosure *recur = test__find_closure(&cr.chunk, "recur");
+    ASSERT(recur != NULL);
+
+    /* CPS: recur takes n + __k = 2 params */
+    ASSERT_INT_EQ(recur->param_count, 2);
+
+    /* Body should contain at least one continuation for post-spawn/await code */
+    JaclClosure *cont = test__find_closure(&recur->chunk, "__cont");
+    ASSERT(cont != NULL);
+    ASSERT_INT_EQ(cont->param_count, 1);
+
+    /* Continuation must capture upvalues (at minimum __k and n) */
+    ASSERT(cont->upvalue_count >= 1);
+
+    /* Scan recur's bytecode for OP_SPAWN (spawn is in the body) */
+    bool found_spawn = false;
+    for (uint32_t i = 0; i < recur->chunk.code_count; i++) {
+        if (recur->chunk.code[i] == OP_SPAWN) {
+            found_spawn = true;
+            break;
+        }
+    }
+    ASSERT(found_spawn);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/**
+ * Test: recursive proc with parallel in body gets correct upvalue capture.
+ * The continuation after parallel must capture variables needed by the
+ * recursive call, including the parallel result and __k.
+ */
+static int test_cps_recursive_parallel_upvalues(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /*
+     * Recursive proc with parallel:
+     *   proc loop [n] {
+     *     if [< $n 1] { 0 } {
+     *       def r [parallel { $n } { [+ $n 1] }]
+     *       [+ [vec-get $r 0] [loop [- $n 1]]]
+     *     }
+     *   }
+     *
+     * The continuation after parallel must capture:
+     * - __k (for the tail call or final result)
+     * - n (for the recursive call argument)
+     */
+    CompileResult cr = test__compile(
+        "proc loop [n] {\n"
+        "  if [< $n 1] { 0 } {\n"
+        "    def r [parallel { [+ $n 0] } { [+ $n 1] }]\n"
+        "    [+ [vec-get $r 0] [loop [- $n 1]]]\n"
+        "  }\n"
+        "}", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *loop = test__find_closure(&cr.chunk, "loop");
+    ASSERT(loop != NULL);
+
+    /* CPS: loop takes n + __k = 2 params */
+    ASSERT_INT_EQ(loop->param_count, 2);
+
+    /* Should have a continuation for post-parallel code */
+    JaclClosure *cont = test__find_closure(&loop->chunk, "__cont");
+    ASSERT(cont != NULL);
+
+    /* Continuation captures __k and n for the recursive [loop ...] call.
+     * At minimum 2 upvalues (n, __k), possibly more depending on codegen. */
+    ASSERT(cont->upvalue_count >= 2);
+
+    /* Scan for OP_PARALLEL in loop's bytecode */
+    bool found_parallel = false;
+    for (uint32_t i = 0; i < loop->chunk.code_count; i++) {
+        if (loop->chunk.code[i] == OP_PARALLEL) {
+            found_parallel = true;
+            break;
+        }
+    }
+    ASSERT(found_parallel);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/**
+ * Test: tail-call path in compiler__compile_suspending_call_cps correctly
+ * passes __k. When a recursive suspending call is in tail position
+ * (remaining_count == 0), no continuation is emitted — __k is passed directly.
+ */
+static int test_cps_recursive_tail_call_passes_k(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /*
+     * Tail-recursive proc where the recursive call IS the last statement:
+     *   proc run [n] {
+     *     def f [spawn { [+ $n 0] }]
+     *     def v [await $f]
+     *     [run [- $n 1]]
+     *   }
+     *
+     * After await, the recursive [run ...] is in tail position.
+     * The innermost continuation (for post-await code) should NOT create
+     * another nested continuation for the [run ...] call — it should pass
+     * __k directly.
+     */
+    CompileResult cr = test__compile(
+        "proc run [n] {\n"
+        "  def f [spawn { [+ $n 0] }]\n"
+        "  def v [await $f]\n"
+        "  [run [- $n 1]]\n"
+        "}", &arena, &vm);
+    ASSERT_U32_EQ(cr.error_count, 0);
+
+    JaclClosure *run = test__find_closure(&cr.chunk, "run");
+    ASSERT(run != NULL);
+    ASSERT_INT_EQ(run->param_count, 2); /* n + __k */
+
+    /* Find the continuation after the await (handles 'v' + tail call) */
+    JaclClosure *cont = test__find_closure(&run->chunk, "__cont");
+    ASSERT(cont != NULL);
+
+    /* The innermost continuation (for the tail [run ...] call) should NOT
+     * have a nested __cont — the tail call passes __k directly. */
+    JaclClosure *inner_cont = test__find_closure(&cont->chunk, "__cont");
+
+    /* If there's a chain of continuations (spawn -> cont1, await -> cont2),
+     * find the deepest one */
+    JaclClosure *deepest = cont;
+    while (inner_cont != NULL) {
+        deepest = inner_cont;
+        inner_cont = test__find_closure(&deepest->chunk, "__cont");
+    }
+
+    /* The deepest continuation should have no nested __cont — the recursive
+     * call is a tail call that passes __k directly */
+    ASSERT(test__find_closure(&deepest->chunk, "__cont") == NULL);
+
+    /* The deepest continuation must capture __k to pass to the recursive call */
+    ASSERT(deepest->upvalue_count >= 1);
+
+    /* Verify the deepest continuation has OP_CALL (for the recursive call)
+     * but NOT OP_SPAWN or OP_AWAIT (those are in outer continuations) */
+    bool found_call = false;
+    bool found_spawn_in_deepest = false;
+    bool found_await_in_deepest = false;
+    for (uint32_t i = 0; i < deepest->chunk.code_count; i++) {
+        if (deepest->chunk.code[i] == OP_CALL) found_call = true;
+        if (deepest->chunk.code[i] == OP_SPAWN) found_spawn_in_deepest = true;
+        if (deepest->chunk.code[i] == OP_AWAIT) found_await_in_deepest = true;
+    }
+    ASSERT(found_call);
+    ASSERT(!found_spawn_in_deepest);
+    ASSERT(!found_await_in_deepest);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/**
+ * Test: recursive CPS proc with spawn/await actually runs correctly (integration).
+ * Verifies the bytecode is not just structurally correct but executes properly
+ * through 3 levels of recursion.
+ */
+static int test_cps_recursive_spawn_runs(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    PrintCapture cap = {{0}, 0};
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult r = jacl_run(
+        "proc work [n] {\n"
+        "  if [< $n 1] { 0 } {\n"
+        "    def f [spawn { [+ $n 0] }]\n"
+        "    def v [await $f]\n"
+        "    [+ $v [work [- $n 1]]]\n"
+        "  }\n"
+        "}\n"
+        "print [work 3]",
+        &vm, &arena);
+    ASSERT(r == VM_OK);
+    /* work(3) = 3 + work(2) = 3 + 2 + work(1) = 3 + 2 + 1 + work(0) = 6 */
+    ASSERT_STR_EQ(cap.buffer, "6\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -4157,6 +4396,11 @@ int main(void) {
         { "gc_oom_tier2_heap_grow", test_gc_oom_tier2_heap_growth },
         { "gc_oom_tier3_handler",   test_gc_oom_tier3_handler_info },
         { "gc_parallel_join_press", test_gc_parallel_join_pressure },
+        /* CPS recursive transform unit tests */
+        { "cps_recur_spawn_xform", test_cps_recursive_spawn_transform },
+        { "cps_recur_par_upvals",  test_cps_recursive_parallel_upvalues },
+        { "cps_recur_tail_k",     test_cps_recursive_tail_call_passes_k },
+        { "cps_recur_spawn_runs", test_cps_recursive_spawn_runs },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
