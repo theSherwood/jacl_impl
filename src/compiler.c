@@ -459,6 +459,7 @@ struct Compiler {
   bool             in_non_suspending_callback; /* error if suspension inside */
   SuspensionMap*   suspension_map;  /* pre-computed suspension analysis */
   bool             is_cps;          /* true if this proc is CPS-transformed */
+  bool             in_concurrent_body; /* true inside spawn/parallel/race body */
   bool             force_global_procs; /* procs emit OP_DEF_GLOBAL even at scope>0 */
   JaclType         expected_type;   /* contextual type hint for RHS compilation */
   JaclType         last_expr_type;  /* type of the last compiled expression */
@@ -483,6 +484,7 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->in_non_suspending_callback = false;
   c->suspension_map  = NULL;
   c->is_cps          = false;
+  c->in_concurrent_body = false;
   c->force_global_procs = false;
   c->expected_type   = TYPE_DYN;
   c->last_expr_type  = TYPE_DYN;
@@ -859,6 +861,7 @@ static void compiler__emit_continuation(Compiler* c,
   cont_compiler.enclosing      = c;
   cont_compiler.suspension_map = c->suspension_map;
   cont_compiler.is_cps         = true;
+  cont_compiler.in_concurrent_body = c->in_concurrent_body;
 
   /* Copy global arities from parent for suspension lookups */
   {
@@ -1056,6 +1059,10 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
     compiler__add_local(&body_compiler, jacl_inline_string("__k", 3), line, col);
     body_compiler.locals[body_compiler.local_count - 1].is_param = true;
     body_compiler.is_cps = true;
+    /* Per-worker VM isolation makes set! unsound in concurrent bodies:
+       each worker gets its own vm->env copy, so OP_SET_GLOBAL only
+       modifies the local worker's env and changes are lost. */
+    body_compiler.in_concurrent_body = true;
 
     if (stmt_count == 0) {
       compiler__emit_get_k(&body_compiler, line);
@@ -1068,6 +1075,7 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
     compiler__emit_byte(&body_compiler, OP_RETURN, line);
   } else {
     /* Non-suspending body: compile as block expression */
+    body_compiler.in_concurrent_body = true;
     compiler__compile_block_expr(&body_compiler, body_block);
     compiler__emit_byte(&body_compiler, OP_RETURN, line);
   }
@@ -2239,6 +2247,17 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     JaclVal name_val = jacl_inline_string(args[0]->data.lit_string.value, name_len);
     char err_msg[128];
+
+    /* Per-worker VM isolation: set! inside spawn/parallel/race bodies
+       only modifies the worker's local env copy — changes are silently
+       lost when the worker finishes. Use def to create new bindings. */
+    if (c->in_concurrent_body) {
+      snprintf(err_msg, sizeof(err_msg),
+               "cannot use set! inside spawn/parallel/race body"
+               " (use def instead)");
+      compiler__error(c, line, col, err_msg);
+      return;
+    }
 
     /* Resolve local */
     int local_slot = compiler__resolve_local(c, name_val);
@@ -3635,6 +3654,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__add_local(&body_compiler, jacl_inline_string("__k", 3), line, col);
       body_compiler.locals[body_compiler.local_count - 1].is_param = true;
       body_compiler.is_cps = true;
+      /* Per-worker VM isolation makes set! unsound in spawn bodies */
+      body_compiler.in_concurrent_body = true;
 
       if (stmt_count == 0) {
         compiler__emit_get_k(&body_compiler, line);
@@ -3647,6 +3668,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(&body_compiler, OP_RETURN, line);
     } else {
       /* Non-suspending spawn body: compile as block expression */
+      body_compiler.in_concurrent_body = true;
       compiler__compile_block_expr(&body_compiler, body_block);
       compiler__emit_byte(&body_compiler, OP_RETURN, line);
     }
