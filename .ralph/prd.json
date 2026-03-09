@@ -22,7 +22,7 @@
         "Compiles without warnings"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "The overflow happens in src/lexer.c at lines 412 (hex), 444 (binary), and 498 (decimal) where int64_t val is cast to (int32_t) without bounds checking. The fix is to add an `if (val > INT32_MAX)` check before the cast in all three code paths, and emit TOKEN_ERROR instead. The Token struct already has payload.error_msg for error messages and start/line/col for source position."
     },
     {
@@ -43,7 +43,7 @@
         "Compiles without warnings"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "The existing pinning mechanism is in compiler.c: ast__contains_set() scans AST for set! usage and sets pin_all_closures flag. The same flag and infrastructure can be reused — the change is extending the analysis to also detect $var references to mut/box bindings, not just set! calls. CompileLocal has is_mutable field. The compiler__find_binding() function resolves variable names to their binding scope and can check is_mutable."
     },
     {

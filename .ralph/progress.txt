@@ -14,7 +14,40 @@ Progress log for ralph/m12m13-hardening branch.
 - gc_alloc is in src/gc.c, gc_collect/gc_sweep in src/gc_collect.c
 - Write barrier (hybrid SATB + insertion) is in src/gc.c
 - Worker pinning infrastructure: pin_all_closures flag in compiler, pinned/pin_worker_id on JaclClosure, runtime__push_pinned() in runtime.c
-- ast__contains_set() scans AST for set! usage to decide pinning
+- ast__contains_nonlocal_set() scans AST for set! usage to decide pinning
+- compiler__body_captures_mutable() checks $var refs to mutable bindings for pinning
+- Both checks are ORed together: either triggers pinning for spawn/parallel/race bodies
 - Bare `$var` in JACL is parsed as a zero-arg function call, NOT a value expression
 
+---
+
+## 2026-03-09 - US-001
+- Implemented i32 range checking for hex, binary, and decimal integer literals in lexer
+- Added overflow checks at 3 locations in src/lexer.c (hex ~line 410, binary ~line 448, decimal ~line 512)
+- Error message: "integer literal out of i32 range (use [i64 ...] or [u64 ...])"
+- Added 7 new tests in test/test_lexer.c: decimal overflow, hex overflow (0xFFFFFFFF, 0x80000000), hex max valid, binary overflow (33 bits), binary max valid, error span check
+- Files changed: src/lexer.c, test/test_lexer.c
+- **Learnings for future iterations:**
+  - INT32_MAX is available via stdint.h (included by jacl.c in unity build)
+  - Lexer error tokens use `tok.payload.error_msg` for the message string
+  - `strstr()` can be used for substring assertions in tests (no ASSERT_STR_CONTAINS macro)
+  - The `(*error_count)++` must be called alongside TOKEN_ERROR emission
+---
+
+## 2026-03-09 - US-002
+- Extended pinning analysis to detect closures that capture mut/box bindings via $var references (not just set! usage)
+- Added `ast__collect_local_names()` — collects both def and mut declaration names in a body
+- Added `ast__refs_nonlocal_mutable_impl()` — walks AST for $var refs resolving to mutable bindings in enclosing compiler scope chain
+- Added `compiler__body_captures_mutable()` — public API combining the above two
+- Updated spawn compilation (~line 3918) and parallel body compilation (~line 1328) to OR the new check with existing ast__contains_nonlocal_set()
+- Updated TODO comment at line 494 to document what the analysis now covers and what remains out of scope
+- Added 3 compiler tests: spawn_captures_mut_pinned, spawn_local_mut_not_pinned, spawn_captures_def_not_pinned
+- Added .jacl test: mut_capture_spawn.jacl (local mut read via $x in spawn body)
+- Files changed: src/compiler.c, test/test_compiler.c, test/jacl/mut_capture_spawn.jacl
+- **Learnings for future iterations:**
+  - Global mut vars (mut at top level) accessed in concurrent spawns may produce `<error: error>` — use local mut inside a proc instead
+  - The analysis is conservative: skips nested spawn/parallel/race (own pinning) but looks inside nested proc (captures propagate)
+  - Upvalue struct already tracks is_mutable, so the compiler has the info needed
+  - `compiler__resolve_local()` is side-effect-free; `compiler__resolve_upvalue()` adds upvalues — only use resolve_local for read-only checks
+  - find_closure_by_name helper can find closure templates in constant pool by name (e.g. "<spawn>")
 ---

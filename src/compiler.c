@@ -494,10 +494,14 @@ static void ast__collect_local_muts(AstNode* node, JaclVal* names,
  * A "local" here means a mut declared within the same body scope.
  *
  * NOTE: This is a conservative syntactic analysis, NOT full escape analysis.
- * A closure that captures a local mut and is passed to another thread via
- * data structures (e.g., stored in a collection) will not be caught.
- * TODO: Add escape analysis to detect indirect cross-thread leaking of
- * mutable references for complete soundness.
+ * It covers:
+ *   - Direct set! on non-local mutable variables
+ *   - $var references to mut/box bindings from enclosing scopes (US-002)
+ *   - Transitive capture: closure capturing another closure that captures
+ *     a mutable binding (US-003, handled via pin_all_closures propagation)
+ * Out of scope:
+ *   - Box references stored in collections then retrieved on another thread
+ *   - Dynamic box creation passed indirectly through data structures
  */
 static bool ast__contains_nonlocal_set_impl(AstNode* node,
                                              JaclVal* local_muts,
@@ -829,6 +833,152 @@ static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
   }
 
   return -1;
+}
+
+/**
+ * Collect all locally declared names (def + mut) in an AST body.
+ * Used by compiler__body_captures_mutable to distinguish local vs captured vars.
+ * Skips nested proc/spawn/parallel/race scopes (they are separate bodies).
+ */
+#define AST_LOCAL_NAMES_MAX 128
+static void ast__collect_local_names(AstNode* node, JaclVal* names,
+                                      uint32_t* count) {
+  if (!node || *count >= AST_LOCAL_NAMES_MAX) return;
+
+  switch (node->type) {
+    case AST_COMMAND: {
+      AstNode* head = node->data.command.head;
+      if (head->type == AST_LIT_STRING) {
+        const char* hname = head->data.lit_string.value;
+        uint32_t hlen = head->data.lit_string.length;
+        /* Record def and mut declarations */
+        if ((hlen == 3 && memcmp(hname, "def", 3) == 0) ||
+            (hlen == 3 && memcmp(hname, "mut", 3) == 0)) {
+          uint32_t argc = node->data.command.arg_count;
+          if (argc >= 2 && node->data.command.args[0]->type == AST_LIT_STRING) {
+            AstNode* name_node = node->data.command.args[0];
+            uint32_t nlen = name_node->data.lit_string.length;
+            if (nlen <= 7) {
+              names[*count] = jacl_inline_string(
+                  name_node->data.lit_string.value, nlen);
+              (*count)++;
+            }
+          }
+          return;
+        }
+        /* Skip nested scope boundaries */
+        if ((hlen == 4 && memcmp(hname, "proc", 4) == 0) ||
+            (hlen == 5 && memcmp(hname, "spawn", 5) == 0) ||
+            (hlen == 8 && memcmp(hname, "parallel", 8) == 0) ||
+            (hlen == 4 && memcmp(hname, "race", 4) == 0)) {
+          return;
+        }
+      }
+      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+        ast__collect_local_names(node->data.command.args[i], names, count);
+      }
+      break;
+    }
+    case AST_BLOCK: {
+      for (uint32_t i = 0; i < node->data.block.count; i++) {
+        ast__collect_local_names(node->data.block.commands[i], names, count);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+/**
+ * Check if an AST body contains $var references to mutable bindings
+ * from an enclosing compiler scope. This detects closures that capture
+ * mut/box variables, even without explicit set! usage.
+ *
+ * Conservative: skips spawn/parallel/race scopes (they get own pinning)
+ * but does NOT skip nested proc scopes (captures propagate upward).
+ * May have false positives from proc-local parameter shadowing.
+ */
+static bool ast__refs_nonlocal_mutable_impl(AstNode* node,
+                                             JaclVal* local_names,
+                                             uint32_t local_name_count,
+                                             Compiler* enclosing) {
+  if (!node) return false;
+
+  switch (node->type) {
+    case AST_VAR_REF: {
+      uint32_t len = node->data.var_ref.length;
+      if (len > 7) return false;
+      JaclVal name = jacl_inline_string(node->data.var_ref.name, len);
+      /* Check if locally declared in the body */
+      for (uint32_t i = 0; i < local_name_count; i++) {
+        if (local_names[i] == name) return false;
+      }
+      /* Not local — check if mutable in enclosing scope chain */
+      for (Compiler* cc = enclosing; cc; cc = cc->enclosing) {
+        int slot = compiler__resolve_local(cc, name);
+        if (slot != -1) return cc->locals[slot].is_mutable;
+        for (uint32_t i = 0; i < cc->upvalue_count; i++) {
+          if (cc->upvalues[i].name == name) return cc->upvalues[i].is_mutable;
+        }
+      }
+      /* Check global arities */
+      GlobalArity* ga = compiler__find_global_arity(enclosing, name);
+      if (ga) return ga->is_mutable;
+      return false;
+    }
+    case AST_COMMAND: {
+      AstNode* head = node->data.command.head;
+      if (head->type == AST_LIT_STRING) {
+        const char* hname = head->data.lit_string.value;
+        uint32_t hlen = head->data.lit_string.length;
+        /* Skip nested concurrent scopes — they get their own pinning */
+        if ((hlen == 5 && memcmp(hname, "spawn", 5) == 0) ||
+            (hlen == 8 && memcmp(hname, "parallel", 8) == 0) ||
+            (hlen == 4 && memcmp(hname, "race", 4) == 0)) {
+          return false;
+        }
+      }
+      /* Check head (for $var calls) */
+      if (ast__refs_nonlocal_mutable_impl(head, local_names,
+                                           local_name_count, enclosing))
+        return true;
+      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+        if (ast__refs_nonlocal_mutable_impl(node->data.command.args[i],
+                                             local_names, local_name_count,
+                                             enclosing))
+          return true;
+      }
+      return false;
+    }
+    case AST_BLOCK: {
+      for (uint32_t i = 0; i < node->data.block.count; i++) {
+        if (ast__refs_nonlocal_mutable_impl(node->data.block.commands[i],
+                                             local_names, local_name_count,
+                                             enclosing))
+          return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * Check if a concurrent body captures a mutable (mut/box) binding from
+ * an enclosing scope via $var references.
+ *
+ * Used alongside ast__contains_nonlocal_set() to decide pinning.
+ * If either check is true, the body is pinned to thread 0.
+ */
+static bool compiler__body_captures_mutable(Compiler* enclosing,
+                                             AstNode* body_block) {
+  JaclVal local_names[AST_LOCAL_NAMES_MAX];
+  uint32_t local_name_count = 0;
+  ast__collect_local_names(body_block, local_names, &local_name_count);
+  return ast__refs_nonlocal_mutable_impl(body_block, local_names,
+                                          local_name_count, enclosing);
 }
 
 /* Forward declaration for compile_block_expr */
@@ -1170,12 +1320,14 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   closure->variadic     = false;
   closure->pin_worker_id = -1;
 
-  /* Pin this body to thread 0 if it mutates non-local variables.
+  /* Pin this body to thread 0 if it mutates non-local variables
+     OR captures a mutable (mut/box) binding from an enclosing scope.
      Per-worker VM isolation means OP_SET_GLOBAL only modifies the local
      worker's env — pinning to thread 0 ensures all mutable state reads
      and writes go through a single worker for consistency.
      Bodies with only local mutations can safely run on any worker. */
-  bool needs_pinning = ast__contains_nonlocal_set(body_block);
+  bool needs_pinning = ast__contains_nonlocal_set(body_block)
+                    || compiler__body_captures_mutable(c, body_block);
   closure->pinned = needs_pinning;
 
   if (body_suspends) {
@@ -3763,9 +3915,11 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     closure->variadic     = false;
     closure->pin_worker_id = -1;
 
-    /* Pin spawn body to thread 0 if it mutates non-local variables.
+    /* Pin spawn body to thread 0 if it mutates non-local variables
+       OR captures a mutable (mut/box) binding from an enclosing scope.
        Bodies with only local mutations can run on any worker. */
-    bool needs_pinning = ast__contains_nonlocal_set(body_block);
+    bool needs_pinning = ast__contains_nonlocal_set(body_block)
+                      || compiler__body_captures_mutable(c, body_block);
     closure->pinned = needs_pinning;
 
     if (spawn_suspends) {

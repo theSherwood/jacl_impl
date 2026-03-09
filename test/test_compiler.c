@@ -2636,6 +2636,112 @@ static int test_recursion_depth_limit(void) {
   TEST_PASS();
 }
 
+/* ===== US-002 (M12/M13): Closure capturing mut pinned in spawn ===== */
+
+/* Helper: find a closure constant by name in a chunk (recursive into nested closures) */
+static JaclClosure* find_closure_by_name(BytecodeChunk* chunk, const char* name) {
+  for (uint32_t i = 0; i < chunk->const_count; i++) {
+    if (jacl_is_closure(chunk->constants[i])) {
+      JaclClosure* cl = jacl_as_closure(chunk->constants[i]);
+      if (cl->name && strcmp(cl->name, name) == 0) return cl;
+      /* Recurse into nested closures */
+      JaclClosure* nested = find_closure_by_name(&cl->chunk, name);
+      if (nested) return nested;
+    }
+  }
+  return NULL;
+}
+
+/* Test: spawn body that captures a mut var (no set!) should be pinned */
+static int test_spawn_captures_mut_pinned(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  /* mut x captured via $x in spawn body (read only, no set!) */
+  const char* program =
+    "[proc main [] {\n"
+    "  [mut x 42]\n"
+    "  [spawn { [+ $x 1] }]\n"
+    "}]\n"
+    "[main]";
+
+  CompileResult cr = compile_source(program, &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  /* Find the <spawn> closure — it should be pinned */
+  JaclClosure* spawn_cl = find_closure_by_name(&cr.chunk, "<spawn>");
+  ASSERT(spawn_cl != NULL);
+  ASSERT(spawn_cl->pinned);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: spawn body with only local mut (no capture) should NOT be pinned */
+static int test_spawn_local_mut_not_pinned(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  /* mut x declared inside spawn body — local, no pinning needed */
+  const char* program =
+    "[proc main [] {\n"
+    "  [spawn {\n"
+    "    [mut x 42]\n"
+    "    [set! x 99]\n"
+    "    $x\n"
+    "  }]\n"
+    "}]\n"
+    "[main]";
+
+  CompileResult cr = compile_source(program, &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  JaclClosure* spawn_cl = find_closure_by_name(&cr.chunk, "<spawn>");
+  ASSERT(spawn_cl != NULL);
+  ASSERT(!spawn_cl->pinned);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: spawn body with def (non-mutable) capture should NOT be pinned */
+static int test_spawn_captures_def_not_pinned(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  const char* program =
+    "[proc main [] {\n"
+    "  [def x 42]\n"
+    "  [spawn { [+ $x 1] }]\n"
+    "}]\n"
+    "[main]";
+
+  CompileResult cr = compile_source(program, &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  JaclClosure* spawn_cl = find_closure_by_name(&cr.chunk, "<spawn>");
+  ASSERT(spawn_cl != NULL);
+  ASSERT(!spawn_cl->pinned);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -2751,6 +2857,10 @@ int main(void) {
     { "recursion_factorial",         test_recursion_factorial },
     { "recursion_fibonacci",         test_recursion_fibonacci },
     { "recursion_depth_limit",       test_recursion_depth_limit },
+    /* US-002 (M12/M13): Closure capturing mut pinned in spawn */
+    { "spawn_captures_mut_pinned",   test_spawn_captures_mut_pinned },
+    { "spawn_local_mut_not_pinned",  test_spawn_local_mut_not_pinned },
+    { "spawn_captures_def_not_pinned", test_spawn_captures_def_not_pinned },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
