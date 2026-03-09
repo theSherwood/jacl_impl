@@ -252,6 +252,9 @@ typedef struct {
   const char*   name;         /* procedure name for debug, may be NULL */
   uint8_t       min_args;     /* minimum argument count (== param_count for fixed-arity) */
   bool          variadic;     /* true if proc accepts variable args (future use) */
+  bool          pinned;       /* true if closure must run on a specific worker thread
+                                 (set when concurrent body touches mutable globals) */
+  int8_t        pin_worker_id; /* worker ID to pin to (-1 = not yet assigned) */
 } JaclClosure;
 
 static inline JaclVal jacl_closure(JaclClosure* cl) {

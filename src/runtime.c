@@ -111,6 +111,7 @@ static void runtime__init_worker_vm(WorkerThread *w) {
     vm->grey_buf      = &w->grey_buf;
     vm->gc_active_ptr = &w->runtime->gc_active;
     vm->runtime       = (void *)w->runtime;
+    vm->worker_id     = w->id;
     vm->frame_count   = 0;
     vm->error_message = NULL;
     vm->error_line    = 0;
@@ -412,6 +413,22 @@ static void runtime__push_inbox(Runtime *rt, RuntimeTask *task) {
     }
     rt->inbox[rt->inbox_count++] = (uintptr_t)task;
     MUTEX_UNLOCK(rt->inbox_mutex);
+}
+
+/* ======================================================================
+ * Pinned task routing — push to a specific worker's private deque so
+ * only that worker executes the task. Used when a closure touches
+ * mutable global state that lives in a specific worker's vm->env.
+ * ====================================================================== */
+
+static void runtime__push_pinned(Runtime *rt, RuntimeTask *task, int worker_id) {
+    if (worker_id >= 0 && worker_id < rt->num_workers) {
+        rt_deque_deque_push(rt->workers[worker_id].private_deque,
+                            (uintptr_t)task);
+    } else {
+        /* Fallback: worker ID not valid (e.g., task created outside workers) */
+        runtime__push_inbox(rt, task);
+    }
 }
 
 /* ======================================================================
@@ -811,6 +828,8 @@ static JaclVal runtime__create_resolve_closure(ThreadHeap *heap, arena_t *arena,
     cl->param_names   = NULL;
     cl->min_args      = 1;
     cl->variadic      = false;
+    cl->pinned        = false;
+    cl->pin_worker_id = -1;
 
     return jacl_closure(cl);
 }
@@ -863,6 +882,8 @@ static JaclVal runtime__create_parallel_k(ThreadHeap *heap, arena_t *arena,
     cl->param_names   = NULL;
     cl->min_args      = 1;
     cl->variadic      = false;
+    cl->pinned        = false;
+    cl->pin_worker_id = -1;
 
     return jacl_closure(cl);
 }
@@ -969,6 +990,8 @@ static JaclVal runtime__create_race_k(ThreadHeap *heap, arena_t *arena,
     cl->param_names   = NULL;
     cl->min_args      = 1;
     cl->variadic      = false;
+    cl->pinned        = false;
+    cl->pin_worker_id = -1;
 
     return jacl_closure(cl);
 }
@@ -1052,7 +1075,11 @@ static void runtime__schedule_continuation(void *runtime_ptr,
     task->gc_root  = jacl_closure_ptr(continuation);
     task->gc_root2 = result;
 
-    runtime__push_inbox(rt, task);
+    if (continuation->pinned && continuation->pin_worker_id >= 0) {
+        runtime__push_pinned(rt, task, continuation->pin_worker_id);
+    } else {
+        runtime__push_inbox(rt, task);
+    }
 }
 
 static void runtime__schedule_waiters(void *runtime_ptr,
@@ -1140,7 +1167,11 @@ static void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
     task->gc_root2 = JACL_TAG_CLOSURE
                    | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
 
-    runtime__push_inbox(rt, task);
+    if (closure->pinned && closure->pin_worker_id >= 0) {
+        runtime__push_pinned(rt, task, closure->pin_worker_id);
+    } else {
+        runtime__push_inbox(rt, task);
+    }
 }
 
 /* ======================================================================
@@ -1227,7 +1258,11 @@ static void runtime__submit_parallel_task(void *runtime_ptr,
     task->gc_root2 = JACL_TAG_CLOSURE
                    | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
 
-    runtime__push_inbox(rt, task);
+    if (closure->pinned && closure->pin_worker_id >= 0) {
+        runtime__push_pinned(rt, task, closure->pin_worker_id);
+    } else {
+        runtime__push_inbox(rt, task);
+    }
 }
 
 /* ======================================================================
@@ -1310,7 +1345,11 @@ static void runtime__submit_race_task(void *runtime_ptr,
     task->gc_root2 = JACL_TAG_CLOSURE
                    | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
 
-    runtime__push_inbox(rt, task);
+    if (closure->pinned && closure->pin_worker_id >= 0) {
+        runtime__push_pinned(rt, task, closure->pin_worker_id);
+    } else {
+        runtime__push_inbox(rt, task);
+    }
 }
 
 /* ======================================================================

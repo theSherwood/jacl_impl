@@ -85,6 +85,7 @@ typedef struct {
   GreyBuffer*    grey_buf;       /* write barrier target (NULL in single-threaded) */
   volatile uint32_t *gc_active_ptr; /* pointer to runtime's gc_active (NULL in single-threaded) */
   void*          runtime;        /* Runtime pointer for concurrent GC trigger (NULL in single-threaded) */
+  int            worker_id;      /* Worker thread ID for task pinning (-1 if not on a worker) */
   const char*    error_message;  /* last error message, or NULL */
   uint32_t       error_line;     /* source line of last error */
   StackTrace     stack_trace;    /* most recent error's trace */
@@ -244,6 +245,7 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->grey_buf      = NULL;
   vm->gc_active_ptr = NULL;
   vm->runtime       = NULL;
+  vm->worker_id     = -1;
   vm->frame_count   = 0;
   vm->error_message = NULL;
   vm->error_line    = 0;
@@ -1051,6 +1053,10 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         cl->upvalue_count = template->upvalue_count;
         cl->min_args     = template->min_args;
         cl->variadic     = template->variadic;
+        cl->pinned       = template->pinned;
+        /* Assign current worker ID at runtime so pinned tasks know
+           which worker thread owns the mutable state they reference. */
+        cl->pin_worker_id = template->pinned ? (int8_t)vm->worker_id : -1;
 
         if (cl->upvalue_count > 0) {
           cl->upvalues = (JaclVal*)(cl + 1); /* trailing array */

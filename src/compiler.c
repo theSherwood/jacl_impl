@@ -435,6 +435,43 @@ static bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
   }
 }
 
+/* Check if an AST subtree contains any set! calls (mutable global mutation).
+   Skips nested proc/spawn/parallel/race definitions since those are separate
+   closure scopes with independent pinning decisions. */
+static bool ast__contains_set(AstNode* node) {
+  if (!node) return false;
+
+  switch (node->type) {
+    case AST_COMMAND: {
+      AstNode* head = node->data.command.head;
+      if (head->type == AST_LIT_STRING) {
+        const char* name = head->data.lit_string.value;
+        uint32_t len = head->data.lit_string.length;
+        if (len == 4 && memcmp(name, "set!", 4) == 0) return true;
+        /* Skip nested scope boundaries — they get their own pinning */
+        if ((len == 4 && memcmp(name, "proc", 4) == 0) ||
+            (len == 5 && memcmp(name, "spawn", 5) == 0) ||
+            (len == 8 && memcmp(name, "parallel", 8) == 0) ||
+            (len == 4 && memcmp(name, "race", 4) == 0)) {
+          return false;
+        }
+      }
+      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+        if (ast__contains_set(node->data.command.args[i])) return true;
+      }
+      return false;
+    }
+    case AST_BLOCK: {
+      for (uint32_t i = 0; i < node->data.block.count; i++) {
+        if (ast__contains_set(node->data.block.commands[i])) return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
 /* --- Internal: Compiler state --- */
 
 typedef struct Compiler Compiler;
@@ -460,6 +497,7 @@ struct Compiler {
   SuspensionMap*   suspension_map;  /* pre-computed suspension analysis */
   bool             is_cps;          /* true if this proc is CPS-transformed */
   bool             in_concurrent_body; /* true inside spawn/parallel/race body */
+  bool             pin_all_closures;  /* true when concurrent body touches mutable globals */
   bool             force_global_procs; /* procs emit OP_DEF_GLOBAL even at scope>0 */
   JaclType         expected_type;   /* contextual type hint for RHS compilation */
   JaclType         last_expr_type;  /* type of the last compiled expression */
@@ -485,6 +523,7 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->suspension_map  = NULL;
   c->is_cps          = false;
   c->in_concurrent_body = false;
+  c->pin_all_closures   = false;
   c->force_global_procs = false;
   c->expected_type   = TYPE_DYN;
   c->last_expr_type  = TYPE_DYN;
@@ -849,6 +888,8 @@ static void compiler__emit_continuation(Compiler* c,
   cont->name         = "__cont";
   cont->min_args     = 1;
   cont->variadic     = false;
+  cont->pinned       = c->pin_all_closures;
+  cont->pin_worker_id = -1;
 
   JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal));
   pnames[0] = param_name;
@@ -862,6 +903,7 @@ static void compiler__emit_continuation(Compiler* c,
   cont_compiler.suspension_map = c->suspension_map;
   cont_compiler.is_cps         = true;
   cont_compiler.in_concurrent_body = c->in_concurrent_body;
+  cont_compiler.pin_all_closures   = c->pin_all_closures;
 
   /* Copy global arities from parent for suspension lookups */
   {
@@ -1027,6 +1069,14 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   closure->param_names  = NULL;
   closure->min_args     = 0;
   closure->variadic     = false;
+  closure->pin_worker_id = -1;
+
+  /* Pin this body to the parent worker if it touches mutable globals.
+     Per-worker VM isolation means OP_SET_GLOBAL only modifies the local
+     worker's env — pinning ensures the task runs on the thread that
+     owns the mutable state. */
+  bool needs_pinning = ast__contains_set(body_block);
+  closure->pinned = needs_pinning;
 
   if (body_suspends) {
     /* CPS parallel body: hidden __k parameter */
@@ -1044,6 +1094,7 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   body_compiler.scope_depth    = 1;
   body_compiler.enclosing      = c;
   body_compiler.suspension_map = c->suspension_map;
+  body_compiler.pin_all_closures = needs_pinning;
 
   /* Copy global arities for suspension lookups */
   {
@@ -1059,9 +1110,6 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
     compiler__add_local(&body_compiler, jacl_inline_string("__k", 3), line, col);
     body_compiler.locals[body_compiler.local_count - 1].is_param = true;
     body_compiler.is_cps = true;
-    /* Per-worker VM isolation makes set! unsound in concurrent bodies:
-       each worker gets its own vm->env copy, so OP_SET_GLOBAL only
-       modifies the local worker's env and changes are lost. */
     body_compiler.in_concurrent_body = true;
 
     if (stmt_count == 0) {
@@ -2248,17 +2296,6 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclVal name_val = jacl_inline_string(args[0]->data.lit_string.value, name_len);
     char err_msg[128];
 
-    /* Per-worker VM isolation: set! inside spawn/parallel/race bodies
-       only modifies the worker's local env copy — changes are silently
-       lost when the worker finishes. Use def to create new bindings. */
-    if (c->in_concurrent_body) {
-      snprintf(err_msg, sizeof(err_msg),
-               "cannot use set! inside spawn/parallel/race body"
-               " (use def instead)");
-      compiler__error(c, line, col, err_msg);
-      return;
-    }
-
     /* Resolve local */
     int local_slot = compiler__resolve_local(c, name_val);
     if (local_slot != -1) {
@@ -2671,6 +2708,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     closure->name         = name_copy;
     closure->min_args     = min_args;
     closure->variadic     = is_variadic;
+    closure->pinned       = false;
+    closure->pin_worker_id = -1;
 
     /* Allocate and fill param_names from parsed array */
     if (param_count > 0) {
@@ -3622,6 +3661,11 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     closure->param_names  = NULL;
     closure->min_args     = 0;
     closure->variadic     = false;
+    closure->pin_worker_id = -1;
+
+    /* Pin spawn body to parent worker if it touches mutable globals */
+    bool needs_pinning = ast__contains_set(body_block);
+    closure->pinned = needs_pinning;
 
     if (spawn_suspends) {
       /* CPS spawn: hidden __k parameter */
@@ -3639,6 +3683,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     body_compiler.scope_depth    = 1;
     body_compiler.enclosing      = c;
     body_compiler.suspension_map = c->suspension_map;
+    body_compiler.pin_all_closures = needs_pinning;
 
     /* Copy global arities for suspension lookups */
     {
@@ -3654,7 +3699,6 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__add_local(&body_compiler, jacl_inline_string("__k", 3), line, col);
       body_compiler.locals[body_compiler.local_count - 1].is_param = true;
       body_compiler.is_cps = true;
-      /* Per-worker VM isolation makes set! unsound in spawn bodies */
       body_compiler.in_concurrent_body = true;
 
       if (stmt_count == 0) {
@@ -4137,6 +4181,32 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
       }
     }
 
+    /* Phase 1b: Pre-register top-level mut declarations so proc bodies
+       compiled in Phase 2 can resolve mutable globals (needed for set!
+       inside spawn/parallel bodies that pin to the parent worker). */
+    for (uint32_t i = 0; i < parse.count; i++) {
+      AstNode* node = parse.nodes[i];
+      if (node->type == AST_COMMAND &&
+          compiler__head_matches(node->data.command.head, "mut", 3)) {
+        uint32_t margc = node->data.command.arg_count;
+        if (margc >= 2) {
+          /* mut [type] name value — name is last-but-one arg */
+          AstNode* name_node = node->data.command.args[margc >= 3 ? 1 : 0];
+          if (name_node->type == AST_LIT_STRING &&
+              name_node->data.lit_string.length <= 7) {
+            JaclVal mname = jacl_inline_string(
+                name_node->data.lit_string.value,
+                name_node->data.lit_string.length);
+            compiler__set_global_arity(&c, mname, -1);
+            GlobalArity* ga = compiler__find_global_arity(&c, mname);
+            if (ga) {
+              ga->is_mutable = true;
+            }
+          }
+        }
+      }
+    }
+
     /* Phase 2: Hoist top-level proc definitions into the outer chunk so
        they are defined via OP_SET_GLOBAL before the CPS closure executes.
        This ensures all workers have proc definitions in their env when
@@ -4165,6 +4235,8 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     main_cl->name          = "__main";
     main_cl->min_args      = 1;
     main_cl->variadic      = false;
+    main_cl->pinned        = false;
+    main_cl->pin_worker_id = -1;
     JaclVal* main_pnames   = (JaclVal*)arena_alloc(arena, sizeof(JaclVal));
     main_pnames[0]         = jacl_inline_string("__k", 3);
     main_cl->param_names   = main_pnames;

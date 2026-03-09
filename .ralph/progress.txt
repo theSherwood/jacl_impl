@@ -10,9 +10,68 @@ Progress log for ralph/cps-recursive-mutation-bugs branch.
 - test_gc.c and test_m13.c include `../src/jacl.c` directly (unity build pattern)
 - Pre-existing compiler warnings in hamt.h, rrb_vec.h, etc. are expected — only check for new warnings from changed files
 - `gc__emergency_gc_fn` is `__thread` — clear it in tests using raw BlockPool/ThreadHeap to avoid stale callbacks
-- CPS recursion + suspending calls (parallel/spawn/await) in the recursive body produces `<error: error>` — THIS IS THE BUG TO FIX
-- `set` does not work in CPS concurrent mode (per-worker VM isolation) — THIS IS THE BUG TO FIX
+- CPS recursion + suspending calls (parallel/spawn/await) in the recursive body produces `<error: error>` — FIXED in US-001
+- `set!` inside spawn/parallel/race bodies triggers worker pinning — the task runs on the parent worker's thread so OP_SET_GLOBAL modifies the correct vm->env (FIXED in US-003/US-004)
 - The likely culprit for bug 1 is compiler__compile_suspending_call_cps() in compiler.c. The <error: error> is generated at runtime.c when vm__run() doesn't return VM_OK or the continuation wasn't called
-- Bug 2 root cause: each worker has its own VM with isolated env. OP_SET_GLOBAL modifies only the local worker's vm->env. Proc defs are hoisted (compiler.c lines 4118-4135) but mutable vars are not.
+- Bug 2 root cause: each worker has its own VM with isolated env. OP_SET_GLOBAL modifies only the local worker's vm->env. Proc defs are hoisted but mutable vars are not — Phase 1b now pre-registers mut globals.
+- Worker pinning: closures with `pinned=true` are pushed to a specific worker's private_deque (Chase-Lev), not the global inbox. Only that worker takes from its private deque.
+- `ast__contains_set()` scans AST for set! usage, skipping nested proc/spawn/parallel/race scopes. Used to decide if a concurrent body needs pinning.
+- `pin_all_closures` compiler flag propagates to continuations via `compiler__emit_continuation()`
 
+- Bare `$var` in JACL is parsed as a zero-arg function call, NOT a value expression. Use `[+ $var 0]` or `[identity $var]` to get the value in expression position.
+- `runtime__continuation_task_exec` error check must use `frame_count == 0` to distinguish completed continuations from suspended ones
+- When OP_AWAIT/OP_PARALLEL/OP_RACE return VM_OK mid-execution, frames are NOT unwound — stack has leftover values
+
+---
+
+## 2026-03-09 - US-001
+- **Diagnosed and fixed** the recursive CPS suspension error
+- **Root cause**: `runtime__continuation_task_exec` in runtime.c checked `vm->stack[stack_top-1]` for error values after vm__run returned VM_OK. When a CPS continuation suspended via OP_AWAIT (which returns VM_OK without unwinding frames), the stack contained leftover values from in-progress frames. If any of these had the error flag set, it triggered spurious error forwarding through the __k chain, producing `<error: error>`.
+- **Fix**: Added `vm->frame_count == 0` guard to the errored check. frame_count==0 means the continuation completed normally (all frames returned via OP_RETURN). frame_count>0 means it suspended mid-execution.
+- **Files changed**: src/runtime.c (fix), test/jacl/cps_recursive_spawn.jacl (new test)
+- **Learnings for future iterations:**
+  - The bug was NOT in the compiler (compiler__compile_suspending_call_cps was correct)
+  - The CPS transform correctly threads __k through recursive calls and continuation chains
+  - Bare `$var` in JACL blocks compiles to OP_CALL 0 (tries to invoke the value), not just a push — always use bracket syntax like `[+ $var 0]` for expression values
+  - The frame_count check is the key distinguisher between "continuation completed" and "continuation suspended"
+---
+
+## 2026-03-09 - US-002
+- **Added** `test/jacl/cps_recursive_parallel.jacl` — recursive proc using `parallel` in body, 3 levels deep
+- `cps_recursive_spawn.jacl` already existed from US-001 (recursive proc with spawn/await, 3 levels deep)
+- Both tests use `# mode: concurrent` and `# expect:` headers
+- All 180 JACL tests pass, all 48 test suites pass
+- **Files changed**: test/jacl/cps_recursive_parallel.jacl (new)
+- **Learnings for future iterations:**
+  - Recursive calls inside `parallel { }` bodies work correctly — the CPS transform handles the recursive call as a suspending child branch
+  - `vec-get` is used to extract results from parallel return vectors
+---
+
+## 2026-03-09 - US-003
+- **Implemented** compile-time error for `set!` inside spawn/parallel/race bodies
+- **Root cause confirmed**: per-worker VM isolation — each worker thread gets its own `vm->env`, so `OP_SET_GLOBAL` only modifies the local worker's copy and changes are silently lost
+- **Fix**: Added `in_concurrent_body` flag to Compiler struct, set in `compiler__compile_parallel_body` and spawn body compilation, propagated through continuation compilers. The `set!` handler checks this flag and emits a clear error directing users to use `def` instead.
+- **Files changed**: src/compiler.c
+- **Learnings for future iterations:**
+  - The `in_concurrent_body` flag must propagate through CPS continuation compilers (not just the initial body compiler), since continuations execute in the same worker context
+  - Non-suspending parallel/spawn bodies also need the flag (they still run on workers)
+  - `set!` on locals declared INSIDE the body would technically be safe, but blocking all `set!` is simpler and consistent with the `def`-based functional style
+  - Error test harness format: `# expect-error: <substring>` for compile error tests
+---
+
+## 2026-03-09 - US-004
+- **Replaced** compile-time error for `set!` in concurrent bodies with **worker thread pinning**
+- **Architecture**: Compiler scans concurrent body ASTs for `set!` usage via `ast__contains_set()`. If found, marks all closures (body + continuations) as `pinned=true`. At runtime, OP_CLOSURE sets `pin_worker_id` from `vm->worker_id`. Task submission functions check pinned flag and push to the specific worker's private deque instead of the global inbox.
+- **Key changes**:
+  - `bytecode.c`: Added `pinned` and `pin_worker_id` fields to JaclClosure
+  - `vm.c`: Added `worker_id` to VM struct, set in OP_CLOSURE for pinned closures
+  - `compiler.c`: Added `ast__contains_set()`, `pin_all_closures` flag, Phase 1b for pre-registering mut globals, removed set! compile-time error
+  - `runtime.c`: Added `runtime__push_pinned()`, updated submit functions and `runtime__schedule_continuation()` to route pinned tasks to specific worker's private deque
+- **New tests**: `set_concurrent_spawn.jacl`, `set_concurrent_parallel.jacl`
+- All 182 JACL tests pass, all 48 test suites pass
+- **Learnings for future iterations:**
+  - CPS Phase 1 only registers proc arities. Top-level `mut` declarations must be pre-registered in Phase 1b for proc bodies to resolve them during Phase 2 compilation
+  - Worker's private_deque (Chase-Lev) is only taken from by the owning worker — ideal for pinning tasks
+  - `pin_all_closures` must propagate to continuation compilers so ALL closures in a pinned concurrent body get pinned (not just the ones that directly use set!)
+  - `ast__contains_set()` must skip nested proc/spawn/parallel/race scopes since those are separate concurrent bodies with independent pinning
 ---

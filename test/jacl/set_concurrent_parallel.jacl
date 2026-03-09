@@ -1,0 +1,17 @@
+# expect: 10
+# expect: 20
+# mode: concurrent
+# set! inside parallel bodies — each body is pinned to the parent worker
+mut x 0
+proc main [] {
+  def r [parallel {
+    set! x 10
+    [+ $x 0]
+  } {
+    set! x 20
+    [+ $x 0]
+  }]
+  print [vec-get $r 0]
+  print [vec-get $r 1]
+}
+main
