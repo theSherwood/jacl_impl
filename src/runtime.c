@@ -1013,9 +1013,14 @@ static void runtime__continuation_task_exec(void *data) {
     VMResult r = vm__run(vm, 0);
 
     /* If continuation failed, __k was not called. Forward error to __k
-       to prevent completion future from hanging. __k is upvalue 0. */
+       to prevent completion future from hanging. __k is upvalue 0.
+       Only check for errors when the continuation actually completed
+       (frame_count == 0). When frame_count > 0, the continuation
+       suspended via OP_AWAIT/OP_PARALLEL/OP_RACE and the stack contains
+       leftover values from in-progress frames — not meaningful errors. */
     bool errored = (r != VM_OK) ||
-        (vm->stack_top > 0 && jacl_is_error(vm->stack[vm->stack_top - 1]));
+        (vm->frame_count == 0 && vm->stack_top > 0 &&
+         jacl_is_error(vm->stack[vm->stack_top - 1]));
     if (errored && ctd->continuation->upvalue_count > 0) {
         JaclVal k_val = ctd->continuation->upvalues[0];
         if (jacl_is_closure(k_val)) {
