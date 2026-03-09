@@ -417,8 +417,10 @@ static void runtime__push_inbox(Runtime *rt, RuntimeTask *task) {
 
 /* ======================================================================
  * Pinned task routing — push to a specific worker's private deque so
- * only that worker executes the task. Used when a closure touches
- * mutable global state that lives in a specific worker's vm->env.
+ * only that worker executes the task. Currently all pinned tasks target
+ * thread 0. Used when a concurrent body mutates non-local mutable state
+ * (upvalue or global set!). Thread 0 is the single owner of all
+ * non-local mutable state, ensuring consistency across workers.
  * ====================================================================== */
 
 static void runtime__push_pinned(Runtime *rt, RuntimeTask *task, int worker_id) {

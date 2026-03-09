@@ -1054,9 +1054,10 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         cl->min_args     = template->min_args;
         cl->variadic     = template->variadic;
         cl->pinned       = template->pinned;
-        /* Assign current worker ID at runtime so pinned tasks know
-           which worker thread owns the mutable state they reference. */
-        cl->pin_worker_id = template->pinned ? (int8_t)vm->worker_id : -1;
+        /* All pinned closures run on thread 0 (the main worker thread).
+           This ensures all non-local mutable state reads and writes go
+           through a single worker, avoiding per-worker env isolation issues. */
+        cl->pin_worker_id = template->pinned ? 0 : -1;
 
         if (cl->upvalue_count > 0) {
           cl->upvalues = (JaclVal*)(cl + 1); /* trailing array */

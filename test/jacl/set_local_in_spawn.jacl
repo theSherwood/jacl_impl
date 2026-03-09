@@ -1,0 +1,13 @@
+# expect: 42
+# mode: concurrent
+# set! targeting a local mut inside spawn does not need pinning
+proc main [] {
+  def f [spawn {
+    mut x 0
+    set! x 42
+    [+ $x 0]
+  }]
+  def r [await $f]
+  print $r
+}
+main
