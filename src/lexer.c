@@ -407,6 +407,14 @@ static void lexer__lex_number(Lexer* lex, TokenArray* arr,
       (*error_count)++;
       return;
     }
+    if (val > INT32_MAX) {
+      Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
+      tok.payload.error_msg =
+        "integer literal out of i32 range (use [i64 ...] or [u64 ...])";
+      lexer__arr_push(arr, tok);
+      (*error_count)++;
+      return;
+    }
     {
       Token tok = lexer__make_token(lex, TOKEN_INT, start, sline, scol);
       tok.payload.int_val = (int32_t)val;
@@ -435,6 +443,14 @@ static void lexer__lex_number(Lexer* lex, TokenArray* arr,
       tok.payload.error_msg = !has_digits
         ? "binary literal with no digits"
         : "invalid suffix on number";
+      lexer__arr_push(arr, tok);
+      (*error_count)++;
+      return;
+    }
+    if (val > INT32_MAX) {
+      Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
+      tok.payload.error_msg =
+        "integer literal out of i32 range (use [i64 ...] or [u64 ...])";
       lexer__arr_push(arr, tok);
       (*error_count)++;
       return;
@@ -489,6 +505,14 @@ static void lexer__lex_number(Lexer* lex, TokenArray* arr,
         lexer__advance(lex);
       Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
       tok.payload.error_msg = "invalid suffix on number";
+      lexer__arr_push(arr, tok);
+      (*error_count)++;
+      return;
+    }
+    if (int_val > INT32_MAX) {
+      Token tok = lexer__make_token(lex, TOKEN_ERROR, start, sline, scol);
+      tok.payload.error_msg =
+        "integer literal out of i32 range (use [i64 ...] or [u64 ...])";
       lexer__arr_push(arr, tok);
       (*error_count)++;
       return;

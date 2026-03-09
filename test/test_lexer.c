@@ -637,6 +637,95 @@ static int test_int32_max(void) {
   TEST_PASS();
 }
 
+/* M12 US-001: integer overflow detection */
+
+static int test_decimal_overflow(void) {
+  setup();
+  LexResult r = lexer_lex("2147483648", &test_arena);
+  ASSERT_U32_EQ(r.count, 2); /* ERROR + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_hex_overflow_0xFFFFFFFF(void) {
+  setup();
+  LexResult r = lexer_lex("0xFFFFFFFF", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_hex_overflow_0x80000000(void) {
+  setup();
+  LexResult r = lexer_lex("0x80000000", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_hex_max_valid(void) {
+  setup();
+  LexResult r = lexer_lex("0x7FFFFFFF", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[0].payload.int_val, 2147483647);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_binary_overflow_33bits(void) {
+  setup();
+  /* 33 ones = exceeds i32 */
+  LexResult r = lexer_lex("0b111111111111111111111111111111111", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT(strstr(r.tokens[0].payload.error_msg, "i32 range") != NULL);
+  ASSERT_U32_EQ(r.error_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_binary_max_valid(void) {
+  setup();
+  /* 0x7FFFFFFF in binary = 31 ones */
+  LexResult r = lexer_lex("0b1111111111111111111111111111111", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_INT);
+  ASSERT_INT_EQ(r.tokens[0].payload.int_val, 2147483647);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_overflow_error_has_span(void) {
+  setup();
+  LexResult r = lexer_lex("2147483648", &test_arena);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
+  ASSERT_U32_EQ(r.tokens[0].offset, 0);
+  ASSERT_U32_EQ(r.tokens[0].length, 10);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 static int test_very_small_float(void) {
   setup();
   LexResult r = lexer_lex("0.001", &test_arena);
@@ -2022,6 +2111,14 @@ int main(void) {
     {"invalid_suffix_float",     test_invalid_suffix_on_float},
     {"invalid_suffix_hex",       test_invalid_suffix_on_hex},
     {"int32_max",                test_int32_max},
+    /* M12 US-001: integer overflow */
+    {"decimal_overflow",         test_decimal_overflow},
+    {"hex_overflow_FFFFFFFF",    test_hex_overflow_0xFFFFFFFF},
+    {"hex_overflow_80000000",    test_hex_overflow_0x80000000},
+    {"hex_max_valid",            test_hex_max_valid},
+    {"bin_overflow_33bits",      test_binary_overflow_33bits},
+    {"bin_max_valid",            test_binary_max_valid},
+    {"overflow_error_span",      test_overflow_error_has_span},
     {"very_small_float",         test_very_small_float},
     {"numbers_in_expression",    test_numbers_in_expression},
     {"multiple_numbers",         test_multiple_numbers},
