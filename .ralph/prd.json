@@ -88,7 +88,7 @@
         "build.sh passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "The original gc_high_churn.jacl used 51 flat sequential calls to p10 (each spawning 10 parallel tasks) because CPS recursion + suspending calls didn't work. Now that recursive CPS suspension is fixed, this can be simplified to a recursive loop."
     },
     {
@@ -104,7 +104,7 @@
         "Compiles without warnings"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "test_m13.c uses the unity build pattern (includes ../src/jacl.c). Check existing tests in test_m13.c for patterns on how to compile code and inspect bytecode."
     }
   ]

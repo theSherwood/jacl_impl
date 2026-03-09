@@ -75,3 +75,31 @@ Progress log for ralph/cps-recursive-mutation-bugs branch.
   - `pin_all_closures` must propagate to continuation compilers so ALL closures in a pinned concurrent body get pinned (not just the ones that directly use set!)
   - `ast__contains_set()` must skip nested proc/spawn/parallel/race scopes since those are separate concurrent bodies with independent pinning
 ---
+
+## 2026-03-09 - US-005
+- **Simplified** `test/jacl/gc_high_churn.jacl` from 84 lines to 37 lines
+- Replaced 51 flat sequential `p10` calls with a recursive `loop` proc that calls `p10` n times and accumulates results
+- This exercises the recursive CPS + suspending calls pattern (fixed in US-001) under GC pressure
+- Still achieves 510 parallel task executions (51 × 10) across 5 rounds
+- Same expected outputs: 2100, 2100, 2100, 2100, 2310
+- All 182 JACL tests pass, all 48 test suites pass
+- **Files changed**: test/jacl/gc_high_churn.jacl
+- **Learnings for future iterations:**
+  - The recursive `loop` pattern with suspending calls in the body is a clean replacement for flat sequential call patterns
+  - `[+ $acc 0]` is needed to return the accumulator value (bare `$acc` would be parsed as a zero-arg function call)
+---
+
+## 2026-03-09 - US-006
+- **Added** 4 C-level CPS transform unit tests in test/test_m13.c:
+  1. `test_cps_recursive_spawn_transform` — recursive proc with spawn/await gets __k param, continuation, and OP_SPAWN in bytecode
+  2. `test_cps_recursive_parallel_upvalues` — recursive proc with parallel captures __k + n in continuation upvalues, has OP_PARALLEL
+  3. `test_cps_recursive_tail_call_passes_k` — tail-recursive suspending call has no nested __cont (passes __k directly), deepest continuation has OP_CALL but no OP_SPAWN/OP_AWAIT
+  4. `test_cps_recursive_spawn_runs` — integration test: recursive proc with spawn/await runs correctly through 3 levels (work(3) = 6)
+- All 186 JACL tests pass, all 48 test suites pass, no new compiler warnings
+- **Files changed**: test/test_m13.c
+- **Learnings for future iterations:**
+  - `test__compile()` + `test__find_closure()` are the key helpers for bytecode inspection tests
+  - Walking `test__find_closure(&cont->chunk, "__cont")` chains lets you find nested continuations at any depth
+  - Scanning `chunk.code[]` for specific opcodes (OP_SPAWN, OP_PARALLEL, OP_CALL) is a simple way to verify bytecode structure
+  - Tail call detection: the deepest continuation in a chain should NOT have a nested `__cont` — the tail call passes __k directly
+---
