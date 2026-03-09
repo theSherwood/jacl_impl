@@ -1,0 +1,111 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/cps-recursive-mutation-bugs",
+  "description": "Fix two CPS runtime bugs: (1) recursive procs with suspending bodies produce <error: error>, (2) set mutation inside concurrent CPS closures silently fails due to per-worker VM isolation.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Diagnose and fix recursive CPS suspension error",
+      "description": "As a runtime developer, I need to find and fix the code path that produces <error: error> when a recursive proc body contains suspending operations (spawn/await/parallel).",
+      "acceptanceCriteria": [
+        "Create a minimal .jacl reproducer in test/jacl/cps_recursive_spawn.jacl that demonstrates the bug (recursive proc with spawn/await in body)",
+        "Trace through compiler__compile_suspending_call_cps() for the recursive call — identify whether the issue is in tail-call continuation passing or upvalue capture in compiler__emit_continuation()",
+        "Trace runtime execution through runtime__spawn_task_exec / runtime__continuation_task_exec — identify where jacl_set_error(jacl_inline_string(\"error\", 5)) gets triggered",
+        "Fix the root cause in compiler.c and/or runtime.c so recursive procs with suspending bodies return correct results",
+        "Document the root cause and fix rationale in a comment near the changed code",
+        "Existing CPS tests all pass (cps_*.jacl, spawn_*.jacl, parallel_*.jacl)",
+        "All existing tests pass",
+        "build.sh passes",
+        "Compiles without warnings"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "The likely culprit is compiler__compile_suspending_call_cps() in compiler.c (around lines 1141-1199). When remaining_count == 0 (tail call), the compiler passes the parent's __k directly. For recursive calls where the body creates intermediate continuations, this chain may not thread results back correctly. The <error: error> is generated at runtime.c lines ~1094 and ~1177 when vm__run() doesn't return VM_OK or the continuation wasn't properly called."
+    },
+    {
+      "id": "US-002",
+      "title": "Add recursive CPS suspension regression tests",
+      "description": "As a runtime developer, I need regression tests for recursive procs with suspending bodies so the bug doesn't regress.",
+      "acceptanceCriteria": [
+        "test/jacl/cps_recursive_spawn.jacl exists and passes: recursive proc using spawn/await in body, exercises at least 3 levels of recursion depth",
+        "Test uses # mode: concurrent header",
+        "Test has # expect: headers with correct expected output",
+        "Add a second test test/jacl/cps_recursive_parallel.jacl: recursive proc using parallel in body, at least 3 levels deep",
+        "All existing tests pass",
+        "build.sh passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "JACL proc names must be <= 7 bytes. Use short names like 'work', 'loop', 'recur'. == is the equality operator (not =). Use def not set in concurrent mode. The test harness auto-discovers .jacl files in test/jacl/."
+    },
+    {
+      "id": "US-003",
+      "title": "Diagnose and handle set mutation in concurrent CPS closures",
+      "description": "As a runtime developer, I need to fix or explicitly restrict set inside concurrent CPS closures so that silent data loss doesn't occur.",
+      "acceptanceCriteria": [
+        "Confirm the root cause: per-worker vm->env isolation in runtime__init_worker_vm() means OP_SET_GLOBAL only modifies the local worker's env",
+        "Implement a compile-time error: compiler.c emits an error when set targets a variable inside a spawn/parallel/race body in CPS mode",
+        "Error message clearly tells the user to use def instead",
+        "Document the rationale in a comment near the check (per-worker VM isolation makes cross-worker mutation unsound)",
+        "Existing CPS and mutation tests pass (mut_*.jacl files must still work in single-threaded mode)",
+        "All existing tests pass",
+        "build.sh passes",
+        "Compiles without warnings"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Approach revised: instead of compile-time error, set! inside concurrent bodies triggers worker pinning. The compiler scans for set! in concurrent body ASTs and marks closures as pinned. At runtime, pinned tasks are pushed to the owning worker's private deque instead of the global inbox. This ensures OP_SET_GLOBAL modifies the correct vm->env. Phase 1b pre-registers mut declarations so proc bodies can resolve mutable globals."
+    },
+    {
+      "id": "US-004",
+      "title": "Add set concurrent mode regression tests",
+      "description": "As a runtime developer, I need regression tests for set behavior in concurrent mode.",
+      "acceptanceCriteria": [
+        "New test test/jacl/set_concurrent_error.jacl that verifies the compile-time error when using set inside a spawn body",
+        "Test uses appropriate error expectation header (# expect_error: or equivalent for the test harness)",
+        "Test covers set inside spawn { ... } body",
+        "Test covers set inside parallel { ... } body",
+        "Verify that set still works correctly in non-concurrent mode (existing mut_*.jacl tests pass)",
+        "All existing tests pass",
+        "build.sh passes"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "Approach changed from compile-time error to worker pinning. set! inside concurrent bodies now works correctly by pinning the task to the parent worker thread. Tests verify set! works in spawn and parallel bodies."
+    },
+    {
+      "id": "US-005",
+      "title": "Simplify gc_high_churn.jacl to use fixed patterns",
+      "description": "As a runtime developer, I want to update gc_high_churn.jacl to use the now-fixed recursive CPS patterns where applicable, proving the fixes work under GC pressure.",
+      "acceptanceCriteria": [
+        "Review test/jacl/gc_high_churn.jacl for workarounds that were needed due to these bugs",
+        "Replace flat sequential workarounds with recursive or natural patterns where the fix enables it",
+        "Test still achieves 500+ task executions",
+        "Test still uses # mode: concurrent header",
+        "All # expect: values remain correct",
+        "Test runs in under 10 seconds",
+        "All existing tests pass",
+        "build.sh passes"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "The original gc_high_churn.jacl used 51 flat sequential calls to p10 (each spawning 10 parallel tasks) because CPS recursion + suspending calls didn't work. Now that recursive CPS suspension is fixed, this can be simplified to a recursive loop."
+    },
+    {
+      "id": "US-006",
+      "title": "Add C-level CPS transform unit tests",
+      "description": "As a runtime developer, I need C-level unit tests that verify CPS transformation correctness for recursive suspending procs.",
+      "acceptanceCriteria": [
+        "New test in test/test_m13.c (or appropriate test file): compile a recursive proc with suspending body, verify the generated bytecode has correct continuation passing for the recursive call",
+        "Test verifies upvalue capture includes necessary variables for nested suspension closures in the recursive body",
+        "Test verifies the tail-call path in compiler__compile_suspending_call_cps() correctly passes __k",
+        "All existing tests pass",
+        "build.sh passes",
+        "Compiles without warnings"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "test_m13.c uses the unity build pattern (includes ../src/jacl.c). Check existing tests in test_m13.c for patterns on how to compile code and inspect bytecode."
+    }
+  ]
+}

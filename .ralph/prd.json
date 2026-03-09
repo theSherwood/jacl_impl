@@ -1,111 +1,248 @@
 {
   "project": "JACL",
-  "branchName": "ralph/cps-recursive-mutation-bugs",
-  "description": "Fix two CPS runtime bugs: (1) recursive procs with suspending bodies produce <error: error>, (2) set mutation inside concurrent CPS closures silently fails due to per-worker VM isolation.",
+  "branchName": "ralph/m12m13-hardening",
+  "description": "M12/M13 hardening: fix lexer integer overflow, add escape analysis for mutable cell leaking through closures, implement non-moving generational GC (sticky mark-bit), and add E2E concurrent stress tests.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Diagnose and fix recursive CPS suspension error",
-      "description": "As a runtime developer, I need to find and fix the code path that produces <error: error> when a recursive proc body contains suspending operations (spawn/await/parallel).",
+      "title": "Lexer rejects integer literals outside i32 range",
+      "description": "As a JACL developer, I want the lexer to produce an error when a bare integer literal exceeds the i32 range, so I don't get silently truncated values.",
       "acceptanceCriteria": [
-        "Create a minimal .jacl reproducer in test/jacl/cps_recursive_spawn.jacl that demonstrates the bug (recursive proc with spawn/await in body)",
-        "Trace through compiler__compile_suspending_call_cps() for the recursive call — identify whether the issue is in tail-call continuation passing or upvalue capture in compiler__emit_continuation()",
-        "Trace runtime execution through runtime__spawn_task_exec / runtime__continuation_task_exec — identify where jacl_set_error(jacl_inline_string(\"error\", 5)) gets triggered",
-        "Fix the root cause in compiler.c and/or runtime.c so recursive procs with suspending bodies return correct results",
-        "Document the root cause and fix rationale in a comment near the changed code",
-        "Existing CPS tests all pass (cps_*.jacl, spawn_*.jacl, parallel_*.jacl)",
-        "All existing tests pass",
+        "Hex literals: if parsed value > INT32_MAX, the lexer emits a TOKEN_ERROR with message containing 'integer literal out of i32 range'",
+        "Binary literals: same range check and error",
+        "Decimal literals: same range check and error — since the lexer doesn't parse negative literals (negation is a separate op), only check val > INT32_MAX",
+        "Hex values that fit in u32 but not i32 (e.g. 0xFFFFFFFF) still error — the user must use [u32 ...]",
+        "Values that fit in i32 continue to work identically (no behavior change)",
+        "Error message includes suggestion to use [i64 ...] or [u64 ...]",
+        "Error token captures the source span (start/end position) so downstream error reporting can show the literal",
+        "Add lexer tests in test_lexer.c for: 0xFFFFFFFF, 0x80000000, 2147483648, 0b followed by 33 ones, and exact boundaries (2147483647 passes, 2147483648 errors)",
+        "Test that the error message contains 'i32 range' substring",
+        "Existing lexer tests pass",
         "build.sh passes",
         "Compiles without warnings"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "The likely culprit is compiler__compile_suspending_call_cps() in compiler.c (around lines 1141-1199). When remaining_count == 0 (tail call), the compiler passes the parent's __k directly. For recursive calls where the body creates intermediate continuations, this chain may not thread results back correctly. The <error: error> is generated at runtime.c lines ~1094 and ~1177 when vm__run() doesn't return VM_OK or the continuation wasn't properly called."
+      "passes": false,
+      "notes": "The overflow happens in src/lexer.c at lines 412 (hex), 444 (binary), and 498 (decimal) where int64_t val is cast to (int32_t) without bounds checking. The fix is to add an `if (val > INT32_MAX)` check before the cast in all three code paths, and emit TOKEN_ERROR instead. The Token struct already has payload.error_msg for error messages and start/line/col for source position."
     },
     {
       "id": "US-002",
-      "title": "Add recursive CPS suspension regression tests",
-      "description": "As a runtime developer, I need regression tests for recursive procs with suspending bodies so the bug doesn't regress.",
+      "title": "Detect box/cell capture in closures passed to concurrent primitives",
+      "description": "As a runtime developer, I need the compiler to detect when a closure capturing a box or mutable cell is passed as an argument to spawn/parallel/race, and auto-pin the task to the owning worker thread.",
       "acceptanceCriteria": [
-        "test/jacl/cps_recursive_spawn.jacl exists and passes: recursive proc using spawn/await in body, exercises at least 3 levels of recursion depth",
-        "Test uses # mode: concurrent header",
-        "Test has # expect: headers with correct expected output",
-        "Add a second test test/jacl/cps_recursive_parallel.jacl: recursive proc using parallel in body, at least 3 levels deep",
-        "All existing tests pass",
-        "build.sh passes"
+        "Extend ast__contains_nonlocal_set_impl (or add a parallel analysis function) to also detect closures that capture variables declared with mut or box — not just direct set! usage",
+        "When a closure capturing a box/cell is passed to spawn/parallel/race, the compiler marks the generated CPS continuation as pinned (same mechanism as current set! pinning via pin_all_closures flag)",
+        "The analysis walks closure argument subtrees: if a $var reference in a closure argument resolves to a mut/box binding from an enclosing scope, that closure is flagged for pinning",
+        "Pinning behavior: pinned tasks go to the owning worker's private deque (existing infrastructure), ensuring box dereferences hit the correct thread-local state",
+        "Direct box usage in concurrent bodies (not via closure argument) continues to work via existing pinning",
+        "Update the TODO comment at compiler.c ~line 499 to document what the new analysis covers and what remains out of scope (e.g., box refs stored in collections then retrieved on another thread)",
+        "Add compiler test in test_compiler.c or test_m13.c: closure capturing a box passed to spawn — verify pinned flag is set on the continuation",
+        "Add .jacl test: closure capturing a box used inside spawn body — verify correct value is read",
+        "Existing mut_*.jacl and set_concurrent_*.jacl tests pass",
+        "build.sh passes",
+        "Compiles without warnings"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "JACL proc names must be <= 7 bytes. Use short names like 'work', 'loop', 'recur'. == is the equality operator (not =). Use def not set in concurrent mode. The test harness auto-discovers .jacl files in test/jacl/."
+      "passes": false,
+      "notes": "The existing pinning mechanism is in compiler.c: ast__contains_set() scans AST for set! usage and sets pin_all_closures flag. The same flag and infrastructure can be reused — the change is extending the analysis to also detect $var references to mut/box bindings, not just set! calls. CompileLocal has is_mutable field. The compiler__find_binding() function resolves variable names to their binding scope and can check is_mutable."
     },
     {
       "id": "US-003",
-      "title": "Diagnose and handle set mutation in concurrent CPS closures",
-      "description": "As a runtime developer, I need to fix or explicitly restrict set inside concurrent CPS closures so that silent data loss doesn't occur.",
+      "title": "Escape analysis covers transitive capture",
+      "description": "As a runtime developer, I need the escape analysis to handle transitive capture — closure A captures a box, closure B captures A, and B is passed to spawn.",
       "acceptanceCriteria": [
-        "Confirm the root cause: per-worker vm->env isolation in runtime__init_worker_vm() means OP_SET_GLOBAL only modifies the local worker's env",
-        "Implement a compile-time error: compiler.c emits an error when set targets a variable inside a spawn/parallel/race body in CPS mode",
-        "Error message clearly tells the user to use def instead",
-        "Document the rationale in a comment near the check (per-worker VM isolation makes cross-worker mutation unsound)",
-        "Existing CPS and mutation tests pass (mut_*.jacl files must still work in single-threaded mode)",
-        "All existing tests pass",
+        "If a closure captures another closure that itself captures a mutable cell, and the outer closure is passed to a concurrent primitive, the task is pinned",
+        "Analysis is conservative: if unsure whether a captured variable transitively holds a mutable ref, pin (safe default)",
+        "Add compiler test: transitive capture scenario with a box — verify pinned flag is set",
+        "Add .jacl test: nested closure with box used in spawn — correct result",
+        "Existing tests pass",
         "build.sh passes",
         "Compiles without warnings"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "Approach revised: instead of compile-time error, set! inside concurrent bodies triggers worker pinning. The compiler scans for set! in concurrent body ASTs and marks closures as pinned. At runtime, pinned tasks are pushed to the owning worker's private deque instead of the global inbox. This ensures OP_SET_GLOBAL modifies the correct vm->env. Phase 1b pre-registers mut declarations so proc bodies can resolve mutable globals."
+      "passes": false,
+      "notes": "This extends US-002. The analysis from US-002 checks direct $var references to mut/box bindings. Transitive capture means: proc A captures box b, proc B captures A (via $A or calling A), B is passed to spawn. The analysis needs to track which closures capture mutable state and propagate that flag when those closures are themselves captured. Conservative approach: if any captured variable is a closure that was compiled with pin_all_closures, the capturing closure also gets pinned."
     },
     {
       "id": "US-004",
-      "title": "Add set concurrent mode regression tests",
-      "description": "As a runtime developer, I need regression tests for set behavior in concurrent mode.",
+      "title": "Add gen field to GCHeader",
+      "description": "As a GC developer, I need a generation bit in the object header to distinguish young from old objects without increasing header size.",
       "acceptanceCriteria": [
-        "New test test/jacl/set_concurrent_error.jacl that verifies the compile-time error when using set inside a spawn body",
-        "Test uses appropriate error expectation header (# expect_error: or equivalent for the test harness)",
-        "Test covers set inside spawn { ... } body",
-        "Test covers set inside parallel { ... } body",
-        "Verify that set still works correctly in non-concurrent mode (existing mut_*.jacl tests pass)",
-        "All existing tests pass",
-        "build.sh passes"
+        "Reclaim bits from the mark field (currently uint8_t but only needs 1 bit): use 1 bit for mark, 1 bit for gen, leaving 6 bits unused. Or use a bitfield. The header must remain 8 bytes total.",
+        "gen is initialized to 0 (young) in gc_alloc",
+        "gc_header_of and all existing header access patterns continue to work",
+        "Document the bit layout in a comment on the GCHeader struct",
+        "All existing GC tests pass — no behavioral change yet",
+        "build.sh passes",
+        "Compiles without warnings"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "Approach changed from compile-time error to worker pinning. set! inside concurrent bodies now works correctly by pinning the task to the parent worker thread. Tests verify set! works in spawn and parallel bodies."
+      "passes": false,
+      "notes": "GCHeader is defined in src/gc.c around line 36. Currently: epoch(uint32_t) + mark(uint8_t) + obj_type(uint8_t) + alloc_total(uint16_t) = 8 bytes. The mark field is a full uint8_t but only uses values 0 and 1 (alternating mark bit). Simplest approach: split the mark byte into mark(1 bit) + gen(1 bit) + reserved(6 bits) using bitfields or bit masking. All mark comparisons (header->mark == current_mark) need updating to use the mask."
     },
     {
       "id": "US-005",
-      "title": "Simplify gc_high_churn.jacl to use fixed patterns",
-      "description": "As a runtime developer, I want to update gc_high_churn.jacl to use the now-fixed recursive CPS patterns where applicable, proving the fixes work under GC pressure.",
+      "title": "Implement promotion logic in sweep",
+      "description": "As a GC developer, I need the sweep phase to promote objects that survive 2 GC cycles to the old generation.",
       "acceptanceCriteria": [
-        "Review test/jacl/gc_high_churn.jacl for workarounds that were needed due to these bugs",
-        "Replace flat sequential workarounds with recursive or natural patterns where the fix enables it",
-        "Test still achieves 500+ task executions",
-        "Test still uses # mode: concurrent header",
-        "All # expect: values remain correct",
-        "Test runs in under 10 seconds",
-        "All existing tests pass",
-        "build.sh passes"
+        "An object is promoted (gen = 1) if it is live (marked or epoch-protected) after surviving 2 consecutive GC cycles",
+        "Track survival via a survive_count bit or heuristic: if an object was marked in the previous cycle AND is marked again in the current cycle, promote it. Alternatively, use a 2-bit counter carved from the reserved bits in the mark byte.",
+        "Promotion is in-place: only the gen metadata changes. No object movement, no pointer updates, no copying, no forwarding pointers",
+        "Add C-level test in test_m12.c or test_gc.c: allocate objects, run 2 GC cycles, verify promoted objects have gen == 1",
+        "Add C-level test: allocate short-lived objects, run 1 GC cycle, verify they remain gen == 0",
+        "Existing GC tests pass",
+        "build.sh passes",
+        "Compiles without warnings"
       ],
       "priority": 5,
-      "passes": true,
-      "notes": "The original gc_high_churn.jacl used 51 flat sequential calls to p10 (each spawning 10 parallel tasks) because CPS recursion + suspending calls didn't work. Now that recursive CPS suspension is fixed, this can be simplified to a recursive loop."
+      "passes": false,
+      "notes": "The sweep phase is in src/gc_collect.c. The gc_sweep and gc_sweep_concurrent functions iterate objects in blocks and check mark status. Promotion logic goes here: after determining an object is alive, check if it survived the previous cycle too. The mark bit alternates 0/1 each cycle, so 'survived previous cycle' can be inferred if the object's mark matches BOTH the current and previous mark values — but since marks alternate, this needs a separate tracking mechanism. Simplest: add a 2-bit survive_count in the reserved bits of the mark byte, increment on survival, promote when it reaches 2."
     },
     {
       "id": "US-006",
-      "title": "Add C-level CPS transform unit tests",
-      "description": "As a runtime developer, I need C-level unit tests that verify CPS transformation correctness for recursive suspending procs.",
+      "title": "Implement per-thread remembered set",
+      "description": "As a GC developer, I need a per-thread remembered set that tracks old-to-young pointers created by box/atom mutation.",
       "acceptanceCriteria": [
-        "New test in test/test_m13.c (or appropriate test file): compile a recursive proc with suspending body, verify the generated bytecode has correct continuation passing for the recursive call",
-        "Test verifies upvalue capture includes necessary variables for nested suspension closures in the recursive body",
-        "Test verifies the tail-call path in compiler__compile_suspending_call_cps() correctly passes __k",
-        "All existing tests pass",
+        "Add a RememberedSet structure to WorkerThread: append-only buffer of JaclVal container references, similar to GreyBuffer",
+        "Add remembered_set_init, remembered_set_push, remembered_set_drain, remembered_set_destroy functions",
+        "Extend the hybrid write barrier (gc_write_barrier or equivalent) to record a remembered set entry when an old-gen container (gen == 1) stores a young-gen value (gen == 0)",
+        "The generational check runs unconditionally (not gated on gc_active), because the remembered set must be maintained between GC cycles",
+        "Remembered set is per-thread, no contention",
+        "Drain deduplicates entries (a container mutated multiple times between GCs only appears once)",
+        "Add C-level test: mutate an old-gen atom to point to a young-gen value — verify remembered set contains the atom",
+        "Add C-level test: mutate a young-gen atom — verify remembered set is NOT populated",
+        "Existing tests pass",
         "build.sh passes",
         "Compiles without warnings"
       ],
       "priority": 6,
-      "passes": true,
-      "notes": "test_m13.c uses the unity build pattern (includes ../src/jacl.c). Check existing tests in test_m13.c for patterns on how to compile code and inspect bytecode."
+      "passes": false,
+      "notes": "The write barrier is in src/gc.c (grey_buf_push pattern). The remembered set is structurally identical to GreyBuffer (per-thread append buffer with dynamic growth). The key difference: grey buffer is only populated when gc_active is true, but the remembered set must record old->young mutations at all times. The generational check: get GCHeader of both container and new value, check gen fields. WorkerThread is defined in src/runtime.c."
+    },
+    {
+      "id": "US-007",
+      "title": "Implement minor GC mode",
+      "description": "As a GC developer, I need a minor GC mode that only traces and sweeps young-generation objects, using the remembered set for old-to-young references.",
+      "acceptanceCriteria": [
+        "Add a gc_collect_minor function (or a mode flag on the existing gc_collect)",
+        "Minor GC mark phase: trace from all roots (same as full GC), but STOP tracing at old-gen objects (don't push their children onto mark stack) — except for objects in the remembered set",
+        "Minor GC also traces from remembered set entries: for each old-gen container in the set, trace its current value (which may be young)",
+        "Minor GC sweep: only sweep young objects (gen == 0). Old-gen lines/objects are untouched",
+        "After sweep, promote surviving young objects that meet the promotion threshold (US-005 logic)",
+        "Clear the remembered set after minor GC completes",
+        "Major GC (gc_collect) continues to work as before — traces everything, sweeps everything, resets all gen flags if desired",
+        "Add C-level test: allocate young and old objects, run minor GC, verify only dead young objects are reclaimed and old objects are untouched",
+        "Add C-level test: old atom pointing to young value, run minor GC, verify young value survives (reachable via remembered set)",
+        "Existing GC tests pass",
+        "build.sh passes",
+        "Compiles without warnings"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "The mark phase is in src/gc_collect.c (gc_mark function). The key change for minor mode: when popping a value from the mark stack and it's a heap object with gen == 1, mark it but DON'T push its children (they're all old or will be caught by remembered set). The sweep functions (gc_sweep, gc_sweep_concurrent) need a mode flag to skip old-gen objects. Non-moving: objects stay where they are, only metadata changes."
+    },
+    {
+      "id": "US-008",
+      "title": "GC scheduling heuristics for minor vs major",
+      "description": "As a GC developer, I need the GC scheduler to choose between minor and major collection based on allocation patterns.",
+      "acceptanceCriteria": [
+        "Default trigger: young allocation threshold exceeded (configurable, default ~1MB of new allocations) triggers minor GC",
+        "Major GC trigger: old generation has grown by >50% since last major GC",
+        "Emergency fallback: OOM during allocation triggers synchronous full (major) GC, same as existing 3-tier escalation",
+        "The bytes_since_gc counter on WorkerThread drives minor GC scheduling (existing infrastructure)",
+        "Add an old_gen_bytes counter that tracks total old-gen size, updated during promotion and major sweep",
+        "First GC cycle is always a major GC (no old gen exists yet)",
+        "Add C-level test: verify minor GC triggers after allocation threshold",
+        "Add C-level test: verify major GC triggers after old gen growth threshold",
+        "Existing tests pass",
+        "build.sh passes",
+        "Compiles without warnings"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "GC scheduling is currently in src/gc.c — the allocation path checks bytes_since_gc > GC_THRESHOLD and enqueues a GC task. The change: instead of always enqueuing a full GC, check whether a minor or major GC is appropriate. The gc_running atomic flag already provides mutual exclusion. Add old_gen_bytes as an atomic counter on the Runtime struct (or BlockPool). The 50% growth threshold means: if old_gen_bytes > last_major_old_gen_bytes * 1.5, trigger major."
+    },
+    {
+      "id": "US-009",
+      "title": "E2E stress test — GC under spawn/await pressure",
+      "description": "As a runtime developer, I need a stress test that spawns many tasks producing garbage while GC runs concurrently.",
+      "acceptanceCriteria": [
+        "New test/jacl/gc_stress_spawn.jacl with # mode: concurrent header",
+        "Spawns 100+ tasks, each allocating vectors/maps/strings that become garbage after use",
+        "Uses await to collect results, verifying correctness",
+        "Forces at least 2-3 GC cycles during execution (allocate enough to exceed threshold)",
+        "Correct results despite concurrent GC — verified by # expect: headers",
+        "Test runs in under 10 seconds",
+        "build.sh passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "JACL proc names must be <= 7 bytes (inline string limit). Use short names like 'work', 'trash', 'batch'. The test harness auto-discovers .jacl files in test/jacl/. Use # mode: concurrent header. Each spawned task should do enough allocation to create GC pressure — e.g., build a vector of 100 elements, compute a result from it, return just the result (letting the vector become garbage)."
+    },
+    {
+      "id": "US-010",
+      "title": "E2E stress test — parallel with large persistent data structures",
+      "description": "As a runtime developer, I need a test that shares large persistent vectors/maps across parallel tasks while GC runs.",
+      "acceptanceCriteria": [
+        "New test/jacl/gc_stress_persistent.jacl with # mode: concurrent header",
+        "Creates a large vector (1000+ elements) and a large map (100+ entries)",
+        "Passes these to parallel branches that read and derive new collections from them",
+        "GC runs during the parallel execution (allocation pressure from derived collections)",
+        "Verifies all branches see correct, uncorrupted data",
+        "Tests that the original collections are unchanged (persistence property)",
+        "build.sh passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Building a 1000-element vector: use a recursive proc that vec-push in a loop. JACL proc names <= 7 bytes. Parallel branches should do reads (vec-get, map-get) and derivations (vec-push new elements, map-set new keys) to create allocation pressure. The key correctness check: the original vector/map values are unchanged after all parallel branches complete."
+    },
+    {
+      "id": "US-011",
+      "title": "E2E stress test — atom contention under GC",
+      "description": "As a runtime developer, I need a test that hammers atoms with concurrent CAS operations while GC is active.",
+      "acceptanceCriteria": [
+        "New test/jacl/gc_stress_atom.jacl with # mode: concurrent header",
+        "Creates an atom holding a counter value",
+        "Spawns 50+ tasks that each swap! the atom (increment counter)",
+        "GC runs during the swap operations (each task also allocates garbage to create pressure)",
+        "Final atom value is correct (all swaps applied, no lost updates)",
+        "Write barrier fires correctly — no use-after-free (test doesn't crash)",
+        "build.sh passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "swap! uses CAS internally — retries on contention. The write barrier fires on successful CAS. The test verifies that the final atom value equals the sum of all increments, proving no lost updates. Each spawned task should also allocate some garbage (vectors/strings) to trigger GC during the swap operations."
+    },
+    {
+      "id": "US-012",
+      "title": "E2E stress test — deep CPS recursion with concurrent suspension",
+      "description": "As a runtime developer, I need a test that exercises deep recursive CPS chains with interleaved spawn/await to stress continuation management under GC.",
+      "acceptanceCriteria": [
+        "New test/jacl/gc_stress_deep_cps.jacl with # mode: concurrent header",
+        "Recursive proc that spawns a subtask at each level, awaits it, and recurses (at least 20 levels deep)",
+        "Each level allocates some garbage (strings, vectors) to trigger GC",
+        "Final result is correct (sum or product of recursive results)",
+        "Tests that CPS continuations are properly rooted through all GC cycles",
+        "build.sh passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": "This exercises the CPS recursive suspension pattern fixed in the previous PRD (ralph/cps-recursive-mutation-bugs). The test goes deeper (20 levels vs 3) and adds GC pressure at each level. The key invariant: every intermediate continuation must survive GC because it's rooted via gc_root/gc_root2 on the task."
+    },
+    {
+      "id": "US-013",
+      "title": "E2E stress test — race with GC and write barriers",
+      "description": "As a runtime developer, I need a test that uses race with multiple branches producing garbage, verifying the winner's result survives GC.",
+      "acceptanceCriteria": [
+        "New test/jacl/gc_stress_race.jacl with # mode: concurrent header",
+        "Races 5+ branches, each allocating different amounts of garbage",
+        "Winner's result is correct",
+        "Test runs multiple races in sequence to exercise GC across multiple race completions",
+        "build.sh passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": "Race picks the first branch to complete. Losers are cooperatively cancelled. The test should run multiple sequential races (5-10) to ensure GC handles the repeated allocation/cancellation pattern. Each branch should allocate vectors/maps as garbage to create GC pressure."
     }
   ]
 }
