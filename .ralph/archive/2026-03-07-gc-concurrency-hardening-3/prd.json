@@ -1,0 +1,175 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/gc-concurrency-hardening-3",
+  "description": "M16 — GC/Concurrency Hardening Phase 3: Fix deferred block recycling race, document memory-ordering safety invariants, extract duplicated runtime helpers, and add concurrent stress tests.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Fix deferred block recycling race",
+      "description": "As a runtime developer, I need deferred block recycling to happen safely so that the heap block list is never corrupted by concurrent allocator access.",
+      "acceptanceCriteria": [
+        "gc_sweep_concurrent in gc_collect.c: when a block is fully empty, unlink it from the heap's block list inline and call gc_block_pool_return directly",
+        "Remove the deferred_out and deferred_count_out parameters from gc_sweep_concurrent",
+        "gc_sweep_concurrent receives a BlockPool * parameter to return blocks to the pool",
+        "Remove the MAX_DEFERRED_BLOCKS constant and the deferred block arrays in gc_concurrent_collect",
+        "Remove the post-sweep deferred block unlinking loop in gc_concurrent_collect (the loop after gc_running is set to false that walks heap->blocks to unlink deferred blocks)",
+        "gc_sweep_concurrent must still skip skip_block (the owning worker's active allocation block)",
+        "Update all callers of gc_sweep_concurrent (runtime.c, test_runtime.c, test_m12.c) to match new signature",
+        "All existing GC tests pass (test_gc.c and all .jacl integration tests)",
+        "Compiles without warnings"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Document grey buffer realloc safety with regression test",
+      "description": "As a runtime developer, I need the grey buffer's realloc-during-concurrent-read safety to be explicitly documented and tested so that future changes don't accidentally break the invariant.",
+      "acceptanceCriteria": [
+        "Add a detailed comment block above grey_buf_push in gc.c explaining: (a) the race scenario (GC reads entries while worker reallocs), (b) why it's safe (release on count happens after realloc + entry write; acquire on count in gc__drain_grey_bufs sees both), (c) the critical invariant: the gb->entries pointer store and the gb->entries[c] store must both happen-before the release store to count",
+        "Add a matching comment in gc__drain_grey_bufs (runtime.c) referencing the invariant: acquire load of count ensures visibility of all entries and the entries pointer itself",
+        "New test function gc_grey_buffer_drain_after_realloc in test_gc.c: push GREY_BUF_INIT_CAP * 3 entries (forces at least one realloc), verify all entries readable and correct, verify cap grew",
+        "All pushed values in the test are heap-type JaclVals pointing to real GC-allocated objects (not sentinel values)",
+        "All existing tests pass",
+        "Compiles without warnings"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Document line_map memcpy safety on weakly-ordered architectures",
+      "description": "As a runtime developer, I need the line_map concurrent memcpy reasoning documented for ARM/RISC-V so that the benign race is understood and TSan annotations are justified.",
+      "acceptanceCriteria": [
+        "Expand the existing comment block at the Phase 3 memcpy in gc_sweep_concurrent (gc_collect.c) to include: (a) ARM/RISC-V analysis — torn byte reads from wide-store memcpy produce non-0 values treated as OCCUPIED by gc__find_free_run (harmless), (b) the one-directional invariant (sweep only transitions OCCUPIED to FREE, never reverse), (c) Phase 1 zeroing ensures freed memory is safe to allocate into regardless of line map visibility timing",
+        "Add a note about TSan suppression if this code path is annotated",
+        "All existing tests pass",
+        "Compiles without warnings"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Document epoch truncation from uint64_t to uint32_t",
+      "description": "As a runtime developer, I need the epoch field width mismatch documented so that the truncation is intentional and understood.",
+      "acceptanceCriteria": [
+        "Add a comment on the GCHeader.epoch field in gc.c explaining: field is intentionally uint32_t for header compactness (keeps GCHeader at 8 bytes), truncated from uint64_t global_epoch, wraps after ~4 billion cycles which is conservative on wraparound (false positives protect too many objects, not false negatives)",
+        "Add a comment at gc__bump_alloc where hdr->epoch = gc__thread_epoch explaining the truncation path: global_epoch (u64) -> thread_epoch (u64) -> gc__thread_epoch (u32) -> hdr->epoch (u32)",
+        "All existing tests pass",
+        "Compiles without warnings"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Extract runtime inbox push helper",
+      "description": "As a runtime developer, I want a single runtime__push_inbox helper so that the inbox push pattern is defined once and all call sites are simplified.",
+      "acceptanceCriteria": [
+        "New static function runtime__push_inbox(Runtime *rt, RuntimeTask *task) in runtime.c that handles: lock inbox mutex, grow if inbox_count >= inbox_cap, store task, increment count, unlock",
+        "Refactor runtime_submit to use runtime__push_inbox",
+        "Refactor runtime_submit_task to use runtime__push_inbox",
+        "Refactor runtime__submit_spawn_task to use runtime__push_inbox",
+        "Refactor runtime__submit_parallel_task to use runtime__push_inbox",
+        "Refactor runtime__submit_race_task to use runtime__push_inbox",
+        "Refactor runtime__schedule_continuation to use runtime__push_inbox",
+        "All existing tests pass",
+        "Compiles without warnings"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Extract VM reset and closure frame setup helper",
+      "description": "As a runtime developer, I want a single helper for reset VM state and set up a closure call frame so that the 5 task execution functions are shorter and less error-prone.",
+      "acceptanceCriteria": [
+        "New static function runtime__setup_call(VM *vm, JaclClosure *cl, int argc, JaclVal *argv) in runtime.c that: resets stack_top/frame_count/error_message/error_line/stack_trace, pushes closure + args to stack, sets frames[0] fields (closure, return_ip=NULL, stack_base, chunk), sets ip/chunk/top_chunk",
+        "argc is the number of arguments (0 for no-arg calls, 1 for single-arg like continuation/CPS calls)",
+        "argv is a pointer to argument values (NULL if argc==0)",
+        "Refactor runtime__exec_closure to use runtime__setup_call",
+        "Refactor runtime__continuation_task_exec to use runtime__setup_call",
+        "Refactor runtime__spawn_task_exec (both CPS and non-CPS paths) to use runtime__setup_call",
+        "Refactor runtime__parallel_task_exec (both CPS and non-CPS paths) to use runtime__setup_call",
+        "Refactor runtime__race_task_exec (both CPS and non-CPS paths) to use runtime__setup_call",
+        "All existing tests pass",
+        "Compiles without warnings"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Deduplicate parallel completion logic",
+      "description": "As a runtime developer, I want the non-CPS parallel completion path to call runtime__complete_parallel_slot so the logic exists in exactly one place.",
+      "acceptanceCriteria": [
+        "Non-CPS branch of runtime__parallel_task_exec calls runtime__complete_parallel_slot(self->runtime, vm, ptd->agg_val, ptd->index, task_result) instead of duplicating the completion logic inline",
+        "Remove the duplicated ~45 lines of parallel completion code from the non-CPS branch (store result, CAS error, atomic increment, check if last, build vector, schedule continuation)",
+        "All existing parallel tests pass (both CPS and non-CPS paths, including parallel_concurrent.jacl and parallel_gc_pressure.jacl)",
+        "Compiles without warnings"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Add concurrent allocation and GC stress test",
+      "description": "As a runtime developer, I need a C stress test that exercises concurrent allocation across multiple threads while sharing a block pool, to verify per-thread heap isolation and block pool access are correct under contention.",
+      "acceptanceCriteria": [
+        "New test function gc_concurrent_alloc_stress in test_gc.c",
+        "Test creates 4 pthreads, each with its own ThreadHeap sharing a single BlockPool",
+        "Each thread performs 12500 allocations (50000 total) of varying sizes (16 to 2048 bytes), writing a known pattern (e.g. thread_id repeated) to each allocation",
+        "After all threads join, walk each heap's blocks and verify known patterns are intact for all live objects",
+        "Verify block pool accounting: total_blocks_allocated matches actual blocks across all heaps plus free list",
+        "Test runs in under 5 seconds",
+        "All existing tests pass",
+        "Compiles without warnings"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Add high task churn .jacl integration test",
+      "description": "As a runtime developer, I need a .jacl test that spawns 500+ concurrent tasks under GC pressure to stress timing-sensitive race windows in the concurrent GC.",
+      "acceptanceCriteria": [
+        "New file test/jacl/gc_high_churn.jacl",
+        "Test uses parallel to spawn batches of tasks that each perform a small computation with allocation (e.g. fib(8) or building a small vector)",
+        "Total of 500+ task executions across all batches",
+        "All results collected and verified for correctness (printed and matched against expected output)",
+        "Test uses # mode: concurrent header",
+        "Test completes without hanging, crashing, or producing incorrect results",
+        "Test runs in under 10 seconds",
+        "Add test to test harness expected-output list"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Add OOM escalation tests for all 3 tiers",
+      "description": "As a runtime developer, I need tests for all 3 tiers of OOM escalation to verify that emergency GC, heap growth, and panic handling work correctly.",
+      "acceptanceCriteria": [
+        "New test gc_oom_tier1_emergency_gc in test_gc.c: set max_blocks=2, fill both blocks, install mock gc__emergency_gc_fn callback that runs gc_sweep to free objects, verify next allocation succeeds by reclaiming freed space",
+        "New test gc_oom_tier2_heap_growth in test_gc.c: set max_blocks=2, fill both blocks, no emergency GC callback set, verify tier-2 growth path allocates a third block (temporarily increase max_blocks in the callback or verify total_blocks_allocated increases to 3)",
+        "New test gc_oom_tier3_panic in test_gc.c: set max_blocks=1, fill the block, install custom gc__oom_handler that sets a flag instead of aborting, verify the handler is called with correct heap pointer and request size arguments",
+        "Clear gc__emergency_gc_fn before each test to avoid stale callbacks from prior VM-based tests",
+        "All existing tests pass",
+        "Compiles without warnings"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
