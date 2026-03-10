@@ -14,10 +14,14 @@ Progress log for ralph/m12m13-hardening branch.
 - Promotion: survive_count incremented each GC sweep; promoted (gen=1) when survive_count >= 1 at second sweep (2 cycles survived)
 - The GC is non-moving. No compaction, no semi-spaces, no object relocation.
 - gc_alloc is in src/gc.c, gc_collect/gc_sweep in src/gc_collect.c
+- GC scheduling: gc_should_major() returns true for first cycle or when old_gen_bytes > last_major_old_gen_bytes * 1.5
+- ThreadHeap tracks old_gen_bytes, last_major_old_gen_bytes, gc_cycle_count for scheduling
+- Major sweep recounts old_gen_bytes; minor sweep adds promoted_bytes to old_gen_bytes
 - Write barrier (hybrid SATB + insertion) is in src/gc.c. Generational write barrier (gc_remembered_set_barrier) fires unconditionally alongside it.
 - RememberedSet is per-thread (on WorkerThread), structurally identical to GreyBuffer. VM has remembered_set pointer (NULL in single-threaded mode).
 - All mutable container mutation sites (OP_SET_CELL_LOCAL, OP_SET_CELL_UPVALUE, OP_RESET, OP_SWAP) call gc_remembered_set_barrier after gc_write_barrier
 - When adding RememberedSet to WorkerThread, also update rt_test__init_no_threads / rt_test__destroy_no_threads in ALL test files (test_m12.c, test_m13.c, test_runtime.c)
+- When capturing variables in spawn bodies for use in function args, pre-compute into def locals (e.g. `def a0 [+ $base 1]`) then capture the local — avoid inline `[+ $base N]` in spawn bodies which can cause issues with complex expressions
 - Worker pinning infrastructure: pin_all_closures flag in compiler, pinned/pin_worker_id on JaclClosure, runtime__push_pinned() in runtime.c
 - ast__contains_nonlocal_set() scans AST for set! usage to decide pinning
 - compiler__body_captures_mutable() checks $var refs to mutable bindings for pinning
@@ -25,6 +29,11 @@ Progress log for ralph/m12m13-hardening branch.
 - Bare `$var` in JACL is parsed as a zero-arg function call, NOT a value expression
 - Transitive capture: `captures_mutable` flag on Local/Upvalue/GlobalArity propagates through upvalue resolution and continuation eager capture
 - To call a closure captured from enclosing scope in a spawn body, use `[$f]` (var ref call), not `[f]` (name call) — name calls only resolve builtins/globals
+- CPS mode effective recursion limit ~65 iterations (VM_STACK_MAX=256). For large N, use non-recursive batched patterns.
+- Multi-line `[command ...]` (newlines between `[` and `]`) causes parse errors. Keep on one line or use `\` continuation.
+- Returning a vector/map from a CPS function: bare `$var` calls it as a function. Wrap in a builtin like `[vec-slice $v 0 [vec-len $v]]`.
+- Large vector pattern: `v10` (inline 10) + `c100` (concat 10 v10s) + `mkv` (chain 10 c100s) = 1000 elements, zero recursion
+- Large map pattern: nested `[map-set [map-set ...] k v]` with 10 entries per def, 10 defs = 100 entries
 
 ---
 
@@ -118,4 +127,109 @@ Progress log for ralph/m12m13-hardening branch.
   - remembered_set_drain does linear dedup — fine for small sets but could use a hash set for large workloads
   - When adding fields to WorkerThread, must update ALL test files' rt_test__init_no_threads helpers (3 files)
   - The container JaclVal (atom/box/cell tagged pointer) is stored in the remembered set, not the raw JaclMutableRef*
+- Minor GC: gc_mark_minor stops tracing at old-gen objects (gen==1), gc_sweep_minor only zeros dead young objects and preserves old-gen lines
+- After mark bit toggle, newly allocated objects (mark=0) may alias current_mark — this is expected one-cycle immunity, not a bug
+---
+
+## 2026-03-10 - US-007
+- Implemented minor GC mode: gc_mark_minor, gc_sweep_minor, gc_collect_minor
+- gc_mark_minor traces from all roots but stops at old-gen objects (marks them but doesn't trace children)
+- gc_mark_minor also traces remembered set entries (old-gen containers → young-gen children)
+- gc_sweep_minor tracks which lines contain old-gen objects (protected), only zeros dead young objects
+- gc_sweep_minor promotes surviving young objects using same threshold as full GC
+- gc_collect_minor clears remembered set after collection
+- Major GC (gc_collect) continues to work unchanged
+- Added 5 tests: minor_gc_reclaims_dead_young, minor_gc_remembered_set_saves, minor_gc_old_untouched, minor_gc_promotes_survivors, minor_gc_major_still_works
+- Files changed: src/gc_collect.c, test/test_m12.c
+- **Learnings for future iterations:**
+  - After mark bit toggle (minor or major GC), newly allocated objects have mark=0 which may match current_mark — objects allocated between GCs get a one-cycle immunity (not collected until the next cycle)
+  - gc_sweep_minor must track old_on_line[] to avoid freeing lines that contain old-gen objects
+  - Remembered set entries need their children traced (not just marked) to find young objects reachable through old containers
+  - gc_collect_minor must clear the remembered set after processing to avoid stale entries
+---
+
+## 2026-03-10 - US-008
+- Implemented GC scheduling heuristics: gc_should_major() determines minor vs major collection
+- Added old_gen_bytes, last_major_old_gen_bytes, gc_cycle_count fields to ThreadHeap
+- gc_sweep (major) recounts old_gen_bytes from all surviving old-gen objects
+- gc_sweep_minor tracks promoted_bytes and adds to old_gen_bytes
+- gc_sweep_concurrent also tracks old_gen_bytes for concurrent mode
+- Single-threaded safepoint (vm.c) now chooses minor vs major based on gc_should_major()
+- Concurrent GC (always major) updates last_major_old_gen_bytes and gc_cycle_count
+- First GC cycle always major (gc_cycle_count == 0); major if old gen grew >50%
+- Added 5 tests: first_cycle_major, minor_after_threshold, major_on_old_growth, old_gen_tracked, cycle_count
+- Files changed: src/gc.c, src/gc_collect.c, src/vm.c, src/runtime.c, test/test_m12.c
+- **Learnings for future iterations:**
+  - gc_should_major() is a pure function on ThreadHeap — easy to test in isolation
+  - Concurrent GC is always major for now (concurrent minor would need per-worker remembered set draining coordination)
+  - old_gen_bytes tracking in gc_sweep_concurrent must count both already-old and newly-promoted objects
+  - gc_cycle_count is per-heap in single-threaded mode, per-worker in concurrent mode (all workers increment together)
+---
+
+## 2026-03-10 - US-009
+- Created gc_stress_spawn.jacl: E2E stress test spawning 100 tasks under concurrent GC
+- Each task allocates 30 rounds of 13-element vectors (garbage) then returns its index
+- 10 batches of 10 spawns (s10 helper), results summed to verify correctness (5050)
+- Pre-computes spawn arguments into local defs to avoid expression evaluation issues in spawn bodies
+- Forces multiple GC cycles through heavy allocation pressure (100 tasks × 30 iterations × 13-element vectors)
+- Files changed: test/jacl/gc_stress_spawn.jacl
+- **Learnings for future iterations:**
+  - Pre-compute values into `def` locals before capturing in spawn bodies — inline expressions like `[+ $base N]` can cause issues when captured
+  - The s10 pattern (batch 10 spawns in a helper proc) is a good way to scale to 100+ spawns without hitting code size limits
+  - All await results should be stored in def locals before summing — don't await the same future twice
+---
+
+## 2026-03-10 - US-010
+- Created gc_stress_persistent.jacl: E2E stress test sharing large persistent data structures across parallel branches under concurrent GC
+- Builds a 1000-element vector [0..999] using batched vec-concat (10 chunks of 100 elements, each chunk built from 10x v10 inline constructors)
+- Builds a 100-entry map {0:0, ..., 99:99} using nested map-set (10 entries per line, 10 lines)
+- 4 parallel branches: (1) sum vector with garbage, (2) derive new vector + sum original, (3) sum map with garbage, (4) derive new map + sum original
+- Post-parallel verification: sums original vector and map again to confirm persistence (originals unchanged)
+- Expected output: 499500*3 + 4950*3 = 1513350
+- Files changed: test/jacl/gc_stress_persistent.jacl
+- **Learnings for future iterations:**
+  - CPS mode has effective recursion limit of ~65 iterations due to VM_STACK_MAX=256. Use non-recursive batched patterns for large N.
+  - Bare `$var` in expression position is a zero-arg function call — returning a vector/map from a function requires wrapping in a builtin like `[vec-slice $v 0 [vec-len $v]]`
+  - Multi-line `[command ...]` calls (with newlines between `[` and `]`) cause parse errors. Use backslash continuation `\` or keep commands on single lines.
+  - Build large vectors with `v10` (inline 10 elements) + `c100` (concat 10 chunks) + `mkv` (chain 10 c100 calls) = 1000 elements with zero recursion
+  - Build large maps with nested `[map-set [map-set ... ] k v]` — 10 entries per line, properly nested brackets
+  - `sumv`/`summ` must also be non-recursive: use s10/sm10 (sum 10 elements inline) + sv100 (sum 10 batches) + sumv (sum 10 sv100s)
+---
+
+## 2026-03-10 - US-011
+- Created gc_stress_atom.jacl: E2E stress test — 50 tasks concurrently swap! a single shared atom under GC pressure
+- 50 tasks (5 batches of 10 via s10 helper), each does 10 swap! increments + allocates garbage (20 rounds of 13-element vectors)
+- Final atom value = 50 × 10 = 500, verifying no lost updates under CAS contention
+- Write barrier fires on each successful swap!, GC triggered by allocation pressure from garbage vectors
+- Files changed: test/jacl/gc_stress_atom.jacl
+- **Learnings for future iterations:**
+  - Single shared atom with 50 concurrent swappers works correctly — CAS retry handles contention
+  - Pattern: `bump` proc does recursive swap! loop, `trash` proc does recursive allocation, both called in spawn body
+  - s10 pattern reused from US-009 for batching 10 spawns at a time
+---
+
+## 2026-03-10 - US-012
+- Created gc_stress_deep_cps.jacl: E2E stress test — deep CPS recursion with spawn/await at each of 20 levels
+- Recursive `deep` proc: at each level, allocates garbage, spawns a subtask (which also allocates garbage), awaits result, recurses
+- Final result = 1+2+...+20 = 210, verifying all CPS continuations survive GC across 20 levels of suspension
+- Each level allocates 10 rounds of garbage (15 rounds in spawned subtask) to trigger multiple GC cycles
+- Files changed: test/jacl/gc_stress_deep_cps.jacl
+- **Learnings for future iterations:**
+  - 20 levels of spawn/await recursion is well within CPS limits (~65 effective iterations)
+  - The `deep` pattern (recursive spawn+await) is simpler than batched patterns since each level is sequential
+  - Pre-capturing `$lvl` into `def lv` before spawn body avoids issues with mutable loop variables
+---
+
+## 2026-03-10 - US-013
+- Created gc_stress_race.jacl: E2E stress test — 8 sequential races with 5 branches each under concurrent GC
+- Each race has 5 branches allocating different amounts of garbage (5, 10, 20, 30, 40 rounds)
+- All branches return 100 for deterministic output; 8 races × 100 = 800
+- `trash` proc allocates 13-element vectors recursively for GC pressure
+- `r5` helper encapsulates a single 5-branch race, called 8 times sequentially
+- Files changed: test/jacl/gc_stress_race.jacl
+- **Learnings for future iterations:**
+  - Race branches must all return the same value for deterministic test output (winner is nondeterministic)
+  - Vary garbage allocation amounts across branches to test different completion times
+  - Running multiple sequential races exercises GC across repeated allocation/cancellation cycles
+  - Avoid naming a local the same as a proc (used `r5v` instead of `r5` as local name)
 ---

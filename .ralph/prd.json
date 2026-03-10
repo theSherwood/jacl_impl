@@ -138,7 +138,7 @@
         "Compiles without warnings"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "The mark phase is in src/gc_collect.c (gc_mark function). The key change for minor mode: when popping a value from the mark stack and it's a heap object with gen == 1, mark it but DON'T push its children (they're all old or will be caught by remembered set). The sweep functions (gc_sweep, gc_sweep_concurrent) need a mode flag to skip old-gen objects. Non-moving: objects stay where they are, only metadata changes."
     },
     {
@@ -159,7 +159,7 @@
         "Compiles without warnings"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "GC scheduling is currently in src/gc.c — the allocation path checks bytes_since_gc > GC_THRESHOLD and enqueues a GC task. The change: instead of always enqueuing a full GC, check whether a minor or major GC is appropriate. The gc_running atomic flag already provides mutual exclusion. Add old_gen_bytes as an atomic counter on the Runtime struct (or BlockPool). The 50% growth threshold means: if old_gen_bytes > last_major_old_gen_bytes * 1.5, trigger major."
     },
     {
@@ -176,7 +176,7 @@
         "build.sh passes"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "JACL proc names must be <= 7 bytes (inline string limit). Use short names like 'work', 'trash', 'batch'. The test harness auto-discovers .jacl files in test/jacl/. Use # mode: concurrent header. Each spawned task should do enough allocation to create GC pressure — e.g., build a vector of 100 elements, compute a result from it, return just the result (letting the vector become garbage)."
     },
     {
@@ -193,7 +193,7 @@
         "build.sh passes"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Building a 1000-element vector: use a recursive proc that vec-push in a loop. JACL proc names <= 7 bytes. Parallel branches should do reads (vec-get, map-get) and derivations (vec-push new elements, map-set new keys) to create allocation pressure. The key correctness check: the original vector/map values are unchanged after all parallel branches complete."
     },
     {
@@ -210,7 +210,7 @@
         "build.sh passes"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "swap! uses CAS internally — retries on contention. The write barrier fires on successful CAS. The test verifies that the final atom value equals the sum of all increments, proving no lost updates. Each spawned task should also allocate some garbage (vectors/strings) to trigger GC during the swap operations."
     },
     {
@@ -226,7 +226,7 @@
         "build.sh passes"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "This exercises the CPS recursive suspension pattern fixed in the previous PRD (ralph/cps-recursive-mutation-bugs). The test goes deeper (20 levels vs 3) and adds GC pressure at each level. The key invariant: every intermediate continuation must survive GC because it's rooted via gc_root/gc_root2 on the task."
     },
     {
@@ -241,7 +241,7 @@
         "build.sh passes"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "Race picks the first branch to complete. Losers are cooperatively cancelled. The test should run multiple sequential races (5-10) to ensure GC handles the repeated allocation/cancellation pattern. Each branch should allocate vectors/maps as garbage to create GC pressure."
     }
   ]
