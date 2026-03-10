@@ -1017,6 +1017,42 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_TAIL_CALL: {
+        uint8_t arg_count = vm__read_byte(vm);
+        JaclVal callee = vm->stack[vm->stack_top - arg_count - 1];
+
+        if (!jacl_is_closure(callee)) {
+          vm__set_error(vm, "cannot call %s value", vm__type_name(callee));
+          return VM_RUNTIME_ERROR;
+        }
+
+        JaclClosure* closure = jacl_as_closure(callee);
+
+        if (arg_count != closure->param_count) {
+          vm__set_error(vm, "expected %d arguments but got %d",
+                       (int)closure->param_count, (int)arg_count);
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Slide callee + args down to reuse current frame's stack region.
+           stack_base - 1 is where the caller's closure sits. */
+        uint32_t src = vm->stack_top - arg_count - 1; /* callee position */
+        uint32_t dst = frame->stack_base - 1;         /* overwrite current frame's closure */
+        for (uint32_t i = 0; i <= (uint32_t)arg_count; i++) {
+          vm->stack[dst + i] = vm->stack[src + i];
+        }
+        vm->stack_top = dst + 1 + arg_count;
+
+        /* Reuse current frame — no frame_count change */
+        frame->closure    = closure;
+        frame->stack_base = dst + 1;
+        frame->chunk      = &closure->chunk;
+
+        vm->ip    = frame->chunk->code;
+        vm->chunk = frame->chunk;
+        break;
+      }
+
       case OP_RETURN: {
         JaclVal return_value;
         result = vm__pop(vm, &return_value);

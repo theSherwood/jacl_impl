@@ -2230,6 +2230,263 @@ static int test_call_frame_overflow(void) {
   TEST_PASS();
 }
 
+/* Test: basic tail call — outer(x) tail-calls inner(x) which returns x+1 */
+static int test_tail_call_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* inner(x): GET_LOCAL 0, CONST 1, ADD, RETURN → returns x+1 */
+  JaclClosure* inner = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&inner->chunk, &arena);
+  inner->param_count = 1;
+  inner->param_names = (JaclVal*)arena_alloc(&arena, sizeof(JaclVal));
+  inner->param_names[0] = jacl_inline_string("x", 1);
+  inner->upvalue_count = 0;
+  inner->upvalues = NULL;
+  inner->name = "inner";
+
+  uint16_t c1_inner = chunk_add_constant(&inner->chunk, jacl_i32(1));
+  chunk_write(&inner->chunk, OP_GET_LOCAL, 1);
+  chunk_write(&inner->chunk, 0, 1);
+  chunk_write(&inner->chunk, OP_CONST, 1);
+  chunk_write_u16(&inner->chunk, c1_inner, 1);
+  chunk_write(&inner->chunk, OP_ADD, 1);
+  chunk_write(&inner->chunk, OP_RETURN, 1);
+
+  /* outer(x): push inner, push x, TAIL_CALL 1 → tail-calls inner(x) */
+  JaclClosure* outer = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&outer->chunk, &arena);
+  outer->param_count = 1;
+  outer->param_names = (JaclVal*)arena_alloc(&arena, sizeof(JaclVal));
+  outer->param_names[0] = jacl_inline_string("x", 1);
+  outer->upvalue_count = 0;
+  outer->upvalues = NULL;
+  outer->name = "outer";
+
+  uint16_t inner_idx = chunk_add_constant(&outer->chunk, jacl_closure(inner));
+  chunk_write(&outer->chunk, OP_CONST, 1);
+  chunk_write_u16(&outer->chunk, inner_idx, 1);
+  chunk_write(&outer->chunk, OP_GET_LOCAL, 1);
+  chunk_write(&outer->chunk, 0, 1);
+  chunk_write(&outer->chunk, OP_TAIL_CALL, 1);
+  chunk_write(&outer->chunk, 1, 1);
+
+  /* Main: push outer, push 10, call 1, halt → expect 11 */
+  BytecodeChunk main_chunk;
+  chunk_init(&main_chunk, &arena);
+  uint16_t outer_idx = chunk_add_constant(&main_chunk, jacl_closure(outer));
+  uint16_t c10 = chunk_add_constant(&main_chunk, jacl_i32(10));
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, outer_idx, 1);
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, c10, 1);
+  chunk_write(&main_chunk, OP_CALL, 1);
+  chunk_write(&main_chunk, 1, 1);
+  chunk_write(&main_chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &main_chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 11);
+
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: self-recursive tail call does NOT overflow frames.
+ * A closure tail-calls itself 200 times (way past VM_FRAMES_MAX=64),
+ * decrementing a counter each time, then returns 0 at base case.
+ * With OP_CALL this would overflow; with OP_TAIL_CALL it must succeed. */
+static int test_tail_call_no_frame_overflow(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* countdown(n):
+   *   GET_LOCAL 0               ; push n
+   *   CONST 0                   ; push 0
+   *   EQ                        ; n == 0?
+   *   JUMP_IF_FALSE +offset     ; if false, skip to recursive case
+   *   CONST 0                   ; push 0 (base case result)
+   *   RETURN
+   *   ; recursive case:
+   *   CONST self                ; push self
+   *   GET_LOCAL 0               ; push n
+   *   CONST 1                   ; push 1
+   *   SUB                       ; n - 1
+   *   TAIL_CALL 1               ; countdown(n-1) — reuses frame
+   */
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->param_count = 1;
+  cl->param_names = (JaclVal*)arena_alloc(&arena, sizeof(JaclVal));
+  cl->param_names[0] = jacl_inline_string("n", 1);
+  cl->upvalue_count = 0;
+  cl->upvalues = NULL;
+  cl->name = "countdown";
+
+  uint16_t self_idx = chunk_add_constant(&cl->chunk, jacl_closure(cl));
+  uint16_t c0 = chunk_add_constant(&cl->chunk, jacl_i32(0));
+  uint16_t c1 = chunk_add_constant(&cl->chunk, jacl_i32(1));
+
+  /* n == 0 check */
+  chunk_write(&cl->chunk, OP_GET_LOCAL, 1);
+  chunk_write(&cl->chunk, 0, 1);
+  chunk_write(&cl->chunk, OP_CONST, 1);
+  chunk_write_u16(&cl->chunk, c0, 1);
+  chunk_write(&cl->chunk, OP_EQ, 1);
+  chunk_write(&cl->chunk, OP_JUMP_IF_FALSE, 1);
+  chunk_write_u16(&cl->chunk, 4, 1);  /* skip over CONST+RETURN = 4 bytes */
+
+  /* base case: return 0 */
+  chunk_write(&cl->chunk, OP_CONST, 1);
+  chunk_write_u16(&cl->chunk, c0, 1);
+  chunk_write(&cl->chunk, OP_RETURN, 1);
+
+  /* recursive case: tail-call self(n-1) */
+  chunk_write(&cl->chunk, OP_CONST, 1);
+  chunk_write_u16(&cl->chunk, self_idx, 1);
+  chunk_write(&cl->chunk, OP_GET_LOCAL, 1);
+  chunk_write(&cl->chunk, 0, 1);
+  chunk_write(&cl->chunk, OP_CONST, 1);
+  chunk_write_u16(&cl->chunk, c1, 1);
+  chunk_write(&cl->chunk, OP_SUB, 1);
+  chunk_write(&cl->chunk, OP_TAIL_CALL, 1);
+  chunk_write(&cl->chunk, 1, 1);
+
+  /* Main: push closure, push 200, call 1, halt */
+  BytecodeChunk main_chunk;
+  chunk_init(&main_chunk, &arena);
+  uint16_t cl_main = chunk_add_constant(&main_chunk, jacl_closure(cl));
+  uint16_t c200 = chunk_add_constant(&main_chunk, jacl_i32(200));
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, cl_main, 1);
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, c200, 1);
+  chunk_write(&main_chunk, OP_CALL, 1);
+  chunk_write(&main_chunk, 1, 1);
+  chunk_write(&main_chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &main_chunk);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 0);
+
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: tail-calling a non-closure produces error */
+static int test_tail_call_non_closure(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* outer(x): push 42, TAIL_CALL 0 → tries to tail-call an integer */
+  JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&cl->chunk, &arena);
+  cl->param_count = 0;
+  cl->param_names = NULL;
+  cl->upvalue_count = 0;
+  cl->upvalues = NULL;
+  cl->name = "bad";
+
+  uint16_t c42 = chunk_add_constant(&cl->chunk, jacl_i32(42));
+  chunk_write(&cl->chunk, OP_CONST, 1);
+  chunk_write_u16(&cl->chunk, c42, 1);
+  chunk_write(&cl->chunk, OP_TAIL_CALL, 1);
+  chunk_write(&cl->chunk, 0, 1);
+
+  BytecodeChunk main_chunk;
+  chunk_init(&main_chunk, &arena);
+  uint16_t cl_idx = chunk_add_constant(&main_chunk, jacl_closure(cl));
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, cl_idx, 1);
+  chunk_write(&main_chunk, OP_CALL, 1);
+  chunk_write(&main_chunk, 0, 1);
+  chunk_write(&main_chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &main_chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "cannot call") != NULL);
+
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: tail call with wrong arg count produces error */
+static int test_tail_call_arg_mismatch(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* target expects 2 args */
+  JaclClosure* target = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&target->chunk, &arena);
+  target->param_count = 2;
+  target->param_names = NULL;
+  target->upvalue_count = 0;
+  target->upvalues = NULL;
+  target->name = "target";
+  chunk_write(&target->chunk, OP_NIL, 1);
+  chunk_write(&target->chunk, OP_RETURN, 1);
+
+  /* outer(): push target, push 10, TAIL_CALL 1 → 1 arg but target wants 2 */
+  JaclClosure* outer = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  chunk_init(&outer->chunk, &arena);
+  outer->param_count = 0;
+  outer->param_names = NULL;
+  outer->upvalue_count = 0;
+  outer->upvalues = NULL;
+  outer->name = "outer";
+
+  uint16_t target_idx = chunk_add_constant(&outer->chunk, jacl_closure(target));
+  uint16_t c10 = chunk_add_constant(&outer->chunk, jacl_i32(10));
+  chunk_write(&outer->chunk, OP_CONST, 1);
+  chunk_write_u16(&outer->chunk, target_idx, 1);
+  chunk_write(&outer->chunk, OP_CONST, 1);
+  chunk_write_u16(&outer->chunk, c10, 1);
+  chunk_write(&outer->chunk, OP_TAIL_CALL, 1);
+  chunk_write(&outer->chunk, 1, 1);
+
+  BytecodeChunk main_chunk;
+  chunk_init(&main_chunk, &arena);
+  uint16_t outer_idx = chunk_add_constant(&main_chunk, jacl_closure(outer));
+  chunk_write(&main_chunk, OP_CONST, 1);
+  chunk_write_u16(&main_chunk, outer_idx, 1);
+  chunk_write(&main_chunk, OP_CALL, 1);
+  chunk_write(&main_chunk, 0, 1);
+  chunk_write(&main_chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = vm_exec(&vm, &main_chunk);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "expected") != NULL);
+
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* Test: truthiness — empty string and i32(0) are truthy */
 static int test_truthiness(void) {
   tracker_reset();
@@ -2345,6 +2602,10 @@ int main(void) {
     { "call_non_closure",           test_call_non_closure },
     { "call_arg_mismatch",          test_call_arg_mismatch },
     { "call_frame_overflow",        test_call_frame_overflow },
+    { "tail_call_basic",            test_tail_call_basic },
+    { "tail_call_no_frame_overflow", test_tail_call_no_frame_overflow },
+    { "tail_call_non_closure",      test_tail_call_non_closure },
+    { "tail_call_arg_mismatch",     test_tail_call_arg_mismatch },
     { "truthiness",                 test_truthiness },
   };
 

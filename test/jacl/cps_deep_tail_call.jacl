@@ -1,0 +1,20 @@
+# expect: 500500
+# mode: concurrent
+# Deep CPS recursion via tail-call optimization.
+# Computes sum 1..1000 = 500500 via recursive spawn/await.
+# This would have hit stack overflow at ~65 iterations without TCO.
+proc sum [n] {
+  if [== $n 0] {
+    0
+  } {
+    def f [spawn { [+ $n 0] }]
+    def v [await $f]
+    def rest [sum [- $n 1]]
+    [+ $v $rest]
+  }
+}
+proc main [] {
+  def r [sum 1000]
+  print $r
+}
+main

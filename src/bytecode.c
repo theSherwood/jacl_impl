@@ -40,6 +40,7 @@ typedef enum {
   OP_JUMP_IF_FALSE, /* conditional jump: followed by uint16_t offset, pops condition */
   OP_LOOP,          /* backward jump: followed by uint16_t offset */
   OP_CALL,          /* call closure: followed by uint8_t arg count */
+  OP_TAIL_CALL,     /* tail call: followed by uint8_t arg count; reuses current frame */
   OP_RETURN,        /* return from call */
   OP_CLOSURE,       /* create closure: followed by uint16_t const index, then N upvalue descriptors */
   OP_POP_N,         /* discard N values: followed by uint8_t count */
@@ -295,6 +296,7 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_JUMP_IF_FALSE:   return "OP_JUMP_IF_FALSE";
     case OP_LOOP:            return "OP_LOOP";
     case OP_CALL:            return "OP_CALL";
+    case OP_TAIL_CALL:       return "OP_TAIL_CALL";
     case OP_RETURN:          return "OP_RETURN";
     case OP_CLOSURE:         return "OP_CLOSURE";
     case OP_POP_N:           return "OP_POP_N";

@@ -1402,7 +1402,7 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
     if (stmt_count == 0) {
       compiler__emit_get_k(&body_compiler, line);
       compiler__emit_byte(&body_compiler, OP_NIL, line);
-      compiler__emit_byte(&body_compiler, OP_CALL, line);
+      compiler__emit_byte(&body_compiler, OP_TAIL_CALL, line);
       compiler__emit_byte(&body_compiler, 1, line);
     } else {
       compiler__compile_cps_stmts(&body_compiler, stmts, stmt_count, line);
@@ -1536,8 +1536,8 @@ static void compiler__compile_suspending_call_cps(Compiler* c,
     compiler__emit_continuation(c, param_name, remaining_stmts, remaining_count, line);
   }
 
-  /* Call with argc + 1 (extra __k param) */
-  compiler__emit_byte(c, OP_CALL, line);
+  /* Tail call with argc + 1 (extra __k param) — reuses frame */
+  compiler__emit_byte(c, OP_TAIL_CALL, line);
   compiler__emit_byte(c, (uint8_t)(argc + 1), line);
 }
 
@@ -1606,8 +1606,8 @@ static void compiler__compile_cps_branch(Compiler* c, AstNode* block,
     } else {
       compiler__emit_byte(c, OP_NIL, line);
     }
-    /* Call k(result) */
-    compiler__emit_byte(c, OP_CALL, line);
+    /* Tail call k(result) — reuses frame */
+    compiler__emit_byte(c, OP_TAIL_CALL, line);
     compiler__emit_byte(c, 1, line);
   }
 }
@@ -1667,7 +1667,7 @@ static void compiler__compile_cps_if(Compiler* c, AstNode* if_node,
       compiler__emit_get_k(c, line);
     }
     compiler__emit_byte(c, OP_NIL, line);
-    compiler__emit_byte(c, OP_CALL, line);
+    compiler__emit_byte(c, OP_TAIL_CALL, line);
     compiler__emit_byte(c, 1, line);
   }
 
@@ -1906,10 +1906,10 @@ static void compiler__compile_cps_extract_def_value(
 static void compiler__compile_cps_stmts(Compiler* c, AstNode** stmts,
                                          uint32_t count, uint32_t line) {
   if (count == 0) {
-    /* No statements: call __k(nil) */
+    /* No statements: tail-call __k(nil) */
     compiler__emit_get_k(c, line);
     compiler__emit_byte(c, OP_NIL, line);
-    compiler__emit_byte(c, OP_CALL, line);
+    compiler__emit_byte(c, OP_TAIL_CALL, line);
     compiler__emit_byte(c, 1, line);
     return;
   }
@@ -1937,8 +1937,8 @@ static void compiler__compile_cps_stmts(Compiler* c, AstNode** stmts,
     compiler__emit_get_k(c, line);
     compiler__compile_node(c, stmts[count - 1]);
 
-    /* Call __k(result) */
-    compiler__emit_byte(c, OP_CALL, line);
+    /* Tail-call __k(result) */
+    compiler__emit_byte(c, OP_TAIL_CALL, line);
     compiler__emit_byte(c, 1, line);
     return;
   }
@@ -3041,10 +3041,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       AstNode** stmts = body_block->data.block.commands;
 
       if (stmt_count == 0) {
-        /* Empty body: call __k(nil) */
+        /* Empty body: tail-call __k(nil) */
         compiler__emit_get_k(&body_compiler, line);
         compiler__emit_byte(&body_compiler, OP_NIL, line);
-        compiler__emit_byte(&body_compiler, OP_CALL, line);
+        compiler__emit_byte(&body_compiler, OP_TAIL_CALL, line);
         compiler__emit_byte(&body_compiler, 1, line);
       } else {
         compiler__compile_cps_stmts(&body_compiler, stmts, stmt_count, line);
@@ -4008,7 +4008,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       if (stmt_count == 0) {
         compiler__emit_get_k(&body_compiler, line);
         compiler__emit_byte(&body_compiler, OP_NIL, line);
-        compiler__emit_byte(&body_compiler, OP_CALL, line);
+        compiler__emit_byte(&body_compiler, OP_TAIL_CALL, line);
         compiler__emit_byte(&body_compiler, 1, line);
       } else {
         compiler__compile_cps_stmts(&body_compiler, stmts, stmt_count, line);

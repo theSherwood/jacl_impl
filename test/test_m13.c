@@ -4171,17 +4171,17 @@ static int test_cps_recursive_tail_call_passes_k(void) {
     /* The deepest continuation must capture __k to pass to the recursive call */
     ASSERT(deepest->upvalue_count >= 1);
 
-    /* Verify the deepest continuation has OP_CALL (for the recursive call)
+    /* Verify the deepest continuation has OP_TAIL_CALL (for the recursive call)
      * but NOT OP_SPAWN or OP_AWAIT (those are in outer continuations) */
-    bool found_call = false;
+    bool found_tail_call = false;
     bool found_spawn_in_deepest = false;
     bool found_await_in_deepest = false;
     for (uint32_t i = 0; i < deepest->chunk.code_count; i++) {
-        if (deepest->chunk.code[i] == OP_CALL) found_call = true;
+        if (deepest->chunk.code[i] == OP_TAIL_CALL) found_tail_call = true;
         if (deepest->chunk.code[i] == OP_SPAWN) found_spawn_in_deepest = true;
         if (deepest->chunk.code[i] == OP_AWAIT) found_await_in_deepest = true;
     }
-    ASSERT(found_call);
+    ASSERT(found_tail_call);
     ASSERT(!found_spawn_in_deepest);
     ASSERT(!found_await_in_deepest);
 

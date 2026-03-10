@@ -21,26 +21,26 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 
 ## Milestone Roadmap
 
-| #   | Milestone                 | Status       | Key Deliverable                                    |
-| --- | ------------------------- | ------------ | -------------------------------------------------- |
-| 0   | Value Representation      | **COMPLETE** | 64-bit tagged values, arithmetic, comparisons      |
-| 1   | Lexer                     | **COMPLETE** | Token stream (23 token types)                      |
-| 2   | Parser & AST              | **COMPLETE** | Recursive descent parser, arena-allocated AST      |
-| 3   | Bytecode Compiler & VM    | **COMPLETE** | Opcodes, compiler, stack VM, `jacl_run` pipeline   |
-| 4   | Variables, Procs, Control | **COMPLETE** | `proc`, `if`, closures, lexical scoping            |
-| 5   | String System             | **COMPLETE** | Heap interned strings, interpolation end-to-end    |
-| 6   | Line-Based Syntax Sugar   | **COMPLETE** | Implicit brackets, line/semicolon/comma delimiters |
-| 7   | Arity Checking            | **COMPLETE** | Compile-time arity checks, variadic procs          |
-| 8   | Persistent Collections    | **COMPLETE** | Vectors (RRB) and maps (HAMT) from JACL            |
-| 9   | Error Handling            | **COMPLETE** | Error flag propagation, `try`                      |
-| 10  | Mutable State             | **COMPLETE** | `mut`, `set!`, `box`, `atom`                       |
-| 11  | Static Type System        | **COMPLETE** | Typed/unboxed values, compile-time checking        |
+| #   | Milestone                 | Status       | Key Deliverable                                                                           |
+| --- | ------------------------- | ------------ | ----------------------------------------------------------------------------------------- |
+| 0   | Value Representation      | **COMPLETE** | 64-bit tagged values, arithmetic, comparisons                                             |
+| 1   | Lexer                     | **COMPLETE** | Token stream (23 token types)                                                             |
+| 2   | Parser & AST              | **COMPLETE** | Recursive descent parser, arena-allocated AST                                             |
+| 3   | Bytecode Compiler & VM    | **COMPLETE** | Opcodes, compiler, stack VM, `jacl_run` pipeline                                          |
+| 4   | Variables, Procs, Control | **COMPLETE** | `proc`, `if`, closures, lexical scoping                                                   |
+| 5   | String System             | **COMPLETE** | Heap interned strings, interpolation end-to-end                                           |
+| 6   | Line-Based Syntax Sugar   | **COMPLETE** | Implicit brackets, line/semicolon/comma delimiters                                        |
+| 7   | Arity Checking            | **COMPLETE** | Compile-time arity checks, variadic procs                                                 |
+| 8   | Persistent Collections    | **COMPLETE** | Vectors (RRB) and maps (HAMT) from JACL                                                   |
+| 9   | Error Handling            | **COMPLETE** | Error flag propagation, `try`                                                             |
+| 10  | Mutable State             | **COMPLETE** | `mut`, `set!`, `box`, `atom`                                                              |
+| 11  | Static Type System        | **COMPLETE** | Typed/unboxed values, compile-time checking                                               |
 | 12  | Garbage Collection        | **COMPLETE** | Epoch-based tracing GC, non-moving generational (sticky mark-bit), minor/major scheduling |
 | 13  | Concurrency               | **COMPLETE** | NxM scheduler, parallel/spawn/await, escape analysis for mutable capture pinning          |
-| 14  | Module System             |              | File modules, sandboxing                           |
-| 15  | Macro System              |              | AST macros, hygiene                                |
-| 16  | Phase 2 Syntax            |              | Operators, assignment sugar                        |
-| 17  | FFI & Embedding           |              | C interop, embedding API                           |
+| 14  | Module System             |              | File modules, sandboxing                                                                  |
+| 15  | Macro System              |              | AST macros, hygiene                                                                       |
+| 16  | Phase 2 Syntax            |              | Operators, assignment sugar                                                               |
+| 17  | FFI & Embedding           |              | C interop, embedding API                                                                  |
 
 ## Future Milestone Details
 
@@ -71,10 +71,6 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 ## Known Limitations
 
 **Escape analysis: boxes in collections are not tracked.** The escape analysis (compiler.c) detects direct mutable captures and transitive captures through closures, but does not detect box/cell refs stored in collections. If a box is stashed into a vector and that vector is passed to `spawn`, the task will not be pinned. Fixing this would require tracking taint through collection operations (vec-push, map-set, etc.).
-
-**CPS recursion limit ~65 iterations.** `VM_STACK_MAX=256` limits effective CPS recursion depth to approximately 65 iterations (each CPS call consumes ~4 stack slots). For larger iteration counts, use non-recursive batched patterns. This applies to any recursive proc running in concurrent mode.
-
-**Multi-line `[command ...]` causes parse errors.** Newlines between `[` and `]` in a command call break the parser. Keep commands on single lines or use `\` line continuation.
 
 ## Open Questions
 
