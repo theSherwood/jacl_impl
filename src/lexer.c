@@ -36,6 +36,7 @@ typedef enum {
   TOKEN_INTERP_EXPR_END,  /* ] closing interpolated expression */
   TOKEN_VAR,              /* $identifier variable reference */
   TOKEN_DOLLAR_BRACKET,   /* $[ subcommand expression */
+  TOKEN_USE,              /* use keyword */
   TOKEN_NEWLINE,          /* newline (\n or \r\n) */
   TOKEN_ERROR,            /* lexer error with descriptive message */
   TOKEN_EOF               /* end of input */
@@ -958,7 +959,12 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       while (lexer__is_word_char(lexer__peek(&lex))) {
         lexer__advance(&lex);
       }
-      Token tok = lexer__make_token(&lex, TOKEN_WORD, start, sline, scol);
+      uint32_t wlen = lex.pos - start;
+      TokenType wtype = TOKEN_WORD;
+      if (wlen == 3 && memcmp(lex.source + start, "use", 3) == 0) {
+        wtype = TOKEN_USE;
+      }
+      Token tok = lexer__make_token(&lex, wtype, start, sline, scol);
       tok.payload.text = lex.source + start;
       lexer__arr_push(&arr, tok);
       continue;
