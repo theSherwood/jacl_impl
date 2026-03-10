@@ -2742,6 +2742,99 @@ static int test_spawn_captures_def_not_pinned(void) {
   TEST_PASS();
 }
 
+/* Test: transitive capture — proc capturing a closure that captures mut,
+   passed to spawn — should be pinned (US-003) */
+static int test_spawn_transitive_capture_pinned(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  /* proc f captures mut x, proc g calls f, g is called in spawn body */
+  const char* program =
+    "[proc main [] {\n"
+    "  [mut x 42]\n"
+    "  [proc f [] { $x }]\n"
+    "  [spawn { [f] }]\n"
+    "}]\n"
+    "[main]";
+
+  CompileResult cr = compile_source(program, &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  /* The <spawn> closure should be pinned because f captures mut x */
+  JaclClosure* spawn_cl = find_closure_by_name(&cr.chunk, "<spawn>");
+  ASSERT(spawn_cl != NULL);
+  ASSERT(spawn_cl->pinned);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: transitive capture via $var ref — proc capturing a closure that
+   captures mut, referenced via $f in spawn body — should be pinned */
+static int test_spawn_transitive_varref_pinned(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  /* proc f captures mut x, spawn body uses $f (var ref) */
+  const char* program =
+    "[proc main [] {\n"
+    "  [mut x 42]\n"
+    "  [proc f [] { $x }]\n"
+    "  [spawn { $f }]\n"
+    "}]\n"
+    "[main]";
+
+  CompileResult cr = compile_source(program, &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  JaclClosure* spawn_cl = find_closure_by_name(&cr.chunk, "<spawn>");
+  ASSERT(spawn_cl != NULL);
+  ASSERT(spawn_cl->pinned);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: non-mutable closure capture should NOT trigger pinning */
+static int test_spawn_transitive_def_not_pinned(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  /* proc f captures def x (immutable), spawn calls f — NOT pinned */
+  const char* program =
+    "[proc main [] {\n"
+    "  [def x 42]\n"
+    "  [proc f [] { $x }]\n"
+    "  [spawn { [f] }]\n"
+    "}]\n"
+    "[main]";
+
+  CompileResult cr = compile_source(program, &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  JaclClosure* spawn_cl = find_closure_by_name(&cr.chunk, "<spawn>");
+  ASSERT(spawn_cl != NULL);
+  ASSERT(!spawn_cl->pinned);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -2861,6 +2954,10 @@ int main(void) {
     { "spawn_captures_mut_pinned",   test_spawn_captures_mut_pinned },
     { "spawn_local_mut_not_pinned",  test_spawn_local_mut_not_pinned },
     { "spawn_captures_def_not_pinned", test_spawn_captures_def_not_pinned },
+    /* US-003: Transitive capture — closure capturing closure with mut */
+    { "spawn_transitive_capture_pinned", test_spawn_transitive_capture_pinned },
+    { "spawn_transitive_varref_pinned",  test_spawn_transitive_varref_pinned },
+    { "spawn_transitive_def_not_pinned", test_spawn_transitive_def_not_pinned },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

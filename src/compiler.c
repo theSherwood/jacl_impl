@@ -116,6 +116,7 @@ typedef struct {
   bool      is_mutable;   /* true if declared with mut */
   bool      is_param;     /* true if this is a function parameter */
   bool      suspends;     /* true if bound to a suspending proc */
+  bool      captures_mutable; /* true if bound to a closure that captures mutable state */
   JaclType  type;         /* compile-time type (default TYPE_DYN) */
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
   JaclType* param_types;  /* proc param types (NULL for non-procs, arena-allocated) */
@@ -130,6 +131,7 @@ typedef struct {
   int16_t   known_arity;
   bool      is_mutable;   /* true if declared with mut */
   bool      suspends;     /* true if this is a suspending proc */
+  bool      captures_mutable; /* true if bound to a closure that captures mutable state */
   JaclType  type;         /* compile-time type (default TYPE_DYN) */
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
   JaclType  param_types[COMPILER_MAX_PROC_PARAMS]; /* proc param types */
@@ -141,6 +143,7 @@ typedef struct {
   JaclVal   name;     /* for debug/lookup */
   bool      is_mutable; /* true if capturing a mut binding */
   bool      suspends;   /* true if capturing a suspending proc */
+  bool      captures_mutable; /* true if capturing a closure that captures mutable state */
   JaclType  type;     /* compile-time type (default TYPE_DYN) */
 } Upvalue;
 
@@ -498,7 +501,11 @@ static void ast__collect_local_muts(AstNode* node, JaclVal* names,
  *   - Direct set! on non-local mutable variables
  *   - $var references to mut/box bindings from enclosing scopes (US-002)
  *   - Transitive capture: closure capturing another closure that captures
- *     a mutable binding (US-003, handled via pin_all_closures propagation)
+ *     a mutable binding (US-003). Detected via captures_mutable flag on
+ *     Local/Upvalue/GlobalArity — set after proc compilation if any upvalue
+ *     is_mutable or captures_mutable. Propagated through upvalue resolution,
+ *     continuation eager capture, and checked for both $var refs and
+ *     function call targets in concurrent bodies.
  * Out of scope:
  *   - Box references stored in collections then retrieved on another thread
  *   - Dynamic box creation passed indirectly through data structures
@@ -697,6 +704,7 @@ static void compiler__add_local(Compiler* c, JaclVal name,
   local->is_mutable  = false;
   local->is_param    = false;
   local->suspends    = false;
+  local->captures_mutable = false;
   local->type        = TYPE_DYN;
   local->return_type = TYPE_DYN;
   local->param_types = NULL;
@@ -773,6 +781,7 @@ static void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity)
     ga->known_arity = arity;
     ga->is_mutable = false;
     ga->suspends = false;
+    ga->captures_mutable = false;
     ga->type = TYPE_DYN;
     ga->return_type = TYPE_DYN;
     memset(ga->param_types, 0, sizeof(ga->param_types));
@@ -799,6 +808,7 @@ static int compiler__add_upvalue(Compiler* c, uint8_t index, uint8_t is_local,
   c->upvalues[c->upvalue_count].name       = name;
   c->upvalues[c->upvalue_count].is_mutable = false;
   c->upvalues[c->upvalue_count].suspends   = false;
+  c->upvalues[c->upvalue_count].captures_mutable = false;
   c->upvalues[c->upvalue_count].type       = TYPE_DYN;
   return (int)c->upvalue_count++;
 }
@@ -813,6 +823,7 @@ static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
     if (uv != -1) {
       if (c->enclosing->locals[local].is_mutable)
         c->upvalues[uv].is_mutable = true;
+      c->upvalues[uv].captures_mutable = c->enclosing->locals[local].captures_mutable;
       c->upvalues[uv].suspends = c->enclosing->locals[local].suspends;
       c->upvalues[uv].type = c->enclosing->locals[local].type;
     }
@@ -826,6 +837,7 @@ static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
     if (uv != -1) {
       if (c->enclosing->upvalues[upvalue].is_mutable)
         c->upvalues[uv].is_mutable = true;
+      c->upvalues[uv].captures_mutable = c->enclosing->upvalues[upvalue].captures_mutable;
       c->upvalues[uv].suspends = c->enclosing->upvalues[upvalue].suspends;
       c->upvalues[uv].type = c->enclosing->upvalues[upvalue].type;
     }
@@ -892,13 +904,32 @@ static void ast__collect_local_names(AstNode* node, JaclVal* names,
 
 /**
  * Check if an AST body contains $var references to mutable bindings
- * from an enclosing compiler scope. This detects closures that capture
- * mut/box variables, even without explicit set! usage.
+ * from an enclosing compiler scope, or references to closures that
+ * transitively capture mutable state (US-003).
  *
  * Conservative: skips spawn/parallel/race scopes (they get own pinning)
  * but does NOT skip nested proc scopes (captures propagate upward).
  * May have false positives from proc-local parameter shadowing.
  */
+
+/* Helper: check if a name resolves to a binding with is_mutable or
+   captures_mutable in the enclosing scope chain. */
+static bool compiler__name_touches_mutable(Compiler* enclosing, JaclVal name) {
+  for (Compiler* cc = enclosing; cc; cc = cc->enclosing) {
+    int slot = compiler__resolve_local(cc, name);
+    if (slot != -1)
+      return cc->locals[slot].is_mutable || cc->locals[slot].captures_mutable;
+    for (uint32_t i = 0; i < cc->upvalue_count; i++) {
+      if (cc->upvalues[i].name == name)
+        return cc->upvalues[i].is_mutable || cc->upvalues[i].captures_mutable;
+    }
+  }
+  /* Check global arities */
+  GlobalArity* ga = compiler__find_global_arity(enclosing, name);
+  if (ga) return ga->is_mutable || ga->captures_mutable;
+  return false;
+}
+
 static bool ast__refs_nonlocal_mutable_impl(AstNode* node,
                                              JaclVal* local_names,
                                              uint32_t local_name_count,
@@ -914,18 +945,8 @@ static bool ast__refs_nonlocal_mutable_impl(AstNode* node,
       for (uint32_t i = 0; i < local_name_count; i++) {
         if (local_names[i] == name) return false;
       }
-      /* Not local — check if mutable in enclosing scope chain */
-      for (Compiler* cc = enclosing; cc; cc = cc->enclosing) {
-        int slot = compiler__resolve_local(cc, name);
-        if (slot != -1) return cc->locals[slot].is_mutable;
-        for (uint32_t i = 0; i < cc->upvalue_count; i++) {
-          if (cc->upvalues[i].name == name) return cc->upvalues[i].is_mutable;
-        }
-      }
-      /* Check global arities */
-      GlobalArity* ga = compiler__find_global_arity(enclosing, name);
-      if (ga) return ga->is_mutable;
-      return false;
+      /* Not local — check if mutable or captures_mutable in enclosing scope */
+      return compiler__name_touches_mutable(enclosing, name);
     }
     case AST_COMMAND: {
       AstNode* head = node->data.command.head;
@@ -937,6 +958,18 @@ static bool ast__refs_nonlocal_mutable_impl(AstNode* node,
             (hlen == 8 && memcmp(hname, "parallel", 8) == 0) ||
             (hlen == 4 && memcmp(hname, "race", 4) == 0)) {
           return false;
+        }
+        /* Check if function call target is a non-local closure that
+           transitively captures mutable state (US-003). */
+        if (hlen <= 7) {
+          JaclVal fname = jacl_inline_string(hname, hlen);
+          bool is_local_name = false;
+          for (uint32_t i = 0; i < local_name_count; i++) {
+            if (local_names[i] == fname) { is_local_name = true; break; }
+          }
+          if (!is_local_name &&
+              compiler__name_touches_mutable(enclosing, fname))
+            return true;
         }
       }
       /* Check head (for $var calls) */
@@ -1196,6 +1229,7 @@ static void compiler__emit_continuation(Compiler* c,
                                     c->locals[i].name);
     if (uv != -1) {
       cont_compiler.upvalues[uv].is_mutable = c->locals[i].is_mutable;
+      cont_compiler.upvalues[uv].captures_mutable = c->locals[i].captures_mutable;
       cont_compiler.upvalues[uv].suspends   = c->locals[i].suspends;
       cont_compiler.upvalues[uv].type       = c->locals[i].type;
     }
@@ -1207,6 +1241,7 @@ static void compiler__emit_continuation(Compiler* c,
                                     c->upvalues[i].name);
     if (uv != -1) {
       cont_compiler.upvalues[uv].is_mutable = c->upvalues[i].is_mutable;
+      cont_compiler.upvalues[uv].captures_mutable = c->upvalues[i].captures_mutable;
       cont_compiler.upvalues[uv].suspends   = c->upvalues[i].suspends;
       cont_compiler.upvalues[uv].type       = c->upvalues[i].type;
     }
@@ -3075,6 +3110,18 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       proc_suspends = suspension_map_lookup(c->suspension_map, name_val);
     }
 
+    /* Determine if this proc transitively captures mutable state (US-003).
+       A proc captures_mutable if any of its upvalues is_mutable or
+       captures_mutable (transitive through nested closures). */
+    bool proc_captures_mutable = false;
+    for (uint32_t i = 0; i < body_compiler.upvalue_count; i++) {
+      if (body_compiler.upvalues[i].is_mutable ||
+          body_compiler.upvalues[i].captures_mutable) {
+        proc_captures_mutable = true;
+        break;
+      }
+    }
+
     /* Bind the name — use user_param_count (excludes hidden __k) for arity checks */
     if (c->scope_depth > 0 && !c->force_global_procs) {
       /* Local scope: closure is on stack as local */
@@ -3083,6 +3130,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       c->locals[c->local_count - 1].return_type = proc_return_type;
       c->locals[c->local_count - 1].param_types = stored_param_types;
       c->locals[c->local_count - 1].suspends    = proc_suspends;
+      c->locals[c->local_count - 1].captures_mutable = proc_captures_mutable;
       /* proc returns the closure value (enables make-adder pattern) */
       compiler__emit_byte(c, OP_GET_LOCAL, line);
       compiler__emit_byte(c, (uint8_t)(c->local_count - 1), line);
@@ -3098,6 +3146,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
         if (ga) {
           ga->return_type = proc_return_type;
           ga->suspends    = proc_suspends;
+          ga->captures_mutable = proc_captures_mutable;
           for (uint8_t i = 0; i < user_param_count && i < COMPILER_MAX_PROC_PARAMS; i++) {
             ga->param_types[i] = param_types_arr[i];
           }
