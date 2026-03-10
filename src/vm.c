@@ -105,6 +105,9 @@ static VMResult jacl_run(const char* source, VM* vm, arena_t* arena);
 /* --- GC collect (defined in gc_collect.c, after vm.c in unity build) --- */
 
 static void gc_collect(ThreadHeap *heap, VM *vm);
+static void gc_collect_minor(ThreadHeap *heap, VM *vm,
+                              RememberedSet *remembered_set);
+static bool gc_should_major(ThreadHeap *heap);
 
 /* --- Emergency GC callback for single-threaded mode --- */
 
@@ -575,7 +578,12 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
     /* GC safepoint: collect if threshold exceeded */
     if (vm->heap.needs_gc) {
       if (!vm->runtime) {
-        gc_collect(&vm->heap, vm);
+        /* Single-threaded: choose minor or major GC */
+        if (gc_should_major(&vm->heap)) {
+          gc_collect(&vm->heap, vm);
+        } else {
+          gc_collect_minor(&vm->heap, vm, vm->remembered_set);
+        }
       } else {
         vm->heap.needs_gc = false;
         vm->heap.bytes_since_gc = 0;

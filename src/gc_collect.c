@@ -294,6 +294,7 @@ static size_t gc_sweep(ThreadHeap *heap) {
     GCBlock *block = heap->blocks;
     GCBlock *prev  = NULL;
     size_t   bytes_survived = 0;
+    size_t   old_gen_bytes  = 0; /* recount old gen during major sweep */
 
     while (block) {
         GCBlock *next = block->next;
@@ -333,9 +334,13 @@ static size_t gc_sweep(ThreadHeap *heap) {
                     uint8_t sc = hdr->survive_count;
                     if (sc >= 1) {
                         hdr->gen = 1; /* promote to old generation */
+                        old_gen_bytes += total;
                     } else {
                         hdr->survive_count = sc + 1;
                     }
+                } else {
+                    /* Already old — count towards old gen total */
+                    old_gen_bytes += total;
                 }
             } else {
                 /* Dead object — zero its memory for safe future walking */
@@ -370,6 +375,9 @@ static size_t gc_sweep(ThreadHeap *heap) {
     heap->cursor        = NULL;
     heap->limit         = NULL;
     heap->current_block = NULL;
+
+    /* Update old gen tracking — major GC recounts everything */
+    heap->old_gen_bytes = old_gen_bytes;
 
     return bytes_survived;
 }
@@ -409,6 +417,9 @@ static void gc_collect(ThreadHeap *heap, VM *vm) {
     heap->current_mark  = 1 - heap->current_mark;
     heap->bytes_since_gc = 0;
     heap->needs_gc       = false;
+    heap->gc_cycle_count++;
+    /* Snapshot old gen size after major GC for scheduling heuristics */
+    heap->last_major_old_gen_bytes = heap->old_gen_bytes;
 }
 
 /* ======================================================================
@@ -515,6 +526,7 @@ static size_t gc_sweep_minor(ThreadHeap *heap) {
     uint8_t  current_mark = heap->current_mark;
     GCBlock *block = heap->blocks;
     size_t   bytes_survived = 0;
+    size_t   promoted_bytes = 0; /* bytes promoted to old gen this cycle */
 
     while (block) {
         GCBlock *next = block->next;
@@ -595,6 +607,7 @@ static size_t gc_sweep_minor(ThreadHeap *heap) {
                 uint8_t sc = hdr->survive_count;
                 if (sc >= 1) {
                     hdr->gen = 1; /* promote to old generation */
+                    promoted_bytes += total;
                 } else {
                     hdr->survive_count = sc + 1;
                 }
@@ -613,6 +626,9 @@ static size_t gc_sweep_minor(ThreadHeap *heap) {
     heap->cursor        = NULL;
     heap->limit         = NULL;
     heap->current_block = NULL;
+
+    /* Update old gen tracking — add newly promoted bytes */
+    heap->old_gen_bytes += promoted_bytes;
 
     return bytes_survived;
 }
@@ -633,11 +649,32 @@ static void gc_collect_minor(ThreadHeap *heap, VM *vm,
     heap->current_mark  = 1 - heap->current_mark;
     heap->bytes_since_gc = 0;
     heap->needs_gc       = false;
+    heap->gc_cycle_count++;
 
     /* Clear remembered set — entries were processed during mark */
     if (remembered_set) {
         remembered_set->count = 0;
     }
+}
+
+/* ======================================================================
+ * gc_should_major: determine if a major GC is needed instead of minor.
+ *
+ * Returns true if:
+ *   - This is the first GC cycle (no old gen exists yet)
+ *   - Old generation has grown >50% since last major GC
+ * ====================================================================== */
+
+static bool gc_should_major(ThreadHeap *heap) {
+    /* First GC cycle is always major */
+    if (heap->gc_cycle_count == 0) return true;
+
+    /* Major GC if old gen grew >50% since last major */
+    size_t threshold = heap->last_major_old_gen_bytes
+                     + heap->last_major_old_gen_bytes / 2;
+    if (heap->old_gen_bytes > threshold) return true;
+
+    return false;
 }
 
 /* ======================================================================
@@ -661,6 +698,7 @@ static size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
                                    BlockPool *pool) {
     GCBlock **pp = &heap->blocks;
     size_t    bytes_survived = 0;
+    size_t    old_gen_bytes  = 0; /* recount old gen during concurrent sweep */
 
     while (*pp) {
         GCBlock *block = *pp;
@@ -727,9 +765,13 @@ static size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
                 uint8_t sc = hdr->survive_count;
                 if (sc >= 1) {
                     hdr->gen = 1; /* promote to old generation */
+                    old_gen_bytes += total;
                 } else {
                     hdr->survive_count = sc + 1;
                 }
+            } else {
+                /* Already old — count towards old gen total */
+                old_gen_bytes += total;
             }
 
             ptr += total;
@@ -802,6 +844,9 @@ static size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
             pp = &block->next;
         }
     }
+
+    /* Update old gen tracking — concurrent sweep recounts everything */
+    heap->old_gen_bytes = old_gen_bytes;
 
     return bytes_survived;
 }

@@ -205,6 +205,10 @@ typedef struct {
     BlockPool *pool;           /* shared block pool */
     uint8_t    current_mark;   /* alternates 0/1 each GC cycle */
     bool       needs_gc;       /* set by gc_alloc when threshold exceeded */
+    /* Generational GC scheduling */
+    size_t     old_gen_bytes;           /* total bytes in old generation */
+    size_t     last_major_old_gen_bytes; /* old_gen_bytes at end of last major GC */
+    uint32_t   gc_cycle_count;          /* total GC cycles run (first cycle is major) */
 } ThreadHeap;
 
 static void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
@@ -217,6 +221,9 @@ static void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
     heap->pool = pool;
     heap->current_mark = 1; /* first GC marks with 1 (initial mark on objects is 0) */
     heap->needs_gc = false;
+    heap->old_gen_bytes           = 0;
+    heap->last_major_old_gen_bytes = 0;
+    heap->gc_cycle_count          = 0;
 }
 
 static void gc_heap_destroy(ThreadHeap *heap) {

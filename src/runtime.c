@@ -763,10 +763,14 @@ static void gc_concurrent_collect(Runtime *rt) {
      * cycle's gc_active=1 (release) re-enables write barriers. */
     uint8_t next_mark = 1 - mark;
     for (i = 0; i < rt->num_workers; i++) {
-        rt->workers[i].vm.heap.current_mark   = next_mark;
-        rt->workers[i].vm.heap.bytes_since_gc = 0;
-        rt->workers[i].vm.heap.needs_gc       = false;
-        rt->workers[i].grey_buf.count         = 0;
+        ThreadHeap *wh = &rt->workers[i].vm.heap;
+        wh->current_mark   = next_mark;
+        wh->bytes_since_gc = 0;
+        wh->needs_gc       = false;
+        wh->gc_cycle_count++;
+        /* Concurrent GC is always major — snapshot old gen size */
+        wh->last_major_old_gen_bytes = wh->old_gen_bytes;
+        rt->workers[i].grey_buf.count = 0;
     }
 
     gc__ms_destroy(&ms);

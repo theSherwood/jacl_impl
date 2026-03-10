@@ -1334,6 +1334,167 @@ static int test_minor_gc_major_gc_still_works(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * US-008: GC scheduling heuristics for minor vs major
+ * ==================================================================== */
+
+static int test_gc_schedule_first_cycle_major(void) {
+    /* First GC cycle should always be major (gc_should_major returns true) */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Fresh heap: gc_cycle_count == 0 → should be major */
+    ASSERT_INT_EQ(vm.heap.gc_cycle_count, 0);
+    ASSERT(gc_should_major(&vm.heap));
+
+    /* Run one major GC cycle */
+    JaclVal live = jacl_i64(&vm.heap, 1);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+    gc_collect(&vm.heap, &vm);
+
+    /* After first major, gc_cycle_count == 1, should NOT be major (no old growth) */
+    ASSERT_INT_EQ(vm.heap.gc_cycle_count, 1);
+    ASSERT(!gc_should_major(&vm.heap));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_schedule_minor_after_threshold(void) {
+    /* After first cycle, normal allocation triggers minor GC (not major) */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* First cycle: major (required) */
+    JaclVal live = jacl_i64(&vm.heap, 1);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+    gc_collect(&vm.heap, &vm);
+
+    /* Simulate allocation exceeding threshold */
+    vm.heap.bytes_since_gc = GC_THRESHOLD + 1;
+    vm.heap.needs_gc = true;
+
+    /* gc_should_major should return false (no old gen growth) */
+    ASSERT(!gc_should_major(&vm.heap));
+
+    /* Run minor GC — should succeed */
+    gc_collect_minor(&vm.heap, &vm, NULL);
+    ASSERT_INT_EQ(vm.heap.gc_cycle_count, 2);
+    ASSERT_INT_EQ(vm.heap.bytes_since_gc, 0);
+    ASSERT(!vm.heap.needs_gc);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_schedule_major_on_old_gen_growth(void) {
+    /* Major GC triggers when old gen grows >50% since last major */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Allocate some objects and root them */
+    JaclVal vals[10];
+    for (int i = 0; i < 10; i++) {
+        vals[i] = jacl_i64(&vm.heap, i);
+        vm.stack[i] = vals[i];
+    }
+    vm.stack_top = 10;
+
+    /* First major GC */
+    gc_collect(&vm.heap, &vm);
+    ASSERT_INT_EQ(vm.heap.gc_cycle_count, 1);
+
+    /* Second major GC (promotes objects after 2 cycles survived) */
+    gc_collect(&vm.heap, &vm);
+    ASSERT_INT_EQ(vm.heap.gc_cycle_count, 2);
+
+    /* Now we have some old gen bytes from promotions */
+    size_t old_after_major = vm.heap.old_gen_bytes;
+    ASSERT(old_after_major > 0);
+    ASSERT_INT_EQ(vm.heap.last_major_old_gen_bytes, old_after_major);
+
+    /* No growth yet — should NOT trigger major */
+    ASSERT(!gc_should_major(&vm.heap));
+
+    /* Simulate old gen growing >50%: artificially increase old_gen_bytes */
+    vm.heap.old_gen_bytes = old_after_major * 2;
+    ASSERT(gc_should_major(&vm.heap));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_schedule_old_gen_bytes_tracked(void) {
+    /* old_gen_bytes is correctly tracked through major and minor sweeps */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Start with no old gen */
+    ASSERT_INT_EQ(vm.heap.old_gen_bytes, 0);
+
+    /* Allocate and root objects */
+    JaclVal live = jacl_i64(&vm.heap, 42);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    /* After first major GC: survive_count = 1, still young → no old bytes */
+    gc_collect(&vm.heap, &vm);
+    ASSERT_INT_EQ(vm.heap.old_gen_bytes, 0);
+
+    /* After second major GC: promoted → old_gen_bytes > 0 */
+    gc_collect(&vm.heap, &vm);
+    ASSERT(vm.heap.old_gen_bytes > 0);
+    size_t old_after = vm.heap.old_gen_bytes;
+
+    /* Minor GC with new young object: old_gen_bytes stays same or increases */
+    JaclVal young = jacl_i64(&vm.heap, 99);
+    vm.stack[1] = young;
+    vm.stack_top = 2;
+    gc_collect_minor(&vm.heap, &vm, NULL);
+
+    /* old_gen_bytes >= old_after (didn't shrink — minor doesn't collect old) */
+    ASSERT(vm.heap.old_gen_bytes >= old_after);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_schedule_cycle_count_increments(void) {
+    /* gc_cycle_count increments for both major and minor GC */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal live = jacl_i64(&vm.heap, 1);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    ASSERT_INT_EQ(vm.heap.gc_cycle_count, 0);
+
+    gc_collect(&vm.heap, &vm);
+    ASSERT_INT_EQ(vm.heap.gc_cycle_count, 1);
+
+    gc_collect_minor(&vm.heap, &vm, NULL);
+    ASSERT_INT_EQ(vm.heap.gc_cycle_count, 2);
+
+    gc_collect(&vm.heap, &vm);
+    ASSERT_INT_EQ(vm.heap.gc_cycle_count, 3);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -1385,6 +1546,12 @@ int main(void) {
         { "minor_gc_old_untouched",        test_minor_gc_old_objects_untouched },
         { "minor_gc_promotes_survivors",   test_minor_gc_promotes_survivors },
         { "minor_gc_major_still_works",    test_minor_gc_major_gc_still_works },
+        /* US-008: GC scheduling heuristics */
+        { "gc_schedule_first_major",       test_gc_schedule_first_cycle_major },
+        { "gc_schedule_minor_after_thresh", test_gc_schedule_minor_after_threshold },
+        { "gc_schedule_major_old_growth",  test_gc_schedule_major_on_old_gen_growth },
+        { "gc_schedule_old_gen_tracked",   test_gc_schedule_old_gen_bytes_tracked },
+        { "gc_schedule_cycle_count",       test_gc_schedule_cycle_count_increments },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
