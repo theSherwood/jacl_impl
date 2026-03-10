@@ -1,0 +1,132 @@
+# mode: concurrent
+# expect: 1513350
+# US-010: E2E stress test — parallel with large persistent data structures.
+# Creates a 1000-element vector and 100-entry map, passes to parallel branches
+# that read and derive new collections. Verifies persistence and correctness
+# under concurrent GC pressure.
+# Sum: 499500*3 + 4950*3 = 1513350
+
+# Build a 10-element vector starting at offset o
+proc v10 [o] {
+  [vec $o [+ $o 1] [+ $o 2] [+ $o 3] [+ $o 4] [+ $o 5] [+ $o 6] [+ $o 7] [+ $o 8] [+ $o 9]]
+}
+
+# Concat 10 chunks of 10 onto v (adds 100 elements starting at s)
+proc c100 [v s] {
+  def a [vec-concat $v [v10 $s]]
+  def b [vec-concat $a [v10 [+ $s 10]]]
+  def c [vec-concat $b [v10 [+ $s 20]]]
+  def d [vec-concat $c [v10 [+ $s 30]]]
+  def e [vec-concat $d [v10 [+ $s 40]]]
+  def f [vec-concat $e [v10 [+ $s 50]]]
+  def g [vec-concat $f [v10 [+ $s 60]]]
+  def h [vec-concat $g [v10 [+ $s 70]]]
+  def j [vec-concat $h [v10 [+ $s 80]]]
+  [vec-concat $j [v10 [+ $s 90]]]
+}
+
+# Build 1000-element vector [0..999]
+proc mkv [] {
+  def a [c100 [vec] 0]
+  def b [c100 $a 100]
+  def c [c100 $b 200]
+  def d [c100 $c 300]
+  def e [c100 $d 400]
+  def f [c100 $e 500]
+  def g [c100 $f 600]
+  def h [c100 $g 700]
+  def j [c100 $h 800]
+  [c100 $j 900]
+}
+
+# Build 100-entry map {0:0, 1:1, ..., 99:99}
+proc mkm [] {
+  def a [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map] 0 0] 1 1] 2 2] 3 3] 4 4] 5 5] 6 6] 7 7] 8 8] 9 9]
+  def b [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $a 10 10] 11 11] 12 12] 13 13] 14 14] 15 15] 16 16] 17 17] 18 18] 19 19]
+  def c [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $b 20 20] 21 21] 22 22] 23 23] 24 24] 25 25] 26 26] 27 27] 28 28] 29 29]
+  def d [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $c 30 30] 31 31] 32 32] 33 33] 34 34] 35 35] 36 36] 37 37] 38 38] 39 39]
+  def e [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $d 40 40] 41 41] 42 42] 43 43] 44 44] 45 45] 46 46] 47 47] 48 48] 49 49]
+  def f [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $e 50 50] 51 51] 52 52] 53 53] 54 54] 55 55] 56 56] 57 57] 58 58] 59 59]
+  def g [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $f 60 60] 61 61] 62 62] 63 63] 64 64] 65 65] 66 66] 67 67] 68 68] 69 69]
+  def h [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $g 70 70] 71 71] 72 72] 73 73] 74 74] 75 75] 76 76] 77 77] 78 78] 79 79]
+  def j [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $h 80 80] 81 81] 82 82] 83 83] 84 84] 85 85] 86 86] 87 87] 88 88] 89 89]
+  [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $j 90 90] 91 91] 92 92] 93 93] 94 94] 95 95] 96 96] 97 97] 98 98] 99 99]
+}
+
+# Sum 10 vector elements starting at index i
+proc s10 [v i] {
+  [+ [+ [+ [+ [vec-get $v $i] [vec-get $v [+ $i 1]]] [+ [vec-get $v [+ $i 2]] [vec-get $v [+ $i 3]]]] [+ [+ [vec-get $v [+ $i 4]] [vec-get $v [+ $i 5]]] [+ [vec-get $v [+ $i 6]] [vec-get $v [+ $i 7]]]]] [+ [vec-get $v [+ $i 8]] [vec-get $v [+ $i 9]]]]
+}
+
+# Sum 100 vector elements starting at s
+proc sv100 [v s] {
+  def a [s10 $v $s]
+  def b [s10 $v [+ $s 10]]
+  def c [s10 $v [+ $s 20]]
+  def d [s10 $v [+ $s 30]]
+  def e [s10 $v [+ $s 40]]
+  def f [s10 $v [+ $s 50]]
+  def g [s10 $v [+ $s 60]]
+  def h [s10 $v [+ $s 70]]
+  def j [s10 $v [+ $s 80]]
+  def k [s10 $v [+ $s 90]]
+  [+ [+ [+ [+ $a $b] [+ $c $d]] [+ [+ $e $f] [+ $g $h]]] [+ $j $k]]
+}
+
+# Sum all 1000 vector elements
+proc sumv [v] {
+  def a [sv100 $v 0]
+  def b [sv100 $v 100]
+  def c [sv100 $v 200]
+  def d [sv100 $v 300]
+  def e [sv100 $v 400]
+  def f [sv100 $v 500]
+  def g [sv100 $v 600]
+  def h [sv100 $v 700]
+  def j [sv100 $v 800]
+  def k [sv100 $v 900]
+  [+ [+ [+ [+ $a $b] [+ $c $d]] [+ [+ $e $f] [+ $g $h]]] [+ $j $k]]
+}
+
+# Sum 10 map values starting at key i
+proc sm10 [m i] {
+  [+ [+ [+ [+ [map-get $m $i] [map-get $m [+ $i 1]]] [+ [map-get $m [+ $i 2]] [map-get $m [+ $i 3]]]] [+ [+ [map-get $m [+ $i 4]] [map-get $m [+ $i 5]]] [+ [map-get $m [+ $i 6]] [map-get $m [+ $i 7]]]]] [+ [map-get $m [+ $i 8]] [map-get $m [+ $i 9]]]]
+}
+
+# Sum all 100 map values
+proc summ [m] {
+  def a [sm10 $m 0]
+  def b [sm10 $m 10]
+  def c [sm10 $m 20]
+  def d [sm10 $m 30]
+  def e [sm10 $m 40]
+  def f [sm10 $m 50]
+  def g [sm10 $m 60]
+  def h [sm10 $m 70]
+  def j [sm10 $m 80]
+  def k [sm10 $m 90]
+  [+ [+ [+ [+ $a $b] [+ $c $d]] [+ [+ $e $f] [+ $g $h]]] [+ $j $k]]
+}
+
+# Generate garbage to trigger GC
+proc trash [i n] {
+  if [< $i $n] {
+    def v [vec 1 2 3 4 5 6 7 8 9 10]
+    def w [vec-push [vec-push [vec-push $v 11] 12] 13]
+    [trash [+ $i 1] $n]
+  } { 0 }
+}
+
+proc main [] {
+  def v [mkv]
+  def m [mkm]
+  def r [parallel { [trash 0 20]; [sumv $v] } { def d [c100 $v 1000]; [sumv $v] } { [trash 0 20]; [summ $m] } { def d [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $m 100 100] 101 101] 102 102] 103 103] 104 104] 105 105] 106 106] 107 107] 108 108] 109 109]; [summ $m] }]
+  def s0 [vec-get $r 0]
+  def s1 [vec-get $r 1]
+  def s2 [vec-get $r 2]
+  def s3 [vec-get $r 3]
+  def sv [sumv $v]
+  def sm [summ $m]
+  print [+ [+ [+ [+ [+ $s0 $s1] $s2] $s3] $sv] $sm]
+}
+main
