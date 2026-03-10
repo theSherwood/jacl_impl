@@ -23,6 +23,7 @@ typedef enum {
   AST_VAR_REF,       /* variable reference: $name */
   AST_BLOCK,         /* code block: { cmd1; cmd2 } */
   AST_INTERP_STRING, /* interpolated string: "hello $name" */
+  AST_USE,           /* use "path" [name1 name2 ...] */
   AST_ERROR          /* parse error with recovery */
 } AstNodeType;
 
@@ -54,6 +55,9 @@ struct AstNode {
     struct { const char* name;    uint32_t length; }               var_ref;
     struct { AstNode**   commands; uint32_t count; }               block;
     struct { AstNode**   segments; uint32_t count; }               interp_string;
+    struct { const char* path; uint32_t path_len;
+             const char** names; uint32_t* name_lens;
+             uint32_t name_count; }                               use_decl;
     struct { const char* message; }                                error;
   } data;
 };
@@ -276,6 +280,18 @@ static void ast__pp_node(AstStrBuf* b, AstNode* node) {
         }
       }
       ast__buf_char(b, '"');
+      break;
+    }
+    case AST_USE: {
+      ast__buf_cstr(b, "use \"");
+      ast__buf_str(b, node->data.use_decl.path, node->data.use_decl.path_len);
+      ast__buf_cstr(b, "\" [");
+      for (uint32_t i = 0; i < node->data.use_decl.name_count; i++) {
+        if (i > 0) ast__buf_char(b, ' ');
+        ast__buf_str(b, node->data.use_decl.names[i],
+                     node->data.use_decl.name_lens[i]);
+      }
+      ast__buf_char(b, ']');
       break;
     }
     case AST_ERROR: {

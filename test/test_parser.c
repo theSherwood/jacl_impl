@@ -1643,6 +1643,125 @@ static int test_roundtrip_complex(void) {
   TEST_PASS();
 }
 
+/* ---- M14 US-002: use declarations ---- */
+
+static int test_use_basic(void) {
+  setup();
+  ParseResult r = parse("use \"math.jacl\" [add sub mul]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_USE);
+  ASSERT_U32_EQ(n->data.use_decl.path_len, 9);
+  ASSERT(memcmp(n->data.use_decl.path, "math.jacl", 9) == 0);
+  ASSERT_U32_EQ(n->data.use_decl.name_count, 3);
+  ASSERT(memcmp(n->data.use_decl.names[0], "add", 3) == 0);
+  ASSERT(memcmp(n->data.use_decl.names[1], "sub", 3) == 0);
+  ASSERT(memcmp(n->data.use_decl.names[2], "mul", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_use_single_name(void) {
+  setup();
+  ParseResult r = parse("use \"lib.jacl\" [foo]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_USE);
+  ASSERT_U32_EQ(n->data.use_decl.name_count, 1);
+  ASSERT(memcmp(n->data.use_decl.names[0], "foo", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_use_before_statements(void) {
+  setup();
+  ParseResult r = parse("use \"lib.jacl\" [add]\n[add 1 2]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT(r.nodes[0]->type == AST_USE);
+  ASSERT(r.nodes[1]->type == AST_COMMAND);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_use_after_statement_error(void) {
+  setup();
+  ParseResult r = parse("[add 1 2]\nuse \"lib.jacl\" [add]");
+  ASSERT(r.error_count > 0);
+  /* First node is a command, second should be error */
+  ASSERT(r.nodes[0]->type == AST_COMMAND);
+  ASSERT(r.nodes[1]->type == AST_ERROR);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_use_empty_list_error(void) {
+  setup();
+  ParseResult r = parse("use \"lib.jacl\" []");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_use_non_string_path_error(void) {
+  setup();
+  ParseResult r = parse("use lib [add]");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_use_duplicate_path_error(void) {
+  setup();
+  ParseResult r = parse("use \"lib.jacl\" [add]\nuse \"lib.jacl\" [sub]");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_use_duplicate_name_error(void) {
+  setup();
+  ParseResult r = parse("use \"a.jacl\" [add]\nuse \"b.jacl\" [add]");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_use_multiple_modules(void) {
+  setup();
+  ParseResult r = parse("use \"math.jacl\" [add]\nuse \"str.jacl\" [concat]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT(r.nodes[0]->type == AST_USE);
+  ASSERT(r.nodes[1]->type == AST_USE);
+  ASSERT(memcmp(r.nodes[0]->data.use_decl.path, "math.jacl", 9) == 0);
+  ASSERT(memcmp(r.nodes[1]->data.use_decl.path, "str.jacl", 8) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_use_pretty_print(void) {
+  setup();
+  ParseResult r = parse("use \"math.jacl\" [add sub]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  const char* pp = ast_pretty_print(r.nodes[0], &test_arena);
+  ASSERT(strcmp(pp, "use \"math.jacl\" [add sub]") == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -1751,6 +1870,17 @@ int main(void) {
     {"roundtrip_blocks",      test_roundtrip_blocks},
     {"roundtrip_interp",      test_roundtrip_interp},
     {"roundtrip_complex",     test_roundtrip_complex},
+    /* M14 US-002: use declarations */
+    {"use_basic",             test_use_basic},
+    {"use_single_name",       test_use_single_name},
+    {"use_before_stmts",      test_use_before_statements},
+    {"use_after_stmt_err",    test_use_after_statement_error},
+    {"use_empty_list_err",    test_use_empty_list_error},
+    {"use_non_string_path",   test_use_non_string_path_error},
+    {"use_dup_path_err",      test_use_duplicate_path_error},
+    {"use_dup_name_err",      test_use_duplicate_name_error},
+    {"use_multi_modules",     test_use_multiple_modules},
+    {"use_pretty_print",      test_use_pretty_print},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

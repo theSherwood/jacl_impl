@@ -4407,6 +4407,11 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
       break;
     }
 
+    case AST_USE: {
+      /* Module import — handled in later compilation stages (US-006+) */
+      break;
+    }
+
     case AST_ERROR: {
       compiler__error(c, line, node->start.column, "parse error in AST");
       break;

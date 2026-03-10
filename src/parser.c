@@ -389,6 +389,83 @@ static int parser__is_command_end(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Parse use declaration: use "path" [name1 name2 ...]
+ *
+ * Called when the current token is TOKEN_USE.
+ * Returns AST_USE on success, AST_ERROR on failure.
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_use(Parser* p) {
+  Token* use_tok = parser__advance(p); /* consume 'use' */
+  SourcePos start = parser__token_start(use_tok);
+
+  /* Expect string literal for path */
+  Token* path_tok = parser__peek(p);
+  if (path_tok->type != TOKEN_STRING) {
+    return parser__error(p, "'use' path must be a string literal", path_tok);
+  }
+  parser__advance(p);
+  const char* path = path_tok->payload.text;
+  uint32_t path_len = (uint32_t)strlen(path);
+
+  /* Expect '[' for name list */
+  Token* bracket_tok = parser__peek(p);
+  if (bracket_tok->type != TOKEN_LBRACKET) {
+    return parser__error(p, "expected '[' after use path", bracket_tok);
+  }
+  parser__advance(p); /* consume '[' */
+
+  /* Check for empty name list */
+  if (parser__peek(p)->type == TOKEN_RBRACKET) {
+    Token* close = parser__advance(p);
+    AstNode* err = parser__error(p, "use name list must not be empty", close);
+    err->start = start;
+    return err;
+  }
+
+  /* Parse names until ']' */
+  NodeArray names;
+  parser__arr_init(&names, p->arena);
+
+  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACKET) {
+    Token* name_tok = parser__peek(p);
+    if (name_tok->type != TOKEN_WORD) {
+      return parser__error(p, "expected name in use list", name_tok);
+    }
+    parser__advance(p);
+    parser__arr_push(&names, (AstNode*)(void*)name_tok); /* temp: store Token* */
+  }
+
+  /* Expect closing ']' */
+  if (parser__peek(p)->type != TOKEN_RBRACKET) {
+    return parser__error(p, "expected ']' to close use name list", bracket_tok);
+  }
+  Token* close = parser__advance(p);
+
+  /* Build name arrays */
+  const char** name_strs = (const char**)arena_alloc(
+      p->arena, sizeof(const char*) * names.count);
+  uint32_t* name_lens = (uint32_t*)arena_alloc(
+      p->arena, sizeof(uint32_t) * names.count);
+  for (uint32_t i = 0; i < names.count; i++) {
+    Token* t = (Token*)(void*)names.nodes[i];
+    name_strs[i] = t->payload.text;
+    name_lens[i] = t->length;
+  }
+
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_USE;
+  node->start = start;
+  node->end   = parser__token_end(close);
+  node->data.use_decl.path       = path;
+  node->data.use_decl.path_len   = path_len;
+  node->data.use_decl.names      = name_strs;
+  node->data.use_decl.name_lens  = name_lens;
+  node->data.use_decl.name_count = names.count;
+  return node;
+}
+
+/* -------------------------------------------------------------------------
  * Internal: Parse a top-level bare command
  *
  * Reads the first expression as the command head, then collects subsequent
@@ -650,7 +727,12 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
     }
     if (parser__at_end(&p)) break;
 
-    AstNode* cmd = parser__parse_bare_command(&p);
+    AstNode* cmd;
+    if (parser__peek(&p)->type == TOKEN_USE) {
+      cmd = parser__parse_use(&p);
+    } else {
+      cmd = parser__parse_bare_command(&p);
+    }
     if (cmd != NULL) {
       parser__arr_push(&top_level, cmd);
     } else {
@@ -659,6 +741,79 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
       AstNode* err = parser__error(&p, "unexpected token", bad);
       parser__advance(&p);
       parser__arr_push(&top_level, err);
+    }
+  }
+
+  /* --- Post-parse validation for use declarations --- */
+
+  /* Check: use declarations must appear before any other statements */
+  int seen_non_use = 0;
+  for (uint32_t i = 0; i < top_level.count; i++) {
+    AstNode* node = top_level.nodes[i];
+    if (node->type == AST_ERROR) continue;
+    if (node->type == AST_USE) {
+      if (seen_non_use) {
+        /* Replace this node with an error */
+        AstNode* err = ast_alloc(arena);
+        err->type  = AST_ERROR;
+        err->start = node->start;
+        err->end   = node->end;
+        err->data.error.message = "'use' declarations must appear before all other statements";
+        p.error_count++;
+        top_level.nodes[i] = err;
+      }
+    } else {
+      seen_non_use = 1;
+    }
+  }
+
+  /* Check: duplicate use paths */
+  for (uint32_t i = 0; i < top_level.count; i++) {
+    if (top_level.nodes[i]->type != AST_USE) continue;
+    for (uint32_t j = i + 1; j < top_level.count; j++) {
+      if (top_level.nodes[j]->type != AST_USE) continue;
+      if (top_level.nodes[i]->data.use_decl.path_len ==
+              top_level.nodes[j]->data.use_decl.path_len &&
+          memcmp(top_level.nodes[i]->data.use_decl.path,
+                 top_level.nodes[j]->data.use_decl.path,
+                 top_level.nodes[i]->data.use_decl.path_len) == 0) {
+        AstNode* err = ast_alloc(arena);
+        err->type  = AST_ERROR;
+        err->start = top_level.nodes[j]->start;
+        err->end   = top_level.nodes[j]->end;
+        err->data.error.message = "duplicate use of the same module path";
+        p.error_count++;
+        top_level.nodes[j] = err;
+      }
+    }
+  }
+
+  /* Check: duplicate imported names across use declarations */
+  for (uint32_t i = 0; i < top_level.count; i++) {
+    if (top_level.nodes[i]->type != AST_USE) continue;
+    AstNode* use_i = top_level.nodes[i];
+    for (uint32_t ni = 0; ni < use_i->data.use_decl.name_count; ni++) {
+      for (uint32_t j = i + 1; j < top_level.count; j++) {
+        if (top_level.nodes[j]->type != AST_USE) continue;
+        AstNode* use_j = top_level.nodes[j];
+        for (uint32_t nj = 0; nj < use_j->data.use_decl.name_count; nj++) {
+          if (use_i->data.use_decl.name_lens[ni] ==
+                  use_j->data.use_decl.name_lens[nj] &&
+              memcmp(use_i->data.use_decl.names[ni],
+                     use_j->data.use_decl.names[nj],
+                     use_i->data.use_decl.name_lens[ni]) == 0) {
+            AstNode* err = ast_alloc(arena);
+            err->type  = AST_ERROR;
+            err->start = top_level.nodes[j]->start;
+            err->end   = top_level.nodes[j]->end;
+            err->data.error.message = "duplicate imported name across use declarations";
+            p.error_count++;
+            top_level.nodes[j] = err;
+            goto next_use_j; /* skip remaining names in this use */
+          }
+        }
+        next_use_j:;
+      }
     }
   }
 
