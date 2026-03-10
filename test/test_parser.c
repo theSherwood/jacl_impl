@@ -1762,6 +1762,37 @@ static int test_use_pretty_print(void) {
   TEST_PASS();
 }
 
+/* ---- M14 US-005: underscore-prefix privacy ---- */
+
+static int test_use_private_name_error(void) {
+  setup();
+  ParseResult r = parse("use \"mod.jacl\" [_helper]");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_use_private_name_mixed(void) {
+  setup();
+  /* One private name among public ones — should error */
+  ParseResult r = parse("use \"mod.jacl\" [add _internal sub]");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_use_non_private_ok(void) {
+  setup();
+  /* Names not starting with _ should be fine */
+  ParseResult r = parse("use \"mod.jacl\" [add sub_thing mul]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -1881,6 +1912,10 @@ int main(void) {
     {"use_dup_name_err",      test_use_duplicate_name_error},
     {"use_multi_modules",     test_use_multiple_modules},
     {"use_pretty_print",      test_use_pretty_print},
+    /* M14 US-005: underscore-prefix privacy */
+    {"use_private_err",       test_use_private_name_error},
+    {"use_private_mixed",     test_use_private_name_mixed},
+    {"use_non_private_ok",    test_use_non_private_ok},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

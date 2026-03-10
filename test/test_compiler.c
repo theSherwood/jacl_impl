@@ -2938,6 +2938,35 @@ static int test_import_stack_chain_str(void) {
   TEST_PASS();
 }
 
+/* ===== US-005 (M14): Underscore-prefix privacy ===== */
+
+static int test_module_is_private(void) {
+  ASSERT(module__is_private("_helper", 7));
+  ASSERT(module__is_private("_", 1));
+  ASSERT(module__is_private("_internal", 9));
+  ASSERT(!module__is_private("add", 3));
+  ASSERT(!module__is_private("sub_thing", 9));
+  ASSERT(!module__is_private("", 0));
+  TEST_PASS();
+}
+
+static int test_use_private_compile_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  /* Importing a private name should produce a parse error propagated to compile */
+  CompileResult cr = compile_source("use \"mod.jacl\" [_helper]", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -3067,6 +3096,9 @@ int main(void) {
     { "import_stack_basic",              test_import_stack_basic },
     { "import_stack_circular_detect",    test_import_stack_circular_detect },
     { "import_stack_chain_str",          test_import_stack_chain_str },
+    /* US-005 (M14): Underscore-prefix privacy */
+    { "module_is_private",               test_module_is_private },
+    { "use_private_compile_err",         test_use_private_compile_error },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

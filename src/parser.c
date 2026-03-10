@@ -788,6 +788,24 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
     }
   }
 
+  /* Check: private names (underscore-prefixed) in use declarations */
+  for (uint32_t i = 0; i < top_level.count; i++) {
+    if (top_level.nodes[i]->type != AST_USE) continue;
+    AstNode* use_node = top_level.nodes[i];
+    for (uint32_t ni = 0; ni < use_node->data.use_decl.name_count; ni++) {
+      if (use_node->data.use_decl.names[ni][0] == '_') {
+        AstNode* err = ast_alloc(arena);
+        err->type  = AST_ERROR;
+        err->start = use_node->start;
+        err->end   = use_node->end;
+        err->data.error.message = "cannot import private name (underscore-prefixed)";
+        p.error_count++;
+        top_level.nodes[i] = err;
+        break; /* already replaced this node */
+      }
+    }
+  }
+
   /* Check: duplicate imported names across use declarations */
   for (uint32_t i = 0; i < top_level.count; i++) {
     if (top_level.nodes[i]->type != AST_USE) continue;

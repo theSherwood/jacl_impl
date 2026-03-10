@@ -292,6 +292,15 @@ static const char* module__resolve_path(const char* importer_path,
   return result;
 }
 
+/* --- Module privacy: underscore-prefix convention --- */
+
+/* Returns true if a top-level name is private (underscore-prefixed).
+   Private names are excluded from module export lists and cannot be
+   imported by other modules. */
+static bool module__is_private(const char* name, uint32_t name_len) {
+  return name_len > 0 && name[0] == '_';
+}
+
 /* --- Internal: Local variable tracking --- */
 
 #define COMPILER_LOCALS_MAX 256
