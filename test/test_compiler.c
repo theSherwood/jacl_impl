@@ -2833,6 +2833,111 @@ static int test_spawn_transitive_def_not_pinned(void) {
   TEST_PASS();
 }
 
+/* ===== US-004 (M14): Path resolution and circular import detection ===== */
+
+/* Test: module__resolve_path resolves relative to importer directory */
+static int test_module_resolve_path(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  /* Use build.sh (which we know exists) as a test target */
+  /* Resolve "build.sh" relative to src/jacl.c's parent directory */
+  char importer[1024];
+  realpath("src/jacl.c", importer);
+
+  /* "../../build.sh" from src/ should resolve to project root's build.sh */
+  const char* resolved = module__resolve_path(importer, "../build.sh", &arena);
+  ASSERT(resolved != NULL);
+  /* The result should be a canonical path ending in /build.sh */
+  const char* basename = strrchr(resolved, '/');
+  ASSERT(basename != NULL);
+  ASSERT_STR_EQ(basename + 1, "build.sh");
+
+  /* Verify it's a canonical path (starts with /) */
+  ASSERT(resolved[0] == '/');
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: module__resolve_path returns NULL for missing files */
+static int test_module_resolve_path_not_found(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  char importer[1024];
+  realpath("src/jacl.c", importer);
+
+  const char* resolved = module__resolve_path(importer, "nonexistent_file_xyz.jacl", &arena);
+  ASSERT(resolved == NULL);
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: ImportStack push/contains/pop */
+static int test_import_stack_basic(void) {
+  ImportStack stack;
+  import_stack__init(&stack);
+
+  ASSERT_U32_EQ(stack.count, 0);
+  ASSERT(!import_stack__contains(&stack, "/a.jacl"));
+
+  import_stack__push(&stack, "/a.jacl");
+  ASSERT_U32_EQ(stack.count, 1);
+  ASSERT(import_stack__contains(&stack, "/a.jacl"));
+  ASSERT(!import_stack__contains(&stack, "/b.jacl"));
+
+  import_stack__push(&stack, "/b.jacl");
+  ASSERT_U32_EQ(stack.count, 2);
+  ASSERT(import_stack__contains(&stack, "/b.jacl"));
+
+  import_stack__pop(&stack);
+  ASSERT_U32_EQ(stack.count, 1);
+  ASSERT(!import_stack__contains(&stack, "/b.jacl"));
+  ASSERT(import_stack__contains(&stack, "/a.jacl"));
+
+  TEST_PASS();
+}
+
+/* Test: ImportStack detects circular imports */
+static int test_import_stack_circular_detect(void) {
+  ImportStack stack;
+  import_stack__init(&stack);
+
+  import_stack__push(&stack, "/src/a.jacl");
+  import_stack__push(&stack, "/src/b.jacl");
+
+  /* b.jacl trying to import a.jacl → circular */
+  ASSERT(import_stack__contains(&stack, "/src/a.jacl"));
+  /* c.jacl not in stack → no cycle */
+  ASSERT(!import_stack__contains(&stack, "/src/c.jacl"));
+
+  TEST_PASS();
+}
+
+/* Test: import_stack__chain_str produces readable cycle description */
+static int test_import_stack_chain_str(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  ImportStack stack;
+  import_stack__init(&stack);
+  import_stack__push(&stack, "/project/a.jacl");
+  import_stack__push(&stack, "/project/b.jacl");
+  import_stack__push(&stack, "/project/c.jacl");
+
+  /* c.jacl tries to import a.jacl: chain should be a.jacl -> b.jacl -> c.jacl -> a.jacl */
+  const char* chain = import_stack__chain_str(&stack, "/project/a.jacl", &arena);
+  ASSERT_STR_EQ(chain, "a.jacl -> b.jacl -> c.jacl -> a.jacl");
+
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -2956,6 +3061,12 @@ int main(void) {
     { "spawn_transitive_capture_pinned", test_spawn_transitive_capture_pinned },
     { "spawn_transitive_varref_pinned",  test_spawn_transitive_varref_pinned },
     { "spawn_transitive_def_not_pinned", test_spawn_transitive_def_not_pinned },
+    /* US-004 (M14): Path resolution and circular import detection */
+    { "module_resolve_path",             test_module_resolve_path },
+    { "module_resolve_path_not_found",   test_module_resolve_path_not_found },
+    { "import_stack_basic",              test_import_stack_basic },
+    { "import_stack_circular_detect",    test_import_stack_circular_detect },
+    { "import_stack_chain_str",          test_import_stack_chain_str },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

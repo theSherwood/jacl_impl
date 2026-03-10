@@ -173,6 +173,125 @@ static Module* module_cache__add(ModuleCache* cache, const char* canonical_path)
   return mod;
 }
 
+/* --- Module path resolution and circular import detection --- */
+
+#define MODULE_IMPORT_STACK_MAX 32
+
+typedef struct {
+  const char* paths[MODULE_IMPORT_STACK_MAX]; /* canonical paths being compiled */
+  uint32_t    count;
+} ImportStack;
+
+static void import_stack__init(ImportStack* stack) {
+  stack->count = 0;
+}
+
+static bool import_stack__contains(ImportStack* stack, const char* canonical_path) {
+  for (uint32_t i = 0; i < stack->count; i++) {
+    if (strcmp(stack->paths[i], canonical_path) == 0) return true;
+  }
+  return false;
+}
+
+static bool import_stack__push(ImportStack* stack, const char* canonical_path) {
+  if (stack->count >= MODULE_IMPORT_STACK_MAX) return false;
+  stack->paths[stack->count++] = canonical_path;
+  return true;
+}
+
+static void import_stack__pop(ImportStack* stack) {
+  if (stack->count > 0) stack->count--;
+}
+
+/* Build a circular import chain string: "A -> B -> C -> A"
+   The cycle_path is the path that was found again in the stack. */
+static const char* import_stack__chain_str(ImportStack* stack,
+                                           const char* cycle_path,
+                                           arena_t* arena) {
+  /* Find the start of the cycle in the stack */
+  uint32_t start = 0;
+  for (uint32_t i = 0; i < stack->count; i++) {
+    if (strcmp(stack->paths[i], cycle_path) == 0) {
+      start = i;
+      break;
+    }
+  }
+
+  /* Calculate total length: filenames joined by " -> " plus final " -> first" */
+  size_t total = 0;
+  for (uint32_t i = start; i < stack->count; i++) {
+    /* Extract basename from path for readability */
+    const char* p = stack->paths[i];
+    const char* slash = strrchr(p, '/');
+    const char* base = slash ? slash + 1 : p;
+    total += strlen(base);
+    if (i > start) total += 4; /* " -> " */
+  }
+  /* Add " -> first" at the end to show the cycle */
+  const char* first_slash = strrchr(stack->paths[start], '/');
+  const char* first_base = first_slash ? first_slash + 1 : stack->paths[start];
+  total += 4 + strlen(first_base); /* " -> basename" */
+
+  char* buf = (char*)arena_alloc(arena, (uint32_t)(total + 1));
+  size_t pos = 0;
+  for (uint32_t i = start; i < stack->count; i++) {
+    if (i > start) {
+      memcpy(buf + pos, " -> ", 4);
+      pos += 4;
+    }
+    const char* p = stack->paths[i];
+    const char* slash = strrchr(p, '/');
+    const char* base = slash ? slash + 1 : p;
+    size_t len = strlen(base);
+    memcpy(buf + pos, base, len);
+    pos += len;
+  }
+  memcpy(buf + pos, " -> ", 4);
+  pos += 4;
+  size_t flen = strlen(first_base);
+  memcpy(buf + pos, first_base, flen);
+  pos += flen;
+  buf[pos] = '\0';
+  return buf;
+}
+
+/* Resolve a use-declaration path relative to the importing file's directory.
+   importer_path: canonical path of the file containing the `use` statement
+   use_path:      the relative path string from the `use` declaration
+   arena:         for allocating the result string
+   Returns: canonical path on success, NULL on failure (file not found) */
+static const char* module__resolve_path(const char* importer_path,
+                                        const char* use_path,
+                                        arena_t* arena) {
+  /* Find the directory of the importing file */
+  const char* last_slash = strrchr(importer_path, '/');
+  size_t dir_len = last_slash ? (size_t)(last_slash - importer_path) : 0;
+
+  /* Build the joined path: dir/use_path */
+  size_t use_len = strlen(use_path);
+  size_t joined_len = dir_len + 1 + use_len;
+  char joined[1024];
+  if (joined_len >= sizeof(joined)) return NULL;
+
+  if (dir_len > 0) {
+    memcpy(joined, importer_path, dir_len);
+    joined[dir_len] = '/';
+    memcpy(joined + dir_len + 1, use_path, use_len + 1);
+  } else {
+    memcpy(joined, use_path, use_len + 1);
+  }
+
+  /* Canonicalize with realpath() — resolves .., ., and symlinks */
+  char resolved[1024];
+  if (!realpath(joined, resolved)) return NULL; /* file not found */
+
+  /* Copy into arena */
+  size_t rlen = strlen(resolved);
+  char* result = (char*)arena_alloc(arena, (uint32_t)(rlen + 1));
+  memcpy(result, resolved, rlen + 1);
+  return result;
+}
+
 /* --- Internal: Local variable tracking --- */
 
 #define COMPILER_LOCALS_MAX 256
