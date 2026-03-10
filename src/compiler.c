@@ -301,6 +301,21 @@ static bool module__is_private(const char* name, uint32_t name_len) {
   return name_len > 0 && name[0] == '_';
 }
 
+/* Read a file into arena-allocated memory. Returns NULL on failure. */
+static char* module__read_file(const char* path, arena_t* arena) {
+  FILE* f = fopen(path, "rb");
+  if (!f) return NULL;
+  fseek(f, 0, SEEK_END);
+  long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (size < 0) { fclose(f); return NULL; }
+  char* buf = (char*)arena_alloc(arena, (uint32_t)(size + 1));
+  size_t nread = fread(buf, 1, (size_t)size, f);
+  buf[nread] = '\0';
+  fclose(f);
+  return buf;
+}
+
 /* --- Internal: Local variable tracking --- */
 
 #define COMPILER_LOCALS_MAX 256
@@ -813,6 +828,7 @@ struct Compiler {
   JaclType         return_type;     /* declared return type for current function */
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
   Module*          current_module;  /* module currently being compiled */
+  ImportStack*     import_stack;    /* shared import stack for circular detection */
 };
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -841,7 +857,13 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->return_type     = TYPE_DYN;
   c->module_cache    = NULL;
   c->current_module  = NULL;
+  c->import_stack    = NULL;
 }
+
+/* Forward declarations for module compilation (defined after compiler_compile) */
+static bool compiler__compile_module(const char* canonical_path,
+                                     Compiler* importer,
+                                     uint32_t line, uint32_t col);
 
 /* --- Internal: Emit helpers --- */
 
@@ -4611,7 +4633,50 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_USE: {
-      /* Module import — handled in later compilation stages (US-006+) */
+      /* Module import — compile the dependency module if not cached */
+      const char* use_path = node->data.use_decl.path;
+
+      /* Resolve path relative to the current module */
+      const char* importer_path = c->current_module ? c->current_module->path : NULL;
+      if (!importer_path) {
+        /* No current module context — cannot resolve relative import */
+        compiler__error(c, line, node->start.column,
+                        "use declaration requires module context");
+        break;
+      }
+
+      const char* canonical = module__resolve_path(importer_path, use_path, c->arena);
+      if (!canonical) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "module not found: \"%s\"", use_path);
+        char* msg = (char*)arena_alloc(c->arena, (uint32_t)(strlen(buf) + 1));
+        memcpy(msg, buf, strlen(buf) + 1);
+        compiler__error(c, line, node->start.column, msg);
+        break;
+      }
+
+      /* Check circular import */
+      if (c->import_stack && import_stack__contains(c->import_stack, canonical)) {
+        const char* chain = import_stack__chain_str(c->import_stack, canonical,
+                                                     c->arena);
+        char buf[512];
+        snprintf(buf, sizeof(buf), "circular import detected: %s", chain);
+        char* msg = (char*)arena_alloc(c->arena, (uint32_t)(strlen(buf) + 1));
+        memcpy(msg, buf, strlen(buf) + 1);
+        compiler__error(c, line, node->start.column, msg);
+        break;
+      }
+
+      /* Check cache — if already compiled, nothing to do for now */
+      if (c->module_cache && module_cache__find(c->module_cache, canonical)) {
+        break;
+      }
+
+      /* Compile the dependency module */
+      if (!compiler__compile_module(canonical, c, line, node->start.column)) {
+        /* Error already reported by compile_module */
+        break;
+      }
       break;
     }
 
@@ -4811,6 +4876,146 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   result.error_count  += c.error_count;
   result.error_message = c.first_error;
   return result;
+}
+
+/* --- Module compilation --- */
+
+/* Populate a Module's export list from the compiler's global_arities,
+   excluding underscore-prefixed (private) names. */
+static void module__populate_exports(Module* mod, Compiler* c) {
+  /* Count non-private globals */
+  uint32_t count = 0;
+  for (uint32_t i = 0; i < c->global_arity_count; i++) {
+    char name_buf[8];
+    jacl_inline_string_get(c->global_arities[i].name, name_buf, sizeof(name_buf));
+    size_t name_len = jacl_inline_string_len(c->global_arities[i].name);
+    if (!module__is_private(name_buf, (uint32_t)name_len)) {
+      count++;
+    }
+  }
+
+  if (count == 0) {
+    mod->exports = NULL;
+    mod->export_count = 0;
+    return;
+  }
+
+  mod->exports = (ExportEntry*)arena_alloc(c->arena, count * sizeof(ExportEntry));
+  mod->export_count = 0;
+
+  for (uint32_t i = 0; i < c->global_arity_count; i++) {
+    char name_buf[8];
+    jacl_inline_string_get(c->global_arities[i].name, name_buf, sizeof(name_buf));
+    size_t name_len = jacl_inline_string_len(c->global_arities[i].name);
+    if (module__is_private(name_buf, (uint32_t)name_len)) continue;
+
+    ExportEntry* e = &mod->exports[mod->export_count++];
+    /* Arena-copy the name so it outlives the stack buffer */
+    char* stored_name = (char*)arena_alloc(c->arena, (uint32_t)(name_len + 1));
+    memcpy(stored_name, name_buf, name_len);
+    stored_name[name_len] = '\0';
+    e->name       = stored_name;
+    e->name_len   = (uint32_t)name_len;
+    e->arity      = c->global_arities[i].known_arity;
+    e->is_mutable = c->global_arities[i].is_mutable;
+    e->suspends   = c->global_arities[i].suspends;
+    e->type       = c->global_arities[i].type;
+    e->return_type = c->global_arities[i].return_type;
+    memcpy(e->param_types, c->global_arities[i].param_types, sizeof(e->param_types));
+    e->param_count = (c->global_arities[i].known_arity >= 0) ?
+                     (uint32_t)c->global_arities[i].known_arity : 0;
+  }
+}
+
+/* Compile a module from a canonical file path.
+   Reads the file, lexes, parses, and compiles into a new Module in the cache.
+   Returns true on success, false on error (error reported via importer). */
+static bool compiler__compile_module(const char* canonical_path,
+                                     Compiler* importer,
+                                     uint32_t line, uint32_t col) {
+  arena_t* arena = importer->arena;
+
+  /* Read source file */
+  char* source = module__read_file(canonical_path, arena);
+  if (!source) {
+    char buf[256];
+    snprintf(buf, sizeof(buf), "could not read module: \"%s\"", canonical_path);
+    char* msg = (char*)arena_alloc(arena, (uint32_t)(strlen(buf) + 1));
+    memcpy(msg, buf, strlen(buf) + 1);
+    compiler__error(importer, line, col, msg);
+    return false;
+  }
+
+  /* Create module in cache */
+  Module* mod = module_cache__add(importer->module_cache, canonical_path);
+  if (!mod) {
+    compiler__error(importer, line, col, "too many modules (cache full)");
+    return false;
+  }
+  mod->source = source;
+
+  /* Push onto import stack for circular detection */
+  import_stack__push(importer->import_stack, canonical_path);
+
+  /* Lex and parse */
+  LexResult tokens = lexer_lex(source, arena);
+  ParseResult parse = parser_parse(tokens, arena);
+  if (parse.error_count > 0) {
+    char buf[256];
+    snprintf(buf, sizeof(buf), "parse error in module \"%s\"", canonical_path);
+    char* msg = (char*)arena_alloc(arena, (uint32_t)(strlen(buf) + 1));
+    memcpy(msg, buf, strlen(buf) + 1);
+    compiler__error(importer, line, col, msg);
+    import_stack__pop(importer->import_stack);
+    return false;
+  }
+
+  /* Suspension analysis */
+  SuspensionMap suspension_map = compiler__analyze_suspension(
+      parse.nodes, parse.count);
+
+  /* Compile into a new chunk */
+  BytecodeChunk* chunk = (BytecodeChunk*)arena_alloc(arena, sizeof(BytecodeChunk));
+  chunk_init(chunk, arena);
+
+  Compiler mc;
+  compiler__init(&mc, chunk, arena, importer->intern_table, importer->heap);
+  mc.suspension_map  = &suspension_map;
+  mc.module_cache    = importer->module_cache;
+  mc.current_module  = mod;
+  mc.import_stack    = importer->import_stack;
+
+  /* Compile all top-level statements */
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&mc, parse.nodes[i]);
+    if (i < parse.count - 1) {
+      compiler__emit_check_error(&mc, parse.nodes[i]->start.line);
+    }
+  }
+
+  /* Every module chunk ends with OP_HALT */
+  compiler__emit_byte(&mc, OP_HALT,
+                      parse.count > 0 ? parse.nodes[parse.count - 1]->start.line : 1);
+
+  /* Populate exports from global arities (exclude private names) */
+  module__populate_exports(mod, &mc);
+
+  mod->chunk    = chunk;
+  mod->compiled = true;
+
+  /* Pop import stack */
+  import_stack__pop(importer->import_stack);
+
+  /* Propagate errors to importer */
+  if (mc.error_count > 0) {
+    importer->error_count += mc.error_count;
+    if (!importer->first_error && mc.first_error) {
+      importer->first_error = mc.first_error;
+    }
+    return false;
+  }
+
+  return true;
 }
 
 #endif /* COMPILER_C */

@@ -13,5 +13,97 @@ Progress log for ralph/m14-module-system branch.
 - When adding fields to WorkerThread, must update ALL test files' rt_test__init_no_threads helpers
 - Bare `$var` in JACL is a value read (not a zero-arg call as of 16ebe58)
 - CPS mode effective recursion limit ~65 iterations (VM_STACK_MAX=256)
+- When adding new AST node types: must add explicit case in compiler__compile_node (no default), but analysis switches have default: cases
+- realpath() available via platform.h (<stdlib.h>) — use for canonical path resolution in module system
+- compiler__compile_module() is the entry point for compiling dependency modules; shares ModuleCache + ImportStack with importer
+- Module exports are populated from compiler's global_arities after compilation, excluding underscore-prefixed names
 
+---
+
+## 2026-03-10 - US-001
+- Added TOKEN_USE to TokenType enum in lexer.c
+- Lexer word-scanning section checks for 3-char "use" match and emits TOKEN_USE
+- All 191 jacl tests + 48 test suites pass
+- Files changed: src/lexer.c
+- **Learnings for future iterations:**
+  - The lexer has no existing keyword tokens — "def", "proc", etc. are all TOKEN_WORD checked by string comparison in the compiler
+  - TOKEN_USE is the first keyword token; future keywords can follow the same pattern in the word-lexing section of lexer_lex()
+  - Word tokens inside interpolated expressions (lexer__lex_interp_expr) do NOT need keyword detection since `use` is only valid at top-level
+---
+
+## 2026-03-10 - US-002
+- Added AST_USE node type to ast.c with use_decl union (path, names, name_lens, name_count)
+- Added parser__parse_use() function: parses `use "path" [name1 name2 ...]` syntax
+- Added post-parse validation in parser_parse(): use-before-statements ordering, duplicate path detection, duplicate name detection across use declarations
+- Added AST_USE pretty-print support
+- Added `case AST_USE:` no-op in compiler__compile_node (placeholder for US-006+)
+- Added 10 parser tests covering happy path and all error cases
+- All 95 parser tests pass, all 191 JACL tests pass, 48 test suites pass
+- Files changed: src/ast.c, src/parser.c, src/compiler.c, test/test_parser.c
+- **Learnings for future iterations:**
+  - TOKEN_USE is detected before parser__parse_bare_command in the main loop — TOKEN_USE would not be recognized as an atom/expr
+  - The use_decl stores names as const char** + uint32_t* (not AstNode**) — uses Token* directly via a cast trick in the parser, then copies to arena arrays
+  - Post-parse validation runs after the main loop in parser_parse() — converts invalid AST_USE nodes to AST_ERROR nodes
+  - All 7 analysis-phase switch statements in compiler.c have default: cases, so AST_USE is safely ignored there
+  - The compiler__compile_node switch at line 4198 has NO default, so new AST node types MUST be added explicitly there
+---
+
+## 2026-03-10 - US-003
+- Added ExportEntry struct: name, name_len, arity, is_mutable, suspends, type, return_type, param_types[16], param_count
+- Added Module struct: chunk, path, source, exports, export_count, compiled
+- Added ModuleCache struct with init/find/add functions (linear scan, max 64 modules)
+- Added module_cache and current_module fields to Compiler struct, initialized to NULL
+- Moved COMPILER_MAX_PROC_PARAMS define earlier so ExportEntry can reference it
+- All 48 test suites pass, 191 JACL tests pass
+- Files changed: src/compiler.c
+- **Learnings for future iterations:**
+  - Module structs are defined after type system section (line ~105) and before Local/GlobalArity structs
+  - ModuleCache uses arena allocation — all paths and Module structs are arena-allocated
+  - ExportEntry mirrors GlobalArity fields closely — both track arity, types, mutability, suspension
+  - COMPILER_MAX_PROC_PARAMS was moved up to be available for ExportEntry; original location has a comment
+---
+
+## 2026-03-10 - US-004
+- Added ImportStack struct (fixed-size array of canonical paths, max 32 deep) with init/contains/push/pop/chain_str functions
+- Added module__resolve_path() function: takes importer's canonical path + relative use-path, builds joined path, calls realpath() for canonicalization, returns NULL on file-not-found
+- Added import_stack__chain_str() for producing readable cycle error messages (e.g., "a.jacl -> b.jacl -> c.jacl -> a.jacl") using basenames
+- Added 5 unit tests: resolve_path (success), resolve_path_not_found, import_stack_basic, import_stack_circular_detect, import_stack_chain_str
+- All 48 test suites pass, 191 JACL tests pass
+- Files changed: src/compiler.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - realpath() is available via platform.h which includes <stdlib.h> — no additional includes needed in compiler.c
+  - module__resolve_path() uses stack-allocated 1024-byte buffers for joined and resolved paths, then copies to arena
+  - ImportStack is a standalone struct (not embedded in Compiler yet) — US-006+ will need to thread it through compilation
+  - The chain_str function extracts basenames via strrchr for readability; full paths are used for comparison
+---
+
+## 2026-03-10 - US-005
+- Added privacy check in parser post-validation: names starting with `_` in use declarations produce compile error
+- Added `module__is_private()` helper in compiler.c for export filtering (used by US-006+)
+- Added 3 parser tests: private name error, mixed private/public error, non-private underscore-containing names OK
+- Added 2 compiler tests: module__is_private unit test, use-private compile error propagation
+- All 48 test suites pass, 191 JACL tests pass
+- Files changed: src/parser.c, src/compiler.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Privacy is enforced at two levels: (1) parser rejects `use` of `_`-prefixed names, (2) compiler's `module__is_private()` will exclude them from export lists in US-006
+  - Names containing `_` but not starting with it (e.g., `sub_thing`) are NOT private — only the leading underscore matters
+  - The parser privacy check runs before duplicate-name checks, so a private name error takes precedence
+---
+
+## 2026-03-10 - US-006
+- Implemented module compilation: AST_USE now resolves paths, checks cache, and compiles dependencies
+- Added `module__read_file()` for reading .jacl files into arena memory
+- Added `module__populate_exports()` to build export list from compiler's global_arities (excluding private names)
+- Added `compiler__compile_module()` that orchestrates full pipeline (read → lex → parse → compile) for dependency modules
+- Added `ImportStack*` field to Compiler struct, threaded through module compilation for circular detection
+- Each module chunk ends with OP_HALT; exports carry full type info (arity, return_type, param_types, is_mutable, suspends)
+- Added 6 compiler tests: populate_exports, basic module compile, mutable export, private exclusion, cache hit, typed exports
+- All 48 test suites pass, 191 JACL tests pass
+- Files changed: src/compiler.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - `compiler__compile_module()` creates a fresh Compiler for each module but shares the ModuleCache and ImportStack with the importer
+  - ExportEntry names are arena-allocated copies extracted from JaclVal inline strings via `jacl_inline_string_get()`
+  - Module compilation uses the same non-CPS compilation path as single-file; CPS is only for top-level concurrent code
+  - AST_USE in single-file mode (no current_module) gracefully errors with "use declaration requires module context"
+  - Tests create temp .jacl files in /tmp and clean up after — need `<sys/stat.h>` and `<unistd.h>` for mkdir/unlink/rmdir
 ---

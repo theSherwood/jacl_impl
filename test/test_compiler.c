@@ -1,6 +1,9 @@
 #include "test_helpers.h"
 #include "../src/jacl.c"
 
+#include <sys/stat.h>
+#include <unistd.h>
+
 /* ===== Helper: parse source and compile ===== */
 
 static CompileResult compile_source(const char* source, arena_t* arena, ThreadHeap* heap) {
@@ -2967,6 +2970,454 @@ static int test_use_private_compile_error(void) {
   TEST_PASS();
 }
 
+/* ===== US-006 (M14): Module compilation — one chunk per module with export population ===== */
+
+/* Helper: write a string to a temp file, return the path */
+static const char* write_temp_jacl(const char* dir, const char* filename,
+                                    const char* content) {
+  static char path[1024];
+  snprintf(path, sizeof(path), "%s/%s", dir, filename);
+  FILE* f = fopen(path, "w");
+  if (!f) return NULL;
+  fputs(content, f);
+  fclose(f);
+  return path;
+}
+
+/* Test: module__populate_exports builds correct export list */
+static int test_module_populate_exports(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  /* Compile a source with def, proc, mut, and private names */
+  const char* source = "def x 42\n"
+                       "proc add [a b] { [+ $a $b] }\n"
+                       "mut cnt 0\n"
+                       "def _priv 99\n";
+  LexResult tokens = lexer_lex(source, &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  SuspensionMap suspension_map = compiler__analyze_suspension(
+      parse.nodes, parse.count);
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  Compiler c;
+  compiler__init(&c, &chunk, &arena, &intern_table, &heap);
+  c.suspension_map = &suspension_map;
+
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&c, parse.nodes[i]);
+  }
+
+  /* Create a module and populate exports */
+  Module mod;
+  mod.exports = NULL;
+  mod.export_count = 0;
+  module__populate_exports(&mod, &c);
+
+  /* Should have 3 exports: x, add, cnt (not _priv) */
+  ASSERT_U32_EQ(mod.export_count, 3);
+
+  /* Find each export by name */
+  int found_x = 0, found_add = 0, found_cnt = 0;
+  for (uint32_t i = 0; i < mod.export_count; i++) {
+    if (strcmp(mod.exports[i].name, "x") == 0) {
+      found_x = 1;
+      ASSERT_INT_EQ(mod.exports[i].arity, -1); /* def, not a proc */
+      ASSERT(!mod.exports[i].is_mutable);
+    } else if (strcmp(mod.exports[i].name, "add") == 0) {
+      found_add = 1;
+      ASSERT_INT_EQ(mod.exports[i].arity, 2);
+      ASSERT(!mod.exports[i].is_mutable);
+    } else if (strcmp(mod.exports[i].name, "cnt") == 0) {
+      found_cnt = 1;
+      ASSERT_INT_EQ(mod.exports[i].arity, -1);
+      ASSERT(mod.exports[i].is_mutable);
+    }
+  }
+  ASSERT(found_x);
+  ASSERT(found_add);
+  ASSERT(found_cnt);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: compiler__compile_module reads file, compiles, caches, and populates exports */
+static int test_compile_module_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  /* Create a temp module file */
+  const char* dir = "/tmp/jacl_test_m14";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add [a b] { [+ $a $b] }\n");
+
+  /* Create an importer module path */
+  char importer_path[1024];
+  snprintf(importer_path, sizeof(importer_path), "%s/main.jacl", dir);
+  /* Write a dummy main so realpath works */
+  write_temp_jacl(dir, "main.jacl", "");
+
+  char real_importer[1024];
+  realpath(importer_path, real_importer);
+
+  /* Resolve lib.jacl canonical path */
+  const char* lib_canonical = module__resolve_path(real_importer, "lib.jacl", &arena);
+  ASSERT(lib_canonical != NULL);
+
+  /* Set up module cache and import stack */
+  ModuleCache cache;
+  module_cache__init(&cache, &arena);
+  ImportStack import_stack;
+  import_stack__init(&import_stack);
+  import_stack__push(&import_stack, real_importer);
+
+  /* Set up a fake importer compiler */
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  Compiler importer;
+  compiler__init(&importer, &chunk, &arena, &intern_table, &heap);
+  importer.module_cache = &cache;
+  importer.import_stack = &import_stack;
+
+  Module importer_mod;
+  importer_mod.path = real_importer;
+  importer_mod.chunk = NULL;
+  importer_mod.source = NULL;
+  importer_mod.exports = NULL;
+  importer_mod.export_count = 0;
+  importer_mod.compiled = false;
+  importer.current_module = &importer_mod;
+
+  /* Compile the lib module */
+  bool ok = compiler__compile_module(lib_canonical, &importer, 1, 1);
+  ASSERT(ok);
+  ASSERT_U32_EQ(importer.error_count, 0);
+
+  /* Verify module is in cache */
+  Module* lib_mod = module_cache__find(&cache, lib_canonical);
+  ASSERT(lib_mod != NULL);
+  ASSERT(lib_mod->compiled);
+  ASSERT(lib_mod->chunk != NULL);
+
+  /* Verify exports */
+  ASSERT_U32_EQ(lib_mod->export_count, 2);
+
+  /* Verify OP_HALT at end of module chunk */
+  ASSERT(lib_mod->chunk->code_count > 0);
+  ASSERT_INT_EQ(lib_mod->chunk->code[lib_mod->chunk->code_count - 1], OP_HALT);
+
+  /* Clean up temp files */
+  unlink("/tmp/jacl_test_m14/lib.jacl");
+  unlink("/tmp/jacl_test_m14/main.jacl");
+  rmdir("/tmp/jacl_test_m14");
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: mutable exports have is_mutable flag set */
+static int test_compile_module_mutable_export(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  const char* dir = "/tmp/jacl_test_m14b";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "state.jacl", "mut count 0\ndef name \"bob\"\n");
+  write_temp_jacl(dir, "main.jacl", "");
+
+  char importer_path[1024];
+  snprintf(importer_path, sizeof(importer_path), "%s/main.jacl", dir);
+  char real_importer[1024];
+  realpath(importer_path, real_importer);
+
+  const char* state_canonical = module__resolve_path(real_importer, "state.jacl", &arena);
+  ASSERT(state_canonical != NULL);
+
+  ModuleCache cache;
+  module_cache__init(&cache, &arena);
+  ImportStack import_stack;
+  import_stack__init(&import_stack);
+  import_stack__push(&import_stack, real_importer);
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  Compiler importer;
+  compiler__init(&importer, &chunk, &arena, &intern_table, &heap);
+  importer.module_cache = &cache;
+  importer.import_stack = &import_stack;
+
+  Module importer_mod;
+  importer_mod.path = real_importer;
+  importer_mod.chunk = NULL;
+  importer_mod.source = NULL;
+  importer_mod.exports = NULL;
+  importer_mod.export_count = 0;
+  importer_mod.compiled = false;
+  importer.current_module = &importer_mod;
+
+  bool ok = compiler__compile_module(state_canonical, &importer, 1, 1);
+  ASSERT(ok);
+
+  Module* state_mod = module_cache__find(&cache, state_canonical);
+  ASSERT(state_mod != NULL);
+  ASSERT_U32_EQ(state_mod->export_count, 2);
+
+  /* Find the mutable export */
+  int found_count = 0, found_name = 0;
+  for (uint32_t i = 0; i < state_mod->export_count; i++) {
+    if (strcmp(state_mod->exports[i].name, "count") == 0) {
+      found_count = 1;
+      ASSERT(state_mod->exports[i].is_mutable);
+    } else if (strcmp(state_mod->exports[i].name, "name") == 0) {
+      found_name = 1;
+      ASSERT(!state_mod->exports[i].is_mutable);
+    }
+  }
+  ASSERT(found_count);
+  ASSERT(found_name);
+
+  unlink("/tmp/jacl_test_m14b/state.jacl");
+  unlink("/tmp/jacl_test_m14b/main.jacl");
+  rmdir("/tmp/jacl_test_m14b");
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: private names excluded from module exports */
+static int test_compile_module_private_excluded(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  const char* dir = "/tmp/jacl_test_m14c";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "priv.jacl",
+                  "def pub 1\ndef _secret 2\nproc _help [x] { $x }\nproc greet [x] { $x }\n");
+  write_temp_jacl(dir, "main.jacl", "");
+
+  char importer_path[1024];
+  snprintf(importer_path, sizeof(importer_path), "%s/main.jacl", dir);
+  char real_importer[1024];
+  realpath(importer_path, real_importer);
+
+  const char* priv_canonical = module__resolve_path(real_importer, "priv.jacl", &arena);
+  ASSERT(priv_canonical != NULL);
+
+  ModuleCache cache;
+  module_cache__init(&cache, &arena);
+  ImportStack import_stack;
+  import_stack__init(&import_stack);
+  import_stack__push(&import_stack, real_importer);
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  Compiler importer;
+  compiler__init(&importer, &chunk, &arena, &intern_table, &heap);
+  importer.module_cache = &cache;
+  importer.import_stack = &import_stack;
+
+  Module importer_mod;
+  importer_mod.path = real_importer;
+  importer_mod.chunk = NULL;
+  importer_mod.source = NULL;
+  importer_mod.exports = NULL;
+  importer_mod.export_count = 0;
+  importer_mod.compiled = false;
+  importer.current_module = &importer_mod;
+
+  bool ok = compiler__compile_module(priv_canonical, &importer, 1, 1);
+  ASSERT(ok);
+
+  Module* priv_mod = module_cache__find(&cache, priv_canonical);
+  ASSERT(priv_mod != NULL);
+  /* Only pub and greet should be exported (not _secret, _help) */
+  ASSERT_U32_EQ(priv_mod->export_count, 2);
+
+  for (uint32_t i = 0; i < priv_mod->export_count; i++) {
+    ASSERT(priv_mod->exports[i].name[0] != '_');
+  }
+
+  unlink("/tmp/jacl_test_m14c/priv.jacl");
+  unlink("/tmp/jacl_test_m14c/main.jacl");
+  rmdir("/tmp/jacl_test_m14c");
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: cached module is not recompiled */
+static int test_compile_module_cached(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  const char* dir = "/tmp/jacl_test_m14d";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "lib.jacl", "def x 42\n");
+  write_temp_jacl(dir, "main.jacl", "");
+
+  char importer_path[1024];
+  snprintf(importer_path, sizeof(importer_path), "%s/main.jacl", dir);
+  char real_importer[1024];
+  realpath(importer_path, real_importer);
+
+  const char* lib_canonical = module__resolve_path(real_importer, "lib.jacl", &arena);
+
+  ModuleCache cache;
+  module_cache__init(&cache, &arena);
+  ImportStack import_stack;
+  import_stack__init(&import_stack);
+  import_stack__push(&import_stack, real_importer);
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  Compiler importer;
+  compiler__init(&importer, &chunk, &arena, &intern_table, &heap);
+  importer.module_cache = &cache;
+  importer.import_stack = &import_stack;
+
+  Module importer_mod;
+  importer_mod.path = real_importer;
+  importer_mod.chunk = NULL;
+  importer_mod.source = NULL;
+  importer_mod.exports = NULL;
+  importer_mod.export_count = 0;
+  importer_mod.compiled = false;
+  importer.current_module = &importer_mod;
+
+  /* Compile once */
+  bool ok = compiler__compile_module(lib_canonical, &importer, 1, 1);
+  ASSERT(ok);
+  ASSERT_U32_EQ(cache.count, 1);
+
+  /* Module is already cached — cache lookup should find it */
+  Module* cached = module_cache__find(&cache, lib_canonical);
+  ASSERT(cached != NULL);
+  ASSERT(cached->compiled);
+
+  /* Cache count should still be 1 (not recompiled) */
+  ASSERT_U32_EQ(cache.count, 1);
+
+  unlink("/tmp/jacl_test_m14d/lib.jacl");
+  unlink("/tmp/jacl_test_m14d/main.jacl");
+  rmdir("/tmp/jacl_test_m14d");
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: typed proc exports carry full type info */
+static int test_compile_module_typed_exports(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  const char* dir = "/tmp/jacl_test_m14e";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "math.jacl",
+                  "proc i64 add [i64 a i64 b] { [+ $a $b] }\n");
+  write_temp_jacl(dir, "main.jacl", "");
+
+  char importer_path[1024];
+  snprintf(importer_path, sizeof(importer_path), "%s/main.jacl", dir);
+  char real_importer[1024];
+  realpath(importer_path, real_importer);
+
+  const char* math_canonical = module__resolve_path(real_importer, "math.jacl", &arena);
+
+  ModuleCache cache;
+  module_cache__init(&cache, &arena);
+  ImportStack import_stack;
+  import_stack__init(&import_stack);
+  import_stack__push(&import_stack, real_importer);
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  Compiler importer;
+  compiler__init(&importer, &chunk, &arena, &intern_table, &heap);
+  importer.module_cache = &cache;
+  importer.import_stack = &import_stack;
+
+  Module importer_mod;
+  importer_mod.path = real_importer;
+  importer_mod.chunk = NULL;
+  importer_mod.source = NULL;
+  importer_mod.exports = NULL;
+  importer_mod.export_count = 0;
+  importer_mod.compiled = false;
+  importer.current_module = &importer_mod;
+
+  bool ok = compiler__compile_module(math_canonical, &importer, 1, 1);
+  ASSERT(ok);
+
+  Module* math_mod = module_cache__find(&cache, math_canonical);
+  ASSERT(math_mod != NULL);
+  ASSERT_U32_EQ(math_mod->export_count, 1);
+
+  ExportEntry* e = &math_mod->exports[0];
+  ASSERT_STR_EQ(e->name, "add");
+  ASSERT_INT_EQ(e->arity, 2);
+  ASSERT_INT_EQ((int)e->return_type, (int)TYPE_I64);
+  ASSERT_INT_EQ((int)e->param_types[0], (int)TYPE_I64);
+  ASSERT_INT_EQ((int)e->param_types[1], (int)TYPE_I64);
+  ASSERT_U32_EQ(e->param_count, 2);
+
+  unlink("/tmp/jacl_test_m14e/math.jacl");
+  unlink("/tmp/jacl_test_m14e/main.jacl");
+  rmdir("/tmp/jacl_test_m14e");
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -3099,6 +3550,13 @@ int main(void) {
     /* US-005 (M14): Underscore-prefix privacy */
     { "module_is_private",               test_module_is_private },
     { "use_private_compile_err",         test_use_private_compile_error },
+    /* US-006 (M14): Module compilation — export population */
+    { "module_populate_exports",         test_module_populate_exports },
+    { "compile_module_basic",            test_compile_module_basic },
+    { "compile_module_mutable_export",   test_compile_module_mutable_export },
+    { "compile_module_private_excluded", test_compile_module_private_excluded },
+    { "compile_module_cached",           test_compile_module_cached },
+    { "compile_module_typed_exports",    test_compile_module_typed_exports },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
