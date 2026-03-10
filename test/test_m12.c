@@ -718,6 +718,127 @@ static int test_memory_bounded(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * US-004: GCHeader gen field
+ * ==================================================================== */
+
+static int test_gc_header_size(void) {
+    /* GCHeader must remain exactly 8 bytes after adding gen bitfield */
+    ASSERT((int)sizeof(GCHeader) == 8);
+    TEST_PASS();
+}
+
+static int test_gc_gen_young_on_alloc(void) {
+    /* Newly allocated objects have gen == 0 (young) */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    void *p1 = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    void *p2 = gc_alloc(&vm.heap, OBJ_CLOSURE, sizeof(JaclClosure));
+    void *p3 = gc_alloc(&vm.heap, OBJ_STRING, 32);
+
+    ASSERT_INT_EQ(gc_header_of(p1)->gen, 0);
+    ASSERT_INT_EQ(gc_header_of(p2)->gen, 0);
+    ASSERT_INT_EQ(gc_header_of(p3)->gen, 0);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_gen_independent_of_mark(void) {
+    /* gen and mark are independent bitfields — setting one doesn't affect the other */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    void *p = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    GCHeader *hdr = gc_header_of(p);
+
+    /* Initial state: mark=0, gen=0 */
+    ASSERT_INT_EQ(hdr->mark, 0);
+    ASSERT_INT_EQ(hdr->gen, 0);
+
+    /* Set gen=1, mark should stay 0 */
+    hdr->gen = 1;
+    ASSERT_INT_EQ(hdr->mark, 0);
+    ASSERT_INT_EQ(hdr->gen, 1);
+
+    /* Set mark=1, gen should stay 1 */
+    hdr->mark = 1;
+    ASSERT_INT_EQ(hdr->mark, 1);
+    ASSERT_INT_EQ(hdr->gen, 1);
+
+    /* Clear mark, gen should stay 1 */
+    hdr->mark = 0;
+    ASSERT_INT_EQ(hdr->mark, 0);
+    ASSERT_INT_EQ(hdr->gen, 1);
+
+    /* Clear gen, mark should stay 0 */
+    hdr->gen = 0;
+    ASSERT_INT_EQ(hdr->mark, 0);
+    ASSERT_INT_EQ(hdr->gen, 0);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_gen_survives_gc(void) {
+    /* gen field is preserved through GC cycles (not reset by mark/sweep) */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal live = jacl_i64(&vm.heap, 42);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    /* Manually promote object to old gen */
+    GCHeader *hdr = gc_header_of(jacl_as_ptr(live));
+    hdr->gen = 1;
+
+    /* Run a GC cycle */
+    gc_collect(&vm.heap, &vm);
+
+    /* Object survived, gen still 1 */
+    ASSERT(jacl_as_i64(live) == 42);
+    ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(live))->gen, 1);
+
+    /* Run another GC cycle */
+    gc_collect(&vm.heap, &vm);
+
+    /* Still gen 1 */
+    ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(live))->gen, 1);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_header_of_with_gen(void) {
+    /* gc_header_of works correctly with gen field populated */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    void *p = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    GCHeader *hdr = gc_header_of(p);
+
+    hdr->gen = 1;
+    ASSERT_INT_EQ(hdr->obj_type, OBJ_HEAP_I64);
+    ASSERT(hdr->alloc_total > 0);
+    ASSERT_INT_EQ(hdr->gen, 1);
+
+    /* Verify pointer arithmetic: header is right before payload */
+    ASSERT((void *)(hdr + 1) == p);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -745,6 +866,12 @@ int main(void) {
         { "mt_stress_atom_swap",          test_mt_stress_atom_swap },
         /* Memory bounded */
         { "memory_bounded",               test_memory_bounded },
+        /* US-004: GCHeader gen field */
+        { "gc_header_size",               test_gc_header_size },
+        { "gc_gen_young_on_alloc",        test_gc_gen_young_on_alloc },
+        { "gc_gen_independent_of_mark",   test_gc_gen_independent_of_mark },
+        { "gc_gen_survives_gc",           test_gc_gen_survives_gc },
+        { "gc_header_of_with_gen",        test_gc_header_of_with_gen },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
