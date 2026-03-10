@@ -3958,6 +3958,188 @@ static int test_module_set_immutable_errors(void) {
   TEST_PASS();
 }
 
+/* ===== US-009 (M14): Compiler API — multi-file entry point ===== */
+
+/* Helper: recursively remove a directory of .jacl files */
+static void cleanup_jacl_dir(const char* dir, const char** files, uint32_t count) {
+  for (uint32_t i = 0; i < count; i++) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s", dir, files[i]);
+    unlink(path);
+  }
+  rmdir(dir);
+}
+
+/* Test: single-file program (no imports) compiles successfully */
+static int test_compile_program_single_file(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable intern; intern_table_init(&intern, &arena);
+
+  const char* dir = "/tmp/jacl_us009a";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "main.jacl", "def x 42\n");
+
+  ProgramResult pr = jacl_compile_program(
+      "/tmp/jacl_us009a/main.jacl", &arena, &intern, &heap);
+
+  ASSERT_U32_EQ(pr.error_count, 0);
+  ASSERT_U32_EQ(pr.module_count, 1);
+  ASSERT(pr.modules != NULL);
+  ASSERT(pr.modules[0] != NULL);
+  ASSERT(pr.modules[0]->compiled);
+  ASSERT(pr.modules[0]->chunk != NULL);
+  /* Root is last (and only) */
+  ASSERT(pr.suspending == false);
+
+  const char* files[] = { "main.jacl" };
+  cleanup_jacl_dir(dir, files, 1);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: multi-file program — root imports a library module */
+static int test_compile_program_with_dep(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable intern; intern_table_init(&intern, &arena);
+
+  const char* dir = "/tmp/jacl_us009b";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add [a b] { [+ $a $b] }\n");
+  write_temp_jacl(dir, "main.jacl", "use \"lib.jacl\" [add x]\n[add $x 1]\n");
+
+  ProgramResult pr = jacl_compile_program(
+      "/tmp/jacl_us009b/main.jacl", &arena, &intern, &heap);
+
+  ASSERT_U32_EQ(pr.error_count, 0);
+  ASSERT_U32_EQ(pr.module_count, 2);
+  ASSERT(pr.modules != NULL);
+  /* Dependencies first, root last */
+  /* modules[0] should be lib.jacl (dependency) */
+  ASSERT(pr.modules[0]->compiled);
+  ASSERT(pr.modules[0]->export_count >= 2); /* add and x */
+  /* modules[1] should be root (main.jacl) */
+  ASSERT(pr.modules[1]->compiled);
+
+  const char* files[] = { "lib.jacl", "main.jacl" };
+  cleanup_jacl_dir(dir, files, 2);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: topological order — root is always last */
+static int test_compile_program_topo_order(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable intern; intern_table_init(&intern, &arena);
+
+  const char* dir = "/tmp/jacl_us009c";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "a.jacl", "def val_a 1\n");
+  write_temp_jacl(dir, "b.jacl", "use \"a.jacl\" [val_a]\ndef val_b 2\n");
+  write_temp_jacl(dir, "main.jacl", "use \"b.jacl\" [val_b]\n[+ $val_b 10]\n");
+
+  ProgramResult pr = jacl_compile_program(
+      "/tmp/jacl_us009c/main.jacl", &arena, &intern, &heap);
+
+  ASSERT_U32_EQ(pr.error_count, 0);
+  ASSERT_U32_EQ(pr.module_count, 3);
+  /* Root (main.jacl) must be last */
+  char main_resolved[1024];
+  realpath("/tmp/jacl_us009c/main.jacl", main_resolved);
+  ASSERT_STR_EQ(pr.modules[2]->path, main_resolved);
+
+  const char* files[] = { "a.jacl", "b.jacl", "main.jacl" };
+  cleanup_jacl_dir(dir, files, 3);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: file not found produces error */
+static int test_compile_program_not_found(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable intern; intern_table_init(&intern, &arena);
+
+  ProgramResult pr = jacl_compile_program(
+      "/tmp/jacl_us009_nonexistent.jacl", &arena, &intern, &heap);
+
+  ASSERT(pr.error_count > 0);
+  ASSERT(pr.error_message != NULL);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: existing compiler_compile still works for single-file */
+static int test_single_file_api_unchanged(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source("def x 42\n[+ $x 1]\n", &arena, &heap);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT(cr.chunk.code_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: program with exports populates root module exports */
+static int test_compile_program_root_exports(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable intern; intern_table_init(&intern, &arena);
+
+  const char* dir = "/tmp/jacl_us009e";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "main.jacl", "def x 42\nproc add [a b] { [+ $a $b] }\n");
+
+  ProgramResult pr = jacl_compile_program(
+      "/tmp/jacl_us009e/main.jacl", &arena, &intern, &heap);
+
+  ASSERT_U32_EQ(pr.error_count, 0);
+  /* Root module should have exports populated */
+  Module* root = pr.modules[pr.module_count - 1];
+  ASSERT(root->export_count >= 2); /* x and add */
+
+  const char* files[] = { "main.jacl" };
+  cleanup_jacl_dir(dir, files, 1);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -4111,6 +4293,13 @@ int main(void) {
     { "module_mutable_import_is_box",    test_module_mutable_import_is_box },
     { "module_set_emits_reset",          test_module_set_emits_reset },
     { "module_set_immutable_errors",     test_module_set_immutable_errors },
+    /* US-009 (M14): Compiler API — multi-file entry point */
+    { "compile_program_single_file",     test_compile_program_single_file },
+    { "compile_program_with_dep",        test_compile_program_with_dep },
+    { "compile_program_topo_order",      test_compile_program_topo_order },
+    { "compile_program_not_found",       test_compile_program_not_found },
+    { "single_file_api_unchanged",       test_single_file_api_unchanged },
+    { "compile_program_root_exports",    test_compile_program_root_exports },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

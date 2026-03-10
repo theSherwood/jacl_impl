@@ -24,6 +24,8 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       JaclInternTable* intern_table,
                                       ThreadHeap* heap);
 
+/* jacl_compile_program forward-declared after ProgramResult (below) */
+
 /* --- Type system --- */
 
 typedef enum {
@@ -128,6 +130,21 @@ typedef struct {
   uint32_t       export_count; /* number of exports */
   bool           compiled;     /* true once compilation is complete */
 } Module;
+
+/* --- Program Result (multi-module) --- */
+
+typedef struct {
+  Module**    modules;       /* modules in topological order (root last) */
+  uint32_t    module_count;
+  uint32_t    error_count;
+  const char* error_message; /* first error message, or NULL */
+  bool        suspending;    /* true if root module is CPS-transformed */
+} ProgramResult;
+
+static ProgramResult jacl_compile_program(const char* root_path,
+                                          arena_t* arena,
+                                          JaclInternTable* intern_table,
+                                          ThreadHeap* heap);
 
 typedef struct {
   Module*  modules[MODULE_CACHE_MAX]; /* compiled modules by slot */
@@ -5121,6 +5138,250 @@ static bool compiler__compile_module(const char* canonical_path,
   }
 
   return true;
+}
+
+/* --- Multi-file program compilation API --- */
+
+/* Compile a program starting from a root file.
+   Recursively compiles all dependency modules and returns them in
+   topological order (dependencies first, root module last). */
+static ProgramResult jacl_compile_program(const char* root_path,
+                                          arena_t* arena,
+                                          JaclInternTable* intern_table,
+                                          ThreadHeap* heap) {
+  ProgramResult result;
+  memset(&result, 0, sizeof(result));
+
+  /* Canonicalize root path */
+  char resolved[1024];
+  if (!realpath(root_path, resolved)) {
+    result.error_count = 1;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "module not found: \"%s\"", root_path);
+    char* msg = (char*)arena_alloc(arena, (uint32_t)(strlen(buf) + 1));
+    memcpy(msg, buf, strlen(buf) + 1);
+    result.error_message = msg;
+    return result;
+  }
+  char* canonical = (char*)arena_alloc(arena, (uint32_t)(strlen(resolved) + 1));
+  memcpy(canonical, resolved, strlen(resolved) + 1);
+
+  /* Read source file */
+  char* source = module__read_file(canonical, arena);
+  if (!source) {
+    result.error_count = 1;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "could not read module: \"%s\"", root_path);
+    char* msg = (char*)arena_alloc(arena, (uint32_t)(strlen(buf) + 1));
+    memcpy(msg, buf, strlen(buf) + 1);
+    result.error_message = msg;
+    return result;
+  }
+
+  /* Set up module infrastructure */
+  ModuleCache cache;
+  module_cache__init(&cache, arena);
+  ImportStack istack;
+  import_stack__init(&istack);
+
+  /* Create root module in cache */
+  Module* root_mod = module_cache__add(&cache, canonical);
+  root_mod->source = source;
+
+  import_stack__push(&istack, canonical);
+
+  /* Lex and parse */
+  LexResult tokens = lexer_lex(source, arena);
+  ParseResult parse = parser_parse(tokens, arena);
+  if (parse.error_count > 0) {
+    result.error_count = parse.error_count;
+    result.error_message = "parse error in root module";
+    return result;
+  }
+
+  /* Suspension analysis */
+  SuspensionMap suspension_map = compiler__analyze_suspension(
+      parse.nodes, parse.count);
+  bool top_suspends = compiler__top_level_suspends(
+      parse.nodes, parse.count, &suspension_map);
+
+  /* Create root module chunk */
+  BytecodeChunk* root_chunk = (BytecodeChunk*)arena_alloc(
+      arena, sizeof(BytecodeChunk));
+  chunk_init(root_chunk, arena);
+
+  /* Initialize compiler with module context */
+  Compiler c;
+  compiler__init(&c, root_chunk, arena, intern_table, heap);
+  c.suspension_map = &suspension_map;
+  c.module_cache   = &cache;
+  c.current_module = root_mod;
+  c.import_stack   = &istack;
+
+  if (top_suspends) {
+    /* CPS-transform top-level code — same logic as compiler_compile */
+
+    /* Phase 1: Register proc global arities */
+    for (uint32_t i = 0; i < parse.count; i++) {
+      AstNode* node = parse.nodes[i];
+      if (node->type == AST_COMMAND &&
+          compiler__head_matches(node->data.command.head, "proc", 4)) {
+        AstNode** pargs = node->data.command.args;
+        uint32_t pargc = node->data.command.arg_count;
+        if (pargc >= 3) {
+          AstNode* name_node = pargs[0];
+          if (name_node->type == AST_LIT_STRING &&
+              name_node->data.lit_string.length <= 7) {
+            JaclVal pname = jacl_inline_string(
+                name_node->data.lit_string.value,
+                name_node->data.lit_string.length);
+            AstNode* param_list = pargs[1];
+            int16_t pcount = 0;
+            if (param_list->type == AST_COMMAND) {
+              AstNode* phead = param_list->data.command.head;
+              if (phead && phead->type == AST_LIT_STRING &&
+                  phead->data.lit_string.length > 0) {
+                pcount = 1 + (int16_t)param_list->data.command.arg_count;
+              }
+            }
+            compiler__set_global_arity(&c, pname, pcount);
+            GlobalArity* ga = compiler__find_global_arity(&c, pname);
+            if (ga) {
+              ga->suspends = suspension_map_lookup(&suspension_map, pname);
+            }
+          }
+        }
+      }
+    }
+
+    /* Phase 1b: Pre-register mut declarations */
+    for (uint32_t i = 0; i < parse.count; i++) {
+      AstNode* node = parse.nodes[i];
+      if (node->type == AST_COMMAND &&
+          compiler__head_matches(node->data.command.head, "mut", 3)) {
+        uint32_t margc = node->data.command.arg_count;
+        if (margc >= 2) {
+          AstNode* name_node = node->data.command.args[margc >= 3 ? 1 : 0];
+          if (name_node->type == AST_LIT_STRING &&
+              name_node->data.lit_string.length <= 7) {
+            JaclVal mname = jacl_inline_string(
+                name_node->data.lit_string.value,
+                name_node->data.lit_string.length);
+            compiler__set_global_arity(&c, mname, -1);
+            GlobalArity* ga = compiler__find_global_arity(&c, mname);
+            if (ga) {
+              ga->is_mutable = true;
+            }
+          }
+        }
+      }
+    }
+
+    /* Phase 2: Hoist proc definitions, collect non-proc stmts */
+    uint32_t non_proc_count = 0;
+    AstNode** non_proc_stmts = (AstNode**)arena_alloc(arena,
+        parse.count * sizeof(AstNode*));
+    for (uint32_t i = 0; i < parse.count; i++) {
+      AstNode* node = parse.nodes[i];
+      if (node->type == AST_COMMAND &&
+          compiler__head_matches(node->data.command.head, "proc", 4)) {
+        compiler__compile_node(&c, node);
+        compiler__emit_check_error(&c, node->start.line);
+      } else {
+        non_proc_stmts[non_proc_count++] = node;
+      }
+    }
+
+    /* Phase 3: Create __main CPS closure */
+    JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
+    chunk_init(&main_cl->chunk, arena);
+    main_cl->param_count   = 1;
+    main_cl->upvalue_count = 0;
+    main_cl->upvalues      = NULL;
+    main_cl->name          = "__main";
+    main_cl->min_args      = 1;
+    main_cl->variadic      = false;
+    main_cl->pinned        = false;
+    main_cl->pin_worker_id = -1;
+    JaclVal* main_pnames   = (JaclVal*)arena_alloc(arena, sizeof(JaclVal));
+    main_pnames[0]         = jacl_inline_string("__k", 3);
+    main_cl->param_names   = main_pnames;
+
+    Compiler body;
+    compiler__init(&body, &main_cl->chunk, arena, intern_table, heap);
+    body.scope_depth       = 1;
+    body.enclosing         = &c;
+    body.suspension_map    = &suspension_map;
+    body.is_cps            = true;
+    body.force_global_procs = true;
+    body.module_cache      = &cache;
+    body.current_module    = root_mod;
+    body.import_stack      = &istack;
+
+    memcpy(body.global_arities, c.global_arities,
+           sizeof(GlobalArity) * c.global_arity_count);
+    body.global_arity_count = c.global_arity_count;
+
+    compiler__add_local(&body, jacl_inline_string("__k", 3), 1, 0);
+    body.locals[body.local_count - 1].is_param = true;
+
+    compiler__compile_cps_stmts(&body, non_proc_stmts, non_proc_count, 1);
+    compiler__emit_byte(&body, OP_RETURN, 1);
+
+    c.error_count += body.error_count;
+    if (!c.first_error && body.first_error) {
+      c.first_error = body.first_error;
+    }
+
+    main_cl->upvalue_count = (uint8_t)body.upvalue_count;
+
+    uint16_t cl_idx = chunk_add_constant(root_chunk, jacl_closure(main_cl));
+    compiler__emit_byte(&c, OP_CLOSURE, 1);
+    compiler__emit_u16(&c, cl_idx, 1);
+    for (uint32_t i = 0; i < body.upvalue_count; i++) {
+      compiler__emit_byte(&c, body.upvalues[i].is_local, 1);
+      compiler__emit_byte(&c, body.upvalues[i].index, 1);
+    }
+    compiler__emit_byte(&c, OP_HALT, 1);
+
+    result.suspending = true;
+  } else {
+    /* Normal non-suspending compilation */
+    for (uint32_t i = 0; i < parse.count; i++) {
+      compiler__compile_node(&c, parse.nodes[i]);
+      if (i < parse.count - 1) {
+        compiler__emit_check_error(&c, parse.nodes[i]->start.line);
+      }
+    }
+    compiler__emit_byte(&c, OP_HALT,
+        parse.count > 0 ? parse.nodes[parse.count - 1]->start.line : 1);
+  }
+
+  /* Populate root module exports and finalize */
+  module__populate_exports(root_mod, &c);
+  root_mod->chunk    = root_chunk;
+  root_mod->compiled = true;
+
+  import_stack__pop(&istack);
+
+  /* Build topological module list: dependencies first, root last.
+     Cache order is insertion order: root is index 0, dependencies follow.
+     We output all non-root modules first, then root. */
+  result.module_count = cache.count;
+  result.modules = (Module**)arena_alloc(arena,
+      cache.count * sizeof(Module*));
+
+  uint32_t out = 0;
+  for (uint32_t i = 0; i < cache.count; i++) {
+    if (cache.modules[i] != root_mod) {
+      result.modules[out++] = cache.modules[i];
+    }
+  }
+  result.modules[out] = root_mod;
+
+  result.error_count   = c.error_count;
+  result.error_message = c.first_error;
+  return result;
 }
 
 #endif /* COMPILER_C */
