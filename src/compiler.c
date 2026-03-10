@@ -4667,15 +4667,81 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
         break;
       }
 
-      /* Check cache — if already compiled, nothing to do for now */
-      if (c->module_cache && module_cache__find(c->module_cache, canonical)) {
-        break;
+      /* Check cache — compile if not already compiled */
+      Module* dep_mod = c->module_cache
+                          ? module_cache__find(c->module_cache, canonical)
+                          : NULL;
+      if (!dep_mod) {
+        /* Compile the dependency module */
+        if (!compiler__compile_module(canonical, c, line, node->start.column)) {
+          /* Error already reported by compile_module */
+          break;
+        }
+        dep_mod = module_cache__find(c->module_cache, canonical);
+        if (!dep_mod) {
+          compiler__error(c, line, node->start.column,
+                          "internal error: module not in cache after compile");
+          break;
+        }
       }
 
-      /* Compile the dependency module */
-      if (!compiler__compile_module(canonical, c, line, node->start.column)) {
-        /* Error already reported by compile_module */
-        break;
+      /* Register each imported name as a GlobalArity in this compiler */
+      for (uint32_t ni = 0; ni < node->data.use_decl.name_count; ni++) {
+        const char* imp_name  = node->data.use_decl.names[ni];
+        uint32_t    imp_len   = node->data.use_decl.name_lens[ni];
+
+        /* Find the name in the module's exports */
+        ExportEntry* found_export = NULL;
+        for (uint32_t ei = 0; ei < dep_mod->export_count; ei++) {
+          if (dep_mod->exports[ei].name_len == imp_len &&
+              memcmp(dep_mod->exports[ei].name, imp_name, imp_len) == 0) {
+            found_export = &dep_mod->exports[ei];
+            break;
+          }
+        }
+
+        if (!found_export) {
+          /* Check if it's a private name (parser should catch this,
+             but double-check for robustness) */
+          char buf[256];
+          snprintf(buf, sizeof(buf), "'%.*s' is not exported by '%s'",
+                   (int)imp_len, imp_name, use_path);
+          char* msg = (char*)arena_alloc(c->arena, (uint32_t)(strlen(buf) + 1));
+          memcpy(msg, buf, strlen(buf) + 1);
+          compiler__error(c, line, node->start.column, msg);
+          continue;
+        }
+
+        /* Check for conflict with existing local or global definition */
+        if (imp_len <= 7) {
+          JaclVal name_val = jacl_inline_string(imp_name, imp_len);
+
+          /* Check conflict with existing global */
+          GlobalArity* existing = compiler__find_global_arity(c, name_val);
+          if (existing) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "'%.*s' is already defined",
+                     (int)imp_len, imp_name);
+            char* msg = (char*)arena_alloc(c->arena, (uint32_t)(strlen(buf) + 1));
+            memcpy(msg, buf, strlen(buf) + 1);
+            compiler__error(c, line, node->start.column, msg);
+            continue;
+          }
+
+          /* Register the import as a GlobalArity with full type info */
+          if (c->global_arity_count < COMPILER_GLOBAL_ARITIES_MAX) {
+            GlobalArity* ga = &c->global_arities[c->global_arity_count++];
+            ga->name              = name_val;
+            ga->known_arity       = found_export->arity;
+            ga->is_mutable        = found_export->is_mutable;
+            ga->suspends          = found_export->suspends;
+            ga->captures_mutable  = false;
+            ga->type              = found_export->type;
+            ga->return_type       = found_export->return_type;
+            memcpy(ga->param_types, found_export->param_types,
+                   sizeof(ga->param_types));
+          }
+        }
       }
       break;
     }

@@ -3418,6 +3418,327 @@ static int test_compile_module_typed_exports(void) {
   TEST_PASS();
 }
 
+/* ===== US-007 (M14): Import name resolution with strict typing ===== */
+
+/* Helper: set up a module compilation context with temp files.
+   Creates dir, writes lib file and dummy main, sets up cache/stack/compiler. */
+static void setup_module_ctx(const char* dir, const char* lib_name,
+                              const char* lib_src, arena_t* arena,
+                              BlockPool* pool, ThreadHeap* heap,
+                              ModuleCache* cache, ImportStack* istack,
+                              BytecodeChunk* chunk, JaclInternTable* intern,
+                              Compiler* importer, Module* importer_mod,
+                              char* real_importer, size_t ri_size) {
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, lib_name, lib_src);
+  write_temp_jacl(dir, "main.jacl", "");
+  char importer_path[1024];
+  snprintf(importer_path, sizeof(importer_path), "%s/main.jacl", dir);
+  realpath(importer_path, real_importer);
+
+  gc_block_pool_init(pool);
+  gc_heap_init(heap, pool);
+  module_cache__init(cache, arena);
+  import_stack__init(istack);
+  import_stack__push(istack, real_importer);
+  chunk_init(chunk, arena);
+  intern_table_init(intern, arena);
+  compiler__init(importer, chunk, arena, intern, heap);
+  importer->module_cache = cache;
+  importer->import_stack = istack;
+
+  importer_mod->path = real_importer;
+  importer_mod->chunk = NULL;
+  importer_mod->source = NULL;
+  importer_mod->exports = NULL;
+  importer_mod->export_count = 0;
+  importer_mod->compiled = false;
+  importer->current_module = importer_mod;
+}
+
+/* Test: use "lib.jacl" [add x] registers GlobalArity entries for imported names */
+static int test_import_registers_globals(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; ThreadHeap heap;
+  ModuleCache cache; ImportStack istack;
+  BytecodeChunk chunk; JaclInternTable intern;
+  Compiler importer; Module importer_mod;
+  char real_importer[1024];
+
+  setup_module_ctx("/tmp/jacl_us007a", "lib.jacl",
+                   "def x 42\nproc add [a b] { [+ $a $b] }\n",
+                   &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
+                   &importer, &importer_mod, real_importer, sizeof(real_importer));
+
+  /* Compile: use "lib.jacl" [add x] */
+  const char* src = "use \"lib.jacl\" [add x]\n";
+  LexResult tokens = lexer_lex(src, &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  ASSERT_U32_EQ(parse.error_count, 0);
+
+  /* Compile the use declaration */
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&importer, parse.nodes[i]);
+  }
+  ASSERT_U32_EQ(importer.error_count, 0);
+
+  /* Check that 'add' is registered with arity 2 */
+  JaclVal add_name = jacl_inline_string("add", 3);
+  int16_t add_arity = compiler__resolve_global_arity(&importer, add_name);
+  ASSERT_INT_EQ((int)add_arity, 2);
+
+  /* Check that 'x' is registered with arity -1 (non-proc) */
+  JaclVal x_name = jacl_inline_string("x", 1);
+  int16_t x_arity = compiler__resolve_global_arity(&importer, x_name);
+  ASSERT_INT_EQ((int)x_arity, -1);
+
+  unlink("/tmp/jacl_us007a/lib.jacl");
+  unlink("/tmp/jacl_us007a/main.jacl");
+  rmdir("/tmp/jacl_us007a");
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: importing a name not in exports produces compile error */
+static int test_import_unknown_export_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; ThreadHeap heap;
+  ModuleCache cache; ImportStack istack;
+  BytecodeChunk chunk; JaclInternTable intern;
+  Compiler importer; Module importer_mod;
+  char real_importer[1024];
+
+  setup_module_ctx("/tmp/jacl_us007b", "lib.jacl",
+                   "def x 42\n",
+                   &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
+                   &importer, &importer_mod, real_importer, sizeof(real_importer));
+
+  /* Try to import 'foo' which doesn't exist */
+  const char* src = "use \"lib.jacl\" [foo]\n";
+  LexResult tokens = lexer_lex(src, &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  ASSERT_U32_EQ(parse.error_count, 0);
+
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&importer, parse.nodes[i]);
+  }
+  ASSERT(importer.error_count > 0);
+  ASSERT(strstr(importer.first_error, "is not exported by") != NULL);
+
+  unlink("/tmp/jacl_us007b/lib.jacl");
+  unlink("/tmp/jacl_us007b/main.jacl");
+  rmdir("/tmp/jacl_us007b");
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: importing a name that conflicts with existing definition produces error */
+static int test_import_conflict_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; ThreadHeap heap;
+  ModuleCache cache; ImportStack istack;
+  BytecodeChunk chunk; JaclInternTable intern;
+  Compiler importer; Module importer_mod;
+  char real_importer[1024];
+
+  setup_module_ctx("/tmp/jacl_us007c", "lib.jacl",
+                   "def x 42\n",
+                   &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
+                   &importer, &importer_mod, real_importer, sizeof(real_importer));
+
+  /* Pre-define 'x' in the importer */
+  JaclVal x_name = jacl_inline_string("x", 1);
+  compiler__set_global_arity(&importer, x_name, -1);
+
+  /* Try to import 'x' — should conflict */
+  const char* src = "use \"lib.jacl\" [x]\n";
+  LexResult tokens = lexer_lex(src, &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  ASSERT_U32_EQ(parse.error_count, 0);
+
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&importer, parse.nodes[i]);
+  }
+  ASSERT(importer.error_count > 0);
+  ASSERT(strstr(importer.first_error, "is already defined") != NULL);
+
+  unlink("/tmp/jacl_us007c/lib.jacl");
+  unlink("/tmp/jacl_us007c/main.jacl");
+  rmdir("/tmp/jacl_us007c");
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: typed exports propagate full type info to importer GlobalArity */
+static int test_import_typed_propagation(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; ThreadHeap heap;
+  ModuleCache cache; ImportStack istack;
+  BytecodeChunk chunk; JaclInternTable intern;
+  Compiler importer; Module importer_mod;
+  char real_importer[1024];
+
+  setup_module_ctx("/tmp/jacl_us007d", "math.jacl",
+                   "proc i64 add [i64 a i64 b] { [+ $a $b] }\n",
+                   &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
+                   &importer, &importer_mod, real_importer, sizeof(real_importer));
+
+  const char* src = "use \"math.jacl\" [add]\n";
+  LexResult tokens = lexer_lex(src, &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  ASSERT_U32_EQ(parse.error_count, 0);
+
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&importer, parse.nodes[i]);
+  }
+  ASSERT_U32_EQ(importer.error_count, 0);
+
+  /* Check full type info propagated */
+  JaclVal add_name = jacl_inline_string("add", 3);
+  GlobalArity* ga = compiler__find_global_arity(&importer, add_name);
+  ASSERT(ga != NULL);
+  ASSERT_INT_EQ((int)ga->known_arity, 2);
+  ASSERT_INT_EQ((int)ga->return_type, (int)TYPE_I64);
+  ASSERT_INT_EQ((int)ga->param_types[0], (int)TYPE_I64);
+  ASSERT_INT_EQ((int)ga->param_types[1], (int)TYPE_I64);
+
+  unlink("/tmp/jacl_us007d/math.jacl");
+  unlink("/tmp/jacl_us007d/main.jacl");
+  rmdir("/tmp/jacl_us007d");
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: arity checking works on imported procs — wrong arg count produces error */
+static int test_import_arity_check(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; ThreadHeap heap;
+  ModuleCache cache; ImportStack istack;
+  BytecodeChunk chunk; JaclInternTable intern;
+  Compiler importer; Module importer_mod;
+  char real_importer[1024];
+
+  setup_module_ctx("/tmp/jacl_us007e", "lib.jacl",
+                   "proc add [a b] { [+ $a $b] }\n",
+                   &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
+                   &importer, &importer_mod, real_importer, sizeof(real_importer));
+
+  /* Import add then call with wrong arity */
+  const char* src = "use \"lib.jacl\" [add]\n[add 1]\n";
+  LexResult tokens = lexer_lex(src, &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  ASSERT_U32_EQ(parse.error_count, 0);
+
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&importer, parse.nodes[i]);
+  }
+  ASSERT(importer.error_count > 0);
+  ASSERT(strstr(importer.first_error, "expects 2 arguments but got 1") != NULL);
+
+  unlink("/tmp/jacl_us007e/lib.jacl");
+  unlink("/tmp/jacl_us007e/main.jacl");
+  rmdir("/tmp/jacl_us007e");
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: type checking works on imported typed procs — wrong arg type produces error */
+static int test_import_type_check(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; ThreadHeap heap;
+  ModuleCache cache; ImportStack istack;
+  BytecodeChunk chunk; JaclInternTable intern;
+  Compiler importer; Module importer_mod;
+  char real_importer[1024];
+
+  setup_module_ctx("/tmp/jacl_us007f", "math.jacl",
+                   "proc i64 add [i64 a i64 b] { [+ $a $b] }\n",
+                   &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
+                   &importer, &importer_mod, real_importer, sizeof(real_importer));
+
+  /* Import add then call with wrong type (string instead of i64) */
+  const char* src = "use \"math.jacl\" [add]\n[add \"hi\" 1]\n";
+  LexResult tokens = lexer_lex(src, &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  ASSERT_U32_EQ(parse.error_count, 0);
+
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&importer, parse.nodes[i]);
+  }
+  ASSERT(importer.error_count > 0);
+  ASSERT(strstr(importer.first_error, "type error") != NULL);
+
+  unlink("/tmp/jacl_us007f/math.jacl");
+  unlink("/tmp/jacl_us007f/main.jacl");
+  rmdir("/tmp/jacl_us007f");
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: mutable export registers as mutable in importer GlobalArity */
+static int test_import_mutable_flag(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; ThreadHeap heap;
+  ModuleCache cache; ImportStack istack;
+  BytecodeChunk chunk; JaclInternTable intern;
+  Compiler importer; Module importer_mod;
+  char real_importer[1024];
+
+  setup_module_ctx("/tmp/jacl_us007g", "state.jacl",
+                   "mut count 0\n",
+                   &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
+                   &importer, &importer_mod, real_importer, sizeof(real_importer));
+
+  const char* src = "use \"state.jacl\" [count]\n";
+  LexResult tokens = lexer_lex(src, &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  ASSERT_U32_EQ(parse.error_count, 0);
+
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&importer, parse.nodes[i]);
+  }
+  ASSERT_U32_EQ(importer.error_count, 0);
+
+  JaclVal count_name = jacl_inline_string("count", 5);
+  GlobalArity* ga = compiler__find_global_arity(&importer, count_name);
+  ASSERT(ga != NULL);
+  ASSERT(ga->is_mutable);
+
+  unlink("/tmp/jacl_us007g/state.jacl");
+  unlink("/tmp/jacl_us007g/main.jacl");
+  rmdir("/tmp/jacl_us007g");
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -3557,6 +3878,14 @@ int main(void) {
     { "compile_module_private_excluded", test_compile_module_private_excluded },
     { "compile_module_cached",           test_compile_module_cached },
     { "compile_module_typed_exports",    test_compile_module_typed_exports },
+    /* US-007 (M14): Import name resolution with strict typing */
+    { "import_registers_globals",        test_import_registers_globals },
+    { "import_unknown_export_error",     test_import_unknown_export_error },
+    { "import_conflict_error",           test_import_conflict_error },
+    { "import_typed_propagation",        test_import_typed_propagation },
+    { "import_arity_check",             test_import_arity_check },
+    { "import_type_check",              test_import_type_check },
+    { "import_mutable_flag",            test_import_mutable_flag },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
