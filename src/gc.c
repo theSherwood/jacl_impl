@@ -34,9 +34,10 @@ typedef enum {
 /* --- GC object header (8 bytes, prepended before payload) ---
  *
  * Bit layout of the mark/gen byte (offset 4):
- *   bit 0:    mark     — alternates 0/1 each GC cycle
- *   bit 1:    gen      — generation: 0 = young, 1 = old
- *   bits 2-7: reserved — available for survive_count, flags, etc.
+ *   bit 0:    mark          — alternates 0/1 each GC cycle
+ *   bit 1:    gen           — generation: 0 = young, 1 = old
+ *   bits 2-3: survive_count — number of GC cycles survived (0-3); promoted at 2
+ *   bits 4-7: reserved      — available for future flags
  */
 
 typedef struct {
@@ -52,9 +53,10 @@ typedef struct {
      * protecting objects that could be swept — but never false negatives,
      * so correctness is preserved (conservative, not dangerous). */
     uint32_t epoch;
-    uint8_t  mark     : 1; /* mark bit (alternates 0/1 each GC cycle) */
-    uint8_t  gen      : 1; /* generation: 0 = young, 1 = old */
-    uint8_t  _reserved: 6; /* reserved for future use (survive_count, etc.) */
+    uint8_t  mark          : 1; /* mark bit (alternates 0/1 each GC cycle) */
+    uint8_t  gen           : 1; /* generation: 0 = young, 1 = old */
+    uint8_t  survive_count : 2; /* GC cycles survived (0-3); promoted at 2 */
+    uint8_t  _reserved     : 4; /* reserved for future flags */
     uint8_t  obj_type;     /* GCObjType — tells GC how to trace */
     uint16_t alloc_total;  /* total aligned allocation size (header + payload + padding) */
 } GCHeader;
@@ -325,9 +327,10 @@ static void *gc__bump_alloc(ThreadHeap *heap, size_t total, uint8_t obj_type) {
      * → gc__thread_epoch (u32, set at task start in runtime.c) → hdr->epoch
      * (u32).  See GCHeader comment for wraparound safety analysis. */
     hdr->epoch       = gc__thread_epoch;
-    hdr->mark        = 0;
-    hdr->gen         = 0; /* young generation */
-    hdr->obj_type    = obj_type;
+    hdr->mark          = 0;
+    hdr->gen           = 0; /* young generation */
+    hdr->survive_count = 0;
+    hdr->obj_type      = obj_type;
     hdr->alloc_total = (uint16_t)total;
 
     return hdr + 1; /* payload pointer */

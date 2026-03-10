@@ -327,6 +327,16 @@ static size_t gc_sweep(ThreadHeap *heap) {
                     block->line_map[i] = GC_LINE_OCCUPIED;
                 }
                 bytes_survived += total;
+
+                /* Promotion: young objects that survive 2 GC cycles become old */
+                if (hdr->gen == 0) {
+                    uint8_t sc = hdr->survive_count;
+                    if (sc >= 1) {
+                        hdr->gen = 1; /* promote to old generation */
+                    } else {
+                        hdr->survive_count = sc + 1;
+                    }
+                }
             } else {
                 /* Dead object — zero its memory for safe future walking */
                 memset(ptr, 0, total);
@@ -482,6 +492,16 @@ static size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
                 new_map[i] = GC_LINE_OCCUPIED;
             }
             bytes_survived += total;
+
+            /* Promotion: young objects that survive 2 GC cycles become old */
+            if (hdr->gen == 0) {
+                uint8_t sc = hdr->survive_count;
+                if (sc >= 1) {
+                    hdr->gen = 1; /* promote to old generation */
+                } else {
+                    hdr->survive_count = sc + 1;
+                }
+            }
 
             ptr += total;
         }

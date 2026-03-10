@@ -839,6 +839,166 @@ static int test_gc_header_of_with_gen(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * US-005: Promotion logic in sweep
+ * ==================================================================== */
+
+static int test_gc_promote_after_2_cycles(void) {
+    /* Objects surviving 2 GC cycles are promoted to old generation (gen=1) */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal live = jacl_i64(&vm.heap, 42);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    GCHeader *hdr = gc_header_of(jacl_as_ptr(live));
+
+    /* Initially young with survive_count=0 */
+    ASSERT_INT_EQ(hdr->gen, 0);
+    ASSERT_INT_EQ(hdr->survive_count, 0);
+
+    /* After 1 GC cycle: still young, survive_count=1 */
+    gc_collect(&vm.heap, &vm);
+    hdr = gc_header_of(jacl_as_ptr(live));
+    ASSERT_INT_EQ(hdr->gen, 0);
+    ASSERT_INT_EQ(hdr->survive_count, 1);
+
+    /* After 2 GC cycles: promoted to old (gen=1) */
+    gc_collect(&vm.heap, &vm);
+    hdr = gc_header_of(jacl_as_ptr(live));
+    ASSERT_INT_EQ(hdr->gen, 1);
+
+    /* Value is still correct */
+    ASSERT(jacl_as_i64(live) == 42);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_no_promote_after_1_cycle(void) {
+    /* Objects surviving only 1 GC cycle remain young (gen=0) */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal live = jacl_i64(&vm.heap, 99);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    gc_collect(&vm.heap, &vm);
+
+    GCHeader *hdr = gc_header_of(jacl_as_ptr(live));
+    ASSERT_INT_EQ(hdr->gen, 0);
+    ASSERT_INT_EQ(hdr->survive_count, 1);
+
+    /* Value intact */
+    ASSERT(jacl_as_i64(live) == 99);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_dead_not_promoted(void) {
+    /* Dead objects are collected, not promoted */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Allocate but don't root */
+    void *dead = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+
+    /* Root a live object to keep the VM valid */
+    JaclVal live = jacl_i64(&vm.heap, 1);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    gc_collect(&vm.heap, &vm);
+
+    /* Dead object should be zeroed */
+    ASSERT(gc_header_of(dead)->alloc_total == 0);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_old_stays_old(void) {
+    /* Already-old objects stay old through additional GC cycles */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal live = jacl_i64(&vm.heap, 55);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    /* Promote after 2 cycles */
+    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, &vm);
+
+    GCHeader *hdr = gc_header_of(jacl_as_ptr(live));
+    ASSERT_INT_EQ(hdr->gen, 1);
+
+    /* Run 3 more cycles — should stay old */
+    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, &vm);
+
+    hdr = gc_header_of(jacl_as_ptr(live));
+    ASSERT_INT_EQ(hdr->gen, 1);
+    ASSERT(jacl_as_i64(live) == 55);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_promote_multiple_objects(void) {
+    /* Multiple objects promoted independently */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal v1 = jacl_i64(&vm.heap, 10);
+    JaclVal v2 = jacl_i64(&vm.heap, 20);
+    vm.stack[0] = v1;
+    vm.stack[1] = v2;
+    vm.stack_top = 2;
+
+    /* 1 cycle: both young */
+    gc_collect(&vm.heap, &vm);
+    ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(v1))->gen, 0);
+    ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(v2))->gen, 0);
+
+    /* Allocate a new object after first cycle */
+    JaclVal v3 = jacl_i64(&vm.heap, 30);
+    vm.stack[2] = v3;
+    vm.stack_top = 3;
+
+    /* 2nd cycle: v1,v2 promoted; v3 still young (only 1 survival) */
+    gc_collect(&vm.heap, &vm);
+    ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(v1))->gen, 1);
+    ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(v2))->gen, 1);
+    ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(v3))->gen, 0);
+
+    /* 3rd cycle: v3 now promoted too */
+    gc_collect(&vm.heap, &vm);
+    ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(v3))->gen, 1);
+
+    /* Values all correct */
+    ASSERT(jacl_as_i64(v1) == 10);
+    ASSERT(jacl_as_i64(v2) == 20);
+    ASSERT(jacl_as_i64(v3) == 30);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -872,6 +1032,12 @@ int main(void) {
         { "gc_gen_independent_of_mark",   test_gc_gen_independent_of_mark },
         { "gc_gen_survives_gc",           test_gc_gen_survives_gc },
         { "gc_header_of_with_gen",        test_gc_header_of_with_gen },
+        /* US-005: Promotion logic in sweep */
+        { "gc_promote_after_2_cycles",    test_gc_promote_after_2_cycles },
+        { "gc_no_promote_after_1_cycle",  test_gc_no_promote_after_1_cycle },
+        { "gc_dead_not_promoted",         test_gc_dead_not_promoted },
+        { "gc_old_stays_old",             test_gc_old_stays_old },
+        { "gc_promote_multiple_objects",  test_gc_promote_multiple_objects },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
