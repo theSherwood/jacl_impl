@@ -3739,6 +3739,225 @@ static int test_import_mutable_flag(void) {
   TEST_PASS();
 }
 
+/* US-008 (M14): Mutable imports as boxes */
+
+/* Test: module-context mut emits OP_BOX before OP_DEF_GLOBAL */
+static int test_module_mut_emits_box(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; ThreadHeap heap;
+  ModuleCache cache; ImportStack istack;
+  BytecodeChunk chunk; JaclInternTable intern;
+  Compiler importer; Module importer_mod;
+  char real_importer[1024];
+
+  setup_module_ctx("/tmp/jacl_us008a", "state.jacl",
+                   "mut count 0\n",
+                   &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
+                   &importer, &importer_mod, real_importer, sizeof(real_importer));
+
+  /* Compile the dependency module */
+  const char* canonical = module__resolve_path(real_importer, "state.jacl", &arena);
+  ASSERT(canonical != NULL);
+  bool ok = compiler__compile_module(canonical, &importer, 1, 1);
+  ASSERT(ok);
+
+  Module* state_mod = module_cache__find(&cache, canonical);
+  ASSERT(state_mod != NULL);
+
+  /* Check bytecode contains OP_BOX before OP_DEF_GLOBAL */
+  BytecodeChunk* mc = state_mod->chunk;
+  bool found_box = false;
+  for (uint32_t i = 0; i < mc->code_count; i++) {
+    if (mc->code[i] == OP_BOX) {
+      /* Next meaningful opcode should be OP_DEF_GLOBAL */
+      ASSERT(i + 1 < mc->code_count);
+      ASSERT(mc->code[i + 1] == OP_DEF_GLOBAL);
+      found_box = true;
+      break;
+    }
+  }
+  ASSERT(found_box);
+
+  unlink("/tmp/jacl_us008a/state.jacl");
+  unlink("/tmp/jacl_us008a/main.jacl");
+  rmdir("/tmp/jacl_us008a");
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: non-module mut does NOT emit OP_BOX (backwards compat) */
+static int test_nonmodule_mut_no_box(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  JaclInternTable intern;
+  intern_table_init(&intern, &arena);
+  Compiler c;
+  compiler__init(&c, &chunk, &arena, &intern, &heap);
+  /* No current_module — single-file mode */
+
+  const char* src = "mut x 42\n";
+  LexResult tokens = lexer_lex(src, &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  ASSERT_U32_EQ(parse.error_count, 0);
+
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&c, parse.nodes[i]);
+  }
+  ASSERT_U32_EQ(c.error_count, 0);
+
+  /* Should NOT contain OP_BOX */
+  for (uint32_t i = 0; i < chunk.code_count; i++) {
+    ASSERT(chunk.code[i] != OP_BOX);
+  }
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: mutable export is_mutable flag propagates to importer */
+static int test_module_mutable_import_is_box(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; ThreadHeap heap;
+  ModuleCache cache; ImportStack istack;
+  BytecodeChunk chunk; JaclInternTable intern;
+  Compiler importer; Module importer_mod;
+  char real_importer[1024];
+
+  setup_module_ctx("/tmp/jacl_us008b", "state.jacl",
+                   "mut count 0\ndef name \"bob\"\n",
+                   &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
+                   &importer, &importer_mod, real_importer, sizeof(real_importer));
+
+  const char* src = "use \"state.jacl\" [count name]\n";
+  LexResult tokens = lexer_lex(src, &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  ASSERT_U32_EQ(parse.error_count, 0);
+
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&importer, parse.nodes[i]);
+  }
+  ASSERT_U32_EQ(importer.error_count, 0);
+
+  /* count should be mutable (box), name should not */
+  JaclVal count_name = jacl_inline_string("count", 5);
+  GlobalArity* ga_count = compiler__find_global_arity(&importer, count_name);
+  ASSERT(ga_count != NULL);
+  ASSERT(ga_count->is_mutable);
+
+  JaclVal name_name = jacl_inline_string("name", 4);
+  GlobalArity* ga_name = compiler__find_global_arity(&importer, name_name);
+  ASSERT(ga_name != NULL);
+  ASSERT(!ga_name->is_mutable);
+
+  unlink("/tmp/jacl_us008b/state.jacl");
+  unlink("/tmp/jacl_us008b/main.jacl");
+  rmdir("/tmp/jacl_us008b");
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: set! on module mutable global emits GET_GLOBAL + OP_RESET */
+static int test_module_set_emits_reset(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; ThreadHeap heap;
+  ModuleCache cache; ImportStack istack;
+  BytecodeChunk chunk; JaclInternTable intern;
+  Compiler importer; Module importer_mod;
+  char real_importer[1024];
+
+  setup_module_ctx("/tmp/jacl_us008c", "state.jacl",
+                   "mut count 0\n",
+                   &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
+                   &importer, &importer_mod, real_importer, sizeof(real_importer));
+
+  /* Compile use + set! */
+  const char* src = "use \"state.jacl\" [count]\n[set! count 5]\n";
+  LexResult tokens = lexer_lex(src, &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  ASSERT_U32_EQ(parse.error_count, 0);
+
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&importer, parse.nodes[i]);
+  }
+  ASSERT_U32_EQ(importer.error_count, 0);
+
+  /* Check bytecode contains OP_GET_GLOBAL followed eventually by OP_RESET
+     (not OP_SET_GLOBAL) for the set! statement */
+  bool found_get_global = false;
+  bool found_reset = false;
+  bool found_set_global = false;
+  for (uint32_t i = 0; i < chunk.code_count; i++) {
+    if (chunk.code[i] == OP_GET_GLOBAL) found_get_global = true;
+    if (chunk.code[i] == OP_RESET) found_reset = true;
+    if (chunk.code[i] == OP_SET_GLOBAL) found_set_global = true;
+  }
+  ASSERT(found_get_global);
+  ASSERT(found_reset);
+  ASSERT(!found_set_global);
+
+  unlink("/tmp/jacl_us008c/state.jacl");
+  unlink("/tmp/jacl_us008c/main.jacl");
+  rmdir("/tmp/jacl_us008c");
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: module set! on immutable binding still errors */
+static int test_module_set_immutable_errors(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; ThreadHeap heap;
+  ModuleCache cache; ImportStack istack;
+  BytecodeChunk chunk; JaclInternTable intern;
+  Compiler importer; Module importer_mod;
+  char real_importer[1024];
+
+  setup_module_ctx("/tmp/jacl_us008d", "lib.jacl",
+                   "def x 42\n",
+                   &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
+                   &importer, &importer_mod, real_importer, sizeof(real_importer));
+
+  const char* src = "use \"lib.jacl\" [x]\n[set! x 99]\n";
+  LexResult tokens = lexer_lex(src, &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  ASSERT_U32_EQ(parse.error_count, 0);
+
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&importer, parse.nodes[i]);
+  }
+  /* Should have compile error — x is immutable */
+  ASSERT(importer.error_count > 0);
+
+  unlink("/tmp/jacl_us008d/lib.jacl");
+  unlink("/tmp/jacl_us008d/main.jacl");
+  rmdir("/tmp/jacl_us008d");
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -3886,6 +4105,12 @@ int main(void) {
     { "import_arity_check",             test_import_arity_check },
     { "import_type_check",              test_import_type_check },
     { "import_mutable_flag",            test_import_mutable_flag },
+    /* US-008 (M14): Mutable imports as boxes */
+    { "module_mut_emits_box",            test_module_mut_emits_box },
+    { "nonmodule_mut_no_box",            test_nonmodule_mut_no_box },
+    { "module_mutable_import_is_box",    test_module_mutable_import_is_box },
+    { "module_set_emits_reset",          test_module_set_emits_reset },
+    { "module_set_immutable_errors",     test_module_set_immutable_errors },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -2771,6 +2771,11 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, OP_TO_DYN, line);
         compiler__emit_byte(c, (uint8_t)effective_type, line);
       }
+      /* In module context, wrap mutable globals in a box so they can be
+         shared across module boundaries as live references. */
+      if (c->current_module) {
+        compiler__emit_byte(c, OP_BOX, line);
+      }
       uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
@@ -2900,35 +2905,69 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     if (compiler__resolve_global_info(c, name_val, &global_mutable)) {
       if (global_mutable) {
         JaclType target_type = compiler__resolve_global_type(c, name_val);
-        c->expected_type = target_type;
-        compiler__compile_node(c, args[1]);
-        c->expected_type = TYPE_DYN;
-        JaclType rhs_type = c->last_expr_type;
-        /* Type check */
-        if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
-          snprintf(err_msg, sizeof(err_msg),
-                   "type error: cannot assign %s to %s binding '%.*s'",
-                   type_name(rhs_type), type_name(target_type),
-                   (int)name_len, args[0]->data.lit_string.value);
-          compiler__error(c, line, col, err_msg);
-          return;
+        if (c->current_module) {
+          /* In module context, mutable globals are boxes — use reset!
+             semantics to update the box in place (shared reference).
+             Emit: GET_GLOBAL (push box), compile RHS, OP_RESET */
+          uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+          compiler__emit_byte(c, OP_GET_GLOBAL, line);
+          compiler__emit_u16(c, name_idx, line);
+          c->expected_type = target_type;
+          compiler__compile_node(c, args[1]);
+          c->expected_type = TYPE_DYN;
+          JaclType rhs_type = c->last_expr_type;
+          if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
+            snprintf(err_msg, sizeof(err_msg),
+                     "type error: cannot assign %s to %s binding '%.*s'",
+                     type_name(rhs_type), type_name(target_type),
+                     (int)name_len, args[0]->data.lit_string.value);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+          if (target_type != TYPE_DYN && rhs_type == TYPE_DYN) {
+            snprintf(err_msg, sizeof(err_msg),
+                     "type error: cannot assign dyn to %s binding '%.*s'",
+                     type_name(target_type),
+                     (int)name_len, args[0]->data.lit_string.value);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+          if (is_unboxed_type(target_type)) {
+            compiler__emit_byte(c, OP_TO_DYN, line);
+            compiler__emit_byte(c, (uint8_t)target_type, line);
+          }
+          compiler__emit_byte(c, OP_RESET, line);
+        } else {
+          c->expected_type = target_type;
+          compiler__compile_node(c, args[1]);
+          c->expected_type = TYPE_DYN;
+          JaclType rhs_type = c->last_expr_type;
+          /* Type check */
+          if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
+            snprintf(err_msg, sizeof(err_msg),
+                     "type error: cannot assign %s to %s binding '%.*s'",
+                     type_name(rhs_type), type_name(target_type),
+                     (int)name_len, args[0]->data.lit_string.value);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+          if (target_type != TYPE_DYN && rhs_type == TYPE_DYN) {
+            snprintf(err_msg, sizeof(err_msg),
+                     "type error: cannot assign dyn to %s binding '%.*s'",
+                     type_name(target_type),
+                     (int)name_len, args[0]->data.lit_string.value);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+          /* Box unboxed types for global storage */
+          if (is_unboxed_type(target_type)) {
+            compiler__emit_byte(c, OP_TO_DYN, line);
+            compiler__emit_byte(c, (uint8_t)target_type, line);
+          }
+          uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+          compiler__emit_byte(c, OP_SET_GLOBAL, line);
+          compiler__emit_u16(c, name_idx, line);
         }
-        if (target_type != TYPE_DYN && rhs_type == TYPE_DYN) {
-          snprintf(err_msg, sizeof(err_msg),
-                   "type error: cannot assign dyn to %s binding '%.*s'",
-                   type_name(target_type),
-                   (int)name_len, args[0]->data.lit_string.value);
-          compiler__error(c, line, col, err_msg);
-          return;
-        }
-        /* Box unboxed types for global storage */
-        if (is_unboxed_type(target_type)) {
-          compiler__emit_byte(c, OP_TO_DYN, line);
-          compiler__emit_byte(c, (uint8_t)target_type, line);
-        }
-        uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
-        compiler__emit_byte(c, OP_SET_GLOBAL, line);
-        compiler__emit_u16(c, name_idx, line);
         return;
       }
       snprintf(err_msg, sizeof(err_msg), "cannot mutate immutable binding '%.*s'",
