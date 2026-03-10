@@ -9,15 +9,22 @@ Progress log for ralph/m12m13-hardening branch.
 - .jacl integration tests use `# mode: concurrent` and `# expect:` headers
 - test_gc.c, test_m12.c, test_m13.c include `../src/jacl.c` directly (unity build pattern)
 - Pre-existing compiler warnings in hamt.h, rrb_vec.h are expected — only check for new warnings
-- GCHeader is 8 bytes: epoch(u32) + mark(u8) + obj_type(u8) + alloc_total(u16)
+- GCHeader is 8 bytes: epoch(u32) + mark:1/gen:1/survive_count:2/_reserved:4 (bitfields) + obj_type(u8) + alloc_total(u16)
+- gen field: 0 = young, 1 = old. Initialized to 0 in gc__bump_alloc. Independent of mark bit.
+- Promotion: survive_count incremented each GC sweep; promoted (gen=1) when survive_count >= 1 at second sweep (2 cycles survived)
 - The GC is non-moving. No compaction, no semi-spaces, no object relocation.
 - gc_alloc is in src/gc.c, gc_collect/gc_sweep in src/gc_collect.c
-- Write barrier (hybrid SATB + insertion) is in src/gc.c
+- Write barrier (hybrid SATB + insertion) is in src/gc.c. Generational write barrier (gc_remembered_set_barrier) fires unconditionally alongside it.
+- RememberedSet is per-thread (on WorkerThread), structurally identical to GreyBuffer. VM has remembered_set pointer (NULL in single-threaded mode).
+- All mutable container mutation sites (OP_SET_CELL_LOCAL, OP_SET_CELL_UPVALUE, OP_RESET, OP_SWAP) call gc_remembered_set_barrier after gc_write_barrier
+- When adding RememberedSet to WorkerThread, also update rt_test__init_no_threads / rt_test__destroy_no_threads in ALL test files (test_m12.c, test_m13.c, test_runtime.c)
 - Worker pinning infrastructure: pin_all_closures flag in compiler, pinned/pin_worker_id on JaclClosure, runtime__push_pinned() in runtime.c
 - ast__contains_nonlocal_set() scans AST for set! usage to decide pinning
 - compiler__body_captures_mutable() checks $var refs to mutable bindings for pinning
 - Both checks are ORed together: either triggers pinning for spawn/parallel/race bodies
 - Bare `$var` in JACL is parsed as a zero-arg function call, NOT a value expression
+- Transitive capture: `captures_mutable` flag on Local/Upvalue/GlobalArity propagates through upvalue resolution and continuation eager capture
+- To call a closure captured from enclosing scope in a spawn body, use `[$f]` (var ref call), not `[f]` (name call) — name calls only resolve builtins/globals
 
 ---
 
@@ -50,4 +57,65 @@ Progress log for ralph/m12m13-hardening branch.
   - Upvalue struct already tracks is_mutable, so the compiler has the info needed
   - `compiler__resolve_local()` is side-effect-free; `compiler__resolve_upvalue()` adds upvalues — only use resolve_local for read-only checks
   - find_closure_by_name helper can find closure templates in constant pool by name (e.g. "<spawn>")
+---
+
+## 2026-03-09 - US-003
+- Implemented transitive capture detection for escape analysis
+- Added `captures_mutable` flag to Local, Upvalue, and GlobalArity structs
+- After proc body compilation, checks if any upvalue is_mutable or captures_mutable — sets flag on the local/global binding
+- Propagated `captures_mutable` through: compiler__resolve_upvalue, continuation eager capture, compiler__set_global_arity
+- Added `compiler__name_touches_mutable()` helper: checks both is_mutable and captures_mutable in enclosing scope chain
+- Extended `ast__refs_nonlocal_mutable_impl` to check captures_mutable for both $var refs AND function call head names (AST_LIT_STRING heads in AST_COMMAND)
+- Updated TODO comment at ~line 496 documenting US-003 coverage
+- Added 3 compiler tests: spawn_transitive_capture_pinned, spawn_transitive_varref_pinned, spawn_transitive_def_not_pinned
+- Added .jacl integration test: mut_transitive_spawn.jacl
+- Files changed: src/compiler.c, test/test_compiler.c, test/jacl/mut_transitive_spawn.jacl
+- **Learnings for future iterations:**
+  - Calling closures captured from enclosing scope in spawn bodies requires `[$f]` (var ref call), not `[f]` — `[f]` resolves as builtin/global name only
+  - Proc bodies in JACL must be blocks `{ ... }`, not bare expressions
+  - The captures_mutable flag enables conservative transitive pinning: if a proc captures a closure that captures mutable state, the proc is also treated as touching mutable state
+---
+
+## 2026-03-10 - US-004
+- Added gen bitfield to GCHeader for generational GC support
+- Split the mark uint8_t into bitfields: mark:1, gen:1, _reserved:6 — header stays 8 bytes
+- gen initialized to 0 (young) in gc__bump_alloc alongside other header fields
+- All existing mark comparisons (`hdr->mark == mark`, `hdr->mark = mark`) work unchanged with 1-bit bitfield
+- Added 5 tests in test/test_m12.c: header size, young-on-alloc, mark/gen independence, gen survives GC, header_of with gen
+- Files changed: src/gc.c, test/test_m12.c
+- **Learnings for future iterations:**
+  - uint8_t bitfields are supported by GCC/Clang and pack correctly into a single byte
+  - Bitfield approach is cleaner than bit masking — existing `hdr->mark` assignments/comparisons work unchanged since mark values are always 0 or 1
+  - The gen field is preserved through mark/sweep because sweep only zeros dead objects and mark phase only writes the mark bitfield
+  - The _reserved:6 bits are available for US-005's survive_count (2-bit counter for promotion threshold)
+---
+
+## 2026-03-10 - US-005
+- Implemented promotion logic in sweep: young objects promoted to old (gen=1) after surviving 2 GC cycles
+- Added `survive_count` 2-bit field to GCHeader (from reserved bits): mark:1, gen:1, survive_count:2, _reserved:4
+- Initialized survive_count=0 in gc__bump_alloc alongside other header fields
+- Added promotion logic to both gc_sweep (single-threaded) and gc_sweep_concurrent (concurrent): on live object, if gen==0, increment survive_count; if survive_count>=1 at sweep time, promote (gen=1)
+- Added 5 tests: promote_after_2_cycles, no_promote_after_1_cycle, dead_not_promoted, old_stays_old, promote_multiple_objects
+- Files changed: src/gc.c, src/gc_collect.c, test/test_m12.c
+- **Learnings for future iterations:**
+  - Promotion threshold of 2 means: survive_count incremented to 1 on first survival, then on second survival sc>=1 triggers promotion
+  - Already-old objects (gen==1) skip the promotion check entirely — no survive_count overflow concern
+  - Both sweep paths (single-threaded gc_sweep and concurrent gc_sweep_concurrent) need the same promotion logic
+  - The survive_count field persists across GC cycles because sweep only zeros dead objects, not live ones
+---
+
+## 2026-03-10 - US-006
+- Implemented per-thread remembered set tracking old-to-young pointers from mutable container mutations
+- Added RememberedSet structure to src/gc.c: remembered_set_init, remembered_set_push, remembered_set_drain (with deduplication), remembered_set_destroy
+- Added gc_remembered_set_barrier() inline: checks gen bits of container and new value, records when old→young
+- Added RememberedSet to WorkerThread struct in src/runtime.c, RememberedSet* to VM struct in src/vm.c
+- Wired up gc_remembered_set_barrier at all 6 mutation sites: OP_SET_CELL_LOCAL, OP_SET_CELL_UPVALUE, OP_RESET (atom+box), OP_SWAP (atom+box)
+- Added 5 tests: old_to_young (populated), young_to_young (not populated), drain_dedup, old_to_old (not populated), null_noop
+- Updated rt_test__init/destroy helpers in test_m12.c, test_m13.c, test_runtime.c
+- Files changed: src/gc.c, src/runtime.c, src/vm.c, test/test_m12.c, test/test_m13.c, test/test_runtime.c
+- **Learnings for future iterations:**
+  - The remembered set fires unconditionally (not gated on gc_active), unlike the grey buffer
+  - remembered_set_drain does linear dedup — fine for small sets but could use a hash set for large workloads
+  - When adding fields to WorkerThread, must update ALL test files' rt_test__init_no_threads helpers (3 files)
+  - The container JaclVal (atom/box/cell tagged pointer) is stored in the remembered set, not the raw JaclMutableRef*
 ---

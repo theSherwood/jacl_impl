@@ -55,6 +55,7 @@ typedef struct WorkerThread {
     rt_deque_deque    *private_deque;        /* thread-local tasks (not stolen) */
     /* Per-thread GC heap lives in vm.heap — uses shared BlockPool */
     GreyBuffer         grey_buf;             /* write barrier entries */
+    RememberedSet      remembered_set;      /* generational old→young pointer tracking */
     volatile uintptr_t currently_executing;  /* IDLE / BUSY / task ptr */
     volatile uint64_t  thread_epoch;         /* set to global_epoch before each task */
     VM                 vm;                   /* per-thread VM instance */
@@ -109,6 +110,7 @@ static void runtime__init_worker_vm(WorkerThread *w) {
     vm->intern_table  = NULL;
     vm->top_chunk     = NULL;
     vm->grey_buf      = &w->grey_buf;
+    vm->remembered_set = &w->remembered_set;
     vm->gc_active_ptr = &w->runtime->gc_active;
     vm->runtime       = (void *)w->runtime;
     vm->worker_id     = w->id;
@@ -314,6 +316,7 @@ static void runtime_init(Runtime *rt, int num_workers) {
         w->private_deque = rt_deque_deque_new(6);
 
         grey_buf_init(&w->grey_buf);
+        remembered_set_init(&w->remembered_set);
 
         w->arena = (arena_t){0};
         runtime__init_worker_vm(w);
@@ -382,6 +385,7 @@ static void runtime_destroy(Runtime *rt) {
         rt_deque_deque_free(w->private_deque);
 
         grey_buf_destroy(&w->grey_buf);
+        remembered_set_destroy(&w->remembered_set);
 
         /* Cleanup VM: heap returns blocks to shared pool, local pool freed */
         vm_destroy(&w->vm);

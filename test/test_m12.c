@@ -39,6 +39,7 @@ static void rt_test__init_no_threads(Runtime *rt, int num_workers) {
         w->public_deque  = rt_deque_deque_new(4);
         w->private_deque = rt_deque_deque_new(4);
         grey_buf_init(&w->grey_buf);
+        remembered_set_init(&w->remembered_set);
         w->arena = (arena_t){0};
         runtime__init_worker_vm(w);
         w->steal_ids = (int *)calloc((size_t)num_workers, sizeof(int));
@@ -57,6 +58,7 @@ static void rt_test__destroy_no_threads(Runtime *rt) {
         rt_deque_deque_free(w->public_deque);
         rt_deque_deque_free(w->private_deque);
         grey_buf_destroy(&w->grey_buf);
+        remembered_set_destroy(&w->remembered_set);
         free(w->steal_ids);
         vm_destroy(&w->vm);
         arena_destroy(&w->arena);
@@ -999,6 +1001,168 @@ static int test_gc_promote_multiple_objects(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * US-006: Per-thread remembered set
+ * ==================================================================== */
+
+static int test_remembered_set_old_to_young(void) {
+    /* Mutating an old-gen atom to point to a young-gen value populates
+     * the remembered set with the atom container */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    gc__thread_epoch = 1;
+
+    /* Allocate atom (mutable ref) and promote to old gen */
+    JaclVal initial = jacl_i64(&w->vm.heap, 10);
+    JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+    ref->value = initial;
+    JaclVal atom_val = jacl_atom_ptr(ref);
+
+    /* Manually promote atom to old gen */
+    gc_header_of(ref)->gen = 1;
+    /* Also promote initial value so it's not young */
+    gc_header_of(jacl_as_ptr(initial))->gen = 1;
+
+    /* Allocate a new young value */
+    JaclVal young_val = jacl_i64(&w->vm.heap, 20);
+    ASSERT_INT_EQ(gc_header_of(jacl_as_ptr(young_val))->gen, 0);
+
+    /* Fire the generational barrier: old atom → young value */
+    gc_remembered_set_barrier(&w->remembered_set, atom_val, young_val);
+
+    /* Remembered set should contain the atom */
+    ASSERT(w->remembered_set.count == 1);
+    ASSERT(w->remembered_set.entries[0] == atom_val);
+
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+static int test_remembered_set_young_to_young(void) {
+    /* Mutating a young-gen atom to point to a young-gen value does NOT
+     * populate the remembered set */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    gc__thread_epoch = 1;
+
+    /* Allocate atom (young gen, the default) */
+    JaclVal initial = jacl_i64(&w->vm.heap, 10);
+    JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+    ref->value = initial;
+    JaclVal atom_val = jacl_atom_ptr(ref);
+
+    /* Both atom and value are young */
+    ASSERT_INT_EQ(gc_header_of(ref)->gen, 0);
+
+    /* Allocate another young value */
+    JaclVal young_val = jacl_i64(&w->vm.heap, 20);
+
+    /* Fire the generational barrier: young atom → young value */
+    gc_remembered_set_barrier(&w->remembered_set, atom_val, young_val);
+
+    /* Remembered set should be empty */
+    ASSERT_INT_EQ(w->remembered_set.count, 0);
+
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+static int test_remembered_set_drain_dedup(void) {
+    /* Drain deduplicates entries: same container pushed multiple times
+     * appears only once in the output */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    gc__thread_epoch = 1;
+
+    /* Allocate old-gen atom */
+    JaclVal initial = jacl_i64(&w->vm.heap, 10);
+    JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+    ref->value = initial;
+    JaclVal atom_val = jacl_atom_ptr(ref);
+    gc_header_of(ref)->gen = 1;
+    gc_header_of(jacl_as_ptr(initial))->gen = 1;
+
+    /* Push the same atom multiple times (simulates repeated mutations) */
+    JaclVal y1 = jacl_i64(&w->vm.heap, 1);
+    JaclVal y2 = jacl_i64(&w->vm.heap, 2);
+    JaclVal y3 = jacl_i64(&w->vm.heap, 3);
+    gc_remembered_set_barrier(&w->remembered_set, atom_val, y1);
+    gc_remembered_set_barrier(&w->remembered_set, atom_val, y2);
+    gc_remembered_set_barrier(&w->remembered_set, atom_val, y3);
+
+    ASSERT(w->remembered_set.count == 3);
+
+    /* Drain with deduplication */
+    JaclVal out[16];
+    uint32_t unique = remembered_set_drain(&w->remembered_set, out, 16);
+
+    /* Only 1 unique entry */
+    ASSERT_INT_EQ(unique, 1);
+    ASSERT(out[0] == atom_val);
+
+    /* Set is now empty */
+    ASSERT_INT_EQ(w->remembered_set.count, 0);
+
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+static int test_remembered_set_old_to_old(void) {
+    /* Old-gen atom pointing to old-gen value: NOT recorded */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    gc__thread_epoch = 1;
+
+    JaclVal initial = jacl_i64(&w->vm.heap, 10);
+    JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+    ref->value = initial;
+    JaclVal atom_val = jacl_atom_ptr(ref);
+    gc_header_of(ref)->gen = 1;
+    gc_header_of(jacl_as_ptr(initial))->gen = 1;
+
+    /* Allocate and promote value to old gen */
+    JaclVal old_val = jacl_i64(&w->vm.heap, 99);
+    gc_header_of(jacl_as_ptr(old_val))->gen = 1;
+
+    gc_remembered_set_barrier(&w->remembered_set, atom_val, old_val);
+
+    /* Old → old: not recorded */
+    ASSERT_INT_EQ(w->remembered_set.count, 0);
+
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+static int test_remembered_set_null_noop(void) {
+    /* NULL remembered_set pointer (single-threaded mode) is a no-op */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal v1 = jacl_i64(&vm.heap, 10);
+    JaclVal v2 = jacl_i64(&vm.heap, 20);
+    gc_header_of(jacl_as_ptr(v1))->gen = 1;
+
+    /* Should not crash with NULL remembered_set */
+    gc_remembered_set_barrier(NULL, v1, v2);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -1038,6 +1202,12 @@ int main(void) {
         { "gc_dead_not_promoted",         test_gc_dead_not_promoted },
         { "gc_old_stays_old",             test_gc_old_stays_old },
         { "gc_promote_multiple_objects",  test_gc_promote_multiple_objects },
+        /* US-006: Per-thread remembered set */
+        { "remembered_set_old_to_young",  test_remembered_set_old_to_young },
+        { "remembered_set_young_to_young", test_remembered_set_young_to_young },
+        { "remembered_set_drain_dedup",   test_remembered_set_drain_dedup },
+        { "remembered_set_old_to_old",    test_remembered_set_old_to_old },
+        { "remembered_set_null_noop",     test_remembered_set_null_noop },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

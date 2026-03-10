@@ -701,6 +701,70 @@ static void grey_buf_destroy(GreyBuffer *gb) {
 }
 
 /* ======================================================================
+ * RememberedSet: per-thread append-only buffer tracking old-to-young
+ * pointers created by box/atom/cell mutations. Structurally identical
+ * to GreyBuffer but maintained between GC cycles (not gated on gc_active).
+ *
+ * Stores container JaclVal references (the old-gen mutable ref whose
+ * value now points to a young-gen object).
+ * ====================================================================== */
+
+#define REMEMBERED_SET_INIT_CAP 256
+
+typedef struct {
+    JaclVal  *entries;
+    uint32_t  count;
+    uint32_t  cap;
+} RememberedSet;
+
+static void remembered_set_init(RememberedSet *rs) {
+    rs->entries = (JaclVal *)malloc(REMEMBERED_SET_INIT_CAP * sizeof(JaclVal));
+    rs->count   = 0;
+    rs->cap     = REMEMBERED_SET_INIT_CAP;
+}
+
+static void remembered_set_push(RememberedSet *rs, JaclVal container) {
+    uint32_t c = rs->count;
+    if (c >= rs->cap) {
+        uint32_t new_cap = rs->cap * 2;
+        rs->entries = (JaclVal *)realloc(rs->entries,
+                                          (size_t)new_cap * sizeof(JaclVal));
+        rs->cap = new_cap;
+    }
+    rs->entries[c] = container;
+    rs->count = c + 1;
+}
+
+/* Drain the remembered set, returning deduplicated entries.
+ * Writes unique container values to out_entries (caller-allocated),
+ * returns the count of unique entries, and resets the set to empty. */
+static uint32_t remembered_set_drain(RememberedSet *rs,
+                                      JaclVal *out_entries,
+                                      uint32_t out_cap) {
+    uint32_t unique = 0;
+    for (uint32_t i = 0; i < rs->count && unique < out_cap; i++) {
+        JaclVal v = rs->entries[i];
+        /* Deduplicate: linear scan (set is typically small) */
+        bool dup = false;
+        for (uint32_t j = 0; j < unique; j++) {
+            if (out_entries[j] == v) { dup = true; break; }
+        }
+        if (!dup) {
+            out_entries[unique++] = v;
+        }
+    }
+    rs->count = 0;
+    return unique;
+}
+
+static void remembered_set_destroy(RememberedSet *rs) {
+    free(rs->entries);
+    rs->entries = NULL;
+    rs->count   = 0;
+    rs->cap     = 0;
+}
+
+/* ======================================================================
  * Write barrier: hybrid SATB (deletion) + insertion barrier.
  *
  * Fires on mutable container mutations (reset!, swap!, set! on cells)
@@ -728,6 +792,36 @@ static inline void gc_write_barrier(GreyBuffer *gb,
     /* Insertion barrier: protect new value stored after GC scanned container */
     if (jacl_is_heap_type(new_val))
         grey_buf_push(gb, new_val);
+}
+
+/* ======================================================================
+ * Generational write barrier: records old-to-young pointer creation.
+ *
+ * Fires unconditionally (not gated on gc_active) whenever a mutable
+ * container (box/atom/cell) is mutated. If the container is old-gen
+ * (gen == 1) and the new value is young-gen (gen == 0), the container
+ * is recorded in the per-thread remembered set.
+ *
+ * This enables minor GC to find young objects reachable only through
+ * old-gen containers without scanning the entire old generation.
+ * ====================================================================== */
+
+static inline void gc_remembered_set_barrier(RememberedSet *rs,
+                                              JaclVal container,
+                                              JaclVal new_val) {
+    /* No remembered set in single-threaded mode */
+    if (!rs) return;
+
+    /* Both container and new value must be heap objects */
+    if (!jacl_is_heap_type(container) || !jacl_is_heap_type(new_val)) return;
+
+    GCHeader *container_hdr = gc_header_of(jacl_as_ptr(container));
+    GCHeader *new_hdr       = gc_header_of(jacl_as_ptr(new_val));
+
+    /* Record when old-gen container stores a young-gen value */
+    if (container_hdr->gen == 1 && new_hdr->gen == 0) {
+        remembered_set_push(rs, container);
+    }
 }
 
 /* ======================================================================

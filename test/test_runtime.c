@@ -226,6 +226,7 @@ static void rt_test__init_no_threads(Runtime *rt, int num_workers) {
         w->public_deque  = rt_deque_deque_new(4);
         w->private_deque = rt_deque_deque_new(4);
         grey_buf_init(&w->grey_buf);
+        remembered_set_init(&w->remembered_set);
         w->arena = (arena_t){0};
         runtime__init_worker_vm(w);
         w->steal_ids = (int *)calloc((size_t)num_workers, sizeof(int));
@@ -245,6 +246,7 @@ static void rt_test__destroy_no_threads(Runtime *rt) {
         rt_deque_deque_free(w->public_deque);
         rt_deque_deque_free(w->private_deque);
         grey_buf_destroy(&w->grey_buf);
+        remembered_set_destroy(&w->remembered_set);
         free(w->steal_ids);
         vm_destroy(&w->vm);
         arena_destroy(&w->arena);

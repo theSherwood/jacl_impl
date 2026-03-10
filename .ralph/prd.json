@@ -60,7 +60,7 @@
         "Compiles without warnings"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "This extends US-002. The analysis from US-002 checks direct $var references to mut/box bindings. Transitive capture means: proc A captures box b, proc B captures A (via $A or calling A), B is passed to spawn. The analysis needs to track which closures capture mutable state and propagate that flag when those closures are themselves captured. Conservative approach: if any captured variable is a closure that was compiled with pin_all_closures, the capturing closure also gets pinned."
     },
     {
@@ -77,7 +77,7 @@
         "Compiles without warnings"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "GCHeader is defined in src/gc.c around line 36. Currently: epoch(uint32_t) + mark(uint8_t) + obj_type(uint8_t) + alloc_total(uint16_t) = 8 bytes. The mark field is a full uint8_t but only uses values 0 and 1 (alternating mark bit). Simplest approach: split the mark byte into mark(1 bit) + gen(1 bit) + reserved(6 bits) using bitfields or bit masking. All mark comparisons (header->mark == current_mark) need updating to use the mask."
     },
     {
@@ -95,7 +95,7 @@
         "Compiles without warnings"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "The sweep phase is in src/gc_collect.c. The gc_sweep and gc_sweep_concurrent functions iterate objects in blocks and check mark status. Promotion logic goes here: after determining an object is alive, check if it survived the previous cycle too. The mark bit alternates 0/1 each cycle, so 'survived previous cycle' can be inferred if the object's mark matches BOTH the current and previous mark values — but since marks alternate, this needs a separate tracking mechanism. Simplest: add a 2-bit survive_count in the reserved bits of the mark byte, increment on survival, promote when it reaches 2."
     },
     {
@@ -116,7 +116,7 @@
         "Compiles without warnings"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "The write barrier is in src/gc.c (grey_buf_push pattern). The remembered set is structurally identical to GreyBuffer (per-thread append buffer with dynamic growth). The key difference: grey buffer is only populated when gc_active is true, but the remembered set must record old->young mutations at all times. The generational check: get GCHeader of both container and new value, check gen fields. WorkerThread is defined in src/runtime.c."
     },
     {

@@ -83,6 +83,7 @@ typedef struct {
   JaclInternTable* intern_table;  /* shared intern table for concat/interning */
   BytecodeChunk* top_chunk;       /* top-level chunk for GC root scanning */
   GreyBuffer*    grey_buf;       /* write barrier target (NULL in single-threaded) */
+  RememberedSet* remembered_set; /* generational write barrier target (NULL in single-threaded) */
   volatile uint32_t *gc_active_ptr; /* pointer to runtime's gc_active (NULL in single-threaded) */
   void*          runtime;        /* Runtime pointer for concurrent GC trigger (NULL in single-threaded) */
   int            worker_id;      /* Worker thread ID for task pinning (-1 if not on a worker) */
@@ -243,6 +244,7 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->intern_table  = NULL;
   vm->top_chunk     = NULL;
   vm->grey_buf      = NULL;
+  vm->remembered_set = NULL;
   vm->gc_active_ptr = NULL;
   vm->runtime       = NULL;
   vm->worker_id     = -1;
@@ -2302,6 +2304,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclMutableRef* ref = jacl_as_cell(cell);
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
                          ref->value, new_value);
+        gc_remembered_set_barrier(vm->remembered_set, cell, new_value);
         ref->value = new_value;
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
@@ -2325,6 +2328,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclMutableRef* ref = jacl_as_cell(cell);
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
                          ref->value, new_value);
+        gc_remembered_set_barrier(vm->remembered_set, cell, new_value);
         ref->value = new_value;
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
@@ -3040,10 +3044,12 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           JaclVal reset_old = ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE);
           gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
                            reset_old, new_val);
+          gc_remembered_set_barrier(vm->remembered_set, container, new_val);
           ATOMIC_STORE_EXPLICIT(&ref->value, new_val, MEM_RELEASE);
         } else {
           gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
                            ref->value, new_val);
+          gc_remembered_set_barrier(vm->remembered_set, container, new_val);
           ref->value = new_val;
         }
         result = vm__push(vm, new_val);
@@ -3131,6 +3137,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
               /* CAS succeeded — fire write barrier */
               gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
                                swap_old_val, swap_result);
+              gc_remembered_set_barrier(vm->remembered_set,
+                                        container, swap_result);
               break; /* exit retry loop */
             }
             /* CAS failed — swap_result becomes garbage, retry */
@@ -3138,6 +3146,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             /* Box: non-atomic store, write barrier always fires */
             gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
                              swap_old_val, swap_result);
+            gc_remembered_set_barrier(vm->remembered_set,
+                                      container, swap_result);
             ref->value = swap_result;
             break; /* no retry for boxes */
           }
