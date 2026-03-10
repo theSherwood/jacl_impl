@@ -412,6 +412,235 @@ static void gc_collect(ThreadHeap *heap, VM *vm) {
 }
 
 /* ======================================================================
+ * gc_mark_minor: trace from roots but STOP at old-gen objects.
+ *
+ * Minor GC only collects young objects. Old-gen objects are treated as
+ * opaque roots — marked but not traced (their children are assumed live).
+ * Exception: remembered set entries are old-gen containers that store
+ * young-gen values; their children ARE traced to find young objects
+ * reachable only through old-gen containers.
+ * ====================================================================== */
+
+static void gc_mark_minor(ThreadHeap *heap, VM *vm,
+                           RememberedSet *remembered_set) {
+    GCMarkStack ms;
+    gc__ms_init(&ms);
+
+    uint8_t mark = heap->current_mark;
+
+    /* --- Root enumeration (same as full GC) --- */
+
+    /* 1. VM stack values */
+    for (uint32_t i = 0; i < vm->stack_top; i++) {
+        gc__ms_push_val(&ms, vm->stack[i]);
+    }
+
+    /* 2. Call frame closures */
+    for (uint32_t i = 0; i < vm->frame_count; i++) {
+        if (vm->frames[i].closure) {
+            gc__ms_push(&ms, vm->frames[i].closure);
+        }
+    }
+
+    /* 3. Global environment values */
+    for (uint32_t i = 0; i < vm->env.count; i++) {
+        gc__ms_push_val(&ms, vm->env.values[i]);
+    }
+
+    /* 4. Intern table entries */
+    if (vm->intern_table) {
+        for (uint32_t i = 0; i < vm->intern_table->cap; i++) {
+            if (vm->intern_table->entries[i]) {
+                gc__ms_push(&ms, vm->intern_table->entries[i]);
+            }
+        }
+    }
+
+    /* 5. Call frame chunk constants */
+    for (uint32_t i = 0; i < vm->frame_count; i++) {
+        BytecodeChunk *ch = vm->frames[i].chunk;
+        if (ch) {
+            for (uint32_t j = 0; j < ch->const_count; j++) {
+                gc__ms_push_const(&ms, ch->constants[j]);
+            }
+        }
+    }
+
+    /* 6. Remembered set: trace old-gen containers' children.
+     * These are old-gen mutable refs that point to young-gen values.
+     * We trace them so their young-gen children are marked. */
+    if (remembered_set) {
+        for (uint32_t i = 0; i < remembered_set->count; i++) {
+            JaclVal container = remembered_set->entries[i];
+            if (jacl_is_heap_type(container)) {
+                void *ptr = jacl_as_ptr(container);
+                GCHeader *hdr = gc_header_of(ptr);
+                /* Mark the container itself */
+                if (hdr->mark != mark) {
+                    hdr->mark = mark;
+                }
+                /* Trace its children (the young values it points to) */
+                gc__trace_object(ptr, &ms);
+            }
+        }
+    }
+
+    /* --- Minor mark loop: stop tracing at old-gen objects --- */
+    void *ptr;
+    while (gc__ms_pop(&ms, &ptr)) {
+        GCHeader *hdr = gc_header_of(ptr);
+        if (hdr->mark == mark) continue; /* already marked this cycle */
+        hdr->mark = mark;
+
+        /* Old-gen objects: mark but DON'T trace children.
+         * Their children are all old or will be caught by remembered set. */
+        if (hdr->gen == 1) continue;
+
+        /* Young-gen objects: trace normally */
+        gc__trace_object(ptr, &ms);
+    }
+
+    gc__ms_destroy(&ms);
+}
+
+/* ======================================================================
+ * gc_sweep_minor: only sweep young-generation objects (gen == 0).
+ *
+ * Old-gen objects and their lines are untouched. Dead young objects are
+ * zeroed. Surviving young objects that meet the promotion threshold are
+ * promoted to old gen.
+ * ====================================================================== */
+
+static size_t gc_sweep_minor(ThreadHeap *heap) {
+    uint8_t  current_mark = heap->current_mark;
+    GCBlock *block = heap->blocks;
+    size_t   bytes_survived = 0;
+
+    while (block) {
+        GCBlock *next = block->next;
+
+        /* Phase 1: clear lines that ONLY contain young objects to FREE.
+         * Lines containing any old-gen object must stay OCCUPIED.
+         * We do this in two passes: first determine which lines have old
+         * objects, then process young objects. */
+
+        /* Track which lines contain old-gen objects (must not be freed) */
+        bool old_on_line[GC_LINES_PER_BLOCK];
+        memset(old_on_line, 0, sizeof(old_on_line));
+
+        /* First pass: identify lines with old-gen or live young objects */
+        uint8_t *ptr = block->payload;
+        uint8_t *end = block->payload + GC_BLOCK_SIZE;
+
+        while (ptr < end) {
+            GCHeader *hdr   = (GCHeader *)ptr;
+            uint16_t  total = hdr->alloc_total;
+
+            if (total == 0) {
+                size_t offset = (size_t)(ptr - block->payload);
+                size_t next_line = ((offset / GC_LINE_SIZE) + 1) * GC_LINE_SIZE;
+                if (next_line >= GC_BLOCK_SIZE) break;
+                ptr = block->payload + next_line;
+                continue;
+            }
+
+            if (hdr->gen == 1) {
+                /* Old-gen object — protect its lines */
+                size_t offset = (size_t)(ptr - block->payload);
+                int first_line = (int)(offset / GC_LINE_SIZE);
+                int last_line  = (int)((offset + total - 1) / GC_LINE_SIZE);
+                for (int i = first_line; i <= last_line; i++) {
+                    old_on_line[i] = true;
+                }
+            }
+
+            ptr += total;
+        }
+
+        /* Phase 2: clear line marks for lines without old objects */
+        for (int i = 0; i < GC_LINES_PER_BLOCK; i++) {
+            if (!old_on_line[i]) {
+                block->line_map[i] = GC_LINE_FREE;
+            }
+        }
+
+        /* Phase 3: walk objects — handle young objects only */
+        ptr = block->payload;
+        while (ptr < end) {
+            GCHeader *hdr   = (GCHeader *)ptr;
+            uint16_t  total = hdr->alloc_total;
+
+            if (total == 0) {
+                size_t offset = (size_t)(ptr - block->payload);
+                size_t next_line = ((offset / GC_LINE_SIZE) + 1) * GC_LINE_SIZE;
+                if (next_line >= GC_BLOCK_SIZE) break;
+                ptr = block->payload + next_line;
+                continue;
+            }
+
+            if (hdr->gen == 1) {
+                /* Old-gen: untouched, count as survived */
+                bytes_survived += total;
+            } else if (hdr->mark == current_mark) {
+                /* Live young object — re-mark lines as OCCUPIED */
+                size_t offset = (size_t)(ptr - block->payload);
+                int first_line = (int)(offset / GC_LINE_SIZE);
+                int last_line  = (int)((offset + total - 1) / GC_LINE_SIZE);
+                for (int i = first_line; i <= last_line; i++) {
+                    block->line_map[i] = GC_LINE_OCCUPIED;
+                }
+                bytes_survived += total;
+
+                /* Promotion: young objects that survive 2 GC cycles */
+                uint8_t sc = hdr->survive_count;
+                if (sc >= 1) {
+                    hdr->gen = 1; /* promote to old generation */
+                } else {
+                    hdr->survive_count = sc + 1;
+                }
+            } else {
+                /* Dead young object — zero memory */
+                memset(ptr, 0, total);
+            }
+
+            ptr += total;
+        }
+
+        block = next;
+    }
+
+    /* Invalidate cursor — gc_alloc will rescan for free runs */
+    heap->cursor        = NULL;
+    heap->limit         = NULL;
+    heap->current_block = NULL;
+
+    return bytes_survived;
+}
+
+/* ======================================================================
+ * gc_collect_minor: single-threaded minor GC cycle.
+ *
+ * Only traces and sweeps young-generation objects. Uses the remembered
+ * set to find young objects reachable through old-gen containers.
+ * Clears the remembered set after collection.
+ * ====================================================================== */
+
+static void gc_collect_minor(ThreadHeap *heap, VM *vm,
+                              RememberedSet *remembered_set) {
+    gc_mark_minor(heap, vm, remembered_set);
+    size_t bytes_survived = gc_sweep_minor(heap);
+    gc__adjust_threshold(heap, bytes_survived);
+    heap->current_mark  = 1 - heap->current_mark;
+    heap->bytes_since_gc = 0;
+    heap->needs_gc       = false;
+
+    /* Clear remembered set — entries were processed during mark */
+    if (remembered_set) {
+        remembered_set->count = 0;
+    }
+}
+
+/* ======================================================================
  * gc_sweep_concurrent: concurrent-safe sweep with epoch watermark
  *
  * Unlike gc_sweep (single-threaded), this function:

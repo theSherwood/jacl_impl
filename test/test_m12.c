@@ -1163,6 +1163,177 @@ static int test_remembered_set_null_noop(void) {
     TEST_PASS();
 }
 
+/* ====================================================================
+ * US-007: Minor GC mode
+ * ==================================================================== */
+
+static int test_minor_gc_reclaims_dead_young(void) {
+    /* Minor GC reclaims dead young objects but leaves old objects untouched */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Allocate a live young object */
+    JaclVal live_young = jacl_i64(&vm.heap, 42);
+    vm.stack[0] = live_young;
+    vm.stack_top = 1;
+
+    /* Allocate an old object (manually promoted) */
+    void *old_obj = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    ((JaclHeapI64 *)old_obj)->value = 999;
+    gc_header_of(old_obj)->gen = 1;
+
+    /* Allocate dead young objects */
+    void *dead1 = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    void *dead2 = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+
+    gc_collect_minor(&vm.heap, &vm, NULL);
+
+    /* Dead young objects zeroed */
+    ASSERT(gc_header_of(dead1)->alloc_total == 0);
+    ASSERT(gc_header_of(dead2)->alloc_total == 0);
+
+    /* Live young object survives */
+    ASSERT(jacl_as_i64(live_young) == 42);
+
+    /* Old object untouched (not zeroed, still has alloc_total) */
+    ASSERT(gc_header_of(old_obj)->alloc_total > 0);
+    ASSERT(gc_header_of(old_obj)->gen == 1);
+    ASSERT(((JaclHeapI64 *)old_obj)->value == 999);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_minor_gc_remembered_set_saves_young(void) {
+    /* Old atom pointing to young value: minor GC keeps the young value
+     * alive because it's in the remembered set */
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    gc__thread_epoch = 1;
+
+    /* Allocate old-gen atom holding a young value */
+    JaclVal young_val = jacl_i64(&w->vm.heap, 77);
+    JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+    ref->value = young_val;
+    JaclVal atom_val = jacl_atom_ptr(ref);
+
+    /* Promote atom to old gen */
+    gc_header_of(ref)->gen = 1;
+
+    /* Record in remembered set (simulates write barrier) */
+    gc_remembered_set_barrier(&w->remembered_set, atom_val, young_val);
+
+    /* Root the atom on the VM stack */
+    w->vm.stack[0] = atom_val;
+    w->vm.stack_top = 1;
+
+    /* Run minor GC with remembered set */
+    gc_collect_minor(&w->vm.heap, &w->vm, &w->remembered_set);
+
+    /* Young value should survive (reachable via remembered set) */
+    ASSERT(gc_header_of(jacl_as_ptr(young_val))->alloc_total > 0);
+    ASSERT(jacl_as_i64(young_val) == 77);
+
+    /* Remembered set should be cleared after minor GC */
+    ASSERT_INT_EQ(w->remembered_set.count, 0);
+
+    gc__thread_epoch = 0;
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+static int test_minor_gc_old_objects_untouched(void) {
+    /* Minor GC does not collect old-gen objects even if unreachable */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Allocate object and promote to old — but DON'T root it */
+    void *old_unreachable = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    gc_header_of(old_unreachable)->gen = 1;
+
+    /* Root a young object to keep VM valid */
+    JaclVal live = jacl_i64(&vm.heap, 1);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    gc_collect_minor(&vm.heap, &vm, NULL);
+
+    /* Old unreachable object NOT collected by minor GC */
+    ASSERT(gc_header_of(old_unreachable)->alloc_total > 0);
+    ASSERT(gc_header_of(old_unreachable)->gen == 1);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_minor_gc_promotes_survivors(void) {
+    /* Young objects surviving 2 minor GC cycles are promoted */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal live = jacl_i64(&vm.heap, 42);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    GCHeader *hdr = gc_header_of(jacl_as_ptr(live));
+    ASSERT_INT_EQ(hdr->gen, 0);
+
+    /* 1st minor cycle: survive_count -> 1, still young */
+    gc_collect_minor(&vm.heap, &vm, NULL);
+    hdr = gc_header_of(jacl_as_ptr(live));
+    ASSERT_INT_EQ(hdr->gen, 0);
+    ASSERT_INT_EQ(hdr->survive_count, 1);
+
+    /* 2nd minor cycle: promoted to old */
+    gc_collect_minor(&vm.heap, &vm, NULL);
+    hdr = gc_header_of(jacl_as_ptr(live));
+    ASSERT_INT_EQ(hdr->gen, 1);
+
+    ASSERT(jacl_as_i64(live) == 42);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_minor_gc_major_gc_still_works(void) {
+    /* Major GC (gc_collect) still works correctly after minor GC */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal live = jacl_i64(&vm.heap, 55);
+    vm.stack[0] = live;
+    vm.stack_top = 1;
+
+    /* Run a minor GC first */
+    gc_collect_minor(&vm.heap, &vm, NULL);
+
+    /* Allocate dead objects */
+    void *dead = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+
+    /* Run two major GC cycles — first cycle immunizes recently allocated
+     * objects (mark bit aliasing), second cycle collects them */
+    gc_collect(&vm.heap, &vm);
+    gc_collect(&vm.heap, &vm);
+
+    /* Dead object collected */
+    ASSERT(gc_header_of(dead)->alloc_total == 0);
+    /* Live object survives */
+    ASSERT(jacl_as_i64(live) == 55);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test runner --- */
 
 typedef struct { const char *name; int (*fn)(void); } TestEntry;
@@ -1208,6 +1379,12 @@ int main(void) {
         { "remembered_set_drain_dedup",   test_remembered_set_drain_dedup },
         { "remembered_set_old_to_old",    test_remembered_set_old_to_old },
         { "remembered_set_null_noop",     test_remembered_set_null_noop },
+        /* US-007: Minor GC mode */
+        { "minor_gc_reclaims_dead_young",  test_minor_gc_reclaims_dead_young },
+        { "minor_gc_remembered_set_saves", test_minor_gc_remembered_set_saves_young },
+        { "minor_gc_old_untouched",        test_minor_gc_old_objects_untouched },
+        { "minor_gc_promotes_survivors",   test_minor_gc_promotes_survivors },
+        { "minor_gc_major_still_works",    test_minor_gc_major_gc_still_works },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
