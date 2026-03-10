@@ -102,12 +102,83 @@ static bool is_unboxed_type(JaclType t) {
   return t == TYPE_I64 || t == TYPE_U64 || t == TYPE_F64;
 }
 
+/* --- Module system structs --- */
+
+#define COMPILER_MAX_PROC_PARAMS 16
+#define MODULE_CACHE_MAX 64
+#define MODULE_EXPORTS_MAX 64
+
+typedef struct {
+  const char* name;
+  uint32_t    name_len;
+  int16_t     arity;          /* -1 for non-procs (def/mut values) */
+  bool        is_mutable;     /* true if exported as a box */
+  bool        suspends;       /* true if proc is suspending */
+  JaclType    type;           /* value type or return type for procs */
+  JaclType    return_type;    /* proc return type (TYPE_DYN for non-procs) */
+  JaclType    param_types[COMPILER_MAX_PROC_PARAMS];
+  uint32_t    param_count;
+} ExportEntry;
+
+typedef struct {
+  BytecodeChunk* chunk;        /* compiled bytecode for this module */
+  const char*    path;         /* canonical (absolute) path */
+  const char*    source;       /* original source text */
+  ExportEntry*   exports;      /* array of exported names */
+  uint32_t       export_count; /* number of exports */
+  bool           compiled;     /* true once compilation is complete */
+} Module;
+
+typedef struct {
+  Module*  modules[MODULE_CACHE_MAX]; /* compiled modules by slot */
+  char*    paths[MODULE_CACHE_MAX];   /* canonical path per slot */
+  uint32_t count;
+  arena_t* arena;
+} ModuleCache;
+
+static void module_cache__init(ModuleCache* cache, arena_t* arena) {
+  cache->count = 0;
+  cache->arena = arena;
+  for (uint32_t i = 0; i < MODULE_CACHE_MAX; i++) {
+    cache->modules[i] = NULL;
+    cache->paths[i]   = NULL;
+  }
+}
+
+static Module* module_cache__find(ModuleCache* cache, const char* canonical_path) {
+  for (uint32_t i = 0; i < cache->count; i++) {
+    if (cache->paths[i] && strcmp(cache->paths[i], canonical_path) == 0) {
+      return cache->modules[i];
+    }
+  }
+  return NULL;
+}
+
+static Module* module_cache__add(ModuleCache* cache, const char* canonical_path) {
+  if (cache->count >= MODULE_CACHE_MAX) return NULL;
+  uint32_t idx = cache->count++;
+  size_t path_len = strlen(canonical_path);
+  char* path_copy = (char*)arena_alloc(cache->arena, path_len + 1);
+  memcpy(path_copy, canonical_path, path_len + 1);
+  cache->paths[idx] = path_copy;
+
+  Module* mod = (Module*)arena_alloc(cache->arena, sizeof(Module));
+  mod->chunk        = NULL;
+  mod->path         = path_copy;
+  mod->source       = NULL;
+  mod->exports      = NULL;
+  mod->export_count = 0;
+  mod->compiled     = false;
+  cache->modules[idx] = mod;
+  return mod;
+}
+
 /* --- Internal: Local variable tracking --- */
 
 #define COMPILER_LOCALS_MAX 256
 #define COMPILER_UPVALUES_MAX 256
 #define COMPILER_TRY_PATCHES_MAX 128
-#define COMPILER_MAX_PROC_PARAMS 16
+/* COMPILER_MAX_PROC_PARAMS defined above with module structs */
 
 typedef struct {
   JaclVal   name;         /* inline string name */
@@ -612,6 +683,8 @@ struct Compiler {
   JaclType         expected_type;   /* contextual type hint for RHS compilation */
   JaclType         last_expr_type;  /* type of the last compiled expression */
   JaclType         return_type;     /* declared return type for current function */
+  ModuleCache*     module_cache;    /* shared cache of compiled modules */
+  Module*          current_module;  /* module currently being compiled */
 };
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -638,6 +711,8 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->expected_type   = TYPE_DYN;
   c->last_expr_type  = TYPE_DYN;
   c->return_type     = TYPE_DYN;
+  c->module_cache    = NULL;
+  c->current_module  = NULL;
 }
 
 /* --- Internal: Emit helpers --- */
