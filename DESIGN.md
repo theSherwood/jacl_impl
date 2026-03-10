@@ -72,8 +72,6 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 
 **Escape analysis: boxes in collections are not tracked.** The escape analysis (compiler.c) detects direct mutable captures and transitive captures through closures, but does not detect box/cell refs stored in collections. If a box is stashed into a vector and that vector is passed to `spawn`, the task will not be pinned. Fixing this would require tracking taint through collection operations (vec-push, map-set, etc.).
 
-**`$var` is a zero-arg function call, not a value expression.** Bare `$var` in expression position is parsed as a zero-arg call to the value. Returning a vector or map from a CPS function via `$v` will attempt to call it as a function. Workaround: wrap in a builtin like `[vec-slice $v 0 [vec-len $v]]`.
-
 **CPS recursion limit ~65 iterations.** `VM_STACK_MAX=256` limits effective CPS recursion depth to approximately 65 iterations (each CPS call consumes ~4 stack slots). For larger iteration counts, use non-recursive batched patterns. This applies to any recursive proc running in concurrent mode.
 
 **Multi-line `[command ...]` causes parse errors.** Newlines between `[` and `]` in a command call break the parser. Keep commands on single lines or use `\` line continuation.

@@ -741,20 +741,18 @@ static int test_bare_block_not_wrapped(void) {
   TEST_PASS();
 }
 
-/* ---- M6 US-005 tests: $var lines as zero-arg command calls ---- */
+/* ---- M6 US-005 tests: $var as value expression ---- */
 
 static int test_var_ref_zero_arg(void) {
   setup();
-  /* '$fn' alone at statement position → AST_COMMAND { head: AST_VAR_REF("fn"), arg_count: 0 } */
+  /* '$fn' alone at statement position → AST_VAR_REF (value read, not a call) */
   ParseResult r = parse("$fn");
   ASSERT_U32_EQ(r.count, 1);
   ASSERT_U32_EQ(r.error_count, 0);
   AstNode* n = r.nodes[0];
-  ASSERT(n->type == AST_COMMAND);
-  ASSERT(n->data.command.head->type == AST_VAR_REF);
-  ASSERT(memcmp(n->data.command.head->data.var_ref.name, "fn", 2) == 0);
-  ASSERT_U32_EQ(n->data.command.head->data.var_ref.length, 2);
-  ASSERT_U32_EQ(n->data.command.arg_count, 0);
+  ASSERT(n->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.var_ref.name, "fn", 2) == 0);
+  ASSERT_U32_EQ(n->data.var_ref.length, 2);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();

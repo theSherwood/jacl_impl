@@ -416,10 +416,10 @@ static AstNode* parser__parse_bare_command(Parser* p) {
 
   /* Single expression with no trailing args */
   if (args.count == 0) {
-    /* Bare word or $var at statement position → zero-arg command call.
+    /* Bare word at statement position → zero-arg command call.
        'exit' on its own line desugars to '[exit]'.
-       '$fn' on its own line desugars to '[$fn]'. */
-    if (head_token_type == TOKEN_WORD || head_token_type == TOKEN_VAR) {
+       '$var' is a value read; use '[$var]' for invocation. */
+    if (head_token_type == TOKEN_WORD) {
       AstNode* node = ast_alloc(p->arena);
       node->type  = AST_COMMAND;
       node->start = head->start;
