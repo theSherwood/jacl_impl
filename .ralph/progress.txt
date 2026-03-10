@@ -17,6 +17,10 @@ Progress log for ralph/m14-module-system branch.
 - realpath() available via platform.h (<stdlib.h>) — use for canonical path resolution in module system
 - compiler__compile_module() is the entry point for compiling dependency modules; shares ModuleCache + ImportStack with importer
 - Module exports are populated from compiler's global_arities after compilation, excluding underscore-prefixed names
+- Typed proc syntax: `proc i64 add [i64 a i64 b]` — return type AFTER `proc`, not before
+- Import name resolution adds GlobalArity entries to the importing compiler; existing arity/type checking then works automatically
+- BytecodeChunk field is `code_count` (not `count`) for bytecode byte count
+- In module context, mutable globals are boxes (OP_BOX before OP_DEF_GLOBAL); set! uses OP_GET_GLOBAL + OP_RESET
 
 ---
 
@@ -106,4 +110,36 @@ Progress log for ralph/m14-module-system branch.
   - Module compilation uses the same non-CPS compilation path as single-file; CPS is only for top-level concurrent code
   - AST_USE in single-file mode (no current_module) gracefully errors with "use declaration requires module context"
   - Tests create temp .jacl files in /tmp and clean up after — need `<sys/stat.h>` and `<unistd.h>` for mkdir/unlink/rmdir
+---
+
+## 2026-03-10 - US-007
+- Modified AST_USE case in compiler__compile_node to register imported names as GlobalArity entries
+- After compiling/finding cached dependency module, iterates use_decl.names and looks up each in module's exports
+- Reports error if name not exported ("'foo' is not exported by 'lib.jacl'")
+- Reports error if name conflicts with existing global ("'x' is already defined")
+- Copies full type info from ExportEntry to GlobalArity: arity, return_type, param_types, is_mutable, suspends
+- Added 7 compiler tests: register globals, unknown export error, conflict error, typed propagation, arity check, type check, mutable flag
+- All 48 test suites pass, 191 JACL tests pass
+- Files changed: src/compiler.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Typed proc syntax is `proc i64 add [i64 a i64 b]` (return type after `proc`, NOT before)
+  - Import name resolution leverages existing GlobalArity infrastructure — once registered, arity/type checking works automatically via compiler__resolve_global_arity/compiler__find_global_arity
+  - The ExportEntry → GlobalArity copy is straightforward since both structs have matching fields for type info
+  - Module names in use declarations are ≤7 bytes (inline string limit) — enforced by parser
+  - Tests use a setup_module_ctx() helper to reduce boilerplate for module context setup
+---
+
+## 2026-03-10 - US-008
+- In module context, `mut` at global scope now emits OP_BOX before OP_DEF_GLOBAL, wrapping mutable globals in boxes
+- `set!` for global mutable in module context emits OP_GET_GLOBAL + OP_RESET (box-update) instead of OP_SET_GLOBAL
+- Single-file mode (no current_module) is unchanged — no boxes for globals
+- Added 5 compiler tests: module_mut_emits_box, nonmodule_mut_no_box, module_mutable_import_is_box, module_set_emits_reset, module_set_immutable_errors
+- All 48 test suites pass, 191 JACL tests pass
+- Files changed: src/compiler.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - BytecodeChunk uses `code_count` not `count` for the byte count field
+  - OP_RESET expects stack order [container, new_val] (pops new_val first, then container)
+  - In module context, ALL mutable globals are boxes — both the module's own mut bindings and imported mutable bindings
+  - `set!` in module context must emit GET_GLOBAL before compiling RHS (to get the box on the stack first), then OP_RESET
+  - OP_RESET pushes the new value (not nil like OP_SET_GLOBAL), which is fine since callers pop statement results
 ---
