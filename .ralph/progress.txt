@@ -21,6 +21,7 @@ Progress log for ralph/m14-module-system branch.
 - Import name resolution adds GlobalArity entries to the importing compiler; existing arity/type checking then works automatically
 - BytecodeChunk field is `code_count` (not `count`) for bytecode byte count
 - In module context, mutable globals are boxes (OP_BOX before OP_DEF_GLOBAL); set! uses OP_GET_GLOBAL + OP_RESET
+- jacl_compile_program() is the multi-file API; compiler_compile() is the single-file API — both must stay in sync for CPS paths
 
 ---
 
@@ -142,4 +143,20 @@ Progress log for ralph/m14-module-system branch.
   - In module context, ALL mutable globals are boxes — both the module's own mut bindings and imported mutable bindings
   - `set!` in module context must emit GET_GLOBAL before compiling RHS (to get the box on the stack first), then OP_RESET
   - OP_RESET pushes the new value (not nil like OP_SET_GLOBAL), which is fine since callers pop statement results
+---
+
+## 2026-03-10 - US-009
+- Added ProgramResult struct: Module** modules (topological order), module_count, error_count, error_message, suspending
+- Implemented jacl_compile_program(): reads root file, sets up ModuleCache/ImportStack, compiles root with module context, collects modules in topological order (dependencies first, root last)
+- Supports both CPS (suspending) and non-CPS compilation paths for root module
+- Forward declaration placed after ProgramResult definition (not in API section) since ProgramResult depends on Module type
+- Existing compiler_compile() single-file API is unchanged
+- Added 6 compiler tests: single_file, with_dep, topo_order, not_found, api_unchanged, root_exports
+- All 48 test suites pass, all JACL tests pass
+- Files changed: src/compiler.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - ProgramResult must be defined after Module (line ~138) since it references Module*; forward declaration goes after ProgramResult, not in the early API section
+  - ModuleCache insertion order IS topological order for dependencies (DFS post-order), but root is added first (index 0), so output array skips root, then appends it last
+  - jacl_compile_program duplicates CPS logic from compiler_compile — both must be kept in sync if CPS compilation changes
+  - Module context (current_module, module_cache, import_stack) must also be set on the CPS body compiler, not just the outer compiler
 ---
