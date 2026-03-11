@@ -4852,6 +4852,97 @@ static int test_struct_in_vec(void) {
   TEST_PASS();
 }
 
+/* ===== US-008 (Struct): Inline anonymous struct types ===== */
+
+static int test_inline_struct_runtime(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult r = jacl_run(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "defstruct Wrapper [pos :struct{x:i32,y:i32}]\n"
+      "def w [Wrapper [Point 42 10]]\n"
+      "print [. [. $w pos] x]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_inline_struct_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct Wrapper [pos :struct{x:i32,y:i32}]", &arena, &heap);
+  if (cr.error_count > 0) {
+    printf("ERRORS: %u\n", cr.error_count);
+  }
+  ASSERT_U32_EQ(cr.error_count, 0);
+  /* Registry should have 2 entries: the anonymous struct and Wrapper */
+  ASSERT(cr.struct_registry != NULL);
+  ASSERT(cr.struct_registry->count == 2);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_inline_struct_equivalence(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct A [p :struct{x:i32,y:i32}]\n"
+      "defstruct B [q :struct{x:i32,y:i32}]", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  /* Registry: anon_struct (shared), A, B = 3 entries */
+  ASSERT(cr.struct_registry != NULL);
+  ASSERT(cr.struct_registry->count == 3);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_inline_struct_nested(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct C [d :struct{start:struct{x:i32,y:i32},end:struct{x:i32,y:i32}}]",
+      &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT(cr.struct_registry != NULL);
+  /* inner struct (shared) + outer struct + C = 3 entries */
+  ASSERT(cr.struct_registry->count == 3);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -5046,6 +5137,11 @@ int main(void) {
     { "struct_dyn_field_access",         test_struct_dyn_field_access },
     { "struct_dyn_field_set",            test_struct_dyn_field_set },
     { "struct_in_vec",                   test_struct_in_vec },
+    /* US-008 (Struct): Inline anonymous struct types */
+    { "inline_struct_runtime",           test_inline_struct_runtime },
+    { "inline_struct_basic",             test_inline_struct_basic },
+    { "inline_struct_equivalence",       test_inline_struct_equivalence },
+    { "inline_struct_nested",            test_inline_struct_nested },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

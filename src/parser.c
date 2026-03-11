@@ -472,6 +472,122 @@ static AstNode* parser__parse_use(Parser* p) {
  * Returns AST_DEFSTRUCT on success, AST_ERROR on failure.
  * ------------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------------
+ * Internal: Parse inline struct type: struct{name:type,...}
+ *
+ * Called after ':' has been consumed and the current token is TOKEN_WORD
+ * "struct" followed by TOKEN_LBRACE. Builds a canonical string like
+ * "struct{x:i32,y:i32}" in the arena. Returns NULL on error.
+ * ------------------------------------------------------------------------- */
+
+static const char* parser__parse_inline_struct_type(Parser* p, uint32_t* out_len) {
+  /* Consume TOKEN_WORD("struct") */
+  parser__advance(p);
+  /* Consume TOKEN_LBRACE */
+  if (parser__peek(p)->type != TOKEN_LBRACE) {
+    parser__error(p, "expected '{' after 'struct' in inline type", parser__peek(p));
+    return NULL;
+  }
+  parser__advance(p);
+
+  /* Build canonical string in a stack buffer */
+  char buf[512];
+  uint32_t pos = 0;
+  memcpy(buf + pos, "struct{", 7); pos += 7;
+
+  int first = 1;
+  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
+    if (!first) {
+      if (parser__peek(p)->type != TOKEN_COMMA) {
+        parser__error(p, "expected ',' between inline struct fields", parser__peek(p));
+        return NULL;
+      }
+      parser__advance(p); /* consume ',' */
+      buf[pos++] = ',';
+    }
+    first = 0;
+
+    /* Field name: TOKEN_WORD */
+    Token* fname = parser__peek(p);
+    if (fname->type != TOKEN_WORD) {
+      parser__error(p, "expected field name in inline struct", fname);
+      return NULL;
+    }
+    parser__advance(p);
+    if (pos + fname->length + 1 >= sizeof(buf)) {
+      parser__error(p, "inline struct type too long", fname);
+      return NULL;
+    }
+    memcpy(buf + pos, fname->payload.text, fname->length);
+    pos += fname->length;
+
+    /* Colon: TOKEN_OPERATOR starting with ':' */
+    Token* colon = parser__peek(p);
+    if (colon->type != TOKEN_OPERATOR || colon->length < 1 || colon->payload.text[0] != ':') {
+      parser__error(p, "expected ':type' in inline struct field", colon);
+      return NULL;
+    }
+    parser__advance(p);
+    buf[pos++] = ':';
+
+    if (colon->length > 1) {
+      /* :i32 etc — type is rest of operator token */
+      uint32_t tlen = colon->length - 1;
+      const char* tstr = colon->payload.text + 1;
+      if (pos + tlen >= sizeof(buf)) {
+        parser__error(p, "inline struct type too long", colon);
+        return NULL;
+      }
+      memcpy(buf + pos, tstr, tlen);
+      pos += tlen;
+    } else {
+      /* Just ':' — check for nested struct or type name */
+      Token* tname = parser__peek(p);
+      if (tname->type == TOKEN_WORD &&
+          tname->length == 6 && memcmp(tname->payload.text, "struct", 6) == 0 &&
+          p->pos + 1 < p->count &&
+          p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
+        /* Recursive inline struct */
+        uint32_t nested_len = 0;
+        const char* nested = parser__parse_inline_struct_type(p, &nested_len);
+        if (!nested) return NULL;
+        if (pos + nested_len >= sizeof(buf)) {
+          parser__error(p, "inline struct type too long", tname);
+          return NULL;
+        }
+        memcpy(buf + pos, nested, nested_len);
+        pos += nested_len;
+      } else if (tname->type == TOKEN_WORD) {
+        parser__advance(p);
+        if (pos + tname->length >= sizeof(buf)) {
+          parser__error(p, "inline struct type too long", tname);
+          return NULL;
+        }
+        memcpy(buf + pos, tname->payload.text, tname->length);
+        pos += tname->length;
+      } else {
+        parser__error(p, "expected type name in inline struct field", tname);
+        return NULL;
+      }
+    }
+  }
+
+  /* Expect '}' */
+  if (parser__at_end(p) || parser__peek(p)->type != TOKEN_RBRACE) {
+    parser__error(p, "expected '}' to close inline struct type", parser__peek(p));
+    return NULL;
+  }
+  parser__advance(p);
+  buf[pos++] = '}';
+
+  /* Copy to arena */
+  char* result = (char*)arena_alloc(p->arena, pos + 1);
+  memcpy(result, buf, pos);
+  result[pos] = '\0';
+  *out_len = pos;
+  return result;
+}
+
 static AstNode* parser__parse_defstruct(Parser* p) {
   Token* kw_tok = parser__advance(p); /* consume 'defstruct' */
   SourcePos start = parser__token_start(kw_tok);
@@ -535,16 +651,29 @@ static AstNode* parser__parse_defstruct(Parser* p) {
         type_str = type_tok->payload.text + 1;
         type_len = type_tok->length - 1;
       } else {
-        /* Just ':' — next token is the type name */
+        /* Just ':' — check for inline struct or type name */
         Token* tname = parser__peek(p);
-        if (tname->type != TOKEN_WORD) {
+        if (tname->type == TOKEN_WORD &&
+            tname->length == 6 && memcmp(tname->payload.text, "struct", 6) == 0 &&
+            p->pos + 1 < p->count &&
+            p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
+          /* Inline struct type */
+          uint32_t inline_len = 0;
+          type_str = parser__parse_inline_struct_type(p, &inline_len);
+          if (!type_str) {
+            parser__sync_bracket(p);
+            return parser__error(p, "invalid inline struct type", tname);
+          }
+          type_len = inline_len;
+        } else if (tname->type != TOKEN_WORD) {
           AstNode* err = parser__error(p, "expected type name after ':'", tname);
           parser__sync_bracket(p);
           return err;
+        } else {
+          parser__advance(p);
+          type_str = tname->payload.text;
+          type_len = tname->length;
         }
-        parser__advance(p);
-        type_str = tname->payload.text;
-        type_len = tname->length;
       }
     } else {
       AstNode* err = parser__error(p, "expected ':type' annotation for field", type_tok);

@@ -203,6 +203,109 @@ static uint32_t struct_registry__find(StructTypeRegistry* reg, const char* name,
   return UINT32_MAX;
 }
 
+/* Register an inline anonymous struct type from a canonical string like "struct{x:i32,y:i32}".
+   Returns registry index or UINT32_MAX on error. Uses structural equivalence: if an identical
+   canonical string already exists in the registry, returns that index. */
+static uint32_t compiler__register_inline_struct(
+    StructTypeRegistry* reg, const char* spec, uint32_t spec_len) {
+  if (!reg) return UINT32_MAX;
+
+  /* Check for structural equivalence (same canonical string) */
+  uint32_t existing = struct_registry__find(reg, spec, spec_len);
+  if (existing != UINT32_MAX) return existing;
+
+  if (reg->count >= STRUCT_REGISTRY_MAX) return UINT32_MAX;
+
+  /* Parse the canonical string: struct{name:type,name:type,...} */
+  if (spec_len < 9 || memcmp(spec, "struct{", 7) != 0 || spec[spec_len - 1] != '}')
+    return UINT32_MAX;
+
+  StructTypeDef* sdef = &reg->defs[reg->count];
+  sdef->name     = spec;
+  sdef->name_len = spec_len;
+  sdef->name_val = JACL_NIL; /* anonymous — no constructor */
+  sdef->field_count = 0;
+
+  /* Parse fields from the inner content between { and } */
+  const char* p = spec + 7;
+  const char* end = spec + spec_len - 1;
+  uint32_t offset = 0;
+  uint32_t max_align = 1;
+
+  while (p < end) {
+    if (sdef->field_count >= STRUCT_MAX_FIELDS) return UINT32_MAX;
+
+    /* Parse field name (up to ':') */
+    const char* colon = p;
+    while (colon < end && *colon != ':') colon++;
+    if (colon >= end) return UINT32_MAX;
+
+    uint32_t fname_len = (uint32_t)(colon - p);
+    const char* fname = p;
+
+    /* Parse field type (up to ',' or end, handling nested struct{} braces) */
+    const char* tstart = colon + 1;
+    const char* tp = tstart;
+    int depth = 0;
+    while (tp < end) {
+      if (*tp == '{') depth++;
+      else if (*tp == '}') { if (depth == 0) break; depth--; }
+      else if (*tp == ',' && depth == 0) break;
+      tp++;
+    }
+    uint32_t tlen = (uint32_t)(tp - tstart);
+
+    /* Resolve field type */
+    JaclType ftype = TYPE_DYN;
+    uint32_t f_struct_idx = 0;
+
+    if (is_type_keyword(tstart, tlen)) {
+      ftype = type_from_keyword(tstart, tlen);
+    } else if (tlen > 7 && memcmp(tstart, "struct{", 7) == 0) {
+      /* Nested inline struct — recursive registration */
+      uint32_t nested_idx = compiler__register_inline_struct(reg, tstart, tlen);
+      if (nested_idx == UINT32_MAX) return UINT32_MAX;
+      ftype = TYPE_STRUCT;
+      f_struct_idx = nested_idx;
+    } else {
+      /* Named struct type */
+      uint32_t idx = struct_registry__find(reg, tstart, tlen);
+      if (idx == UINT32_MAX) return UINT32_MAX;
+      ftype = TYPE_STRUCT;
+      f_struct_idx = idx;
+    }
+
+    /* Compute C-ABI layout */
+    uint32_t fsize  = struct__type_size(ftype, reg, f_struct_idx);
+    uint32_t falign = struct__type_align(ftype, reg, f_struct_idx);
+    offset = struct__align_up(offset, falign);
+
+    sdef->fields[sdef->field_count].name           = fname;
+    sdef->fields[sdef->field_count].name_len       = fname_len;
+    sdef->fields[sdef->field_count].type           = ftype;
+    sdef->fields[sdef->field_count].struct_type_idx = f_struct_idx;
+    sdef->fields[sdef->field_count].offset         = offset;
+    sdef->fields[sdef->field_count].size           = fsize;
+    sdef->field_count++;
+
+    offset += fsize;
+    if (falign > max_align) max_align = falign;
+
+    /* Skip comma separator */
+    p = tp;
+    if (p < end && *p == ',') p++;
+  }
+
+  if (sdef->field_count == 0) return UINT32_MAX;
+
+  sdef->total_size = struct__align_up(offset, max_align);
+  sdef->alignment  = max_align;
+
+  uint32_t idx = reg->count;
+  reg->count++;
+  return idx;
+}
+
 /* --- Module system structs --- */
 
 #define COMPILER_MAX_PROC_PARAMS 16
@@ -1201,6 +1304,11 @@ static bool compiler__resolve_type(Compiler* c, const char* word, uint32_t len,
                                     JaclType* out_type) {
   if (is_type_keyword(word, len)) {
     *out_type = type_from_keyword(word, len);
+    return true;
+  }
+  /* Check for inline struct type string */
+  if (len > 7 && memcmp(word, "struct{", 7) == 0) {
+    *out_type = TYPE_STRUCT;
     return true;
   }
   /* Check struct registry */
@@ -5268,7 +5376,10 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
         break;
       }
 
-      StructTypeDef* sdef = &reg->defs[reg->count];
+      /* Reserve slot first so inline struct registration doesn't overwrite it */
+      uint32_t this_idx = reg->count;
+      reg->count++;
+      StructTypeDef* sdef = &reg->defs[this_idx];
       sdef->name     = struct_name;
       sdef->name_len = struct_name_len;
       if (struct_name_len <= 7) {
@@ -5309,6 +5420,21 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
 
         if (is_type_keyword(ftype_str, ftype_len)) {
           ftype = type_from_keyword(ftype_str, ftype_len);
+        } else if (ftype_len > 7 && memcmp(ftype_str, "struct{", 7) == 0) {
+          /* Inline anonymous struct type */
+          uint32_t idx = compiler__register_inline_struct(reg, ftype_str, ftype_len);
+          if (idx == UINT32_MAX) {
+            char err[128];
+            snprintf(err, sizeof(err),
+                     "invalid inline struct type for field '%.*s' in struct '%.*s'",
+                     (int)fname_len, fname,
+                     (int)struct_name_len, struct_name);
+            compiler__error(c, line, node->start.column, err);
+            has_error = true;
+            break;
+          }
+          ftype = TYPE_STRUCT;
+          f_struct_idx = idx;
         } else {
           /* Check if it's a named struct type */
           uint32_t idx = struct_registry__find(reg, ftype_str, ftype_len);
@@ -5343,14 +5469,16 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
         if (falign > max_align) max_align = falign;
       }
 
-      if (has_error) break;
+      if (has_error) {
+        reg->count = this_idx; /* rollback slot reservation */
+        break;
+      }
 
       /* Trailing padding to struct alignment */
       sdef->total_size = struct__align_up(offset, max_align);
       sdef->alignment  = max_align;
 
-      /* Commit to registry */
-      reg->count++;
+      /* Slot was already reserved above (reg->count++) */
 
       /* Register struct name as a global with arity = field_count (constructor)
          and type = TYPE_STRUCT */

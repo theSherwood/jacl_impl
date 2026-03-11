@@ -1,0 +1,6 @@
+# expect: 42
+# Test inline anonymous struct type in defstruct field
+defstruct Point [x :i32] [y :i32]
+defstruct Wrapper [pos :struct{x:i32,y:i32}]
+def w [Wrapper [Point 42 10]]
+print [. [. $w pos] x]

@@ -136,8 +136,8 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Parser builds canonical string like struct{x:i32,y:i32} stored as field type. Compiler registers inline structs in registry with structural equivalence via name match. Registry slot must be reserved before processing fields to prevent inline struct registration from overwriting the parent entry."
     },
     {
       "id": "US-009",

@@ -133,3 +133,20 @@ Thread: (inline)
 - Nested struct types, chained field access, and nested field mutation all work
 - Added struct_nested_set.jacl integration test
 ---
+
+## 2026-03-11 - US-008
+Thread: (inline)
+- Inline struct type syntax: `:struct{x:i32,y:i32}` in defstruct field type positions
+- Parser builds canonical string (e.g. "struct{x:i32,y:i32}") — no AST changes needed
+- Parser helper `parser__parse_inline_struct_type` handles nested braces and recursive inline structs
+- Compiler function `compiler__register_inline_struct` parses canonical string, registers in StructTypeRegistry
+- Structural equivalence: same canonical string = same registry entry (via struct_registry__find)
+- Updated `compiler__resolve_type` to recognize `struct{...}` strings
+- **Critical fix**: AST_DEFSTRUCT handler must reserve its registry slot (reg->count++) BEFORE processing field types, because inline struct registration can also increment reg->count, overwriting the parent entry
+- Added 4 compiler tests and 1 integration test
+- Files changed: src/parser.c, src/compiler.c, test/test_compiler.c, test/jacl/struct_inline.jacl
+- **Learnings for future iterations:**
+  - StructTypeRegistry entries are indexed by `reg->count`; any code that writes to `reg->defs[reg->count]` must be aware that field type resolution (inline structs, forward refs) can also modify the registry during that same operation
+  - Inline struct canonical string format: `struct{field:type,...}` — no spaces, brace-delimited, comma-separated
+  - `parser__parse_inline_struct_type` must handle recursive inline structs by checking `TOKEN_WORD("struct")` + `TOKEN_LBRACE` after a `:` in field types
+---
