@@ -1,0 +1,7 @@
+# expect: 6
+# expect: 2
+# expect: 12
+use "lib.jacl" [add sub mul]
+print [add 1 5]
+print [sub 7 5]
+print [mul 3 4]

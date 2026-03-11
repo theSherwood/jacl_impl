@@ -1,0 +1,2 @@
+use "d.jacl" [base]
+proc bfn [x] { [base [base $x]] }

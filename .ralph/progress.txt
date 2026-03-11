@@ -27,6 +27,9 @@ Progress log for ralph/m14-module-system branch.
 - OP_DEF_GLOBAL pushes nil — when emitting multiple imports in AST_USE, pop nil between each pair, emit final OP_NIL
 - In CPS path of jacl_compile_program, AST_USE nodes are hoisted to Phase 2 (alongside procs) so import aliases are set up before CPS closure
 - reset! (with !) is the box mutation command, deref for reading — not reset/deref without punctuation
+- Module integration tests go in test/jacl/modules/<test_name>/main.jacl with # expect: headers
+- JACL proc body uses `{}` braces (NOT `end` keyword): `proc name [params] { body }`
+- Module topo_order is assigned via DFS post-order (topo_counter++ after compilation); jacl_compile_program sorts modules by topo_order for correct dependency ordering
 
 ---
 
@@ -183,4 +186,39 @@ Progress log for ralph/m14-module-system branch.
   - OP_DEF_GLOBAL pops value and pushes nil; when emitting multiple imports, must OP_POP between each and emit final OP_NIL for inter-statement CHECK_ERROR
   - In CPS path, AST_USE must be compiled in Phase 2 (alongside proc hoisting), not inside CPS closure body, because import aliases need to be available globally
   - reset! (with !) is the box mutation command; deref for reading — PRD used "reset" without ! but actual syntax includes !
+---
+
+## 2026-03-11 - US-011
+- Added `run_module_test()` function to test_jacl_harness.c: uses `jacl_compile_program()` + `jacl_exec_program()` for multi-file tests
+- Added `run_modules_directory()` function: scans test/jacl/modules/ for subdirectories containing main.jacl
+- Updated `main()` to run module tests after single-file tests
+- Created test/jacl/modules/ directory structure with basic_import smoke test
+- Supports `# expect:` and `# expect-error:` headers in main.jacl (same as single-file tests)
+- Module tests use realpath() for absolute path resolution required by jacl_compile_program
+- All 48 test suites pass, 192 JACL tests pass (191 single-file + 1 module)
+- Files changed: test/test_jacl_harness.c, test/jacl/modules/basic_import/{main,lib}.jacl
+- **Learnings for future iterations:**
+  - Module tests require absolute paths for jacl_compile_program — use realpath() on main.jacl path
+  - run_modules_directory checks for main.jacl existence (fopen) rather than d_type==DT_DIR for portability
+  - JACL proc syntax: `proc name [params] { body }` with `{}` braces, NOT `end` keyword
+  - `[print "text"]` is the call form for print inside proc bodies; `print "text"` is the statement form at top level
+  - Module tests show under "--- Module tests ---" separator in harness output
+---
+
+## 2026-03-11 - US-012
+- Created 4 new module E2E test directories: multi_import, multi_module, transitive, diamond
+- multi_import: tests `use "lib.jacl" [add sub mul]` — multiple imports from one module
+- multi_module: tests imports from two different modules (math.jacl + str.jacl)
+- transitive: tests A→B→C chain — A imports B's `quad` which internally uses C's `double`
+- diamond: tests A→{B,C}→D pattern — D prints on init, verifying it only runs once
+- **Fixed critical bug**: module topological ordering was using cache insertion order (DFS pre-order) instead of post-order, causing transitive deps to execute in wrong order
+- Added `topo_order` field to Module struct, `topo_counter` to ModuleCache, assigned in DFS post-order during compilation
+- jacl_compile_program now sorts modules by topo_order instead of skipping root from cache order
+- All 196 JACL tests pass (191 single-file + 5 module), 48 test suites pass
+- Files changed: src/compiler.c, test/jacl/modules/{multi_import,multi_module,transitive,diamond}/*.jacl
+- **Learnings for future iterations:**
+  - Module cache insertion order is DFS pre-order (parent added before children) — NOT valid topological order for transitive deps
+  - DFS post-order (assign order after all deps compiled) gives correct topological sort for dependency execution
+  - Diamond imports test verifies side effects run once: `print "d init"` in D appears only once even though B and C both import D
+  - `concat` is a built-in string concatenation function: `[concat "hi " $name]`
 ---

@@ -1,0 +1,3 @@
+# expect: 20
+use "b.jacl" [quad]
+print [quad 5]

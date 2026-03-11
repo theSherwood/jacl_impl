@@ -128,6 +128,7 @@ typedef struct {
   const char*    source;       /* original source text */
   ExportEntry*   exports;      /* array of exported names */
   uint32_t       export_count; /* number of exports */
+  uint32_t       topo_order;   /* post-order index for topological sort */
   bool           compiled;     /* true once compilation is complete */
 } Module;
 
@@ -150,11 +151,13 @@ typedef struct {
   Module*  modules[MODULE_CACHE_MAX]; /* compiled modules by slot */
   char*    paths[MODULE_CACHE_MAX];   /* canonical path per slot */
   uint32_t count;
+  uint32_t topo_counter;              /* monotonic counter for post-order assignment */
   arena_t* arena;
 } ModuleCache;
 
 static void module_cache__init(ModuleCache* cache, arena_t* arena) {
   cache->count = 0;
+  cache->topo_counter = 0;
   cache->arena = arena;
   for (uint32_t i = 0; i < MODULE_CACHE_MAX; i++) {
     cache->modules[i] = NULL;
@@ -185,6 +188,7 @@ static Module* module_cache__add(ModuleCache* cache, const char* canonical_path)
   mod->source       = NULL;
   mod->exports      = NULL;
   mod->export_count = 0;
+  mod->topo_order   = 0;
   mod->compiled     = false;
   cache->modules[idx] = mod;
   return mod;
@@ -5213,8 +5217,9 @@ static bool compiler__compile_module(const char* canonical_path,
   /* Populate exports from global arities (exclude private names) */
   module__populate_exports(mod, &mc);
 
-  mod->chunk    = chunk;
-  mod->compiled = true;
+  mod->chunk      = chunk;
+  mod->compiled   = true;
+  mod->topo_order = importer->module_cache->topo_counter++;
 
   /* Pop import stack */
   import_stack__pop(importer->import_stack);
@@ -5452,25 +5457,32 @@ static ProgramResult jacl_compile_program(const char* root_path,
 
   /* Populate root module exports and finalize */
   module__populate_exports(root_mod, &c);
-  root_mod->chunk    = root_chunk;
-  root_mod->compiled = true;
+  root_mod->chunk      = root_chunk;
+  root_mod->compiled   = true;
+  root_mod->topo_order = cache.topo_counter++;
 
   import_stack__pop(&istack);
 
   /* Build topological module list: dependencies first, root last.
-     Cache order is insertion order: root is index 0, dependencies follow.
-     We output all non-root modules first, then root. */
+     Modules have topo_order assigned in DFS post-order during compilation,
+     so sorting by topo_order gives correct dependency order. */
   result.module_count = cache.count;
   result.modules = (Module**)arena_alloc(arena,
       cache.count * sizeof(Module*));
 
-  uint32_t out = 0;
   for (uint32_t i = 0; i < cache.count; i++) {
-    if (cache.modules[i] != root_mod) {
-      result.modules[out++] = cache.modules[i];
-    }
+    result.modules[i] = cache.modules[i];
   }
-  result.modules[out] = root_mod;
+  /* Insertion sort by topo_order (small N, arena-allocated) */
+  for (uint32_t i = 1; i < cache.count; i++) {
+    Module* key = result.modules[i];
+    uint32_t j = i;
+    while (j > 0 && result.modules[j - 1]->topo_order > key->topo_order) {
+      result.modules[j] = result.modules[j - 1];
+      j--;
+    }
+    result.modules[j] = key;
+  }
 
   result.error_count   = c.error_count;
   result.error_message = c.first_error;
