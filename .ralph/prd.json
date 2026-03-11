@@ -1,230 +1,209 @@
 {
   "project": "JACL",
-  "branchName": "ralph/m14-module-system",
-  "description": "M14 Module System — file-based modules with explicit imports, strict typing, underscore privacy, mutable exports as boxes, circular import detection, and module caching.",
+  "branchName": "ralph/struct-types",
+  "description": "Struct Types — user-defined compound value types with typed fields, C-ABI layout, dyn boxing, and module export/import, as precursor to FFI.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Lexer — use keyword",
-      "description": "As a developer, I need the lexer to recognize `use` as a keyword so that import declarations can be parsed.",
+      "title": "defstruct keyword and parser support",
+      "description": "As a developer, I need the lexer and parser to recognize struct definitions so that struct types can be declared in JACL source code.",
       "acceptanceCriteria": [
-        "`use` is recognized as a keyword token (TOKEN_USE)",
-        "`use` as a bare word in non-keyword positions (e.g., inside a string or as a variable name) continues to work correctly — only recognized as keyword at statement start",
-        "Build passes, all existing lexer tests pass"
+        "`defstruct` is recognized as a keyword token (TOKEN_DEFSTRUCT)",
+        "Parse: `defstruct Point [x :i32] [y :i32]` produces AST_DEFSTRUCT node with name Point and field list",
+        "Each field is a [name :type] pair",
+        "Field types can be any existing type (:i32, :i64, :u32, :u64, :f32, :f64, :str, :bool, :dyn) or another named struct type",
+        "Error on duplicate field names within a struct",
+        "Error on zero fields (structs must have at least one field)",
+        "`defstruct` must appear at top level (not inside a proc or block)",
+        "Build passes, all existing tests pass"
       ],
       "priority": 1,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Parser — use declarations",
-      "description": "As a developer, I need the parser to recognize `use` declarations at the top of a file so that import intent is captured in the AST.",
+      "title": "Struct type registration in the compiler",
+      "description": "As a developer, I need the compiler to register struct definitions as named types so that struct names can be used as type annotations throughout the program.",
       "acceptanceCriteria": [
-        "Parse: `use \"math.jacl\" [add sub mul]` produces AST_USE node with path \"math.jacl\" and name list [add, sub, mul]",
-        "`use` declarations must appear before any other statements; error if `use` appears after a def, proc, or expression",
-        "Path must be a string literal (not a variable or interpolated string)",
-        "Name list must contain at least one name; error on empty list `use \"math.jacl\" []`",
-        "Error on duplicate `use` of the same path",
-        "Error on duplicate names across `use` declarations (e.g., two modules both importing `add`)",
-        "Build passes, all existing parser tests pass"
+        "Add TYPE_STRUCT to JaclType enum",
+        "Compiler maintains a struct type registry (name to field list with types and offsets)",
+        "Struct names are valid type annotations: `def p :Point [Point 1 2]`",
+        "Error on duplicate struct name definitions",
+        "Error on struct fields referencing undefined struct types (forward references not allowed)",
+        "Struct types are available for use after their defstruct declaration (declaration order matters)",
+        "Build passes, all existing tests pass"
       ],
       "priority": 2,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-003",
-      "title": "Module struct and ModuleCache",
-      "description": "As a developer, I need Module and ModuleCache structs so that the compiler can track compiled modules, their exports, and avoid re-compilation.",
+      "title": "Struct value representation and instantiation",
+      "description": "As a developer, I need to create struct instances at runtime so that JACL programs can work with structured data.",
       "acceptanceCriteria": [
-        "New struct Module: contains BytecodeChunk* chunk, const char* path (canonical), const char* source, ExportEntry* exports, uint32_t export_count, bool compiled",
-        "ExportEntry includes: name, arity (for procs), parameter types, return type, is_mutable flag",
-        "New struct ModuleCache: stores compiled modules keyed by canonical path, prevents re-compilation",
-        "Compiler gains ModuleCache* and Module* current_module fields",
-        "Build passes"
+        "Add JACL_TAG_STRUCT tag for struct values",
+        "Struct instances are heap-allocated with fields laid out in declaration order using C-ABI alignment rules (natural alignment per field type, trailing padding to struct alignment)",
+        "Instantiation syntax: [Point 1 2] — struct name as command, positional arguments for fields in declaration order",
+        "Compile-time arity check: error if wrong number of arguments",
+        "Compile-time type check: each argument must match the declared field type",
+        "Add OP_STRUCT_NEW opcode: pops N field values from the stack, allocates struct, pushes struct value",
+        "Struct values carry a pointer to their type metadata (for field access and GC)",
+        "Build passes, all existing tests pass"
       ],
       "priority": 3,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-004",
-      "title": "Path resolution and circular import detection",
-      "description": "As a developer, I need the compiler to resolve relative import paths and detect circular dependencies so that imports are deterministic and infinite loops are impossible.",
+      "title": "Field access",
+      "description": "As a developer, I need to read individual fields from a struct so that I can use struct data in expressions.",
       "acceptanceCriteria": [
-        "Paths are resolved relative to the directory of the importing file: if src/main.jacl says `use \"lib/math.jacl\"`, it resolves to src/lib/math.jacl",
-        "Paths are canonicalized (resolve .., ., symlinks) before cache lookup using realpath()",
-        "The compiler maintains an in-progress set of module paths during compilation",
-        "If a module being compiled is already in the in-progress set, emit error: circular import detected: A -> B -> A",
-        "The error message includes the full import chain for debugging",
-        "File-not-found produces a clear error: module not found: \"path/to/missing.jacl\"",
-        "Build passes"
+        "Field access syntax: [. $point x] — dot command, struct value, field name",
+        "Add OP_STRUCT_GET opcode with field offset operand",
+        "Compiler resolves field name to offset at compile time — error on unknown field name",
+        "Compiler knows the result type of field access (the declared field type)",
+        "Works with nested structs: [. [. $line start] x] to access line.start.x",
+        "Error when used on non-struct values",
+        "Build passes, all existing tests pass"
       ],
       "priority": 4,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-005",
-      "title": "Underscore-prefix privacy enforcement",
-      "description": "As a developer, I want names prefixed with `_` to be private to their defining module so that internal helpers cannot leak across module boundaries.",
+      "title": "Field mutation",
+      "description": "As a developer, I need to modify struct fields in place so that structs work as mutable data containers.",
       "acceptanceCriteria": [
-        "Top-level definitions starting with _ (e.g., proc _helper, def _internal) are excluded from the module's export list",
-        "Attempting to import a private name via `use \"mod.jacl\" [_helper]` produces compile error: '_helper' is private to module 'mod.jacl'",
-        "Private names remain accessible within their own module (no restrictions on internal use)",
-        "Build passes"
+        "Field mutation syntax: [.set! $point x 42] — dot-set command, struct value, field name, new value",
+        "Add OP_STRUCT_SET opcode with field offset operand",
+        "Compiler resolves field name to offset at compile time — error on unknown field name",
+        "Compile-time type check: new value must match the declared field type",
+        "Returns the struct value (for chaining)",
+        "Error when used on non-struct values",
+        "Build passes, all existing tests pass"
       ],
       "priority": 5,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-006",
-      "title": "Module compilation — one chunk per module with export population",
-      "description": "As a developer, I need each module to compile into its own independent bytecode chunk and populate its export list so that modules are self-contained compilation units.",
+      "title": "Struct boxing and dyn interop",
+      "description": "As a developer, I need to store structs in dynamically-typed collections so that structs integrate with JACL's existing vec and map types.",
       "acceptanceCriteria": [
-        "When compiling a `use` declaration, the compiler resolves the path, checks the cache, and compiles the dependency if not already compiled",
-        "Each module's top-level bytecode chunk includes OP_HALT at the end",
-        "Module compilation populates the exports array with all non-underscore-prefixed top-level def, proc, and mut bindings including their full type signature",
-        "Mutable top-level bindings (x : 0) are exported as boxes — the export entry has is_mutable = true and the runtime value is a box containing the current value",
-        "Build passes"
+        "Struct values can be assigned to :dyn variables: `def d :dyn [Point 1 2]`",
+        "Structs can be stored in vec: [vec [Point 1 2] [Point 3 4]]",
+        "Structs can be stored as map values: [map \"origin\" [Point 0 0]]",
+        "Field access on a :dyn value holding a struct works with runtime type checking",
+        "OP_TO_DYN handles struct values (boxes them with their tag)",
+        "Build passes, all existing tests pass"
       ],
       "priority": 6,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-007",
-      "title": "Import name resolution with strict typing",
-      "description": "As a developer, I need `use \"math.jacl\" [add sub]` to make add and sub available as direct names in the importing module with full type information so that cross-module calls are type-safe.",
+      "title": "Nested struct types",
+      "description": "As a developer, I need struct fields that are themselves structs so that I can model complex data.",
       "acceptanceCriteria": [
-        "After `use \"math.jacl\" [add sub]`, calling [add 1 2] resolves to math.jacl's add proc",
-        "After `use \"math.jacl\" [add sub]`, reading $add resolves to math.jacl's add value",
-        "Importing a name that doesn't exist in the target module produces compile error: 'foo' is not exported by 'math.jacl'",
-        "Importing a name that conflicts with a local definition produces compile error: 'add' is already defined",
-        "Arity checking works across module boundaries: [add 1] (wrong arity) produces the standard arity error",
-        "Type metadata fully propagates: if math.jacl defines `i64 add [i64 x i64 y]`, the importing module sees the typed signature and enforces it",
-        "Calling a typed imported proc with wrong argument types produces a compile-time type error",
-        "Build passes"
+        "Struct fields can reference other named struct types: `defstruct Line [start :Point] [end :Point]`",
+        "Instantiation works with nested structs: [Line [Point 0 0] [Point 10 10]]",
+        "Field access chains work: [. [. $line start] x]",
+        "Field mutation works on nested struct fields: [.set! [. $line start] x 5]",
+        "Compile-time type checking applies at all nesting levels",
+        "Build passes, all existing tests pass"
       ],
       "priority": 7,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-008",
-      "title": "Mutable imports as boxes",
-      "description": "As a developer, I need mutable module-level bindings to be exported as boxes so that importers get a live reference to the value, not a snapshot.",
+      "title": "Inline anonymous struct types (FFI prep)",
+      "description": "As a developer, I need to define anonymous struct types inline in FFI function signatures so that C struct parameters don't all need top-level defstruct declarations.",
       "acceptanceCriteria": [
-        "A module defining `counter : 0` exports counter as a box",
-        "Importing counter via `use \"state.jacl\" [counter]` gives a box value",
-        "The importer can read the current value with [deref $counter]",
-        "The importer can update the value with [reset $counter 5] or [swap $counter inc]",
-        "Changes made by the importer are visible to the defining module and other importers (shared mutable state)",
-        "The is_mutable flag in the export metadata lets the compiler know this is a box, not a plain value",
-        "Build passes"
+        "Inline struct type syntax in type annotation position: :struct{x:i32,y:i32}",
+        "Inline structs can be used as field types in defstruct: `defstruct Wrapper [pos :struct{x:i32,y:i32}]`",
+        "Inline structs can nest: :struct{start:struct{x:i32,y:i32},end:struct{x:i32,y:i32}}",
+        "Inline struct types follow the same layout rules as named structs (C-ABI compatible)",
+        "Two inline structs with the same fields and types in the same order are structurally equivalent",
+        "Compiler generates internal type metadata for inline structs (no user-visible name)",
+        "Build passes, all existing tests pass"
       ],
       "priority": 8,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-009",
-      "title": "Compiler API — multi-file entry point",
-      "description": "As a developer, I need a top-level compilation API that takes a root file path and produces a fully linked program (all modules compiled and dependency-ordered) so that the VM can execute multi-file programs.",
+      "title": "Module export/import of struct types",
+      "description": "As a developer, I need struct type definitions to be available across module boundaries so that modules can share structured data.",
       "acceptanceCriteria": [
-        "New function: CompileResult jacl_compile_program(const char* root_path, arena_t* arena, JaclInternTable* intern, ThreadHeap* heap) — reads root file, recursively compiles all dependencies, returns compiled program",
-        "CompileResult contains: Module** modules (in topological order), uint32_t module_count, error info",
-        "The root file's module is always last in the topological order (executed last)",
-        "Existing jacl_compile() single-source API continues to work for single-file programs",
-        "Build passes"
+        "Struct types defined in a module are exported by default (following existing convention — unless prefixed with _)",
+        "`use \"shapes.jacl\" [Point Line]` imports both struct type definitions and their constructors",
+        "Imported struct types can be used as type annotations in the importing module",
+        "Field access and mutation work on imported struct instances",
+        "Type checking across module boundaries works correctly (a Point from module A is the same type as Point imported from module A)",
+        "Private structs (_Point) cannot be imported — compile-time error",
+        "Build passes, all existing tests pass"
       ],
       "priority": 9,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-010",
-      "title": "Module initialization and runtime execution",
-      "description": "As a developer, I need modules to be initialized (their top-level code executed) exactly once, in dependency order, so that def and proc bindings are available before they're imported.",
+      "title": "GC integration for struct values",
+      "description": "As a developer, I need the garbage collector to correctly trace and collect struct values so there are no memory leaks or use-after-free bugs.",
       "acceptanceCriteria": [
-        "New function: VMResult jacl_exec_program(CompileResult* program, VM* vm) — initializes modules in topological order, then executes root module",
-        "Each module's globals are stored with namespace-prefixed keys in the VM environment (e.g., math.jacl::add)",
-        "Imported names resolve to the correct namespace-prefixed globals via bytecode (compiler emits OP_GET_GLOBAL with prefixed key)",
-        "Mutable imports resolve to the box object in the source module's namespace (shared reference)",
-        "Side effects in module top-level code (e.g., print \"loaded\") execute exactly once regardless of how many files import the module",
-        "If module initialization fails (runtime error), the error propagates with context: error in module 'math.jacl': <message>",
-        "Concurrent mode works: modules containing spawn/await/parallel/race undergo CPS transform as before",
-        "Existing single-file vm_exec() continues to work unchanged",
-        "Build passes"
+        "GC traces struct fields that contain heap-allocated values (strings, other structs, closures, collections)",
+        "Struct instances are collected when unreachable",
+        "No use-after-free when structs are nested (inner struct outlives outer)",
+        "Stress test: allocate many structs in a loop, verify memory is reclaimed",
+        "Build passes, all existing tests pass"
       ],
       "priority": 10,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-011",
-      "title": "Test harness support for multi-file tests",
-      "description": "As a developer, I need the test harness to support multi-file test programs so that module tests can be written as .jacl files with the standard # expect: format.",
+      "title": "E2E tests — struct basics",
+      "description": "As a developer, I need end-to-end tests covering struct definition, instantiation, field access, and mutation.",
       "acceptanceCriteria": [
-        "New directory: test/jacl/modules/ for multi-file test programs",
-        "Convention: each test is a subdirectory containing main.jacl (entry point) and dependency files",
-        "The test harness detects subdirectories in test/jacl/modules/ and runs main.jacl as the root using jacl_compile_program / jacl_exec_program",
-        "# expect: comments in main.jacl define expected output (same format as single-file tests)",
-        "Build passes"
+        "Test: define struct, instantiate, access fields, verify values",
+        "Test: field mutation with [.set!], verify updated value",
+        "Test: struct as proc parameter and return value",
+        "Test: struct with all supported field types (i32, i64, u32, u64, f32, f64, str, bool, dyn)",
+        "Test: nested structs — access and mutate nested fields",
+        "Test: structs in collections (vec, map)",
+        "All tests pass"
       ],
       "priority": 11,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-012",
-      "title": "E2E tests — basic imports and multiple modules",
-      "description": "As a developer, I need integration tests for basic import scenarios to verify the module system works end-to-end.",
+      "title": "E2E tests — error cases",
+      "description": "As a developer, I need tests verifying that struct-related errors are caught at compile time.",
       "acceptanceCriteria": [
-        "Test: basic import — use \"lib.jacl\" [add] then [add 1 2] produces 3",
-        "Test: multiple imports from one module — use \"lib.jacl\" [add sub mul]",
-        "Test: imports from multiple modules — use \"math.jacl\" [add] and use \"str.jacl\" [concat]",
-        "Test: transitive imports — A imports B, B imports C; A can use B's exports (not C's directly)",
-        "Test: diamond imports — A imports B and C, both B and C import D; D initialized once",
-        "All existing single-file .jacl tests continue to pass",
-        "Build passes"
+        "Test: wrong number of fields in constructor produces compile error",
+        "Test: type mismatch in constructor argument produces compile error",
+        "Test: access nonexistent field produces compile error",
+        "Test: mutate field with wrong type produces compile error",
+        "Test: duplicate struct definition produces compile error",
+        "Test: duplicate field name in struct produces compile error",
+        "Test: undefined struct type in field produces compile error",
+        "All tests pass"
       ],
       "priority": 12,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-013",
-      "title": "E2E tests — error cases",
-      "description": "As a developer, I need integration tests for module system error cases to verify correct compile-time error reporting.",
-      "acceptanceCriteria": [
-        "Test: privacy enforcement — importing _private name produces compile error",
-        "Test: circular import detection — A imports B, B imports A produces compile error with chain",
-        "Test: module not found — use \"nonexistent.jacl\" produces clear error",
-        "Test: name conflict — importing a name that's already defined produces compile error",
-        "Test: unknown export — use \"lib.jacl\" [nonexistent] produces compile error",
-        "Test: arity checking across modules — wrong arg count on imported proc produces compile error",
-        "Test: typed imports — i64 proc imported and called with wrong types produces compile error",
-        "Build passes"
-      ],
-      "priority": 13,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-014",
-      "title": "E2E tests — mutable imports and concurrent modules",
-      "description": "As a developer, I need integration tests for mutable box imports and concurrent module usage to verify advanced module scenarios.",
-      "acceptanceCriteria": [
-        "Test: mutable import — module defines counter : 0, importer does [deref $counter] and [reset $counter 5], changes visible",
-        "Test: side effects run once — module prints on load, imported by two files via diamond, output appears once",
-        "Test: module with concurrent code — module uses spawn/await, importing module awaits result",
-        "Build passes"
-      ],
-      "priority": 14,
-      "passes": true,
+      "passes": false,
       "notes": ""
     }
   ]
