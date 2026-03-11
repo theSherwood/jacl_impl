@@ -1,0 +1,27 @@
+# expect: done
+# Stress test: allocate many structs in a loop, verify memory is reclaimed.
+# Each iteration creates structs that become garbage, triggering GC.
+defstruct Point [x :i32] [y :i32]
+defstruct Line [start :Point] [end :Point]
+
+proc batch [] {
+  def p1 [Point 1 2]
+  def p2 [Point 3 4]
+  def ln [Line $p1 $p2]
+  def p3 [Point 5 6]
+  def p4 [Point 7 8]
+  def l2 [Line $p3 $p4]
+  [+ [. [. $ln start] x] [. [. $l2 end] y]]
+}
+
+proc loop [i n] {
+  if [< $i $n] {
+    [batch]
+    [batch]
+    [batch]
+    [loop [+ $i 1] $n]
+  } { 0 }
+}
+
+[loop 0 50]
+print "done"
