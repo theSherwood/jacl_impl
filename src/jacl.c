@@ -31,5 +31,6 @@
 #include "vm.c"
 #include "gc_collect.c"
 #include "runtime.c"
+#include "embed.c"
 
 #endif /* JACL_C */

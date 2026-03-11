@@ -69,6 +69,7 @@ TESTS=(
     "test/test_m12.c|m12|-Wall -Wextra -std=c99 -g -lpthread"
     "test/test_m13.c|m13|-Wall -Wextra -std=c99 -g -lpthread"
     "test/test_jacl_harness.c|jacl_harness|-Wall -Wextra -std=c99 -g -lpthread"
+    "test/test_embed.c|embed|"
 )
 
 # Filter tests if --lib flag is set
