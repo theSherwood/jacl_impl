@@ -100,6 +100,178 @@ static int test_vm_new_ex_threshold_clamping(void) {
   return 1;
 }
 
+/* ===== US-003: Eval API — jacl_eval / jacl_eval_file ===== */
+
+/* Test: eval [+ 1 2] returns i32 3 */
+static int test_eval_basic(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal result = jacl_eval(vm, "[+ 1 2]");
+  ASSERT(!jacl_is_error(result));
+  ASSERT(jacl_is_i32(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 3);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: eval with syntax error returns error-flagged value */
+static int test_eval_parse_error(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal result = jacl_eval(vm, "[+ 1");  /* unclosed bracket */
+  ASSERT(jacl_is_error(result));
+
+  const char* msg = jacl_error_message_str(vm, result);
+  ASSERT(msg != NULL);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: eval with runtime error returns error-flagged value with message */
+static int test_eval_runtime_error(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal result = jacl_eval(vm, "[/ 1 0]");  /* division by zero */
+  ASSERT(jacl_is_error(result));
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: multiple sequential evals share global state */
+static int test_eval_globals_persist(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  /* Define a global variable */
+  JaclVal r1 = jacl_eval(vm, "def x 42");
+  ASSERT(!jacl_is_error(r1));
+
+  /* Read back the global */
+  JaclVal r2 = jacl_eval(vm, "$x");
+  ASSERT(!jacl_is_error(r2));
+  ASSERT(jacl_is_i32(r2));
+  ASSERT_INT_EQ(jacl_as_i32(r2), 42);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: multiple independent VMs don't interfere */
+static int test_eval_independent_vms(void) {
+  JaclVM* vm1 = jacl_vm_new();
+  JaclVM* vm2 = jacl_vm_new();
+  ASSERT(vm1 != NULL);
+  ASSERT(vm2 != NULL);
+
+  /* Define x=10 in vm1 */
+  JaclVal r1 = jacl_eval(vm1, "def x 10");
+  ASSERT(!jacl_is_error(r1));
+
+  /* Define x=20 in vm2 */
+  JaclVal r2 = jacl_eval(vm2, "def x 20");
+  ASSERT(!jacl_is_error(r2));
+
+  /* Read from each — should be independent */
+  JaclVal v1 = jacl_eval(vm1, "$x");
+  ASSERT(!jacl_is_error(v1));
+  ASSERT_INT_EQ(jacl_as_i32(v1), 10);
+
+  JaclVal v2 = jacl_eval(vm2, "$x");
+  ASSERT(!jacl_is_error(v2));
+  ASSERT_INT_EQ(jacl_as_i32(v2), 20);
+
+  jacl_vm_free(vm1);
+  jacl_vm_free(vm2);
+  return 1;
+}
+
+/* Test: jacl_is_error returns false for non-error values */
+static int test_is_error_non_error(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal result = jacl_eval(vm, "42");
+  ASSERT(!jacl_is_error(result));
+
+  JaclVal zero_result = jacl_eval(vm, "0");
+  ASSERT(!jacl_is_error(zero_result));
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: jacl_error_message returns NULL for non-error */
+static int test_error_message_non_error(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal result = jacl_eval(vm, "42");
+  const char* msg = jacl_error_message_str(vm, result);
+  ASSERT(msg == NULL);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: jacl_eval_file reads and evaluates a file */
+static int test_eval_file(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  /* Write a temp file */
+  const char* path = "/tmp/jacl_test_eval.jacl";
+  FILE* f = fopen(path, "w");
+  ASSERT(f != NULL);
+  fprintf(f, "[+ 10 20]");
+  fclose(f);
+
+  JaclVal result = jacl_eval_file(vm, path);
+  ASSERT(!jacl_is_error(result));
+  ASSERT(jacl_is_i32(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 30);
+
+  remove(path);
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: jacl_eval_file with nonexistent file returns error */
+static int test_eval_file_not_found(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal result = jacl_eval_file(vm, "/tmp/nonexistent_jacl_file.jacl");
+  ASSERT(jacl_is_error(result));
+
+  const char* msg = jacl_error_message_str(vm, result);
+  ASSERT(msg != NULL);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: compile error returns error-flagged value with message */
+static int test_eval_compile_error(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  /* Call an undefined function */
+  JaclVal result = jacl_eval(vm, "[undef 1]");
+  ASSERT(jacl_is_error(result));
+
+  const char* msg = jacl_error_message_str(vm, result);
+  ASSERT(msg != NULL);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
 int main(void) {
   int pass = 0, fail = 0;
 
@@ -116,6 +288,18 @@ int main(void) {
   RUN(test_multiple_vms);
   RUN(test_vm_new_ex_zero_handles);
   RUN(test_vm_new_ex_threshold_clamping);
+
+  printf("\n=== Embedding API: Eval ===\n");
+  RUN(test_eval_basic);
+  RUN(test_eval_parse_error);
+  RUN(test_eval_runtime_error);
+  RUN(test_eval_globals_persist);
+  RUN(test_eval_independent_vms);
+  RUN(test_is_error_non_error);
+  RUN(test_error_message_non_error);
+  RUN(test_eval_file);
+  RUN(test_eval_file_not_found);
+  RUN(test_eval_compile_error);
 
   printf("\n%d passed, %d failed\n", pass, fail);
   return fail > 0 ? 1 : 0;

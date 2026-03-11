@@ -15,6 +15,8 @@ Progress log for ralph/ffi-embedding branch.
 - CPS mode effective recursion limit ~65 iterations (VM_STACK_MAX=256)
 - When adding new AST node types: must add explicit case in compiler__compile_node (no default), but analysis switches have default: cases
 - realpath() available via platform.h (<stdlib.h>) — use for canonical path resolution in module system
+- embed.c cannot #include jacl.h directly — redefinition conflicts with internal types. Forward-declare JaclVM, JaclConfig etc. in embed.c instead
+- JaclVM_s wraps: VM (internal), arena_t (owns memory), JaclInternTable (persistent across evals), max_handles, last_error
 - compiler__compile_module() is the entry point for compiling dependency modules; shares ModuleCache + ImportStack with importer
 - Module exports are populated from compiler's global_arities after compilation, excluding underscore-prefixed names
 - Typed proc syntax: `proc i64 add [i64 a i64 b]` — return type AFTER `proc`, not before
@@ -27,3 +29,52 @@ Progress log for ralph/ffi-embedding branch.
 - defstruct emits only OP_NIL at runtime — no OP_DEF_GLOBAL. Struct constructors exist only at compile time
 - The OP_HALT value changes when new opcodes are added — update test_bytecode.c opcode_enum test
 - VM is single-threaded for external callers. NxM scheduler owns internal threading.
+
+## 2026-03-11 - US-001
+- Implemented `include/jacl.h` — the public embedding API header
+- Declares opaque types: JaclVM, JaclHandle, JaclTrampoline
+- Re-exports JaclVal (uint64_t) and JaclType enum (JACL_TYPE_DYN..JACL_TYPE_STRUCT)
+- All public symbols prefixed with Jacl/jacl_/JACL_
+- JACL_API macro for export/visibility (MSVC dllexport, GCC/Clang visibility)
+- Version macros: JACL_VERSION_MAJOR=0, JACL_VERSION_MINOR=17, JACL_VERSION_PATCH=0
+- #ifdef __cplusplus extern "C" guards
+- Self-contained (only includes stdint.h, stddef.h, stdbool.h)
+- Forward-declares all embedding API functions (lifecycle, eval, values, handles, native fns, structs, trampolines)
+- Files changed: include/jacl.h (new)
+- **Learnings for future iterations:**
+  - The internal JaclType enum is in compiler.c (TYPE_DYN..TYPE_STRUCT) — public header mirrors it with JACL_TYPE_ prefix
+  - VM struct is defined in vm.c as `VM` — public header uses opaque `JaclVM` (typedef struct JaclVM_s)
+  - Internal value constructors (jacl_i32, jacl_bool etc.) already exist in value.c — public API uses _val suffix to avoid collision
+  - No include/ directory existed before this story
+---
+
+## 2026-03-11 - US-002
+- Implemented `jacl_vm_new`, `jacl_vm_new_ex`, `jacl_vm_free` in `src/embed.c`
+- `JaclVM_s` struct wraps internal VM, arena_t, JaclInternTable, and max_handles
+- `jacl_vm_new()` delegates to `jacl_vm_new_ex(NULL)` with default 1024 handles
+- `jacl_vm_new_ex` applies JaclConfig: initial_heap_size → gc_threshold (clamped), max_heap_size → block_pool.max_blocks, max_handles stored for future handle API
+- `jacl_vm_free(NULL)` is safe no-op
+- Multiple VMs coexist independently (separate arenas, block pools, heaps)
+- Files changed: src/embed.c (new), src/jacl.c (added embed.c include), test/test_embed.c (new), build.sh (added embed test)
+- **Learnings for future iterations:**
+  - Cannot include jacl.h from embed.c — JaclType and JaclVal typedefs conflict with internal definitions. Must forward-declare JaclVM, JaclConfig in embed.c
+  - Functions in embed.c must be `static` (unity build pattern)
+  - JaclVM_s struct definition is in embed.c — all future embedding API functions access internal VM via `jvm->vm`
+  - Intern table is initialized once per JaclVM and persists across evals (unlike jacl_run which creates a local one)
+---
+
+## 2026-03-11 - US-003
+- Implemented `jacl_eval`, `jacl_eval_file`, `jacl_is_error` (reuses internal), `jacl_error_message_str` in `src/embed.c`
+- `jacl_eval` does lex → parse → compile → exec, using persistent intern table and preserving env (globals) across calls
+- Handles both normal and CPS-transformed code paths (mirroring `jacl_run`)
+- Error values use existing `JACL_FLAG_ERROR` (bit 61) on JACL_NIL — no new tag needed
+- Error messages stored on `JaclVM_s.last_error` (arena-allocated)
+- `jacl_eval_file` reads file into arena buffer, then delegates to `jacl_eval`
+- Added 10 tests: basic eval, parse error, runtime error, globals persist, independent VMs, non-error check, error message null for non-error, eval_file, file not found, compile error
+- Files changed: src/embed.c, test/test_embed.c
+- **Learnings for future iterations:**
+  - JACL already has `jacl_is_error` / `jacl_set_error` in value.c using JACL_FLAG_ERROR (bit 61) — don't create a separate error tag
+  - Bare identifiers like `nil`, `true`, `false` are in VM env but NOT compiler-known — can't eval "nil" directly, must use `$nil` or expressions
+  - `jacl_eval` must reset stack_top and frame_count before execution but NOT touch env (preserves globals)
+  - embed.c error message function named `jacl_error_message_str` to avoid collision with any future internal `jacl_error_message`
+---
