@@ -4140,6 +4140,249 @@ static int test_compile_program_root_exports(void) {
   TEST_PASS();
 }
 
+/* ===== US-010 (M14): Module initialization and runtime execution ===== */
+
+typedef struct {
+  char buf[4096];
+  uint32_t len;
+} US010PrintCapture;
+
+static void us010_capture_print(const char* text, uint32_t len, void* ctx) {
+  US010PrintCapture* cap = (US010PrintCapture*)ctx;
+  uint32_t remaining = (uint32_t)sizeof(cap->buf) - cap->len - 1;
+  uint32_t copy_len = len < remaining ? len : remaining;
+  memcpy(cap->buf + cap->len, text, copy_len);
+  cap->len += copy_len;
+  cap->buf[cap->len] = '\0';
+}
+
+/* Test: basic module execution — import proc from dep, call it */
+static int test_exec_program_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable intern; intern_table_init(&intern, &arena);
+
+  const char* dir = "/tmp/jacl_us010a";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "lib.jacl",
+    "proc add [a b] { [+ $a $b] }\n");
+  write_temp_jacl(dir, "main.jacl",
+    "use \"lib.jacl\" [add]\n[print [add 1 2]]\n");
+
+  ProgramResult pr = jacl_compile_program(
+      "/tmp/jacl_us010a/main.jacl", &arena, &intern, &heap);
+  ASSERT_U32_EQ(pr.error_count, 0);
+
+  US010PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = us010_capture_print;
+  vm.print_ctx = &cap;
+  vm.intern_table = &intern;
+
+  VMResult r = jacl_exec_program(&pr, &vm);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n");
+
+  vm_destroy(&vm);
+  const char* files[] = { "lib.jacl", "main.jacl" };
+  cleanup_jacl_dir(dir, files, 2);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: namespace-prefixed globals — module globals don't collide */
+static int test_exec_program_namespace(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable intern; intern_table_init(&intern, &arena);
+
+  const char* dir = "/tmp/jacl_us010b";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "a.jacl", "def x 10\n");
+  write_temp_jacl(dir, "b.jacl", "def x 20\n");
+  write_temp_jacl(dir, "main.jacl",
+    "use \"a.jacl\" [x]\n[print $x]\n");
+
+  ProgramResult pr = jacl_compile_program(
+      "/tmp/jacl_us010b/main.jacl", &arena, &intern, &heap);
+  ASSERT_U32_EQ(pr.error_count, 0);
+
+  US010PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = us010_capture_print;
+  vm.print_ctx = &cap;
+  vm.intern_table = &intern;
+
+  VMResult r = jacl_exec_program(&pr, &vm);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n");
+
+  vm_destroy(&vm);
+  const char* files[] = { "a.jacl", "b.jacl", "main.jacl" };
+  cleanup_jacl_dir(dir, files, 3);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: side effects run once — module print on load, imported by root */
+static int test_exec_program_side_effects_once(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable intern; intern_table_init(&intern, &arena);
+
+  const char* dir = "/tmp/jacl_us010c";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "lib.jacl",
+    "[print \"loaded\"]\ndef x 42\n");
+  write_temp_jacl(dir, "main.jacl",
+    "use \"lib.jacl\" [x]\n[print $x]\n");
+
+  ProgramResult pr = jacl_compile_program(
+      "/tmp/jacl_us010c/main.jacl", &arena, &intern, &heap);
+  ASSERT_U32_EQ(pr.error_count, 0);
+
+  US010PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = us010_capture_print;
+  vm.print_ctx = &cap;
+  vm.intern_table = &intern;
+
+  VMResult r = jacl_exec_program(&pr, &vm);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "loaded\n42\n");
+
+  vm_destroy(&vm);
+  const char* files[] = { "lib.jacl", "main.jacl" };
+  cleanup_jacl_dir(dir, files, 2);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: error in dependency module propagates with context */
+static int test_exec_program_dep_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable intern; intern_table_init(&intern, &arena);
+
+  const char* dir = "/tmp/jacl_us010d";
+  mkdir(dir, 0755);
+  /* lib.jacl accesses undefined variable, causing runtime error */
+  write_temp_jacl(dir, "lib.jacl",
+    "def x [+ $undef 1]\n");
+  write_temp_jacl(dir, "main.jacl",
+    "use \"lib.jacl\" [x]\n[print $x]\n");
+
+  ProgramResult pr = jacl_compile_program(
+      "/tmp/jacl_us010d/main.jacl", &arena, &intern, &heap);
+  ASSERT_U32_EQ(pr.error_count, 0);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.intern_table = &intern;
+
+  VMResult r = jacl_exec_program(&pr, &vm);
+  ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
+  /* Error message should contain module context */
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "lib.jacl") != NULL);
+
+  vm_destroy(&vm);
+  const char* files[] = { "lib.jacl", "main.jacl" };
+  cleanup_jacl_dir(dir, files, 2);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: mutable import as box — deref and reset work */
+static int test_exec_program_mutable_import(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable intern; intern_table_init(&intern, &arena);
+
+  const char* dir = "/tmp/jacl_us010e";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "state.jacl",
+    "mut cnt 0\n");
+  write_temp_jacl(dir, "main.jacl",
+    "use \"state.jacl\" [cnt]\n"
+    "[print [deref $cnt]]\n"
+    "[reset! $cnt 5]\n"
+    "[print [deref $cnt]]\n");
+
+  ProgramResult pr = jacl_compile_program(
+      "/tmp/jacl_us010e/main.jacl", &arena, &intern, &heap);
+  ASSERT_U32_EQ(pr.error_count, 0);
+
+  US010PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = us010_capture_print;
+  vm.print_ctx = &cap;
+  vm.intern_table = &intern;
+
+  VMResult r = jacl_exec_program(&pr, &vm);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "0\n5\n");
+
+  vm_destroy(&vm);
+  const char* files[] = { "state.jacl", "main.jacl" };
+  cleanup_jacl_dir(dir, files, 2);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: existing single-file vm_exec works unchanged */
+static int test_exec_single_file_unchanged(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  CompileResult cr = compile_source("[print [+ 1 2]]", &arena, NULL);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  US010PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = us010_capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = vm_exec(&vm, &cr.chunk);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n");
+
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -4300,6 +4543,13 @@ int main(void) {
     { "compile_program_not_found",       test_compile_program_not_found },
     { "single_file_api_unchanged",       test_single_file_api_unchanged },
     { "compile_program_root_exports",    test_compile_program_root_exports },
+    /* US-010 (M14): Module initialization and runtime execution */
+    { "exec_program_basic",              test_exec_program_basic },
+    { "exec_program_namespace",          test_exec_program_namespace },
+    { "exec_program_side_effects_once",  test_exec_program_side_effects_once },
+    { "exec_program_dep_error",          test_exec_program_dep_error },
+    { "exec_program_mutable_import",     test_exec_program_mutable_import },
+    { "exec_single_file_unchanged",      test_exec_single_file_unchanged },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

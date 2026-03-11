@@ -101,6 +101,7 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk);
 /* --- Pipeline convenience --- */
 
 static VMResult jacl_run(const char* source, VM* vm, arena_t* arena);
+static VMResult jacl_exec_program(ProgramResult* program, VM* vm);
 
 /* --- GC collect (defined in gc_collect.c, after vm.c in unity build) --- */
 
@@ -3808,6 +3809,106 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 }
 
 #undef VM__BINARY_NUMERIC_OP
+
+/* --- Multi-module execution: jacl_exec_program --- */
+
+/**
+ * Execute a compiled multi-module program.
+ * Initializes modules in topological order (dependencies first),
+ * then executes the root module (last in the array).
+ * For CPS-transformed root modules, handles continuation setup.
+ */
+static VMResult jacl_exec_program(ProgramResult* program, VM* vm) {
+  if (!program || program->module_count == 0) {
+    vm->error_message = "no modules to execute";
+    return VM_RUNTIME_ERROR;
+  }
+
+  /* Execute each module's chunk in topological order.
+     Dependencies come first, root module is last. */
+  uint32_t last = program->module_count - 1;
+
+  /* Execute dependency modules (non-root) */
+  for (uint32_t i = 0; i < last; i++) {
+    Module* mod = program->modules[i];
+    vm->stack_top = 0;
+    VMResult r = vm_exec(vm, mod->chunk);
+    if (r != VM_OK) {
+      /* Wrap error with module context */
+      const char* slash = strrchr(mod->path, '/');
+      const char* basename = slash ? slash + 1 : mod->path;
+      char buf[256];
+      snprintf(buf, sizeof(buf), "error in module '%s': %s",
+               basename,
+               vm->error_message ? vm->error_message : "unknown error");
+      char* msg = (char*)arena_alloc(vm->arena, (uint32_t)(strlen(buf) + 1));
+      memcpy(msg, buf, strlen(buf) + 1);
+      vm->error_message = msg;
+      return r;
+    }
+  }
+
+  /* Execute root module */
+  Module* root = program->modules[last];
+  vm->stack_top = 0;
+
+  if (program->suspending) {
+    /* CPS-transformed root: chunk produces __main closure on stack.
+       Execute chunk to get the closure, then call it with resolve_k. */
+    VMResult r = vm_exec(vm, root->chunk);
+    if (r != VM_OK) return r;
+
+    JaclVal main_cl_val = vm->stack[0];
+    if (!jacl_is_closure(main_cl_val)) {
+      vm->error_message = "internal error: CPS top-level did not produce closure";
+      return VM_RUNTIME_ERROR;
+    }
+    JaclClosure *main_cl = jacl_as_closure(main_cl_val);
+
+    JaclVal completion = jacl_future(&vm->heap);
+    JaclVal resolve_k = runtime__create_resolve_closure(&vm->heap, vm->arena,
+                                                         completion);
+
+    vm->stack_top = 0;
+    vm->stack[0]  = main_cl_val;
+    vm->stack[1]  = resolve_k;
+    vm->stack_top = 2;
+
+    JaclClosure top_closure_wrapper;
+    memset(&top_closure_wrapper, 0, sizeof(top_closure_wrapper));
+    top_closure_wrapper.chunk = *root->chunk;
+
+    vm->frames[0].closure    = &top_closure_wrapper;
+    vm->frames[0].return_ip  = NULL;
+    vm->frames[0].stack_base = 0;
+    vm->frames[0].chunk      = root->chunk;
+    vm->frame_count = 1;
+
+    vm->frames[1].closure    = main_cl;
+    vm->frames[1].return_ip  = NULL;
+    vm->frames[1].stack_base = 1;
+    vm->frames[1].chunk      = &main_cl->chunk;
+    vm->frame_count = 2;
+    vm->ip    = main_cl->chunk.code;
+    vm->chunk = &main_cl->chunk;
+    vm->top_chunk = &main_cl->chunk;
+
+    r = vm__run(vm, 1);
+
+    JaclFuture *cfut = jacl_as_future(completion);
+    uint32_t state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_RELAXED);
+    if (state == FUTURE_RESOLVED) {
+      vm->stack[0] = (JaclVal)cfut->result;
+      vm->stack_top = 1;
+    } else if (state == FUTURE_ERROR) {
+      vm->stack[0] = (JaclVal)cfut->result;
+      vm->stack_top = 1;
+    }
+    return r;
+  }
+
+  return vm_exec(vm, root->chunk);
+}
 
 /* --- Pipeline convenience: jacl_run --- */
 

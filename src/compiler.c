@@ -846,6 +846,8 @@ struct Compiler {
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
   Module*          current_module;  /* module currently being compiled */
   ImportStack*     import_stack;    /* shared import stack for circular detection */
+  const char*      module_prefix;   /* "basename::" for namespace-prefixed globals */
+  uint32_t         module_prefix_len;
 };
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -875,12 +877,54 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->module_cache    = NULL;
   c->current_module  = NULL;
   c->import_stack    = NULL;
+  c->module_prefix     = NULL;
+  c->module_prefix_len = 0;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
 static bool compiler__compile_module(const char* canonical_path,
                                      Compiler* importer,
                                      uint32_t line, uint32_t col);
+
+/* Build "basename::" prefix string for a module path (arena-allocated). */
+static const char* module__build_prefix(const char* canonical_path, arena_t* arena,
+                                         uint32_t* out_len) {
+  const char* slash = strrchr(canonical_path, '/');
+  const char* basename = slash ? slash + 1 : canonical_path;
+  uint32_t blen = (uint32_t)strlen(basename);
+  uint32_t plen = blen + 2; /* "basename::" */
+  char* prefix = (char*)arena_alloc(arena, plen + 1);
+  memcpy(prefix, basename, blen);
+  prefix[blen] = ':';
+  prefix[blen + 1] = ':';
+  prefix[plen] = '\0';
+  *out_len = plen;
+  return prefix;
+}
+
+/* Create a namespace-prefixed global name constant.
+   In module context, returns interned "prefix::name".
+   Outside module context, returns inline string. */
+static JaclVal compiler__global_name_val(Compiler* c, const char* name,
+                                          uint32_t name_len) {
+  /* Walk to root compiler to find module prefix */
+  Compiler* root = c;
+  while (root->enclosing) root = root->enclosing;
+
+  if (root->module_prefix) {
+    /* Build prefixed name and intern it */
+    char buf[256];
+    uint32_t total = root->module_prefix_len + name_len;
+    if (total >= sizeof(buf)) total = sizeof(buf) - 1;
+    memcpy(buf, root->module_prefix, root->module_prefix_len);
+    memcpy(buf + root->module_prefix_len, name,
+           total - root->module_prefix_len);
+    buf[total] = '\0';
+    return jacl_intern(c->heap, c->intern_table, buf, total);
+  }
+
+  return jacl_inline_string(name, name_len);
+}
 
 /* --- Internal: Emit helpers --- */
 
@@ -1755,7 +1799,9 @@ static void compiler__compile_suspending_call_cps(Compiler* c,
         }
         compiler__emit_byte(c, (uint8_t)uv, line);
       } else {
-        uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+        JaclVal gkey = compiler__global_name_val(c,
+            head->data.lit_string.value, name_len);
+        uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
         compiler__emit_byte(c, OP_GET_GLOBAL, line);
         compiler__emit_u16(c, name_idx, line);
       }
@@ -2793,10 +2839,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       if (c->current_module) {
         compiler__emit_byte(c, OP_BOX, line);
       }
-      uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+      JaclVal global_key = compiler__global_name_val(c,
+          args[name_arg_idx]->data.lit_string.value, name_len);
+      uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
-      /* Record as mutable in global info with type */
+      /* Record as mutable in global info with type (use plain name for metadata) */
       compiler__set_global_arity(c, name_val, -1);
       /* Walk to the entry we just set and mark mutable + type */
       {
@@ -2926,7 +2974,9 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           /* In module context, mutable globals are boxes — use reset!
              semantics to update the box in place (shared reference).
              Emit: GET_GLOBAL (push box), compile RHS, OP_RESET */
-          uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+          JaclVal set_key = compiler__global_name_val(c,
+              args[0]->data.lit_string.value, name_len);
+          uint16_t name_idx = chunk_add_constant(c->chunk, set_key);
           compiler__emit_byte(c, OP_GET_GLOBAL, line);
           compiler__emit_u16(c, name_idx, line);
           c->expected_type = target_type;
@@ -3079,10 +3129,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, OP_TO_DYN, line);
         compiler__emit_byte(c, (uint8_t)effective_type, line);
       }
-      uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+      JaclVal def_key = compiler__global_name_val(c,
+          args[name_arg_idx]->data.lit_string.value, name_len);
+      uint16_t name_idx = chunk_add_constant(c->chunk, def_key);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
-      /* Register global with arity and type */
+      /* Register global with arity and type (use plain name for metadata) */
       compiler__set_global_arity(c, name_val, rhs_arity);
       {
         Compiler* root = c;
@@ -3417,7 +3469,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, (uint8_t)(c->local_count - 1), line);
     } else {
       /* Global scope */
-      uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+      JaclVal proc_key = compiler__global_name_val(c, proc_name, proc_name_len);
+      uint16_t name_idx = chunk_add_constant(c->chunk, proc_key);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
       compiler__set_global_arity(c, name_val, (int16_t)user_param_count);
@@ -4380,7 +4433,9 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
         }
         compiler__emit_byte(c, (uint8_t)local_slot, line);
       } else {
-        uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+        JaclVal gkey = compiler__global_name_val(c,
+            head->data.lit_string.value, name_len);
+        uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
         compiler__emit_byte(c, OP_GET_GLOBAL, line);
         compiler__emit_u16(c, name_idx, line);
       }
@@ -4608,7 +4663,9 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
           c->last_expr_type = c->upvalues[upvalue_idx].type;
         } else {
           JaclType global_type = compiler__resolve_global_type(c, name_val);
-          uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+          JaclVal gkey = compiler__global_name_val(c,
+              node->data.var_ref.name, name_len);
+          uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
           compiler__emit_byte(c, OP_GET_GLOBAL, line);
           compiler__emit_u16(c, name_idx, line);
           /* Unbox typed globals: globals store tagged JaclVal, convert to raw */
@@ -4797,8 +4854,40 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
             memcpy(ga->param_types, found_export->param_types,
                    sizeof(ga->param_types));
           }
+
+          /* Emit runtime bytecode: copy value from dependency namespace
+             to importing module's namespace.
+             OP_GET_GLOBAL "dep.jacl::name" → OP_DEF_GLOBAL "self::name" */
+          {
+            /* Build dependency module's prefixed name */
+            uint32_t dep_prefix_len;
+            const char* dep_prefix = module__build_prefix(
+                dep_mod->path, c->arena, &dep_prefix_len);
+            char dep_buf[256];
+            uint32_t dep_total = dep_prefix_len + imp_len;
+            if (dep_total >= sizeof(dep_buf)) dep_total = sizeof(dep_buf) - 1;
+            memcpy(dep_buf, dep_prefix, dep_prefix_len);
+            memcpy(dep_buf + dep_prefix_len, imp_name,
+                   dep_total - dep_prefix_len);
+            dep_buf[dep_total] = '\0';
+            JaclVal dep_key = jacl_intern(c->heap, c->intern_table,
+                                           dep_buf, dep_total);
+            uint16_t get_idx = chunk_add_constant(c->chunk, dep_key);
+            compiler__emit_byte(c, OP_GET_GLOBAL, line);
+            compiler__emit_u16(c, get_idx, line);
+
+            /* Define under importing module's prefixed name */
+            JaclVal self_key = compiler__global_name_val(c, imp_name, imp_len);
+            uint16_t def_idx = chunk_add_constant(c->chunk, self_key);
+            compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+            compiler__emit_u16(c, def_idx, line);
+            /* Pop the nil pushed by OP_DEF_GLOBAL */
+            compiler__emit_byte(c, OP_POP, line);
+          }
         }
       }
+      /* use statement produces nil as its result value */
+      compiler__emit_byte(c, OP_NIL, line);
       break;
     }
 
@@ -5106,6 +5195,8 @@ static bool compiler__compile_module(const char* canonical_path,
   mc.module_cache    = importer->module_cache;
   mc.current_module  = mod;
   mc.import_stack    = importer->import_stack;
+  mc.module_prefix   = module__build_prefix(canonical_path, arena,
+                                              &mc.module_prefix_len);
 
   /* Compile all top-level statements */
   for (uint32_t i = 0; i < parse.count; i++) {
@@ -5217,6 +5308,7 @@ static ProgramResult jacl_compile_program(const char* root_path,
   c.module_cache   = &cache;
   c.current_module = root_mod;
   c.import_stack   = &istack;
+  c.module_prefix  = module__build_prefix(canonical, arena, &c.module_prefix_len);
 
   if (top_suspends) {
     /* CPS-transform top-level code — same logic as compiler_compile */
@@ -5283,8 +5375,9 @@ static ProgramResult jacl_compile_program(const char* root_path,
         parse.count * sizeof(AstNode*));
     for (uint32_t i = 0; i < parse.count; i++) {
       AstNode* node = parse.nodes[i];
-      if (node->type == AST_COMMAND &&
-          compiler__head_matches(node->data.command.head, "proc", 4)) {
+      if ((node->type == AST_COMMAND &&
+           compiler__head_matches(node->data.command.head, "proc", 4)) ||
+          node->type == AST_USE) {
         compiler__compile_node(&c, node);
         compiler__emit_check_error(&c, node->start.line);
       } else {

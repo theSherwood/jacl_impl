@@ -22,6 +22,11 @@ Progress log for ralph/m14-module-system branch.
 - BytecodeChunk field is `code_count` (not `count`) for bytecode byte count
 - In module context, mutable globals are boxes (OP_BOX before OP_DEF_GLOBAL); set! uses OP_GET_GLOBAL + OP_RESET
 - jacl_compile_program() is the multi-file API; compiler_compile() is the single-file API — both must stay in sync for CPS paths
+- Module globals use namespace-prefixed interned strings (e.g., "lib.jacl::add") via compiler__global_name_val(); walks enclosing chain to find root's module_prefix
+- jacl_exec_program() executes modules in topological order; CPS root handling mirrors jacl_run()'s CPS path
+- OP_DEF_GLOBAL pushes nil — when emitting multiple imports in AST_USE, pop nil between each pair, emit final OP_NIL
+- In CPS path of jacl_compile_program, AST_USE nodes are hoisted to Phase 2 (alongside procs) so import aliases are set up before CPS closure
+- reset! (with !) is the box mutation command, deref for reading — not reset/deref without punctuation
 
 ---
 
@@ -159,4 +164,23 @@ Progress log for ralph/m14-module-system branch.
   - ModuleCache insertion order IS topological order for dependencies (DFS post-order), but root is added first (index 0), so output array skips root, then appends it last
   - jacl_compile_program duplicates CPS logic from compiler_compile — both must be kept in sync if CPS compilation changes
   - Module context (current_module, module_cache, import_stack) must also be set on the CPS body compiler, not just the outer compiler
+---
+
+## 2026-03-11 - US-010
+- Implemented `jacl_exec_program(ProgramResult*, VM*)` in vm.c: executes dependency modules in topological order, then root module
+- Added namespace-prefixed global names via `compiler__global_name_val()` and `module__build_prefix()`: module globals stored as interned "basename::name" strings (e.g., "lib.jacl::add")
+- Modified all 3 OP_DEF_GLOBAL sites (def, mut, proc) and 4 OP_GET_GLOBAL sites (bare call, $var ref, CPS call, set! module) to use prefixed names in module context
+- AST_USE now emits runtime bytecode: OP_GET_GLOBAL dep_prefix::name → OP_DEF_GLOBAL self_prefix::name for each imported name
+- CPS root module execution mirrors jacl_run()'s CPS path (continuation + future)
+- Error in dependency module wraps message with "error in module 'basename': message"
+- AST_USE hoisted to Phase 2 in CPS path so import aliases are set up before CPS closure
+- Added 6 compiler tests: exec_program_basic, exec_program_namespace, exec_program_side_effects_once, exec_program_dep_error, exec_program_mutable_import, exec_single_file_unchanged
+- All 48 test suites pass, 191 JACL tests pass
+- Files changed: src/compiler.c, src/vm.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Module global names exceed 7-byte inline string limit → must use jacl_intern() for interned heap strings; VM env comparison via == works for both inline and interned strings (pointer equality)
+  - compiler__global_name_val() walks enclosing chain to find root compiler's module_prefix — nested compilers (proc bodies) automatically get correct prefix
+  - OP_DEF_GLOBAL pops value and pushes nil; when emitting multiple imports, must OP_POP between each and emit final OP_NIL for inter-statement CHECK_ERROR
+  - In CPS path, AST_USE must be compiled in Phase 2 (alongside proc hoisting), not inside CPS closure body, because import aliases need to be available globally
+  - reset! (with !) is the box mutation command; deref for reading — PRD used "reset" without ! but actual syntax includes !
 ---
