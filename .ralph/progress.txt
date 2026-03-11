@@ -18,3 +18,39 @@ Progress log for ralph/struct-types branch.
 - compiler__compile_module() is the entry point for compiling dependency modules; shares ModuleCache + ImportStack with importer
 - Module exports are populated from compiler's global_arities after compilation, excluding underscore-prefixed names
 - Typed proc syntax: `proc i64 add [i64 a i64 b]` — return type AFTER `proc`, not before
+- TOKEN_DEFSTRUCT is a keyword token recognized by the lexer (like TOKEN_USE)
+- AST_DEFSTRUCT node stores: name, field_names[], field_types[] (as string pairs)
+- defstruct parsing: `defstruct Name [field :type] ...` — each field is a bracket pair with colon-prefixed type
+- The `:type` annotation lexes as TOKEN_OPERATOR (colon added as operator char in US-002); `:i32` becomes `:` (TOKEN_OPERATOR) + `i32` (TOKEN_WORD)
+- StructTypeRegistry holds up to 32 struct defs with C-ABI layout (field offsets, sizes, alignment)
+- Struct names are registered in global_arities with type=TYPE_STRUCT and arity=field_count (for constructor)
+- compiler__resolve_type() checks both built-in types and struct registry — use it instead of is_type_keyword() when struct names should be valid
+
+## 2026-03-11 - US-001
+Thread: (inline)
+- Implemented TOKEN_DEFSTRUCT in lexer, AST_DEFSTRUCT in AST, parser for defstruct syntax
+- Files changed: src/lexer.c, src/ast.c, src/parser.c, src/compiler.c
+- **Learnings for future iterations:**
+  - The `:type` in field definitions lexes as a TOKEN_OPERATOR because `:` is an operator char. The parser handles both `:i32` (single token) and `: i32` (two tokens) forms.
+  - TOKEN_DEFSTRUCT is not handled in parser__parse_atom/parser__parse_expr, so defstruct inside a block is naturally rejected (returns NULL, token gets skipped).
+  - Compiler stub for AST_DEFSTRUCT just emits OP_NIL — real type registration happens in US-002.
+  - DEFSTRUCT_MAX_FIELDS is 64 (stack-allocated temp arrays in parser).
+---
+
+## 2026-03-11 - US-002
+Thread: (inline)
+- Added TYPE_STRUCT to JaclType enum
+- Created StructTypeRegistry (max 32 structs, 64 fields each) with C-ABI field layout (offsets, sizes, alignment)
+- Implemented AST_DEFSTRUCT compilation: type registration, field type resolution, duplicate checks
+- Added compiler__resolve_type() helper that handles both built-in types and struct names
+- Updated def, mut, proc type annotation resolution to accept struct names
+- Fixed lexer: added ':' as operator char (was producing TOKEN_ERROR before)
+- Struct registry shared across module boundaries via root compiler
+- Added 8 compiler tests covering basic, duplicate, nested, type annotation, and error cases
+- Files changed: src/compiler.c, src/lexer.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - The ':' character was NOT in lexer__is_operator_char before US-002 — US-001's parser code for `:type` was untested. Always add integration tests for new syntax.
+  - struct_registry is lazily allocated on root compiler but pre-allocated in compiler_compile() and jacl_compile_program() entry points. Module compilers share via root.
+  - compiler__resolve_type() should be used anywhere struct names need to be valid as type annotations. is_type_keyword() only handles built-in types.
+  - The `to:` builtin (type conversion) intentionally does NOT support struct types — left as-is.
+---

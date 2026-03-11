@@ -41,7 +41,8 @@ typedef enum {
   TYPE_STR,
   TYPE_VEC,
   TYPE_MAP,
-  TYPE_CLOSURE
+  TYPE_CLOSURE,
+  TYPE_STRUCT
 } JaclType;
 
 static bool is_type_keyword(const char* word, size_t len) {
@@ -91,6 +92,7 @@ static const char* type_name(JaclType t) {
     case TYPE_VEC:     return "vec";
     case TYPE_MAP:     return "map";
     case TYPE_CLOSURE: return "closure";
+    case TYPE_STRUCT:  return "struct";
   }
   return "unknown";
 }
@@ -102,6 +104,98 @@ static bool is_numeric_type(JaclType t) {
 
 static bool is_unboxed_type(JaclType t) {
   return t == TYPE_I64 || t == TYPE_U64 || t == TYPE_F64;
+}
+
+/* --- Struct type registry --- */
+
+#define STRUCT_REGISTRY_MAX 32
+#define STRUCT_MAX_FIELDS   64
+
+typedef struct {
+  const char* name;
+  uint32_t    name_len;
+  JaclVal     name_val;       /* inline string (for global_arities lookup) */
+  struct {
+    const char* name;
+    uint32_t    name_len;
+    JaclType    type;
+    uint32_t    struct_type_idx; /* index into registry if type==TYPE_STRUCT */
+    uint32_t    offset;          /* byte offset in struct memory (C-ABI) */
+    uint32_t    size;            /* field size in bytes (C-ABI) */
+  } fields[STRUCT_MAX_FIELDS];
+  uint32_t field_count;
+  uint32_t total_size;         /* total size including trailing padding */
+  uint32_t alignment;          /* max alignment of all fields */
+} StructTypeDef;
+
+typedef struct {
+  StructTypeDef defs[STRUCT_REGISTRY_MAX];
+  uint32_t count;
+} StructTypeRegistry;
+
+/* C-ABI size and alignment for a JaclType */
+static uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx) {
+  switch (t) {
+    case TYPE_BOOL:    return 1;
+    case TYPE_NIL:     return 0;
+    case TYPE_I32:
+    case TYPE_U32:
+    case TYPE_F32:     return 4;
+    case TYPE_I64:
+    case TYPE_U64:
+    case TYPE_F64:     return 8;
+    case TYPE_STR:
+    case TYPE_VEC:
+    case TYPE_MAP:
+    case TYPE_CLOSURE:
+    case TYPE_DYN:     return 8; /* JaclVal / pointer */
+    case TYPE_STRUCT:
+      if (reg && struct_idx < reg->count) {
+        return reg->defs[struct_idx].total_size;
+      }
+      return 8; /* fallback */
+  }
+  return 8;
+}
+
+static uint32_t struct__type_align(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx) {
+  switch (t) {
+    case TYPE_BOOL:    return 1;
+    case TYPE_NIL:     return 1;
+    case TYPE_I32:
+    case TYPE_U32:
+    case TYPE_F32:     return 4;
+    case TYPE_I64:
+    case TYPE_U64:
+    case TYPE_F64:     return 8;
+    case TYPE_STR:
+    case TYPE_VEC:
+    case TYPE_MAP:
+    case TYPE_CLOSURE:
+    case TYPE_DYN:     return 8;
+    case TYPE_STRUCT:
+      if (reg && struct_idx < reg->count) {
+        return reg->defs[struct_idx].alignment;
+      }
+      return 8;
+  }
+  return 8;
+}
+
+static uint32_t struct__align_up(uint32_t offset, uint32_t align) {
+  return (offset + align - 1) & ~(align - 1);
+}
+
+/* Look up a struct type by name in the registry. Returns index or UINT32_MAX if not found. */
+static uint32_t struct_registry__find(StructTypeRegistry* reg, const char* name, uint32_t name_len) {
+  if (!reg) return UINT32_MAX;
+  for (uint32_t i = 0; i < reg->count; i++) {
+    if (reg->defs[i].name_len == name_len &&
+        memcmp(reg->defs[i].name, name, name_len) == 0) {
+      return i;
+    }
+  }
+  return UINT32_MAX;
 }
 
 /* --- Module system structs --- */
@@ -852,6 +946,7 @@ struct Compiler {
   ImportStack*     import_stack;    /* shared import stack for circular detection */
   const char*      module_prefix;   /* "basename::" for namespace-prefixed globals */
   uint32_t         module_prefix_len;
+  StructTypeRegistry* struct_registry; /* shared struct type registry (root compiler owns) */
 };
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -883,6 +978,7 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->import_stack    = NULL;
   c->module_prefix     = NULL;
   c->module_prefix_len = 0;
+  c->struct_registry   = NULL;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -1077,6 +1173,38 @@ static void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity)
     memset(ga->param_types, 0, sizeof(ga->param_types));
     c->global_arity_count++;
   }
+}
+
+/* --- Internal: Struct type registry access --- */
+
+static StructTypeRegistry* compiler__get_struct_registry(Compiler* c) {
+  Compiler* root = c;
+  while (root->enclosing) root = root->enclosing;
+  return root->struct_registry;
+}
+
+/* Resolve a type annotation string to a JaclType.
+   Handles built-in types and named struct types.
+   Returns true if resolved, false if unknown type. */
+static bool compiler__resolve_type(Compiler* c, const char* word, uint32_t len,
+                                    JaclType* out_type) {
+  if (is_type_keyword(word, len)) {
+    *out_type = type_from_keyword(word, len);
+    return true;
+  }
+  /* Check struct registry */
+  StructTypeRegistry* reg = compiler__get_struct_registry(c);
+  if (reg && struct_registry__find(reg, word, len) != UINT32_MAX) {
+    *out_type = TYPE_STRUCT;
+    return true;
+  }
+  return false;
+}
+
+/* Check if a string is a valid type annotation (built-in or struct name) */
+static bool compiler__is_type_annotation(Compiler* c, const char* word, uint32_t len) {
+  JaclType dummy;
+  return compiler__resolve_type(c, word, len, &dummy);
 }
 
 /* --- Internal: Upvalue resolution --- */
@@ -2771,11 +2899,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       uint32_t first_len = args[0]->data.lit_string.length;
       const char* first_str = args[0]->data.lit_string.value;
-      if (!is_type_keyword(first_str, first_len)) {
+      if (!compiler__resolve_type(c, first_str, first_len, &declared_type)) {
         compiler__error(c, line, col, "mut with 3 arguments requires type keyword as first argument");
         return;
       }
-      declared_type  = type_from_keyword(first_str, first_len);
       name_arg_idx   = 1;
       value_arg_idx  = 2;
     } else if (argc != 2) {
@@ -3068,11 +3195,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       uint32_t first_len = args[0]->data.lit_string.length;
       const char* first_str = args[0]->data.lit_string.value;
-      if (!is_type_keyword(first_str, first_len)) {
+      if (!compiler__resolve_type(c, first_str, first_len, &declared_type)) {
         compiler__error(c, line, col, "def with 3 arguments requires type keyword as first argument");
         return;
       }
-      declared_type  = type_from_keyword(first_str, first_len);
       name_arg_idx   = 1;
       value_arg_idx  = 2;
     } else if (argc != 2) {
@@ -3165,14 +3291,13 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     if (argc == 4) {
       /* [proc TYPE name params body] */
       if (args[0]->type != AST_LIT_STRING ||
-          !is_type_keyword(args[0]->data.lit_string.value,
-                           args[0]->data.lit_string.length)) {
+          !compiler__resolve_type(c, args[0]->data.lit_string.value,
+                                  args[0]->data.lit_string.length,
+                                  &proc_return_type)) {
         compiler__error(c, line, col,
             "proc with 4 arguments requires type keyword as first argument");
         return;
       }
-      proc_return_type = type_from_keyword(args[0]->data.lit_string.value,
-                                           args[0]->data.lit_string.length);
       name_arg_idx   = 1;
       params_arg_idx = 2;
       body_arg_idx   = 3;
@@ -3264,10 +3389,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
         continue;
       }
 
-      /* Check if current element is a type keyword */
-      if (is_type_keyword(word, wlen) && fi + 1 < flat_count) {
-        /* Type keyword followed by param name → typed param */
-        JaclType ptype = type_from_keyword(word, wlen);
+      /* Check if current element is a type keyword (including struct names) */
+      JaclType ptype;
+      if (compiler__resolve_type(c, word, wlen, &ptype) && fi + 1 < flat_count) {
+        /* Type annotation followed by param name → typed param */
         fi++;
         elem = flat_elems[fi];
         if (elem->type != AST_LIT_STRING || elem->data.lit_string.length > 7) {
@@ -4896,7 +5021,141 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_DEFSTRUCT: {
-      /* Struct type registration handled in US-002; parser-only for now */
+      const char* struct_name     = node->data.defstruct.name;
+      uint32_t    struct_name_len = node->data.defstruct.name_len;
+      uint32_t    field_count     = node->data.defstruct.field_count;
+
+      /* Must be at top level (scope_depth == 0) — parser already rejects
+         defstruct inside blocks, but double-check */
+      if (c->scope_depth > 0) {
+        compiler__error(c, line, node->start.column,
+                        "defstruct must appear at top level");
+        break;
+      }
+
+      /* Get or create struct registry on the root compiler */
+      Compiler* root = c;
+      while (root->enclosing) root = root->enclosing;
+      if (!root->struct_registry) {
+        root->struct_registry = (StructTypeRegistry*)arena_alloc(
+            root->arena, sizeof(StructTypeRegistry));
+        root->struct_registry->count = 0;
+      }
+      StructTypeRegistry* reg = root->struct_registry;
+
+      /* Error on duplicate struct name */
+      if (struct_registry__find(reg, struct_name, struct_name_len) != UINT32_MAX) {
+        char err[128];
+        snprintf(err, sizeof(err), "duplicate struct definition '%.*s'",
+                 (int)struct_name_len, struct_name);
+        compiler__error(c, line, node->start.column, err);
+        break;
+      }
+
+      /* Check registry capacity */
+      if (reg->count >= STRUCT_REGISTRY_MAX) {
+        compiler__error(c, line, node->start.column,
+                        "too many struct type definitions");
+        break;
+      }
+
+      StructTypeDef* sdef = &reg->defs[reg->count];
+      sdef->name     = struct_name;
+      sdef->name_len = struct_name_len;
+      if (struct_name_len <= 7) {
+        sdef->name_val = jacl_inline_string(struct_name, struct_name_len);
+      } else {
+        sdef->name_val = JACL_NIL;
+      }
+      sdef->field_count = field_count;
+
+      /* Check for duplicate field names and resolve field types */
+      uint32_t offset = 0;
+      uint32_t max_align = 1;
+      bool has_error = false;
+
+      for (uint32_t fi = 0; fi < field_count; fi++) {
+        const char* fname     = node->data.defstruct.field_names[fi];
+        uint32_t    fname_len = node->data.defstruct.field_name_lens[fi];
+        const char* ftype_str = node->data.defstruct.field_types[fi];
+        uint32_t    ftype_len = node->data.defstruct.field_type_lens[fi];
+
+        /* Check for duplicate field names */
+        for (uint32_t j = 0; j < fi; j++) {
+          if (sdef->fields[j].name_len == fname_len &&
+              memcmp(sdef->fields[j].name, fname, fname_len) == 0) {
+            char err[128];
+            snprintf(err, sizeof(err), "duplicate field name '%.*s' in struct '%.*s'",
+                     (int)fname_len, fname, (int)struct_name_len, struct_name);
+            compiler__error(c, line, node->start.column, err);
+            has_error = true;
+            break;
+          }
+        }
+        if (has_error) break;
+
+        /* Resolve field type */
+        JaclType ftype = TYPE_DYN;
+        uint32_t f_struct_idx = 0;
+
+        if (is_type_keyword(ftype_str, ftype_len)) {
+          ftype = type_from_keyword(ftype_str, ftype_len);
+        } else {
+          /* Check if it's a named struct type */
+          uint32_t idx = struct_registry__find(reg, ftype_str, ftype_len);
+          if (idx == UINT32_MAX) {
+            char err[128];
+            snprintf(err, sizeof(err),
+                     "undefined type '%.*s' for field '%.*s' in struct '%.*s'",
+                     (int)ftype_len, ftype_str,
+                     (int)fname_len, fname,
+                     (int)struct_name_len, struct_name);
+            compiler__error(c, line, node->start.column, err);
+            has_error = true;
+            break;
+          }
+          ftype = TYPE_STRUCT;
+          f_struct_idx = idx;
+        }
+
+        /* Compute C-ABI layout */
+        uint32_t fsize  = struct__type_size(ftype, reg, f_struct_idx);
+        uint32_t falign = struct__type_align(ftype, reg, f_struct_idx);
+        offset = struct__align_up(offset, falign);
+
+        sdef->fields[fi].name           = fname;
+        sdef->fields[fi].name_len       = fname_len;
+        sdef->fields[fi].type           = ftype;
+        sdef->fields[fi].struct_type_idx = f_struct_idx;
+        sdef->fields[fi].offset         = offset;
+        sdef->fields[fi].size           = fsize;
+
+        offset += fsize;
+        if (falign > max_align) max_align = falign;
+      }
+
+      if (has_error) break;
+
+      /* Trailing padding to struct alignment */
+      sdef->total_size = struct__align_up(offset, max_align);
+      sdef->alignment  = max_align;
+
+      /* Commit to registry */
+      reg->count++;
+
+      /* Register struct name as a global with arity = field_count (constructor)
+         and type = TYPE_STRUCT */
+      if (struct_name_len <= 7) {
+        JaclVal name_val = sdef->name_val;
+        compiler__set_global_arity(root, name_val, (int16_t)field_count);
+        GlobalArity* ga = compiler__find_global_arity(root, name_val);
+        if (ga) {
+          ga->type = TYPE_STRUCT;
+          ga->return_type = TYPE_STRUCT;
+        }
+      }
+
+      /* defstruct is a declaration, produces nil */
       compiler__emit_byte(c, OP_NIL, line);
       break;
     }
@@ -4937,6 +5196,11 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   Compiler c;
   compiler__init(&c, &result.chunk, arena, intern_table, heap);
   c.suspension_map = &suspension_map;
+  {
+    StructTypeRegistry* reg = (StructTypeRegistry*)arena_alloc(arena, sizeof(StructTypeRegistry));
+    reg->count = 0;
+    c.struct_registry = reg;
+  }
 
   /* Check if top-level code is suspending */
   bool top_suspends = compiler__top_level_suspends(
@@ -5205,6 +5469,12 @@ static bool compiler__compile_module(const char* canonical_path,
   mc.module_cache    = importer->module_cache;
   mc.current_module  = mod;
   mc.import_stack    = importer->import_stack;
+  {
+    /* Share struct registry from importer root with module compiler */
+    Compiler* imp_root = importer;
+    while (imp_root->enclosing) imp_root = imp_root->enclosing;
+    mc.struct_registry = imp_root->struct_registry;
+  }
   mc.module_prefix   = module__build_prefix(canonical_path, arena,
                                               &mc.module_prefix_len);
 
@@ -5327,6 +5597,11 @@ static ProgramResult jacl_compile_program(const char* root_path,
   c.current_module = root_mod;
   c.import_stack   = &istack;
   c.module_prefix  = module__build_prefix(canonical, arena, &c.module_prefix_len);
+  {
+    StructTypeRegistry* reg = (StructTypeRegistry*)arena_alloc(arena, sizeof(StructTypeRegistry));
+    reg->count = 0;
+    c.struct_registry = reg;
+  }
 
   if (top_suspends) {
     /* CPS-transform top-level code — same logic as compiler_compile */

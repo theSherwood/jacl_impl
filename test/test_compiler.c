@@ -4383,6 +4383,160 @@ static int test_exec_single_file_unchanged(void) {
   TEST_PASS();
 }
 
+/* ===== US-002 (Struct): Struct type registration ===== */
+
+/* Test: basic defstruct compiles without errors */
+static int test_defstruct_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct Point [x :i32] [y :i32]", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: duplicate struct name produces error */
+static int test_defstruct_duplicate_name(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "defstruct Point [a :f32] [b :f32]", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: duplicate field name in struct produces error */
+static int test_defstruct_duplicate_field(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct Bad [x :i32] [x :i32]", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: field referencing undefined struct type produces error */
+static int test_defstruct_undefined_field_type(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct Line [start :Point] [end :Point]", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: struct field referencing previously-defined struct type works */
+static int test_defstruct_nested_type(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "defstruct Line [start :Point] [end :Point]", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: struct name works as type annotation in def */
+static int test_defstruct_type_annotation(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  /* def Point p $x — struct name as type annotation with dyn RHS.
+     Verifies that 'Point' is accepted as a type keyword after defstruct. */
+  CompileResult cr = compile_source(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "def x 0\n"
+      "def Point p $x", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: all basic field types compile without error */
+static int test_defstruct_all_field_types(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct All [a :i32] [b :i64] [c :u32] [d :u64] [e :f32] [f :f64] [g :str]",
+      &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: forward reference (using struct before defining it) produces error */
+static int test_defstruct_forward_ref_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct Line [start :Point] [end :Point]\n"
+      "defstruct Point [x :i32] [y :i32]", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -4550,6 +4704,15 @@ int main(void) {
     { "exec_program_dep_error",          test_exec_program_dep_error },
     { "exec_program_mutable_import",     test_exec_program_mutable_import },
     { "exec_single_file_unchanged",      test_exec_single_file_unchanged },
+    /* US-002 (Struct): Struct type registration */
+    { "defstruct_basic",                 test_defstruct_basic },
+    { "defstruct_duplicate_name",        test_defstruct_duplicate_name },
+    { "defstruct_duplicate_field",       test_defstruct_duplicate_field },
+    { "defstruct_undefined_field_type",  test_defstruct_undefined_field_type },
+    { "defstruct_nested_type",           test_defstruct_nested_type },
+    { "defstruct_type_annotation",       test_defstruct_type_annotation },
+    { "defstruct_all_field_types",       test_defstruct_all_field_types },
+    { "defstruct_forward_ref_error",     test_defstruct_forward_ref_error },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

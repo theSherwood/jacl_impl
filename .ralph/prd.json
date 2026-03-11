@@ -18,7 +18,7 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -35,7 +35,7 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
