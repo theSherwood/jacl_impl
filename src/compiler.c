@@ -4895,6 +4895,12 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
       break;
     }
 
+    case AST_DEFSTRUCT: {
+      /* Struct type registration handled in US-002; parser-only for now */
+      compiler__emit_byte(c, OP_NIL, line);
+      break;
+    }
+
     case AST_ERROR: {
       compiler__error(c, line, node->start.column, "parse error in AST");
       break;

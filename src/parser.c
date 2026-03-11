@@ -466,6 +466,153 @@ static AstNode* parser__parse_use(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Parse defstruct declaration: defstruct Name [field :type] ...
+ *
+ * Called when the current token is TOKEN_DEFSTRUCT.
+ * Returns AST_DEFSTRUCT on success, AST_ERROR on failure.
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_defstruct(Parser* p) {
+  Token* kw_tok = parser__advance(p); /* consume 'defstruct' */
+  SourcePos start = parser__token_start(kw_tok);
+
+  /* Expect struct name (a word) */
+  Token* name_tok = parser__peek(p);
+  if (name_tok->type != TOKEN_WORD) {
+    return parser__error(p, "expected struct name after 'defstruct'", name_tok);
+  }
+  parser__advance(p);
+  const char* struct_name = name_tok->payload.text;
+  uint32_t struct_name_len = name_tok->length;
+
+  /* Parse field definitions: [name :type] ... */
+  NodeArray field_names_arr;
+  parser__arr_init(&field_names_arr, p->arena);
+
+  /* We'll collect field info as Token* pairs (name, type) stored in the array */
+  const char** field_names = NULL;
+  uint32_t* field_name_lens = NULL;
+  const char** field_types = NULL;
+  uint32_t* field_type_lens = NULL;
+  uint32_t field_count = 0;
+
+  /* Temporary storage - use a simple growable approach */
+  #define DEFSTRUCT_MAX_FIELDS 64
+  const char* tmp_fnames[DEFSTRUCT_MAX_FIELDS];
+  uint32_t tmp_fname_lens[DEFSTRUCT_MAX_FIELDS];
+  const char* tmp_ftypes[DEFSTRUCT_MAX_FIELDS];
+  uint32_t tmp_ftype_lens[DEFSTRUCT_MAX_FIELDS];
+
+  SourcePos last_end = parser__token_end(name_tok);
+
+  while (!parser__at_end(p) && !parser__is_command_end(p)) {
+    Token* open = parser__peek(p);
+    if (open->type != TOKEN_LBRACKET) {
+      return parser__error(p, "expected '[' for field definition", open);
+    }
+    parser__advance(p); /* consume '[' */
+
+    /* Field name */
+    Token* fname_tok = parser__peek(p);
+    if (fname_tok->type != TOKEN_WORD) {
+      AstNode* err = parser__error(p, "expected field name", fname_tok);
+      parser__sync_bracket(p);
+      return err;
+    }
+    parser__advance(p);
+
+    /* Type annotation: expect a word starting with ':' or an operator ':' followed by word */
+    Token* type_tok = parser__peek(p);
+    const char* type_str = NULL;
+    uint32_t type_len = 0;
+
+    if (type_tok->type == TOKEN_OPERATOR &&
+        type_tok->length >= 1 && type_tok->payload.text[0] == ':') {
+      /* Operator token starting with ':' — type name is the rest */
+      parser__advance(p);
+      if (type_tok->length > 1) {
+        /* :i32 etc — the colon and type are in one token */
+        type_str = type_tok->payload.text + 1;
+        type_len = type_tok->length - 1;
+      } else {
+        /* Just ':' — next token is the type name */
+        Token* tname = parser__peek(p);
+        if (tname->type != TOKEN_WORD) {
+          AstNode* err = parser__error(p, "expected type name after ':'", tname);
+          parser__sync_bracket(p);
+          return err;
+        }
+        parser__advance(p);
+        type_str = tname->payload.text;
+        type_len = tname->length;
+      }
+    } else {
+      AstNode* err = parser__error(p, "expected ':type' annotation for field", type_tok);
+      parser__sync_bracket(p);
+      return err;
+    }
+
+    /* Expect closing ']' */
+    Token* close = parser__peek(p);
+    if (close->type != TOKEN_RBRACKET) {
+      AstNode* err = parser__error(p, "expected ']' to close field definition", close);
+      parser__sync_bracket(p);
+      return err;
+    }
+    parser__advance(p);
+    last_end = parser__token_end(close);
+
+    if (field_count >= DEFSTRUCT_MAX_FIELDS) {
+      return parser__error(p, "too many fields in struct (max 64)", kw_tok);
+    }
+
+    /* Check for duplicate field names */
+    for (uint32_t i = 0; i < field_count; i++) {
+      if (tmp_fname_lens[i] == fname_tok->length &&
+          memcmp(tmp_fnames[i], fname_tok->payload.text, fname_tok->length) == 0) {
+        return parser__error(p, "duplicate field name in struct", fname_tok);
+      }
+    }
+
+    tmp_fnames[field_count] = fname_tok->payload.text;
+    tmp_fname_lens[field_count] = fname_tok->length;
+    tmp_ftypes[field_count] = type_str;
+    tmp_ftype_lens[field_count] = type_len;
+    field_count++;
+  }
+
+  /* Validate: at least one field */
+  if (field_count == 0) {
+    return parser__error(p, "struct must have at least one field", name_tok);
+  }
+
+  /* Copy to arena-allocated arrays */
+  field_names = (const char**)arena_alloc(p->arena, sizeof(const char*) * field_count);
+  field_name_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * field_count);
+  field_types = (const char**)arena_alloc(p->arena, sizeof(const char*) * field_count);
+  field_type_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * field_count);
+  for (uint32_t i = 0; i < field_count; i++) {
+    field_names[i] = tmp_fnames[i];
+    field_name_lens[i] = tmp_fname_lens[i];
+    field_types[i] = tmp_ftypes[i];
+    field_type_lens[i] = tmp_ftype_lens[i];
+  }
+
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_DEFSTRUCT;
+  node->start = start;
+  node->end   = last_end;
+  node->data.defstruct.name = struct_name;
+  node->data.defstruct.name_len = struct_name_len;
+  node->data.defstruct.field_names = field_names;
+  node->data.defstruct.field_name_lens = field_name_lens;
+  node->data.defstruct.field_types = field_types;
+  node->data.defstruct.field_type_lens = field_type_lens;
+  node->data.defstruct.field_count = field_count;
+  return node;
+}
+
+/* -------------------------------------------------------------------------
  * Internal: Parse a top-level bare command
  *
  * Reads the first expression as the command head, then collects subsequent
@@ -730,6 +877,8 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
     AstNode* cmd;
     if (parser__peek(&p)->type == TOKEN_USE) {
       cmd = parser__parse_use(&p);
+    } else if (parser__peek(&p)->type == TOKEN_DEFSTRUCT) {
+      cmd = parser__parse_defstruct(&p);
     } else {
       cmd = parser__parse_bare_command(&p);
     }
