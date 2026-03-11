@@ -4731,6 +4731,25 @@ static int test_struct_set_unknown_field(void) {
   TEST_PASS();
 }
 
+static int test_struct_set_type_mismatch(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "def p [Point 1 2]\n"
+      "[. $p x \"hello\"]", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 static int test_struct_set_preserves_other_fields(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -5180,6 +5199,7 @@ int main(void) {
     /* US-005 (Struct): Field mutation */
     { "struct_set_basic",                test_struct_set_basic },
     { "struct_set_unknown_field",        test_struct_set_unknown_field },
+    { "struct_set_type_mismatch",        test_struct_set_type_mismatch },
     { "struct_set_preserves_other",      test_struct_set_preserves_other_fields },
     /* US-006 (Struct): Boxing and dyn interop */
     { "struct_dyn_assign",               test_struct_dyn_assign },
