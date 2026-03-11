@@ -5301,10 +5301,14 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
                    sizeof(ga->param_types));
           }
 
-          /* Emit runtime bytecode: copy value from dependency namespace
-             to importing module's namespace.
-             OP_GET_GLOBAL "dep.jacl::name" → OP_DEF_GLOBAL "self::name" */
-          {
+          /* Struct types are compile-time only (no runtime value).
+             Skip runtime bytecode for struct constructors — the shared
+             struct_registry handles constructor detection at compile time. */
+          if (found_export->type == TYPE_STRUCT &&
+              found_export->return_type == TYPE_STRUCT) {
+            /* No runtime bytecode needed — struct constructor is
+               resolved at compile time via struct_registry */
+          } else {
             /* Build dependency module's prefixed name */
             uint32_t dep_prefix_len;
             const char* dep_prefix = module__build_prefix(
@@ -5329,7 +5333,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
             compiler__emit_u16(c, def_idx, line);
             /* Pop the nil pushed by OP_DEF_GLOBAL */
             compiler__emit_byte(c, OP_POP, line);
-          }
+          } /* end else (non-struct runtime bytecode) */
         }
       }
       /* use statement produces nil as its result value */

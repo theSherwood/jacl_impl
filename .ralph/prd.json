@@ -153,8 +153,8 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Struct registry is shared across modules so struct types are already visible. Struct constructors are compile-time-only, so the use handler skips runtime bytecode for TYPE_STRUCT exports."
     },
     {
       "id": "US-010",

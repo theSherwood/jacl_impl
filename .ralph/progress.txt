@@ -150,3 +150,16 @@ Thread: (inline)
   - Inline struct canonical string format: `struct{field:type,...}` — no spaces, brace-delimited, comma-separated
   - `parser__parse_inline_struct_type` must handle recursive inline structs by checking `TOKEN_WORD("struct")` + `TOKEN_LBRACE` after a `:` in field types
 ---
+
+## 2026-03-11 - US-009
+Thread: (inline)
+- Struct registry is already shared across all modules (root compiler owns it)
+- Struct constructors are exported via module__populate_exports (GlobalArity with TYPE_STRUCT)
+- Key fix: `use` handler must skip OP_GET_GLOBAL/OP_DEF_GLOBAL bytecode for struct type imports since defstruct doesn't define a runtime global — constructors are resolved at compile time via struct_registry
+- Private structs (_prefixed) are naturally excluded from exports by existing convention
+- Added 1 compiler test, 2 integration module tests (struct_import, err_struct_private)
+- Files changed: src/compiler.c, test/test_compiler.c, test/jacl/modules/struct_import/, test/jacl/modules/err_struct_private/
+- **Learnings for future iterations:**
+  - defstruct emits only OP_NIL at runtime — no OP_DEF_GLOBAL. Struct constructors exist only at compile time via struct_registry
+  - When adding new "compile-time only" definitions, the use handler must be aware and skip runtime value copying
+---

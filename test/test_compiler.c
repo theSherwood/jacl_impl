@@ -4943,6 +4943,55 @@ static int test_inline_struct_nested(void) {
   TEST_PASS();
 }
 
+/* ===== US-009 (Struct): Module export/import of struct types ===== */
+
+static int test_struct_module_import(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable intern; intern_table_init(&intern, &arena);
+
+  const char* dir = "/tmp/jacl_us009a";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "shapes.jacl",
+    "defstruct Point [x :i32] [y :i32]\n");
+  write_temp_jacl(dir, "main.jacl",
+    "use \"shapes.jacl\" [Point]\n"
+    "def p [Point 42 10]\n"
+    "print [. $p x]\n");
+
+  ProgramResult pr = jacl_compile_program(
+      "/tmp/jacl_us009a/main.jacl", &arena, &intern, &heap);
+  if (pr.error_count > 0) {
+    printf("COMPILE ERROR: %s\n", pr.error_message ? pr.error_message : "(null)");
+  }
+  ASSERT_U32_EQ(pr.error_count, 0);
+
+  US010PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = us010_capture_print;
+  vm.print_ctx = &cap;
+  vm.intern_table = &intern;
+
+  VMResult r = jacl_exec_program(&pr, &vm);
+  if (r != VM_OK) {
+    printf("RUN ERROR: %s\n", vm.error_message ? vm.error_message : "(null)");
+  }
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  vm_destroy(&vm);
+  const char* files[] = { "shapes.jacl", "main.jacl" };
+  cleanup_jacl_dir(dir, files, 2);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -5142,6 +5191,8 @@ int main(void) {
     { "inline_struct_basic",             test_inline_struct_basic },
     { "inline_struct_equivalence",       test_inline_struct_equivalence },
     { "inline_struct_nested",            test_inline_struct_nested },
+    /* US-009 (Struct): Module export/import */
+    { "struct_module_import",            test_struct_module_import },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

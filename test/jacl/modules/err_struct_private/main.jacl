@@ -1,0 +1,2 @@
+# expect-error: cannot import private name
+use "shapes.jacl" [_Point]
