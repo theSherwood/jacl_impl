@@ -1,0 +1,16 @@
+# expect: 30
+# expect: Point{x: 100, y: 200}
+# Test struct as proc parameter and return value
+defstruct Point [x :i32] [y :i32]
+
+proc sum [Point p] {
+  [+ [. $p x] [. $p y]]
+}
+
+proc mk [i32 a i32 b] {
+  [Point $a $b]
+}
+
+def p [Point 10 20]
+print [sum $p]
+print [mk 100 200]

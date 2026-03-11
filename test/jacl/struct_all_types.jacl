@@ -1,0 +1,18 @@
+# expect: 42
+# expect: 1000000
+# expect: 7
+# expect: 9999999
+# expect: 3
+# expect: 2.71828
+# expect: hello
+# Test struct with all supported field types
+defstruct All [a :i32] [b :i64] [c :u32] [d :u64] [e :f32] [f :f64] [g :str]
+
+def s [All 42 1000000 7 9999999 3.0 2.71828 "hello"]
+print [. $s a]
+print [. $s b]
+print [. $s c]
+print [. $s d]
+print [. $s e]
+print [. $s f]
+print [. $s g]
