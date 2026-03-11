@@ -168,8 +168,8 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "GC tracing already implemented in gc_collect.c (OBJ_STRUCT case). gc__struct_registry wired from vm->struct_registry before GC. Added stress and nested survival integration tests."
     },
     {
       "id": "US-011",
@@ -185,8 +185,8 @@
         "All tests pass"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added struct_proc.jacl and struct_all_types.jacl. Pre-existing tests cover definition, field access/mutation, nested structs, and collections."
     },
     {
       "id": "US-012",
@@ -203,8 +203,8 @@
         "All tests pass"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added struct_set_type_mismatch test. All other error cases already covered by pre-existing compiler tests from US-002 through US-005."
     }
   ]
 }

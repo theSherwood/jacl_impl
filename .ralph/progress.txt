@@ -163,3 +163,29 @@ Thread: (inline)
   - defstruct emits only OP_NIL at runtime — no OP_DEF_GLOBAL. Struct constructors exist only at compile time via struct_registry
   - When adding new "compile-time only" definitions, the use handler must be aware and skip runtime value copying
 ---
+
+## 2026-03-11 - US-010
+Thread: (inline)
+- GC tracing for OBJ_STRUCT already implemented in gc_collect.c (lines 217-241)
+- gc__struct_registry (void* in gc.c) is set from vm->struct_registry before GC runs (gc_collect.c lines 441, 674; runtime.c line 681)
+- Traces reference-type fields: str, vec, map, closure, dyn, struct — skips raw types (i32/u32/f32/i64/u64/f64/bool)
+- Added struct_gc_stress.jacl: 50 iterations × 3 batches × 4 structs each (Points + Lines)
+- Added struct_gc_nested.jacl: inner struct extracted, outer becomes garbage, inner survives
+- No code changes needed — only tests added
+- Files changed: test/jacl/struct_gc_stress.jacl, test/jacl/struct_gc_nested.jacl
+---
+
+## 2026-03-11 - US-011
+Thread: (inline)
+- Added struct_proc.jacl: struct as proc parameter and return value
+- Added struct_all_types.jacl: i32, i64, u32, u64, f32, f64, str field types tested
+- Pre-existing tests already cover: definition, instantiation, field access, mutation, nested structs, collections
+- Files changed: test/jacl/struct_proc.jacl, test/jacl/struct_all_types.jacl
+---
+
+## 2026-03-11 - US-012
+Thread: (inline)
+- Added test_struct_set_type_mismatch compiler test: [. $p x "hello"] on i32 field → compile error
+- All other error cases already covered by existing compiler tests from US-002 through US-005
+- Files changed: test/test_compiler.c
+---
