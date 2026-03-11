@@ -1,0 +1,2 @@
+print "shared init"
+def val 42

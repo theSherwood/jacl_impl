@@ -1,0 +1,7 @@
+# expect: shared init
+# expect: 43
+# expect: 84
+use "b.jacl" [bfn]
+use "c.jacl" [cfn]
+print [bfn 1]
+print [cfn 2]
