@@ -30,6 +30,8 @@ Progress log for ralph/m14-module-system branch.
 - Module integration tests go in test/jacl/modules/<test_name>/main.jacl with # expect: headers
 - JACL proc body uses `{}` braces (NOT `end` keyword): `proc name [params] { body }`
 - Module topo_order is assigned via DFS post-order (topo_counter++ after compilation); jacl_compile_program sorts modules by topo_order for correct dependency ordering
+- Error test naming convention: `err_<case>/main.jacl` with `# expect-error: <substring>` — harness uses strstr matching
+- Parse errors (privacy, duplicate names) are caught by parser → AST_ERROR nodes; compiler errors (not exported, conflict, arity, type) by compiler → first_error string
 
 ---
 
@@ -221,4 +223,36 @@ Progress log for ralph/m14-module-system branch.
   - DFS post-order (assign order after all deps compiled) gives correct topological sort for dependency execution
   - Diamond imports test verifies side effects run once: `print "d init"` in D appears only once even though B and C both import D
   - `concat` is a built-in string concatenation function: `[concat "hi " $name]`
+---
+
+## 2026-03-11 - US-013
+- Created 7 module error-case E2E test directories: err_private, err_circular, err_not_found, err_conflict, err_unknown_export, err_arity, err_typed
+- err_private: tests that importing `_secret` produces "cannot import private name" parse error
+- err_circular: tests A→B→A cycle detection via "circular import detected"
+- err_not_found: tests `use "nonexistent.jacl"` produces "module not found"
+- err_conflict: tests duplicate imported name across two `use` declarations
+- err_unknown_export: tests importing a non-existent name produces "is not exported by"
+- err_arity: tests wrong arg count on imported proc produces arity error
+- err_typed: tests typed imported proc called with wrong types produces type error
+- **Fixed**: improved `jacl_compile_program()` to extract specific parse error messages from AST_ERROR nodes instead of returning generic "parse error in root module"
+- All 203 JACL tests pass (191 single-file + 12 module), 48 test suites pass
+- Files changed: src/compiler.c, test/jacl/modules/err_*/*.jacl
+- **Learnings for future iterations:**
+  - Privacy is enforced by parser (not compiler) — `use` of `_`-prefixed names creates AST_ERROR with "cannot import private name" message
+  - Name conflict between two `use` imports is caught by parser ("duplicate imported name across use declarations"), not compiler's `'X' is already defined`
+  - `jacl_compile_program` parse error path now walks AST_ERROR nodes to extract specific message — previously returned generic string
+  - `# expect-error:` in module tests uses `strstr` matching — only a substring of the error message is needed
+---
+
+## 2026-03-11 - US-014
+- Created 3 module E2E test directories: mut_import, side_effects_once, concurrent_module
+- mut_import: tests mutable import as box — `mut cnt 0` in state.jacl, importer uses `[deref $cnt]` and `[reset! $cnt 5]`
+- side_effects_once: diamond pattern (main→{b,c}→shared) verifying shared.jacl's `print "shared init"` runs once
+- concurrent_module: tests spawn/await across module boundary — imports `double` proc from compute.jacl, spawns closure that calls it
+- All 206 JACL tests pass (191 single-file + 15 module), 48 test suites pass
+- Files changed: test/jacl/modules/{mut_import,side_effects_once,concurrent_module}/*.jacl
+- **Learnings for future iterations:**
+  - OP_SPAWN works in single-threaded mode (no Runtime) — executes closure synchronously when vm->runtime is NULL
+  - CPS module tests work with jacl_exec_program without Runtime setup; spawn/await resolves synchronously
+  - `mut` in module context auto-boxes; importers use `[deref $var]` to read and `[reset! $var val]` to write
 ---
