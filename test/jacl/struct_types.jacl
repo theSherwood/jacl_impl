@@ -1,0 +1,5 @@
+# expect: Pair{a: 10, b: 20}
+# Test struct with i32 fields
+defstruct Pair [a :i32] [b :i32]
+def r [Pair 10 20]
+print $r

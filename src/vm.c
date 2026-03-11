@@ -90,6 +90,7 @@ typedef struct {
   const char*    error_message;  /* last error message, or NULL */
   uint32_t       error_line;     /* source line of last error */
   StackTrace     stack_trace;    /* most recent error's trace */
+  StructTypeRegistry* struct_registry; /* struct type metadata from compiler */
 } VM;
 
 /* --- API --- */
@@ -256,6 +257,7 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->error_message = NULL;
   vm->error_line    = 0;
   vm->stack_trace.count = 0;
+  vm->struct_registry = NULL;
 
   /* Initialize GC heap and make it available for collection templates */
   gc_block_pool_init(&vm->block_pool);
@@ -894,6 +896,68 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (result != VM_OK) return result;
             break;
           }
+        } else if (jacl_is_struct(val)) {
+          JaclStruct* s = jacl_as_struct_ptr(val);
+          VMFormatBuf fmt;
+          vm__fmt_init(&fmt, vm->arena);
+          if (vm->struct_registry && s->type_idx < vm->struct_registry->count) {
+            StructTypeDef* sdef = &vm->struct_registry->defs[s->type_idx];
+            vm__fmt_append(&fmt, sdef->name, sdef->name_len);
+            vm__fmt_append(&fmt, "{", 1);
+            for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+              if (fi > 0) vm__fmt_append(&fmt, ", ", 2);
+              vm__fmt_append(&fmt, sdef->fields[fi].name, sdef->fields[fi].name_len);
+              vm__fmt_append(&fmt, ": ", 2);
+              switch (sdef->fields[fi].type) {
+                case TYPE_I32: {
+                  int32_t n; memcpy(&n, s->data + sdef->fields[fi].offset, 4);
+                  char fbuf[32]; int flen = snprintf(fbuf, sizeof(fbuf), "%d", n);
+                  vm__fmt_append(&fmt, fbuf, (uint32_t)flen); break;
+                }
+                case TYPE_I64: {
+                  int64_t n; memcpy(&n, s->data + sdef->fields[fi].offset, 8);
+                  char fbuf[32]; int flen = snprintf(fbuf, sizeof(fbuf), "%" PRIi64, n);
+                  vm__fmt_append(&fmt, fbuf, (uint32_t)flen); break;
+                }
+                case TYPE_U32: {
+                  uint32_t n; memcpy(&n, s->data + sdef->fields[fi].offset, 4);
+                  char fbuf[32]; int flen = snprintf(fbuf, sizeof(fbuf), "%u", n);
+                  vm__fmt_append(&fmt, fbuf, (uint32_t)flen); break;
+                }
+                case TYPE_U64: {
+                  uint64_t n; memcpy(&n, s->data + sdef->fields[fi].offset, 8);
+                  char fbuf[32]; int flen = snprintf(fbuf, sizeof(fbuf), "%" PRIu64, n);
+                  vm__fmt_append(&fmt, fbuf, (uint32_t)flen); break;
+                }
+                case TYPE_F32: {
+                  float f; memcpy(&f, s->data + sdef->fields[fi].offset, 4);
+                  char fbuf[32]; int flen = snprintf(fbuf, sizeof(fbuf), "%g", (double)f);
+                  vm__fmt_append(&fmt, fbuf, (uint32_t)flen); break;
+                }
+                case TYPE_F64: {
+                  double d; memcpy(&d, s->data + sdef->fields[fi].offset, 8);
+                  char fbuf[32]; int flen = snprintf(fbuf, sizeof(fbuf), "%g", d);
+                  vm__fmt_append(&fmt, fbuf, (uint32_t)flen); break;
+                }
+                case TYPE_BOOL: {
+                  uint8_t b = s->data[sdef->fields[fi].offset];
+                  vm__fmt_append(&fmt, b ? "true" : "false", b ? 4 : 5); break;
+                }
+                default: {
+                  JaclVal fval; memcpy(&fval, s->data + sdef->fields[fi].offset, sizeof(JaclVal));
+                  vm__fmt_value(&fmt, fval); break;
+                }
+              }
+            }
+            vm__fmt_append(&fmt, "}", 1);
+          } else {
+            vm__fmt_append(&fmt, "<struct>", 8);
+          }
+          vm__fmt_append(&fmt, "\n", 1);
+          vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
+          result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
+          break;
         } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena);
@@ -3796,6 +3860,79 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_STRUCT_NEW: {
+        uint16_t type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = &vm->struct_registry->defs[type_idx];
+        uint32_t field_count = sdef->field_count;
+
+        /* Allocate struct on GC heap */
+        gc__current_heap = &vm->heap;
+        JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                sizeof(JaclStruct) + sdef->total_size);
+        s->type_idx = type_idx;
+        s->_pad = 0;
+        memset(s->data, 0, sdef->total_size);
+
+        /* Store each field value from the stack into struct data */
+        for (uint32_t i = 0; i < field_count; i++) {
+          JaclVal val = vm->stack[vm->stack_top - field_count + i];
+          uint32_t off = sdef->fields[i].offset;
+          switch (sdef->fields[i].type) {
+            case TYPE_BOOL: {
+              uint8_t b = jacl_as_bool(val) ? 1 : 0;
+              s->data[off] = b;
+              break;
+            }
+            case TYPE_I32: {
+              int32_t n = jacl_as_i32(val);
+              memcpy(s->data + off, &n, 4);
+              break;
+            }
+            case TYPE_U32: {
+              uint32_t n = jacl_as_u32(val);
+              memcpy(s->data + off, &n, 4);
+              break;
+            }
+            case TYPE_F32: {
+              float f = jacl_as_f32(val);
+              memcpy(s->data + off, &f, 4);
+              break;
+            }
+            case TYPE_I64: {
+              /* Raw i64 on stack (unboxed) */
+              int64_t n = (int64_t)val;
+              memcpy(s->data + off, &n, 8);
+              break;
+            }
+            case TYPE_U64: {
+              uint64_t n = val;
+              memcpy(s->data + off, &n, 8);
+              break;
+            }
+            case TYPE_F64: {
+              double d;
+              memcpy(&d, &val, 8);
+              memcpy(s->data + off, &d, 8);
+              break;
+            }
+            default: {
+              /* str, vec, map, closure, dyn, struct — store full JaclVal */
+              memcpy(s->data + off, &val, sizeof(JaclVal));
+              break;
+            }
+          }
+        }
+
+        vm->stack_top -= field_count;
+        result = vm__push(vm, jacl_struct_val(s));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }
@@ -3823,6 +3960,8 @@ static VMResult jacl_exec_program(ProgramResult* program, VM* vm) {
     vm->error_message = "no modules to execute";
     return VM_RUNTIME_ERROR;
   }
+
+  vm->struct_registry = program->struct_registry;
 
   /* Execute each module's chunk in topological order.
      Dependencies come first, root module is last. */
@@ -3935,6 +4074,7 @@ static VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   }
 
   vm->intern_table = &intern_table;
+  vm->struct_registry = cr.struct_registry;
 
   if (cr.suspending) {
     /* Top-level code is CPS-transformed. The chunk contains OP_CLOSURE + OP_HALT

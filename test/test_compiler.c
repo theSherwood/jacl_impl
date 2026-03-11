@@ -4537,6 +4537,85 @@ static int test_defstruct_forward_ref_error(void) {
   TEST_PASS();
 }
 
+/* US-003 (Struct): Struct instantiation */
+
+static int test_struct_new_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "def p [Point 1 2]", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_arity_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "[Point 1]", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_type_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "[Point 1 \"hello\"]", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_runtime(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult r = jacl_run(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "def p [Point 10 20]\n"
+      "print $p",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -4713,6 +4792,11 @@ int main(void) {
     { "defstruct_type_annotation",       test_defstruct_type_annotation },
     { "defstruct_all_field_types",       test_defstruct_all_field_types },
     { "defstruct_forward_ref_error",     test_defstruct_forward_ref_error },
+    /* US-003 (Struct): Struct instantiation */
+    { "struct_new_basic",                test_struct_new_basic },
+    { "struct_new_arity_error",          test_struct_new_arity_error },
+    { "struct_new_type_error",           test_struct_new_type_error },
+    { "struct_new_runtime",              test_struct_new_runtime },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

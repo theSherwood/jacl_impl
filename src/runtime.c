@@ -118,6 +118,7 @@ static void runtime__init_worker_vm(WorkerThread *w) {
     vm->error_message = NULL;
     vm->error_line    = 0;
     vm->stack_trace.count = 0;
+    vm->struct_registry = NULL;
 
     /* Init a local block pool (unused — heap points to shared pool).
      * We still init it so vm_destroy can safely destroy it. */
@@ -674,6 +675,11 @@ static void gc_concurrent_collect(Runtime *rt) {
     int i;
     GCMarkStack ms;
     gc__ms_init(&ms);
+
+    /* Set struct registry for GC tracing */
+    if (rt->num_workers > 0) {
+        gc__struct_registry = rt->workers[0].vm.struct_registry;
+    }
 
     /* 1. Increment global epoch */
     uint64_t new_epoch = ATOMIC_LOAD_EXPLICIT(&rt->global_epoch,

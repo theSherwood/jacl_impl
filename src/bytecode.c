@@ -138,6 +138,7 @@ typedef enum {
   OP_CONST_I64,     /* push raw i64 from constant pool */
   OP_CONST_U64,     /* push raw u64 from constant pool */
   OP_CONST_F64,     /* push raw f64 from constant pool */
+  OP_STRUCT_NEW,    /* construct struct: followed by uint16_t struct_type_index */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -388,6 +389,7 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_CONST_I64:       return "OP_CONST_I64";
     case OP_CONST_U64:       return "OP_CONST_U64";
     case OP_CONST_F64:       return "OP_CONST_F64";
+    case OP_STRUCT_NEW:      return "OP_STRUCT_NEW";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";

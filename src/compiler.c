@@ -9,6 +9,9 @@
 
 #include <string.h>
 
+/* --- Forward declarations for struct types --- */
+typedef struct StructTypeRegistry StructTypeRegistry;
+
 /* --- Compile Result --- */
 
 typedef struct {
@@ -16,6 +19,7 @@ typedef struct {
   uint32_t      error_count;
   const char*   error_message;  /* first error message, or NULL */
   bool          suspending;     /* true if top-level code is CPS-transformed */
+  StructTypeRegistry* struct_registry; /* struct type metadata for VM */
 } CompileResult;
 
 /* --- API --- */
@@ -128,10 +132,11 @@ typedef struct {
   uint32_t alignment;          /* max alignment of all fields */
 } StructTypeDef;
 
-typedef struct {
+struct StructTypeRegistry {
   StructTypeDef defs[STRUCT_REGISTRY_MAX];
   uint32_t count;
-} StructTypeRegistry;
+};
+/* typedef already forward-declared above */
 
 /* C-ABI size and alignment for a JaclType */
 static uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx) {
@@ -234,6 +239,7 @@ typedef struct {
   uint32_t    error_count;
   const char* error_message; /* first error message, or NULL */
   bool        suspending;    /* true if root module is CPS-transformed */
+  StructTypeRegistry* struct_registry; /* struct type metadata for VM */
 } ProgramResult;
 
 static ProgramResult jacl_compile_program(const char* root_path,
@@ -4505,6 +4511,66 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* Struct constructor: [StructName field1 field2 ...] */
+  if (head->type == AST_LIT_STRING) {
+    StructTypeRegistry* reg = compiler__get_struct_registry(c);
+    uint32_t name_len = head->data.lit_string.length;
+    uint32_t struct_idx = struct_registry__find(reg,
+        head->data.lit_string.value, name_len);
+    if (struct_idx != UINT32_MAX) {
+      StructTypeDef* sdef = &reg->defs[struct_idx];
+
+      /* Arity check */
+      if (argc != sdef->field_count) {
+        char err_msg[128];
+        snprintf(err_msg, sizeof(err_msg),
+                 "struct '%.*s' has %u fields but got %u arguments",
+                 (int)name_len, head->data.lit_string.value,
+                 sdef->field_count, argc);
+        compiler__error(c, line, col, err_msg);
+        return;
+      }
+
+      /* Compile and type-check each field argument */
+      for (uint32_t i = 0; i < argc; i++) {
+        JaclType field_type = sdef->fields[i].type;
+        c->expected_type = field_type;
+        compiler__compile_node(c, args[i]);
+        JaclType arg_type = c->last_expr_type;
+        c->expected_type = TYPE_DYN;
+
+        if (field_type != TYPE_DYN && arg_type != TYPE_DYN &&
+            arg_type != field_type) {
+          char err_msg[192];
+          snprintf(err_msg, sizeof(err_msg),
+                   "type error: field '%.*s' of struct '%.*s' expected %s, got %s",
+                   (int)sdef->fields[i].name_len, sdef->fields[i].name,
+                   (int)name_len, head->data.lit_string.value,
+                   type_name(field_type), type_name(arg_type));
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        if (field_type != TYPE_DYN && arg_type == TYPE_DYN) {
+          char err_msg[192];
+          snprintf(err_msg, sizeof(err_msg),
+                   "type error: field '%.*s' of struct '%.*s' expected %s, got dyn",
+                   (int)sdef->fields[i].name_len, sdef->fields[i].name,
+                   (int)name_len, head->data.lit_string.value,
+                   type_name(field_type));
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+      }
+
+      /* Emit OP_STRUCT_NEW + uint16_t struct_type_index */
+      compiler__emit_byte(c, OP_STRUCT_NEW, line);
+      compiler__emit_u16(c, (uint16_t)struct_idx, line);
+
+      c->last_expr_type = TYPE_STRUCT;
+      return;
+    }
+  }
+
   /* Dynamic call: unrecognized command head — look up and call */
   {
     /* Resolve callee param types for call-site type checking */
@@ -5360,6 +5426,7 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
 
   result.error_count  += c.error_count;
   result.error_message = c.first_error;
+  result.struct_registry = c.struct_registry;
   return result;
 }
 
@@ -5774,6 +5841,7 @@ static ProgramResult jacl_compile_program(const char* root_path,
 
   result.error_count   = c.error_count;
   result.error_message = c.first_error;
+  result.struct_registry = c.struct_registry;
   return result;
 }
 

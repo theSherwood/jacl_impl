@@ -28,7 +28,8 @@ typedef enum {
     OBJ_FUTURE,
     OBJ_FUTURE_WAITER,
     OBJ_PARALLEL_AGG,
-    OBJ_RACE_AGG
+    OBJ_RACE_AGG,
+    OBJ_STRUCT
 } GCObjType;
 
 /* --- GC object header (8 bytes, prepended before payload) ---
@@ -82,7 +83,8 @@ static inline bool jacl_is_heap_type(JaclVal v) {
         || tag == JACL_TAG_I64
         || tag == JACL_TAG_U64
         || tag == JACL_TAG_F64
-        || tag == JACL_TAG_FUTURE;
+        || tag == JACL_TAG_FUTURE
+        || tag == JACL_TAG_STRUCT;
 }
 
 /* ======================================================================
@@ -436,6 +438,22 @@ got_block:
     return gc__bump_alloc(heap, total, obj_type);
 }
 
+/* --- Struct heap type --- */
+
+typedef struct {
+    uint32_t type_idx;    /* index into StructTypeRegistry */
+    uint32_t _pad;        /* padding to 8-byte alignment */
+    uint8_t  data[];      /* C-ABI laid out field data (total_size bytes) */
+} JaclStruct;
+
+static inline JaclStruct* jacl_as_struct_ptr(JaclVal v) {
+    return (JaclStruct*)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+}
+
+static inline JaclVal jacl_struct_val(JaclStruct* s) {
+    return JACL_TAG_STRUCT | ((uint64_t)(uintptr_t)s & JACL_PAYLOAD_MASK);
+}
+
 /* ======================================================================
  * Heap-allocating value constructors (moved from value.c — need ThreadHeap)
  * ====================================================================== */
@@ -640,6 +658,12 @@ static inline JaclVal jacl_f64_neg(ThreadHeap *heap, JaclVal a) {
  * Each worker thread sets its own copy in the task execution loop. */
 
 static __thread ThreadHeap *gc__current_heap = NULL;
+
+/* --- Global struct registry pointer for GC tracing ---
+ * Type is void* because StructTypeRegistry is defined in compiler.c,
+ * which is included after gc.c in the unity build. Cast to
+ * StructTypeRegistry* in gc_collect.c (included after compiler.c). */
+static void *gc__struct_registry = NULL;
 
 /* ======================================================================
  * GreyBuffer: per-thread append-only buffer for write barrier entries.
