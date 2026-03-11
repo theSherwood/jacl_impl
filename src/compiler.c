@@ -5291,7 +5291,14 @@ static ProgramResult jacl_compile_program(const char* root_path,
   ParseResult parse = parser_parse(tokens, arena);
   if (parse.error_count > 0) {
     result.error_count = parse.error_count;
-    result.error_message = "parse error in root module";
+    /* Extract first parse error message from AST_ERROR nodes */
+    const char* parse_err = NULL;
+    for (uint32_t i = 0; i < parse.count && !parse_err; i++) {
+      if (parse.nodes[i]->type == AST_ERROR) {
+        parse_err = parse.nodes[i]->data.error.message;
+      }
+    }
+    result.error_message = parse_err ? parse_err : "parse error in root module";
     return result;
   }
 

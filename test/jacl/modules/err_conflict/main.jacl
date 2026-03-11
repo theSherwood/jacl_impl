@@ -1,0 +1,4 @@
+# expect-error: duplicate imported name across use declarations
+use "lib.jacl" [add]
+use "lib2.jacl" [add]
+print [add 1 2]

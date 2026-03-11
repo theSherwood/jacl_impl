@@ -1,0 +1,3 @@
+# expect-error: is not exported by
+use "lib.jacl" [missing]
+print $missing

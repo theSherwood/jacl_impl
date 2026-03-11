@@ -1,0 +1,2 @@
+use "a.jacl" [aval]
+def bval 2

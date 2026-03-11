@@ -1,0 +1,2 @@
+proc _secret [] { 42 }
+proc add [a b] { [+ $a $b] }

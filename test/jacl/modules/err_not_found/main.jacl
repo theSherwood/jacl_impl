@@ -1,0 +1,3 @@
+# expect-error: module not found
+use "nonexistent.jacl" [foo]
+print $foo
