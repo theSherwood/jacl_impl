@@ -3992,6 +3992,109 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_STRUCT_GET_DYN: {
+        uint16_t name_idx = vm__read_u16(vm);
+        JaclVal struct_val;
+        result = vm__pop(vm, &struct_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(struct_val)) {
+          result = vm__push(vm, struct_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_struct(struct_val)) {
+          vm__set_error(vm, "field access on non-struct value");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclStruct* s = jacl_as_struct_ptr(struct_val);
+        if (!vm->struct_registry || s->type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index");
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = &vm->struct_registry->defs[s->type_idx];
+        JaclVal name_val = frame->chunk->constants[name_idx];
+        char fname[64]; uint32_t flen;
+        flen = jacl_string_data(name_val, fname, sizeof(fname));
+        uint32_t fi;
+        for (fi = 0; fi < sdef->field_count; fi++) {
+          if (sdef->fields[fi].name_len == flen &&
+              memcmp(sdef->fields[fi].name, fname, flen) == 0) break;
+        }
+        if (fi == sdef->field_count) {
+          vm__set_error(vm, "struct '%.*s' has no field '%.*s'",
+                        (int)sdef->name_len, sdef->name, (int)flen, fname);
+          return VM_RUNTIME_ERROR;
+        }
+        /* Read field and box to JaclVal (always boxed for dyn context) */
+        JaclVal field_val;
+        uint16_t foff = sdef->fields[fi].offset;
+        switch (sdef->fields[fi].type) {
+          case TYPE_BOOL: { uint8_t b = s->data[foff]; field_val = jacl_bool(b); break; }
+          case TYPE_I32:  { int32_t n; memcpy(&n, s->data + foff, 4); field_val = jacl_i32(n); break; }
+          case TYPE_U32:  { uint32_t n; memcpy(&n, s->data + foff, 4); field_val = jacl_u32(n); break; }
+          case TYPE_F32:  { float f; memcpy(&f, s->data + foff, 4); field_val = jacl_f32(f); break; }
+          case TYPE_I64:  { int64_t n; memcpy(&n, s->data + foff, 8); field_val = jacl_i64(&vm->heap, n); break; }
+          case TYPE_U64:  { uint64_t n; memcpy(&n, s->data + foff, 8); field_val = jacl_u64(&vm->heap, n); break; }
+          case TYPE_F64:  { double d; memcpy(&d, s->data + foff, 8); field_val = jacl_f64(&vm->heap, d); break; }
+          default:        { memcpy(&field_val, s->data + foff, sizeof(JaclVal)); break; }
+        }
+        result = vm__push(vm, field_val);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_STRUCT_SET_DYN: {
+        uint16_t name_idx = vm__read_u16(vm);
+        JaclVal new_val;
+        result = vm__pop(vm, &new_val);
+        if (result != VM_OK) return result;
+        JaclVal struct_val;
+        result = vm__pop(vm, &struct_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(struct_val)) {
+          result = vm__push(vm, struct_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_struct(struct_val)) {
+          vm__set_error(vm, "field mutation on non-struct value");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclStruct* sd = jacl_as_struct_ptr(struct_val);
+        if (!vm->struct_registry || sd->type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index");
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef2 = &vm->struct_registry->defs[sd->type_idx];
+        JaclVal name_val2 = frame->chunk->constants[name_idx];
+        char fname2[64]; uint32_t flen2;
+        flen2 = jacl_string_data(name_val2, fname2, sizeof(fname2));
+        uint32_t fi2;
+        for (fi2 = 0; fi2 < sdef2->field_count; fi2++) {
+          if (sdef2->fields[fi2].name_len == flen2 &&
+              memcmp(sdef2->fields[fi2].name, fname2, flen2) == 0) break;
+        }
+        if (fi2 == sdef2->field_count) {
+          vm__set_error(vm, "struct '%.*s' has no field '%.*s'",
+                        (int)sdef2->name_len, sdef2->name, (int)flen2, fname2);
+          return VM_RUNTIME_ERROR;
+        }
+        uint16_t foff2 = sdef2->fields[fi2].offset;
+        switch (sdef2->fields[fi2].type) {
+          case TYPE_BOOL: { uint8_t b = jacl_as_bool(new_val) ? 1 : 0; sd->data[foff2] = b; break; }
+          case TYPE_I32:  { int32_t n = jacl_as_i32(new_val); memcpy(sd->data + foff2, &n, 4); break; }
+          case TYPE_U32:  { uint32_t n = jacl_as_u32(new_val); memcpy(sd->data + foff2, &n, 4); break; }
+          case TYPE_F32:  { float f = jacl_as_f32(new_val); memcpy(sd->data + foff2, &f, 4); break; }
+          case TYPE_I64:  { int64_t n = (int64_t)new_val; memcpy(sd->data + foff2, &n, 8); break; }
+          case TYPE_U64:  { uint64_t n = new_val; memcpy(sd->data + foff2, &n, 8); break; }
+          case TYPE_F64:  { double d; memcpy(&d, &new_val, 8); memcpy(sd->data + foff2, &d, 8); break; }
+          default:        { memcpy(sd->data + foff2, &new_val, sizeof(JaclVal)); break; }
+        }
+        result = vm__push(vm, struct_val);
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_STRUCT_NEW: {
         uint16_t type_idx = vm__read_u16(vm);
         if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {

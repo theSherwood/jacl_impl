@@ -103,8 +103,8 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Dyn typed annotation syntax is `def dyn d expr` (not `:dyn`). Structs already work in vec/map since they are JaclVal. Added OP_STRUCT_GET_DYN and OP_STRUCT_SET_DYN for runtime field resolution."
     },
     {
       "id": "US-007",

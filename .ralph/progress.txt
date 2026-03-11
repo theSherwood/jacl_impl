@@ -108,3 +108,21 @@ Thread: (inline)
   - When JACL syntax can't support a new keyword due to lexer constraints, overloading existing operators by arity is the preferred pattern
   - The `.` handler dispatches get vs set by checking child_count: 2 = get, 3 = set, anything else = error
 ---
+
+## 2026-03-11 - US-006
+Thread: (inline)
+- Structs are already JaclVal (tagged JACL_TAG_STRUCT), so they work in vec/map without changes
+- OP_TO_DYN handles structs via default case (already boxed) — no changes needed
+- Added OP_STRUCT_GET_DYN and OP_STRUCT_SET_DYN opcodes for runtime field resolution on :dyn variables
+- Compiler `.` handler now emits dynamic opcodes when struct_type is TYPE_DYN (instead of error)
+- VM dynamic handlers: read field name from constant pool, look up struct type from JaclStruct.type_idx, resolve field at runtime
+- Dynamic opcodes always box raw types (i64/u64/f64) since result type is dyn
+- Typed def syntax is `def dyn d expr` (type keyword first), not `def d :dyn expr`
+- Collection access is `vec-get`/`map-get`, not `get`
+- Added 4 compiler tests and 3 integration tests
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_compiler.c, test/jacl/struct_dyn.jacl, test/jacl/struct_in_vec.jacl, test/jacl/struct_in_map.jacl
+- **Learnings for future iterations:**
+  - `jacl_string_data(val, buf, buflen)` copies to a buffer and returns length — it does NOT return a pointer like `const char**`
+  - `jacl_inline_string(str, len)` creates inline string JaclVal, `chunk_add_constant(chunk, val)` adds to constant pool
+  - vec-get/map-get don't set last_expr_type, so variables assigned from them default to TYPE_DYN — which triggers the dynamic field access path
+---

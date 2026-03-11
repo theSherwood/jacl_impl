@@ -1,0 +1,8 @@
+# expect: Point{x: 3, y: 4}
+# expect: 3
+# Test structs stored in vec
+defstruct Point [x :i32] [y :i32]
+def v [vec [Point 1 2] [Point 3 4]]
+def p [vec-get $v 1]
+print $p
+print [. $p x]

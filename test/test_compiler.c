@@ -4755,6 +4755,103 @@ static int test_struct_set_preserves_other_fields(void) {
   TEST_PASS();
 }
 
+/* ===== US-006 (Struct): Boxing and dyn interop ===== */
+
+static int test_struct_dyn_assign(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult r = jacl_run(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "def dyn d [Point 1 2]\n"
+      "print $d",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_dyn_field_access(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult r = jacl_run(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "def dyn d [Point 10 20]\n"
+      "print [. $d x]\n"
+      "print [. $d y]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_dyn_field_set(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult r = jacl_run(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "def dyn d [Point 1 2]\n"
+      "[. $d x 99]\n"
+      "print [. $d x]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_in_vec(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult r = jacl_run(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "def v [vec [Point 1 2] [Point 3 4]]\n"
+      "def p [vec-get $v 1]\n"
+      "print [. $p x]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -4944,6 +5041,11 @@ int main(void) {
     { "struct_set_basic",                test_struct_set_basic },
     { "struct_set_unknown_field",        test_struct_set_unknown_field },
     { "struct_set_preserves_other",      test_struct_set_preserves_other_fields },
+    /* US-006 (Struct): Boxing and dyn interop */
+    { "struct_dyn_assign",               test_struct_dyn_assign },
+    { "struct_dyn_field_access",         test_struct_dyn_field_access },
+    { "struct_dyn_field_set",            test_struct_dyn_field_set },
+    { "struct_in_vec",                   test_struct_in_vec },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

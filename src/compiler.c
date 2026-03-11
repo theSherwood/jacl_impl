@@ -4618,8 +4618,30 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
 
-    /* Struct type unknown at compile time — runtime error for now */
-    compiler__error(c, line, col, "type error: '.' requires a statically-typed struct value");
+    /* Struct type unknown at compile time — emit runtime field resolution */
+    {
+      /* Store field name as a constant */
+      JaclVal name_val = jacl_inline_string(field_name, field_name_len);
+      uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+
+      if (is_set) {
+        /* Compile the new value */
+        compiler__compile_node(c, args[2]);
+        /* Emit OP_STRUCT_SET_DYN + const_idx (field name) */
+        compiler__emit_byte(c, OP_STRUCT_SET_DYN, line);
+        compiler__emit_u16(c, name_idx, line);
+        /* Result type is dyn (we don't know the struct type) */
+        c->last_expr_type = TYPE_DYN;
+        c->last_struct_idx = UINT32_MAX;
+      } else {
+        /* Emit OP_STRUCT_GET_DYN + const_idx (field name) */
+        compiler__emit_byte(c, OP_STRUCT_GET_DYN, line);
+        compiler__emit_u16(c, name_idx, line);
+        /* Result type is dyn (field type unknown at compile time) */
+        c->last_expr_type = TYPE_DYN;
+        c->last_struct_idx = UINT32_MAX;
+      }
+    }
     return;
   }
 
