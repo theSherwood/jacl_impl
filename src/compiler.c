@@ -453,6 +453,7 @@ typedef struct {
   bool      suspends;     /* true if bound to a suspending proc */
   bool      captures_mutable; /* true if bound to a closure that captures mutable state */
   JaclType  type;         /* compile-time type (default TYPE_DYN) */
+  uint32_t  struct_type_idx; /* struct registry index when type==TYPE_STRUCT */
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
   JaclType* param_types;  /* proc param types (NULL for non-procs, arena-allocated) */
 } Local;
@@ -468,6 +469,7 @@ typedef struct {
   bool      suspends;     /* true if this is a suspending proc */
   bool      captures_mutable; /* true if bound to a closure that captures mutable state */
   JaclType  type;         /* compile-time type (default TYPE_DYN) */
+  uint32_t  struct_type_idx; /* struct registry index when type==TYPE_STRUCT */
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
   JaclType  param_types[COMPILER_MAX_PROC_PARAMS]; /* proc param types */
 } GlobalArity;
@@ -480,6 +482,7 @@ typedef struct {
   bool      suspends;   /* true if capturing a suspending proc */
   bool      captures_mutable; /* true if capturing a closure that captures mutable state */
   JaclType  type;     /* compile-time type (default TYPE_DYN) */
+  uint32_t  struct_type_idx; /* struct registry index when type==TYPE_STRUCT */
 } Upvalue;
 
 /* --- Internal: Suspension analysis --- */
@@ -946,6 +949,7 @@ struct Compiler {
   bool             force_global_procs; /* procs emit OP_DEF_GLOBAL even at scope>0 */
   JaclType         expected_type;   /* contextual type hint for RHS compilation */
   JaclType         last_expr_type;  /* type of the last compiled expression */
+  uint32_t         last_struct_idx; /* struct type index when last_expr_type==TYPE_STRUCT */
   JaclType         return_type;     /* declared return type for current function */
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
   Module*          current_module;  /* module currently being compiled */
@@ -978,6 +982,7 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->force_global_procs = false;
   c->expected_type   = TYPE_DYN;
   c->last_expr_type  = TYPE_DYN;
+  c->last_struct_idx = UINT32_MAX;
   c->return_type     = TYPE_DYN;
   c->module_cache    = NULL;
   c->current_module  = NULL;
@@ -1250,6 +1255,7 @@ static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
       c->upvalues[uv].captures_mutable = c->enclosing->locals[local].captures_mutable;
       c->upvalues[uv].suspends = c->enclosing->locals[local].suspends;
       c->upvalues[uv].type = c->enclosing->locals[local].type;
+      c->upvalues[uv].struct_type_idx = c->enclosing->locals[local].struct_type_idx;
     }
     return uv;
   }
@@ -1264,6 +1270,7 @@ static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
       c->upvalues[uv].captures_mutable = c->enclosing->upvalues[upvalue].captures_mutable;
       c->upvalues[uv].suspends = c->enclosing->upvalues[upvalue].suspends;
       c->upvalues[uv].type = c->enclosing->upvalues[upvalue].type;
+      c->upvalues[uv].struct_type_idx = c->enclosing->upvalues[upvalue].struct_type_idx;
     }
     return uv;
   }
@@ -1656,6 +1663,7 @@ static void compiler__emit_continuation(Compiler* c,
       cont_compiler.upvalues[uv].captures_mutable = c->locals[i].captures_mutable;
       cont_compiler.upvalues[uv].suspends   = c->locals[i].suspends;
       cont_compiler.upvalues[uv].type       = c->locals[i].type;
+      cont_compiler.upvalues[uv].struct_type_idx = c->locals[i].struct_type_idx;
     }
   }
   /* Also capture parent's upvalues transitively, so variables from
@@ -1668,6 +1676,7 @@ static void compiler__emit_continuation(Compiler* c,
       cont_compiler.upvalues[uv].captures_mutable = c->upvalues[i].captures_mutable;
       cont_compiler.upvalues[uv].suspends   = c->upvalues[i].suspends;
       cont_compiler.upvalues[uv].type       = c->upvalues[i].type;
+      cont_compiler.upvalues[uv].struct_type_idx = c->upvalues[i].struct_type_idx;
     }
   }
 
@@ -2941,11 +2950,11 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    /* Determine effective type: declared type wins, else infer unboxed from RHS */
+    /* Determine effective type: declared type wins, else infer unboxed/struct from RHS */
     JaclType effective_type;
     if (declared_type != TYPE_DYN) {
       effective_type = declared_type;
-    } else if (is_unboxed_type(rhs_type)) {
+    } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT) {
       effective_type = rhs_type;
     } else {
       effective_type = TYPE_DYN;
@@ -2963,6 +2972,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__add_local(c, name_val, line, col);
       c->locals[c->local_count - 1].is_mutable = true;
       c->locals[c->local_count - 1].type = effective_type;
+      if (effective_type == TYPE_STRUCT)
+        c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
       /* mut returns nil */
       compiler__emit_byte(c, OP_NIL, line);
     } else {
@@ -2991,6 +3002,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           if (root->global_arities[i].name == name_val) {
             root->global_arities[i].is_mutable = true;
             root->global_arities[i].type = effective_type;
+            if (effective_type == TYPE_STRUCT)
+              root->global_arities[i].struct_type_idx = c->last_struct_idx;
             break;
           }
         }
@@ -3239,12 +3252,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
     JaclVal name_val = jacl_inline_string(args[name_arg_idx]->data.lit_string.value, name_len);
 
-    /* Determine effective type: declared type wins, else infer unboxed from RHS */
+    /* Determine effective type: declared type wins, else infer unboxed/struct from RHS */
     JaclType effective_type;
     if (declared_type != TYPE_DYN) {
       effective_type = declared_type;
-    } else if (is_unboxed_type(rhs_type)) {
-      /* Infer unboxed types from RHS — must track because stack holds raw values */
+    } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT) {
+      /* Infer unboxed types and struct types from RHS */
       effective_type = rhs_type;
     } else {
       effective_type = TYPE_DYN;
@@ -3257,6 +3270,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__add_local(c, name_val, line, col);
       c->locals[c->local_count - 1].known_arity = rhs_arity;
       c->locals[c->local_count - 1].type = effective_type;
+      if (effective_type == TYPE_STRUCT)
+        c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
       /* def returns nil */
       compiler__emit_byte(c, OP_NIL, line);
     } else {
@@ -3278,6 +3293,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
         for (uint32_t i = 0; i < root->global_arity_count; i++) {
           if (root->global_arities[i].name == name_val) {
             root->global_arities[i].type = effective_type;
+            if (effective_type == TYPE_STRUCT)
+              root->global_arities[i].struct_type_idx = c->last_struct_idx;
             break;
           }
         }
@@ -4511,6 +4528,71 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* Struct field access: [. $struct_val field_name] */
+  if (compiler__head_matches(head, ".", 1)) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, ".", "2 arguments (struct and field name)", argc);
+      return;
+    }
+
+    /* Compile struct expression */
+    compiler__compile_node(c, args[0]);
+    JaclType struct_type = c->last_expr_type;
+    uint32_t struct_idx = c->last_struct_idx;
+
+    if (struct_type != TYPE_STRUCT && struct_type != TYPE_DYN) {
+      compiler__error(c, line, col, "type error: '.' requires a struct value");
+      return;
+    }
+
+    /* Field name must be a literal string */
+    if (args[1]->type != AST_LIT_STRING) {
+      compiler__error(c, line, col, "field name must be a literal identifier");
+      return;
+    }
+
+    const char* field_name = args[1]->data.lit_string.value;
+    uint32_t field_name_len = args[1]->data.lit_string.length;
+
+    if (struct_type == TYPE_STRUCT && struct_idx != UINT32_MAX) {
+      StructTypeRegistry* reg = compiler__get_struct_registry(c);
+      if (reg && struct_idx < reg->count) {
+        StructTypeDef* sdef = &reg->defs[struct_idx];
+        /* Find field by name */
+        uint32_t fi;
+        for (fi = 0; fi < sdef->field_count; fi++) {
+          if (sdef->fields[fi].name_len == field_name_len &&
+              memcmp(sdef->fields[fi].name, field_name, field_name_len) == 0) {
+            break;
+          }
+        }
+        if (fi == sdef->field_count) {
+          char err_msg[128];
+          snprintf(err_msg, sizeof(err_msg),
+                   "struct '%.*s' has no field '%.*s'",
+                   (int)sdef->name_len, sdef->name,
+                   (int)field_name_len, field_name);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+
+        /* Emit OP_STRUCT_GET + field_offset (u16) + field_type (u8) */
+        compiler__emit_byte(c, OP_STRUCT_GET, line);
+        compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
+        compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
+
+        c->last_expr_type = sdef->fields[fi].type;
+        if (sdef->fields[fi].type == TYPE_STRUCT)
+          c->last_struct_idx = sdef->fields[fi].struct_type_idx;
+        return;
+      }
+    }
+
+    /* Struct type unknown at compile time — runtime error for now */
+    compiler__error(c, line, col, "type error: '.' requires a statically-typed struct value");
+    return;
+  }
+
   /* Struct constructor: [StructName field1 field2 ...] */
   if (head->type == AST_LIT_STRING) {
     StructTypeRegistry* reg = compiler__get_struct_registry(c);
@@ -4567,6 +4649,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_u16(c, (uint16_t)struct_idx, line);
 
       c->last_expr_type = TYPE_STRUCT;
+      c->last_struct_idx = struct_idx;
       return;
     }
   }
@@ -4830,6 +4913,8 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, (uint8_t)local_slot, line);
         }
         c->last_expr_type = c->locals[local_slot].type;
+        if (c->locals[local_slot].type == TYPE_STRUCT)
+          c->last_struct_idx = c->locals[local_slot].struct_type_idx;
       } else {
         int upvalue_idx = compiler__resolve_upvalue(c, name_val);
         if (upvalue_idx != -1) {
@@ -4856,6 +4941,8 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, (uint8_t)upvalue_idx, line);
           }
           c->last_expr_type = c->upvalues[upvalue_idx].type;
+          if (c->upvalues[upvalue_idx].type == TYPE_STRUCT)
+            c->last_struct_idx = c->upvalues[upvalue_idx].struct_type_idx;
         } else {
           JaclType global_type = compiler__resolve_global_type(c, name_val);
           JaclVal gkey = compiler__global_name_val(c,
@@ -4878,6 +4965,10 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
             }
           }
           c->last_expr_type = global_type;
+          if (global_type == TYPE_STRUCT) {
+            GlobalArity* ga = compiler__find_global_arity(c, name_val);
+            if (ga) c->last_struct_idx = ga->struct_type_idx;
+          }
         }
       }
       break;

@@ -132,7 +132,8 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_CONST_U64,      116);
   ASSERT_INT_EQ(OP_CONST_F64,      117);
   ASSERT_INT_EQ(OP_STRUCT_NEW,     118);
-  ASSERT_INT_EQ(OP_HALT,           119);
+  ASSERT_INT_EQ(OP_STRUCT_GET,     119);
+  ASSERT_INT_EQ(OP_HALT,           120);
   TEST_PASS();
 }
 

@@ -3860,6 +3860,71 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_STRUCT_GET: {
+        uint16_t field_offset = vm__read_u16(vm);
+        uint8_t field_type = vm__read_byte(vm);
+        JaclVal struct_val;
+        result = vm__pop(vm, &struct_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(struct_val)) {
+          result = vm__push(vm, struct_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_struct(struct_val)) {
+          vm__set_error(vm, "field access on non-struct value");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclStruct* s = jacl_as_struct_ptr(struct_val);
+        JaclVal field_val;
+        switch ((JaclType)field_type) {
+          case TYPE_BOOL: {
+            uint8_t b = s->data[field_offset];
+            field_val = jacl_bool(b);
+            break;
+          }
+          case TYPE_I32: {
+            int32_t n; memcpy(&n, s->data + field_offset, 4);
+            field_val = jacl_i32(n);
+            break;
+          }
+          case TYPE_U32: {
+            uint32_t n; memcpy(&n, s->data + field_offset, 4);
+            field_val = jacl_u32(n);
+            break;
+          }
+          case TYPE_F32: {
+            float f; memcpy(&f, s->data + field_offset, 4);
+            field_val = jacl_f32(f);
+            break;
+          }
+          case TYPE_I64: {
+            int64_t n; memcpy(&n, s->data + field_offset, 8);
+            /* Push raw i64 (unboxed) */
+            field_val = (JaclVal)n;
+            break;
+          }
+          case TYPE_U64: {
+            uint64_t n; memcpy(&n, s->data + field_offset, 8);
+            field_val = n;
+            break;
+          }
+          case TYPE_F64: {
+            double d; memcpy(&d, s->data + field_offset, 8);
+            memcpy(&field_val, &d, 8);
+            break;
+          }
+          default: {
+            /* str, vec, map, closure, dyn, struct — stored as JaclVal */
+            memcpy(&field_val, s->data + field_offset, sizeof(JaclVal));
+            break;
+          }
+        }
+        result = vm__push(vm, field_val);
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_STRUCT_NEW: {
         uint16_t type_idx = vm__read_u16(vm);
         if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
