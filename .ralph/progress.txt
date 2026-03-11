@@ -25,6 +25,13 @@ Progress log for ralph/struct-types branch.
 - StructTypeRegistry holds up to 32 struct defs with C-ABI layout (field offsets, sizes, alignment)
 - Struct names are registered in global_arities with type=TYPE_STRUCT and arity=field_count (for constructor)
 - compiler__resolve_type() checks both built-in types and struct registry — use it instead of is_type_keyword() when struct names should be valid
+- JACL_TAG_STRUCT is 0x12; JaclStruct is {type_idx, _pad, data[]} heap object (OBJ_STRUCT)
+- OP_STRUCT_NEW takes uint16_t struct_type_index operand; pops N fields, allocates, pushes struct val
+- Struct constructor in compiler intercepts struct names in compile_command BEFORE the dynamic call fallback
+- VM.struct_registry and gc__struct_registry (void*) must be set for runtime struct ops and GC tracing
+- Struct fields stored in C-ABI layout: i32/u32/f32 as 4 bytes, i64/u64/f64 as 8 bytes raw, str/dyn/vec/map/struct as JaclVal (8 bytes)
+- In JACL, `true`/`false` are bare words (strings), not keywords. Use typed fields carefully — bool fields need $true/$false (var refs)
+- CompileResult and ProgramResult carry struct_registry pointer to VM; jacl_run and jacl_exec_program wire it
 
 ## 2026-03-11 - US-001
 Thread: (inline)
@@ -53,4 +60,51 @@ Thread: (inline)
   - struct_registry is lazily allocated on root compiler but pre-allocated in compiler_compile() and jacl_compile_program() entry points. Module compilers share via root.
   - compiler__resolve_type() should be used anywhere struct names need to be valid as type annotations. is_type_keyword() only handles built-in types.
   - The `to:` builtin (type conversion) intentionally does NOT support struct types — left as-is.
+---
+
+## 2026-03-11 - US-003
+Thread: (inline)
+- Added JACL_TAG_STRUCT (0x12) value tag, OBJ_STRUCT GC object type, JaclStruct heap type
+- Added OP_STRUCT_NEW opcode with uint16_t struct_type_index operand
+- Implemented struct constructor detection in compiler (compile_command), with compile-time arity and type checking
+- Implemented OP_STRUCT_NEW VM handler: pops N fields, stores in C-ABI layout, pushes tagged struct value
+- Added struct printing in OP_PRINT: displays as StructName{field: val, ...}
+- Added GC tracing for OBJ_STRUCT via gc__struct_registry (void* global, cast in gc_collect.c)
+- Wired struct_registry from CompileResult/ProgramResult to VM
+- Added 4 compiler tests and 2 integration tests
+- Files changed: src/value.c, src/gc.c, src/gc_collect.c, src/bytecode.c, src/compiler.c, src/vm.c, src/runtime.c, test/test_bytecode.c, test/test_compiler.c, test/jacl/struct_basic.jacl, test/jacl/struct_types.jacl
+- **Learnings for future iterations:**
+  - gc.c is included BEFORE compiler.c in the unity build, so gc__struct_registry must be void* (StructTypeRegistry not yet defined)
+  - Struct constructor detection must be placed BEFORE the dynamic call fallback in compile_command, otherwise the struct name matches as a global proc call
+  - In JACL, `true`/`false` are bare words (AST_LIT_STRING, type=str), not keywords. For bool struct fields, use $true/$false (var refs) in tests
+  - OP_STRUCT_NEW stores field values based on field type: raw types (i64/u64/f64) are unboxed on stack, inline types (i32/u32/f32/bool) are extracted from JaclVal, reference types (str/dyn/vec/map/struct) stored as JaclVal
+  - The OP_HALT value changes when new opcodes are added — update test_bytecode.c opcode_enum test
+---
+
+## 2026-03-11 - US-004
+Thread: (inline)
+- Added OP_STRUCT_GET opcode: uint16_t field_offset + uint8_t field_type operands
+- Implemented [. $struct field] syntax in compiler with compile-time field resolution
+- Added last_struct_idx tracking to Compiler, Local, GlobalArity, and Upvalue for struct type propagation
+- Added struct type inference in def/mut (TYPE_STRUCT now inferred from RHS like unboxed types)
+- Nested field access works: [. [. $line start] x] — each [.] produces the correct struct type index
+- Added 3 compiler tests and 2 integration tests
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - `def p [Point 1 2]` without `:Point` annotation needs struct type inference — added `|| rhs_type == TYPE_STRUCT` to effective_type logic
+  - last_struct_idx must propagate through: struct constructor, variable reads (local/upvalue/global), field access results, and upvalue captures
+  - OP_STRUCT_GET uses field_type to reconstruct the correct JaclVal: raw types become tagged, reference types are read as JaclVal directly
+---
+
+## 2026-03-11 - US-005
+Thread: (inline)
+- Added OP_STRUCT_SET opcode: uint16_t field_offset + uint8_t field_type operands
+- Overloaded [. $struct field value] syntax: 2-arg = get, 3-arg = set (mutation)
+- `.set!` cannot be a single token because `.` is an operator char — `.set!` lexes as `. set !`
+- OP_STRUCT_SET pops value and struct, stores value at field offset, pushes struct back (for chaining)
+- Added 3 compiler tests and 1 integration test
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_compiler.c, test/jacl/struct_set.jacl
+- **Learnings for future iterations:**
+  - When JACL syntax can't support a new keyword due to lexer constraints, overloading existing operators by arity is the preferred pattern
+  - The `.` handler dispatches get vs set by checking child_count: 2 = get, 3 = set, anything else = error
 ---

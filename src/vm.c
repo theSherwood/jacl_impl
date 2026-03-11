@@ -3925,6 +3925,73 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_STRUCT_SET: {
+        uint16_t field_offset = vm__read_u16(vm);
+        uint8_t field_type = vm__read_byte(vm);
+        JaclVal new_val;
+        result = vm__pop(vm, &new_val);
+        if (result != VM_OK) return result;
+        JaclVal struct_val;
+        result = vm__pop(vm, &struct_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(struct_val)) {
+          result = vm__push(vm, struct_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_struct(struct_val)) {
+          vm__set_error(vm, "field mutation on non-struct value");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclStruct* s = jacl_as_struct_ptr(struct_val);
+        switch ((JaclType)field_type) {
+          case TYPE_BOOL: {
+            uint8_t b = jacl_as_bool(new_val) ? 1 : 0;
+            s->data[field_offset] = b;
+            break;
+          }
+          case TYPE_I32: {
+            int32_t n = jacl_as_i32(new_val);
+            memcpy(s->data + field_offset, &n, 4);
+            break;
+          }
+          case TYPE_U32: {
+            uint32_t n = jacl_as_u32(new_val);
+            memcpy(s->data + field_offset, &n, 4);
+            break;
+          }
+          case TYPE_F32: {
+            float f = jacl_as_f32(new_val);
+            memcpy(s->data + field_offset, &f, 4);
+            break;
+          }
+          case TYPE_I64: {
+            int64_t n = (int64_t)new_val;
+            memcpy(s->data + field_offset, &n, 8);
+            break;
+          }
+          case TYPE_U64: {
+            uint64_t n = new_val;
+            memcpy(s->data + field_offset, &n, 8);
+            break;
+          }
+          case TYPE_F64: {
+            double d;
+            memcpy(&d, &new_val, 8);
+            memcpy(s->data + field_offset, &d, 8);
+            break;
+          }
+          default: {
+            memcpy(s->data + field_offset, &new_val, sizeof(JaclVal));
+            break;
+          }
+        }
+        /* Push struct value back (for chaining) */
+        result = vm__push(vm, struct_val);
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_STRUCT_NEW: {
         uint16_t type_idx = vm__read_u16(vm);
         if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {

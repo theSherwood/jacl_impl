@@ -4685,6 +4685,76 @@ static int test_struct_get_nested(void) {
   TEST_PASS();
 }
 
+/* ===== US-005 (Struct): Field mutation ===== */
+
+static int test_struct_set_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult r = jacl_run(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "def p [Point 10 20]\n"
+      "[. $p x 99]\n"
+      "print [. $p x]\n"
+      "print [. $p y]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_set_unknown_field(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "defstruct Point [x :i32] [y :i32]\n"
+      "def p [Point 1 2]\n"
+      "[. $p z 99]", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_set_preserves_other_fields(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult r = jacl_run(
+      "defstruct Pair [a :i32] [b :i32]\n"
+      "def p [Pair 1 2]\n"
+      "[. $p a 42]\n"
+      "print [. $p b]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -4870,6 +4940,10 @@ int main(void) {
     { "struct_get_basic",                test_struct_get_basic },
     { "struct_get_unknown_field",        test_struct_get_unknown_field },
     { "struct_get_nested",               test_struct_get_nested },
+    /* US-005 (Struct): Field mutation */
+    { "struct_set_basic",                test_struct_set_basic },
+    { "struct_set_unknown_field",        test_struct_set_unknown_field },
+    { "struct_set_preserves_other",      test_struct_set_preserves_other_fields },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

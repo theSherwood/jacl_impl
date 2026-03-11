@@ -4528,10 +4528,11 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* Struct field access: [. $struct_val field_name] */
+  /* Struct field access/mutation: [. $s field] or [. $s field value] */
   if (compiler__head_matches(head, ".", 1)) {
-    if (argc != 2) {
-      compiler__builtin_arity_error(c, line, col, ".", "2 arguments (struct and field name)", argc);
+    bool is_set = (argc == 3);
+    if (argc != 2 && argc != 3) {
+      compiler__builtin_arity_error(c, line, col, ".", "2 or 3 arguments", argc);
       return;
     }
 
@@ -4576,14 +4577,43 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           return;
         }
 
-        /* Emit OP_STRUCT_GET + field_offset (u16) + field_type (u8) */
-        compiler__emit_byte(c, OP_STRUCT_GET, line);
-        compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
-        compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
+        if (is_set) {
+          /* Compile new value with type checking */
+          JaclType field_type = sdef->fields[fi].type;
+          c->expected_type = field_type;
+          compiler__compile_node(c, args[2]);
+          JaclType val_type = c->last_expr_type;
+          c->expected_type = TYPE_DYN;
 
-        c->last_expr_type = sdef->fields[fi].type;
-        if (sdef->fields[fi].type == TYPE_STRUCT)
-          c->last_struct_idx = sdef->fields[fi].struct_type_idx;
+          if (field_type != TYPE_DYN && val_type != TYPE_DYN && val_type != field_type) {
+            char err_msg[192];
+            snprintf(err_msg, sizeof(err_msg),
+                     "type error: field '%.*s' of struct '%.*s' expected %s, got %s",
+                     (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
+                     (int)sdef->name_len, sdef->name,
+                     type_name(field_type), type_name(val_type));
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+
+          /* Emit OP_STRUCT_SET + field_offset (u16) + field_type (u8) */
+          compiler__emit_byte(c, OP_STRUCT_SET, line);
+          compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
+          compiler__emit_byte(c, (uint8_t)field_type, line);
+
+          /* Returns struct value */
+          c->last_expr_type = TYPE_STRUCT;
+          c->last_struct_idx = struct_idx;
+        } else {
+          /* Emit OP_STRUCT_GET + field_offset (u16) + field_type (u8) */
+          compiler__emit_byte(c, OP_STRUCT_GET, line);
+          compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
+          compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
+
+          c->last_expr_type = sdef->fields[fi].type;
+          if (sdef->fields[fi].type == TYPE_STRUCT)
+            c->last_struct_idx = sdef->fields[fi].struct_type_idx;
+        }
         return;
       }
     }

@@ -53,7 +53,7 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -70,7 +70,7 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -87,8 +87,8 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Syntax is [. $struct field value] (3-arg dot) instead of [.set! ...] because .set! cannot lex as a single token"
     },
     {
       "id": "US-006",
