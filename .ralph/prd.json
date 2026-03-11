@@ -1,210 +1,288 @@
 {
   "project": "JACL",
-  "branchName": "ralph/struct-types",
-  "description": "Struct Types — user-defined compound value types with typed fields, C-ABI layout, dyn boxing, and module export/import, as precursor to FFI.",
+  "branchName": "ralph/ffi-embedding",
+  "description": "FFI & Embedding API (M17) — C embedding API for JACL: VM lifecycle, eval, native function registration, GC handles, struct interop, and closure-to-function-pointer trampolines via libffi.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "defstruct keyword and parser support",
-      "description": "As a developer, I need the lexer and parser to recognize struct definitions so that struct types can be declared in JACL source code.",
+      "title": "Public header — jacl.h with type declarations",
+      "description": "As a C developer embedding JACL, I need a single public header that declares the embedding API types so I can include one file and use JACL from my application.",
       "acceptanceCriteria": [
-        "`defstruct` is recognized as a keyword token (TOKEN_DEFSTRUCT)",
-        "Parse: `defstruct Point [x :i32] [y :i32]` produces AST_DEFSTRUCT node with name Point and field list",
-        "Each field is a [name :type] pair",
-        "Field types can be any existing type (:i32, :i64, :u32, :u64, :f32, :f64, :str, :bool, :dyn) or another named struct type",
-        "Error on duplicate field names within a struct",
-        "Error on zero fields (structs must have at least one field)",
-        "`defstruct` must appear at top level (not inside a proc or block)",
+        "include/jacl.h exists with JACL_API annotation macro for export/visibility",
+        "Declares opaque types: JaclVM, JaclHandle, JaclTrampoline",
+        "Re-exports JaclVal (uint64_t) and JaclType enum",
+        "All public symbols prefixed with Jacl or jacl_",
+        "#ifdef __cplusplus extern \"C\" guards",
+        "Version macros: JACL_VERSION_MAJOR, JACL_VERSION_MINOR, JACL_VERSION_PATCH",
+        "Header is self-contained (no transitive includes of internal headers)",
         "Build passes, all existing tests pass"
       ],
       "priority": 1,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Struct type registration in the compiler",
-      "description": "As a developer, I need the compiler to register struct definitions as named types so that struct names can be used as type annotations throughout the program.",
+      "title": "VM lifecycle — jacl_vm_new / jacl_vm_free",
+      "description": "As a C developer, I need to create and destroy JACL VMs so I can run JACL code from my application.",
       "acceptanceCriteria": [
-        "Add TYPE_STRUCT to JaclType enum",
-        "Compiler maintains a struct type registry (name to field list with types and offsets)",
-        "Struct names are valid type annotations: `def p :Point [Point 1 2]`",
-        "Error on duplicate struct name definitions",
-        "Error on struct fields referencing undefined struct types (forward references not allowed)",
-        "Struct types are available for use after their defstruct declaration (declaration order matters)",
+        "JaclVM* jacl_vm_new(void) allocates and initializes a new VM with default settings",
+        "void jacl_vm_free(JaclVM* vm) destroys VM and frees all associated memory (GC heap, intern table, struct registry)",
+        "JaclVM* jacl_vm_new_ex(const JaclConfig* config) creates VM with custom initial_heap_size, max_heap_size, max_handles (default 1024)",
+        "Multiple VMs can coexist in the same process without interfering",
+        "jacl_vm_free on NULL is a safe no-op",
+        "Function declarations added to jacl.h",
         "Build passes, all existing tests pass"
       ],
       "priority": 2,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-003",
-      "title": "Struct value representation and instantiation",
-      "description": "As a developer, I need to create struct instances at runtime so that JACL programs can work with structured data.",
+      "title": "Eval API — jacl_eval / jacl_eval_file",
+      "description": "As a C developer, I need to evaluate JACL source code strings and get results so I can script my application.",
       "acceptanceCriteria": [
-        "Add JACL_TAG_STRUCT tag for struct values",
-        "Struct instances are heap-allocated with fields laid out in declaration order using C-ABI alignment rules (natural alignment per field type, trailing padding to struct alignment)",
-        "Instantiation syntax: [Point 1 2] — struct name as command, positional arguments for fields in declaration order",
-        "Compile-time arity check: error if wrong number of arguments",
-        "Compile-time type check: each argument must match the declared field type",
-        "Add OP_STRUCT_NEW opcode: pops N field values from the stack, allocates struct, pushes struct value",
-        "Struct values carry a pointer to their type metadata (for field access and GC)",
+        "JaclVal jacl_eval(JaclVM* vm, const char* source) parses, compiles, and executes JACL source, returns result",
+        "JaclVal jacl_eval_file(JaclVM* vm, const char* path) reads file and evals contents",
+        "On parse/compile/runtime error, returns an error-flagged value",
+        "bool jacl_is_error(JaclVal val) checks error flag",
+        "const char* jacl_error_message(JaclVM* vm, JaclVal err) extracts error message string",
+        "Multiple sequential jacl_eval calls share the same VM state (globals persist)",
+        "Function declarations added to jacl.h",
         "Build passes, all existing tests pass"
       ],
       "priority": 3,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-004",
-      "title": "Field access",
-      "description": "As a developer, I need to read individual fields from a struct so that I can use struct data in expressions.",
+      "title": "Value constructors and extractors",
+      "description": "As a C developer, I need to create JACL values from C types and extract C types from JACL values so I can marshal data across the boundary.",
       "acceptanceCriteria": [
-        "Field access syntax: [. $point x] — dot command, struct value, field name",
-        "Add OP_STRUCT_GET opcode with field offset operand",
-        "Compiler resolves field name to offset at compile time — error on unknown field name",
-        "Compiler knows the result type of field access (the declared field type)",
-        "Works with nested structs: [. [. $line start] x] to access line.start.x",
-        "Error when used on non-struct values",
+        "Constructors: jacl_nil(), jacl_bool(bool), jacl_i32(int32_t), jacl_i64(JaclVM*, int64_t), jacl_u32(uint32_t), jacl_u64(JaclVM*, uint64_t), jacl_f32(float), jacl_f64(JaclVM*, double)",
+        "jacl_string(JaclVM* vm, const char* s, size_t len) creates JACL string from C buffer",
+        "jacl_string_cstr(JaclVM* vm, const char* s) convenience for null-terminated strings",
+        "Extractors: jacl_as_i32, jacl_as_i64, jacl_as_f32, jacl_as_f64, jacl_as_bool",
+        "jacl_as_cstr(JaclVM* vm, JaclVal val, size_t* len_out) returns pointer to string data",
+        "Type query: jacl_typeof(JaclVal) returns tag/type enum",
+        "Inline types (nil, bool, i32, f32, u32) require no VM pointer",
+        "Function declarations added to jacl.h",
         "Build passes, all existing tests pass"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": ""
+      "passes": false,
+      "notes": "Many of these already exist as static inline functions in value.c — this story wraps them as public API in jacl.h"
     },
     {
       "id": "US-005",
-      "title": "Field mutation",
-      "description": "As a developer, I need to modify struct fields in place so that structs work as mutable data containers.",
+      "title": "GC handle API — pin values from C",
+      "description": "As a C developer, I need to prevent the GC from collecting values I'm holding in C so that my references remain valid across GC cycles.",
       "acceptanceCriteria": [
-        "Field mutation syntax: [.set! $point x 42] — dot-set command, struct value, field name, new value",
-        "Add OP_STRUCT_SET opcode with field offset operand",
-        "Compiler resolves field name to offset at compile time — error on unknown field name",
-        "Compile-time type check: new value must match the declared field type",
-        "Returns the struct value (for chaining)",
-        "Error when used on non-struct values",
+        "JaclHandle jacl_handle_new(JaclVM* vm, JaclVal val) creates a GC root handle",
+        "JaclVal jacl_handle_get(JaclHandle h) retrieves the value from a handle",
+        "void jacl_handle_free(JaclVM* vm, JaclHandle h) releases the handle",
+        "Handles stored as JaclVal array on JaclVM, scanned as additional GC roots during mark phase",
+        "Free handles use a free list for reuse (no per-handle heap allocation)",
+        "Default max 1024 handles, configurable via JaclConfig",
+        "Function declarations added to jacl.h",
         "Build passes, all existing tests pass"
       ],
       "priority": 5,
-      "passes": true,
-      "notes": "Syntax is [. $struct field value] (3-arg dot) instead of [.set! ...] because .set! cannot lex as a single token"
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-006",
-      "title": "Struct boxing and dyn interop",
-      "description": "As a developer, I need to store structs in dynamically-typed collections so that structs integrate with JACL's existing vec and map types.",
+      "title": "Native function tag and OP_CALL dispatch",
+      "description": "As a developer, I need the VM to support a native function value type so that C functions can be called from JACL bytecode.",
       "acceptanceCriteria": [
-        "Struct values can be assigned to :dyn variables: `def d :dyn [Point 1 2]`",
-        "Structs can be stored in vec: [vec [Point 1 2] [Point 3 4]]",
-        "Structs can be stored as map values: [map \"origin\" [Point 0 0]]",
-        "Field access on a :dyn value holding a struct works with runtime type checking",
-        "OP_TO_DYN handles struct values (boxes them with their tag)",
+        "Add JACL_TAG_NATIVE_FN value tag",
+        "Native function signature: typedef JaclVal (*JaclNativeFn)(JaclVM* vm, JaclVal* args, int argc)",
+        "NativeFnEntry struct stores: function pointer, name, arity (-1 for variadic)",
+        "JaclVM has a native function registry (array of NativeFnEntry, indexed by payload)",
+        "OP_CALL checks tag — if JACL_TAG_NATIVE_FN, calls C function directly without pushing bytecode call frame",
+        "Native function receives args from VM stack, return value pushed onto stack",
         "Build passes, all existing tests pass"
       ],
       "priority": 6,
-      "passes": true,
-      "notes": "Dyn typed annotation syntax is `def dyn d expr` (not `:dyn`). Structs already work in vec/map since they are JaclVal. Added OP_STRUCT_GET_DYN and OP_STRUCT_SET_DYN for runtime field resolution."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-007",
-      "title": "Nested struct types",
-      "description": "As a developer, I need struct fields that are themselves structs so that I can model complex data.",
+      "title": "jacl_register_fn — register C functions",
+      "description": "As a C developer, I need to register C functions that JACL code can call as procs so I can extend JACL with native functionality.",
       "acceptanceCriteria": [
-        "Struct fields can reference other named struct types: `defstruct Line [start :Point] [end :Point]`",
-        "Instantiation works with nested structs: [Line [Point 0 0] [Point 10 10]]",
-        "Field access chains work: [. [. $line start] x]",
-        "Field mutation works on nested struct fields: [.set! [. $line start] x 5]",
-        "Compile-time type checking applies at all nesting levels",
+        "bool jacl_register_fn(JaclVM* vm, const char* name, JaclNativeFn fn, int arity) registers a native function",
+        "Registered functions callable from JACL: [my-native-fn 1 2 3]",
+        "Arity=-1 for variadic; arity mismatch produces compile-time error",
+        "Native function can return error-flagged values to propagate errors to JACL",
+        "Re-entrant: native functions can call jacl_call back into JACL",
+        "Function declaration added to jacl.h",
         "Build passes, all existing tests pass"
       ],
       "priority": 7,
-      "passes": true,
-      "notes": "Already implemented in US-002 through US-005. Added dedicated integration test."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-008",
-      "title": "Inline anonymous struct types (FFI prep)",
-      "description": "As a developer, I need to define anonymous struct types inline in FFI function signatures so that C struct parameters don't all need top-level defstruct declarations.",
+      "title": "jacl_call — call JACL functions from C",
+      "description": "As a C developer, I need to call JACL-defined procs from C so I can invoke callbacks and scripted logic from my host application.",
       "acceptanceCriteria": [
-        "Inline struct type syntax in type annotation position: :struct{x:i32,y:i32}",
-        "Inline structs can be used as field types in defstruct: `defstruct Wrapper [pos :struct{x:i32,y:i32}]`",
-        "Inline structs can nest: :struct{start:struct{x:i32,y:i32},end:struct{x:i32,y:i32}}",
-        "Inline struct types follow the same layout rules as named structs (C-ABI compatible)",
-        "Two inline structs with the same fields and types in the same order are structurally equivalent",
-        "Compiler generates internal type metadata for inline structs (no user-visible name)",
+        "JaclVal jacl_call(JaclVM* vm, JaclVal fn, JaclVal* args, int argc) calls a closure or native function",
+        "JaclVal jacl_call_named(JaclVM* vm, const char* name, JaclVal* args, int argc) looks up global proc by name",
+        "Returns function's return value, or error-flagged value on failure",
+        "Handles re-entrant calls (C calls JACL calls native C calls JACL)",
+        "Proper stack management: call frame pushed/popped correctly",
+        "Function declarations added to jacl.h",
         "Build passes, all existing tests pass"
       ],
       "priority": 8,
-      "passes": true,
-      "notes": "Parser builds canonical string like struct{x:i32,y:i32} stored as field type. Compiler registers inline structs in registry with structural equivalence via name match. Registry slot must be reserved before processing fields to prevent inline struct registration from overwriting the parent entry."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-009",
-      "title": "Module export/import of struct types",
-      "description": "As a developer, I need struct type definitions to be available across module boundaries so that modules can share structured data.",
+      "title": "Struct interop from C",
+      "description": "As a C developer, I need to create, read, and modify JACL structs from C so I can work with structured data across the embedding boundary.",
       "acceptanceCriteria": [
-        "Struct types defined in a module are exported by default (following existing convention — unless prefixed with _)",
-        "`use \"shapes.jacl\" [Point Line]` imports both struct type definitions and their constructors",
-        "Imported struct types can be used as type annotations in the importing module",
-        "Field access and mutation work on imported struct instances",
-        "Type checking across module boundaries works correctly (a Point from module A is the same type as Point imported from module A)",
-        "Private structs (_Point) cannot be imported — compile-time error",
+        "JaclVal jacl_struct_new(JaclVM* vm, const char* type_name, JaclVal* fields, int count) instantiates a struct",
+        "JaclVal jacl_struct_get(JaclVM* vm, JaclVal s, const char* field_name) reads a field by name",
+        "bool jacl_struct_set(JaclVM* vm, JaclVal s, const char* field_name, JaclVal value) writes a field",
+        "const char* jacl_struct_type_name(JaclVM* vm, JaclVal s) gets the struct type name",
+        "Type checking on set: returns false if value type doesn't match field type",
+        "GC write barrier triggered on struct field mutation of heap-typed fields",
+        "Function declarations added to jacl.h",
         "Build passes, all existing tests pass"
       ],
       "priority": 9,
-      "passes": true,
-      "notes": "Struct registry is shared across modules so struct types are already visible. Struct constructors are compile-time-only, so the use handler skips runtime bytecode for TYPE_STRUCT exports."
+      "passes": false,
+      "notes": "Uses existing StructTypeRegistry for offset/type lookup"
     },
     {
       "id": "US-010",
-      "title": "GC integration for struct values",
-      "description": "As a developer, I need the garbage collector to correctly trace and collect struct values so there are no memory leaks or use-after-free bugs.",
+      "title": "Build system — libffi detection and linking",
+      "description": "As a developer building JACL, I need the build system to detect and optionally link libffi for trampoline support.",
       "acceptanceCriteria": [
-        "GC traces struct fields that contain heap-allocated values (strings, other structs, closures, collections)",
-        "Struct instances are collected when unreachable",
-        "No use-after-free when structs are nested (inner struct outlives outer)",
-        "Stress test: allocate many structs in a loop, verify memory is reclaimed",
-        "Build passes, all existing tests pass"
+        "build.sh detects libffi via pkg-config --cflags --libs libffi (or fallback to standard paths)",
+        "If libffi found: defines JACL_HAS_LIBFFI=1, links -lffi",
+        "If libffi not found: builds without trampoline support, no error",
+        "bool jacl_has_trampolines(void) runtime query returns true/false",
+        "Build passes on macOS and Linux"
       ],
       "priority": 10,
-      "passes": true,
-      "notes": "GC tracing already implemented in gc_collect.c (OBJ_STRUCT case). gc__struct_registry wired from vm->struct_registry before GC. Added stress and nested survival integration tests."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-011",
-      "title": "E2E tests — struct basics",
-      "description": "As a developer, I need end-to-end tests covering struct definition, instantiation, field access, and mutation.",
+      "title": "Closure-to-function-pointer trampolines via libffi",
+      "description": "As a C developer, I need to obtain a C function pointer from a JACL closure so I can pass JACL callbacks to C libraries that expect function pointers.",
       "acceptanceCriteria": [
-        "Test: define struct, instantiate, access fields, verify values",
-        "Test: field mutation with [.set!], verify updated value",
-        "Test: struct as proc parameter and return value",
-        "Test: struct with all supported field types (i32, i64, u32, u64, f32, f64, str, bool, dyn)",
-        "Test: nested structs — access and mutate nested fields",
-        "Test: structs in collections (vec, map)",
-        "All tests pass"
+        "JaclTrampoline* jacl_trampoline_new(JaclVM* vm, JaclVal closure, const char* sig) creates C-callable function pointer",
+        "Signature format: i32(i32,i32) — types: void, i32, i64, u32, u64, f32, f64, ptr",
+        "void* jacl_trampoline_ptr(JaclTrampoline* t) returns raw C function pointer",
+        "void jacl_trampoline_free(JaclVM* vm, JaclTrampoline* t) releases trampoline and libffi resources",
+        "Trampoline pins closure via GC handle (prevents collection while alive)",
+        "When called: marshals C args to JaclVal, calls closure via jacl_call, marshals return back",
+        "Uses ffi_closure_alloc / ffi_prep_closure_loc from libffi",
+        "Guarded by #ifdef JACL_HAS_LIBFFI — stubs return NULL when unavailable",
+        "jacl_vm_free silently frees all outstanding trampolines",
+        "Function declarations added to jacl.h",
+        "Build passes, all existing tests pass"
       ],
       "priority": 11,
-      "passes": true,
-      "notes": "Added struct_proc.jacl and struct_all_types.jacl. Pre-existing tests cover definition, field access/mutation, nested structs, and collections."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-012",
-      "title": "E2E tests — error cases",
-      "description": "As a developer, I need tests verifying that struct-related errors are caught at compile time.",
+      "title": "Emscripten / WASM build target",
+      "description": "As a developer, I need JACL to compile to WebAssembly via Emscripten so the embedding API works in browser and WASI contexts.",
       "acceptanceCriteria": [
-        "Test: wrong number of fields in constructor produces compile error",
-        "Test: type mismatch in constructor argument produces compile error",
-        "Test: access nonexistent field produces compile error",
-        "Test: mutate field with wrong type produces compile error",
-        "Test: duplicate struct definition produces compile error",
-        "Test: duplicate field name in struct produces compile error",
-        "Test: undefined struct type in field produces compile error",
-        "All tests pass"
+        "emcc compiles all of JACL to .wasm + .js module",
+        "Embedding API functions exported via EMSCRIPTEN_KEEPALIVE or -s EXPORTED_FUNCTIONS",
+        "Threading primitives in platform.h compile as no-ops under Emscripten",
+        "GC works in single-threaded mode",
+        "Trampoline API stubs return NULL when called (runtime unsupported, not compile error)",
+        "Basic test: create VM, eval expression, extract result — works in Node.js",
+        "Build passes with emcc"
       ],
       "priority": 12,
-      "passes": true,
-      "notes": "Added struct_set_type_mismatch test. All other error cases already covered by pre-existing compiler tests from US-002 through US-005."
+      "passes": false,
+      "notes": "NxM scheduler degrades to single-worker event loop under Emscripten"
+    },
+    {
+      "id": "US-013",
+      "title": "E2E tests — embedding basics",
+      "description": "As a developer, I need end-to-end tests for the core embedding API to verify correctness.",
+      "acceptanceCriteria": [
+        "Test: create VM, eval [+ 1 2], extract i32 result, verify == 3, free VM",
+        "Test: eval with syntax error returns error-flagged value",
+        "Test: eval with runtime error returns error-flagged value with message",
+        "Test: create all value types from C, round-trip through eval, extract back",
+        "Test: string creation, extraction, and GC survival via handle",
+        "Test: multiple sequential evals share global state",
+        "Test: multiple independent VMs don't interfere",
+        "All tests pass, no memory leaks (ASAN clean)"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "E2E tests — native functions and jacl_call",
+      "description": "As a developer, I need tests for native function registration, calling conventions, and jacl_call.",
+      "acceptanceCriteria": [
+        "Test: register native function, call from JACL, verify args and return value",
+        "Test: variadic native function receives correct argc/argv",
+        "Test: native function returns error value, JACL propagates error flag",
+        "Test: native function calls jacl_call back into JACL (re-entrant)",
+        "Test: jacl_call_named looks up and calls a global proc",
+        "Test: register multiple native functions, call them in sequence",
+        "All tests pass, no memory leaks"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "E2E tests — GC handles",
+      "description": "As a developer, I need tests proving the handle API keeps values alive across GC cycles.",
+      "acceptanceCriteria": [
+        "Test: create handle, force GC, verify value survives",
+        "Test: free handle, force GC, verify value is collected",
+        "Test: create many handles (100+), GC stress, verify all survive",
+        "Test: handle to a struct — struct fields survive GC",
+        "Test: handle to a closure — closure and upvalues survive GC",
+        "All tests pass, no memory leaks"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "E2E tests — struct interop and trampolines",
+      "description": "As a developer, I need tests for struct manipulation from C and closure-to-function-pointer trampolines.",
+      "acceptanceCriteria": [
+        "Test: create struct from C via jacl_struct_new, read fields, verify values",
+        "Test: mutate struct field from C, read back from JACL, verify change",
+        "Test: type mismatch on struct set returns false",
+        "Test: create trampoline from JACL closure, call C function pointer, verify closure executes",
+        "Test: trampoline with various signatures (void return, multiple args, different types)",
+        "Test: free trampoline, verify closure becomes collectible",
+        "Test: trampoline used as callback to C qsort — sort array using JACL comparator",
+        "All tests pass, no memory leaks (trampoline tests skipped when JACL_HAS_LIBFFI is 0)"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
     }
   ]
 }

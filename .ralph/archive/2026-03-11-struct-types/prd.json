@@ -1,0 +1,210 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/struct-types",
+  "description": "Struct Types — user-defined compound value types with typed fields, C-ABI layout, dyn boxing, and module export/import, as precursor to FFI.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "defstruct keyword and parser support",
+      "description": "As a developer, I need the lexer and parser to recognize struct definitions so that struct types can be declared in JACL source code.",
+      "acceptanceCriteria": [
+        "`defstruct` is recognized as a keyword token (TOKEN_DEFSTRUCT)",
+        "Parse: `defstruct Point [x :i32] [y :i32]` produces AST_DEFSTRUCT node with name Point and field list",
+        "Each field is a [name :type] pair",
+        "Field types can be any existing type (:i32, :i64, :u32, :u64, :f32, :f64, :str, :bool, :dyn) or another named struct type",
+        "Error on duplicate field names within a struct",
+        "Error on zero fields (structs must have at least one field)",
+        "`defstruct` must appear at top level (not inside a proc or block)",
+        "Build passes, all existing tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Struct type registration in the compiler",
+      "description": "As a developer, I need the compiler to register struct definitions as named types so that struct names can be used as type annotations throughout the program.",
+      "acceptanceCriteria": [
+        "Add TYPE_STRUCT to JaclType enum",
+        "Compiler maintains a struct type registry (name to field list with types and offsets)",
+        "Struct names are valid type annotations: `def p :Point [Point 1 2]`",
+        "Error on duplicate struct name definitions",
+        "Error on struct fields referencing undefined struct types (forward references not allowed)",
+        "Struct types are available for use after their defstruct declaration (declaration order matters)",
+        "Build passes, all existing tests pass"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Struct value representation and instantiation",
+      "description": "As a developer, I need to create struct instances at runtime so that JACL programs can work with structured data.",
+      "acceptanceCriteria": [
+        "Add JACL_TAG_STRUCT tag for struct values",
+        "Struct instances are heap-allocated with fields laid out in declaration order using C-ABI alignment rules (natural alignment per field type, trailing padding to struct alignment)",
+        "Instantiation syntax: [Point 1 2] — struct name as command, positional arguments for fields in declaration order",
+        "Compile-time arity check: error if wrong number of arguments",
+        "Compile-time type check: each argument must match the declared field type",
+        "Add OP_STRUCT_NEW opcode: pops N field values from the stack, allocates struct, pushes struct value",
+        "Struct values carry a pointer to their type metadata (for field access and GC)",
+        "Build passes, all existing tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Field access",
+      "description": "As a developer, I need to read individual fields from a struct so that I can use struct data in expressions.",
+      "acceptanceCriteria": [
+        "Field access syntax: [. $point x] — dot command, struct value, field name",
+        "Add OP_STRUCT_GET opcode with field offset operand",
+        "Compiler resolves field name to offset at compile time — error on unknown field name",
+        "Compiler knows the result type of field access (the declared field type)",
+        "Works with nested structs: [. [. $line start] x] to access line.start.x",
+        "Error when used on non-struct values",
+        "Build passes, all existing tests pass"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Field mutation",
+      "description": "As a developer, I need to modify struct fields in place so that structs work as mutable data containers.",
+      "acceptanceCriteria": [
+        "Field mutation syntax: [.set! $point x 42] — dot-set command, struct value, field name, new value",
+        "Add OP_STRUCT_SET opcode with field offset operand",
+        "Compiler resolves field name to offset at compile time — error on unknown field name",
+        "Compile-time type check: new value must match the declared field type",
+        "Returns the struct value (for chaining)",
+        "Error when used on non-struct values",
+        "Build passes, all existing tests pass"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Syntax is [. $struct field value] (3-arg dot) instead of [.set! ...] because .set! cannot lex as a single token"
+    },
+    {
+      "id": "US-006",
+      "title": "Struct boxing and dyn interop",
+      "description": "As a developer, I need to store structs in dynamically-typed collections so that structs integrate with JACL's existing vec and map types.",
+      "acceptanceCriteria": [
+        "Struct values can be assigned to :dyn variables: `def d :dyn [Point 1 2]`",
+        "Structs can be stored in vec: [vec [Point 1 2] [Point 3 4]]",
+        "Structs can be stored as map values: [map \"origin\" [Point 0 0]]",
+        "Field access on a :dyn value holding a struct works with runtime type checking",
+        "OP_TO_DYN handles struct values (boxes them with their tag)",
+        "Build passes, all existing tests pass"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Dyn typed annotation syntax is `def dyn d expr` (not `:dyn`). Structs already work in vec/map since they are JaclVal. Added OP_STRUCT_GET_DYN and OP_STRUCT_SET_DYN for runtime field resolution."
+    },
+    {
+      "id": "US-007",
+      "title": "Nested struct types",
+      "description": "As a developer, I need struct fields that are themselves structs so that I can model complex data.",
+      "acceptanceCriteria": [
+        "Struct fields can reference other named struct types: `defstruct Line [start :Point] [end :Point]`",
+        "Instantiation works with nested structs: [Line [Point 0 0] [Point 10 10]]",
+        "Field access chains work: [. [. $line start] x]",
+        "Field mutation works on nested struct fields: [.set! [. $line start] x 5]",
+        "Compile-time type checking applies at all nesting levels",
+        "Build passes, all existing tests pass"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "Already implemented in US-002 through US-005. Added dedicated integration test."
+    },
+    {
+      "id": "US-008",
+      "title": "Inline anonymous struct types (FFI prep)",
+      "description": "As a developer, I need to define anonymous struct types inline in FFI function signatures so that C struct parameters don't all need top-level defstruct declarations.",
+      "acceptanceCriteria": [
+        "Inline struct type syntax in type annotation position: :struct{x:i32,y:i32}",
+        "Inline structs can be used as field types in defstruct: `defstruct Wrapper [pos :struct{x:i32,y:i32}]`",
+        "Inline structs can nest: :struct{start:struct{x:i32,y:i32},end:struct{x:i32,y:i32}}",
+        "Inline struct types follow the same layout rules as named structs (C-ABI compatible)",
+        "Two inline structs with the same fields and types in the same order are structurally equivalent",
+        "Compiler generates internal type metadata for inline structs (no user-visible name)",
+        "Build passes, all existing tests pass"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "Parser builds canonical string like struct{x:i32,y:i32} stored as field type. Compiler registers inline structs in registry with structural equivalence via name match. Registry slot must be reserved before processing fields to prevent inline struct registration from overwriting the parent entry."
+    },
+    {
+      "id": "US-009",
+      "title": "Module export/import of struct types",
+      "description": "As a developer, I need struct type definitions to be available across module boundaries so that modules can share structured data.",
+      "acceptanceCriteria": [
+        "Struct types defined in a module are exported by default (following existing convention — unless prefixed with _)",
+        "`use \"shapes.jacl\" [Point Line]` imports both struct type definitions and their constructors",
+        "Imported struct types can be used as type annotations in the importing module",
+        "Field access and mutation work on imported struct instances",
+        "Type checking across module boundaries works correctly (a Point from module A is the same type as Point imported from module A)",
+        "Private structs (_Point) cannot be imported — compile-time error",
+        "Build passes, all existing tests pass"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "Struct registry is shared across modules so struct types are already visible. Struct constructors are compile-time-only, so the use handler skips runtime bytecode for TYPE_STRUCT exports."
+    },
+    {
+      "id": "US-010",
+      "title": "GC integration for struct values",
+      "description": "As a developer, I need the garbage collector to correctly trace and collect struct values so there are no memory leaks or use-after-free bugs.",
+      "acceptanceCriteria": [
+        "GC traces struct fields that contain heap-allocated values (strings, other structs, closures, collections)",
+        "Struct instances are collected when unreachable",
+        "No use-after-free when structs are nested (inner struct outlives outer)",
+        "Stress test: allocate many structs in a loop, verify memory is reclaimed",
+        "Build passes, all existing tests pass"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "GC tracing already implemented in gc_collect.c (OBJ_STRUCT case). gc__struct_registry wired from vm->struct_registry before GC. Added stress and nested survival integration tests."
+    },
+    {
+      "id": "US-011",
+      "title": "E2E tests — struct basics",
+      "description": "As a developer, I need end-to-end tests covering struct definition, instantiation, field access, and mutation.",
+      "acceptanceCriteria": [
+        "Test: define struct, instantiate, access fields, verify values",
+        "Test: field mutation with [.set!], verify updated value",
+        "Test: struct as proc parameter and return value",
+        "Test: struct with all supported field types (i32, i64, u32, u64, f32, f64, str, bool, dyn)",
+        "Test: nested structs — access and mutate nested fields",
+        "Test: structs in collections (vec, map)",
+        "All tests pass"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "Added struct_proc.jacl and struct_all_types.jacl. Pre-existing tests cover definition, field access/mutation, nested structs, and collections."
+    },
+    {
+      "id": "US-012",
+      "title": "E2E tests — error cases",
+      "description": "As a developer, I need tests verifying that struct-related errors are caught at compile time.",
+      "acceptanceCriteria": [
+        "Test: wrong number of fields in constructor produces compile error",
+        "Test: type mismatch in constructor argument produces compile error",
+        "Test: access nonexistent field produces compile error",
+        "Test: mutate field with wrong type produces compile error",
+        "Test: duplicate struct definition produces compile error",
+        "Test: duplicate field name in struct produces compile error",
+        "Test: undefined struct type in field produces compile error",
+        "All tests pass"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "Added struct_set_type_mismatch test. All other error cases already covered by pre-existing compiler tests from US-002 through US-005."
+    }
+  ]
+}
