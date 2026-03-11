@@ -410,6 +410,106 @@ static int run_jacl_test(const char* filepath) {
   return ok;
 }
 
+/* ===== Module (multi-file) test runner ===== */
+
+/* Runs a module test from a subdirectory containing main.jacl.
+   Uses jacl_compile_program / jacl_exec_program for multi-file support.
+   Returns 1 if pass, 0 if fail. */
+static int run_module_test(const char* dir_path) {
+  char main_path[1024];
+  snprintf(main_path, sizeof(main_path), "%s/main.jacl", dir_path);
+
+  char* source = read_file(main_path);
+  if (!source) {
+    fprintf(stderr, "  Could not read file: %s\n", main_path);
+    return 0;
+  }
+
+  /* Parse expectations from main.jacl */
+  Expectations exp;
+  if (!parse_expectations(source, &exp)) {
+    free(source);
+    return 0;
+  }
+  free(source);
+
+  /* Resolve to absolute path for module system */
+  char abs_path[1024];
+  if (!realpath(main_path, abs_path)) {
+    fprintf(stderr, "  Could not resolve path: %s\n", main_path);
+    return 0;
+  }
+
+  /* Set up VM */
+  arena_t arena = {0};
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.intern_table = &intern_table;
+
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Compile multi-file program */
+  ProgramResult prog = jacl_compile_program(abs_path, &arena, &intern_table, &vm.heap);
+
+  if (prog.error_count > 0) {
+    if (exp.expect_error) {
+      int match = prog.error_message && strstr(prog.error_message, exp.error_substr);
+      vm_destroy(&vm);
+      arena_destroy(&arena);
+      return match != 0;
+    }
+    fprintf(stderr, "  Compile error: %s\n",
+            prog.error_message ? prog.error_message : "(unknown)");
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    return 0;
+  }
+
+  /* If expecting a compile error but compilation succeeded, fail */
+  if (exp.expect_error) {
+    fprintf(stderr, "  Expected compile error containing \"%s\", but compilation succeeded\n",
+            exp.error_substr);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    return 0;
+  }
+
+  /* Execute program */
+  VMResult result = jacl_exec_program(&prog, &vm);
+
+  int ok = 1;
+
+  if (result != VM_OK) {
+    fprintf(stderr, "  Runtime error: %s\n",
+            vm.error_message ? vm.error_message : "(unknown)");
+    ok = 0;
+  } else {
+    /* Build expected output string */
+    char expected[8192];
+    expected[0] = '\0';
+    for (int i = 0; i < exp.count; i++) {
+      strcat(expected, exp.lines[i]);
+      strcat(expected, "\n");
+    }
+
+    if (strcmp(cap.buf, expected) != 0) {
+      fprintf(stderr, "  Output mismatch:\n");
+      fprintf(stderr, "    Expected: \"%s\"\n", expected);
+      fprintf(stderr, "    Actual:   \"%s\"\n", cap.buf);
+      ok = 0;
+    }
+  }
+
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  return ok;
+}
+
 /* ===== Directory scanning ===== */
 
 /* Compare function for qsort of filenames */
@@ -465,6 +565,63 @@ static void run_directory(const char* dirpath, int* passed, int* failed) {
   }
 }
 
+/* Scan modules directory for subdirectories, run each as a module test. */
+static void run_modules_directory(const char* dirpath, int* passed, int* failed) {
+  DIR* dir = opendir(dirpath);
+  if (!dir) {
+    /* No modules directory is fine — just skip */
+    return;
+  }
+
+  /* Collect subdirectory names for deterministic ordering */
+  char* dirnames[MAX_TEST_FILES];
+  int dir_count = 0;
+
+  struct dirent* entry;
+  while ((entry = readdir(dir)) != NULL) {
+    /* Skip . and .. */
+    if (entry->d_name[0] == '.') continue;
+
+    /* Check if it's a directory by trying to open dir_path/name/main.jacl */
+    char check_path[1024];
+    snprintf(check_path, sizeof(check_path), "%s/%s/main.jacl", dirpath, entry->d_name);
+    FILE* f = fopen(check_path, "r");
+    if (f) {
+      fclose(f);
+      if (dir_count < MAX_TEST_FILES) {
+        dirnames[dir_count] = (char*)malloc(strlen(entry->d_name) + 1);
+        strcpy(dirnames[dir_count], entry->d_name);
+        dir_count++;
+      }
+    }
+  }
+  closedir(dir);
+
+  if (dir_count == 0) return;
+
+  /* Sort alphabetically for deterministic ordering */
+  qsort(dirnames, (size_t)dir_count, sizeof(char*), cmp_strings);
+
+  printf("\n  --- Module tests ---\n");
+
+  /* Run each subdirectory */
+  for (int i = 0; i < dir_count; i++) {
+    char subdir[1024];
+    snprintf(subdir, sizeof(subdir), "%s/%s", dirpath, dirnames[i]);
+
+    printf("  %-40s ", dirnames[i]);
+    if (run_module_test(subdir)) {
+      printf("PASS\n");
+      (*passed)++;
+    } else {
+      printf("FAIL\n");
+      (*failed)++;
+    }
+
+    free(dirnames[i]);
+  }
+}
+
 /* ===== Main ===== */
 
 int main(int argc, char* argv[]) {
@@ -493,6 +650,7 @@ int main(int argc, char* argv[]) {
   } else {
     /* Directory mode */
     run_directory("test/jacl", &passed, &failed);
+    run_modules_directory("test/jacl/modules", &passed, &failed);
   }
 
   printf("\n  %d/%d passed\n", passed, passed + failed);
