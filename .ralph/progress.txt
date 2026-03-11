@@ -126,3 +126,10 @@ Thread: (inline)
   - `jacl_inline_string(str, len)` creates inline string JaclVal, `chunk_add_constant(chunk, val)` adds to constant pool
   - vec-get/map-get don't set last_expr_type, so variables assigned from them default to TYPE_DYN — which triggers the dynamic field access path
 ---
+
+## 2026-03-11 - US-007
+Thread: (inline)
+- All acceptance criteria already passing from US-002 through US-005 implementation
+- Nested struct types, chained field access, and nested field mutation all work
+- Added struct_nested_set.jacl integration test
+---
