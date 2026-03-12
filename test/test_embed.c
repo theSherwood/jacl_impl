@@ -850,6 +850,181 @@ static int test_native_fn_typeof(void) {
   return 1;
 }
 
+/* ===== US-007: jacl_register_fn — register C functions ===== */
+
+/* Test: register native fn via public API and call from JACL */
+static int test_register_fn_basic(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  bool ok = jacl_register_fn_val(vm, "nadd2", native_add, 2);
+  ASSERT(ok);
+
+  JaclVal result = jacl_eval(vm, "[nadd2 3 7]");
+  ASSERT(!jacl_is_error(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 10);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: registered function callable with expression syntax [fn args] */
+static int test_register_fn_call_syntax(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  jacl_register_fn_val(vm, "ft2", native_fortytwo, 0);
+
+  JaclVal result = jacl_eval(vm, "[ft2]");
+  ASSERT(!jacl_is_error(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 42);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: variadic native function (arity=-1) via public API */
+static int test_register_fn_variadic(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  bool ok = jacl_register_fn_val(vm, "vsum", native_sum, -1);
+  ASSERT(ok);
+
+  JaclVal r1 = jacl_eval(vm, "[vsum 1 2 3 4]");
+  ASSERT(!jacl_is_error(r1));
+  ASSERT_INT_EQ(jacl_as_i32(r1), 10);
+
+  /* Single arg */
+  JaclVal r2 = jacl_eval(vm, "[vsum 99]");
+  ASSERT(!jacl_is_error(r2));
+  ASSERT_INT_EQ(jacl_as_i32(r2), 99);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: arity mismatch produces compile-time error */
+static int test_register_fn_arity_mismatch(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  jacl_register_fn_val(vm, "nadd3", native_add, 2);
+
+  /* Too few args */
+  JaclVal r1 = jacl_eval(vm, "[nadd3 1]");
+  ASSERT(jacl_is_error(r1));
+
+  /* Too many args */
+  JaclVal r2 = jacl_eval(vm, "[nadd3 1 2 3]");
+  ASSERT(jacl_is_error(r2));
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: native function returns error-flagged value, propagates to JACL */
+static int test_register_fn_error_propagation(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  jacl_register_fn_val(vm, "nfail2", native_fail, 0);
+
+  JaclVal result = jacl_eval(vm, "[nfail2]");
+  ASSERT(jacl_is_error(result));
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Native fn that calls jacl_eval (re-entrant) */
+static JaclVal native_reenter(JaclVM* vm, JaclVal* args, int argc) {
+  (void)args; (void)argc;
+  return jacl_eval(vm, "[+ 100 200]");
+}
+
+/* Test: re-entrant — native function calls back into JACL via jacl_eval */
+static int test_register_fn_reentrant(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  jacl_register_fn_val(vm, "reen", native_reenter, 0);
+
+  JaclVal result = jacl_eval(vm, "[reen]");
+  ASSERT(!jacl_is_error(result));
+  ASSERT(jacl_is_i32(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 300);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: register multiple native functions, call them in sequence */
+static int test_register_fn_multiple(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  jacl_register_fn_val(vm, "ra", native_add, 2);
+  jacl_register_fn_val(vm, "rb", native_fortytwo, 0);
+  jacl_register_fn_val(vm, "rc", native_sum, -1);
+
+  JaclVal r1 = jacl_eval(vm, "[ra 5 5]");
+  ASSERT(!jacl_is_error(r1));
+  ASSERT_INT_EQ(jacl_as_i32(r1), 10);
+
+  JaclVal r2 = jacl_eval(vm, "[rb]");
+  ASSERT(!jacl_is_error(r2));
+  ASSERT_INT_EQ(jacl_as_i32(r2), 42);
+
+  JaclVal r3 = jacl_eval(vm, "[rc 1 2 3 4 5]");
+  ASSERT(!jacl_is_error(r3));
+  ASSERT_INT_EQ(jacl_as_i32(r3), 15);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: jacl_register_fn returns false for NULL/invalid inputs */
+static int test_register_fn_null_safety(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  ASSERT(!jacl_register_fn_val(NULL, "test", native_add, 2));
+  ASSERT(!jacl_register_fn_val(vm, NULL, native_add, 2));
+  ASSERT(!jacl_register_fn_val(vm, "test", NULL, 2));
+  /* Name too long (>7 bytes) */
+  ASSERT(!jacl_register_fn_val(vm, "toolongname", native_add, 2));
+  /* Empty name */
+  ASSERT(!jacl_register_fn_val(vm, "", native_add, 2));
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: re-registering same name updates the function */
+static int test_register_fn_reregister(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  jacl_register_fn_val(vm, "rfn", native_fortytwo, 0);
+
+  JaclVal r1 = jacl_eval(vm, "[rfn]");
+  ASSERT(!jacl_is_error(r1));
+  ASSERT_INT_EQ(jacl_as_i32(r1), 42);
+
+  /* Re-register with a different function — however, since embed__register_native
+   * adds a new entry (existing name check updates env value), subsequent eval
+   * should use the new fn. */
+  jacl_register_fn_val(vm, "rfn", native_add, 2);
+
+  JaclVal r2 = jacl_eval(vm, "[rfn 5 6]");
+  ASSERT(!jacl_is_error(r2));
+  ASSERT_INT_EQ(jacl_as_i32(r2), 11);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
 int main(void) {
   int pass = 0, fail = 0;
 
@@ -916,6 +1091,17 @@ int main(void) {
   RUN(test_native_fn_args);
   RUN(test_native_fn_multiple);
   RUN(test_native_fn_typeof);
+
+  printf("\n=== Embedding API: jacl_register_fn ===\n");
+  RUN(test_register_fn_basic);
+  RUN(test_register_fn_call_syntax);
+  RUN(test_register_fn_variadic);
+  RUN(test_register_fn_arity_mismatch);
+  RUN(test_register_fn_error_propagation);
+  RUN(test_register_fn_reentrant);
+  RUN(test_register_fn_multiple);
+  RUN(test_register_fn_null_safety);
+  RUN(test_register_fn_reregister);
 
   printf("\n%d passed, %d failed\n", pass, fail);
   return fail > 0 ? 1 : 0;

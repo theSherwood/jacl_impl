@@ -191,23 +191,59 @@ static JaclVal jacl_eval(JaclVM* jvm, const char* source) {
                                                    : "compile error");
   }
 
+  /* Save VM execution state for re-entrant calls */
+  uint32_t saved_stack_top   = vm->stack_top;
+  uint32_t saved_frame_count = vm->frame_count;
+  uint8_t* saved_ip          = vm->ip;
+  BytecodeChunk* saved_chunk = vm->chunk;
+  BytecodeChunk* saved_top   = vm->top_chunk;
+  void*    saved_struct_reg  = vm->struct_registry;
+
+  /* For re-entrant calls: save active stack and frames on C stack */
+  JaclVal saved_stack[VM_STACK_MAX];
+  CallFrame saved_frames[VM_FRAMES_MAX];
+  if (saved_stack_top > 0)
+    memcpy(saved_stack, vm->stack, saved_stack_top * sizeof(JaclVal));
+  if (saved_frame_count > 0)
+    memcpy(saved_frames, vm->frames, saved_frame_count * sizeof(CallFrame));
+
   vm->struct_registry = cr.struct_registry;
 
   /* Reset stack for execution but preserve env (globals) */
   vm->stack_top = 0;
   vm->frame_count = 0;
 
+  /* Helper macro to restore VM state before returning */
+  #define EVAL_RESTORE() do { \
+    if (saved_stack_top > 0) \
+      memcpy(vm->stack, saved_stack, saved_stack_top * sizeof(JaclVal)); \
+    if (saved_frame_count > 0) \
+      memcpy(vm->frames, saved_frames, saved_frame_count * sizeof(CallFrame)); \
+    vm->stack_top      = saved_stack_top; \
+    vm->frame_count    = saved_frame_count; \
+    vm->ip             = saved_ip; \
+    vm->chunk          = saved_chunk; \
+    vm->top_chunk      = saved_top; \
+    vm->struct_registry = saved_struct_reg; \
+  } while (0)
+
+  JaclVal eval_result;
+
   if (cr.suspending) {
     /* CPS-transformed code — run to get main closure, then call with resolve_k */
     VMResult r = vm_exec(vm, &cr.chunk);
     if (r != VM_OK) {
-      return embed__make_error(jvm, vm->error_message ? vm->error_message
-                                                      : "runtime error");
+      eval_result = embed__make_error(jvm, vm->error_message ? vm->error_message
+                                                              : "runtime error");
+      EVAL_RESTORE();
+      return eval_result;
     }
 
     JaclVal main_cl_val = vm->stack[0];
     if (!jacl_is_closure(main_cl_val)) {
-      return embed__make_error(jvm, "internal error: CPS top-level did not produce closure");
+      eval_result = embed__make_error(jvm, "internal error: CPS top-level did not produce closure");
+      EVAL_RESTORE();
+      return eval_result;
     }
     JaclClosure *main_cl = jacl_as_closure(main_cl_val);
 
@@ -241,32 +277,44 @@ static JaclVal jacl_eval(JaclVM* jvm, const char* source) {
 
     r = vm__run(vm, 1);
     if (r != VM_OK) {
-      return embed__make_error(jvm, vm->error_message ? vm->error_message
-                                                      : "runtime error");
+      eval_result = embed__make_error(jvm, vm->error_message ? vm->error_message
+                                                              : "runtime error");
+      EVAL_RESTORE();
+      return eval_result;
     }
 
     JaclFuture *cfut = jacl_as_future(completion);
     uint32_t state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_RELAXED);
     if (state == FUTURE_RESOLVED) {
-      return (JaclVal)cfut->result;
+      eval_result = (JaclVal)cfut->result;
     } else if (state == FUTURE_ERROR) {
-      return embed__make_error(jvm, "runtime error in CPS execution");
+      eval_result = embed__make_error(jvm, "runtime error in CPS execution");
+    } else {
+      eval_result = JACL_NIL;
     }
-    return JACL_NIL;
+    EVAL_RESTORE();
+    return eval_result;
   }
 
   /* Non-CPS: straightforward execution */
   VMResult r = vm_exec(vm, &cr.chunk);
   if (r != VM_OK) {
-    return embed__make_error(jvm, vm->error_message ? vm->error_message
-                                                    : "runtime error");
+    eval_result = embed__make_error(jvm, vm->error_message ? vm->error_message
+                                                            : "runtime error");
+    EVAL_RESTORE();
+    return eval_result;
   }
 
   /* Return the top-of-stack value, or nil if stack is empty */
   if (vm->stack_top > 0) {
-    return vm->stack[vm->stack_top - 1];
+    eval_result = vm->stack[vm->stack_top - 1];
+  } else {
+    eval_result = JACL_NIL;
   }
-  return JACL_NIL;
+  EVAL_RESTORE();
+  return eval_result;
+
+  #undef EVAL_RESTORE
 }
 
 /* --- jacl_eval_file — read file and eval contents --- */
@@ -509,6 +557,20 @@ static uint32_t embed__register_native(JaclVM* jvm, const char* name,
   env->values[env->count] = fn_val;
   env->count++;
   return idx;
+}
+
+/* ===== US-007: jacl_register_fn — public API for native function registration ===== */
+
+static bool jacl_register_fn_val(JaclVM* jvm, const char* name,
+                                  EmbedNativeFn fn, int arity) {
+  if (!jvm || !name || !fn) return false;
+  /* Name must fit inline string (<=7 bytes) */
+  size_t name_len = strlen(name);
+  if (name_len == 0 || name_len > 7) return false;
+  /* Arity must be -1 (variadic) or non-negative */
+  if (arity < -1) return false;
+  uint32_t idx = embed__register_native(jvm, name, fn, (int8_t)arity);
+  return idx != UINT32_MAX;
 }
 
 /* ===== US-005: GC handle API — pin values from C ===== */
