@@ -86,6 +86,7 @@ TESTS=(
     "test/test_jacl_harness.c|jacl_harness|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "test/test_embed.c|embed|${LIBFFI_FLAGS}"
     "test/test_e2e_embed_basics.c|e2e_embed_basics|${LIBFFI_FLAGS}"
+    "test/test_e2e_native_fns.c|e2e_native_fns|${LIBFFI_FLAGS}"
 )
 
 # Filter tests if --lib flag is set

@@ -247,7 +247,7 @@
         "All tests pass, no memory leaks"
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
