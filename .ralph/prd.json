@@ -72,7 +72,7 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Many of these already exist as static inline functions in value.c — this story wraps them as public API in jacl.h"
     },
     {
@@ -90,7 +90,7 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

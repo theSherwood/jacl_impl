@@ -517,6 +517,167 @@ static int test_value_roundtrip_eval(void) {
   return 1;
 }
 
+/* ===== US-005: GC handle API — pin values from C ===== */
+
+/* Test: create handle, get value back */
+static int test_handle_basic(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal val = jacl_i32_val(42);
+  EmbedJaclHandle h = jacl_handle_new_val(vm, val);
+  ASSERT(h.index != UINT32_MAX);
+
+  JaclVal got = jacl_handle_get_val(vm, h);
+  ASSERT(jacl_is_i32(got));
+  ASSERT_INT_EQ(jacl_as_i32(got), 42);
+
+  jacl_handle_free_val(vm, h);
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: handle keeps heap value alive across GC */
+static int test_handle_survives_gc(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  /* Create a heap-allocated string (>7 bytes → heap) */
+  JaclVal val = jacl_string_val(vm, "a longer string for GC test!!", 29);
+  ASSERT(jacl_is_string(val));
+  ASSERT(!jacl_is_inline_string(val));
+
+  /* Pin it with a handle */
+  EmbedJaclHandle h = jacl_handle_new_val(vm, val);
+  ASSERT(h.index != UINT32_MAX);
+
+  /* Force GC */
+  gc_collect_minor(&vm->vm.heap, &vm->vm, NULL);
+
+  /* Value should still be alive */
+  JaclVal got = jacl_handle_get_val(vm, h);
+  ASSERT(jacl_is_string(got));
+
+  size_t len = 0;
+  const char* s = jacl_as_cstr_val(vm, got, &len);
+  ASSERT(s != NULL);
+  ASSERT_SIZE_EQ(len, 29);
+  ASSERT(memcmp(s, "a longer string for GC test!!", 29) == 0);
+
+  jacl_handle_free_val(vm, h);
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: free handle, slot is reusable */
+static int test_handle_reuse(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal val1 = jacl_i32_val(10);
+  EmbedJaclHandle h1 = jacl_handle_new_val(vm, val1);
+  uint32_t idx1 = h1.index;
+
+  jacl_handle_free_val(vm, h1);
+
+  /* Next allocation should reuse the freed slot */
+  JaclVal val2 = jacl_i32_val(20);
+  EmbedJaclHandle h2 = jacl_handle_new_val(vm, val2);
+  ASSERT(h2.index == idx1);
+
+  JaclVal got = jacl_handle_get_val(vm, h2);
+  ASSERT_INT_EQ(jacl_as_i32(got), 20);
+
+  jacl_handle_free_val(vm, h2);
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: many handles (100+) can be created */
+static int test_handle_many(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  EmbedJaclHandle handles[200];
+  for (int i = 0; i < 200; i++) {
+    handles[i] = jacl_handle_new_val(vm, jacl_i32_val(i));
+    ASSERT(handles[i].index != UINT32_MAX);
+  }
+
+  /* Verify all values */
+  for (int i = 0; i < 200; i++) {
+    JaclVal got = jacl_handle_get_val(vm, handles[i]);
+    ASSERT_INT_EQ(jacl_as_i32(got), i);
+  }
+
+  /* Free all */
+  for (int i = 0; i < 200; i++) {
+    jacl_handle_free_val(vm, handles[i]);
+  }
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: handle exhaustion returns invalid handle */
+static int test_handle_exhaustion(void) {
+  JaclConfig config = { .max_handles = 4 };
+  JaclVM* vm = jacl_vm_new_ex(&config);
+  ASSERT(vm != NULL);
+
+  EmbedJaclHandle h[4];
+  for (int i = 0; i < 4; i++) {
+    h[i] = jacl_handle_new_val(vm, jacl_i32_val(i));
+    ASSERT(h[i].index != UINT32_MAX);
+  }
+
+  /* 5th handle should fail */
+  EmbedJaclHandle overflow = jacl_handle_new_val(vm, jacl_i32_val(99));
+  ASSERT(overflow.index == UINT32_MAX);
+
+  /* Free one and retry — should succeed now */
+  jacl_handle_free_val(vm, h[0]);
+  EmbedJaclHandle retry = jacl_handle_new_val(vm, jacl_i32_val(99));
+  ASSERT(retry.index != UINT32_MAX);
+  ASSERT_INT_EQ(jacl_as_i32(jacl_handle_get_val(vm, retry)), 99);
+
+  jacl_handle_free_val(vm, h[1]);
+  jacl_handle_free_val(vm, h[2]);
+  jacl_handle_free_val(vm, h[3]);
+  jacl_handle_free_val(vm, retry);
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: handle with NULL vm is safe */
+static int test_handle_null_vm(void) {
+  EmbedJaclHandle h = jacl_handle_new_val(NULL, jacl_i32_val(1));
+  ASSERT(h.index == UINT32_MAX);
+
+  JaclVal got = jacl_handle_get_val(NULL, h);
+  ASSERT(jacl_is_nil(got));
+
+  jacl_handle_free_val(NULL, h); /* should not crash */
+  return 1;
+}
+
+/* Test: default max_handles is 1024, configurable */
+static int test_handle_config(void) {
+  JaclVM* vm1 = jacl_vm_new();
+  ASSERT(vm1 != NULL);
+  ASSERT_U32_EQ(vm1->max_handles, 1024);
+  ASSERT_U32_EQ(vm1->handle_count, 1024);
+  jacl_vm_free(vm1);
+
+  JaclConfig config = { .max_handles = 2048 };
+  JaclVM* vm2 = jacl_vm_new_ex(&config);
+  ASSERT(vm2 != NULL);
+  ASSERT_U32_EQ(vm2->max_handles, 2048);
+  ASSERT_U32_EQ(vm2->handle_count, 2048);
+  jacl_vm_free(vm2);
+  return 1;
+}
+
 int main(void) {
   int pass = 0, fail = 0;
 
@@ -563,6 +724,15 @@ int main(void) {
   RUN(test_typeof_val);
   RUN(test_inline_no_vm);
   RUN(test_value_roundtrip_eval);
+
+  printf("\n=== Embedding API: GC handles ===\n");
+  RUN(test_handle_basic);
+  RUN(test_handle_survives_gc);
+  RUN(test_handle_reuse);
+  RUN(test_handle_many);
+  RUN(test_handle_exhaustion);
+  RUN(test_handle_null_vm);
+  RUN(test_handle_config);
 
   printf("\n%d passed, %d failed\n", pass, fail);
   return fail > 0 ? 1 : 0;

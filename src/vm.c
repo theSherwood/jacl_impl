@@ -91,6 +91,8 @@ typedef struct {
   uint32_t       error_line;     /* source line of last error */
   StackTrace     stack_trace;    /* most recent error's trace */
   StructTypeRegistry* struct_registry; /* struct type metadata from compiler */
+  JaclVal*   gc_handle_slots;  /* external GC root handles (owned by embedding layer) */
+  uint32_t   gc_handle_count;  /* number of slots in gc_handle_slots */
 } VM;
 
 /* --- API --- */
@@ -258,6 +260,8 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->error_line    = 0;
   vm->stack_trace.count = 0;
   vm->struct_registry = NULL;
+  vm->gc_handle_slots = NULL;
+  vm->gc_handle_count = 0;
 
   /* Initialize GC heap and make it available for collection templates */
   gc_block_pool_init(&vm->block_pool);

@@ -25,8 +25,13 @@ struct JaclVM_s {
   VM              vm;           /* internal VM */
   arena_t         arena;        /* owns all arena-allocated memory */
   JaclInternTable intern_table; /* persistent across evals */
-  uint32_t        max_handles;  /* configured max handles (for future use) */
+  uint32_t        max_handles;  /* configured max handles */
   const char*     last_error;   /* last error message (arena-allocated) */
+  /* GC handle storage */
+  JaclVal*        handle_slots;      /* array of handle values (JACL_NIL = free) */
+  uint32_t*       handle_free_list;  /* stack of free slot indices */
+  uint32_t        handle_count;      /* number of allocated slots */
+  uint32_t        handle_free_top;   /* top of free list stack */
 };
 
 /* --- Forward declare jacl_vm_new_ex so jacl_vm_new can call it --- */
@@ -78,6 +83,20 @@ static JaclVM* jacl_vm_new_ex(const JaclConfig* config) {
   jvm->max_handles = max_handles;
   jvm->last_error = NULL;
 
+  /* Allocate handle storage */
+  jvm->handle_slots = (JaclVal*)malloc(max_handles * sizeof(JaclVal));
+  jvm->handle_free_list = (uint32_t*)malloc(max_handles * sizeof(uint32_t));
+  jvm->handle_count = max_handles;
+  jvm->handle_free_top = max_handles;
+  /* Initialize all slots as free (JACL_NIL) and populate free list */
+  for (uint32_t i = 0; i < max_handles; i++) {
+    jvm->handle_slots[i] = JACL_NIL;
+    jvm->handle_free_list[i] = i;
+  }
+  /* Wire handle slots into VM for GC root scanning */
+  jvm->vm.gc_handle_slots = jvm->handle_slots;
+  jvm->vm.gc_handle_count = max_handles;
+
   return jvm;
 }
 
@@ -86,6 +105,10 @@ static JaclVM* jacl_vm_new_ex(const JaclConfig* config) {
 static void jacl_vm_free(JaclVM* vm) {
   if (!vm) return;
 
+  free(vm->handle_slots);
+  free(vm->handle_free_list);
+  vm->vm.gc_handle_slots = NULL;
+  vm->vm.gc_handle_count = 0;
   vm_destroy(&vm->vm);
   arena_destroy(&vm->arena);
   free(vm);
@@ -381,6 +404,38 @@ static int jacl_typeof_val(JaclVal val) {
     case JACL_TAG_STRUCT:        return EMBED_TYPE_STRUCT;
     default:                     return EMBED_TYPE_DYN;
   }
+}
+
+/* ===== US-005: GC handle API — pin values from C ===== */
+
+typedef struct { uint32_t index; } EmbedJaclHandle;
+
+static EmbedJaclHandle jacl_handle_new_val(JaclVM* jvm, JaclVal val) {
+  EmbedJaclHandle h = { .index = UINT32_MAX };
+  if (!jvm) return h;
+
+  if (jvm->handle_free_top == 0) {
+    /* No free handles available */
+    return h;
+  }
+
+  /* Pop a free slot from the free list */
+  uint32_t idx = jvm->handle_free_list[--jvm->handle_free_top];
+  jvm->handle_slots[idx] = val;
+  h.index = idx;
+  return h;
+}
+
+static JaclVal jacl_handle_get_val(JaclVM* jvm, EmbedJaclHandle h) {
+  if (!jvm || h.index >= jvm->handle_count) return JACL_NIL;
+  return jvm->handle_slots[h.index];
+}
+
+static void jacl_handle_free_val(JaclVM* jvm, EmbedJaclHandle h) {
+  if (!jvm || h.index >= jvm->handle_count) return;
+  /* Mark slot as free and push back to free list */
+  jvm->handle_slots[h.index] = JACL_NIL;
+  jvm->handle_free_list[jvm->handle_free_top++] = h.index;
 }
 
 #endif /* EMBED_C */

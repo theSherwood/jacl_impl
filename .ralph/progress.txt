@@ -29,6 +29,10 @@ Progress log for ralph/ffi-embedding branch.
 - defstruct emits only OP_NIL at runtime — no OP_DEF_GLOBAL. Struct constructors exist only at compile time
 - The OP_HALT value changes when new opcodes are added — update test_bytecode.c opcode_enum test
 - VM is single-threaded for external callers. NxM scheduler owns internal threading.
+- Public embed API constructors use `_val` suffix (jacl_i32_val) to avoid collision with internal names (jacl_i32)
+- Strings ≤7 bytes are inline (no heap needed); >7 bytes go through jacl_intern to GC heap
+- VM struct has gc_handle_slots/gc_handle_count fields for GC root scanning — set by embedding layer, scanned by gc_mark and gc_mark_minor
+- Handle API uses `_val` suffix (jacl_handle_new_val) and EmbedJaclHandle type to avoid collision with jacl.h declarations
 
 ## 2026-03-11 - US-001
 - Implemented `include/jacl.h` — the public embedding API header
@@ -77,4 +81,34 @@ Progress log for ralph/ffi-embedding branch.
   - Bare identifiers like `nil`, `true`, `false` are in VM env but NOT compiler-known — can't eval "nil" directly, must use `$nil` or expressions
   - `jacl_eval` must reset stack_top and frame_count before execution but NOT touch env (preserves globals)
   - embed.c error message function named `jacl_error_message_str` to avoid collision with any future internal `jacl_error_message`
+---
+
+## 2026-03-12 - US-004
+- Implemented value constructors and extractors in `src/embed.c`
+- Constructors: `jacl_nil_val`, `jacl_bool_val`, `jacl_i32_val`, `jacl_i64_val`, `jacl_u32_val`, `jacl_u64_val`, `jacl_f32_val`, `jacl_f64_val`, `jacl_string_val`, `jacl_string_cstr_val`
+- Extractors: `jacl_as_i32_val`, `jacl_as_i64_val`, `jacl_as_u32_val`, `jacl_as_u64_val`, `jacl_as_f32_val`, `jacl_as_f64_val`, `jacl_as_bool_val`, `jacl_as_cstr_val`
+- Type query: `jacl_typeof_val` maps internal tags to public JaclType enum
+- Added 16 tests covering all constructors, extractors, type queries, inline/heap strings, round-trip through eval
+- Files changed: src/embed.c, test/test_embed.c
+- **Learnings for future iterations:**
+  - Public API functions use `_val` suffix to avoid collision with internal constructors (e.g. `jacl_i32_val` vs `jacl_i32`)
+  - Strings ≤7 bytes use inline encoding (no heap allocation); longer strings go through `jacl_intern` to GC heap
+  - `jacl_as_cstr_val` must copy string data to arena with null terminator since neither inline nor heap strings are null-terminated
+  - Heap-allocated types (i64, u64, f64) need `ThreadHeap*` from `jvm->vm.heap` — can't be created without a VM
+  - `EmbedJaclType` enum in embed.c mirrors `JaclType` in jacl.h — both inline and heap strings map to EMBED_TYPE_STR
+---
+
+## 2026-03-12 - US-005
+- Implemented GC handle API: `jacl_handle_new_val`, `jacl_handle_get_val`, `jacl_handle_free_val` in `src/embed.c`
+- Added `gc_handle_slots` and `gc_handle_count` fields to VM struct for GC root scanning
+- Both `gc_mark` and `gc_mark_minor` now scan handle slots as additional GC roots
+- Handle storage: flat JaclVal array + uint32_t free list stack (no per-handle heap allocation)
+- Default 1024 handles, configurable via `JaclConfig.max_handles`
+- Added 7 tests: basic create/get/free, GC survival, slot reuse, many handles (200), exhaustion + recovery, NULL safety, config
+- Files changed: src/vm.c, src/gc_collect.c, src/embed.c, test/test_embed.c
+- **Learnings for future iterations:**
+  - Adding fields to VM struct doesn't require updating `rt_test__init_no_threads` if `vm_init` initializes them (vm_init sets fields explicitly)
+  - GC root scanning happens in two places: `gc_mark` (full GC) and `gc_mark_minor` (minor GC) — both must be updated
+  - Handle API uses EmbedJaclHandle type (struct with uint32_t index) to avoid collision with JaclHandle from jacl.h
+  - UINT32_MAX sentinel for invalid handle index works well for error signaling
 ---

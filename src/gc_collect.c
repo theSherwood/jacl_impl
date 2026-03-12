@@ -293,6 +293,13 @@ static void gc_mark(ThreadHeap *heap, VM *vm) {
         }
     }
 
+    /* 6. External GC handle slots (embedding API) */
+    if (vm->gc_handle_slots) {
+        for (uint32_t i = 0; i < vm->gc_handle_count; i++) {
+            gc__ms_push_val(&ms, vm->gc_handle_slots[i]);
+        }
+    }
+
     /* --- Mark loop --- */
     void *ptr;
     while (gc__ms_pop(&ms, &ptr)) {
@@ -505,7 +512,14 @@ static void gc_mark_minor(ThreadHeap *heap, VM *vm,
         }
     }
 
-    /* 6. Remembered set: trace old-gen containers' children.
+    /* 6. External GC handle slots (embedding API) */
+    if (vm->gc_handle_slots) {
+        for (uint32_t i = 0; i < vm->gc_handle_count; i++) {
+            gc__ms_push_val(&ms, vm->gc_handle_slots[i]);
+        }
+    }
+
+    /* 7. Remembered set: trace old-gen containers' children.
      * These are old-gen mutable refs that point to young-gen values.
      * We trace them so their young-gen children are marked. */
     if (remembered_set) {
