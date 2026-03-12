@@ -1,4 +1,44 @@
+## 2026-03-12 - US-015
+Thread: n/a
+- Implemented E2E tests for GC handles in `test/test_e2e_gc_handles.c`
+- 5 tests covering all acceptance criteria:
+  1. `test_e2e_gc_handle_survives`: pin heap string, force GC directly via gc_collect, verify JaclVal bits and string content intact
+  2. `test_e2e_gc_handle_free_releases`: free handle, force GC (no crash), verify slot returns JACL_NIL, verify LIFO free list reuses slot
+  3. `test_e2e_gc_many_handles`: 150 heap strings, all pinned, force GC, verify all 150 survive with correct content
+  4. `test_e2e_gc_handle_struct`: defstruct with `:str` field, create from C, pin struct, force GC, verify struct + string field survive
+  5. `test_e2e_gc_handle_closure`: nested proc with upvalue capture, call outer proc to create inner closure, pin closure (only root), force GC twice, call recovered closure and verify result
+- Added `force_gc_now` helper that calls `gc_collect` directly (available via unity build)
+- Added test entry to `build.sh`
+- All 52 tests pass (0 failures), including 5 new E2E tests
+- Files changed: test/test_e2e_gc_handles.c (new), build.sh, .ralph/prd.json
+- **Learnings for future iterations:**
+  - JACL requires named inner procs: `proc outer [n] { proc inner [x] { [+ $x $n] } }` NOT `proc outer [n] { proc [x] { [+ $x $n] } }` (anonymous procs not supported)
+  - To force GC in unity-build tests: call `gc_collect(&jvm->vm.heap, &jvm->vm)` directly — no need to allocate thousands of objects
+  - `force_gc_now` must be defined AFTER `#include "../src/jacl.c"` since it references internal `gc_collect` and `JaclVM_s` fields
+  - For "verify collection" tests: after `jacl_handle_free_val`, the slot is JACL_NIL; next allocation reuses it (LIFO free list); no crash after GC = collection was safe
+  - Struct with `:str` field syntax: `defstruct Item [name :str] [val :i32]` — works with `jacl_struct_new_val` passing a `jacl_string_cstr_val` result
+---
+
 ## FFI & Embedding API (M17) — C embedding API for JACL
+
+## 2026-03-12 - US-014
+Thread: n/a
+- Implemented E2E tests for native functions and jacl_call in `test/test_e2e_native_fns.c`
+- 6 tests covering all acceptance criteria:
+  1. `test_e2e_native_fn_register_and_call`: register native multiplier, call from JACL with literals/computed args, use inside JACL proc
+  2. `test_e2e_variadic_native_fn`: arity=-1 functions, verifies argc (0,1,4 args) and correct summation
+  3. `test_e2e_native_fn_error_propagation`: native error returned directly and propagated through a wrapping JACL proc; VM usable after error
+  4. `test_e2e_native_fn_reentrant`: native fn calls jacl_call_named_val back into JACL, chained calls, and jacl_call_val directly from C
+  5. `test_e2e_jacl_call_named`: jacl_call_named_val for i32 proc, string-returning proc, undefined name error, jacl_call_val on closure
+  6. `test_e2e_multiple_native_fns_sequence`: 5 native fns (2-arity, variadic argc, variadic sum, error, i32→string) called in sequence and combined in JACL expressions
+- Added test entry to `build.sh`
+- All 51 tests pass (0 failures), including 6 new E2E tests
+- Files changed: test/test_e2e_native_fns.c (new), build.sh, .ralph/prd.json
+- **Learnings for future iterations:**
+  - E2E test files use internal `_val` suffix names (jacl_register_fn_val, jacl_call_val, jacl_call_named_val, jacl_as_cstr_val, etc.) and EmbedJaclHandle — same as test_e2e_embed_basics.c, because they include ../src/jacl.c (unity build)
+  - JACL proc names must be ≤7 bytes (inline string limit) — `ctrpl` not `call_triple`
+  - The public jacl.h API names (jacl_register_fn, jacl_call, etc.) don't have implementations yet — tests use the _val internal names
+---
 
 Progress log for ralph/ffi-embedding branch.
 
