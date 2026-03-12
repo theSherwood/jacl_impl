@@ -174,7 +174,7 @@
         "Build passes on macOS and Linux"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -195,7 +195,7 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
