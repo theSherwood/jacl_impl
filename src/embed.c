@@ -980,6 +980,16 @@ static bool jacl_struct_set_val(JaclVM* jvm, JaclVal s_val,
   return false; /* field not found */
 }
 
+/* ===== US-010: jacl_has_trampolines — runtime libffi availability query ===== */
+
+static bool jacl_has_trampolines(void) {
+#ifdef JACL_HAS_LIBFFI
+  return true;
+#else
+  return false;
+#endif
+}
+
 /**
  * jacl_struct_type_name_val — get the struct type name from C.
  *

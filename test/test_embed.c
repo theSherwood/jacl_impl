@@ -1380,6 +1380,18 @@ static int test_struct_null_safety(void) {
   return 1;
 }
 
+/* ===== US-010: Build system / libffi detection ===== */
+
+/* Test: jacl_has_trampolines returns a bool consistent with compile-time detection */
+static int test_has_trampolines(void) {
+#ifdef JACL_HAS_LIBFFI
+  ASSERT(jacl_has_trampolines() == true);
+#else
+  ASSERT(jacl_has_trampolines() == false);
+#endif
+  return 1;
+}
+
 int main(void) {
   int pass = 0, fail = 0;
 
@@ -1478,6 +1490,9 @@ int main(void) {
   RUN(test_struct_new_wrong_count);
   RUN(test_struct_registry_persists);
   RUN(test_struct_null_safety);
+
+  printf("\n=== Embedding API: Build system / libffi ===\n");
+  RUN(test_has_trampolines);
 
   printf("\n%d passed, %d failed\n", pass, fail);
   return fail > 0 ? 1 : 0;

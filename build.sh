@@ -6,6 +6,21 @@ PASS=0
 FAIL=0
 FAILED_TESTS=""
 
+# Detect libffi for trampoline support
+LIBFFI_FLAGS=""
+if pkg-config --exists libffi 2>/dev/null; then
+  LIBFFI_CFLAGS="$(pkg-config --cflags libffi 2>/dev/null)"
+  LIBFFI_LIBS="$(pkg-config --libs libffi 2>/dev/null)"
+  LIBFFI_FLAGS="-DJACL_HAS_LIBFFI=1 ${LIBFFI_CFLAGS} ${LIBFFI_LIBS}"
+  echo "libffi: found via pkg-config"
+elif [ -f "/usr/include/ffi.h" ] || [ -f "/usr/local/include/ffi.h" ] || \
+     [ -f "/usr/include/x86_64-linux-gnu/ffi.h" ]; then
+  LIBFFI_FLAGS="-DJACL_HAS_LIBFFI=1 -lffi"
+  echo "libffi: found in standard paths"
+else
+  echo "libffi: not found (trampolines disabled)"
+fi
+
 LIB_ONLY=0
 for arg in "$@"; do
   case "$arg" in
@@ -69,7 +84,7 @@ TESTS=(
     "test/test_m12.c|m12|-Wall -Wextra -std=c99 -g -lpthread"
     "test/test_m13.c|m13|-Wall -Wextra -std=c99 -g -lpthread"
     "test/test_jacl_harness.c|jacl_harness|-Wall -Wextra -std=c99 -g -lpthread"
-    "test/test_embed.c|embed|"
+    "test/test_embed.c|embed|${LIBFFI_FLAGS}"
 )
 
 # Filter tests if --lib flag is set
