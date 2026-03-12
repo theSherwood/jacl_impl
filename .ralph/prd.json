@@ -159,7 +159,7 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "Uses existing StructTypeRegistry for offset/type lookup"
     },
     {

@@ -44,6 +44,9 @@ Progress log for ralph/ffi-embedding branch.
 - Build env: gcc unavailable; use `CC=/usr/bin/cc -Wno-implicit-function-declaration -lpthread -lm -D_POSIX_C_SOURCE=200809L` for embed tests. `realpath` errors in compiler.c are pre-existing.
 - Githooks runner broken by default; fix with: `echo '#!/bin/sh\nexit 0' > ~/githooks_runner.sh && chmod +x ~/githooks_runner.sh && git config githooks.runner ~/githooks_runner.sh`
 - jacl_call_val sets up 1 frame (frame_count=1), vm__run exits when OP_RETURN drops frame_count to 0, result in stack[0]
+- compiler_compile takes a `seed_registry` (StructTypeRegistry*) param — pass `&jvm->persistent_struct_registry` from embed to accumulate struct defs across evals; pass NULL from vm.c jacl_run
+- JaclVM_s.persistent_struct_registry holds accumulated struct defs; copy cr.struct_registry back to it after each eval
+- jacl_struct_new_val/get_val/set_val/type_name_val use `_val` suffix and `jvm->persistent_struct_registry` for name-based lookup (not index-based)
 
 ## 2026-03-11 - US-001
 - Implemented `include/jacl.h` — the public embedding API header
@@ -169,4 +172,23 @@ Progress log for ralph/ffi-embedding branch.
   - `vm__env_get` uses bitwise == on JaclVal — works for inline strings (same bit pattern) and interned heap strings (same pointer)
   - Build environment: gcc not available; use `CC=/usr/bin/cc` with `-Wno-implicit-function-declaration -lpthread -lm -D_POSIX_C_SOURCE=200809L`. The build.sh `realpath` errors are pre-existing in this environment.
   - Githooks runner was broken (non-existent path). Fixed by creating `/home/agent/githooks_runner.sh` and setting `git config githooks.runner` to it.
+---
+
+## 2026-03-12 - US-009
+- Implemented struct interop C API: `jacl_struct_new_val`, `jacl_struct_get_val`, `jacl_struct_set_val`, `jacl_struct_type_name_val` in `src/embed.c`
+- Added `seed_registry` parameter to `compiler_compile` (compiler.c) — seeded from `jvm->persistent_struct_registry` so struct defs accumulate across multiple `jacl_eval` calls
+- Added `persistent_struct_registry` (embedded StructTypeRegistry, not pointer) to `JaclVM_s` — updated after each eval from `cr.struct_registry`
+- `jacl_struct_new_val`: looks up struct type by name in persistent registry, allocates `JaclStruct` on GC heap, writes field values via `embed__struct_write_field`
+- `jacl_struct_get_val`: reads field by name, boxes value (i64/u64/f64 boxed via GC heap)
+- `jacl_struct_set_val`: type-checks value against field type, triggers `gc_write_barrier` for heap-typed fields (DYN/STR/VEC/MAP/CLOSURE/STRUCT), writes field
+- `jacl_struct_type_name_val`: returns arena-copied null-terminated type name string
+- Updated vm.c to pass NULL for `seed_registry` in `jacl_run` (non-embed path, no accumulation needed)
+- Added 8 tests: new+get, set+JACL readback, type mismatch, type name, unknown type, wrong count, registry persistence, null safety
+- Files changed: src/compiler.c, src/vm.c, src/embed.c, test/test_embed.c
+- **Learnings for future iterations:**
+  - `compiler_compile` creates a fresh StructTypeRegistry each call — to share struct defs across evals, seed it from a persistent registry before compile and copy back after
+  - `StructTypeDef` contains `const char*` pointers into the compilation arena — safe to copy the struct since all compilations use `jvm->arena` (persistent)
+  - After EVAL_RESTORE, `vm->struct_registry` is NULL — the persistent `jvm->persistent_struct_registry` must be the source of truth for C API struct lookups
+  - `jacl_as_i64`/`jacl_as_u64`/`jacl_as_f64` dereference heap pointers — use these to extract from boxed values when writing to struct fields; use `jacl_i64(&vm->heap, n)` etc. to box when reading from struct fields
+  - GC write barrier needs old+new JaclVal — read old value from struct data before overwriting, then call `gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, old, new)`
 ---
