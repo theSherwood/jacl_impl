@@ -107,7 +107,7 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -124,7 +124,7 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -141,7 +141,7 @@
         "Build passes, all existing tests pass"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
