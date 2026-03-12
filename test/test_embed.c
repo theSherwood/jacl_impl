@@ -1194,6 +1194,192 @@ static int test_call_multiple(void) {
   return 1;
 }
 
+/* ===== US-009: Struct interop from C ===== */
+
+/* Test: create struct from C via jacl_struct_new_val, read fields, verify values */
+static int test_struct_new_and_get(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  /* Define the struct type */
+  JaclVal def_r = jacl_eval(vm, "defstruct Point [x :i32] [y :i32]");
+  ASSERT(!jacl_is_error(def_r));
+
+  /* Create a struct from C */
+  JaclVal fields[2] = { jacl_i32(10), jacl_i32(20) };
+  JaclVal p = jacl_struct_new_val(vm, "Point", fields, 2);
+  ASSERT(!jacl_is_error(p));
+  ASSERT(jacl_is_struct(p));
+
+  /* Read fields from C */
+  JaclVal x = jacl_struct_get_val(vm, p, "x");
+  ASSERT(!jacl_is_error(x));
+  ASSERT(jacl_is_i32(x));
+  ASSERT_INT_EQ(jacl_as_i32(x), 10);
+
+  JaclVal y = jacl_struct_get_val(vm, p, "y");
+  ASSERT(!jacl_is_error(y));
+  ASSERT(jacl_is_i32(y));
+  ASSERT_INT_EQ(jacl_as_i32(y), 20);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: mutate struct field from C, read back from JACL, verify change */
+static int test_struct_set_and_read_from_jacl(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  /* Define struct and create instance in JACL */
+  JaclVal def_r = jacl_eval(vm,
+    "defstruct Box [v :i32]\n"
+    "def b [Box 5]");
+  ASSERT(!jacl_is_error(def_r));
+
+  /* Get the struct value from JACL */
+  JaclVal b = jacl_eval(vm, "$b");
+  ASSERT(!jacl_is_error(b));
+  ASSERT(jacl_is_struct(b));
+
+  /* Mutate the field from C */
+  bool ok = jacl_struct_set_val(vm, b, "v", jacl_i32(99));
+  ASSERT(ok);
+
+  /* Verify from C */
+  JaclVal v = jacl_struct_get_val(vm, b, "v");
+  ASSERT(!jacl_is_error(v));
+  ASSERT_INT_EQ(jacl_as_i32(v), 99);
+
+  /* Verify from JACL via dynamic field access */
+  JaclVal r = jacl_eval(vm, "[. $b v]");
+  ASSERT(!jacl_is_error(r));
+  ASSERT_INT_EQ(jacl_as_i32(r), 99);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: type mismatch on struct set returns false */
+static int test_struct_set_type_mismatch(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal def_r = jacl_eval(vm, "defstruct Pt2 [x :i32] [y :i32]");
+  ASSERT(!jacl_is_error(def_r));
+
+  JaclVal fields[2] = { jacl_i32(1), jacl_i32(2) };
+  JaclVal p = jacl_struct_new_val(vm, "Pt2", fields, 2);
+  ASSERT(!jacl_is_error(p));
+
+  /* Setting an i32 field to a bool should fail */
+  bool ok = jacl_struct_set_val(vm, p, "x", jacl_bool(true));
+  ASSERT(!ok);
+
+  /* Setting to correct type should succeed */
+  ok = jacl_struct_set_val(vm, p, "x", jacl_i32(42));
+  ASSERT(ok);
+  JaclVal x = jacl_struct_get_val(vm, p, "x");
+  ASSERT_INT_EQ(jacl_as_i32(x), 42);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: jacl_struct_type_name returns the struct type name */
+static int test_struct_type_name(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal def_r = jacl_eval(vm, "defstruct Vec2 [x :f32] [y :f32]");
+  ASSERT(!jacl_is_error(def_r));
+
+  JaclVal fields[2] = { jacl_f32(1.0f), jacl_f32(2.0f) };
+  JaclVal v = jacl_struct_new_val(vm, "Vec2", fields, 2);
+  ASSERT(!jacl_is_error(v));
+
+  const char* name = jacl_struct_type_name_val(vm, v);
+  ASSERT(name != NULL);
+  ASSERT(strcmp(name, "Vec2") == 0);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: unknown type name returns error */
+static int test_struct_new_unknown_type(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal fields[1] = { jacl_i32(0) };
+  JaclVal r = jacl_struct_new_val(vm, "NoSuch", fields, 1);
+  ASSERT(jacl_is_error(r));
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: wrong field count returns error */
+static int test_struct_new_wrong_count(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal def_r = jacl_eval(vm, "defstruct Pair [a :i32] [b :i32]");
+  ASSERT(!jacl_is_error(def_r));
+
+  /* Pass wrong count (1 instead of 2) */
+  JaclVal fields[1] = { jacl_i32(1) };
+  JaclVal r = jacl_struct_new_val(vm, "Pair", fields, 1);
+  ASSERT(jacl_is_error(r));
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: struct registry persists across multiple eval calls */
+static int test_struct_registry_persists(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  /* Define struct in eval 1 */
+  JaclVal def_r = jacl_eval(vm, "defstruct Cnt [n :i32]");
+  ASSERT(!jacl_is_error(def_r));
+
+  /* Create from C using persistent registry */
+  JaclVal fields[1] = { jacl_i32(7) };
+  JaclVal c = jacl_struct_new_val(vm, "Cnt", fields, 1);
+  ASSERT(!jacl_is_error(c));
+
+  JaclVal n = jacl_struct_get_val(vm, c, "n");
+  ASSERT_INT_EQ(jacl_as_i32(n), 7);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: null safety */
+static int test_struct_null_safety(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  /* NULL vm */
+  JaclVal r1 = jacl_struct_new_val(NULL, "Point", NULL, 0);
+  ASSERT(jacl_is_error(r1));
+
+  /* Not a struct */
+  bool ok = jacl_struct_set_val(vm, jacl_i32(1), "x", jacl_i32(0));
+  ASSERT(!ok);
+
+  JaclVal r2 = jacl_struct_get_val(vm, jacl_i32(1), "x");
+  ASSERT(jacl_is_error(r2));
+
+  const char* name = jacl_struct_type_name_val(vm, jacl_i32(1));
+  ASSERT(name == NULL);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
 int main(void) {
   int pass = 0, fail = 0;
 
@@ -1282,6 +1468,16 @@ int main(void) {
   RUN(test_call_wrong_arity);
   RUN(test_call_null_safety);
   RUN(test_call_multiple);
+
+  printf("\n=== Embedding API: Struct interop ===\n");
+  RUN(test_struct_new_and_get);
+  RUN(test_struct_set_and_read_from_jacl);
+  RUN(test_struct_set_type_mismatch);
+  RUN(test_struct_type_name);
+  RUN(test_struct_new_unknown_type);
+  RUN(test_struct_new_wrong_count);
+  RUN(test_struct_registry_persists);
+  RUN(test_struct_null_safety);
 
   printf("\n%d passed, %d failed\n", pass, fail);
   return fail > 0 ? 1 : 0;

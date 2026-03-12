@@ -4363,7 +4363,7 @@ static VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   JaclInternTable intern_table;
   intern_table_init(&intern_table, arena);
 
-  CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap);
+  CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL);
   if (cr.error_count > 0) {
     vm->error_message = cr.error_message ? cr.error_message : "compile error";
     return VM_RUNTIME_ERROR;

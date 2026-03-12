@@ -26,7 +26,8 @@ typedef struct {
 
 static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       JaclInternTable* intern_table,
-                                      ThreadHeap* heap);
+                                      ThreadHeap* heap,
+                                      StructTypeRegistry* seed_registry);
 
 /* jacl_compile_program forward-declared after ProgramResult (below) */
 
@@ -5524,7 +5525,8 @@ static bool compiler__top_level_suspends(AstNode** stmts, uint32_t count,
 
 static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       JaclInternTable* intern_table,
-                                      ThreadHeap* heap) {
+                                      ThreadHeap* heap,
+                                      StructTypeRegistry* seed_registry) {
   CompileResult result;
   chunk_init(&result.chunk, arena);
   result.error_count = parse.error_count;
@@ -5539,7 +5541,11 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   c.suspension_map = &suspension_map;
   {
     StructTypeRegistry* reg = (StructTypeRegistry*)arena_alloc(arena, sizeof(StructTypeRegistry));
-    reg->count = 0;
+    if (seed_registry) {
+      *reg = *seed_registry;  /* seed with accumulated struct defs */
+    } else {
+      reg->count = 0;
+    }
     c.struct_registry = reg;
   }
 

@@ -49,6 +49,8 @@ struct JaclVM_s {
   int8_t*         native_fn_arities; /* arity mirror for VM dispatch */
   uint32_t        native_fn_count;   /* number of registered functions */
   uint32_t        native_fn_cap;     /* capacity of native_fns array */
+  /* Persistent struct registry — accumulates across all jacl_eval calls */
+  StructTypeRegistry persistent_struct_registry;
 };
 
 /* --- Native function dispatch callback (called from VM's OP_CALL) --- */
@@ -59,6 +61,9 @@ static JaclVal embed__call_native(void* ctx, uint32_t fn_index,
   if (fn_index >= jvm->native_fn_count) return jacl_set_error(JACL_NIL);
   return jvm->native_fns[fn_index].fn(jvm, args, argc);
 }
+
+/* --- Forward declare StructTypeRegistry for persistent registry --- */
+/* (StructTypeRegistry is defined in compiler.c, included before embed.c) */
 
 /* --- Forward declare jacl_vm_new_ex so jacl_vm_new can call it --- */
 
@@ -123,6 +128,9 @@ static JaclVM* jacl_vm_new_ex(const JaclConfig* config) {
   jvm->vm.gc_handle_slots = jvm->handle_slots;
   jvm->vm.gc_handle_count = max_handles;
 
+  /* Initialize persistent struct registry (accumulates across evals) */
+  jvm->persistent_struct_registry.count = 0;
+
   /* Initialize native function registry */
   jvm->native_fns = (NativeFnEntry*)malloc(NATIVE_FN_INIT_CAP * sizeof(NativeFnEntry));
   jvm->native_fn_arities = (int8_t*)malloc(NATIVE_FN_INIT_CAP * sizeof(int8_t));
@@ -183,12 +191,18 @@ static JaclVal jacl_eval(JaclVM* jvm, const char* source) {
     return embed__make_error(jvm, "parse error");
   }
 
-  /* Compile — use persistent intern table */
+  /* Compile — use persistent intern table and seeded struct registry */
   CompileResult cr = compiler_compile(parse, &jvm->arena,
-                                      &jvm->intern_table, &vm->heap);
+                                      &jvm->intern_table, &vm->heap,
+                                      &jvm->persistent_struct_registry);
   if (cr.error_count > 0) {
     return embed__make_error(jvm, cr.error_message ? cr.error_message
                                                    : "compile error");
+  }
+
+  /* Update persistent struct registry with any new struct defs from this eval */
+  if (cr.struct_registry) {
+    jvm->persistent_struct_registry = *cr.struct_registry;
   }
 
   /* Save VM execution state for re-entrant calls */
@@ -737,6 +751,254 @@ static JaclVal jacl_call_named_val(JaclVM* jvm, const char* name,
   }
 
   return jacl_call_val(jvm, fn, args, argc);
+}
+
+/* ===== US-009: Struct interop from C ===== */
+
+/* Check whether a JaclVal matches a struct field type */
+static bool embed__val_matches_field_type(JaclVal val, int field_type) {
+  switch ((JaclType)field_type) {
+    case TYPE_BOOL:    return jacl_is_bool(val);
+    case TYPE_I32:     return jacl_is_i32(val);
+    case TYPE_U32:     return jacl_is_u32(val);
+    case TYPE_F32:     return jacl_is_f32(val);
+    case TYPE_I64:     return jacl_is_i64(val);
+    case TYPE_U64:     return jacl_is_u64(val);
+    case TYPE_F64:     return jacl_is_f64(val);
+    case TYPE_STR:     return jacl_is_string(val);
+    case TYPE_VEC:     return jacl_is_vector(val);
+    case TYPE_MAP:     return jacl_is_map(val);
+    case TYPE_CLOSURE: return jacl_is_closure(val);
+    case TYPE_STRUCT:  return jacl_is_struct(val);
+    case TYPE_DYN:     return true; /* any value accepted */
+    case TYPE_NIL:     return jacl_is_nil(val);
+  }
+  return false;
+}
+
+/* Read a field from struct data and return as JaclVal (always boxed) */
+static JaclVal embed__struct_read_field(JaclVM* jvm, JaclStruct* s,
+                                         uint32_t offset, int field_type) {
+  switch ((JaclType)field_type) {
+    case TYPE_BOOL: {
+      uint8_t b = s->data[offset];
+      return jacl_bool(b);
+    }
+    case TYPE_I32: {
+      int32_t n; memcpy(&n, s->data + offset, 4);
+      return jacl_i32(n);
+    }
+    case TYPE_U32: {
+      uint32_t n; memcpy(&n, s->data + offset, 4);
+      return jacl_u32(n);
+    }
+    case TYPE_F32: {
+      float f; memcpy(&f, s->data + offset, 4);
+      return jacl_f32(f);
+    }
+    case TYPE_I64: {
+      int64_t n; memcpy(&n, s->data + offset, 8);
+      return jacl_i64(&jvm->vm.heap, n);
+    }
+    case TYPE_U64: {
+      uint64_t n; memcpy(&n, s->data + offset, 8);
+      return jacl_u64(&jvm->vm.heap, n);
+    }
+    case TYPE_F64: {
+      double d; memcpy(&d, s->data + offset, 8);
+      return jacl_f64(&jvm->vm.heap, d);
+    }
+    default: {
+      /* str, vec, map, closure, dyn, struct — stored as full JaclVal */
+      JaclVal val; memcpy(&val, s->data + offset, sizeof(JaclVal));
+      return val;
+    }
+  }
+}
+
+/* Write a JaclVal to a struct field (caller must have already type-checked) */
+static void embed__struct_write_field(JaclStruct* s, uint32_t offset,
+                                       int field_type, JaclVal val) {
+  switch ((JaclType)field_type) {
+    case TYPE_BOOL: {
+      uint8_t b = jacl_as_bool(val) ? 1 : 0;
+      s->data[offset] = b;
+      break;
+    }
+    case TYPE_I32: {
+      int32_t n = jacl_as_i32(val);
+      memcpy(s->data + offset, &n, 4);
+      break;
+    }
+    case TYPE_U32: {
+      uint32_t n = jacl_as_u32(val);
+      memcpy(s->data + offset, &n, 4);
+      break;
+    }
+    case TYPE_F32: {
+      float f = jacl_as_f32(val);
+      memcpy(s->data + offset, &f, 4);
+      break;
+    }
+    case TYPE_I64: {
+      int64_t n = jacl_as_i64(val);
+      memcpy(s->data + offset, &n, 8);
+      break;
+    }
+    case TYPE_U64: {
+      uint64_t n = jacl_as_u64(val);
+      memcpy(s->data + offset, &n, 8);
+      break;
+    }
+    case TYPE_F64: {
+      double d = jacl_as_f64(val);
+      memcpy(s->data + offset, &d, 8);
+      break;
+    }
+    default: {
+      memcpy(s->data + offset, &val, sizeof(JaclVal));
+      break;
+    }
+  }
+}
+
+/**
+ * jacl_struct_new_val — instantiate a JACL struct from C.
+ *
+ * type_name: struct type name (must be registered via defstruct)
+ * fields:    array of count field values (in declaration order)
+ * count:     number of fields (must match struct's field_count)
+ *
+ * Returns the struct value, or error-flagged value on failure.
+ */
+static JaclVal jacl_struct_new_val(JaclVM* jvm, const char* type_name,
+                                    JaclVal* fields, int count) {
+  if (!jvm || !type_name) return jacl_set_error(JACL_NIL);
+
+  StructTypeRegistry* reg = &jvm->persistent_struct_registry;
+  uint32_t name_len = (uint32_t)strlen(type_name);
+  uint32_t type_idx = struct_registry__find(reg, type_name, name_len);
+  if (type_idx == UINT32_MAX) {
+    return embed__make_error(jvm, "unknown struct type");
+  }
+
+  StructTypeDef* sdef = &reg->defs[type_idx];
+  if (count != (int)sdef->field_count) {
+    return embed__make_error(jvm, "field count mismatch");
+  }
+
+  /* Allocate struct on GC heap */
+  JaclStruct* s = (JaclStruct*)gc_alloc(&jvm->vm.heap, OBJ_STRUCT,
+                                          sizeof(JaclStruct) + sdef->total_size);
+  if (!s) return embed__make_error(jvm, "allocation failed");
+
+  s->type_idx = type_idx;
+  s->_pad = 0;
+  memset(s->data, 0, sdef->total_size);
+
+  /* Store each field value */
+  for (int i = 0; i < count; i++) {
+    embed__struct_write_field(s, sdef->fields[i].offset,
+                               (int)sdef->fields[i].type, fields[i]);
+  }
+
+  return jacl_struct_val(s);
+}
+
+/**
+ * jacl_struct_get_val — read a struct field by name from C.
+ *
+ * Returns the field value (boxed), or error-flagged value on failure.
+ */
+static JaclVal jacl_struct_get_val(JaclVM* jvm, JaclVal s_val,
+                                    const char* field_name) {
+  if (!jvm || !field_name) return jacl_set_error(JACL_NIL);
+  if (!jacl_is_struct(s_val)) {
+    return embed__make_error(jvm, "not a struct value");
+  }
+
+  JaclStruct* s = jacl_as_struct_ptr(s_val);
+  StructTypeRegistry* reg = &jvm->persistent_struct_registry;
+  if (s->type_idx >= reg->count) {
+    return embed__make_error(jvm, "invalid struct type index");
+  }
+
+  StructTypeDef* sdef = &reg->defs[s->type_idx];
+  uint32_t fname_len = (uint32_t)strlen(field_name);
+
+  for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+    if (sdef->fields[fi].name_len == fname_len &&
+        memcmp(sdef->fields[fi].name, field_name, fname_len) == 0) {
+      return embed__struct_read_field(jvm, s, sdef->fields[fi].offset,
+                                      (int)sdef->fields[fi].type);
+    }
+  }
+
+  return embed__make_error(jvm, "no such field");
+}
+
+/**
+ * jacl_struct_set_val — write a struct field by name from C.
+ *
+ * Returns true on success, false if type mismatch or field not found.
+ * Triggers GC write barrier for heap-typed fields.
+ */
+static bool jacl_struct_set_val(JaclVM* jvm, JaclVal s_val,
+                                 const char* field_name, JaclVal value) {
+  if (!jvm || !field_name) return false;
+  if (!jacl_is_struct(s_val)) return false;
+
+  JaclStruct* s = jacl_as_struct_ptr(s_val);
+  StructTypeRegistry* reg = &jvm->persistent_struct_registry;
+  if (s->type_idx >= reg->count) return false;
+
+  StructTypeDef* sdef = &reg->defs[s->type_idx];
+  uint32_t fname_len = (uint32_t)strlen(field_name);
+
+  for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+    if (sdef->fields[fi].name_len == fname_len &&
+        memcmp(sdef->fields[fi].name, field_name, fname_len) == 0) {
+      int field_type = (int)sdef->fields[fi].type;
+      /* Type check */
+      if (!embed__val_matches_field_type(value, field_type)) {
+        return false;
+      }
+      /* GC write barrier for heap-typed fields (DYN, STR, VEC, MAP, CLOSURE, STRUCT) */
+      if (field_type == TYPE_DYN || field_type == TYPE_STR ||
+          field_type == TYPE_VEC || field_type == TYPE_MAP ||
+          field_type == TYPE_CLOSURE || field_type == TYPE_STRUCT) {
+        JaclVal old_val;
+        memcpy(&old_val, s->data + sdef->fields[fi].offset, sizeof(JaclVal));
+        gc_write_barrier(jvm->vm.grey_buf, jvm->vm.gc_active_ptr,
+                         old_val, value);
+      }
+      embed__struct_write_field(s, sdef->fields[fi].offset, field_type, value);
+      return true;
+    }
+  }
+
+  return false; /* field not found */
+}
+
+/**
+ * jacl_struct_type_name_val — get the struct type name from C.
+ *
+ * Returns an arena-allocated null-terminated string, or NULL on failure.
+ */
+static const char* jacl_struct_type_name_val(JaclVM* jvm, JaclVal s_val) {
+  if (!jvm) return NULL;
+  if (!jacl_is_struct(s_val)) return NULL;
+
+  JaclStruct* s = jacl_as_struct_ptr(s_val);
+  StructTypeRegistry* reg = &jvm->persistent_struct_registry;
+  if (s->type_idx >= reg->count) return NULL;
+
+  StructTypeDef* sdef = &reg->defs[s->type_idx];
+  /* Copy name to arena with null terminator for safe C string return */
+  char* buf = (char*)arena_alloc(&jvm->arena, sdef->name_len + 1);
+  memcpy(buf, sdef->name, sdef->name_len);
+  buf[sdef->name_len] = '\0';
+  return buf;
 }
 
 #endif /* EMBED_C */
