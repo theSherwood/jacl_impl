@@ -12,7 +12,38 @@
 
 #include <stdbool.h>
 
-#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) && !defined(__STDC_NO_ATOMICS__)
+/*
+ * Thread-local storage macro.
+ * Emscripten single-threaded: plain static (no TLS).
+ */
+#ifdef __EMSCRIPTEN__
+  #define JACL_THREAD_LOCAL /* nothing — single-threaded */
+#elif defined(_MSC_VER)
+  #define JACL_THREAD_LOCAL __declspec(thread)
+#else
+  #define JACL_THREAD_LOCAL __thread
+#endif
+
+#ifdef __EMSCRIPTEN__
+
+/* Emscripten: single-threaded — atomics are plain read/write */
+#define MEM_RELAXED 0
+#define MEM_ACQUIRE 1
+#define MEM_RELEASE 2
+#define MEM_ACQ_REL 3
+#define MEM_SEQ_CST 4
+
+#define ATOMIC_INC(ptr)  (++(*(ptr)))
+#define ATOMIC_DEC(ptr)  (--(*(ptr)))
+#define ATOMIC_LOAD(ptr) (*(ptr))
+
+#define ATOMIC_LOAD_EXPLICIT(ptr, order) (*(ptr))
+#define ATOMIC_STORE_EXPLICIT(ptr, val, order) (*(ptr) = (val))
+#define ATOMIC_CAS(ptr, expected, desired, succ, fail) \
+  (*(ptr) == *(expected) ? (*(ptr) = (desired), true) : (*(expected) = *(ptr), false))
+#define ATOMIC_FENCE(order) ((void)0)
+
+#elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) && !defined(__STDC_NO_ATOMICS__)
 
 /* C11 atomics (preferred when available) */
 #include <stdatomic.h>
@@ -132,7 +163,12 @@ static inline bool _platform_cas(volatile void* ptr, void* expected, long long d
  * ---------------------------------------------------------------------------
  */
 
-#ifdef _WIN32
+#ifdef __EMSCRIPTEN__
+
+/* Emscripten: no real sleep — yield or no-op */
+#define SLEEP_MILLISECONDS(ms) ((void)(ms))
+
+#elif defined(_WIN32)
 
 #include <windows.h>
 #define SLEEP_MILLISECONDS(ms) Sleep(ms)
@@ -154,7 +190,18 @@ static inline void SLEEP_MILLISECONDS(long ms) {
  * ---------------------------------------------------------------------------
  */
 
-#ifdef _WIN32
+#ifdef __EMSCRIPTEN__
+
+/* Emscripten: single-threaded — thread primitives are no-ops */
+#define THREAD_PROC_RETURN void*
+#define THREAD_PROC_TYPE
+typedef unsigned long thread_t;
+#define THREAD_CREATE(thread, attr, start_routine, arg) (*(thread) = 0, -1)
+#define THREAD_JOIN(thread, retval)                     ((void)(thread), (void)(retval))
+#define THREAD_SELF()                                   ((thread_t)0)
+#define THREAD_EQUAL(a, b)                              ((a) == (b))
+
+#elif defined(_WIN32)
 
 #include <windows.h>
 #define THREAD_PROC_RETURN DWORD
@@ -190,7 +237,16 @@ typedef pthread_t thread_t;
  * ---------------------------------------------------------------------------
  */
 
-#ifdef _WIN32
+#ifdef __EMSCRIPTEN__
+
+/* Emscripten: single-threaded — mutexes are no-ops */
+typedef int platform_mutex_t;
+#define MUTEX_INIT(m)    ((void)(m))
+#define MUTEX_LOCK(m)    ((void)(m))
+#define MUTEX_UNLOCK(m)  ((void)(m))
+#define MUTEX_DESTROY(m) ((void)(m))
+
+#elif defined(_WIN32)
 
 typedef CRITICAL_SECTION platform_mutex_t;
 #define MUTEX_INIT(m)    InitializeCriticalSection(&(m))

@@ -87,10 +87,10 @@ static void runtime_submit(Runtime *rt, void (*fn)(void *), void *data);
 static void gc_concurrent_collect(Runtime *rt);
 
 /* Thread-local worker ID (set in worker loop, -1 for non-worker threads) */
-static __thread int rt__worker_id = -1;
+static JACL_THREAD_LOCAL int rt__worker_id = -1;
 
 /* Thread-local pointer to current worker (set in worker loop) */
-static __thread WorkerThread *rt__current_worker = NULL;
+static JACL_THREAD_LOCAL WorkerThread *rt__current_worker = NULL;
 
 /* ======================================================================
  * Worker VM initialization — uses the shared block pool

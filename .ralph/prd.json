@@ -212,7 +212,7 @@
         "Build passes with emcc"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "NxM scheduler degrades to single-worker event loop under Emscripten"
     },
     {

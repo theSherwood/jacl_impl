@@ -193,7 +193,7 @@ static void gc_block_pool_destroy(BlockPool *pool) {
 /* Thread-local epoch for gc_alloc stamping. Workers set this from their
  * thread_epoch at the start of each task. Main thread leaves it at 0
  * (single-threaded mode doesn't use epoch watermarking). */
-static __thread uint32_t gc__thread_epoch = 0;
+static JACL_THREAD_LOCAL uint32_t gc__thread_epoch = 0;
 
 /* --- ThreadHeap: per-thread heap state --- */
 
@@ -247,8 +247,8 @@ static void gc_heap_destroy(ThreadHeap *heap) {
 
 /* --- Emergency GC callback (set by vm.c or runtime.c) --- */
 
-static __thread void (*gc__emergency_gc_fn)(void *ctx) = NULL;
-static __thread void *gc__emergency_gc_ctx = NULL;
+static JACL_THREAD_LOCAL void (*gc__emergency_gc_fn)(void *ctx) = NULL;
+static JACL_THREAD_LOCAL void *gc__emergency_gc_ctx = NULL;
 
 /* --- OOM panic handler --- */
 
@@ -657,7 +657,7 @@ static inline JaclVal jacl_f64_neg(ThreadHeap *heap, JaclVal a) {
  * so the template allocator can reach the current thread's GC heap.
  * Each worker thread sets its own copy in the task execution loop. */
 
-static __thread ThreadHeap *gc__current_heap = NULL;
+static JACL_THREAD_LOCAL ThreadHeap *gc__current_heap = NULL;
 
 /* --- Global struct registry pointer for GC tracing ---
  * Type is void* because StructTypeRegistry is defined in compiler.c,
