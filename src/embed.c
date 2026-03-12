@@ -12,12 +12,47 @@
 /* --- Types from jacl.h (cannot include directly due to redefinition conflicts) --- */
 
 typedef struct JaclVM_s JaclVM;
+typedef struct JaclTrampoline_s JaclTrampoline;
 
 typedef struct {
   size_t   initial_heap_size;
   size_t   max_heap_size;
   uint32_t max_handles;
 } JaclConfig;
+
+/* --- Trampoline type IDs (for signature parsing and marshaling) --- */
+
+#define TRAMP_TYPE_VOID    0
+#define TRAMP_TYPE_I32     1
+#define TRAMP_TYPE_I64     2
+#define TRAMP_TYPE_U32     3
+#define TRAMP_TYPE_U64     4
+#define TRAMP_TYPE_F32     5
+#define TRAMP_TYPE_F64     6
+#define TRAMP_TYPE_PTR     7
+#define TRAMP_TYPE_UNKNOWN 255
+
+#ifdef JACL_HAS_LIBFFI
+#include <ffi.h>
+struct JaclTrampoline_s {
+  JaclVM*         jvm;
+  JaclVal         closure;         /* pinned closure value */
+  uint32_t        handle_idx;      /* GC handle slot index */
+  void*           ffi_closure;     /* libffi writable closure (for ffi_closure_free) */
+  void*           code_ptr;        /* executable function pointer */
+  ffi_cif         cif;
+  ffi_type**      ffi_arg_types;   /* array of ffi_type pointers (malloc'd) */
+  int             arg_types_id[16];
+  int             arg_count;
+  int             ret_type_id;
+  JaclTrampoline* vm_next;         /* linked list node in JaclVM_s */
+};
+#else
+struct JaclTrampoline_s { int _unused; }; /* stub — never allocated without libffi */
+#endif
+
+/* Forward declaration — defined at end of file in trampoline section */
+static void embed__free_all_trampolines(JaclVM* jvm);
 
 /* --- Native function signature and registry entry --- */
 
@@ -51,6 +86,8 @@ struct JaclVM_s {
   uint32_t        native_fn_cap;     /* capacity of native_fns array */
   /* Persistent struct registry — accumulates across all jacl_eval calls */
   StructTypeRegistry persistent_struct_registry;
+  /* Live trampolines — freed on jacl_vm_free */
+  JaclTrampoline* trampoline_list;
 };
 
 /* --- Native function dispatch callback (called from VM's OP_CALL) --- */
@@ -131,6 +168,9 @@ static JaclVM* jacl_vm_new_ex(const JaclConfig* config) {
   /* Initialize persistent struct registry (accumulates across evals) */
   jvm->persistent_struct_registry.count = 0;
 
+  /* Initialize trampoline list */
+  jvm->trampoline_list = NULL;
+
   /* Initialize native function registry */
   jvm->native_fns = (NativeFnEntry*)malloc(NATIVE_FN_INIT_CAP * sizeof(NativeFnEntry));
   jvm->native_fn_arities = (int8_t*)malloc(NATIVE_FN_INIT_CAP * sizeof(int8_t));
@@ -158,6 +198,7 @@ static void jacl_vm_free(JaclVM* vm) {
   free(vm->native_fn_arities);
   vm->vm.call_native = NULL;
   vm->vm.native_fn_count = 0;
+  embed__free_all_trampolines(vm);
   vm_destroy(&vm->vm);
   arena_destroy(&vm->arena);
   free(vm);
@@ -989,6 +1030,221 @@ static bool jacl_has_trampolines(void) {
   return false;
 #endif
 }
+
+/* ===== US-011: Closure-to-function-pointer trampolines via libffi ===== */
+
+#ifdef JACL_HAS_LIBFFI
+
+/* Parse a single type token from signature string, advance *p */
+static int tramp__parse_type(const char** p) {
+  const char* s = *p;
+  if      (strncmp(s, "void", 4) == 0) { *p += 4; return TRAMP_TYPE_VOID; }
+  else if (strncmp(s, "i32",  3) == 0) { *p += 3; return TRAMP_TYPE_I32;  }
+  else if (strncmp(s, "i64",  3) == 0) { *p += 3; return TRAMP_TYPE_I64;  }
+  else if (strncmp(s, "u32",  3) == 0) { *p += 3; return TRAMP_TYPE_U32;  }
+  else if (strncmp(s, "u64",  3) == 0) { *p += 3; return TRAMP_TYPE_U64;  }
+  else if (strncmp(s, "f32",  3) == 0) { *p += 3; return TRAMP_TYPE_F32;  }
+  else if (strncmp(s, "f64",  3) == 0) { *p += 3; return TRAMP_TYPE_F64;  }
+  else if (strncmp(s, "ptr",  3) == 0) { *p += 3; return TRAMP_TYPE_PTR;  }
+  return TRAMP_TYPE_UNKNOWN;
+}
+
+/* Map type ID to libffi type descriptor */
+static ffi_type* tramp__ffi_type(int type_id) {
+  switch (type_id) {
+    case TRAMP_TYPE_VOID: return &ffi_type_void;
+    case TRAMP_TYPE_I32:  return &ffi_type_sint32;
+    case TRAMP_TYPE_I64:  return &ffi_type_sint64;
+    case TRAMP_TYPE_U32:  return &ffi_type_uint32;
+    case TRAMP_TYPE_U64:  return &ffi_type_uint64;
+    case TRAMP_TYPE_F32:  return &ffi_type_float;
+    case TRAMP_TYPE_F64:  return &ffi_type_double;
+    case TRAMP_TYPE_PTR:  return &ffi_type_pointer;
+    default:              return &ffi_type_void;
+  }
+}
+
+/* libffi callback invoked when the trampoline's C function pointer is called */
+static void tramp__callback(ffi_cif* cif, void* ret, void** args, void* user_data) {
+  (void)cif;
+  JaclTrampoline* t = (JaclTrampoline*)user_data;
+  JaclVM* jvm = t->jvm;
+
+  /* Marshal C args → JaclVal */
+  JaclVal jacl_args[16];
+  for (int i = 0; i < t->arg_count && i < 16; i++) {
+    switch (t->arg_types_id[i]) {
+      case TRAMP_TYPE_I32: jacl_args[i] = jacl_i32(*(int32_t*)args[i]); break;
+      case TRAMP_TYPE_I64: jacl_args[i] = jacl_i64(&jvm->vm.heap, *(int64_t*)args[i]); break;
+      case TRAMP_TYPE_U32: jacl_args[i] = jacl_u32(*(uint32_t*)args[i]); break;
+      case TRAMP_TYPE_U64: jacl_args[i] = jacl_u64(&jvm->vm.heap, *(uint64_t*)args[i]); break;
+      case TRAMP_TYPE_F32: jacl_args[i] = jacl_f32(*(float*)args[i]); break;
+      case TRAMP_TYPE_F64: jacl_args[i] = jacl_f64(&jvm->vm.heap, *(double*)args[i]); break;
+      case TRAMP_TYPE_PTR: jacl_args[i] = jacl_u64(&jvm->vm.heap,
+                               (uint64_t)(uintptr_t)*(void**)args[i]); break;
+      default:             jacl_args[i] = JACL_NIL; break;
+    }
+  }
+
+  /* Invoke JACL closure */
+  JaclVal result = jacl_call_val(jvm, t->closure, jacl_args, t->arg_count);
+
+  /* Marshal JaclVal → C return value */
+  if (!ret) return;
+  switch (t->ret_type_id) {
+    case TRAMP_TYPE_VOID: break;
+    case TRAMP_TYPE_I32: *(int32_t*)ret  = jacl_is_i32(result) ? jacl_as_i32(result) : 0; break;
+    case TRAMP_TYPE_I64: *(int64_t*)ret  = jacl_is_i64(result) ? jacl_as_i64(result) : 0; break;
+    case TRAMP_TYPE_U32: *(uint32_t*)ret = jacl_is_u32(result) ? jacl_as_u32(result) : 0; break;
+    case TRAMP_TYPE_U64: *(uint64_t*)ret = jacl_is_u64(result) ? jacl_as_u64(result) : 0; break;
+    case TRAMP_TYPE_F32: *(float*)ret    = jacl_is_f32(result) ? jacl_as_f32(result) : 0.f; break;
+    case TRAMP_TYPE_F64: *(double*)ret   = jacl_is_f64(result) ? jacl_as_f64(result) : 0.0; break;
+    case TRAMP_TYPE_PTR: *(void**)ret    = jacl_is_u64(result)
+                             ? (void*)(uintptr_t)jacl_as_u64(result) : NULL; break;
+    default: break;
+  }
+}
+
+static JaclTrampoline* jacl_trampoline_new_val(JaclVM* jvm, JaclVal closure,
+                                                const char* sig) {
+  if (!jvm || !sig || !jacl_is_closure(closure)) return NULL;
+
+  /* Parse signature: rettype(argtype,...) */
+  const char* p = sig;
+  int ret_type = tramp__parse_type(&p);
+  if (ret_type == TRAMP_TYPE_UNKNOWN) return NULL;
+  if (*p != '(') return NULL;
+  p++; /* skip '(' */
+
+  int arg_types_id[16];
+  int arg_count = 0;
+  if (*p != ')') {
+    while (*p) {
+      if (arg_count >= 16) return NULL;
+      int at = tramp__parse_type(&p);
+      if (at == TRAMP_TYPE_UNKNOWN || at == TRAMP_TYPE_VOID) return NULL;
+      arg_types_id[arg_count++] = at;
+      if      (*p == ',') { p++; }
+      else if (*p == ')') { break; }
+      else { return NULL; }
+    }
+  }
+  if (*p != ')') return NULL;
+
+  /* Allocate trampoline struct */
+  JaclTrampoline* t = (JaclTrampoline*)malloc(sizeof(JaclTrampoline));
+  if (!t) return NULL;
+  memset(t, 0, sizeof(JaclTrampoline));
+
+  t->jvm        = jvm;
+  t->closure    = closure;
+  t->ret_type_id = ret_type;
+  t->arg_count   = arg_count;
+  memcpy(t->arg_types_id, arg_types_id, (size_t)arg_count * sizeof(int));
+
+  /* Pin closure via a GC handle slot */
+  if (jvm->handle_free_top == 0) { free(t); return NULL; }
+  uint32_t hidx = jvm->handle_free_list[--jvm->handle_free_top];
+  jvm->handle_slots[hidx] = closure;
+  t->handle_idx = hidx;
+
+  /* Build ffi_type pointer array */
+  size_t atypes_sz = (size_t)(arg_count > 0 ? arg_count : 1);
+  t->ffi_arg_types = (ffi_type**)malloc(atypes_sz * sizeof(ffi_type*));
+  if (!t->ffi_arg_types) goto fail_handle;
+  for (int i = 0; i < arg_count; i++) {
+    t->ffi_arg_types[i] = tramp__ffi_type(arg_types_id[i]);
+  }
+
+  /* Prepare call interface */
+  {
+    ffi_status st = ffi_prep_cif(&t->cif, FFI_DEFAULT_ABI,
+                                  (unsigned int)arg_count,
+                                  tramp__ffi_type(ret_type),
+                                  arg_count > 0 ? t->ffi_arg_types : NULL);
+    if (st != FFI_OK) goto fail_atypes;
+  }
+
+  /* Allocate executable closure memory */
+  t->ffi_closure = ffi_closure_alloc(sizeof(ffi_closure), &t->code_ptr);
+  if (!t->ffi_closure) goto fail_atypes;
+
+  /* Prepare the closure */
+  {
+    ffi_status st = ffi_prep_closure_loc((ffi_closure*)t->ffi_closure,
+                                          &t->cif, tramp__callback,
+                                          t, t->code_ptr);
+    if (st != FFI_OK) goto fail_ffi_closure;
+  }
+
+  /* Track in VM's linked list */
+  t->vm_next = jvm->trampoline_list;
+  jvm->trampoline_list = t;
+  return t;
+
+fail_ffi_closure:
+  ffi_closure_free(t->ffi_closure);
+fail_atypes:
+  free(t->ffi_arg_types);
+fail_handle:
+  jvm->handle_slots[hidx] = JACL_NIL;
+  jvm->handle_free_list[jvm->handle_free_top++] = hidx;
+  free(t);
+  return NULL;
+}
+
+static void* jacl_trampoline_ptr_val(JaclTrampoline* t) {
+  if (!t) return NULL;
+  return t->code_ptr;
+}
+
+/* Destroy a single trampoline without removing from VM list (for batch cleanup) */
+static void embed__trampoline_destroy(JaclVM* jvm, JaclTrampoline* t) {
+  ffi_closure_free(t->ffi_closure);
+  free(t->ffi_arg_types);
+  /* Release GC handle */
+  jvm->handle_slots[t->handle_idx] = JACL_NIL;
+  jvm->handle_free_list[jvm->handle_free_top++] = t->handle_idx;
+  free(t);
+}
+
+static void jacl_trampoline_free_val(JaclVM* jvm, JaclTrampoline* t) {
+  if (!jvm || !t) return;
+  /* Remove from VM's linked list */
+  JaclTrampoline** prev = &jvm->trampoline_list;
+  while (*prev) {
+    if (*prev == t) { *prev = t->vm_next; break; }
+    prev = &(*prev)->vm_next;
+  }
+  embed__trampoline_destroy(jvm, t);
+}
+
+static void embed__free_all_trampolines(JaclVM* jvm) {
+  JaclTrampoline* t = jvm->trampoline_list;
+  while (t) {
+    JaclTrampoline* next = t->vm_next;
+    embed__trampoline_destroy(jvm, t);
+    t = next;
+  }
+  jvm->trampoline_list = NULL;
+}
+
+#else /* !JACL_HAS_LIBFFI */
+
+static JaclTrampoline* jacl_trampoline_new_val(JaclVM* jvm, JaclVal closure,
+                                                const char* sig) {
+  (void)jvm; (void)closure; (void)sig; return NULL;
+}
+
+static void* jacl_trampoline_ptr_val(JaclTrampoline* t) { (void)t; return NULL; }
+
+static void jacl_trampoline_free_val(JaclVM* jvm, JaclTrampoline* t) {
+  (void)jvm; (void)t;
+}
+
+static void embed__free_all_trampolines(JaclVM* jvm) { (void)jvm; }
+
+#endif /* JACL_HAS_LIBFFI */
 
 /**
  * jacl_struct_type_name_val — get the struct type name from C.

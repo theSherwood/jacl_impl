@@ -1392,6 +1392,154 @@ static int test_has_trampolines(void) {
   return 1;
 }
 
+/* ===== US-011: Trampoline API ===== */
+
+/* Test: trampoline_new returns NULL when libffi is unavailable */
+static int test_trampoline_null_without_libffi(void) {
+#ifndef JACL_HAS_LIBFFI
+  JaclVM* vm = jacl_vm_new();
+  jacl_eval(vm, "proc add [a b] { [+ $a $b] }");
+  JaclVal cl = jacl_eval(vm, "$add");
+  JaclTrampoline* t = jacl_trampoline_new_val(vm, cl, "i32(i32,i32)");
+  ASSERT(t == NULL);
+  jacl_vm_free(vm);
+#endif
+  return 1;
+}
+
+/* Test: trampoline_ptr returns NULL for NULL trampoline */
+static int test_trampoline_ptr_null(void) {
+  void* p = jacl_trampoline_ptr_val(NULL);
+  ASSERT(p == NULL);
+  return 1;
+}
+
+/* Test: trampoline_free with NULL args is safe */
+static int test_trampoline_free_null_safe(void) {
+  JaclVM* vm = jacl_vm_new();
+  jacl_trampoline_free_val(vm, NULL);   /* no crash */
+  jacl_trampoline_free_val(NULL, NULL); /* no crash */
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: VM with no trampolines — vm_free is clean */
+static int test_trampoline_vm_free_no_trampolines(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm->trampoline_list == NULL);
+  jacl_vm_free(vm); /* should not crash */
+  return 1;
+}
+
+#ifdef JACL_HAS_LIBFFI
+
+/* Test: basic i32(i32,i32) trampoline */
+static int test_trampoline_i32_add(void) {
+  JaclVM* vm = jacl_vm_new();
+  jacl_eval(vm, "proc add [a b] { [+ $a $b] }");
+  JaclVal cl = jacl_eval(vm, "$add");
+  ASSERT(jacl_is_closure(cl));
+
+  JaclTrampoline* t = jacl_trampoline_new_val(vm, cl, "i32(i32,i32)");
+  ASSERT(t != NULL);
+
+  void* fptr = jacl_trampoline_ptr_val(t);
+  ASSERT(fptr != NULL);
+
+  /* Cast to function pointer and call */
+  typedef int32_t (*AddFn)(int32_t, int32_t);
+  AddFn fn;
+  memcpy(&fn, &fptr, sizeof(fn));
+  int32_t result = fn(3, 4);
+  ASSERT_INT_EQ(result, 7);
+
+  jacl_trampoline_free_val(vm, t);
+  ASSERT(vm->trampoline_list == NULL);
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: void() trampoline */
+static int test_trampoline_void_no_args(void) {
+  JaclVM* vm = jacl_vm_new();
+  jacl_eval(vm, "proc noop [] { nil }");
+  JaclVal cl = jacl_eval(vm, "$noop");
+
+  JaclTrampoline* t = jacl_trampoline_new_val(vm, cl, "void()");
+  ASSERT(t != NULL);
+
+  typedef void (*VoidFn)(void);
+  void* fptr = jacl_trampoline_ptr_val(t);
+  VoidFn fn;
+  memcpy(&fn, &fptr, sizeof(fn));
+  fn(); /* should not crash */
+
+  jacl_trampoline_free_val(vm, t);
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: multiple trampolines — vm_free cleans all */
+static int test_trampoline_vm_free_cleans_all(void) {
+  JaclVM* vm = jacl_vm_new();
+  jacl_eval(vm, "proc id [x] { $x }");
+  JaclVal cl = jacl_eval(vm, "$id");
+
+  JaclTrampoline* t1 = jacl_trampoline_new_val(vm, cl, "i32(i32)");
+  JaclTrampoline* t2 = jacl_trampoline_new_val(vm, cl, "i32(i32)");
+  ASSERT(t1 != NULL);
+  ASSERT(t2 != NULL);
+  ASSERT(vm->trampoline_list != NULL);
+  /* vm_free should clean them all without crashing */
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: invalid signature returns NULL */
+static int test_trampoline_invalid_sig(void) {
+  JaclVM* vm = jacl_vm_new();
+  jacl_eval(vm, "proc f [x] { $x }");
+  JaclVal cl = jacl_eval(vm, "$f");
+
+  ASSERT(jacl_trampoline_new_val(vm, cl, "xyz(i32)")  == NULL); /* bad ret */
+  ASSERT(jacl_trampoline_new_val(vm, cl, "i32[i32]")  == NULL); /* bad syntax */
+  ASSERT(jacl_trampoline_new_val(vm, cl, "i32(xyz)")  == NULL); /* bad arg */
+  ASSERT(jacl_trampoline_new_val(vm, cl, "i32(void)") == NULL); /* void as arg */
+  ASSERT(jacl_trampoline_new_val(vm, cl, "i32(")      == NULL); /* truncated */
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: non-closure input returns NULL */
+static int test_trampoline_non_closure(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(jacl_trampoline_new_val(vm, jacl_i32(42), "i32(i32)") == NULL);
+  ASSERT(jacl_trampoline_new_val(vm, JACL_NIL,     "i32(i32)") == NULL);
+  ASSERT(jacl_trampoline_new_val(NULL, JACL_NIL,   "i32(i32)") == NULL);
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: explicit trampoline_free removes from VM list */
+static int test_trampoline_explicit_free(void) {
+  JaclVM* vm = jacl_vm_new();
+  jacl_eval(vm, "proc dbl [x] { [* $x 2] }");
+  JaclVal cl = jacl_eval(vm, "$dbl");
+
+  JaclTrampoline* t = jacl_trampoline_new_val(vm, cl, "i32(i32)");
+  ASSERT(t != NULL);
+  ASSERT(vm->trampoline_list == t);
+
+  jacl_trampoline_free_val(vm, t);
+  ASSERT(vm->trampoline_list == NULL);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+#endif /* JACL_HAS_LIBFFI */
+
 int main(void) {
   int pass = 0, fail = 0;
 
@@ -1493,6 +1641,20 @@ int main(void) {
 
   printf("\n=== Embedding API: Build system / libffi ===\n");
   RUN(test_has_trampolines);
+
+  printf("\n=== Embedding API: Trampolines ===\n");
+  RUN(test_trampoline_null_without_libffi);
+  RUN(test_trampoline_ptr_null);
+  RUN(test_trampoline_free_null_safe);
+  RUN(test_trampoline_vm_free_no_trampolines);
+#ifdef JACL_HAS_LIBFFI
+  RUN(test_trampoline_i32_add);
+  RUN(test_trampoline_void_no_args);
+  RUN(test_trampoline_vm_free_cleans_all);
+  RUN(test_trampoline_invalid_sig);
+  RUN(test_trampoline_non_closure);
+  RUN(test_trampoline_explicit_free);
+#endif
 
   printf("\n%d passed, %d failed\n", pass, fail);
   return fail > 0 ? 1 : 0;
