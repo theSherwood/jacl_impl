@@ -1,0 +1,711 @@
+# JACL Syntax Redesign
+
+JACL syntax is being redesigned around a three-mode delimiter system.
+
+**Why:** Current syntax overloads `[]` for commands, param lists, struct fields, and import lists. Goal is a scrappy, pragmatic scripting language comfortable in a shell.
+
+## Three parsing modes (delimiter-determined)
+
+- `[]` — **Juxtaposition**: items separated by whitespace, no implied relationship. First item determines semantics. Used for procedure calls `[foo 1 2]` and nesting `[foo [bar 3] 2]`.
+- `{}` / top-level — **Command mode**: bare commands with separators (`;` `,` newline). `|` pipes between commands. Used for code blocks, param lists, struct field declarations (same construct, differentiated by context).
+- `()` — **Infix mode**: symbolic operators parsed infix, no precedence, left associative. `($x + 3 * 2)` desugars to `[* [+ $x 3] 2]`. Use nested parens for explicit grouping: `($x + (3 * 2))`. `|` means bitwise OR in this mode.
+
+## Key syntax decisions
+
+- `proc foo {x, y} {+ $x $y}` — braces for both params and body
+- `struct Point {i32 x, i32 y}` — `defstruct` shortened to `struct`
+- Type-before-name everywhere: `{i64 a, i64 b}`, `proc i64 add ...`
+- `:type` prefix in struct fields replaced with type-before-name
+- `()` reserved for infix expressions, not declarations
+- Zero-arg procs: `proc greet {} {print "hello"}`
+- Block bodies use bare command syntax: `{* $n 2}` not `{[* $n 2]}`
+
+## Operator precedence in `()`
+
+No operator precedence. All operators are at the same level, evaluated left to right (left associative). Parenthesize for explicit grouping.
+
+```
+(1 + 2 * 3)             # → ((1 + 2) * 3) → 9
+(1 + (2 * 3))           # → 7 — explicit grouping
+(10 - 3 - 2)            # → ((10 - 3) - 2) → 5
+($price * $qty + $tax)  # → (($price * $qty) + $tax) — often correct naturally
+```
+
+This is the Smalltalk approach. Trade-off: no precedence table to memorize, but `*` doesn't bind tighter than `+`. Use nested parens or prefix `[* 2 3]` when needed.
+
+Unary prefix operators (`not`, `-`) bind tighter than binary operators:
+
+```
+(- $x + $y)             # → ((- $x) + $y)
+(not $a or $b)          # → ((not $a) or $b)
+```
+
+## String interpolation
+
+The three-mode system applies uniformly inside strings. Each delimiter switches parsing mode:
+
+```
+"hello $name"                  # variable interpolation
+"result: $[+ 1 2]"            # juxtaposition mode — command call
+"total: $($price * $qty)"     # infix mode — arithmetic
+```
+
+- `$name` — variable reference
+- `$[...]` — evaluates a juxtaposition (command call)
+- `$(...)` — evaluates an infix expression
+- `\$` — escaped literal `$`
+- Modes nest: `"value: $($x + $[vec-len $v])"`
+
+## Pipes
+
+- `|` is intrinsic to command mode (not bolted on)
+- First-arg threading: `foo a | bar b` → `[bar [foo a] b]`
+- Line-level feature, not inside `[]`
+
+## Lambda shorthand
+
+- `[\ + $it 2]` as macro expanding to `proc {it} {+ $it 2}`
+- `$it` is implicit single-arg parameter
+- Multi-arg lambdas use explicit `proc`
+
+## Destructuring
+
+- `[]` for positional (vectors): `def [a b c] [vec 1 2 3]`
+- `{}` for named (structs/maps): `def {x, y} $point`
+- `..rest` for rest patterns: `def [head ..rest] $v`
+- `..` means "the rest" everywhere:
+  - `{..}` — destructure all fields into scope (structs, modules)
+  - `{x, ..}` — explicit x, plus everything else
+  - `{x, ..rest}` — explicit x, remaining fields collected into rest
+  - `[..]` — all positions
+  - Only works on fully-typed containers (compiler must know names)
+- `_` for wildcards
+- `def {..} $point` — binds x and y from Point into current scope
+- `use "shapes.jacl" {..}` — import all public bindings
+- Destructuring in proc params deferred — do it in the body instead
+
+## Match/case
+
+- `match $val { pattern { body } ... }`
+- Literals match, bare identifiers bind, `$var` pins against variable value
+- Type patterns: `Point {x, y} { ... }`
+- Guards use `()`: `n ($n > 0) { ... }`
+- Composes with pipes: `get-shape | match { ... }`
+
+## Shell interop
+
+### Command resolution
+
+- `!cmd args...` — always means external command, in all contexts
+- **REPL/terminal:** bare unknown commands fall back to `$PATH` (on by default)
+- **Scripts:** bare unknown commands are compile errors (strict by default)
+- **Pragma `#! path-fallback`:** opt-in for scripts to enable `$PATH` fallback (file-level)
+
+### `!cmd` — simple form (95% of use cases)
+
+Returns stdout as a string value on success, error value on failure.
+
+**On success (exit 0):**
+- Return value: stdout as string
+- Stderr: prints to terminal (warnings, progress — visible but doesn't enter the pipeline)
+
+**On failure (exit non-zero):**
+- Return value: JACL error value with stderr as the error message
+- Stdout: discarded
+
+```
+# stdout becomes a string value
+def files [!ls -la]
+
+# pipes work naturally — stdout flows through
+!ls -la | split "\n" | each [\ print $it]
+
+# failure short-circuits the pipeline
+!curl $bad_url | json-parse
+# curl exits non-zero → error value (message = stderr)
+# json-parse never runs
+
+# catch failure inline
+!curl $url | catch {err} {
+  print "curl failed: $err"
+  "{}"
+} | json-parse
+```
+
+### `|` between external commands
+
+When `!cmd` pipes into another `!cmd`, it's a real OS pipe (stdout→stdin byte stream):
+
+```
+!ls -la | !grep ".jacl"    # real OS pipe, no conversion
+!ls -la | split "\n"        # OS stdout → JACL string → split
+```
+
+### `exec` — full control form (rare)
+
+Returns a struct with all streams and exit code. Use when you need stderr on success, or fine-grained exit code inspection.
+
+```
+def result [exec "ls" "-la"]
+# result is a struct: {str stdout, str stderr, i32 exit}
+
+. $result stdout | split "\n"
+. $result stderr | print
+if (. $result exit != 0) { print "failed" }
+```
+
+### Design rationale
+
+This avoids Nushell's structured-vs-raw impedance mismatch. Nushell tried to make external commands feel native in structured pipelines, but stderr bypasses the pipeline by default, `try`/`catch` doesn't reliably catch external failures, and the workarounds are inconsistent. JACL avoids this by:
+- Keeping the boundary explicit (`!` prefix)
+- Giving stderr a clear destination in both outcomes (terminal on success, error message on failure)
+- Providing `exec` as an escape hatch for full control, rather than trying to make the simple form handle every case
+
+## Streams
+
+JACL has a stream type representing a lazy sequence — elements are produced one at a time rather than materializing all at once. Streams unify the behavior of internal and external command pipelines.
+
+### Where streams come from
+
+- `!cmd` — external command stdout is a stream of bytes
+- `lines` — converts a byte/string stream or string into a stream of line strings
+- Ranges `(1..1000000)` — produce streams of values
+- Any builtin or proc that yields sequential data
+
+### Stream-aware commands
+
+`each`, `filter`, `transform` accept both streams and vectors:
+
+```
+# stream in, stream out (lazy, O(1) memory):
+!cat hugefile | lines | filter [\ match-re /error/ $it] | each [\ print $it]
+
+# vector in, vector out (eager):
+def v [vec 1 2 3 4 5]
+$v | filter [\ > $it 2] | each [\ print $it]
+```
+
+### Explicit collection — no auto-collect
+
+Streams do not silently materialize into vectors. Commands that require random access (like `vec-get`, `vec-set`, `vec-slice`) do not accept streams — you must explicitly `collect` first. This makes memory costs visible.
+
+```
+# Streaming — O(1) memory:
+!cat hugefile | lines | count
+
+# Explicit collection — O(n) memory, user sees the cost:
+!cat hugefile | lines | collect | vec-len
+
+# Error — vec-get requires a vector, not a stream:
+!cat hugefile | lines | vec-get 0    # type error
+!cat hugefile | lines | collect | vec-get 0    # works
+```
+
+### Sequence operations (work on both streams and vectors)
+
+These commands accept either a stream or a vector. When given a stream, they consume lazily. When given a vector, they work eagerly.
+
+| Command | Input | Output | Description |
+|---------|-------|--------|-------------|
+| `each` | stream or vec | (side effects) | Apply function to each element |
+| `filter` | stream or vec | stream or vec | Keep elements matching predicate |
+| `transform` | stream or vec | stream or vec | Apply function, collect results |
+| `count` | stream or vec | scalar | Count elements (consumes stream) |
+| `take N` | stream or vec | stream or vec | First N elements |
+| `first` | stream or vec | scalar | First element (consumes one from stream) |
+| `collect` | stream | vec | Materialize stream into vector |
+| `lines` | stream or str | stream | Split into line stream |
+
+### Vector-only operations (require `collect` for streams)
+
+| Command | Description |
+|---------|-------------|
+| `vec-get` | Random access by index |
+| `vec-set` | Set element by index |
+| `vec-slice` | Slice by index range |
+| `vec-len` | Length (use `count` for streams) |
+| `vec-push` | Append element |
+| `vec-concat` | Concatenate two vectors |
+
+### Pipes remain value-passing
+
+Streams don't change the pipe model. `|` still threads a single value (first-arg). A stream is a value like any other — it just hasn't computed all its elements yet.
+
+```
+# scalar value through pipe — no streaming:
++ 1 2 | * 3 | print
+
+# stream value through pipe — lazy processing:
+!find . -name "*.txt" | lines | par-each [\ process-file $it]
+```
+
+### Concurrency and streams
+
+`par-each` pulls elements from a stream and dispatches them to workers concurrently, without loading all elements into memory first:
+
+```
+!find . -name "*.txt" | lines | par-each [\ process-file $it]
+```
+
+## Concurrency
+
+### Primitives
+
+| Command | Takes | Returns | Description |
+|---------|-------|---------|-------------|
+| `spawn { expr }` | block | future | Start async task |
+| `await $f` | future | resolved value | Wait for future (suspends) |
+| `parallel { } { } ...` | N blocks | vector of N results | Run blocks concurrently, collect all |
+| `race { } { } ...` | N blocks | single result | Run blocks, return first to complete |
+| `par-each` | collection/stream + fn | vector of results | Process elements concurrently |
+| `timeout N { }` | duration + block | result or error | Sugar for race + sleep |
+
+All compose with pipes — they're commands that return values:
+
+```
+# parallel returns a vector — pipe to each
+parallel {fetch $url1} {fetch $url2} | each [\ json-parse $it]
+
+# parallel + destructuring
+def [users posts] [parallel {fetch "/users"} {fetch "/posts"}]
+
+# race returns the winner — pipe to next stage
+race {fetch $primary} {fetch $mirror} | json-parse
+
+# timeout
+timeout 5 {fetch $url} | json-parse
+
+# par-each on a collection
+$urls | par-each [\ fetch $it] | each [\ json-parse $it]
+
+# spawn/await for manual control
+def future [spawn { expensive-work $data }]
+# ... do other stuff ...
+await $future | process-result
+```
+
+### Error semantics
+
+- **`parallel`:** All branches run to completion. Result vector may contain a mix of values and errors. Caller decides how to handle.
+- **`race`:** First to complete wins, error or not. If the winner errored, the error propagates through the pipe.
+- **`par-each`:** All elements processed. Results may contain errors (same as `parallel`).
+- All errors compose with pipe short-circuiting and `catch`.
+
+```
+# parallel — handle mixed results
+def results [parallel {fetch $url1} {fetch $url2} {fetch $url3}]
+$results | filter [\ not [error? $it]] | each [\ json-parse $it]
+
+# race with fallback on error
+race {fetch $primary} {fetch $mirror} | catch {"default"} | json-parse
+```
+
+## Iteration and control flow
+
+### `for` — unified iteration
+
+`for` replaces `each` as the single iteration construct. Multiple forms distinguished by argument shape:
+
+```
+# C-style (mutable loop variable)
+for {mut i 0; ($i < 10); ++ i} {
+  log $i
+}
+
+# Collection + implicit binding ($it)
+for $items { log $it }
+
+# Collection + explicit binding
+for $items item { log $item }
+
+# Collection + callback (HOF form)
+for $items $callback
+```
+
+Compiler distinguishes forms by argument shape:
+- First arg is `{}` block → C-style loop
+- First arg is a value, next is `{}` block → implicit binding (`$it`)
+- First arg is a value, next is bare word, next is `{}` block → explicit binding
+- First arg is a value, next is a proc/variable → HOF callback
+
+Works on both streams and vectors. `filter` and `transform` remain separate — they produce new collections, not side effects.
+
+`while` stays as a separate construct: `while $cond { body }`.
+
+### `return`, `break`, `continue`
+
+**Key principle:** `return` always exits the nearest `proc`. Blocks are not procs — they are inlined into the enclosing proc's scope.
+
+- **`return`** — exits the nearest enclosing `proc`
+- **`break`** — exits the nearest enclosing `for`/`while` loop
+- **`continue`** — skips to the next iteration of the nearest `for`/`while`
+
+```
+proc find-first {items, pred} {
+  for $items item {
+    if [$pred $item] { return $item }    # exits find-first
+  }
+  $nil
+}
+
+proc process {items} {
+  for $items item {
+    if [skip? $item] { continue }        # next iteration
+    if [done? $item] { break }           # exit for loop
+    print $item
+  }
+}
+```
+
+### Block form vs lambda form
+
+The distinction between blocks and lambdas determines how `return`/`break`/`continue` behave:
+
+- **Block form** `for $items item { body }` — block is inlined, `return` exits enclosing proc, `break`/`continue` work
+- **Lambda form** `for $items [\ do-thing $it]` — lambda is a separate proc, `return` exits the lambda, `break`/`continue` are errors
+
+Both forms coexist. Use blocks when you need control flow, lambdas for concise pipelines:
+
+```
+# Block form — full control flow
+for $items item {
+  if ($item > 10) { return $item }
+}
+
+# Lambda form — concise in pipelines
+$items | filter [\ > $it 2] | for [\ print $it]
+```
+
+## Variadic procs
+
+`..` in param lists collects remaining arguments, consistent with destructuring syntax:
+
+```
+proc log {level, ..msgs} {
+  for $msgs msg { print "[$level] $msg" }
+}
+
+log "INFO" "server started" "listening on 8080"
+```
+
+## Ranges
+
+Range operators in `()` infix mode:
+
+```
+(1 ..< 10)     # exclusive: 1, 2, 3, ..., 9
+(1 ..= 10)     # inclusive: 1, 2, 3, ..., 10
+```
+
+Ranges produce streams. Work with `for`, `filter`, `transform`, etc:
+
+```
+for (0 ..< 10) i { print $i }
+(1 ..= 100) | filter [\ == 0 ($it % 2)] | collect
+```
+
+## Pragmas
+
+`#{ ... }` syntax for pragmas (avoids collision with `#!/usr/bin/env jacl` shebang):
+
+```
+#!/usr/bin/env jacl
+#{ path-fallback }
+
+# script content...
+!ls -la | lines | for line { print $line }
+```
+
+## Scoping
+
+- `def` is block-scoped
+- Shadowing in the same scope is a compile-time error
+- Shadowing in a nested scope is allowed (new `def` in inner block)
+
+```
+def x 1
+def x 2          # error: x already defined in this scope
+
+{
+  def x 2        # ok: nested scope, shadows outer x
+}
+```
+
+## Optional chaining
+
+`?.` operator in `()` infix mode for nil-safe field access:
+
+```
+($val ?. field)          # nil if $val is nil, otherwise field access
+($user ?. address ?. city)   # chains safely
+```
+
+## Module visibility
+
+Everything top-level is public by default. Underscore prefix marks private names — the compiler enforces this at import boundaries.
+
+```
+# shapes.jacl
+struct Point {i32 x, i32 y}
+proc distance {Point a, Point b} { ... }
+proc _helper {x} { ... }                # private — underscore prefix
+
+# main.jacl
+use "shapes.jacl" {Point, distance}      # import specific names
+use "shapes.jacl" {..}                   # import all public names
+use "shapes.jacl" {_helper}              # error: _helper is private
+```
+
+No `pub`/`priv` keywords needed. The convention is the mechanism. If encapsulation needs grow later, explicit keywords can be added without breaking existing code.
+
+## Multi-line strings
+
+Triple-quoted strings for multi-line content:
+
+```
+def sql """
+  SELECT * FROM users
+  WHERE active = true
+"""
+```
+
+- Interpolation works inside triple-quoted strings: `$var`, `$[expr]`, `$(expr)`
+- Leading whitespace stripped based on indentation of closing `"""` (Kotlin-style)
+- No delimiter name needed (unlike heredocs)
+
+```
+def query """
+  SELECT * FROM $table
+  WHERE id = $($id + 1)
+"""
+```
+
+## Comments
+
+- `#` — single-line comment (unchanged)
+- `##` — doc comment convention (extractable by tooling)
+- No multi-line comment syntax — stack `#` lines instead
+
+```
+# Regular comment
+
+## Calculates the distance between two points.
+## Returns f64.
+proc distance {Point a, Point b} {
+  ...
+}
+```
+
+## Callable values
+
+Maps and atoms are callable in head position of `[]`, extending JACL's dispatch rule: if the first item in a juxtaposition is callable, call it.
+
+### Maps as callable (key lookup)
+
+Like Clojure, placing a map in head position does a key lookup:
+
+```
+def colors [map "red" "#ff0000" "blue" "#0000ff"]
+[$colors red]       # → "#ff0000"
+[$colors blue]      # → "#0000ff"
+```
+
+### Atoms as callable (deref + delegate)
+
+Calling an atom derefs it and delegates to the contained value. If the atom holds a map, calling the atom does deref → map → key lookup:
+
+```
+def config [atom [map "debug" $false "port" 8080]]
+[$config port]      # → 8080 (deref atom → map, lookup "port")
+```
+
+## Environment variables
+
+`$env` is an atom containing a `[map string string]` that syncs bidirectionally with the OS environment via atom listeners.
+
+### Reading
+
+```
+[$env HOME]           # atom deref → map → key lookup → "/Users/adam"
+[$env PATH]           # → "/usr/bin:..."
+```
+
+### Writing
+
+```
+# swap atomically applies a function to the atom's value
+swap $env [\ map-set $it NODE_ENV "production"]
+# listener fires → setenv("NODE_ENV", "production")
+```
+
+### Scoped changes
+
+`with-env` temporarily modifies `$env`, runs a block, then restores the original. The listener syncs to the OS at each step:
+
+```
+with-env {DEBUG "1", NODE_ENV "production"} {
+  !npm run build    # child process sees DEBUG=1 and NODE_ENV=production
+  do-stuff          # JACL code sees them via [$env DEBUG]
+}
+# restored — DEBUG and NODE_ENV back to original values
+```
+
+### Built-in aliases
+
+A small set of read-only convenience variables that stay in sync with `$env` via listeners:
+
+| Variable | Synced from | Description |
+|----------|------------|-------------|
+| `$home` | `[$env HOME]` | User home directory |
+| `$pwd` | Working directory | Current working directory |
+| `$pid` | Process ID | Current process ID |
+
+These update automatically. For example, `cd` updates the working directory, swaps `PWD` in `$env`, and the listener updates `$pwd`:
+
+```
+print $pwd         # /Users/adam/code
+cd "src"
+print $pwd         # /Users/adam/code/src
+```
+
+### Atom listeners (general-purpose mechanism)
+
+The env sync is built on a general-purpose listener mechanism for atoms. Any atom can have watchers:
+
+```
+def counter [atom 0]
+
+watch $counter [proc {old, new} {
+  print "changed: $old → $new"
+}]
+
+swap $counter [\ + $it 1]
+# prints: changed: 0 → 1
+```
+
+The `$env` atom has a built-in listener that:
+- Calls `setenv()`/`unsetenv()` for each changed key
+- Updates `$home` if `HOME` changed
+- Updates `$pwd` if `PWD` changed
+
+No special-casing of `$env` in the language — it's an atom with a listener, same as any user-created atom.
+
+## Error handling
+
+- Errors are values (existing JACL design)
+- **Pipes short-circuit on error by default** — if a stage produces an error, subsequent stages don't run
+- **`catch` as a pipe stage** for inline recovery:
+  ```
+  read-file $path | catch {"fallback"} | split "\n"
+  read-file $path | catch {err} { print "warning: $err"; "fallback" } | split "\n"
+  ```
+- **`try`/`catch` as block-level form** for non-pipeline code:
+  ```
+  try { risky-operation } err { print "failed: $err" }
+  ```
+- External commands: non-zero exit code → error value (see Shell interop above)
+
+## Typed collections
+
+Concrete type parameterization for collections using `[]` in type position. Not full generics — no type variables, no inference, no constraints. Just "this vec holds Points."
+
+### Syntax
+
+Extends the existing typed-def pattern (`def TYPE name value`):
+
+```
+# Typed vectors
+def [vec Point] points [vec [Point 1 2] [Point 3 4]]
+def [vec i64] numbers [vec 1 2 3 4 5]
+
+# Typed maps
+def [map str Point] lookup [map "origin" [Point 0 0]]
+def [map str [vec Point]] groups [map "a" $points1 "b" $points2]
+
+# Nested
+def [vec [vec i64]] matrix [vec [vec 1 2] [vec 3 4]]
+```
+
+`[vec Point]` in type position is type parameterization — `[]` juxtaposition where the compiler reads items as types. Same principle as destructuring: position determines meaning.
+
+### In struct fields
+
+```
+struct Polygon {[vec Point] vertices, str name}
+struct Graph {[map str [vec str]] edges}
+```
+
+### In proc signatures
+
+```
+proc [vec Point] get-points {} {
+  vec [Point 1 2] [Point 3 4]
+}
+
+proc closest {[vec Point] points, Point target} { ... }
+```
+
+### Type checking
+
+```
+def [vec i64] nums [vec 1 2 3]
+vec-push $nums "hello"     # compile error: expected i64, got str
+vec-push $nums 42           # ok
+```
+
+### Gradual typing still holds
+
+```
+# Typed: compiler checks element types
+def [vec i64] nums [vec 1 2 3]
+
+# Untyped: holds anything, no checking
+def stuff [vec 1 "hello" $true]
+
+# Generic proc: just don't annotate
+proc first {v} { vec-get $v 0 }    # works on any vec
+```
+
+### Implementation path
+
+- Phase 1: Compile-time type checking only (elements stored as `dyn` at runtime)
+- Phase 2: Unboxed storage for typed collections (contiguous memory layout, no tag overhead)
+
+The syntax is the same for both phases. Full parametric generics (type variables, constraints) remain a future possibility if needed.
+
+## Open design questions
+
+### Resolved
+
+- Three-mode delimiter system — `[]` juxtaposition, `{}` command mode, `()` infix
+- Pipe threading (first-arg)
+- Destructuring with `{..}`
+- Match/case with guards
+- Generics (skipped)
+- Shell interop — `!cmd` simple form, `exec` full control, `$PATH` fallback modes
+- Error handling — short-circuit pipes, `catch` pipe stage, `try`/`catch` block form
+- Streams — lazy sequence type, explicit `collect`, sequence ops work on both streams and vectors
+- Concurrency — `spawn`/`await`, `parallel`, `race`, `par-each`, `timeout`; all compose with pipes
+- Callable values — maps (key lookup) and atoms (deref + delegate) are callable in `[]` head position
+- Environment variables — `$env` is an atom of a map, synced to OS via listeners; `[$env HOME]` for access; `with-env` for scoped changes; `$home`/`$pwd`/`$pid` as synced aliases
+- Atom listeners — `watch` adds watchers to any atom; env sync is one application
+
+### Needs design work
+
+1. ~~**String interpolation**~~ — resolved, see String interpolation section.
+2. **Boolean/logical operators** — `and`/`or`/`not`: word-form, symbol-form, or both? Precedence in `()` infix mode? Deferred.
+3. ~~**Early return**~~ — resolved: `return` exits nearest `proc`, blocks are inlined.
+4. ~~**Loops**~~ — resolved: `for` replaces `each`, `while` stays, `break`/`continue` work in block forms.
+5. ~~**Module visibility**~~ — resolved: everything top-level is public, underscore prefix is private (compiler-enforced).
+6. ~~**Multi-line strings**~~ — resolved: triple-quoted strings with interpolation, Kotlin-style whitespace stripping.
+7. ~~**Comments**~~ — resolved: `#` single-line, `##` doc comments, no multi-line syntax.
+8. ~~**Variadic procs**~~ — resolved: `..` in param lists, consistent with destructuring.
+9. ~~**Pragmas**~~ — resolved: `#{ ... }` syntax, avoids shebang collision.
+10. ~~**Ranges**~~ — resolved: `(1 ..< 10)` exclusive, `(1 ..= 10)` inclusive, produce streams.
+11. ~~**Scoping**~~ — resolved: same-scope shadowing is compile error, nested scope shadowing is fine.
+12. ~~**Optional chaining**~~ — resolved: `($val ?. field)` in infix mode.
+13. **Dot notation** — open. `.` conflicts with filenames (`foo .somefile.txt`). No solution yet.
+14. **Regular expressions** — deferred. Need literal syntax eventually.
+15. **Operator overloading** — desired but not designed. Operators should be user-definable.
+16. **Boolean/logical operators** — deferred. Connects to operator overloading and user-definable operators.
+17. **Standard library surface** — deferred. What's builtin vs module?
