@@ -1,3 +1,25 @@
+## 2026-03-12 - US-016
+Thread: n/a
+- Implemented E2E tests for struct interop and trampolines in `test/test_e2e_struct_tramp.c`
+- 3 struct tests (always run) + 4 trampoline tests (guarded by `#ifdef JACL_HAS_LIBFFI`):
+  1. `test_e2e_struct_create_and_read`: define Vec3 struct, create from C with f32 fields, read and verify, check type name, verify unknown field returns error
+  2. `test_e2e_struct_mutate_and_readback`: define Score struct in JACL, retrieve via eval, mutate pts from C, verify from C and JACL, verify struct independence
+  3. `test_e2e_struct_type_mismatch`: type-check on Pair struct (i32+f32), wrong types return false, correct types succeed, unknown field is error, null safety
+  4. `test_e2e_tramp_basic_call`: i32(i32,i32) add trampoline, call via C function pointer, multiple calls
+  5. `test_e2e_tramp_various_signatures`: void(), i32(i32) identity, i32(i32,i32) mul, invalid signatures return NULL
+  6. `test_e2e_tramp_free_releases_closure`: create+call+free trampoline, force GC, verify handle slot reused
+  7. `test_e2e_tramp_qsort`: register `dref` native (u64→i32 deref), JACL comparator `[- [dref $a] [dref $b]]`, i32(ptr,ptr) trampoline, qsort 5 elements, verify sorted
+- Trampoline tests print "(trampoline tests skipped — JACL_HAS_LIBFFI not set)" when not compiled with libffi
+- All 53 tests pass (0 failures); trampoline tests compile correctly (verified separately)
+- Files changed: test/test_e2e_struct_tramp.c (new), build.sh, .ralph/prd.json
+- **Learnings for future iterations:**
+  - Trampoline `ptr` arg → JACL receives `u64` (the pointer address); need native `dref` helper to read the pointed-to value from JACL code
+  - Negative integer literals like `-1` not supported in JACL source — use `[- 0 1]` or `[- $a $b]` instead
+  - When testing qsort with JACL comparator, use `[- [dref $a] [dref $b]]` pattern (a-b ascending comparator, avoids negative literals)
+  - `tramp_force_gc` defined locally avoids redefinition issues (each test binary is compiled from one .c file)
+  - The 11 pre-existing warnings (rrb_vec.h, hamt.h) also appear when compiling with JACL_HAS_LIBFFI=1
+---
+
 ## 2026-03-12 - US-015
 Thread: n/a
 - Implemented E2E tests for GC handles in `test/test_e2e_gc_handles.c`

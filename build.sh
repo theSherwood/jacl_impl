@@ -88,6 +88,7 @@ TESTS=(
     "test/test_e2e_embed_basics.c|e2e_embed_basics|${LIBFFI_FLAGS}"
     "test/test_e2e_native_fns.c|e2e_native_fns|${LIBFFI_FLAGS}"
     "test/test_e2e_gc_handles.c|e2e_gc_handles|${LIBFFI_FLAGS}"
+    "test/test_e2e_struct_tramp.c|e2e_struct_tramp|${LIBFFI_FLAGS}"
 )
 
 # Filter tests if --lib flag is set

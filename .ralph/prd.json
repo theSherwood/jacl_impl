@@ -281,7 +281,7 @@
         "All tests pass, no memory leaks (trampoline tests skipped when JACL_HAS_LIBFFI is 0)"
       ],
       "priority": 16,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ]
