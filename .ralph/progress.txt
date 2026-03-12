@@ -2,6 +2,30 @@
 
 Progress log for ralph/ffi-embedding branch.
 
+## 2026-03-12 - US-012
+Thread: n/a
+- Implemented Emscripten / WASM build target for JACL
+- Added Emscripten platform support to `lib/platform/platform.h`: no-op threads, no-op mutexes, plain atomics, `JACL_THREAD_LOCAL` macro
+- Replaced `__thread` with `JACL_THREAD_LOCAL` in `src/gc.c` (3 occurrences) and `src/runtime.c` (2 occurrences)
+- Added `JACL_EMBED_FN` macro to `src/embed.c`: `static` in unity build, `EMSCRIPTEN_KEEPALIVE` under Emscripten
+- Applied `JACL_EMBED_FN` to all 40+ public API functions in embed.c
+- Added `jacl_is_error_val()` wrapper in embed.c (the internal `jacl_is_error` is static inline in value.c, can't be directly exported)
+- Created `build_wasm.sh`: compiles with emcc, exports all embedding API via `-s EXPORTED_FUNCTIONS`, uses `-s WASM_BIGINT=1` for uint64_t JaclVal, `-s MODULARIZE=1 -s EXPORT_NAME=createJACL`
+- Created `test/test_wasm.mjs`: 12 tests covering VM lifecycle, eval, error detection, trampolines unavailable, value constructors, globals persistence, independent VMs
+- Trampoline stubs correctly return NULL in WASM (no libffi, no compile error)
+- GC works in single-threaded mode via JACL_THREAD_LOCAL → plain static, no-op mutexes, plain atomics
+- All 12 WASM tests pass in Node.js, all 49 native tests pass (0 failures)
+- Files changed: lib/platform/platform.h, src/embed.c, src/gc.c, src/runtime.c, build_wasm.sh (new), test/test_wasm.mjs (new), .ralph/prd.json
+- **Learnings for future iterations:**
+  - JaclVal is uint64_t — Emscripten needs `-s WASM_BIGINT=1` for correct 64-bit value passing between JS and WASM
+  - Without WASM_BIGINT, Emscripten "legalizes" i64 to two i32 (truncating high bits where NaN-boxing tags and error flags live)
+  - Emscripten cache dir must be writable: use `EM_CACHE=/tmp/emscripten_cache` if default is read-only
+  - `jacl_is_error` is static inline in value.c — needs a separate exported wrapper (`jacl_is_error_val`) for WASM
+  - `JACL_EMBED_FN` macro cleanly switches between `static` (unity build) and `EMSCRIPTEN_KEEPALIVE` (WASM export) without code duplication
+  - Direct `_function` access in JS (e.g., `jacl._jacl_vm_new()`) works better than `cwrap` for BigInt i64 values
+  - `build_wasm/` output directory is gitignored-worthy (generated artifacts)
+---
+
 ## 2026-03-12 - US-011
 Thread: n/a
 - Implemented closure-to-function-pointer trampolines via libffi in `src/embed.c`
@@ -23,6 +47,11 @@ Thread: n/a
 ---
 
 ## Codebase Patterns
+- WASM build: `EM_CACHE=/tmp/emscripten_cache bash build_wasm.sh` — produces build_wasm/jacl.{js,wasm}
+- WASM test: `node test/test_wasm.mjs` — requires build_wasm/ to exist
+- JaclVal is uint64_t: Emscripten needs `-s WASM_BIGINT=1` for correct 64-bit passing; use direct `_function` access in JS, not cwrap
+- `JACL_EMBED_FN` macro in embed.c: `static` (native unity build) or `EMSCRIPTEN_KEEPALIVE` (WASM); use for all public API functions
+- `JACL_THREAD_LOCAL` macro in platform.h replaces raw `__thread` — empty under Emscripten (single-threaded)
 - Build and test with `bash build.sh` from project root
 - JACL proc names must be <= 7 bytes (inline string limit). Use short names.
 - `==` is the equality operator (not `=`)
