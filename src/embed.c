@@ -1,7 +1,8 @@
-/* JACL Embedding API — VM lifecycle, eval, error handling.
+/* JACL Embedding API — VM lifecycle, eval, error handling, value constructors.
  *
  * Implements jacl_vm_new, jacl_vm_new_ex, jacl_vm_free,
- * jacl_eval, jacl_eval_file, jacl_is_error, jacl_error_message.
+ * jacl_eval, jacl_eval_file, jacl_is_error, jacl_error_message,
+ * value constructors/extractors, and jacl_typeof.
  * Included after runtime.c in the unity build.
  */
 
@@ -237,6 +238,149 @@ static const char* jacl_error_message_str(JaclVM* jvm, JaclVal err) {
   if (!jvm) return NULL;
   if (!jacl_is_error(err)) return NULL;
   return jvm->last_error;
+}
+
+/* ===== US-004: Value constructors and extractors ===== */
+
+/* --- Value constructors (public API wrappers) --- */
+
+static JaclVal jacl_nil_val(void) {
+  return JACL_NIL;
+}
+
+static JaclVal jacl_bool_val(bool b) {
+  return jacl_bool(b);
+}
+
+static JaclVal jacl_i32_val(int32_t n) {
+  return jacl_i32(n);
+}
+
+static JaclVal jacl_i64_val(JaclVM* jvm, int64_t n) {
+  return jacl_i64(&jvm->vm.heap, n);
+}
+
+static JaclVal jacl_u32_val(uint32_t n) {
+  return jacl_u32(n);
+}
+
+static JaclVal jacl_u64_val(JaclVM* jvm, uint64_t n) {
+  return jacl_u64(&jvm->vm.heap, n);
+}
+
+static JaclVal jacl_f32_val(float f) {
+  return jacl_f32(f);
+}
+
+static JaclVal jacl_f64_val(JaclVM* jvm, double d) {
+  return jacl_f64(&jvm->vm.heap, d);
+}
+
+static JaclVal jacl_string_val(JaclVM* jvm, const char* s, size_t len) {
+  if (!jvm || !s) return jacl_set_error(JACL_NIL);
+  if (len <= 7) {
+    return jacl_inline_string(s, len);
+  }
+  return jacl_intern(&jvm->vm.heap, &jvm->intern_table, s, (uint32_t)len);
+}
+
+static JaclVal jacl_string_cstr_val(JaclVM* jvm, const char* s) {
+  if (!jvm || !s) return jacl_set_error(JACL_NIL);
+  return jacl_string_val(jvm, s, strlen(s));
+}
+
+/* --- Value extractors (public API wrappers) --- */
+
+static int32_t jacl_as_i32_val(JaclVal val) {
+  return jacl_as_i32(val);
+}
+
+static int64_t jacl_as_i64_val(JaclVal val) {
+  return jacl_as_i64(val);
+}
+
+static uint32_t jacl_as_u32_val(JaclVal val) {
+  return jacl_as_u32(val);
+}
+
+static uint64_t jacl_as_u64_val(JaclVal val) {
+  return jacl_as_u64(val);
+}
+
+static float jacl_as_f32_val(JaclVal val) {
+  return jacl_as_f32(val);
+}
+
+static double jacl_as_f64_val(JaclVal val) {
+  return jacl_as_f64(val);
+}
+
+static bool jacl_as_bool_val(JaclVal val) {
+  return jacl_as_bool(val);
+}
+
+static const char* jacl_as_cstr_val(JaclVM* jvm, JaclVal val, size_t* len_out) {
+  if (!jvm) return NULL;
+  if (!jacl_is_string(val)) return NULL;
+
+  if (jacl_is_inline_string(val)) {
+    /* Copy inline string to arena buffer so we can return a stable C string */
+    size_t len = jacl_inline_string_len(val);
+    char* buf = (char*)arena_alloc(&jvm->arena, (uint32_t)(len + 1));
+    jacl_inline_string_get(val, buf, len + 1);
+    buf[len] = '\0';
+    if (len_out) *len_out = len;
+    return buf;
+  }
+
+  /* Heap string — data is in GC heap, return pointer directly */
+  JaclHeapString* hs = jacl_as_heap_string(val);
+  if (len_out) *len_out = hs->length;
+  /* Heap strings are not null-terminated; copy to arena with null terminator */
+  char* buf = (char*)arena_alloc(&jvm->arena, hs->length + 1);
+  memcpy(buf, hs->data, hs->length);
+  buf[hs->length] = '\0';
+  return buf;
+}
+
+/* --- Type query --- */
+
+typedef enum {
+  EMBED_TYPE_DYN = 0,
+  EMBED_TYPE_BOOL,
+  EMBED_TYPE_NIL,
+  EMBED_TYPE_I32,
+  EMBED_TYPE_I64,
+  EMBED_TYPE_U32,
+  EMBED_TYPE_U64,
+  EMBED_TYPE_F32,
+  EMBED_TYPE_F64,
+  EMBED_TYPE_STR,
+  EMBED_TYPE_VEC,
+  EMBED_TYPE_MAP,
+  EMBED_TYPE_CLOSURE,
+  EMBED_TYPE_STRUCT
+} EmbedJaclType;
+
+static int jacl_typeof_val(JaclVal val) {
+  uint64_t tag = val & JACL_TYPE_MASK;
+  switch (tag) {
+    case JACL_TAG_NIL:           return EMBED_TYPE_NIL;
+    case JACL_TAG_BOOL:          return EMBED_TYPE_BOOL;
+    case JACL_TAG_I32:           return EMBED_TYPE_I32;
+    case JACL_TAG_I64:           return EMBED_TYPE_I64;
+    case JACL_TAG_U32:           return EMBED_TYPE_U32;
+    case JACL_TAG_U64:           return EMBED_TYPE_U64;
+    case JACL_TAG_F32:           return EMBED_TYPE_F32;
+    case JACL_TAG_F64:           return EMBED_TYPE_F64;
+    case JACL_TAG_INLINE_STRING: return EMBED_TYPE_STR;
+    case JACL_TAG_STRING:        return EMBED_TYPE_STR;
+    case JACL_TAG_VECTOR:        return EMBED_TYPE_VEC;
+    case JACL_TAG_MAP:           return EMBED_TYPE_MAP;
+    case JACL_TAG_CLOSURE:       return EMBED_TYPE_CLOSURE;
+    case JACL_TAG_STRUCT:        return EMBED_TYPE_STRUCT;
+    default:                     return EMBED_TYPE_DYN;
+  }
 }
 
 #endif /* EMBED_C */
