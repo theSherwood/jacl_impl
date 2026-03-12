@@ -605,4 +605,138 @@ static void jacl_handle_free_val(JaclVM* jvm, EmbedJaclHandle h) {
   jvm->handle_free_list[jvm->handle_free_top++] = h.index;
 }
 
+/* ===== US-008: jacl_call / jacl_call_named — call JACL from C ===== */
+
+/**
+ * jacl_call_val — call a JACL closure or native function from C.
+ *
+ * For native functions: dispatches directly without touching the VM stack.
+ * For closures: saves VM state, sets up a single call frame, runs to completion,
+ *               then restores state. Supports re-entrant calls.
+ */
+static JaclVal jacl_call_val(JaclVM* jvm, JaclVal fn, JaclVal* args, int argc) {
+  if (!jvm) return jacl_set_error(JACL_NIL);
+
+  VM* vm = &jvm->vm;
+
+  /* --- Native function path --- */
+  if (jacl_is_native_fn(fn)) {
+    uint32_t idx = jacl_as_native_fn_index(fn);
+    if (idx >= jvm->native_fn_count) {
+      return embed__make_error(jvm, "invalid native function index");
+    }
+    /* Validate arity */
+    int8_t arity = jvm->native_fn_arities[idx];
+    if (arity >= 0 && argc != (int)arity) {
+      return embed__make_error(jvm, "argument count mismatch");
+    }
+    return jvm->native_fns[idx].fn(jvm, args, argc);
+  }
+
+  /* --- Closure path --- */
+  if (!jacl_is_closure(fn)) {
+    return embed__make_error(jvm, "not a callable value");
+  }
+
+  JaclClosure* closure = jacl_as_closure(fn);
+
+  /* Validate arity */
+  if (!closure->variadic) {
+    if (argc < (int)closure->min_args || argc != (int)closure->param_count) {
+      return embed__make_error(jvm, "argument count mismatch");
+    }
+  }
+
+  /* --- Save VM execution state (re-entrancy support) --- */
+  uint32_t saved_stack_top   = vm->stack_top;
+  uint32_t saved_frame_count = vm->frame_count;
+  uint8_t* saved_ip          = vm->ip;
+  BytecodeChunk* saved_chunk = vm->chunk;
+  BytecodeChunk* saved_top   = vm->top_chunk;
+  void*    saved_struct_reg  = vm->struct_registry;
+
+  JaclVal    saved_stack[VM_STACK_MAX];
+  CallFrame  saved_frames[VM_FRAMES_MAX];
+  if (saved_stack_top > 0)
+    memcpy(saved_stack, vm->stack, saved_stack_top * sizeof(JaclVal));
+  if (saved_frame_count > 0)
+    memcpy(saved_frames, vm->frames, saved_frame_count * sizeof(CallFrame));
+
+  /* --- Set up fresh stack: [fn, args...] --- */
+  vm->stack[0] = fn;
+  for (int i = 0; i < argc; i++) vm->stack[1 + i] = args[i];
+  vm->stack_top = (uint32_t)(1 + argc);
+
+  /* --- Set up a single call frame for the closure --- */
+  vm->frames[0].closure    = closure;
+  vm->frames[0].return_ip  = NULL;   /* no caller to return to */
+  vm->frames[0].stack_base = 1;      /* locals/args start after the closure slot */
+  vm->frames[0].chunk      = &closure->chunk;
+  vm->frame_count = 1;
+
+  vm->ip        = closure->chunk.code;
+  vm->chunk     = &closure->chunk;
+  vm->top_chunk = &closure->chunk;
+
+  #define CALL_RESTORE() do { \
+    if (saved_stack_top > 0) \
+      memcpy(vm->stack, saved_stack, saved_stack_top * sizeof(JaclVal)); \
+    if (saved_frame_count > 0) \
+      memcpy(vm->frames, saved_frames, saved_frame_count * sizeof(CallFrame)); \
+    vm->stack_top       = saved_stack_top; \
+    vm->frame_count     = saved_frame_count; \
+    vm->ip              = saved_ip; \
+    vm->chunk           = saved_chunk; \
+    vm->top_chunk       = saved_top; \
+    vm->struct_registry = saved_struct_reg; \
+  } while (0)
+
+  VMResult r = vm__run(vm, 0);
+
+  JaclVal call_result;
+  if (r != VM_OK) {
+    call_result = embed__make_error(jvm, vm->error_message ? vm->error_message
+                                                            : "runtime error");
+    CALL_RESTORE();
+    return call_result;
+  }
+
+  /* OP_RETURN with frame_count==1 stores result in stack[0], sets stack_top=1 */
+  call_result = (vm->stack_top > 0) ? vm->stack[0] : JACL_NIL;
+  CALL_RESTORE();
+  return call_result;
+
+  #undef CALL_RESTORE
+}
+
+/**
+ * jacl_call_named_val — look up a global proc by name and call it.
+ *
+ * Supports names ≤7 bytes (inline) and longer names (heap-interned).
+ */
+static JaclVal jacl_call_named_val(JaclVM* jvm, const char* name,
+                                    JaclVal* args, int argc) {
+  if (!jvm || !name) return jacl_set_error(JACL_NIL);
+
+  size_t name_len = strlen(name);
+  if (name_len == 0) return embed__make_error(jvm, "empty function name");
+
+  /* Build the JaclVal key used in the environment */
+  JaclVal name_val;
+  if (name_len <= 7) {
+    name_val = jacl_inline_string(name, name_len);
+  } else {
+    name_val = jacl_intern(&jvm->vm.heap, &jvm->intern_table,
+                           name, (uint32_t)name_len);
+  }
+
+  bool found;
+  JaclVal fn = vm__env_get(&jvm->vm, name_val, &found);
+  if (!found) {
+    return embed__make_error(jvm, "undefined function");
+  }
+
+  return jacl_call_val(jvm, fn, args, argc);
+}
+
 #endif /* EMBED_C */

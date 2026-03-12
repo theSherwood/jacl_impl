@@ -1025,6 +1025,175 @@ static int test_register_fn_reregister(void) {
   return 1;
 }
 
+/* ===== US-008: jacl_call / jacl_call_named ===== */
+
+/* Test: call a JACL closure from C via jacl_call_val */
+static int test_call_closure(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  /* Define a proc, then get its closure value */
+  JaclVal def_r = jacl_eval(vm, "proc add2 [a b] { [+ $a $b] }");
+  ASSERT(!jacl_is_error(def_r));
+
+  JaclVal fn = jacl_eval(vm, "$add2");
+  ASSERT(!jacl_is_error(fn));
+  ASSERT(jacl_is_closure(fn));
+
+  JaclVal args[2] = { jacl_i32(3), jacl_i32(7) };
+  JaclVal result = jacl_call_val(vm, fn, args, 2);
+  ASSERT(!jacl_is_error(result));
+  ASSERT(jacl_is_i32(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 10);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: call a native function via jacl_call_val */
+static int test_call_native_fn(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  uint32_t idx = embed__register_native(vm, "nadd4", native_add, 2);
+  ASSERT(idx != UINT32_MAX);
+
+  /* Use the native fn value directly */
+  JaclVal fn = jacl_native_fn(idx);
+  ASSERT(jacl_is_native_fn(fn));
+
+  JaclVal args[2] = { jacl_i32(10), jacl_i32(20) };
+  JaclVal result = jacl_call_val(vm, fn, args, 2);
+  ASSERT(!jacl_is_error(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 30);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: jacl_call_named_val looks up and calls a global proc */
+static int test_call_named_proc(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal def_r = jacl_eval(vm, "proc mul2 [a b] { [* $a $b] }");
+  ASSERT(!jacl_is_error(def_r));
+
+  JaclVal args[2] = { jacl_i32(6), jacl_i32(7) };
+  JaclVal result = jacl_call_named_val(vm, "mul2", args, 2);
+  ASSERT(!jacl_is_error(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 42);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: calling a proc that errors returns an error value */
+static int test_call_returns_error(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal def_r = jacl_eval(vm, "proc divz [a] { [/ $a 0] }");
+  ASSERT(!jacl_is_error(def_r));
+
+  JaclVal fn = jacl_eval(vm, "$divz");
+  ASSERT(!jacl_is_error(fn));
+
+  JaclVal args[1] = { jacl_i32(5) };
+  JaclVal result = jacl_call_val(vm, fn, args, 1);
+  ASSERT(jacl_is_error(result));
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Native fn that calls jacl_call_named back into JACL */
+static JaclVal native_call_jacl_fn(JaclVM* vm, JaclVal* args, int argc) {
+  (void)argc;
+  /* Call the JACL "double" proc with the given arg */
+  return jacl_call_named_val(vm, "double", args, 1);
+}
+
+/* Test: re-entrant — native fn calls jacl_call back into JACL */
+static int test_call_reentrant(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  /* Define a JACL proc */
+  JaclVal def_r = jacl_eval(vm, "proc double [x] { [* $x 2] }");
+  ASSERT(!jacl_is_error(def_r));
+
+  /* Register a native fn that will call the JACL proc */
+  embed__register_native(vm, "cdbl", native_call_jacl_fn, 1);
+
+  /* Call from JACL: native fn → jacl_call_named → JACL closure */
+  JaclVal result = jacl_eval(vm, "[cdbl 21]");
+  ASSERT(!jacl_is_error(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 42);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: jacl_call_named with undefined name returns error */
+static int test_call_named_undefined(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal result = jacl_call_named_val(vm, "nope", NULL, 0);
+  ASSERT(jacl_is_error(result));
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: jacl_call with wrong arity returns error */
+static int test_call_wrong_arity(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal def_r = jacl_eval(vm, "proc add2b [a b] { [+ $a $b] }");
+  ASSERT(!jacl_is_error(def_r));
+  JaclVal fn = jacl_eval(vm, "$add2b");
+  ASSERT(!jacl_is_error(fn));
+  ASSERT(jacl_is_closure(fn));
+
+  /* Too few args */
+  JaclVal args1[1] = { jacl_i32(1) };
+  JaclVal r1 = jacl_call_val(vm, fn, args1, 1);
+  ASSERT(jacl_is_error(r1));
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: jacl_call with NULL vm returns error */
+static int test_call_null_safety(void) {
+  JaclVal fn = jacl_i32_val(99); /* not a closure */
+  JaclVal result = jacl_call_val(NULL, fn, NULL, 0);
+  ASSERT(jacl_is_error(result));
+  return 1;
+}
+
+/* Test: call proc multiple times, result is correct each time */
+static int test_call_multiple(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  JaclVal def_r = jacl_eval(vm, "proc sq [n] { [* $n $n] }");
+  ASSERT(!jacl_is_error(def_r));
+
+  for (int i = 1; i <= 5; i++) {
+    JaclVal args[1] = { jacl_i32(i) };
+    JaclVal result = jacl_call_named_val(vm, "sq", args, 1);
+    ASSERT(!jacl_is_error(result));
+    ASSERT_INT_EQ(jacl_as_i32(result), i * i);
+  }
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
 int main(void) {
   int pass = 0, fail = 0;
 
@@ -1102,6 +1271,17 @@ int main(void) {
   RUN(test_register_fn_multiple);
   RUN(test_register_fn_null_safety);
   RUN(test_register_fn_reregister);
+
+  printf("\n=== Embedding API: jacl_call / jacl_call_named ===\n");
+  RUN(test_call_closure);
+  RUN(test_call_native_fn);
+  RUN(test_call_named_proc);
+  RUN(test_call_returns_error);
+  RUN(test_call_reentrant);
+  RUN(test_call_named_undefined);
+  RUN(test_call_wrong_arity);
+  RUN(test_call_null_safety);
+  RUN(test_call_multiple);
 
   printf("\n%d passed, %d failed\n", pass, fail);
   return fail > 0 ? 1 : 0;
