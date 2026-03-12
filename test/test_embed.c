@@ -678,6 +678,178 @@ static int test_handle_config(void) {
   return 1;
 }
 
+/* ===== US-006: Native function tag and OP_CALL dispatch ===== */
+
+/* Simple native function: add two i32s */
+static JaclVal native_add(JaclVM* vm, JaclVal* args, int argc) {
+  (void)vm; (void)argc;
+  return jacl_i32(jacl_as_i32(args[0]) + jacl_as_i32(args[1]));
+}
+
+/* Native function returning a constant */
+static JaclVal native_fortytwo(JaclVM* vm, JaclVal* args, int argc) {
+  (void)vm; (void)args; (void)argc;
+  return jacl_i32(42);
+}
+
+/* Variadic native function: sum all args */
+static JaclVal native_sum(JaclVM* vm, JaclVal* args, int argc) {
+  (void)vm;
+  int32_t total = 0;
+  for (int i = 0; i < argc; i++) {
+    total += jacl_as_i32(args[i]);
+  }
+  return jacl_i32(total);
+}
+
+/* Native function that returns an error */
+static JaclVal native_fail(JaclVM* vm, JaclVal* args, int argc) {
+  (void)vm; (void)args; (void)argc;
+  return jacl_set_error(JACL_NIL);
+}
+
+/* Test: register native fn and call from JACL */
+static int test_native_fn_basic(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  uint32_t idx = embed__register_native(vm, "nadd", native_add, 2);
+  ASSERT(idx != UINT32_MAX);
+
+  JaclVal result = jacl_eval(vm, "[nadd 10 20]");
+  ASSERT(!jacl_is_error(result));
+  ASSERT(jacl_is_i32(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 30);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: zero-arg native function */
+static int test_native_fn_zero_args(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  embed__register_native(vm, "ft", native_fortytwo, 0);
+
+  JaclVal result = jacl_eval(vm, "[ft]");
+  ASSERT(!jacl_is_error(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 42);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: variadic native function (arity=-1) */
+static int test_native_fn_variadic(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  embed__register_native(vm, "nsum", native_sum, -1);
+
+  JaclVal r1 = jacl_eval(vm, "[nsum 1 2 3]");
+  ASSERT(!jacl_is_error(r1));
+  ASSERT_INT_EQ(jacl_as_i32(r1), 6);
+
+  JaclVal r2 = jacl_eval(vm, "[nsum 10]");
+  ASSERT(!jacl_is_error(r2));
+  ASSERT_INT_EQ(jacl_as_i32(r2), 10);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: native function arity mismatch produces runtime error */
+static int test_native_fn_arity_mismatch(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  embed__register_native(vm, "nadd", native_add, 2);
+
+  /* Too few args — this should be a compile error or runtime error */
+  JaclVal result = jacl_eval(vm, "[nadd 1]");
+  ASSERT(jacl_is_error(result));
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: native function returning error propagates */
+static int test_native_fn_error(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  embed__register_native(vm, "nfail", native_fail, 0);
+
+  JaclVal result = jacl_eval(vm, "[nfail]");
+  ASSERT(jacl_is_error(result));
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: JACL_TAG_NATIVE_FN value has correct type */
+static int test_native_fn_tag(void) {
+  JaclVal v = jacl_native_fn(0);
+  ASSERT(jacl_is_native_fn(v));
+  ASSERT(!jacl_is_closure(v));
+  ASSERT(!jacl_is_nil(v));
+  ASSERT_INT_EQ(jacl_as_native_fn_index(v), 0);
+
+  JaclVal v2 = jacl_native_fn(42);
+  ASSERT(jacl_is_native_fn(v2));
+  ASSERT_INT_EQ(jacl_as_native_fn_index(v2), 42);
+  return 1;
+}
+
+/* Test: native fn receives args from VM stack correctly */
+static int test_native_fn_args(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  embed__register_native(vm, "nadd", native_add, 2);
+
+  /* Call with computed args */
+  JaclVal result = jacl_eval(vm, "[nadd [+ 1 2] [+ 3 4]]");
+  ASSERT(!jacl_is_error(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 10); /* (1+2) + (3+4) = 10 */
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: multiple native fns can coexist */
+static int test_native_fn_multiple(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+
+  embed__register_native(vm, "nadd", native_add, 2);
+  embed__register_native(vm, "ft", native_fortytwo, 0);
+  embed__register_native(vm, "nsum", native_sum, -1);
+
+  JaclVal r1 = jacl_eval(vm, "[nadd 1 2]");
+  ASSERT(!jacl_is_error(r1));
+  ASSERT_INT_EQ(jacl_as_i32(r1), 3);
+
+  JaclVal r2 = jacl_eval(vm, "[ft]");
+  ASSERT(!jacl_is_error(r2));
+  ASSERT_INT_EQ(jacl_as_i32(r2), 42);
+
+  JaclVal r3 = jacl_eval(vm, "[nsum 1 2 3 4 5]");
+  ASSERT(!jacl_is_error(r3));
+  ASSERT_INT_EQ(jacl_as_i32(r3), 15);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: typeof returns EMBED_TYPE_NATIVE_FN for native fn values */
+static int test_native_fn_typeof(void) {
+  JaclVal v = jacl_native_fn(0);
+  ASSERT_INT_EQ(jacl_typeof_val(v), EMBED_TYPE_NATIVE_FN);
+  return 1;
+}
+
 int main(void) {
   int pass = 0, fail = 0;
 
@@ -733,6 +905,17 @@ int main(void) {
   RUN(test_handle_exhaustion);
   RUN(test_handle_null_vm);
   RUN(test_handle_config);
+
+  printf("\n=== Embedding API: Native function dispatch ===\n");
+  RUN(test_native_fn_tag);
+  RUN(test_native_fn_basic);
+  RUN(test_native_fn_zero_args);
+  RUN(test_native_fn_variadic);
+  RUN(test_native_fn_arity_mismatch);
+  RUN(test_native_fn_error);
+  RUN(test_native_fn_args);
+  RUN(test_native_fn_multiple);
+  RUN(test_native_fn_typeof);
 
   printf("\n%d passed, %d failed\n", pass, fail);
   return fail > 0 ? 1 : 0;

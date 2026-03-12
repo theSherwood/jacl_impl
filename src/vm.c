@@ -93,6 +93,11 @@ typedef struct {
   StructTypeRegistry* struct_registry; /* struct type metadata from compiler */
   JaclVal*   gc_handle_slots;  /* external GC root handles (owned by embedding layer) */
   uint32_t   gc_handle_count;  /* number of slots in gc_handle_slots */
+  /* Native function registry (owned by embedding layer) */
+  JaclVal    (*call_native)(void* ctx, uint32_t fn_index, JaclVal* args, int argc);
+  void*      native_fn_ctx;     /* JaclVM_s* for dispatch callback */
+  int8_t*    native_fn_arities; /* arity per native fn (-1 = variadic) */
+  uint32_t   native_fn_count;   /* number of registered native functions */
 } VM;
 
 /* --- API --- */
@@ -171,6 +176,7 @@ static const char* vm__type_name(JaclVal v) {
   if (jacl_is_vector(v))        return "vector";
   if (jacl_is_map(v))           return "map";
   if (jacl_is_future(v))        return "future";
+  if (jacl_is_native_fn(v))    return "native-fn";
   return "unknown";
 }
 
@@ -262,6 +268,10 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->struct_registry = NULL;
   vm->gc_handle_slots = NULL;
   vm->gc_handle_count = 0;
+  vm->call_native       = NULL;
+  vm->native_fn_ctx     = NULL;
+  vm->native_fn_arities = NULL;
+  vm->native_fn_count   = 0;
 
   /* Initialize GC heap and make it available for collection templates */
   gc_block_pool_init(&vm->block_pool);
@@ -531,6 +541,10 @@ static void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
       vm__fmt_value(buf, (JaclVal)fut->result);
       vm__fmt_append(buf, ">", 1);
     }
+  } else if (jacl_is_native_fn(val)) {
+    n = snprintf(tmp, sizeof(tmp), "<native-fn #%u>",
+                 jacl_as_native_fn_index(val));
+    vm__fmt_append(buf, tmp, (uint32_t)n);
   } else {
     vm__fmt_append(buf, "<unknown>", 9);
   }
@@ -1056,6 +1070,27 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint8_t arg_count = vm__read_byte(vm);
         JaclVal callee = vm->stack[vm->stack_top - arg_count - 1];
 
+        if (jacl_is_native_fn(callee)) {
+          uint32_t fn_idx = jacl_as_native_fn_index(callee);
+          if (fn_idx >= vm->native_fn_count || !vm->call_native) {
+            vm__set_error(vm, "invalid native function index %u", fn_idx);
+            return VM_RUNTIME_ERROR;
+          }
+          int8_t arity = vm->native_fn_arities[fn_idx];
+          if (arity >= 0 && arg_count != (uint8_t)arity) {
+            vm__set_error(vm, "expected %d arguments but got %d",
+                         (int)arity, (int)arg_count);
+            return VM_RUNTIME_ERROR;
+          }
+          JaclVal* args = &vm->stack[vm->stack_top - arg_count];
+          JaclVal ret = vm->call_native(vm->native_fn_ctx, fn_idx,
+                                         args, (int)arg_count);
+          vm->stack_top -= (arg_count + 1); /* pop args + callee */
+          result = vm__push(vm, ret);
+          if (result != VM_OK) return result;
+          break;
+        }
+
         if (!jacl_is_closure(callee)) {
           vm__set_error(vm, "cannot call %s value", vm__type_name(callee));
           return VM_RUNTIME_ERROR;
@@ -1089,6 +1124,28 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
       case OP_TAIL_CALL: {
         uint8_t arg_count = vm__read_byte(vm);
         JaclVal callee = vm->stack[vm->stack_top - arg_count - 1];
+
+        if (jacl_is_native_fn(callee)) {
+          /* Native functions can't be tail-called; degrade to regular call */
+          uint32_t fn_idx = jacl_as_native_fn_index(callee);
+          if (fn_idx >= vm->native_fn_count || !vm->call_native) {
+            vm__set_error(vm, "invalid native function index %u", fn_idx);
+            return VM_RUNTIME_ERROR;
+          }
+          int8_t arity = vm->native_fn_arities[fn_idx];
+          if (arity >= 0 && arg_count != (uint8_t)arity) {
+            vm__set_error(vm, "expected %d arguments but got %d",
+                         (int)arity, (int)arg_count);
+            return VM_RUNTIME_ERROR;
+          }
+          JaclVal* args = &vm->stack[vm->stack_top - arg_count];
+          JaclVal ret = vm->call_native(vm->native_fn_ctx, fn_idx,
+                                         args, (int)arg_count);
+          vm->stack_top -= (arg_count + 1);
+          result = vm__push(vm, ret);
+          if (result != VM_OK) return result;
+          break;
+        }
 
         if (!jacl_is_closure(callee)) {
           vm__set_error(vm, "cannot call %s value", vm__type_name(callee));

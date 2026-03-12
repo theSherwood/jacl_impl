@@ -19,6 +19,18 @@ typedef struct {
   uint32_t max_handles;
 } JaclConfig;
 
+/* --- Native function signature and registry entry --- */
+
+typedef JaclVal (*EmbedNativeFn)(JaclVM* vm, JaclVal* args, int argc);
+
+typedef struct {
+  EmbedNativeFn fn;     /* C function pointer */
+  JaclVal       name;   /* inline string name */
+  int8_t        arity;  /* expected arg count, -1 = variadic */
+} NativeFnEntry;
+
+#define NATIVE_FN_INIT_CAP 32
+
 /* --- JaclVM wrapper (opaque to external callers) --- */
 
 struct JaclVM_s {
@@ -32,7 +44,21 @@ struct JaclVM_s {
   uint32_t*       handle_free_list;  /* stack of free slot indices */
   uint32_t        handle_count;      /* number of allocated slots */
   uint32_t        handle_free_top;   /* top of free list stack */
+  /* Native function registry */
+  NativeFnEntry*  native_fns;        /* array of registered native functions */
+  int8_t*         native_fn_arities; /* arity mirror for VM dispatch */
+  uint32_t        native_fn_count;   /* number of registered functions */
+  uint32_t        native_fn_cap;     /* capacity of native_fns array */
 };
+
+/* --- Native function dispatch callback (called from VM's OP_CALL) --- */
+
+static JaclVal embed__call_native(void* ctx, uint32_t fn_index,
+                                   JaclVal* args, int argc) {
+  JaclVM* jvm = (JaclVM*)ctx;
+  if (fn_index >= jvm->native_fn_count) return jacl_set_error(JACL_NIL);
+  return jvm->native_fns[fn_index].fn(jvm, args, argc);
+}
 
 /* --- Forward declare jacl_vm_new_ex so jacl_vm_new can call it --- */
 
@@ -97,6 +123,17 @@ static JaclVM* jacl_vm_new_ex(const JaclConfig* config) {
   jvm->vm.gc_handle_slots = jvm->handle_slots;
   jvm->vm.gc_handle_count = max_handles;
 
+  /* Initialize native function registry */
+  jvm->native_fns = (NativeFnEntry*)malloc(NATIVE_FN_INIT_CAP * sizeof(NativeFnEntry));
+  jvm->native_fn_arities = (int8_t*)malloc(NATIVE_FN_INIT_CAP * sizeof(int8_t));
+  jvm->native_fn_count = 0;
+  jvm->native_fn_cap = NATIVE_FN_INIT_CAP;
+  /* Wire dispatch callback into VM */
+  jvm->vm.call_native       = embed__call_native;
+  jvm->vm.native_fn_ctx     = jvm;
+  jvm->vm.native_fn_arities = jvm->native_fn_arities;
+  jvm->vm.native_fn_count   = 0;
+
   return jvm;
 }
 
@@ -109,6 +146,10 @@ static void jacl_vm_free(JaclVM* vm) {
   free(vm->handle_free_list);
   vm->vm.gc_handle_slots = NULL;
   vm->vm.gc_handle_count = 0;
+  free(vm->native_fns);
+  free(vm->native_fn_arities);
+  vm->vm.call_native = NULL;
+  vm->vm.native_fn_count = 0;
   vm_destroy(&vm->vm);
   arena_destroy(&vm->arena);
   free(vm);
@@ -382,7 +423,8 @@ typedef enum {
   EMBED_TYPE_VEC,
   EMBED_TYPE_MAP,
   EMBED_TYPE_CLOSURE,
-  EMBED_TYPE_STRUCT
+  EMBED_TYPE_STRUCT,
+  EMBED_TYPE_NATIVE_FN
 } EmbedJaclType;
 
 static int jacl_typeof_val(JaclVal val) {
@@ -402,8 +444,71 @@ static int jacl_typeof_val(JaclVal val) {
     case JACL_TAG_MAP:           return EMBED_TYPE_MAP;
     case JACL_TAG_CLOSURE:       return EMBED_TYPE_CLOSURE;
     case JACL_TAG_STRUCT:        return EMBED_TYPE_STRUCT;
+    case JACL_TAG_NATIVE_FN:    return EMBED_TYPE_NATIVE_FN;
     default:                     return EMBED_TYPE_DYN;
   }
+}
+
+/* ===== US-006: Native function registration (internal) ===== */
+
+static uint32_t embed__register_native(JaclVM* jvm, const char* name,
+                                        EmbedNativeFn fn, int8_t arity) {
+  if (!jvm || !fn) return UINT32_MAX;
+
+  /* Grow registry if needed */
+  if (jvm->native_fn_count >= jvm->native_fn_cap) {
+    uint32_t new_cap = jvm->native_fn_cap * 2;
+    NativeFnEntry* new_fns = (NativeFnEntry*)realloc(
+        jvm->native_fns, new_cap * sizeof(NativeFnEntry));
+    int8_t* new_arities = (int8_t*)realloc(
+        jvm->native_fn_arities, new_cap * sizeof(int8_t));
+    if (!new_fns || !new_arities) return UINT32_MAX;
+    jvm->native_fns = new_fns;
+    jvm->native_fn_arities = new_arities;
+    jvm->native_fn_cap = new_cap;
+    /* Re-wire VM pointer since realloc may have moved the buffer */
+    jvm->vm.native_fn_arities = jvm->native_fn_arities;
+  }
+
+  uint32_t idx = jvm->native_fn_count++;
+  jvm->native_fns[idx].fn    = fn;
+  jvm->native_fns[idx].name  = jacl_inline_string(name, strlen(name));
+  jvm->native_fns[idx].arity = arity;
+  jvm->native_fn_arities[idx] = arity;
+  jvm->vm.native_fn_count     = jvm->native_fn_count;
+
+  /* Register the native function value as a global in the VM's environment */
+  JaclVal fn_val = jacl_native_fn(idx);
+  JaclVal name_val = jacl_inline_string(name, strlen(name));
+  Environment* env = &jvm->vm.env;
+
+  /* Check if name already exists */
+  for (uint32_t i = 0; i < env->count; i++) {
+    if ((env->names[i] & (JACL_TYPE_MASK | JACL_PAYLOAD_MASK)) ==
+        (name_val & (JACL_TYPE_MASK | JACL_PAYLOAD_MASK))) {
+      env->values[i] = fn_val;
+      return idx;
+    }
+  }
+
+  /* Grow env if needed */
+  if (env->count >= env->cap) {
+    uint32_t new_cap = env->cap * 2;
+    JaclVal* new_names = (JaclVal*)arena_alloc(jvm->vm.arena,
+                                                new_cap * sizeof(JaclVal));
+    JaclVal* new_values = (JaclVal*)arena_alloc(jvm->vm.arena,
+                                                 new_cap * sizeof(JaclVal));
+    memcpy(new_names, env->names, env->count * sizeof(JaclVal));
+    memcpy(new_values, env->values, env->count * sizeof(JaclVal));
+    env->names = new_names;
+    env->values = new_values;
+    env->cap = new_cap;
+  }
+
+  env->names[env->count]  = name_val;
+  env->values[env->count] = fn_val;
+  env->count++;
+  return idx;
 }
 
 /* ===== US-005: GC handle API — pin values from C ===== */

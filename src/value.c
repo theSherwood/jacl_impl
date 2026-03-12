@@ -58,6 +58,7 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_F64            ((uint64_t)0x10 << JACL_TAG_SHIFT)
 #define JACL_TAG_FUTURE         ((uint64_t)0x11 << JACL_TAG_SHIFT)
 #define JACL_TAG_STRUCT         ((uint64_t)0x12 << JACL_TAG_SHIFT)
+#define JACL_TAG_NATIVE_FN     ((uint64_t)0x13 << JACL_TAG_SHIFT)
 
 /* --- Heap structs for 64-bit numeric types --- */
 
@@ -240,6 +241,19 @@ static inline bool jacl_is_future(JaclVal v) {
 
 static inline bool jacl_is_struct(JaclVal v) {
     return (v & JACL_TYPE_MASK) == JACL_TAG_STRUCT;
+}
+
+/* Native function: payload is registry index */
+static inline bool jacl_is_native_fn(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_NATIVE_FN;
+}
+
+static inline JaclVal jacl_native_fn(uint32_t index) {
+    return JACL_TAG_NATIVE_FN | ((uint64_t)index & JACL_PAYLOAD_MASK);
+}
+
+static inline uint32_t jacl_as_native_fn_index(JaclVal v) {
+    return (uint32_t)(v & JACL_PAYLOAD_MASK);
 }
 
 /* --- Inline string constructor --- */
