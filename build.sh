@@ -1,7 +1,7 @@
 #!/bin/bash
 
 CC="${CC:-gcc}"
-CFLAGS="-Wall -Wextra -std=c99 -g"
+CFLAGS="-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE"
 PASS=0
 FAIL=0
 FAILED_TESTS=""
@@ -31,7 +31,7 @@ done
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
-BUILD_DIR=$(mktemp -d)
+BUILD_DIR=$(mktemp -d "${DIR}/.build_XXXXXX")
 trap "rm -rf '$BUILD_DIR'" EXIT
 
 # Define tests: src|name|flags
@@ -43,15 +43,15 @@ TESTS=(
     "lib/hamt/test_hamt_types.c|hamt_types|"
     "lib/hamt/test_hamt_transient.c|hamt_transient|"
     "lib/hamt/test_hamt_hash.c|hamt_hash|"
-    "lib/hamt/test_hamt_ownership.c|hamt_ownership|-Wall -Wextra -std=c99 -g -DNDEBUG -lpthread"
-    "lib/hamt/test_hamt_concurrent.c|hamt_concurrent|-Wall -Wextra -std=c99 -g -lpthread"
+    "lib/hamt/test_hamt_ownership.c|hamt_ownership|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -DNDEBUG -lpthread"
+    "lib/hamt/test_hamt_concurrent.c|hamt_concurrent|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "lib/chase_lev/test_chase_lev.c|chase_lev|"
-    "lib/chase_lev/test_chase_lev_stress.c|chase_lev_stress|-Wall -Wextra -std=c99 -g -O2 -lpthread"
+    "lib/chase_lev/test_chase_lev_stress.c|chase_lev_stress|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -O2 -lpthread"
     "lib/rrb_vec/test_rrb_vec.c|rrb_vec|"
-    "lib/rrb_vec/test_rrb_vec_ownership.c|rrb_vec_ownership|-Wall -Wextra -std=c99 -g -DNDEBUG -lpthread"
-    "lib/rrb_vec/test_rrb_vec_concurrent.c|rrb_vec_concurrent|-Wall -Wextra -std=c99 -g -lpthread"
+    "lib/rrb_vec/test_rrb_vec_ownership.c|rrb_vec_ownership|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -DNDEBUG -lpthread"
+    "lib/rrb_vec/test_rrb_vec_concurrent.c|rrb_vec_concurrent|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "lib/rrb_vec/test_rrb_vec_transient_functional.c|rrb_vec_transient_functional|"
-    "lib/rrb_vec/test_rrb_vec_transient_functional_ownership.c|rrb_vec_transient_functional_ownership|-Wall -Wextra -std=c99 -g -DNDEBUG -lpthread"
+    "lib/rrb_vec/test_rrb_vec_transient_functional_ownership.c|rrb_vec_transient_functional_ownership|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -DNDEBUG -lpthread"
     "lib/rrb_vec/test_rrb_vec_hash.c|rrb_vec_hash|"
     "lib/sum_tree/test_sum_tree.c|sum_tree|"
     "lib/sum_tree/test_utf8.c|utf8|"
@@ -80,11 +80,12 @@ TESTS=(
     "test/test_m10.c|m10|"
     "test/test_m11.c|m11|"
     "test/test_gc.c|gc|"
-    "test/test_runtime.c|runtime|-Wall -Wextra -std=c99 -g -lpthread"
-    "test/test_m12.c|m12|-Wall -Wextra -std=c99 -g -lpthread"
-    "test/test_m13.c|m13|-Wall -Wextra -std=c99 -g -lpthread"
-    "test/test_jacl_harness.c|jacl_harness|-Wall -Wextra -std=c99 -g -lpthread"
+    "test/test_runtime.c|runtime|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
+    "test/test_m12.c|m12|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
+    "test/test_m13.c|m13|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
+    "test/test_jacl_harness.c|jacl_harness|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "test/test_embed.c|embed|${LIBFFI_FLAGS}"
+    "test/test_e2e_embed_basics.c|e2e_embed_basics|${LIBFFI_FLAGS}"
 )
 
 # Filter tests if --lib flag is set
@@ -108,7 +109,7 @@ for entry in "${TESTS[@]}"; do
     if [ -n "$extra_cflags" ]; then
         flags="$extra_cflags"
     fi
-    $CC $flags "$src" -o "$BUILD_DIR/$name" 2>"$BUILD_DIR/${name}.err" &
+    $CC $flags "$src" -o "$BUILD_DIR/$name" -lm 2>"$BUILD_DIR/${name}.err" &
     PIDS+=($!)
 done
 

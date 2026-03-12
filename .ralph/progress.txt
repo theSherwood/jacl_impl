@@ -2,6 +2,25 @@
 
 Progress log for ralph/ffi-embedding branch.
 
+## 2026-03-12 - US-013
+Thread: n/a
+- Implemented E2E tests for embedding basics in `test/test_e2e_embed_basics.c`
+- 7 tests covering all acceptance criteria:
+  1. `test_e2e_eval_add`: create VM, eval `[+ 1 2]`, extract i32, verify == 3, free VM
+  2. `test_e2e_syntax_error`: unclosed bracket and unexpected token both produce error-flagged values
+  3. `test_e2e_runtime_error_with_message`: undefined variable and type mismatch produce errors with messages; VM recovers after errors
+  4. `test_e2e_value_roundtrip_all_types`: nil, bool, i32, i64, u32, u64, f32, f64, short string, long string; also round-trips through eval
+  5. `test_e2e_string_gc_handle`: heap string pinned via GC handle survives 500 garbage allocations, content intact after recovery
+  6. `test_e2e_globals_persist`: 6 sequential evals sharing def, proc, mutation across calls
+  7. `test_e2e_independent_vms`: two VMs with independent globals and procs, freed in reverse order
+- Added test entry to `build.sh`
+- All 50 tests pass (0 failures), including 7 new E2E tests
+- Files changed: test/test_e2e_embed_basics.c (new), build.sh, .ralph/prd.json
+- **Learnings for future iterations:**
+  - i32 division by zero (`[/ 10 0]`) returns an error-flagged *value* via inline arithmetic (VM_OK, not VM_RUNTIME_ERROR) — `jacl_error_message_str` will return NULL since `last_error` is never set. Use undefined variable or type mismatch errors to test runtime errors with messages.
+  - `$undefined_var` triggers `vm__set_error` + `VM_RUNTIME_ERROR`, which flows through `embed__make_error` and populates `last_error`
+---
+
 ## 2026-03-12 - US-012
 Thread: n/a
 - Implemented Emscripten / WASM build target for JACL
@@ -99,6 +118,7 @@ Thread: n/a
 - jacl_struct_new_val/get_val/set_val/type_name_val use `_val` suffix and `jvm->persistent_struct_registry` for name-based lookup (not index-based)
 - JaclTrampoline_s is defined inside `#ifdef JACL_HAS_LIBFFI` with a stub in `#else`; forward-declare struct before JaclVM_s; handle pinning uses raw slot manipulation (not EmbedJaclHandle) to avoid ordering issues
 - Trampoline signature format: `rettype(argtype,argtype)` — types: void, i32, i64, u32, u64, f32, f64, ptr; void only valid as return type
+- Two error kinds: (1) inline error-flagged values (e.g. i32 div-by-zero) — VM_OK, no `last_error`; (2) VM_RUNTIME_ERROR (e.g. undefined var, type mismatch) — `last_error` set via `embed__make_error`
 
 ## 2026-03-11 - US-001
 - Implemented `include/jacl.h` — the public embedding API header

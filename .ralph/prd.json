@@ -230,7 +230,7 @@
         "All tests pass, no memory leaks (ASAN clean)"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
