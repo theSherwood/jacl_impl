@@ -121,7 +121,7 @@ Returns stdout as a string value on success, error value on failure.
 def files [!ls -la]
 
 # pipes work naturally — stdout flows through
-!ls -la | split "\n" | each [\ print $it]
+!ls -la | split "\n" | for [\ print $it]
 
 # failure short-circuits the pipeline
 !curl $bad_url | json-parse
@@ -259,15 +259,15 @@ JACL has a stream type representing a lazy sequence — elements are produced on
 
 ### Stream-aware commands
 
-`each`, `filter`, `transform` accept both streams and vectors:
+`for`, `filter`, `transform` accept both streams and vectors:
 
 ```
 # stream in, stream out (lazy, O(1) memory):
-!cat hugefile | lines | filter [\ match-re /error/ $it] | each [\ print $it]
+!cat hugefile | lines | filter [\ match-re /error/ $it] | for [\ print $it]
 
 # vector in, vector out (eager):
 def v [vec 1 2 3 4 5]
-$v | filter [\ > $it 2] | each [\ print $it]
+$v | filter [\ > $it 2] | for [\ print $it]
 ```
 
 ### Explicit collection — no auto-collect
@@ -292,7 +292,7 @@ These commands accept either a stream or a vector. When given a stream, they con
 
 | Command     | Input         | Output         | Description                              |
 | ----------- | ------------- | -------------- | ---------------------------------------- |
-| `each`      | stream or vec | (side effects) | Apply function to each element           |
+| `for`       | stream or vec | (side effects) | Apply function to each element           |
 | `filter`    | stream or vec | stream or vec  | Keep elements matching predicate         |
 | `transform` | stream or vec | stream or vec  | Apply function, collect results          |
 | `count`     | stream or vec | scalar         | Count elements (consumes stream)         |
@@ -349,7 +349,7 @@ All compose with pipes — they're commands that return values:
 
 ```
 # parallel returns a vector — pipe to each
-parallel {fetch $url1} {fetch $url2} | each [\ json-parse $it]
+parallel {fetch $url1} {fetch $url2} | for [\ json-parse $it]
 
 # parallel + destructuring
 def [users posts] [parallel {fetch "/users"} {fetch "/posts"}]
@@ -361,7 +361,7 @@ race {fetch $primary} {fetch $mirror} | json-parse
 timeout 5 {fetch $url} | json-parse
 
 # par-each on a collection
-$urls | par-each [\ fetch $it] | each [\ json-parse $it]
+$urls | par-each [\ fetch $it] | for [\ json-parse $it]
 
 # spawn/await for manual control
 def future [spawn { expensive-work $data }]
@@ -379,7 +379,7 @@ await $future | process-result
 ```
 # parallel — handle mixed results
 def results [parallel {fetch $url1} {fetch $url2} {fetch $url3}]
-$results | filter [\ not [error? $it]] | each [\ json-parse $it]
+$results | filter [\ not [error? $it]] | for [\ json-parse $it]
 
 # race with fallback on error
 race {fetch $primary} {fetch $mirror} | catch {"default"} | json-parse
@@ -433,6 +433,26 @@ def [api db] [parallel { !start-api } { !start-db }]
 . $api pid                    # both are Jobs
 signal $db SIGTERM            # signal one
 timeout 30 { await $job }    # timeout works
+```
+
+## Conditionals
+
+```
+if $cond { body }
+if $cond { body } else { body }
+if $cond { body } elif $cond2 { body } else { body }
+```
+
+`if` is an expression — it returns the value of the taken branch:
+
+```
+def x [if ($n > 0) { "positive" } else { "non-positive" }]
+```
+
+Composes with pipes:
+
+```
+get-status | if (== $it "ok") { proceed } else { abort }
 ```
 
 ## Iteration and control flow
@@ -512,6 +532,41 @@ for $items item {
 $items | filter [\ > $it 2] | for [\ print $it]
 ```
 
+## Splat / spread (`..`)
+
+`..` is a builtin symbol (like `$` and `!`) with special handling by the parser. It works in two directions:
+
+### Collecting (rest patterns)
+
+In destructuring and param lists, `..` collects remaining items:
+
+```
+def [head ..rest] $v                     # destructuring
+proc log {level, ..msgs} { ... }         # variadic params
+```
+
+### Spreading
+
+In `[]` juxtaposition and `!cmd` args, `..` spreads a collection into separate arguments:
+
+```
+def args [vec "-la" "/tmp"]
+!ls ..$args                              # → !ls -la /tmp
+
+def nums [vec 1 2 3]
+[+ ..$nums]                             # → [+ 1 2 3]
+
+# Glob + splat for passing matched files to external commands
+!ls ..[glob "*.txt"]                     # → !ls file1.txt file2.txt ...
+
+# Forwarding variadic args
+proc wrapper {..args} {
+  !git status ..$args
+}
+```
+
+`..` is not a user-definable operator — it's a parser-level construct, same category as `$` (variable reference) and `!` (external command).
+
 ## Variadic procs
 
 `..` in param lists collects remaining arguments, consistent with destructuring syntax:
@@ -538,6 +593,31 @@ Ranges produce streams. Work with `for`, `filter`, `transform`, etc:
 ```
 for (0 ..< 10) i { print $i }
 (1 ..= 100) | filter [\ == 0 ($it % 2)] | collect
+```
+
+## Line continuation
+
+Newline, `,`, and `;` are command separators in `{}` command mode and at top level. To continue a command across lines, use `\` at end of line:
+
+```
+!curl -X POST \
+  -H "Content-Type: application/json" \
+  -d $payload \
+  $url
+
+glob "**/*.jacl" \
+  | filter [\ match-re /test/ $it] \
+  | for f { run-test $f }
+```
+
+Inside `{}` blocks, `()`, and `[]`, newlines are already handled by the delimiters — no `\` needed:
+
+```
+def results [parallel
+  {fetch $url1}
+  {fetch $url2}
+  {fetch $url3}
+]
 ```
 
 ## Pragmas
@@ -1105,6 +1185,10 @@ The syntax is the same for both phases. Full parametric generics (type variables
 - `$ctx` closures — resolve at call time (true dynamic scoping); `spawn` snapshots at spawn time
 - `$ctx` performance — copy-on-write forking, compiler marks ctx-pure procs to skip fork
 - Globbing — explicit `glob` command, reads `$ctx.pwd`, returns stream; no implicit expansion anywhere
+- Conditionals — `if $cond {} elif $cond2 {} else {}`, is an expression, composes with pipes
+- `for` replaces `each` — `for` is the single iteration construct, `each` removed
+- Splat/spread (`..`) — builtin parser symbol, spreads collections into args in `[]` and `!cmd`; not a user-definable operator
+- Line continuation — `\` at end of line; newline/`,`/`;` are command separators
 
 ### Needs design work
 
@@ -1129,6 +1213,6 @@ The syntax is the same for both phases. Full parametric generics (type variables
 19. **`cancel` semantics** — Does `cancel` on a Job send SIGTERM with a grace period then SIGKILL? Or just SIGKILL immediately? What does `cancel` do on a plain Future — cooperative cancellation or hard kill?
 20. **`&` syntax** — Confirmed as sugar for `spawn { !cmd }`? Does it work only on `!cmd` or on any command? (`expensive-work &` for a JACL proc?)
 21. **Alias scoping** — Are aliases file-scoped like `def`? Can you import them from modules (`use "aliases.jacl" {..}`)? Or are they session/config-level (like `.bashrc` aliases)?
-22. **Splat into `!cmd`** — Variadic procs can collect `..args`, but how do you expand them as separate arguments to an external command? `!git status $args` passes one value; need a spread syntax like `!git status ..$args` or `!git status $args...`
+22. ~~**Splat into `!cmd`**~~ — resolved: `..` is a builtin parser symbol, `!cmd ..$args` spreads into separate args.
 23. **`signal` on plain Future** — Type error? Silently ignored? Probably a type error — only Jobs have a process to signal.
 24. **`$ctx` vs `$env` relationship** — Does `$ctx.env` subsume `$env`? Or does `$env` remain as the OS-synced atom while `$ctx.env` is the JACL-scoped view? If both exist, which does `!cmd` inherit?
