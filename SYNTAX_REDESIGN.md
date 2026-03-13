@@ -904,6 +904,72 @@ Copy-on-write: forking is a pointer copy. A new `$ctx` is only allocated when a 
   ```
 - External commands: non-zero exit code → error value (see Shell interop above)
 
+## Operators as macros
+
+Symbolic operators in `{}` command mode and `()` infix mode are macros — they receive unevaluated AST and produce transformed AST. The parser treats all operators uniformly; semantics are defined by the macro system.
+
+### Command-mode operators (`{}`)
+
+In `{}`, operators work between commands (not individual values):
+
+```
+foo a | bar b           # pipe: [bar [foo a] b]
+foo a && bar b          # and-then: run bar only if foo succeeded
+foo a || bar b          # or-else: run bar only if foo failed
+i64 x = 3              # immutable binding: def i64 x 3
+i64 y : 0              # mutable binding: mut i64 y 0
+y :: ($y + 1)           # reassignment: set y ($y + 1)
+```
+
+No operator precedence in `{}` — left to right, same as `()`.
+
+### Binding operators
+
+Three operators corresponding to the three binding commands:
+
+| Operator | Command | Meaning |
+|----------|---------|---------|
+| `=` | `def` | Immutable binding |
+| `:` | `mut` | Mutable binding |
+| `::` | `set` | Reassignment |
+
+The command forms (`def`, `mut`, `set`) remain available. Operators are sugar:
+
+```
+# These pairs are equivalent:
+def i64 x 3         ↔  i64 x = 3
+mut i64 y 0         ↔  i64 y : 0
+set y ($y + 1)      ↔  y :: ($y + 1)
+
+# Untyped:
+def name "alice"    ↔  name = "alice"
+mut count 0         ↔  count : 0
+set count ($count + 1)  ↔  count :: ($count + 1)
+```
+
+### Infix-mode operators (`()`)
+
+In `()`, operators work between values/expressions. The same symbol can have different semantics per mode via operator overloading:
+
+- `|` in `{}` = pipe between commands
+- `|` in `()` = bitwise OR on values
+
+### User-definable operators
+
+Operators are a kind of macro. Users can define new operators using the same mechanism the built-in operators use. Design details TBD:
+
+- **AST representation**: macros need to receive and return syntax as data. Format TBD.
+- **Mode-specific overloading**: same symbol can have different definitions for `{}` and `()` modes.
+- **Leaking**: macros can intentionally introduce bindings into the caller's scope (needed for `=`, `:`, etc.). Full hygiene design TBD.
+
+### Prelude
+
+A prelude module is implicitly imported and pre-defines the core operators:
+- `|`, `&&`, `||` — command control flow
+- `=`, `:`, `::` — binding operators
+- `\` — lambda shorthand
+- Arithmetic, comparison, and logical operators for `()` mode
+
 ## Aliases
 
 Aliases are macros that rewrite call sites. The alias body is spliced in at the call site, and any trailing arguments from the caller are appended.
