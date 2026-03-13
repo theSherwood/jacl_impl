@@ -8,7 +8,7 @@ JACL syntax is being redesigned around a three-mode delimiter system.
 
 - `[]` — **Juxtaposition**: items separated by whitespace, no implied relationship. First item determines semantics. Used for procedure calls `[foo 1 2]` and nesting `[foo [bar 3] 2]`.
 - `{}` / top-level — **Command mode**: bare commands with separators (`;` `,` newline). `|` pipes between commands. Used for code blocks, param lists, struct field declarations (same construct, differentiated by context).
-- `()` — **Infix mode**: symbolic operators parsed infix, no precedence, left associative. `($x + 3 * 2)` desugars to `[* [+ $x 3] 2]`. Use nested parens for explicit grouping: `($x + (3 * 2))`. `|` means bitwise OR in this mode.
+- `()` — **Infix mode**: symbolic operators parsed infix, no precedence, left associative. `($x + 3 * 2)` desugars to `[* [+ $x 3 2]]`. `|` means bitwise OR in this mode.
 
 ## Key syntax decisions
 
@@ -94,9 +94,10 @@ The three-mode system applies uniformly inside strings. Each delimiter switches 
 
 ## Shell interop
 
-### Command resolution
-
 - `!cmd args...` — always means external command, in all contexts
+- `|` between external commands is a real OS pipe (stdout→stdin)
+- `|` from external to JACL converts stdout to string value
+- External command result includes stdout + exit code; non-zero exit → JACL error value
 - **REPL/terminal:** bare unknown commands fall back to `$PATH` (on by default)
 - **Scripts:** bare unknown commands are compile errors (strict by default)
 - **Pragma `#! path-fallback`:** opt-in for scripts to enable `$PATH` fallback (file-level)
@@ -106,10 +107,12 @@ The three-mode system applies uniformly inside strings. Each delimiter switches 
 Returns stdout as a string value on success, error value on failure.
 
 **On success (exit 0):**
+
 - Return value: stdout as string
 - Stderr: prints to terminal (warnings, progress — visible but doesn't enter the pipeline)
 
 **On failure (exit non-zero):**
+
 - Return value: JACL error value with stderr as the error message
 - Stdout: discarded
 
@@ -157,9 +160,91 @@ if (. $result exit != 0) { print "failed" }
 ### Design rationale
 
 This avoids Nushell's structured-vs-raw impedance mismatch. Nushell tried to make external commands feel native in structured pipelines, but stderr bypasses the pipeline by default, `try`/`catch` doesn't reliably catch external failures, and the workarounds are inconsistent. JACL avoids this by:
+
 - Keeping the boundary explicit (`!` prefix)
 - Giving stderr a clear destination in both outcomes (terminal on success, error message on failure)
 - Providing `exec` as an escape hatch for full control, rather than trying to make the simple form handle every case
+
+### I/O redirection
+
+JACL uses commands for I/O redirection, not operators. No `>`, `>>`, `<` syntax — file I/O composes with pipes like everything else.
+
+#### String/stream → external command (stdin)
+
+When a JACL string or stream pipes into `!cmd`, it feeds stdin:
+
+```
+read-file "input.txt" | !sort           # file contents → stdin of sort
+!cat huge.log | lines | !grep "error"   # stream → stdin
+"hello world" | !wc -w                  # literal string → stdin
+```
+
+Between two `!cmd`s, `|` remains a real OS pipe (no conversion).
+
+#### Output to files
+
+`write-file` and `append-file` are pipe-friendly commands:
+
+```
+!ls -la | write-file "files.txt"        # write stdout to file
+!ls -la | append-file "log.txt"         # append stdout to file
+!curl $url | json-parse | to-json | write-file "data.json"
+```
+
+#### Stderr
+
+The simple `!cmd` form already handles stderr:
+- On success: stderr prints to terminal
+- On failure: stderr becomes the error message
+
+For full control, use `exec`:
+
+```
+def r [exec "cmd" "args"]
+. $r stderr | write-file "errors.log"
+. $r stdout | write-file "output.txt"
+```
+
+#### Design rationale
+
+Operators like `>` and `<` would be feasible as command-mode macros (mode-specific semantics already exist for `|`). But commands compose better with JACL's pipe model and avoid importing shell-specific syntax. `write-file "path"` in a pipeline is just as concise and more explicit.
+
+### Globbing
+
+`glob` is a command that returns a stream of paths. It reads `$ctx.pwd` for its base directory (see Implicit context).
+
+```
+glob "*.txt"                    # relative to $ctx.pwd
+glob "src/**/*.jacl"            # recursive, path in pattern
+glob "*.{txt,md}"               # brace expansion
+```
+
+`!cmd` does **not** expand globs — arguments are always passed literally:
+
+```
+!ls *.txt                       # passes literal "*.txt" to ls — not what you want
+!ls ..[glob "*.txt"]            # splat glob results as separate args
+```
+
+Use `with-dir` to change the glob context:
+
+```
+with-dir "/var/log" {
+  glob "*.log" | for f { !gzip $f }
+}
+```
+
+Glob + pipes for file processing:
+
+```
+glob "**/*.log"
+  | filter [\ > [file-size $it] 1000000]
+  | for f { print "large: $f" }
+```
+
+#### Design rationale
+
+No implicit glob expansion anywhere — not in `!cmd` args, not in the REPL. Globbing is always explicit via the `glob` command. This avoids the bash problem where `*.txt` silently expands (or doesn't, if no matches) and makes the data flow visible. The `glob` command composes naturally with streams, pipes, and `$ctx.pwd`.
 
 ## Streams
 
@@ -205,27 +290,27 @@ Streams do not silently materialize into vectors. Commands that require random a
 
 These commands accept either a stream or a vector. When given a stream, they consume lazily. When given a vector, they work eagerly.
 
-| Command | Input | Output | Description |
-|---------|-------|--------|-------------|
-| `each` | stream or vec | (side effects) | Apply function to each element |
-| `filter` | stream or vec | stream or vec | Keep elements matching predicate |
-| `transform` | stream or vec | stream or vec | Apply function, collect results |
-| `count` | stream or vec | scalar | Count elements (consumes stream) |
-| `take N` | stream or vec | stream or vec | First N elements |
-| `first` | stream or vec | scalar | First element (consumes one from stream) |
-| `collect` | stream | vec | Materialize stream into vector |
-| `lines` | stream or str | stream | Split into line stream |
+| Command     | Input         | Output         | Description                              |
+| ----------- | ------------- | -------------- | ---------------------------------------- |
+| `each`      | stream or vec | (side effects) | Apply function to each element           |
+| `filter`    | stream or vec | stream or vec  | Keep elements matching predicate         |
+| `transform` | stream or vec | stream or vec  | Apply function, collect results          |
+| `count`     | stream or vec | scalar         | Count elements (consumes stream)         |
+| `take N`    | stream or vec | stream or vec  | First N elements                         |
+| `first`     | stream or vec | scalar         | First element (consumes one from stream) |
+| `collect`   | stream        | vec            | Materialize stream into vector           |
+| `lines`     | stream or str | stream         | Split into line stream                   |
 
 ### Vector-only operations (require `collect` for streams)
 
-| Command | Description |
-|---------|-------------|
-| `vec-get` | Random access by index |
-| `vec-set` | Set element by index |
-| `vec-slice` | Slice by index range |
-| `vec-len` | Length (use `count` for streams) |
-| `vec-push` | Append element |
-| `vec-concat` | Concatenate two vectors |
+| Command      | Description                      |
+| ------------ | -------------------------------- |
+| `vec-get`    | Random access by index           |
+| `vec-set`    | Set element by index             |
+| `vec-slice`  | Slice by index range             |
+| `vec-len`    | Length (use `count` for streams) |
+| `vec-push`   | Append element                   |
+| `vec-concat` | Concatenate two vectors          |
 
 ### Pipes remain value-passing
 
@@ -251,14 +336,14 @@ Streams don't change the pipe model. `|` still threads a single value (first-arg
 
 ### Primitives
 
-| Command | Takes | Returns | Description |
-|---------|-------|---------|-------------|
-| `spawn { expr }` | block | future | Start async task |
-| `await $f` | future | resolved value | Wait for future (suspends) |
-| `parallel { } { } ...` | N blocks | vector of N results | Run blocks concurrently, collect all |
-| `race { } { } ...` | N blocks | single result | Run blocks, return first to complete |
-| `par-each` | collection/stream + fn | vector of results | Process elements concurrently |
-| `timeout N { }` | duration + block | result or error | Sugar for race + sleep |
+| Command                | Takes                  | Returns             | Description                          |
+| ---------------------- | ---------------------- | ------------------- | ------------------------------------ |
+| `spawn { expr }`       | block                  | future              | Start async task                     |
+| `await $f`             | future                 | resolved value      | Wait for future (suspends)           |
+| `parallel { } { } ...` | N blocks               | vector of N results | Run blocks concurrently, collect all |
+| `race { } { } ...`     | N blocks               | single result       | Run blocks, return first to complete |
+| `par-each`             | collection/stream + fn | vector of results   | Process elements concurrently        |
+| `timeout N { }`        | duration + block       | result or error     | Sugar for race + sleep               |
 
 All compose with pipes — they're commands that return values:
 
@@ -300,6 +385,56 @@ $results | filter [\ not [error? $it]] | each [\ json-parse $it]
 race {fetch $primary} {fetch $mirror} | catch {"default"} | json-parse
 ```
 
+### Jobs
+
+When `spawn` runs a block containing an external command, the returned future is a **Job** — a future that also wraps an OS process.
+
+#### Future vs Job
+
+A Future is a JACL async task. A Job is a Future with process-level capabilities:
+
+| | Future | Job |
+|---|--------|-----|
+| `await` | result value | `{str stdout, str stderr, i32 exit}` |
+| `cancel` | stops the task | kills the process |
+| `pid` | n/a | OS process ID |
+| `signal` | n/a | send OS signal |
+
+```
+# Future — pure JACL computation
+def f [spawn { expensive-work $data }]
+await $f              # → result value
+cancel $f             # stops the task
+
+# Job — wraps an OS process
+def j [spawn { !python -m http.server }]
+. $j pid              # → 12345
+signal $j SIGTERM     # send signal
+cancel $j             # kill the process
+await $j              # → {stdout, stderr, exit}
+```
+
+#### `&` suffix as spawn sugar
+
+`&` at the end of a `!cmd` is sugar for `spawn { !cmd }`, returning a Job:
+
+```
+def server [!python -m http.server &]
+# equivalent to:
+def server [spawn { !python -m http.server }]
+```
+
+#### Composability
+
+Jobs compose with everything futures already compose with:
+
+```
+def [api db] [parallel { !start-api } { !start-db }]
+. $api pid                    # both are Jobs
+signal $db SIGTERM            # signal one
+timeout 30 { await $job }    # timeout works
+```
+
 ## Iteration and control flow
 
 ### `for` — unified iteration
@@ -323,6 +458,7 @@ for $items $callback
 ```
 
 Compiler distinguishes forms by argument shape:
+
 - First arg is `{}` block → C-style loop
 - First arg is a value, next is `{}` block → implicit binding (`$it`)
 - First arg is a value, next is bare word, next is `{}` block → explicit binding
@@ -554,11 +690,11 @@ with-env {DEBUG "1", NODE_ENV "production"} {
 
 A small set of read-only convenience variables that stay in sync with `$env` via listeners:
 
-| Variable | Synced from | Description |
-|----------|------------|-------------|
-| `$home` | `[$env HOME]` | User home directory |
-| `$pwd` | Working directory | Current working directory |
-| `$pid` | Process ID | Current process ID |
+| Variable | Synced from       | Description               |
+| -------- | ----------------- | ------------------------- |
+| `$home`  | `[$env HOME]`     | User home directory       |
+| `$pwd`   | Working directory | Current working directory |
+| `$pid`   | Process ID        | Current process ID        |
 
 These update automatically. For example, `cd` updates the working directory, swaps `PWD` in `$env`, and the listener updates `$pwd`:
 
@@ -584,11 +720,174 @@ swap $counter [\ + $it 1]
 ```
 
 The `$env` atom has a built-in listener that:
+
 - Calls `setenv()`/`unsetenv()` for each changed key
 - Updates `$home` if `HOME` changed
 - Updates `$pwd` if `PWD` changed
 
 No special-casing of `$env` in the language — it's an atom with a listener, same as any user-created atom.
+
+## Implicit context (`$ctx`)
+
+`$ctx` is a typed, dynamically-scoped context implicitly available in every proc. It carries ambient state like working directory and environment, and is user-extensible via module-level field declarations.
+
+### Core semantics
+
+- Every proc receives `$ctx` implicitly — no explicit parameter needed
+- Mutations to `$ctx` fields propagate downward to callees within the same scope (true dynamic scoping)
+- Each proc call gets a fork of the caller's `$ctx` — changes don't leak back to the caller
+- `with-ctx` is the primitive for creating a scoped fork with specific field changes
+
+### Built-in fields
+
+| Field | Type | Mutable | Description |
+|-------|------|---------|-------------|
+| `pwd` | `str` | yes | Working directory |
+| `env` | `[map str str]` | yes | Environment variables (relationship with `$env` atom TBD) |
+
+### Dynamic scoping
+
+Mutations within a scope are visible to all callees in that scope:
+
+```
+cd "src"              # mutates $ctx.pwd
+do-stuff              # sees $ctx.pwd = ".../src"
+!make                 # child process CWD = $ctx.pwd
+```
+
+But changes don't leak upward — each proc call gets a fork:
+
+```
+proc setup {} {
+  cd "build"          # mutates this proc's fork of $ctx
+}
+setup                 # setup's fork is discarded on return
+# $ctx.pwd unchanged here
+```
+
+### Forking context
+
+`with-ctx` creates a fork with changed fields. The fork is discarded when the block exits:
+
+```
+with-ctx {pwd [path-join $ctx.pwd "src"]} {
+  glob "*.txt"        # globs in src/
+  !make               # runs in src/
+}
+# $ctx.pwd restored
+```
+
+`with-dir` and `with-env` are sugar for common `with-ctx` patterns:
+
+```
+with-dir "src" { ... }
+# desugars to:
+with-ctx {pwd [path-join $ctx.pwd "src"]} { ... }
+
+with-env {DEBUG "1"} { ... }
+# desugars to:
+with-ctx {env [map-set $ctx.env DEBUG "1"]} { ... }
+```
+
+### User-extensible fields
+
+Modules can declare additional typed fields on `$ctx` at the top level. Only declared fields can be read or written — the compiler enforces this. Mutability is per-field (`mut` opt-in, immutable by default).
+
+```
+ctx mut Connection db-conn              # mutable, no default — runtime error if read while unset
+ctx mut i32 log-level = 0               # mutable, has default — always safe to read
+ctx str app-name                        # immutable, set via with-ctx only
+```
+
+Field declarations follow the existing type-before-name pattern.
+
+### Field conflicts
+
+Two imported modules declaring the same `$ctx` field name with different types is a compile error — same as name conflicts with `use {..}`. Resolve by wrapping one module's usage behind a differently-named field.
+
+### Example: database connection
+
+```
+# db.jacl
+ctx mut Connection db-conn
+
+proc with-db {Connection conn, block} {
+  with-ctx {db-conn $conn} $block
+}
+
+proc query {str sql} {
+  _execute $ctx.db-conn $sql    # reads from ctx
+}
+```
+
+```
+use "db.jacl" {with-db, query}
+
+with-db [connect "postgres://..."] {
+  query "SELECT * FROM users"
+}
+```
+
+### Example: scoped query builder
+
+`$ctx` enables implicit scoped state without threading values through every call:
+
+```
+# qb.jacl
+ctx mut QueryBuilder qb
+
+proc with-query {block} {
+  with-ctx {qb [QueryBuilder]} $block
+}
+
+proc select {..cols} {
+  set $ctx.qb [qb-add-select $ctx.qb $cols]
+}
+
+proc where {str clause} {
+  set $ctx.qb [qb-add-where $ctx.qb $clause]
+}
+
+proc build {} { qb-to-sql $ctx.qb }
+```
+
+```
+use "qb.jacl" {..}
+
+with-query {
+  select "name" "age"
+  where "age > 21"
+  build
+}
+# → "SELECT name, age WHERE age > 21"
+```
+
+### Closures and `$ctx`
+
+Lambdas and proc calls resolve `$ctx` at **call time** (true dynamic scoping). A stored callback sees the caller's context, not the context from when it was defined:
+
+```
+def cb [\ query "SELECT 1"]
+with-db $other-conn {
+  [$cb]    # uses $other-conn — the current scope's db-conn
+}
+```
+
+`spawn` is the exception — it snapshots `$ctx` at spawn time, because the task runs independently of the call stack:
+
+```
+cd "src"
+def f [spawn {
+  # sees $ctx.pwd = ".../src" (snapshot)
+  cd "lib"            # only affects this task's fork
+  !make
+}]
+# parent $ctx unaffected
+```
+
+### Performance
+
+Copy-on-write: forking is a pointer copy. A new `$ctx` is only allocated when a field is actually mutated. Most proc calls don't mutate `$ctx`, so zero overhead. The compiler can further optimize by statically marking procs as "ctx-pure" (no mutations in the proc or its callees) and skipping the fork entirely.
 
 ## Error handling
 
@@ -604,6 +903,48 @@ No special-casing of `$env` in the language — it's an atom with a listener, sa
   try { risky-operation } err { print "failed: $err" }
   ```
 - External commands: non-zero exit code → error value (see Shell interop above)
+
+## Aliases
+
+Aliases are macros that rewrite call sites. The alias body is spliced in at the call site, and any trailing arguments from the caller are appended.
+
+### External command aliases
+
+```
+alias ll { !ls -la }
+alias gs { !git status }
+alias k { !kubectl }
+
+# Usage        → Expands to
+ll -h /tmp       !ls -la -h /tmp
+gs -s            !git status -s
+k get pods       !kubectl get pods
+```
+
+### JACL command aliases
+
+Aliases work for JACL commands too — they're syntactic rewrites, not shell-specific:
+
+```
+alias pj { json-parse }
+
+fetch $url | pj       # → fetch $url | json-parse
+```
+
+### Aliases vs procs
+
+Aliases are compile-time rewrites. Procs are runtime values. Use aliases for simple abbreviations; use procs when you need logic, bindings, or control flow:
+
+```
+# Alias — simple rewrite, args appended
+alias gs { !git status }
+
+# Proc — logic, conditional behavior
+proc deploy {env, ..flags} {
+  !docker build -t myapp .
+  !kubectl apply -f "deploy/$env.yaml"
+}
+```
 
 ## Typed collections
 
@@ -675,7 +1016,7 @@ The syntax is the same for both phases. Full parametric generics (type variables
 
 ## Open design questions
 
-### Resolved
+### Resolved in this document
 
 - Three-mode delimiter system — `[]` juxtaposition, `{}` command mode, `()` infix
 - Pipe threading (first-arg)
@@ -689,6 +1030,15 @@ The syntax is the same for both phases. Full parametric generics (type variables
 - Callable values — maps (key lookup) and atoms (deref + delegate) are callable in `[]` head position
 - Environment variables — `$env` is an atom of a map, synced to OS via listeners; `[$env HOME]` for access; `with-env` for scoped changes; `$home`/`$pwd`/`$pid` as synced aliases
 - Atom listeners — `watch` adds watchers to any atom; env sync is one application
+- I/O redirection — commands (`write-file`, `append-file`), not operators; string/stream piped to `!cmd` feeds stdin
+- Aliases — compile-time macros that rewrite call sites with arg appending
+- Implicit context (`$ctx`) — typed, dynamically-scoped, user-extensible; `with-ctx` forks, proc calls fork, mutations propagate downward
+- `$ctx` user-extensible — modules declare typed fields at top level; compiler enforces field existence and type
+- `$ctx` field conflicts — compile error, same as name conflicts with `use {..}`
+- `$ctx` default values — three forms: no default (runtime error if unset), default value, optional type (nil if unset)
+- `$ctx` closures — resolve at call time (true dynamic scoping); `spawn` snapshots at spawn time
+- `$ctx` performance — copy-on-write forking, compiler marks ctx-pure procs to skip fork
+- Globbing — explicit `glob` command, reads `$ctx.pwd`, returns stream; no implicit expansion anywhere
 
 ### Needs design work
 
@@ -709,3 +1059,10 @@ The syntax is the same for both phases. Full parametric generics (type variables
 15. **Operator overloading** — desired but not designed. Operators should be user-definable.
 16. **Boolean/logical operators** — deferred. Connects to operator overloading and user-definable operators.
 17. **Standard library surface** — deferred. What's builtin vs module?
+18. **Job detection** — Is it static (compiler sees `spawn { !cmd }`) or dynamic (runtime checks if the task launched a process)? Static means the compiler knows at spawn-site whether it's a Job or plain Future. Dynamic means any Future could become a Job if it happens to exec a process.
+19. **`cancel` semantics** — Does `cancel` on a Job send SIGTERM with a grace period then SIGKILL? Or just SIGKILL immediately? What does `cancel` do on a plain Future — cooperative cancellation or hard kill?
+20. **`&` syntax** — Confirmed as sugar for `spawn { !cmd }`? Does it work only on `!cmd` or on any command? (`expensive-work &` for a JACL proc?)
+21. **Alias scoping** — Are aliases file-scoped like `def`? Can you import them from modules (`use "aliases.jacl" {..}`)? Or are they session/config-level (like `.bashrc` aliases)?
+22. **Splat into `!cmd`** — Variadic procs can collect `..args`, but how do you expand them as separate arguments to an external command? `!git status $args` passes one value; need a spread syntax like `!git status ..$args` or `!git status $args...`
+23. **`signal` on plain Future** — Type error? Silently ignored? Probably a type error — only Jobs have a process to signal.
+24. **`$ctx` vs `$env` relationship** — Does `$ctx.env` subsume `$env`? Or does `$env` remain as the OS-synced atom while `$ctx.env` is the JACL-scoped view? If both exist, which does `!cmd` inherit?
