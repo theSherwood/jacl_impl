@@ -1204,7 +1204,7 @@ The syntax is the same for both phases. Full parametric generics (type variables
 10. ~~**Ranges**~~ — resolved: `(1 ..< 10)` exclusive, `(1 ..= 10)` inclusive, produce streams.
 11. ~~**Scoping**~~ — resolved: same-scope shadowing is compile error, nested scope shadowing is fine.
 12. ~~**Optional chaining**~~ — resolved: `($val ?. field)` in infix mode.
-13. **Dot notation** — open. `.` conflicts with filenames (`foo .somefile.txt`). No solution yet.
+13. **Field access syntax** — open. `.` is the natural choice but conflicts with bare word strings (filenames, paths — `.` appears in nearly every filename). Since bare character runs are strings in JACL, `.` can't be special in the middle of a token. The symbol must work uniformly across all three modes (not mode-specific). It's part of `$` sigil parsing: `$var<symbol>field`. Top candidates: `` ` `` (backtick — light, K precedent for lookups), `'` (tick — lightest, no precedent), `->` (arrow — C/C++ precedent, self-documenting, heavier). All are rare in filenames/URIs and unambiguous after `$identifier`.
 14. **Regular expressions** — deferred. Need literal syntax eventually.
 15. **Operator overloading** — desired but not designed. Operators should be user-definable.
 16. **Boolean/logical operators** — deferred. Connects to operator overloading and user-definable operators.
