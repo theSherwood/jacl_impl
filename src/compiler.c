@@ -2753,6 +2753,51 @@ static void compiler__compile_binary(Compiler* c, AstNode** args,
   }
 }
 
+/* --- Internal: Shared HOF builtin compilation (transform/each/filter) --- */
+
+static void compiler__compile_hof_builtin(Compiler* c, const char* name,
+                                           AstNode** args, uint32_t argc,
+                                           uint8_t opcode,
+                                           uint32_t line, uint32_t col) {
+  if (argc != 2) {
+    compiler__builtin_arity_error(c, line, col, name, "2 arguments", argc);
+    return;
+  }
+  /* Check if callback is a known suspending proc ($var reference) */
+  if (args[1]->type == AST_VAR_REF && args[1]->data.var_ref.length <= 7) {
+    JaclVal cb_name = jacl_inline_string(args[1]->data.var_ref.name,
+                                          args[1]->data.var_ref.length);
+    char err_msg[128];
+    snprintf(err_msg, sizeof(err_msg),
+             "cannot pass suspending closure to non-suspending builtin '%s'",
+             name);
+    int slot = compiler__resolve_local(c, cb_name);
+    if (slot != -1 && c->locals[slot].suspends) {
+      compiler__error(c, line, col, err_msg);
+      return;
+    }
+    GlobalArity* ga = compiler__find_global(c, cb_name);
+    if (ga && ga->suspends) {
+      compiler__error(c, line, col, err_msg);
+      return;
+    }
+  }
+  /* Check if callback block contains suspension points */
+  if (ast__contains_suspension(args[1], c->suspension_map)) {
+    compiler__error(c, line, col,
+        "cannot suspend inside non-suspending callback");
+    return;
+  }
+  compiler__compile_node(c, args[0]);
+  {
+    bool saved = c->in_non_suspending_callback;
+    c->in_non_suspending_callback = true;
+    compiler__compile_node(c, args[1]);
+    c->in_non_suspending_callback = saved;
+  }
+  compiler__emit_byte(c, opcode, line);
+}
+
 /* --- Internal: Compile a command invocation --- */
 
 static void compiler__compile_command(Compiler* c, AstNode* node) {
@@ -4000,121 +4045,19 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* transform builtin (exactly 2 args — non-suspending callback) */
   if (compiler__head_matches(head, "transform", 9)) {
-    if (argc != 2) {
-      compiler__builtin_arity_error(c, line, col, "transform", "2 arguments", argc);
-      return;
-    }
-    /* Check if callback is a known suspending proc ($var reference) */
-    if (args[1]->type == AST_VAR_REF && args[1]->data.var_ref.length <= 7) {
-      JaclVal cb_name = jacl_inline_string(args[1]->data.var_ref.name,
-                                            args[1]->data.var_ref.length);
-      int slot = compiler__resolve_local(c, cb_name);
-      if (slot != -1 && c->locals[slot].suspends) {
-        compiler__error(c, line, col,
-            "cannot pass suspending closure to non-suspending builtin 'transform'");
-        return;
-      }
-      GlobalArity* ga = compiler__find_global(c, cb_name);
-      if (ga && ga->suspends) {
-        compiler__error(c, line, col,
-            "cannot pass suspending closure to non-suspending builtin 'transform'");
-        return;
-      }
-    }
-    /* Check if callback block contains suspension points */
-    if (ast__contains_suspension(args[1], c->suspension_map)) {
-      compiler__error(c, line, col,
-          "cannot suspend inside non-suspending callback");
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    {
-      bool saved = c->in_non_suspending_callback;
-      c->in_non_suspending_callback = true;
-      compiler__compile_node(c, args[1]);
-      c->in_non_suspending_callback = saved;
-    }
-    compiler__emit_byte(c, OP_TRANSFORM, line);
+    compiler__compile_hof_builtin(c, "transform", args, argc, OP_TRANSFORM, line, col);
     return;
   }
 
   /* each builtin (exactly 2 args — non-suspending callback) */
   if (compiler__head_matches(head, "each", 4)) {
-    if (argc != 2) {
-      compiler__builtin_arity_error(c, line, col, "each", "2 arguments", argc);
-      return;
-    }
-    /* Check if callback is a known suspending proc ($var reference) */
-    if (args[1]->type == AST_VAR_REF && args[1]->data.var_ref.length <= 7) {
-      JaclVal cb_name = jacl_inline_string(args[1]->data.var_ref.name,
-                                            args[1]->data.var_ref.length);
-      int slot = compiler__resolve_local(c, cb_name);
-      if (slot != -1 && c->locals[slot].suspends) {
-        compiler__error(c, line, col,
-            "cannot pass suspending closure to non-suspending builtin 'each'");
-        return;
-      }
-      GlobalArity* ga = compiler__find_global(c, cb_name);
-      if (ga && ga->suspends) {
-        compiler__error(c, line, col,
-            "cannot pass suspending closure to non-suspending builtin 'each'");
-        return;
-      }
-    }
-    /* Check if callback block contains suspension points */
-    if (ast__contains_suspension(args[1], c->suspension_map)) {
-      compiler__error(c, line, col,
-          "cannot suspend inside non-suspending callback");
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    {
-      bool saved = c->in_non_suspending_callback;
-      c->in_non_suspending_callback = true;
-      compiler__compile_node(c, args[1]);
-      c->in_non_suspending_callback = saved;
-    }
-    compiler__emit_byte(c, OP_EACH, line);
+    compiler__compile_hof_builtin(c, "each", args, argc, OP_EACH, line, col);
     return;
   }
 
   /* filter builtin (exactly 2 args — non-suspending callback) */
   if (compiler__head_matches(head, "filter", 6)) {
-    if (argc != 2) {
-      compiler__builtin_arity_error(c, line, col, "filter", "2 arguments", argc);
-      return;
-    }
-    /* Check if callback is a known suspending proc ($var reference) */
-    if (args[1]->type == AST_VAR_REF && args[1]->data.var_ref.length <= 7) {
-      JaclVal cb_name = jacl_inline_string(args[1]->data.var_ref.name,
-                                            args[1]->data.var_ref.length);
-      int slot = compiler__resolve_local(c, cb_name);
-      if (slot != -1 && c->locals[slot].suspends) {
-        compiler__error(c, line, col,
-            "cannot pass suspending closure to non-suspending builtin 'filter'");
-        return;
-      }
-      GlobalArity* ga = compiler__find_global(c, cb_name);
-      if (ga && ga->suspends) {
-        compiler__error(c, line, col,
-            "cannot pass suspending closure to non-suspending builtin 'filter'");
-        return;
-      }
-    }
-    /* Check if callback block contains suspension points */
-    if (ast__contains_suspension(args[1], c->suspension_map)) {
-      compiler__error(c, line, col,
-          "cannot suspend inside non-suspending callback");
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    {
-      bool saved = c->in_non_suspending_callback;
-      c->in_non_suspending_callback = true;
-      compiler__compile_node(c, args[1]);
-      c->in_non_suspending_callback = saved;
-    }
-    compiler__emit_byte(c, OP_FILTER, line);
+    compiler__compile_hof_builtin(c, "filter", args, argc, OP_FILTER, line, col);
     return;
   }
 
