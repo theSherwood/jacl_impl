@@ -30,7 +30,7 @@
         "All existing tests pass, especially any CPS/suspension-related tests"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "The two functions differ only in where the modified node gets inserted into the new statement list — one modifies a command's arguments, the other modifies a def's value expression. The core loop (lines 2269-2322 vs 2369-2416) is structurally identical: same temp name generation, same ast_alloc sequence, same var ref / name node / def head / def command construction."
     },
     {

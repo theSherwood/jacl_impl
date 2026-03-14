@@ -15,3 +15,12 @@ Started: Sat Mar 14 23:12:59 UTC 2026
   - The set! handler used both compiler__resolve_global_info and compiler__resolve_global_type in sequence on the same name — combined into one compiler__find_global call using local variable `set_ga` to avoid shadowing
   - One call site called both compiler__resolve_global_arity AND compiler__find_global_arity back-to-back — collapsed into single compiler__find_global call
 ---
+
+## 2026-03-14 - US-002
+- What was implemented: Extracted compiler__cps_extract_args_helper that handles the shared 60-line loop (temp name gen, ast_alloc, var-ref/name-node/def construction). Both compiler__compile_cps_extract_args and compiler__compile_cps_extract_def_value became thin wrappers.
+- Files changed: src/compiler.c
+- **Learnings for future iterations:**
+  - def_name parameter in compiler__compile_cps_extract_def_value was unused — added (void)def_name to silence warning while keeping the signature unchanged
+  - The helper returns susp_count; callers pre-allocate argc-sized arrays for new_args and defs (argc is an upper bound on susp_count)
+  - The two wrappers differ only in the "pivot node" at new_stmts[susp_count]: extract_args inserts a shallow-copied command; extract_def_value inserts a modified def with its value replaced
+---
