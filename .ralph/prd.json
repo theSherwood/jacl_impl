@@ -1,288 +1,91 @@
 {
   "project": "JACL",
-  "branchName": "ralph/ffi-embedding",
-  "description": "FFI & Embedding API (M17) — C embedding API for JACL: VM lifecycle, eval, native function registration, GC handles, struct interop, and closure-to-function-pointer trampolines via libffi.",
+  "branchName": "ralph/compiler-vm-refactor",
+  "description": "Compiler & VM Refactoring — eliminate structural duplication in compiler.c and vm.c before the syntax redesign lands",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Public header — jacl.h with type declarations",
-      "description": "As a C developer embedding JACL, I need a single public header that declares the embedding API types so I can include one file and use JACL from my application.",
+      "title": "Consolidate global arity lookups",
+      "description": "As a developer working on the compiler, I want a single function for looking up global arity information so that I don't have to maintain four near-identical linear scans.",
       "acceptanceCriteria": [
-        "include/jacl.h exists with JACL_API annotation macro for export/visibility",
-        "Declares opaque types: JaclVM, JaclHandle, JaclTrampoline",
-        "Re-exports JaclVal (uint64_t) and JaclType enum",
-        "All public symbols prefixed with Jacl or jacl_",
-        "#ifdef __cplusplus extern \"C\" guards",
-        "Version macros: JACL_VERSION_MAJOR, JACL_VERSION_MINOR, JACL_VERSION_PATCH",
-        "Header is self-contained (no transitive includes of internal headers)",
-        "Build passes, all existing tests pass"
+        "Four functions replaced with a single `compiler__find_global(c, name)` returning `GlobalArity*`: remove compiler__resolve_global_arity (lines 1225-1235), compiler__resolve_global_info (lines 1237-1248), compiler__resolve_global_type (lines 1250-1259); rename/keep compiler__find_global_arity (lines 1261-1270) as the single entry point",
+        "All call sites updated to use the single function and access GlobalArity fields directly",
+        "No callers do their own root-walk or linear scan — all go through the single function",
+        "All existing tests pass",
+        "Compiler builds cleanly with no new warnings"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": ""
+      "passes": false,
+      "notes": "GlobalArity struct is defined at compiler.c lines 569-579 with fields: name, known_arity, is_mutable, suspends, captures_mutable, type, struct_type_idx, return_type, param_types. Callers currently extract individual fields via separate functions — just return the pointer and let them access fields directly."
     },
     {
       "id": "US-002",
-      "title": "VM lifecycle — jacl_vm_new / jacl_vm_free",
-      "description": "As a C developer, I need to create and destroy JACL VMs so I can run JACL code from my application.",
+      "title": "Merge CPS argument extraction",
+      "description": "As a developer working on CPS transforms, I want the shared extraction logic in one place so that adding new CPS-aware constructs doesn't require duplicating 100 lines.",
       "acceptanceCriteria": [
-        "JaclVM* jacl_vm_new(void) allocates and initializes a new VM with default settings",
-        "void jacl_vm_free(JaclVM* vm) destroys VM and frees all associated memory (GC heap, intern table, struct registry)",
-        "JaclVM* jacl_vm_new_ex(const JaclConfig* config) creates VM with custom initial_heap_size, max_heap_size, max_handles (default 1024)",
-        "Multiple VMs can coexist in the same process without interfering",
-        "jacl_vm_free on NULL is a safe no-op",
-        "Function declarations added to jacl.h",
-        "Build passes, all existing tests pass"
+        "A shared helper extracted that takes an AstNode** array of arguments, identifies which ones are suspending, generates synthetic [def __aN ...] AST nodes for each, and returns the modified argument array plus the synthetic defs",
+        "compiler__compile_cps_extract_args (lines 2245-2344) becomes a thin wrapper calling the shared helper",
+        "compiler__compile_cps_extract_def_value (lines 2346-2436) becomes a thin wrapper calling the shared helper",
+        "The shared helper covers: temp name generation, ast_alloc sequence, var ref / name node / def head / def command construction",
+        "All existing tests pass, especially any CPS/suspension-related tests"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": ""
+      "passes": false,
+      "notes": "The two functions differ only in where the modified node gets inserted into the new statement list — one modifies a command's arguments, the other modifies a def's value expression. The core loop (lines 2269-2322 vs 2369-2416) is structurally identical: same temp name generation, same ast_alloc sequence, same var ref / name node / def head / def command construction."
     },
     {
       "id": "US-003",
-      "title": "Eval API — jacl_eval / jacl_eval_file",
-      "description": "As a C developer, I need to evaluate JACL source code strings and get results so I can script my application.",
+      "title": "Extract HOF builtin compilation helper",
+      "description": "As a developer adding new higher-order builtins (like for, par-each), I want a shared compilation helper so each new builtin is ~5 lines instead of ~40.",
       "acceptanceCriteria": [
-        "JaclVal jacl_eval(JaclVM* vm, const char* source) parses, compiles, and executes JACL source, returns result",
-        "JaclVal jacl_eval_file(JaclVM* vm, const char* path) reads file and evals contents",
-        "On parse/compile/runtime error, returns an error-flagged value",
-        "bool jacl_is_error(JaclVal val) checks error flag",
-        "const char* jacl_error_message(JaclVM* vm, JaclVal err) extracts error message string",
-        "Multiple sequential jacl_eval calls share the same VM state (globals persist)",
-        "Function declarations added to jacl.h",
-        "Build passes, all existing tests pass"
+        "A compiler__compile_hof_builtin helper extracted with signature like: (Compiler* c, const char* name, uint32_t name_len, AstNode** args, uint32_t argc, uint8_t opcode, uint32_t line, uint32_t col)",
+        "The helper handles: arity check (exactly 2 args), non-suspending callback validation (local slot check, global arity check, block suspension point check), collection compilation, in_non_suspending_callback save/set/restore, callback compilation, opcode emission",
+        "transform builtin (lines 4103-4141) rewritten as one call to the helper",
+        "each builtin (lines 4143-4181) rewritten as one call to the helper",
+        "filter builtin (lines 4183-4221) rewritten as one call to the helper",
+        "All existing tests pass"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": ""
+      "passes": false,
+      "notes": "The three builtins share identical 30-line non-suspending callback validation blocks. The only differences are the builtin name (for error messages) and the final opcode. The in_non_suspending_callback flag needs careful save/restore — the current code does this and the helper must preserve the pattern."
     },
     {
       "id": "US-004",
-      "title": "Value constructors and extractors",
-      "description": "As a C developer, I need to create JACL values from C types and extract C types from JACL values so I can marshal data across the boundary.",
+      "title": "Extract shared struct field marshaling",
+      "description": "As a developer, I want struct field read/write logic defined once so that changes to type marshaling don't require updating six copy-pasted switch statements.",
       "acceptanceCriteria": [
-        "Constructors: jacl_nil(), jacl_bool(bool), jacl_i32(int32_t), jacl_i64(JaclVM*, int64_t), jacl_u32(uint32_t), jacl_u64(JaclVM*, uint64_t), jacl_f32(float), jacl_f64(JaclVM*, double)",
-        "jacl_string(JaclVM* vm, const char* s, size_t len) creates JACL string from C buffer",
-        "jacl_string_cstr(JaclVM* vm, const char* s) convenience for null-terminated strings",
-        "Extractors: jacl_as_i32, jacl_as_i64, jacl_as_f32, jacl_as_f64, jacl_as_bool",
-        "jacl_as_cstr(JaclVM* vm, JaclVal val, size_t* len_out) returns pointer to string data",
-        "Type query: jacl_typeof(JaclVal) returns tag/type enum",
-        "Inline types (nil, bool, i32, f32, u32) require no VM pointer",
-        "Function declarations added to jacl.h",
-        "Build passes, all existing tests pass"
+        "embed__struct_read_field (embed.c lines 836-873) promoted to a shared function accessible by both vm.c and embed.c",
+        "embed__struct_write_field (embed.c lines 876-919) promoted to a shared function accessible by both vm.c and embed.c",
+        "OP_STRUCT_GET (vm.c lines 3924-3987) calls the shared read function instead of inlining the type switch",
+        "OP_STRUCT_SET (vm.c lines 3989-4054) calls the shared write function instead of inlining the type switch",
+        "OP_STRUCT_GET_DYN (vm.c lines 4056-4105) calls the shared read function",
+        "OP_STRUCT_SET_DYN (vm.c lines 4107-4160) calls the shared write function",
+        "Static vs dynamic opcode variants differ only in how they resolve field offset and type — marshaling is shared",
+        "Shared functions placed wherever makes sense (value.c, shared header as static inline, etc.) and included in unity build if new file",
+        "All existing tests pass, including embed API tests"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "Many of these already exist as static inline functions in value.c — this story wraps them as public API in jacl.h"
+      "passes": false,
+      "notes": "The embed.c functions already work as standalone functions that take (struct_data, offset, field_type, heap/val) and do the type-switch marshaling. Promote these rather than writing new ones. They always box through JaclVal — the static opcodes lose a minor 'mixed boxing' optimization for i64/u64/f64 but this is negligible for a scripting language and can be revisited if profiling shows it matters."
     },
     {
       "id": "US-005",
-      "title": "GC handle API — pin values from C",
-      "description": "As a C developer, I need to prevent the GC from collecting values I'm holding in C so that my references remain valid across GC cycles.",
+      "title": "Macro-ify typed arithmetic opcodes",
+      "description": "As a developer, I want the 20 typed arithmetic/comparison opcode handlers generated by macros so the pattern is obvious and mechanical changes don't risk introducing bugs in one of 20 copies.",
       "acceptanceCriteria": [
-        "JaclHandle jacl_handle_new(JaclVM* vm, JaclVal val) creates a GC root handle",
-        "JaclVal jacl_handle_get(JaclHandle h) retrieves the value from a handle",
-        "void jacl_handle_free(JaclVM* vm, JaclHandle h) releases the handle",
-        "Handles stored as JaclVal array on JaclVM, scanned as additional GC roots during mark phase",
-        "Free handles use a free list for reuse (no per-handle heap allocation)",
-        "Default max 1024 handles, configurable via JaclConfig",
-        "Function declarations added to jacl.h",
-        "Build passes, all existing tests pass"
+        "VM__I64_BINOP(op) macro defined that handles: pop two values, cast to int64_t, apply operator, push result, break",
+        "VM__F64_BINOP(op) macro defined that handles: pop two values, memcpy to double, apply operator, memcpy back or box as bool, push, break",
+        "Extended variants for div/mod that include zero-check before the operation",
+        "Unary neg variants handled (either separate macro or parameterized)",
+        "i64 opcodes (lines 3338-3463) replaced with macro invocations: ADD, SUB, MUL, DIV, MOD, NEG, LT, GT, LE, GE, EQ",
+        "f64 opcodes (lines 3465-3627) replaced with macro invocations: ADD, SUB, MUL, DIV, MOD, NEG, LT, GT, LE, GE",
+        "Macros defined near their usage in vm.c (not in a shared header — they are vm-internal)",
+        "Arithmetic macros do not change evaluation order (pop b first, then a) or error behavior (div/mod zero checks)",
+        "All existing tests pass"
       ],
       "priority": 5,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-006",
-      "title": "Native function tag and OP_CALL dispatch",
-      "description": "As a developer, I need the VM to support a native function value type so that C functions can be called from JACL bytecode.",
-      "acceptanceCriteria": [
-        "Add JACL_TAG_NATIVE_FN value tag",
-        "Native function signature: typedef JaclVal (*JaclNativeFn)(JaclVM* vm, JaclVal* args, int argc)",
-        "NativeFnEntry struct stores: function pointer, name, arity (-1 for variadic)",
-        "JaclVM has a native function registry (array of NativeFnEntry, indexed by payload)",
-        "OP_CALL checks tag — if JACL_TAG_NATIVE_FN, calls C function directly without pushing bytecode call frame",
-        "Native function receives args from VM stack, return value pushed onto stack",
-        "Build passes, all existing tests pass"
-      ],
-      "priority": 6,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-007",
-      "title": "jacl_register_fn — register C functions",
-      "description": "As a C developer, I need to register C functions that JACL code can call as procs so I can extend JACL with native functionality.",
-      "acceptanceCriteria": [
-        "bool jacl_register_fn(JaclVM* vm, const char* name, JaclNativeFn fn, int arity) registers a native function",
-        "Registered functions callable from JACL: [my-native-fn 1 2 3]",
-        "Arity=-1 for variadic; arity mismatch produces compile-time error",
-        "Native function can return error-flagged values to propagate errors to JACL",
-        "Re-entrant: native functions can call jacl_call back into JACL",
-        "Function declaration added to jacl.h",
-        "Build passes, all existing tests pass"
-      ],
-      "priority": 7,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-008",
-      "title": "jacl_call — call JACL functions from C",
-      "description": "As a C developer, I need to call JACL-defined procs from C so I can invoke callbacks and scripted logic from my host application.",
-      "acceptanceCriteria": [
-        "JaclVal jacl_call(JaclVM* vm, JaclVal fn, JaclVal* args, int argc) calls a closure or native function",
-        "JaclVal jacl_call_named(JaclVM* vm, const char* name, JaclVal* args, int argc) looks up global proc by name",
-        "Returns function's return value, or error-flagged value on failure",
-        "Handles re-entrant calls (C calls JACL calls native C calls JACL)",
-        "Proper stack management: call frame pushed/popped correctly",
-        "Function declarations added to jacl.h",
-        "Build passes, all existing tests pass"
-      ],
-      "priority": 8,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-009",
-      "title": "Struct interop from C",
-      "description": "As a C developer, I need to create, read, and modify JACL structs from C so I can work with structured data across the embedding boundary.",
-      "acceptanceCriteria": [
-        "JaclVal jacl_struct_new(JaclVM* vm, const char* type_name, JaclVal* fields, int count) instantiates a struct",
-        "JaclVal jacl_struct_get(JaclVM* vm, JaclVal s, const char* field_name) reads a field by name",
-        "bool jacl_struct_set(JaclVM* vm, JaclVal s, const char* field_name, JaclVal value) writes a field",
-        "const char* jacl_struct_type_name(JaclVM* vm, JaclVal s) gets the struct type name",
-        "Type checking on set: returns false if value type doesn't match field type",
-        "GC write barrier triggered on struct field mutation of heap-typed fields",
-        "Function declarations added to jacl.h",
-        "Build passes, all existing tests pass"
-      ],
-      "priority": 9,
-      "passes": true,
-      "notes": "Uses existing StructTypeRegistry for offset/type lookup"
-    },
-    {
-      "id": "US-010",
-      "title": "Build system — libffi detection and linking",
-      "description": "As a developer building JACL, I need the build system to detect and optionally link libffi for trampoline support.",
-      "acceptanceCriteria": [
-        "build.sh detects libffi via pkg-config --cflags --libs libffi (or fallback to standard paths)",
-        "If libffi found: defines JACL_HAS_LIBFFI=1, links -lffi",
-        "If libffi not found: builds without trampoline support, no error",
-        "bool jacl_has_trampolines(void) runtime query returns true/false",
-        "Build passes on macOS and Linux"
-      ],
-      "priority": 10,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-011",
-      "title": "Closure-to-function-pointer trampolines via libffi",
-      "description": "As a C developer, I need to obtain a C function pointer from a JACL closure so I can pass JACL callbacks to C libraries that expect function pointers.",
-      "acceptanceCriteria": [
-        "JaclTrampoline* jacl_trampoline_new(JaclVM* vm, JaclVal closure, const char* sig) creates C-callable function pointer",
-        "Signature format: i32(i32,i32) — types: void, i32, i64, u32, u64, f32, f64, ptr",
-        "void* jacl_trampoline_ptr(JaclTrampoline* t) returns raw C function pointer",
-        "void jacl_trampoline_free(JaclVM* vm, JaclTrampoline* t) releases trampoline and libffi resources",
-        "Trampoline pins closure via GC handle (prevents collection while alive)",
-        "When called: marshals C args to JaclVal, calls closure via jacl_call, marshals return back",
-        "Uses ffi_closure_alloc / ffi_prep_closure_loc from libffi",
-        "Guarded by #ifdef JACL_HAS_LIBFFI — stubs return NULL when unavailable",
-        "jacl_vm_free silently frees all outstanding trampolines",
-        "Function declarations added to jacl.h",
-        "Build passes, all existing tests pass"
-      ],
-      "priority": 11,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-012",
-      "title": "Emscripten / WASM build target",
-      "description": "As a developer, I need JACL to compile to WebAssembly via Emscripten so the embedding API works in browser and WASI contexts.",
-      "acceptanceCriteria": [
-        "emcc compiles all of JACL to .wasm + .js module",
-        "Embedding API functions exported via EMSCRIPTEN_KEEPALIVE or -s EXPORTED_FUNCTIONS",
-        "Threading primitives in platform.h compile as no-ops under Emscripten",
-        "GC works in single-threaded mode",
-        "Trampoline API stubs return NULL when called (runtime unsupported, not compile error)",
-        "Basic test: create VM, eval expression, extract result — works in Node.js",
-        "Build passes with emcc"
-      ],
-      "priority": 12,
-      "passes": true,
-      "notes": "NxM scheduler degrades to single-worker event loop under Emscripten"
-    },
-    {
-      "id": "US-013",
-      "title": "E2E tests — embedding basics",
-      "description": "As a developer, I need end-to-end tests for the core embedding API to verify correctness.",
-      "acceptanceCriteria": [
-        "Test: create VM, eval [+ 1 2], extract i32 result, verify == 3, free VM",
-        "Test: eval with syntax error returns error-flagged value",
-        "Test: eval with runtime error returns error-flagged value with message",
-        "Test: create all value types from C, round-trip through eval, extract back",
-        "Test: string creation, extraction, and GC survival via handle",
-        "Test: multiple sequential evals share global state",
-        "Test: multiple independent VMs don't interfere",
-        "All tests pass, no memory leaks (ASAN clean)"
-      ],
-      "priority": 13,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-014",
-      "title": "E2E tests — native functions and jacl_call",
-      "description": "As a developer, I need tests for native function registration, calling conventions, and jacl_call.",
-      "acceptanceCriteria": [
-        "Test: register native function, call from JACL, verify args and return value",
-        "Test: variadic native function receives correct argc/argv",
-        "Test: native function returns error value, JACL propagates error flag",
-        "Test: native function calls jacl_call back into JACL (re-entrant)",
-        "Test: jacl_call_named looks up and calls a global proc",
-        "Test: register multiple native functions, call them in sequence",
-        "All tests pass, no memory leaks"
-      ],
-      "priority": 14,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-015",
-      "title": "E2E tests — GC handles",
-      "description": "As a developer, I need tests proving the handle API keeps values alive across GC cycles.",
-      "acceptanceCriteria": [
-        "Test: create handle, force GC, verify value survives",
-        "Test: free handle, force GC, verify value is collected",
-        "Test: create many handles (100+), GC stress, verify all survive",
-        "Test: handle to a struct — struct fields survive GC",
-        "Test: handle to a closure — closure and upvalues survive GC",
-        "All tests pass, no memory leaks"
-      ],
-      "priority": 15,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-016",
-      "title": "E2E tests — struct interop and trampolines",
-      "description": "As a developer, I need tests for struct manipulation from C and closure-to-function-pointer trampolines.",
-      "acceptanceCriteria": [
-        "Test: create struct from C via jacl_struct_new, read fields, verify values",
-        "Test: mutate struct field from C, read back from JACL, verify change",
-        "Test: type mismatch on struct set returns false",
-        "Test: create trampoline from JACL closure, call C function pointer, verify closure executes",
-        "Test: trampoline with various signatures (void return, multiple args, different types)",
-        "Test: free trampoline, verify closure becomes collectible",
-        "Test: trampoline used as callback to C qsort — sort array using JACL comparator",
-        "All tests pass, no memory leaks (trampoline tests skipped when JACL_HAS_LIBFFI is 0)"
-      ],
-      "priority": 16,
-      "passes": true,
-      "notes": ""
+      "passes": false,
+      "notes": "Use do { ... } while(0) or statement-expression patterns for macro hygiene. Comparison ops for f64 return bool (jacl_bool) not f64 — the macro may need a variant or parameter for this. The i64 comparison ops also return bool."
     }
   ]
 }
