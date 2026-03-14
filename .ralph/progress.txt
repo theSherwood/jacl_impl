@@ -1,3 +1,17 @@
-## Compiler & VM Refactoring
+# Ralph Progress Log
+Started: Sat Mar 14 23:12:59 UTC 2026
+---
 
-Progress log for ralph/compiler-vm-refactor branch.
+## Codebase Patterns
+- test/test_compiler.c directly calls internal compiler functions (like compiler__find_global_arity) — update test file when renaming internal helpers
+- Build uses build.sh; results show "=== Results: N passed, M failed ===" at the end
+- Pre-existing failures on main: rdoc, nfa_rdoc, nfa_cross (3 total after US-001)
+
+## 2026-03-14 - US-001
+- What was implemented: Replaced four near-identical global arity lookup functions (compiler__resolve_global_arity, compiler__resolve_global_info, compiler__resolve_global_type, compiler__find_global_arity) with a single compiler__find_global(c, name) returning GlobalArity*. All call sites updated to access fields directly.
+- Files changed: src/compiler.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - test/test_compiler.c directly references internal compiler functions — must update it alongside compiler.c when renaming helpers
+  - The set! handler used both compiler__resolve_global_info and compiler__resolve_global_type in sequence on the same name — combined into one compiler__find_global call using local variable `set_ga` to avoid shadowing
+  - One call site called both compiler__resolve_global_arity AND compiler__find_global_arity back-to-back — collapsed into single compiler__find_global call
+---

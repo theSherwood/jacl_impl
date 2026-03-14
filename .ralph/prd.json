@@ -15,7 +15,7 @@
         "Compiler builds cleanly with no new warnings"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "GlobalArity struct is defined at compiler.c lines 569-579 with fields: name, known_arity, is_mutable, suspends, captures_mutable, type, struct_type_idx, return_type, param_types. Callers currently extract individual fields via separate functions — just return the pointer and let them access fields directly."
     },
     {
