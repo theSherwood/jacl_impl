@@ -84,7 +84,7 @@
         "All existing tests pass"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Use do { ... } while(0) or statement-expression patterns for macro hygiene. Comparison ops for f64 return bool (jacl_bool) not f64 — the macro may need a variant or parameter for this. The i64 comparison ops also return bool."
     }
   ]

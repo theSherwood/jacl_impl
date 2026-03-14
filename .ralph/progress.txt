@@ -45,3 +45,14 @@ Started: Sat Mar 14 23:12:59 UTC 2026
   - Shared helpers placed in vm.c before vm__run/vm_exec; since jacl.c includes vm.c before embed.c, they are visible to embed.c in the unity build
   - Existing tests only use i32/f32 struct fields for mutation; i64/u64/f64 struct field writes are untested but the implementation is correct
 ---
+
+## 2026-03-14 - US-005
+- What was implemented: Replaced 21 verbose i64/f64 opcode handlers with 9 vm.c-internal macros (VM__I64_BINOP, VM__I64_DIVOP, VM__I64_NEG, VM__I64_CMPOP, VM__F64_BINOP, VM__F64_DIVOP, VM__F64_MODOP, VM__F64_NEG, VM__F64_CMPOP). Macros placed as #defines just before the i64 opcode section in the switch.
+- Files changed: src/vm.c
+- **Learnings for future iterations:**
+  - Macros placed as file-level #defines inside the switch statement body (before case labels) work in C — the preprocessor doesn't care about switch context
+  - Trailing underscores (a_, b_, r_) prevent variable shadowing between nested macro expansions
+  - do{}while(0) wrapping allows the macro to be used as a statement, and the break; after the macro invocation properly exits the case
+  - VM__F64_DIVOP and VM__F64_MODOP are separate (different operators: / vs fmod()) rather than parameterized, keeping them simpler
+  - u64 opcodes (DIV_U64, MOD_U64, LT/GT/LE/GE_U64) were NOT included in AC — left as-is
+---
