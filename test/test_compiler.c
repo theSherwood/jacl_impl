@@ -3485,12 +3485,14 @@ static int test_import_registers_globals(void) {
 
   /* Check that 'add' is registered with arity 2 */
   JaclVal add_name = jacl_inline_string("add", 3);
-  int16_t add_arity = compiler__resolve_global_arity(&importer, add_name);
+  GlobalArity* add_ga = compiler__find_global(&importer, add_name);
+  int16_t add_arity = add_ga ? add_ga->known_arity : -1;
   ASSERT_INT_EQ((int)add_arity, 2);
 
   /* Check that 'x' is registered with arity -1 (non-proc) */
   JaclVal x_name = jacl_inline_string("x", 1);
-  int16_t x_arity = compiler__resolve_global_arity(&importer, x_name);
+  GlobalArity* x_ga = compiler__find_global(&importer, x_name);
+  int16_t x_arity = x_ga ? x_ga->known_arity : -1;
   ASSERT_INT_EQ((int)x_arity, -1);
 
   unlink("/tmp/jacl_us007a/lib.jacl");
@@ -3608,7 +3610,7 @@ static int test_import_typed_propagation(void) {
 
   /* Check full type info propagated */
   JaclVal add_name = jacl_inline_string("add", 3);
-  GlobalArity* ga = compiler__find_global_arity(&importer, add_name);
+  GlobalArity* ga = compiler__find_global(&importer, add_name);
   ASSERT(ga != NULL);
   ASSERT_INT_EQ((int)ga->known_arity, 2);
   ASSERT_INT_EQ((int)ga->return_type, (int)TYPE_I64);
@@ -3725,7 +3727,7 @@ static int test_import_mutable_flag(void) {
   ASSERT_U32_EQ(importer.error_count, 0);
 
   JaclVal count_name = jacl_inline_string("count", 5);
-  GlobalArity* ga = compiler__find_global_arity(&importer, count_name);
+  GlobalArity* ga = compiler__find_global(&importer, count_name);
   ASSERT(ga != NULL);
   ASSERT(ga->is_mutable);
 
@@ -3853,12 +3855,12 @@ static int test_module_mutable_import_is_box(void) {
 
   /* count should be mutable (box), name should not */
   JaclVal count_name = jacl_inline_string("count", 5);
-  GlobalArity* ga_count = compiler__find_global_arity(&importer, count_name);
+  GlobalArity* ga_count = compiler__find_global(&importer, count_name);
   ASSERT(ga_count != NULL);
   ASSERT(ga_count->is_mutable);
 
   JaclVal name_name = jacl_inline_string("name", 4);
-  GlobalArity* ga_name = compiler__find_global_arity(&importer, name_name);
+  GlobalArity* ga_name = compiler__find_global(&importer, name_name);
   ASSERT(ga_name != NULL);
   ASSERT(!ga_name->is_mutable);
 

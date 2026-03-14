@@ -1222,43 +1222,7 @@ static int compiler__resolve_local(Compiler* c, JaclVal name) {
 
 /* --- Internal: Global arity helpers --- */
 
-static int16_t compiler__resolve_global_arity(Compiler* c, JaclVal name) {
-  /* Walk to root compiler which holds global arity info */
-  Compiler* root = c;
-  while (root->enclosing) root = root->enclosing;
-  for (uint32_t i = 0; i < root->global_arity_count; i++) {
-    if (root->global_arities[i].name == name) {
-      return root->global_arities[i].known_arity;
-    }
-  }
-  return -1;
-}
-
-static bool compiler__resolve_global_info(Compiler* c, JaclVal name,
-                                           bool* is_mutable) {
-  Compiler* root = c;
-  while (root->enclosing) root = root->enclosing;
-  for (uint32_t i = 0; i < root->global_arity_count; i++) {
-    if (root->global_arities[i].name == name) {
-      *is_mutable = root->global_arities[i].is_mutable;
-      return true;
-    }
-  }
-  return false;
-}
-
-static JaclType compiler__resolve_global_type(Compiler* c, JaclVal name) {
-  Compiler* root = c;
-  while (root->enclosing) root = root->enclosing;
-  for (uint32_t i = 0; i < root->global_arity_count; i++) {
-    if (root->global_arities[i].name == name) {
-      return root->global_arities[i].type;
-    }
-  }
-  return TYPE_DYN;
-}
-
-static GlobalArity* compiler__find_global_arity(Compiler* c, JaclVal name) {
+static GlobalArity* compiler__find_global(Compiler* c, JaclVal name) {
   Compiler* root = c;
   while (root->enclosing) root = root->enclosing;
   for (uint32_t i = 0; i < root->global_arity_count; i++) {
@@ -1465,7 +1429,7 @@ static bool compiler__name_touches_mutable(Compiler* enclosing, JaclVal name) {
     }
   }
   /* Check global arities */
-  GlobalArity* ga = compiler__find_global_arity(enclosing, name);
+  GlobalArity* ga = compiler__find_global(enclosing, name);
   if (ga) return ga->is_mutable || ga->captures_mutable;
   return false;
 }
@@ -1635,7 +1599,7 @@ static bool compiler__node_is_suspension(Compiler* c, AstNode* node) {
         int slot = compiler__resolve_local(c, name_val);
         if (slot != -1 && c->locals[slot].suspends) return true;
         /* Check globals */
-        GlobalArity* ga = compiler__find_global_arity(c, name_val);
+        GlobalArity* ga = compiler__find_global(c, name_val);
         if (ga && ga->suspends) return true;
         /* Check suspension map */
         if (suspension_map_lookup(c->suspension_map, name_val)) return true;
@@ -1998,7 +1962,7 @@ static bool compiler__is_suspending_call(Compiler* c, AstNode* node) {
       JaclVal name_val = jacl_inline_string(name, len);
       int slot = compiler__resolve_local(c, name_val);
       if (slot != -1 && c->locals[slot].suspends) return true;
-      GlobalArity* ga = compiler__find_global_arity(c, name_val);
+      GlobalArity* ga = compiler__find_global(c, name_val);
       if (ga && ga->suspends) return true;
       if (suspension_map_lookup(c->suspension_map, name_val)) return true;
     }
@@ -2728,14 +2692,16 @@ static int16_t compiler__node_known_arity(Compiler* c, AstNode* node) {
       if (slot != -1) {
         return c->locals[slot].known_arity;
       }
-      return compiler__resolve_global_arity(c, name_val);
+      GlobalArity* ga = compiler__find_global(c, name_val);
+      return ga ? ga->known_arity : -1;
     }
   }
   if (node->type == AST_LIT_STRING) {
     uint32_t name_len = node->data.lit_string.length;
     if (name_len <= 7) {
       JaclVal name_val = jacl_inline_string(node->data.lit_string.value, name_len);
-      return compiler__resolve_global_arity(c, name_val);
+      GlobalArity* ga = compiler__find_global(c, name_val);
+      return ga ? ga->known_arity : -1;
     }
   }
   return -1;
@@ -3225,10 +3191,11 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     /* Resolve global */
-    bool global_mutable = false;
-    if (compiler__resolve_global_info(c, name_val, &global_mutable)) {
+    GlobalArity* set_ga = compiler__find_global(c, name_val);
+    if (set_ga) {
+      bool global_mutable = set_ga->is_mutable;
       if (global_mutable) {
-        JaclType target_type = compiler__resolve_global_type(c, name_val);
+        JaclType target_type = set_ga->type;
         if (c->current_module) {
           /* In module context, mutable globals are boxes — use reset!
              semantics to update the box in place (shared reference).
@@ -3737,7 +3704,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__set_global_arity(c, name_val, (int16_t)user_param_count);
       /* Store param types, return type, and suspension in GlobalArity */
       {
-        GlobalArity* ga = compiler__find_global_arity(c, name_val);
+        GlobalArity* ga = compiler__find_global(c, name_val);
         if (ga) {
           ga->return_type = proc_return_type;
           ga->suspends    = proc_suspends;
@@ -4116,7 +4083,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
             "cannot pass suspending closure to non-suspending builtin 'transform'");
         return;
       }
-      GlobalArity* ga = compiler__find_global_arity(c, cb_name);
+      GlobalArity* ga = compiler__find_global(c, cb_name);
       if (ga && ga->suspends) {
         compiler__error(c, line, col,
             "cannot pass suspending closure to non-suspending builtin 'transform'");
@@ -4156,7 +4123,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
             "cannot pass suspending closure to non-suspending builtin 'each'");
         return;
       }
-      GlobalArity* ga = compiler__find_global_arity(c, cb_name);
+      GlobalArity* ga = compiler__find_global(c, cb_name);
       if (ga && ga->suspends) {
         compiler__error(c, line, col,
             "cannot pass suspending closure to non-suspending builtin 'each'");
@@ -4196,7 +4163,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
             "cannot pass suspending closure to non-suspending builtin 'filter'");
         return;
       }
-      GlobalArity* ga = compiler__find_global_arity(c, cb_name);
+      GlobalArity* ga = compiler__find_global(c, cb_name);
       if (ga && ga->suspends) {
         compiler__error(c, line, col,
             "cannot pass suspending closure to non-suspending builtin 'filter'");
@@ -4845,9 +4812,9 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           call_return_type = c->locals[local_slot].return_type;
           call_param_count = head_arity;
         } else {
-          head_arity = compiler__resolve_global_arity(c, name_val);
-          GlobalArity* ga = compiler__find_global_arity(c, name_val);
+          GlobalArity* ga = compiler__find_global(c, name_val);
           if (ga) {
+            head_arity = ga->known_arity;
             call_param_types = ga->param_types;
             call_return_type = ga->return_type;
             call_param_count = head_arity;
@@ -4905,7 +4872,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
             call_return_type = c->locals[slot].return_type;
             call_param_count = c->locals[slot].known_arity;
           } else {
-            GlobalArity* ga = compiler__find_global_arity(c, vname);
+            GlobalArity* ga = compiler__find_global(c, vname);
             if (ga) {
               call_param_types = ga->param_types;
               call_return_type = ga->return_type;
@@ -5105,7 +5072,8 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
           if (c->upvalues[upvalue_idx].type == TYPE_STRUCT)
             c->last_struct_idx = c->upvalues[upvalue_idx].struct_type_idx;
         } else {
-          JaclType global_type = compiler__resolve_global_type(c, name_val);
+          GlobalArity* ga = compiler__find_global(c, name_val);
+          JaclType global_type = ga ? ga->type : TYPE_DYN;
           JaclVal gkey = compiler__global_name_val(c,
               node->data.var_ref.name, name_len);
           uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
@@ -5127,7 +5095,6 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
           }
           c->last_expr_type = global_type;
           if (global_type == TYPE_STRUCT) {
-            GlobalArity* ga = compiler__find_global_arity(c, name_val);
             if (ga) c->last_struct_idx = ga->struct_type_idx;
           }
         }
@@ -5277,7 +5244,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
           JaclVal name_val = jacl_inline_string(imp_name, imp_len);
 
           /* Check conflict with existing global */
-          GlobalArity* existing = compiler__find_global_arity(c, name_val);
+          GlobalArity* existing = compiler__find_global(c, name_val);
           if (existing) {
             char buf[256];
             snprintf(buf, sizeof(buf), "'%.*s' is already defined",
@@ -5490,7 +5457,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
       if (struct_name_len <= 7) {
         JaclVal name_val = sdef->name_val;
         compiler__set_global_arity(root, name_val, (int16_t)field_count);
-        GlobalArity* ga = compiler__find_global_arity(root, name_val);
+        GlobalArity* ga = compiler__find_global(root, name_val);
         if (ga) {
           ga->type = TYPE_STRUCT;
           ga->return_type = TYPE_STRUCT;
@@ -5581,7 +5548,7 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
               }
             }
             compiler__set_global_arity(&c, pname, pcount);
-            GlobalArity* ga = compiler__find_global_arity(&c, pname);
+            GlobalArity* ga = compiler__find_global(&c, pname);
             if (ga) {
               ga->suspends = suspension_map_lookup(&suspension_map, pname);
             }
@@ -5607,7 +5574,7 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                 name_node->data.lit_string.value,
                 name_node->data.lit_string.length);
             compiler__set_global_arity(&c, mname, -1);
-            GlobalArity* ga = compiler__find_global_arity(&c, mname);
+            GlobalArity* ga = compiler__find_global(&c, mname);
             if (ga) {
               ga->is_mutable = true;
             }
@@ -5978,7 +5945,7 @@ static ProgramResult jacl_compile_program(const char* root_path,
               }
             }
             compiler__set_global_arity(&c, pname, pcount);
-            GlobalArity* ga = compiler__find_global_arity(&c, pname);
+            GlobalArity* ga = compiler__find_global(&c, pname);
             if (ga) {
               ga->suspends = suspension_map_lookup(&suspension_map, pname);
             }
@@ -6001,7 +5968,7 @@ static ProgramResult jacl_compile_program(const char* root_path,
                 name_node->data.lit_string.value,
                 name_node->data.lit_string.length);
             compiler__set_global_arity(&c, mname, -1);
-            GlobalArity* ga = compiler__find_global_arity(&c, mname);
+            GlobalArity* ga = compiler__find_global(&c, mname);
             if (ga) {
               ga->is_mutable = true;
             }
