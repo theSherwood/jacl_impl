@@ -2201,6 +2201,73 @@ static bool compiler__has_suspending_non_block_args(Compiler* c, AstNode* node) 
 }
 
 /**
+ * Shared helper: for each suspending non-block arg in args[0..argc), create a
+ * synthetic [def __aN arg] statement and replace the arg with a $__aN var ref.
+ * out_new_args must be caller-allocated with argc slots (pre-copied from args).
+ * out_defs must be caller-allocated with argc slots (upper bound on susp count).
+ * Returns the number of synthetic defs emitted (= number of suspending args).
+ */
+static uint32_t compiler__cps_extract_args_helper(
+    Compiler* c, AstNode** args, uint32_t argc,
+    AstNode** out_new_args, AstNode** out_defs) {
+  memcpy(out_new_args, args, sizeof(AstNode*) * argc);
+  uint32_t susp_count = 0;
+  for (uint32_t i = 0; i < argc; i++) {
+    if (args[i]->type == AST_BLOCK || !compiler__node_is_suspension(c, args[i]))
+      continue;
+
+    /* Generate temp name __a0, __a1, etc. */
+    char tmp_name[8];
+    snprintf(tmp_name, sizeof(tmp_name), "__a%u", susp_count);
+    uint32_t name_len = (uint32_t)strlen(tmp_name);
+    char* name_copy = (char*)arena_alloc(c->arena, name_len + 1);
+    memcpy(name_copy, tmp_name, name_len + 1);
+
+    /* Var ref node to replace the suspending arg */
+    AstNode* var_ref = ast_alloc(c->arena);
+    var_ref->type = AST_VAR_REF;
+    var_ref->start = args[i]->start;
+    var_ref->end = args[i]->end;
+    var_ref->data.var_ref.name = name_copy;
+    var_ref->data.var_ref.length = name_len;
+
+    /* Name literal node for def */
+    AstNode* name_node = ast_alloc(c->arena);
+    name_node->type = AST_LIT_STRING;
+    name_node->start = args[i]->start;
+    name_node->end = args[i]->end;
+    name_node->data.lit_string.value = name_copy;
+    name_node->data.lit_string.length = name_len;
+
+    /* def head */
+    AstNode* def_head = ast_alloc(c->arena);
+    def_head->type = AST_LIT_STRING;
+    def_head->start = args[i]->start;
+    def_head->end = args[i]->end;
+    def_head->data.lit_string.value = "def";
+    def_head->data.lit_string.length = 3;
+
+    /* [def name original_arg] command */
+    AstNode** def_args = ast_alloc_array(c->arena, 2);
+    def_args[0] = name_node;
+    def_args[1] = args[i];
+
+    AstNode* def_cmd = ast_alloc(c->arena);
+    def_cmd->type = AST_COMMAND;
+    def_cmd->start = args[i]->start;
+    def_cmd->end = args[i]->end;
+    def_cmd->data.command.head = def_head;
+    def_cmd->data.command.args = def_args;
+    def_cmd->data.command.arg_count = 2;
+
+    out_defs[susp_count] = def_cmd;
+    out_new_args[i] = var_ref;
+    susp_count++;
+  }
+  return susp_count;
+}
+
+/**
  * Extract suspending non-block arguments from a command into temp defs.
  * Creates synthetic AST: [def __a0 susp_arg0]; [def __a1 susp_arg1]; ...;
  * [modified_cmd with $__a0 $__a1 ...]; remaining_stmts.
@@ -2211,94 +2278,23 @@ static void compiler__compile_cps_extract_args(Compiler* c, AstNode* cmd_node,
                                                 uint32_t remaining_count,
                                                 uint32_t line) {
   uint32_t argc = cmd_node->data.command.arg_count;
-  AstNode** args = cmd_node->data.command.args;
+  AstNode** new_args = ast_alloc_array(c->arena, argc);
+  AstNode** defs = ast_alloc_array(c->arena, argc);
+  uint32_t susp_count = compiler__cps_extract_args_helper(
+      c, cmd_node->data.command.args, argc, new_args, defs);
 
-  /* Count extractable suspending args */
-  uint32_t susp_count = 0;
-  for (uint32_t i = 0; i < argc; i++) {
-    if (args[i]->type != AST_BLOCK &&
-        compiler__node_is_suspension(c, args[i])) {
-      susp_count++;
-    }
-  }
-
-  /* Build synthetic statement list: defs + modified_cmd + remaining */
   uint32_t total = susp_count + 1 + remaining_count;
   AstNode** new_stmts = ast_alloc_array(c->arena, total);
+  for (uint32_t i = 0; i < susp_count; i++) new_stmts[i] = defs[i];
 
-  /* Create modified args array */
-  AstNode** new_args = ast_alloc_array(c->arena, argc);
-  memcpy(new_args, args, sizeof(AstNode*) * argc);
-
-  uint32_t def_idx = 0;
-  for (uint32_t i = 0; i < argc; i++) {
-    if (args[i]->type != AST_BLOCK &&
-        compiler__node_is_suspension(c, args[i])) {
-      /* Generate temp name __a0, __a1, etc. */
-      char tmp_name[8];
-      snprintf(tmp_name, sizeof(tmp_name), "__a%u", def_idx);
-      uint32_t name_len = (uint32_t)strlen(tmp_name);
-
-      char* name_copy = (char*)arena_alloc(c->arena, name_len + 1);
-      memcpy(name_copy, tmp_name, name_len + 1);
-
-      /* Create var ref node to replace the suspending arg */
-      AstNode* var_ref = ast_alloc(c->arena);
-      var_ref->type = AST_VAR_REF;
-      var_ref->start = args[i]->start;
-      var_ref->end = args[i]->end;
-      var_ref->data.var_ref.name = name_copy;
-      var_ref->data.var_ref.length = name_len;
-
-      /* Create name literal node for def */
-      AstNode* name_node = ast_alloc(c->arena);
-      name_node->type = AST_LIT_STRING;
-      name_node->start = args[i]->start;
-      name_node->end = args[i]->end;
-      name_node->data.lit_string.value = name_copy;
-      name_node->data.lit_string.length = name_len;
-
-      /* Create def head */
-      AstNode* def_head = ast_alloc(c->arena);
-      def_head->type = AST_LIT_STRING;
-      def_head->start = args[i]->start;
-      def_head->end = args[i]->end;
-      def_head->data.lit_string.value = "def";
-      def_head->data.lit_string.length = 3;
-
-      /* Create def args: [name, value] */
-      AstNode** def_args = ast_alloc_array(c->arena, 2);
-      def_args[0] = name_node;
-      def_args[1] = args[i]; /* original suspending expression */
-
-      /* Create def command node */
-      AstNode* def_cmd = ast_alloc(c->arena);
-      def_cmd->type = AST_COMMAND;
-      def_cmd->start = args[i]->start;
-      def_cmd->end = args[i]->end;
-      def_cmd->data.command.head = def_head;
-      def_cmd->data.command.args = def_args;
-      def_cmd->data.command.arg_count = 2;
-
-      new_stmts[def_idx] = def_cmd;
-      new_args[i] = var_ref;
-      def_idx++;
-    }
-  }
-
-  /* Create modified command with extracted args replaced by var refs */
   AstNode* mod_cmd = ast_alloc(c->arena);
   *mod_cmd = *cmd_node;
   mod_cmd->data.command.args = new_args;
-
   new_stmts[susp_count] = mod_cmd;
 
-  /* Append remaining statements */
-  for (uint32_t i = 0; i < remaining_count; i++) {
+  for (uint32_t i = 0; i < remaining_count; i++)
     new_stmts[susp_count + 1 + i] = remaining_stmts[i];
-  }
 
-  /* Compile the expanded sequence through CPS */
   compiler__compile_cps_stmts(c, new_stmts, total, line);
 }
 
@@ -2310,97 +2306,32 @@ static void compiler__compile_cps_extract_args(Compiler* c, AstNode* cmd_node,
 static void compiler__compile_cps_extract_def_value(
     Compiler* c, AstNode* def_stmt, JaclVal def_name, AstNode* value_node,
     AstNode** remaining_stmts, uint32_t remaining_count, uint32_t line) {
+  (void)def_name;
   uint32_t v_argc = value_node->data.command.arg_count;
-  AstNode** v_args = value_node->data.command.args;
+  AstNode** new_v_args = ast_alloc_array(c->arena, v_argc);
+  AstNode** defs = ast_alloc_array(c->arena, v_argc);
+  uint32_t susp_count = compiler__cps_extract_args_helper(
+      c, value_node->data.command.args, v_argc, new_v_args, defs);
 
-  /* Count extractable suspending args in value */
-  uint32_t susp_count = 0;
-  for (uint32_t i = 0; i < v_argc; i++) {
-    if (v_args[i]->type != AST_BLOCK &&
-        compiler__node_is_suspension(c, v_args[i])) {
-      susp_count++;
-    }
-  }
-
-  /* Build: defs + modified_def_stmt + remaining */
   uint32_t total = susp_count + 1 + remaining_count;
   AstNode** new_stmts = ast_alloc_array(c->arena, total);
+  for (uint32_t i = 0; i < susp_count; i++) new_stmts[i] = defs[i];
 
-  /* Create modified value args */
-  AstNode** new_v_args = ast_alloc_array(c->arena, v_argc);
-  memcpy(new_v_args, v_args, sizeof(AstNode*) * v_argc);
-
-  uint32_t def_idx = 0;
-  for (uint32_t i = 0; i < v_argc; i++) {
-    if (v_args[i]->type != AST_BLOCK &&
-        compiler__node_is_suspension(c, v_args[i])) {
-      char tmp_name[8];
-      snprintf(tmp_name, sizeof(tmp_name), "__a%u", def_idx);
-      uint32_t name_len = (uint32_t)strlen(tmp_name);
-
-      char* name_copy = (char*)arena_alloc(c->arena, name_len + 1);
-      memcpy(name_copy, tmp_name, name_len + 1);
-
-      AstNode* var_ref = ast_alloc(c->arena);
-      var_ref->type = AST_VAR_REF;
-      var_ref->start = v_args[i]->start;
-      var_ref->end = v_args[i]->end;
-      var_ref->data.var_ref.name = name_copy;
-      var_ref->data.var_ref.length = name_len;
-
-      AstNode* name_node = ast_alloc(c->arena);
-      name_node->type = AST_LIT_STRING;
-      name_node->start = v_args[i]->start;
-      name_node->end = v_args[i]->end;
-      name_node->data.lit_string.value = name_copy;
-      name_node->data.lit_string.length = name_len;
-
-      AstNode* def_head = ast_alloc(c->arena);
-      def_head->type = AST_LIT_STRING;
-      def_head->start = v_args[i]->start;
-      def_head->end = v_args[i]->end;
-      def_head->data.lit_string.value = "def";
-      def_head->data.lit_string.length = 3;
-
-      AstNode** def_args_arr = ast_alloc_array(c->arena, 2);
-      def_args_arr[0] = name_node;
-      def_args_arr[1] = v_args[i];
-
-      AstNode* def_cmd = ast_alloc(c->arena);
-      def_cmd->type = AST_COMMAND;
-      def_cmd->start = v_args[i]->start;
-      def_cmd->end = v_args[i]->end;
-      def_cmd->data.command.head = def_head;
-      def_cmd->data.command.args = def_args_arr;
-      def_cmd->data.command.arg_count = 2;
-
-      new_stmts[def_idx] = def_cmd;
-      new_v_args[i] = var_ref;
-      def_idx++;
-    }
-  }
-
-  /* Create modified value node */
   AstNode* mod_value = ast_alloc(c->arena);
   *mod_value = *value_node;
   mod_value->data.command.args = new_v_args;
 
-  /* Create modified def stmt */
   AstNode* mod_def = ast_alloc(c->arena);
   *mod_def = *def_stmt;
-  AstNode** mod_def_args = ast_alloc_array(c->arena, def_stmt->data.command.arg_count);
-  memcpy(mod_def_args, def_stmt->data.command.args,
-         sizeof(AstNode*) * def_stmt->data.command.arg_count);
-  /* Replace the value node in def args */
   uint32_t d_argc = def_stmt->data.command.arg_count;
+  AstNode** mod_def_args = ast_alloc_array(c->arena, d_argc);
+  memcpy(mod_def_args, def_stmt->data.command.args, sizeof(AstNode*) * d_argc);
   mod_def_args[d_argc - 1] = mod_value;
   mod_def->data.command.args = mod_def_args;
-
   new_stmts[susp_count] = mod_def;
 
-  for (uint32_t i = 0; i < remaining_count; i++) {
+  for (uint32_t i = 0; i < remaining_count; i++)
     new_stmts[susp_count + 1 + i] = remaining_stmts[i];
-  }
 
   compiler__compile_cps_stmts(c, new_stmts, total, line);
 }
