@@ -46,7 +46,7 @@
         "All existing tests pass"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "The three builtins share identical 30-line non-suspending callback validation blocks. The only differences are the builtin name (for error messages) and the final opcode. The in_non_suspending_callback flag needs careful save/restore — the current code does this and the helper must preserve the pattern."
     },
     {
@@ -65,7 +65,7 @@
         "All existing tests pass, including embed API tests"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "The embed.c functions already work as standalone functions that take (struct_data, offset, field_type, heap/val) and do the type-switch marshaling. Promote these rather than writing new ones. They always box through JaclVal — the static opcodes lose a minor 'mixed boxing' optimization for i64/u64/f64 but this is negligible for a scripting language and can be revisited if profiling shows it matters."
     },
     {

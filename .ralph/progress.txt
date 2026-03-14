@@ -6,6 +6,8 @@ Started: Sat Mar 14 23:12:59 UTC 2026
 - test/test_compiler.c directly calls internal compiler functions (like compiler__find_global_arity) — update test file when renaming internal helpers
 - Build uses build.sh; results show "=== Results: N passed, M failed ===" at the end
 - Pre-existing failures on main: rdoc, nfa_rdoc, nfa_cross (3 total after US-001)
+- VM uses UNBOXED raw bits for i64/u64/f64 on the stack (typed arithmetic path); embed API uses BOXED heap objects. Shared struct helpers use ThreadHeap*=NULL for unboxed, non-NULL for boxed. Embed write functions must unbox 64-bit values before calling vm__struct_write_field.
+- jacl.c unity build order: value.c → gc.c → ... → vm.c → gc_collect.c → runtime.c → embed.c. Shared helpers in vm.c are accessible by embed.c (defined earlier in the translation unit).
 
 ## 2026-03-14 - US-001
 - What was implemented: Replaced four near-identical global arity lookup functions (compiler__resolve_global_arity, compiler__resolve_global_info, compiler__resolve_global_type, compiler__find_global_arity) with a single compiler__find_global(c, name) returning GlobalArity*. All call sites updated to access fields directly.
@@ -23,4 +25,23 @@ Started: Sat Mar 14 23:12:59 UTC 2026
   - def_name parameter in compiler__compile_cps_extract_def_value was unused — added (void)def_name to silence warning while keeping the signature unchanged
   - The helper returns susp_count; callers pre-allocate argc-sized arrays for new_args and defs (argc is an upper bound on susp_count)
   - The two wrappers differ only in the "pivot node" at new_stmts[susp_count]: extract_args inserts a shallow-copied command; extract_def_value inserts a modified def with its value replaced
+---
+
+## 2026-03-14 - US-003
+- What was implemented: Extracted compiler__compile_hof_builtin(c, name, args, argc, opcode, line, col) static helper. All three HOF builtins (transform, each, filter) became 2-line wrappers. Helper placed just before compiler__compile_command.
+- Files changed: src/compiler.c
+- **Learnings for future iterations:**
+  - compiler__error takes a static const char* — dynamic messages require a local char buf[128] + snprintf before calling it
+  - The two suspending-closure error messages for local and global checks were identical — formatted once into a single buf and passed to both compiler__error calls
+  - name_len is not needed inside the helper since snprintf only needs the C string; omit it to avoid unused-parameter warnings
+---
+
+## 2026-03-14 - US-004
+- What was implemented: Promoted embed__struct_read_field and embed__struct_write_field from static embed.c helpers to shared vm__struct_read_field / vm__struct_write_field in vm.c. All four struct opcodes (OP_STRUCT_GET, OP_STRUCT_SET, OP_STRUCT_GET_DYN, OP_STRUCT_SET_DYN) call the shared helpers. embed.c thin-wrappers delegate to them.
+- Files changed: src/vm.c, src/embed.c
+- **Learnings for future iterations:**
+  - VM uses unboxed raw bits for i64/u64/f64 (typed arithmetic path); passing NULL heap to vm__struct_read_field signals unboxed output for OP_STRUCT_GET static; non-NULL heap means boxed (for dyn/embed)
+  - embed.c write wrapper must unbox 64-bit JaclVals (jacl_as_i64/u64/f64) before calling vm__struct_write_field, since embed API always uses boxed values but the shared function uses raw-bits convention
+  - Shared helpers placed in vm.c before vm__run/vm_exec; since jacl.c includes vm.c before embed.c, they are visible to embed.c in the unity build
+  - Existing tests only use i32/f32 struct fields for mutation; i64/u64/f64 struct field writes are untested but the implementation is correct
 ---
