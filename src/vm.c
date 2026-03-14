@@ -556,6 +556,53 @@ static bool vm__deep_eq(JaclVal a, JaclVal b) {
   return jacl_val_eq(a, b);
 }
 
+/* --- Shared struct field marshaling helpers --- */
+
+/* Read a field from struct data and return as JaclVal.
+ * Pass heap=NULL for unboxed 64-bit types (raw bits, for typed arithmetic).
+ * Pass heap!=NULL for boxed 64-bit types (heap-allocated, for dyn/embed). */
+static JaclVal vm__struct_read_field(ThreadHeap* heap, JaclStruct* s,
+                                      uint32_t offset, int field_type) {
+  switch ((JaclType)field_type) {
+    case TYPE_BOOL: { uint8_t b = s->data[offset]; return jacl_bool(b); }
+    case TYPE_I32: { int32_t n; memcpy(&n, s->data + offset, 4); return jacl_i32(n); }
+    case TYPE_U32: { uint32_t n; memcpy(&n, s->data + offset, 4); return jacl_u32(n); }
+    case TYPE_F32: { float f; memcpy(&f, s->data + offset, 4); return jacl_f32(f); }
+    case TYPE_I64: {
+      int64_t n; memcpy(&n, s->data + offset, 8);
+      return heap ? jacl_i64(heap, n) : (JaclVal)n;
+    }
+    case TYPE_U64: {
+      uint64_t n; memcpy(&n, s->data + offset, 8);
+      return heap ? jacl_u64(heap, n) : (JaclVal)n;
+    }
+    case TYPE_F64: {
+      double d; memcpy(&d, s->data + offset, 8);
+      if (heap) return jacl_f64(heap, d);
+      JaclVal v; memcpy(&v, &d, 8); return v;
+    }
+    default: {
+      JaclVal val; memcpy(&val, s->data + offset, sizeof(JaclVal)); return val;
+    }
+  }
+}
+
+/* Write a JaclVal to a struct field (caller must have already type-checked).
+ * For i64/u64/f64, val must contain raw bits (unboxed VM representation). */
+static void vm__struct_write_field(JaclStruct* s, uint32_t offset,
+                                    int field_type, JaclVal val) {
+  switch ((JaclType)field_type) {
+    case TYPE_BOOL: { uint8_t b = jacl_as_bool(val) ? 1 : 0; s->data[offset] = b; break; }
+    case TYPE_I32: { int32_t n = jacl_as_i32(val); memcpy(s->data + offset, &n, 4); break; }
+    case TYPE_U32: { uint32_t n = jacl_as_u32(val); memcpy(s->data + offset, &n, 4); break; }
+    case TYPE_F32: { float f = jacl_as_f32(val); memcpy(s->data + offset, &f, 4); break; }
+    case TYPE_I64: { int64_t n = (int64_t)val; memcpy(s->data + offset, &n, 8); break; }
+    case TYPE_U64: { uint64_t n = val; memcpy(s->data + offset, &n, 8); break; }
+    case TYPE_F64: { double d; memcpy(&d, &val, 8); memcpy(s->data + offset, &d, 8); break; }
+    default: { memcpy(s->data + offset, &val, sizeof(JaclVal)); break; }
+  }
+}
+
 /* Forward declaration for recursive call from OP_EACH */
 static VMResult vm__run(VM* vm, uint32_t min_frame);
 
@@ -3937,50 +3984,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         JaclStruct* s = jacl_as_struct_ptr(struct_val);
-        JaclVal field_val;
-        switch ((JaclType)field_type) {
-          case TYPE_BOOL: {
-            uint8_t b = s->data[field_offset];
-            field_val = jacl_bool(b);
-            break;
-          }
-          case TYPE_I32: {
-            int32_t n; memcpy(&n, s->data + field_offset, 4);
-            field_val = jacl_i32(n);
-            break;
-          }
-          case TYPE_U32: {
-            uint32_t n; memcpy(&n, s->data + field_offset, 4);
-            field_val = jacl_u32(n);
-            break;
-          }
-          case TYPE_F32: {
-            float f; memcpy(&f, s->data + field_offset, 4);
-            field_val = jacl_f32(f);
-            break;
-          }
-          case TYPE_I64: {
-            int64_t n; memcpy(&n, s->data + field_offset, 8);
-            /* Push raw i64 (unboxed) */
-            field_val = (JaclVal)n;
-            break;
-          }
-          case TYPE_U64: {
-            uint64_t n; memcpy(&n, s->data + field_offset, 8);
-            field_val = n;
-            break;
-          }
-          case TYPE_F64: {
-            double d; memcpy(&d, s->data + field_offset, 8);
-            memcpy(&field_val, &d, 8);
-            break;
-          }
-          default: {
-            /* str, vec, map, closure, dyn, struct — stored as JaclVal */
-            memcpy(&field_val, s->data + field_offset, sizeof(JaclVal));
-            break;
-          }
-        }
+        /* NULL heap → unboxed 64-bit (raw bits for typed arithmetic) */
+        JaclVal field_val = vm__struct_read_field(NULL, s, field_offset, field_type);
         result = vm__push(vm, field_val);
         if (result != VM_OK) return result;
         break;
@@ -4005,48 +4010,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         JaclStruct* s = jacl_as_struct_ptr(struct_val);
-        switch ((JaclType)field_type) {
-          case TYPE_BOOL: {
-            uint8_t b = jacl_as_bool(new_val) ? 1 : 0;
-            s->data[field_offset] = b;
-            break;
-          }
-          case TYPE_I32: {
-            int32_t n = jacl_as_i32(new_val);
-            memcpy(s->data + field_offset, &n, 4);
-            break;
-          }
-          case TYPE_U32: {
-            uint32_t n = jacl_as_u32(new_val);
-            memcpy(s->data + field_offset, &n, 4);
-            break;
-          }
-          case TYPE_F32: {
-            float f = jacl_as_f32(new_val);
-            memcpy(s->data + field_offset, &f, 4);
-            break;
-          }
-          case TYPE_I64: {
-            int64_t n = (int64_t)new_val;
-            memcpy(s->data + field_offset, &n, 8);
-            break;
-          }
-          case TYPE_U64: {
-            uint64_t n = new_val;
-            memcpy(s->data + field_offset, &n, 8);
-            break;
-          }
-          case TYPE_F64: {
-            double d;
-            memcpy(&d, &new_val, 8);
-            memcpy(s->data + field_offset, &d, 8);
-            break;
-          }
-          default: {
-            memcpy(s->data + field_offset, &new_val, sizeof(JaclVal));
-            break;
-          }
-        }
+        vm__struct_write_field(s, field_offset, field_type, new_val);
         /* Push struct value back (for chaining) */
         result = vm__push(vm, struct_val);
         if (result != VM_OK) return result;
@@ -4086,19 +4050,10 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
                         (int)sdef->name_len, sdef->name, (int)flen, fname);
           return VM_RUNTIME_ERROR;
         }
-        /* Read field and box to JaclVal (always boxed for dyn context) */
-        JaclVal field_val;
+        /* heap != NULL → boxed 64-bit types (always boxed for dyn context) */
         uint16_t foff = sdef->fields[fi].offset;
-        switch (sdef->fields[fi].type) {
-          case TYPE_BOOL: { uint8_t b = s->data[foff]; field_val = jacl_bool(b); break; }
-          case TYPE_I32:  { int32_t n; memcpy(&n, s->data + foff, 4); field_val = jacl_i32(n); break; }
-          case TYPE_U32:  { uint32_t n; memcpy(&n, s->data + foff, 4); field_val = jacl_u32(n); break; }
-          case TYPE_F32:  { float f; memcpy(&f, s->data + foff, 4); field_val = jacl_f32(f); break; }
-          case TYPE_I64:  { int64_t n; memcpy(&n, s->data + foff, 8); field_val = jacl_i64(&vm->heap, n); break; }
-          case TYPE_U64:  { uint64_t n; memcpy(&n, s->data + foff, 8); field_val = jacl_u64(&vm->heap, n); break; }
-          case TYPE_F64:  { double d; memcpy(&d, s->data + foff, 8); field_val = jacl_f64(&vm->heap, d); break; }
-          default:        { memcpy(&field_val, s->data + foff, sizeof(JaclVal)); break; }
-        }
+        JaclVal field_val = vm__struct_read_field(&vm->heap, s, foff,
+                                                   (int)sdef->fields[fi].type);
         result = vm__push(vm, field_val);
         if (result != VM_OK) return result;
         break;
@@ -4141,16 +4096,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         uint16_t foff2 = sdef2->fields[fi2].offset;
-        switch (sdef2->fields[fi2].type) {
-          case TYPE_BOOL: { uint8_t b = jacl_as_bool(new_val) ? 1 : 0; sd->data[foff2] = b; break; }
-          case TYPE_I32:  { int32_t n = jacl_as_i32(new_val); memcpy(sd->data + foff2, &n, 4); break; }
-          case TYPE_U32:  { uint32_t n = jacl_as_u32(new_val); memcpy(sd->data + foff2, &n, 4); break; }
-          case TYPE_F32:  { float f = jacl_as_f32(new_val); memcpy(sd->data + foff2, &f, 4); break; }
-          case TYPE_I64:  { int64_t n = (int64_t)new_val; memcpy(sd->data + foff2, &n, 8); break; }
-          case TYPE_U64:  { uint64_t n = new_val; memcpy(sd->data + foff2, &n, 8); break; }
-          case TYPE_F64:  { double d; memcpy(&d, &new_val, 8); memcpy(sd->data + foff2, &d, 8); break; }
-          default:        { memcpy(sd->data + foff2, &new_val, sizeof(JaclVal)); break; }
-        }
+        vm__struct_write_field(sd, foff2, (int)sdef2->fields[fi2].type, new_val);
         result = vm__push(vm, struct_val);
         if (result != VM_OK) return result;
         break;
