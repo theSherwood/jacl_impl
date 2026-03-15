@@ -223,7 +223,45 @@ static AstNode* parser__parse_atom(Parser* p) {
       node->data.lit_string.length = (uint32_t)strlen(tok->payload.text);
       return node;
     }
-    case TOKEN_OPERATOR: {
+    case TOKEN_OPERATOR:
+    /* New operator tokens — usable as command names during transition */
+    case TOKEN_PIPE:
+    case TOKEN_ARROW:
+    case TOKEN_BACKSLASH:
+    case TOKEN_BANG:
+    case TOKEN_DOTDOT:
+    case TOKEN_AMP:
+    case TOKEN_AND:
+    case TOKEN_OR:
+    case TOKEN_NOT:
+    case TOKEN_EQUALS:
+    case TOKEN_COLON:
+    case TOKEN_DOUBLE_COLON: {
+      parser__advance(p);
+      AstNode* node = ast_alloc(p->arena);
+      node->type = AST_LIT_STRING;
+      node->start = parser__token_start(tok);
+      node->end   = parser__token_end(tok);
+      node->data.lit_string.value  = tok->payload.text;
+      node->data.lit_string.length = tok->length;
+      return node;
+    }
+    /* New keyword tokens — usable as command names during transition */
+    case TOKEN_STRUCT:
+    case TOKEN_PROC:
+    case TOKEN_IF:
+    case TOKEN_ELIF:
+    case TOKEN_ELSE:
+    case TOKEN_WHILE:
+    case TOKEN_FOR:
+    case TOKEN_DEF:
+    case TOKEN_MUT:
+    case TOKEN_SET:
+    case TOKEN_MATCH:
+    case TOKEN_RETURN:
+    case TOKEN_BREAK:
+    case TOKEN_CONTINUE:
+    case TOKEN_TRY: {
       parser__advance(p);
       AstNode* node = ast_alloc(p->arena);
       node->type = AST_LIT_STRING;
@@ -371,6 +409,35 @@ static AstNode* parser__parse_expr(Parser* p) {
     case TOKEN_STRING:
     case TOKEN_OPERATOR:
     case TOKEN_VAR:
+    /* New operator tokens */
+    case TOKEN_PIPE:
+    case TOKEN_ARROW:
+    case TOKEN_BACKSLASH:
+    case TOKEN_BANG:
+    case TOKEN_DOTDOT:
+    case TOKEN_AMP:
+    case TOKEN_AND:
+    case TOKEN_OR:
+    case TOKEN_NOT:
+    case TOKEN_EQUALS:
+    case TOKEN_COLON:
+    case TOKEN_DOUBLE_COLON:
+    /* New keyword tokens */
+    case TOKEN_STRUCT:
+    case TOKEN_PROC:
+    case TOKEN_IF:
+    case TOKEN_ELIF:
+    case TOKEN_ELSE:
+    case TOKEN_WHILE:
+    case TOKEN_FOR:
+    case TOKEN_DEF:
+    case TOKEN_MUT:
+    case TOKEN_SET:
+    case TOKEN_MATCH:
+    case TOKEN_RETURN:
+    case TOKEN_BREAK:
+    case TOKEN_CONTINUE:
+    case TOKEN_TRY:
       return parser__parse_atom(p);
 
     default:
@@ -468,7 +535,7 @@ static AstNode* parser__parse_use(Parser* p) {
 /* -------------------------------------------------------------------------
  * Internal: Parse defstruct declaration: defstruct Name [field :type] ...
  *
- * Called when the current token is TOKEN_DEFSTRUCT.
+ * Called when the current token is TOKEN_STRUCT.
  * Returns AST_DEFSTRUCT on success, AST_ERROR on failure.
  * ------------------------------------------------------------------------- */
 
@@ -521,16 +588,19 @@ static const char* parser__parse_inline_struct_type(Parser* p, uint32_t* out_len
     memcpy(buf + pos, fname->payload.text, fname->length);
     pos += fname->length;
 
-    /* Colon: TOKEN_OPERATOR starting with ':' */
+    /* Colon: TOKEN_COLON or TOKEN_OPERATOR starting with ':' */
     Token* colon = parser__peek(p);
-    if (colon->type != TOKEN_OPERATOR || colon->length < 1 || colon->payload.text[0] != ':') {
+    int is_colon = (colon->type == TOKEN_COLON) ||
+                   (colon->type == TOKEN_OPERATOR && colon->length >= 1 &&
+                    colon->payload.text[0] == ':');
+    if (!is_colon) {
       parser__error(p, "expected ':type' in inline struct field", colon);
       return NULL;
     }
     parser__advance(p);
     buf[pos++] = ':';
 
-    if (colon->length > 1) {
+    if (colon->type == TOKEN_OPERATOR && colon->length > 1) {
       /* :i32 etc — type is rest of operator token */
       uint32_t tlen = colon->length - 1;
       const char* tstr = colon->payload.text + 1;
@@ -543,8 +613,9 @@ static const char* parser__parse_inline_struct_type(Parser* p, uint32_t* out_len
     } else {
       /* Just ':' — check for nested struct or type name */
       Token* tname = parser__peek(p);
-      if (tname->type == TOKEN_WORD &&
-          tname->length == 6 && memcmp(tname->payload.text, "struct", 6) == 0 &&
+      if ((tname->type == TOKEN_STRUCT ||
+           (tname->type == TOKEN_WORD && tname->length == 6 &&
+            memcmp(tname->payload.text, "struct", 6) == 0)) &&
           p->pos + 1 < p->count &&
           p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
         /* Recursive inline struct */
@@ -642,19 +713,21 @@ static AstNode* parser__parse_defstruct(Parser* p) {
     const char* type_str = NULL;
     uint32_t type_len = 0;
 
-    if (type_tok->type == TOKEN_OPERATOR &&
-        type_tok->length >= 1 && type_tok->payload.text[0] == ':') {
-      /* Operator token starting with ':' — type name is the rest */
+    if (type_tok->type == TOKEN_COLON ||
+        (type_tok->type == TOKEN_OPERATOR &&
+         type_tok->length >= 1 && type_tok->payload.text[0] == ':')) {
+      /* TOKEN_COLON or operator token starting with ':' — type name is the rest */
       parser__advance(p);
-      if (type_tok->length > 1) {
+      if (type_tok->type == TOKEN_OPERATOR && type_tok->length > 1) {
         /* :i32 etc — the colon and type are in one token */
         type_str = type_tok->payload.text + 1;
         type_len = type_tok->length - 1;
       } else {
-        /* Just ':' — check for inline struct or type name */
+        /* Just ':' (TOKEN_COLON or TOKEN_OPERATOR length 1) — check for inline struct or type name */
         Token* tname = parser__peek(p);
-        if (tname->type == TOKEN_WORD &&
-            tname->length == 6 && memcmp(tname->payload.text, "struct", 6) == 0 &&
+        if ((tname->type == TOKEN_STRUCT ||
+             (tname->type == TOKEN_WORD && tname->length == 6 &&
+              memcmp(tname->payload.text, "struct", 6) == 0)) &&
             p->pos + 1 < p->count &&
             p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
           /* Inline struct type */
@@ -1006,7 +1079,7 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
     AstNode* cmd;
     if (parser__peek(&p)->type == TOKEN_USE) {
       cmd = parser__parse_use(&p);
-    } else if (parser__peek(&p)->type == TOKEN_DEFSTRUCT) {
+    } else if (parser__peek(&p)->type == TOKEN_STRUCT) {
       cmd = parser__parse_defstruct(&p);
     } else {
       cmd = parser__parse_bare_command(&p);

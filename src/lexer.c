@@ -36,8 +36,37 @@ typedef enum {
   TOKEN_INTERP_EXPR_END,  /* ] closing interpolated expression */
   TOKEN_VAR,              /* $identifier variable reference */
   TOKEN_DOLLAR_BRACKET,   /* $[ subcommand expression */
+  TOKEN_DOLLAR_PAREN,     /* $( infix-mode interpolation in strings */
   TOKEN_USE,              /* use keyword */
-  TOKEN_DEFSTRUCT,        /* defstruct keyword */
+  TOKEN_STRUCT,           /* struct keyword (also emitted for defstruct) */
+  /* --- new operator tokens --- */
+  TOKEN_PIPE,             /* | */
+  TOKEN_ARROW,            /* -> */
+  TOKEN_BACKSLASH,        /* \ (non-continuation) */
+  TOKEN_BANG,             /* ! (standalone) */
+  TOKEN_DOTDOT,           /* .. */
+  TOKEN_AMP,              /* & (single) */
+  TOKEN_AND,              /* && */
+  TOKEN_OR,               /* || */
+  TOKEN_NOT,              /* ~ */
+  TOKEN_EQUALS,           /* = (single) */
+  TOKEN_COLON,            /* : (single) */
+  TOKEN_DOUBLE_COLON,     /* :: */
+  /* --- new keyword tokens --- */
+  TOKEN_PROC,             /* proc */
+  TOKEN_IF,               /* if */
+  TOKEN_ELIF,             /* elif */
+  TOKEN_ELSE,             /* else */
+  TOKEN_WHILE,            /* while */
+  TOKEN_FOR,              /* for */
+  TOKEN_DEF,              /* def */
+  TOKEN_MUT,              /* mut */
+  TOKEN_SET,              /* set */
+  TOKEN_MATCH,            /* match */
+  TOKEN_RETURN,           /* return */
+  TOKEN_BREAK,            /* break */
+  TOKEN_CONTINUE,         /* continue */
+  TOKEN_TRY,              /* try */
   TOKEN_NEWLINE,          /* newline (\n or \r\n) */
   TOKEN_ERROR,            /* lexer error with descriptive message */
   TOKEN_EOF               /* end of input */
@@ -570,11 +599,11 @@ static void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
       continue;
     }
 
-    /* Interpolation: $var or $[expr] */
+    /* Interpolation: $var, $[expr], or $(expr) */
     if (ch == '$') {
       char next_ch = lex->source[lex->pos + 1];
 
-      if (lexer__is_word_start(next_ch) || next_ch == '[') {
+      if (lexer__is_word_start(next_ch) || next_ch == '[' || next_ch == '(') {
         /* Emit current text segment as STRING_BEGIN or STRING_PART */
         strbuf_push(&sb, '\0');
         {
@@ -604,6 +633,18 @@ static void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
             lexer__arr_push(arr, expr_tok);
           }
           lexer__lex_interp_expr(lex, arr, error_count);
+        } else if (next_ch == '(') {
+          /* $(expr) infix interpolation */
+          uint32_t dp_start = lex->pos;
+          uint32_t dp_line  = lex->line;
+          uint32_t dp_col   = lex->col;
+          lexer__advance(lex); /* consume '$' */
+          lexer__advance(lex); /* consume '(' */
+          {
+            Token dp_tok = lexer__make_token(lex, TOKEN_DOLLAR_PAREN,
+                                              dp_start, dp_line, dp_col);
+            lexer__arr_push(arr, dp_tok);
+          }
         } else {
           /* $var interpolation */
           uint32_t var_start = lex->pos;
@@ -961,11 +1002,43 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
         lexer__advance(&lex);
       }
       uint32_t wlen = lex.pos - start;
+      const char* wstart = lex.source + start;
       TokenType wtype = TOKEN_WORD;
-      if (wlen == 3 && memcmp(lex.source + start, "use", 3) == 0) {
-        wtype = TOKEN_USE;
-      } else if (wlen == 9 && memcmp(lex.source + start, "defstruct", 9) == 0) {
-        wtype = TOKEN_DEFSTRUCT;
+      switch (wlen) {
+        case 2:
+          if (memcmp(wstart, "if", 2) == 0)     wtype = TOKEN_IF;
+          else if (memcmp(wstart, "or", 2) == 0) {} /* keep as TOKEN_WORD */
+          break;
+        case 3:
+          if      (memcmp(wstart, "use", 3) == 0)  wtype = TOKEN_USE;
+          else if (memcmp(wstart, "def", 3) == 0)  wtype = TOKEN_DEF;
+          else if (memcmp(wstart, "mut", 3) == 0)  wtype = TOKEN_MUT;
+          else if (memcmp(wstart, "set", 3) == 0)  wtype = TOKEN_SET;
+          else if (memcmp(wstart, "for", 3) == 0)  wtype = TOKEN_FOR;
+          else if (memcmp(wstart, "try", 3) == 0)  wtype = TOKEN_TRY;
+          break;
+        case 4:
+          if      (memcmp(wstart, "proc", 4) == 0) wtype = TOKEN_PROC;
+          else if (memcmp(wstart, "elif", 4) == 0) wtype = TOKEN_ELIF;
+          else if (memcmp(wstart, "else", 4) == 0) wtype = TOKEN_ELSE;
+          break;
+        case 5:
+          if      (memcmp(wstart, "while", 5) == 0) wtype = TOKEN_WHILE;
+          else if (memcmp(wstart, "match", 5) == 0) wtype = TOKEN_MATCH;
+          else if (memcmp(wstart, "break", 5) == 0) wtype = TOKEN_BREAK;
+          break;
+        case 6:
+          if      (memcmp(wstart, "return", 6) == 0) wtype = TOKEN_RETURN;
+          else if (memcmp(wstart, "struct", 6) == 0) wtype = TOKEN_STRUCT;
+          break;
+        case 8:
+          if (memcmp(wstart, "continue", 8) == 0) wtype = TOKEN_CONTINUE;
+          break;
+        case 9:
+          if (memcmp(wstart, "defstruct", 9) == 0) wtype = TOKEN_STRUCT;
+          break;
+        default:
+          break;
       }
       Token tok = lexer__make_token(&lex, wtype, start, sline, scol);
       tok.payload.text = lex.source + start;
@@ -973,7 +1046,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       continue;
     }
 
-    /* Backslash line continuation: \ followed by newline */
+    /* Backslash: line continuation if followed by newline, else TOKEN_BACKSLASH */
     if (c == '\\') {
       char next = lex.source[lex.pos + 1];
       if (next == '\n') {
@@ -993,23 +1066,114 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
         lex.col = 1;
         continue;
       }
+      /* Not a continuation — emit TOKEN_BACKSLASH */
+      {
+        uint32_t start = lex.pos;
+        uint32_t sline = lex.line;
+        uint32_t scol  = lex.col;
+        lexer__advance(&lex);
+        Token tok = lexer__make_token(&lex, TOKEN_BACKSLASH, start, sline, scol);
+        lexer__arr_push(&arr, tok);
+        continue;
+      }
     }
 
-    /* Operators: sequences of operator characters */
+    /* Operators: specific tokens for new operators, greedy scan for the rest */
     if (lexer__is_operator_char(c)) {
       uint32_t start = lex.pos;
       uint32_t sline = lex.line;
       uint32_t scol  = lex.col;
-      while (lexer__is_operator_char(lexer__peek(&lex))) {
-        lexer__advance(&lex);
+      TokenType otype;
+
+      switch (c) {
+        case '|':
+          lexer__advance(&lex);
+          if (lexer__peek(&lex) == '|') {
+            lexer__advance(&lex);
+            otype = TOKEN_OR;
+          } else {
+            otype = TOKEN_PIPE;
+          }
+          break;
+        case '&':
+          lexer__advance(&lex);
+          if (lexer__peek(&lex) == '&') {
+            lexer__advance(&lex);
+            otype = TOKEN_AND;
+          } else {
+            otype = TOKEN_AMP;
+          }
+          break;
+        case '~':
+          lexer__advance(&lex);
+          otype = TOKEN_NOT;
+          break;
+        case '=':
+          lexer__advance(&lex);
+          if (lexer__peek(&lex) == '=') {
+            lexer__advance(&lex);
+            otype = TOKEN_OPERATOR; /* == stays TOKEN_OPERATOR */
+          } else {
+            otype = TOKEN_EQUALS;
+          }
+          break;
+        case ':':
+          lexer__advance(&lex);
+          if (lexer__peek(&lex) == ':') {
+            lexer__advance(&lex);
+            otype = TOKEN_DOUBLE_COLON;
+          } else {
+            otype = TOKEN_COLON;
+          }
+          break;
+        case '!':
+          lexer__advance(&lex);
+          if (lexer__peek(&lex) == '=') {
+            lexer__advance(&lex);
+            otype = TOKEN_OPERATOR; /* != stays TOKEN_OPERATOR */
+          } else {
+            otype = TOKEN_BANG;
+          }
+          break;
+        case '-':
+          lexer__advance(&lex);
+          if (lexer__peek(&lex) == '>') {
+            lexer__advance(&lex);
+            otype = TOKEN_ARROW;
+          } else {
+            /* greedy scan remaining operator chars */
+            while (lexer__is_operator_char(lexer__peek(&lex)))
+              lexer__advance(&lex);
+            otype = TOKEN_OPERATOR;
+          }
+          break;
+        case '.':
+          lexer__advance(&lex);
+          if (lexer__peek(&lex) == '.') {
+            lexer__advance(&lex);
+            otype = TOKEN_DOTDOT;
+          } else {
+            /* greedy scan remaining operator chars */
+            while (lexer__is_operator_char(lexer__peek(&lex)))
+              lexer__advance(&lex);
+            otype = TOKEN_OPERATOR;
+          }
+          break;
+        default:
+          lexer__advance(&lex);
+          while (lexer__is_operator_char(lexer__peek(&lex)))
+            lexer__advance(&lex);
+          otype = TOKEN_OPERATOR;
+          break;
       }
-      Token tok = lexer__make_token(&lex, TOKEN_OPERATOR, start, sline, scol);
+
+      Token tok = lexer__make_token(&lex, otype, start, sline, scol);
       tok.payload.text = lex.source + start;
       lexer__arr_push(&arr, tok);
       continue;
     }
 
-    /* Variable references: $identifier or $[ */
+    /* Variable references: $identifier, $[, or $( */
     if (c == '$') {
       uint32_t start = lex.pos;
       uint32_t sline = lex.line;
@@ -1022,6 +1186,14 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       if (next == '[') {
         lexer__advance(&lex); /* consume '[' */
         Token tok = lexer__make_token(&lex, TOKEN_DOLLAR_BRACKET, start, sline, scol);
+        lexer__arr_push(&arr, tok);
+        continue;
+      }
+
+      /* $( → DOLLAR_PAREN */
+      if (next == '(') {
+        lexer__advance(&lex); /* consume '(' */
+        Token tok = lexer__make_token(&lex, TOKEN_DOLLAR_PAREN, start, sline, scol);
         lexer__arr_push(&arr, tok);
         continue;
       }

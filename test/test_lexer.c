@@ -935,12 +935,12 @@ static int test_dollar_digit(void) {
 static int test_dollar_bang(void) {
   setup();
   LexResult r = lexer_lex("$!", &test_arena);
-  /* ERROR + OPERATOR + EOF = 3 ($ is error, ! is operator) */
+  /* ERROR + TOKEN_BANG + EOF = 3 ($ is error, ! is TOKEN_BANG) */
   ASSERT_U32_EQ(r.count, 3);
   ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ERROR);
   ASSERT_U32_EQ(r.tokens[0].length, 1);
-  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OPERATOR);
-  ASSERT(token_text_eq(r.tokens[1], "!"));
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_BANG);
+  ASSERT_INT_EQ(r.tokens[1].length, 1);
   ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
   ASSERT_U32_EQ(r.error_count, 1);
   teardown();
@@ -1718,10 +1718,10 @@ static int test_error_mixed_program(void) {
   LexResult r = lexer_lex(src, &test_arena);
 
   TokenType expected[] = {
-    TOKEN_WORD, TOKEN_WORD, TOKEN_INT, TOKEN_NEWLINE,
+    TOKEN_SET, TOKEN_WORD, TOKEN_INT, TOKEN_NEWLINE,
     TOKEN_ERROR, TOKEN_NEWLINE,
-    TOKEN_WORD, TOKEN_WORD, TOKEN_ERROR, TOKEN_NEWLINE,
-    TOKEN_WORD, TOKEN_WORD, TOKEN_ERROR, TOKEN_NEWLINE,
+    TOKEN_SET, TOKEN_WORD, TOKEN_ERROR, TOKEN_NEWLINE,
+    TOKEN_SET, TOKEN_WORD, TOKEN_ERROR, TOKEN_NEWLINE,
     TOKEN_LBRACKET, TOKEN_WORD, TOKEN_VAR, TOKEN_RBRACKET, TOKEN_NEWLINE,
     TOKEN_EOF
   };
@@ -1825,15 +1825,15 @@ static int test_integration_full_program(void) {
     /* line 6-7: blank + comment */
     TOKEN_NEWLINE, TOKEN_NEWLINE,
     /* line 8: set name "world" */
-    TOKEN_WORD, TOKEN_WORD, TOKEN_STRING, TOKEN_NEWLINE,
+    TOKEN_SET, TOKEN_WORD, TOKEN_STRING, TOKEN_NEWLINE,
     /* line 9: set count 42 */
-    TOKEN_WORD, TOKEN_WORD, TOKEN_INT, TOKEN_NEWLINE,
+    TOKEN_SET, TOKEN_WORD, TOKEN_INT, TOKEN_NEWLINE,
     /* line 10: set ratio 3.14 */
-    TOKEN_WORD, TOKEN_WORD, TOKEN_FLOAT, TOKEN_NEWLINE,
+    TOKEN_SET, TOKEN_WORD, TOKEN_FLOAT, TOKEN_NEWLINE,
     /* line 11: set mask 0xFF */
-    TOKEN_WORD, TOKEN_WORD, TOKEN_INT, TOKEN_NEWLINE,
+    TOKEN_SET, TOKEN_WORD, TOKEN_INT, TOKEN_NEWLINE,
     /* line 12: set flags 0b1010 */
-    TOKEN_WORD, TOKEN_WORD, TOKEN_INT, TOKEN_NEWLINE,
+    TOKEN_SET, TOKEN_WORD, TOKEN_INT, TOKEN_NEWLINE,
     /* line 13-14: blank + comment */
     TOKEN_NEWLINE, TOKEN_NEWLINE,
     /* line 15: [map host "localhost" port 8080] */
@@ -1842,7 +1842,7 @@ static int test_integration_full_program(void) {
     /* line 16-17: blank + comment */
     TOKEN_NEWLINE, TOKEN_NEWLINE,
     /* line 18: set x $name */
-    TOKEN_WORD, TOKEN_WORD, TOKEN_VAR, TOKEN_NEWLINE,
+    TOKEN_SET, TOKEN_WORD, TOKEN_VAR, TOKEN_NEWLINE,
     /* line 19: [+ $count 1] */
     TOKEN_LBRACKET, TOKEN_OPERATOR, TOKEN_VAR, TOKEN_INT,
     TOKEN_RBRACKET, TOKEN_NEWLINE,
@@ -1852,7 +1852,7 @@ static int test_integration_full_program(void) {
     /* line 21-22: blank + comment */
     TOKEN_NEWLINE, TOKEN_NEWLINE,
     /* line 23: set result $[+ 1 2] */
-    TOKEN_WORD, TOKEN_WORD, TOKEN_DOLLAR_BRACKET, TOKEN_OPERATOR,
+    TOKEN_SET, TOKEN_WORD, TOKEN_DOLLAR_BRACKET, TOKEN_OPERATOR,
     TOKEN_INT, TOKEN_INT, TOKEN_RBRACKET, TOKEN_NEWLINE,
     /* line 24-25: blank + comment */
     TOKEN_NEWLINE, TOKEN_NEWLINE,
@@ -1869,7 +1869,7 @@ static int test_integration_full_program(void) {
     /* line 30-31: blank + comment */
     TOKEN_NEWLINE, TOKEN_NEWLINE,
     /* line 32: [if [> $count 0] */
-    TOKEN_LBRACKET, TOKEN_WORD, TOKEN_LBRACKET, TOKEN_OPERATOR,
+    TOKEN_LBRACKET, TOKEN_IF, TOKEN_LBRACKET, TOKEN_OPERATOR,
     TOKEN_VAR, TOKEN_INT, TOKEN_RBRACKET, TOKEN_NEWLINE,
     /* line 33: [print "positive"] */
     TOKEN_LBRACKET, TOKEN_WORD, TOKEN_STRING, TOKEN_RBRACKET,
@@ -1885,7 +1885,7 @@ static int test_integration_full_program(void) {
     TOKEN_LBRACKET, TOKEN_WORD, TOKEN_WORD, TOKEN_LBRACE, TOKEN_WORD,
     TOKEN_RBRACE, TOKEN_LPAREN, TOKEN_NEWLINE,
     /* line 39: set msg "Hi $person" */
-    TOKEN_WORD, TOKEN_WORD, TOKEN_STRING_BEGIN, TOKEN_INTERP_VAR,
+    TOKEN_SET, TOKEN_WORD, TOKEN_STRING_BEGIN, TOKEN_INTERP_VAR,
     TOKEN_STRING_END, TOKEN_NEWLINE,
     /* line 40: [print $msg] */
     TOKEN_LBRACKET, TOKEN_WORD, TOKEN_VAR, TOKEN_RBRACKET,
@@ -1895,15 +1895,15 @@ static int test_integration_full_program(void) {
     /* line 42-43: blank + comment */
     TOKEN_NEWLINE, TOKEN_NEWLINE,
     /* line 44: set report "Found $count at $[now]" */
-    TOKEN_WORD, TOKEN_WORD, TOKEN_STRING_BEGIN, TOKEN_INTERP_VAR,
+    TOKEN_SET, TOKEN_WORD, TOKEN_STRING_BEGIN, TOKEN_INTERP_VAR,
     TOKEN_STRING_PART, TOKEN_INTERP_EXPR_START, TOKEN_WORD,
     TOKEN_INTERP_EXPR_END, TOKEN_STRING_END, TOKEN_NEWLINE,
     /* line 45-46: blank + comment */
     TOKEN_NEWLINE, TOKEN_NEWLINE,
     /* line 47: set path "C:\\dir\\file" */
-    TOKEN_WORD, TOKEN_WORD, TOKEN_STRING, TOKEN_NEWLINE,
+    TOKEN_SET, TOKEN_WORD, TOKEN_STRING, TOKEN_NEWLINE,
     /* line 48: set tabs "a\tb\tc" */
-    TOKEN_WORD, TOKEN_WORD, TOKEN_STRING, TOKEN_NEWLINE,
+    TOKEN_SET, TOKEN_WORD, TOKEN_STRING, TOKEN_NEWLINE,
     /* line 49-50: blank + comment */
     TOKEN_NEWLINE, TOKEN_NEWLINE,
     /* line 51: [foo {bar} (baz)] */
@@ -1913,7 +1913,7 @@ static int test_integration_full_program(void) {
     /* line 52-53: blank + comment */
     TOKEN_NEWLINE, TOKEN_NEWLINE,
     /* line 54: set multi "line1\nline2\nline3" */
-    TOKEN_WORD, TOKEN_WORD, TOKEN_STRING, TOKEN_NEWLINE,
+    TOKEN_SET, TOKEN_WORD, TOKEN_STRING, TOKEN_NEWLINE,
     /* line 55: [print $multi] */
     TOKEN_LBRACKET, TOKEN_WORD, TOKEN_VAR, TOKEN_RBRACKET,
     TOKEN_NEWLINE,
@@ -1965,14 +1965,14 @@ static int test_integration_full_program(void) {
 
 static int test_comma_separator(void) {
   setup();
-  /* 'def x 1, def y 2' -> [WORD WORD INT COMMA WORD WORD INT EOF] */
+  /* 'def x 1, def y 2' -> [DEF WORD INT COMMA DEF WORD INT EOF] */
   LexResult r = lexer_lex("def x 1, def y 2", &test_arena);
   ASSERT_U32_EQ(r.count, 8);
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_DEF);
   ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
   ASSERT_INT_EQ(r.tokens[2].type, TOKEN_INT);
   ASSERT_INT_EQ(r.tokens[3].type, TOKEN_COMMA);
-  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_WORD);
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_DEF);
   ASSERT_INT_EQ(r.tokens[5].type, TOKEN_WORD);
   ASSERT_INT_EQ(r.tokens[6].type, TOKEN_INT);
   ASSERT_INT_EQ(r.tokens[7].type, TOKEN_EOF);
@@ -2035,10 +2035,11 @@ static int test_backslash_crlf_continuation(void) {
 
 static int test_backslash_not_continuation(void) {
   setup();
-  /* "\\ " (backslash followed by space) — remains operator, not continuation */
+  /* "\\ " (backslash followed by space) — now TOKEN_BACKSLASH, not continuation */
   LexResult r = lexer_lex("\\ ", &test_arena);
-  ASSERT_U32_EQ(r.count, 2); /* OPERATOR EOF */
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_OPERATOR);
+  ASSERT_U32_EQ(r.count, 2); /* BACKSLASH EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BACKSLASH);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
   ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
   ASSERT_U32_EQ(r.error_count, 0);
   teardown();
@@ -2053,6 +2054,624 @@ static int test_backslash_string_unaffected(void) {
   ASSERT_U32_EQ(r.count, 2); /* STRING EOF */
   ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING);
   ASSERT_STR_EQ(r.tokens[0].payload.text, "a\nb");
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ---- US-001: New operator tokens ---- */
+
+static int test_token_pipe(void) {
+  setup();
+  LexResult r = lexer_lex("|", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_PIPE);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_or(void) {
+  setup();
+  LexResult r = lexer_lex("||", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_OR);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_amp(void) {
+  setup();
+  LexResult r = lexer_lex("&", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_AMP);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_and(void) {
+  setup();
+  LexResult r = lexer_lex("&&", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_AND);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_not(void) {
+  setup();
+  LexResult r = lexer_lex("~", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_NOT);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_equals(void) {
+  setup();
+  LexResult r = lexer_lex("=", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_EQUALS);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_eq_eq_stays_operator(void) {
+  setup();
+  /* == stays TOKEN_OPERATOR */
+  LexResult r = lexer_lex("==", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_OPERATOR);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_colon(void) {
+  setup();
+  LexResult r = lexer_lex(":", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_COLON);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_double_colon(void) {
+  setup();
+  LexResult r = lexer_lex("::", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_DOUBLE_COLON);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_bang(void) {
+  setup();
+  LexResult r = lexer_lex("!", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_neq_stays_operator(void) {
+  setup();
+  /* != stays TOKEN_OPERATOR */
+  LexResult r = lexer_lex("!=", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_OPERATOR);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_arrow(void) {
+  setup();
+  LexResult r = lexer_lex("->", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ARROW);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_dotdot(void) {
+  setup();
+  LexResult r = lexer_lex("..", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_DOTDOT);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_backslash(void) {
+  setup();
+  /* Backslash not followed by newline → TOKEN_BACKSLASH */
+  LexResult r = lexer_lex("\\x", &test_arena);
+  ASSERT_U32_EQ(r.count, 3);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BACKSLASH);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_backslash_position(void) {
+  setup();
+  /* Position tracking for TOKEN_BACKSLASH */
+  LexResult r = lexer_lex("foo \\", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* WORD BACKSLASH EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_BACKSLASH);
+  ASSERT_U32_EQ(r.tokens[1].line, 1);
+  ASSERT_U32_EQ(r.tokens[1].column, 5);
+  ASSERT_U32_EQ(r.tokens[1].offset, 4);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_dollar_paren(void) {
+  setup();
+  /* $( outside a string → TOKEN_DOLLAR_PAREN */
+  LexResult r = lexer_lex("$(", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_DOLLAR_PAREN);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_token_dollar_paren_in_string(void) {
+  setup();
+  /* "$($x + 1)" — $( in string starts infix interpolation */
+  LexResult r = lexer_lex("\"$($x + 1)\"", &test_arena);
+  /* STRING_BEGIN DOLLAR_PAREN VAR OPERATOR INT RPAREN STRING_END EOF */
+  ASSERT(r.count >= 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRING_BEGIN);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_DOLLAR_PAREN);
+  ASSERT_U32_EQ(r.tokens[1].length, 2);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ---- US-001: New keyword tokens ---- */
+
+static int test_keyword_proc(void) {
+  setup();
+  LexResult r = lexer_lex("proc", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_PROC);
+  ASSERT_U32_EQ(r.tokens[0].length, 4);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_if(void) {
+  setup();
+  LexResult r = lexer_lex("if", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_IF);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_elif(void) {
+  setup();
+  LexResult r = lexer_lex("elif", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ELIF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_else(void) {
+  setup();
+  LexResult r = lexer_lex("else", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ELSE);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_while(void) {
+  setup();
+  LexResult r = lexer_lex("while", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WHILE);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_for(void) {
+  setup();
+  LexResult r = lexer_lex("for", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_FOR);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_def(void) {
+  setup();
+  LexResult r = lexer_lex("def", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_DEF);
+  ASSERT_U32_EQ(r.tokens[0].length, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_mut(void) {
+  setup();
+  LexResult r = lexer_lex("mut", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_MUT);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_set(void) {
+  setup();
+  LexResult r = lexer_lex("set", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_SET);
+  ASSERT_U32_EQ(r.tokens[0].length, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_match(void) {
+  setup();
+  LexResult r = lexer_lex("match", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_MATCH);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_return(void) {
+  setup();
+  LexResult r = lexer_lex("return", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_RETURN);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_break(void) {
+  setup();
+  LexResult r = lexer_lex("break", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BREAK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_continue(void) {
+  setup();
+  LexResult r = lexer_lex("continue", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_CONTINUE);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_try(void) {
+  setup();
+  LexResult r = lexer_lex("try", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_TRY);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_struct(void) {
+  setup();
+  LexResult r = lexer_lex("struct", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRUCT);
+  ASSERT_U32_EQ(r.tokens[0].length, 6);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_defstruct_backward_compat(void) {
+  setup();
+  /* defstruct is backward compat — now emits TOKEN_STRUCT */
+  LexResult r = lexer_lex("defstruct", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRUCT);
+  ASSERT_U32_EQ(r.tokens[0].length, 9);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keywords_have_correct_positions(void) {
+  setup();
+  /* "proc foo if" — verify positions are correct */
+  LexResult r = lexer_lex("proc foo if", &test_arena);
+  ASSERT_U32_EQ(r.count, 4); /* PROC WORD IF EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_PROC);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_U32_EQ(r.tokens[0].offset, 0);
+  ASSERT_U32_EQ(r.tokens[0].length, 4);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT_U32_EQ(r.tokens[1].column, 6);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_IF);
+  ASSERT_U32_EQ(r.tokens[2].column, 10);
+  ASSERT_U32_EQ(r.tokens[2].length, 2);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_prefix_not_keyword(void) {
+  setup();
+  /* "proca" is not TOKEN_PROC — only exact match */
+  LexResult r = lexer_lex("proca", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT_U32_EQ(r.tokens[0].length, 5);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_keyword_with_hyphen_not_keyword(void) {
+  setup();
+  /* "set-foo" is not TOKEN_SET — hyphens extend the word */
+  LexResult r = lexer_lex("set-foo", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT_U32_EQ(r.tokens[0].length, 7);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_operator_tokens_positions(void) {
+  setup();
+  /* "| & ->" — test positions of new operator tokens */
+  LexResult r = lexer_lex("| & ->", &test_arena);
+  ASSERT_U32_EQ(r.count, 4); /* PIPE AMP ARROW EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_PIPE);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_AMP);
+  ASSERT_U32_EQ(r.tokens[1].column, 3);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_ARROW);
+  ASSERT_U32_EQ(r.tokens[2].column, 5);
+  ASSERT_U32_EQ(r.tokens[2].length, 2);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_pipe_vs_or(void) {
+  setup();
+  /* "|" and "||" produce different tokens */
+  LexResult r = lexer_lex("| ||", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* PIPE OR EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_PIPE);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OR);
+  ASSERT_U32_EQ(r.tokens[1].length, 2);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_amp_vs_and(void) {
+  setup();
+  /* "&" and "&&" produce different tokens */
+  LexResult r = lexer_lex("& &&", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* AMP AND EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_AMP);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_AND);
+  ASSERT_U32_EQ(r.tokens[1].length, 2);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_colon_vs_double_colon(void) {
+  setup();
+  /* ":" and "::" produce different tokens */
+  LexResult r = lexer_lex(": ::", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* COLON DOUBLE_COLON EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_COLON);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_DOUBLE_COLON);
+  ASSERT_U32_EQ(r.tokens[1].length, 2);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_equals_vs_eq_eq(void) {
+  setup();
+  /* "=" is TOKEN_EQUALS, "==" is TOKEN_OPERATOR */
+  LexResult r = lexer_lex("= ==", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* EQUALS OPERATOR EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_EQUALS);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OPERATOR);
+  ASSERT_U32_EQ(r.tokens[1].length, 2);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bang_vs_neq(void) {
+  setup();
+  /* "!" is TOKEN_BANG, "!=" is TOKEN_OPERATOR */
+  LexResult r = lexer_lex("! !=", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* BANG OPERATOR EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OPERATOR);
+  ASSERT_U32_EQ(r.tokens[1].length, 2);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_arrow_vs_minus(void) {
+  setup();
+  /* "->" is TOKEN_ARROW, "-" is TOKEN_OPERATOR */
+  LexResult r = lexer_lex("-> -", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* ARROW OPERATOR EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_ARROW);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OPERATOR);
+  ASSERT_U32_EQ(r.tokens[1].length, 1);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dotdot_vs_dot(void) {
+  setup();
+  /* ".." is TOKEN_DOTDOT, "." is TOKEN_OPERATOR */
+  LexResult r = lexer_lex(".. .", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* DOTDOT OPERATOR EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_DOTDOT);
+  ASSERT_U32_EQ(r.tokens[0].length, 2);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OPERATOR);
+  ASSERT_U32_EQ(r.tokens[1].length, 1);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_old_arithmetic_operators_unchanged(void) {
+  setup();
+  /* +, -, *, /, %, <=, >= stay TOKEN_OPERATOR */
+  LexResult r = lexer_lex("+ - * / % <= >=", &test_arena);
+  ASSERT_U32_EQ(r.count, 8); /* 7 operators + EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_OPERATOR);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_OPERATOR);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_OPERATOR);
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_OPERATOR);
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_OPERATOR);
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_OPERATOR);
+  ASSERT_INT_EQ(r.tokens[6].type, TOKEN_OPERATOR);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_word_with_bang_suffix_still_word(void) {
+  setup();
+  /* "set!" is a word with ! suffix, not TOKEN_SET + TOKEN_BANG */
+  LexResult r = lexer_lex("set!", &test_arena);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
+  ASSERT_U32_EQ(r.tokens[0].length, 4);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_EOF);
   ASSERT_U32_EQ(r.error_count, 0);
   teardown();
   ASSERT(check_no_leaks());
@@ -2186,6 +2805,54 @@ int main(void) {
     {"backslash_crlf_cont",          test_backslash_crlf_continuation},
     {"backslash_not_continuation",   test_backslash_not_continuation},
     {"backslash_string_unaffected",  test_backslash_string_unaffected},
+    /* US-001: new operator tokens */
+    {"token_pipe",                   test_token_pipe},
+    {"token_or",                     test_token_or},
+    {"token_amp",                    test_token_amp},
+    {"token_and",                    test_token_and},
+    {"token_not",                    test_token_not},
+    {"token_equals",                 test_token_equals},
+    {"token_eq_eq_operator",         test_token_eq_eq_stays_operator},
+    {"token_colon",                  test_token_colon},
+    {"token_double_colon",           test_token_double_colon},
+    {"token_bang",                   test_token_bang},
+    {"token_neq_operator",           test_token_neq_stays_operator},
+    {"token_arrow",                  test_token_arrow},
+    {"token_dotdot",                 test_token_dotdot},
+    {"token_backslash",              test_token_backslash},
+    {"token_backslash_position",     test_token_backslash_position},
+    {"token_dollar_paren",           test_token_dollar_paren},
+    {"token_dollar_paren_in_string", test_token_dollar_paren_in_string},
+    /* US-001: new keyword tokens */
+    {"keyword_proc",                 test_keyword_proc},
+    {"keyword_if",                   test_keyword_if},
+    {"keyword_elif",                 test_keyword_elif},
+    {"keyword_else",                 test_keyword_else},
+    {"keyword_while",                test_keyword_while},
+    {"keyword_for",                  test_keyword_for},
+    {"keyword_def",                  test_keyword_def},
+    {"keyword_mut",                  test_keyword_mut},
+    {"keyword_set",                  test_keyword_set},
+    {"keyword_match",                test_keyword_match},
+    {"keyword_return",               test_keyword_return},
+    {"keyword_break",                test_keyword_break},
+    {"keyword_continue",             test_keyword_continue},
+    {"keyword_try",                  test_keyword_try},
+    {"keyword_struct",               test_keyword_struct},
+    {"keyword_defstruct_compat",     test_keyword_defstruct_backward_compat},
+    {"keywords_positions",           test_keywords_have_correct_positions},
+    {"keyword_prefix_not_keyword",   test_keyword_prefix_not_keyword},
+    {"keyword_hyphen_not_keyword",   test_keyword_with_hyphen_not_keyword},
+    {"operator_tokens_positions",    test_operator_tokens_positions},
+    {"pipe_vs_or",                   test_pipe_vs_or},
+    {"amp_vs_and",                   test_amp_vs_and},
+    {"colon_vs_double_colon",        test_colon_vs_double_colon},
+    {"equals_vs_eq_eq",              test_equals_vs_eq_eq},
+    {"bang_vs_neq",                  test_bang_vs_neq},
+    {"arrow_vs_minus",               test_arrow_vs_minus},
+    {"dotdot_vs_dot",                test_dotdot_vs_dot},
+    {"arithmetic_operators_unchanged", test_old_arithmetic_operators_unchanged},
+    {"word_bang_suffix_word",        test_word_with_bang_suffix_still_word},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;
