@@ -21,7 +21,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "This is additive — old token types still work. The parser hasn't changed yet so old syntax still parses. Keywords are recognized by the lexer in the word-scanning path (similar to how TOKEN_USE and TOKEN_DEFSTRUCT are handled today at lexer.c lines 960-970). New operator tokens (|, ->, &&, ||, ~, =, :, ::) need to be recognized in the operator-scanning path."
     },
     {
