@@ -1,91 +1,331 @@
 {
   "project": "JACL",
-  "branchName": "ralph/compiler-vm-refactor",
-  "description": "Compiler & VM Refactoring — eliminate structural duplication in compiler.c and vm.c before the syntax redesign lands",
+  "branchName": "ralph/syntax-redesign",
+  "description": "Three-mode syntax redesign — replace []-only syntax with [] juxtaposition, {} command mode, () infix mode. Clean break from old syntax, all tests rewritten.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Consolidate global arity lookups",
-      "description": "As a developer working on the compiler, I want a single function for looking up global arity information so that I don't have to maintain four near-identical linear scans.",
+      "title": "Lexer — new tokens and keywords",
+      "description": "As a compiler developer, I need the lexer to emit new token types for the three-mode syntax so the parser can distinguish between modes and keywords.",
       "acceptanceCriteria": [
-        "Four functions replaced with a single `compiler__find_global(c, name)` returning `GlobalArity*`: remove compiler__resolve_global_arity (lines 1225-1235), compiler__resolve_global_info (lines 1237-1248), compiler__resolve_global_type (lines 1250-1259); rename/keep compiler__find_global_arity (lines 1261-1270) as the single entry point",
-        "All call sites updated to use the single function and access GlobalArity fields directly",
-        "No callers do their own root-walk or linear scan — all go through the single function",
-        "All existing tests pass",
-        "Compiler builds cleanly with no new warnings"
+        "Add TOKEN_PIPE for |, TOKEN_ARROW for ->, TOKEN_BACKSLASH for \\",
+        "Add TOKEN_BANG for !, TOKEN_DOTDOT for .., TOKEN_AMP for &",
+        "Add TOKEN_AND for &&, TOKEN_OR for ||, TOKEN_NOT for ~",
+        "Add TOKEN_EQUALS for =, TOKEN_COLON for :, TOKEN_DOUBLE_COLON for ::",
+        "Add TOKEN_DOLLAR_PAREN for $( in string interpolation",
+        "Add keyword tokens: TOKEN_STRUCT (replacing TOKEN_DEFSTRUCT), TOKEN_PROC, TOKEN_IF, TOKEN_ELIF, TOKEN_ELSE, TOKEN_WHILE, TOKEN_FOR, TOKEN_DEF, TOKEN_MUT, TOKEN_SET, TOKEN_MATCH, TOKEN_RETURN, TOKEN_BREAK, TOKEN_CONTINUE, TOKEN_TRY",
+        "Remove TOKEN_DEFSTRUCT",
+        "Existing token types (TOKEN_WORD, TOKEN_INT, TOKEN_FLOAT, TOKEN_STRING, TOKEN_VAR, TOKEN_LBRACKET, TOKEN_RBRACKET, etc.) still work unchanged",
+        "All new tokens have correct source position tracking (line, column, byte offset)",
+        "Rewrite test_lexer.c to test all new token types",
+        "All existing tests still pass (no regressions)"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "GlobalArity struct is defined at compiler.c lines 569-579 with fields: name, known_arity, is_mutable, suspends, captures_mutable, type, struct_type_idx, return_type, param_types. Callers currently extract individual fields via separate functions — just return the pointer and let them access fields directly."
+      "passes": false,
+      "notes": "This is additive — old token types still work. The parser hasn't changed yet so old syntax still parses. Keywords are recognized by the lexer in the word-scanning path (similar to how TOKEN_USE and TOKEN_DEFSTRUCT are handled today at lexer.c lines 960-970). New operator tokens (|, ->, &&, ||, ~, =, :, ::) need to be recognized in the operator-scanning path."
     },
     {
       "id": "US-002",
-      "title": "Merge CPS argument extraction",
-      "description": "As a developer working on CPS transforms, I want the shared extraction logic in one place so that adding new CPS-aware constructs doesn't require duplicating 100 lines.",
+      "title": "Parser — infix mode for ()",
+      "description": "As a compiler developer, I need the parser to handle () as infix mode where operators are parsed left-to-right with no precedence.",
       "acceptanceCriteria": [
-        "A shared helper extracted that takes an AstNode** array of arguments, identifies which ones are suspending, generates synthetic [def __aN ...] AST nodes for each, and returns the modified argument array plus the synthetic defs",
-        "compiler__compile_cps_extract_args (lines 2245-2344) becomes a thin wrapper calling the shared helper",
-        "compiler__compile_cps_extract_def_value (lines 2346-2436) becomes a thin wrapper calling the shared helper",
-        "The shared helper covers: temp name generation, ast_alloc sequence, var ref / name node / def head / def command construction",
-        "All existing tests pass, especially any CPS/suspension-related tests"
+        "($x + 3) parses as AST_COMMAND with head +, args $x and 3",
+        "($x + 3 * 2) parses as AST_COMMAND [* [+ $x 3] 2] — no precedence, left-to-right",
+        "(1 + (2 * 3)) parses as [+ 1 [* 2 3]] — explicit grouping with nested parens",
+        "Unary prefix operators bind tighter: (- $x + $y) parses as [+ [neg $x] $y]",
+        "All arithmetic operators work in infix: +, -, *, /, %",
+        "All comparison operators work in infix: ==, <, >, <=, >=",
+        "Logical operators: ($a && $b) parses as [and $a $b], ($a || $b) as [or $a $b], (~ $a) as [not $a]",
+        "Nested [] calls work inside (): ($x + [vec-len $v]) parses correctly",
+        "Variable references work: ($x + $y) parses correctly",
+        "Add parser tests for all infix patterns",
+        "All existing tests still pass (no regressions)"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "The two functions differ only in where the modified node gets inserted into the new statement list — one modifies a command's arguments, the other modifies a def's value expression. The core loop (lines 2269-2322 vs 2369-2416) is structurally identical: same temp name generation, same ast_alloc sequence, same var ref / name node / def head / def command construction."
+      "passes": false,
+      "notes": "This is additive — () was previously unused in the parser. Create a new parser__parse_infix() function. The key algorithm: parse first operand, then loop: if next token is an operator, parse next operand, wrap in AST_COMMAND with operator as head. For unary prefix (- and ~), check if the first token is an operator and handle it before entering the binary loop. and/or/not don't exist as builtins yet — parse them as command names and defer compilation to a later story."
     },
     {
       "id": "US-003",
-      "title": "Extract HOF builtin compilation helper",
-      "description": "As a developer adding new higher-order builtins (like for, par-each), I want a shared compilation helper so each new builtin is ~5 lines instead of ~40.",
+      "title": "Proc syntax update",
+      "description": "As a compiler developer, I need proc to use {params} {body} syntax with type-before-name parameter declarations, while keeping the old proc syntax working temporarily.",
       "acceptanceCriteria": [
-        "A compiler__compile_hof_builtin helper extracted with signature like: (Compiler* c, const char* name, uint32_t name_len, AstNode** args, uint32_t argc, uint8_t opcode, uint32_t line, uint32_t col)",
-        "The helper handles: arity check (exactly 2 args), non-suspending callback validation (local slot check, global arity check, block suspension point check), collection compilation, in_non_suspending_callback save/set/restore, callback compilation, opcode emission",
-        "transform builtin (lines 4103-4141) rewritten as one call to the helper",
-        "each builtin (lines 4143-4181) rewritten as one call to the helper",
-        "filter builtin (lines 4183-4221) rewritten as one call to the helper",
-        "All existing tests pass"
+        "proc foo {x, y} {+ $x $y} — braces for both params and body",
+        "proc i64 add {i64 a, i64 b} {+ $a $b} — return type before name, typed params",
+        "proc greet {} {print \"hello\"} — zero-arg procs with empty param braces",
+        "proc add {a, b} {+ $a $b} — untyped params (gradual typing preserved)",
+        "Params are comma-separated within {}",
+        "Type-before-name in params: {i64 a, str b} not {a :i64, b :str}",
+        "Closures and upvalue capture still work with new syntax",
+        "Tail-call optimization still applies with new syntax",
+        "Old proc syntax [proc [x y] [+ $x $y]] still works (backward compat during transition)",
+        "New-syntax proc tests added and passing",
+        "All existing tests still pass (no regressions)"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "The three builtins share identical 30-line non-suspending callback validation blocks. The only differences are the builtin name (for error messages) and the final opcode. The in_non_suspending_callback flag needs careful save/restore — the current code does this and the helper must preserve the pattern."
+      "passes": false,
+      "notes": "The parser needs to detect when proc is followed by a word (name) then { (params). Parse the param list as comma-separated items, where each item is either 'type name' (two words) or 'name' (one word). The body is the next {} block parsed in command mode (bare commands). The compiler receives the same AST_COMMAND structure it handles today — just constructed differently by the parser. Keep the old [proc [params] [body]] path working during transition."
     },
     {
       "id": "US-004",
-      "title": "Extract shared struct field marshaling",
-      "description": "As a developer, I want struct field read/write logic defined once so that changes to type marshaling don't require updating six copy-pasted switch statements.",
+      "title": "Struct syntax update",
+      "description": "As a compiler developer, I need struct (replacing defstruct) to use type-before-name field syntax, while keeping old defstruct working temporarily.",
       "acceptanceCriteria": [
-        "embed__struct_read_field (embed.c lines 836-873) promoted to a shared function accessible by both vm.c and embed.c",
-        "embed__struct_write_field (embed.c lines 876-919) promoted to a shared function accessible by both vm.c and embed.c",
-        "OP_STRUCT_GET (vm.c lines 3924-3987) calls the shared read function instead of inlining the type switch",
-        "OP_STRUCT_SET (vm.c lines 3989-4054) calls the shared write function instead of inlining the type switch",
-        "OP_STRUCT_GET_DYN (vm.c lines 4056-4105) calls the shared read function",
-        "OP_STRUCT_SET_DYN (vm.c lines 4107-4160) calls the shared write function",
-        "Static vs dynamic opcode variants differ only in how they resolve field offset and type — marshaling is shared",
-        "Shared functions placed wherever makes sense (value.c, shared header as static inline, etc.) and included in unity build if new file",
-        "All existing tests pass, including embed API tests"
+        "struct Point {i32 x, i32 y} — keyword is struct not defstruct",
+        "Fields use type-before-name: {i32 x, i32 y} not [x :i32, y :i32]",
+        "Struct construction unchanged: [Point 1 2] still works",
+        "All existing struct runtime behavior preserved (C-ABI layout, typed fields, GC integration)",
+        "Old defstruct Name [field :type] syntax still works (backward compat during transition)",
+        "New-syntax struct tests added and passing",
+        "All existing tests still pass (no regressions)"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "The embed.c functions already work as standalone functions that take (struct_data, offset, field_type, heap/val) and do the type-switch marshaling. Promote these rather than writing new ones. They always box through JaclVal — the static opcodes lose a minor 'mixed boxing' optimization for i64/u64/f64 but this is negligible for a scripting language and can be revisited if profiling shows it matters."
+      "passes": false,
+      "notes": "Similar to proc — the parser detects struct keyword followed by name then {fields}. Field list is comma-separated, each item is 'type name'. The compiler receives the same AST_DEFSTRUCT structure (or equivalent) — just with fields parsed differently. Keep old defstruct path working during transition."
     },
     {
       "id": "US-005",
-      "title": "Macro-ify typed arithmetic opcodes",
-      "description": "As a developer, I want the 20 typed arithmetic/comparison opcode handlers generated by macros so the pattern is obvious and mechanical changes don't risk introducing bugs in one of 20 copies.",
+      "title": "Control flow — if/elif/else and while",
+      "description": "As a compiler developer, I need if to support block bodies with elif chains and while to use block bodies, while keeping old syntax working temporarily.",
       "acceptanceCriteria": [
-        "VM__I64_BINOP(op) macro defined that handles: pop two values, cast to int64_t, apply operator, push result, break",
-        "VM__F64_BINOP(op) macro defined that handles: pop two values, memcpy to double, apply operator, memcpy back or box as bool, push, break",
-        "Extended variants for div/mod that include zero-check before the operation",
-        "Unary neg variants handled (either separate macro or parameterized)",
-        "i64 opcodes (lines 3338-3463) replaced with macro invocations: ADD, SUB, MUL, DIV, MOD, NEG, LT, GT, LE, GE, EQ",
-        "f64 opcodes (lines 3465-3627) replaced with macro invocations: ADD, SUB, MUL, DIV, MOD, NEG, LT, GT, LE, GE",
-        "Macros defined near their usage in vm.c (not in a shared header — they are vm-internal)",
-        "Arithmetic macros do not change evaluation order (pop b first, then a) or error behavior (div/mod zero checks)",
-        "All existing tests pass"
+        "if $cond { body } — condition then block",
+        "if $cond { body } else { body } — else clause",
+        "if $cond { body } elif $cond2 { body } else { body } — elif chains",
+        "if with infix condition: if ($n > 0) { \"positive\" } else { \"non-positive\" }",
+        "if is an expression — returns value of the taken branch",
+        "while $cond { body } — while loop with block body",
+        "while ($i < 10) { body } — while with infix condition",
+        "Old [if cond then else] syntax still works (backward compat during transition)",
+        "New-syntax control flow tests added and passing",
+        "All existing tests still pass (no regressions)"
       ],
       "priority": 5,
-      "passes": true,
-      "notes": "Use do { ... } while(0) or statement-expression patterns for macro hygiene. Comparison ops for f64 return bool (jacl_bool) not f64 — the macro may need a variant or parameter for this. The i64 comparison ops also return bool."
+      "passes": false,
+      "notes": "The parser detects if keyword, parses condition (which can be a $var, a () infix expression, or a [] command), then parses { body } block. If next token is elif, repeat. If next token is else, parse final { body }. The elif chain desugars to nested if/else in the AST. The compiler already handles if with 2 or 3 args — the parser just needs to produce the right AST shape."
+    },
+    {
+      "id": "US-006",
+      "title": "for command replacing each",
+      "description": "As a compiler developer, I need for to replace each as the iteration command, with implicit $it binding and explicit name binding forms.",
+      "acceptanceCriteria": [
+        "for $items { print $it } — iteration with implicit $it binding",
+        "for $items item { print $item } — iteration with explicit binding variable",
+        "for $items [\\  print $it] — iteration with lambda callback (HOF form, like current each)",
+        "Compiler distinguishes forms by argument shape: value+block = implicit $it, value+word+block = explicit binding, value+closure = HOF callback",
+        "for works on vectors (same runtime behavior as current each)",
+        "each still works as alias for for during transition",
+        "New-syntax for tests added and passing",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "The HOF callback form (for $items callback) maps directly to current each behavior — same opcode (OP_EACH). The block forms (implicit $it and explicit binding) are new — the compiler needs to wrap the block body in an implicit closure with the binding variable, then emit OP_EACH. The parser detects for keyword and determines which form based on what follows the collection argument."
+    },
+    {
+      "id": "US-007",
+      "title": "Builtin renames",
+      "description": "As a compiler developer, I need set!/reset!/swap! renamed to set/reset/swap, accepting both old and new names during transition.",
+      "acceptanceCriteria": [
+        "set works as variable reassignment (same as current set!)",
+        "reset works as atom/box reset (same as current reset!)",
+        "swap works as atom/box swap (same as current swap!)",
+        "Old names set!, reset!, swap! still work during transition",
+        "New-name tests added and passing",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "Simple change in compiler.c — add new string comparisons for 'set', 'reset', 'swap' alongside existing 'set!', 'reset!', 'swap!' comparisons. Both dispatch to the same compilation logic and opcodes. No runtime changes."
+    },
+    {
+      "id": "US-008",
+      "title": "Binding operators (=, :, ::)",
+      "description": "As a compiler developer, I need =, :, :: to work as sugar for def, mut, set in command mode.",
+      "acceptanceCriteria": [
+        "x = 5 desugars to [def x 5]",
+        "i64 x = 5 desugars to [def i64 x 5] (typed binding)",
+        "x : 0 desugars to [mut x 0]",
+        "i64 x : 0 desugars to [mut i64 x 0] (typed mutable binding)",
+        "x :: ($x + 1) desugars to [set x ($x + 1)]",
+        "Command forms def/mut/set still work alongside operators",
+        "Binding operators only work in command mode ({} and top-level), not inside [] or ()",
+        "Tests for all binding operator forms passing",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "The desugaring happens in the parser or early compiler: when parsing a command in {} mode, after collecting tokens, scan for =, :, or :: operators. If found, rewrite the command as a def/mut/set AST_COMMAND. For typed bindings like 'i64 x = 5', the type word and name word appear before the operator. The parser needs to handle this without ambiguity — = and : should only be treated as binding operators when they appear in the right position (after a name or type+name)."
+    },
+    {
+      "id": "US-009",
+      "title": "Arrow field access (->)",
+      "description": "As a compiler developer, I need $var->field to work as struct field access, replacing the . command.",
+      "acceptanceCriteria": [
+        "$point->x parses as field access and compiles to OP_STRUCT_GET",
+        "Works in all three modes: $point->x in {}, ($point->x + 1) in (), [foo $point->x] in []",
+        "Chained access: $user->address->city compiles to nested OP_STRUCT_GET",
+        "Field access on expression results: [get-point]->x accesses field on return value",
+        "Old . command [. $struct field] still works during transition",
+        "Tests for arrow field access passing",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "The -> can be handled in the parser as a postfix operator on expressions. After parsing a primary expression ($var, [cmd], etc.), check if the next token is TOKEN_ARROW. If so, consume the arrow and the following word (field name), and wrap in an AST_COMMAND equivalent to [. expr field]. Chain by looping. This is similar to how many languages handle member access as a postfix operator."
+    },
+    {
+      "id": "US-010",
+      "title": "Pipe threading (|)",
+      "description": "As a compiler developer, I need | in command mode to thread the left command's result as the first argument to the right command.",
+      "acceptanceCriteria": [
+        "foo $a | bar $b desugars to [bar [foo $a] $b] (first-arg threading)",
+        "Multi-stage pipes: a | b | c desugars to [c [b [a]]]",
+        "Pipes with arguments: + 1 2 | * 3 desugars to [* [+ 1 2] 3]",
+        "Pipes compose with existing builtins: vec 1 2 3 | vec-len desugars to [vec-len [vec 1 2 3]]",
+        "Pipe short-circuits on error values (existing error propagation via OP_CHECK_ERROR handles this)",
+        "Tests for pipe threading passing",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Pipes are parsed in command mode when TOKEN_PIPE appears between commands. The parser collects left-side command, sees |, collects right-side command, then rewrites: right command's args list gets left command's result inserted as first arg. This is an AST rewrite — the compiler never sees pipes, just nested AST_COMMAND nodes. Implement in the parser's command-mode parsing function."
+    },
+    {
+      "id": "US-011",
+      "title": "Lambda shorthand (\\)",
+      "description": "As a compiler developer, I need [\\ + $it 2] as shorthand for a lambda with implicit $it parameter.",
+      "acceptanceCriteria": [
+        "[\\ + $it 2] parses as equivalent to [proc {it} {+ $it $2}] — lambda with implicit $it",
+        "Works as callback arg: for $items [\\ print $it]",
+        "Works in pipe chains: $items | filter [\\ > $it 2]",
+        "$it is automatically bound as the single parameter name",
+        "\\ at end of line in command mode is line continuation (not lambda) — context-dependent",
+        "Tests for lambda shorthand passing",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "In the parser, when parsing inside [] and the first token is TOKEN_BACKSLASH, treat the remaining items as the body of a proc with a single param named 'it'. Construct an AST equivalent to [proc [it] [body...]]. The compiler already handles proc/closure compilation — the parser just needs to produce the right AST. Disambiguation from line continuation: \\ followed by newline = continuation; \\ followed by non-newline inside [] = lambda."
+    },
+    {
+      "id": "US-012",
+      "title": "$(expr) string interpolation and line continuation",
+      "description": "As a compiler developer, I need $(expr) in strings to evaluate infix expressions, and \\ at end of line to continue commands.",
+      "acceptanceCriteria": [
+        "\"total: $($price * $qty)\" works — $(expr) evaluates infix expression inside string",
+        "Existing $var and $[expr] interpolation still works unchanged",
+        "$(expr) nests with $[]: \"value: $($x + $[vec-len $v])\" works",
+        "\\ at end of line continues the command on the next line in command mode",
+        "Inside [], (), and {}, newlines within balanced delimiters already don't terminate — no change needed there",
+        "Blank lines (multiple newlines) don't produce empty commands",
+        "Tests for $(expr) interpolation and line continuation passing",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": "For $(expr): the lexer already handles $[ for TOKEN_DOLLAR_BRACKET. Add similar handling for $( — emit TOKEN_DOLLAR_PAREN. The parser, when building an interpolated string and encountering TOKEN_DOLLAR_PAREN, calls parser__parse_infix() to parse the infix expression, then expects TOKEN_RPAREN. For line continuation: in the lexer, when \\ is followed by newline, skip both and continue scanning. This only applies when not inside [] (where \\ is lambda shorthand)."
+    },
+    {
+      "id": "US-013",
+      "title": "Rewrite lexer and parser tests",
+      "description": "As a compiler developer, I need test_lexer.c and test_parser.c fully rewritten to use new syntax exclusively.",
+      "acceptanceCriteria": [
+        "test_lexer.c uses new token types throughout — no references to TOKEN_DEFSTRUCT, tests new keywords and operators",
+        "test_parser.c tests all three parsing modes: [] juxtaposition, {} command mode, () infix mode",
+        "test_parser.c tests nesting across modes: {} containing [] and (), etc.",
+        "No old-syntax test programs remain in these files",
+        "All tests in test_lexer.c and test_parser.c pass",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": "These files were partially updated in earlier stories. This story does the comprehensive sweep — every test program string in these files must use the new syntax. Focus on coverage: ensure all three modes are tested, all new token types have tests, error recovery tests work across all modes."
+    },
+    {
+      "id": "US-014",
+      "title": "Rewrite compiler and basic feature tests",
+      "description": "As a compiler developer, I need test_compiler.c, test_m4.c, and test_m6.c fully rewritten to use new syntax.",
+      "acceptanceCriteria": [
+        "test_compiler.c: all test programs use new proc/struct/if/for/binding syntax",
+        "test_m4.c: all variable, proc, and control flow tests use new syntax",
+        "test_m6.c: all line-based syntax tests updated for command mode semantics",
+        "No old-syntax test programs remain in these files",
+        "All tests in these three files pass",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": "test_compiler.c is the largest test file (~166 tests). Focus on systematic search-and-replace: [proc [params] [body]] -> proc name {params} {body}, [if cond then else] -> if cond {then} else {else}, [def x val] -> x = val or def x val, [set! x val] -> set x val, [each cb coll] -> for $coll cb, [defstruct Name [fields]] -> struct Name {fields}."
+    },
+    {
+      "id": "US-015",
+      "title": "Rewrite VM, error handling, and mutable state tests",
+      "description": "As a compiler developer, I need test_vm.c, test_m9.c, and test_m10.c fully rewritten to use new syntax.",
+      "acceptanceCriteria": [
+        "test_vm.c: all test programs use new syntax (proc, if, for, binding ops, etc.)",
+        "test_m9.c: all error handling test programs use new syntax (try/catch blocks)",
+        "test_m10.c: all mutable state tests use set/reset/swap instead of set!/reset!/swap!",
+        "No old-syntax test programs remain in these files",
+        "All tests in these three files pass",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": "test_m10.c is the most important for builtin renames — every set!/reset!/swap! must become set/reset/swap. test_m9.c error handling tests need [try ...] rewritten to try { ... } err { ... } syntax. test_vm.c has many small programs that need proc/if/def syntax updates."
+    },
+    {
+      "id": "US-016",
+      "title": "Rewrite struct, collection, and string tests",
+      "description": "As a compiler developer, I need test_m11.c, test_collections.c, test_string.c, and test_m5.c fully rewritten to use new syntax.",
+      "acceptanceCriteria": [
+        "test_m11.c: all struct tests use struct keyword with {type name} fields and ->field access",
+        "test_collections.c: all iteration tests use for instead of each, new syntax throughout",
+        "test_string.c: all string tests use new syntax, add $(expr) interpolation tests",
+        "test_m5.c: all string system tests use new syntax",
+        "No old-syntax test programs remain in these files",
+        "All tests in these four files pass",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": "test_m11.c needs defstruct->struct and [. $s field]->$s->field changes throughout. test_collections.c needs each->for changes. test_string.c and test_m5.c likely need minimal syntax changes beyond proc/def updates."
+    },
+    {
+      "id": "US-017",
+      "title": "Rewrite remaining test files",
+      "description": "As a compiler developer, I need all remaining test files rewritten: test_m12.c, test_m13.c, test_embed.c, test_e2e_*.c, and test_integration.c.",
+      "acceptanceCriteria": [
+        "test_m12.c (GC tests): any JACL source strings use new syntax",
+        "test_m13.c (concurrency tests): all spawn/await/parallel/race programs use new syntax",
+        "test_embed.c: all embedded JACL programs use new syntax",
+        "test_e2e_struct_trampoline.c, test_e2e_embed.c, test_e2e_native.c, test_e2e_gc_handles.c: all use new syntax",
+        "test_integration.c: all end-to-end programs use new syntax",
+        "No old-syntax test programs remain in any test file",
+        "All tests in all files pass",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": "This is the final test migration sweep. After this story, every test file in test/ uses the new syntax exclusively. Files like test_value.c, test_bytecode.c, test_gc.c, test_runtime.c may not contain JACL source strings — verify and skip if no changes needed."
+    },
+    {
+      "id": "US-018",
+      "title": "Remove old syntax support",
+      "description": "As a compiler developer, I need to remove all backward-compatibility code for the old syntax, ensuring the new syntax is the only way to write JACL.",
+      "acceptanceCriteria": [
+        "Old proc syntax [proc [x y] [+ $x $y]] produces a parse error",
+        "Old defstruct keyword produces a parse error",
+        "Old set!/reset!/swap! names produce compile errors",
+        "Old [. $struct field] command produces a compile error",
+        "Old [if cond then else] form produces a parse error",
+        "Old [each callback coll] name produces a compile error",
+        "All backward-compat code paths removed from parser and compiler",
+        "All ~1200 tests pass with no regressions",
+        "Build compiles cleanly with no warnings"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": "This is the cleanup story. Go through parser.c and compiler.c and remove every old-syntax code path that was kept during transition. Remove old keyword token types if any remain. Verify the build is clean and all tests pass. This makes the clean break final."
     }
   ]
 }
