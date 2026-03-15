@@ -293,6 +293,7 @@ static AstNode* parser__parse_atom(Parser* p) {
 static AstNode* parser__parse_expr(Parser* p);
 static AstNode* parser__parse_block(Parser* p);
 static AstNode* parser__parse_interp_string(Parser* p);
+static AstNode* parser__parse_infix(Parser* p);
 
 /* -------------------------------------------------------------------------
  * Internal: Parse bracketed command [cmd arg1 arg2]
@@ -382,10 +383,241 @@ static AstNode* parser__parse_command(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Sync to matching ')' for error recovery in infix mode
+ * ------------------------------------------------------------------------- */
+
+static void parser__sync_paren(Parser* p) {
+  int depth = 1;
+  while (!parser__at_end(p)) {
+    TokenType t = parser__peek(p)->type;
+    if (t == TOKEN_LPAREN) {
+      depth++;
+    } else if (t == TOKEN_RPAREN) {
+      depth--;
+      if (depth == 0) {
+        parser__advance(p);
+        return;
+      }
+    } else if (t == TOKEN_NEWLINE) {
+      return;
+    }
+    parser__advance(p);
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Check if a token is a binary infix operator
+ *
+ * TOKEN_OPERATOR covers +, -, *, /, %, ==, !=, <, >, <=, >=
+ * TOKEN_AND covers &&, TOKEN_OR covers ||
+ * ------------------------------------------------------------------------- */
+
+static int parser__is_infix_binary_op(Token* tok) {
+  return tok->type == TOKEN_OPERATOR
+      || tok->type == TOKEN_AND
+      || tok->type == TOKEN_OR;
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Parse an operand in infix mode
+ *
+ * Handles unary prefix operators (- for negation, ~ for logical not)
+ * before dispatching to primary expression parsing.
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_infix_operand(Parser* p) {
+  Token* tok = parser__peek(p);
+
+  /* Unary prefix: - (negation) */
+  if (tok->type == TOKEN_OPERATOR &&
+      tok->length == 1 && tok->payload.text[0] == '-') {
+    Token* op = parser__advance(p);
+    AstNode* operand = parser__parse_infix_operand(p);
+    if (operand == NULL) {
+      return parser__error(p, "expected operand after unary '-'", op);
+    }
+
+    AstNode* head = ast_alloc(p->arena);
+    head->type = AST_LIT_STRING;
+    head->start = parser__token_start(op);
+    head->end   = parser__token_end(op);
+    head->data.lit_string.value  = "neg";
+    head->data.lit_string.length = 3;
+
+    AstNode** args = ast_alloc_array(p->arena, 1);
+    args[0] = operand;
+
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_COMMAND;
+    node->start = parser__token_start(op);
+    node->end   = operand->end;
+    node->data.command.head      = head;
+    node->data.command.args      = args;
+    node->data.command.arg_count = 1;
+    return node;
+  }
+
+  /* Unary prefix: ~ (logical not) */
+  if (tok->type == TOKEN_NOT) {
+    Token* op = parser__advance(p);
+    AstNode* operand = parser__parse_infix_operand(p);
+    if (operand == NULL) {
+      return parser__error(p, "expected operand after '~'", op);
+    }
+
+    AstNode* head = ast_alloc(p->arena);
+    head->type = AST_LIT_STRING;
+    head->start = parser__token_start(op);
+    head->end   = parser__token_end(op);
+    head->data.lit_string.value  = "not";
+    head->data.lit_string.length = 3;
+
+    AstNode** args = ast_alloc_array(p->arena, 1);
+    args[0] = operand;
+
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_COMMAND;
+    node->start = parser__token_start(op);
+    node->end   = operand->end;
+    node->data.command.head      = head;
+    node->data.command.args      = args;
+    node->data.command.arg_count = 1;
+    return node;
+  }
+
+  /* Primary expressions */
+  switch (tok->type) {
+    case TOKEN_LPAREN:
+      return parser__parse_infix(p);
+    case TOKEN_LBRACKET:
+      return parser__parse_command(p);
+    case TOKEN_LBRACE:
+      return parser__parse_block(p);
+    case TOKEN_STRING_BEGIN:
+      return parser__parse_interp_string(p);
+    case TOKEN_INT:
+    case TOKEN_FLOAT:
+    case TOKEN_WORD:
+    case TOKEN_STRING:
+    case TOKEN_VAR:
+    case TOKEN_STRUCT:
+    case TOKEN_PROC:
+    case TOKEN_IF:
+    case TOKEN_ELIF:
+    case TOKEN_ELSE:
+    case TOKEN_WHILE:
+    case TOKEN_FOR:
+    case TOKEN_DEF:
+    case TOKEN_MUT:
+    case TOKEN_SET:
+    case TOKEN_MATCH:
+    case TOKEN_RETURN:
+    case TOKEN_BREAK:
+    case TOKEN_CONTINUE:
+    case TOKEN_TRY:
+      return parser__parse_atom(p);
+    default:
+      return NULL;
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Parse infix mode expression: (operand op operand op ...)
+ *
+ * Called when the current token is TOKEN_LPAREN.
+ * Parses left-to-right with no operator precedence.
+ * Returns AST_COMMAND for binary/unary ops, or the bare operand for
+ * simple grouping like ($x).
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_infix(Parser* p) {
+  Token* open = parser__advance(p); /* consume '(' */
+
+  /* Empty parens → error */
+  if (parser__peek(p)->type == TOKEN_RPAREN) {
+    parser__advance(p);
+    return parser__error(p, "empty parentheses in infix expression", open);
+  }
+
+  /* Parse first operand */
+  AstNode* left = parser__parse_infix_operand(p);
+  if (left == NULL) {
+    AstNode* err = parser__error(p,
+        "expected expression after '('", open);
+    parser__sync_paren(p);
+    return err;
+  }
+
+  /* Loop: binary operator + right operand, left-to-right */
+  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RPAREN) {
+    Token* op_tok = parser__peek(p);
+    if (!parser__is_infix_binary_op(op_tok)) {
+      break;
+    }
+    parser__advance(p); /* consume operator */
+
+    /* Determine operator name: && → "and", || → "or", else literal */
+    const char* op_name;
+    uint32_t op_name_len;
+    if (op_tok->type == TOKEN_AND) {
+      op_name = "and"; op_name_len = 3;
+    } else if (op_tok->type == TOKEN_OR) {
+      op_name = "or"; op_name_len = 2;
+    } else {
+      op_name = op_tok->payload.text;
+      op_name_len = op_tok->length;
+    }
+
+    /* Parse right operand */
+    AstNode* right = parser__parse_infix_operand(p);
+    if (right == NULL) {
+      AstNode* err = parser__error(p,
+          "expected operand after operator", op_tok);
+      parser__sync_paren(p);
+      return err;
+    }
+
+    /* Build AST_COMMAND: [op left right] */
+    AstNode* head = ast_alloc(p->arena);
+    head->type = AST_LIT_STRING;
+    head->start = parser__token_start(op_tok);
+    head->end   = parser__token_end(op_tok);
+    head->data.lit_string.value  = op_name;
+    head->data.lit_string.length = op_name_len;
+
+    AstNode** args = ast_alloc_array(p->arena, 2);
+    args[0] = left;
+    args[1] = right;
+
+    AstNode* cmd = ast_alloc(p->arena);
+    cmd->type  = AST_COMMAND;
+    cmd->start = left->start;
+    cmd->end   = right->end;
+    cmd->data.command.head      = head;
+    cmd->data.command.args      = args;
+    cmd->data.command.arg_count = 2;
+
+    left = cmd;
+  }
+
+  /* Expect closing paren */
+  if (parser__peek(p)->type != TOKEN_RPAREN) {
+    AstNode* err = parser__error(p,
+        "expected ')' to close infix expression", open);
+    parser__sync_paren(p);
+    return err;
+  }
+  parser__advance(p); /* consume ')' */
+
+  return left;
+}
+
+/* -------------------------------------------------------------------------
  * Internal: Parse a single expression
  *
  * Dispatches based on the current token:
  *   TOKEN_LBRACKET  → parse_command
+ *   TOKEN_LPAREN    → parse_infix
  *   atom tokens     → parse_atom
  *   otherwise       → NULL
  * ------------------------------------------------------------------------- */
@@ -396,6 +628,9 @@ static AstNode* parser__parse_expr(Parser* p) {
   switch (tok->type) {
     case TOKEN_LBRACKET:
       return parser__parse_command(p);
+
+    case TOKEN_LPAREN:
+      return parser__parse_infix(p);
 
     case TOKEN_LBRACE:
       return parser__parse_block(p);
