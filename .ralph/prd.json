@@ -42,7 +42,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "This is additive — () was previously unused in the parser. Create a new parser__parse_infix() function. The key algorithm: parse first operand, then loop: if next token is an operator, parse next operand, wrap in AST_COMMAND with operator as head. For unary prefix (- and ~), check if the first token is an operator and handle it before entering the binary loop. and/or/not don't exist as builtins yet — parse them as command names and defer compilation to a later story."
     },
     {

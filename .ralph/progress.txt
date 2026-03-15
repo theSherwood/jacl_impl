@@ -11,6 +11,8 @@ Started: Sun Mar 15 00:51:19 UTC 2026
 - Words with ! suffix (like set!, reset!) are still TOKEN_WORD because lexer__is_word_char includes !
 - defstruct keyword now emits TOKEN_STRUCT for backward compat; both defstruct and struct parse the same way
 - pre-existing failures: rdoc, nfa_rdoc, nfa_cross (double-free in lib/ tests, unrelated to JACL language)
+- () is now infix mode: parser__parse_infix parses left-to-right with no precedence; nested () for explicit grouping
+- For adding new expression forms, add dispatch in parser__parse_expr AND in parser__parse_infix_operand (for use inside ())
 
 ## 2026-03-15 - US-001
 Thread: n/a
@@ -30,4 +32,23 @@ Thread: n/a
   - Parser checks for "struct" word by text comparison — must update to also accept TOKEN_STRUCT
   - Keyword tokens still work as command heads/args because parser__parse_atom maps them to AST_LIT_STRING
   - The inline struct type parser (parser__parse_inline_struct_type) just advances past whatever token it's on
+---
+
+## 2026-03-15 - US-002
+Thread: n/a
+- Added parser__parse_infix() for () infix mode — left-to-right, no precedence
+- Added parser__parse_infix_operand() for unary prefix handling (- → neg, ~ → not)
+- Added parser__sync_paren() for error recovery in infix mode
+- Added parser__is_infix_binary_op() helper — TOKEN_OPERATOR, TOKEN_AND, TOKEN_OR
+- Added TOKEN_LPAREN dispatch in parser__parse_expr()
+- Operator name mapping: && → "and", || → "or", unary - → "neg", ~ → "not"
+- 20 new parser tests covering all infix patterns (118 total, all pass)
+- Files changed: src/parser.c, test/test_parser.c
+- **Learnings for future iterations:**
+  - Infix operands (parser__parse_infix_operand) must NOT include TOKEN_OPERATOR in primary dispatch — operators are only handled as unary prefix or binary infix
+  - Unary prefix is recursive: (- - $x) correctly produces [neg [neg $x]]
+  - () for grouping returns the inner value directly; binary ops produce AST_COMMAND
+  - Infix mode works inside [], {}, and bare commands — parser__parse_expr dispatches TOKEN_LPAREN
+  - TOKEN_OPERATOR covers +, -, *, /, %, ==, !=, <, >, <=, >= (compound operators)
+  - TOKEN_AND (&&) and TOKEN_OR (||) are separate token types with their own infix handling
 ---
