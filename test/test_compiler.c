@@ -5013,6 +5013,275 @@ static int test_struct_module_import(void) {
   TEST_PASS();
 }
 
+/* ===== US-001 (For-loop PRD): Break as control flow ===== */
+
+/* Test: break exits while loop, loop evaluates to nil */
+static int test_break_while_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[def i 0]\n"
+    "[while $true {\n"
+    "  [if [>= $i 3] { [break] }]\n"
+    "  [print $i]\n"
+    "  [def i [+ $i 1]]\n"
+    "}]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "0\n1\n2\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: break $value returns value from while loop expression */
+static int test_break_while_with_value(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[def i 0]\n"
+    "[def result [while $true {\n"
+    "  [if [>= $i 5] { [break $i] }]\n"
+    "  [def i [+ $i 1]]\n"
+    "}]]\n"
+    "[print $result]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: break with no value makes loop evaluate to nil */
+static int test_break_while_nil_value(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[def result [while $true {\n"
+    "  [break]\n"
+    "}]]\n"
+    "[print $result]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "nil\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: nested loops — break exits only the innermost loop */
+static int test_break_nested_loops(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Outer loop runs 3 times, inner loop breaks after 2 iterations */
+  const char* program =
+    "[def i 0]\n"
+    "[while [< $i 3] {\n"
+    "  [def j 0]\n"
+    "  [while $true {\n"
+    "    [if [>= $j 2] { [break] }]\n"
+    "    [print $i]\n"
+    "    [print $j]\n"
+    "    [def j [+ $j 1]]\n"
+    "  }]\n"
+    "  [def i [+ $i 1]]\n"
+    "}]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  /* i=0,j=0; i=0,j=1; i=1,j=0; i=1,j=1; i=2,j=0; i=2,j=1 */
+  ASSERT_STR_EQ(cap.buf, "0\n0\n0\n1\n1\n0\n1\n1\n2\n0\n2\n1\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: break outside loop is compile error */
+static int test_break_outside_loop_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source("[break]", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+  ASSERT(strstr(cr.error_message, "break outside of loop") != NULL);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: break outside loop in bare command form is compile error */
+static int test_break_bare_outside_loop_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source("break", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+  ASSERT(strstr(cr.error_message, "break outside of loop") != NULL);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: break with value using bare command form */
+static int test_break_bare_with_value(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[def i 0]\n"
+    "[def result [while $true {\n"
+    "  [if [>= $i 3] {\n"
+    "    break $i\n"
+    "  }]\n"
+    "  [def i [+ $i 1]]\n"
+    "}]]\n"
+    "[print $result]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: continue in while loop skips to next iteration */
+static int test_continue_while_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Print 0,1,3,4 — skip 2 */
+  const char* program =
+    "[def i 0]\n"
+    "[while [< $i 5] {\n"
+    "  [def old $i]\n"
+    "  [def i [+ $i 1]]\n"
+    "  [if [== $old 2] { [continue] }]\n"
+    "  [print $old]\n"
+    "}]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "0\n1\n3\n4\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: continue outside loop is compile error */
+static int test_continue_outside_loop_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source("[continue]", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+  ASSERT(strstr(cr.error_message, "continue outside of loop") != NULL);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -5215,6 +5484,16 @@ int main(void) {
     { "inline_struct_nested",            test_inline_struct_nested },
     /* US-009 (Struct): Module export/import */
     { "struct_module_import",            test_struct_module_import },
+    /* US-001 (For-loop PRD): Break as control flow */
+    { "break_while_basic",               test_break_while_basic },
+    { "break_while_with_value",          test_break_while_with_value },
+    { "break_while_nil_value",           test_break_while_nil_value },
+    { "break_nested_loops",              test_break_nested_loops },
+    { "break_outside_loop_error",        test_break_outside_loop_error },
+    { "break_bare_outside_loop_error",   test_break_bare_outside_loop_error },
+    { "break_bare_with_value",           test_break_bare_with_value },
+    { "continue_while_basic",            test_continue_while_basic },
+    { "continue_outside_loop_error",     test_continue_outside_loop_error },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

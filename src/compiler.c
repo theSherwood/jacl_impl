@@ -708,6 +708,12 @@ static void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
       }
       break;
     }
+    case AST_BREAK: {
+      if (node->data.break_stmt.value) {
+        analyze__walk_body(node->data.break_stmt.value, info);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -769,6 +775,12 @@ static void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list) {
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
         analyze__collect_procs(node->data.block.commands[i], list);
+      }
+      break;
+    }
+    case AST_BREAK: {
+      if (node->data.break_stmt.value) {
+        analyze__collect_procs(node->data.break_stmt.value, list);
       }
       break;
     }
@@ -872,6 +884,12 @@ static bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
         if (ast__contains_suspension(node->data.block.commands[i], map))
           return true;
+      }
+      return false;
+    }
+    case AST_BREAK: {
+      if (node->data.break_stmt.value) {
+        return ast__contains_suspension(node->data.break_stmt.value, map);
       }
       return false;
     }
@@ -1024,6 +1042,17 @@ static bool ast__contains_nonlocal_set(AstNode* block) {
   return ast__contains_nonlocal_set_impl(block, local_muts, local_mut_count);
 }
 
+/* --- Internal: Loop context for break/continue --- */
+
+#define COMPILER_LOOP_DEPTH_MAX 16
+#define COMPILER_BREAK_PATCHES_MAX 32
+
+typedef struct {
+  uint32_t loop_start;     /* bytecode offset of loop start (for continue) */
+  uint32_t break_patches[COMPILER_BREAK_PATCHES_MAX];
+  uint32_t break_patch_count;
+} LoopContext;
+
 /* --- Internal: Compiler state --- */
 
 typedef struct Compiler Compiler;
@@ -1061,6 +1090,8 @@ struct Compiler {
   const char*      module_prefix;   /* "basename::" for namespace-prefixed globals */
   uint32_t         module_prefix_len;
   StructTypeRegistry* struct_registry; /* shared struct type registry (root compiler owns) */
+  LoopContext          loop_stack[COMPILER_LOOP_DEPTH_MAX];
+  uint32_t             loop_depth;     /* current nesting depth (0 = not in loop) */
 };
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -1094,6 +1125,7 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->module_prefix     = NULL;
   c->module_prefix_len = 0;
   c->struct_registry   = NULL;
+  c->loop_depth        = 0;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -3749,8 +3781,17 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
+    /* Push loop context for break/continue */
+    if (c->loop_depth >= COMPILER_LOOP_DEPTH_MAX) {
+      compiler__error(c, line, col, "too many nested loops");
+      return;
+    }
+    LoopContext* lctx = &c->loop_stack[c->loop_depth++];
+    lctx->break_patch_count = 0;
+
     /* Loop-start label */
     uint32_t loop_start = c->chunk->code_count;
+    lctx->loop_start = loop_start;
 
     /* Compile condition */
     compiler__compile_node(c, args[0]);
@@ -3775,7 +3816,66 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Patch exit jump to here */
     compiler__patch_jump(c, exit_jump);
 
-    /* while returns nil */
+    /* Normal exit: while returns nil */
+    compiler__emit_byte(c, OP_NIL, line);
+
+    /* Jump over the break landing zone */
+    uint32_t skip_break = compiler__emit_jump(c, OP_JUMP, line);
+
+    /* Patch all break jumps to here (break value already on stack) */
+    for (uint32_t i = 0; i < lctx->break_patch_count; i++) {
+      compiler__patch_jump(c, lctx->break_patches[i]);
+    }
+
+    /* Patch skip_break to here */
+    compiler__patch_jump(c, skip_break);
+
+    /* Pop loop context */
+    c->loop_depth--;
+    return;
+  }
+
+  /* break [value] — bracket form */
+  if (compiler__head_matches(head, "break", 5)) {
+    if (argc > 1) {
+      compiler__builtin_arity_error(c, line, col, "break", "0 or 1 arguments", argc);
+      return;
+    }
+    if (c->loop_depth == 0) {
+      compiler__error(c, line, col, "break outside of loop");
+      return;
+    }
+    LoopContext* lctx = &c->loop_stack[c->loop_depth - 1];
+    if (argc == 1) {
+      compiler__compile_node(c, args[0]);
+    } else {
+      compiler__emit_byte(c, OP_NIL, line);
+    }
+    if (lctx->break_patch_count < COMPILER_BREAK_PATCHES_MAX) {
+      lctx->break_patches[lctx->break_patch_count++] =
+          compiler__emit_jump(c, OP_JUMP, line);
+    } else {
+      compiler__error(c, line, col, "too many break statements in loop");
+    }
+    return;
+  }
+
+  /* continue — bracket form */
+  if (compiler__head_matches(head, "continue", 8)) {
+    if (argc != 0) {
+      compiler__builtin_arity_error(c, line, col, "continue", "0 arguments", argc);
+      return;
+    }
+    if (c->loop_depth == 0) {
+      compiler__error(c, line, col, "continue outside of loop");
+      return;
+    }
+    LoopContext* lctx = &c->loop_stack[c->loop_depth - 1];
+    compiler__emit_byte(c, OP_LOOP, line);
+    uint32_t offset = c->chunk->code_count - lctx->loop_start + 2;
+    compiler__emit_byte(c, (uint8_t)((offset >> 8) & 0xFF), line);
+    compiler__emit_byte(c, (uint8_t)(offset & 0xFF), line);
+    /* continue must leave a value for the statement (popped by CHECK_ERROR) */
     compiler__emit_byte(c, OP_NIL, line);
     return;
   }
@@ -5340,6 +5440,45 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
 
       /* defstruct is a declaration, produces nil */
       compiler__emit_byte(c, OP_NIL, line);
+      break;
+    }
+
+    case AST_BREAK: {
+      if (c->loop_depth == 0) {
+        compiler__error(c, line, node->start.column,
+                        "break outside of loop");
+        break;
+      }
+      LoopContext* lctx = &c->loop_stack[c->loop_depth - 1];
+      /* Compile break value (or nil) */
+      if (node->data.break_stmt.value) {
+        compiler__compile_node(c, node->data.break_stmt.value);
+      } else {
+        compiler__emit_byte(c, OP_NIL, line);
+      }
+      /* Emit forward jump to be patched at loop exit */
+      if (lctx->break_patch_count < COMPILER_BREAK_PATCHES_MAX) {
+        lctx->break_patches[lctx->break_patch_count++] =
+            compiler__emit_jump(c, OP_JUMP, line);
+      } else {
+        compiler__error(c, line, node->start.column,
+                        "too many break statements in loop");
+      }
+      break;
+    }
+
+    case AST_CONTINUE: {
+      if (c->loop_depth == 0) {
+        compiler__error(c, line, node->start.column,
+                        "continue outside of loop");
+        break;
+      }
+      LoopContext* lctx = &c->loop_stack[c->loop_depth - 1];
+      /* Jump back to loop start */
+      compiler__emit_byte(c, OP_LOOP, line);
+      uint32_t offset = c->chunk->code_count - lctx->loop_start + 2;
+      compiler__emit_byte(c, (uint8_t)((offset >> 8) & 0xFF), line);
+      compiler__emit_byte(c, (uint8_t)(offset & 0xFF), line);
       break;
     }
 

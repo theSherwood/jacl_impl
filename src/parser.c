@@ -751,6 +751,38 @@ static AstNode* parser__parse_defstruct(Parser* p) {
  * ------------------------------------------------------------------------- */
 
 static AstNode* parser__parse_bare_command(Parser* p) {
+  /* break [value] → AST_BREAK */
+  Token* peek = parser__peek(p);
+  if (peek->type == TOKEN_WORD && peek->length == 5 &&
+      memcmp(peek->payload.text, "break", 5) == 0) {
+    Token* kw = parser__advance(p);
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_BREAK;
+    node->start = parser__token_start(kw);
+    node->end   = parser__token_end(kw);
+    node->data.break_stmt.value = NULL;
+    /* Optional value argument */
+    if (!parser__is_command_end(p)) {
+      AstNode* val = parser__parse_expr(p);
+      if (val != NULL) {
+        node->data.break_stmt.value = val;
+        node->end = val->end;
+      }
+    }
+    return node;
+  }
+
+  /* continue → AST_CONTINUE */
+  if (peek->type == TOKEN_WORD && peek->length == 8 &&
+      memcmp(peek->payload.text, "continue", 8) == 0) {
+    Token* kw = parser__advance(p);
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_CONTINUE;
+    node->start = parser__token_start(kw);
+    node->end   = parser__token_end(kw);
+    return node;
+  }
+
   TokenType head_token_type = parser__peek(p)->type;
   AstNode* head = parser__parse_expr(p);
   if (head == NULL) return NULL;

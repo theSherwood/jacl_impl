@@ -1,13 +1,3 @@
 # Ralph Progress Log
-Started: 2026-03-14
+Started: Mon Mar 16 20:45:23 UTC 2026
 ---
-
-## Codebase Patterns
-- Build uses build.sh; results show "=== Results: N passed, M failed ===" at the end
-- Pre-existing failures on main: rdoc, nfa_rdoc, nfa_cross (3 total)
-- Unity build: jacl.c includes all src/*.c in order: value.c → gc.c → ... → vm.c → gc_collect.c → runtime.c → embed.c
-- VM uses UNBOXED raw bits for i64/u64/f64 on stack; embed API uses BOXED heap objects
-- All AST nodes are arena-allocated via parser's arena
-- Compiler dispatches on command name strings (strcmp in compiler__compile_command)
-- Current syntax uses [] for everything — this redesign adds {} command mode and () infix mode
-- Old syntax must be kept working during transition (US-001 through US-012), then removed in US-018

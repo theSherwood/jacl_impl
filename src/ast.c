@@ -25,6 +25,8 @@ typedef enum {
   AST_INTERP_STRING, /* interpolated string: "hello $name" */
   AST_USE,           /* use "path" [name1 name2 ...] */
   AST_DEFSTRUCT,     /* defstruct Name [field :type] ... */
+  AST_BREAK,         /* break or break $value */
+  AST_CONTINUE,      /* continue */
   AST_ERROR          /* parse error with recovery */
 } AstNodeType;
 
@@ -63,6 +65,7 @@ struct AstNode {
              const char** field_names; uint32_t* field_name_lens;
              const char** field_types; uint32_t* field_type_lens;
              uint32_t field_count; }                              defstruct;
+    struct { AstNode* value; /* NULL if no value */ }              break_stmt;
     struct { const char* message; }                                error;
   } data;
 };
@@ -311,6 +314,18 @@ static void ast__pp_node(AstStrBuf* b, AstNode* node) {
                      node->data.defstruct.field_type_lens[i]);
         ast__buf_char(b, ']');
       }
+      break;
+    }
+    case AST_BREAK: {
+      ast__buf_cstr(b, "break");
+      if (node->data.break_stmt.value) {
+        ast__buf_char(b, ' ');
+        ast__pp_node(b, node->data.break_stmt.value);
+      }
+      break;
+    }
+    case AST_CONTINUE: {
+      ast__buf_cstr(b, "continue");
       break;
     }
     case AST_ERROR: {
