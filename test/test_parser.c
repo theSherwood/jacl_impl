@@ -1187,7 +1187,7 @@ static int test_multi_realistic_program(void) {
     "# Conditional\n"
     "if [> $x 0] {\n"
     "  print \"positive\"\n"
-    "} {\n"
+    "} else {\n"
     "  print \"non-positive\"\n"
     "}\n"
     "\n"
@@ -1240,7 +1240,7 @@ static int test_multi_realistic_program(void) {
   ASSERT_U32_EQ(print_cmd->data.command.arg_count, 1);
   ASSERT(print_cmd->data.command.args[0]->type == AST_INTERP_STRING);
 
-  /* 4: if [> $x 0] { print "positive" } { print "non-positive" } */
+  /* 4: if [> $x 0] { print "positive" } else { print "non-positive" } */
   ASSERT(r.nodes[4]->type == AST_COMMAND);
   ASSERT(memcmp(r.nodes[4]->data.command.head->data.lit_string.value, "if", 2) == 0);
   ASSERT_U32_EQ(r.nodes[4]->data.command.arg_count, 3);
@@ -1633,7 +1633,7 @@ static int test_roundtrip_complex(void) {
     "}\n"
     "if [> $x 0] {\n"
     "  print \"positive\"\n"
-    "} {\n"
+    "} else {\n"
     "  print \"non-positive\"\n"
     "}\n"
     "greet\n"
@@ -2559,6 +2559,295 @@ static int test_struct_multiline_new(void) {
   TEST_PASS();
 }
 
+/* ---- Syntax Redesign US-005: New if/elif/else and while syntax ---- */
+
+static int test_if_basic_new(void) {
+  setup();
+  /* if $cond { body } — no else, 2-arg if */
+  ParseResult r = parse("if $true { 42 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* condition: $true */
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  /* then block */
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  ASSERT_U32_EQ(n->data.command.args[1]->data.block.count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_else_new(void) {
+  setup();
+  /* if $cond { 1 } else { 2 } — 3-arg if */
+  ParseResult r = parse("if $true { 1 } else { 2 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_elif_else_new(void) {
+  setup();
+  /* if $a { 1 } elif $b { 2 } else { 3 }
+     Desugars to: [if $a {1} {[if $b {2} {3}]}] */
+  ParseResult r = parse("if $a { 1 } elif $b { 2 } else { 3 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  /* else branch is a block containing the nested if */
+  AstNode* else_blk = n->data.command.args[2];
+  ASSERT(else_blk->type == AST_BLOCK);
+  ASSERT_U32_EQ(else_blk->data.block.count, 1);
+  AstNode* nested = else_blk->data.block.commands[0];
+  ASSERT(nested->type == AST_COMMAND);
+  ASSERT(memcmp(nested->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(nested->data.command.arg_count, 3);
+  ASSERT(nested->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(nested->data.command.args[1]->type == AST_BLOCK);
+  ASSERT(nested->data.command.args[2]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_elif_chain_new(void) {
+  setup();
+  /* if $a { 1 } elif $b { 2 } elif $c { 3 } else { 4 } — double elif */
+  ParseResult r = parse("if $a { 1 } elif $b { 2 } elif $c { 3 } else { 4 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  /* First elif desugars to nested if in else block */
+  AstNode* elif1_blk = n->data.command.args[2];
+  ASSERT(elif1_blk->type == AST_BLOCK);
+  AstNode* elif1 = elif1_blk->data.block.commands[0];
+  ASSERT(elif1->type == AST_COMMAND);
+  ASSERT_U32_EQ(elif1->data.command.arg_count, 3);
+  /* Second elif desugars to nested if in else block */
+  AstNode* elif2_blk = elif1->data.command.args[2];
+  ASSERT(elif2_blk->type == AST_BLOCK);
+  AstNode* elif2 = elif2_blk->data.block.commands[0];
+  ASSERT(elif2->type == AST_COMMAND);
+  ASSERT_U32_EQ(elif2->data.command.arg_count, 3);
+  ASSERT(elif2->data.command.args[2]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_infix_condition(void) {
+  setup();
+  /* if ($n > 0) { "positive" } else { "non-positive" } */
+  ParseResult r = parse("if ($n > 0) { \"positive\" } else { \"non-positive\" }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  /* condition is infix: [> $n 0] */
+  AstNode* cond = n->data.command.args[0];
+  ASSERT(cond->type == AST_COMMAND);
+  ASSERT(memcmp(cond->data.command.head->data.lit_string.value, ">", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_command_condition(void) {
+  setup();
+  /* if [> $x 0] { 1 } else { 2 } — bracket command condition */
+  ParseResult r = parse("if [> $x 0] { 1 } else { 2 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  AstNode* cond = n->data.command.args[0];
+  ASSERT(cond->type == AST_COMMAND);
+  ASSERT(memcmp(cond->data.command.head->data.lit_string.value, ">", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_multiline_new(void) {
+  setup();
+  /* Multiline if/else with newlines between } else { */
+  ParseResult r = parse(
+    "if $cond {\n"
+    "  print \"yes\"\n"
+    "}\n"
+    "else {\n"
+    "  print \"no\"\n"
+    "}\n"
+  );
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_nested_new(void) {
+  setup();
+  /* Nested if inside then branch */
+  ParseResult r = parse(
+    "if $outer {\n"
+    "  if $inner { 1 } else { 2 }\n"
+    "}\n"
+  );
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  AstNode* then_blk = n->data.command.args[1];
+  ASSERT(then_blk->type == AST_BLOCK);
+  ASSERT_U32_EQ(then_blk->data.block.count, 1);
+  AstNode* inner = then_blk->data.block.commands[0];
+  ASSERT(inner->type == AST_COMMAND);
+  ASSERT(memcmp(inner->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(inner->data.command.arg_count, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_old_bracket_compat(void) {
+  setup();
+  /* Old bracket syntax still works: [if cond {then} {else}] */
+  AstNode* n = parse_expr("[if $true { 1 } { 2 }]");
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_while_basic_new(void) {
+  setup();
+  /* while $cond { body } — 2-arg while */
+  ParseResult r = parse("while $running { print \"loop\" }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "while", 5) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_while_infix_condition(void) {
+  setup();
+  /* while ($i < 10) { body } — infix condition */
+  ParseResult r = parse("while ($i < 10) { print $i }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "while", 5) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* condition is infix: [< $i 10] */
+  AstNode* cond = n->data.command.args[0];
+  ASSERT(cond->type == AST_COMMAND);
+  ASSERT(memcmp(cond->data.command.head->data.lit_string.value, "<", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_while_multiline_new(void) {
+  setup();
+  /* Multiline while */
+  ParseResult r = parse(
+    "while ($i < 5) {\n"
+    "  print $i\n"
+    "  def i [+ $i 1]\n"
+    "}\n"
+  );
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "while", 5) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* body has 2 commands */
+  AstNode* body = n->data.command.args[1];
+  ASSERT(body->type == AST_BLOCK);
+  ASSERT_U32_EQ(body->data.block.count, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_while_old_bracket_compat(void) {
+  setup();
+  /* Old bracket syntax still works: [while cond {body}] */
+  AstNode* n = parse_expr("[while $true { 1 }]");
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "while", 5) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_elif_no_else(void) {
+  setup();
+  /* if $a { 1 } elif $b { 2 } — no else, elif still desugars to nested if */
+  ParseResult r = parse("if $a { 1 } elif $b { 2 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  AstNode* else_blk = n->data.command.args[2];
+  ASSERT(else_blk->type == AST_BLOCK);
+  AstNode* nested = else_blk->data.block.commands[0];
+  ASSERT(nested->type == AST_COMMAND);
+  ASSERT(memcmp(nested->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(nested->data.command.arg_count, 2); /* no else on nested */
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -2723,6 +3012,21 @@ int main(void) {
     {"struct_empty_err",      test_struct_empty_fields_error},
     {"struct_type_field",     test_struct_struct_type_field},
     {"struct_multiline_new",  test_struct_multiline_new},
+    /* Syntax Redesign US-005: New if/elif/else and while syntax */
+    {"if_basic_new",          test_if_basic_new},
+    {"if_else_new",           test_if_else_new},
+    {"if_elif_else_new",      test_if_elif_else_new},
+    {"if_elif_chain_new",     test_if_elif_chain_new},
+    {"if_infix_condition",    test_if_infix_condition},
+    {"if_cmd_condition",      test_if_command_condition},
+    {"if_multiline_new",      test_if_multiline_new},
+    {"if_nested_new",         test_if_nested_new},
+    {"if_old_bracket_compat", test_if_old_bracket_compat},
+    {"if_elif_no_else",       test_if_elif_no_else},
+    {"while_basic_new",       test_while_basic_new},
+    {"while_infix_cond",      test_while_infix_condition},
+    {"while_multiline_new",   test_while_multiline_new},
+    {"while_old_bracket_compat", test_while_old_bracket_compat},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

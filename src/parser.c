@@ -1266,6 +1266,167 @@ static AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Parse new-syntax if/elif/else form
+ *
+ * if condition { then_body }
+ * if condition { then_body } else { else_body }
+ * if condition { then_body } elif condition2 { body2 } else { body3 }
+ *
+ * elif desugars to nested if/else. Produces AST_COMMAND with head="if",
+ * 2 args (no else) or 3 args (with else block).
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
+  SourcePos start = if_head->start;
+
+  /* Parse condition expression */
+  AstNode* cond = parser__parse_expr(p);
+  if (cond == NULL) {
+    return parser__error(p, "expected condition after 'if'", parser__peek(p));
+  }
+  if (cond->type == AST_ERROR) return cond;
+
+  /* Expect { then_body } */
+  if (parser__peek(p)->type != TOKEN_LBRACE) {
+    return parser__error(p, "expected '{' after if condition", parser__peek(p));
+  }
+  AstNode* then_block = parser__parse_block(p);
+  if (then_block->type == AST_ERROR) return then_block;
+
+  /* Skip newlines to check for elif/else */
+  while (parser__peek(p)->type == TOKEN_NEWLINE) {
+    parser__advance(p);
+  }
+
+  if (parser__peek(p)->type == TOKEN_ELIF) {
+    /* elif → desugar to nested if/else */
+    Token* elif_tok = parser__advance(p); /* consume 'elif' */
+
+    /* Create "if" literal node for the nested if */
+    AstNode* nested_if_head = ast_alloc(p->arena);
+    nested_if_head->type = AST_LIT_STRING;
+    nested_if_head->start = parser__token_start(elif_tok);
+    nested_if_head->end   = parser__token_end(elif_tok);
+    nested_if_head->data.lit_string.value  = "if";
+    nested_if_head->data.lit_string.length = 2;
+
+    /* Recursively parse the elif as an if form */
+    AstNode* nested_if = parser__parse_if_form(p, nested_if_head);
+    if (nested_if->type == AST_ERROR) return nested_if;
+
+    /* Wrap nested if in a block for the else branch */
+    AstNode* else_block = ast_alloc(p->arena);
+    else_block->type  = AST_BLOCK;
+    else_block->start = nested_if->start;
+    else_block->end   = nested_if->end;
+    AstNode** block_cmds = ast_alloc_array(p->arena, 1);
+    block_cmds[0] = nested_if;
+    else_block->data.block.commands = block_cmds;
+    else_block->data.block.count    = 1;
+
+    /* Build 3-arg if: [if cond then_block else_block] */
+    AstNode** args = ast_alloc_array(p->arena, 3);
+    args[0] = cond;
+    args[1] = then_block;
+    args[2] = else_block;
+
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_COMMAND;
+    node->start = start;
+    node->end   = else_block->end;
+    node->data.command.head      = if_head;
+    node->data.command.args      = args;
+    node->data.command.arg_count = 3;
+    return node;
+
+  } else if (parser__peek(p)->type == TOKEN_ELSE) {
+    parser__advance(p); /* consume 'else' */
+
+    /* Skip newlines after else */
+    while (parser__peek(p)->type == TOKEN_NEWLINE) {
+      parser__advance(p);
+    }
+
+    /* Expect { else_body } */
+    if (parser__peek(p)->type != TOKEN_LBRACE) {
+      return parser__error(p, "expected '{' after 'else'", parser__peek(p));
+    }
+    AstNode* else_block = parser__parse_block(p);
+    if (else_block->type == AST_ERROR) return else_block;
+
+    /* Build 3-arg if: [if cond then_block else_block] */
+    AstNode** args = ast_alloc_array(p->arena, 3);
+    args[0] = cond;
+    args[1] = then_block;
+    args[2] = else_block;
+
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_COMMAND;
+    node->start = start;
+    node->end   = else_block->end;
+    node->data.command.head      = if_head;
+    node->data.command.args      = args;
+    node->data.command.arg_count = 3;
+    return node;
+
+  } else {
+    /* No else clause — 2-arg if */
+    AstNode** args = ast_alloc_array(p->arena, 2);
+    args[0] = cond;
+    args[1] = then_block;
+
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_COMMAND;
+    node->start = start;
+    node->end   = then_block->end;
+    node->data.command.head      = if_head;
+    node->data.command.args      = args;
+    node->data.command.arg_count = 2;
+    return node;
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Parse new-syntax while form
+ *
+ * while condition { body }
+ *
+ * Produces AST_COMMAND with head="while", 2 args (condition + body block).
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_while_form(Parser* p, AstNode* while_head) {
+  SourcePos start = while_head->start;
+
+  /* Parse condition expression */
+  AstNode* cond = parser__parse_expr(p);
+  if (cond == NULL) {
+    return parser__error(p, "expected condition after 'while'", parser__peek(p));
+  }
+  if (cond->type == AST_ERROR) return cond;
+
+  /* Expect { body } */
+  if (parser__peek(p)->type != TOKEN_LBRACE) {
+    return parser__error(p, "expected '{' after while condition", parser__peek(p));
+  }
+  AstNode* body = parser__parse_block(p);
+  if (body->type == AST_ERROR) return body;
+
+  /* Build 2-arg while: [while cond body_block] */
+  AstNode** args = ast_alloc_array(p->arena, 2);
+  args[0] = cond;
+  args[1] = body;
+
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_COMMAND;
+  node->start = start;
+  node->end   = body->end;
+  node->data.command.head      = while_head;
+  node->data.command.args      = args;
+  node->data.command.arg_count = 2;
+  return node;
+}
+
+/* -------------------------------------------------------------------------
  * Internal: Parse a top-level bare command
  *
  * Reads the first expression as the command head, then collects subsequent
@@ -1313,6 +1474,16 @@ static AstNode* parser__parse_bare_command(Parser* p) {
         return parser__parse_proc_form(p, head);
       }
     }
+  }
+
+  /* New if syntax: if condition { body } [elif condition { body }]* [else { body }] */
+  if (head_token_type == TOKEN_IF && !parser__is_command_end(p)) {
+    return parser__parse_if_form(p, head);
+  }
+
+  /* New while syntax: while condition { body } */
+  if (head_token_type == TOKEN_WHILE && !parser__is_command_end(p)) {
+    return parser__parse_while_form(p, head);
   }
 
   NodeArray args;

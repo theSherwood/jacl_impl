@@ -5297,6 +5297,335 @@ static int test_struct_new_syntax_duplicate_field(void) {
   TEST_PASS();
 }
 
+/* --- Syntax Redesign US-005: New if/elif/else and while syntax --- */
+
+/* if $true { 1 } → takes then branch, returns 1 */
+static int test_if_new_then_branch(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("if $true { 1 }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  /* no else → nil when condition false, but condition is true → returns 1 */
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if $false { 1 } else { 2 } → takes else branch, returns 2 */
+static int test_if_new_else_branch(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("if $false { 1 } else { 2 }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if $false { 1 } → no else, returns nil */
+static int test_if_new_no_else_nil(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("if $false { 1 }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if ($n > 0) { "positive" } else { "non-positive" } — infix condition */
+static int test_if_new_infix_condition(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "[def n 5]\n"
+    "if ($n > 0) {\n"
+    "  print \"positive\"\n"
+    "} else {\n"
+    "  print \"non-positive\"\n"
+    "}", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "positive\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if $false { 1 } elif $true { 2 } else { 3 } → takes elif branch, returns 2 */
+static int test_if_new_elif(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "if $false { 1 } elif $true { 2 } else { 3 }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if $false { 1 } elif $false { 2 } else { 3 } → takes else branch, returns 3 */
+static int test_if_new_elif_else(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "if $false { 1 } elif $false { 2 } else { 3 }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 3);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if/elif chain with 3 branches — first match wins */
+static int test_if_new_elif_chain(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "if $false { 1 } elif $false { 2 } elif $true { 3 } else { 4 }",
+    &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 3);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if is an expression — [+ if $true { 10 } else { 20 } 5] not directly testable
+   but we can test via old bracket syntax embedding new if */
+static int test_if_new_as_expression(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  /* Use def to capture value of new-syntax if as expression */
+  VMResult result = jacl_run(
+    "[def x [if $true { 10 } { 20 }]]\n"
+    "[+ $x 5]",
+    &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 15);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* while ($i < 5) { body } — new syntax iterative sum */
+static int test_while_new_iterative_sum(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "[def i 1]\n"
+    "[def sum 0]\n"
+    "while [<= $i 5] {\n"
+    "  [def sum [+ $sum $i]]\n"
+    "  [def i [+ $i 1]]\n"
+    "}\n"
+    "[print $sum]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "15\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* while with infix condition: while ($i < 3) { ... } */
+static int test_while_new_infix_condition(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "[def i 3]\n"
+    "while ($i > 0) {\n"
+    "  [print $i]\n"
+    "  [def i [- $i 1]]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n2\n1\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* while returns nil */
+static int test_while_new_returns_nil(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("while $false { 999 }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Combined if + while with new syntax */
+static int test_if_while_combined_new(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "[def i 1]\n"
+    "while [<= $i 4] {\n"
+    "  if [== [% $i 2] 0] {\n"
+    "    [print \"even\"]\n"
+    "  } else {\n"
+    "    [print \"odd\"]\n"
+    "  }\n"
+    "  [def i [+ $i 1]]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "odd\neven\nodd\neven\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -5513,6 +5842,19 @@ int main(void) {
     { "struct_new_syntax_nested",        test_struct_new_syntax_nested },
     { "struct_new_syntax_construct",     test_struct_new_syntax_construct_and_access },
     { "struct_new_syntax_dup_field",     test_struct_new_syntax_duplicate_field },
+    /* Syntax Redesign US-005: New if/elif/else and while syntax */
+    { "if_new_then_branch",            test_if_new_then_branch },
+    { "if_new_else_branch",            test_if_new_else_branch },
+    { "if_new_no_else_nil",            test_if_new_no_else_nil },
+    { "if_new_infix_condition",        test_if_new_infix_condition },
+    { "if_new_elif",                   test_if_new_elif },
+    { "if_new_elif_else",             test_if_new_elif_else },
+    { "if_new_elif_chain",            test_if_new_elif_chain },
+    { "if_new_as_expression",          test_if_new_as_expression },
+    { "while_new_iterative_sum",       test_while_new_iterative_sum },
+    { "while_new_infix_condition",     test_while_new_infix_condition },
+    { "while_new_returns_nil",         test_while_new_returns_nil },
+    { "if_while_combined_new",         test_if_while_combined_new },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
