@@ -367,7 +367,7 @@ static bool test__compile_has_error(const char* source, const char* expected_sub
 /* Test: suspension inferred for direct use of await */
 static int test_suspension_direct_await(void) {
     SuspensionMap map = test__analyze(
-        "proc foo [] { await 42 }");
+        "proc foo {} { await 42 }");
     JaclVal foo = jacl_inline_string("foo", 3);
     ASSERT(suspension_map_lookup(&map, foo));
     TEST_PASS();
@@ -376,7 +376,7 @@ static int test_suspension_direct_await(void) {
 /* Test: suspension inferred for direct use of parallel */
 static int test_suspension_direct_parallel(void) {
     SuspensionMap map = test__analyze(
-        "proc foo [] { parallel { 1 } { 2 } }");
+        "proc foo {} { parallel { 1 } { 2 } }");
     JaclVal foo = jacl_inline_string("foo", 3);
     ASSERT(suspension_map_lookup(&map, foo));
     TEST_PASS();
@@ -385,7 +385,7 @@ static int test_suspension_direct_parallel(void) {
 /* Test: suspension inferred for direct use of race */
 static int test_suspension_direct_race(void) {
     SuspensionMap map = test__analyze(
-        "proc foo [] { race { 1 } { 2 } }");
+        "proc foo {} { race { 1 } { 2 } }");
     JaclVal foo = jacl_inline_string("foo", 3);
     ASSERT(suspension_map_lookup(&map, foo));
     TEST_PASS();
@@ -394,8 +394,8 @@ static int test_suspension_direct_race(void) {
 /* Test: transitive suspension through direct calls */
 static int test_suspension_transitive(void) {
     SuspensionMap map = test__analyze(
-        "proc inner [] { await 42 }\n"
-        "proc outer [] { inner }");
+        "proc inner {} { await 42 }\n"
+        "proc outer {} { inner }");
     JaclVal inner = jacl_inline_string("inner", 5);
     JaclVal outer = jacl_inline_string("outer", 5);
     ASSERT(suspension_map_lookup(&map, inner));
@@ -406,8 +406,8 @@ static int test_suspension_transitive(void) {
 /* Test: nested procs — inner suspends, outer calls inner → both suspend */
 static int test_suspension_nested_procs(void) {
     SuspensionMap map = test__analyze(
-        "proc outer [] {\n"
-        "  proc inner [] { await 42 }\n"
+        "proc outer {} {\n"
+        "  proc inner {} { await 42 }\n"
         "  inner\n"
         "}");
     JaclVal inner = jacl_inline_string("inner", 5);
@@ -421,8 +421,8 @@ static int test_suspension_nested_procs(void) {
    when suspending procs exist in the program */
 static int test_suspension_indirect_call(void) {
     SuspensionMap map = test__analyze(
-        "proc async_fn [] { await 42 }\n"
-        "proc caller [f] { [$f] }");
+        "proc async_fn {} { await 42 }\n"
+        "proc caller {f} { [$f] }");
     JaclVal async_fn = jacl_inline_string("async_f", 7);
     /* async_fn name is truncated to 7 chars for inline; use the actual name */
     async_fn = jacl_inline_string("async_f", 7);
@@ -430,8 +430,8 @@ static int test_suspension_indirect_call(void) {
        Let me use shorter names. */
     (void)async_fn;
     map = test__analyze(
-        "proc afn [] { await 42 }\n"
-        "proc caller [f] { [$f] }");
+        "proc afn {} { await 42 }\n"
+        "proc caller {f} { [$f] }");
     JaclVal afn = jacl_inline_string("afn", 3);
     JaclVal caller = jacl_inline_string("caller", 6);
     ASSERT(suspension_map_lookup(&map, afn));
@@ -442,8 +442,8 @@ static int test_suspension_indirect_call(void) {
 /* Test: proc without suspension points is non-suspending */
 static int test_suspension_non_suspending(void) {
     SuspensionMap map = test__analyze(
-        "proc add [a b] { [+ $a $b] }\n"
-        "proc mul [a b] { [* $a $b] }");
+        "proc add {a, b} { [+ $a $b] }\n"
+        "proc mul {a, b} { [* $a $b] }");
     JaclVal add = jacl_inline_string("add", 3);
     JaclVal mul = jacl_inline_string("mul", 3);
     ASSERT(!suspension_map_lookup(&map, add));
@@ -454,7 +454,7 @@ static int test_suspension_non_suspending(void) {
 /* Test: spawn is NOT a suspension point */
 static int test_suspension_spawn_not_suspending(void) {
     SuspensionMap map = test__analyze(
-        "proc foo [] { spawn { 42 } }");
+        "proc foo {} { spawn { 42 } }");
     JaclVal foo = jacl_inline_string("foo", 3);
     ASSERT(!suspension_map_lookup(&map, foo));
     TEST_PASS();
@@ -463,7 +463,7 @@ static int test_suspension_spawn_not_suspending(void) {
 /* Test: indirect calls are non-suspending when no suspending procs exist */
 static int test_suspension_indirect_no_suspending_procs(void) {
     SuspensionMap map = test__analyze(
-        "proc caller [f] { [$f] }");
+        "proc caller {f} { [$f] }");
     JaclVal caller = jacl_inline_string("caller", 6);
     ASSERT(!suspension_map_lookup(&map, caller));
     TEST_PASS();
@@ -472,7 +472,7 @@ static int test_suspension_indirect_no_suspending_procs(void) {
 /* Test: compile error for await inside try/catch */
 static int test_suspension_error_try_catch(void) {
     ASSERT(test__compile_has_error(
-        "proc foo [] { try { await 42 } e { $e } }",
+        "proc foo {} { try { await 42 } e { $e } }",
         "cannot suspend inside try/catch"));
     TEST_PASS();
 }
@@ -480,7 +480,7 @@ static int test_suspension_error_try_catch(void) {
 /* Test: compile error for parallel inside try/catch */
 static int test_suspension_error_try_catch_parallel(void) {
     ASSERT(test__compile_has_error(
-        "proc foo [] { try { parallel { 1 } { 2 } } e { $e } }",
+        "proc foo {} { try { parallel { 1 } { 2 } } e { $e } }",
         "cannot suspend inside try/catch"));
     TEST_PASS();
 }
@@ -488,7 +488,7 @@ static int test_suspension_error_try_catch_parallel(void) {
 /* Test: compile error for race inside try/catch */
 static int test_suspension_error_try_catch_race(void) {
     ASSERT(test__compile_has_error(
-        "proc foo [] { try { race { 1 } { 2 } } e { $e } }",
+        "proc foo {} { try { race { 1 } { 2 } } e { $e } }",
         "cannot suspend inside try/catch"));
     TEST_PASS();
 }
@@ -496,8 +496,8 @@ static int test_suspension_error_try_catch_race(void) {
 /* Test: compile error for suspending closure passed to each */
 static int test_suspension_error_suspending_callback_each(void) {
     ASSERT(test__compile_has_error(
-        "proc sfn [x] { await $x }\n"
-        "[each [vec 1 2] $sfn]",
+        "proc sfn {x} { await $x }\n"
+        "[for [vec 1 2] $sfn]",
         "cannot pass suspending closure to non-suspending builtin"));
     TEST_PASS();
 }
@@ -505,7 +505,7 @@ static int test_suspension_error_suspending_callback_each(void) {
 /* Test: compile error for suspending closure passed to filter */
 static int test_suspension_error_suspending_callback_filter(void) {
     ASSERT(test__compile_has_error(
-        "proc sfn [x] { await $x }\n"
+        "proc sfn {x} { await $x }\n"
         "[filter [vec 1 2] $sfn]",
         "cannot pass suspending closure to non-suspending builtin"));
     TEST_PASS();
@@ -514,7 +514,7 @@ static int test_suspension_error_suspending_callback_filter(void) {
 /* Test: compile error for suspending closure passed to transform */
 static int test_suspension_error_suspending_callback_transform(void) {
     ASSERT(test__compile_has_error(
-        "proc sfn [x] { await $x }\n"
+        "proc sfn {x} { await $x }\n"
         "[transform [vec 1 2] $sfn]",
         "cannot pass suspending closure to non-suspending builtin"));
     TEST_PASS();
@@ -527,9 +527,9 @@ static int test_suspension_existing_code_compiles(void) {
     vm_init(&vm, &arena);
 
     VMResult r = jacl_run(
-        "proc add [a b] { [+ $a $b] }\n"
-        "proc apply [f x] { [$f $x] }\n"
-        "proc double [x] { [* $x 2] }\n"
+        "proc add {a, b} { [+ $a $b] }\n"
+        "proc apply {f, x} { [$f $x] }\n"
+        "proc double {x} { [* $x 2] }\n"
         "print [add 1 2]",
         &vm, &arena);
     ASSERT(r == VM_OK);
@@ -572,7 +572,7 @@ static int test_cps_single_await_compiles(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [x] { def a [await $x]; [+ $a 1] }", &arena, &vm);
+        "proc foo {x} { def a [await $x]; [+ $a 1] }", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
     /* Find the foo closure in the top-level chunk */
@@ -601,7 +601,7 @@ static int test_cps_two_sequential_awaits(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [x y] {\n"
+        "proc foo {x, y} {\n"
         "  def a [await $x]\n"
         "  def b [await $y]\n"
         "  [+ $a $b]\n"
@@ -639,7 +639,7 @@ static int test_cps_three_sequential_awaits(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [x y z] {\n"
+        "proc foo {x, y, z} {\n"
         "  def a [await $x]\n"
         "  def b [await $y]\n"
         "  def c [await $z]\n"
@@ -681,7 +681,7 @@ static int test_cps_non_suspending_unaffected(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc add [a b] { [+ $a $b] }\n"
+        "proc add {a, b} { [+ $a $b] }\n"
         "print [add 10 20]",
         &vm, &arena);
     ASSERT(r == VM_OK);
@@ -699,7 +699,7 @@ static int test_cps_non_suspending_param_count(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc add [a b] { [+ $a $b] }", &arena, &vm);
+        "proc add {a, b} { [+ $a $b] }", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
     JaclClosure *add = test__find_closure(&cr.chunk, "add");
@@ -718,8 +718,8 @@ static int test_cps_propagation_to_caller(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc afn [x] { def a [await $x]; $a }\n"
-        "proc caller [f] { def r [afn $f]; $r }", &arena, &vm);
+        "proc afn {x} { def a [await $x]; $a }\n"
+        "proc caller {f} { def r [afn $f]; $r }", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
     /* afn is suspending → CPS-transformed with __k */
@@ -754,7 +754,7 @@ static int test_cps_single_await_resolved(void) {
     /* Create a resolved future, then call the CPS proc.
        The OP_AWAIT stub calls the continuation immediately with the resolved value. */
     VMResult r = jacl_run(
-        "proc afn [f] { def v [await $f]; [print $v] }\n"
+        "proc afn {f} { def v [await $f]; [print $v] }\n"
         "def fut [spawn { 42 }]\n"
         "[afn $fut { \"done\" }]",
         &vm, &arena);
@@ -778,7 +778,7 @@ static int test_cps_variable_capture(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [a b c] {\n"
+        "proc foo {a, b, c} {\n"
         "  def x [await $a]\n"
         "  # b is not used after await, but still captured eagerly\n"
         "  [+ $x $c]\n"
@@ -811,7 +811,7 @@ static int test_cps_eager_capture(void) {
        but a parallel body inside the continuation references it.
        With eager capture, the continuation still captures it. */
     CompileResult cr = test__compile(
-        "proc foo [unused] {\n"
+        "proc foo {unused} {\n"
         "  def f [spawn { 1 }]\n"
         "  def x [await $f]\n"
         "  [+ $x 0]\n"
@@ -841,7 +841,7 @@ static int test_cps_deep_chain(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [a b c d e] {\n"
+        "proc foo {a, b, c, d, e} {\n"
         "  def v1 [await $a]\n"
         "  def v2 [await $b]\n"
         "  def v3 [await $c]\n"
@@ -882,7 +882,7 @@ static int test_cps_emits_op_await(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [x] { def a [await $x]; $a }", &arena, &vm);
+        "proc foo {x} { def a [await $x]; $a }", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
@@ -913,7 +913,7 @@ static int test_cps_existing_code_unaffected(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc fib [n] {\n"
+        "proc fib {n} {\n"
         "  if [< $n 2] { [+ $n 0] } {\n"
         "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
         "  }\n"
@@ -939,7 +939,7 @@ static int test_cps_if_then_suspends(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [f] {\n"
+        "proc foo {f} {\n"
         "  def r [if [> 1 0] { [await $f] } { 42 }]\n"
         "  [+ $r 1]\n"
         "}", &arena, &vm);
@@ -966,7 +966,7 @@ static int test_cps_if_else_suspends(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [f] {\n"
+        "proc foo {f} {\n"
         "  def r [if [> 1 0] { 42 } { [await $f] }]\n"
         "  [+ $r 1]\n"
         "}", &arena, &vm);
@@ -991,7 +991,7 @@ static int test_cps_if_both_suspend(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [x y] {\n"
+        "proc foo {x, y} {\n"
         "  def r [if [> 1 0] { [await $x] } { [await $y] }]\n"
         "  [+ $r 1]\n"
         "}", &arena, &vm);
@@ -1017,7 +1017,7 @@ static int test_cps_nested_if(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [f] {\n"
+        "proc foo {f} {\n"
         "  def r [if [> 1 0] {\n"
         "    if [> 2 1] { [await $f] } { 10 }\n"
         "  } { 42 }]\n"
@@ -1041,7 +1041,7 @@ static int test_cps_chained_if(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [x f] {\n"
+        "proc foo {x, f} {\n"
         "  def r [if [== $x 1] {\n"
         "    [await $f]\n"
         "  } {\n"
@@ -1067,7 +1067,7 @@ static int test_cps_nested_await_args(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [x y] {\n"
+        "proc foo {x, y} {\n"
         "  [+ [await $x] [await $y]]\n"
         "}", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
@@ -1092,7 +1092,7 @@ static int test_cps_def_if_suspension(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [f] {\n"
+        "proc foo {f} {\n"
         "  def x [if [> 1 0] { [await $f] } { 42 }]\n"
         "  [print $x]\n"
         "}", &arena, &vm);
@@ -1124,7 +1124,7 @@ static int test_cps_if_then_runtime(void) {
     /* spawn creates a future (stub resolves it immediately with closure result).
        await retrieves the result from the future. */
     VMResult r = jacl_run(
-        "proc afn [f] {\n"
+        "proc afn {f} {\n"
         "  if [> 1 0] { [await $f] } { 99 }\n"
         "}\n"
         "def fut [spawn { 42 }]\n"
@@ -1151,7 +1151,7 @@ static int test_cps_if_nonsuspend_branch(void) {
     /* Condition is false → takes non-suspending else branch.
        Non-suspending branch calls join continuation directly. */
     VMResult r = jacl_run(
-        "proc afn [f] {\n"
+        "proc afn {f} {\n"
         "  if [> 0 1] { [await $f] } { 42 }\n"
         "}\n"
         "def fut [spawn { 99 }]\n"
@@ -1171,7 +1171,7 @@ static int test_cps_try_catch_error(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [f] { try { [await $f] } e { $e } }", &arena, &vm);
+        "proc foo {f} { try { [await $f] } e { $e } }", &arena, &vm);
     ASSERT(cr.error_count > 0);
 
     vm_destroy(&vm);
@@ -1186,7 +1186,7 @@ static int test_cps_let_block_suspension(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [a b] {\n"
+        "proc foo {a, b} {\n"
         "  def x [await $a]\n"
         "  def y [+ $x 10]\n"
         "  def z [await $b]\n"
@@ -1218,7 +1218,7 @@ static int test_cps_if_last_stmt(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc foo [f] {\n"
+        "proc foo {f} {\n"
         "  if [> 1 0] { [await $f] } { 42 }\n"
         "}", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
@@ -1242,7 +1242,7 @@ static int test_cps_if_no_suspension_ok(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc abs [n] { if [< $n 0] { [- 0 $n] } { [+ $n 0] } }\n"
+        "proc abs {n} { if [< $n 0] { [- 0 $n] } { [+ $n 0] } }\n"
         "print [abs [- 0 5]]\n"
         "print [abs 3]",
         &vm, &arena);
@@ -1385,7 +1385,7 @@ static int test_spawn_worker_execution(void) {
     VM vm;
     vm_init(&vm, &arena);
 
-    CompileResult cr = test__compile("proc task [] { 42 }", &arena, &vm);
+    CompileResult cr = test__compile("proc task {} { 42 }", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
     JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
@@ -1441,7 +1441,7 @@ static int test_rt_run_to_completion(void) {
     vm_init(&vm, &arena);
 
     /* Compile a non-suspending closure we can submit */
-    CompileResult cr = test__compile("proc task [] { 42 }", &arena, &vm);
+    CompileResult cr = test__compile("proc task {} { 42 }", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
     JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
@@ -1469,7 +1469,7 @@ static int test_spawn_existing_code_ok(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc fib [n] {\n"
+        "proc fib {n} {\n"
         "  if [< $n 2] { [+ $n 0] } {\n"
         "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
         "  }\n"
@@ -1683,7 +1683,7 @@ static int test_await_worker_resolved(void) {
     /* Compile a program: proc that spawns, awaits, and returns result.
        We compile the proc then run it via rt_run_to_completion. */
     CompileResult cr = test__compile(
-        "proc task [] { def f [spawn { 42 }]; await $f }",
+        "proc task {} { def f [spawn { 42 }]; await $f }",
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -1715,7 +1715,7 @@ static int test_await_existing_code_ok(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc add [a b] { [+ $a $b] }\n"
+        "proc add {a, b} { [+ $a $b] }\n"
         "print [add 3 4]\n"
         "print [add 10 20]",
         &vm, &arena);
@@ -1741,7 +1741,7 @@ static int test_parallel_two_tasks_order(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def results [parallel { 10 } { 20 }]\n"
         "  print [vec-get $results 0]\n"
         "  print [vec-get $results 1]\n"
@@ -1766,7 +1766,7 @@ static int test_parallel_three_tasks(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def results [parallel { [+ 1 2] } { [* 3 4] } { [- 10 5] }]\n"
         "  print [vec-get $results 0]\n"
         "  print [vec-get $results 1]\n"
@@ -1792,7 +1792,7 @@ static int test_parallel_error_propagation(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def results [parallel { 42 } { error \"fail\" }]\n"
         "  if [error? $results] {\n"
         "    print \"got-error\"\n"
@@ -1817,7 +1817,7 @@ static int test_parallel_compiles(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc main [] { parallel { 1 } { 2 } }",
+        "proc main {} { parallel { 1 } { 2 } }",
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -1842,7 +1842,7 @@ static int test_parallel_suspending_bodies(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def results [parallel { def f [spawn { 100 }]; await $f } { def g [spawn { 200 }]; await $g }]\n"
         "  print [vec-get $results 0]\n"
         "  print [vec-get $results 1]\n"
@@ -1866,7 +1866,7 @@ static int test_parallel_worker_execution(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc task [] { parallel { 10 } { 20 } }",
+        "proc task {} { parallel { 10 } { 20 } }",
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -1892,7 +1892,7 @@ static int test_parallel_result_vector(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def results [parallel { 1 } { 2 } { 3 } { 4 }]\n"
         "  print [vec-len $results]\n"
         "}\n"
@@ -1916,7 +1916,7 @@ static int test_parallel_with_continuation(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def results [parallel { 5 } { 10 }]\n"
         "  def sum [+ [vec-get $results 0] [vec-get $results 1]]\n"
         "  print $sum\n"
@@ -1941,7 +1941,7 @@ static int test_parallel_existing_code_ok(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc fib [n] {\n"
+        "proc fib {n} {\n"
         "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
         "}\n"
         "print [fib 10]",
@@ -1968,7 +1968,7 @@ static int test_race_two_tasks(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def winner [race { 42 } { 99 }]\n"
         "  print $winner\n"
         "}\n"
@@ -1993,7 +1993,7 @@ static int test_race_three_tasks(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def winner [race { 10 } { 20 } { 30 }]\n"
         "  print $winner\n"
         "}\n"
@@ -2017,7 +2017,7 @@ static int test_race_error_propagation(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def result [race { error \"fail\" } { 42 }]\n"
         "  if [error? $result] {\n"
         "    print \"got-error\"\n"
@@ -2042,7 +2042,7 @@ static int test_race_compiles(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc main [] { race { 1 } { 2 } }",
+        "proc main {} { race { 1 } { 2 } }",
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -2066,7 +2066,7 @@ static int test_race_worker_execution(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc task [] { race { 10 } { 20 } }",
+        "proc task {} { race { 10 } { 20 } }",
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -2092,7 +2092,7 @@ static int test_race_with_continuation(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def w [race { 5 } { 10 }]\n"
         "  print [+ $w 100]\n"
         "}\n"
@@ -2116,7 +2116,7 @@ static int test_race_existing_code_ok(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc fib [n] {\n"
+        "proc fib {n} {\n"
         "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
         "}\n"
         "print [fib 10]",
@@ -2143,7 +2143,7 @@ static int test_no_stack_scan_spawn(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc task [] { def f [spawn { 42 }]; await $f }",
+        "proc task {} { def f [spawn { 42 }]; await $f }",
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -2168,7 +2168,7 @@ static int test_no_stack_scan_parallel(void) {
     vm_init(&vm, &arena);
 
     CompileResult cr = test__compile(
-        "proc task [] { parallel { 10 } { 20 } }",
+        "proc task {} { parallel { 10 } { 20 } }",
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -2196,7 +2196,7 @@ static int test_st_gc_still_works(void) {
     /* This test runs without runtime — single-threaded GC should
      * still scan VM stack for backward compatibility. */
     VMResult r = jacl_run(
-        "proc fib [n] {\n"
+        "proc fib {n} {\n"
         "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
         "}\n"
         "print [fib 10]",
@@ -2497,7 +2497,7 @@ static int test_oom_existing_code_ok(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc fib [n] {\n"
+        "proc fib {n} {\n"
         "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
         "}\n"
         "print [fib 10]",
@@ -2573,7 +2573,7 @@ static int test_integ_await_in_if(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  if [> 2 1] {\n"
         "    def f [spawn { 100 }]\n"
         "    print [await $f]\n"
@@ -2677,15 +2677,15 @@ static int test_integ_suspension_propagation(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc inner [] {\n"
+        "proc inner {} {\n"
         "  def f [spawn { 99 }]\n"
         "  await $f\n"
         "}\n"
-        "proc outer [] {\n"
+        "proc outer {} {\n"
         "  def val [inner]\n"
         "  [+ $val 1]\n"
         "}\n"
-        "proc main [] { print [outer] }\n"
+        "proc main {} { print [outer] }\n"
         "main",
         &vm, &arena);
     ASSERT(r == VM_OK);
@@ -2729,7 +2729,7 @@ static int test_integ_multi_spawn_await(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def f1 [spawn { 10 }]\n"
         "  def f2 [spawn { 20 }]\n"
         "  def f3 [spawn { 30 }]\n"
@@ -2759,12 +2759,12 @@ static int test_integ_spawn_heavy_alloc(void) {
 
     /* Spawn a task that does recursive fibonacci — heavy allocation */
     VMResult r = jacl_run(
-        "proc fib [n] {\n"
+        "proc fib {n} {\n"
         "  if [< $n 2] { [+ $n 0] } {\n"
         "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
         "  }\n"
         "}\n"
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def f [spawn { [fib 15] }]\n"
         "  print [await $f]\n"
         "}\n"
@@ -2865,7 +2865,7 @@ static int test_integ_parallel_two(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def r [parallel { [+ 1 2] } { [* 3 4] }]\n"
         "  print [vec-get $r 0]\n"
         "  print [vec-get $r 1]\n"
@@ -2890,7 +2890,7 @@ static int test_integ_parallel_five(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def r [parallel { 10 } { 20 } { 30 } { 40 } { 50 }]\n"
         "  print [vec-get $r 0]\n"
         "  print [vec-get $r 1]\n"
@@ -2918,7 +2918,7 @@ static int test_integ_parallel_error(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def r [parallel { 42 } { error \"bad\" }]\n"
         "  if [error? $r] { print \"error\" } { print \"ok\" }\n"
         "}\n"
@@ -2943,12 +2943,12 @@ static int test_integ_parallel_heavy_alloc(void) {
 
     /* fib at top-level, main uses parallel with fib calls */
     VMResult r = jacl_run(
-        "proc fib [n] {\n"
+        "proc fib {n} {\n"
         "  if [< $n 2] { [+ $n 0] } {\n"
         "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
         "  }\n"
         "}\n"
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def r [parallel { [fib 10] } { [fib 8] }]\n"
         "  print [vec-get $r 0]\n"
         "  print [vec-get $r 1]\n"
@@ -2975,7 +2975,7 @@ static int test_integ_race_two(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def w [race { 42 } { 99 }]\n"
         "  print $w\n"
         "}\n"
@@ -3001,7 +3001,7 @@ static int test_integ_race_losers_ok(void) {
 
     /* 3 tasks, first wins, losers complete silently */
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def w [race { 1 } { 2 } { 3 }]\n"
         "  print $w\n"
         "}\n"
@@ -3027,12 +3027,12 @@ static int test_integ_toplevel_suspending(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc aadd [a b] {\n"
+        "proc aadd {a, b} {\n"
         "  def fa [spawn { [+ $a 0] }]\n"
         "  def fb [spawn { [+ $b 0] }]\n"
         "  [+ [await $fa] [await $fb]]\n"
         "}\n"
-        "proc main [] { print [aadd 15 27] }\n"
+        "proc main {} { print [aadd 15 27] }\n"
         "main",
         &vm, &arena);
     ASSERT(r == VM_OK);
@@ -3053,15 +3053,15 @@ static int test_integ_nested_suspending(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc inner [x] {\n"
+        "proc inner {x} {\n"
         "  def f [spawn { [+ $x 10] }]\n"
         "  await $f\n"
         "}\n"
-        "proc mid [x] {\n"
+        "proc mid {x} {\n"
         "  def v [inner $x]\n"
         "  [+ $v 5]\n"
         "}\n"
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  print [mid 100]\n"
         "}\n"
         "main",
@@ -3084,11 +3084,11 @@ static int test_integ_error_through_cps(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc bad [] {\n"
+        "proc bad {} {\n"
         "  def f [spawn { error \"oops\" }]\n"
         "  await $f\n"
         "}\n"
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def result [bad]\n"
         "  print [error? $result]\n"
         "}\n"
@@ -3114,7 +3114,7 @@ static int test_stress_workers_spawn(void) {
 
     /* Compile a proc that spawns a sub-task and awaits it */
     CompileResult cr = test__compile(
-        "proc task [] { def f [spawn { [+ 20 22] }]; await $f }",
+        "proc task {} { def f [spawn { [+ 20 22] }]; await $f }",
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -3140,12 +3140,12 @@ static int test_stress_heavy_alloc_gc(void) {
 
     /* fib(15) does heavy allocation — exercises GC under concurrent load */
     CompileResult cr = test__compile(
-        "proc fib [n] {\n"
+        "proc fib {n} {\n"
         "  if [< $n 2] { [+ $n 0] } {\n"
         "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
         "  }\n"
         "}\n"
-        "proc task [] { def f [spawn { [fib 15] }]; await $f }",
+        "proc task {} { def f [spawn { [fib 15] }]; await $f }",
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -3171,7 +3171,7 @@ static int test_stress_parallel_many(void) {
 
     /* parallel 4 tasks on 4 workers */
     CompileResult cr = test__compile(
-        "proc task [] { parallel { 1 } { 2 } { 3 } { 4 } }",
+        "proc task {} { parallel { 1 } { 2 } { 3 } { 4 } }",
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -3203,7 +3203,7 @@ static int test_stress_parallel_join_gc(void) {
     /* Parallel with 4 bodies + result vector access in continuation.
      * Verifies the result vector is intact after parallel completion. */
     CompileResult cr = test__compile(
-        "proc task [] {\n"
+        "proc task {} {\n"
         "  def r [parallel { [+ 10 20] } { [+ 30 40] } { [+ 50 60] } { [+ 70 80] }]\n"
         "  [+ [+ [vec-get $r 0] [vec-get $r 1]] [+ [vec-get $r 2] [vec-get $r 3]]]\n"
         "}",
@@ -3232,7 +3232,7 @@ static int test_stress_race_many(void) {
 
     /* race 4 tasks on 4 workers */
     CompileResult cr = test__compile(
-        "proc task [] { race { 10 } { 20 } { 30 } { 40 } }",
+        "proc task {} { race { 10 } { 20 } { 30 } { 40 } }",
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -3258,7 +3258,7 @@ static int test_stress_mixed_workload(void) {
 
     /* A proc that uses spawn+await then returns result */
     CompileResult cr = test__compile(
-        "proc task [] {\n"
+        "proc task {} {\n"
         "  def f [spawn { [+ 10 20] }]\n"
         "  def a [await $f]\n"
         "  def r [parallel { [+ $a 1] } { [+ $a 2] }]\n"
@@ -3293,7 +3293,7 @@ static int test_integ_memory_bounded(void) {
     /* Multiple sequential spawn+await — each creates futures and closures
        that become garbage. GC should keep heap bounded. */
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def f1 [spawn { 1 }]\n"
         "  def a [await $f1]\n"
         "  def f2 [spawn { [+ $a 2] }]\n"
@@ -3332,7 +3332,7 @@ static int test_regression_fib(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc fib [n] {\n"
+        "proc fib {n} {\n"
         "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
         "}\n"
         "print [fib 10]",
@@ -3355,8 +3355,8 @@ static int test_regression_closures(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc mkadd [x] {\n"
-        "  proc inner [y] { [+ $x $y] }\n"
+        "proc mkadd {x} {\n"
+        "  proc inner {y} { [+ $x $y] }\n"
         "}\n"
         "def add5 [mkadd 5]\n"
         "print [$add5 10]\n"
@@ -3426,7 +3426,7 @@ static int test_regression_mutable_state(void) {
 
     VMResult r = jacl_run(
         "def a [atom 0]\n"
-        "reset! $a 42\n"
+        "reset $a 42\n"
         "print [deref $a]",
         &vm, &arena);
     ASSERT(r == VM_OK);
@@ -3556,8 +3556,8 @@ static int test_closure_oob_local_capture(void) {
 /* Test: ast__contains_suspension with map detects named suspending proc */
 static int test_contains_susp_named_proc(void) {
     SuspensionMap map = test__analyze(
-        "proc deep [] { await 42 }\n"
-        "proc mid [] { def f [spawn { deep }]; await $f }");
+        "proc deep {} { await 42 }\n"
+        "proc mid {} { def f [spawn { deep }]; await $f }");
     JaclVal deep = jacl_inline_string("deep", 4);
     JaclVal mid = jacl_inline_string("mid", 3);
     ASSERT(suspension_map_lookup(&map, deep));
@@ -3585,11 +3585,11 @@ static int test_spawn_calls_susp_proc(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc slow [] {\n"
+        "proc slow {} {\n"
         "  def f [spawn { 42 }]\n"
         "  await $f\n"
         "}\n"
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def f [spawn { slow }]\n"
         "  def r [await $f]\n"
         "  print $r\n"
@@ -3608,8 +3608,8 @@ static int test_susp_callback_reject_via_map(void) {
     /* A block containing a call to a suspending proc should be
        detected by ast__contains_suspension with map */
     ASSERT(test__compile_has_error(
-        "proc sfn [] { await 42 }\n"
-        "[each [vec 1 2] { sfn }]",
+        "proc sfn {} { await 42 }\n"
+        "[for [vec 1 2] { sfn }]",
         "cannot suspend inside non-suspending callback"));
     TEST_PASS();
 }
@@ -3626,7 +3626,7 @@ static int test_cont_error_propagation(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc main [] {\n"
+        "proc main {} {\n"
         "  def r [parallel { 42 } { error \"fail\" }]\n"
         "  print [error? $r]\n"
         "  print [error-val $r]\n"
@@ -3961,10 +3961,10 @@ static int test_gc_parallel_join_pressure(void) {
      * The result vector must survive GC between the last task completing
      * and the join continuation executing. */
     CompileResult cr = test__compile(
-        "proc fib [n] {\n"
+        "proc fib {n} {\n"
         "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
         "}\n"
-        "proc task [] {\n"
+        "proc task {} {\n"
         "  def r [parallel { [fib 10] } { [fib 8] } { [fib 6] } { [fib 4] }]\n"
         "  [+ [+ [vec-get $r 0] [vec-get $r 1]] [+ [vec-get $r 2] [vec-get $r 3]]]\n"
         "}",
@@ -3999,7 +3999,7 @@ static int test_cps_recursive_spawn_transform(void) {
 
     /*
      * Recursive proc 'recur' with spawn/await in body:
-     *   proc recur [n] {
+     *   proc recur {n} {
      *     if [< $n 1] { 0 } {
      *       def f [spawn { [+ $n 10] }]
      *       def v [await $f]
@@ -4013,7 +4013,7 @@ static int test_cps_recursive_spawn_transform(void) {
      * - The recursive [recur ...] call in tail position passes __k directly
      */
     CompileResult cr = test__compile(
-        "proc recur [n] {\n"
+        "proc recur {n} {\n"
         "  if [< $n 1] { 0 } {\n"
         "    def f [spawn { [+ $n 10] }]\n"
         "    def v [await $f]\n"
@@ -4064,7 +4064,7 @@ static int test_cps_recursive_parallel_upvalues(void) {
 
     /*
      * Recursive proc with parallel:
-     *   proc loop [n] {
+     *   proc loop {n} {
      *     if [< $n 1] { 0 } {
      *       def r [parallel { $n } { [+ $n 1] }]
      *       [+ [vec-get $r 0] [loop [- $n 1]]]
@@ -4076,7 +4076,7 @@ static int test_cps_recursive_parallel_upvalues(void) {
      * - n (for the recursive call argument)
      */
     CompileResult cr = test__compile(
-        "proc loop [n] {\n"
+        "proc loop {n} {\n"
         "  if [< $n 1] { 0 } {\n"
         "    def r [parallel { [+ $n 0] } { [+ $n 1] }]\n"
         "    [+ [vec-get $r 0] [loop [- $n 1]]]\n"
@@ -4125,7 +4125,7 @@ static int test_cps_recursive_tail_call_passes_k(void) {
 
     /*
      * Tail-recursive proc where the recursive call IS the last statement:
-     *   proc run [n] {
+     *   proc run {n} {
      *     def f [spawn { [+ $n 0] }]
      *     def v [await $f]
      *     [run [- $n 1]]
@@ -4137,7 +4137,7 @@ static int test_cps_recursive_tail_call_passes_k(void) {
      * __k directly.
      */
     CompileResult cr = test__compile(
-        "proc run [n] {\n"
+        "proc run {n} {\n"
         "  def f [spawn { [+ $n 0] }]\n"
         "  def v [await $f]\n"
         "  [run [- $n 1]]\n"
@@ -4204,7 +4204,7 @@ static int test_cps_recursive_spawn_runs(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc work [n] {\n"
+        "proc work {n} {\n"
         "  if [< $n 1] { 0 } {\n"
         "    def f [spawn { [+ $n 0] }]\n"
         "    def v [await $f]\n"

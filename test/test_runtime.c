@@ -748,13 +748,13 @@ static int test_write_barrier_vm_reset(void) {
 
     ATOMIC_STORE_EXPLICIT(&rt.gc_active, 1, MEM_RELEASE);
 
-    /* Compile and run: create a box, then reset! it */
-    const char *src = "def b [box 10]\n[reset! $b 20]";
+    /* Compile and run: create a box, then reset it */
+    const char *src = "def b [box 10]\n[reset $b 20]";
     gc__current_heap = &vm->heap;
     VMResult r = jacl_run(src, vm, &arena);
     ASSERT(r == VM_OK);
 
-    /* Grey buffer should have entries from the reset! operation.
+    /* Grey buffer should have entries from the reset operation.
      * old = 10 (inline int), new = 20 (inline int) — both inline, so
      * the write barrier won't push either. Let's use heap-allocated values. */
     ATOMIC_STORE_EXPLICIT(&rt.gc_active, 0, MEM_RELEASE);
