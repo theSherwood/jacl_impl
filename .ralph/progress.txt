@@ -23,6 +23,14 @@ Started: Sun Mar 15 00:51:19 UTC 2026
 - elif desugars to nested if/else wrapped in AST_BLOCK — compiler never sees elif
 - `for` uses default bare command parsing (no custom parse function needed) — compiler distinguishes forms by arg count/type
 - Block-form iteration (for collection { body }) creates implicit closures at compile time using sub-compiler pattern, then emits OP_EACH
+- When renaming builtins, update both compiler__compile_command AND ast analysis functions (e.g., ast__contains_nonlocal_set_impl)
+- Binding operators (=, :, ::) desugar in parser__parse_bare_command — no compiler changes needed; only active for TOKEN_WORD heads in command mode
+- Arrow field access (->): postfix operator handled in parser__maybe_arrow_access, called from parser__parse_expr and parser__parse_infix_operand
+- Lexer word/var scanning must use lexer__is_word_char_no_arrow() to stop before -> (since - is a valid word char)
+- Proc names must be ≤7 bytes due to inline string limit — use short names in tests
+- Pipe threading (|) is pure parser transform: parser__parse_piped_command wraps parser__parse_bare_command and chains pipes
+- TOKEN_PIPE added to parser__is_command_end so commands terminate before |; pipes only work in command mode ({} and top-level), not inside []
+- Inside [] brackets, | is still parsed as literal string "|" (no pipe semantics) — arg collection loop terminates on RBRACKET, not is_command_end
 
 ## 2026-03-15 - US-001
 Thread: n/a
@@ -142,4 +150,86 @@ Thread: n/a
   - Upvalue capture works automatically — sub-compiler's enclosing pointer enables upvalue resolution
   - No new opcodes needed — reuses OP_EACH for all forms
   - str-cat is not a valid builtin; use string interpolation or arithmetic for test values
+---
+
+## 2026-03-16 - US-007
+Thread: n/a
+- Added `set`/`reset`/`swap` as aliases for `set!`/`reset!`/`swap!` in compiler.c
+- Updated compiler__head_matches checks to accept both old and new names
+- Updated ast__contains_nonlocal_set_impl to detect `set` (without bang) for concurrent pinning analysis
+- Error messages now use bang-less names (e.g., "set" instead of "set!")
+- Updated 3 arity tests in test_m10.c to match new error message format
+- Added 8 new compiler tests: set/set! local, reset/reset! atom, swap/swap! atom, set global, set multiple reassign
+- All 50 build suites pass (0 failures), 206 compiler tests pass
+- Files changed: src/compiler.c, test/test_compiler.c, test/test_m10.c
+- **Learnings for future iterations:**
+  - Renaming builtins requires updating both the compilation path AND the ast analysis functions (ast__contains_nonlocal_set_impl)
+  - Error message strings in tests must be updated when error messages change — check test_m10.c arity tests
+  - TOKEN_SET keyword maps to AST_LIT_STRING "set" in parser — no special handling needed for the keyword/builtin name overlap
+  - `set!` is still TOKEN_WORD (lexer__is_word_char includes !), while `set` is TOKEN_SET keyword — both produce AST_LIT_STRING
+---
+
+## 2026-03-16 - US-008
+Thread: n/a
+- Added binding operator desugaring in parser__parse_bare_command:
+  - `x = 5` → `[def x 5]`, `i64 x = 5` → `[def i64 x 5]` (TOKEN_EQUALS)
+  - `x : 0` → `[mut x 0]`, `i64 x : 0` → `[mut i64 x 0]` (TOKEN_COLON)
+  - `x :: val` → `[set x val]` (TOKEN_DOUBLE_COLON)
+- Untyped form: detect TOKEN_EQUALS/COLON/DOUBLE_COLON after word head
+- Typed form: detect word + word + TOKEN_EQUALS/COLON (lookahead p->pos+1)
+- Only triggers when head_token_type == TOKEN_WORD (not inside [] or ())
+- No compiler changes needed — desugaring produces same AST as def/mut/set commands
+- 9 new parser tests: equals→def, typed equals, colon→mut, typed colon, double-colon→set, in-block, def-cmd-still-works, expr-value, not-in-brackets
+- 8 new compiler tests: equals def, typed equals, colon mut, typed colon, double-colon set, mixed with commands, in-block, expr values
+- All 163 parser tests pass, all 214 compiler tests pass, all 50 build suites pass (0 failures)
+- Files changed: src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Binding operators are pure parser sugar — detect token type after head, rewrite to AST_COMMAND with def/mut/set head
+  - Typed bindings need 2-token lookahead: check p->tokens[p->pos + 1] for the operator token
+  - Only TOKEN_WORD heads trigger binding detection — keyword tokens (TOKEN_DEF, TOKEN_MUT, TOKEN_SET) skip it, so `def x 5` still works normally
+  - Binding operators naturally don't work in [] or () because parser__parse_bare_command is only called from block and top-level parsing
+---
+
+## 2026-03-16 - US-009
+Thread: n/a
+- Added parser__maybe_arrow_access() — postfix arrow field access that wraps expr->field as [. expr field]
+- Called from parser__parse_expr() and parser__parse_infix_operand() for universal support across all three modes
+- Removed TOKEN_ARROW from atom dispatch lists (no longer a standalone value)
+- Modified lexer word/var scanning to stop before -> sequences (lexer__is_word_char_no_arrow helper)
+- Updated 5 lexer scanning loops: new-path word (1009), new-path var (1211), old-path word (841), old-path var (878), string interp var (662)
+- No compiler changes needed — parser produces [. expr field] AST_COMMAND that compiler already handles
+- 6 new parser tests: basic, chained, on-command, in-infix, in-bracket-cmd, old-dot-compat
+- 6 new compiler tests: basic-get, chained-get, on-expr-result, in-infix-mode, in-bracket-cmd, old-dot-compat
+- All 169 parser tests pass, all 220 compiler tests pass, all 50 build suites pass (0 failures)
+- Files changed: src/lexer.c, src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Postfix operators (like ->) need handling in BOTH parser__parse_expr AND parser__parse_infix_operand to work in all three modes
+  - The lexer's word/var char set includes - (hyphen), so -> must be special-cased to stop word scanning before the arrow
+  - lexer__is_word_char_no_arrow checks current char + next char to detect -> boundary
+  - All 5 word/var scanning loops (old-path + new-path + string interp) must be updated for consistent behavior
+  - Proc name inline string limit is 7 bytes — use short names in tests (mkpt not make-point)
+  - Arrow desugaring is pure parser transform: $p->x → [. $p x], no compiler changes needed
+---
+
+## 2026-03-16 - US-010
+Thread: n/a
+- Added parser__parse_piped_command() — wraps parser__parse_bare_command with pipe chaining
+- Added TOKEN_PIPE to parser__is_command_end so commands terminate before |
+- Pipe desugars as first-arg threading: foo $a | bar $b → [bar [foo $a] $b]
+- Multi-stage pipes chain left-to-right: a | b | c → [c [b [a]]]
+- Handles both AST_COMMAND right sides (insert left as first arg) and non-command right sides (wrap as call)
+- Updated parser__parse_block and parser_parse to call parse_piped_command instead of parse_bare_command
+- Pipes only work in command mode ({} and top-level); inside [] brackets, | remains a literal string
+- No compiler changes needed — pipe desugaring produces nested AST_COMMAND nodes
+- 6 new parser tests: basic, multi-stage, with-args, in-block, zero-arg-right, literal-in-brackets
+- 6 new compiler tests: basic, multi-stage, with-builtins, in-block, with-vars, in-proc-body
+- All 175 parser tests pass, all 226 compiler tests pass, all 50 build suites pass (0 failures)
+- Files changed: src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Pipe is pure parser transform — no compiler changes needed, just nested AST_COMMAND
+  - TOKEN_PIPE in parser__is_command_end means commands terminate before | in bare command mode
+  - Inside [] brackets, | is still parsed as literal string — arg collection uses RBRACKET not is_command_end
+  - Pipe desugaring wraps parse_bare_command, so pipes compose with all existing command forms (if, while, proc, binding ops)
+  - Newlines after | are skipped for multi-line pipe chains
+  - Cannot use pipe inside [] brackets — tests that want pipe results in binding must use proc body or top-level pipe
 ---

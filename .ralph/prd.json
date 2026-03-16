@@ -134,7 +134,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Simple change in compiler.c — add new string comparisons for 'set', 'reset', 'swap' alongside existing 'set!', 'reset!', 'swap!' comparisons. Both dispatch to the same compilation logic and opcodes. No runtime changes."
     },
     {
@@ -153,7 +153,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "The desugaring happens in the parser or early compiler: when parsing a command in {} mode, after collecting tokens, scan for =, :, or :: operators. If found, rewrite the command as a def/mut/set AST_COMMAND. For typed bindings like 'i64 x = 5', the type word and name word appear before the operator. The parser needs to handle this without ambiguity — = and : should only be treated as binding operators when they appear in the right position (after a name or type+name)."
     },
     {
@@ -170,7 +170,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "The -> can be handled in the parser as a postfix operator on expressions. After parsing a primary expression ($var, [cmd], etc.), check if the next token is TOKEN_ARROW. If so, consume the arrow and the following word (field name), and wrap in an AST_COMMAND equivalent to [. expr field]. Chain by looping. This is similar to how many languages handle member access as a postfix operator."
     },
     {
@@ -187,7 +187,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Pipes are parsed in command mode when TOKEN_PIPE appears between commands. The parser collects left-side command, sees |, collects right-side command, then rewrites: right command's args list gets left command's result inserted as first arg. This is an AST rewrite — the compiler never sees pipes, just nested AST_COMMAND nodes. Implement in the parser's command-mode parsing function."
     },
     {
