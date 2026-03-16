@@ -64,7 +64,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Currently for block bodies are wrapped in closures and called via OP_EACH. Inlining means the compiler emits the iteration loop directly (like while): get collection length, loop counter, get element, bind as local ($it or named), compile body inline, increment counter, loop back. This is a significant compiler change — the for block forms switch from OP_EACH-based to direct loop emission. Lambda and HOF forms continue using OP_EACH unchanged. break/continue from US-001/US-002 must work with the inlined loop."
     },
     {

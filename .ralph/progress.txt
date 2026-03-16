@@ -14,6 +14,11 @@ Started: Mon Mar 16 20:45:23 UTC 2026
 - For HOF callback form `[for $coll $callback]`, reuse OP_EACH via compiler__compile_hof_builtin
 - Test pattern: compile-and-run via jacl_run(), capture stdout with PrintCapture, ASSERT_STR_EQ
 - For compile-error tests: compile_source() returns CompileResult, check error_count and strstr(error_message)
+- `return` keyword: AST_RETURN node, compiles to push value (or nil) + OP_RETURN — works in both bracket `[return $val]` and bare `return $val` forms
+- Since for-loop bodies are inlined, `return` inside a for block naturally exits the enclosing proc via OP_RETURN (no special handling needed)
+- HOF callback form uses OP_EACH (separate call frame), so `return` in callback exits only the callback proc
+- Lambda shorthand `\` is specified in SYNTAX_REDESIGN.md but NOT implemented — use named `proc` + `$callback` for HOF form tests
+- Proc/variable names must be ≤ 7 chars (inline string limit) — use short names in tests
 
 ---
 
@@ -45,4 +50,19 @@ Started: Mon Mar 16 20:45:23 UTC 2026
   - Continue in for-loops uses forward-jump patching (like break) because the increment code is AFTER the body. While-loop continue uses backward OP_LOOP because condition is BEFORE the body
   - Pre-allocated element slot with OP_SET_LOCAL avoids creating new locals each iteration and keeps the stack layout stable
   - Adding opcodes shifts OP_HALT — test_bytecode.c has ordinal assertions that must be updated
+---
+
+## 2026-03-16 - US-003
+- Implemented `return` keyword and verified inlined for-loop return semantics
+- Files changed:
+  - src/ast.c: Added AST_RETURN node type with optional value child, added pretty-printer case
+  - src/parser.c: Parse `return [value]` in parser__parse_bare_command (same pattern as break)
+  - src/compiler.c: Added `[return]`/`[return $val]` bracket-form handler (push value + OP_RETURN); added AST_RETURN case in compile_node switch (same logic); updated 3 AST walkers (analyze__walk_body, analyze__collect_procs, ast__contains_suspension) with AST_RETURN cases
+  - test/test_compiler.c: 5 new e2e tests — return from for block, return $value from for block, return from HOF callback for (exits callback only), bare return from for block, return nil from for block
+- **Learnings for future iterations:**
+  - For-loop bodies were already inlined (from US-002), so `return` inside them naturally exits the enclosing proc — OP_RETURN destroys the entire call frame including loop hidden locals
+  - HOF callback form (OP_EACH) runs each iteration in a separate call frame, so `return` exits only the callback's frame — this is the correct lambda/HOF semantics
+  - The `\` lambda shorthand from SYNTAX_REDESIGN.md is not yet implemented — tests must use named proc + $callback HOF pattern
+  - Proc and variable names have a 7-byte inline string limit — `sum-until` (9 chars) fails, use `sumto` instead
+  - AST_RETURN follows the same pattern as AST_BREAK: optional value child, compile to emit value + control flow opcode
 ---
