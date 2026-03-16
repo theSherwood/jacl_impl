@@ -1,6 +1,6 @@
 # expect: Point{x: 0, y: 0}
 # Test structs stored as map values
-defstruct Point [x :i32] [y :i32]
+struct Point {i32 x, i32 y}
 def m [map "origin" [Point 0 0]]
 def p [map-get $m "origin"]
 print $p

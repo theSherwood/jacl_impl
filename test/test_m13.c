@@ -914,7 +914,7 @@ static int test_cps_existing_code_unaffected(void) {
 
     VMResult r = jacl_run(
         "proc fib {n} {\n"
-        "  if [< $n 2] { [+ $n 0] } {\n"
+        "  if [< $n 2] { [+ $n 0] } else {\n"
         "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
         "  }\n"
         "}\n"
@@ -1019,7 +1019,7 @@ static int test_cps_nested_if(void) {
     CompileResult cr = test__compile(
         "proc foo {f} {\n"
         "  def r [if [> 1 0] {\n"
-        "    if [> 2 1] { [await $f] } { 10 }\n"
+        "    if [> 2 1] { [await $f] } else { 10 }\n"
         "  } { 42 }]\n"
         "  [+ $r 1]\n"
         "}", &arena, &vm);
@@ -1045,7 +1045,7 @@ static int test_cps_chained_if(void) {
         "  def r [if [== $x 1] {\n"
         "    [await $f]\n"
         "  } {\n"
-        "    if [== $x 2] { 20 } { 30 }\n"
+        "    if [== $x 2] { 20 } else { 30 }\n"
         "  }]\n"
         "  [+ $r 1]\n"
         "}", &arena, &vm);
@@ -1125,7 +1125,7 @@ static int test_cps_if_then_runtime(void) {
        await retrieves the result from the future. */
     VMResult r = jacl_run(
         "proc afn {f} {\n"
-        "  if [> 1 0] { [await $f] } { 99 }\n"
+        "  if [> 1 0] { [await $f] } else { 99 }\n"
         "}\n"
         "def fut [spawn { 42 }]\n"
         "print [afn $fut { \"done\" }]",
@@ -1152,7 +1152,7 @@ static int test_cps_if_nonsuspend_branch(void) {
        Non-suspending branch calls join continuation directly. */
     VMResult r = jacl_run(
         "proc afn {f} {\n"
-        "  if [> 0 1] { [await $f] } { 42 }\n"
+        "  if [> 0 1] { [await $f] } else { 42 }\n"
         "}\n"
         "def fut [spawn { 99 }]\n"
         "print [afn $fut { \"done\" }]",
@@ -1219,7 +1219,7 @@ static int test_cps_if_last_stmt(void) {
 
     CompileResult cr = test__compile(
         "proc foo {f} {\n"
-        "  if [> 1 0] { [await $f] } { 42 }\n"
+        "  if [> 1 0] { [await $f] } else { 42 }\n"
         "}", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -1242,7 +1242,7 @@ static int test_cps_if_no_suspension_ok(void) {
     vm.print_ctx = &cap;
 
     VMResult r = jacl_run(
-        "proc abs {n} { if [< $n 0] { [- 0 $n] } { [+ $n 0] } }\n"
+        "proc abs {n} { if [< $n 0] { [- 0 $n] } else { [+ $n 0] } }\n"
         "print [abs [- 0 5]]\n"
         "print [abs 3]",
         &vm, &arena);
@@ -1470,7 +1470,7 @@ static int test_spawn_existing_code_ok(void) {
 
     VMResult r = jacl_run(
         "proc fib {n} {\n"
-        "  if [< $n 2] { [+ $n 0] } {\n"
+        "  if [< $n 2] { [+ $n 0] } else {\n"
         "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
         "  }\n"
         "}\n"
@@ -1796,7 +1796,7 @@ static int test_parallel_error_propagation(void) {
         "  def results [parallel { 42 } { error \"fail\" }]\n"
         "  if [error? $results] {\n"
         "    print \"got-error\"\n"
-        "  } {\n"
+        "  } else {\n"
         "    print \"no-error\"\n"
         "  }\n"
         "}\n"
@@ -1942,7 +1942,7 @@ static int test_parallel_existing_code_ok(void) {
 
     VMResult r = jacl_run(
         "proc fib {n} {\n"
-        "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
+        "  if [<= $n 1] { [+ $n 0] } else { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
         "}\n"
         "print [fib 10]",
         &vm, &arena);
@@ -2021,7 +2021,7 @@ static int test_race_error_propagation(void) {
         "  def result [race { error \"fail\" } { 42 }]\n"
         "  if [error? $result] {\n"
         "    print \"got-error\"\n"
-        "  } {\n"
+        "  } else {\n"
         "    print \"no-error\"\n"
         "  }\n"
         "}\n"
@@ -2117,7 +2117,7 @@ static int test_race_existing_code_ok(void) {
 
     VMResult r = jacl_run(
         "proc fib {n} {\n"
-        "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
+        "  if [<= $n 1] { [+ $n 0] } else { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
         "}\n"
         "print [fib 10]",
         &vm, &arena);
@@ -2197,7 +2197,7 @@ static int test_st_gc_still_works(void) {
      * still scan VM stack for backward compatibility. */
     VMResult r = jacl_run(
         "proc fib {n} {\n"
-        "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
+        "  if [<= $n 1] { [+ $n 0] } else { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
         "}\n"
         "print [fib 10]",
         &vm, &arena);
@@ -2498,7 +2498,7 @@ static int test_oom_existing_code_ok(void) {
 
     VMResult r = jacl_run(
         "proc fib {n} {\n"
-        "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
+        "  if [<= $n 1] { [+ $n 0] } else { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
         "}\n"
         "print [fib 10]",
         &vm, &arena);
@@ -2577,7 +2577,7 @@ static int test_integ_await_in_if(void) {
         "  if [> 2 1] {\n"
         "    def f [spawn { 100 }]\n"
         "    print [await $f]\n"
-        "  } {\n"
+        "  } else {\n"
         "    print 42\n"
         "  }\n"
         "}\n"
@@ -2760,7 +2760,7 @@ static int test_integ_spawn_heavy_alloc(void) {
     /* Spawn a task that does recursive fibonacci — heavy allocation */
     VMResult r = jacl_run(
         "proc fib {n} {\n"
-        "  if [< $n 2] { [+ $n 0] } {\n"
+        "  if [< $n 2] { [+ $n 0] } else {\n"
         "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
         "  }\n"
         "}\n"
@@ -2920,7 +2920,7 @@ static int test_integ_parallel_error(void) {
     VMResult r = jacl_run(
         "proc main {} {\n"
         "  def r [parallel { 42 } { error \"bad\" }]\n"
-        "  if [error? $r] { print \"error\" } { print \"ok\" }\n"
+        "  if [error? $r] { print \"error\" } else { print \"ok\" }\n"
         "}\n"
         "main",
         &vm, &arena);
@@ -2944,7 +2944,7 @@ static int test_integ_parallel_heavy_alloc(void) {
     /* fib at top-level, main uses parallel with fib calls */
     VMResult r = jacl_run(
         "proc fib {n} {\n"
-        "  if [< $n 2] { [+ $n 0] } {\n"
+        "  if [< $n 2] { [+ $n 0] } else {\n"
         "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
         "  }\n"
         "}\n"
@@ -3141,7 +3141,7 @@ static int test_stress_heavy_alloc_gc(void) {
     /* fib(15) does heavy allocation — exercises GC under concurrent load */
     CompileResult cr = test__compile(
         "proc fib {n} {\n"
-        "  if [< $n 2] { [+ $n 0] } {\n"
+        "  if [< $n 2] { [+ $n 0] } else {\n"
         "    [+ [fib [- $n 1]] [fib [- $n 2]]]\n"
         "  }\n"
         "}\n"
@@ -3333,7 +3333,7 @@ static int test_regression_fib(void) {
 
     VMResult r = jacl_run(
         "proc fib {n} {\n"
-        "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
+        "  if [<= $n 1] { [+ $n 0] } else { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
         "}\n"
         "print [fib 10]",
         &vm, &arena);
@@ -3962,7 +3962,7 @@ static int test_gc_parallel_join_pressure(void) {
      * and the join continuation executing. */
     CompileResult cr = test__compile(
         "proc fib {n} {\n"
-        "  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
+        "  if [<= $n 1] { [+ $n 0] } else { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n"
         "}\n"
         "proc task {} {\n"
         "  def r [parallel { [fib 10] } { [fib 8] } { [fib 6] } { [fib 4] }]\n"
@@ -4014,7 +4014,7 @@ static int test_cps_recursive_spawn_transform(void) {
      */
     CompileResult cr = test__compile(
         "proc recur {n} {\n"
-        "  if [< $n 1] { 0 } {\n"
+        "  if [< $n 1] { 0 } else {\n"
         "    def f [spawn { [+ $n 10] }]\n"
         "    def v [await $f]\n"
         "    [+ $v [recur [- $n 1]]]\n"
@@ -4077,7 +4077,7 @@ static int test_cps_recursive_parallel_upvalues(void) {
      */
     CompileResult cr = test__compile(
         "proc loop {n} {\n"
-        "  if [< $n 1] { 0 } {\n"
+        "  if [< $n 1] { 0 } else {\n"
         "    def r [parallel { [+ $n 0] } { [+ $n 1] }]\n"
         "    [+ [vec-get $r 0] [loop [- $n 1]]]\n"
         "  }\n"
@@ -4205,7 +4205,7 @@ static int test_cps_recursive_spawn_runs(void) {
 
     VMResult r = jacl_run(
         "proc work {n} {\n"
-        "  if [< $n 1] { 0 } {\n"
+        "  if [< $n 1] { 0 } else {\n"
         "    def f [spawn { [+ $n 0] }]\n"
         "    def v [await $f]\n"
         "    [+ $v [work [- $n 1]]]\n"

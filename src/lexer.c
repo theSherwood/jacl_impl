@@ -38,7 +38,7 @@ typedef enum {
   TOKEN_DOLLAR_BRACKET,   /* $[ subcommand expression */
   TOKEN_DOLLAR_PAREN,     /* $( infix-mode interpolation in strings */
   TOKEN_USE,              /* use keyword */
-  TOKEN_STRUCT,           /* struct keyword (also emitted for defstruct) */
+  TOKEN_STRUCT,           /* struct keyword */
   /* --- new operator tokens --- */
   TOKEN_PIPE,             /* | */
   TOKEN_ARROW,            /* -> */
@@ -1308,9 +1308,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
         case 8:
           if (memcmp(wstart, "continue", 8) == 0) wtype = TOKEN_CONTINUE;
           break;
-        case 9:
-          if (memcmp(wstart, "defstruct", 9) == 0) wtype = TOKEN_STRUCT;
-          break;
+        /* defstruct keyword removed — use struct instead */
         default:
           break;
       }

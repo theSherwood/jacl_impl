@@ -2,9 +2,9 @@
 # expect: 1
 # expect: 99
 # Test struct boxing and dyn interop
-defstruct Point [x :i32] [y :i32]
+struct Point {i32 x, i32 y}
 def dyn d [Point 1 2]
 print $d
-print [. $d x]
-[. $d x 99]
-print [. $d x]
+print $d->x
+. $d x 99
+print $d->x

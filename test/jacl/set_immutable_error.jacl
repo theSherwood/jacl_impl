@@ -1,7 +1,7 @@
 # expect-error: cannot mutate immutable binding 'x'
-# set! on a def binding is a compile error
-proc t-imm [] {
+# set on a def binding is a compile error
+proc t-imm {} {
   def x 10
-  set! x 42
+  set x 42
 }
 [t-imm]

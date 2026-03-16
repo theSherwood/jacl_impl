@@ -3,7 +3,7 @@
 # expect: 110
 # 3+ levels of nested closures across suspension points with variable capture at each level
 # Verifies bounds checks don't false-positive on valid deep upvalue chains
-proc main [] {
+proc main {} {
   def a 1
   def f1 [spawn { 10 }]
   def b [await $f1]

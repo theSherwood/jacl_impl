@@ -1,8 +1,8 @@
 # expect: 42
 # mode: concurrent
-# Closure capturing a local mut binding (read via $x, no set!) inside spawn body
+# Closure capturing a local mut binding (read via $x, no set) inside spawn body
 # should be pinned to owning thread — correct value is read
-proc main [] {
+proc main {} {
   mut x 42
   def f [spawn {
     [+ $x 0]

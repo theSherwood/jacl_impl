@@ -776,7 +776,7 @@ static int test_write_barrier_vm_set_cell(void) {
     /* Compile and run: mut local, then set! it.
      * Both values are inline ints, so barrier fires but skips push.
      * This tests that the barrier call doesn't crash. */
-    const char *src = "mut x 10\nset! x 20";
+    const char *src = "mut x 10\nset x 20";
     gc__current_heap = &vm->heap;
     VMResult r = jacl_run(src, vm, &arena);
     ASSERT(r == VM_OK);

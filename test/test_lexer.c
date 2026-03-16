@@ -2458,12 +2458,12 @@ static int test_keyword_struct(void) {
   TEST_PASS();
 }
 
-static int test_keyword_defstruct_backward_compat(void) {
+static int test_keyword_defstruct_removed(void) {
   setup();
-  /* defstruct is backward compat — now emits TOKEN_STRUCT */
+  /* defstruct is no longer a keyword — should lex as TOKEN_WORD */
   LexResult r = lexer_lex("defstruct", &test_arena);
   ASSERT_U32_EQ(r.count, 2);
-  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_STRUCT);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_WORD);
   ASSERT_U32_EQ(r.tokens[0].length, 9);
   teardown();
   ASSERT(check_no_leaks());
@@ -2839,7 +2839,7 @@ int main(void) {
     {"keyword_continue",             test_keyword_continue},
     {"keyword_try",                  test_keyword_try},
     {"keyword_struct",               test_keyword_struct},
-    {"keyword_defstruct_compat",     test_keyword_defstruct_backward_compat},
+    {"keyword_defstruct_removed",    test_keyword_defstruct_removed},
     {"keywords_positions",           test_keywords_have_correct_positions},
     {"keyword_prefix_not_keyword",   test_keyword_prefix_not_keyword},
     {"keyword_hyphen_not_keyword",   test_keyword_with_hyphen_not_keyword},

@@ -1,10 +1,10 @@
 # expect: 42
 # mode: concurrent
-# set! inside a spawn body is pinned to the parent worker thread
+# set inside a spawn body is pinned to the parent worker thread
 mut x 0
-proc main [] {
+proc main {} {
   def f [spawn {
-    set! x 42
+    set x 42
     [+ $x 0]
   }]
   def r [await $f]

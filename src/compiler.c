@@ -963,8 +963,7 @@ static bool ast__contains_nonlocal_set_impl(AstNode* node,
       if (head->type == AST_LIT_STRING) {
         const char* name = head->data.lit_string.value;
         uint32_t len = head->data.lit_string.length;
-        if ((len == 4 && memcmp(name, "set!", 4) == 0) ||
-            (len == 3 && memcmp(name, "set", 3) == 0)) {
+        if (len == 3 && memcmp(name, "set", 3) == 0) {
           /* Check if the target is a local mut */
           uint32_t argc = node->data.command.arg_count;
           if (argc >= 1 && node->data.command.args[0]->type == AST_LIT_STRING) {
@@ -3065,9 +3064,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* set / set! — reassign mutable binding */
-  if (compiler__head_matches(head, "set!", 4) ||
-      compiler__head_matches(head, "set", 3)) {
+  /* set — reassign mutable binding */
+  if (compiler__head_matches(head, "set", 3)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "set", "2 arguments", argc); return; }
     if (args[0]->type != AST_LIT_STRING) {
       compiler__error(c, line, col, "set first argument must be a name");
@@ -4057,12 +4055,6 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* each builtin (exactly 2 args — non-suspending callback) */
-  if (compiler__head_matches(head, "each", 4)) {
-    compiler__compile_hof_builtin(c, "each", args, argc, OP_EACH, line, col);
-    return;
-  }
-
   /* for builtin — three forms:
      (a) for collection { body }          — implicit $it binding (2 args, last is block)
      (b) for collection name { body }     — explicit binding     (3 args, last is block)
@@ -4380,9 +4372,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* reset / reset! builtin (exactly 2 args) */
-  if (compiler__head_matches(head, "reset!", 6) ||
-      compiler__head_matches(head, "reset", 5)) {
+  /* reset builtin (exactly 2 args) */
+  if (compiler__head_matches(head, "reset", 5)) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "reset", "2 arguments", argc);
       return;
@@ -4393,9 +4384,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* swap / swap! builtin (exactly 2 args) */
-  if (compiler__head_matches(head, "swap!", 5) ||
-      compiler__head_matches(head, "swap", 4)) {
+  /* swap builtin (exactly 2 args) */
+  if (compiler__head_matches(head, "swap", 4)) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "swap", "2 arguments", argc);
       return;

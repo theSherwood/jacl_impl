@@ -1,3 +1,3 @@
-# expect-error: builtin 'each' expects 2 arguments but got 1
-# compile-time arity check: each requires exactly 2 args
-[each [vec 1]]
+# expect-error: for expects: for collection { body }, for collection name { body }, or for collection callback
+# compile-time arity check: for requires at least 2 args
+[for [vec 1]]

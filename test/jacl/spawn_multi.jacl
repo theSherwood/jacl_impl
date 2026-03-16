@@ -3,7 +3,7 @@
 # expect: 20
 # expect: 30
 # spawn multiple tasks, await each sequentially, print in order
-proc main [] {
+proc main {} {
   def f1 [spawn { 10 }]
   def f2 [spawn { 20 }]
   def f3 [spawn { 30 }]

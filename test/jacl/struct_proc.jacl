@@ -1,13 +1,13 @@
 # expect: 30
 # expect: Point{x: 100, y: 200}
 # Test struct as proc parameter and return value
-defstruct Point [x :i32] [y :i32]
+struct Point {i32 x, i32 y}
 
-proc sum [Point p] {
-  [+ [. $p x] [. $p y]]
+proc sum {Point, p} {
+  [+ $p->x $p->y]
 }
 
-proc mk [i32 a i32 b] {
+proc mk {i32 a, i32 b} {
   [Point $a $b]
 }
 

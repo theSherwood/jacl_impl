@@ -3516,7 +3516,7 @@ static int test_compile_module_typed_exports(void) {
   const char* dir = "/tmp/jacl_test_m14e";
   mkdir(dir, 0755);
   write_temp_jacl(dir, "math.jacl",
-                  "proc i64 add [i64 a i64 b] { [+ $a $b] }\n");
+                  "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n");
   write_temp_jacl(dir, "main.jacl", "");
 
   char importer_path[1024];
@@ -3753,7 +3753,7 @@ static int test_import_typed_propagation(void) {
   char real_importer[1024];
 
   setup_module_ctx("/tmp/jacl_us007d", "math.jacl",
-                   "proc i64 add [i64 a i64 b] { [+ $a $b] }\n",
+                   "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -3834,7 +3834,7 @@ static int test_import_type_check(void) {
   char real_importer[1024];
 
   setup_module_ctx("/tmp/jacl_us007f", "math.jacl",
-                   "proc i64 add [i64 a i64 b] { [+ $a $b] }\n",
+                   "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -4492,7 +4492,7 @@ static int test_exec_program_mutable_import(void) {
   write_temp_jacl(dir, "main.jacl",
     "use \"state.jacl\" [cnt]\n"
     "[print [deref $cnt]]\n"
-    "[reset! $cnt 5]\n"
+    "[reset $cnt 5]\n"
     "[print [deref $cnt]]\n");
 
   ProgramResult pr = jacl_compile_program(
@@ -4546,7 +4546,7 @@ static int test_exec_single_file_unchanged(void) {
 
 /* ===== US-002 (Struct): Struct type registration ===== */
 
-/* Test: basic defstruct compiles without errors */
+/* Test: basic struct compiles without errors */
 static int test_defstruct_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -4554,7 +4554,7 @@ static int test_defstruct_basic(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]", &arena, &heap);
+      "struct Point {i32 x, i32 y}", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   gc_heap_destroy(&heap);
@@ -4572,8 +4572,8 @@ static int test_defstruct_duplicate_name(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
-      "defstruct Point [a :f32] [b :f32]", &arena, &heap);
+      "struct Point {i32 x, i32 y}\n"
+      "struct Point {f32 a, f32 b}", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4591,7 +4591,7 @@ static int test_defstruct_duplicate_field(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Bad [x :i32] [x :i32]", &arena, &heap);
+      "struct Bad {i32 x, i32 x}", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4609,7 +4609,7 @@ static int test_defstruct_undefined_field_type(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Line [start :Point] [end :Point]", &arena, &heap);
+      "struct Line {Point start, Point end}", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4627,8 +4627,8 @@ static int test_defstruct_nested_type(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
-      "defstruct Line [start :Point] [end :Point]", &arena, &heap);
+      "struct Point {i32 x, i32 y}\n"
+      "struct Line {Point start, Point end}", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   gc_heap_destroy(&heap);
@@ -4646,9 +4646,9 @@ static int test_defstruct_type_annotation(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* def Point p $x — struct name as type annotation with dyn RHS.
-     Verifies that 'Point' is accepted as a type keyword after defstruct. */
+     Verifies that 'Point' is accepted as a type keyword after struct. */
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def x 0\n"
       "def Point p $x", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -4668,7 +4668,7 @@ static int test_defstruct_all_field_types(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct All [a :i32] [b :i64] [c :u32] [d :u64] [e :f32] [f :f64] [g :str]",
+      "struct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, str g}",
       &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -4687,8 +4687,8 @@ static int test_defstruct_forward_ref_error(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Line [start :Point] [end :Point]\n"
-      "defstruct Point [x :i32] [y :i32]", &arena, &heap);
+      "struct Line {Point start, Point end}\n"
+      "struct Point {i32 x, i32 y}", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4707,7 +4707,7 @@ static int test_struct_new_basic(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 1 2]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -4725,7 +4725,7 @@ static int test_struct_new_arity_error(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "[Point 1]", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
@@ -4743,7 +4743,7 @@ static int test_struct_new_type_error(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "[Point 1 \"hello\"]", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
@@ -4763,7 +4763,7 @@ static int test_struct_new_runtime(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 10 20]\n"
       "print $p",
       &vm, &arena);
@@ -4788,10 +4788,10 @@ static int test_struct_get_basic(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 10 20]\n"
-      "print [. $p x]\n"
-      "print [. $p y]",
+      "print $p->x\n"
+      "print $p->y",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4810,9 +4810,9 @@ static int test_struct_get_unknown_field(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 1 2]\n"
-      "[. $p z]", &arena, &heap);
+      "print $p->z", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4831,10 +4831,10 @@ static int test_struct_get_nested(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
-      "defstruct Line [start :Point] [end :Point]\n"
+      "struct Point {i32 x, i32 y}\n"
+      "struct Line {Point start, Point end}\n"
       "def ln [Line [Point 5 6] [Point 10 20]]\n"
-      "print [. [. $ln start] x]",
+      "print $ln->start->x",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4857,11 +4857,11 @@ static int test_struct_set_basic(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 10 20]\n"
-      "[. $p x 99]\n"
-      "print [. $p x]\n"
-      "print [. $p y]",
+      ". $p x 99\n"
+      "print $p->x\n"
+      "print $p->y",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4880,9 +4880,9 @@ static int test_struct_set_unknown_field(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 1 2]\n"
-      "[. $p z 99]", &arena, &heap);
+      ". $p z 99", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4899,9 +4899,9 @@ static int test_struct_set_type_mismatch(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 1 2]\n"
-      "[. $p x \"hello\"]", &arena, &heap);
+      ". $p x \"hello\"", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4920,10 +4920,10 @@ static int test_struct_set_preserves_other_fields(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Pair [a :i32] [b :i32]\n"
+      "struct Pair {i32 a, i32 b}\n"
       "def p [Pair 1 2]\n"
-      "[. $p a 42]\n"
-      "print [. $p b]",
+      ". $p a 42\n"
+      "print $p->b",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4946,7 +4946,7 @@ static int test_struct_dyn_assign(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def dyn d [Point 1 2]\n"
       "print $d",
       &vm, &arena);
@@ -4969,10 +4969,10 @@ static int test_struct_dyn_field_access(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def dyn d [Point 10 20]\n"
-      "print [. $d x]\n"
-      "print [. $d y]",
+      "print $d->x\n"
+      "print $d->y",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4993,10 +4993,10 @@ static int test_struct_dyn_field_set(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def dyn d [Point 1 2]\n"
-      "[. $d x 99]\n"
-      "print [. $d x]",
+      ". $d x 99\n"
+      "print $d->x",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -5017,10 +5017,10 @@ static int test_struct_in_vec(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def v [vec [Point 1 2] [Point 3 4]]\n"
       "def p [vec-get $v 1]\n"
-      "print [. $p x]",
+      "print $p->x",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -5043,10 +5043,10 @@ static int test_inline_struct_runtime(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
-      "defstruct Wrapper [pos :struct{x:i32,y:i32}]\n"
+      "struct Point {i32 x, i32 y}\n"
+      "struct Wrapper {struct{x:i32,y:i32} pos}\n"
       "def w [Wrapper [Point 42 10]]\n"
-      "print [. [. $w pos] x]",
+      "print $w->pos->x",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -5065,7 +5065,7 @@ static int test_inline_struct_basic(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Wrapper [pos :struct{x:i32,y:i32}]", &arena, &heap);
+      "struct Wrapper {struct{x:i32,y:i32} pos}", &arena, &heap);
   if (cr.error_count > 0) {
     printf("ERRORS: %u\n", cr.error_count);
   }
@@ -5088,8 +5088,8 @@ static int test_inline_struct_equivalence(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct A [p :struct{x:i32,y:i32}]\n"
-      "defstruct B [q :struct{x:i32,y:i32}]", &arena, &heap);
+      "struct A {struct{x:i32,y:i32} p}\n"
+      "struct B {struct{x:i32,y:i32} q}", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   /* Registry: anon_struct (shared), A, B = 3 entries */
   ASSERT(cr.struct_registry != NULL);
@@ -5109,7 +5109,7 @@ static int test_inline_struct_nested(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct C [d :struct{start:struct{x:i32,y:i32},end:struct{x:i32,y:i32}}]",
+      "struct C {struct{start:struct{x:i32,y:i32},end:struct{x:i32,y:i32}} d}",
       &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT(cr.struct_registry != NULL);
@@ -5135,11 +5135,11 @@ static int test_struct_module_import(void) {
   const char* dir = "/tmp/jacl_us009a";
   mkdir(dir, 0755);
   write_temp_jacl(dir, "shapes.jacl",
-    "defstruct Point [x :i32] [y :i32]\n");
+    "struct Point {i32 x, i32 y}\n");
   write_temp_jacl(dir, "main.jacl",
     "use \"shapes.jacl\" [Point]\n"
     "def p [Point 42 10]\n"
-    "print [. $p x]\n");
+    "print $p->x\n");
 
   ProgramResult pr = jacl_compile_program(
       "/tmp/jacl_us009a/main.jacl", &arena, &intern, &heap);
@@ -5202,7 +5202,7 @@ static int test_struct_new_syntax_runtime(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "def p [Point 10 20]\n"
-      "print [. $p x]",
+      "print $p->x",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -5266,8 +5266,8 @@ static int test_struct_new_syntax_construct_and_access(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "def p [Point 3 7]\n"
-      "print [. $p x]\n"
-      "print [. $p y]",
+      "print $p->x\n"
+      "print $p->y",
       &vm, &arena);
   ASSERT(r == VM_OK);
   ASSERT_STR_EQ(cap.buf, "3\n7\n");
@@ -5944,7 +5944,7 @@ static int test_reset_without_bang(void) {
   TEST_PASS();
 }
 
-/* Test: reset! still works (backward compat) */
+/* Test: reset! is removed — produces error */
 static int test_reset_bang_still_works(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -5961,8 +5961,7 @@ static int test_reset_bang_still_works(void) {
     "[reset! $b 99]\n"
     "[print [deref $b]]", &vm, &arena);
 
-  ASSERT_INT_EQ(result, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "99\n");
+  ASSERT(result != VM_OK);
 
   vm_destroy(&vm);
   gc_heap_destroy(&heap);
@@ -6001,7 +6000,7 @@ static int test_swap_without_bang(void) {
   TEST_PASS();
 }
 
-/* Test: swap! still works (backward compat) */
+/* Test: swap! is removed — produces error */
 static int test_swap_bang_still_works(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -6019,8 +6018,7 @@ static int test_swap_bang_still_works(void) {
     "[swap! $b $inc]\n"
     "[print [deref $b]]", &vm, &arena);
 
-  ASSERT_INT_EQ(result, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "11\n");
+  ASSERT(result != VM_OK);
 
   vm_destroy(&vm);
   gc_heap_destroy(&heap);
@@ -6468,20 +6466,13 @@ static int test_arrow_old_dot_compat(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  VM vm;
-  vm_init(&vm, &arena);
-  PrintCapture cap = { .len = 0 };
-  vm.print_fn = capture_print;
-  vm.print_ctx = &cap;
-  VMResult r = jacl_run(
+  /* [. $p x] inside brackets is now a parse error — use $p->x instead */
+  CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
       "p = [Point 10 20]\n"
-      "print [. $p x]",
-      &vm, &arena);
-  ASSERT_INT_EQ(r, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "10\n");
+      "print [. $p x]", &arena, &heap);
+  ASSERT(cr.error_count > 0);
 
-  vm_destroy(&vm);
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
@@ -6706,7 +6697,7 @@ static int test_lambda_arithmetic(void) {
   TEST_PASS();
 }
 
-/* Lambda as HOF callback for each */
+/* Lambda as HOF callback for for */
 static int test_lambda_each_compat(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -6719,7 +6710,7 @@ static int test_lambda_each_compat(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
-      "each [vec 3 5 7] [\\ print [* $it 2]]",
+      "for [vec 3 5 7] [\\ print [* $it 2]]",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "6\n10\n14\n");

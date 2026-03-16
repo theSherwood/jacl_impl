@@ -1,8 +1,8 @@
 # expect: 42
 # expect: 42
-proc test [] {
+proc test {} {
   mut x 0
-  proc set-x [] { set! x 42 }
+  proc set-x {} { set x 42 }
   [set-x]
   print $x
   [+ $x 0]

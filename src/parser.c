@@ -224,7 +224,7 @@ static AstNode* parser__parse_atom(Parser* p) {
       return node;
     }
     case TOKEN_OPERATOR:
-    /* New operator tokens — usable as command names during transition */
+    /* Operator tokens — usable as command names */
     case TOKEN_PIPE:
     case TOKEN_BACKSLASH:
     case TOKEN_BANG:
@@ -245,7 +245,7 @@ static AstNode* parser__parse_atom(Parser* p) {
       node->data.lit_string.length = tok->length;
       return node;
     }
-    /* New keyword tokens — usable as command names during transition */
+    /* Keyword tokens — usable as command names */
     case TOKEN_STRUCT:
     case TOKEN_PROC:
     case TOKEN_IF:
@@ -428,10 +428,26 @@ static AstNode* parser__parse_command(Parser* p) {
   }
 
   /* Parse head (command name) */
+  TokenType head_token_type = parser__peek(p)->type;
   AstNode* head = parser__parse_expr(p);
   if (head == NULL) {
     AstNode* err = parser__error(p, "expected command name after '['", open);
     err->end = parser__token_end(parser__peek(p));
+    parser__sync_bracket(p);
+    return err;
+  }
+
+  /* Reject old-syntax forms inside brackets */
+  if (head_token_type == TOKEN_PROC) {
+    AstNode* err = parser__error(p, "proc must use command syntax: proc name {params} {body}", open);
+    parser__sync_bracket(p);
+    return err;
+  }
+  if (head_token_type == TOKEN_OPERATOR &&
+      head->type == AST_LIT_STRING &&
+      head->data.lit_string.length == 1 &&
+      head->data.lit_string.value[0] == '.') {
+    AstNode* err = parser__error(p, "use $struct->field instead of [. $struct field]", open);
     parser__sync_bracket(p);
     return err;
   }
@@ -979,7 +995,7 @@ static AstNode* parser__parse_use(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
- * Internal: Parse defstruct declaration: defstruct Name [field :type] ...
+ * Internal: Parse struct declaration: struct Name {type field, ...}
  *
  * Called when the current token is TOKEN_STRUCT.
  * Returns AST_DEFSTRUCT on success, AST_ERROR on failure.
@@ -1208,106 +1224,9 @@ static AstNode* parser__parse_defstruct(Parser* p) {
       return parser__error(p, "struct must have at least one field", name_tok);
     }
   }
-  /* ── Old syntax: defstruct Name [name :type] [name :type] ... ── */
+  /* Old bracket syntax [field :type] removed — require braces */
   else {
-    NodeArray field_names_arr;
-    parser__arr_init(&field_names_arr, p->arena);
-
-    while (!parser__at_end(p) && !parser__is_command_end(p)) {
-      Token* open = parser__peek(p);
-      if (open->type != TOKEN_LBRACKET) {
-        return parser__error(p, "expected '[' for field definition", open);
-      }
-      parser__advance(p); /* consume '[' */
-
-      /* Field name */
-      Token* fname_tok = parser__peek(p);
-      if (fname_tok->type != TOKEN_WORD) {
-        AstNode* err = parser__error(p, "expected field name", fname_tok);
-        parser__sync_bracket(p);
-        return err;
-      }
-      parser__advance(p);
-
-      /* Type annotation: expect a word starting with ':' or an operator ':' followed by word */
-      Token* type_tok = parser__peek(p);
-      const char* type_str = NULL;
-      uint32_t type_len = 0;
-
-      if (type_tok->type == TOKEN_COLON ||
-          (type_tok->type == TOKEN_OPERATOR &&
-           type_tok->length >= 1 && type_tok->payload.text[0] == ':')) {
-        /* TOKEN_COLON or operator token starting with ':' — type name is the rest */
-        parser__advance(p);
-        if (type_tok->type == TOKEN_OPERATOR && type_tok->length > 1) {
-          /* :i32 etc — the colon and type are in one token */
-          type_str = type_tok->payload.text + 1;
-          type_len = type_tok->length - 1;
-        } else {
-          /* Just ':' (TOKEN_COLON or TOKEN_OPERATOR length 1) — check for inline struct or type name */
-          Token* tname = parser__peek(p);
-          if ((tname->type == TOKEN_STRUCT ||
-               (tname->type == TOKEN_WORD && tname->length == 6 &&
-                memcmp(tname->payload.text, "struct", 6) == 0)) &&
-              p->pos + 1 < p->count &&
-              p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
-            /* Inline struct type */
-            uint32_t inline_len = 0;
-            type_str = parser__parse_inline_struct_type(p, &inline_len);
-            if (!type_str) {
-              parser__sync_bracket(p);
-              return parser__error(p, "invalid inline struct type", tname);
-            }
-            type_len = inline_len;
-          } else if (tname->type != TOKEN_WORD) {
-            AstNode* err = parser__error(p, "expected type name after ':'", tname);
-            parser__sync_bracket(p);
-            return err;
-          } else {
-            parser__advance(p);
-            type_str = tname->payload.text;
-            type_len = tname->length;
-          }
-        }
-      } else {
-        AstNode* err = parser__error(p, "expected ':type' annotation for field", type_tok);
-        parser__sync_bracket(p);
-        return err;
-      }
-
-      /* Expect closing ']' */
-      Token* close = parser__peek(p);
-      if (close->type != TOKEN_RBRACKET) {
-        AstNode* err = parser__error(p, "expected ']' to close field definition", close);
-        parser__sync_bracket(p);
-        return err;
-      }
-      parser__advance(p);
-      last_end = parser__token_end(close);
-
-      if (field_count >= DEFSTRUCT_MAX_FIELDS) {
-        return parser__error(p, "too many fields in struct (max 64)", kw_tok);
-      }
-
-      /* Check for duplicate field names */
-      for (uint32_t i = 0; i < field_count; i++) {
-        if (tmp_fname_lens[i] == fname_tok->length &&
-            memcmp(tmp_fnames[i], fname_tok->payload.text, fname_tok->length) == 0) {
-          return parser__error(p, "duplicate field name in struct", fname_tok);
-        }
-      }
-
-      tmp_fnames[field_count] = fname_tok->payload.text;
-      tmp_fname_lens[field_count] = fname_tok->length;
-      tmp_ftypes[field_count] = type_str;
-      tmp_ftype_lens[field_count] = type_len;
-      field_count++;
-    }
-
-    /* Validate: at least one field */
-    if (field_count == 0) {
-      return parser__error(p, "struct must have at least one field", name_tok);
-    }
+    return parser__error(p, "expected '{' for struct fields (use struct Name {type field, ...})", name_tok);
   }
 
   /* Copy to arena-allocated arrays */
@@ -1580,25 +1499,6 @@ static AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
     node->data.command.arg_count = 3;
     return node;
 
-  } else if (parser__peek(p)->type == TOKEN_LBRACE) {
-    /* Old-syntax compat: if cond { then } { else } — bare block as else */
-    AstNode* else_block = parser__parse_block(p);
-    if (else_block->type == AST_ERROR) return else_block;
-
-    AstNode** args = ast_alloc_array(p->arena, 3);
-    args[0] = cond;
-    args[1] = then_block;
-    args[2] = else_block;
-
-    AstNode* node = ast_alloc(p->arena);
-    node->type  = AST_COMMAND;
-    node->start = start;
-    node->end   = else_block->end;
-    node->data.command.head      = if_head;
-    node->data.command.args      = args;
-    node->data.command.arg_count = 3;
-    return node;
-
   } else {
     /* No else clause — 2-arg if */
     AstNode** args = ast_alloc_array(p->arena, 2);
@@ -1673,37 +1573,10 @@ static AstNode* parser__parse_bare_command(Parser* p) {
   /* Error from sub-expression (e.g. unclosed bracket): propagate immediately */
   if (head->type == AST_ERROR) return head;
 
-  /* New proc syntax: proc [type] name {params} {body}
-     Requires TWO {} blocks — {params} then {body}. If only one {} follows
-     the name, it's old-style bare command (proc name { body }). */
+  /* proc syntax: proc [type] name {params} {body} — always requires two {} blocks */
   if (head_token_type == TOKEN_PROC && !parser__is_command_end(p) &&
       parser__peek(p)->type == TOKEN_WORD) {
-    uint32_t brace_pos = 0;
-    int has_brace = 0;
-    if (p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
-      brace_pos = p->pos + 1;
-      has_brace = 1;
-    } else if ((p->tokens[p->pos + 1].type == TOKEN_WORD ||
-                p->tokens[p->pos + 1].type == TOKEN_STRUCT) &&
-               p->tokens[p->pos + 2].type == TOKEN_LBRACE) {
-      brace_pos = p->pos + 2;
-      has_brace = 1;
-    }
-    if (has_brace) {
-      /* Scan to matching } then check for second { */
-      int depth = 1;
-      uint32_t si = brace_pos + 1;
-      while (si < p->count && depth > 0) {
-        if (p->tokens[si].type == TOKEN_LBRACE) depth++;
-        if (p->tokens[si].type == TOKEN_RBRACE) depth--;
-        si++;
-      }
-      /* Skip newlines after matching } */
-      while (si < p->count && p->tokens[si].type == TOKEN_NEWLINE) si++;
-      if (si < p->count && p->tokens[si].type == TOKEN_LBRACE) {
-        return parser__parse_proc_form(p, head);
-      }
-    }
+    return parser__parse_proc_form(p, head);
   }
 
   /* New if syntax: if condition { body } [elif condition { body }]* [else { body }] */
@@ -1714,6 +1587,14 @@ static AstNode* parser__parse_bare_command(Parser* p) {
   /* New while syntax: while condition { body } */
   if (head_token_type == TOKEN_WHILE && !parser__is_command_end(p)) {
     return parser__parse_while_form(p, head);
+  }
+
+  /* Reject removed 'defstruct' keyword — use 'struct' instead */
+  if (head_token_type == TOKEN_WORD && head->type == AST_LIT_STRING &&
+      head->data.lit_string.length == 9 &&
+      memcmp(head->data.lit_string.value, "defstruct", 9) == 0) {
+    return parser__error(p, "'defstruct' is removed — use 'struct Name {type field, ...}'",
+                         &p->tokens[p->pos > 0 ? p->pos - 1 : 0]);
   }
 
   /* Binding operator desugaring (command mode only):

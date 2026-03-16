@@ -1,2 +1,2 @@
 use "c.jacl" [double]
-proc quad [x] { [double [double $x]] }
+proc quad {x} { [double [double $x]] }

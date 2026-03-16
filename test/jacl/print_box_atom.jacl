@@ -12,7 +12,7 @@
 # Atom holding a string
 [print [atom "hello"]]
 # Cell transparency: mut local prints contained value directly
-proc t [] {
+proc t {} {
   mut x 99
   [print $x]
 }

@@ -1180,7 +1180,7 @@ static int test_multi_realistic_program(void) {
     "def result [+ $x 10]\n"
     "\n"
     "# Procedure definition\n"
-    "proc greet {\n"
+    "proc greet {} {\n"
     "  print \"hello $name\"\n"
     "}\n"
     "\n"
@@ -1224,13 +1224,13 @@ static int test_multi_realistic_program(void) {
   ASSERT(arith->data.command.args[1]->type == AST_LIT_INT);
   ASSERT_INT_EQ(arith->data.command.args[1]->data.lit_int.value, 10);
 
-  /* 3: proc greet { print "hello $name" } */
+  /* 3: proc greet {} { print "hello $name" } */
   ASSERT(r.nodes[3]->type == AST_COMMAND);
   ASSERT(memcmp(r.nodes[3]->data.command.head->data.lit_string.value, "proc", 4) == 0);
-  ASSERT_U32_EQ(r.nodes[3]->data.command.arg_count, 2);
+  ASSERT_U32_EQ(r.nodes[3]->data.command.arg_count, 3);
   ASSERT(r.nodes[3]->data.command.args[0]->type == AST_LIT_STRING);
   ASSERT(memcmp(r.nodes[3]->data.command.args[0]->data.lit_string.value, "greet", 5) == 0);
-  AstNode* proc_body = r.nodes[3]->data.command.args[1];
+  AstNode* proc_body = r.nodes[3]->data.command.args[2];
   ASSERT(proc_body->type == AST_BLOCK);
   ASSERT_U32_EQ(proc_body->data.block.count, 1);
   /* The print command inside the block */
@@ -1604,7 +1604,7 @@ static int test_roundtrip_blocks(void) {
   setup();
   ASSERT(roundtrip_ok("if $cond { print yes }"));
   ASSERT(roundtrip_ok("if $x { print yes; print no }"));
-  ASSERT(roundtrip_ok("proc greet { print hello }"));
+  ASSERT(roundtrip_ok("proc greet {} { print hello }"));
   ASSERT(roundtrip_ok("if $x { if $y { inner } }"));
   teardown();
   ASSERT(check_no_leaks());
@@ -1628,7 +1628,7 @@ static int test_roundtrip_complex(void) {
     "def x 42\n"
     "def name \"world\"\n"
     "def result [+ $x 10]\n"
-    "proc greet {\n"
+    "proc greet {} {\n"
     "  print \"hello $name\"\n"
     "}\n"
     "if [> $x 0] {\n"
@@ -2510,19 +2510,11 @@ static int test_proc_untyped_params(void) {
   TEST_PASS();
 }
 
-static int test_proc_old_syntax_still_works(void) {
+static int test_proc_old_syntax_rejected(void) {
   setup();
-  /* Old syntax: [proc add [a b] { [+ $a $b] }] — inside brackets */
+  /* Old syntax: [proc add [a b] { [+ $a $b] }] — now rejected */
   ParseResult r = parse("[proc add [a b] { [+ $a $b] }]");
-  ASSERT_U32_EQ(r.error_count, 0);
-  ASSERT_U32_EQ(r.count, 1);
-  AstNode* n = r.nodes[0];
-  assert_proc_head(n);
-  ASSERT_U32_EQ(n->data.command.arg_count, 3);
-  /* args: name, [a b] command, { body } block */
-  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
-  ASSERT(n->data.command.args[1]->type == AST_COMMAND);
-  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2596,17 +2588,9 @@ static int test_proc_single_param(void) {
 
 static int test_proc_bare_cmd_one_block_not_new(void) {
   setup();
-  /* proc greet { print hello } — only one block → old-style bare command */
+  /* proc greet { print hello } — only one block → now rejected (proc requires two {} blocks) */
   ParseResult r = parse("proc greet { print hello }");
-  ASSERT_U32_EQ(r.error_count, 0);
-  ASSERT_U32_EQ(r.count, 1);
-  AstNode* n = r.nodes[0];
-  /* Should be: head="proc", args=["greet", AST_BLOCK] */
-  ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "proc", 4) == 0);
-  ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
-  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -2669,19 +2653,14 @@ static int test_struct_single_field(void) {
   TEST_PASS();
 }
 
-static int test_struct_old_syntax_compat(void) {
+static int test_struct_old_syntax_rejected(void) {
   setup();
-  /* Old syntax still works */
+  /* Old defstruct syntax is now rejected */
   ParseResult r = parse("defstruct Point [x :i32] [y :i32]");
-  ASSERT_U32_EQ(r.error_count, 0);
-  ASSERT_U32_EQ(r.count, 1);
-  AstNode* n = r.nodes[0];
-  ASSERT(n->type == AST_DEFSTRUCT);
-  ASSERT_U32_EQ(n->data.defstruct.field_count, 2);
-  ASSERT(memcmp(n->data.defstruct.field_names[0], "x", 1) == 0);
-  ASSERT(memcmp(n->data.defstruct.field_types[0], "i32", 3) == 0);
-  ASSERT(memcmp(n->data.defstruct.field_names[1], "y", 1) == 0);
-  ASSERT(memcmp(n->data.defstruct.field_types[1], "i32", 3) == 0);
+  ASSERT(r.error_count > 0);
+  /* Also test struct with bracket fields → error */
+  ParseResult r2 = parse("struct Point [x :i32]");
+  ASSERT(r2.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -3268,12 +3247,13 @@ static int test_binding_not_in_brackets(void) {
 
 /* ---- Syntax Redesign US-009: Arrow field access (->) ---- */
 
-/* $point->x parses as [. $point x] */
+/* $point->x parses as [. $point x] internally */
 static int test_arrow_basic(void) {
   setup();
+  /* [. $point x] in brackets is now rejected — use $point->x instead */
   ParseResult r = parse("[. $point x]");
-  ASSERT_U32_EQ(r.error_count, 0);
-  /* Parse same thing with arrow syntax in a block context */
+  ASSERT(r.error_count > 0);
+  /* Arrow syntax works */
   ParseResult r2 = parse("$point->x");
   ASSERT_U32_EQ(r2.error_count, 0);
   ASSERT_U32_EQ(r2.count, 1);
@@ -3377,16 +3357,11 @@ static int test_arrow_in_bracket_cmd(void) {
   TEST_PASS();
 }
 
-/* Old [. $struct field] syntax still works */
-static int test_arrow_old_dot_compat(void) {
+/* Old [. $struct field] syntax is now rejected */
+static int test_arrow_old_dot_rejected(void) {
   setup();
   ParseResult r = parse("[. $p x]");
-  ASSERT_U32_EQ(r.error_count, 0);
-  ASSERT_U32_EQ(r.count, 1);
-  AstNode* n = r.nodes[0];
-  ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, ".", 1) == 0);
-  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -3929,7 +3904,7 @@ int main(void) {
     {"proc_typed_params",     test_proc_typed_params},
     {"proc_zero_params_new",  test_proc_zero_params_new},
     {"proc_untyped_params",   test_proc_untyped_params},
-    {"proc_old_syntax_compat",test_proc_old_syntax_still_works},
+    {"proc_old_syntax_rejected",test_proc_old_syntax_rejected},
     {"proc_in_block",         test_proc_in_block},
     {"proc_multiline",        test_proc_multiline},
     {"proc_mixed_type_untype",test_proc_mixed_typed_untyped},
@@ -3939,7 +3914,7 @@ int main(void) {
     {"struct_basic_new",      test_struct_basic_new_syntax},
     {"struct_mixed_types",    test_struct_mixed_types},
     {"struct_single_field",   test_struct_single_field},
-    {"struct_old_compat",     test_struct_old_syntax_compat},
+    {"struct_old_rejected",   test_struct_old_syntax_rejected},
     {"struct_dup_field_new",  test_struct_duplicate_field_new},
     {"struct_empty_err",      test_struct_empty_fields_error},
     {"struct_type_field",     test_struct_struct_type_field},
@@ -3980,7 +3955,7 @@ int main(void) {
     {"arrow_on_command",        test_arrow_on_command},
     {"arrow_in_infix",          test_arrow_in_infix},
     {"arrow_in_bracket_cmd",    test_arrow_in_bracket_cmd},
-    {"arrow_old_dot_compat",    test_arrow_old_dot_compat},
+    {"arrow_old_dot_rejected",  test_arrow_old_dot_rejected},
     /* Syntax Redesign US-010: Pipe threading (|) */
     {"pipe_basic",              test_pipe_basic},
     {"pipe_multi_stage",        test_pipe_multi_stage},

@@ -610,7 +610,7 @@ static int test_each_empty(void) {
 }
 
 static int test_each_arity(void) {
-  ASSERT(run_err("[each [vec 1]]", "builtin 'each' expects 2 arguments"));
+  ASSERT(run_err("[each [vec 1]]", "undefined variable '$each'"));
   TEST_PASS();
 }
 

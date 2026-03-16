@@ -2,17 +2,17 @@
 # mode: concurrent
 # Recursive proc with spawn/await in body — exercises 3 levels of recursion.
 # Tests CPS transform for recursive procs with suspending operations.
-proc sum [n] {
+proc sum {n} {
   if [== $n 0] {
     0
-  } {
+  } else {
     def f [spawn { [+ $n 0] }]
     def v [await $f]
     def rest [sum [- $n 1]]
     [+ $v $rest]
   }
 }
-proc main [] {
+proc main {} {
   def r [sum 3]
   print $r
 }
