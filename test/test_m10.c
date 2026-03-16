@@ -550,7 +550,7 @@ static int test_arity_set(void) {
     "  mut x 0\n"
     "  [set! x]\n"
     "}\n",
-    "set!"));
+    "set"));
   TEST_PASS();
 }
 
@@ -570,12 +570,12 @@ static int test_arity_deref(void) {
 }
 
 static int test_arity_reset(void) {
-  ASSERT(run_err("[reset! [box 0]]", "builtin 'reset!' expects 2 arguments"));
+  ASSERT(run_err("[reset! [box 0]]", "builtin 'reset' expects 2 arguments"));
   TEST_PASS();
 }
 
 static int test_arity_swap(void) {
-  ASSERT(run_err("[swap! [box 0]]", "builtin 'swap!' expects 2 arguments"));
+  ASSERT(run_err("[swap! [box 0]]", "builtin 'swap' expects 2 arguments"));
   TEST_PASS();
 }
 

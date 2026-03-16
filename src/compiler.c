@@ -963,7 +963,8 @@ static bool ast__contains_nonlocal_set_impl(AstNode* node,
       if (head->type == AST_LIT_STRING) {
         const char* name = head->data.lit_string.value;
         uint32_t len = head->data.lit_string.length;
-        if (len == 4 && memcmp(name, "set!", 4) == 0) {
+        if ((len == 4 && memcmp(name, "set!", 4) == 0) ||
+            (len == 3 && memcmp(name, "set", 3) == 0)) {
           /* Check if the target is a local mut */
           uint32_t argc = node->data.command.arg_count;
           if (argc >= 1 && node->data.command.args[0]->type == AST_LIT_STRING) {
@@ -3064,11 +3065,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* set! — reassign mutable binding */
-  if (compiler__head_matches(head, "set!", 4)) {
-    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "set!", "2 arguments", argc); return; }
+  /* set / set! — reassign mutable binding */
+  if (compiler__head_matches(head, "set!", 4) ||
+      compiler__head_matches(head, "set", 3)) {
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "set", "2 arguments", argc); return; }
     if (args[0]->type != AST_LIT_STRING) {
-      compiler__error(c, line, col, "set! first argument must be a name");
+      compiler__error(c, line, col, "set first argument must be a name");
       return;
     }
     uint32_t name_len = args[0]->data.lit_string.length;
@@ -4372,10 +4374,11 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* reset! builtin (exactly 2 args) */
-  if (compiler__head_matches(head, "reset!", 6)) {
+  /* reset / reset! builtin (exactly 2 args) */
+  if (compiler__head_matches(head, "reset!", 6) ||
+      compiler__head_matches(head, "reset", 5)) {
     if (argc != 2) {
-      compiler__builtin_arity_error(c, line, col, "reset!", "2 arguments", argc);
+      compiler__builtin_arity_error(c, line, col, "reset", "2 arguments", argc);
       return;
     }
     compiler__compile_node(c, args[0]);
@@ -4384,10 +4387,11 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* swap! builtin (exactly 2 args) */
-  if (compiler__head_matches(head, "swap!", 5)) {
+  /* swap / swap! builtin (exactly 2 args) */
+  if (compiler__head_matches(head, "swap!", 5) ||
+      compiler__head_matches(head, "swap", 4)) {
     if (argc != 2) {
-      compiler__builtin_arity_error(c, line, col, "swap!", "2 arguments", argc);
+      compiler__builtin_arity_error(c, line, col, "swap", "2 arguments", argc);
       return;
     }
     compiler__compile_node(c, args[0]);
