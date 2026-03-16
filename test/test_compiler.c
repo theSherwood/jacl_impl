@@ -6091,6 +6091,237 @@ static int test_set_multiple_reassign(void) {
   TEST_PASS();
 }
 
+/* --- Syntax Redesign US-008: Binding operators (=, :, ::) --- */
+
+/* x = 5 → def x 5 — basic immutable binding */
+static int test_bind_equals_def(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "x = 5\n"
+    "[print $x]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* i64 x = 5 → def i64 x 5 — typed immutable binding */
+static int test_bind_typed_equals(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "i64 x = 5\n"
+    "[print $x]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* x : 0; set x 5 → mut + set — mutable binding */
+static int test_bind_colon_mut(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "x : 0\n"
+    "set x 5\n"
+    "[print $x]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* i64 x : 0 → mut i64 x 0 — typed mutable binding */
+static int test_bind_typed_colon(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "i64 x : 0\n"
+    "set x 42\n"
+    "[print $x]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* x :: ($x + 1) → set x (+ $x 1) — reassignment via :: */
+static int test_bind_double_colon_set(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "x : 10\n"
+    "x :: ($x + 5)\n"
+    "[print $x]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "15\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Binding operators alongside def/mut/set commands */
+static int test_bind_mixed_with_commands(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "a = 1\n"
+    "def b 2\n"
+    "c : 0\n"
+    "mut d 0\n"
+    "c :: 3\n"
+    "set d 4\n"
+    "[print (($a + $b) + ($c + $d))]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Binding in block body */
+static int test_bind_in_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "proc test {} {\n"
+    "  x = 10\n"
+    "  y = 20\n"
+    "  [print ($x + $y)]\n"
+    "}\n"
+    "[test]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Binding with expression values */
+static int test_bind_expr_values(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "x = [+ 1 2]\n"
+    "y = ($x * 3)\n"
+    "[print $y]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "9\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -6338,6 +6569,15 @@ int main(void) {
     { "swap_bang_still_works",        test_swap_bang_still_works },
     { "set_global_without_bang",      test_set_global_without_bang },
     { "set_multiple_reassign",        test_set_multiple_reassign },
+    /* Syntax Redesign US-008: Binding operators (=, :, ::) */
+    { "bind_equals_def",              test_bind_equals_def },
+    { "bind_typed_equals",            test_bind_typed_equals },
+    { "bind_colon_mut",               test_bind_colon_mut },
+    { "bind_typed_colon",             test_bind_typed_colon },
+    { "bind_double_colon_set",        test_bind_double_colon_set },
+    { "bind_mixed_with_commands",     test_bind_mixed_with_commands },
+    { "bind_in_block",                test_bind_in_block },
+    { "bind_expr_values",             test_bind_expr_values },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

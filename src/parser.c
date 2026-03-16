@@ -1505,6 +1505,94 @@ static AstNode* parser__parse_bare_command(Parser* p) {
     return parser__parse_while_form(p, head);
   }
 
+  /* Binding operator desugaring (command mode only):
+     name = val      →  [def name val]
+     type name = val  →  [def type name val]
+     name : val      →  [mut name val]
+     type name : val  →  [mut type name val]
+     name :: val     →  [set name val]
+  */
+  if (head_token_type == TOKEN_WORD) {
+    Token* next = parser__peek(p);
+
+    /* Untyped binding: name = val, name : val, name :: val */
+    if (next->type == TOKEN_EQUALS || next->type == TOKEN_COLON ||
+        next->type == TOKEN_DOUBLE_COLON) {
+      const char* cmd_name;
+      uint32_t cmd_len;
+      if (next->type == TOKEN_EQUALS)       { cmd_name = "def"; cmd_len = 3; }
+      else if (next->type == TOKEN_COLON)    { cmd_name = "mut"; cmd_len = 3; }
+      else                                    { cmd_name = "set"; cmd_len = 3; }
+
+      parser__advance(p); /* consume operator */
+
+      NodeArray args;
+      parser__arr_init(&args, p->arena);
+      parser__arr_push(&args, head); /* name becomes first arg */
+      while (!parser__is_command_end(p)) {
+        AstNode* arg = parser__parse_expr(p);
+        if (arg == NULL) break;
+        parser__arr_push(&args, arg);
+      }
+
+      AstNode* cmd_head = ast_alloc(p->arena);
+      cmd_head->type = AST_LIT_STRING;
+      cmd_head->start = head->start;
+      cmd_head->end   = head->end;
+      cmd_head->data.lit_string.value  = cmd_name;
+      cmd_head->data.lit_string.length = cmd_len;
+
+      AstNode* node = ast_alloc(p->arena);
+      node->type  = AST_COMMAND;
+      node->start = head->start;
+      node->end   = (args.count > 0) ? args.nodes[args.count - 1]->end : head->end;
+      node->data.command.head      = cmd_head;
+      node->data.command.args      = args.nodes;
+      node->data.command.arg_count = args.count;
+      return node;
+    }
+
+    /* Typed binding: type name = val, type name : val */
+    if (next->type == TOKEN_WORD && p->pos + 1 < p->count) {
+      Token* after_name = &p->tokens[p->pos + 1];
+      if (after_name->type == TOKEN_EQUALS || after_name->type == TOKEN_COLON) {
+        const char* cmd_name;
+        uint32_t cmd_len;
+        if (after_name->type == TOKEN_EQUALS) { cmd_name = "def"; cmd_len = 3; }
+        else                                   { cmd_name = "mut"; cmd_len = 3; }
+
+        AstNode* name_node = parser__parse_expr(p); /* parse name */
+        parser__advance(p); /* consume operator */
+
+        NodeArray args;
+        parser__arr_init(&args, p->arena);
+        parser__arr_push(&args, head);      /* type */
+        parser__arr_push(&args, name_node); /* name */
+        while (!parser__is_command_end(p)) {
+          AstNode* arg = parser__parse_expr(p);
+          if (arg == NULL) break;
+          parser__arr_push(&args, arg);
+        }
+
+        AstNode* cmd_head = ast_alloc(p->arena);
+        cmd_head->type = AST_LIT_STRING;
+        cmd_head->start = head->start;
+        cmd_head->end   = head->end;
+        cmd_head->data.lit_string.value  = cmd_name;
+        cmd_head->data.lit_string.length = cmd_len;
+
+        AstNode* node = ast_alloc(p->arena);
+        node->type  = AST_COMMAND;
+        node->start = head->start;
+        node->end   = args.nodes[args.count - 1]->end;
+        node->data.command.head      = cmd_head;
+        node->data.command.args      = args.nodes;
+        node->data.command.arg_count = args.count;
+        return node;
+      }
+    }
+  }
+
   NodeArray args;
   parser__arr_init(&args, p->arena);
 

@@ -2920,6 +2920,164 @@ static int test_for_inline_collection(void) {
   TEST_PASS();
 }
 
+/* ---- Syntax Redesign US-008: Binding operators (=, :, ::) ---- */
+
+/* x = 5 → [def x 5] */
+static int test_binding_equals_def(void) {
+  setup();
+  ParseResult r = parse("x = 5");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* i64 x = 5 → [def i64 x 5] */
+static int test_binding_typed_equals(void) {
+  setup();
+  ParseResult r = parse("i64 x = 5");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "i64", 3) == 0);
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[2]->type == AST_LIT_INT);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* x : 0 → [mut x 0] */
+static int test_binding_colon_mut(void) {
+  setup();
+  ParseResult r = parse("x : 0");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "mut", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* i64 x : 0 → [mut i64 x 0] */
+static int test_binding_typed_colon(void) {
+  setup();
+  ParseResult r = parse("i64 x : 0");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "mut", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "i64", 3) == 0);
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[2]->type == AST_LIT_INT);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* x :: ($x + 1) → [set x ($x + 1)] */
+static int test_binding_double_colon_set(void) {
+  setup();
+  ParseResult r = parse("x :: ($x + 1)");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "set", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_COMMAND); /* infix expression */
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Binding operators inside {} block */
+static int test_binding_in_block(void) {
+  setup();
+  ParseResult r = parse("{ x = 5; y : 0 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* blk = r.nodes[0];
+  ASSERT(blk->type == AST_BLOCK);
+  ASSERT_U32_EQ(blk->data.block.count, 2);
+  /* first: [def x 5] */
+  ASSERT(blk->data.block.commands[0]->type == AST_COMMAND);
+  ASSERT(memcmp(blk->data.block.commands[0]->data.command.head->data.lit_string.value, "def", 3) == 0);
+  /* second: [mut y 0] */
+  ASSERT(blk->data.block.commands[1]->type == AST_COMMAND);
+  ASSERT(memcmp(blk->data.block.commands[1]->data.command.head->data.lit_string.value, "mut", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* def/mut/set command forms still work */
+static int test_binding_def_cmd_still_works(void) {
+  setup();
+  ParseResult r = parse("def x 5");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Binding with expression value: x = [vec 1 2 3] */
+static int test_binding_expr_value(void) {
+  setup();
+  ParseResult r = parse("x = [vec 1 2 3]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_COMMAND); /* [vec 1 2 3] */
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Binding operators not active inside [] */
+static int test_binding_not_in_brackets(void) {
+  setup();
+  ParseResult r = parse("[x = 5]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  /* Inside [], = is just an atom — head is "x", args are "=" and 5 */
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "x", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -3104,6 +3262,16 @@ int main(void) {
     {"for_explicit_binding",    test_for_explicit_binding},
     {"for_hof_form",            test_for_hof_form},
     {"for_inline_collection",   test_for_inline_collection},
+    /* Syntax Redesign US-008: Binding operators (=, :, ::) */
+    {"bind_equals_def",         test_binding_equals_def},
+    {"bind_typed_equals",       test_binding_typed_equals},
+    {"bind_colon_mut",          test_binding_colon_mut},
+    {"bind_typed_colon",        test_binding_typed_colon},
+    {"bind_dcolon_set",         test_binding_double_colon_set},
+    {"bind_in_block",           test_binding_in_block},
+    {"bind_def_cmd_works",      test_binding_def_cmd_still_works},
+    {"bind_expr_value",         test_binding_expr_value},
+    {"bind_not_in_brackets",    test_binding_not_in_brackets},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;
