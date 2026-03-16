@@ -1,3 +1,28 @@
 # Ralph Progress Log
 Started: Mon Mar 16 20:45:23 UTC 2026
+
+## Codebase Patterns
+- While loops are compiled inline (not closure-wrapped) — condition/body/loop-back pattern with OP_JUMP_IF_FALSE + OP_LOOP
+- Break/continue use OP_JUMP forward-patching (break) and OP_LOOP backward-jump (continue) — same technique as if/else
+- OP_CHECK_ERROR after each body statement pops the value if not an error — net stack effect of loop body is zero
+- Loop context stack (LoopContext) tracks break jump patches per nesting level
+- Both bracket syntax `[break $val]` and bare command syntax `break $val` are supported — compiler handles AST_BREAK node AND command head "break"
+- For break with value: break pushes value then jumps past OP_NIL; normal exit pushes nil then jumps over break landing zone
+- Test pattern: compile-and-run via jacl_run(), capture stdout with PrintCapture, ASSERT_STR_EQ
+- For compile-error tests: compile_source() returns CompileResult, check error_count and strstr(error_message)
+
+---
+
+## 2026-03-16 - US-001
+- Implemented break and continue as control flow for while loops
+- Files changed:
+  - src/ast.c: Added AST_BREAK, AST_CONTINUE node types with data fields
+  - src/parser.c: Parse "break" [value] and "continue" as distinct AST nodes in parser__parse_bare_command
+  - src/compiler.c: Added LoopContext stack, modified while compilation to push/pop context, added break/continue compilation with forward-jump patching, added compile-time error for break/continue outside loops, updated AST walkers (analyze__walk_body, analyze__collect_procs, ast__contains_suspension) to handle new node types
+  - test/test_compiler.c: 9 new e2e tests — break basic, break with value, break nil value, nested loops, break outside loop error (bracket + bare), bare break with value, continue basic, continue outside loop error
+- **Learnings for future iterations:**
+  - break value requires a "skip_break" jump in the normal exit path so that both paths (normal exit → nil, break → value) converge correctly
+  - continue in while loops jumps back to loop_start (condition re-check); for for-loops it should jump to the step/advance point instead
+  - The continue statement in a command context needs to emit OP_NIL after OP_LOOP to satisfy OP_CHECK_ERROR's expectation of a value on the stack (even though OP_LOOP has already jumped away, this prevents compiler validation issues)
+  - All AST walkers with switch(node->type) have default cases, so new node types are safe — but adding explicit AST_BREAK cases to recursive walkers is important when the break has a value child expression
 ---

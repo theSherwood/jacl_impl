@@ -23,7 +23,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "break is already lexed as TOKEN_BREAK but parsed as AST_LIT_STRING. Needs: new AST node type, compiler loop context stack for jump patching, new opcode or reuse of OP_JUMP. The compiler must track a stack of loop contexts so break knows where to jump. Use forward-jump patching (same technique as if/else). break $value requires leaving the value on the stack before jumping."
     },
     {
