@@ -761,7 +761,7 @@ static AstNode* parser__parse_expr(Parser* p) {
 static int parser__is_command_end(Parser* p) {
   TokenType t = parser__peek(p)->type;
   return t == TOKEN_NEWLINE || t == TOKEN_SEMICOLON || t == TOKEN_COMMA
-      || t == TOKEN_EOF || t == TOKEN_RBRACE;
+      || t == TOKEN_EOF || t == TOKEN_RBRACE || t == TOKEN_PIPE;
 }
 
 /* -------------------------------------------------------------------------
@@ -1709,6 +1709,63 @@ static AstNode* parser__parse_bare_command(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Parse piped command chain: cmd1 | cmd2 | cmd3
+ *
+ * Wraps parser__parse_bare_command, then handles pipe chaining.
+ * Pipes thread the left result as the first argument of the right command:
+ *   foo $a | bar $b  →  [bar [foo $a] $b]
+ *   a | b | c        →  [c [b [a]]]
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_piped_command(Parser* p) {
+  AstNode* left = parser__parse_bare_command(p);
+  if (left == NULL || left->type == AST_ERROR) return left;
+
+  while (parser__peek(p)->type == TOKEN_PIPE) {
+    parser__advance(p); /* consume | */
+
+    /* Skip newlines after pipe for multi-line pipe chains */
+    while (parser__peek(p)->type == TOKEN_NEWLINE) {
+      parser__advance(p);
+    }
+
+    AstNode* right = parser__parse_bare_command(p);
+    if (right == NULL || right->type == AST_ERROR) return right;
+
+    if (right->type == AST_COMMAND) {
+      /* Insert left as first arg of right command */
+      uint32_t old_count = right->data.command.arg_count;
+      uint32_t new_count = old_count + 1;
+      AstNode** new_args = (AstNode**)arena_alloc(p->arena,
+                                                    sizeof(AstNode*) * new_count);
+      new_args[0] = left;
+      for (uint32_t i = 0; i < old_count; i++) {
+        new_args[i + 1] = right->data.command.args[i];
+      }
+      right->data.command.args      = new_args;
+      right->data.command.arg_count = new_count;
+      right->start = left->start;
+    } else {
+      /* Wrap non-command as call with left as first arg */
+      AstNode* node = ast_alloc(p->arena);
+      node->type  = AST_COMMAND;
+      node->start = left->start;
+      node->end   = right->end;
+      node->data.command.head = right;
+      AstNode** new_args = (AstNode**)arena_alloc(p->arena, sizeof(AstNode*));
+      new_args[0] = left;
+      node->data.command.args      = new_args;
+      node->data.command.arg_count = 1;
+      right = node;
+    }
+
+    left = right;
+  }
+
+  return left;
+}
+
+/* -------------------------------------------------------------------------
  * Internal: Parse code block { cmd1; cmd2; ... }
  *
  * Called when the current token is TOKEN_LBRACE.
@@ -1731,7 +1788,7 @@ static AstNode* parser__parse_block(Parser* p) {
     }
     if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
 
-    AstNode* cmd = parser__parse_bare_command(p);
+    AstNode* cmd = parser__parse_piped_command(p);
     if (cmd != NULL) {
       parser__arr_push(&commands, cmd);
     } else {
@@ -1918,7 +1975,7 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
     } else if (parser__peek(&p)->type == TOKEN_STRUCT) {
       cmd = parser__parse_defstruct(&p);
     } else {
-      cmd = parser__parse_bare_command(&p);
+      cmd = parser__parse_piped_command(&p);
     }
     if (cmd != NULL) {
       parser__arr_push(&top_level, cmd);

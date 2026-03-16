@@ -6489,6 +6489,169 @@ static int test_arrow_old_dot_compat(void) {
   TEST_PASS();
 }
 
+/* ---- Syntax Redesign US-010: Pipe threading (|) ---- */
+
+/* foo $a | bar $b  →  [bar [foo $a] $b] (first-arg threading) */
+static int test_pipe_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "+ 1 2 | * 3 | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "9\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Multi-stage pipe: a | b | c  →  [c [b [a]]] */
+static int test_pipe_multi_stage(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  /* + 10 20 → 30, * 30 2 → 60, print 60 */
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "+ 10 20 | * 2 | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "60\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Pipe composes with vec builtins */
+static int test_pipe_with_builtins(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "vec 1 2 3 | vec-len | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Pipe in block */
+static int test_pipe_in_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "proc dbl {x} { * $x 2 }\n"
+      "dbl 5 | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Pipe with variable references */
+static int test_pipe_with_vars(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "x = 5\n"
+      "y = 3\n"
+      "+ $x $y | * 2 | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "16\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Pipe inside proc body block */
+static int test_pipe_in_proc_body(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "proc f {} { + 3 4 | * 2 }\n"
+      "f | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "14\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -6752,6 +6915,13 @@ int main(void) {
     { "arrow_in_infix_mode",          test_arrow_in_infix_mode },
     { "arrow_in_bracket_cmd",         test_arrow_in_bracket_cmd },
     { "arrow_old_dot_compat",         test_arrow_old_dot_compat },
+    /* Syntax Redesign US-010: Pipe threading (|) */
+    { "pipe_basic",                    test_pipe_basic },
+    { "pipe_multi_stage",              test_pipe_multi_stage },
+    { "pipe_with_builtins",            test_pipe_with_builtins },
+    { "pipe_in_block",                 test_pipe_in_block },
+    { "pipe_with_vars",                test_pipe_with_vars },
+    { "pipe_in_proc_body",             test_pipe_in_proc_body },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

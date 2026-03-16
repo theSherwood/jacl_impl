@@ -3204,6 +3204,144 @@ static int test_arrow_old_dot_compat(void) {
   TEST_PASS();
 }
 
+/* ---- Syntax Redesign US-010: Pipe threading (|) ---- */
+
+/* foo $a | bar $b  →  [bar [foo $a] $b] */
+static int test_pipe_basic(void) {
+  setup();
+  ParseResult r = parse("foo $a | bar $b");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "bar", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* first arg is [foo $a] */
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_COMMAND);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "foo", 3) == 0);
+  ASSERT_U32_EQ(left->data.command.arg_count, 1);
+  ASSERT(left->data.command.args[0]->type == AST_VAR_REF);
+  /* second arg is $b */
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[1]->data.var_ref.name, "b", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* a | b | c  →  [c [b [a]]] */
+static int test_pipe_multi_stage(void) {
+  setup();
+  ParseResult r = parse("a | b | c");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  /* Outermost: [c [b [a]]] */
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "c", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  /* inner: [b [a]] */
+  AstNode* mid = n->data.command.args[0];
+  ASSERT(mid->type == AST_COMMAND);
+  ASSERT(memcmp(mid->data.command.head->data.lit_string.value, "b", 1) == 0);
+  ASSERT_U32_EQ(mid->data.command.arg_count, 1);
+  /* innermost: [a] */
+  AstNode* inner = mid->data.command.args[0];
+  ASSERT(inner->type == AST_COMMAND);
+  ASSERT(memcmp(inner->data.command.head->data.lit_string.value, "a", 1) == 0);
+  ASSERT_U32_EQ(inner->data.command.arg_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* + 1 2 | * 3  →  [* [+ 1 2] 3] */
+static int test_pipe_with_args(void) {
+  setup();
+  ParseResult r = parse("+ 1 2 | * 3");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "*", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* first arg is [+ 1 2] */
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_COMMAND);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(left->data.command.arg_count, 2);
+  ASSERT(left->data.command.args[0]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(left->data.command.args[0]->data.lit_int.value, 1);
+  ASSERT(left->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(left->data.command.args[1]->data.lit_int.value, 2);
+  /* second arg is 3 */
+  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(n->data.command.args[1]->data.lit_int.value, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Pipe in block: { foo $a | bar $b } */
+static int test_pipe_in_block(void) {
+  setup();
+  ParseResult r = parse("{ foo $a | bar $b }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* block = r.nodes[0];
+  ASSERT(block->type == AST_BLOCK);
+  ASSERT_U32_EQ(block->data.block.count, 1);
+  AstNode* n = block->data.block.commands[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "bar", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Zero-arg pipe: vec 1 2 3 | vlen  →  [vlen [vec 1 2 3]] */
+static int test_pipe_zero_arg_right(void) {
+  setup();
+  ParseResult r = parse("vec 1 2 3 | vlen");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "vlen", 4) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_COMMAND);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "vec", 3) == 0);
+  ASSERT_U32_EQ(left->data.command.arg_count, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Pipe inside [] still treats | as literal (no pipe semantics) */
+static int test_pipe_literal_in_brackets(void) {
+  setup();
+  ParseResult r = parse("[foo | bar]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "foo", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* | is parsed as literal string "|" inside brackets */
+  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "|", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "bar", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -3405,6 +3543,13 @@ int main(void) {
     {"arrow_in_infix",          test_arrow_in_infix},
     {"arrow_in_bracket_cmd",    test_arrow_in_bracket_cmd},
     {"arrow_old_dot_compat",    test_arrow_old_dot_compat},
+    /* Syntax Redesign US-010: Pipe threading (|) */
+    {"pipe_basic",              test_pipe_basic},
+    {"pipe_multi_stage",        test_pipe_multi_stage},
+    {"pipe_with_args",          test_pipe_with_args},
+    {"pipe_in_block",           test_pipe_in_block},
+    {"pipe_zero_arg_right",     test_pipe_zero_arg_right},
+    {"pipe_literal_in_bracket", test_pipe_literal_in_brackets},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;
