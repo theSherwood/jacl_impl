@@ -647,6 +647,41 @@ static AstNode* parser__parse_infix_operand(Parser* p) {
     case TOKEN_LBRACKET:
       result = parser__parse_command(p);
       break;
+    case TOKEN_DOLLAR_BRACKET: {
+      /* $[cmd args] inside infix / $() context */
+      Token* db = parser__advance(p); /* consume $[ */
+      AstNode* head = parser__parse_expr(p);
+      if (head == NULL) {
+        return parser__error(p, "expected expression after $[", db);
+      }
+      NodeArray args;
+      parser__arr_init(&args, p->arena);
+      while (!parser__at_end(p) &&
+             parser__peek(p)->type != TOKEN_RBRACKET) {
+        if (parser__peek(p)->type == TOKEN_NEWLINE) {
+          parser__advance(p); continue;
+        }
+        AstNode* arg = parser__parse_expr(p);
+        if (arg == NULL) break;
+        parser__arr_push(&args, arg);
+      }
+      SourcePos end_pos;
+      if (parser__peek(p)->type == TOKEN_RBRACKET) {
+        Token* rb = parser__advance(p);
+        end_pos = parser__token_end(rb);
+      } else {
+        end_pos = parser__token_end(parser__peek(p));
+      }
+      AstNode* cmd = ast_alloc(p->arena);
+      cmd->type = AST_COMMAND;
+      cmd->start = parser__token_start(db);
+      cmd->end = end_pos;
+      cmd->data.command.head = head;
+      cmd->data.command.args = args.nodes;
+      cmd->data.command.arg_count = args.count;
+      result = cmd;
+      break;
+    }
     case TOKEN_LBRACE:
       result = parser__parse_block(p);
       break;
@@ -2008,6 +2043,79 @@ static AstNode* parser__parse_interp_string(Parser* p) {
       cmd->data.command.args = args.nodes;
       cmd->data.command.arg_count = args.count;
       parser__arr_push(&segments, cmd);
+    }
+    else if (tok->type == TOKEN_DOLLAR_PAREN) {
+      Token* dp_tok = parser__advance(p); /* consume TOKEN_DOLLAR_PAREN */
+
+      /* Parse infix expression contents (same as parse_infix but no LPAREN) */
+      AstNode* left = parser__parse_infix_operand(p);
+      if (left == NULL) {
+        AstNode* err = parser__error(p, "expected expression after $(", dp_tok);
+        parser__arr_push(&segments, err);
+        /* Skip to TOKEN_RPAREN */
+        while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RPAREN) {
+          parser__advance(p);
+        }
+        if (parser__peek(p)->type == TOKEN_RPAREN) {
+          parser__advance(p);
+        }
+        continue;
+      }
+
+      /* Binary operator loop — left-to-right, no precedence */
+      while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RPAREN) {
+        Token* op_tok = parser__peek(p);
+        if (!parser__is_infix_binary_op(op_tok)) break;
+        parser__advance(p); /* consume operator */
+
+        const char* op_name;
+        uint32_t op_name_len;
+        if (op_tok->type == TOKEN_AND) {
+          op_name = "and"; op_name_len = 3;
+        } else if (op_tok->type == TOKEN_OR) {
+          op_name = "or"; op_name_len = 2;
+        } else {
+          op_name = op_tok->payload.text;
+          op_name_len = op_tok->length;
+        }
+
+        AstNode* right = parser__parse_infix_operand(p);
+        if (right == NULL) {
+          AstNode* err = parser__error(p,
+              "expected operand after operator in $()", op_tok);
+          parser__sync_paren(p);
+          parser__arr_push(&segments, err);
+          goto dp_done;
+        }
+
+        AstNode* head = ast_alloc(p->arena);
+        head->type = AST_LIT_STRING;
+        head->start = parser__token_start(op_tok);
+        head->end   = parser__token_end(op_tok);
+        head->data.lit_string.value  = op_name;
+        head->data.lit_string.length = op_name_len;
+
+        AstNode** args = ast_alloc_array(p->arena, 2);
+        args[0] = left;
+        args[1] = right;
+
+        AstNode* cmd = ast_alloc(p->arena);
+        cmd->type  = AST_COMMAND;
+        cmd->start = left->start;
+        cmd->end   = right->end;
+        cmd->data.command.head      = head;
+        cmd->data.command.args      = args;
+        cmd->data.command.arg_count = 2;
+
+        left = cmd;
+      }
+
+      /* Expect closing ) */
+      if (parser__peek(p)->type == TOKEN_RPAREN) {
+        parser__advance(p); /* consume ')' */
+      }
+      parser__arr_push(&segments, left);
+      dp_done: ;
     }
     else if (tok->type == TOKEN_STRING_PART) {
       parser__advance(p);

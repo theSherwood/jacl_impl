@@ -3467,6 +3467,116 @@ static int test_lambda_no_args(void) {
   TEST_PASS();
 }
 
+/* ---- US-012: $(expr) string interpolation and line continuation ---- */
+
+static int test_dollar_paren_basic(void) {
+  /* "val: $(1 + 2)" — basic $(expr) in string */
+  setup();
+  AstNode* n = parse_expr("\"val: $(1 + 2)\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  ASSERT_U32_EQ(n->data.interp_string.count, 2);
+  /* first segment: "val: " */
+  ASSERT(n->data.interp_string.segments[0]->type == AST_LIT_STRING);
+  /* second segment: infix result [+ 1 2] */
+  AstNode* expr = n->data.interp_string.segments[1];
+  ASSERT(expr->type == AST_COMMAND);
+  ASSERT(memcmp(expr->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(expr->data.command.arg_count, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_paren_vars(void) {
+  /* "total: $($x * $y)" — $(expr) with variables */
+  setup();
+  AstNode* n = parse_expr("\"total: $($x * $y)\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  ASSERT_U32_EQ(n->data.interp_string.count, 2);
+  AstNode* expr = n->data.interp_string.segments[1];
+  ASSERT(expr->type == AST_COMMAND);
+  ASSERT(memcmp(expr->data.command.head->data.lit_string.value, "*", 1) == 0);
+  ASSERT(expr->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(expr->data.command.args[1]->type == AST_VAR_REF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_paren_with_bracket(void) {
+  /* "v: $($x + $[len $v])" — $(expr) nesting with $[] */
+  setup();
+  AstNode* n = parse_expr("\"v: $($x + $[len $v])\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  /* segments: "v: ", then $(expr) with + */
+  AstNode* expr = n->data.interp_string.segments[1];
+  ASSERT(expr->type == AST_COMMAND);
+  ASSERT(memcmp(expr->data.command.head->data.lit_string.value, "+", 1) == 0);
+  /* right operand should be a command [len $v] */
+  ASSERT(expr->data.command.args[1]->type == AST_COMMAND);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_paren_single_value(void) {
+  /* "$($x)" — single value (no binary op) */
+  setup();
+  AstNode* n = parse_expr("\"$($x)\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  /* The $( ) with just a var ref */
+  AstNode* expr = n->data.interp_string.segments[0];
+  ASSERT(expr->type == AST_VAR_REF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_paren_existing_interp(void) {
+  /* Existing $var interp still works */
+  setup();
+  AstNode* n = parse_expr("\"hello $name\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  ASSERT_U32_EQ(n->data.interp_string.count, 2);
+  ASSERT(n->data.interp_string.segments[1]->type == AST_VAR_REF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_line_continuation(void) {
+  /* \ at end of line continues command */
+  setup();
+  ParseResult r = parse("print \\\n  42");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "print", 5) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  ASSERT(n->data.command.args[0]->type == AST_LIT_INT);
+  ASSERT(n->data.command.args[0]->data.lit_int.value == 42);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_blank_lines_no_empty(void) {
+  /* Blank lines (multiple newlines) don't produce empty commands */
+  setup();
+  ParseResult r = parse("\n\n\nprint 1\n\n\nprint 2\n\n");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -3682,6 +3792,14 @@ int main(void) {
     {"lambda_nested_bracket",   test_lambda_nested_bracket},
     {"lambda_in_pipe",          test_lambda_in_pipe},
     {"lambda_no_args",          test_lambda_no_args},
+    /* Syntax Redesign US-012: $(expr) interpolation & line continuation */
+    {"dollar_paren_basic",      test_dollar_paren_basic},
+    {"dollar_paren_vars",       test_dollar_paren_vars},
+    {"dollar_paren_bracket",    test_dollar_paren_with_bracket},
+    {"dollar_paren_single",     test_dollar_paren_single_value},
+    {"dollar_paren_existing",   test_dollar_paren_existing_interp},
+    {"line_continuation",       test_line_continuation},
+    {"blank_lines_no_empty",    test_blank_lines_no_empty},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

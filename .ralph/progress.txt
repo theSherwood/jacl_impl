@@ -34,6 +34,8 @@ Started: Sun Mar 15 00:51:19 UTC 2026
 - Lambda shorthand [\\ body] desugars in parser__parse_command: detect TOKEN_BACKSLASH after [, wrap body in [proc "" [it] {body}]
 - Anonymous proc (empty name, length 0) skips name binding in compiler — closure stays on stack as expression value
 - `each` argument order is `each collection callback` (NOT callback first) — same as OP_EACH stack order
+- $() in strings: lexer emits TOKEN_DOLLAR_PAREN, lex_interp_infix lexes inner tokens; parser uses parse_infix_operand loop until TOKEN_RPAREN
+- TOKEN_DOLLAR_BRACKET in parse_infix_operand: needed for $[cmd] inside $() — different from INTERP_EXPR_START used in string-level $[]
 
 ## 2026-03-15 - US-001
 Thread: n/a
@@ -254,4 +256,23 @@ Thread: n/a
   - `each` argument order is `each collection callback` — collection first, callback second (matches OP_EACH stack order)
   - Analysis functions (suspension, mutation, etc.) handle anonymous procs correctly — they skip proc bodies by checking head="proc"
   - Lambda body is a single command (head + args), not a block of commands — for multi-statement lambdas, use a proc
+---
+
+## 2026-03-16 - US-012
+Thread: n/a
+- Added `lexer__lex_interp_infix()` function in lexer.c — lexes tokens inside $(...) in strings, tracking paren depth
+- Modified `lexer__lex_string_body()` to call `lexer__lex_interp_infix` after emitting TOKEN_DOLLAR_PAREN for $(
+- Added TOKEN_DOLLAR_PAREN handling in `parser__parse_interp_string` — calls parser__parse_infix_operand for left, loops binary ops until TOKEN_RPAREN
+- Added TOKEN_DOLLAR_BRACKET handling in `parser__parse_infix_operand` — so $[cmd args] works inside $() infix context
+- Line continuation (\ at end of line) was already handled by lexer from US-001
+- Blank lines (multiple newlines) already correctly produce no empty commands (parser skips TOKEN_NEWLINE)
+- 7 new parser tests: dollar-paren-basic, vars, bracket-nested, single-value, existing-interp, line-continuation, blank-lines
+- 6 new compiler tests: basic, vars, nested-$[], existing-interp, line-continuation, blank-lines
+- All 188 parser tests pass, all 238 compiler tests pass, all 50 build suites pass (0 failures)
+- Files changed: src/lexer.c, src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - $() in strings reuses infix parsing logic but without consuming LPAREN — parser sees TOKEN_DOLLAR_PAREN then parses infix operands/ops until TOKEN_RPAREN
+  - TOKEN_DOLLAR_BRACKET inside $() context needs explicit handling in parser__parse_infix_operand — lexer emits it differently than inside strings (TOKEN_INTERP_EXPR_START)
+  - Lexer's lex_interp_infix handles nested parens, $var, $[...], operators, words/ints/floats — similar to lex_interp_expr but for paren delimiters
+  - No compiler changes needed — $(expr) produces same AST_COMMAND nodes as regular infix, and interp string compilation handles them uniformly
 ---

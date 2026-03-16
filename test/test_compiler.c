@@ -6812,6 +6812,164 @@ static int test_lambda_in_pipe(void) {
   TEST_PASS();
 }
 
+/* ===== Syntax Redesign US-012: $(expr) string interpolation & line continuation ===== */
+
+/* Basic $(1 + 2) inside string */
+static int test_dollar_paren_compile_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "print \"total: $(1 + 2)\"",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "total: 3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* $(expr) with variable references */
+static int test_dollar_paren_compile_vars(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "def price 10\ndef qty 3\nprint \"total: $($price * $qty)\"",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "total: 30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* $(expr) nesting with $[cmd] */
+static int test_dollar_paren_compile_nested(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "def x 5\nprint \"val: $($x + $[+ 2 3])\"",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "val: 10\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Existing $var and $[expr] interpolation still works */
+static int test_dollar_paren_compile_existing(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "def name \"world\"\nprint \"hello $name, $[+ 1 2]\"",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello world, 3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Line continuation: \ at end of line */
+static int test_line_continuation_compile(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "print \\\n  42",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Blank lines don't produce empty commands */
+static int test_blank_lines_compile(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "\n\nprint 1\n\n\nprint 2\n\n",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\n2\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -7089,6 +7247,13 @@ int main(void) {
     { "lambda_upvalue",                test_lambda_upvalue },
     { "lambda_as_value",               test_lambda_as_value },
     { "lambda_in_pipe",                test_lambda_in_pipe },
+    /* Syntax Redesign US-012: $(expr) interpolation & line continuation */
+    { "dollar_paren_basic",            test_dollar_paren_compile_basic },
+    { "dollar_paren_vars",             test_dollar_paren_compile_vars },
+    { "dollar_paren_nested",           test_dollar_paren_compile_nested },
+    { "dollar_paren_existing",         test_dollar_paren_compile_existing },
+    { "line_continuation",             test_line_continuation_compile },
+    { "blank_lines",                   test_blank_lines_compile },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

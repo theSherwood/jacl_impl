@@ -310,6 +310,8 @@ static void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
                                     uint32_t str_col);
 static void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
                                     uint32_t* error_count);
+static void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
+                                     uint32_t* error_count);
 
 /* -------------------------------------------------------------------------
  * Internal: String escape sequence handler
@@ -653,6 +655,7 @@ static void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
                                               dp_start, dp_line, dp_col);
             lexer__arr_push(arr, dp_tok);
           }
+          lexer__lex_interp_infix(lex, arr, error_count);
         } else {
           /* $var interpolation */
           uint32_t var_start = lex->pos;
@@ -900,6 +903,269 @@ static void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
       uint32_t sc = lex->col;
       lexer__advance(lex);
       lexer__lex_string_body(lex, arr, error_count, s, sl, sc);
+      continue;
+    }
+
+    /* Unrecognized character */
+    {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      lexer__advance(lex);
+      Token tok = lexer__make_token(lex, TOKEN_ERROR, s, sl, sc);
+      tok.payload.error_msg = lexer__unexpected_char_msg(lex, c);
+      lexer__arr_push(arr, tok);
+      (*error_count)++;
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Infix interpolation expression lexer (inside $(...))
+ *
+ * Lexes tokens until matching ) is found, tracking paren depth.
+ * Emits TOKEN_RPAREN for the closing ).
+ * Called after $( has been consumed and TOKEN_DOLLAR_PAREN emitted.
+ * ------------------------------------------------------------------------- */
+
+static void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
+                                     uint32_t* error_count) {
+  int depth = 1;
+
+  while (depth > 0) {
+    char c = lexer__peek(lex);
+
+    /* EOF — unterminated expression */
+    if (c == '\0') {
+      Token tok = lexer__make_token(lex, TOKEN_ERROR, lex->pos, lex->line, lex->col);
+      tok.length = 0;
+      tok.payload.error_msg = "unterminated $() interpolation expression";
+      lexer__arr_push(arr, tok);
+      (*error_count)++;
+      return;
+    }
+
+    /* Skip whitespace */
+    if (c == ' ' || c == '\t') {
+      lexer__advance(lex);
+      continue;
+    }
+
+    /* Comments */
+    if (c == '#') {
+      lexer__advance(lex);
+      while (lexer__peek(lex) != '\0' && lexer__peek(lex) != '\n'
+             && lexer__peek(lex) != '\r') {
+        lexer__advance(lex);
+      }
+      continue;
+    }
+
+    /* Newlines */
+    if (c == '\n' || c == '\r') {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      lexer__advance(lex);
+      if (c == '\r' && lexer__peek(lex) == '\n')
+        lexer__advance(lex);
+      Token tok = lexer__make_token(lex, TOKEN_NEWLINE, s, sl, sc);
+      lexer__arr_push(arr, tok);
+      lex->line++;
+      lex->col = 1;
+      continue;
+    }
+
+    /* Closing paren */
+    if (c == ')') {
+      depth--;
+      if (depth == 0) {
+        uint32_t s  = lex->pos;
+        uint32_t sl = lex->line;
+        uint32_t sc = lex->col;
+        lexer__advance(lex);
+        Token tok = lexer__make_token(lex, TOKEN_RPAREN, s, sl, sc);
+        lexer__arr_push(arr, tok);
+        return;
+      }
+      /* Nested ) — emit RPAREN */
+      {
+        uint32_t s  = lex->pos;
+        uint32_t sl = lex->line;
+        uint32_t sc = lex->col;
+        lexer__advance(lex);
+        Token tok = lexer__make_token(lex, TOKEN_RPAREN, s, sl, sc);
+        lexer__arr_push(arr, tok);
+      }
+      continue;
+    }
+
+    /* Opening paren */
+    if (c == '(') {
+      depth++;
+      {
+        uint32_t s  = lex->pos;
+        uint32_t sl = lex->line;
+        uint32_t sc = lex->col;
+        lexer__advance(lex);
+        Token tok = lexer__make_token(lex, TOKEN_LPAREN, s, sl, sc);
+        lexer__arr_push(arr, tok);
+      }
+      continue;
+    }
+
+    /* Brackets and braces */
+    if (c == '[' || c == ']' || c == '{' || c == '}') {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      lexer__advance(lex);
+      TokenType type;
+      switch (c) {
+        case '[': type = TOKEN_LBRACKET; break;
+        case ']': type = TOKEN_RBRACKET; break;
+        case '{': type = TOKEN_LBRACE;   break;
+        default:  type = TOKEN_RBRACE;   break;
+      }
+      Token tok = lexer__make_token(lex, type, s, sl, sc);
+      lexer__arr_push(arr, tok);
+      continue;
+    }
+
+    /* Numbers */
+    if (c >= '0' && c <= '9') {
+      lexer__lex_number(lex, arr, error_count);
+      continue;
+    }
+
+    /* Words */
+    if (lexer__is_word_start(c)) {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      while (lexer__is_word_char_no_arrow(lex))
+        lexer__advance(lex);
+      Token tok = lexer__make_token(lex, TOKEN_WORD, s, sl, sc);
+      tok.payload.text = lex->source + s;
+      lexer__arr_push(arr, tok);
+      continue;
+    }
+
+    /* Operators */
+    if (lexer__is_operator_char(c)) {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      TokenType otype;
+
+      switch (c) {
+        case '|':
+          lexer__advance(lex);
+          if (lexer__peek(lex) == '|') {
+            lexer__advance(lex);
+            otype = TOKEN_OR;
+          } else {
+            otype = TOKEN_PIPE;
+          }
+          break;
+        case '&':
+          lexer__advance(lex);
+          if (lexer__peek(lex) == '&') {
+            lexer__advance(lex);
+            otype = TOKEN_AND;
+          } else {
+            otype = TOKEN_AMP;
+          }
+          break;
+        case '~':
+          lexer__advance(lex);
+          otype = TOKEN_NOT;
+          break;
+        case '=':
+          lexer__advance(lex);
+          if (lexer__peek(lex) == '=') {
+            lexer__advance(lex);
+            otype = TOKEN_OPERATOR;
+          } else {
+            otype = TOKEN_EQUALS;
+          }
+          break;
+        case '-':
+          lexer__advance(lex);
+          if (lexer__peek(lex) == '>') {
+            lexer__advance(lex);
+            otype = TOKEN_ARROW;
+          } else {
+            while (lexer__is_operator_char(lexer__peek(lex)))
+              lexer__advance(lex);
+            otype = TOKEN_OPERATOR;
+          }
+          break;
+        default:
+          lexer__advance(lex);
+          while (lexer__is_operator_char(lexer__peek(lex)))
+            lexer__advance(lex);
+          otype = TOKEN_OPERATOR;
+          break;
+      }
+
+      Token tok = lexer__make_token(lex, otype, s, sl, sc);
+      tok.payload.text = lex->source + s;
+      lexer__arr_push(arr, tok);
+      continue;
+    }
+
+    /* Variable references: $identifier or $[ */
+    if (c == '$') {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      lexer__advance(lex);
+      char next = lexer__peek(lex);
+
+      if (next == '[') {
+        lexer__advance(lex);
+        Token tok = lexer__make_token(lex, TOKEN_DOLLAR_BRACKET, s, sl, sc);
+        lexer__arr_push(arr, tok);
+        continue;
+      }
+      if (lexer__is_word_start(next)) {
+        while (lexer__is_word_char_no_arrow(lex))
+          lexer__advance(lex);
+        Token tok = lexer__make_token(lex, TOKEN_VAR, s, sl, sc);
+        tok.payload.text = lex->source + s + 1;
+        lexer__arr_push(arr, tok);
+        continue;
+      }
+      {
+        Token tok = lexer__make_token(lex, TOKEN_ERROR, s, sl, sc);
+        tok.payload.error_msg = next == '\0'
+          ? "unexpected end of input after $"
+          : "invalid character after $";
+        lexer__arr_push(arr, tok);
+        (*error_count)++;
+      }
+      continue;
+    }
+
+    /* Strings inside expressions */
+    if (c == '"') {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      lexer__advance(lex);
+      lexer__lex_string_body(lex, arr, error_count, s, sl, sc);
+      continue;
+    }
+
+    /* Comma */
+    if (c == ',') {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      lexer__advance(lex);
+      Token tok = lexer__make_token(lex, TOKEN_COMMA, s, sl, sc);
+      lexer__arr_push(arr, tok);
       continue;
     }
 
