@@ -2424,6 +2424,141 @@ static int test_proc_bare_cmd_one_block_not_new(void) {
   TEST_PASS();
 }
 
+/* ---- Syntax Redesign US-004: New struct syntax ---- */
+
+static int test_struct_basic_new_syntax(void) {
+  setup();
+  /* struct Point {i32 x, i32 y} */
+  ParseResult r = parse("struct Point {i32 x, i32 y}");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_DEFSTRUCT);
+  ASSERT_U32_EQ(n->data.defstruct.field_count, 2);
+  ASSERT(memcmp(n->data.defstruct.name, "Point", 5) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[0], "i32", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[0], "x", 1) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[1], "i32", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[1], "y", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_mixed_types(void) {
+  setup();
+  /* struct Record {i64 id, str name, f32 score} */
+  ParseResult r = parse("struct Record {i64 id, str name, f32 score}");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_DEFSTRUCT);
+  ASSERT_U32_EQ(n->data.defstruct.field_count, 3);
+  ASSERT(memcmp(n->data.defstruct.field_types[0], "i64", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[0], "id", 2) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[1], "str", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[1], "name", 4) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[2], "f32", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[2], "score", 5) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_single_field(void) {
+  setup();
+  /* struct Wrapper {i32 val} */
+  ParseResult r = parse("struct Wrapper {i32 val}");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_DEFSTRUCT);
+  ASSERT_U32_EQ(n->data.defstruct.field_count, 1);
+  ASSERT(memcmp(n->data.defstruct.field_types[0], "i32", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[0], "val", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_old_syntax_compat(void) {
+  setup();
+  /* Old syntax still works */
+  ParseResult r = parse("defstruct Point [x :i32] [y :i32]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_DEFSTRUCT);
+  ASSERT_U32_EQ(n->data.defstruct.field_count, 2);
+  ASSERT(memcmp(n->data.defstruct.field_names[0], "x", 1) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[0], "i32", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[1], "y", 1) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[1], "i32", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_duplicate_field_new(void) {
+  setup();
+  /* Duplicate field name → error */
+  ParseResult r = parse("struct Bad {i32 x, i32 x}");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_empty_fields_error(void) {
+  setup();
+  /* Empty fields → error */
+  ParseResult r = parse("struct Empty {}");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_struct_type_field(void) {
+  setup();
+  /* A struct field referencing another struct by name */
+  ParseResult r = parse("struct Line {Point start, Point end}");
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_DEFSTRUCT);
+  ASSERT_U32_EQ(n->data.defstruct.field_count, 2);
+  ASSERT(memcmp(n->data.defstruct.field_types[0], "Point", 5) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[0], "start", 5) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[1], "Point", 5) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[1], "end", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_multiline_new(void) {
+  setup();
+  /* Multiline struct definition */
+  ParseResult r = parse(
+    "struct Vec3 {\n"
+    "  f32 x,\n"
+    "  f32 y,\n"
+    "  f32 z\n"
+    "}\n"
+  );
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_DEFSTRUCT);
+  ASSERT_U32_EQ(n->data.defstruct.field_count, 3);
+  ASSERT(memcmp(n->data.defstruct.field_types[0], "f32", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[0], "x", 1) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[2], "f32", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[2], "z", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -2579,6 +2714,15 @@ int main(void) {
     {"proc_mixed_type_untype",test_proc_mixed_typed_untyped},
     {"proc_single_param",     test_proc_single_param},
     {"proc_one_block_old",    test_proc_bare_cmd_one_block_not_new},
+    /* Syntax Redesign US-004: New struct syntax */
+    {"struct_basic_new",      test_struct_basic_new_syntax},
+    {"struct_mixed_types",    test_struct_mixed_types},
+    {"struct_single_field",   test_struct_single_field},
+    {"struct_old_compat",     test_struct_old_syntax_compat},
+    {"struct_dup_field_new",  test_struct_duplicate_field_new},
+    {"struct_empty_err",      test_struct_empty_fields_error},
+    {"struct_type_field",     test_struct_struct_type_field},
+    {"struct_multiline_new",  test_struct_multiline_new},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

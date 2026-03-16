@@ -895,30 +895,25 @@ static const char* parser__parse_inline_struct_type(Parser* p, uint32_t* out_len
 }
 
 static AstNode* parser__parse_defstruct(Parser* p) {
-  Token* kw_tok = parser__advance(p); /* consume 'defstruct' */
+  Token* kw_tok = parser__advance(p); /* consume 'struct'/'defstruct' */
   SourcePos start = parser__token_start(kw_tok);
 
   /* Expect struct name (a word) */
   Token* name_tok = parser__peek(p);
   if (name_tok->type != TOKEN_WORD) {
-    return parser__error(p, "expected struct name after 'defstruct'", name_tok);
+    return parser__error(p, "expected struct name after 'struct'", name_tok);
   }
   parser__advance(p);
   const char* struct_name = name_tok->payload.text;
   uint32_t struct_name_len = name_tok->length;
 
-  /* Parse field definitions: [name :type] ... */
-  NodeArray field_names_arr;
-  parser__arr_init(&field_names_arr, p->arena);
-
-  /* We'll collect field info as Token* pairs (name, type) stored in the array */
   const char** field_names = NULL;
   uint32_t* field_name_lens = NULL;
   const char** field_types = NULL;
   uint32_t* field_type_lens = NULL;
   uint32_t field_count = 0;
 
-  /* Temporary storage - use a simple growable approach */
+  /* Temporary storage */
   #define DEFSTRUCT_MAX_FIELDS 64
   const char* tmp_fnames[DEFSTRUCT_MAX_FIELDS];
   uint32_t tmp_fname_lens[DEFSTRUCT_MAX_FIELDS];
@@ -927,100 +922,181 @@ static AstNode* parser__parse_defstruct(Parser* p) {
 
   SourcePos last_end = parser__token_end(name_tok);
 
-  while (!parser__at_end(p) && !parser__is_command_end(p)) {
-    Token* open = parser__peek(p);
-    if (open->type != TOKEN_LBRACKET) {
-      return parser__error(p, "expected '[' for field definition", open);
-    }
-    parser__advance(p); /* consume '[' */
+  /* ── New syntax: struct Name {type name, type name, ...} ── */
+  if (!parser__at_end(p) && parser__peek(p)->type == TOKEN_LBRACE) {
+    Token* open = parser__advance(p); /* consume '{' */
 
-    /* Field name */
-    Token* fname_tok = parser__peek(p);
-    if (fname_tok->type != TOKEN_WORD) {
-      AstNode* err = parser__error(p, "expected field name", fname_tok);
-      parser__sync_bracket(p);
-      return err;
-    }
-    parser__advance(p);
+    while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
+      /* Skip commas and newlines between fields */
+      while (!parser__at_end(p) &&
+             (parser__peek(p)->type == TOKEN_COMMA ||
+              parser__peek(p)->type == TOKEN_NEWLINE ||
+              parser__peek(p)->type == TOKEN_SEMICOLON)) {
+        parser__advance(p);
+      }
+      if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
 
-    /* Type annotation: expect a word starting with ':' or an operator ':' followed by word */
-    Token* type_tok = parser__peek(p);
-    const char* type_str = NULL;
-    uint32_t type_len = 0;
+      /* Field type — word or keyword token */
+      Token* type_tok = parser__peek(p);
+      const char* type_str = NULL;
+      uint32_t type_len = 0;
 
-    if (type_tok->type == TOKEN_COLON ||
-        (type_tok->type == TOKEN_OPERATOR &&
-         type_tok->length >= 1 && type_tok->payload.text[0] == ':')) {
-      /* TOKEN_COLON or operator token starting with ':' — type name is the rest */
-      parser__advance(p);
-      if (type_tok->type == TOKEN_OPERATOR && type_tok->length > 1) {
-        /* :i32 etc — the colon and type are in one token */
-        type_str = type_tok->payload.text + 1;
-        type_len = type_tok->length - 1;
+      if (type_tok->type == TOKEN_WORD) {
+        type_str = type_tok->payload.text;
+        type_len = type_tok->length;
+        parser__advance(p);
+      } else if (type_tok->type == TOKEN_STRUCT &&
+                 p->pos + 1 < p->count &&
+                 p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
+        /* Inline struct type: struct{...} */
+        uint32_t inline_len = 0;
+        type_str = parser__parse_inline_struct_type(p, &inline_len);
+        if (!type_str) {
+          return parser__error(p, "invalid inline struct type", type_tok);
+        }
+        type_len = inline_len;
       } else {
-        /* Just ':' (TOKEN_COLON or TOKEN_OPERATOR length 1) — check for inline struct or type name */
-        Token* tname = parser__peek(p);
-        if ((tname->type == TOKEN_STRUCT ||
-             (tname->type == TOKEN_WORD && tname->length == 6 &&
-              memcmp(tname->payload.text, "struct", 6) == 0)) &&
-            p->pos + 1 < p->count &&
-            p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
-          /* Inline struct type */
-          uint32_t inline_len = 0;
-          type_str = parser__parse_inline_struct_type(p, &inline_len);
-          if (!type_str) {
-            parser__sync_bracket(p);
-            return parser__error(p, "invalid inline struct type", tname);
-          }
-          type_len = inline_len;
-        } else if (tname->type != TOKEN_WORD) {
-          AstNode* err = parser__error(p, "expected type name after ':'", tname);
-          parser__sync_bracket(p);
-          return err;
-        } else {
-          parser__advance(p);
-          type_str = tname->payload.text;
-          type_len = tname->length;
+        return parser__error(p, "expected field type", type_tok);
+      }
+
+      /* Field name — must be a word */
+      Token* fname_tok = parser__peek(p);
+      if (fname_tok->type != TOKEN_WORD) {
+        return parser__error(p, "expected field name after type", fname_tok);
+      }
+      parser__advance(p);
+
+      if (field_count >= DEFSTRUCT_MAX_FIELDS) {
+        return parser__error(p, "too many fields in struct (max 64)", kw_tok);
+      }
+
+      /* Check for duplicate field names */
+      for (uint32_t i = 0; i < field_count; i++) {
+        if (tmp_fname_lens[i] == fname_tok->length &&
+            memcmp(tmp_fnames[i], fname_tok->payload.text, fname_tok->length) == 0) {
+          return parser__error(p, "duplicate field name in struct", fname_tok);
         }
       }
-    } else {
-      AstNode* err = parser__error(p, "expected ':type' annotation for field", type_tok);
-      parser__sync_bracket(p);
-      return err;
+
+      tmp_fnames[field_count] = fname_tok->payload.text;
+      tmp_fname_lens[field_count] = fname_tok->length;
+      tmp_ftypes[field_count] = type_str;
+      tmp_ftype_lens[field_count] = type_len;
+      field_count++;
     }
 
-    /* Expect closing ']' */
-    Token* close = parser__peek(p);
-    if (close->type != TOKEN_RBRACKET) {
-      AstNode* err = parser__error(p, "expected ']' to close field definition", close);
-      parser__sync_bracket(p);
-      return err;
+    /* Expect closing brace */
+    if (parser__at_end(p) || parser__peek(p)->type != TOKEN_RBRACE) {
+      return parser__error(p, "expected '}' to close struct fields", open);
     }
-    parser__advance(p);
+    Token* close = parser__advance(p);
     last_end = parser__token_end(close);
 
-    if (field_count >= DEFSTRUCT_MAX_FIELDS) {
-      return parser__error(p, "too many fields in struct (max 64)", kw_tok);
+    /* Validate: at least one field */
+    if (field_count == 0) {
+      return parser__error(p, "struct must have at least one field", name_tok);
     }
-
-    /* Check for duplicate field names */
-    for (uint32_t i = 0; i < field_count; i++) {
-      if (tmp_fname_lens[i] == fname_tok->length &&
-          memcmp(tmp_fnames[i], fname_tok->payload.text, fname_tok->length) == 0) {
-        return parser__error(p, "duplicate field name in struct", fname_tok);
-      }
-    }
-
-    tmp_fnames[field_count] = fname_tok->payload.text;
-    tmp_fname_lens[field_count] = fname_tok->length;
-    tmp_ftypes[field_count] = type_str;
-    tmp_ftype_lens[field_count] = type_len;
-    field_count++;
   }
+  /* ── Old syntax: defstruct Name [name :type] [name :type] ... ── */
+  else {
+    NodeArray field_names_arr;
+    parser__arr_init(&field_names_arr, p->arena);
 
-  /* Validate: at least one field */
-  if (field_count == 0) {
-    return parser__error(p, "struct must have at least one field", name_tok);
+    while (!parser__at_end(p) && !parser__is_command_end(p)) {
+      Token* open = parser__peek(p);
+      if (open->type != TOKEN_LBRACKET) {
+        return parser__error(p, "expected '[' for field definition", open);
+      }
+      parser__advance(p); /* consume '[' */
+
+      /* Field name */
+      Token* fname_tok = parser__peek(p);
+      if (fname_tok->type != TOKEN_WORD) {
+        AstNode* err = parser__error(p, "expected field name", fname_tok);
+        parser__sync_bracket(p);
+        return err;
+      }
+      parser__advance(p);
+
+      /* Type annotation: expect a word starting with ':' or an operator ':' followed by word */
+      Token* type_tok = parser__peek(p);
+      const char* type_str = NULL;
+      uint32_t type_len = 0;
+
+      if (type_tok->type == TOKEN_COLON ||
+          (type_tok->type == TOKEN_OPERATOR &&
+           type_tok->length >= 1 && type_tok->payload.text[0] == ':')) {
+        /* TOKEN_COLON or operator token starting with ':' — type name is the rest */
+        parser__advance(p);
+        if (type_tok->type == TOKEN_OPERATOR && type_tok->length > 1) {
+          /* :i32 etc — the colon and type are in one token */
+          type_str = type_tok->payload.text + 1;
+          type_len = type_tok->length - 1;
+        } else {
+          /* Just ':' (TOKEN_COLON or TOKEN_OPERATOR length 1) — check for inline struct or type name */
+          Token* tname = parser__peek(p);
+          if ((tname->type == TOKEN_STRUCT ||
+               (tname->type == TOKEN_WORD && tname->length == 6 &&
+                memcmp(tname->payload.text, "struct", 6) == 0)) &&
+              p->pos + 1 < p->count &&
+              p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
+            /* Inline struct type */
+            uint32_t inline_len = 0;
+            type_str = parser__parse_inline_struct_type(p, &inline_len);
+            if (!type_str) {
+              parser__sync_bracket(p);
+              return parser__error(p, "invalid inline struct type", tname);
+            }
+            type_len = inline_len;
+          } else if (tname->type != TOKEN_WORD) {
+            AstNode* err = parser__error(p, "expected type name after ':'", tname);
+            parser__sync_bracket(p);
+            return err;
+          } else {
+            parser__advance(p);
+            type_str = tname->payload.text;
+            type_len = tname->length;
+          }
+        }
+      } else {
+        AstNode* err = parser__error(p, "expected ':type' annotation for field", type_tok);
+        parser__sync_bracket(p);
+        return err;
+      }
+
+      /* Expect closing ']' */
+      Token* close = parser__peek(p);
+      if (close->type != TOKEN_RBRACKET) {
+        AstNode* err = parser__error(p, "expected ']' to close field definition", close);
+        parser__sync_bracket(p);
+        return err;
+      }
+      parser__advance(p);
+      last_end = parser__token_end(close);
+
+      if (field_count >= DEFSTRUCT_MAX_FIELDS) {
+        return parser__error(p, "too many fields in struct (max 64)", kw_tok);
+      }
+
+      /* Check for duplicate field names */
+      for (uint32_t i = 0; i < field_count; i++) {
+        if (tmp_fname_lens[i] == fname_tok->length &&
+            memcmp(tmp_fnames[i], fname_tok->payload.text, fname_tok->length) == 0) {
+          return parser__error(p, "duplicate field name in struct", fname_tok);
+        }
+      }
+
+      tmp_fnames[field_count] = fname_tok->payload.text;
+      tmp_fname_lens[field_count] = fname_tok->length;
+      tmp_ftypes[field_count] = type_str;
+      tmp_ftype_lens[field_count] = type_len;
+      field_count++;
+    }
+
+    /* Validate: at least one field */
+    if (field_count == 0) {
+      return parser__error(p, "struct must have at least one field", name_tok);
+    }
   }
 
   /* Copy to arena-allocated arrays */

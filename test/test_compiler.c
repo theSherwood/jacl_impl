@@ -5172,6 +5172,131 @@ static int test_struct_module_import(void) {
   TEST_PASS();
 }
 
+/* Syntax Redesign US-004: New struct syntax */
+
+static int test_struct_new_syntax_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "struct Point {i32 x, i32 y}", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_syntax_runtime(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "def p [Point 10 20]\n"
+      "print [. $p x]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_syntax_all_types(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "struct AllTypes {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, str g}",
+      &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_syntax_nested(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "struct Point {i32 x, i32 y}\n"
+      "struct Line {Point start, Point end}",
+      &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_syntax_construct_and_access(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "def p [Point 3 7]\n"
+      "print [. $p x]\n"
+      "print [. $p y]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n7\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_syntax_duplicate_field(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "struct Bad {i32 x, i32 x}", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -5381,6 +5506,13 @@ int main(void) {
     { "inline_struct_nested",            test_inline_struct_nested },
     /* US-009 (Struct): Module export/import */
     { "struct_module_import",            test_struct_module_import },
+    /* Syntax Redesign US-004: New struct syntax */
+    { "struct_new_syntax_basic",         test_struct_new_syntax_basic },
+    { "struct_new_syntax_runtime",       test_struct_new_syntax_runtime },
+    { "struct_new_syntax_all_types",     test_struct_new_syntax_all_types },
+    { "struct_new_syntax_nested",        test_struct_new_syntax_nested },
+    { "struct_new_syntax_construct",     test_struct_new_syntax_construct_and_access },
+    { "struct_new_syntax_dup_field",     test_struct_new_syntax_duplicate_field },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
