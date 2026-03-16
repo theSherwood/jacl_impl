@@ -5626,6 +5626,234 @@ static int test_if_while_combined_new(void) {
   TEST_PASS();
 }
 
+/* ====================== Syntax Redesign US-006: for command ====================== */
+
+/* for $items { body } — implicit $it binding */
+static int test_for_implicit_it(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "for [vec 10 20 30] {\n"
+    "  [print $it]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for $items item { body } — explicit binding variable */
+static int test_for_explicit_binding(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "for [vec 1 2 3] x {\n"
+    "  [print $x]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\n2\n3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for $items [\  print $it] — HOF callback form (like each) */
+static int test_for_hof_callback(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "[def v [vec 10 20 30]]\n"
+    "proc p {x} { [print $x] }\n"
+    "[for $v $p]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for on empty vector — no iteration */
+static int test_for_empty_vec(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "for [vec] {\n"
+    "  [print $it]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for with variable collection — for $v { body } */
+static int test_for_variable_collection(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "[def v [vec 5 10 15]]\n"
+    "for $v {\n"
+    "  [print $it]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n10\n15\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for returns nil */
+static int test_for_returns_nil(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "[def v [vec 1]]\n"
+    "proc p {x} { [+ $x 0] }\n"
+    "[print [for $v $p]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "nil\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for with upvalue capture — implicit $it body referencing outer scope */
+static int test_for_upvalue_capture(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "[def offset 100]\n"
+    "for [vec 1 2 3] {\n"
+    "  [print [+ $offset $it]]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "101\n102\n103\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* each still works as alias during transition */
+static int test_each_still_works(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "[def v [vec 10 20 30]]\n"
+    "proc p {x} { [print $x] }\n"
+    "[each $v $p]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -5855,6 +6083,15 @@ int main(void) {
     { "while_new_infix_condition",     test_while_new_infix_condition },
     { "while_new_returns_nil",         test_while_new_returns_nil },
     { "if_while_combined_new",         test_if_while_combined_new },
+    /* Syntax Redesign US-006: for command */
+    { "for_implicit_it",               test_for_implicit_it },
+    { "for_explicit_binding",          test_for_explicit_binding },
+    { "for_hof_callback",             test_for_hof_callback },
+    { "for_empty_vec",                test_for_empty_vec },
+    { "for_variable_collection",      test_for_variable_collection },
+    { "for_returns_nil",              test_for_returns_nil },
+    { "for_upvalue_capture",          test_for_upvalue_capture },
+    { "each_still_works",            test_each_still_works },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

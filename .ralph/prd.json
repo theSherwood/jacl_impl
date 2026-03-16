@@ -118,7 +118,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "The HOF callback form (for $items callback) maps directly to current each behavior — same opcode (OP_EACH). The block forms (implicit $it and explicit binding) are new — the compiler needs to wrap the block body in an implicit closure with the binding variable, then emit OP_EACH. The parser detects for keyword and determines which form based on what follows the collection argument."
     },
     {

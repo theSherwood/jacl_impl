@@ -4055,6 +4055,195 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* for builtin — three forms:
+     (a) for collection { body }          — implicit $it binding (2 args, last is block)
+     (b) for collection name { body }     — explicit binding     (3 args, last is block)
+     (c) for collection callback          — HOF form, same as each (2 args, no block)  */
+  if (compiler__head_matches(head, "for", 3)) {
+    /* Form (c): HOF callback — delegate to each */
+    if (argc == 2 && args[1]->type != AST_BLOCK) {
+      compiler__compile_hof_builtin(c, "for", args, argc, OP_EACH, line, col);
+      return;
+    }
+
+    /* Form (a): for collection { body } — implicit $it */
+    if (argc == 2 && args[1]->type == AST_BLOCK) {
+      const char* param_name = "it";
+      uint32_t param_len = 2;
+
+      /* Check for suspension in block body */
+      if (ast__contains_suspension(args[1], c->suspension_map)) {
+        compiler__error(c, line, col,
+            "cannot suspend inside non-suspending callback");
+        return;
+      }
+
+      /* Compile collection */
+      compiler__compile_node(c, args[0]);
+
+      /* Create implicit closure with parameter "it" wrapping block body */
+      JaclClosure* closure = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
+      chunk_init(&closure->chunk, c->arena);
+      closure->param_count  = 1;
+      closure->upvalue_count = 0;
+      closure->upvalues     = NULL;
+      closure->name         = "__for_it";
+      closure->min_args     = 1;
+      closure->variadic     = false;
+      closure->pinned       = false;
+      closure->pin_worker_id = -1;
+
+      JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal));
+      pnames[0] = jacl_inline_string(param_name, param_len);
+      closure->param_names = pnames;
+
+      /* Compile body in sub-compiler */
+      Compiler body_compiler;
+      compiler__init(&body_compiler, &closure->chunk, c->arena, c->intern_table, c->heap);
+      body_compiler.scope_depth    = 1;
+      body_compiler.enclosing      = c;
+      body_compiler.suspension_map = c->suspension_map;
+
+      /* Copy global arities for arity checking */
+      {
+        Compiler* root = c;
+        while (root->enclosing) root = root->enclosing;
+        memcpy(body_compiler.global_arities, root->global_arities,
+               sizeof(GlobalArity) * root->global_arity_count);
+        body_compiler.global_arity_count = root->global_arity_count;
+      }
+
+      /* Add "it" as local param at slot 0 */
+      compiler__add_local(&body_compiler, pnames[0], line, col);
+      body_compiler.locals[body_compiler.local_count - 1].is_param = true;
+      body_compiler.locals[body_compiler.local_count - 1].type = TYPE_DYN;
+
+      /* Compile block body as expression */
+      {
+        bool saved = body_compiler.in_non_suspending_callback;
+        body_compiler.in_non_suspending_callback = true;
+        compiler__compile_block_expr(&body_compiler, args[1]);
+        body_compiler.in_non_suspending_callback = saved;
+      }
+      compiler__emit_byte(&body_compiler, OP_RETURN, line);
+
+      /* Propagate errors */
+      c->error_count += body_compiler.error_count;
+      if (!c->first_error && body_compiler.first_error) {
+        c->first_error = body_compiler.first_error;
+      }
+
+      closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
+
+      /* Store closure in constant pool and emit OP_CLOSURE */
+      uint16_t closure_idx = chunk_add_constant(c->chunk, jacl_closure(closure));
+      compiler__emit_byte(c, OP_CLOSURE, line);
+      compiler__emit_u16(c, closure_idx, line);
+      for (uint32_t i = 0; i < body_compiler.upvalue_count; i++) {
+        compiler__emit_byte(c, body_compiler.upvalues[i].is_local, line);
+        compiler__emit_byte(c, body_compiler.upvalues[i].index, line);
+      }
+
+      /* Emit OP_EACH — stack has [collection, closure] */
+      compiler__emit_byte(c, OP_EACH, line);
+      return;
+    }
+
+    /* Form (b): for collection name { body } — explicit binding */
+    if (argc == 3 && args[1]->type == AST_LIT_STRING && args[2]->type == AST_BLOCK) {
+      const char* param_name = args[1]->data.lit_string.value;
+      uint32_t param_len = args[1]->data.lit_string.length;
+
+      if (param_len > 7) {
+        compiler__error(c, line, col, "for binding variable name exceeds 7-byte limit");
+        return;
+      }
+
+      /* Check for suspension in block body */
+      if (ast__contains_suspension(args[2], c->suspension_map)) {
+        compiler__error(c, line, col,
+            "cannot suspend inside non-suspending callback");
+        return;
+      }
+
+      /* Compile collection */
+      compiler__compile_node(c, args[0]);
+
+      /* Create implicit closure with named parameter wrapping block body */
+      JaclClosure* closure = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
+      chunk_init(&closure->chunk, c->arena);
+      closure->param_count  = 1;
+      closure->upvalue_count = 0;
+      closure->upvalues     = NULL;
+      closure->name         = "__for";
+      closure->min_args     = 1;
+      closure->variadic     = false;
+      closure->pinned       = false;
+      closure->pin_worker_id = -1;
+
+      JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal));
+      pnames[0] = jacl_inline_string(param_name, param_len);
+      closure->param_names = pnames;
+
+      /* Compile body in sub-compiler */
+      Compiler body_compiler;
+      compiler__init(&body_compiler, &closure->chunk, c->arena, c->intern_table, c->heap);
+      body_compiler.scope_depth    = 1;
+      body_compiler.enclosing      = c;
+      body_compiler.suspension_map = c->suspension_map;
+
+      /* Copy global arities for arity checking */
+      {
+        Compiler* root = c;
+        while (root->enclosing) root = root->enclosing;
+        memcpy(body_compiler.global_arities, root->global_arities,
+               sizeof(GlobalArity) * root->global_arity_count);
+        body_compiler.global_arity_count = root->global_arity_count;
+      }
+
+      /* Add binding variable as local param at slot 0 */
+      compiler__add_local(&body_compiler, pnames[0], line, col);
+      body_compiler.locals[body_compiler.local_count - 1].is_param = true;
+      body_compiler.locals[body_compiler.local_count - 1].type = TYPE_DYN;
+
+      /* Compile block body as expression */
+      {
+        bool saved = body_compiler.in_non_suspending_callback;
+        body_compiler.in_non_suspending_callback = true;
+        compiler__compile_block_expr(&body_compiler, args[2]);
+        body_compiler.in_non_suspending_callback = saved;
+      }
+      compiler__emit_byte(&body_compiler, OP_RETURN, line);
+
+      /* Propagate errors */
+      c->error_count += body_compiler.error_count;
+      if (!c->first_error && body_compiler.first_error) {
+        c->first_error = body_compiler.first_error;
+      }
+
+      closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
+
+      /* Store closure in constant pool and emit OP_CLOSURE */
+      uint16_t closure_idx = chunk_add_constant(c->chunk, jacl_closure(closure));
+      compiler__emit_byte(c, OP_CLOSURE, line);
+      compiler__emit_u16(c, closure_idx, line);
+      for (uint32_t i = 0; i < body_compiler.upvalue_count; i++) {
+        compiler__emit_byte(c, body_compiler.upvalues[i].is_local, line);
+        compiler__emit_byte(c, body_compiler.upvalues[i].index, line);
+      }
+
+      /* Emit OP_EACH — stack has [collection, closure] */
+      compiler__emit_byte(c, OP_EACH, line);
+      return;
+    }
+
+    /* Invalid form */
+    compiler__error(c, line, col,
+        "for expects: for collection { body }, "
+        "for collection name { body }, or for collection callback");
+    return;
+  }
+
   /* filter builtin (exactly 2 args — non-suspending callback) */
   if (compiler__head_matches(head, "filter", 6)) {
     compiler__compile_hof_builtin(c, "filter", args, argc, OP_FILTER, line, col);

@@ -2848,6 +2848,78 @@ static int test_if_elif_no_else(void) {
   TEST_PASS();
 }
 
+/* ====================== Syntax Redesign US-006: for command ====================== */
+
+/* for $items { body } — implicit $it form: parses as 2-arg command */
+static int test_for_implicit_it(void) {
+  setup();
+  ParseResult r = parse("for $v { [print $it] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "for", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for $items name { body } — explicit binding: parses as 3-arg command */
+static int test_for_explicit_binding(void) {
+  setup();
+  ParseResult r = parse("for $v item { [print $item] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "for", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "item", 4) == 0);
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for $items $callback — HOF form: parses as 2-arg command */
+static int test_for_hof_form(void) {
+  setup();
+  ParseResult r = parse("[for $v $cb]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "for", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for with inline collection: for [vec 1 2 3] { body } */
+static int test_for_inline_collection(void) {
+  setup();
+  ParseResult r = parse("for [vec 1 2 3] { [print $it] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "for", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND); /* [vec 1 2 3] */
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -3027,6 +3099,11 @@ int main(void) {
     {"while_infix_cond",      test_while_infix_condition},
     {"while_multiline_new",   test_while_multiline_new},
     {"while_old_bracket_compat", test_while_old_bracket_compat},
+    /* Syntax Redesign US-006: for command */
+    {"for_implicit_it",         test_for_implicit_it},
+    {"for_explicit_binding",    test_for_explicit_binding},
+    {"for_hof_form",            test_for_hof_form},
+    {"for_inline_collection",   test_for_inline_collection},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;
