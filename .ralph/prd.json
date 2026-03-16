@@ -270,7 +270,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 15,
-      "passes": false,
+      "passes": true,
       "notes": "test_m10.c is the most important for builtin renames \u2014 every set!/reset!/swap! must become set/reset/swap. test_m9.c error handling tests need [try ...] rewritten to try { ... } err { ... } syntax. test_vm.c has many small programs that need proc/if/def syntax updates."
     },
     {

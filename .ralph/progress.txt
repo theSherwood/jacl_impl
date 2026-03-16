@@ -307,3 +307,18 @@ Thread: n/a
   - set! still works in compiler (backward compat) but tests should use :: or bare `set` for new syntax
   - each still works as builtin alias — backward compat tests can keep it
 ---
+
+## 2026-03-16 - US-015
+Thread: n/a
+- test_vm.c: already had no old-syntax patterns (0 changes needed)
+- test_m9.c: updated 14 proc definitions from `proc name [] {` to `proc name {} {`
+- test_m10.c: ~80 changes — proc params [] → {}, [set! x val] → x :: val or [set x val], [reset! $b val] → [reset $b val], [swap! $b $f] → [swap $b $f], [def x val] → x = val, [mut x val] → x : val
+- Fixed 2 broken tests: `def r [mut x 42]` and `def r [set! x 42]` capture return values of mut/set; script incorrectly converted these to binding ops (which don't return values in the same way); fixed to `r = [mut x 42]` and `r = [set x 42]`
+- Error message strings kept `reset!:`/`swap!:` to match actual VM error output (vm.c still uses bang names in messages)
+- All 58 test_m10 tests pass, all test_m9 tests pass, all 50 build suites pass (0 failures)
+- Files changed: test/test_m9.c, test/test_m10.c
+- **Learnings for future iterations:**
+  - When converting `[def r [mut x val]]` to new syntax, the nested `[mut x val]` must stay in brackets to capture its return value; `x : val` as a binding statement doesn't produce a value to capture
+  - replace_all with `[set! ` → `[set` (missing trailing space) causes character-level merge bugs — always verify spacing in replacements
+  - VM error messages still use `set!`/`reset!`/`swap!` names — don't update error string assertions
+---
