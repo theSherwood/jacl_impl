@@ -322,3 +322,17 @@ Thread: n/a
   - replace_all with `[set! ` → `[set` (missing trailing space) causes character-level merge bugs — always verify spacing in replacements
   - VM error messages still use `set!`/`reset!`/`swap!` names — don't update error string assertions
 ---
+
+## 2026-03-16 - US-016
+Thread: n/a
+- test_m11.c: updated proc params `[]` → `{}`, `[set!` → `[set`, typed params `[i64 n label]` → `{i64 n, label}`
+- test_collections.c: `[each ...` → `[for ...`, proc params updated; kept `[each [vec 1]]` in arity error test (different error path than `[for [vec 1]]`)
+- test_string.c: `[def x val]` → `x = val` via bulk script
+- test_m5.c: `[def x val]` → `x = val`, nested `[proc inner [name] {...}]` → `proc inner {name} {...}`
+- Used Python bulk transform script + manual fixups for nested procs and edge cases
+- All 50 build suites pass (0 failures)
+- Files changed: test/test_m11.c, test/test_collections.c, test/test_string.c, test/test_m5.c
+- **Learnings for future iterations:**
+  - `[for [vec 1]]` with argc=1 hits `for`'s special form handling, not the `each` arity check — produces different error message; keep `[each [vec 1]]` for arity tests
+  - Bulk transform scripts need post-verification for nested proc definitions within multi-line C strings
+---

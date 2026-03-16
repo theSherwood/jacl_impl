@@ -573,8 +573,8 @@ static int test_each_vec(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "def v [vec 10 20 30]\n"
-    "proc p [x] { [print $x] }\n"
-    "[each $v $p]",
+    "proc p {x} { [print $x] }\n"
+    "[for $v $p]",
     &cap, "10\n20\n30\n"));
   TEST_PASS();
 }
@@ -584,8 +584,8 @@ static int test_each_map(void) {
   /* Single-entry for deterministic order */
   ASSERT(run_ok(
     "def m [map-set [map] \"k\" 42]\n"
-    "proc p [k v] { [print $k]\n[print $v] }\n"
-    "[each $m $p]",
+    "proc p {k, v} { [print $k]\n[print $v] }\n"
+    "[for $m $p]",
     &cap, "k\n42\n"));
   TEST_PASS();
 }
@@ -594,8 +594,8 @@ static int test_each_nil_return(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "def v [vec 1]\n"
-    "proc p [x] { [+ $x 0] }\n"
-    "[print [each $v $p]]",
+    "proc p {x} { [+ $x 0] }\n"
+    "[print [for $v $p]]",
     &cap, "nil\n"));
   TEST_PASS();
 }
@@ -603,8 +603,8 @@ static int test_each_nil_return(void) {
 static int test_each_empty(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc p [x] { [print $x] }\n"
-    "[each [vec] $p]",
+    "proc p {x} { [print $x] }\n"
+    "[for [vec] $p]",
     &cap, ""));
   TEST_PASS();
 }
@@ -620,7 +620,7 @@ static int test_transform_vec(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "def v [vec 1 2 3]\n"
-    "proc inc [x] { [+ $x 10] }\n"
+    "proc inc {x} { [+ $x 10] }\n"
     "def v2 [transform $v $inc]\n"
     "[print [vec-get $v2 0]]\n"
     "[print [vec-get $v2 1]]\n"
@@ -632,7 +632,7 @@ static int test_transform_vec(void) {
 static int test_transform_empty(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc inc [x] { [+ $x 1] }\n"
+    "proc inc {x} { [+ $x 1] }\n"
     "[print [vec-len [transform [vec] $inc]]]",
     &cap, "0\n"));
   TEST_PASS();
@@ -643,7 +643,7 @@ static int test_transform_map(void) {
   /* Single-entry for determinism */
   ASSERT(run_ok(
     "def m [map-set [map] \"a\" 5]\n"
-    "proc dbl [k v] { [vec $k [* $v 2]] }\n"
+    "proc dbl {k, v} { [vec $k [* $v 2]] }\n"
     "def m2 [transform $m $dbl]\n"
     "[print [map-get $m2 \"a\"]]",
     &cap, "10\n"));
@@ -656,7 +656,7 @@ static int test_filter_vec(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "def v [vec 1 2 3 4 5]\n"
-    "proc gt2 [x] { [> $x 2] }\n"
+    "proc gt2 {x} { [> $x 2] }\n"
     "def v2 [filter $v $gt2]\n"
     "[print [vec-len $v2]]\n"
     "[print [vec-get $v2 0]]\n"
@@ -669,7 +669,7 @@ static int test_filter_vec(void) {
 static int test_filter_empty(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc gt2 [x] { [> $x 2] }\n"
+    "proc gt2 {x} { [> $x 2] }\n"
     "[print [vec-len [filter [vec] $gt2]]]",
     &cap, "0\n"));
   TEST_PASS();
@@ -680,7 +680,7 @@ static int test_filter_map(void) {
   /* Use single-entry maps: one that passes, one that doesn't */
   ASSERT(run_ok(
     "def m [map-set [map] \"a\" 10]\n"
-    "proc big [k v] { [> $v 5] }\n"
+    "proc big {k, v} { [> $v 5] }\n"
     "def m2 [filter $m $big]\n"
     "[print [map-len $m2]]\n"
     "[print [map-get $m2 \"a\"]]",
@@ -692,7 +692,7 @@ static int test_filter_map_exclude(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "def m [map-set [map] \"a\" 1]\n"
-    "proc big [k v] { [> $v 5] }\n"
+    "proc big {k, v} { [> $v 5] }\n"
     "def m2 [filter $m $big]\n"
     "[print [map-len $m2]]",
     &cap, "0\n"));
@@ -718,8 +718,8 @@ static int test_map_get_type_err(void) {
 
 static int test_each_type_err(void) {
   ASSERT(run_err(
-    "proc p [x] { [+ $x 0] }\n"
-    "[each 42 $p]",
+    "proc p {x} { [+ $x 0] }\n"
+    "[for 42 $p]",
     "expected vector or map"));
   TEST_PASS();
 }
@@ -797,8 +797,8 @@ static int test_chained_transforms(void) {
   /* Map then filter: double elements, keep > 5 */
   ASSERT(run_ok(
     "def v [vec 1 2 3 4 5]\n"
-    "proc dbl [x] { [* $x 2] }\n"
-    "proc gt5 [x] { [> $x 5] }\n"
+    "proc dbl {x} { [* $x 2] }\n"
+    "proc gt5 {x} { [> $x 5] }\n"
     "def v2 [filter [transform $v $dbl] $gt5]\n"
     "[print [vec-len $v2]]\n"
     "[print [vec-get $v2 0]]\n"
@@ -812,9 +812,9 @@ static int test_multiline_program(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "def items [vec 10 20 30 40 50]\n"
-    "proc gt25 [x] { [> $x 25] }\n"
+    "proc gt25 {x} { [> $x 25] }\n"
     "def big [filter $items $gt25]\n"
-    "proc add1 [x] { [+ $x 1] }\n"
+    "proc add1 {x} { [+ $x 1] }\n"
     "def res [transform $big $add1]\n"
     "[print [vec-get $res 0]]\n"
     "[print [vec-get $res 1]]\n"
@@ -840,7 +840,7 @@ static int test_transform_empty_map(void) {
   PrintCapture cap;
   /* Transforming an empty map returns an empty map */
   ASSERT(run_ok(
-    "proc dbl [k v] { [vec $k [* $v 2]] }\n"
+    "proc dbl {k, v} { [vec $k [* $v 2]] }\n"
     "[print [map-len [transform [map] $dbl]]]",
     &cap, "0\n"));
   TEST_PASS();

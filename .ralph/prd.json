@@ -287,7 +287,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 16,
-      "passes": false,
+      "passes": true,
       "notes": "test_m11.c needs defstruct->struct and [. $s field]->$s->field changes throughout. test_collections.c needs each->for changes. test_string.c and test_m5.c likely need minimal syntax changes beyond proc/def updates."
     },
     {

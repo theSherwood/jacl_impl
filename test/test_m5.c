@@ -54,7 +54,7 @@ static int test_concat_var(void) {
   TEST_SETUP();
 
   const char* program =
-    "[def s \"hello\"]\n"
+    "s = \"hello\"\n"
     "[print [concat $s \" world\"]]";
   VMResult result = jacl_run(program, &vm, &arena);
 
@@ -108,7 +108,7 @@ static int test_interpolation_var(void) {
   TEST_SETUP();
 
   const char* program =
-    "[def name \"JACL\"]\n"
+    "name = \"JACL\"\n"
     "[print \"hello $name\"]";
   VMResult result = jacl_run(program, &vm, &arena);
 
@@ -164,9 +164,9 @@ static int test_heap_string_proc_arg_return(void) {
   TEST_SETUP();
 
   const char* program =
-    "[proc greet [name] {\n"
+    "proc greet {name} {\n"
     "  [concat \"hello \" $name]\n"
-    "}]\n"
+    "}\n"
     "[print [greet \"world\"]]";
   VMResult result = jacl_run(program, &vm, &arena);
 
@@ -181,12 +181,12 @@ static int test_closure_captures_heap_string(void) {
   TEST_SETUP();
 
   const char* program =
-    "[proc mkgreet [prefix] {\n"
-    "  [proc inner [name] {\n"
+    "proc mkgreet {prefix} {\n"
+    "  proc inner {name} {\n"
     "    [concat $prefix $name]\n"
-    "  }]\n"
-    "}]\n"
-    "[def hi [mkgreet \"hello \"]]\n"
+    "  }\n"
+    "}\n"
+    "hi = [mkgreet \"hello \"]\n"
     "[print [hi \"world\"]]\n"
     "[print [hi \"JACL\"]]";
   VMResult result = jacl_run(program, &vm, &arena);
@@ -228,7 +228,7 @@ static int test_interpolation_mixed(void) {
   TEST_SETUP();
 
   const char* program =
-    "[def x 10]\n"
+    "x = 10\n"
     "[print \"$x times 2 is $[* $x 2]\"]";
   VMResult result = jacl_run(program, &vm, &arena);
 
@@ -284,12 +284,12 @@ static int test_string_while_loop(void) {
   TEST_SETUP();
 
   const char* program =
-    "[def s \"hello\"]\n"
-    "[def i 0]\n"
-    "[def r \"\"]\n"
+    "s = \"hello\"\n"
+    "i = 0\n"
+    "r = \"\"\n"
     "[while [< $i [length $s]] {\n"
-    "  [def r [concat $r [index $s $i]]]\n"
-    "  [def i [+ $i 1]]\n"
+    "  r = [concat $r [index $s $i]]\n"
+    "  i = [+ $i 1]\n"
     "}]\n"
     "[print $r]";
   VMResult result = jacl_run(program, &vm, &arena);

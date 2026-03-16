@@ -310,7 +310,7 @@ static int test_def_typed_error_str_to_f64(void) {
 static int test_def_i64_local(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc t [] {\n"
+    "proc t {} {\n"
     "  def i64 x 100\n"
     "  [print [to-string $x]]\n"
     "}\n"
@@ -322,7 +322,7 @@ static int test_def_i64_local(void) {
 static int test_def_f64_local(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc t [] {\n"
+    "proc t {} {\n"
     "  def f64 x 2.5\n"
     "  [print [to-string $x]]\n"
     "}\n"
@@ -337,7 +337,7 @@ static int test_mut_i64_basic(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "mut i64 x 0\n"
-    "[set! x 42]\n"
+    "x :: 42\n"
     "[print [to-string $x]]",
     &cap, "42\n"));
   TEST_PASS();
@@ -347,7 +347,7 @@ static int test_mut_f64_basic(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "mut f64 x 0.0\n"
-    "[set! x 3.14]\n"
+    "x :: 3.14\n"
     "[print [to-string $x]]",
     &cap, "3.14\n"));
   TEST_PASS();
@@ -357,7 +357,7 @@ static int test_mut_u64_basic(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "mut u64 x 0\n"
-    "[set! x 100]\n"
+    "x :: 100\n"
     "[print [to-string $x]]",
     &cap, "100\n"));
   TEST_PASS();
@@ -367,7 +367,7 @@ static int test_mut_u32_basic(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "mut u32 x 0\n"
-    "[set! x 77]\n"
+    "x :: 77\n"
     "[print [to-string $x]]",
     &cap, "77\n"));
   TEST_PASS();
@@ -376,7 +376,7 @@ static int test_mut_u32_basic(void) {
 static int test_set_type_error_str_to_i64(void) {
   ASSERT(run_err(
     "mut i64 x 0\n"
-    "[set! x \"hello\"]",
+    "x :: \"hello\"",
     "type error: cannot assign str to i64 binding"));
   TEST_PASS();
 }
@@ -385,7 +385,7 @@ static int test_set_type_error_dyn_to_i64(void) {
   ASSERT(run_err(
     "mut i64 x 0\n"
     "def y 42\n"
-    "[set! x $y]",
+    "x :: $y",
     "type error: cannot assign dyn to i64 binding"));
   TEST_PASS();
 }
@@ -393,10 +393,10 @@ static int test_set_type_error_dyn_to_i64(void) {
 static int test_set_typed_to_typed_ok(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc t [] {\n"
+    "proc t {} {\n"
     "  mut i64 x 0\n"
     "  def i64 y 99\n"
-    "  [set! x $y]\n"
+    "  x :: $y\n"
     "  [print [to-string $x]]\n"
     "}\n"
     "[t]",
@@ -409,7 +409,7 @@ static int test_set_untyped_mut_no_checking(void) {
   /* Untyped mut should accept any value type */
   ASSERT(run_ok(
     "mut x 0\n"
-    "[set! x \"hello\"]\n"
+    "x :: \"hello\"\n"
     "[print $x]",
     &cap, "hello\n"));
   TEST_PASS();
@@ -420,10 +420,10 @@ static int test_set_untyped_mut_no_checking(void) {
 static int test_mut_i64_local(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc t [] {\n"
+    "proc t {} {\n"
     "  mut i64 n 0\n"
-    "  [set! n 10]\n"
-    "  [set! n [+ $n 5]]\n"
+    "  n :: 10\n"
+    "  [set n [+ $n 5]]\n"
     "  [print [to-string $n]]\n"
     "}\n"
     "[t]",
@@ -629,7 +629,7 @@ static int test_arith_f64_div_by_zero(void) {
 
 static int test_arith_result_type_inference(void) {
   PrintCapture cap;
-  /* [def y [+ $a $b]] where a,b are i64 -> y inferred as i64 */
+  /* y = [+ $a $b] where a,b are i64 -> y inferred as i64 */
   ASSERT(run_ok(
     "def i64 a 10\n"
     "def i64 b 20\n"
@@ -818,7 +818,7 @@ static int test_proc_mixed_params(void) {
   PrintCapture cap;
   /* Mixed typed/untyped params */
   ASSERT(run_ok(
-    "proc f [i64 n label] {\n"
+    "proc f {i64 n, label} {\n"
     "  [print $label]\n"
     "  [print [to-string $n]]\n"
     "}\n"
@@ -830,7 +830,7 @@ static int test_proc_mixed_params(void) {
 static int test_proc_untyped_unchanged(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc add [a b] { [+ $a $b] }\n"
+    "proc add {a, b} { [+ $a $b] }\n"
     "[print [add 3 4]]",
     &cap, "7\n"));
   TEST_PASS();
@@ -862,9 +862,9 @@ static int test_contextual_literal_in_set(void) {
   PrintCapture cap;
   /* set! passes expected type to RHS literal */
   ASSERT(run_ok(
-    "proc t [] {\n"
+    "proc t {} {\n"
     "  mut i64 x 0\n"
-    "  [set! x 99]\n"
+    "  x :: 99\n"
     "  [print [to-string $x]]\n"
     "}\n"
     "[t]",
@@ -903,9 +903,9 @@ static int test_typed_closure_capture(void) {
   /* Typed mut captured through closure retains type;
      get must be typed i64 so its unboxed return is handled correctly */
   ASSERT(run_ok(
-    "proc test [] {\n"
+    "proc test {} {\n"
     "  mut i64 n 0\n"
-    "  proc inc [] { [set! n [+ $n 1]] }\n"
+    "  proc inc {} { [set n [+ $n 1]] }\n"
     "  proc i64 get [] { [+ $n 0] }\n"
     "  [inc]\n"
     "  [inc]\n"
@@ -920,7 +920,7 @@ static int test_typed_closure_param(void) {
   PrintCapture cap;
   /* Closure with typed params */
   ASSERT(run_ok(
-    "proc test [] {\n"
+    "proc test {} {\n"
     "  proc i64 add [i64 a i64 b] { [+ $a $b] }\n"
     "  [print [to-string [add 10 20]]]\n"
     "}\n"
@@ -933,10 +933,10 @@ static int test_typed_upvalue_transitive(void) {
   PrintCapture cap;
   /* Inner closure captures typed mut from grandparent */
   ASSERT(run_ok(
-    "proc outer [] {\n"
+    "proc outer {} {\n"
     "  mut i64 x 0\n"
-    "  proc mid [] {\n"
-    "    proc inn [] { [set! x [+ $x 10]] }\n"
+    "  proc mid {} {\n"
+    "    proc inn {} { [set x [+ $x 10]] }\n"
     "    [inn]\n"
     "  }\n"
     "  [mid]\n"
@@ -1051,12 +1051,12 @@ static int test_typed_while_loop(void) {
   PrintCapture cap;
   /* Typed mut in while loop */
   ASSERT(run_ok(
-    "proc t [] {\n"
+    "proc t {} {\n"
     "  mut i64 i 0\n"
     "  mut i64 s 0\n"
     "  [while [< $i 5] {\n"
-    "    [set! s [+ $s $i]]\n"
-    "    [set! i [+ $i 1]]\n"
+    "    [set s [+ $s $i]]\n"
+    "    [set i [+ $i 1]]\n"
     "  }]\n"
     "  [print [to-string [+ $s 0]]]\n"
     "}\n"
