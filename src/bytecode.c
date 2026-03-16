@@ -143,6 +143,7 @@ typedef enum {
   OP_STRUCT_SET,    /* field mutation: followed by uint16_t field_offset, uint8_t field_type */
   OP_STRUCT_GET_DYN,/* runtime field access: followed by uint16_t const_idx (field name) */
   OP_STRUCT_SET_DYN,/* runtime field mutation: followed by uint16_t const_idx (field name) */
+  OP_CLOSE_LOOP,    /* pop N values under top-of-stack: followed by uint8_t count */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -398,6 +399,7 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_STRUCT_SET:      return "OP_STRUCT_SET";
     case OP_STRUCT_GET_DYN:  return "OP_STRUCT_GET_DYN";
     case OP_STRUCT_SET_DYN:  return "OP_STRUCT_SET_DYN";
+    case OP_CLOSE_LOOP:      return "OP_CLOSE_LOOP";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";

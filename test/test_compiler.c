@@ -5282,6 +5282,339 @@ static int test_continue_outside_loop_error(void) {
   TEST_PASS();
 }
 
+/* === US-002 (For-loop PRD): Continue as control flow === */
+
+/* Test: for loop with implicit $it — basic iteration */
+static int test_for_implicit_it(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[for [vec 10 20 30] {\n"
+    "  [print $it]\n"
+    "}]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: for loop with explicit binding name */
+static int test_for_explicit_binding(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[for [vec 1 2 3] x {\n"
+    "  [print $x]\n"
+    "}]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\n2\n3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: for over empty collection — no iterations */
+static int test_for_empty_collection(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[for [vec] {\n"
+    "  [print $it]\n"
+    "}]\n"
+    "[print \"done\"]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "done\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: for with continue — skips element */
+static int test_continue_for_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Print 1, 2, 4, 5 — skip 3 */
+  const char* program =
+    "[for [vec 1 2 3 4 5] {\n"
+    "  [if [== $it 3] { [continue] }]\n"
+    "  [print $it]\n"
+    "}]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\n2\n4\n5\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: continue in for loop — bare syntax */
+static int test_continue_for_bare(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Print 1, 3 — skip 2 */
+  const char* program =
+    "for [vec 1 2 3] {\n"
+    "  if [== $it 2] { continue }\n"
+    "  [print $it]\n"
+    "}\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\n3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: nested loops — continue affects only innermost */
+static int test_continue_nested_loops(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Outer: 1,2  Inner: skip 20, print 10,30
+     Expected: 10 30 10 30 */
+  const char* program =
+    "[for [vec 1 2] x {\n"
+    "  [for [vec 10 20 30] y {\n"
+    "    [if [== $y 20] { [continue] }]\n"
+    "    [print $y]\n"
+    "  }]\n"
+    "}]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n30\n10\n30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: for with break — exits loop */
+static int test_break_for_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Print 1, 2 — break at 3 */
+  const char* program =
+    "[for [vec 1 2 3 4 5] {\n"
+    "  [if [== $it 3] { [break] }]\n"
+    "  [print $it]\n"
+    "}]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\n2\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: for with break value */
+static int test_break_for_with_value(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* break with value from for loop — the for expression evaluates to 30 */
+  const char* program =
+    "[def result [for [vec 10 20 30 40] {\n"
+    "  [if [== $it 30] { [break $it] }]\n"
+    "}]]\n"
+    "[print $result]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: continue in while + for nested — only innermost affected */
+static int test_continue_mixed_nested(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Outer while iterates twice. Inner for skips element 2.
+     Expected: 1 3 1 3 done */
+  const char* program =
+    "[def n 0]\n"
+    "[while [< $n 2] {\n"
+    "  [def n [+ $n 1]]\n"
+    "  [for [vec 1 2 3] {\n"
+    "    [if [== $it 2] { [continue] }]\n"
+    "    [print $it]\n"
+    "  }]\n"
+    "}]\n"
+    "[print \"done\"]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\n3\n1\n3\ndone\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: for with HOF callback (via OP_EACH) */
+static int test_for_hof_callback(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[proc cb [x] { [print $x] }]\n"
+    "[for [vec 10 20 30] $cb]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -5494,6 +5827,17 @@ int main(void) {
     { "break_bare_with_value",           test_break_bare_with_value },
     { "continue_while_basic",            test_continue_while_basic },
     { "continue_outside_loop_error",     test_continue_outside_loop_error },
+    /* US-002 (For-loop PRD): Continue as control flow */
+    { "for_implicit_it",                 test_for_implicit_it },
+    { "for_explicit_binding",            test_for_explicit_binding },
+    { "for_empty_collection",            test_for_empty_collection },
+    { "continue_for_basic",              test_continue_for_basic },
+    { "continue_for_bare",              test_continue_for_bare },
+    { "continue_nested_loops",           test_continue_nested_loops },
+    { "break_for_basic",                 test_break_for_basic },
+    { "break_for_with_value",            test_break_for_with_value },
+    { "continue_mixed_nested",           test_continue_mixed_nested },
+    { "for_hof_callback",               test_for_hof_callback },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

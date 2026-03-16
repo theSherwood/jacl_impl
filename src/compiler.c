@@ -1046,11 +1046,16 @@ static bool ast__contains_nonlocal_set(AstNode* block) {
 
 #define COMPILER_LOOP_DEPTH_MAX 16
 #define COMPILER_BREAK_PATCHES_MAX 32
+#define COMPILER_CONTINUE_PATCHES_MAX 32
 
 typedef struct {
-  uint32_t loop_start;     /* bytecode offset of loop start (for continue) */
+  uint32_t loop_start;     /* bytecode offset of loop condition (for OP_LOOP) */
   uint32_t break_patches[COMPILER_BREAK_PATCHES_MAX];
   uint32_t break_patch_count;
+  uint32_t continue_patches[COMPILER_CONTINUE_PATCHES_MAX];
+  uint32_t continue_patch_count;
+  uint32_t local_count_at_loop; /* local_count before loop locals were pushed */
+  bool     is_for_loop;         /* true for inlined for-loops */
 } LoopContext;
 
 /* --- Internal: Compiler state --- */
@@ -3788,6 +3793,9 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     LoopContext* lctx = &c->loop_stack[c->loop_depth++];
     lctx->break_patch_count = 0;
+    lctx->continue_patch_count = 0;
+    lctx->local_count_at_loop = c->local_count;
+    lctx->is_for_loop = false;
 
     /* Loop-start label */
     uint32_t loop_start = c->chunk->code_count;
@@ -3835,6 +3843,166 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* for — collection-based iteration with inlined body
+     Forms:
+       [for $collection { body }]           — implicit $it binding
+       [for $collection name { body }]      — explicit binding
+       [for $collection $callback]           — HOF via OP_EACH
+  */
+  if (compiler__head_matches(head, "for", 3)) {
+    /* Detect HOF callback form: [for $collection $callback] */
+    if (argc == 2 && args[1]->type == AST_VAR_REF) {
+      compiler__compile_hof_builtin(c, "each", args, argc, OP_EACH, line, col);
+      return;
+    }
+
+    /* Determine binding name and body block */
+    const char* bind_name = "it";
+    uint32_t bind_name_len = 2;
+    AstNode* body_block = NULL;
+
+    if (argc == 2 && args[1]->type == AST_BLOCK) {
+      /* [for $collection { body }] — implicit $it */
+      body_block = args[1];
+    } else if (argc == 3 && args[1]->type == AST_LIT_STRING &&
+               args[2]->type == AST_BLOCK) {
+      /* [for $collection name { body }] — explicit binding */
+      bind_name = args[1]->data.lit_string.value;
+      bind_name_len = args[1]->data.lit_string.length;
+      body_block = args[2];
+    } else if (argc == 2 && args[1]->type == AST_COMMAND) {
+      /* [for $collection [\ body]] — lambda callback via OP_EACH */
+      compiler__compile_hof_builtin(c, "each", args, argc, OP_EACH, line, col);
+      return;
+    } else {
+      compiler__error(c, line, col,
+          "for requires: $collection { body }, $collection name { body }, "
+          "or $collection $callback");
+      return;
+    }
+
+    if (bind_name_len > 7) {
+      compiler__error(c, line, col, "for binding name exceeds 7-byte inline limit");
+      return;
+    }
+
+    /* Check loop depth */
+    if (c->loop_depth >= COMPILER_LOOP_DEPTH_MAX) {
+      compiler__error(c, line, col, "too many nested loops");
+      return;
+    }
+
+    /* Begin scope for hidden locals (__col, __len, __idx, $it/name) */
+    compiler__begin_scope(c);
+    uint32_t saved_local_count = c->local_count;
+
+    /* Compile collection → local __col */
+    compiler__compile_node(c, args[0]);
+    compiler__add_local(c, jacl_inline_string("__col", 5), line, col);
+
+    /* Compute length → local __len */
+    compiler__emit_byte(c, OP_GET_LOCAL, line);
+    compiler__emit_byte(c, (uint8_t)(c->local_count - 1), line);
+    compiler__emit_byte(c, OP_VEC_LEN, line);
+    compiler__add_local(c, jacl_inline_string("__len", 5), line, col);
+
+    /* Counter → local __idx (starts at 0) */
+    compiler__emit_constant(c, jacl_i32(0), line);
+    compiler__add_local(c, jacl_inline_string("__idx", 5), line, col);
+
+    /* Element placeholder → local $it/name (starts as nil) */
+    compiler__emit_byte(c, OP_NIL, line);
+    JaclVal bind_val = jacl_inline_string(bind_name, bind_name_len);
+    compiler__add_local(c, bind_val, line, col);
+
+    uint8_t col_slot = (uint8_t)(saved_local_count);
+    uint8_t len_slot = (uint8_t)(saved_local_count + 1);
+    uint8_t idx_slot = (uint8_t)(saved_local_count + 2);
+    uint8_t elem_slot = (uint8_t)(saved_local_count + 3);
+
+    /* Push loop context */
+    LoopContext* lctx = &c->loop_stack[c->loop_depth++];
+    lctx->break_patch_count = 0;
+    lctx->continue_patch_count = 0;
+    lctx->local_count_at_loop = saved_local_count;
+    lctx->is_for_loop = true;
+
+    /* --- Condition check (loop start for OP_LOOP backward jumps) --- */
+    uint32_t loop_start = c->chunk->code_count;
+    lctx->loop_start = loop_start;
+
+    /* __idx < __len */
+    compiler__emit_byte(c, OP_GET_LOCAL, line);
+    compiler__emit_byte(c, idx_slot, line);
+    compiler__emit_byte(c, OP_GET_LOCAL, line);
+    compiler__emit_byte(c, len_slot, line);
+    compiler__emit_byte(c, OP_LT, line);
+
+    /* Exit if false */
+    uint32_t exit_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+
+    /* Update element: $it = __col[__idx] */
+    compiler__emit_byte(c, OP_GET_LOCAL, line);
+    compiler__emit_byte(c, col_slot, line);
+    compiler__emit_byte(c, OP_GET_LOCAL, line);
+    compiler__emit_byte(c, idx_slot, line);
+    compiler__emit_byte(c, OP_VEC_GET, line);
+    compiler__emit_byte(c, OP_SET_LOCAL, line);
+    compiler__emit_byte(c, elem_slot, line);
+    compiler__emit_byte(c, OP_POP, line);  /* discard SET_LOCAL's TOS */
+
+    /* Compile body statements inline */
+    uint32_t body_count = body_block->data.block.count;
+    for (uint32_t i = 0; i < body_count; i++) {
+      compiler__compile_node(c, body_block->data.block.commands[i]);
+      compiler__emit_check_error(c, line);
+    }
+
+    /* --- Continue target: patch forward jumps from continue --- */
+    for (uint32_t i = 0; i < lctx->continue_patch_count; i++) {
+      compiler__patch_jump(c, lctx->continue_patches[i]);
+    }
+
+    /* Increment: __idx = __idx + 1 */
+    compiler__emit_byte(c, OP_GET_LOCAL, line);
+    compiler__emit_byte(c, idx_slot, line);
+    compiler__emit_constant(c, jacl_i32(1), line);
+    compiler__emit_byte(c, OP_ADD, line);
+    compiler__emit_byte(c, OP_SET_LOCAL, line);
+    compiler__emit_byte(c, idx_slot, line);
+    compiler__emit_byte(c, OP_POP, line);  /* discard SET_LOCAL's TOS */
+
+    /* Loop back to condition */
+    compiler__emit_byte(c, OP_LOOP, line);
+    uint32_t back_offset = c->chunk->code_count - loop_start + 2;
+    compiler__emit_byte(c, (uint8_t)((back_offset >> 8) & 0xFF), line);
+    compiler__emit_byte(c, (uint8_t)(back_offset & 0xFF), line);
+
+    /* --- Exit --- */
+    compiler__patch_jump(c, exit_jump);
+
+    /* End scope: pop hidden locals (__col, __len, __idx, $it) */
+    compiler__end_scope(c, line);
+
+    /* Normal exit: push nil */
+    compiler__emit_byte(c, OP_NIL, line);
+
+    /* Jump over break landing zone */
+    uint32_t skip_break = compiler__emit_jump(c, OP_JUMP, line);
+
+    /* Break landing zone (break value already on stack, locals cleaned up) */
+    for (uint32_t i = 0; i < lctx->break_patch_count; i++) {
+      compiler__patch_jump(c, lctx->break_patches[i]);
+    }
+
+    /* Convergence */
+    compiler__patch_jump(c, skip_break);
+
+    /* Pop loop context */
+    c->loop_depth--;
+    return;
+  }
+
   /* break [value] — bracket form */
   if (compiler__head_matches(head, "break", 5)) {
     if (argc > 1) {
@@ -3850,6 +4018,14 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__compile_node(c, args[0]);
     } else {
       compiler__emit_byte(c, OP_NIL, line);
+    }
+    /* For inlined for-loops, clean up hidden locals under the break value */
+    if (lctx->is_for_loop) {
+      uint32_t cleanup = c->local_count - lctx->local_count_at_loop;
+      if (cleanup > 0) {
+        compiler__emit_byte(c, OP_CLOSE_LOOP, line);
+        compiler__emit_byte(c, (uint8_t)cleanup, line);
+      }
     }
     if (lctx->break_patch_count < COMPILER_BREAK_PATCHES_MAX) {
       lctx->break_patches[lctx->break_patch_count++] =
@@ -3871,10 +4047,21 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     LoopContext* lctx = &c->loop_stack[c->loop_depth - 1];
-    compiler__emit_byte(c, OP_LOOP, line);
-    uint32_t offset = c->chunk->code_count - lctx->loop_start + 2;
-    compiler__emit_byte(c, (uint8_t)((offset >> 8) & 0xFF), line);
-    compiler__emit_byte(c, (uint8_t)(offset & 0xFF), line);
+    if (lctx->is_for_loop) {
+      /* For-loop: forward-jump to increment code (patched later) */
+      if (lctx->continue_patch_count < COMPILER_CONTINUE_PATCHES_MAX) {
+        lctx->continue_patches[lctx->continue_patch_count++] =
+            compiler__emit_jump(c, OP_JUMP, line);
+      } else {
+        compiler__error(c, line, col, "too many continue statements in loop");
+      }
+    } else {
+      /* While-loop: backward-jump to condition check */
+      compiler__emit_byte(c, OP_LOOP, line);
+      uint32_t offset = c->chunk->code_count - lctx->loop_start + 2;
+      compiler__emit_byte(c, (uint8_t)((offset >> 8) & 0xFF), line);
+      compiler__emit_byte(c, (uint8_t)(offset & 0xFF), line);
+    }
     /* continue must leave a value for the statement (popped by CHECK_ERROR) */
     compiler__emit_byte(c, OP_NIL, line);
     return;
@@ -5456,6 +5643,14 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
       } else {
         compiler__emit_byte(c, OP_NIL, line);
       }
+      /* For inlined for-loops, clean up hidden locals under the break value */
+      if (lctx->is_for_loop) {
+        uint32_t cleanup = c->local_count - lctx->local_count_at_loop;
+        if (cleanup > 0) {
+          compiler__emit_byte(c, OP_CLOSE_LOOP, line);
+          compiler__emit_byte(c, (uint8_t)cleanup, line);
+        }
+      }
       /* Emit forward jump to be patched at loop exit */
       if (lctx->break_patch_count < COMPILER_BREAK_PATCHES_MAX) {
         lctx->break_patches[lctx->break_patch_count++] =
@@ -5474,11 +5669,22 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
         break;
       }
       LoopContext* lctx = &c->loop_stack[c->loop_depth - 1];
-      /* Jump back to loop start */
-      compiler__emit_byte(c, OP_LOOP, line);
-      uint32_t offset = c->chunk->code_count - lctx->loop_start + 2;
-      compiler__emit_byte(c, (uint8_t)((offset >> 8) & 0xFF), line);
-      compiler__emit_byte(c, (uint8_t)(offset & 0xFF), line);
+      if (lctx->is_for_loop) {
+        /* For-loop: forward-jump to increment code (patched later) */
+        if (lctx->continue_patch_count < COMPILER_CONTINUE_PATCHES_MAX) {
+          lctx->continue_patches[lctx->continue_patch_count++] =
+              compiler__emit_jump(c, OP_JUMP, line);
+        } else {
+          compiler__error(c, line, node->start.column,
+                          "too many continue statements in loop");
+        }
+      } else {
+        /* While-loop: backward-jump to condition check */
+        compiler__emit_byte(c, OP_LOOP, line);
+        uint32_t offset = c->chunk->code_count - lctx->loop_start + 2;
+        compiler__emit_byte(c, (uint8_t)((offset >> 8) & 0xFF), line);
+        compiler__emit_byte(c, (uint8_t)(offset & 0xFF), line);
+      }
       break;
     }
 

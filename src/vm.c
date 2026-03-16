@@ -1322,6 +1322,19 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_CLOSE_LOOP: {
+        /* Pop N values under the top-of-stack value.
+           Used by break inside for-loops to clean up hidden locals
+           while preserving the break value on top. */
+        uint8_t count = vm__read_byte(vm);
+        if (count > 0) {
+          JaclVal top = vm->stack[vm->stack_top - 1];
+          vm->stack_top -= count;
+          vm->stack[vm->stack_top - 1] = top;
+        }
+        break;
+      }
+
       case OP_CONCAT: {
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
