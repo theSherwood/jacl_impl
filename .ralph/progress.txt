@@ -31,6 +31,9 @@ Started: Sun Mar 15 00:51:19 UTC 2026
 - Pipe threading (|) is pure parser transform: parser__parse_piped_command wraps parser__parse_bare_command and chains pipes
 - TOKEN_PIPE added to parser__is_command_end so commands terminate before |; pipes only work in command mode ({} and top-level), not inside []
 - Inside [] brackets, | is still parsed as literal string "|" (no pipe semantics) — arg collection loop terminates on RBRACKET, not is_command_end
+- Lambda shorthand [\\ body] desugars in parser__parse_command: detect TOKEN_BACKSLASH after [, wrap body in [proc "" [it] {body}]
+- Anonymous proc (empty name, length 0) skips name binding in compiler — closure stays on stack as expression value
+- `each` argument order is `each collection callback` (NOT callback first) — same as OP_EACH stack order
 
 ## 2026-03-15 - US-001
 Thread: n/a
@@ -232,4 +235,23 @@ Thread: n/a
   - Pipe desugaring wraps parse_bare_command, so pipes compose with all existing command forms (if, while, proc, binding ops)
   - Newlines after | are skipped for multi-line pipe chains
   - Cannot use pipe inside [] brackets — tests that want pipe results in binding must use proc body or top-level pipe
+---
+
+## 2026-03-16 - US-011
+Thread: n/a
+- Added lambda shorthand `[\\ body...]` in parser__parse_command — detects TOKEN_BACKSLASH after [
+- Lambda desugars to [proc "" [it] {body}] — anonymous proc with implicit $it parameter
+- Body parsed as command (head + args) inside brackets, wrapped in AST_BLOCK
+- Added anonymous proc support in compiler: proc with empty name (length 0) skips name binding, leaves closure on stack
+- No new opcodes — reuses existing proc/closure compilation and OP_CLOSURE
+- 6 new parser tests: basic, as-callback, single-arg, nested-bracket, in-pipe, no-args
+- 6 new compiler tests: basic-call, arithmetic, each-compat, upvalue-capture, as-value, in-pipe
+- All 181 parser tests pass, all 232 compiler tests pass, all 50 build suites pass (0 failures)
+- Files changed: src/parser.c, src/compiler.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Lambda is pure parser transform — detect `\` after `[`, parse remaining as body, wrap in proc AST
+  - Anonymous proc (empty name length 0) in compiler: after OP_CLOSURE + upvalues, just return — closure is expression value
+  - `each` argument order is `each collection callback` — collection first, callback second (matches OP_EACH stack order)
+  - Analysis functions (suspension, mutation, etc.) handle anonymous procs correctly — they skip proc bodies by checking head="proc"
+  - Lambda body is a single command (head + args), not a block of commands — for multi-statement lambdas, use a proc
 ---

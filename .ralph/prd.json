@@ -204,7 +204,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "In the parser, when parsing inside [] and the first token is TOKEN_BACKSLASH, treat the remaining items as the body of a proc with a single param named 'it'. Construct an AST equivalent to [proc [it] [body...]]. The compiler already handles proc/closure compilation — the parser just needs to produce the right AST. Disambiguation from line continuation: \\ followed by newline = continuation; \\ followed by non-newline inside [] = lambda."
     },
     {

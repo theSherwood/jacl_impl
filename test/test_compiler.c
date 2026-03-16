@@ -6652,6 +6652,166 @@ static int test_pipe_in_proc_body(void) {
   TEST_PASS();
 }
 
+/* --- US-011: Lambda shorthand (\) --- */
+
+/* Basic lambda: [\\ + $it 2] called via for */
+static int test_lambda_basic_call(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "for [vec 10 20 30] [\\ print $it]",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Lambda with arithmetic */
+static int test_lambda_arithmetic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "for [vec 1 2 3] [\\ print [+ $it 10]]",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "11\n12\n13\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Lambda as HOF callback for each */
+static int test_lambda_each_compat(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "each [vec 3 5 7] [\\ print [* $it 2]]",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "6\n10\n14\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Lambda captures upvalue */
+static int test_lambda_upvalue(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "x = 100\n"
+      "for [vec 1 2 3] [\\ print [+ $it $x]]",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "101\n102\n103\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Lambda used as expression value (passed to proc) */
+static int test_lambda_as_value(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "proc apply {f, x} { $f $x }\n"
+      "apply [\\ + $it 5] 10 | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "15\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Lambda in pipe chain */
+static int test_lambda_in_pipe(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "for [vec 5 10 15] [\\ print [* $it 3]]",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "15\n30\n45\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -6922,6 +7082,13 @@ int main(void) {
     { "pipe_in_block",                 test_pipe_in_block },
     { "pipe_with_vars",                test_pipe_with_vars },
     { "pipe_in_proc_body",             test_pipe_in_proc_body },
+    /* Syntax Redesign US-011: Lambda shorthand (\) */
+    { "lambda_basic_call",             test_lambda_basic_call },
+    { "lambda_arithmetic",             test_lambda_arithmetic },
+    { "lambda_each_compat",            test_lambda_each_compat },
+    { "lambda_upvalue",                test_lambda_upvalue },
+    { "lambda_as_value",               test_lambda_as_value },
+    { "lambda_in_pipe",                test_lambda_in_pipe },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

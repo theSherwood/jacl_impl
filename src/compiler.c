@@ -3634,6 +3634,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, body_compiler.upvalues[i].index, line);
     }
 
+    /* Anonymous lambda (empty name): closure is already on stack, done */
+    if (proc_name_len == 0) {
+      c->last_expr_type = TYPE_CLOSURE;
+      return;
+    }
+
     /* Arena-allocate param_types array for binding */
     JaclType* stored_param_types = NULL;
     if (param_count > 0) {
