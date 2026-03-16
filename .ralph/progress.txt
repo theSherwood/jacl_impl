@@ -16,6 +16,11 @@ Started: Sun Mar 15 00:51:19 UTC 2026
 - New keyword-based syntax forms (proc, struct, if, etc.) need lookahead in parser__parse_bare_command to detect new vs old syntax
 - New proc syntax uses TWO {} blocks ({params} {body}); distinguish from old syntax (ONE {} block) by scanning for matching } then checking for second {
 - parser__parse_proc_params builds flat AST_COMMAND from comma-separated {type name, type name} — same shape as old [type name type name] params
+- New struct syntax uses ONE {} block ({type name, ...}); detect by checking TOKEN_LBRACE after struct name; old defstruct uses [name :type]
+- New struct syntax is type-before-name: {i32 x, i32 y}; old syntax is name-colon-type: [x :i32] [y :i32]
+- Both struct syntaxes produce identical AST_DEFSTRUCT — no compiler changes needed
+- New control flow (if/while) in bare command mode: detect TOKEN_IF/TOKEN_WHILE + !parser__is_command_end, delegate to parser__parse_if_form/parser__parse_while_form
+- elif desugars to nested if/else wrapped in AST_BLOCK — compiler never sees elif
 
 ## 2026-03-15 - US-001
 Thread: n/a
@@ -73,4 +78,42 @@ Thread: n/a
   - Empty params {} produce AST_COMMAND with empty-string head and 0 args (same as old [])
   - No compiler changes needed — parser produces identical AST_COMMAND structure the compiler already handles
   - Block-wrapped proc tests can have subtle issues with block-expression evaluation; test top-level proc + call pattern instead
+---
+
+## 2026-03-16 - US-004
+Thread: n/a
+- Modified parser__parse_defstruct() to detect TOKEN_LBRACE after struct name → new syntax path
+- New syntax: struct Name {type name, type name, ...} with comma-separated type-before-name fields
+- Old syntax: defstruct Name [name :type] [name :type] — preserved in else branch
+- Both paths produce identical AST_DEFSTRUCT nodes — no compiler changes needed
+- Handles inline struct types in new syntax via parser__parse_inline_struct_type
+- 8 new parser tests: basic, mixed types, single field, old compat, duplicate field, empty error, struct-type field, multiline
+- 6 new compiler tests: basic compile, runtime construct+access, all types, nested structs, construct+field access, duplicate field error
+- All 136 parser tests pass, all 178 compiler tests pass, full build suite passes (only pre-existing lib/ failures)
+- Files changed: src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - New struct syntax needs only ONE {} block (vs proc's TWO); simpler detection — just check TOKEN_LBRACE after name
+  - No compiler changes needed for syntax changes that produce the same AST shape
+  - Type-before-name field parsing is simpler than name-colon-type — just two consecutive words
+  - The parser__parse_defstruct function handles both syntaxes via if/else on TOKEN_LBRACE vs TOKEN_LBRACKET
+---
+
+## 2026-03-16 - US-005
+Thread: n/a
+- Added parser__parse_if_form() — parses if/elif/else with block bodies, elif desugars to nested if/else
+- Added parser__parse_while_form() — parses while condition { body }
+- Added detection in parser__parse_bare_command() for TOKEN_IF and TOKEN_WHILE followed by expressions
+- Conditions can be any expression: $var, (infix), [command] — all dispatched via parser__parse_expr
+- Newlines skipped between } and elif/else to support multiline if chains
+- No compiler changes needed — parser produces same AST_COMMAND shape with AST_BLOCK args that compiler already expects
+- 14 new parser tests: basic if, if/else, elif/else, elif chains, infix condition, command condition, multiline, nested, old compat, elif-no-else, while basic, while infix, while multiline, while old compat
+- 12 new compiler tests: if then, if else, no-else nil, infix condition, elif, elif-else, elif chain, if-as-expression, while iterative sum, while infix, while returns nil, combined if+while
+- All 150 parser tests pass, all 190 compiler tests pass, all 15 JACL test suites pass (only pre-existing lib/ failures)
+- Files changed: src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - New control flow forms (if, while) at bare command level just need TOKEN_IF/TOKEN_WHILE check + !parser__is_command_end
+  - No compiler changes needed — producing AST_COMMAND with head="if"/"while" and AST_BLOCK args matches existing compiler expectations
+  - elif desugars to nested if wrapped in AST_BLOCK: [if cond1 {then1} {[if cond2 {then2} {else}]}]
+  - Newline skipping between } and elif/else is critical for multiline if chains
+  - Old bracket-form [if cond then else] still works because it goes through parser__parse_command, not parser__parse_bare_command
 ---

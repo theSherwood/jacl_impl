@@ -80,7 +80,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Similar to proc — the parser detects struct keyword followed by name then {fields}. Field list is comma-separated, each item is 'type name'. The compiler receives the same AST_DEFSTRUCT structure (or equivalent) — just with fields parsed differently. Keep old defstruct path working during transition."
     },
     {
@@ -100,7 +100,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "The parser detects if keyword, parses condition (which can be a $var, a () infix expression, or a [] command), then parses { body } block. If next token is elif, repeat. If next token is else, parse final { body }. The elif chain desugars to nested if/else in the AST. The compiler already handles if with 2 or 3 args — the parser just needs to produce the right AST shape."
     },
     {
