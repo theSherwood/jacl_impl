@@ -43,7 +43,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Same infrastructure as break (loop context stack, jump patching). continue jumps to the loop's continue point: for collection-based loops this is the next-element advancement, for while loops it's the condition re-check, for C-style for it's the step expression. Reuses the loop context stack from US-001."
     },
     {
