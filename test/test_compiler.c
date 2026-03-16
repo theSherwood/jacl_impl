@@ -5615,6 +5615,195 @@ static int test_for_hof_callback(void) {
   TEST_PASS();
 }
 
+/* === US-003 (For-loop PRD): Inline block-form for bodies — return semantics === */
+
+/* Test: return from inside a for block exits the enclosing proc */
+static int test_return_from_for_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* proc that returns early from a for loop */
+  const char* program =
+    "[proc find [items] {\n"
+    "  [for $items {\n"
+    "    [if [== $it 3] { [return $it] }]\n"
+    "  }]\n"
+    "  999\n"
+    "}]\n"
+    "[print [find [vec 1 2 3 4 5]]]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: return $value from inside a for block returns the value from the proc */
+static int test_return_value_from_for_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* proc that returns a computed value from inside a for loop */
+  const char* program =
+    "[proc sumto [items limit] {\n"
+    "  [mut acc 0]\n"
+    "  [for $items x {\n"
+    "    [if [> $x $limit] { [return $acc] }]\n"
+    "    [set! acc [+ $acc $x]]\n"
+    "  }]\n"
+    "  $acc\n"
+    "}]\n"
+    "[print [sumto [vec 1 2 3 4 5] 3]]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "6\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: return from HOF callback for only exits the callback */
+static int test_return_from_hof_for(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* HOF-form for: return exits the callback proc, not the enclosing proc.
+     The callback returns early for x == 2 but the for loop continues. */
+  const char* program =
+    "[proc testfn [] {\n"
+    "  [proc cb [x] {\n"
+    "    [if [== $x 2] { [return \"skip\"] }]\n"
+    "    [print $x]\n"
+    "  }]\n"
+    "  [for [vec 1 2 3] $cb]\n"
+    "  [print \"done\"]\n"
+    "}]\n"
+    "[testfn]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  /* return in callback exits only the callback, not testfn.
+     So 1 prints, 2 is skipped (return exits callback), 3 prints, then "done" prints. */
+  ASSERT_STR_EQ(cap.buf, "1\n3\ndone\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: bare return from inside a for block exits the enclosing proc */
+static int test_return_bare_from_for_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* bare return with value from a for loop */
+  const char* program =
+    "proc find [items] {\n"
+    "  for $items {\n"
+    "    if [== $it 3] { return $it }\n"
+    "  }\n"
+    "  999\n"
+    "}\n"
+    "print [find [vec 1 2 3 4 5]]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: return with no value from for block returns nil */
+static int test_return_nil_from_for_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* return with no value exits proc returning nil */
+  const char* program =
+    "[proc find [items] {\n"
+    "  [for $items {\n"
+    "    [if [== $it 3] { [return] }]\n"
+    "  }]\n"
+    "  999\n"
+    "}]\n"
+    "[print [find [vec 1 2 3 4 5]]]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "nil\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -5838,6 +6027,12 @@ int main(void) {
     { "break_for_with_value",            test_break_for_with_value },
     { "continue_mixed_nested",           test_continue_mixed_nested },
     { "for_hof_callback",               test_for_hof_callback },
+    /* US-003 (For-loop PRD): Inline block-form for bodies — return semantics */
+    { "return_from_for_block",           test_return_from_for_block },
+    { "return_value_from_for_block",     test_return_value_from_for_block },
+    { "return_from_hof_for",             test_return_from_hof_for },
+    { "return_bare_from_for_block",      test_return_bare_from_for_block },
+    { "return_nil_from_for_block",       test_return_nil_from_for_block },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -783,6 +783,26 @@ static AstNode* parser__parse_bare_command(Parser* p) {
     return node;
   }
 
+  /* return [value] → AST_RETURN */
+  if (peek->type == TOKEN_WORD && peek->length == 6 &&
+      memcmp(peek->payload.text, "return", 6) == 0) {
+    Token* kw = parser__advance(p);
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_RETURN;
+    node->start = parser__token_start(kw);
+    node->end   = parser__token_end(kw);
+    node->data.return_stmt.value = NULL;
+    /* Optional value argument */
+    if (!parser__is_command_end(p)) {
+      AstNode* val = parser__parse_expr(p);
+      if (val != NULL) {
+        node->data.return_stmt.value = val;
+        node->end = val->end;
+      }
+    }
+    return node;
+  }
+
   TokenType head_token_type = parser__peek(p)->type;
   AstNode* head = parser__parse_expr(p);
   if (head == NULL) return NULL;

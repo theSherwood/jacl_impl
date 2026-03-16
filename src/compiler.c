@@ -714,6 +714,12 @@ static void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
       }
       break;
     }
+    case AST_RETURN: {
+      if (node->data.return_stmt.value) {
+        analyze__walk_body(node->data.return_stmt.value, info);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -781,6 +787,12 @@ static void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list) {
     case AST_BREAK: {
       if (node->data.break_stmt.value) {
         analyze__collect_procs(node->data.break_stmt.value, list);
+      }
+      break;
+    }
+    case AST_RETURN: {
+      if (node->data.return_stmt.value) {
+        analyze__collect_procs(node->data.return_stmt.value, list);
       }
       break;
     }
@@ -890,6 +902,12 @@ static bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
     case AST_BREAK: {
       if (node->data.break_stmt.value) {
         return ast__contains_suspension(node->data.break_stmt.value, map);
+      }
+      return false;
+    }
+    case AST_RETURN: {
+      if (node->data.return_stmt.value) {
+        return ast__contains_suspension(node->data.return_stmt.value, map);
       }
       return false;
     }
@@ -4067,6 +4085,21 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* return [value] — bracket form */
+  if (compiler__head_matches(head, "return", 6)) {
+    if (argc > 1) {
+      compiler__builtin_arity_error(c, line, col, "return", "0 or 1 arguments", argc);
+      return;
+    }
+    if (argc == 1) {
+      compiler__compile_node(c, args[0]);
+    } else {
+      compiler__emit_byte(c, OP_NIL, line);
+    }
+    compiler__emit_byte(c, OP_RETURN, line);
+    return;
+  }
+
   /* try special form: [try { body } name { handler }] */
   if (compiler__head_matches(head, "try", 3)) {
     if (argc != 3) {
@@ -5685,6 +5718,17 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, (uint8_t)((offset >> 8) & 0xFF), line);
         compiler__emit_byte(c, (uint8_t)(offset & 0xFF), line);
       }
+      break;
+    }
+
+    case AST_RETURN: {
+      /* Compile return value (or nil) */
+      if (node->data.return_stmt.value) {
+        compiler__compile_node(c, node->data.return_stmt.value);
+      } else {
+        compiler__emit_byte(c, OP_NIL, line);
+      }
+      compiler__emit_byte(c, OP_RETURN, line);
       break;
     }
 

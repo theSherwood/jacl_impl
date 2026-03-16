@@ -27,6 +27,7 @@ typedef enum {
   AST_DEFSTRUCT,     /* defstruct Name [field :type] ... */
   AST_BREAK,         /* break or break $value */
   AST_CONTINUE,      /* continue */
+  AST_RETURN,        /* return or return $value */
   AST_ERROR          /* parse error with recovery */
 } AstNodeType;
 
@@ -66,6 +67,7 @@ struct AstNode {
              const char** field_types; uint32_t* field_type_lens;
              uint32_t field_count; }                              defstruct;
     struct { AstNode* value; /* NULL if no value */ }              break_stmt;
+    struct { AstNode* value; /* NULL if no value */ }              return_stmt;
     struct { const char* message; }                                error;
   } data;
 };
@@ -326,6 +328,14 @@ static void ast__pp_node(AstStrBuf* b, AstNode* node) {
     }
     case AST_CONTINUE: {
       ast__buf_cstr(b, "continue");
+      break;
+    }
+    case AST_RETURN: {
+      ast__buf_cstr(b, "return");
+      if (node->data.return_stmt.value) {
+        ast__buf_char(b, ' ');
+        ast__pp_node(b, node->data.return_stmt.value);
+      }
       break;
     }
     case AST_ERROR: {
