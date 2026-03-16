@@ -305,7 +305,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 17,
-      "passes": false,
+      "passes": true,
       "notes": "This is the final test migration sweep. After this story, every test file in test/ uses the new syntax exclusively. Files like test_value.c, test_bytecode.c, test_gc.c, test_runtime.c may not contain JACL source strings \u2014 verify and skip if no changes needed."
     },
     {
@@ -324,7 +324,7 @@
         "Build compiles cleanly with no warnings"
       ],
       "priority": 18,
-      "passes": false,
+      "passes": true,
       "notes": "This is the cleanup story. Go through parser.c and compiler.c and remove every old-syntax code path that was kept during transition. Remove old keyword token types if any remain. Verify the build is clean and all tests pass. This makes the clean break final."
     }
   ]

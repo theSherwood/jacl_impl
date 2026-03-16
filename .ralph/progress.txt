@@ -9,7 +9,10 @@ Started: Sun Mar 15 00:51:19 UTC 2026
 - When `struct` keyword was TOKEN_WORD, inline struct type parsing searched for TOKEN_WORD "struct"; now must check TOKEN_STRUCT too
 - TOKEN_OPERATOR is still used for compound operators (==, !=, <=, >=, +, -, *, /, etc.); single-char operators now have specific token types
 - Words with ! suffix (like set!, reset!) are still TOKEN_WORD because lexer__is_word_char includes !
-- defstruct keyword now emits TOKEN_STRUCT for backward compat; both defstruct and struct parse the same way
+- defstruct keyword is removed; only struct is recognized as TOKEN_STRUCT
+- Old syntax (set!/reset!/swap!, each, [. $s f], [proc ...], defstruct) is fully removed — produces parse/compile errors
+- [. $s field val] struct mutation must use bare command form `. $s field val` (bracket [. ...] rejected)
+- Bare-command if requires explicit `else` keyword: `if cond { then } else { else }` (no implicit bare-block else)
 - pre-existing failures: rdoc, nfa_rdoc, nfa_cross (double-free in lib/ tests, unrelated to JACL language)
 - () is now infix mode: parser__parse_infix parses left-to-right with no precedence; nested () for explicit grouping
 - For adding new expression forms, add dispatch in parser__parse_expr AND in parser__parse_infix_operand (for use inside ())
@@ -335,4 +338,51 @@ Thread: n/a
 - **Learnings for future iterations:**
   - `[for [vec 1]]` with argc=1 hits `for`'s special form handling, not the `each` arity check — produces different error message; keep `[each [vec 1]]` for arity tests
   - Bulk transform scripts need post-verification for nested proc definitions within multi-line C strings
+---
+
+## 2026-03-16 - US-017
+Thread: n/a
+- test_m12.c: no changes needed (no JACL source strings, pure C-level GC tests)
+- test_m13.c: 124 lines changed — `proc name [params]` → `proc name {params}`, `[each ...]` → `[for ...]`, `reset!` → `reset`
+- test_embed.c: 19 lines changed — proc params, defstruct→struct with type-before-name fields, `[. $b v]` → `$b->v`
+- test_e2e_struct_tramp.c: 10 lines changed — defstruct→struct, proc params, `[. $s pts]` → `$s->pts`
+- test_e2e_embed_basics.c: 2 lines changed — proc params [] → {}
+- test_e2e_native_fns.c: 6 lines changed — proc params [] → {}
+- test_e2e_gc_handles.c: 3 lines changed — defstruct→struct, proc params
+- test_integration.c: `[def x val]` → `x = val` (binding ops), proc params [] → {}
+- test_runtime.c: `[reset! $b 20]` → `[reset $b 20]`
+- Used Python bulk transform script for proc params (regex: `proc \w+ \[([^\[\]]*)\]`), defstruct→struct, dot→arrow, each→for
+- Manual fixups for test_integration.c binding operator conversions and test_runtime.c reset! rename
+- All 50 build suites pass (0 failures)
+- Files changed: test/test_m13.c, test/test_embed.c, test/test_e2e_struct_tramp.c, test/test_e2e_embed_basics.c, test/test_e2e_native_fns.c, test/test_e2e_gc_handles.c, test/test_integration.c, test/test_runtime.c
+- **Learnings for future iterations:**
+  - test_m12.c has no JACL source strings at all — it's pure C-level GC/runtime testing
+  - test_runtime.c had a single `reset!` that needed updating — easy to miss since it's not in the "test_m*" pattern
+  - `[if cond {block1} {block2}]` inside brackets is valid new syntax (keyword as command head with block args), not old syntax
+  - `def x [expr]` (bare command form) is valid new syntax and doesn't need `x = [expr]` conversion — `=` is just sugar for `def`
+  - Bulk regex `proc \w+ \[([^\[\]]*)\]` safely transforms proc params without touching bracket commands in bodies
+---
+
+## 2026-03-16 - US-018
+Thread: n/a
+- Removed all backward-compatibility code for old JACL syntax:
+  - Lexer: removed defstruct → TOKEN_STRUCT keyword mapping (now TOKEN_WORD)
+  - Parser: removed old defstruct bracket-form [field :type] → error "expected '{' for struct fields"
+  - Parser: reject [proc ...] inside brackets → error "proc must use command syntax"
+  - Parser: reject [. $s field] inside brackets → error "use $struct->field"
+  - Parser: removed bare-block-as-else in if-form → require explicit else keyword
+  - Parser: simplified proc detection (always require two {} blocks, no one-block fallback)
+  - Parser: added defstruct word detection → error "'defstruct' is removed"
+  - Compiler: removed set!/reset!/swap! name handlers (only set/reset/swap)
+  - Compiler: removed each command handler (only for)
+  - AST pretty-printer: updated for new syntax (struct, proc, arrow, lambda)
+- Updated 144 files total: 4 source files, ~140 test files
+- All 50 build suites pass (0 failures), build clean with 0 warnings
+- Files changed: src/lexer.c, src/parser.c, src/compiler.c, src/ast.c, test/jacl/*.jacl (104 files), test/test_*.c (8 files)
+- **Learnings for future iterations:**
+  - `[if cond {then} {else}]` in bracket mode (3 args with blocks) is valid; only bare-command if requires explicit else keyword
+  - Proc names with hyphens (e.g., t-mut) need `[\w-]+` not `\w+` in regex patterns
+  - [. $s field val] struct write form must use bare command mode `. $s field val` since bracket [. ...] is now rejected
+  - AST pretty-printer changes are needed when removing syntax — roundtrip tests verify parse→print→reparse stability
+  - When removing builtins, also check ast analysis functions (ast__contains_nonlocal_set_impl)
 ---
