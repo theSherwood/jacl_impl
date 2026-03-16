@@ -2220,6 +2220,210 @@ static int test_infix_in_block(void) {
   TEST_PASS();
 }
 
+/* ---- Syntax Redesign US-003: New proc syntax ---- */
+
+/* Helper: verify AST_COMMAND shape for proc */
+static void assert_proc_head(AstNode* n) {
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(n->data.command.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "proc", 4) == 0);
+}
+
+static int test_proc_basic_new_syntax(void) {
+  setup();
+  /* proc add {a, b} {[+ $a $b]} → AST_COMMAND(proc, [add, params, body]) */
+  ParseResult r = parse("proc add {a, b} { [+ $a $b] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  assert_proc_head(n);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3); /* name, params, body */
+  /* arg[0]: name "add" */
+  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "add", 3) == 0);
+  /* arg[1]: params AST_COMMAND with flat list [a b] */
+  AstNode* params = n->data.command.args[1];
+  ASSERT(params->type == AST_COMMAND);
+  ASSERT(memcmp(params->data.command.head->data.lit_string.value, "a", 1) == 0);
+  ASSERT_U32_EQ(params->data.command.arg_count, 1);
+  ASSERT(memcmp(params->data.command.args[0]->data.lit_string.value, "b", 1) == 0);
+  /* arg[2]: body AST_BLOCK */
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  ASSERT_U32_EQ(n->data.command.args[2]->data.block.count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_typed_params(void) {
+  setup();
+  /* proc i64 add {i64 a, i64 b} {[+ $a $b]} → 4 args (type, name, params, body) */
+  ParseResult r = parse("proc i64 add {i64 a, i64 b} { [+ $a $b] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  assert_proc_head(n);
+  ASSERT_U32_EQ(n->data.command.arg_count, 4); /* type, name, params, body */
+  /* arg[0]: return type "i64" */
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "i64", 3) == 0);
+  /* arg[1]: name "add" */
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "add", 3) == 0);
+  /* arg[2]: params flat list [i64 a i64 b] */
+  AstNode* params = n->data.command.args[2];
+  ASSERT(params->type == AST_COMMAND);
+  /* head = "i64", args = ["a", "i64", "b"] */
+  ASSERT(memcmp(params->data.command.head->data.lit_string.value, "i64", 3) == 0);
+  ASSERT_U32_EQ(params->data.command.arg_count, 3);
+  ASSERT(memcmp(params->data.command.args[0]->data.lit_string.value, "a", 1) == 0);
+  ASSERT(memcmp(params->data.command.args[1]->data.lit_string.value, "i64", 3) == 0);
+  ASSERT(memcmp(params->data.command.args[2]->data.lit_string.value, "b", 1) == 0);
+  /* arg[3]: body AST_BLOCK */
+  ASSERT(n->data.command.args[3]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_zero_params_new(void) {
+  setup();
+  /* proc greet {} { print "hello" } → empty params */
+  ParseResult r = parse("proc greet {} { print \"hello\" }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  assert_proc_head(n);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  /* params: empty AST_COMMAND */
+  AstNode* params = n->data.command.args[1];
+  ASSERT(params->type == AST_COMMAND);
+  ASSERT_U32_EQ(params->data.command.head->data.lit_string.length, 0);
+  ASSERT_U32_EQ(params->data.command.arg_count, 0);
+  /* body has one command */
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  ASSERT_U32_EQ(n->data.command.args[2]->data.block.count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_untyped_params(void) {
+  setup();
+  /* proc add {a, b} {[+ $a $b]} — untyped params */
+  ParseResult r = parse("proc add {a, b} { [+ $a $b] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* params = r.nodes[0]->data.command.args[1];
+  ASSERT(params->type == AST_COMMAND);
+  /* Flat list: head="a", args=["b"] */
+  ASSERT(memcmp(params->data.command.head->data.lit_string.value, "a", 1) == 0);
+  ASSERT_U32_EQ(params->data.command.arg_count, 1);
+  ASSERT(memcmp(params->data.command.args[0]->data.lit_string.value, "b", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_old_syntax_still_works(void) {
+  setup();
+  /* Old syntax: [proc add [a b] { [+ $a $b] }] — inside brackets */
+  ParseResult r = parse("[proc add [a b] { [+ $a $b] }]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  assert_proc_head(n);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  /* args: name, [a b] command, { body } block */
+  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
+  ASSERT(n->data.command.args[1]->type == AST_COMMAND);
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_in_block(void) {
+  setup();
+  /* proc defined inside a block */
+  ParseResult r = parse("{ proc add {a, b} { [+ $a $b] } }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* blk = r.nodes[0];
+  ASSERT(blk->type == AST_BLOCK);
+  ASSERT_U32_EQ(blk->data.block.count, 1);
+  AstNode* proc_cmd = blk->data.block.commands[0];
+  assert_proc_head(proc_cmd);
+  ASSERT_U32_EQ(proc_cmd->data.command.arg_count, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_multiline(void) {
+  setup();
+  /* Multiline proc definition */
+  ParseResult r = parse(
+    "proc add {a, b} {\n"
+    "  [+ $a $b]\n"
+    "}\n"
+  );
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  assert_proc_head(n);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_mixed_typed_untyped(void) {
+  setup();
+  /* proc foo {i64 a, b} → flat list [i64 a b] */
+  ParseResult r = parse("proc foo {i64 a, b} { $a }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* params = r.nodes[0]->data.command.args[1];
+  ASSERT(params->type == AST_COMMAND);
+  /* head="i64", args=["a", "b"] */
+  ASSERT(memcmp(params->data.command.head->data.lit_string.value, "i64", 3) == 0);
+  ASSERT_U32_EQ(params->data.command.arg_count, 2);
+  ASSERT(memcmp(params->data.command.args[0]->data.lit_string.value, "a", 1) == 0);
+  ASSERT(memcmp(params->data.command.args[1]->data.lit_string.value, "b", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_single_param(void) {
+  setup();
+  /* proc double {n} {[* $n 2]} → single param */
+  ParseResult r = parse("proc double {n} { [* $n 2] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* params = r.nodes[0]->data.command.args[1];
+  ASSERT(params->type == AST_COMMAND);
+  ASSERT(memcmp(params->data.command.head->data.lit_string.value, "n", 1) == 0);
+  ASSERT_U32_EQ(params->data.command.arg_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_bare_cmd_one_block_not_new(void) {
+  setup();
+  /* proc greet { print hello } — only one block → old-style bare command */
+  ParseResult r = parse("proc greet { print hello }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  /* Should be: head="proc", args=["greet", AST_BLOCK] */
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "proc", 4) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -2364,6 +2568,17 @@ int main(void) {
     {"infix_unclosed_paren",  test_infix_unclosed_paren},
     {"infix_empty_parens",    test_infix_empty_parens},
     {"infix_in_block",        test_infix_in_block},
+    /* Syntax Redesign US-003: New proc syntax */
+    {"proc_basic_new",        test_proc_basic_new_syntax},
+    {"proc_typed_params",     test_proc_typed_params},
+    {"proc_zero_params_new",  test_proc_zero_params_new},
+    {"proc_untyped_params",   test_proc_untyped_params},
+    {"proc_old_syntax_compat",test_proc_old_syntax_still_works},
+    {"proc_in_block",         test_proc_in_block},
+    {"proc_multiline",        test_proc_multiline},
+    {"proc_mixed_type_untype",test_proc_mixed_typed_untyped},
+    {"proc_single_param",     test_proc_single_param},
+    {"proc_one_block_old",    test_proc_bare_cmd_one_block_not_new},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

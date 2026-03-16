@@ -13,6 +13,9 @@ Started: Sun Mar 15 00:51:19 UTC 2026
 - pre-existing failures: rdoc, nfa_rdoc, nfa_cross (double-free in lib/ tests, unrelated to JACL language)
 - () is now infix mode: parser__parse_infix parses left-to-right with no precedence; nested () for explicit grouping
 - For adding new expression forms, add dispatch in parser__parse_expr AND in parser__parse_infix_operand (for use inside ())
+- New keyword-based syntax forms (proc, struct, if, etc.) need lookahead in parser__parse_bare_command to detect new vs old syntax
+- New proc syntax uses TWO {} blocks ({params} {body}); distinguish from old syntax (ONE {} block) by scanning for matching } then checking for second {
+- parser__parse_proc_params builds flat AST_COMMAND from comma-separated {type name, type name} — same shape as old [type name type name] params
 
 ## 2026-03-15 - US-001
 Thread: n/a
@@ -51,4 +54,23 @@ Thread: n/a
   - Infix mode works inside [], {}, and bare commands — parser__parse_expr dispatches TOKEN_LPAREN
   - TOKEN_OPERATOR covers +, -, *, /, %, ==, !=, <, >, <=, >= (compound operators)
   - TOKEN_AND (&&) and TOKEN_OR (||) are separate token types with their own infix handling
+---
+
+## 2026-03-16 - US-003
+Thread: n/a
+- Added parser__parse_proc_params() — parses {type name, type name, ...} into flat AST_COMMAND (same shape as [type name type name])
+- Added parser__parse_proc_form() — handles `proc [type] name {params} {body}` in bare command context
+- Modified parser__parse_bare_command() with lookahead to detect new proc syntax (requires TWO {} blocks)
+- Lookahead scans for matching } of first brace, then checks for second { — distinguishes new syntax from old `proc name { body }` pattern
+- No changes to compiler.c — new syntax produces identical AST shape that compiler already expects
+- 10 new parser tests: basic, typed params, zero params, untyped, old syntax compat, in-block, multiline, mixed typed/untyped, single param, one-block fallback
+- 6 new compiler tests: basic call, typed return+params, zero params, multi-stmt body, closure capture, implicit return
+- All 128 parser tests pass, all 172 compiler tests pass, full build suite passes (only pre-existing lib/ failures)
+- Files changed: src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - New syntax forms at bare command level need TWO-brace lookahead pattern to distinguish from old syntax
+  - parser__parse_proc_params flattens comma-separated params into a single AST_COMMAND where head=first_elem, args=rest — compiler walks this as interleaved type/name pairs
+  - Empty params {} produce AST_COMMAND with empty-string head and 0 args (same as old [])
+  - No compiler changes needed — parser produces identical AST_COMMAND structure the compiler already handles
+  - Block-wrapped proc tests can have subtle issues with block-expression evaluation; test top-level proc + call pattern instead
 ---

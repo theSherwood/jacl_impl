@@ -1050,6 +1050,146 @@ static AstNode* parser__parse_defstruct(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Parse proc parameter list in braces {type name, type name, ...}
+ *
+ * Called when the current token is TOKEN_LBRACE and we're parsing new-style
+ * proc parameters. Returns AST_COMMAND (same shape as [param ...] lists)
+ * so the compiler can process them identically.
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_proc_params(Parser* p) {
+  Token* open = parser__advance(p); /* consume '{' */
+  SourcePos start = parser__token_start(open);
+
+  NodeArray elems;
+  parser__arr_init(&elems, p->arena);
+
+  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
+    /* Skip commas and newlines between parameters */
+    while (parser__peek(p)->type == TOKEN_COMMA ||
+           parser__peek(p)->type == TOKEN_NEWLINE ||
+           parser__peek(p)->type == TOKEN_SEMICOLON) {
+      parser__advance(p);
+    }
+    if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
+
+    /* Collect all words within one parameter slot (up to comma/brace).
+       Each slot is "name", "type name", or "& name". */
+    while (!parser__at_end(p) &&
+           parser__peek(p)->type != TOKEN_COMMA &&
+           parser__peek(p)->type != TOKEN_RBRACE &&
+           parser__peek(p)->type != TOKEN_NEWLINE) {
+      AstNode* elem = parser__parse_atom(p);
+      if (elem == NULL) {
+        return parser__error(p, "expected parameter name or type", parser__peek(p));
+      }
+      parser__arr_push(&elems, elem);
+    }
+  }
+
+  /* Expect closing brace */
+  if (parser__peek(p)->type != TOKEN_RBRACE) {
+    return parser__error(p, "expected '}' to close proc parameters", open);
+  }
+  Token* close = parser__advance(p); /* consume '}' */
+
+  /* Build AST_COMMAND (same shape as [elem0 elem1 ...]) */
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_COMMAND;
+  node->start = start;
+  node->end   = parser__token_end(close);
+
+  if (elems.count == 0) {
+    /* Empty params {} → equivalent to [] */
+    AstNode* empty_head = ast_alloc(p->arena);
+    empty_head->type = AST_LIT_STRING;
+    empty_head->start = start;
+    empty_head->end   = parser__token_end(close);
+    empty_head->data.lit_string.value  = "";
+    empty_head->data.lit_string.length = 0;
+
+    node->data.command.head      = empty_head;
+    node->data.command.args      = NULL;
+    node->data.command.arg_count = 0;
+  } else {
+    /* head = first element, args = rest */
+    node->data.command.head = elems.nodes[0];
+    if (elems.count > 1) {
+      AstNode** args_arr = ast_alloc_array(p->arena, elems.count - 1);
+      for (uint32_t i = 1; i < elems.count; i++) {
+        args_arr[i - 1] = elems.nodes[i];
+      }
+      node->data.command.args      = args_arr;
+      node->data.command.arg_count = elems.count - 1;
+    } else {
+      node->data.command.args      = NULL;
+      node->data.command.arg_count = 0;
+    }
+  }
+
+  return node;
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Parse new-style proc form
+ *
+ * Called after TOKEN_PROC has been consumed as the head in bare command
+ * context. Handles: proc [return_type] name {params} {body}
+ * Produces the same AST_COMMAND shape the compiler expects.
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
+  SourcePos start = proc_head->start;
+  NodeArray args;
+  parser__arr_init(&args, p->arena);
+
+  /* Detect pattern: word { (name only) vs word word { (return_type + name).
+     p->pos points to the first word after 'proc'. */
+  if (p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
+    /* proc name {params} {body} — no return type */
+    AstNode* name = parser__parse_atom(p);
+    parser__arr_push(&args, name);
+  } else if ((p->tokens[p->pos + 1].type == TOKEN_WORD ||
+              p->tokens[p->pos + 1].type == TOKEN_STRUCT) &&
+             p->tokens[p->pos + 2].type == TOKEN_LBRACE) {
+    /* proc type name {params} {body} — with return type */
+    AstNode* ret_type = parser__parse_atom(p);
+    parser__arr_push(&args, ret_type);
+    AstNode* name = parser__parse_atom(p);
+    parser__arr_push(&args, name);
+  } else {
+    return parser__error(p, "expected proc name followed by '{' parameter list",
+                         parser__peek(p));
+  }
+
+  /* Parse {params} */
+  if (parser__peek(p)->type != TOKEN_LBRACE) {
+    return parser__error(p, "expected '{' for proc parameters", parser__peek(p));
+  }
+  AstNode* params = parser__parse_proc_params(p);
+  if (params->type == AST_ERROR) return params;
+  parser__arr_push(&args, params);
+
+  /* Parse {body} */
+  if (parser__peek(p)->type != TOKEN_LBRACE) {
+    return parser__error(p, "expected '{' for proc body", parser__peek(p));
+  }
+  AstNode* body = parser__parse_block(p);
+  if (body->type == AST_ERROR) return body;
+  parser__arr_push(&args, body);
+
+  /* Build AST_COMMAND: [proc name params body] or [proc type name params body] */
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_COMMAND;
+  node->start = start;
+  node->end   = body->end;
+  node->data.command.head      = proc_head;
+  node->data.command.args      = args.nodes;
+  node->data.command.arg_count = args.count;
+  return node;
+}
+
+/* -------------------------------------------------------------------------
  * Internal: Parse a top-level bare command
  *
  * Reads the first expression as the command head, then collects subsequent
@@ -1065,6 +1205,39 @@ static AstNode* parser__parse_bare_command(Parser* p) {
 
   /* Error from sub-expression (e.g. unclosed bracket): propagate immediately */
   if (head->type == AST_ERROR) return head;
+
+  /* New proc syntax: proc [type] name {params} {body}
+     Requires TWO {} blocks — {params} then {body}. If only one {} follows
+     the name, it's old-style bare command (proc name { body }). */
+  if (head_token_type == TOKEN_PROC && !parser__is_command_end(p) &&
+      parser__peek(p)->type == TOKEN_WORD) {
+    uint32_t brace_pos = 0;
+    int has_brace = 0;
+    if (p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
+      brace_pos = p->pos + 1;
+      has_brace = 1;
+    } else if ((p->tokens[p->pos + 1].type == TOKEN_WORD ||
+                p->tokens[p->pos + 1].type == TOKEN_STRUCT) &&
+               p->tokens[p->pos + 2].type == TOKEN_LBRACE) {
+      brace_pos = p->pos + 2;
+      has_brace = 1;
+    }
+    if (has_brace) {
+      /* Scan to matching } then check for second { */
+      int depth = 1;
+      uint32_t si = brace_pos + 1;
+      while (si < p->count && depth > 0) {
+        if (p->tokens[si].type == TOKEN_LBRACE) depth++;
+        if (p->tokens[si].type == TOKEN_RBRACE) depth--;
+        si++;
+      }
+      /* Skip newlines after matching } */
+      while (si < p->count && p->tokens[si].type == TOKEN_NEWLINE) si++;
+      if (si < p->count && p->tokens[si].type == TOKEN_LBRACE) {
+        return parser__parse_proc_form(p, head);
+      }
+    }
+  }
 
   NodeArray args;
   parser__arr_init(&args, p->arena);

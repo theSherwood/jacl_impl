@@ -63,7 +63,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "The parser needs to detect when proc is followed by a word (name) then { (params). Parse the param list as comma-separated items, where each item is either 'type name' (two words) or 'name' (one word). The body is the next {} block parsed in command mode (bare commands). The compiler receives the same AST_COMMAND structure it handles today — just constructed differently by the parser. Keep the old [proc [params] [body]] path working during transition."
     },
     {

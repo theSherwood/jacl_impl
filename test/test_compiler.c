@@ -2164,6 +2164,165 @@ static int test_proc_def_returns_nil(void) {
   TEST_PASS();
 }
 
+/* ===== Syntax Redesign US-003: New proc syntax ===== */
+
+/* Test: proc add {a, b} { [+ $a $b] } then [add 1 2] returns 3 */
+static int test_proc_new_syntax_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "proc add {a, b} { [+ $a $b] }\n[add 1 2]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 3);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: proc with typed return and typed params */
+static int test_proc_new_syntax_typed(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n[add 1 2]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 3);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: proc with zero params */
+static int test_proc_new_syntax_zero_params(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "proc answer {} { 42 }\n[answer]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: proc with multi-statement body */
+static int test_proc_new_syntax_multi_stmt(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "proc greet {name} {\n"
+    "  [print $name]\n"
+    "  42\n"
+    "}\n"
+    "[greet hello]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello\n");
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: closure capture still works with new proc syntax */
+static int test_proc_new_syntax_closure(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "[def x 10]\n"
+    "proc add_x {n} { [+ $n $x] }\n"
+    "[add_x 5]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 15);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: new proc syntax at top level, implicit return */
+static int test_proc_new_syntax_implicit_return(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "proc double {n} { [* $n 2] }\n[double 7]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 14);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ===== US-007 (M4): Compile and execute while loop ===== */
 
 /* Test: while with false condition never executes body, returns nil */
@@ -5109,6 +5268,13 @@ int main(void) {
     { "proc_wrong_argc",             test_proc_wrong_argc },
     { "proc_call_arg_mismatch",      test_proc_call_arg_mismatch },
     { "proc_def_returns_nil",        test_proc_def_returns_nil },
+    /* Syntax Redesign US-003: New proc syntax */
+    { "proc_new_basic",              test_proc_new_syntax_basic },
+    { "proc_new_typed",              test_proc_new_syntax_typed },
+    { "proc_new_zero_params",        test_proc_new_syntax_zero_params },
+    { "proc_new_multi_stmt",         test_proc_new_syntax_multi_stmt },
+    { "proc_new_closure",            test_proc_new_syntax_closure },
+    { "proc_new_implicit_ret",       test_proc_new_syntax_implicit_return },
     /* US-007 (M4): Compile and execute while loop */
     { "while_zero_iterations",       test_while_zero_iterations },
     { "while_nil_falsy",             test_while_nil_falsy },
