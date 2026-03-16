@@ -764,7 +764,7 @@ static int test_compile_def(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x 42]", &arena, &heap);
+  CompileResult cr = compile_source("x = 42", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 2);
@@ -797,7 +797,7 @@ static int test_compile_def_expr(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x [+ 1 2]]", &arena, &heap);
+  CompileResult cr = compile_source("x = [+ 1 2]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   /* constants: 1, 2, "x" */
@@ -829,20 +829,20 @@ static int test_compile_def_wrong_argc(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  /* Too few args: [def x] */
-  CompileResult cr = compile_source("[def x]", &arena, &heap);
+  /* Too few args: def x */
+  CompileResult cr = compile_source("def x", &arena, &heap);
   ASSERT(cr.error_count > 0);
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
-  /* Too many args: [def x 1 2] */
+  /* Too many args: x = 1 2 */
   tracker_reset();
   arena = (arena_t){ .allocator = tracked_allocator };
   gc_block_pool_init(&pool);
   gc_heap_init(&heap, &pool);
-  cr = compile_source("[def x 1 2]", &arena, &heap);
+  cr = compile_source("x = 1 2", &arena, &heap);
   ASSERT(cr.error_count > 0);
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
@@ -859,8 +859,8 @@ static int test_compile_def_non_string_name(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  /* [def 42 10] - first arg is int, not string */
-  CompileResult cr = compile_source("[def 42 10]", &arena, &heap);
+  /* def 42 10 - first arg is int, not string */
+  CompileResult cr = compile_source("def 42 10", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -922,7 +922,7 @@ static int test_def_print_var(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x 42]\n[print $x]", &arena, &heap);
+  CompileResult cr = compile_source("x = 42\n[print $x]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -950,7 +950,7 @@ static int test_def_expr_print_var(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x [+ 1 2]]\n[print $x]", &arena, &heap);
+  CompileResult cr = compile_source("x = [+ 1 2]\n[print $x]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -1139,7 +1139,7 @@ static int test_multi_def_print(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x 10]\n[def y 20]\n[print [+ $x $y]]", &arena, &heap);
+  CompileResult cr = compile_source("x = 10\ny = 20\n[print [+ $x $y]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -1167,7 +1167,7 @@ static int test_multi_semicolons_def_print(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def a 1]; [def b 2]; [print [+ $a $b]]", &arena, &heap);
+  CompileResult cr = compile_source("a = 1; b = 2; [print [+ $a $b]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -1223,7 +1223,7 @@ static int test_final_result_available(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x 5]\n[+ $x 10]", &arena, &heap);
+  CompileResult cr = compile_source("x = 5\n[+ $x 10]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   VM vm;
@@ -1336,7 +1336,7 @@ static int test_runtime_error_line_number(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* Error on line 2: def x $true; [+ $x 1] */
-  CompileResult cr = compile_source("[def x $true]\n[+ $x 1]", &arena, &heap);
+  CompileResult cr = compile_source("x = $true\n[+ $x 1]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   VM vm;
@@ -1438,13 +1438,13 @@ static int test_local_def_in_block(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  /* { [def x 42]; [print $x] } should print "42\n" */
+  /* { x = 42; [print $x] } should print "42\n" */
   PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
-  VMResult result = jacl_run("{ [def x 42]; [print $x] }", &vm, &arena);
+  VMResult result = jacl_run("{ x = 42; [print $x] }", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "42\n");
@@ -1466,7 +1466,7 @@ static int test_local_not_visible_outside(void) {
 
   VM vm;
   vm_init(&vm, &arena);
-  VMResult result = jacl_run("{ [def x 42] }\n$x", &vm, &arena);
+  VMResult result = jacl_run("{ x = 42 }\n$x", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
@@ -1493,7 +1493,7 @@ static int test_local_shadowing(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[def x 1]\n{ [def x 2]; [print $x] }\n[print $x]",
+    "x = 1\n{ x = 2; [print $x] }\n[print $x]",
     &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -1520,7 +1520,7 @@ static int test_local_nested_scopes(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "{ [def a 10]; { [def b 20]; [print [+ $a $b]] }; [print $a] }",
+    "{ a = 10; { b = 20; [print [+ $a $b]] }; [print $a] }",
     &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -1548,7 +1548,7 @@ static int test_local_same_scope_shadow(void) {
   vm.print_ctx = &cap;
   /* Redefining x in the same scope creates a new local; $x resolves to the latest */
   VMResult result = jacl_run(
-    "{ [def x 1]; [def x 2]; [print $x] }",
+    "{ x = 1; x = 2; [print $x] }",
     &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -1570,7 +1570,7 @@ static int test_local_top_level_still_global(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* At top level, def should use OP_DEF_GLOBAL */
-  CompileResult cr = compile_source("[def x 42]", &arena, &heap);
+  CompileResult cr = compile_source("x = 42", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   /* Bytecode: OP_CONST u16(0) OP_DEF_GLOBAL u16(1) OP_HALT */
@@ -1610,7 +1610,7 @@ static int test_local_max_exceeded(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  /* Build source: { [def x 0]; [def x 1]; ...; [def x 256] } — 257 defs */
+  /* Build source: { x = 0; x = 1; ...; x = 256 } — 257 defs */
   char source[8192];
   int pos = 0;
   pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "{ ");
@@ -1618,7 +1618,7 @@ static int test_local_max_exceeded(void) {
     if (i > 0) {
       pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "; ");
     }
-    pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "[def x %d]", i);
+    pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "x = %d", i);
   }
   pos += snprintf(source + pos, sizeof(source) - (size_t)pos, " }");
 
@@ -1938,7 +1938,7 @@ static int test_if_else_not_block(void) {
 
 /* ===== US-006 (M4): Compile and execute proc definition ===== */
 
-/* Test: [proc add [a b] { [+ $a $b] }] then [add 1 2] returns i32(3) */
+/* Test: proc add {a, b} { [+ $a $b] } then [add 1 2] returns i32(3) */
 static int test_proc_basic_call(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -1948,7 +1948,7 @@ static int test_proc_basic_call(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "[proc add [a b] { [+ $a $b] }]\n[add 1 2]", &vm, &arena);
+    "proc add {a, b} { [+ $a $b] }\n[add 1 2]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -1963,7 +1963,7 @@ static int test_proc_basic_call(void) {
   TEST_PASS();
 }
 
-/* Test: [proc greet [name] { [print $name] }] then [greet hello] prints "hello\n" */
+/* Test: proc greet {name} { [print $name] } then [greet hello] prints "hello\n" */
 static int test_proc_print_param(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -1976,7 +1976,7 @@ static int test_proc_print_param(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[proc greet [name] { [print $name] }]\n[greet hello]", &vm, &arena);
+    "proc greet {name} { [print $name] }\n[greet hello]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello\n");
@@ -1989,7 +1989,7 @@ static int test_proc_print_param(void) {
   TEST_PASS();
 }
 
-/* Test: zero-parameter procedure: [proc answer [] { 42 }] then [answer] returns i32(42) */
+/* Test: zero-parameter procedure: proc answer {} { 42 } then [answer] returns i32(42) */
 static int test_proc_zero_params(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -1999,7 +1999,7 @@ static int test_proc_zero_params(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "[proc answer [] { 42 }]\n[answer]", &vm, &arena);
+    "proc answer {} { 42 }\n[answer]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -2024,7 +2024,7 @@ static int test_proc_implicit_return(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "[proc double [n] { [* $n 2] }]\n[double 5]", &vm, &arena);
+    "proc double {n} { [* $n 2] }\n[double 5]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -2051,7 +2051,7 @@ static int test_proc_multi_stmt_body(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[proc foo [x] { [print $x]; [+ $x 1] }]\n[foo 10]", &vm, &arena);
+    "proc foo {x} { [print $x]; [+ $x 1] }\n[foo 10]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n");
@@ -2076,7 +2076,7 @@ static int test_proc_redefine(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "[proc f [] { 1 }]\n[proc f [] { 2 }]\n[f]", &vm, &arena);
+    "proc f {} { 1 }\nproc f {} { 2 }\n[f]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -2100,12 +2100,12 @@ static int test_proc_wrong_argc(void) {
   /* Too few args */
   VM vm;
   vm_init(&vm, &arena);
-  VMResult result = jacl_run("[proc foo [a]]", &vm, &arena);
+  VMResult result = jacl_run("proc foo {a}", &vm, &arena);
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
 
   /* Too many args */
   vm_init(&vm, &arena);
-  result = jacl_run("[proc foo [a] { 1 } extra]", &vm, &arena);
+  result = jacl_run("proc foo {a} { 1 } extra", &vm, &arena);
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
 
   vm_destroy(&vm);
@@ -2126,7 +2126,7 @@ static int test_proc_call_arg_mismatch(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "[proc add [a b] { [+ $a $b] }]\n[add 1]", &vm, &arena);
+    "proc add {a, b} { [+ $a $b] }\n[add 1]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
@@ -2149,7 +2149,7 @@ static int test_proc_def_returns_nil(void) {
 
   VM vm;
   vm_init(&vm, &arena);
-  VMResult result = jacl_run("[proc f [] { 42 }]", &vm, &arena);
+  VMResult result = jacl_run("proc f {} { 42 }", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -2282,7 +2282,7 @@ static int test_proc_new_syntax_closure(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "[def x 10]\n"
+    "x = 10\n"
     "proc add_x {n} { [+ $n $x] }\n"
     "[add_x 5]", &vm, &arena);
 
@@ -2386,11 +2386,11 @@ static int test_while_iterative_sum(void) {
 
   /* Sum 1..5 using def rebinding in while loop */
   const char* program =
-    "[def i 1]\n"
-    "[def sum 0]\n"
+    "i = 1\n"
+    "sum = 0\n"
     "[while [<= $i 5] {\n"
-    "  [def sum [+ $sum $i]]\n"
-    "  [def i [+ $i 1]]\n"
+    "  sum = [+ $sum $i]\n"
+    "  i = [+ $i 1]\n"
     "}]\n"
     "[print $sum]";
 
@@ -2422,9 +2422,9 @@ static int test_while_returns_nil(void) {
 
   /* Print the result of a while loop — should be nil */
   const char* program =
-    "[def i 0]\n"
+    "i = 0\n"
     "[print [while [< $i 3] {\n"
-    "  [def i [+ $i 1]]\n"
+    "  i = [+ $i 1]\n"
     "}]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2508,10 +2508,10 @@ static int test_while_countdown(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[def n 3]\n"
+    "n = 3\n"
     "[while [> $n 0] {\n"
     "  [print $n]\n"
-    "  [def n [- $n 1]]\n"
+    "  n = [- $n 1]\n"
     "}]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2543,10 +2543,10 @@ static int test_closure_capture_local(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc mkadd [x] {\n"
-    "  [proc inner [y] { [+ $x $y] }]\n"
-    "}]\n"
-    "[def add10 [mkadd 10]]\n"
+    "proc mkadd {x} {\n"
+    "  proc inner {y} { [+ $x $y] }\n"
+    "}\n"
+    "add10 = [mkadd 10]\n"
     "[print [add10 5]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2576,11 +2576,11 @@ static int test_closure_independent_captures(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc mkadd [x] {\n"
-    "  [proc inner [y] { [+ $x $y] }]\n"
-    "}]\n"
-    "[def add5 [mkadd 5]]\n"
-    "[def add20 [mkadd 20]]\n"
+    "proc mkadd {x} {\n"
+    "  proc inner {y} { [+ $x $y] }\n"
+    "}\n"
+    "add5 = [mkadd 5]\n"
+    "add20 = [mkadd 20]\n"
     "[print [add5 1]]\n"
     "[print [add20 1]]";
 
@@ -2611,13 +2611,13 @@ static int test_closure_nested_3_levels(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc outer [a] {\n"
-    "  [proc middle [b] {\n"
-    "    [proc inner [c] { [+ [+ $a $b] $c] }]\n"
-    "  }]\n"
-    "}]\n"
-    "[def mid [outer 100]]\n"
-    "[def inn [mid 20]]\n"
+    "proc outer {a} {\n"
+    "  proc middle {b} {\n"
+    "    proc inner {c} { [+ [+ $a $b] $c] }\n"
+    "  }\n"
+    "}\n"
+    "mid = [outer 100]\n"
+    "inn = [mid 20]\n"
     "[print [inn 3]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2647,10 +2647,10 @@ static int test_closure_capture_multiple(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc make-fn [a b] {\n"
-    "  [proc inner [c] { [+ [+ $a $b] $c] }]\n"
-    "}]\n"
-    "[def f [make-fn 10 20]]\n"
+    "proc make-fn {a, b} {\n"
+    "  proc inner {c} { [+ [+ $a $b] $c] }\n"
+    "}\n"
+    "f = [make-fn 10 20]\n"
     "[print [f 3]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2681,11 +2681,11 @@ static int test_closure_not_global(void) {
 
   /* x=99 at global, x=5 as param — inner should capture param x=5 */
   const char* program =
-    "[def x 99]\n"
-    "[proc wrap [x] {\n"
-    "  [proc inner [] { [+ $x 0] }]\n"
-    "}]\n"
-    "[def f [wrap 5]]\n"
+    "x = 99\n"
+    "proc wrap {x} {\n"
+    "  proc inner {} { [+ $x 0] }\n"
+    "}\n"
+    "f = [wrap 5]\n"
     "[print [f]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2717,9 +2717,9 @@ static int test_recursion_factorial(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc fact [n] {\n"
+    "proc fact {n} {\n"
     "  [if [== $n 0] { 1 } { [* $n [fact [- $n 1]]] }]\n"
-    "}]\n"
+    "}\n"
     "[print [fact 10]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2749,9 +2749,9 @@ static int test_recursion_fibonacci(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc fib [n] {\n"
+    "proc fib {n} {\n"
     "  [if [< $n 2] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }]\n"
-    "}]\n"
+    "}\n"
     "[print [fib 10]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2779,7 +2779,7 @@ static int test_recursion_depth_limit(void) {
 
   /* Infinite recursion with no base case */
   const char* program =
-    "[proc inf [n] { [inf [+ $n 1]] }]\n"
+    "proc inf {n} { [inf [+ $n 1]] }\n"
     "[inf 0]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2821,10 +2821,10 @@ static int test_spawn_captures_mut_pinned(void) {
 
   /* mut x captured via $x in spawn body (read only, no set!) */
   const char* program =
-    "[proc main [] {\n"
-    "  [mut x 42]\n"
+    "proc main {} {\n"
+    "  x : 42\n"
     "  [spawn { [+ $x 1] }]\n"
-    "}]\n"
+    "}\n"
     "[main]";
 
   CompileResult cr = compile_source(program, &arena, &heap);
@@ -2851,13 +2851,13 @@ static int test_spawn_local_mut_not_pinned(void) {
 
   /* mut x declared inside spawn body — local, no pinning needed */
   const char* program =
-    "[proc main [] {\n"
+    "proc main {} {\n"
     "  [spawn {\n"
-    "    [mut x 42]\n"
-    "    [set! x 99]\n"
+    "    x : 42\n"
+    "    x :: 99\n"
     "    $x\n"
     "  }]\n"
-    "}]\n"
+    "}\n"
     "[main]";
 
   CompileResult cr = compile_source(program, &arena, &heap);
@@ -2882,10 +2882,10 @@ static int test_spawn_captures_def_not_pinned(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   const char* program =
-    "[proc main [] {\n"
-    "  [def x 42]\n"
+    "proc main {} {\n"
+    "  x = 42\n"
     "  [spawn { [+ $x 1] }]\n"
-    "}]\n"
+    "}\n"
     "[main]";
 
   CompileResult cr = compile_source(program, &arena, &heap);
@@ -2912,11 +2912,11 @@ static int test_spawn_transitive_capture_pinned(void) {
 
   /* proc f captures mut x, proc g calls f, g is called in spawn body */
   const char* program =
-    "[proc main [] {\n"
-    "  [mut x 42]\n"
-    "  [proc f [] { $x }]\n"
+    "proc main {} {\n"
+    "  x : 42\n"
+    "  proc f {} { $x }\n"
     "  [spawn { [f] }]\n"
-    "}]\n"
+    "}\n"
     "[main]";
 
   CompileResult cr = compile_source(program, &arena, &heap);
@@ -2944,11 +2944,11 @@ static int test_spawn_transitive_varref_pinned(void) {
 
   /* proc f captures mut x, spawn body uses $f (var ref) */
   const char* program =
-    "[proc main [] {\n"
-    "  [mut x 42]\n"
-    "  [proc f [] { $x }]\n"
+    "proc main {} {\n"
+    "  x : 42\n"
+    "  proc f {} { $x }\n"
     "  [spawn { $f }]\n"
-    "}]\n"
+    "}\n"
     "[main]";
 
   CompileResult cr = compile_source(program, &arena, &heap);
@@ -2974,11 +2974,11 @@ static int test_spawn_transitive_def_not_pinned(void) {
 
   /* proc f captures def x (immutable), spawn calls f — NOT pinned */
   const char* program =
-    "[proc main [] {\n"
-    "  [def x 42]\n"
-    "  [proc f [] { $x }]\n"
+    "proc main {} {\n"
+    "  x = 42\n"
+    "  proc f {} { $x }\n"
     "  [spawn { [f] }]\n"
-    "}]\n"
+    "}\n"
     "[main]";
 
   CompileResult cr = compile_source(program, &arena, &heap);
@@ -3152,7 +3152,7 @@ static int test_module_populate_exports(void) {
 
   /* Compile a source with def, proc, mut, and private names */
   const char* source = "def x 42\n"
-                       "proc add [a b] { [+ $a $b] }\n"
+                       "proc add {a, b} { [+ $a $b] }\n"
                        "mut cnt 0\n"
                        "def _priv 99\n";
   LexResult tokens = lexer_lex(source, &arena);
@@ -3220,7 +3220,7 @@ static int test_compile_module_basic(void) {
   /* Create a temp module file */
   const char* dir = "/tmp/jacl_test_m14";
   mkdir(dir, 0755);
-  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add [a b] { [+ $a $b] }\n");
+  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add {a, b} { [+ $a $b] }\n");
 
   /* Create an importer module path */
   char importer_path[1024];
@@ -3379,7 +3379,7 @@ static int test_compile_module_private_excluded(void) {
   const char* dir = "/tmp/jacl_test_m14c";
   mkdir(dir, 0755);
   write_temp_jacl(dir, "priv.jacl",
-                  "def pub 1\ndef _secret 2\nproc _help [x] { $x }\nproc greet [x] { $x }\n");
+                  "def pub 1\ndef _secret 2\nproc _help {x} { $x }\nproc greet {x} { $x }\n");
   write_temp_jacl(dir, "main.jacl", "");
 
   char importer_path[1024];
@@ -3626,7 +3626,7 @@ static int test_import_registers_globals(void) {
   char real_importer[1024];
 
   setup_module_ctx("/tmp/jacl_us007a", "lib.jacl",
-                   "def x 42\nproc add [a b] { [+ $a $b] }\n",
+                   "def x 42\nproc add {a, b} { [+ $a $b] }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -3797,7 +3797,7 @@ static int test_import_arity_check(void) {
   char real_importer[1024];
 
   setup_module_ctx("/tmp/jacl_us007e", "lib.jacl",
-                   "proc add [a b] { [+ $a $b] }\n",
+                   "proc add {a, b} { [+ $a $b] }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -4049,7 +4049,7 @@ static int test_module_set_emits_reset(void) {
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
   /* Compile use + set! */
-  const char* src = "use \"state.jacl\" [count]\n[set! count 5]\n";
+  const char* src = "use \"state.jacl\" [count]\ncount :: 5\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -4098,7 +4098,7 @@ static int test_module_set_immutable_errors(void) {
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
-  const char* src = "use \"lib.jacl\" [x]\n[set! x 99]\n";
+  const char* src = "use \"lib.jacl\" [x]\nx :: 99\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -4174,7 +4174,7 @@ static int test_compile_program_with_dep(void) {
 
   const char* dir = "/tmp/jacl_us009b";
   mkdir(dir, 0755);
-  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add [a b] { [+ $a $b] }\n");
+  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add {a, b} { [+ $a $b] }\n");
   write_temp_jacl(dir, "main.jacl", "use \"lib.jacl\" [add x]\n[add $x 1]\n");
 
   ProgramResult pr = jacl_compile_program(
@@ -4282,7 +4282,7 @@ static int test_compile_program_root_exports(void) {
 
   const char* dir = "/tmp/jacl_us009e";
   mkdir(dir, 0755);
-  write_temp_jacl(dir, "main.jacl", "def x 42\nproc add [a b] { [+ $a $b] }\n");
+  write_temp_jacl(dir, "main.jacl", "def x 42\nproc add {a, b} { [+ $a $b] }\n");
 
   ProgramResult pr = jacl_compile_program(
       "/tmp/jacl_us009e/main.jacl", &arena, &intern, &heap);
@@ -4328,7 +4328,7 @@ static int test_exec_program_basic(void) {
   const char* dir = "/tmp/jacl_us010a";
   mkdir(dir, 0755);
   write_temp_jacl(dir, "lib.jacl",
-    "proc add [a b] { [+ $a $b] }\n");
+    "proc add {a, b} { [+ $a $b] }\n");
   write_temp_jacl(dir, "main.jacl",
     "use \"lib.jacl\" [add]\n[print [add 1 2]]\n");
 
@@ -5384,7 +5384,7 @@ static int test_if_new_infix_condition(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[def n 5]\n"
+    "n = 5\n"
     "if ($n > 0) {\n"
     "  print \"positive\"\n"
     "} else {\n"
@@ -5490,7 +5490,7 @@ static int test_if_new_as_expression(void) {
   vm_init(&vm, &arena);
   /* Use def to capture value of new-syntax if as expression */
   VMResult result = jacl_run(
-    "[def x [if $true { 10 } { 20 }]]\n"
+    "x = [if $true { 10 } { 20 }]\n"
     "[+ $x 5]",
     &vm, &arena);
 
@@ -5520,11 +5520,11 @@ static int test_while_new_iterative_sum(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[def i 1]\n"
-    "[def sum 0]\n"
+    "i = 1\n"
+    "sum = 0\n"
     "while [<= $i 5] {\n"
-    "  [def sum [+ $sum $i]]\n"
-    "  [def i [+ $i 1]]\n"
+    "  sum = [+ $sum $i]\n"
+    "  i = [+ $i 1]\n"
     "}\n"
     "[print $sum]", &vm, &arena);
 
@@ -5552,10 +5552,10 @@ static int test_while_new_infix_condition(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[def i 3]\n"
+    "i = 3\n"
     "while ($i > 0) {\n"
     "  [print $i]\n"
-    "  [def i [- $i 1]]\n"
+    "  i = [- $i 1]\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -5605,14 +5605,14 @@ static int test_if_while_combined_new(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[def i 1]\n"
+    "i = 1\n"
     "while [<= $i 4] {\n"
     "  if [== [% $i 2] 0] {\n"
     "    [print \"even\"]\n"
     "  } else {\n"
     "    [print \"odd\"]\n"
     "  }\n"
-    "  [def i [+ $i 1]]\n"
+    "  i = [+ $i 1]\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -5697,7 +5697,7 @@ static int test_for_hof_callback(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[def v [vec 10 20 30]]\n"
+    "v = [vec 10 20 30]\n"
     "proc p {x} { [print $x] }\n"
     "[for $v $p]", &vm, &arena);
 
@@ -5753,7 +5753,7 @@ static int test_for_variable_collection(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[def v [vec 5 10 15]]\n"
+    "v = [vec 5 10 15]\n"
     "for $v {\n"
     "  [print $it]\n"
     "}\n", &vm, &arena);
@@ -5782,7 +5782,7 @@ static int test_for_returns_nil(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[def v [vec 1]]\n"
+    "v = [vec 1]\n"
     "proc p {x} { [+ $x 0] }\n"
     "[print [for $v $p]]", &vm, &arena);
 
@@ -5810,7 +5810,7 @@ static int test_for_upvalue_capture(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[def offset 100]\n"
+    "offset = 100\n"
     "for [vec 1 2 3] {\n"
     "  [print [+ $offset $it]]\n"
     "}\n", &vm, &arena);
@@ -5839,9 +5839,9 @@ static int test_each_still_works(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[def v [vec 10 20 30]]\n"
+    "v = [vec 10 20 30]\n"
     "proc p {x} { [print $x] }\n"
-    "[each $v $p]", &vm, &arena);
+    "[for $v $p]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
@@ -5870,7 +5870,7 @@ static int test_set_without_bang(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "{\n"
-    "  [mut x 10]\n"
+    "  x : 10\n"
     "  [set x 42]\n"
     "  [print $x]\n"
     "}", &vm, &arena);
@@ -5900,8 +5900,8 @@ static int test_set_bang_still_works(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "{\n"
-    "  [mut x 10]\n"
-    "  [set! x 99]\n"
+    "  x : 10\n"
+    "  x :: 99\n"
     "  [print $x]\n"
     "}", &vm, &arena);
 
@@ -5929,7 +5929,7 @@ static int test_reset_without_bang(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[def b [atom 10]]\n"
+    "b = [atom 10]\n"
     "[reset $b 42]\n"
     "[print [deref $b]]", &vm, &arena);
 
@@ -5957,7 +5957,7 @@ static int test_reset_bang_still_works(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[def b [atom 10]]\n"
+    "b = [atom 10]\n"
     "[reset! $b 99]\n"
     "[print [deref $b]]", &vm, &arena);
 
@@ -5986,7 +5986,7 @@ static int test_swap_without_bang(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "proc inc {x} { [+ $x 1] }\n"
-    "[def b [atom 10]]\n"
+    "b = [atom 10]\n"
     "[swap $b $inc]\n"
     "[print [deref $b]]", &vm, &arena);
 
@@ -6015,7 +6015,7 @@ static int test_swap_bang_still_works(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "proc inc {x} { [+ $x 1] }\n"
-    "[def b [atom 10]]\n"
+    "b = [atom 10]\n"
     "[swap! $b $inc]\n"
     "[print [deref $b]]", &vm, &arena);
 
@@ -6043,7 +6043,7 @@ static int test_set_global_without_bang(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[mut cnt 0]\n"
+    "cnt : 0\n"
     "[set cnt 1]\n"
     "[set cnt [+ $cnt 1]]\n"
     "[print $cnt]", &vm, &arena);
@@ -6073,7 +6073,7 @@ static int test_set_multiple_reassign(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "{\n"
-    "  [mut x 0]\n"
+    "  x : 0\n"
     "  [set x 1]\n"
     "  [set x 2]\n"
     "  [set x 3]\n"

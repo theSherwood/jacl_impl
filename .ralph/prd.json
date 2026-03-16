@@ -254,7 +254,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": "test_compiler.c is the largest test file (~166 tests). Focus on systematic search-and-replace: [proc [params] [body]] -> proc name {params} {body}, [if cond then else] -> if cond {then} else {else}, [def x val] -> x = val or def x val, [set! x val] -> set x val, [each cb coll] -> for $coll cb, [defstruct Name [fields]] -> struct Name {fields}."
     },
     {

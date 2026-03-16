@@ -291,3 +291,19 @@ Thread: n/a
   - Block data member is `data.block.commands[]`, not `stmts`
   - Cross-mode nesting tests are valuable for verifying parser dispatch chains work end-to-end
 ---
+
+## 2026-03-16 - US-014
+Thread: n/a
+- Rewrote test_compiler.c: ~120 lines changed — [def x val] → x = val, [proc name [params] {body}] → proc name {params} {body}, [mut x val] → x : val, [set! x val] → x :: val, [each ...] → [for ...]
+- Rewrote test_m4.c: ~21 lines changed — same patterns as test_compiler.c
+- Rewrote test_m6.c: ~5 lines changed — proc param syntax, def → =, proc [] → proc {}
+- Used Python script for bulk transformation of common patterns, then manual fixup of nested proc definitions and edge cases
+- Error test `def 42 10` (non-string name) needed special handling: `42 = 10` doesn't trigger same error since `=` only works with TOKEN_WORD heads; used bare `def 42 10` instead
+- All 238 compiler tests pass, all test_m4 and test_m6 tests pass, all 50 build suites pass (0 failures)
+- Files changed: test/test_compiler.c, test/test_m4.c, test/test_m6.c
+- **Learnings for future iterations:**
+  - `=` binding op only activates for TOKEN_WORD heads in bare command mode — `42 = 10` becomes [42 = 10], not [def 42 10]
+  - Nested proc definitions in multi-line C strings need manual cleanup after bulk script transforms
+  - set! still works in compiler (backward compat) but tests should use :: or bare `set` for new syntax
+  - each still works as builtin alias — backward compat tests can keep it
+---

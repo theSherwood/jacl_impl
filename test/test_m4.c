@@ -19,7 +19,7 @@ static void capture_print(const char* text, uint32_t len, void* ctx) {
 
 /* ===== US-010: End-to-end M4 integration tests ===== */
 
-/* Test: proc + call — [def x 10] [proc double [n] { [* $n 2] }] [print [double $x]] */
+/* Test: proc + call — x = 10 proc double {n} { [* $n 2] } [print [double $x]] */
 static int test_proc_call_pipeline(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -31,8 +31,8 @@ static int test_proc_call_pipeline(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[def x 10]\n"
-    "[proc double [n] { [* $n 2] }]\n"
+    "x = 10\n"
+    "proc double {n} { [* $n 2] }\n"
     "[print [double $x]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -58,9 +58,9 @@ static int test_factorial(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc fact [n] {\n"
+    "proc fact {n} {\n"
     "  [if [== $n 0] { 1 } { [* $n [fact [- $n 1]]] }]\n"
-    "}]\n"
+    "}\n"
     "[print [fact 10]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -86,9 +86,9 @@ static int test_fibonacci(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc fib [n] {\n"
+    "proc fib {n} {\n"
     "  [if [< $n 2] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }]\n"
-    "}]\n"
+    "}\n"
     "[print [fib 10]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -114,10 +114,10 @@ static int test_closure_capture(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc mkadd [x] {\n"
-    "  [proc inner [y] { [+ $x $y] }]\n"
-    "}]\n"
-    "[def add10 [mkadd 10]]\n"
+    "proc mkadd {x} {\n"
+    "  proc inner {y} { [+ $x $y] }\n"
+    "}\n"
+    "add10 = [mkadd 10]\n"
     "[print [add10 5]]\n"
     "[print [add10 90]]";
 
@@ -173,13 +173,13 @@ static int test_nested_procs(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc outer [a] {\n"
-    "  [proc mid [b] {\n"
-    "    [proc inner [c] { [+ [+ $a $b] $c] }]\n"
-    "  }]\n"
-    "}]\n"
-    "[def m [outer 100]]\n"
-    "[def i [m 20]]\n"
+    "proc outer {a} {\n"
+    "  proc mid {b} {\n"
+    "    proc inner {c} { [+ [+ $a $b] $c] }\n"
+    "  }\n"
+    "}\n"
+    "m = [outer 100]\n"
+    "i = [m 20]\n"
     "[print [i 3]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -202,7 +202,7 @@ static int test_error_wrong_argc(void) {
   vm_init(&vm, &arena);
 
   const char* program =
-    "[proc add [a b] { [+ $a $b] }]\n"
+    "proc add {a, b} { [+ $a $b] }\n"
     "[add 1]";  /* wrong: 1 arg instead of 2 */
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -226,7 +226,7 @@ static int test_error_call_non_function(void) {
   vm_init(&vm, &arena);
 
   const char* program =
-    "[def x 42]\n"
+    "x = 42\n"
     "[x 1]";  /* x is i32, not callable */
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -250,7 +250,7 @@ static int test_error_undefined_in_proc(void) {
   vm_init(&vm, &arena);
 
   const char* program =
-    "[proc f [] { $nope }]\n"
+    "proc f {} { $nope }\n"
     "[f]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -277,11 +277,11 @@ static int test_while_iterative_sum(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[def i 1]\n"
-    "[def sum 0]\n"
+    "i = 1\n"
+    "sum = 0\n"
     "[while [<= $i 10] {\n"
-    "  [def sum [+ $sum $i]]\n"
-    "  [def i [+ $i 1]]\n"
+    "  sum = [+ $sum $i]\n"
+    "  i = [+ $i 1]\n"
     "}]\n"
     "[print $sum]";
 
