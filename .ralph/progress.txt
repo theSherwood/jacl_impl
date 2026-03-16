@@ -276,3 +276,18 @@ Thread: n/a
   - Lexer's lex_interp_infix handles nested parens, $var, $[...], operators, words/ints/floats — similar to lex_interp_expr but for paren delimiters
   - No compiler changes needed — $(expr) produces same AST_COMMAND nodes as regular infix, and interp string compilation handles them uniformly
 ---
+
+## 2026-03-16 - US-013
+Thread: n/a
+- Verified test_lexer.c has no TOKEN_DEFSTRUCT references and covers all new token types (152 tests)
+- Verified test_parser.c already covers all three modes ([], {}, ()) and new syntax features from US-001 through US-012
+- Added 8 roundtrip tests for new syntax: binding ops, pipe, lambda, arrow, $(expr), new proc/struct/if/while syntax
+- Added 6 cross-mode nesting tests: block+infix, block+bracket, infix+bracket, all-three-modes, pipe+lambda, arrow+infix+block
+- Old syntax remains only in explicit backward-compatibility tests (proc_old_syntax_still_works, struct_old_syntax_compat, if/while_old_bracket_compat)
+- All 202 parser tests pass, all 152 lexer tests pass, all 50 build suites pass (0 failures)
+- Files changed: test/test_parser.c
+- **Learnings for future iterations:**
+  - Roundtrip tests verify parse→pretty-print→reparse→pretty-print stability; desugared forms (binding→def, pipe→nested cmd) are what roundtrip preserves
+  - Block data member is `data.block.commands[]`, not `stmts`
+  - Cross-mode nesting tests are valuable for verifying parser dispatch chains work end-to-end
+---

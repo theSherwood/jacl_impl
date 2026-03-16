@@ -238,7 +238,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "These files were partially updated in earlier stories. This story does the comprehensive sweep \u2014 every test program string in these files must use the new syntax. Focus on coverage: ensure all three modes are tested, all new token types have tests, error recovery tests work across all modes."
     },
     {

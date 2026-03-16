@@ -1643,6 +1643,194 @@ static int test_roundtrip_complex(void) {
   TEST_PASS();
 }
 
+/* ---- US-013: Comprehensive new-syntax roundtrip and nesting tests ---- */
+
+static int test_roundtrip_binding_ops(void) {
+  setup();
+  /* Binding ops desugar to def/mut/set — roundtrip on desugared form */
+  ASSERT(roundtrip_ok("x = 5"));
+  ASSERT(roundtrip_ok("x : 0"));
+  ASSERT(roundtrip_ok("x :: 10"));
+  ASSERT(roundtrip_ok("x = [+ 1 2]"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_pipe(void) {
+  setup();
+  /* Pipe desugars to nested commands */
+  ASSERT(roundtrip_ok("get-data | filter | print"));
+  ASSERT(roundtrip_ok("a | b $x"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_lambda(void) {
+  setup();
+  /* Lambda desugars to proc — roundtrip on desugared form */
+  ASSERT(roundtrip_ok("for [vec 1 2 3] [\\ print $it]"));
+  ASSERT(roundtrip_ok("[\\ + $it 1]"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_arrow(void) {
+  setup();
+  ASSERT(roundtrip_ok("print $p->x"));
+  ASSERT(roundtrip_ok("print $p->x->y"));
+  ASSERT(roundtrip_ok("[foo $point->name]"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_dollar_paren(void) {
+  setup();
+  ASSERT(roundtrip_ok("print \"total: $(1 + 2)\""));
+  ASSERT(roundtrip_ok("print \"val: $($x * $y)\""));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_new_proc(void) {
+  setup();
+  ASSERT(roundtrip_ok("proc add {i32 a, i32 b} { [+ $a $b] }"));
+  ASSERT(roundtrip_ok("proc greet {} { print hello }"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_new_struct(void) {
+  setup();
+  ASSERT(roundtrip_ok("struct Pt {i32 x, i32 y}"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_new_if_while(void) {
+  setup();
+  ASSERT(roundtrip_ok("if $cond { print yes } else { print no }"));
+  ASSERT(roundtrip_ok("while $running { tick }"));
+  ASSERT(roundtrip_ok("if $a { 1 } elif $b { 2 } else { 3 }"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_nesting_block_with_infix(void) {
+  /* {} containing () */
+  setup();
+  ParseResult r = parse("if ($x > 0) { print yes }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  /* head = "if" */
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "if", 2) == 0);
+  /* first arg is a command (infix > desugars to [> $x 0]) */
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_nesting_block_with_bracket(void) {
+  /* {} containing [] */
+  setup();
+  ParseResult r = parse("if [> $x 0] { print [+ $x 1] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  /* condition is bracket command */
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  /* body block inner print has nested bracket command arg */
+  AstNode* body = n->data.command.args[1];
+  ASSERT(body->type == AST_BLOCK);
+  AstNode* print_cmd = body->data.block.commands[0];
+  ASSERT(print_cmd->data.command.args[0]->type == AST_COMMAND);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_nesting_infix_with_bracket(void) {
+  /* () containing [] */
+  setup();
+  AstNode* n = parse_expr("($x + [len $v])");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  /* head = "+" */
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "+", 1) == 0);
+  /* right operand is bracket command */
+  ASSERT(n->data.command.args[1]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.args[1]->data.command.head->data.lit_string.value, "len", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_nesting_all_three_modes(void) {
+  /* All modes: bare command (top-level) with () infix, {} block, [] bracket */
+  setup();
+  ParseResult r = parse("if ($x > 0) {\n  print [+ $x 1]\n}");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  /* condition: infix > */
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.args[0]->data.command.head->data.lit_string.value, ">", 1) == 0);
+  /* body: block containing print with bracket command */
+  AstNode* body = n->data.command.args[1];
+  ASSERT(body->type == AST_BLOCK);
+  AstNode* inner = body->data.block.commands[0];
+  ASSERT(inner->data.command.args[0]->type == AST_COMMAND);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_nesting_pipe_with_lambda(void) {
+  /* Pipe + lambda: data | map [\ + $it 1] */
+  setup();
+  ParseResult r = parse("data | map [\\ + $it 1]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  /* Pipe desugars to: [map [data] [\...]] */
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "map", 3) == 0);
+  /* second arg is the lambda (desugared proc) */
+  AstNode* lambda = n->data.command.args[1];
+  ASSERT(lambda->type == AST_COMMAND);
+  ASSERT(memcmp(lambda->data.command.head->data.lit_string.value, "proc", 4) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_nesting_arrow_in_infix_in_block(void) {
+  /* Arrow inside infix inside block: if ($p->x > 0) { ... } */
+  setup();
+  ParseResult r = parse("if ($p->x > 0) { print yes }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* cond = r.nodes[0]->data.command.args[0];
+  ASSERT(cond->type == AST_COMMAND);
+  /* left of > is [get $p x] (arrow desugar) */
+  ASSERT(cond->data.command.args[0]->type == AST_COMMAND);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- M14 US-002: use declarations ---- */
 
 static int test_use_basic(void) {
@@ -3685,6 +3873,21 @@ int main(void) {
     {"roundtrip_blocks",      test_roundtrip_blocks},
     {"roundtrip_interp",      test_roundtrip_interp},
     {"roundtrip_complex",     test_roundtrip_complex},
+    /* US-013: New-syntax roundtrip and cross-mode nesting */
+    {"rt_binding_ops",        test_roundtrip_binding_ops},
+    {"rt_pipe",               test_roundtrip_pipe},
+    {"rt_lambda",             test_roundtrip_lambda},
+    {"rt_arrow",              test_roundtrip_arrow},
+    {"rt_dollar_paren",       test_roundtrip_dollar_paren},
+    {"rt_new_proc",           test_roundtrip_new_proc},
+    {"rt_new_struct",         test_roundtrip_new_struct},
+    {"rt_new_if_while",       test_roundtrip_new_if_while},
+    {"nest_block_infix",      test_nesting_block_with_infix},
+    {"nest_block_bracket",    test_nesting_block_with_bracket},
+    {"nest_infix_bracket",    test_nesting_infix_with_bracket},
+    {"nest_all_three_modes",  test_nesting_all_three_modes},
+    {"nest_pipe_lambda",      test_nesting_pipe_with_lambda},
+    {"nest_arrow_infix_blk",  test_nesting_arrow_in_infix_in_block},
     /* M14 US-002: use declarations */
     {"use_basic",             test_use_basic},
     {"use_single_name",       test_use_single_name},
