@@ -6322,6 +6322,173 @@ static int test_bind_expr_values(void) {
   TEST_PASS();
 }
 
+/* ===== Syntax Redesign US-009: Arrow field access (->) ===== */
+
+static int test_arrow_basic_get(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "p = [Point 10 20]\n"
+      "print $p->x\n"
+      "print $p->y",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_arrow_chained_get(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "struct Line {Point start, Point end}\n"
+      "ln = [Line [Point 5 6] [Point 10 20]]\n"
+      "print $ln->start->x\n"
+      "print $ln->end->y",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_arrow_on_expr_result(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc mkpt {} { [Point 42 99] }\n"
+      "print [mkpt]->x",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_arrow_in_infix_mode(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "p = [Point 10 20]\n"
+      "print ($p->x + $p->y)",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_arrow_in_bracket_cmd(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "p = [Point 10 20]\n"
+      "print [+ $p->x $p->y]",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_arrow_old_dot_compat(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "p = [Point 10 20]\n"
+      "print [. $p x]",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -6578,6 +6745,13 @@ int main(void) {
     { "bind_mixed_with_commands",     test_bind_mixed_with_commands },
     { "bind_in_block",                test_bind_in_block },
     { "bind_expr_values",             test_bind_expr_values },
+    /* Syntax Redesign US-009: Arrow field access (->) */
+    { "arrow_basic_get",              test_arrow_basic_get },
+    { "arrow_chained_get",            test_arrow_chained_get },
+    { "arrow_on_expr_result",         test_arrow_on_expr_result },
+    { "arrow_in_infix_mode",          test_arrow_in_infix_mode },
+    { "arrow_in_bracket_cmd",         test_arrow_in_bracket_cmd },
+    { "arrow_old_dot_compat",         test_arrow_old_dot_compat },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

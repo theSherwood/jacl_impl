@@ -226,7 +226,6 @@ static AstNode* parser__parse_atom(Parser* p) {
     case TOKEN_OPERATOR:
     /* New operator tokens — usable as command names during transition */
     case TOKEN_PIPE:
-    case TOKEN_ARROW:
     case TOKEN_BACKSLASH:
     case TOKEN_BANG:
     case TOKEN_DOTDOT:
@@ -419,6 +418,58 @@ static int parser__is_infix_binary_op(Token* tok) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Postfix arrow field access ($expr->field)
+ *
+ * If the next token is TOKEN_ARROW, wraps expr in [. expr field].
+ * Loops for chained access: $a->b->c becomes [. [. $a b] c].
+ * Returns the original expr unchanged if no arrow follows.
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
+  while (!parser__at_end(p) && parser__peek(p)->type == TOKEN_ARROW) {
+    Token* arrow = parser__advance(p); /* consume '->' */
+
+    Token* field_tok = parser__peek(p);
+    if (field_tok->type != TOKEN_WORD) {
+      return parser__error(p, "expected field name after '->'", arrow);
+    }
+    parser__advance(p); /* consume field name */
+
+    /* Build field name as AST_LIT_STRING */
+    AstNode* field = ast_alloc(p->arena);
+    field->type = AST_LIT_STRING;
+    field->start = parser__token_start(field_tok);
+    field->end   = parser__token_end(field_tok);
+    field->data.lit_string.value  = field_tok->payload.text;
+    field->data.lit_string.length = field_tok->length;
+
+    /* Build "." head */
+    AstNode* dot_head = ast_alloc(p->arena);
+    dot_head->type = AST_LIT_STRING;
+    dot_head->start = parser__token_start(arrow);
+    dot_head->end   = parser__token_end(arrow);
+    dot_head->data.lit_string.value  = ".";
+    dot_head->data.lit_string.length = 1;
+
+    /* Build [. expr field] command */
+    AstNode** args = ast_alloc_array(p->arena, 2);
+    args[0] = expr;
+    args[1] = field;
+
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_COMMAND;
+    node->start = expr->start;
+    node->end   = parser__token_end(field_tok);
+    node->data.command.head      = dot_head;
+    node->data.command.args      = args;
+    node->data.command.arg_count = 2;
+
+    expr = node;
+  }
+  return expr;
+}
+
+/* -------------------------------------------------------------------------
  * Internal: Parse an operand in infix mode
  *
  * Handles unary prefix operators (- for negation, ~ for logical not)
@@ -486,15 +537,20 @@ static AstNode* parser__parse_infix_operand(Parser* p) {
   }
 
   /* Primary expressions */
+  AstNode* result = NULL;
   switch (tok->type) {
     case TOKEN_LPAREN:
-      return parser__parse_infix(p);
+      result = parser__parse_infix(p);
+      break;
     case TOKEN_LBRACKET:
-      return parser__parse_command(p);
+      result = parser__parse_command(p);
+      break;
     case TOKEN_LBRACE:
-      return parser__parse_block(p);
+      result = parser__parse_block(p);
+      break;
     case TOKEN_STRING_BEGIN:
-      return parser__parse_interp_string(p);
+      result = parser__parse_interp_string(p);
+      break;
     case TOKEN_INT:
     case TOKEN_FLOAT:
     case TOKEN_WORD:
@@ -515,10 +571,17 @@ static AstNode* parser__parse_infix_operand(Parser* p) {
     case TOKEN_BREAK:
     case TOKEN_CONTINUE:
     case TOKEN_TRY:
-      return parser__parse_atom(p);
+      result = parser__parse_atom(p);
+      break;
     default:
       return NULL;
   }
+
+  /* Postfix arrow field access: expr->field */
+  if (result != NULL && result->type != AST_ERROR) {
+    result = parser__maybe_arrow_access(p, result);
+  }
+  return result;
 }
 
 /* -------------------------------------------------------------------------
@@ -624,19 +687,24 @@ static AstNode* parser__parse_infix(Parser* p) {
 
 static AstNode* parser__parse_expr(Parser* p) {
   Token* tok = parser__peek(p);
+  AstNode* result = NULL;
 
   switch (tok->type) {
     case TOKEN_LBRACKET:
-      return parser__parse_command(p);
+      result = parser__parse_command(p);
+      break;
 
     case TOKEN_LPAREN:
-      return parser__parse_infix(p);
+      result = parser__parse_infix(p);
+      break;
 
     case TOKEN_LBRACE:
-      return parser__parse_block(p);
+      result = parser__parse_block(p);
+      break;
 
     case TOKEN_STRING_BEGIN:
-      return parser__parse_interp_string(p);
+      result = parser__parse_interp_string(p);
+      break;
 
     case TOKEN_INT:
     case TOKEN_FLOAT:
@@ -646,7 +714,6 @@ static AstNode* parser__parse_expr(Parser* p) {
     case TOKEN_VAR:
     /* New operator tokens */
     case TOKEN_PIPE:
-    case TOKEN_ARROW:
     case TOKEN_BACKSLASH:
     case TOKEN_BANG:
     case TOKEN_DOTDOT:
@@ -673,11 +740,18 @@ static AstNode* parser__parse_expr(Parser* p) {
     case TOKEN_BREAK:
     case TOKEN_CONTINUE:
     case TOKEN_TRY:
-      return parser__parse_atom(p);
+      result = parser__parse_atom(p);
+      break;
 
     default:
       return NULL;
   }
+
+  /* Postfix arrow field access: expr->field */
+  if (result != NULL && result->type != AST_ERROR) {
+    result = parser__maybe_arrow_access(p, result);
+  }
+  return result;
 }
 
 /* -------------------------------------------------------------------------

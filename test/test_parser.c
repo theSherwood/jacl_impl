@@ -3078,6 +3078,132 @@ static int test_binding_not_in_brackets(void) {
   TEST_PASS();
 }
 
+/* ---- Syntax Redesign US-009: Arrow field access (->) ---- */
+
+/* $point->x parses as [. $point x] */
+static int test_arrow_basic(void) {
+  setup();
+  ParseResult r = parse("[. $point x]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  /* Parse same thing with arrow syntax in a block context */
+  ParseResult r2 = parse("$point->x");
+  ASSERT_U32_EQ(r2.error_count, 0);
+  ASSERT_U32_EQ(r2.count, 1);
+  AstNode* n = r2.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, ".", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[0]->data.var_ref.name, "point", 5) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* $a->b->c parses as [. [. $a b] c] — chained access */
+static int test_arrow_chained(void) {
+  setup();
+  ParseResult r = parse("$a->b->c");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* outer = r.nodes[0];
+  ASSERT(outer->type == AST_COMMAND);
+  ASSERT(memcmp(outer->data.command.head->data.lit_string.value, ".", 1) == 0);
+  ASSERT_U32_EQ(outer->data.command.arg_count, 2);
+  /* outer field is "c" */
+  ASSERT(memcmp(outer->data.command.args[1]->data.lit_string.value, "c", 1) == 0);
+  /* inner is [. $a b] */
+  AstNode* inner = outer->data.command.args[0];
+  ASSERT(inner->type == AST_COMMAND);
+  ASSERT(memcmp(inner->data.command.head->data.lit_string.value, ".", 1) == 0);
+  ASSERT_U32_EQ(inner->data.command.arg_count, 2);
+  ASSERT(inner->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(inner->data.command.args[1]->data.lit_string.value, "b", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* [get-point]->x — field access on command result */
+static int test_arrow_on_command(void) {
+  setup();
+  ParseResult r = parse("[foo $a]->x");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, ".", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* first arg is the [foo $a] command */
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.args[0]->data.command.head->data.lit_string.value, "foo", 3) == 0);
+  /* second arg is field name "x" */
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ($point->x + 1) — arrow inside infix mode */
+static int test_arrow_in_infix(void) {
+  setup();
+  ParseResult r = parse("($point->x + 1)");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  /* Should be [+ [. $point x] 1] */
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* first arg is [. $point x] */
+  AstNode* dot = n->data.command.args[0];
+  ASSERT(dot->type == AST_COMMAND);
+  ASSERT(memcmp(dot->data.command.head->data.lit_string.value, ".", 1) == 0);
+  ASSERT(dot->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(dot->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* [foo $point->x] — arrow inside bracket command args */
+static int test_arrow_in_bracket_cmd(void) {
+  setup();
+  ParseResult r = parse("[foo $point->x]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "foo", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  /* the arg is [. $point x] */
+  AstNode* dot = n->data.command.args[0];
+  ASSERT(dot->type == AST_COMMAND);
+  ASSERT(memcmp(dot->data.command.head->data.lit_string.value, ".", 1) == 0);
+  ASSERT(dot->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(dot->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Old [. $struct field] syntax still works */
+static int test_arrow_old_dot_compat(void) {
+  setup();
+  ParseResult r = parse("[. $p x]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, ".", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -3272,6 +3398,13 @@ int main(void) {
     {"bind_def_cmd_works",      test_binding_def_cmd_still_works},
     {"bind_expr_value",         test_binding_expr_value},
     {"bind_not_in_brackets",    test_binding_not_in_brackets},
+    /* Syntax Redesign US-009: Arrow field access (->) */
+    {"arrow_basic",             test_arrow_basic},
+    {"arrow_chained",           test_arrow_chained},
+    {"arrow_on_command",        test_arrow_on_command},
+    {"arrow_in_infix",          test_arrow_in_infix},
+    {"arrow_in_bracket_cmd",    test_arrow_in_bracket_cmd},
+    {"arrow_old_dot_compat",    test_arrow_old_dot_compat},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

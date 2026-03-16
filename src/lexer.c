@@ -268,6 +268,14 @@ static int lexer__is_word_char(char c) {
          || c == '?' || c == '!';
 }
 
+/* Check if current position is a word char, but stop before -> (arrow) */
+static int lexer__is_word_char_no_arrow(Lexer* lex) {
+  char c = lex->source[lex->pos];
+  if (!lexer__is_word_char(c)) return 0;
+  if (c == '-' && lex->source[lex->pos + 1] == '>') return 0;
+  return 1;
+}
+
 static int lexer__is_operator_char(char c) {
   return c == '!' || c == '%' || c == '&' || c == '*' || c == '+' ||
          c == '-' || c == '.' || c == '/' || c == ':' || c == '<' ||
@@ -651,7 +659,7 @@ static void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
           uint32_t var_line  = lex->line;
           uint32_t var_col   = lex->col;
           lexer__advance(lex); /* consume '$' */
-          while (lexer__is_word_char(lexer__peek(lex)))
+          while (lexer__is_word_char_no_arrow(lex))
             lexer__advance(lex);
           {
             Token var_tok = lexer__make_token(lex, TOKEN_INTERP_VAR,
@@ -830,7 +838,7 @@ static void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
       uint32_t s  = lex->pos;
       uint32_t sl = lex->line;
       uint32_t sc = lex->col;
-      while (lexer__is_word_char(lexer__peek(lex)))
+      while (lexer__is_word_char_no_arrow(lex))
         lexer__advance(lex);
       Token tok = lexer__make_token(lex, TOKEN_WORD, s, sl, sc);
       tok.payload.text = lex->source + s;
@@ -867,7 +875,7 @@ static void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
         continue;
       }
       if (lexer__is_word_start(next)) {
-        while (lexer__is_word_char(lexer__peek(lex)))
+        while (lexer__is_word_char_no_arrow(lex))
           lexer__advance(lex);
         Token tok = lexer__make_token(lex, TOKEN_VAR, s, sl, sc);
         tok.payload.text = lex->source + s + 1;
@@ -998,7 +1006,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       uint32_t start = lex.pos;
       uint32_t sline = lex.line;
       uint32_t scol  = lex.col;
-      while (lexer__is_word_char(lexer__peek(&lex))) {
+      while (lexer__is_word_char_no_arrow(&lex)) {
         lexer__advance(&lex);
       }
       uint32_t wlen = lex.pos - start;
@@ -1200,7 +1208,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
 
       /* $identifier → VAR */
       if (lexer__is_word_start(next)) {
-        while (lexer__is_word_char(lexer__peek(&lex))) {
+        while (lexer__is_word_char_no_arrow(&lex)) {
           lexer__advance(&lex);
         }
         Token tok = lexer__make_token(&lex, TOKEN_VAR, start, sline, scol);
