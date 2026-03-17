@@ -429,6 +429,24 @@ static bool jacl_nfd_normalize(const char* data, size_t len,
   return true;
 }
 
+/* --- Grapheme indexing helper --- */
+
+/* jacl_grapheme_nth: find the byte range [out_start, out_end) of the nth
+ * grapheme cluster (0-indexed) in a UTF-8 buffer.
+ * Returns true if the nth grapheme exists, false if n >= grapheme count. */
+static bool jacl_grapheme_nth(const uint8_t* data, size_t len, size_t n,
+                               size_t* out_start, size_t* out_end) {
+  size_t pos = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (pos >= len) return false;
+    pos = unicode_grapheme_next(data, len, pos);
+  }
+  if (pos >= len) return false;
+  *out_start = pos;
+  *out_end = unicode_grapheme_next(data, len, pos);
+  return true;
+}
+
 /* --- Unified string constructor with validation, normalization, and tier routing --- */
 
 /* jacl_string_new: validate UTF-8, normalize to NFD, route to correct tier.

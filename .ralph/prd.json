@@ -102,7 +102,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "unicode_nfd() is in lib/unicode/unicode.h:216 — it takes (src, src_len, dst, dst_cap, &out_len) and writes NFD UTF-8 to dst. unicode_is_nfd() is at unicode.h:341 — quick check using NFD_QC property. unicode_nfd_length() at unicode.h:333 computes output size without writing. Workflow: (1) validate UTF-8, (2) check unicode_is_nfd — if true, skip normalization, (3) call unicode_nfd_length to get output size, (4) allocate buffer (stack for small, arena for large), (5) call unicode_nfd. For now, implement this as helper functions that jacl_string_new() will call in the next story. Use a stack buffer for NFD output ≤256 bytes, arena_alloc for larger."
     },
     {
@@ -124,7 +124,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "This is the central integration point. It calls the validation/normalization from US-005 and routes to inline (value.c), intern (string.c), or rope (rope.h + US-004 JaclRopeString). For the NFD buffer: use a stack buffer of 512 bytes for small strings, fall back to arena_alloc for larger. After normalization, the NFD bytes are what get stored/interned — the original bytes are discarded. The compiler currently calls jacl_inline_string() for ≤7 bytes and jacl_intern() for >7 bytes — update both paths to call jacl_string_new() instead. In vm.c, the OP_CONCAT handler builds a concat buffer then calls jacl_intern — update to call jacl_string_new. Make sure the intern table deduplication still works (jacl_intern is called internally by jacl_string_new for 8-128 byte strings)."
     },
     {
@@ -146,7 +146,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "jacl_string_len() in string.c currently returns byte length — change it to return grapheme count. For inline strings, extract bytes into a stack buffer and call unicode_grapheme_count(). For heap strings, return ->grapheme_len. For rope strings, access the rope summary: rope_summary(jacl_as_rope_string(v)->r) and return .graphemes. The byte-length builtin follows the same pattern as the existing length builtin registration in vm.c — look for how 'length' is registered and add 'byte-length' similarly. Note: existing tests that check [length \"hello world\"] == 11 will now get the grapheme count instead — for ASCII they're the same, but verify. The rope summary is accessed via rope_summary() which returns the root summary."
     },
     {
@@ -165,7 +165,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "The current index builtin in vm.c does byte-based indexing. Change it to grapheme-based. For inline/flat strings: iterate through the bytes counting grapheme clusters using the grapheme break algorithm from unicode.h. When you reach the i-th cluster, extract its bytes (from cluster start to next cluster start). For rope strings: use rope_cursor_advance_graphemes(cursor, i) to seek to the right position, then extract the bytes of the current grapheme cluster. The grapheme iteration uses unicode_grapheme_break() to detect cluster boundaries — a new cluster starts when the break algorithm says 'break here'. Helper function suggestion: jacl_grapheme_nth(const uint8_t* data, size_t len, size_t n, size_t* out_start, size_t* out_end) — finds byte range of nth grapheme."
     },
     {

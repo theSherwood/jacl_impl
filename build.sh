@@ -92,6 +92,7 @@ TESTS=(
     "test/test_utf8_nfd.c|utf8_nfd|"
     "test/test_string_new.c|string_new|"
     "test/test_length_builtin.c|length_builtin|"
+    "test/test_index_builtin.c|index_builtin|"
 )
 
 # Filter tests if --lib flag is set

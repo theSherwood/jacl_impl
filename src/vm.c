@@ -1450,19 +1450,34 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         int32_t idx = jacl_as_i32(idx_val);
-        uint32_t slen = jacl_string_byte_len(str_val);
-        if (idx < 0 || (uint32_t)idx >= slen) {
+        uint32_t glen = jacl_string_len(str_val);
+        if (idx < 0 || (uint32_t)idx >= glen) {
           result = vm__push(vm, JACL_NIL);
         } else {
-          char ch;
-          if (jacl_is_heap_string(str_val)) {
-            ch = jacl_as_heap_string(str_val)->data[idx];
+          if (jacl_is_rope_string(str_val)) {
+            /* Rope: use rope_grapheme_to_byte for O(log n) seek */
+            JaclRopeString* rs = jacl_as_rope_string(str_val);
+            rope_offset_result start_res = rope_grapheme_to_byte(rs->r, (size_t)idx);
+            rope_offset_result end_res = rope_grapheme_to_byte(rs->r, (size_t)idx + 1);
+            size_t byte_start = start_res.found ? start_res.value : 0;
+            size_t byte_end = end_res.found ? end_res.value : rope_byte_count(rs->r);
+            size_t cluster_len = byte_end - byte_start;
+            uint8_t cluster_buf[32];
+            rope_slice_to_str(rs->r, byte_start, cluster_len, cluster_buf, sizeof(cluster_buf));
+            result = vm__push(vm, jacl_string_new(&vm->heap, vm->intern_table,
+                                                   (const char*)cluster_buf, cluster_len));
           } else {
-            char buf[8];
-            jacl_string_data(str_val, buf, sizeof(buf));
-            ch = buf[idx];
+            /* Inline or flat: extract bytes and scan graphemes */
+            uint8_t buf[256];
+            uint32_t byte_len = jacl_string_data(str_val, (char*)buf, sizeof(buf));
+            size_t gs, ge;
+            if (jacl_grapheme_nth(buf, byte_len, (size_t)idx, &gs, &ge)) {
+              result = vm__push(vm, jacl_string_new(&vm->heap, vm->intern_table,
+                                                     (const char*)(buf + gs), ge - gs));
+            } else {
+              result = vm__push(vm, JACL_NIL);
+            }
           }
-          result = vm__push(vm, jacl_inline_string(&ch, 1));
         }
         if (result != VM_OK) return result;
         break;
