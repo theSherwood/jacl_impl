@@ -266,6 +266,45 @@ typedef pthread_mutex_t platform_mutex_t;
 
 /*
  * ---------------------------------------------------------------------------
+ * Read-Write Lock
+ * ---------------------------------------------------------------------------
+ */
+
+#ifdef __EMSCRIPTEN__
+
+/* Emscripten: single-threaded — rwlocks are no-ops */
+typedef int platform_rwlock_t;
+#define RWLOCK_INIT(rw)     ((void)(rw))
+#define RWLOCK_DESTROY(rw)  ((void)(rw))
+#define RWLOCK_RDLOCK(rw)   ((void)(rw))
+#define RWLOCK_RDUNLOCK(rw) ((void)(rw))
+#define RWLOCK_WRLOCK(rw)   ((void)(rw))
+#define RWLOCK_WRUNLOCK(rw) ((void)(rw))
+
+#elif defined(_WIN32)
+
+typedef SRWLOCK platform_rwlock_t;
+#define RWLOCK_INIT(rw)     InitializeSRWLock(&(rw))
+#define RWLOCK_DESTROY(rw)  ((void)(rw))
+#define RWLOCK_RDLOCK(rw)   AcquireSRWLockShared(&(rw))
+#define RWLOCK_RDUNLOCK(rw) ReleaseSRWLockShared(&(rw))
+#define RWLOCK_WRLOCK(rw)   AcquireSRWLockExclusive(&(rw))
+#define RWLOCK_WRUNLOCK(rw) ReleaseSRWLockExclusive(&(rw))
+
+#else
+
+typedef pthread_rwlock_t platform_rwlock_t;
+#define RWLOCK_INIT(rw)     pthread_rwlock_init(&(rw), NULL)
+#define RWLOCK_DESTROY(rw)  pthread_rwlock_destroy(&(rw))
+#define RWLOCK_RDLOCK(rw)   pthread_rwlock_rdlock(&(rw))
+#define RWLOCK_RDUNLOCK(rw) pthread_rwlock_unlock(&(rw))
+#define RWLOCK_WRLOCK(rw)   pthread_rwlock_wrlock(&(rw))
+#define RWLOCK_WRUNLOCK(rw) pthread_rwlock_unlock(&(rw))
+
+#endif
+
+/*
+ * ---------------------------------------------------------------------------
  * Popcount
  * ---------------------------------------------------------------------------
  */
