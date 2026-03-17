@@ -1501,11 +1501,12 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
                        vm__type_name(start_val));
           return VM_RUNTIME_ERROR;
         }
-        uint32_t slen = jacl_string_byte_len(str_val);
+        /* Use grapheme count for bounds, not byte length */
+        uint32_t glen = jacl_string_len(str_val);
         int32_t start = jacl_as_i32(start_val);
         int32_t end;
         if (jacl_is_nil(end_val)) {
-          end = (int32_t)slen;  /* 2-arg form: slice to end */
+          end = (int32_t)glen;  /* 2-arg form: slice to end */
         } else if (jacl_is_i32(end_val)) {
           end = jacl_as_i32(end_val);
         } else {
@@ -1513,40 +1514,67 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
                        vm__type_name(end_val));
           return VM_RUNTIME_ERROR;
         }
-        /* Clamp bounds */
+        /* Clamp grapheme bounds */
         if (start < 0) start = 0;
         if (end < 0) end = 0;
-        if ((uint32_t)start > slen) start = (int32_t)slen;
-        if ((uint32_t)end > slen) end = (int32_t)slen;
+        if ((uint32_t)start > glen) start = (int32_t)glen;
+        if ((uint32_t)end > glen) end = (int32_t)glen;
         if (end < start) end = start;
-        uint32_t slice_len = (uint32_t)(end - start);
+        uint32_t grapheme_count = (uint32_t)(end - start);
 
         JaclVal res;
-        if (slice_len == 0) {
+        if (grapheme_count == 0) {
           res = jacl_inline_string("", 0);
-        } else if (slice_len <= 7) {
-          char buf[8];
-          /* Get pointer to source data */
-          if (jacl_is_heap_string(str_val)) {
-            memcpy(buf, jacl_as_heap_string(str_val)->data + start, slice_len);
+        } else if (jacl_is_rope_string(str_val)) {
+          /* Rope: use rope_slice_by_graphemes for O(log n) slicing */
+          JaclRopeString* rs = jacl_as_rope_string(str_val);
+          rope sliced = rope_slice_by_graphemes(rs->r, (size_t)start, grapheme_count);
+          size_t sliced_bytes = rope_byte_count(sliced);
+          if (sliced_bytes == 0) {
+            rope_unref(sliced);
+            res = jacl_inline_string("", 0);
+          } else if (sliced_bytes <= 128) {
+            /* Materialize small rope slices to flat/inline tier */
+            uint8_t tmp[128];
+            rope_to_str(sliced, tmp, sliced_bytes);
+            rope_unref(sliced);
+            res = jacl_string_new(&vm->heap, vm->intern_table,
+                                  (const char*)tmp, sliced_bytes);
           } else {
-            char src[8];
-            jacl_string_data(str_val, src, sizeof(src));
-            memcpy(buf, src + start, slice_len);
+            /* Wrap large rope slice in JaclRopeString */
+            uint32_t hash = 2166136261u;
+            uint8_t hash_buf[256];
+            size_t remaining = sliced_bytes;
+            size_t offset = 0;
+            while (remaining > 0) {
+              size_t chunk = remaining < sizeof(hash_buf) ? remaining : sizeof(hash_buf);
+              rope_slice_to_str(sliced, offset, chunk, hash_buf, chunk);
+              for (size_t i = 0; i < chunk; i++) {
+                hash ^= hash_buf[i];
+                hash *= 16777619u;
+              }
+              offset += chunk;
+              remaining -= chunk;
+            }
+            JaclRopeString* new_rs = (JaclRopeString*)gc_alloc(&vm->heap,
+                sizeof(JaclRopeString), OBJ_ROPE_STRING);
+            new_rs->hash = hash;
+            new_rs->r = sliced;
+            res = jacl_rope_string_ptr(new_rs);
           }
-          res = jacl_inline_string(buf, slice_len);
         } else {
-          /* Heap-interned slice */
-          const char* src_data;
-          char src_buf[8];
-          if (jacl_is_heap_string(str_val)) {
-            src_data = jacl_as_heap_string(str_val)->data;
+          /* Inline or flat: extract bytes, convert grapheme range to byte range */
+          uint8_t buf[256];
+          uint32_t byte_len = jacl_string_data(str_val, (char*)buf, sizeof(buf));
+          size_t byte_start = unicode_grapheme_byte_offset(buf, byte_len, (size_t)start);
+          size_t byte_end = unicode_grapheme_byte_offset(buf, byte_len, (size_t)end);
+          size_t slice_bytes = byte_end - byte_start;
+          if (slice_bytes == 0) {
+            res = jacl_inline_string("", 0);
           } else {
-            jacl_string_data(str_val, src_buf, sizeof(src_buf));
-            src_data = src_buf;
+            res = jacl_string_new(&vm->heap, vm->intern_table,
+                                  (const char*)(buf + byte_start), slice_bytes);
           }
-          res = jacl_intern(&vm->heap, vm->intern_table,
-                            src_data + start, slice_len);
         }
         result = vm__push(vm, res); if (result != VM_OK) return result;
         break;

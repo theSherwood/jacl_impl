@@ -93,6 +93,7 @@ TESTS=(
     "test/test_string_new.c|string_new|"
     "test/test_length_builtin.c|length_builtin|"
     "test/test_index_builtin.c|index_builtin|"
+    "test/test_slice_builtin.c|slice_builtin|"
 )
 
 # Filter tests if --lib flag is set
