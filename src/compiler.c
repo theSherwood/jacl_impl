@@ -5290,13 +5290,8 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
 
     case AST_LIT_STRING: {
       uint32_t len = node->data.lit_string.length;
-      JaclVal val;
-      if (len > 7) {
-        val = jacl_intern(c->heap, c->intern_table,
-                          node->data.lit_string.value, len);
-      } else {
-        val = jacl_inline_string(node->data.lit_string.value, len);
-      }
+      JaclVal val = jacl_string_new(c->heap, c->intern_table,
+                                     node->data.lit_string.value, (size_t)len);
       compiler__emit_constant(c, val, line);
       c->last_expr_type = TYPE_STR;
       break;

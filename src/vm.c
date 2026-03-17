@@ -1354,12 +1354,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint32_t total = len_a + len_b;
 
         JaclVal res;
-        if (total <= 7) {
-          char buf[8];
-          jacl_string_data(a, buf, len_a);
-          jacl_string_data(b, buf + len_a, len_b);
-          res = jacl_inline_string(buf, total);
-        } else {
+        if (total <= 128) {
+          /* Small concat: extract bytes and route through jacl_string_new */
           char stack_buf[256];
           char* concat_buf = stack_buf;
           if (total > sizeof(stack_buf)) {
@@ -1367,7 +1363,42 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
           jacl_string_data(a, concat_buf, len_a);
           jacl_string_data(b, concat_buf + len_a, len_b);
-          res = jacl_intern(&vm->heap, vm->intern_table, concat_buf, total);
+          /* Both inputs are already NFD, so concat is NFD — unicode_is_nfd
+           * fast path will skip normalization inside jacl_string_new */
+          res = jacl_string_new(&vm->heap, vm->intern_table, concat_buf, total);
+        } else {
+          /* Large concat: use rope_concat for O(log n) structural sharing */
+          rope ra, rb;
+          bool free_ra = false, free_rb = false;
+          if (jacl_is_rope_string(a)) {
+            ra = jacl_as_rope_string(a)->r;
+            rope_ref(ra);
+          } else {
+            char bufa[128];
+            jacl_string_data(a, bufa, len_a);
+            ra = rope_from_str((const uint8_t*)bufa, len_a);
+            free_ra = true;
+          }
+          if (jacl_is_rope_string(b)) {
+            rb = jacl_as_rope_string(b)->r;
+            rope_ref(rb);
+          } else {
+            char bufb[128];
+            jacl_string_data(b, bufb, len_b);
+            rb = rope_from_str((const uint8_t*)bufb, len_b);
+            free_rb = true;
+          }
+          rope rc = rope_concat(ra, rb);
+          uint32_t hash = rope_string__compute_hash(rc);
+          JaclRopeString* rs = (JaclRopeString*)gc_alloc(
+              &vm->heap, OBJ_ROPE_STRING, sizeof(JaclRopeString));
+          rs->hash = hash;
+          rs->r    = rc;
+          res = jacl_rope_string_ptr(rs);
+          /* Release our refs to operand ropes */
+          rope_unref(ra);
+          rope_unref(rb);
+          (void)free_ra; (void)free_rb;
         }
 
         result = vm__push(vm, res); if (result != VM_OK) return result;
@@ -1511,12 +1542,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena);
           vm__fmt_value(&fmt, val);
-          JaclVal str;
-          if (fmt.len <= 7) {
-            str = jacl_inline_string(fmt.data, fmt.len);
-          } else {
-            str = jacl_intern(&vm->heap, vm->intern_table, fmt.data, fmt.len);
-          }
+          JaclVal str = jacl_string_new(&vm->heap, vm->intern_table,
+                                         fmt.data, fmt.len);
           result = vm__push(vm, str);
           if (result != VM_OK) return result;
         } else {
@@ -1559,14 +1586,9 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             n = 9;
           }
 
-          JaclVal str;
           if (n < 0) n = 0;
-          uint32_t slen = (uint32_t)n;
-          if (slen <= 7) {
-            str = jacl_inline_string(buf, slen);
-          } else {
-            str = jacl_intern(&vm->heap, vm->intern_table, buf, slen);
-          }
+          JaclVal str = jacl_string_new(&vm->heap, vm->intern_table,
+                                         buf, (size_t)n);
           result = vm__push(vm, str);
           if (result != VM_OK) return result;
         }

@@ -429,4 +429,43 @@ static bool jacl_nfd_normalize(const char* data, size_t len,
   return true;
 }
 
+/* --- Unified string constructor with validation, normalization, and tier routing --- */
+
+/* jacl_string_new: validate UTF-8, normalize to NFD, route to correct tier.
+ * Returns JACL_NIL on invalid UTF-8.
+ * Tiers: 0-7 bytes → inline, 8-128 bytes → flat interned, 129+ bytes → rope. */
+static JaclVal jacl_string_new(ThreadHeap* heap, JaclInternTable* table,
+                                const char* data, size_t length) {
+  /* Step 1: UTF-8 validation */
+  if (length > 0 && !jacl_utf8_validate(data, length)) {
+    return JACL_NIL;
+  }
+
+  /* Step 2: NFD normalization */
+  uint8_t stack_buf[512];
+  uint8_t* nfd_data;
+  size_t nfd_len;
+  if (!jacl_nfd_normalize(data, length, stack_buf, sizeof(stack_buf),
+                           &nfd_data, &nfd_len)) {
+    return JACL_NIL;
+  }
+
+  /* Step 3: Tier routing based on post-NFD byte length */
+  JaclVal result;
+  if (nfd_len <= 7) {
+    result = jacl_inline_string((const char*)nfd_data, nfd_len);
+  } else if (nfd_len <= 128) {
+    result = jacl_intern(heap, table, (const char*)nfd_data, (uint32_t)nfd_len);
+  } else {
+    result = jacl_rope_string_create(heap, nfd_data, nfd_len);
+  }
+
+  /* Free NFD buffer if it was malloc'd (not input pointer, not stack buffer) */
+  if (nfd_data != (uint8_t*)data && nfd_data != stack_buf) {
+    free(nfd_data);
+  }
+
+  return result;
+}
+
 #endif /* STRING_C */
