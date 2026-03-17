@@ -15,9 +15,10 @@
 /* --- Heap string structure --- */
 
 typedef struct {
-  uint32_t length;  /* byte count (not null-terminated) */
-  uint32_t hash;    /* precomputed FNV-1a hash */
-  char     data[];  /* flexible array member */
+  uint32_t byte_len;     /* byte count (not null-terminated) */
+  uint32_t grapheme_len; /* grapheme cluster count */
+  uint32_t hash;         /* precomputed FNV-1a hash */
+  char     data[];       /* flexible array member */
 } JaclHeapString;
 
 /* --- FNV-1a hash (operates on data+length, no null-terminator dependency) --- */
@@ -65,7 +66,7 @@ static JaclHeapString** intern__find_slot(JaclHeapString** entries,
       return &entries[idx];
     }
     if (entry->hash == hash &&
-        entry->length == length &&
+        entry->byte_len == length &&
         memcmp(entry->data, data, length) == 0) {
       return &entries[idx];
     }
@@ -85,7 +86,7 @@ static void intern__resize(JaclInternTable* table) {
     JaclHeapString* entry = table->entries[i];
     if (entry != NULL) {
       JaclHeapString** slot = intern__find_slot(
-          new_entries, new_cap, entry->data, entry->length, entry->hash);
+          new_entries, new_cap, entry->data, entry->byte_len, entry->hash);
       *slot = entry;
     }
   }
@@ -120,8 +121,10 @@ static JaclVal jacl_intern(ThreadHeap* heap, JaclInternTable* table,
   /* Allocate new heap string on GC heap */
   JaclHeapString* str = (JaclHeapString*)gc_alloc(
       heap, OBJ_STRING, sizeof(JaclHeapString) + length);
-  str->length = length;
-  str->hash   = hash;
+  str->byte_len     = length;
+  str->grapheme_len = (uint32_t)unicode_grapheme_count(
+      (const uint8_t*)data, (size_t)length);
+  str->hash         = hash;
   memcpy(str->data, data, length);
 
   *slot = str;
@@ -144,11 +147,30 @@ static inline JaclHeapString* jacl_as_heap_string(JaclVal v) {
 
 /* --- Unified string API (works for both inline and heap strings) --- */
 
+/* Returns grapheme cluster count. For inline strings (≤7 bytes),
+ * computed on-the-fly. For heap strings, returns cached grapheme_len. */
 static inline uint32_t jacl_string_len(JaclVal v) {
+  if (jacl_is_inline_string(v)) {
+    uint8_t buf[8];
+    uint64_t payload = v & JACL_PAYLOAD_MASK;
+    size_t len = 0;
+    for (size_t i = 0; i < 7; i++) {
+      uint8_t c = (uint8_t)((payload >> (i * 8)) & 0xFF);
+      if (c == 0) break;
+      buf[i] = c;
+      len++;
+    }
+    return (uint32_t)unicode_grapheme_count(buf, len);
+  }
+  return jacl_as_heap_string(v)->grapheme_len;
+}
+
+/* Returns byte length for both inline and heap strings. */
+static inline uint32_t jacl_string_byte_len(JaclVal v) {
   if (jacl_is_inline_string(v)) {
     return (uint32_t)jacl_inline_string_len(v);
   }
-  return jacl_as_heap_string(v)->length;
+  return jacl_as_heap_string(v)->byte_len;
 }
 
 static uint32_t jacl_string_data(JaclVal v, char* buf, size_t buflen) {
@@ -162,9 +184,9 @@ static uint32_t jacl_string_data(JaclVal v, char* buf, size_t buflen) {
     return len;
   }
   JaclHeapString* hs = jacl_as_heap_string(v);
-  uint32_t copy = hs->length < (uint32_t)buflen ? hs->length : (uint32_t)buflen;
+  uint32_t copy = hs->byte_len < (uint32_t)buflen ? hs->byte_len : (uint32_t)buflen;
   memcpy(buf, hs->data, copy);
-  return hs->length;
+  return hs->byte_len;
 }
 
 static bool jacl_string_eq(JaclVal a, JaclVal b) {
@@ -184,10 +206,10 @@ static bool jacl_string_eq(JaclVal a, JaclVal b) {
     return (a & JACL_PAYLOAD_MASK) == (b & JACL_PAYLOAD_MASK);
   }
 
-  /* Cross-representation: length check + memcmp */
+  /* Cross-representation: byte length check + memcmp */
   if ((a_inline || a_heap) && (b_inline || b_heap)) {
-    uint32_t len_a = jacl_string_len(a);
-    uint32_t len_b = jacl_string_len(b);
+    uint32_t len_a = jacl_string_byte_len(a);
+    uint32_t len_b = jacl_string_byte_len(b);
     if (len_a != len_b) return false;
     /* Cross-rep means one is inline (<=7 bytes), so stack buffers suffice */
     char buf_a[8], buf_b[8];
@@ -201,8 +223,8 @@ static bool jacl_string_eq(JaclVal a, JaclVal b) {
 }
 
 static int jacl_string_cmp(JaclVal a, JaclVal b) {
-  uint32_t len_a = jacl_string_len(a);
-  uint32_t len_b = jacl_string_len(b);
+  uint32_t len_a = jacl_string_byte_len(a);
+  uint32_t len_b = jacl_string_byte_len(b);
 
   char buf_a[8], buf_b[8];
   const char* data_a;

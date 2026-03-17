@@ -468,11 +468,11 @@ static void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
     n = snprintf(tmp, sizeof(tmp), "%g", jacl_as_f64(val));
     vm__fmt_append(buf, tmp, (uint32_t)n);
   } else if (jacl_is_string(val)) {
-    uint32_t slen = jacl_string_len(val);
+    uint32_t slen = jacl_string_byte_len(val);
     vm__fmt_append(buf, "\"", 1);
     if (jacl_is_heap_string(val)) {
       JaclHeapString* hs = jacl_as_heap_string(val);
-      vm__fmt_append(buf, hs->data, hs->length);
+      vm__fmt_append(buf, hs->data, hs->byte_len);
     } else {
       char sbuf[8];
       jacl_string_data(val, sbuf, slen);
@@ -893,10 +893,10 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           JaclVal payload = jacl_clear_error(val);
           /* Print payload: strings without quotes, other types with fmt_value */
           if (jacl_is_string(payload)) {
-            uint32_t slen = jacl_string_len(payload);
+            uint32_t slen = jacl_string_byte_len(payload);
             if (jacl_is_heap_string(payload)) {
               JaclHeapString* hs = jacl_as_heap_string(payload);
-              vm__fmt_append(&fmt, hs->data, hs->length);
+              vm__fmt_append(&fmt, hs->data, hs->byte_len);
             } else {
               char sbuf[8];
               jacl_string_data(payload, sbuf, slen);
@@ -941,7 +941,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           text = buf;
           len = (uint32_t)n;
         } else if (jacl_is_string(val)) {
-          uint32_t slen = jacl_string_len(val);
+          uint32_t slen = jacl_string_byte_len(val);
           if (slen + 1 <= sizeof(buf)) {
             jacl_string_data(val, buf, slen);
             buf[slen] = '\n';
@@ -951,7 +951,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             /* String too long for stack buffer: print data then newline */
             if (jacl_is_heap_string(val)) {
               JaclHeapString* hs = jacl_as_heap_string(val);
-              vm->print_fn(hs->data, hs->length, vm->print_ctx);
+              vm->print_fn(hs->data, hs->byte_len, vm->print_ctx);
             } else {
               jacl_string_data(val, buf, sizeof(buf));
               vm->print_fn(buf, slen, vm->print_ctx);
@@ -1349,8 +1349,8 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
 
-        uint32_t len_a = jacl_string_len(a);
-        uint32_t len_b = jacl_string_len(b);
+        uint32_t len_a = jacl_string_byte_len(a);
+        uint32_t len_b = jacl_string_byte_len(b);
         uint32_t total = len_a + len_b;
 
         JaclVal res;
@@ -1405,7 +1405,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         int32_t idx = jacl_as_i32(idx_val);
-        uint32_t slen = jacl_string_len(str_val);
+        uint32_t slen = jacl_string_byte_len(str_val);
         if (idx < 0 || (uint32_t)idx >= slen) {
           result = vm__push(vm, JACL_NIL);
         } else {
@@ -1441,7 +1441,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
                        vm__type_name(start_val));
           return VM_RUNTIME_ERROR;
         }
-        uint32_t slen = jacl_string_len(str_val);
+        uint32_t slen = jacl_string_byte_len(str_val);
         int32_t start = jacl_as_i32(start_val);
         int32_t end;
         if (jacl_is_nil(end_val)) {

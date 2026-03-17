@@ -517,11 +517,11 @@ JACL_EMBED_FN const char* jacl_as_cstr_val(JaclVM* jvm, JaclVal val, size_t* len
 
   /* Heap string — data is in GC heap, return pointer directly */
   JaclHeapString* hs = jacl_as_heap_string(val);
-  if (len_out) *len_out = hs->length;
+  if (len_out) *len_out = hs->byte_len;
   /* Heap strings are not null-terminated; copy to arena with null terminator */
-  char* buf = (char*)arena_alloc(&jvm->arena, hs->length + 1);
-  memcpy(buf, hs->data, hs->length);
-  buf[hs->length] = '\0';
+  char* buf = (char*)arena_alloc(&jvm->arena, hs->byte_len + 1);
+  memcpy(buf, hs->data, hs->byte_len);
+  buf[hs->byte_len] = '\0';
   return buf;
 }
 

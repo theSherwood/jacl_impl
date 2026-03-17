@@ -18,6 +18,9 @@
 /* platform.h is header-only, no IMPLEMENTATION define needed */
 #include "../lib/platform/platform.h"
 
+/* --- Unicode library (needed by string.c for grapheme counting) --- */
+#include "../lib/unicode/unicode.h"
+
 /* --- JACL pipeline (order matters) --- */
 #include "value.c"
 #include "gc.c"

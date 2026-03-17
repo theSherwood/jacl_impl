@@ -19,7 +19,7 @@ static int test_intern_basic(void) {
   ASSERT(jacl_is_string(v));
 
   JaclHeapString* hs = jacl_as_heap_string(v);
-  ASSERT_U32_EQ(hs->length, 11);
+  ASSERT_U32_EQ(hs->byte_len, 11);
   ASSERT(memcmp(hs->data, "hello world", 11) == 0);
 
   gc_heap_destroy(&heap);
@@ -74,8 +74,8 @@ static int test_intern_different(void) {
   JaclHeapString* hs1 = jacl_as_heap_string(v1);
   JaclHeapString* hs2 = jacl_as_heap_string(v2);
   ASSERT(hs1 != hs2);
-  ASSERT_U32_EQ(hs1->length, 11);
-  ASSERT_U32_EQ(hs2->length, 13);
+  ASSERT_U32_EQ(hs1->byte_len, 11);
+  ASSERT_U32_EQ(hs2->byte_len, 13);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
@@ -104,7 +104,7 @@ static int test_intern_embedded_nul(void) {
   ASSERT_U64_EQ(v1, v2);
 
   JaclHeapString* hs = jacl_as_heap_string(v1);
-  ASSERT_U32_EQ(hs->length, 12);
+  ASSERT_U32_EQ(hs->byte_len, 12);
   ASSERT(memcmp(hs->data, data_with_nul, 12) == 0);
 
   /* Different string without NUL should be different */
@@ -465,7 +465,7 @@ static int test_compile_long_string_interns(void) {
   ASSERT(jacl_is_heap_string(val));
 
   JaclHeapString* hs = jacl_as_heap_string(val);
-  ASSERT_U32_EQ(hs->length, 11);
+  ASSERT_U32_EQ(hs->byte_len, 11);
   ASSERT(memcmp(hs->data, "hello world", 11) == 0);
 
   gc_heap_destroy(&heap);
@@ -1808,7 +1808,7 @@ static int test_to_string_heap_result(void) {
   JaclVal top = vm.stack[vm.stack_top - 1];
   ASSERT(jacl_is_heap_string(top));
   JaclHeapString* hs = jacl_as_heap_string(top);
-  ASSERT(memcmp(hs->data, "<proc my_long_proc>", hs->length) == 0);
+  ASSERT(memcmp(hs->data, "<proc my_long_proc>", hs->byte_len) == 0);
 
   vm_destroy(&vm);
   arena_destroy(&arena);
@@ -2002,6 +2002,110 @@ static int test_interp_heap_result(void) {
   TEST_PASS();
 }
 
+/* ===== US-003 (heap-string): grapheme_len field tests ===== */
+
+/* Test: intern a string with combining marks, verify grapheme_len < byte_len */
+static int test_heap_string_grapheme_len_combining(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  /* "e\xCC\x81" = U+0065 U+0301 (e + combining acute accent) — 3 bytes, 1 grapheme */
+  const char combining[] = "e\xCC\x81 hello!";  /* 10 bytes, 8 graphemes */
+  JaclVal v = jacl_intern(&heap, &table, combining, 10);
+
+  ASSERT(jacl_is_heap_string(v));
+  JaclHeapString* hs = jacl_as_heap_string(v);
+  ASSERT_U32_EQ(hs->byte_len, 10);
+  ASSERT_U32_EQ(hs->grapheme_len, 8);  /* e\xCC\x81 = 1 grapheme, then " hello!" = 7 */
+  ASSERT(hs->grapheme_len < hs->byte_len);
+
+  /* jacl_string_len returns grapheme count */
+  ASSERT_U32_EQ(jacl_string_len(v), 8);
+  /* jacl_string_byte_len returns byte count */
+  ASSERT_U32_EQ(jacl_string_byte_len(v), 10);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: intern an ASCII string, grapheme_len == byte_len */
+static int test_heap_string_grapheme_len_ascii(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  JaclVal v = jacl_intern(&heap, &table, "hello world", 11);
+  JaclHeapString* hs = jacl_as_heap_string(v);
+  ASSERT_U32_EQ(hs->byte_len, 11);
+  ASSERT_U32_EQ(hs->grapheme_len, 11);
+  ASSERT_U32_EQ(jacl_string_len(v), 11);
+  ASSERT_U32_EQ(jacl_string_byte_len(v), 11);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: jacl_string_byte_len works for inline strings */
+static int test_string_byte_len_inline(void) {
+  tracker_reset();
+  JaclVal v = jacl_inline_string("hello", 5);
+  ASSERT_U32_EQ(jacl_string_byte_len(v), 5);
+
+  JaclVal empty = jacl_inline_string("", 0);
+  ASSERT_U32_EQ(jacl_string_byte_len(empty), 0);
+
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: jacl_string_byte_len works for heap strings */
+static int test_string_byte_len_heap(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  JaclInternTable table;
+  intern_table_init(&table, &arena);
+
+  JaclVal v = jacl_intern(&heap, &table, "hello world!", 12);
+  ASSERT_U32_EQ(jacl_string_byte_len(v), 12);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: jacl_string_len returns grapheme count for inline strings with combining marks */
+static int test_string_len_grapheme_inline(void) {
+  tracker_reset();
+  /* "e\xCC\x81" = 3 bytes but 1 grapheme cluster (e + combining acute) */
+  JaclVal v = jacl_inline_string("e\xCC\x81", 3);
+  ASSERT_U32_EQ(jacl_string_len(v), 1);     /* 1 grapheme */
+  ASSERT_U32_EQ(jacl_string_byte_len(v), 3); /* 3 bytes */
+
+  /* Pure ASCII: grapheme count == byte count */
+  JaclVal ascii = jacl_inline_string("abc", 3);
+  ASSERT_U32_EQ(jacl_string_len(ascii), 3);
+
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -2084,6 +2188,12 @@ int main(void) {
     { "to_string_closure",                          test_to_string_closure },
     { "to_string_inline_result",                    test_to_string_inline_result },
     { "to_string_heap_result",                      test_to_string_heap_result },
+    /* US-003: JaclHeapString with grapheme_len */
+    { "heap_string_grapheme_len_combining",           test_heap_string_grapheme_len_combining },
+    { "heap_string_grapheme_len_ascii",               test_heap_string_grapheme_len_ascii },
+    { "string_byte_len_inline",                       test_string_byte_len_inline },
+    { "string_byte_len_heap",                         test_string_byte_len_heap },
+    { "string_len_grapheme_inline",                   test_string_len_grapheme_inline },
     /* US-009: String interpolation compilation */
     { "interp_variable",                             test_interp_variable },
     { "interp_int_variable",                         test_interp_int_variable },
