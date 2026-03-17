@@ -1,96 +1,20 @@
+/*
+ * utf8.h — Compatibility forwarder
+ *
+ * Core UTF-8 codec functions have moved to unicode/unicode.h.
+ * This header re-exports them and keeps the simplified grapheme helpers
+ * for backward compatibility until UAX #29 grapheme segmentation (US-004)
+ * replaces them.
+ */
+
 #ifndef UTF8_H
 #define UTF8_H
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+#include "../unicode/unicode.h"
 
-/* Returns 1-4 for valid lead bytes, 0 for continuation/invalid bytes */
-static inline size_t utf8_codepoint_length(uint8_t first_byte) {
-  if (first_byte < 0x80) return 1;
-  if ((first_byte & 0xE0) == 0xC0) return 2;
-  if ((first_byte & 0xF0) == 0xE0) return 3;
-  if ((first_byte & 0xF8) == 0xF0) return 4;
-  return 0;
-}
-
-/* Returns true if byte is a continuation byte (0x80-0xBF) */
-static inline bool utf8_is_continuation(uint8_t b) {
-  return (b & 0xC0) == 0x80;
-}
-
-/* Decodes one codepoint from src. Returns bytes consumed (0 on error or len==0).
-   On success, writes decoded codepoint to *out_cp. */
-static inline size_t utf8_decode(const uint8_t* src, size_t len, uint32_t* out_cp) {
-  if (len == 0) return 0;
-
-  uint8_t b0 = src[0];
-  size_t cplen = utf8_codepoint_length(b0);
-  if (cplen == 0 || cplen > len) return 0;
-
-  uint32_t cp;
-  switch (cplen) {
-    case 1:
-      cp = b0;
-      break;
-    case 2:
-      if (!utf8_is_continuation(src[1])) return 0;
-      cp = ((uint32_t)(b0 & 0x1F) << 6) | (src[1] & 0x3F);
-      /* Reject overlong: 2-byte must encode >= U+0080 */
-      if (cp < 0x80) return 0;
-      break;
-    case 3:
-      if (!utf8_is_continuation(src[1]) || !utf8_is_continuation(src[2])) return 0;
-      cp = ((uint32_t)(b0 & 0x0F) << 12) | ((uint32_t)(src[1] & 0x3F) << 6) | (src[2] & 0x3F);
-      /* Reject overlong: 3-byte must encode >= U+0800 */
-      if (cp < 0x800) return 0;
-      break;
-    case 4:
-      if (!utf8_is_continuation(src[1]) || !utf8_is_continuation(src[2]) || !utf8_is_continuation(src[3])) return 0;
-      cp = ((uint32_t)(b0 & 0x07) << 18) | ((uint32_t)(src[1] & 0x3F) << 12) |
-           ((uint32_t)(src[2] & 0x3F) << 6) | (src[3] & 0x3F);
-      /* Reject overlong: 4-byte must encode >= U+10000 and <= U+10FFFF */
-      if (cp < 0x10000 || cp > 0x10FFFF) return 0;
-      break;
-    default:
-      return 0;
-  }
-
-  if (out_cp) *out_cp = cp;
-  return cplen;
-}
-
-/* Returns true if the entire buffer is valid UTF-8 */
-static inline bool utf8_validate(const uint8_t* src, size_t len) {
-  size_t i = 0;
-  while (i < len) {
-    uint32_t cp;
-    size_t consumed = utf8_decode(src + i, len - i, &cp);
-    if (consumed == 0) return false;
-    /* Reject surrogates (U+D800..U+DFFF) */
-    if (cp >= 0xD800 && cp <= 0xDFFF) return false;
-    i += consumed;
-  }
-  return true;
-}
-
-/* Count codepoints in a valid UTF-8 buffer */
-static inline size_t utf8_codepoint_count(const uint8_t* src, size_t len) {
-  size_t count = 0;
-  for (size_t i = 0; i < len; i++) {
-    if (!utf8_is_continuation(src[i])) count++;
-  }
-  return count;
-}
-
-/* Count newline bytes (0x0A) in buffer */
-static inline size_t utf8_line_count(const uint8_t* src, size_t len) {
-  size_t count = 0;
-  for (size_t i = 0; i < len; i++) {
-    if (src[i] == 0x0A) count++;
-  }
-  return count;
-}
+/* --- Simplified grapheme helpers (compat) --------------------------------
+ * These will be replaced by proper UAX #29 segmentation in unicode.h.
+ * Kept here so that existing consumers (rope.h, test_utf8.c) keep working. */
 
 /* Returns true if codepoint is a combining mark (Extend property).
    Covers: U+0300-U+036F (Combining Diacritical Marks),
@@ -222,17 +146,6 @@ static inline size_t utf8_byte_offset_of_grapheme(const uint8_t* src, size_t len
     i += consumed;
   }
   return len; /* target exceeds total */
-}
-
-/* Given a byte position, adjust backward to a codepoint boundary.
-   Returns adjusted position. Returns pos if already on boundary, 0 if pos is 0. */
-static inline size_t utf8_find_safe_split(const uint8_t* src, size_t len, size_t pos) {
-  if (pos == 0 || pos >= len) return pos;
-  /* Walk backward while we're on a continuation byte */
-  while (pos > 0 && utf8_is_continuation(src[pos])) {
-    pos--;
-  }
-  return pos;
 }
 
 #endif /* UTF8_H */

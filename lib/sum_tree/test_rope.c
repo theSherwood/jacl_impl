@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../test/test_helpers.h"
+#include "../test/test_helpers.h"
 
 /* Override allocator before including rope.h */
 #define STREE_ALLOCATOR                 \

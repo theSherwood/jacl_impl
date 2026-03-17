@@ -35,7 +35,7 @@ static inline rope_summary rope_summary_summarize(const uint8_t* elems, size_t c
     .bytes     = count,
     .chars     = utf8_codepoint_count(elems, count),
     .lines     = utf8_line_count(elems, count),
-    .graphemes = utf8_grapheme_count(elems, count)
+    .graphemes = unicode_grapheme_count(elems, count)
   };
 }
 
@@ -246,7 +246,7 @@ static inline rope_offset_result rope_grapheme_to_byte(rope r, size_t grapheme_o
   /* Within leaf, use proper UTF-8 grapheme scanning */
   rope_st_leaf* leaf = (rope_st_leaf*)node;
   size_t target_in_leaf = grapheme_offset - acc_graphemes;
-  size_t byte_in_leaf = utf8_byte_offset_of_grapheme(leaf->elements, leaf->count, target_in_leaf);
+  size_t byte_in_leaf = unicode_grapheme_byte_offset(leaf->elements, leaf->count, target_in_leaf);
   return (rope_offset_result){acc_bytes + byte_in_leaf, true};
 }
 
@@ -282,7 +282,7 @@ static inline rope_offset_result rope_byte_to_grapheme(rope r, size_t byte_offse
   /* Within leaf, count graphemes up to the target byte offset */
   rope_st_leaf* leaf = (rope_st_leaf*)node;
   size_t remaining = byte_offset - acc_bytes;
-  acc_graphemes += utf8_grapheme_count(leaf->elements, remaining);
+  acc_graphemes += unicode_grapheme_count(leaf->elements, remaining);
   return (rope_offset_result){acc_graphemes, true};
 }
 
@@ -634,7 +634,7 @@ static inline size_t rope_cursor_line(rope_cursor* c) {
 static inline size_t rope_cursor_grapheme_offset(rope_cursor* c) {
   if (!c->valid) return 0;
   if (!c->leaf) return 0;
-  return c->prefix.graphemes + utf8_grapheme_count(c->leaf->elements, c->leaf_offset);
+  return c->prefix.graphemes + unicode_grapheme_count(c->leaf->elements, c->leaf_offset);
 }
 
 /* --- Summary subtraction (for backward navigation) --- */
@@ -854,12 +854,12 @@ static inline bool rope_cursor_advance_graphemes(rope_cursor* c, size_t n) {
   size_t remaining = n;
 
   while (remaining > 0) {
-    size_t graphemes_in_rest = utf8_grapheme_count(
+    size_t graphemes_in_rest = unicode_grapheme_count(
         c->leaf->elements + c->leaf_offset,
         c->leaf->count - c->leaf_offset);
 
     if (remaining < graphemes_in_rest) {
-      c->leaf_offset += utf8_byte_offset_of_grapheme(
+      c->leaf_offset += unicode_grapheme_byte_offset(
           c->leaf->elements + c->leaf_offset,
           c->leaf->count - c->leaf_offset,
           remaining);
@@ -881,7 +881,8 @@ static inline bool rope_cursor_advance_graphemes(rope_cursor* c, size_t n) {
           c->leaf->elements + c->leaf_offset,
           c->leaf->count - c->leaf_offset, &cp);
       if (consumed == 0) break;
-      if (utf8_is_extend(cp) || cp == 0x200D) {
+      UnicodeGraphemeBreak gbp = unicode_grapheme_break(cp);
+      if (gbp == GBP_EXTEND || gbp == GBP_ZWJ || gbp == GBP_SPACINGMARK) {
         c->leaf_offset += consumed;
       } else {
         break;

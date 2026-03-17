@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../test/test_helpers.h"
+#include "../test/test_helpers.h"
 
 /* ========================================================================
  * Instantiation 1: size-rope — char elements, size_t summary (length)
