@@ -96,6 +96,7 @@ TESTS=(
     "test/test_concat_tiers.c|concat_tiers|"
     "test/test_string_eq_cmp.c|string_eq_cmp|"
     "test/test_compiler_vm_integration.c|compiler_vm_integration|"
+    "test/test_heap_strings.c|heap_strings|"
 )
 
 # Filter tests if --lib flag is set
