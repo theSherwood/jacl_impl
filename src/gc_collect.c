@@ -303,14 +303,8 @@ static void gc_mark(ThreadHeap *heap, VM *vm) {
         gc__ms_push_val(&ms, vm->env.values[i]);
     }
 
-    /* 4. Intern table entries (Phase 1: immortal — never collected) */
-    if (vm->intern_table) {
-        for (uint32_t i = 0; i < vm->intern_table->cap; i++) {
-            if (vm->intern_table->entries[i]) {
-                gc__ms_push(&ms, vm->intern_table->entries[i]);
-            }
-        }
-    }
+    /* 4. Intern table entries — treated as weak roots (not scanned).
+     * Dead entries are evicted by gc_sweep_intern_table after mark phase. */
 
     /* 5. Call frame chunk constants (heap i64/u64/f64 literals) */
     for (uint32_t i = 0; i < vm->frame_count; i++) {
@@ -447,6 +441,42 @@ static size_t gc_sweep(ThreadHeap *heap) {
 }
 
 /* ======================================================================
+ * gc_sweep_intern_table: evict dead interned strings as tombstones.
+ *
+ * Called after mark phase but before sweep phase during full GC only.
+ * When load factor (including tombstones) > 0.75, dead entries are
+ * replaced with tombstone sentinels. Otherwise, dead entries are
+ * retroactively marked live to prevent dangling pointers after sweep.
+ * ====================================================================== */
+
+static void gc_sweep_intern_table(JaclInternTable *table,
+                                   uint8_t current_mark) {
+    RWLOCK_WRLOCK(table->lock);
+
+    bool should_evict =
+        (table->count + table->tombstone_count) * 4 > table->cap * 3;
+
+    for (uint32_t i = 0; i < table->cap; i++) {
+        JaclHeapString *entry = table->entries[i];
+        if (entry == NULL || entry == INTERN_TOMBSTONE) continue;
+
+        GCHeader *hdr = gc_header_of(entry);
+        if (hdr->mark != current_mark) {
+            if (should_evict) {
+                table->entries[i] = INTERN_TOMBSTONE;
+                table->count--;
+                table->tombstone_count++;
+            } else {
+                /* Under threshold — keep entry alive */
+                hdr->mark = current_mark;
+            }
+        }
+    }
+
+    RWLOCK_WRUNLOCK(table->lock);
+}
+
+/* ======================================================================
  * gc_collect: full single-threaded mark-sweep cycle
  * ====================================================================== */
 
@@ -477,6 +507,12 @@ static void gc__adjust_threshold(ThreadHeap *heap, size_t bytes_survived) {
 static void gc_collect(ThreadHeap *heap, VM *vm) {
     gc__struct_registry = vm ? vm->struct_registry : NULL;
     gc_mark(heap, vm);
+
+    /* Evict dead intern table entries before sweep zeroes their memory */
+    if (vm && vm->intern_table) {
+        gc_sweep_intern_table(vm->intern_table, heap->current_mark);
+    }
+
     size_t bytes_survived = gc_sweep(heap);
     gc__adjust_threshold(heap, bytes_survived);
     heap->current_mark  = 1 - heap->current_mark;

@@ -36,9 +36,14 @@ static uint32_t string__fnv1a(const char* data, uint32_t length) {
 
 #define INTERN_INIT_CAP 16
 
+/* Tombstone sentinel: (JaclHeapString*)1 is never a valid pointer due to
+ * 8-byte alignment of GC objects. Used to mark evicted intern table slots. */
+#define INTERN_TOMBSTONE ((JaclHeapString*)1)
+
 typedef struct {
-  JaclHeapString** entries;  /* array of pointers (NULL = empty slot) */
-  uint32_t         count;
+  JaclHeapString** entries;  /* array of pointers (NULL = empty, TOMBSTONE = evicted) */
+  uint32_t         count;           /* live entries */
+  uint32_t         tombstone_count; /* tombstone entries */
   uint32_t         cap;
   arena_t*         arena;
   platform_rwlock_t lock;    /* read-write lock for concurrent access */
@@ -46,9 +51,10 @@ typedef struct {
 
 /* Initialize an intern table */
 static void intern_table_init(JaclInternTable* table, arena_t* arena) {
-  table->arena   = arena;
-  table->count   = 0;
-  table->cap     = INTERN_INIT_CAP;
+  table->arena           = arena;
+  table->count           = 0;
+  table->tombstone_count = 0;
+  table->cap             = INTERN_INIT_CAP;
   table->entries = (JaclHeapString**)arena_alloc(arena,
       INTERN_INIT_CAP * sizeof(JaclHeapString*));
   memset(table->entries, 0, INTERN_INIT_CAP * sizeof(JaclHeapString*));
@@ -60,46 +66,62 @@ static void intern_table_destroy(JaclInternTable* table) {
   RWLOCK_DESTROY(table->lock);
 }
 
-/* Internal: find or insert slot */
+/* Internal: find or insert slot.
+ * Probes past tombstones (continue probing), stops at NULL (empty).
+ * Returns the matching entry if found, otherwise the first available
+ * slot for insertion (first tombstone seen, or the NULL slot). */
 static JaclHeapString** intern__find_slot(JaclHeapString** entries,
                                            uint32_t cap,
                                            const char* data,
                                            uint32_t length,
                                            uint32_t hash) {
   uint32_t idx = hash & (cap - 1);
+  JaclHeapString** first_tombstone = NULL;
   for (;;) {
     JaclHeapString* entry = entries[idx];
     if (entry == NULL) {
-      return &entries[idx];
+      return first_tombstone ? first_tombstone : &entries[idx];
     }
-    if (entry->hash == hash &&
-        entry->byte_len == length &&
-        memcmp(entry->data, data, length) == 0) {
+    if (entry == INTERN_TOMBSTONE) {
+      if (!first_tombstone) first_tombstone = &entries[idx];
+    } else if (entry->hash == hash &&
+               entry->byte_len == length &&
+               memcmp(entry->data, data, length) == 0) {
       return &entries[idx];
     }
     idx = (idx + 1) & (cap - 1);
   }
 }
 
-/* Internal: resize when load factor exceeds 0.75 */
-static void intern__resize(JaclInternTable* table) {
-  uint32_t new_cap = table->cap * 2;
+/* Internal: rehash into a new table of given capacity, skipping tombstones */
+static void intern__rehash(JaclInternTable* table, uint32_t new_cap) {
   JaclHeapString** new_entries = (JaclHeapString**)arena_alloc(
       table->arena, new_cap * sizeof(JaclHeapString*));
   memset(new_entries, 0, new_cap * sizeof(JaclHeapString*));
 
-  /* Rehash all existing entries */
+  /* Rehash all live entries (skip NULL and tombstones) */
   for (uint32_t i = 0; i < table->cap; i++) {
     JaclHeapString* entry = table->entries[i];
-    if (entry != NULL) {
+    if (entry != NULL && entry != INTERN_TOMBSTONE) {
       JaclHeapString** slot = intern__find_slot(
           new_entries, new_cap, entry->data, entry->byte_len, entry->hash);
       *slot = entry;
     }
   }
 
-  table->entries = new_entries;
-  table->cap     = new_cap;
+  table->entries         = new_entries;
+  table->cap             = new_cap;
+  table->tombstone_count = 0;
+}
+
+/* Internal: resize when load factor exceeds 0.75 */
+static void intern__resize(JaclInternTable* table) {
+  intern__rehash(table, table->cap * 2);
+}
+
+/* Internal: compact — rehash at same capacity to remove tombstones */
+static void intern__compact(JaclInternTable* table) {
+  intern__rehash(table, table->cap);
 }
 
 /* Intern a string: returns JaclVal with JACL_TAG_STRING tag.
@@ -132,8 +154,14 @@ static JaclVal jacl_intern(ThreadHeap* heap, JaclInternTable* table,
     return result;
   }
 
-  /* Resize if load factor > 0.75 */
-  if ((table->count + 1) * 4 > table->cap * 3) {
+  /* Compact if tombstone ratio > 25% of capacity */
+  if (table->tombstone_count * 4 > table->cap) {
+    intern__compact(table);
+    slot = intern__find_slot(table->entries, table->cap, data, length, hash);
+  }
+
+  /* Resize if load factor (count + tombstones) > 0.75 */
+  if ((table->count + table->tombstone_count + 1) * 4 > table->cap * 3) {
     intern__resize(table);
     /* Re-find slot after resize */
     slot = intern__find_slot(table->entries, table->cap, data, length, hash);
@@ -148,6 +176,10 @@ static JaclVal jacl_intern(ThreadHeap* heap, JaclInternTable* table,
   str->hash         = hash;
   memcpy(str->data, data, length);
 
+  /* Reuse tombstone slot if available */
+  if (*slot == INTERN_TOMBSTONE) {
+    table->tombstone_count--;
+  }
   *slot = str;
   table->count++;
 
