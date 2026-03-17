@@ -19,6 +19,10 @@ Started: Mon Mar 16 20:45:23 UTC 2026
 - HOF callback form uses OP_EACH (separate call frame), so `return` in callback exits only the callback proc
 - Lambda shorthand `\` is specified in SYNTAX_REDESIGN.md but NOT implemented — use named `proc` + `$callback` for HOF form tests
 - Proc/variable names must be ≤ 7 chars (inline string limit) — use short names in tests
+- C-style for `[for {init; cond; step} { body }]` detected by `args[0]->type == AST_BLOCK && args[1]->type == AST_BLOCK` — must be checked BEFORE collection-based form detection
+- C-style for uses `begin_scope`/`end_scope` for init variable scoping; `is_for_loop=true` so continue uses forward-jump patching and break uses OP_CLOSE_LOOP
+- After loop, init vars become out-of-scope locals → accessing them is a **runtime** error (not compile-time), because undefined vars fall through to global lookup
+- Mutable variable update command is `set!` not `set` — use `[set! varname expr]` syntax in tests
 
 ---
 
@@ -65,4 +69,18 @@ Started: Mon Mar 16 20:45:23 UTC 2026
   - The `\` lambda shorthand from SYNTAX_REDESIGN.md is not yet implemented — tests must use named proc + $callback HOF pattern
   - Proc and variable names have a 7-byte inline string limit — `sum-until` (9 chars) fails, use `sumto` instead
   - AST_RETURN follows the same pattern as AST_BREAK: optional value child, compile to emit value + control flow opcode
+---
+
+## 2026-03-17 - US-004
+Thread: (no thread URL — local agent)
+- Implemented C-style for loop `[for {init; cond; step} { body }]`
+- Files changed:
+  - src/compiler.c: Added C-style for detection at the top of the `for` handler — checks `args[0]->type == AST_BLOCK && args[1]->type == AST_BLOCK`. Uses begin_scope/end_scope for init variable scoping, is_for_loop=true for forward-jump continue patching, OP_CLOSE_LOOP for break cleanup
+  - test/test_compiler.c: 5 new e2e tests — basic counting (0..4), break, continue, nested loops, scope (init var not visible after loop)
+- **Learnings for future iterations:**
+  - C-style for detection must come BEFORE collection-based form detection since both can have `args[1]->type == AST_BLOCK`; distinguish by `args[0]->type == AST_BLOCK`
+  - Mutable variable update uses `set!` command (not `set`) — syntax `[set! varname expr]`
+  - Init variable scoping: after end_scope, accessing the var is a runtime error (not compile-time), because undeclared vars fall through to global lookup
+  - is_for_loop=true for C-style for ensures continue uses forward-jump patching (correct, since step is after body) and break uses OP_CLOSE_LOOP to clean up init locals under break value
+  - The `OP_NIL + skip_break + break_landing + convergence` pattern: both normal-exit and break paths converge at the same point; skip_break is a 0-byte forward jump in the no-break case
 ---

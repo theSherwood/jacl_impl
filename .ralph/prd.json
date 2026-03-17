@@ -88,7 +88,7 @@
         "All existing tests still pass (no regressions)"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "The parser needs to detect when for's first arg is a {} block — this distinguishes C-style from collection-based forms. The block contains three ;-separated sections. The compiler emits: init code, then loop (condition check → body → step → jump back). continue target is the step expression. break target is after the loop. Loop variable scoping: wrap in a begin/end scope so the init variable is not visible after the loop."
     },
     {
