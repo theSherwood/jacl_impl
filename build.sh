@@ -89,6 +89,7 @@ TESTS=(
     "test/test_e2e_gc_handles.c|e2e_gc_handles|${LIBFFI_FLAGS}"
     "test/test_e2e_struct_tramp.c|e2e_struct_tramp|${LIBFFI_FLAGS}"
     "test/test_rope_string.c|rope_string|"
+    "test/test_utf8_nfd.c|utf8_nfd|"
 )
 
 # Filter tests if --lib flag is set

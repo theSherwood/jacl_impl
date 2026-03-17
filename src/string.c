@@ -362,4 +362,71 @@ static JaclVal jacl_rope_string_create(ThreadHeap* heap,
   return jacl_rope_string_ptr(rs);
 }
 
+/* --- UTF-8 validation --- */
+
+/* Validate UTF-8: returns true if data contains only valid UTF-8 sequences.
+ * Rejects overlong encodings, surrogate halves (U+D800–U+DFFF),
+ * truncated sequences, and invalid continuation bytes. */
+static bool jacl_utf8_validate(const char* data, size_t len) {
+  const uint8_t* src = (const uint8_t*)data;
+  size_t i = 0;
+  while (i < len) {
+    /* ASCII fast path */
+    if (src[i] < 0x80) { i++; continue; }
+
+    uint32_t cp;
+    size_t consumed = utf8_decode(src + i, len - i, &cp);
+    if (consumed == 0) return false;
+
+    /* utf8_decode rejects overlong and >U+10FFFF but not surrogates */
+    if (cp >= 0xD800 && cp <= 0xDFFF) return false;
+
+    i += consumed;
+  }
+  return true;
+}
+
+/* --- NFD normalization helper --- */
+
+/* Normalize string data to NFD form.
+ * - If already NFD (detected via unicode_is_nfd quick-check), sets *out = src
+ *   and *out_len = len with no copy (fast path for ASCII and pre-decomposed).
+ * - Otherwise, computes NFD length, writes to stack_buf if it fits,
+ *   or allocates via malloc for larger output.
+ * - Sets *out to NFD bytes and *out_len to NFD byte count.
+ * - Returns true on success.
+ * - Caller must free *out only if *out != (uint8_t*)data AND *out != stack_buf. */
+static bool jacl_nfd_normalize(const char* data, size_t len,
+                                uint8_t* stack_buf, size_t stack_cap,
+                                uint8_t** out, size_t* out_len) {
+  const uint8_t* src = (const uint8_t*)data;
+
+  /* Fast path: already NFD (covers pure ASCII and pre-decomposed text) */
+  if (unicode_is_nfd(src, len)) {
+    *out = (uint8_t*)data;
+    *out_len = len;
+    return true;
+  }
+
+  /* Compute NFD output length */
+  size_t nfd_len = unicode_nfd_length(src, len);
+
+  /* Select buffer: stack if fits, otherwise malloc */
+  uint8_t* dst;
+  if (nfd_len <= stack_cap) {
+    dst = stack_buf;
+  } else {
+    dst = (uint8_t*)malloc(nfd_len);
+    if (!dst) return false;
+  }
+
+  /* Perform NFD normalization */
+  size_t actual_len = 0;
+  unicode_nfd(src, len, dst, nfd_len, &actual_len);
+
+  *out = dst;
+  *out_len = actual_len;
+  return true;
+}
+
 #endif /* STRING_C */
