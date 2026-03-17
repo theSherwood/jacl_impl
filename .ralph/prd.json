@@ -16,7 +16,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "Model after the existing platform_mutex_t block in lib/platform/platform.h. POSIX uses pthread_rwlock_init/destroy/rdlock/wrlock/unlock. Windows uses InitializeSRWLock/AcquireSRWLockShared/ReleaseSRWLockShared/AcquireSRWLockExclusive/ReleaseSRWLockExclusive (no destroy needed). Emscripten stubs are no-ops with int type."
     },
     {
@@ -29,7 +29,7 @@
         "Compiles without errors"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "The GCObjType enum is in src/gc.c lines 14-34. Currently has 19 values (0-18), OBJ_ROPE_STRING is 18. Add the two new values after it. The template define pattern is in src/collections.c lines 21-30 (RRB) and 34-42 (HAMT). gc__current_heap is a static JACL_THREAD_LOCAL ThreadHeap* in gc.c."
     },
     {

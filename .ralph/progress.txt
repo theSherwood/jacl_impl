@@ -1,3 +1,32 @@
 # Ralph Progress Log
-Started: Mon Mar 17 2026
+Started: Tue Mar 17 18:47:43 UTC 2026
+
+## Codebase Patterns
+- platform.h uses three-way conditional compilation: `#ifdef __EMSCRIPTEN__` / `#elif defined(_WIN32)` / `#else` (POSIX)
+- Tests use `test_helpers.h` with ASSERT macros and return 1 for pass, 0 for fail
+- build.sh entries with threads need explicit `-lpthread` flag in the extra_cflags field
+- Thread tests use `THREAD_CREATE/THREAD_JOIN` from platform.h, `SLEEP_MILLISECONDS` for timing
+- GC template defines follow pattern: `#define FOO_GC_ALLOC(t, sz) gc_alloc(gc__current_heap, (t), (sz))`
+- RC-based data structures (sum_tree, rope) use template includes of `../rc/rc.h` with RC_NAME and RC_ALLOCATOR defines
+
+---
+
+## 2026-03-17 - US-001
+- Implemented platform_rwlock_t with three backends: POSIX (pthread_rwlock_t), Windows (SRWLOCK), Emscripten (no-op int stub)
+- Provided macros: RWLOCK_INIT, RWLOCK_DESTROY, RWLOCK_RDLOCK, RWLOCK_RDUNLOCK, RWLOCK_WRLOCK, RWLOCK_WRUNLOCK
+- Files changed: lib/platform/platform.h, lib/platform/test_rwlock.c, build.sh
+- **Learnings for future iterations:**
+  - POSIX rwlock uses pthread_rwlock_unlock for both read and write unlock (same function)
+  - Windows SRWLOCK has no destroy function (no-op)
+  - Test binaries can't run from /tmp due to noexec mount — compile into workspace dir
+  - The test_helpers.h has unused static functions that generate warnings — these are expected
+---
+
+## 2026-03-17 - US-002
+- Added OBJ_ROPE_LEAF (19) and OBJ_ROPE_INTERNAL (20) to GCObjType enum in gc.c
+- Added STREE_GC_ALLOC, STREE_GC_OBJ_INTERNAL, STREE_GC_OBJ_LEAF defines in collections.c (after HAMT block)
+- Files changed: src/gc.c, src/collections.c
+- **Learnings for future iterations:**
+  - rope.h is included in jacl.c (line 29) BEFORE gc.c (line 33) and collections.c (line 39) — the STREE_GC_ALLOC defines are not visible to sum_tree.h at include time; US-003 will need to handle this (likely by moving rope.h include or restructuring)
+  - The unity build order in jacl.c is: rope.h → value.c → gc.c → string.c → collections.c → compiler.c → vm.c → gc_collect.c
 ---
