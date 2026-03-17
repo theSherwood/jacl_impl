@@ -1090,22 +1090,6 @@ static inline size_t ST_COPY_RANGE(ST_ROOT root, size_t start_index, size_t coun
   return copied;
 }
 
-/* --- RC compatibility stubs ---
- * Consumers like rope.h reference the expanded RC function names directly
- * (e.g. rope_st_rc_ref, rope_st_rc_unref). Since RC has been removed,
- * provide no-op stubs here while ST_NS() is still available. */
-
-static inline void* ST_NS(_rc_alloc)(int sz, void (*dtor)(void*)) {
-  (void)dtor;
-  return ST_ALLOC_INTERNAL(sz);
-}
-
-static inline void* ST_NS(_rc_ref)(void* p) { return p; }
-static inline void  ST_NS(_rc_unref)(void* p) { (void)p; }
-static inline intptr_t ST_NS(_rc_count)(void* p) { (void)p; return 2; }
-
-static inline void ST_NODE_DESTROY(void* arg) { (void)arg; }
-
 /* --- Cleanup all internal macros --- */
 
 #undef STREE_T

@@ -72,11 +72,11 @@ static inline rope rope_new(void) {
 }
 
 static inline rope rope_ref(rope r) {
-  return (rope){.root = rope_st_ref(r.root)};
+  return r;
 }
 
 static inline void rope_unref(rope r) {
-  rope_st_unref(r.root);
+  (void)r;
 }
 
 /* --- O(1) summary queries --- */
@@ -135,11 +135,6 @@ static inline rope rope_from_str(const uint8_t* str, size_t byte_len) {
 
   /* Assemble tree from leaves */
   rope_st_root root = rope_st_mk_root(leaf_buf, n_leaves, 1);
-
-  /* mk_root refs each node; release creation refs */
-  for (size_t i = 0; i < n_leaves; i++) {
-    rope_st_rc_unref(leaf_buf[i]);
-  }
 
   if (leaf_buf != stack_buf) {
     rope_st_allocator.free(rope_st_allocator.ctx, leaf_buf);
@@ -234,23 +229,15 @@ static inline rope rope_concat(rope left, rope right) {
         if (lsp.left.node) {
           tmp = rope_st_concat(lsp.left, junction.root);
         } else {
-          tmp = rope_st_ref(junction.root);
+          tmp = junction.root;
         }
 
         rope_st_root result;
         if (rsp.right.node) {
           result = rope_st_concat(tmp, rsp.right);
-          rope_st_unref(tmp);
         } else {
           result = tmp;
         }
-
-        /* Cleanup */
-        rope_st_unref(lsp.left);
-        rope_st_unref(lsp.right);
-        rope_st_unref(rsp.left);
-        rope_st_unref(rsp.right);
-        rope_unref(junction);
 
         return (rope){.root = result};
       }
@@ -412,18 +399,12 @@ static inline rope rope_insert(rope r, size_t byte_offset, const uint8_t* str, s
   rope inserted = rope_from_str(str, byte_len);
   if (rope_byte_count(inserted) == 0) {
     /* Invalid UTF-8 in str — from_str returned empty */
-    rope_unref(inserted);
     return rope_ref(r);
   }
 
   rope_st_split_result sp = rope_st_split(r.root, byte_offset);
   rope_st_root tmp = rope_st_concat(sp.left, inserted.root);
   rope_st_root result = rope_st_concat(tmp, sp.right);
-
-  rope_st_unref(sp.left);
-  rope_st_unref(sp.right);
-  rope_st_unref(tmp);
-  rope_unref(inserted);
 
   return (rope){.root = result};
 }
@@ -457,11 +438,6 @@ static inline rope rope_delete(rope r, size_t byte_offset, size_t byte_len) {
   rope_st_split_result sp2 = rope_st_split(sp1.right, byte_len);
   rope_st_root result = rope_st_concat(sp1.left, sp2.right);
 
-  rope_st_unref(sp1.left);
-  rope_st_unref(sp1.right);
-  rope_st_unref(sp2.left);
-  rope_st_unref(sp2.right);
-
   return (rope){.root = result};
 }
 
@@ -493,14 +469,7 @@ static inline rope rope_slice(rope r, size_t byte_offset, size_t byte_len) {
   rope_st_split_result sp1 = rope_st_split(r.root, byte_offset);
   rope_st_split_result sp2 = rope_st_split(sp1.right, byte_len);
 
-  rope result = (rope){.root = rope_st_ref(sp2.left)};
-
-  rope_st_unref(sp1.left);
-  rope_st_unref(sp1.right);
-  rope_st_unref(sp2.left);
-  rope_st_unref(sp2.right);
-
-  return result;
+  return (rope){.root = sp2.left};
 }
 
 static inline size_t rope_slice_to_str(rope r, size_t byte_offset, size_t byte_len,
@@ -616,9 +585,7 @@ static inline rope rope_slice_by_graphemes(rope r, size_t grapheme_offset, size_
 static inline rope rope_replace(rope r, size_t byte_offset, size_t byte_len,
                                  const uint8_t* str, size_t str_len) {
   rope after_delete = rope_delete(r, byte_offset, byte_len);
-  rope result = rope_insert(after_delete, byte_offset, str, str_len);
-  rope_unref(after_delete);
-  return result;
+  return rope_insert(after_delete, byte_offset, str, str_len);
 }
 
 /* --- Cursor --- */
@@ -1141,35 +1108,18 @@ typedef struct {
   bool valid;
 } rope_transient;
 
-/* Helper: clone an internal node (copies children pointers, refs each child) */
+/* Helper: clone an internal node */
 static inline rope_st_node* _rope_transient_clone_internal(rope_st_internal* old) {
-  rope_st_internal* n = (rope_st_internal*)rope_st_rc_alloc(
-      sizeof(rope_st_internal), rope_st_node_destroy);
-  n->header = (rope_st_node){.type = rope_st_NODE_INTERNAL};
-  n->n_children = old->n_children;
-  n->count = old->count;
-  n->summary = old->summary;
-  memcpy(n->child_counts, old->child_counts, sizeof(size_t) * old->n_children);
-  for (size_t i = 0; i < old->n_children; i++) {
-    n->children[i] = old->children[i];
-    rope_st_rc_ref(old->children[i]);
-  }
-  return (rope_st_node*)n;
+  return (rope_st_node*)rope_st_mk_internal(old->children, old->n_children);
 }
 
-/* Helper: ensure a node is exclusively owned; clone if shared, unref old */
+/* Helper: always clone a node for exclusive mutation (GC has no refcount) */
 static inline rope_st_node* _rope_transient_ensure_exclusive(rope_st_node* node) {
-  if (rope_st_rc_count(node) <= 1) return node;
-
-  rope_st_node* clone;
   if (node->type == rope_st_NODE_LEAF) {
     rope_st_leaf* old = (rope_st_leaf*)node;
-    clone = (rope_st_node*)rope_st_mk_leaf(old->elements, old->count);
-  } else {
-    clone = _rope_transient_clone_internal((rope_st_internal*)node);
+    return (rope_st_node*)rope_st_mk_leaf(old->elements, old->count);
   }
-  rope_st_rc_unref(node);
-  return clone;
+  return _rope_transient_clone_internal((rope_st_internal*)node);
 }
 
 static inline rope_transient rope_to_transient(rope r) {
@@ -1179,7 +1129,7 @@ static inline rope_transient rope_to_transient(rope r) {
     .summarize = rope_summary_summarize
   });
   return (rope_transient){
-    .root = rope_st_ref(r.root),
+    .root = r.root,
     .valid = true
   };
 }
@@ -1194,7 +1144,6 @@ static inline rope rope_transient_to_persistent(rope_transient* t) {
 
 static inline void rope_transient_free(rope_transient* t) {
   if (!t->valid) return;
-  rope_st_unref(t->root);
   t->root = rope_st_empty();
   t->valid = false;
 }
@@ -1322,7 +1271,6 @@ static inline void rope_transient_insert(rope_transient* t, size_t byte_offset,
     /* Fallback: persistent insert + root swap */
     rope tmp_rope = {.root = t->root};
     rope result = rope_insert(tmp_rope, byte_offset, str, byte_len);
-    rope_st_unref(t->root);
     t->root = result.root;
   }
 }
@@ -1448,7 +1396,6 @@ static inline void rope_transient_delete(rope_transient* t, size_t byte_offset,
     /* Fallback: persistent delete + root swap */
     rope tmp_rope = {.root = t->root};
     rope result = rope_delete(tmp_rope, byte_offset, byte_len);
-    rope_st_unref(t->root);
     t->root = result.root;
   }
 }
