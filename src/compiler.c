@@ -3863,11 +3863,104 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* for — collection-based iteration with inlined body
      Forms:
+       [for {init; cond; step} { body }]   — C-style counted loop
        [for $collection { body }]           — implicit $it binding
        [for $collection name { body }]      — explicit binding
        [for $collection $callback]           — HOF via OP_EACH
   */
   if (compiler__head_matches(head, "for", 3)) {
+    /* C-style for: [for {init; cond; step} { body }] */
+    if (argc == 2 && args[0]->type == AST_BLOCK && args[1]->type == AST_BLOCK) {
+      AstNode* ctrl       = args[0];
+      AstNode* body_block = args[1];
+
+      if (ctrl->data.block.count != 3) {
+        compiler__error(c, line, col,
+            "C-style for control block must have exactly 3 parts: init; cond; step");
+        return;
+      }
+
+      AstNode* init_node = ctrl->data.block.commands[0];
+      AstNode* cond_node = ctrl->data.block.commands[1];
+      AstNode* step_node = ctrl->data.block.commands[2];
+
+      if (c->loop_depth >= COMPILER_LOOP_DEPTH_MAX) {
+        compiler__error(c, line, col, "too many nested loops");
+        return;
+      }
+
+      /* Begin scope for init variable(s) — not visible after loop */
+      compiler__begin_scope(c);
+      uint32_t saved_local_count = c->local_count;
+
+      /* Compile init (runs once before the loop) */
+      compiler__compile_node(c, init_node);
+      compiler__emit_check_error(c, line);
+
+      /* Push loop context — is_for_loop=true for forward-jump continue */
+      LoopContext* lctx = &c->loop_stack[c->loop_depth++];
+      lctx->break_patch_count    = 0;
+      lctx->continue_patch_count = 0;
+      lctx->local_count_at_loop  = saved_local_count;
+      lctx->is_for_loop          = true;
+
+      /* Loop start: condition check */
+      uint32_t loop_start = c->chunk->code_count;
+      lctx->loop_start = loop_start;
+
+      /* Compile condition */
+      compiler__compile_node(c, cond_node);
+
+      /* JUMP_IF_FALSE → exit */
+      uint32_t exit_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+
+      /* Compile body statements inline */
+      uint32_t body_count = body_block->data.block.count;
+      for (uint32_t i = 0; i < body_count; i++) {
+        compiler__compile_node(c, body_block->data.block.commands[i]);
+        compiler__emit_check_error(c, line);
+      }
+
+      /* Continue target: patch all continue forward jumps here */
+      for (uint32_t i = 0; i < lctx->continue_patch_count; i++) {
+        compiler__patch_jump(c, lctx->continue_patches[i]);
+      }
+
+      /* Compile step expression */
+      compiler__compile_node(c, step_node);
+      compiler__emit_check_error(c, line);
+
+      /* Loop back to condition */
+      compiler__emit_byte(c, OP_LOOP, line);
+      uint32_t back_offset = c->chunk->code_count - loop_start + 2;
+      compiler__emit_byte(c, (uint8_t)((back_offset >> 8) & 0xFF), line);
+      compiler__emit_byte(c, (uint8_t)(back_offset & 0xFF), line);
+
+      /* Exit: patch conditional jump */
+      compiler__patch_jump(c, exit_jump);
+
+      /* End scope: pop init variable(s) */
+      compiler__end_scope(c, line);
+
+      /* Normal exit: push nil */
+      compiler__emit_byte(c, OP_NIL, line);
+
+      /* Jump over break landing zone */
+      uint32_t skip_break = compiler__emit_jump(c, OP_JUMP, line);
+
+      /* Break landing zone (break value already on stack via OP_CLOSE_LOOP) */
+      for (uint32_t i = 0; i < lctx->break_patch_count; i++) {
+        compiler__patch_jump(c, lctx->break_patches[i]);
+      }
+
+      /* Convergence point */
+      compiler__patch_jump(c, skip_break);
+
+      /* Pop loop context */
+      c->loop_depth--;
+      return;
+    }
+
     /* Detect HOF callback form: [for $collection $callback] */
     if (argc == 2 && args[1]->type == AST_VAR_REF) {
       compiler__compile_hof_builtin(c, "each", args, argc, OP_EACH, line, col);

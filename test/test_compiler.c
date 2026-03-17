@@ -5804,6 +5804,165 @@ static int test_return_nil_from_for_block(void) {
   TEST_PASS();
 }
 
+/* === US-004 (For-loop PRD): C-style for loop === */
+
+/* Test: basic counting C-style for loop prints 0 1 2 3 4 */
+static int test_for_cstyle_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  const char* program =
+    "[for {mut i 0; [< $i 5]; [set! i [+ $i 1]]} {\n"
+    "  [print $i]\n"
+    "}]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "0\n1\n2\n3\n4\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: C-style for with break exits early */
+static int test_for_cstyle_break(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Print 0 1 2 then break */
+  const char* program =
+    "[for {mut i 0; [< $i 10]; [set! i [+ $i 1]]} {\n"
+    "  [if [== $i 3] { [break] }]\n"
+    "  [print $i]\n"
+    "}]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "0\n1\n2\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: C-style for with continue skips iteration */
+static int test_for_cstyle_continue(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Print 0 1 3 4 — skip 2 */
+  const char* program =
+    "[for {mut i 0; [< $i 5]; [set! i [+ $i 1]]} {\n"
+    "  [if [== $i 2] { [continue] }]\n"
+    "  [print $i]\n"
+    "}]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "0\n1\n3\n4\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: nested C-style for loops */
+static int test_for_cstyle_nested(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Outer i=0..1, inner j=0..1: prints 00 01 10 11 */
+  const char* program =
+    "[for {mut i 0; [< $i 2]; [set! i [+ $i 1]]} {\n"
+    "  [for {mut j 0; [< $j 2]; [set! j [+ $j 1]]} {\n"
+    "    [print [+ [* $i 10] $j]]\n"
+    "  }]\n"
+    "}]\n";
+
+  VMResult result = jacl_run(program, &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "0\n1\n10\n11\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: loop var from C-style for is not visible after loop ends (runtime error) */
+static int test_for_cstyle_scope(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+
+  /* $i should not be visible after the loop; this should be a runtime error */
+  VMResult result = jacl_run(
+    "[for {mut i 0; [< $i 3]; [set! i [+ $i 1]]} { [print $i] }]\n"
+    "[print $i]\n",  /* $i is undefined here */
+    &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -6033,6 +6192,12 @@ int main(void) {
     { "return_from_hof_for",             test_return_from_hof_for },
     { "return_bare_from_for_block",      test_return_bare_from_for_block },
     { "return_nil_from_for_block",       test_return_nil_from_for_block },
+    /* US-004 (For-loop PRD): C-style for loop */
+    { "for_cstyle_basic",                test_for_cstyle_basic },
+    { "for_cstyle_break",                test_for_cstyle_break },
+    { "for_cstyle_continue",             test_for_cstyle_continue },
+    { "for_cstyle_nested",               test_for_cstyle_nested },
+    { "for_cstyle_scope",                test_for_cstyle_scope },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
