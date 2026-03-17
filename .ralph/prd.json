@@ -20,7 +20,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "The existing utf8_find_safe_split (unicode.h:140) only walks back past continuation bytes (0x80-0xBF). The new function must walk back past entire codepoints that have Extend/ZWJ/SpacingMark grapheme break property. Use unicode_grapheme_break() from unicode_tables.h to check. The function must handle the case where walking back reaches position 0 (return 0). ROPE_LEAF_MAX is 256 bytes (rope.h:50). The change in rope_from_str is a single-line replacement at line 130: change utf8_find_safe_split to grapheme_find_safe_split. The rope summary already tracks grapheme count via rope_summary_summarize() which calls unicode_grapheme_count(). Test file: lib/sum_tree/test_grapheme_split.c or add to existing test_rope.c."
     },
     {

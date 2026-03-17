@@ -569,6 +569,63 @@ static inline size_t unicode_grapheme_byte_offset(const uint8_t* src, size_t len
   return pos;
 }
 
+/* Given a byte position, adjust backward to a grapheme cluster boundary.
+   Unlike utf8_find_safe_split (which only aligns to codepoint boundaries),
+   this walks backward past codepoints with Extend/ZWJ/SpacingMark grapheme
+   break properties so that rope leaf boundaries never fall inside a grapheme
+   cluster. Returns adjusted position; returns 0 if walking back reaches start. */
+static inline size_t grapheme_find_safe_split(const uint8_t* src, size_t len, size_t pos) {
+  if (pos == 0 || pos >= len) return pos;
+
+  /* First, align to a codepoint boundary */
+  while (pos > 0 && utf8_is_continuation(src[pos])) {
+    pos--;
+  }
+
+  /* Now walk backward past codepoints that extend the previous grapheme cluster.
+     These codepoints (Extend, ZWJ, SpacingMark) must stay with their base. */
+  while (pos > 0) {
+    uint32_t cp;
+    size_t nc = utf8_decode(src + pos, len - pos, &cp);
+    if (nc == 0) break;
+
+    UnicodeGraphemeBreak gbp = unicode_grapheme_break(cp);
+    if (gbp != GBP_EXTEND && gbp != GBP_ZWJ && gbp != GBP_SPACINGMARK) {
+      /* We're at a codepoint that doesn't extend; but we also need to check
+         for regional indicator pairs and ZWJ+ExtPict sequences.
+         Use the full grapheme boundary algorithm: find the grapheme cluster
+         that contains this position and split at its start. */
+      break;
+    }
+
+    /* This codepoint extends the previous one — move back past it */
+    pos--;
+    while (pos > 0 && utf8_is_continuation(src[pos])) {
+      pos--;
+    }
+  }
+
+  /* Final check: verify this is actually a grapheme cluster boundary by
+     walking forward from a safe point. If pos falls inside a complex cluster
+     (e.g. regional indicator pair, ZWJ emoji sequence), adjust to the
+     cluster's start. */
+  if (pos > 0) {
+    size_t prev_boundary = unicode_grapheme_prev(src, len, pos);
+    /* If the previous grapheme boundary is before pos, check whether pos
+       is truly a cluster start by seeing if grapheme_next from prev_boundary
+       reaches pos. */
+    if (prev_boundary < pos) {
+      size_t next = unicode_grapheme_next(src, len, prev_boundary);
+      if (next != pos) {
+        /* pos is inside a grapheme cluster — use the cluster start instead */
+        pos = prev_boundary;
+      }
+    }
+  }
+
+  return pos;
+}
+
 /* -----------------------------------------------------------------------
  * Word boundary segmentation (UAX #29)
  * ----------------------------------------------------------------------- */

@@ -1,16 +1,28 @@
 # Ralph Progress Log
-Started: Mon Mar 17 2026
+Started: Tue Mar 17 11:40:18 UTC 2026
+---
 
 ## Codebase Patterns
-- Unity build: all src/*.c files included via src/jacl.c
-- Test pattern: test_helpers.h, tracker_reset(), check_no_leaks(), PrintCapture for stdout
-- 64-bit tagged values: tag in bits 63-56, payload in bits 55-0
-- Existing string tags: JACL_TAG_INLINE_STRING (0x04), JACL_TAG_STRING (0x05)
-- JaclHeapString allocated via gc_alloc(heap, OBJ_STRING, size)
-- Intern table: open addressing, linear probing, arena-backed
-- Rope lib: lib/sum_tree/rope.h (B-tree with monoidal summaries, RC-based persistence)
-- Unicode lib: lib/unicode/unicode.h (NFD normalization, grapheme breaks UAX #29, UTF-8 codec)
-- Rope summary: { size_t bytes, chars, lines, graphemes }
-- Compiler flags: -Wall -Wextra -std=c99 -g
+- `grapheme_find_safe_split` in `unicode.h` uses both fast backward-walk (Extend/ZWJ/SpacingMark check) and full UAX #29 verification via `unicode_grapheme_prev`/`unicode_grapheme_next` for complex clusters (RI pairs, ZWJ emoji)
+- `rope_from_str` in `rope.h` uses `grapheme_find_safe_split` to ensure leaf boundaries never split grapheme clusters
+- Test files in `lib/sum_tree/` use `#include "../../test/test_helpers.h"` for the correct relative path (not `../test/`)
+- `TEST_PASS()` returns 1 (pass), ASSERT macros return 0 (fail). Main should use `if (tests[i]()) pass++; else fail++;` pattern
+- Pre-existing compile failures: `segment_array`, `sum_tree`, `utf8`, `rope`, `nfa`, `nfa_rope` (wrong include path `../test/test_helpers.h`)
 
+---
+
+## 2026-03-17 - US-001
+- Implemented `grapheme_find_safe_split()` in `lib/unicode/unicode.h` (after grapheme utility functions, ~line 572)
+  - First aligns to codepoint boundary, then walks backward past Extend/ZWJ/SpacingMark codepoints
+  - Final verification step using `unicode_grapheme_prev`/`unicode_grapheme_next` for complex clusters (RI pairs, ZWJ sequences)
+- Updated `rope_from_str()` in `lib/sum_tree/rope.h` line 130: changed `utf8_find_safe_split` to `grapheme_find_safe_split`
+- Created test file `lib/sum_tree/test_grapheme_split.c` with 11 tests:
+  - 6 unit tests for `grapheme_find_safe_split`: ASCII, combining marks, multiple combining, ZWJ sequences, regional indicators, edge cases
+  - 5 rope integration tests: combining near boundary, multi-combining at boundary, emoji ZWJ at boundary, RI at boundary, grapheme count consistency
+- Added test to `build.sh` TESTS array
+- Files changed: `lib/unicode/unicode.h`, `lib/sum_tree/rope.h`, `lib/sum_tree/test_grapheme_split.c`, `build.sh`
+- **Learnings for future iterations:**
+  - The `unicode_grapheme_prev` function is key for verifying complex grapheme boundaries - simple Extend/ZWJ/SpacingMark backward walk doesn't handle RI pairs
+  - The rope's `ROPE_LEAF_MAX` is 256 bytes - test grapheme boundary cases should place clusters right around byte 252-260
+  - All 6 pre-existing lib test compile failures are due to wrong include paths, not actual test failures
 ---

@@ -56,6 +56,7 @@ TESTS=(
     "lib/sum_tree/test_sum_tree.c|sum_tree|"
     "lib/sum_tree/test_utf8.c|utf8|"
     "lib/sum_tree/test_rope.c|rope|"
+    "lib/sum_tree/test_grapheme_split.c|grapheme_split|"
     "lib/regex/test_nfa.c|nfa|"
     "lib/regex/test_nfa_rope.c|nfa_rope|"
     "lib/bignum/test_bigint.c|bigint|"

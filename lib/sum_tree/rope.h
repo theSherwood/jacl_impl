@@ -127,7 +127,7 @@ static inline rope rope_from_str(const uint8_t* str, size_t byte_len) {
     if (end >= byte_len) {
       end = byte_len;
     } else {
-      end = utf8_find_safe_split(str, byte_len, end);
+      end = grapheme_find_safe_split(str, byte_len, end);
     }
     leaf_buf[n_leaves++] = (rope_st_node*)rope_st_mk_leaf(str + pos, end - pos);
     pos = end;
