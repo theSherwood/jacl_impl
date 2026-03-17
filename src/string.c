@@ -223,11 +223,32 @@ static uint32_t jacl_string_data(JaclVal v, char* buf, size_t buflen) {
   return hs->byte_len;
 }
 
+/* Internal: compute FNV-1a hash of a JaclVal string (any tier) */
+static uint32_t jacl_string_hash(JaclVal v) {
+  if (jacl_is_inline_string(v)) {
+    uint64_t payload = v & JACL_PAYLOAD_MASK;
+    uint32_t hash = 2166136261u;
+    for (int i = 0; i < 7; i++) {
+      unsigned char c = (unsigned char)((payload >> (i * 8)) & 0xFF);
+      if (c == 0) break;
+      hash ^= c;
+      hash *= 16777619u;
+    }
+    return hash;
+  }
+  if (jacl_is_rope_string(v)) {
+    return jacl_as_rope_string(v)->hash;
+  }
+  return jacl_as_heap_string(v)->hash;
+}
+
 static bool jacl_string_eq(JaclVal a, JaclVal b) {
   bool a_inline = jacl_is_inline_string(a);
   bool b_inline = jacl_is_inline_string(b);
   bool a_heap = jacl_is_heap_string(a);
   bool b_heap = jacl_is_heap_string(b);
+  bool a_rope = jacl_is_rope_string(a);
+  bool b_rope = jacl_is_rope_string(b);
 
   /* Both inline: bitwise comparison (tag+payload, ignoring flags) */
   if (a_inline && b_inline) {
@@ -240,12 +261,78 @@ static bool jacl_string_eq(JaclVal a, JaclVal b) {
     return (a & JACL_PAYLOAD_MASK) == (b & JACL_PAYLOAD_MASK);
   }
 
-  /* Cross-representation: byte length check + memcmp */
-  if ((a_inline || a_heap) && (b_inline || b_heap)) {
+  /* Any comparison involving rope or cross-tier inline/heap:
+   * fast-reject via hash, then compare content */
+  if ((a_inline || a_heap || a_rope) && (b_inline || b_heap || b_rope)) {
     uint32_t len_a = jacl_string_byte_len(a);
     uint32_t len_b = jacl_string_byte_len(b);
     if (len_a != len_b) return false;
-    /* Cross-rep means one is inline (<=7 bytes), so stack buffers suffice */
+
+    /* Hash fast-path: different hashes → definitely not equal */
+    uint32_t hash_a = jacl_string_hash(a);
+    uint32_t hash_b = jacl_string_hash(b);
+    if (hash_a != hash_b) return false;
+
+    /* Same hash, same length — compare content */
+    /* For rope-rope: compare leaf-by-leaf via cursors */
+    if (a_rope && b_rope) {
+      rope ra = jacl_as_rope_string(a)->r;
+      rope rb = jacl_as_rope_string(b)->r;
+      rope_cursor ca = rope_cursor_new(ra, 0);
+      rope_cursor cb = rope_cursor_new(rb, 0);
+      size_t remaining = len_a;
+      while (remaining > 0) {
+        uint8_t chunk_a[256], chunk_b[256];
+        size_t n = remaining < 256 ? remaining : 256;
+        size_t ra_read = rope_cursor_read(&ca, chunk_a, n);
+        size_t rb_read = rope_cursor_read(&cb, chunk_b, n);
+        size_t cmp_len = ra_read < rb_read ? ra_read : rb_read;
+        if (cmp_len == 0) return false;
+        if (memcmp(chunk_a, chunk_b, cmp_len) != 0) return false;
+        rope_cursor_advance_bytes(&ca, cmp_len);
+        rope_cursor_advance_bytes(&cb, cmp_len);
+        remaining -= cmp_len;
+      }
+      return true;
+    }
+
+    /* Cross-tier with at least one rope: materialize non-rope side,
+     * compare against rope via cursor */
+    if (a_rope || b_rope) {
+      /* Arrange so 'rv' is the rope, 'fv' is the flat/inline */
+      JaclVal rv = a_rope ? a : b;
+      JaclVal fv = a_rope ? b : a;
+      uint32_t len = len_a; /* both are same length */
+
+      /* Get flat bytes */
+      char flat_buf[128];
+      const char* flat_data;
+      if (jacl_is_inline_string(fv)) {
+        jacl_string_data(fv, flat_buf, sizeof(flat_buf));
+        flat_data = flat_buf;
+      } else {
+        flat_data = jacl_as_heap_string(fv)->data;
+      }
+
+      /* Compare rope against flat data chunk by chunk */
+      rope rr = jacl_as_rope_string(rv)->r;
+      rope_cursor cr = rope_cursor_new(rr, 0);
+      size_t remaining = len;
+      size_t flat_off = 0;
+      while (remaining > 0) {
+        uint8_t chunk[256];
+        size_t n = remaining < 256 ? remaining : 256;
+        size_t rd = rope_cursor_read(&cr, chunk, n);
+        if (rd == 0) return false;
+        if (memcmp(chunk, flat_data + flat_off, rd) != 0) return false;
+        rope_cursor_advance_bytes(&cr, rd);
+        flat_off += rd;
+        remaining -= rd;
+      }
+      return true;
+    }
+
+    /* Cross inline/heap (one is inline ≤7 bytes) */
     char buf_a[8], buf_b[8];
     jacl_string_data(a, buf_a, sizeof(buf_a));
     jacl_string_data(b, buf_b, sizeof(buf_b));
@@ -256,68 +343,85 @@ static bool jacl_string_eq(JaclVal a, JaclVal b) {
   return false;
 }
 
+/* Internal: get pointer to flat string bytes (inline → stack buf, heap → direct) */
+static const char* jacl_string_flat_ptr(JaclVal v, char* buf, size_t buflen) {
+  if (jacl_is_inline_string(v)) {
+    jacl_string_data(v, buf, buflen);
+    return buf;
+  }
+  return jacl_as_heap_string(v)->data;
+}
+
 static int jacl_string_cmp(JaclVal a, JaclVal b) {
   uint32_t len_a = jacl_string_byte_len(a);
   uint32_t len_b = jacl_string_byte_len(b);
+  bool a_rope = jacl_is_rope_string(a);
+  bool b_rope = jacl_is_rope_string(b);
 
-  /* Rope strings: full implementation in US-011 */
-  bool a_rope = (a & JACL_TYPE_MASK) == JACL_TAG_ROPE_STRING;
-  bool b_rope = (b & JACL_TYPE_MASK) == JACL_TAG_ROPE_STRING;
-  if (a_rope || b_rope) {
-    /* Materialize to temporary buffers for comparison */
-    char *ma = NULL, *mb = NULL;
-    char sa[128], sb[128];
-    const char *da, *db;
-
-    if (a_rope) {
-      ma = len_a <= sizeof(sa) ? sa : (char*)malloc(len_a);
-      jacl_string_data(a, ma, len_a);
-      da = ma;
-    } else if (jacl_is_inline_string(a)) {
-      jacl_string_data(a, sa, sizeof(sa));
-      da = sa;
-    } else {
-      da = jacl_as_heap_string(a)->data;
-    }
-
-    if (b_rope) {
-      mb = len_b <= sizeof(sb) ? sb : (char*)malloc(len_b);
-      jacl_string_data(b, mb, len_b);
-      db = mb;
-    } else if (jacl_is_inline_string(b)) {
-      jacl_string_data(b, sb, sizeof(sb));
-      db = sb;
-    } else {
-      db = jacl_as_heap_string(b)->data;
-    }
-
+  /* Rope-rope: cursor-based leaf-by-leaf comparison (no materialization) */
+  if (a_rope && b_rope) {
+    rope ra = jacl_as_rope_string(a)->r;
+    rope rb = jacl_as_rope_string(b)->r;
+    rope_cursor ca = rope_cursor_new(ra, 0);
+    rope_cursor cb = rope_cursor_new(rb, 0);
     uint32_t min_len = len_a < len_b ? len_a : len_b;
-    int result = min_len > 0 ? memcmp(da, db, min_len) : 0;
-    if (a_rope && ma != sa) free(ma);
-    if (b_rope && mb != sb) free(mb);
-    if (result != 0) return result;
+    size_t compared = 0;
+    while (compared < min_len) {
+      uint8_t chunk_a[256], chunk_b[256];
+      size_t want = min_len - compared;
+      if (want > 256) want = 256;
+      size_t ra_read = rope_cursor_read(&ca, chunk_a, want);
+      size_t rb_read = rope_cursor_read(&cb, chunk_b, want);
+      size_t cmp_len = ra_read < rb_read ? ra_read : rb_read;
+      if (cmp_len == 0) break;
+      int r = memcmp(chunk_a, chunk_b, cmp_len);
+      if (r != 0) return r;
+      rope_cursor_advance_bytes(&ca, cmp_len);
+      rope_cursor_advance_bytes(&cb, cmp_len);
+      compared += cmp_len;
+    }
     if (len_a < len_b) return -1;
     if (len_a > len_b) return 1;
     return 0;
   }
 
+  /* Cross-tier with one rope: compare rope cursor against flat bytes */
+  if (a_rope || b_rope) {
+    JaclVal rv = a_rope ? a : b;
+    JaclVal fv = a_rope ? b : a;
+    uint32_t rv_len = a_rope ? len_a : len_b;
+    uint32_t fv_len = a_rope ? len_b : len_a;
+
+    char flat_stack[128];
+    const char* flat_data = jacl_string_flat_ptr(fv, flat_stack, sizeof(flat_stack));
+
+    rope rr = jacl_as_rope_string(rv)->r;
+    rope_cursor cr = rope_cursor_new(rr, 0);
+    uint32_t min_len = rv_len < fv_len ? rv_len : fv_len;
+    size_t compared = 0;
+    size_t flat_off = 0;
+    while (compared < min_len) {
+      uint8_t chunk[256];
+      size_t want = min_len - compared;
+      if (want > 256) want = 256;
+      size_t rd = rope_cursor_read(&cr, chunk, want);
+      if (rd == 0) break;
+      int r = memcmp(chunk, flat_data + flat_off, rd);
+      /* If a is the rope, rope chunk is 'a' side; if b is rope, flip sign */
+      if (r != 0) return a_rope ? r : -r;
+      rope_cursor_advance_bytes(&cr, rd);
+      flat_off += rd;
+      compared += rd;
+    }
+    if (len_a < len_b) return -1;
+    if (len_a > len_b) return 1;
+    return 0;
+  }
+
+  /* Non-rope: inline/heap only */
   char buf_a[8], buf_b[8];
-  const char* data_a;
-  const char* data_b;
-
-  if (jacl_is_inline_string(a)) {
-    jacl_string_data(a, buf_a, sizeof(buf_a));
-    data_a = buf_a;
-  } else {
-    data_a = jacl_as_heap_string(a)->data;
-  }
-
-  if (jacl_is_inline_string(b)) {
-    jacl_string_data(b, buf_b, sizeof(buf_b));
-    data_b = buf_b;
-  } else {
-    data_b = jacl_as_heap_string(b)->data;
-  }
+  const char* data_a = jacl_string_flat_ptr(a, buf_a, sizeof(buf_a));
+  const char* data_b = jacl_string_flat_ptr(b, buf_b, sizeof(buf_b));
 
   uint32_t min_len = len_a < len_b ? len_a : len_b;
   int result = min_len > 0 ? memcmp(data_a, data_b, min_len) : 0;

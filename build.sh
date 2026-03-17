@@ -94,6 +94,7 @@ TESTS=(
     "test/test_index_builtin.c|index_builtin|"
     "test/test_slice_builtin.c|slice_builtin|"
     "test/test_concat_tiers.c|concat_tiers|"
+    "test/test_string_eq_cmp.c|string_eq_cmp|"
 )
 
 # Filter tests if --lib flag is set

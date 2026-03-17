@@ -88,6 +88,11 @@ static uint32_t jacl_val_hash(JaclVal v) {
     JaclHeapString* hs = jacl_as_heap_string(v);
     return hs->hash;
   }
+  if (tag == JACL_TAG_ROPE_STRING) {
+    /* Use precomputed hash from rope string */
+    JaclRopeString* rs = jacl_as_rope_string(v);
+    return rs->hash;
+  }
   if (tag == JACL_TAG_VECTOR) {
     /* O(1) cached structural hash from RRB root */
     jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(v);
@@ -110,9 +115,8 @@ static bool jacl_val_eq(JaclVal a, JaclVal b) {
   uint64_t tag_a = jacl_type_tag(a);
   uint64_t tag_b = jacl_type_tag(b);
 
-  /* String equality needs special handling (inline vs heap) */
-  if ((tag_a == JACL_TAG_INLINE_STRING || tag_a == JACL_TAG_STRING) &&
-      (tag_b == JACL_TAG_INLINE_STRING || tag_b == JACL_TAG_STRING)) {
+  /* String equality needs special handling (inline vs heap vs rope) */
+  if (jacl_is_string(a) && jacl_is_string(b)) {
     return jacl_string_eq(a, b);
   }
 
