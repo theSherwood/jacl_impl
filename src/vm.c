@@ -952,7 +952,22 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (jacl_is_heap_string(val)) {
               JaclHeapString* hs = jacl_as_heap_string(val);
               vm->print_fn(hs->data, hs->byte_len, vm->print_ctx);
+            } else if (jacl_is_rope_string(val)) {
+              /* Stream rope content leaf-by-leaf via cursor */
+              JaclRopeString* rs = jacl_as_rope_string(val);
+              rope_cursor cur = rope_cursor_new(rs->r, 0);
+              size_t remaining = slen;
+              while (remaining > 0) {
+                size_t chunk = remaining < sizeof(buf) ? remaining : sizeof(buf);
+                size_t got = rope_cursor_read(&cur, (uint8_t*)buf, chunk);
+                if (got == 0) break;
+                vm->print_fn(buf, (uint32_t)got, vm->print_ctx);
+                rope_cursor_advance_bytes(&cur, got);
+                remaining -= got;
+              }
+              rope_cursor_free(cur);
             } else {
+              /* Inline string (max 7 bytes, should never reach here) */
               jacl_string_data(val, buf, sizeof(buf));
               vm->print_fn(buf, slen, vm->print_ctx);
             }

@@ -28,6 +28,13 @@ Started: Tue Mar 17 11:40:18 UTC 2026
 - OP_CONCAT handles all 9 tier combos generically via `jacl_string_data()` + `jacl_string_byte_len()` — no per-combo specialization needed
 - For flat concat results, `jacl_intern()` always computes grapheme_len from scratch via `unicode_grapheme_count()` — handles combining-at-junction correctly
 - For rope concat results, `rope_concat()` (US-002) handles grapheme boundary invariant automatically
+- JACL equality operator is `==`, not `=` — `[== a b]` compiles to `OP_EQ`
+- `jacl_string_hash(v)` returns FNV-1a hash for any string tier (inline computed, heap/rope from cached field)
+- `rope_cursor_read()` does NOT advance cursor — must call `rope_cursor_advance_bytes()` separately after reading
+- JACL proc names must be ≤7 bytes (inline string limit) — `identity` (8 chars) fails at compile time
+- JACL variable assignment: `name = value` (not `def name value`); commands: `[print ...]` (not bare `print ...`)
+- OP_PRINT for rope strings >256 bytes: use `rope_cursor` to stream chunks (read + advance_bytes in loop) — avoids buffer overflow
+- Compiler `AST_INTERP_STRING` empty string path should use `jacl_string_new()` for consistency with NFD pipeline
 
 ---
 
@@ -210,4 +217,63 @@ Thread: N/A (autonomous agent)
   - `jacl_string_data()` dispatches correctly for all 3 tiers, so extracting bytes is tier-agnostic
   - For the large path, stack buffers of 128 bytes suffice for non-rope operands (flat max is 128 bytes, inline max is 7)
   - `do_concat` C-level helper that mirrors OP_CONCAT logic is effective for tier verification tests
+---
+
+## 2026-03-17 - US-011
+Thread: N/A (autonomous agent)
+- Updated `jacl_string_eq()` in `src/string.c` for all 6 cross-tier combinations:
+  - inline×inline: bitwise (unchanged)
+  - flat×flat: pointer (unchanged, interning)
+  - rope×rope: hash fast-reject, then cursor-based leaf-by-leaf content comparison
+  - rope×flat, rope×inline: hash fast-reject, then cursor vs flat bytes comparison
+  - inline×flat: memcmp (unchanged)
+- Added `jacl_string_hash()` helper to compute FNV-1a hash for any string tier (inline on-the-fly, flat/rope from cached field)
+- Updated `jacl_string_cmp()` for all tier combinations:
+  - rope×rope: cursor-based comparison (no materialization needed)
+  - rope×flat/inline: cursor vs flat bytes with correct sign handling
+  - Added `jacl_string_flat_ptr()` helper for non-rope byte access
+- Updated `jacl_val_hash()` in `src/collections.c` to handle `JACL_TAG_ROPE_STRING`
+- Updated `jacl_val_eq()` in `src/collections.c` to use `jacl_is_string()` (covers all 3 tiers)
+- Created test file `test/test_string_eq_cmp.c` with 22 tests:
+  - 11 equality tests: inline×inline same/diff, flat×flat same/diff, inline×flat diff length, rope×rope same/diff, rope×flat same, rope×inline diff, hash collision, combining marks cross-tier
+  - 7 comparison tests: inline lt, flat ordering, rope×rope, rope×flat, rope×inline, prefix length ordering, combining marks byte ordering
+  - 4 VM integration tests: [== "hello" "hello"]→true, [== "abc" "abd"]→false, [< "abc" "abd"]→true, [> "xyz" "abc"]→true
+- Added test to `build.sh` TESTS array
+- Files changed: `src/string.c`, `src/collections.c`, `test/test_string_eq_cmp.c`, `build.sh`
+- All 59 tests pass (6 pre-existing lib failures unchanged)
+- **Learnings for future iterations:**
+  - JACL equality operator is `==`, not `=` — `[= x y]` is not valid syntax
+  - `rope_cursor_read()` does NOT advance the cursor position — must call `rope_cursor_advance_bytes()` separately after reading
+  - For cross-tier rope comparison, sign must be flipped when the rope is on the `b` side: `a_rope ? r : -r`
+  - `jacl_string_hash()` is a new reusable helper for getting FNV-1a hash from any tier (inline computed on-the-fly, heap/rope from cached field)
+---
+
+## 2026-03-17 - US-012
+Thread: N/A (autonomous agent)
+- Fixed OP_PRINT buffer overflow for rope strings >256 bytes in `src/vm.c`:
+  - Previous code: `jacl_string_data(val, buf, sizeof(buf))` then `vm->print_fn(buf, slen, ...)` — read past 256-byte buffer when slen > 256
+  - Fix: added explicit `jacl_is_rope_string()` branch with `rope_cursor`-based chunked streaming (read + advance_bytes in loop)
+- Updated compiler `AST_INTERP_STRING` empty string path (compiler.c:5430): `jacl_inline_string("", 0)` → `jacl_string_new()` for NFD pipeline consistency
+- Verified all prior US-006 integration work already in place:
+  - Compiler `AST_LIT_STRING` already uses `jacl_string_new()` (done in US-006)
+  - VM `OP_TO_STRING` already uses `jacl_string_new()` (done in US-006)
+  - VM `OP_CONCAT` already handles all 9 tier combinations (done in US-006/US-010)
+  - String proc arguments, return values, and closure captures work for all tiers (JaclVal is a tagged pointer)
+- Created test file `test/test_compiler_vm_integration.c` with 13 tests:
+  - 4 string interpolation tests: basic ($var), expression ($[expr]), tier-spanning, empty string
+  - 1 OP_TO_STRING test: bool+int interpolation
+  - 2 print tests: heap string, rope string via C-level cursor streaming
+  - 1 large concat test: recursive proc builds 200-byte rope, verifies byte-length and grapheme length
+  - 2 proc tests: string as argument/return, closure captures inline and heap strings
+  - 1 rope closure test: closure captures 200-byte rope string
+  - 1 mixed tiers test: inline + heap in single expression with equality checks
+  - 1 NFD normalization test: NFC literal decomposed at compile time (C-level)
+- Added test to `build.sh` TESTS array
+- Files changed: `src/vm.c`, `src/compiler.c`, `test/test_compiler_vm_integration.c`, `build.sh`
+- All 60 tests pass (6 pre-existing lib failures unchanged)
+- **Learnings for future iterations:**
+  - JACL proc names must be ≤7 bytes (inline string limit) — `identity` (8 chars) fails at compile time with "proc name exceeds 7-byte inline limit"
+  - JACL variable syntax: `name = value` (not `def name value`); command syntax: `[print ...]` (not `print ...` as statement)
+  - OP_PRINT for rope strings: must use `rope_cursor` chunked streaming (read + advance_bytes) — cannot use `jacl_string_data()` for strings > stack buffer size
+  - Most US-012 acceptance criteria were already satisfied by US-006 (unified constructor), US-010 (tier-aware concat), and US-004 (rope GC integration)
 ---

@@ -235,7 +235,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "jacl_string_eq() is in string.c:170. Currently handles inline-inline (bitwise), heap-heap (pointer), and cross-rep (memcmp). Add rope cases. For rope hash: access jacl_as_rope_string(v)->hash. For flat/inline hash: compute FNV-1a on the fly (for flat: string__fnv1a(hs->data, hs->byte_len); for inline: extract to buffer first). Rope-rope content comparison: use two rope cursors advancing in parallel, comparing leaf chunks. For jacl_string_cmp() (string.c:203): similar extension. For rope-rope ordering: advance cursors in parallel, comparing min(left_remaining, right_remaining) bytes at a time via memcmp. For cross-tier ordering: extract the non-rope side's bytes (max 128 bytes for flat, 7 for inline) and compare against rope cursor."
     },
     {
@@ -254,7 +254,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "Compiler string literal compilation is in src/compiler.c — search for jacl_inline_string and jacl_intern calls, replace with jacl_string_new(). OP_TO_STRING in vm.c converts values to string representations — update to use jacl_string_new() for the result so it gets NFD-normalized (numbers/booleans are ASCII so NFD is no-op, but consistency matters). Print in vm.c needs to handle rope strings — for a rope, either materialize to a temporary buffer via rope_to_str(r, buf, buflen) or iterate leaves printing each chunk. The GC tracing for OBJ_ROPE_STRING was added in US-004. Existing test files: test/test_string.c and test/jacl/strings.jacl — run them and fix any failures from the grapheme-length change."
     },
     {

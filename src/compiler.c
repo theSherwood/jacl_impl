@@ -5427,7 +5427,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
 
       if (seg_count == 0) {
         /* Empty interpolated string → empty string constant */
-        compiler__emit_constant(c, jacl_inline_string("", 0), line);
+        compiler__emit_constant(c, jacl_string_new(c->heap, c->intern_table, "", 0), line);
         c->last_expr_type = TYPE_STR;
         break;
       }
