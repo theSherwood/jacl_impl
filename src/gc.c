@@ -30,7 +30,9 @@ typedef enum {
     OBJ_PARALLEL_AGG,
     OBJ_RACE_AGG,
     OBJ_STRUCT,
-    OBJ_ROPE_STRING
+    OBJ_ROPE_STRING,
+    OBJ_ROPE_LEAF,
+    OBJ_ROPE_INTERNAL
 } GCObjType;
 
 /* --- GC object header (8 bytes, prepended before payload) ---

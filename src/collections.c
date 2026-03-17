@@ -41,6 +41,12 @@ static bool jacl_val_eq(JaclVal a, JaclVal b);
 #define HAMT_GC_OBJ_COLLISION  OBJ_HAMT_COLLISION
 #include "../lib/hamt/hamt.h"
 
+/* --- GC allocation defines for sum_tree (rope) template --- */
+
+#define STREE_GC_ALLOC(t, sz)    gc_alloc(gc__current_heap, (t), (sz))
+#define STREE_GC_OBJ_INTERNAL    OBJ_ROPE_INTERNAL
+#define STREE_GC_OBJ_LEAF        OBJ_ROPE_LEAF
+
 /* --- JaclVal hash function (dispatches on type tag) --- */
 
 static uint32_t jacl_val_hash(JaclVal v) {
