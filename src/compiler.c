@@ -2958,6 +2958,17 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* byte-length builtin */
+  if (compiler__head_matches(head, "byte-length", 11)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "byte-length", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_STR_BYTE_LEN, line);
+    return;
+  }
+
   /* index builtin */
   if (compiler__head_matches(head, "index", 5)) {
     if (argc != 2) {

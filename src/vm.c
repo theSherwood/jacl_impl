@@ -1419,6 +1419,20 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_STR_BYTE_LEN: {
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        if (jacl_is_error(val)) { result = vm__push(vm, val); if (result != VM_OK) return result; break; }
+        if (!jacl_is_string(val)) {
+          vm__set_error(vm, "type error in 'byte-length': expected string, got %s",
+                       vm__type_name(val));
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, jacl_i32((int32_t)jacl_string_byte_len(val)));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_STR_INDEX: {
         JaclVal idx_val, str_val;
         result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;

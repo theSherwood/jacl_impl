@@ -46,6 +46,7 @@ typedef enum {
   OP_POP_N,         /* discard N values: followed by uint8_t count */
   OP_CONCAT,        /* pop two strings, push concatenation */
   OP_STR_LEN,       /* pop string, push i32 length */
+  OP_STR_BYTE_LEN,  /* pop string, push i32 byte length */
   OP_STR_INDEX,     /* pop index + string, push char or nil */
   OP_STR_SLICE,     /* pop end + start + string, push substring */
   OP_TO_STRING,     /* pop value, push string representation */
@@ -308,6 +309,7 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_POP_N:           return "OP_POP_N";
     case OP_CONCAT:          return "OP_CONCAT";
     case OP_STR_LEN:         return "OP_STR_LEN";
+    case OP_STR_BYTE_LEN:   return "OP_STR_BYTE_LEN";
     case OP_STR_INDEX:       return "OP_STR_INDEX";
     case OP_STR_SLICE:       return "OP_STR_SLICE";
     case OP_TO_STRING:       return "OP_TO_STRING";

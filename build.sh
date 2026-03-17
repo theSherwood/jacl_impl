@@ -91,6 +91,7 @@ TESTS=(
     "test/test_rope_string.c|rope_string|"
     "test/test_utf8_nfd.c|utf8_nfd|"
     "test/test_string_new.c|string_new|"
+    "test/test_length_builtin.c|length_builtin|"
 )
 
 # Filter tests if --lib flag is set
