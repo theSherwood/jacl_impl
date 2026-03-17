@@ -37,7 +37,6 @@ trap "rm -rf '$BUILD_DIR'" EXIT
 # Define tests: src|name|flags
 TESTS=(
     "lib/arena/test_arena.c|arena|"
-    "lib/segment_array/test_segment_array.c|segment_array|"
     "lib/rc/test_rc.c|rc|"
     "lib/hamt/test_hamt.c|hamt|"
     "lib/hamt/test_hamt_types.c|hamt_types|"

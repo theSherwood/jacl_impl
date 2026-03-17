@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../test/test_helpers.h"
+#include "../../test/test_helpers.h"
 
 /* Wire up tracked allocator for both NFA and rope sum_tree */
 #define NFA_MALLOC(sz) tracked_malloc(sz)

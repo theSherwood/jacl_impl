@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../test/test_helpers.h"
+#include "../../test/test_helpers.h"
 #include "utf8.h"
 
 /* === utf8_codepoint_length === */

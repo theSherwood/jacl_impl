@@ -6,7 +6,7 @@
 #include <string.h>
 #include <time.h>
 
-#include "../test/test_helpers.h"
+#include "../../test/test_helpers.h"
 
 /* Wire up tracked allocator */
 #define NFA_MALLOC(sz) tracked_malloc(sz)
