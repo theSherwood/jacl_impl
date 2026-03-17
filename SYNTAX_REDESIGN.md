@@ -194,6 +194,7 @@ Between two `!cmd`s, `|` remains a real OS pipe (no conversion).
 #### Stderr
 
 The simple `!cmd` form already handles stderr:
+
 - On success: stderr prints to terminal
 - On failure: stderr becomes the error message
 
@@ -393,12 +394,12 @@ When `spawn` runs a block containing an external command, the returned future is
 
 A Future is a JACL async task. A Job is a Future with process-level capabilities:
 
-| | Future | Job |
-|---|--------|-----|
-| `await` | result value | `{str stdout, str stderr, i32 exit}` |
-| `cancel` | stops the task | kills the process |
-| `pid` | n/a | OS process ID |
-| `signal` | n/a | send OS signal |
+|          | Future         | Job                                  |
+| -------- | -------------- | ------------------------------------ |
+| `await`  | result value   | `{str stdout, str stderr, i32 exit}` |
+| `cancel` | stops the task | kills the process                    |
+| `pid`    | n/a            | OS process ID                        |
+| `signal` | n/a            | send OS signal                       |
 
 ```
 # Future — pure JACL computation
@@ -820,10 +821,10 @@ No special-casing of `$env` in the language — it's an atom with a listener, sa
 
 ### Built-in fields
 
-| Field | Type | Mutable | Description |
-|-------|------|---------|-------------|
-| `pwd` | `str` | yes | Working directory |
-| `env` | `[map str str]` | yes | Environment variables (relationship with `$env` atom TBD) |
+| Field | Type            | Mutable | Description                                               |
+| ----- | --------------- | ------- | --------------------------------------------------------- |
+| `pwd` | `str`           | yes     | Working directory                                         |
+| `env` | `[map str str]` | yes     | Environment variables (relationship with `$env` atom TBD) |
 
 ### Dynamic scoping
 
@@ -1007,11 +1008,11 @@ No operator precedence in `{}` — left to right, same as `()`.
 
 Three operators corresponding to the three binding commands:
 
-| Operator | Command | Meaning |
-|----------|---------|---------|
-| `=` | `def` | Immutable binding |
-| `:` | `mut` | Mutable binding |
-| `::` | `set` | Reassignment |
+| Operator | Command | Meaning           |
+| -------- | ------- | ----------------- |
+| `=`      | `def`   | Immutable binding |
+| `:`      | `mut`   | Mutable binding   |
+| `::`     | `set`   | Reassignment      |
 
 The command forms (`def`, `mut`, `set`) remain available. Operators are sugar:
 
@@ -1045,6 +1046,7 @@ Operators are a kind of macro. Users can define new operators using the same mec
 ### Prelude
 
 A prelude module is implicitly imported and pre-defines the core operators:
+
 - `|`, `&&`, `||` — command control flow
 - `=`, `:`, `::` — binding operators
 - `\` — lambda shorthand
@@ -1216,3 +1218,66 @@ The syntax is the same for both phases. Full parametric generics (type variables
 22. ~~**Splat into `!cmd`**~~ — resolved: `..` is a builtin parser symbol, `!cmd ..$args` spreads into separate args.
 23. **`signal` on plain Future** — Type error? Silently ignored? Probably a type error — only Jobs have a process to signal.
 24. **`$ctx` vs `$env` relationship** — Does `$ctx.env` subsume `$env`? Or does `$env` remain as the OS-synced atom while `$ctx.env` is the JACL-scoped view? If both exist, which does `!cmd` inherit?
+
+## Implementation status
+
+Features from this document compared against the current codebase (M0-M13 complete, syntax redesign merged, for-loop control flow merged).
+
+### Implemented
+
+| Feature | Notes |
+|---------|-------|
+| Three-mode delimiter system (`[]`, `{}`, `()`) | Full lexer/parser/compiler support |
+| Infix mode — no precedence, left-to-right | Smalltalk-style, unary prefix binds tighter |
+| Pipe threading (`\|` first-arg in command mode) | Multi-stage, composes with error short-circuit |
+| Binding operators (`=`, `:`, `::`) | Sugar for `def`, `mut`, `set` |
+| Arrow field access (`->`) | `$point->x`, chained, dynamic |
+| `proc` syntax (`{params} {body}`, type-before-name) | Closures, tail calls, recursion |
+| `struct` syntax (`struct Name {type field, ...}`) | C-ABI layout, typed fields |
+| `if`/`elif`/`else` | Expression-valued, composes with pipes |
+| `while` loops | With `break`/`continue` |
+| `for` — all 4 forms | C-style, collection+implicit, collection+explicit, HOF callback |
+| `break`, `continue`, `return` | Block bodies inlined, lambda bodies separate |
+| Lambda shorthand (`[\  ]` with `$it`) | Works in pipes and callbacks |
+| String interpolation (`$var`, `$[...]`, `$(...)`) | All three modes, nesting |
+| Line continuation (`\` at end of line) | Plus delimiter-based multi-line |
+| Comments (`#` single-line) | `##` doc comments by convention |
+| Error handling (error values, pipe short-circuit, `try`/`catch`) | `error`, `error?`, `error-val` |
+| Persistent collections (vectors, maps) | RRB-tree vectors, HAMT maps |
+| Mutable state (`box`, `atom`, `swap`, `reset`) | Thread-local boxes, CAS atoms |
+| Concurrency (`spawn`, `await`, `parallel`, `race`) | CPS transform, NxM scheduler |
+| Static type system (gradual typing) | Typed/unboxed values, compile-time checks |
+| GC | Epoch-based tracing, generational, non-moving |
+| `filter`, `transform` (HOF) | Eager on vectors |
+
+### Not yet implemented
+
+| Feature | Complexity | Dependencies | Notes |
+|---------|-----------|--------------|-------|
+| **Destructuring** (`def [a b] $v`, `def {x, y} $p`, `{..}`, `..rest`, `_`) | Large | None | Core language feature, used everywhere in spec |
+| **Match/case** (`match $val { pattern { body } ... }`) | Large | Benefits from destructuring | Literals, bindings, type patterns, guards, pipe composition |
+| **Splat/spread** (`..`) | Medium | Destructuring uses `..rest` | Tokens lexed (`TOKEN_DOTDOT`) but not compiled |
+| **Variadic procs** (`proc log {level, ..msgs}`) | Medium | Splat | `..` in param lists |
+| **Ranges** (`(1 ..< 10)`, `(1 ..= 10)`) | Medium | Streams (produce streams) | Infix operators in `()` mode |
+| **Streams** (lazy sequences) | Large | None | New value type, `collect`, lazy `for`/`filter`/`transform` |
+| **Shell interop** (`!cmd`, `exec`) | Large | Streams | `!` prefix, OS pipes, stdin/stdout, error mapping |
+| **Implicit context** (`$ctx`) | Large | Shell interop uses it | Dynamic scoping, `with-ctx`, user-extensible fields |
+| **Module system** (full) | Large | Partially started | `use` recognized; needs cache, circular detection, visibility enforcement |
+| **Module visibility** (underscore = private) | Small | Module system | Compiler enforcement at import boundaries |
+| **Callable values** (maps/atoms in `[]` head position) | Medium | None | `[$colors red]`, `[$config port]` |
+| **Atom listeners** (`watch`) | Medium | None | General-purpose watcher mechanism |
+| **`$env`** (atom of map, `with-env`, `$home`/`$pwd`/`$pid`) | Medium | Atom listeners, callable values | Bidirectional OS sync via listeners |
+| **Aliases** (`alias ll { !ls -la }`) | Small | Shell interop | Compile-time rewrite with arg appending |
+| **Typed collections** (`[vec Point]`, `[map str i64]`) | Medium | None | Type parameterization in type position |
+| **Multi-line strings** (`"""..."""`) | Small | None | Triple-quoted, Kotlin-style whitespace stripping |
+| **Pragmas** (`#{ path-fallback }`) | Small | None | File-level configuration |
+| **Optional chaining** (`$val ?. field`) | Small | None | Nil-safe access in `()` mode |
+| **Globbing** (`glob` command) | Medium | Streams, `$ctx` | Returns stream of paths |
+| **I/O commands** (`read-file`, `write-file`, `append-file`) | Medium | Streams | Pipe-friendly file I/O |
+| **Jobs** (future + OS process) | Medium | Shell interop, concurrency | `pid`, `signal`, `cancel`, `&` sugar |
+| **`par-each`** | Medium | Streams, concurrency | Concurrent stream processing |
+| **`timeout`** | Small | Concurrency | Sugar for `race` + sleep |
+| **Macro system** (`defmacro`) | Large | Module system | AST quasiquoting, hygiene |
+| **Operators as macros** / user-definable operators | Large | Macro system | Mode-specific overloading |
+| **Regular expressions** | Medium | None | Literal syntax TBD |
+| **Scoping: same-scope shadowing error** | Small | None | Compile-time check |
