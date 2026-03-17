@@ -1,10 +1,10 @@
 # expect: 42
 # spawn body calling a named suspending proc (US-003)
-proc slow [] {
+proc slow {} {
   def f [spawn { 42 }]
   await $f
 }
-proc main [] {
+proc main {} {
   def f [spawn { slow }]
   def r [await $f]
   print $r

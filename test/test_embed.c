@@ -1033,7 +1033,7 @@ static int test_call_closure(void) {
   ASSERT(vm != NULL);
 
   /* Define a proc, then get its closure value */
-  JaclVal def_r = jacl_eval(vm, "proc add2 [a b] { [+ $a $b] }");
+  JaclVal def_r = jacl_eval(vm, "proc add2 {a, b} { [+ $a $b] }");
   ASSERT(!jacl_is_error(def_r));
 
   JaclVal fn = jacl_eval(vm, "$add2");
@@ -1076,7 +1076,7 @@ static int test_call_named_proc(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  JaclVal def_r = jacl_eval(vm, "proc mul2 [a b] { [* $a $b] }");
+  JaclVal def_r = jacl_eval(vm, "proc mul2 {a, b} { [* $a $b] }");
   ASSERT(!jacl_is_error(def_r));
 
   JaclVal args[2] = { jacl_i32(6), jacl_i32(7) };
@@ -1093,7 +1093,7 @@ static int test_call_returns_error(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  JaclVal def_r = jacl_eval(vm, "proc divz [a] { [/ $a 0] }");
+  JaclVal def_r = jacl_eval(vm, "proc divz {a} { [/ $a 0] }");
   ASSERT(!jacl_is_error(def_r));
 
   JaclVal fn = jacl_eval(vm, "$divz");
@@ -1120,7 +1120,7 @@ static int test_call_reentrant(void) {
   ASSERT(vm != NULL);
 
   /* Define a JACL proc */
-  JaclVal def_r = jacl_eval(vm, "proc double [x] { [* $x 2] }");
+  JaclVal def_r = jacl_eval(vm, "proc double {x} { [* $x 2] }");
   ASSERT(!jacl_is_error(def_r));
 
   /* Register a native fn that will call the JACL proc */
@@ -1152,7 +1152,7 @@ static int test_call_wrong_arity(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  JaclVal def_r = jacl_eval(vm, "proc add2b [a b] { [+ $a $b] }");
+  JaclVal def_r = jacl_eval(vm, "proc add2b {a, b} { [+ $a $b] }");
   ASSERT(!jacl_is_error(def_r));
   JaclVal fn = jacl_eval(vm, "$add2b");
   ASSERT(!jacl_is_error(fn));
@@ -1180,7 +1180,7 @@ static int test_call_multiple(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  JaclVal def_r = jacl_eval(vm, "proc sq [n] { [* $n $n] }");
+  JaclVal def_r = jacl_eval(vm, "proc sq {n} { [* $n $n] }");
   ASSERT(!jacl_is_error(def_r));
 
   for (int i = 1; i <= 5; i++) {
@@ -1202,7 +1202,7 @@ static int test_struct_new_and_get(void) {
   ASSERT(vm != NULL);
 
   /* Define the struct type */
-  JaclVal def_r = jacl_eval(vm, "defstruct Point [x :i32] [y :i32]");
+  JaclVal def_r = jacl_eval(vm, "struct Point {i32 x, i32 y}");
   ASSERT(!jacl_is_error(def_r));
 
   /* Create a struct from C */
@@ -1233,7 +1233,7 @@ static int test_struct_set_and_read_from_jacl(void) {
 
   /* Define struct and create instance in JACL */
   JaclVal def_r = jacl_eval(vm,
-    "defstruct Box [v :i32]\n"
+    "struct Box {i32 v}\n"
     "def b [Box 5]");
   ASSERT(!jacl_is_error(def_r));
 
@@ -1252,7 +1252,7 @@ static int test_struct_set_and_read_from_jacl(void) {
   ASSERT_INT_EQ(jacl_as_i32(v), 99);
 
   /* Verify from JACL via dynamic field access */
-  JaclVal r = jacl_eval(vm, "[. $b v]");
+  JaclVal r = jacl_eval(vm, "$b->v");
   ASSERT(!jacl_is_error(r));
   ASSERT_INT_EQ(jacl_as_i32(r), 99);
 
@@ -1265,7 +1265,7 @@ static int test_struct_set_type_mismatch(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  JaclVal def_r = jacl_eval(vm, "defstruct Pt2 [x :i32] [y :i32]");
+  JaclVal def_r = jacl_eval(vm, "struct Pt2 {i32 x, i32 y}");
   ASSERT(!jacl_is_error(def_r));
 
   JaclVal fields[2] = { jacl_i32(1), jacl_i32(2) };
@@ -1291,7 +1291,7 @@ static int test_struct_type_name(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  JaclVal def_r = jacl_eval(vm, "defstruct Vec2 [x :f32] [y :f32]");
+  JaclVal def_r = jacl_eval(vm, "struct Vec2 {f32 x, f32 y}");
   ASSERT(!jacl_is_error(def_r));
 
   JaclVal fields[2] = { jacl_f32(1.0f), jacl_f32(2.0f) };
@@ -1324,7 +1324,7 @@ static int test_struct_new_wrong_count(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  JaclVal def_r = jacl_eval(vm, "defstruct Pair [a :i32] [b :i32]");
+  JaclVal def_r = jacl_eval(vm, "struct Pair {i32 a, i32 b}");
   ASSERT(!jacl_is_error(def_r));
 
   /* Pass wrong count (1 instead of 2) */
@@ -1342,7 +1342,7 @@ static int test_struct_registry_persists(void) {
   ASSERT(vm != NULL);
 
   /* Define struct in eval 1 */
-  JaclVal def_r = jacl_eval(vm, "defstruct Cnt [n :i32]");
+  JaclVal def_r = jacl_eval(vm, "struct Cnt {i32 n}");
   ASSERT(!jacl_is_error(def_r));
 
   /* Create from C using persistent registry */
@@ -1398,7 +1398,7 @@ static int test_has_trampolines(void) {
 static int test_trampoline_null_without_libffi(void) {
 #ifndef JACL_HAS_LIBFFI
   JaclVM* vm = jacl_vm_new();
-  jacl_eval(vm, "proc add [a b] { [+ $a $b] }");
+  jacl_eval(vm, "proc add {a, b} { [+ $a $b] }");
   JaclVal cl = jacl_eval(vm, "$add");
   JaclTrampoline* t = jacl_trampoline_new_val(vm, cl, "i32(i32,i32)");
   ASSERT(t == NULL);
@@ -1436,7 +1436,7 @@ static int test_trampoline_vm_free_no_trampolines(void) {
 /* Test: basic i32(i32,i32) trampoline */
 static int test_trampoline_i32_add(void) {
   JaclVM* vm = jacl_vm_new();
-  jacl_eval(vm, "proc add [a b] { [+ $a $b] }");
+  jacl_eval(vm, "proc add {a, b} { [+ $a $b] }");
   JaclVal cl = jacl_eval(vm, "$add");
   ASSERT(jacl_is_closure(cl));
 
@@ -1462,7 +1462,7 @@ static int test_trampoline_i32_add(void) {
 /* Test: void() trampoline */
 static int test_trampoline_void_no_args(void) {
   JaclVM* vm = jacl_vm_new();
-  jacl_eval(vm, "proc noop [] { nil }");
+  jacl_eval(vm, "proc noop {} { nil }");
   JaclVal cl = jacl_eval(vm, "$noop");
 
   JaclTrampoline* t = jacl_trampoline_new_val(vm, cl, "void()");
@@ -1482,7 +1482,7 @@ static int test_trampoline_void_no_args(void) {
 /* Test: multiple trampolines — vm_free cleans all */
 static int test_trampoline_vm_free_cleans_all(void) {
   JaclVM* vm = jacl_vm_new();
-  jacl_eval(vm, "proc id [x] { $x }");
+  jacl_eval(vm, "proc id {x} { $x }");
   JaclVal cl = jacl_eval(vm, "$id");
 
   JaclTrampoline* t1 = jacl_trampoline_new_val(vm, cl, "i32(i32)");
@@ -1498,7 +1498,7 @@ static int test_trampoline_vm_free_cleans_all(void) {
 /* Test: invalid signature returns NULL */
 static int test_trampoline_invalid_sig(void) {
   JaclVM* vm = jacl_vm_new();
-  jacl_eval(vm, "proc f [x] { $x }");
+  jacl_eval(vm, "proc f {x} { $x }");
   JaclVal cl = jacl_eval(vm, "$f");
 
   ASSERT(jacl_trampoline_new_val(vm, cl, "xyz(i32)")  == NULL); /* bad ret */
@@ -1524,7 +1524,7 @@ static int test_trampoline_non_closure(void) {
 /* Test: explicit trampoline_free removes from VM list */
 static int test_trampoline_explicit_free(void) {
   JaclVM* vm = jacl_vm_new();
-  jacl_eval(vm, "proc dbl [x] { [* $x 2] }");
+  jacl_eval(vm, "proc dbl {x} { [* $x 2] }");
   JaclVal cl = jacl_eval(vm, "$dbl");
 
   JaclTrampoline* t = jacl_trampoline_new_val(vm, cl, "i32(i32)");

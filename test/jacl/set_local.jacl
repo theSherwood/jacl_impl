@@ -1,12 +1,12 @@
 # expect: 42
 # expect: 15
-# set! on mutable locals
-proc t-set [] {
+# set on mutable locals
+proc t-set {} {
   mut x 0
-  set! x 42
+  set x 42
   print [+ $x 0]
   mut y 10
-  set! y [+ $y 5]
+  set y [+ $y 5]
   print [+ $y 0]
 }
 [t-set]

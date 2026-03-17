@@ -5,7 +5,7 @@
 def x 42
 print [+ $x 0]
 # $var as command call
-proc get42 [] { 42 }
+proc get42 {} { 42 }
 def f $get42
 print [$f]
 # reassignment via def

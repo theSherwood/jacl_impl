@@ -91,7 +91,7 @@ for i in $(seq 1 "$MAX_ITERATIONS"); do
   # and capture to temp file for completion signal detection.
   # --verbose: shows tool calls, tool results, and thinking blocks
   CLAUDE_EXIT=0
-  claude --dangerously-skip-permissions --verbose < "$SCRIPT_DIR/prompt.md" 2>&1 \
+  claude --dangerously-skip-permissions --effort high --model claude-opus-4-6 < "$SCRIPT_DIR/prompt.md" 2>&1 \
     | tee "$TMPFILE" \
     || CLAUDE_EXIT=$?
 

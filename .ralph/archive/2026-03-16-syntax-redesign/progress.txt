@@ -1,0 +1,388 @@
+# Ralph Progress Log
+Started: Sun Mar 15 00:51:19 UTC 2026
+---
+
+## Codebase Patterns
+- lexer.c, parser.c, compiler.c are all #included into jacl.c (unity build) — no separate compilation
+- Test files include "../src/jacl.c" directly, giving them access to all internal types
+- TOKEN_WORD is used for command heads and args; keyword tokens (TOKEN_DEF, TOKEN_IF, etc.) must be added to parser__parse_atom() and parser__parse_expr() switch to remain usable as atoms
+- When `struct` keyword was TOKEN_WORD, inline struct type parsing searched for TOKEN_WORD "struct"; now must check TOKEN_STRUCT too
+- TOKEN_OPERATOR is still used for compound operators (==, !=, <=, >=, +, -, *, /, etc.); single-char operators now have specific token types
+- Words with ! suffix (like set!, reset!) are still TOKEN_WORD because lexer__is_word_char includes !
+- defstruct keyword is removed; only struct is recognized as TOKEN_STRUCT
+- Old syntax (set!/reset!/swap!, each, [. $s f], [proc ...], defstruct) is fully removed — produces parse/compile errors
+- [. $s field val] struct mutation must use bare command form `. $s field val` (bracket [. ...] rejected)
+- Bare-command if requires explicit `else` keyword: `if cond { then } else { else }` (no implicit bare-block else)
+- pre-existing failures: rdoc, nfa_rdoc, nfa_cross (double-free in lib/ tests, unrelated to JACL language)
+- () is now infix mode: parser__parse_infix parses left-to-right with no precedence; nested () for explicit grouping
+- For adding new expression forms, add dispatch in parser__parse_expr AND in parser__parse_infix_operand (for use inside ())
+- New keyword-based syntax forms (proc, struct, if, etc.) need lookahead in parser__parse_bare_command to detect new vs old syntax
+- New proc syntax uses TWO {} blocks ({params} {body}); distinguish from old syntax (ONE {} block) by scanning for matching } then checking for second {
+- parser__parse_proc_params builds flat AST_COMMAND from comma-separated {type name, type name} — same shape as old [type name type name] params
+- New struct syntax uses ONE {} block ({type name, ...}); detect by checking TOKEN_LBRACE after struct name; old defstruct uses [name :type]
+- New struct syntax is type-before-name: {i32 x, i32 y}; old syntax is name-colon-type: [x :i32] [y :i32]
+- Both struct syntaxes produce identical AST_DEFSTRUCT — no compiler changes needed
+- New control flow (if/while) in bare command mode: detect TOKEN_IF/TOKEN_WHILE + !parser__is_command_end, delegate to parser__parse_if_form/parser__parse_while_form
+- elif desugars to nested if/else wrapped in AST_BLOCK — compiler never sees elif
+- `for` uses default bare command parsing (no custom parse function needed) — compiler distinguishes forms by arg count/type
+- Block-form iteration (for collection { body }) creates implicit closures at compile time using sub-compiler pattern, then emits OP_EACH
+- When renaming builtins, update both compiler__compile_command AND ast analysis functions (e.g., ast__contains_nonlocal_set_impl)
+- Binding operators (=, :, ::) desugar in parser__parse_bare_command — no compiler changes needed; only active for TOKEN_WORD heads in command mode
+- Arrow field access (->): postfix operator handled in parser__maybe_arrow_access, called from parser__parse_expr and parser__parse_infix_operand
+- Lexer word/var scanning must use lexer__is_word_char_no_arrow() to stop before -> (since - is a valid word char)
+- Proc names must be ≤7 bytes due to inline string limit — use short names in tests
+- Pipe threading (|) is pure parser transform: parser__parse_piped_command wraps parser__parse_bare_command and chains pipes
+- TOKEN_PIPE added to parser__is_command_end so commands terminate before |; pipes only work in command mode ({} and top-level), not inside []
+- Inside [] brackets, | is still parsed as literal string "|" (no pipe semantics) — arg collection loop terminates on RBRACKET, not is_command_end
+- Lambda shorthand [\\ body] desugars in parser__parse_command: detect TOKEN_BACKSLASH after [, wrap body in [proc "" [it] {body}]
+- Anonymous proc (empty name, length 0) skips name binding in compiler — closure stays on stack as expression value
+- `each` argument order is `each collection callback` (NOT callback first) — same as OP_EACH stack order
+- $() in strings: lexer emits TOKEN_DOLLAR_PAREN, lex_interp_infix lexes inner tokens; parser uses parse_infix_operand loop until TOKEN_RPAREN
+- TOKEN_DOLLAR_BRACKET in parse_infix_operand: needed for $[cmd] inside $() — different from INTERP_EXPR_START used in string-level $[]
+
+## 2026-03-15 - US-001
+Thread: n/a
+- Added 28 new token types to TokenType enum in lexer.c (new operator tokens + keyword tokens)
+- Replaced TOKEN_DEFSTRUCT with TOKEN_STRUCT (defstruct keyword still emits TOKEN_STRUCT for compat)
+- Changed operator scanning to emit specific tokens for |, ||, &, &&, ~, =, ==, :, ::, !, !=, ->..
+- Changed backslash handling: non-continuation \ now emits TOKEN_BACKSLASH
+- Added TOKEN_DOLLAR_PAREN for $( in main loop and string interpolation
+- Added keyword recognition for: proc, if, elif, else, while, for, def, mut, set, match, return, break, continue, try, struct
+- Updated parser.c to handle all new token types as atoms (backward compat during transition)
+- Updated parser.c colon handling to accept TOKEN_COLON (in 2 defstruct field parsing locations)
+- Updated parser.c inline struct type check to accept TOKEN_STRUCT (in 2 locations)
+- Rewrote test_lexer.c with 46 new tests for new token types (152 total, all pass)
+- Files changed: src/lexer.c, src/parser.c, test/test_lexer.c
+- **Learnings for future iterations:**
+  - When adding new keyword tokens, must update parser__parse_atom AND parser__parse_expr switch tables
+  - Parser checks for "struct" word by text comparison — must update to also accept TOKEN_STRUCT
+  - Keyword tokens still work as command heads/args because parser__parse_atom maps them to AST_LIT_STRING
+  - The inline struct type parser (parser__parse_inline_struct_type) just advances past whatever token it's on
+---
+
+## 2026-03-15 - US-002
+Thread: n/a
+- Added parser__parse_infix() for () infix mode — left-to-right, no precedence
+- Added parser__parse_infix_operand() for unary prefix handling (- → neg, ~ → not)
+- Added parser__sync_paren() for error recovery in infix mode
+- Added parser__is_infix_binary_op() helper — TOKEN_OPERATOR, TOKEN_AND, TOKEN_OR
+- Added TOKEN_LPAREN dispatch in parser__parse_expr()
+- Operator name mapping: && → "and", || → "or", unary - → "neg", ~ → "not"
+- 20 new parser tests covering all infix patterns (118 total, all pass)
+- Files changed: src/parser.c, test/test_parser.c
+- **Learnings for future iterations:**
+  - Infix operands (parser__parse_infix_operand) must NOT include TOKEN_OPERATOR in primary dispatch — operators are only handled as unary prefix or binary infix
+  - Unary prefix is recursive: (- - $x) correctly produces [neg [neg $x]]
+  - () for grouping returns the inner value directly; binary ops produce AST_COMMAND
+  - Infix mode works inside [], {}, and bare commands — parser__parse_expr dispatches TOKEN_LPAREN
+  - TOKEN_OPERATOR covers +, -, *, /, %, ==, !=, <, >, <=, >= (compound operators)
+  - TOKEN_AND (&&) and TOKEN_OR (||) are separate token types with their own infix handling
+---
+
+## 2026-03-16 - US-003
+Thread: n/a
+- Added parser__parse_proc_params() — parses {type name, type name, ...} into flat AST_COMMAND (same shape as [type name type name])
+- Added parser__parse_proc_form() — handles `proc [type] name {params} {body}` in bare command context
+- Modified parser__parse_bare_command() with lookahead to detect new proc syntax (requires TWO {} blocks)
+- Lookahead scans for matching } of first brace, then checks for second { — distinguishes new syntax from old `proc name { body }` pattern
+- No changes to compiler.c — new syntax produces identical AST shape that compiler already expects
+- 10 new parser tests: basic, typed params, zero params, untyped, old syntax compat, in-block, multiline, mixed typed/untyped, single param, one-block fallback
+- 6 new compiler tests: basic call, typed return+params, zero params, multi-stmt body, closure capture, implicit return
+- All 128 parser tests pass, all 172 compiler tests pass, full build suite passes (only pre-existing lib/ failures)
+- Files changed: src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - New syntax forms at bare command level need TWO-brace lookahead pattern to distinguish from old syntax
+  - parser__parse_proc_params flattens comma-separated params into a single AST_COMMAND where head=first_elem, args=rest — compiler walks this as interleaved type/name pairs
+  - Empty params {} produce AST_COMMAND with empty-string head and 0 args (same as old [])
+  - No compiler changes needed — parser produces identical AST_COMMAND structure the compiler already handles
+  - Block-wrapped proc tests can have subtle issues with block-expression evaluation; test top-level proc + call pattern instead
+---
+
+## 2026-03-16 - US-004
+Thread: n/a
+- Modified parser__parse_defstruct() to detect TOKEN_LBRACE after struct name → new syntax path
+- New syntax: struct Name {type name, type name, ...} with comma-separated type-before-name fields
+- Old syntax: defstruct Name [name :type] [name :type] — preserved in else branch
+- Both paths produce identical AST_DEFSTRUCT nodes — no compiler changes needed
+- Handles inline struct types in new syntax via parser__parse_inline_struct_type
+- 8 new parser tests: basic, mixed types, single field, old compat, duplicate field, empty error, struct-type field, multiline
+- 6 new compiler tests: basic compile, runtime construct+access, all types, nested structs, construct+field access, duplicate field error
+- All 136 parser tests pass, all 178 compiler tests pass, full build suite passes (only pre-existing lib/ failures)
+- Files changed: src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - New struct syntax needs only ONE {} block (vs proc's TWO); simpler detection — just check TOKEN_LBRACE after name
+  - No compiler changes needed for syntax changes that produce the same AST shape
+  - Type-before-name field parsing is simpler than name-colon-type — just two consecutive words
+  - The parser__parse_defstruct function handles both syntaxes via if/else on TOKEN_LBRACE vs TOKEN_LBRACKET
+---
+
+## 2026-03-16 - US-005
+Thread: n/a
+- Added parser__parse_if_form() — parses if/elif/else with block bodies, elif desugars to nested if/else
+- Added parser__parse_while_form() — parses while condition { body }
+- Added detection in parser__parse_bare_command() for TOKEN_IF and TOKEN_WHILE followed by expressions
+- Conditions can be any expression: $var, (infix), [command] — all dispatched via parser__parse_expr
+- Newlines skipped between } and elif/else to support multiline if chains
+- No compiler changes needed — parser produces same AST_COMMAND shape with AST_BLOCK args that compiler already expects
+- 14 new parser tests: basic if, if/else, elif/else, elif chains, infix condition, command condition, multiline, nested, old compat, elif-no-else, while basic, while infix, while multiline, while old compat
+- 12 new compiler tests: if then, if else, no-else nil, infix condition, elif, elif-else, elif chain, if-as-expression, while iterative sum, while infix, while returns nil, combined if+while
+- All 150 parser tests pass, all 190 compiler tests pass, all 15 JACL test suites pass (only pre-existing lib/ failures)
+- Files changed: src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - New control flow forms (if, while) at bare command level just need TOKEN_IF/TOKEN_WHILE check + !parser__is_command_end
+  - No compiler changes needed — producing AST_COMMAND with head="if"/"while" and AST_BLOCK args matches existing compiler expectations
+  - elif desugars to nested if wrapped in AST_BLOCK: [if cond1 {then1} {[if cond2 {then2} {else}]}]
+  - Newline skipping between } and elif/else is critical for multiline if chains
+  - Old bracket-form [if cond then else] still works because it goes through parser__parse_command, not parser__parse_bare_command
+---
+
+## 2026-03-16 - US-006
+Thread: n/a
+- Implemented `for` command replacing `each` with three forms:
+  - `for $items { body }` — implicit $it binding (creates implicit closure with param "it")
+  - `for $items name { body }` — explicit binding variable (creates implicit closure with named param)
+  - `for $items $callback` — HOF callback form (same as each, uses OP_EACH)
+- Added compiler handling in compiler__compile_command: detects `for` head, distinguishes forms by arg count and types
+- Block forms create implicit JaclClosure with 1 param, compile block body with sub-compiler, emit OP_CLOSURE + OP_EACH
+- HOF form delegates to compiler__compile_hof_builtin with OP_EACH opcode
+- `each` still works unchanged as alias during transition
+- No parser changes needed — default bare command parsing handles all for forms correctly
+- 4 new parser tests: implicit $it, explicit binding, HOF form, inline collection
+- 8 new compiler tests: implicit $it, explicit binding, HOF callback, empty vec, variable collection, returns nil, upvalue capture, each-still-works
+- All 154 parser tests pass, all 198 compiler tests pass, all 50 build suites pass (0 failures)
+- Files changed: src/compiler.c, test/test_compiler.c, test/test_parser.c
+- **Learnings for future iterations:**
+  - `for` didn't need a custom parser function — default parser__parse_bare_command collects args correctly since TOKEN_LBRACE is handled by parser__parse_expr as AST_BLOCK
+  - Block forms of `for` create implicit closures at compile time: allocate JaclClosure, create sub-compiler, add binding param as local, compile body, emit OP_CLOSURE + OP_EACH
+  - The sub-compiler pattern (Compiler body_compiler with enclosing = c) is reusable for any construct that needs implicit closures
+  - Upvalue capture works automatically — sub-compiler's enclosing pointer enables upvalue resolution
+  - No new opcodes needed — reuses OP_EACH for all forms
+  - str-cat is not a valid builtin; use string interpolation or arithmetic for test values
+---
+
+## 2026-03-16 - US-007
+Thread: n/a
+- Added `set`/`reset`/`swap` as aliases for `set!`/`reset!`/`swap!` in compiler.c
+- Updated compiler__head_matches checks to accept both old and new names
+- Updated ast__contains_nonlocal_set_impl to detect `set` (without bang) for concurrent pinning analysis
+- Error messages now use bang-less names (e.g., "set" instead of "set!")
+- Updated 3 arity tests in test_m10.c to match new error message format
+- Added 8 new compiler tests: set/set! local, reset/reset! atom, swap/swap! atom, set global, set multiple reassign
+- All 50 build suites pass (0 failures), 206 compiler tests pass
+- Files changed: src/compiler.c, test/test_compiler.c, test/test_m10.c
+- **Learnings for future iterations:**
+  - Renaming builtins requires updating both the compilation path AND the ast analysis functions (ast__contains_nonlocal_set_impl)
+  - Error message strings in tests must be updated when error messages change — check test_m10.c arity tests
+  - TOKEN_SET keyword maps to AST_LIT_STRING "set" in parser — no special handling needed for the keyword/builtin name overlap
+  - `set!` is still TOKEN_WORD (lexer__is_word_char includes !), while `set` is TOKEN_SET keyword — both produce AST_LIT_STRING
+---
+
+## 2026-03-16 - US-008
+Thread: n/a
+- Added binding operator desugaring in parser__parse_bare_command:
+  - `x = 5` → `[def x 5]`, `i64 x = 5` → `[def i64 x 5]` (TOKEN_EQUALS)
+  - `x : 0` → `[mut x 0]`, `i64 x : 0` → `[mut i64 x 0]` (TOKEN_COLON)
+  - `x :: val` → `[set x val]` (TOKEN_DOUBLE_COLON)
+- Untyped form: detect TOKEN_EQUALS/COLON/DOUBLE_COLON after word head
+- Typed form: detect word + word + TOKEN_EQUALS/COLON (lookahead p->pos+1)
+- Only triggers when head_token_type == TOKEN_WORD (not inside [] or ())
+- No compiler changes needed — desugaring produces same AST as def/mut/set commands
+- 9 new parser tests: equals→def, typed equals, colon→mut, typed colon, double-colon→set, in-block, def-cmd-still-works, expr-value, not-in-brackets
+- 8 new compiler tests: equals def, typed equals, colon mut, typed colon, double-colon set, mixed with commands, in-block, expr values
+- All 163 parser tests pass, all 214 compiler tests pass, all 50 build suites pass (0 failures)
+- Files changed: src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Binding operators are pure parser sugar — detect token type after head, rewrite to AST_COMMAND with def/mut/set head
+  - Typed bindings need 2-token lookahead: check p->tokens[p->pos + 1] for the operator token
+  - Only TOKEN_WORD heads trigger binding detection — keyword tokens (TOKEN_DEF, TOKEN_MUT, TOKEN_SET) skip it, so `def x 5` still works normally
+  - Binding operators naturally don't work in [] or () because parser__parse_bare_command is only called from block and top-level parsing
+---
+
+## 2026-03-16 - US-009
+Thread: n/a
+- Added parser__maybe_arrow_access() — postfix arrow field access that wraps expr->field as [. expr field]
+- Called from parser__parse_expr() and parser__parse_infix_operand() for universal support across all three modes
+- Removed TOKEN_ARROW from atom dispatch lists (no longer a standalone value)
+- Modified lexer word/var scanning to stop before -> sequences (lexer__is_word_char_no_arrow helper)
+- Updated 5 lexer scanning loops: new-path word (1009), new-path var (1211), old-path word (841), old-path var (878), string interp var (662)
+- No compiler changes needed — parser produces [. expr field] AST_COMMAND that compiler already handles
+- 6 new parser tests: basic, chained, on-command, in-infix, in-bracket-cmd, old-dot-compat
+- 6 new compiler tests: basic-get, chained-get, on-expr-result, in-infix-mode, in-bracket-cmd, old-dot-compat
+- All 169 parser tests pass, all 220 compiler tests pass, all 50 build suites pass (0 failures)
+- Files changed: src/lexer.c, src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Postfix operators (like ->) need handling in BOTH parser__parse_expr AND parser__parse_infix_operand to work in all three modes
+  - The lexer's word/var char set includes - (hyphen), so -> must be special-cased to stop word scanning before the arrow
+  - lexer__is_word_char_no_arrow checks current char + next char to detect -> boundary
+  - All 5 word/var scanning loops (old-path + new-path + string interp) must be updated for consistent behavior
+  - Proc name inline string limit is 7 bytes — use short names in tests (mkpt not make-point)
+  - Arrow desugaring is pure parser transform: $p->x → [. $p x], no compiler changes needed
+---
+
+## 2026-03-16 - US-010
+Thread: n/a
+- Added parser__parse_piped_command() — wraps parser__parse_bare_command with pipe chaining
+- Added TOKEN_PIPE to parser__is_command_end so commands terminate before |
+- Pipe desugars as first-arg threading: foo $a | bar $b → [bar [foo $a] $b]
+- Multi-stage pipes chain left-to-right: a | b | c → [c [b [a]]]
+- Handles both AST_COMMAND right sides (insert left as first arg) and non-command right sides (wrap as call)
+- Updated parser__parse_block and parser_parse to call parse_piped_command instead of parse_bare_command
+- Pipes only work in command mode ({} and top-level); inside [] brackets, | remains a literal string
+- No compiler changes needed — pipe desugaring produces nested AST_COMMAND nodes
+- 6 new parser tests: basic, multi-stage, with-args, in-block, zero-arg-right, literal-in-brackets
+- 6 new compiler tests: basic, multi-stage, with-builtins, in-block, with-vars, in-proc-body
+- All 175 parser tests pass, all 226 compiler tests pass, all 50 build suites pass (0 failures)
+- Files changed: src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Pipe is pure parser transform — no compiler changes needed, just nested AST_COMMAND
+  - TOKEN_PIPE in parser__is_command_end means commands terminate before | in bare command mode
+  - Inside [] brackets, | is still parsed as literal string — arg collection uses RBRACKET not is_command_end
+  - Pipe desugaring wraps parse_bare_command, so pipes compose with all existing command forms (if, while, proc, binding ops)
+  - Newlines after | are skipped for multi-line pipe chains
+  - Cannot use pipe inside [] brackets — tests that want pipe results in binding must use proc body or top-level pipe
+---
+
+## 2026-03-16 - US-011
+Thread: n/a
+- Added lambda shorthand `[\\ body...]` in parser__parse_command — detects TOKEN_BACKSLASH after [
+- Lambda desugars to [proc "" [it] {body}] — anonymous proc with implicit $it parameter
+- Body parsed as command (head + args) inside brackets, wrapped in AST_BLOCK
+- Added anonymous proc support in compiler: proc with empty name (length 0) skips name binding, leaves closure on stack
+- No new opcodes — reuses existing proc/closure compilation and OP_CLOSURE
+- 6 new parser tests: basic, as-callback, single-arg, nested-bracket, in-pipe, no-args
+- 6 new compiler tests: basic-call, arithmetic, each-compat, upvalue-capture, as-value, in-pipe
+- All 181 parser tests pass, all 232 compiler tests pass, all 50 build suites pass (0 failures)
+- Files changed: src/parser.c, src/compiler.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Lambda is pure parser transform — detect `\` after `[`, parse remaining as body, wrap in proc AST
+  - Anonymous proc (empty name length 0) in compiler: after OP_CLOSURE + upvalues, just return — closure is expression value
+  - `each` argument order is `each collection callback` — collection first, callback second (matches OP_EACH stack order)
+  - Analysis functions (suspension, mutation, etc.) handle anonymous procs correctly — they skip proc bodies by checking head="proc"
+  - Lambda body is a single command (head + args), not a block of commands — for multi-statement lambdas, use a proc
+---
+
+## 2026-03-16 - US-012
+Thread: n/a
+- Added `lexer__lex_interp_infix()` function in lexer.c — lexes tokens inside $(...) in strings, tracking paren depth
+- Modified `lexer__lex_string_body()` to call `lexer__lex_interp_infix` after emitting TOKEN_DOLLAR_PAREN for $(
+- Added TOKEN_DOLLAR_PAREN handling in `parser__parse_interp_string` — calls parser__parse_infix_operand for left, loops binary ops until TOKEN_RPAREN
+- Added TOKEN_DOLLAR_BRACKET handling in `parser__parse_infix_operand` — so $[cmd args] works inside $() infix context
+- Line continuation (\ at end of line) was already handled by lexer from US-001
+- Blank lines (multiple newlines) already correctly produce no empty commands (parser skips TOKEN_NEWLINE)
+- 7 new parser tests: dollar-paren-basic, vars, bracket-nested, single-value, existing-interp, line-continuation, blank-lines
+- 6 new compiler tests: basic, vars, nested-$[], existing-interp, line-continuation, blank-lines
+- All 188 parser tests pass, all 238 compiler tests pass, all 50 build suites pass (0 failures)
+- Files changed: src/lexer.c, src/parser.c, test/test_parser.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - $() in strings reuses infix parsing logic but without consuming LPAREN — parser sees TOKEN_DOLLAR_PAREN then parses infix operands/ops until TOKEN_RPAREN
+  - TOKEN_DOLLAR_BRACKET inside $() context needs explicit handling in parser__parse_infix_operand — lexer emits it differently than inside strings (TOKEN_INTERP_EXPR_START)
+  - Lexer's lex_interp_infix handles nested parens, $var, $[...], operators, words/ints/floats — similar to lex_interp_expr but for paren delimiters
+  - No compiler changes needed — $(expr) produces same AST_COMMAND nodes as regular infix, and interp string compilation handles them uniformly
+---
+
+## 2026-03-16 - US-013
+Thread: n/a
+- Verified test_lexer.c has no TOKEN_DEFSTRUCT references and covers all new token types (152 tests)
+- Verified test_parser.c already covers all three modes ([], {}, ()) and new syntax features from US-001 through US-012
+- Added 8 roundtrip tests for new syntax: binding ops, pipe, lambda, arrow, $(expr), new proc/struct/if/while syntax
+- Added 6 cross-mode nesting tests: block+infix, block+bracket, infix+bracket, all-three-modes, pipe+lambda, arrow+infix+block
+- Old syntax remains only in explicit backward-compatibility tests (proc_old_syntax_still_works, struct_old_syntax_compat, if/while_old_bracket_compat)
+- All 202 parser tests pass, all 152 lexer tests pass, all 50 build suites pass (0 failures)
+- Files changed: test/test_parser.c
+- **Learnings for future iterations:**
+  - Roundtrip tests verify parse→pretty-print→reparse→pretty-print stability; desugared forms (binding→def, pipe→nested cmd) are what roundtrip preserves
+  - Block data member is `data.block.commands[]`, not `stmts`
+  - Cross-mode nesting tests are valuable for verifying parser dispatch chains work end-to-end
+---
+
+## 2026-03-16 - US-014
+Thread: n/a
+- Rewrote test_compiler.c: ~120 lines changed — [def x val] → x = val, [proc name [params] {body}] → proc name {params} {body}, [mut x val] → x : val, [set! x val] → x :: val, [each ...] → [for ...]
+- Rewrote test_m4.c: ~21 lines changed — same patterns as test_compiler.c
+- Rewrote test_m6.c: ~5 lines changed — proc param syntax, def → =, proc [] → proc {}
+- Used Python script for bulk transformation of common patterns, then manual fixup of nested proc definitions and edge cases
+- Error test `def 42 10` (non-string name) needed special handling: `42 = 10` doesn't trigger same error since `=` only works with TOKEN_WORD heads; used bare `def 42 10` instead
+- All 238 compiler tests pass, all test_m4 and test_m6 tests pass, all 50 build suites pass (0 failures)
+- Files changed: test/test_compiler.c, test/test_m4.c, test/test_m6.c
+- **Learnings for future iterations:**
+  - `=` binding op only activates for TOKEN_WORD heads in bare command mode — `42 = 10` becomes [42 = 10], not [def 42 10]
+  - Nested proc definitions in multi-line C strings need manual cleanup after bulk script transforms
+  - set! still works in compiler (backward compat) but tests should use :: or bare `set` for new syntax
+  - each still works as builtin alias — backward compat tests can keep it
+---
+
+## 2026-03-16 - US-015
+Thread: n/a
+- test_vm.c: already had no old-syntax patterns (0 changes needed)
+- test_m9.c: updated 14 proc definitions from `proc name [] {` to `proc name {} {`
+- test_m10.c: ~80 changes — proc params [] → {}, [set! x val] → x :: val or [set x val], [reset! $b val] → [reset $b val], [swap! $b $f] → [swap $b $f], [def x val] → x = val, [mut x val] → x : val
+- Fixed 2 broken tests: `def r [mut x 42]` and `def r [set! x 42]` capture return values of mut/set; script incorrectly converted these to binding ops (which don't return values in the same way); fixed to `r = [mut x 42]` and `r = [set x 42]`
+- Error message strings kept `reset!:`/`swap!:` to match actual VM error output (vm.c still uses bang names in messages)
+- All 58 test_m10 tests pass, all test_m9 tests pass, all 50 build suites pass (0 failures)
+- Files changed: test/test_m9.c, test/test_m10.c
+- **Learnings for future iterations:**
+  - When converting `[def r [mut x val]]` to new syntax, the nested `[mut x val]` must stay in brackets to capture its return value; `x : val` as a binding statement doesn't produce a value to capture
+  - replace_all with `[set! ` → `[set` (missing trailing space) causes character-level merge bugs — always verify spacing in replacements
+  - VM error messages still use `set!`/`reset!`/`swap!` names — don't update error string assertions
+---
+
+## 2026-03-16 - US-016
+Thread: n/a
+- test_m11.c: updated proc params `[]` → `{}`, `[set!` → `[set`, typed params `[i64 n label]` → `{i64 n, label}`
+- test_collections.c: `[each ...` → `[for ...`, proc params updated; kept `[each [vec 1]]` in arity error test (different error path than `[for [vec 1]]`)
+- test_string.c: `[def x val]` → `x = val` via bulk script
+- test_m5.c: `[def x val]` → `x = val`, nested `[proc inner [name] {...}]` → `proc inner {name} {...}`
+- Used Python bulk transform script + manual fixups for nested procs and edge cases
+- All 50 build suites pass (0 failures)
+- Files changed: test/test_m11.c, test/test_collections.c, test/test_string.c, test/test_m5.c
+- **Learnings for future iterations:**
+  - `[for [vec 1]]` with argc=1 hits `for`'s special form handling, not the `each` arity check — produces different error message; keep `[each [vec 1]]` for arity tests
+  - Bulk transform scripts need post-verification for nested proc definitions within multi-line C strings
+---
+
+## 2026-03-16 - US-017
+Thread: n/a
+- test_m12.c: no changes needed (no JACL source strings, pure C-level GC tests)
+- test_m13.c: 124 lines changed — `proc name [params]` → `proc name {params}`, `[each ...]` → `[for ...]`, `reset!` → `reset`
+- test_embed.c: 19 lines changed — proc params, defstruct→struct with type-before-name fields, `[. $b v]` → `$b->v`
+- test_e2e_struct_tramp.c: 10 lines changed — defstruct→struct, proc params, `[. $s pts]` → `$s->pts`
+- test_e2e_embed_basics.c: 2 lines changed — proc params [] → {}
+- test_e2e_native_fns.c: 6 lines changed — proc params [] → {}
+- test_e2e_gc_handles.c: 3 lines changed — defstruct→struct, proc params
+- test_integration.c: `[def x val]` → `x = val` (binding ops), proc params [] → {}
+- test_runtime.c: `[reset! $b 20]` → `[reset $b 20]`
+- Used Python bulk transform script for proc params (regex: `proc \w+ \[([^\[\]]*)\]`), defstruct→struct, dot→arrow, each→for
+- Manual fixups for test_integration.c binding operator conversions and test_runtime.c reset! rename
+- All 50 build suites pass (0 failures)
+- Files changed: test/test_m13.c, test/test_embed.c, test/test_e2e_struct_tramp.c, test/test_e2e_embed_basics.c, test/test_e2e_native_fns.c, test/test_e2e_gc_handles.c, test/test_integration.c, test/test_runtime.c
+- **Learnings for future iterations:**
+  - test_m12.c has no JACL source strings at all — it's pure C-level GC/runtime testing
+  - test_runtime.c had a single `reset!` that needed updating — easy to miss since it's not in the "test_m*" pattern
+  - `[if cond {block1} {block2}]` inside brackets is valid new syntax (keyword as command head with block args), not old syntax
+  - `def x [expr]` (bare command form) is valid new syntax and doesn't need `x = [expr]` conversion — `=` is just sugar for `def`
+  - Bulk regex `proc \w+ \[([^\[\]]*)\]` safely transforms proc params without touching bracket commands in bodies
+---
+
+## 2026-03-16 - US-018
+Thread: n/a
+- Removed all backward-compatibility code for old JACL syntax:
+  - Lexer: removed defstruct → TOKEN_STRUCT keyword mapping (now TOKEN_WORD)
+  - Parser: removed old defstruct bracket-form [field :type] → error "expected '{' for struct fields"
+  - Parser: reject [proc ...] inside brackets → error "proc must use command syntax"
+  - Parser: reject [. $s field] inside brackets → error "use $struct->field"
+  - Parser: removed bare-block-as-else in if-form → require explicit else keyword
+  - Parser: simplified proc detection (always require two {} blocks, no one-block fallback)
+  - Parser: added defstruct word detection → error "'defstruct' is removed"
+  - Compiler: removed set!/reset!/swap! name handlers (only set/reset/swap)
+  - Compiler: removed each command handler (only for)
+  - AST pretty-printer: updated for new syntax (struct, proc, arrow, lambda)
+- Updated 144 files total: 4 source files, ~140 test files
+- All 50 build suites pass (0 failures), build clean with 0 warnings
+- Files changed: src/lexer.c, src/parser.c, src/compiler.c, src/ast.c, test/jacl/*.jacl (104 files), test/test_*.c (8 files)
+- **Learnings for future iterations:**
+  - `[if cond {then} {else}]` in bracket mode (3 args with blocks) is valid; only bare-command if requires explicit else keyword
+  - Proc names with hyphens (e.g., t-mut) need `[\w-]+` not `\w+` in regex patterns
+  - [. $s field val] struct write form must use bare command mode `. $s field val` since bracket [. ...] is now rejected
+  - AST pretty-printer changes are needed when removing syntax — roundtrip tests verify parse→print→reparse stability
+  - When removing builtins, also check ast analysis functions (ast__contains_nonlocal_set_impl)
+---

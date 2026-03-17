@@ -1,13 +1,13 @@
 # expect: 1
 # expect: 1
 # expect: 11
-# swap! applies closure to current value, stores result, returns result
+# swap applies closure to current value, stores result, returns result
 def b [box 0]
-proc inc [x] { [+ $x 1] }
-[print [swap! $b $inc]]
+proc inc {x} { [+ $x 1] }
+[print [swap $b $inc]]
 # deref confirms the update
 [print [deref $b]]
-# swap! works on atoms
+# swap works on atoms
 def a [atom 10]
-[swap! $a $inc]
+[swap $a $inc]
 [print [deref $a]]

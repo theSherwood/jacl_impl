@@ -764,7 +764,7 @@ static int test_compile_def(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x 42]", &arena, &heap);
+  CompileResult cr = compile_source("x = 42", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT_U32_EQ(cr.chunk.const_count, 2);
@@ -797,7 +797,7 @@ static int test_compile_def_expr(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x [+ 1 2]]", &arena, &heap);
+  CompileResult cr = compile_source("x = [+ 1 2]", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   /* constants: 1, 2, "x" */
@@ -829,20 +829,20 @@ static int test_compile_def_wrong_argc(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  /* Too few args: [def x] */
-  CompileResult cr = compile_source("[def x]", &arena, &heap);
+  /* Too few args: def x */
+  CompileResult cr = compile_source("def x", &arena, &heap);
   ASSERT(cr.error_count > 0);
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
-  /* Too many args: [def x 1 2] */
+  /* Too many args: x = 1 2 */
   tracker_reset();
   arena = (arena_t){ .allocator = tracked_allocator };
   gc_block_pool_init(&pool);
   gc_heap_init(&heap, &pool);
-  cr = compile_source("[def x 1 2]", &arena, &heap);
+  cr = compile_source("x = 1 2", &arena, &heap);
   ASSERT(cr.error_count > 0);
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
@@ -859,8 +859,8 @@ static int test_compile_def_non_string_name(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  /* [def 42 10] - first arg is int, not string */
-  CompileResult cr = compile_source("[def 42 10]", &arena, &heap);
+  /* def 42 10 - first arg is int, not string */
+  CompileResult cr = compile_source("def 42 10", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -922,7 +922,7 @@ static int test_def_print_var(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x 42]\n[print $x]", &arena, &heap);
+  CompileResult cr = compile_source("x = 42\n[print $x]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -950,7 +950,7 @@ static int test_def_expr_print_var(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x [+ 1 2]]\n[print $x]", &arena, &heap);
+  CompileResult cr = compile_source("x = [+ 1 2]\n[print $x]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -1139,7 +1139,7 @@ static int test_multi_def_print(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x 10]\n[def y 20]\n[print [+ $x $y]]", &arena, &heap);
+  CompileResult cr = compile_source("x = 10\ny = 20\n[print [+ $x $y]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -1167,7 +1167,7 @@ static int test_multi_semicolons_def_print(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def a 1]; [def b 2]; [print [+ $a $b]]", &arena, &heap);
+  CompileResult cr = compile_source("a = 1; b = 2; [print [+ $a $b]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   PrintCapture cap = { .len = 0 };
@@ -1223,7 +1223,7 @@ static int test_final_result_available(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  CompileResult cr = compile_source("[def x 5]\n[+ $x 10]", &arena, &heap);
+  CompileResult cr = compile_source("x = 5\n[+ $x 10]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   VM vm;
@@ -1336,7 +1336,7 @@ static int test_runtime_error_line_number(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* Error on line 2: def x $true; [+ $x 1] */
-  CompileResult cr = compile_source("[def x $true]\n[+ $x 1]", &arena, &heap);
+  CompileResult cr = compile_source("x = $true\n[+ $x 1]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   VM vm;
@@ -1438,13 +1438,13 @@ static int test_local_def_in_block(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  /* { [def x 42]; [print $x] } should print "42\n" */
+  /* { x = 42; [print $x] } should print "42\n" */
   PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
-  VMResult result = jacl_run("{ [def x 42]; [print $x] }", &vm, &arena);
+  VMResult result = jacl_run("{ x = 42; [print $x] }", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "42\n");
@@ -1466,7 +1466,7 @@ static int test_local_not_visible_outside(void) {
 
   VM vm;
   vm_init(&vm, &arena);
-  VMResult result = jacl_run("{ [def x 42] }\n$x", &vm, &arena);
+  VMResult result = jacl_run("{ x = 42 }\n$x", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
@@ -1493,7 +1493,7 @@ static int test_local_shadowing(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[def x 1]\n{ [def x 2]; [print $x] }\n[print $x]",
+    "x = 1\n{ x = 2; [print $x] }\n[print $x]",
     &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -1520,7 +1520,7 @@ static int test_local_nested_scopes(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "{ [def a 10]; { [def b 20]; [print [+ $a $b]] }; [print $a] }",
+    "{ a = 10; { b = 20; [print [+ $a $b]] }; [print $a] }",
     &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -1548,7 +1548,7 @@ static int test_local_same_scope_shadow(void) {
   vm.print_ctx = &cap;
   /* Redefining x in the same scope creates a new local; $x resolves to the latest */
   VMResult result = jacl_run(
-    "{ [def x 1]; [def x 2]; [print $x] }",
+    "{ x = 1; x = 2; [print $x] }",
     &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -1570,7 +1570,7 @@ static int test_local_top_level_still_global(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* At top level, def should use OP_DEF_GLOBAL */
-  CompileResult cr = compile_source("[def x 42]", &arena, &heap);
+  CompileResult cr = compile_source("x = 42", &arena, &heap);
 
   ASSERT_U32_EQ(cr.error_count, 0);
   /* Bytecode: OP_CONST u16(0) OP_DEF_GLOBAL u16(1) OP_HALT */
@@ -1610,7 +1610,7 @@ static int test_local_max_exceeded(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  /* Build source: { [def x 0]; [def x 1]; ...; [def x 256] } — 257 defs */
+  /* Build source: { x = 0; x = 1; ...; x = 256 } — 257 defs */
   char source[8192];
   int pos = 0;
   pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "{ ");
@@ -1618,7 +1618,7 @@ static int test_local_max_exceeded(void) {
     if (i > 0) {
       pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "; ");
     }
-    pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "[def x %d]", i);
+    pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "x = %d", i);
   }
   pos += snprintf(source + pos, sizeof(source) - (size_t)pos, " }");
 
@@ -1938,7 +1938,7 @@ static int test_if_else_not_block(void) {
 
 /* ===== US-006 (M4): Compile and execute proc definition ===== */
 
-/* Test: [proc add [a b] { [+ $a $b] }] then [add 1 2] returns i32(3) */
+/* Test: proc add {a, b} { [+ $a $b] } then [add 1 2] returns i32(3) */
 static int test_proc_basic_call(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -1948,7 +1948,7 @@ static int test_proc_basic_call(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "[proc add [a b] { [+ $a $b] }]\n[add 1 2]", &vm, &arena);
+    "proc add {a, b} { [+ $a $b] }\n[add 1 2]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -1963,7 +1963,7 @@ static int test_proc_basic_call(void) {
   TEST_PASS();
 }
 
-/* Test: [proc greet [name] { [print $name] }] then [greet hello] prints "hello\n" */
+/* Test: proc greet {name} { [print $name] } then [greet hello] prints "hello\n" */
 static int test_proc_print_param(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -1976,7 +1976,7 @@ static int test_proc_print_param(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[proc greet [name] { [print $name] }]\n[greet hello]", &vm, &arena);
+    "proc greet {name} { [print $name] }\n[greet hello]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello\n");
@@ -1989,7 +1989,7 @@ static int test_proc_print_param(void) {
   TEST_PASS();
 }
 
-/* Test: zero-parameter procedure: [proc answer [] { 42 }] then [answer] returns i32(42) */
+/* Test: zero-parameter procedure: proc answer {} { 42 } then [answer] returns i32(42) */
 static int test_proc_zero_params(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -1999,7 +1999,7 @@ static int test_proc_zero_params(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "[proc answer [] { 42 }]\n[answer]", &vm, &arena);
+    "proc answer {} { 42 }\n[answer]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -2024,7 +2024,7 @@ static int test_proc_implicit_return(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "[proc double [n] { [* $n 2] }]\n[double 5]", &vm, &arena);
+    "proc double {n} { [* $n 2] }\n[double 5]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -2051,7 +2051,7 @@ static int test_proc_multi_stmt_body(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[proc foo [x] { [print $x]; [+ $x 1] }]\n[foo 10]", &vm, &arena);
+    "proc foo {x} { [print $x]; [+ $x 1] }\n[foo 10]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n");
@@ -2076,7 +2076,7 @@ static int test_proc_redefine(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "[proc f [] { 1 }]\n[proc f [] { 2 }]\n[f]", &vm, &arena);
+    "proc f {} { 1 }\nproc f {} { 2 }\n[f]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -2100,12 +2100,12 @@ static int test_proc_wrong_argc(void) {
   /* Too few args */
   VM vm;
   vm_init(&vm, &arena);
-  VMResult result = jacl_run("[proc foo [a]]", &vm, &arena);
+  VMResult result = jacl_run("proc foo {a}", &vm, &arena);
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
 
   /* Too many args */
   vm_init(&vm, &arena);
-  result = jacl_run("[proc foo [a] { 1 } extra]", &vm, &arena);
+  result = jacl_run("proc foo {a} { 1 } extra", &vm, &arena);
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
 
   vm_destroy(&vm);
@@ -2126,7 +2126,7 @@ static int test_proc_call_arg_mismatch(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "[proc add [a b] { [+ $a $b] }]\n[add 1]", &vm, &arena);
+    "proc add {a, b} { [+ $a $b] }\n[add 1]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
@@ -2149,12 +2149,171 @@ static int test_proc_def_returns_nil(void) {
 
   VM vm;
   vm_init(&vm, &arena);
-  VMResult result = jacl_run("[proc f [] { 42 }]", &vm, &arena);
+  VMResult result = jacl_run("proc f {} { 42 }", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
   /* proc definition at global scope returns nil (from DEF_GLOBAL) */
   ASSERT(jacl_is_nil(vm.stack[0]));
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ===== Syntax Redesign US-003: New proc syntax ===== */
+
+/* Test: proc add {a, b} { [+ $a $b] } then [add 1 2] returns 3 */
+static int test_proc_new_syntax_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "proc add {a, b} { [+ $a $b] }\n[add 1 2]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 3);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: proc with typed return and typed params */
+static int test_proc_new_syntax_typed(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n[add 1 2]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 3);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: proc with zero params */
+static int test_proc_new_syntax_zero_params(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "proc answer {} { 42 }\n[answer]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: proc with multi-statement body */
+static int test_proc_new_syntax_multi_stmt(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "proc greet {name} {\n"
+    "  [print $name]\n"
+    "  42\n"
+    "}\n"
+    "[greet hello]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello\n");
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 42);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: closure capture still works with new proc syntax */
+static int test_proc_new_syntax_closure(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "x = 10\n"
+    "proc add_x {n} { [+ $n $x] }\n"
+    "[add_x 5]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 15);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: new proc syntax at top level, implicit return */
+static int test_proc_new_syntax_implicit_return(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "proc double {n} { [* $n 2] }\n[double 7]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 14);
 
   vm_destroy(&vm);
   gc_heap_destroy(&heap);
@@ -2227,11 +2386,11 @@ static int test_while_iterative_sum(void) {
 
   /* Sum 1..5 using def rebinding in while loop */
   const char* program =
-    "[def i 1]\n"
-    "[def sum 0]\n"
+    "i = 1\n"
+    "sum = 0\n"
     "[while [<= $i 5] {\n"
-    "  [def sum [+ $sum $i]]\n"
-    "  [def i [+ $i 1]]\n"
+    "  sum = [+ $sum $i]\n"
+    "  i = [+ $i 1]\n"
     "}]\n"
     "[print $sum]";
 
@@ -2263,9 +2422,9 @@ static int test_while_returns_nil(void) {
 
   /* Print the result of a while loop — should be nil */
   const char* program =
-    "[def i 0]\n"
+    "i = 0\n"
     "[print [while [< $i 3] {\n"
-    "  [def i [+ $i 1]]\n"
+    "  i = [+ $i 1]\n"
     "}]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2349,10 +2508,10 @@ static int test_while_countdown(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[def n 3]\n"
+    "n = 3\n"
     "[while [> $n 0] {\n"
     "  [print $n]\n"
-    "  [def n [- $n 1]]\n"
+    "  n = [- $n 1]\n"
     "}]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2384,10 +2543,10 @@ static int test_closure_capture_local(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc mkadd [x] {\n"
-    "  [proc inner [y] { [+ $x $y] }]\n"
-    "}]\n"
-    "[def add10 [mkadd 10]]\n"
+    "proc mkadd {x} {\n"
+    "  proc inner {y} { [+ $x $y] }\n"
+    "}\n"
+    "add10 = [mkadd 10]\n"
     "[print [add10 5]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2417,11 +2576,11 @@ static int test_closure_independent_captures(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc mkadd [x] {\n"
-    "  [proc inner [y] { [+ $x $y] }]\n"
-    "}]\n"
-    "[def add5 [mkadd 5]]\n"
-    "[def add20 [mkadd 20]]\n"
+    "proc mkadd {x} {\n"
+    "  proc inner {y} { [+ $x $y] }\n"
+    "}\n"
+    "add5 = [mkadd 5]\n"
+    "add20 = [mkadd 20]\n"
     "[print [add5 1]]\n"
     "[print [add20 1]]";
 
@@ -2452,13 +2611,13 @@ static int test_closure_nested_3_levels(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc outer [a] {\n"
-    "  [proc middle [b] {\n"
-    "    [proc inner [c] { [+ [+ $a $b] $c] }]\n"
-    "  }]\n"
-    "}]\n"
-    "[def mid [outer 100]]\n"
-    "[def inn [mid 20]]\n"
+    "proc outer {a} {\n"
+    "  proc middle {b} {\n"
+    "    proc inner {c} { [+ [+ $a $b] $c] }\n"
+    "  }\n"
+    "}\n"
+    "mid = [outer 100]\n"
+    "inn = [mid 20]\n"
     "[print [inn 3]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2488,10 +2647,10 @@ static int test_closure_capture_multiple(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc make-fn [a b] {\n"
-    "  [proc inner [c] { [+ [+ $a $b] $c] }]\n"
-    "}]\n"
-    "[def f [make-fn 10 20]]\n"
+    "proc make-fn {a, b} {\n"
+    "  proc inner {c} { [+ [+ $a $b] $c] }\n"
+    "}\n"
+    "f = [make-fn 10 20]\n"
     "[print [f 3]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2522,11 +2681,11 @@ static int test_closure_not_global(void) {
 
   /* x=99 at global, x=5 as param — inner should capture param x=5 */
   const char* program =
-    "[def x 99]\n"
-    "[proc wrap [x] {\n"
-    "  [proc inner [] { [+ $x 0] }]\n"
-    "}]\n"
-    "[def f [wrap 5]]\n"
+    "x = 99\n"
+    "proc wrap {x} {\n"
+    "  proc inner {} { [+ $x 0] }\n"
+    "}\n"
+    "f = [wrap 5]\n"
     "[print [f]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2558,9 +2717,9 @@ static int test_recursion_factorial(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc fact [n] {\n"
+    "proc fact {n} {\n"
     "  [if [== $n 0] { 1 } { [* $n [fact [- $n 1]]] }]\n"
-    "}]\n"
+    "}\n"
     "[print [fact 10]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2590,9 +2749,9 @@ static int test_recursion_fibonacci(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "[proc fib [n] {\n"
+    "proc fib {n} {\n"
     "  [if [< $n 2] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }]\n"
-    "}]\n"
+    "}\n"
     "[print [fib 10]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2620,7 +2779,7 @@ static int test_recursion_depth_limit(void) {
 
   /* Infinite recursion with no base case */
   const char* program =
-    "[proc inf [n] { [inf [+ $n 1]] }]\n"
+    "proc inf {n} { [inf [+ $n 1]] }\n"
     "[inf 0]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2662,10 +2821,10 @@ static int test_spawn_captures_mut_pinned(void) {
 
   /* mut x captured via $x in spawn body (read only, no set!) */
   const char* program =
-    "[proc main [] {\n"
-    "  [mut x 42]\n"
+    "proc main {} {\n"
+    "  x : 42\n"
     "  [spawn { [+ $x 1] }]\n"
-    "}]\n"
+    "}\n"
     "[main]";
 
   CompileResult cr = compile_source(program, &arena, &heap);
@@ -2692,13 +2851,13 @@ static int test_spawn_local_mut_not_pinned(void) {
 
   /* mut x declared inside spawn body — local, no pinning needed */
   const char* program =
-    "[proc main [] {\n"
+    "proc main {} {\n"
     "  [spawn {\n"
-    "    [mut x 42]\n"
-    "    [set! x 99]\n"
+    "    x : 42\n"
+    "    x :: 99\n"
     "    $x\n"
     "  }]\n"
-    "}]\n"
+    "}\n"
     "[main]";
 
   CompileResult cr = compile_source(program, &arena, &heap);
@@ -2723,10 +2882,10 @@ static int test_spawn_captures_def_not_pinned(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   const char* program =
-    "[proc main [] {\n"
-    "  [def x 42]\n"
+    "proc main {} {\n"
+    "  x = 42\n"
     "  [spawn { [+ $x 1] }]\n"
-    "}]\n"
+    "}\n"
     "[main]";
 
   CompileResult cr = compile_source(program, &arena, &heap);
@@ -2753,11 +2912,11 @@ static int test_spawn_transitive_capture_pinned(void) {
 
   /* proc f captures mut x, proc g calls f, g is called in spawn body */
   const char* program =
-    "[proc main [] {\n"
-    "  [mut x 42]\n"
-    "  [proc f [] { $x }]\n"
+    "proc main {} {\n"
+    "  x : 42\n"
+    "  proc f {} { $x }\n"
     "  [spawn { [f] }]\n"
-    "}]\n"
+    "}\n"
     "[main]";
 
   CompileResult cr = compile_source(program, &arena, &heap);
@@ -2785,11 +2944,11 @@ static int test_spawn_transitive_varref_pinned(void) {
 
   /* proc f captures mut x, spawn body uses $f (var ref) */
   const char* program =
-    "[proc main [] {\n"
-    "  [mut x 42]\n"
-    "  [proc f [] { $x }]\n"
+    "proc main {} {\n"
+    "  x : 42\n"
+    "  proc f {} { $x }\n"
     "  [spawn { $f }]\n"
-    "}]\n"
+    "}\n"
     "[main]";
 
   CompileResult cr = compile_source(program, &arena, &heap);
@@ -2815,11 +2974,11 @@ static int test_spawn_transitive_def_not_pinned(void) {
 
   /* proc f captures def x (immutable), spawn calls f — NOT pinned */
   const char* program =
-    "[proc main [] {\n"
-    "  [def x 42]\n"
-    "  [proc f [] { $x }]\n"
+    "proc main {} {\n"
+    "  x = 42\n"
+    "  proc f {} { $x }\n"
     "  [spawn { [f] }]\n"
-    "}]\n"
+    "}\n"
     "[main]";
 
   CompileResult cr = compile_source(program, &arena, &heap);
@@ -2993,7 +3152,7 @@ static int test_module_populate_exports(void) {
 
   /* Compile a source with def, proc, mut, and private names */
   const char* source = "def x 42\n"
-                       "proc add [a b] { [+ $a $b] }\n"
+                       "proc add {a, b} { [+ $a $b] }\n"
                        "mut cnt 0\n"
                        "def _priv 99\n";
   LexResult tokens = lexer_lex(source, &arena);
@@ -3061,7 +3220,7 @@ static int test_compile_module_basic(void) {
   /* Create a temp module file */
   const char* dir = "/tmp/jacl_test_m14";
   mkdir(dir, 0755);
-  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add [a b] { [+ $a $b] }\n");
+  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add {a, b} { [+ $a $b] }\n");
 
   /* Create an importer module path */
   char importer_path[1024];
@@ -3220,7 +3379,7 @@ static int test_compile_module_private_excluded(void) {
   const char* dir = "/tmp/jacl_test_m14c";
   mkdir(dir, 0755);
   write_temp_jacl(dir, "priv.jacl",
-                  "def pub 1\ndef _secret 2\nproc _help [x] { $x }\nproc greet [x] { $x }\n");
+                  "def pub 1\ndef _secret 2\nproc _help {x} { $x }\nproc greet {x} { $x }\n");
   write_temp_jacl(dir, "main.jacl", "");
 
   char importer_path[1024];
@@ -3357,7 +3516,7 @@ static int test_compile_module_typed_exports(void) {
   const char* dir = "/tmp/jacl_test_m14e";
   mkdir(dir, 0755);
   write_temp_jacl(dir, "math.jacl",
-                  "proc i64 add [i64 a i64 b] { [+ $a $b] }\n");
+                  "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n");
   write_temp_jacl(dir, "main.jacl", "");
 
   char importer_path[1024];
@@ -3467,7 +3626,7 @@ static int test_import_registers_globals(void) {
   char real_importer[1024];
 
   setup_module_ctx("/tmp/jacl_us007a", "lib.jacl",
-                   "def x 42\nproc add [a b] { [+ $a $b] }\n",
+                   "def x 42\nproc add {a, b} { [+ $a $b] }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -3594,7 +3753,7 @@ static int test_import_typed_propagation(void) {
   char real_importer[1024];
 
   setup_module_ctx("/tmp/jacl_us007d", "math.jacl",
-                   "proc i64 add [i64 a i64 b] { [+ $a $b] }\n",
+                   "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -3638,7 +3797,7 @@ static int test_import_arity_check(void) {
   char real_importer[1024];
 
   setup_module_ctx("/tmp/jacl_us007e", "lib.jacl",
-                   "proc add [a b] { [+ $a $b] }\n",
+                   "proc add {a, b} { [+ $a $b] }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -3675,7 +3834,7 @@ static int test_import_type_check(void) {
   char real_importer[1024];
 
   setup_module_ctx("/tmp/jacl_us007f", "math.jacl",
-                   "proc i64 add [i64 a i64 b] { [+ $a $b] }\n",
+                   "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -3890,7 +4049,7 @@ static int test_module_set_emits_reset(void) {
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
   /* Compile use + set! */
-  const char* src = "use \"state.jacl\" [count]\n[set! count 5]\n";
+  const char* src = "use \"state.jacl\" [count]\ncount :: 5\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -3939,7 +4098,7 @@ static int test_module_set_immutable_errors(void) {
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
-  const char* src = "use \"lib.jacl\" [x]\n[set! x 99]\n";
+  const char* src = "use \"lib.jacl\" [x]\nx :: 99\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -4015,7 +4174,7 @@ static int test_compile_program_with_dep(void) {
 
   const char* dir = "/tmp/jacl_us009b";
   mkdir(dir, 0755);
-  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add [a b] { [+ $a $b] }\n");
+  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add {a, b} { [+ $a $b] }\n");
   write_temp_jacl(dir, "main.jacl", "use \"lib.jacl\" [add x]\n[add $x 1]\n");
 
   ProgramResult pr = jacl_compile_program(
@@ -4123,7 +4282,7 @@ static int test_compile_program_root_exports(void) {
 
   const char* dir = "/tmp/jacl_us009e";
   mkdir(dir, 0755);
-  write_temp_jacl(dir, "main.jacl", "def x 42\nproc add [a b] { [+ $a $b] }\n");
+  write_temp_jacl(dir, "main.jacl", "def x 42\nproc add {a, b} { [+ $a $b] }\n");
 
   ProgramResult pr = jacl_compile_program(
       "/tmp/jacl_us009e/main.jacl", &arena, &intern, &heap);
@@ -4169,7 +4328,7 @@ static int test_exec_program_basic(void) {
   const char* dir = "/tmp/jacl_us010a";
   mkdir(dir, 0755);
   write_temp_jacl(dir, "lib.jacl",
-    "proc add [a b] { [+ $a $b] }\n");
+    "proc add {a, b} { [+ $a $b] }\n");
   write_temp_jacl(dir, "main.jacl",
     "use \"lib.jacl\" [add]\n[print [add 1 2]]\n");
 
@@ -4333,7 +4492,7 @@ static int test_exec_program_mutable_import(void) {
   write_temp_jacl(dir, "main.jacl",
     "use \"state.jacl\" [cnt]\n"
     "[print [deref $cnt]]\n"
-    "[reset! $cnt 5]\n"
+    "[reset $cnt 5]\n"
     "[print [deref $cnt]]\n");
 
   ProgramResult pr = jacl_compile_program(
@@ -4387,7 +4546,7 @@ static int test_exec_single_file_unchanged(void) {
 
 /* ===== US-002 (Struct): Struct type registration ===== */
 
-/* Test: basic defstruct compiles without errors */
+/* Test: basic struct compiles without errors */
 static int test_defstruct_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -4395,7 +4554,7 @@ static int test_defstruct_basic(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]", &arena, &heap);
+      "struct Point {i32 x, i32 y}", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   gc_heap_destroy(&heap);
@@ -4413,8 +4572,8 @@ static int test_defstruct_duplicate_name(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
-      "defstruct Point [a :f32] [b :f32]", &arena, &heap);
+      "struct Point {i32 x, i32 y}\n"
+      "struct Point {f32 a, f32 b}", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4432,7 +4591,7 @@ static int test_defstruct_duplicate_field(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Bad [x :i32] [x :i32]", &arena, &heap);
+      "struct Bad {i32 x, i32 x}", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4450,7 +4609,7 @@ static int test_defstruct_undefined_field_type(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Line [start :Point] [end :Point]", &arena, &heap);
+      "struct Line {Point start, Point end}", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4468,8 +4627,8 @@ static int test_defstruct_nested_type(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
-      "defstruct Line [start :Point] [end :Point]", &arena, &heap);
+      "struct Point {i32 x, i32 y}\n"
+      "struct Line {Point start, Point end}", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   gc_heap_destroy(&heap);
@@ -4487,9 +4646,9 @@ static int test_defstruct_type_annotation(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   /* def Point p $x — struct name as type annotation with dyn RHS.
-     Verifies that 'Point' is accepted as a type keyword after defstruct. */
+     Verifies that 'Point' is accepted as a type keyword after struct. */
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def x 0\n"
       "def Point p $x", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -4509,7 +4668,7 @@ static int test_defstruct_all_field_types(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct All [a :i32] [b :i64] [c :u32] [d :u64] [e :f32] [f :f64] [g :str]",
+      "struct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, str g}",
       &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -4528,8 +4687,8 @@ static int test_defstruct_forward_ref_error(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Line [start :Point] [end :Point]\n"
-      "defstruct Point [x :i32] [y :i32]", &arena, &heap);
+      "struct Line {Point start, Point end}\n"
+      "struct Point {i32 x, i32 y}", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4548,7 +4707,7 @@ static int test_struct_new_basic(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 1 2]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -4566,7 +4725,7 @@ static int test_struct_new_arity_error(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "[Point 1]", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
@@ -4584,7 +4743,7 @@ static int test_struct_new_type_error(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "[Point 1 \"hello\"]", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
@@ -4604,7 +4763,7 @@ static int test_struct_new_runtime(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 10 20]\n"
       "print $p",
       &vm, &arena);
@@ -4629,10 +4788,10 @@ static int test_struct_get_basic(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 10 20]\n"
-      "print [. $p x]\n"
-      "print [. $p y]",
+      "print $p->x\n"
+      "print $p->y",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4651,9 +4810,9 @@ static int test_struct_get_unknown_field(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 1 2]\n"
-      "[. $p z]", &arena, &heap);
+      "print $p->z", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4672,10 +4831,10 @@ static int test_struct_get_nested(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
-      "defstruct Line [start :Point] [end :Point]\n"
+      "struct Point {i32 x, i32 y}\n"
+      "struct Line {Point start, Point end}\n"
       "def ln [Line [Point 5 6] [Point 10 20]]\n"
-      "print [. [. $ln start] x]",
+      "print $ln->start->x",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4698,11 +4857,11 @@ static int test_struct_set_basic(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 10 20]\n"
-      "[. $p x 99]\n"
-      "print [. $p x]\n"
-      "print [. $p y]",
+      ". $p x 99\n"
+      "print $p->x\n"
+      "print $p->y",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4721,9 +4880,9 @@ static int test_struct_set_unknown_field(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 1 2]\n"
-      "[. $p z 99]", &arena, &heap);
+      ". $p z 99", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4740,9 +4899,9 @@ static int test_struct_set_type_mismatch(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def p [Point 1 2]\n"
-      "[. $p x \"hello\"]", &arena, &heap);
+      ". $p x \"hello\"", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -4761,10 +4920,10 @@ static int test_struct_set_preserves_other_fields(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Pair [a :i32] [b :i32]\n"
+      "struct Pair {i32 a, i32 b}\n"
       "def p [Pair 1 2]\n"
-      "[. $p a 42]\n"
-      "print [. $p b]",
+      ". $p a 42\n"
+      "print $p->b",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4787,7 +4946,7 @@ static int test_struct_dyn_assign(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def dyn d [Point 1 2]\n"
       "print $d",
       &vm, &arena);
@@ -4810,10 +4969,10 @@ static int test_struct_dyn_field_access(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def dyn d [Point 10 20]\n"
-      "print [. $d x]\n"
-      "print [. $d y]",
+      "print $d->x\n"
+      "print $d->y",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4834,10 +4993,10 @@ static int test_struct_dyn_field_set(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def dyn d [Point 1 2]\n"
-      "[. $d x 99]\n"
-      "print [. $d x]",
+      ". $d x 99\n"
+      "print $d->x",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4858,10 +5017,10 @@ static int test_struct_in_vec(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
+      "struct Point {i32 x, i32 y}\n"
       "def v [vec [Point 1 2] [Point 3 4]]\n"
       "def p [vec-get $v 1]\n"
-      "print [. $p x]",
+      "print $p->x",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4884,10 +5043,10 @@ static int test_inline_struct_runtime(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "defstruct Point [x :i32] [y :i32]\n"
-      "defstruct Wrapper [pos :struct{x:i32,y:i32}]\n"
+      "struct Point {i32 x, i32 y}\n"
+      "struct Wrapper {struct{x:i32,y:i32} pos}\n"
       "def w [Wrapper [Point 42 10]]\n"
-      "print [. [. $w pos] x]",
+      "print $w->pos->x",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4906,7 +5065,7 @@ static int test_inline_struct_basic(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct Wrapper [pos :struct{x:i32,y:i32}]", &arena, &heap);
+      "struct Wrapper {struct{x:i32,y:i32} pos}", &arena, &heap);
   if (cr.error_count > 0) {
     printf("ERRORS: %u\n", cr.error_count);
   }
@@ -4929,8 +5088,8 @@ static int test_inline_struct_equivalence(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct A [p :struct{x:i32,y:i32}]\n"
-      "defstruct B [q :struct{x:i32,y:i32}]", &arena, &heap);
+      "struct A {struct{x:i32,y:i32} p}\n"
+      "struct B {struct{x:i32,y:i32} q}", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   /* Registry: anon_struct (shared), A, B = 3 entries */
   ASSERT(cr.struct_registry != NULL);
@@ -4950,7 +5109,7 @@ static int test_inline_struct_nested(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
   CompileResult cr = compile_source(
-      "defstruct C [d :struct{start:struct{x:i32,y:i32},end:struct{x:i32,y:i32}}]",
+      "struct C {struct{start:struct{x:i32,y:i32},end:struct{x:i32,y:i32}} d}",
       &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT(cr.struct_registry != NULL);
@@ -4976,11 +5135,11 @@ static int test_struct_module_import(void) {
   const char* dir = "/tmp/jacl_us009a";
   mkdir(dir, 0755);
   write_temp_jacl(dir, "shapes.jacl",
-    "defstruct Point [x :i32] [y :i32]\n");
+    "struct Point {i32 x, i32 y}\n");
   write_temp_jacl(dir, "main.jacl",
     "use \"shapes.jacl\" [Point]\n"
     "def p [Point 42 10]\n"
-    "print [. $p x]\n");
+    "print $p->x\n");
 
   ProgramResult pr = jacl_compile_program(
       "/tmp/jacl_us009a/main.jacl", &arena, &intern, &heap);
@@ -5013,10 +5172,86 @@ static int test_struct_module_import(void) {
   TEST_PASS();
 }
 
-/* ===== US-001 (For-loop PRD): Break as control flow ===== */
+/* Syntax Redesign US-004: New struct syntax */
 
-/* Test: break exits while loop, loop evaluates to nil */
-static int test_break_while_basic(void) {
+static int test_struct_new_syntax_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "struct Point {i32 x, i32 y}", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_syntax_runtime(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "def p [Point 10 20]\n"
+      "print $p->x",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_syntax_all_types(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "struct AllTypes {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, str g}",
+      &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_syntax_nested(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "struct Point {i32 x, i32 y}\n"
+      "struct Line {Point start, Point end}",
+      &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_syntax_construct_and_access(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
@@ -5025,18 +5260,621 @@ static int test_break_while_basic(void) {
   PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
-  vm.print_fn = capture_print;
+  vm.print_fn  = capture_print;
   vm.print_ctx = &cap;
 
-  const char* program =
-    "[def i 0]\n"
-    "[while $true {\n"
-    "  [if [>= $i 3] { [break] }]\n"
-    "  [print $i]\n"
-    "  [def i [+ $i 1]]\n"
-    "}]\n";
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "def p [Point 3 7]\n"
+      "print $p->x\n"
+      "print $p->y",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n7\n");
 
-  VMResult result = jacl_run(program, &vm, &arena);
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_syntax_duplicate_field(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source(
+      "struct Bad {i32 x, i32 x}", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Syntax Redesign US-005: New if/elif/else and while syntax --- */
+
+/* if $true { 1 } → takes then branch, returns 1 */
+static int test_if_new_then_branch(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("if $true { 1 }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  /* no else → nil when condition false, but condition is true → returns 1 */
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 1);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if $false { 1 } else { 2 } → takes else branch, returns 2 */
+static int test_if_new_else_branch(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("if $false { 1 } else { 2 }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if $false { 1 } → no else, returns nil */
+static int test_if_new_no_else_nil(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("if $false { 1 }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if ($n > 0) { "positive" } else { "non-positive" } — infix condition */
+static int test_if_new_infix_condition(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "n = 5\n"
+    "if ($n > 0) {\n"
+    "  print \"positive\"\n"
+    "} else {\n"
+    "  print \"non-positive\"\n"
+    "}", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "positive\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if $false { 1 } elif $true { 2 } else { 3 } → takes elif branch, returns 2 */
+static int test_if_new_elif(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "if $false { 1 } elif $true { 2 } else { 3 }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 2);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if $false { 1 } elif $false { 2 } else { 3 } → takes else branch, returns 3 */
+static int test_if_new_elif_else(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "if $false { 1 } elif $false { 2 } else { 3 }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 3);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if/elif chain with 3 branches — first match wins */
+static int test_if_new_elif_chain(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run(
+    "if $false { 1 } elif $false { 2 } elif $true { 3 } else { 4 }",
+    &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 3);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* if is an expression — [+ if $true { 10 } else { 20 } 5] not directly testable
+   but we can test via old bracket syntax embedding new if */
+static int test_if_new_as_expression(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  /* Use def to capture value of new-syntax if as expression */
+  VMResult result = jacl_run(
+    "x = [if $true { 10 } { 20 }]\n"
+    "[+ $x 5]",
+    &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_i32(vm.stack[0]));
+  ASSERT_INT_EQ(jacl_as_i32(vm.stack[0]), 15);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* while ($i < 5) { body } — new syntax iterative sum */
+static int test_while_new_iterative_sum(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "i = 1\n"
+    "sum = 0\n"
+    "while [<= $i 5] {\n"
+    "  sum = [+ $sum $i]\n"
+    "  i = [+ $i 1]\n"
+    "}\n"
+    "[print $sum]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "15\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* while with infix condition: while ($i < 3) { ... } */
+static int test_while_new_infix_condition(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "i = 3\n"
+    "while ($i > 0) {\n"
+    "  [print $i]\n"
+    "  i = [- $i 1]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n2\n1\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* while returns nil */
+static int test_while_new_returns_nil(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult result = jacl_run("while $false { 999 }", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_U32_EQ(vm.stack_top, 1);
+  ASSERT(jacl_is_nil(vm.stack[0]));
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Combined if + while with new syntax */
+static int test_if_while_combined_new(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "i = 1\n"
+    "while [<= $i 4] {\n"
+    "  if [== [% $i 2] 0] {\n"
+    "    [print \"even\"]\n"
+    "  } else {\n"
+    "    [print \"odd\"]\n"
+    "  }\n"
+    "  i = [+ $i 1]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "odd\neven\nodd\neven\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ====================== Syntax Redesign US-006: for command ====================== */
+
+/* for $items { body } — implicit $it binding */
+static int test_for_implicit_it(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "for [vec 10 20 30] {\n"
+    "  [print $it]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for $items item { body } — explicit binding variable */
+static int test_for_explicit_binding(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "for [vec 1 2 3] x {\n"
+    "  [print $x]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\n2\n3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for $items [\  print $it] — HOF callback form (like each) */
+static int test_for_hof_callback(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "v = [vec 10 20 30]\n"
+    "proc p {x} { [print $x] }\n"
+    "[for $v $p]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for on empty vector — no iteration */
+static int test_for_empty_vec(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "for [vec] {\n"
+    "  [print $it]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for with variable collection — for $v { body } */
+static int test_for_variable_collection(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "v = [vec 5 10 15]\n"
+    "for $v {\n"
+    "  [print $it]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n10\n15\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for returns nil */
+static int test_for_returns_nil(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "v = [vec 1]\n"
+    "proc p {x} { [+ $x 0] }\n"
+    "[print [for $v $p]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "nil\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for with upvalue capture — implicit $it body referencing outer scope */
+static int test_for_upvalue_capture(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "offset = 100\n"
+    "for [vec 1 2 3] {\n"
+    "  [print [+ $offset $it]]\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "101\n102\n103\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* each still works as alias during transition */
+static int test_each_still_works(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "v = [vec 10 20 30]\n"
+    "proc p {x} { [print $x] }\n"
+    "[for $v $p]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ===== For-loop PRD US-001: Break as control flow ===== */
+
+/* Test: break exits while loop, loop evaluates to nil */
+static int test_break_while_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "i = 0\n"
+    "while $true {\n"
+    "  if [>= $i 3] { [break] }\n"
+    "  [print $i]\n"
+    "  i = [+ $i 1]\n"
+    "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "0\n1\n2\n");
@@ -5056,21 +5894,18 @@ static int test_break_while_with_value(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
-
-  const char* program =
-    "[def i 0]\n"
-    "[def result [while $true {\n"
-    "  [if [>= $i 5] { [break $i] }]\n"
-    "  [def i [+ $i 1]]\n"
-    "}]]\n"
-    "[print $result]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+  VMResult result = jacl_run(
+    "i = 0\n"
+    "result = [while $true {\n"
+    "  if [>= $i 5] { [break $i] }\n"
+    "  i = [+ $i 1]\n"
+    "}]\n"
+    "[print $result]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "5\n");
@@ -5090,19 +5925,16 @@ static int test_break_while_nil_value(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
-
-  const char* program =
-    "[def result [while $true {\n"
+  VMResult result = jacl_run(
+    "result = [while $true {\n"
     "  [break]\n"
-    "}]]\n"
-    "[print $result]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "}]\n"
+    "[print $result]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "nil\n");
@@ -5122,27 +5954,25 @@ static int test_break_nested_loops(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* Outer loop runs 3 times, inner loop breaks after 2 iterations */
-  const char* program =
-    "[def i 0]\n"
-    "[while [< $i 3] {\n"
-    "  [def j 0]\n"
-    "  [while $true {\n"
-    "    [if [>= $j 2] { [break] }]\n"
+  VMResult result = jacl_run(
+    "i = 0\n"
+    "while [< $i 3] {\n"
+    "  j = 0\n"
+    "  while $true {\n"
+    "    if [>= $j 2] { [break] }\n"
     "    [print $i]\n"
     "    [print $j]\n"
-    "    [def j [+ $j 1]]\n"
-    "  }]\n"
-    "  [def i [+ $i 1]]\n"
-    "}]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "    j = [+ $j 1]\n"
+    "  }\n"
+    "  i = [+ $i 1]\n"
+    "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   /* i=0,j=0; i=0,j=1; i=1,j=0; i=1,j=1; i=2,j=0; i=2,j=1 */
@@ -5199,23 +6029,20 @@ static int test_break_bare_with_value(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
-
-  const char* program =
-    "[def i 0]\n"
-    "[def result [while $true {\n"
-    "  [if [>= $i 3] {\n"
+  VMResult result = jacl_run(
+    "i = 0\n"
+    "result = [while $true {\n"
+    "  if [>= $i 3] {\n"
     "    break $i\n"
-    "  }]\n"
-    "  [def i [+ $i 1]]\n"
-    "}]]\n"
-    "[print $result]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "  }\n"
+    "  i = [+ $i 1]\n"
+    "}]\n"
+    "[print $result]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3\n");
@@ -5235,23 +6062,21 @@ static int test_continue_while_basic(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* Print 0,1,3,4 — skip 2 */
-  const char* program =
-    "[def i 0]\n"
-    "[while [< $i 5] {\n"
-    "  [def old $i]\n"
-    "  [def i [+ $i 1]]\n"
-    "  [if [== $old 2] { [continue] }]\n"
+  VMResult result = jacl_run(
+    "i = 0\n"
+    "while [< $i 5] {\n"
+    "  old = $i\n"
+    "  i = [+ $i 1]\n"
+    "  if [== $old 2] { [continue] }\n"
     "  [print $old]\n"
-    "}]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "0\n1\n3\n4\n");
@@ -5282,69 +6107,7 @@ static int test_continue_outside_loop_error(void) {
   TEST_PASS();
 }
 
-/* === US-002 (For-loop PRD): Continue as control flow === */
-
-/* Test: for loop with implicit $it — basic iteration */
-static int test_for_implicit_it(void) {
-  tracker_reset();
-  arena_t arena = { .allocator = tracked_allocator };
-  BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
-
-  PrintCapture cap = { .len = 0 };
-  VM vm;
-  vm_init(&vm, &arena);
-  vm.print_fn = capture_print;
-  vm.print_ctx = &cap;
-
-  const char* program =
-    "[for [vec 10 20 30] {\n"
-    "  [print $it]\n"
-    "}]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
-
-  ASSERT_INT_EQ(result, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
-
-  vm_destroy(&vm);
-  gc_heap_destroy(&heap);
-  gc_block_pool_destroy(&pool);
-  arena_destroy(&arena);
-  ASSERT(check_no_leaks());
-  TEST_PASS();
-}
-
-/* Test: for loop with explicit binding name */
-static int test_for_explicit_binding(void) {
-  tracker_reset();
-  arena_t arena = { .allocator = tracked_allocator };
-  BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
-
-  PrintCapture cap = { .len = 0 };
-  VM vm;
-  vm_init(&vm, &arena);
-  vm.print_fn = capture_print;
-  vm.print_ctx = &cap;
-
-  const char* program =
-    "[for [vec 1 2 3] x {\n"
-    "  [print $x]\n"
-    "}]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
-
-  ASSERT_INT_EQ(result, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "1\n2\n3\n");
-
-  vm_destroy(&vm);
-  gc_heap_destroy(&heap);
-  gc_block_pool_destroy(&pool);
-  arena_destroy(&arena);
-  ASSERT(check_no_leaks());
-  TEST_PASS();
-}
+/* ===== For-loop PRD US-002: Continue as control flow ===== */
 
 /* Test: for over empty collection — no iterations */
 static int test_for_empty_collection(void) {
@@ -5353,19 +6116,16 @@ static int test_for_empty_collection(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
-
-  const char* program =
-    "[for [vec] {\n"
+  VMResult result = jacl_run(
+    "for [vec] {\n"
     "  [print $it]\n"
-    "}]\n"
-    "[print \"done\"]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "}\n"
+    "print \"done\"\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "done\n");
@@ -5385,20 +6145,18 @@ static int test_continue_for_basic(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* Print 1, 2, 4, 5 — skip 3 */
-  const char* program =
-    "[for [vec 1 2 3 4 5] {\n"
-    "  [if [== $it 3] { [continue] }]\n"
+  VMResult result = jacl_run(
+    "for [vec 1 2 3 4 5] {\n"
+    "  if [== $it 3] { [continue] }\n"
     "  [print $it]\n"
-    "}]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "1\n2\n4\n5\n");
@@ -5418,20 +6176,18 @@ static int test_continue_for_bare(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* Print 1, 3 — skip 2 */
-  const char* program =
+  VMResult result = jacl_run(
     "for [vec 1 2 3] {\n"
     "  if [== $it 2] { continue }\n"
     "  [print $it]\n"
-    "}\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "1\n3\n");
@@ -5451,23 +6207,21 @@ static int test_continue_nested_loops(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* Outer: 1,2  Inner: skip 20, print 10,30
      Expected: 10 30 10 30 */
-  const char* program =
-    "[for [vec 1 2] x {\n"
-    "  [for [vec 10 20 30] y {\n"
-    "    [if [== $y 20] { [continue] }]\n"
+  VMResult result = jacl_run(
+    "for [vec 1 2] x {\n"
+    "  for [vec 10 20 30] y {\n"
+    "    if [== $y 20] { [continue] }\n"
     "    [print $y]\n"
-    "  }]\n"
-    "}]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "  }\n"
+    "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n30\n10\n30\n");
@@ -5487,20 +6241,18 @@ static int test_break_for_basic(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* Print 1, 2 — break at 3 */
-  const char* program =
-    "[for [vec 1 2 3 4 5] {\n"
-    "  [if [== $it 3] { [break] }]\n"
+  VMResult result = jacl_run(
+    "for [vec 1 2 3 4 5] {\n"
+    "  if [== $it 3] { [break] }\n"
     "  [print $it]\n"
-    "}]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "1\n2\n");
@@ -5520,20 +6272,18 @@ static int test_break_for_with_value(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* break with value from for loop — the for expression evaluates to 30 */
-  const char* program =
-    "[def result [for [vec 10 20 30 40] {\n"
-    "  [if [== $it 30] { [break $it] }]\n"
-    "}]]\n"
-    "[print $result]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+  VMResult result = jacl_run(
+    "result = [for [vec 10 20 30 40] {\n"
+    "  if [== $it 30] { [break $it] }\n"
+    "}]\n"
+    "[print $result]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "30\n");
@@ -5553,26 +6303,24 @@ static int test_continue_mixed_nested(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* Outer while iterates twice. Inner for skips element 2.
      Expected: 1 3 1 3 done */
-  const char* program =
-    "[def n 0]\n"
-    "[while [< $n 2] {\n"
-    "  [def n [+ $n 1]]\n"
-    "  [for [vec 1 2 3] {\n"
-    "    [if [== $it 2] { [continue] }]\n"
+  VMResult result = jacl_run(
+    "n = 0\n"
+    "while [< $n 2] {\n"
+    "  n = [+ $n 1]\n"
+    "  for [vec 1 2 3] {\n"
+    "    if [== $it 2] { [continue] }\n"
     "    [print $it]\n"
-    "  }]\n"
-    "}]\n"
-    "[print \"done\"]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "  }\n"
+    "}\n"
+    "print \"done\"\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "1\n3\n1\n3\ndone\n");
@@ -5585,37 +6333,7 @@ static int test_continue_mixed_nested(void) {
   TEST_PASS();
 }
 
-/* Test: for with HOF callback (via OP_EACH) */
-static int test_for_hof_callback(void) {
-  tracker_reset();
-  arena_t arena = { .allocator = tracked_allocator };
-  BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
-
-  PrintCapture cap = { .len = 0 };
-  VM vm;
-  vm_init(&vm, &arena);
-  vm.print_fn = capture_print;
-  vm.print_ctx = &cap;
-
-  const char* program =
-    "[proc cb [x] { [print $x] }]\n"
-    "[for [vec 10 20 30] $cb]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
-
-  ASSERT_INT_EQ(result, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
-
-  vm_destroy(&vm);
-  gc_heap_destroy(&heap);
-  gc_block_pool_destroy(&pool);
-  arena_destroy(&arena);
-  ASSERT(check_no_leaks());
-  TEST_PASS();
-}
-
-/* === US-003 (For-loop PRD): Inline block-form for bodies — return semantics === */
+/* ===== For-loop PRD US-003: Inline block-form for bodies — return semantics ===== */
 
 /* Test: return from inside a for block exits the enclosing proc */
 static int test_return_from_for_block(void) {
@@ -5624,23 +6342,21 @@ static int test_return_from_for_block(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* proc that returns early from a for loop */
-  const char* program =
-    "[proc find [items] {\n"
-    "  [for $items {\n"
-    "    [if [== $it 3] { [return $it] }]\n"
-    "  }]\n"
+  VMResult result = jacl_run(
+    "proc find {items} {\n"
+    "  for $items {\n"
+    "    if [== $it 3] { [return $it] }\n"
+    "  }\n"
     "  999\n"
-    "}]\n"
-    "[print [find [vec 1 2 3 4 5]]]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "}\n"
+    "print [find [vec 1 2 3 4 5]]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3\n");
@@ -5660,25 +6376,23 @@ static int test_return_value_from_for_block(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* proc that returns a computed value from inside a for loop */
-  const char* program =
-    "[proc sumto [items limit] {\n"
-    "  [mut acc 0]\n"
-    "  [for $items x {\n"
-    "    [if [> $x $limit] { [return $acc] }]\n"
-    "    [set! acc [+ $acc $x]]\n"
-    "  }]\n"
+  VMResult result = jacl_run(
+    "proc sumto {items limit} {\n"
+    "  acc : 0\n"
+    "  for $items x {\n"
+    "    if [> $x $limit] { [return $acc] }\n"
+    "    [set acc [+ $acc $x]]\n"
+    "  }\n"
     "  $acc\n"
-    "}]\n"
-    "[print [sumto [vec 1 2 3 4 5] 3]]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "}\n"
+    "print [sumto [vec 1 2 3 4 5] 3]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "6\n");
@@ -5698,26 +6412,24 @@ static int test_return_from_hof_for(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* HOF-form for: return exits the callback proc, not the enclosing proc.
      The callback returns early for x == 2 but the for loop continues. */
-  const char* program =
-    "[proc testfn [] {\n"
-    "  [proc cb [x] {\n"
-    "    [if [== $x 2] { [return \"skip\"] }]\n"
+  VMResult result = jacl_run(
+    "proc testfn {} {\n"
+    "  proc cb {x} {\n"
+    "    if [== $x 2] { [return \"skip\"] }\n"
     "    [print $x]\n"
-    "  }]\n"
+    "  }\n"
     "  [for [vec 1 2 3] $cb]\n"
-    "  [print \"done\"]\n"
-    "}]\n"
-    "[testfn]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "  print \"done\"\n"
+    "}\n"
+    "[testfn]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   /* return in callback exits only the callback, not testfn.
@@ -5739,23 +6451,21 @@ static int test_return_bare_from_for_block(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* bare return with value from a for loop */
-  const char* program =
-    "proc find [items] {\n"
+  VMResult result = jacl_run(
+    "proc find {items} {\n"
     "  for $items {\n"
     "    if [== $it 3] { return $it }\n"
     "  }\n"
     "  999\n"
     "}\n"
-    "print [find [vec 1 2 3 4 5]]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "print [find [vec 1 2 3 4 5]]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "3\n");
@@ -5775,23 +6485,21 @@ static int test_return_nil_from_for_block(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* return with no value exits proc returning nil */
-  const char* program =
-    "[proc find [items] {\n"
-    "  [for $items {\n"
-    "    [if [== $it 3] { [return] }]\n"
-    "  }]\n"
+  VMResult result = jacl_run(
+    "proc find {items} {\n"
+    "  for $items {\n"
+    "    if [== $it 3] { [return] }\n"
+    "  }\n"
     "  999\n"
-    "}]\n"
-    "[print [find [vec 1 2 3 4 5]]]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "}\n"
+    "print [find [vec 1 2 3 4 5]]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "nil\n");
@@ -5804,7 +6512,7 @@ static int test_return_nil_from_for_block(void) {
   TEST_PASS();
 }
 
-/* === US-004 (For-loop PRD): C-style for loop === */
+/* ===== For-loop PRD US-004: C-style for loop ===== */
 
 /* Test: basic counting C-style for loop prints 0 1 2 3 4 */
 static int test_for_cstyle_basic(void) {
@@ -5813,18 +6521,15 @@ static int test_for_cstyle_basic(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
-
-  const char* program =
-    "[for {mut i 0; [< $i 5]; [set! i [+ $i 1]]} {\n"
+  VMResult result = jacl_run(
+    "[for {i : 0; [< $i 5]; [set i [+ $i 1]]} {\n"
     "  [print $i]\n"
-    "}]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "}]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "0\n1\n2\n3\n4\n");
@@ -5844,20 +6549,18 @@ static int test_for_cstyle_break(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* Print 0 1 2 then break */
-  const char* program =
-    "[for {mut i 0; [< $i 10]; [set! i [+ $i 1]]} {\n"
-    "  [if [== $i 3] { [break] }]\n"
+  VMResult result = jacl_run(
+    "[for {i : 0; [< $i 10]; [set i [+ $i 1]]} {\n"
+    "  if [== $i 3] { [break] }\n"
     "  [print $i]\n"
-    "}]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "}]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "0\n1\n2\n");
@@ -5877,20 +6580,18 @@ static int test_for_cstyle_continue(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* Print 0 1 3 4 — skip 2 */
-  const char* program =
-    "[for {mut i 0; [< $i 5]; [set! i [+ $i 1]]} {\n"
-    "  [if [== $i 2] { [continue] }]\n"
+  VMResult result = jacl_run(
+    "[for {i : 0; [< $i 5]; [set i [+ $i 1]]} {\n"
+    "  if [== $i 2] { [continue] }\n"
     "  [print $i]\n"
-    "}]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "}]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "0\n1\n3\n4\n");
@@ -5910,21 +6611,19 @@ static int test_for_cstyle_nested(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool);
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
   /* Outer i=0..1, inner j=0..1: prints 00 01 10 11 */
-  const char* program =
-    "[for {mut i 0; [< $i 2]; [set! i [+ $i 1]]} {\n"
-    "  [for {mut j 0; [< $j 2]; [set! j [+ $j 1]]} {\n"
+  VMResult result = jacl_run(
+    "[for {i : 0; [< $i 2]; [set i [+ $i 1]]} {\n"
+    "  [for {j : 0; [< $j 2]; [set j [+ $j 1]]} {\n"
     "    [print [+ [* $i 10] $j]]\n"
     "  }]\n"
-    "}]\n";
-
-  VMResult result = jacl_run(program, &vm, &arena);
+    "}]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "0\n1\n10\n11\n");
@@ -5949,11 +6648,1118 @@ static int test_for_cstyle_scope(void) {
 
   /* $i should not be visible after the loop; this should be a runtime error */
   VMResult result = jacl_run(
-    "[for {mut i 0; [< $i 3]; [set! i [+ $i 1]]} { [print $i] }]\n"
+    "[for {i : 0; [< $i 3]; [set i [+ $i 1]]} { [print $i] }]\n"
     "[print $i]\n",  /* $i is undefined here */
     &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ===== Syntax Redesign US-007: Builtin renames (set/reset/swap) ===== */
+
+/* Test: set (without !) works for mutable local reassignment */
+static int test_set_without_bang(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "{\n"
+    "  x : 10\n"
+    "  [set x 42]\n"
+    "  [print $x]\n"
+    "}", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: set! still works (backward compat) */
+static int test_set_bang_still_works(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "{\n"
+    "  x : 10\n"
+    "  x :: 99\n"
+    "  [print $x]\n"
+    "}", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "99\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: reset (without !) works for atom/box reset */
+static int test_reset_without_bang(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "b = [atom 10]\n"
+    "[reset $b 42]\n"
+    "[print [deref $b]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: reset! is removed — produces error */
+static int test_reset_bang_still_works(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "b = [atom 10]\n"
+    "[reset! $b 99]\n"
+    "[print [deref $b]]", &vm, &arena);
+
+  ASSERT(result != VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: swap (without !) works for atom/box swap */
+static int test_swap_without_bang(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "proc inc {x} { [+ $x 1] }\n"
+    "b = [atom 10]\n"
+    "[swap $b $inc]\n"
+    "[print [deref $b]]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "11\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: swap! is removed — produces error */
+static int test_swap_bang_still_works(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "proc inc {x} { [+ $x 1] }\n"
+    "b = [atom 10]\n"
+    "[swap! $b $inc]\n"
+    "[print [deref $b]]", &vm, &arena);
+
+  ASSERT(result != VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: set on mutable global works */
+static int test_set_global_without_bang(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "cnt : 0\n"
+    "[set cnt 1]\n"
+    "[set cnt [+ $cnt 1]]\n"
+    "[print $cnt]", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "2\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: set with multiple reassignments */
+static int test_set_multiple_reassign(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "{\n"
+    "  x : 0\n"
+    "  [set x 1]\n"
+    "  [set x 2]\n"
+    "  [set x 3]\n"
+    "  [print $x]\n"
+    "}", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Syntax Redesign US-008: Binding operators (=, :, ::) --- */
+
+/* x = 5 → def x 5 — basic immutable binding */
+static int test_bind_equals_def(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "x = 5\n"
+    "[print $x]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* i64 x = 5 → def i64 x 5 — typed immutable binding */
+static int test_bind_typed_equals(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "i64 x = 5\n"
+    "[print $x]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* x : 0; set x 5 → mut + set — mutable binding */
+static int test_bind_colon_mut(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "x : 0\n"
+    "set x 5\n"
+    "[print $x]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* i64 x : 0 → mut i64 x 0 — typed mutable binding */
+static int test_bind_typed_colon(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "i64 x : 0\n"
+    "set x 42\n"
+    "[print $x]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* x :: ($x + 1) → set x (+ $x 1) — reassignment via :: */
+static int test_bind_double_colon_set(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "x : 10\n"
+    "x :: ($x + 5)\n"
+    "[print $x]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "15\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Binding operators alongside def/mut/set commands */
+static int test_bind_mixed_with_commands(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "a = 1\n"
+    "def b 2\n"
+    "c : 0\n"
+    "mut d 0\n"
+    "c :: 3\n"
+    "set d 4\n"
+    "[print (($a + $b) + ($c + $d))]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Binding in block body */
+static int test_bind_in_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "proc test {} {\n"
+    "  x = 10\n"
+    "  y = 20\n"
+    "  [print ($x + $y)]\n"
+    "}\n"
+    "[test]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Binding with expression values */
+static int test_bind_expr_values(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult result = jacl_run(
+    "x = [+ 1 2]\n"
+    "y = ($x * 3)\n"
+    "[print $y]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "9\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ===== Syntax Redesign US-009: Arrow field access (->) ===== */
+
+static int test_arrow_basic_get(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "p = [Point 10 20]\n"
+      "print $p->x\n"
+      "print $p->y",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_arrow_chained_get(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "struct Line {Point start, Point end}\n"
+      "ln = [Line [Point 5 6] [Point 10 20]]\n"
+      "print $ln->start->x\n"
+      "print $ln->end->y",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_arrow_on_expr_result(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc mkpt {} { [Point 42 99] }\n"
+      "print [mkpt]->x",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_arrow_in_infix_mode(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "p = [Point 10 20]\n"
+      "print ($p->x + $p->y)",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_arrow_in_bracket_cmd(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "p = [Point 10 20]\n"
+      "print [+ $p->x $p->y]",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_arrow_old_dot_compat(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  /* [. $p x] inside brackets is now a parse error — use $p->x instead */
+  CompileResult cr = compile_source(
+      "struct Point {i32 x, i32 y}\n"
+      "p = [Point 10 20]\n"
+      "print [. $p x]", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ---- Syntax Redesign US-010: Pipe threading (|) ---- */
+
+/* foo $a | bar $b  →  [bar [foo $a] $b] (first-arg threading) */
+static int test_pipe_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "+ 1 2 | * 3 | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "9\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Multi-stage pipe: a | b | c  →  [c [b [a]]] */
+static int test_pipe_multi_stage(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  /* + 10 20 → 30, * 30 2 → 60, print 60 */
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "+ 10 20 | * 2 | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "60\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Pipe composes with vec builtins */
+static int test_pipe_with_builtins(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "vec 1 2 3 | vec-len | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Pipe in block */
+static int test_pipe_in_block(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "proc dbl {x} { * $x 2 }\n"
+      "dbl 5 | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Pipe with variable references */
+static int test_pipe_with_vars(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "x = 5\n"
+      "y = 3\n"
+      "+ $x $y | * 2 | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "16\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Pipe inside proc body block */
+static int test_pipe_in_proc_body(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "proc f {} { + 3 4 | * 2 }\n"
+      "f | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "14\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- US-011: Lambda shorthand (\) --- */
+
+/* Basic lambda: [\\ + $it 2] called via for */
+static int test_lambda_basic_call(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "for [vec 10 20 30] [\\ print $it]",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Lambda with arithmetic */
+static int test_lambda_arithmetic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "for [vec 1 2 3] [\\ print [+ $it 10]]",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "11\n12\n13\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Lambda as HOF callback for for */
+static int test_lambda_each_compat(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "for [vec 3 5 7] [\\ print [* $it 2]]",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "6\n10\n14\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Lambda captures upvalue */
+static int test_lambda_upvalue(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "x = 100\n"
+      "for [vec 1 2 3] [\\ print [+ $it $x]]",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "101\n102\n103\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Lambda used as expression value (passed to proc) */
+static int test_lambda_as_value(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "proc apply {f, x} { $f $x }\n"
+      "apply [\\ + $it 5] 10 | print",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "15\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Lambda in pipe chain */
+static int test_lambda_in_pipe(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "for [vec 5 10 15] [\\ print [* $it 3]]",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "15\n30\n45\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ===== Syntax Redesign US-012: $(expr) string interpolation & line continuation ===== */
+
+/* Basic $(1 + 2) inside string */
+static int test_dollar_paren_compile_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "print \"total: $(1 + 2)\"",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "total: 3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* $(expr) with variable references */
+static int test_dollar_paren_compile_vars(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "def price 10\ndef qty 3\nprint \"total: $($price * $qty)\"",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "total: 30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* $(expr) nesting with $[cmd] */
+static int test_dollar_paren_compile_nested(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "def x 5\nprint \"val: $($x + $[+ 2 3])\"",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "val: 10\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Existing $var and $[expr] interpolation still works */
+static int test_dollar_paren_compile_existing(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "def name \"world\"\nprint \"hello $name, $[+ 1 2]\"",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello world, 3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Line continuation: \ at end of line */
+static int test_line_continuation_compile(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "print \\\n  42",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Blank lines don't produce empty commands */
+static int test_blank_lines_compile(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+  VMResult r = jacl_run(
+      "\n\nprint 1\n\n\nprint 2\n\n",
+      &vm, &arena);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\n2\n");
 
   vm_destroy(&vm);
   gc_heap_destroy(&heap);
@@ -6059,6 +7865,13 @@ int main(void) {
     { "proc_wrong_argc",             test_proc_wrong_argc },
     { "proc_call_arg_mismatch",      test_proc_call_arg_mismatch },
     { "proc_def_returns_nil",        test_proc_def_returns_nil },
+    /* Syntax Redesign US-003: New proc syntax */
+    { "proc_new_basic",              test_proc_new_syntax_basic },
+    { "proc_new_typed",              test_proc_new_syntax_typed },
+    { "proc_new_zero_params",        test_proc_new_syntax_zero_params },
+    { "proc_new_multi_stmt",         test_proc_new_syntax_multi_stmt },
+    { "proc_new_closure",            test_proc_new_syntax_closure },
+    { "proc_new_implicit_ret",       test_proc_new_syntax_implicit_return },
     /* US-007 (M4): Compile and execute while loop */
     { "while_zero_iterations",       test_while_zero_iterations },
     { "while_nil_falsy",             test_while_nil_falsy },
@@ -6165,7 +7978,36 @@ int main(void) {
     { "inline_struct_nested",            test_inline_struct_nested },
     /* US-009 (Struct): Module export/import */
     { "struct_module_import",            test_struct_module_import },
-    /* US-001 (For-loop PRD): Break as control flow */
+    /* Syntax Redesign US-004: New struct syntax */
+    { "struct_new_syntax_basic",         test_struct_new_syntax_basic },
+    { "struct_new_syntax_runtime",       test_struct_new_syntax_runtime },
+    { "struct_new_syntax_all_types",     test_struct_new_syntax_all_types },
+    { "struct_new_syntax_nested",        test_struct_new_syntax_nested },
+    { "struct_new_syntax_construct",     test_struct_new_syntax_construct_and_access },
+    { "struct_new_syntax_dup_field",     test_struct_new_syntax_duplicate_field },
+    /* Syntax Redesign US-005: New if/elif/else and while syntax */
+    { "if_new_then_branch",            test_if_new_then_branch },
+    { "if_new_else_branch",            test_if_new_else_branch },
+    { "if_new_no_else_nil",            test_if_new_no_else_nil },
+    { "if_new_infix_condition",        test_if_new_infix_condition },
+    { "if_new_elif",                   test_if_new_elif },
+    { "if_new_elif_else",             test_if_new_elif_else },
+    { "if_new_elif_chain",            test_if_new_elif_chain },
+    { "if_new_as_expression",          test_if_new_as_expression },
+    { "while_new_iterative_sum",       test_while_new_iterative_sum },
+    { "while_new_infix_condition",     test_while_new_infix_condition },
+    { "while_new_returns_nil",         test_while_new_returns_nil },
+    { "if_while_combined_new",         test_if_while_combined_new },
+    /* Syntax Redesign US-006: for command */
+    { "for_implicit_it",               test_for_implicit_it },
+    { "for_explicit_binding",          test_for_explicit_binding },
+    { "for_hof_callback",             test_for_hof_callback },
+    { "for_empty_vec",                test_for_empty_vec },
+    { "for_variable_collection",      test_for_variable_collection },
+    { "for_returns_nil",              test_for_returns_nil },
+    { "for_upvalue_capture",          test_for_upvalue_capture },
+    { "each_still_works",            test_each_still_works },
+    /* For-loop PRD US-001: Break as control flow */
     { "break_while_basic",               test_break_while_basic },
     { "break_while_with_value",          test_break_while_with_value },
     { "break_while_nil_value",           test_break_while_nil_value },
@@ -6175,9 +8017,7 @@ int main(void) {
     { "break_bare_with_value",           test_break_bare_with_value },
     { "continue_while_basic",            test_continue_while_basic },
     { "continue_outside_loop_error",     test_continue_outside_loop_error },
-    /* US-002 (For-loop PRD): Continue as control flow */
-    { "for_implicit_it",                 test_for_implicit_it },
-    { "for_explicit_binding",            test_for_explicit_binding },
+    /* For-loop PRD US-002: Continue as control flow */
     { "for_empty_collection",            test_for_empty_collection },
     { "continue_for_basic",              test_continue_for_basic },
     { "continue_for_bare",              test_continue_for_bare },
@@ -6185,19 +8025,64 @@ int main(void) {
     { "break_for_basic",                 test_break_for_basic },
     { "break_for_with_value",            test_break_for_with_value },
     { "continue_mixed_nested",           test_continue_mixed_nested },
-    { "for_hof_callback",               test_for_hof_callback },
-    /* US-003 (For-loop PRD): Inline block-form for bodies — return semantics */
+    /* For-loop PRD US-003: Inline block-form for bodies — return semantics */
     { "return_from_for_block",           test_return_from_for_block },
     { "return_value_from_for_block",     test_return_value_from_for_block },
     { "return_from_hof_for",             test_return_from_hof_for },
     { "return_bare_from_for_block",      test_return_bare_from_for_block },
     { "return_nil_from_for_block",       test_return_nil_from_for_block },
-    /* US-004 (For-loop PRD): C-style for loop */
+    /* For-loop PRD US-004: C-style for loop */
     { "for_cstyle_basic",                test_for_cstyle_basic },
     { "for_cstyle_break",                test_for_cstyle_break },
     { "for_cstyle_continue",             test_for_cstyle_continue },
     { "for_cstyle_nested",               test_for_cstyle_nested },
     { "for_cstyle_scope",                test_for_cstyle_scope },
+    /* Syntax Redesign US-007: Builtin renames (set/reset/swap) */
+    { "set_without_bang",             test_set_without_bang },
+    { "set_bang_still_works",         test_set_bang_still_works },
+    { "reset_without_bang",           test_reset_without_bang },
+    { "reset_bang_still_works",       test_reset_bang_still_works },
+    { "swap_without_bang",            test_swap_without_bang },
+    { "swap_bang_still_works",        test_swap_bang_still_works },
+    { "set_global_without_bang",      test_set_global_without_bang },
+    { "set_multiple_reassign",        test_set_multiple_reassign },
+    /* Syntax Redesign US-008: Binding operators (=, :, ::) */
+    { "bind_equals_def",              test_bind_equals_def },
+    { "bind_typed_equals",            test_bind_typed_equals },
+    { "bind_colon_mut",               test_bind_colon_mut },
+    { "bind_typed_colon",             test_bind_typed_colon },
+    { "bind_double_colon_set",        test_bind_double_colon_set },
+    { "bind_mixed_with_commands",     test_bind_mixed_with_commands },
+    { "bind_in_block",                test_bind_in_block },
+    { "bind_expr_values",             test_bind_expr_values },
+    /* Syntax Redesign US-009: Arrow field access (->) */
+    { "arrow_basic_get",              test_arrow_basic_get },
+    { "arrow_chained_get",            test_arrow_chained_get },
+    { "arrow_on_expr_result",         test_arrow_on_expr_result },
+    { "arrow_in_infix_mode",          test_arrow_in_infix_mode },
+    { "arrow_in_bracket_cmd",         test_arrow_in_bracket_cmd },
+    { "arrow_old_dot_compat",         test_arrow_old_dot_compat },
+    /* Syntax Redesign US-010: Pipe threading (|) */
+    { "pipe_basic",                    test_pipe_basic },
+    { "pipe_multi_stage",              test_pipe_multi_stage },
+    { "pipe_with_builtins",            test_pipe_with_builtins },
+    { "pipe_in_block",                 test_pipe_in_block },
+    { "pipe_with_vars",                test_pipe_with_vars },
+    { "pipe_in_proc_body",             test_pipe_in_proc_body },
+    /* Syntax Redesign US-011: Lambda shorthand (\) */
+    { "lambda_basic_call",             test_lambda_basic_call },
+    { "lambda_arithmetic",             test_lambda_arithmetic },
+    { "lambda_each_compat",            test_lambda_each_compat },
+    { "lambda_upvalue",                test_lambda_upvalue },
+    { "lambda_as_value",               test_lambda_as_value },
+    { "lambda_in_pipe",                test_lambda_in_pipe },
+    /* Syntax Redesign US-012: $(expr) interpolation & line continuation */
+    { "dollar_paren_basic",            test_dollar_paren_compile_basic },
+    { "dollar_paren_vars",             test_dollar_paren_compile_vars },
+    { "dollar_paren_nested",           test_dollar_paren_compile_nested },
+    { "dollar_paren_existing",         test_dollar_paren_compile_existing },
+    { "line_continuation",             test_line_continuation_compile },
+    { "blank_lines",                   test_blank_lines_compile },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

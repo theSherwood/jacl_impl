@@ -3,14 +3,14 @@
 # expect: deep-err
 # error in a deeply nested async call chain propagates to the top-level awaiter
 # Uses named suspending procs called from spawn bodies (US-003)
-proc deep [] {
+proc deep {} {
   error "deep-err"
 }
-proc mid [] {
+proc mid {} {
   def f [spawn { deep }]
   await $f
 }
-proc main [] {
+proc main {} {
   def f1 [spawn { mid }]
   def r [await $f1]
   print [error? $r]

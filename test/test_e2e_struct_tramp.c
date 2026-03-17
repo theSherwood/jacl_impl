@@ -11,7 +11,7 @@ static int test_e2e_struct_create_and_read(void) {
   ASSERT(vm != NULL);
 
   /* Define a struct type */
-  JaclVal def_r = jacl_eval(vm, "defstruct Vec3 [x :f32] [y :f32] [z :f32]");
+  JaclVal def_r = jacl_eval(vm, "struct Vec3 {f32 x, f32 y, f32 z}");
   ASSERT(!jacl_is_error(def_r));
 
   /* Create from C with three f32 fields */
@@ -61,7 +61,7 @@ static int test_e2e_struct_mutate_and_readback(void) {
 
   /* Define struct and create instance in JACL */
   JaclVal def_r = jacl_eval(vm,
-    "defstruct Score [pts :i32]\n"
+    "struct Score {i32 pts}\n"
     "def s [Score 100]");
   ASSERT(!jacl_is_error(def_r));
 
@@ -80,7 +80,7 @@ static int test_e2e_struct_mutate_and_readback(void) {
   ASSERT_INT_EQ(jacl_as_i32(pts), 999);
 
   /* Verify from JACL */
-  JaclVal r = jacl_eval(vm, "[. $s pts]");
+  JaclVal r = jacl_eval(vm, "$s->pts");
   ASSERT(!jacl_is_error(r));
   ASSERT_INT_EQ(jacl_as_i32(r), 999);
 
@@ -100,7 +100,7 @@ static int test_e2e_struct_type_mismatch(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  JaclVal def_r = jacl_eval(vm, "defstruct Pair [a :i32] [b :f32]");
+  JaclVal def_r = jacl_eval(vm, "struct Pair {i32 a, f32 b}");
   ASSERT(!jacl_is_error(def_r));
 
   JaclVal fields[2] = { jacl_i32_val(1), jacl_f32_val(2.0f) };
@@ -159,7 +159,7 @@ static int test_e2e_tramp_basic_call(void) {
   ASSERT(vm != NULL);
 
   /* Define a simple add proc */
-  jacl_eval(vm, "proc add [a b] { [+ $a $b] }");
+  jacl_eval(vm, "proc add {a, b} { [+ $a $b] }");
   JaclVal cl = jacl_eval(vm, "$add");
   ASSERT(jacl_is_closure(cl));
 
@@ -197,7 +197,7 @@ static int test_e2e_tramp_various_signatures(void) {
   ASSERT(vm != NULL);
 
   /* void() — no-arg proc returning nil */
-  jacl_eval(vm, "proc noop [] { nil }");
+  jacl_eval(vm, "proc noop {} { nil }");
   JaclVal cl_noop = jacl_eval(vm, "$noop");
   JaclTrampoline* t_void = jacl_trampoline_new_val(vm, cl_noop, "void()");
   ASSERT(t_void != NULL);
@@ -210,7 +210,7 @@ static int test_e2e_tramp_various_signatures(void) {
   jacl_trampoline_free_val(vm, t_void);
 
   /* i32(i32) — identity */
-  jacl_eval(vm, "proc ident [x] { $x }");
+  jacl_eval(vm, "proc ident {x} { $x }");
   JaclVal cl_id = jacl_eval(vm, "$ident");
   JaclTrampoline* t_id = jacl_trampoline_new_val(vm, cl_id, "i32(i32)");
   ASSERT(t_id != NULL);
@@ -224,7 +224,7 @@ static int test_e2e_tramp_various_signatures(void) {
   jacl_trampoline_free_val(vm, t_id);
 
   /* i32(i32,i32,i32) would need a 3-arg proc — skip, test 2-arg instead */
-  jacl_eval(vm, "proc mul [a b] { [* $a $b] }");
+  jacl_eval(vm, "proc mul {a, b} { [* $a $b] }");
   JaclVal cl_mul = jacl_eval(vm, "$mul");
   JaclTrampoline* t_mul = jacl_trampoline_new_val(vm, cl_mul, "i32(i32,i32)");
   ASSERT(t_mul != NULL);
@@ -250,7 +250,7 @@ static int test_e2e_tramp_free_releases_closure(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  jacl_eval(vm, "proc dbl [x] { [* $x 2] }");
+  jacl_eval(vm, "proc dbl {x} { [* $x 2] }");
   JaclVal cl = jacl_eval(vm, "$dbl");
   ASSERT(jacl_is_closure(cl));
 
@@ -313,7 +313,7 @@ static int test_e2e_tramp_qsort(void) {
    * Returns positive when a > b, negative when a < b, 0 when equal.
    * This is the classic a-b ascending comparator.
    */
-  JaclVal r = jacl_eval(vm, "proc qcmp [a b] { [- [dref $a] [dref $b]] }");
+  JaclVal r = jacl_eval(vm, "proc qcmp {a, b} { [- [dref $a] [dref $b]] }");
   ASSERT(!jacl_is_error(r));
   JaclVal cl = jacl_eval(vm, "$qcmp");
   ASSERT(jacl_is_closure(cl));

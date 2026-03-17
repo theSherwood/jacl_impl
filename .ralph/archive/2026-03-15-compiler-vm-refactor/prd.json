@@ -1,0 +1,91 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/compiler-vm-refactor",
+  "description": "Compiler & VM Refactoring — eliminate structural duplication in compiler.c and vm.c before the syntax redesign lands",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Consolidate global arity lookups",
+      "description": "As a developer working on the compiler, I want a single function for looking up global arity information so that I don't have to maintain four near-identical linear scans.",
+      "acceptanceCriteria": [
+        "Four functions replaced with a single `compiler__find_global(c, name)` returning `GlobalArity*`: remove compiler__resolve_global_arity (lines 1225-1235), compiler__resolve_global_info (lines 1237-1248), compiler__resolve_global_type (lines 1250-1259); rename/keep compiler__find_global_arity (lines 1261-1270) as the single entry point",
+        "All call sites updated to use the single function and access GlobalArity fields directly",
+        "No callers do their own root-walk or linear scan — all go through the single function",
+        "All existing tests pass",
+        "Compiler builds cleanly with no new warnings"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "GlobalArity struct is defined at compiler.c lines 569-579 with fields: name, known_arity, is_mutable, suspends, captures_mutable, type, struct_type_idx, return_type, param_types. Callers currently extract individual fields via separate functions — just return the pointer and let them access fields directly."
+    },
+    {
+      "id": "US-002",
+      "title": "Merge CPS argument extraction",
+      "description": "As a developer working on CPS transforms, I want the shared extraction logic in one place so that adding new CPS-aware constructs doesn't require duplicating 100 lines.",
+      "acceptanceCriteria": [
+        "A shared helper extracted that takes an AstNode** array of arguments, identifies which ones are suspending, generates synthetic [def __aN ...] AST nodes for each, and returns the modified argument array plus the synthetic defs",
+        "compiler__compile_cps_extract_args (lines 2245-2344) becomes a thin wrapper calling the shared helper",
+        "compiler__compile_cps_extract_def_value (lines 2346-2436) becomes a thin wrapper calling the shared helper",
+        "The shared helper covers: temp name generation, ast_alloc sequence, var ref / name node / def head / def command construction",
+        "All existing tests pass, especially any CPS/suspension-related tests"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "The two functions differ only in where the modified node gets inserted into the new statement list — one modifies a command's arguments, the other modifies a def's value expression. The core loop (lines 2269-2322 vs 2369-2416) is structurally identical: same temp name generation, same ast_alloc sequence, same var ref / name node / def head / def command construction."
+    },
+    {
+      "id": "US-003",
+      "title": "Extract HOF builtin compilation helper",
+      "description": "As a developer adding new higher-order builtins (like for, par-each), I want a shared compilation helper so each new builtin is ~5 lines instead of ~40.",
+      "acceptanceCriteria": [
+        "A compiler__compile_hof_builtin helper extracted with signature like: (Compiler* c, const char* name, uint32_t name_len, AstNode** args, uint32_t argc, uint8_t opcode, uint32_t line, uint32_t col)",
+        "The helper handles: arity check (exactly 2 args), non-suspending callback validation (local slot check, global arity check, block suspension point check), collection compilation, in_non_suspending_callback save/set/restore, callback compilation, opcode emission",
+        "transform builtin (lines 4103-4141) rewritten as one call to the helper",
+        "each builtin (lines 4143-4181) rewritten as one call to the helper",
+        "filter builtin (lines 4183-4221) rewritten as one call to the helper",
+        "All existing tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "The three builtins share identical 30-line non-suspending callback validation blocks. The only differences are the builtin name (for error messages) and the final opcode. The in_non_suspending_callback flag needs careful save/restore — the current code does this and the helper must preserve the pattern."
+    },
+    {
+      "id": "US-004",
+      "title": "Extract shared struct field marshaling",
+      "description": "As a developer, I want struct field read/write logic defined once so that changes to type marshaling don't require updating six copy-pasted switch statements.",
+      "acceptanceCriteria": [
+        "embed__struct_read_field (embed.c lines 836-873) promoted to a shared function accessible by both vm.c and embed.c",
+        "embed__struct_write_field (embed.c lines 876-919) promoted to a shared function accessible by both vm.c and embed.c",
+        "OP_STRUCT_GET (vm.c lines 3924-3987) calls the shared read function instead of inlining the type switch",
+        "OP_STRUCT_SET (vm.c lines 3989-4054) calls the shared write function instead of inlining the type switch",
+        "OP_STRUCT_GET_DYN (vm.c lines 4056-4105) calls the shared read function",
+        "OP_STRUCT_SET_DYN (vm.c lines 4107-4160) calls the shared write function",
+        "Static vs dynamic opcode variants differ only in how they resolve field offset and type — marshaling is shared",
+        "Shared functions placed wherever makes sense (value.c, shared header as static inline, etc.) and included in unity build if new file",
+        "All existing tests pass, including embed API tests"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "The embed.c functions already work as standalone functions that take (struct_data, offset, field_type, heap/val) and do the type-switch marshaling. Promote these rather than writing new ones. They always box through JaclVal — the static opcodes lose a minor 'mixed boxing' optimization for i64/u64/f64 but this is negligible for a scripting language and can be revisited if profiling shows it matters."
+    },
+    {
+      "id": "US-005",
+      "title": "Macro-ify typed arithmetic opcodes",
+      "description": "As a developer, I want the 20 typed arithmetic/comparison opcode handlers generated by macros so the pattern is obvious and mechanical changes don't risk introducing bugs in one of 20 copies.",
+      "acceptanceCriteria": [
+        "VM__I64_BINOP(op) macro defined that handles: pop two values, cast to int64_t, apply operator, push result, break",
+        "VM__F64_BINOP(op) macro defined that handles: pop two values, memcpy to double, apply operator, memcpy back or box as bool, push, break",
+        "Extended variants for div/mod that include zero-check before the operation",
+        "Unary neg variants handled (either separate macro or parameterized)",
+        "i64 opcodes (lines 3338-3463) replaced with macro invocations: ADD, SUB, MUL, DIV, MOD, NEG, LT, GT, LE, GE, EQ",
+        "f64 opcodes (lines 3465-3627) replaced with macro invocations: ADD, SUB, MUL, DIV, MOD, NEG, LT, GT, LE, GE",
+        "Macros defined near their usage in vm.c (not in a shared header — they are vm-internal)",
+        "Arithmetic macros do not change evaluation order (pop b first, then a) or error behavior (div/mod zero checks)",
+        "All existing tests pass"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Use do { ... } while(0) or statement-expression patterns for macro hygiene. Comparison ops for f64 return bool (jacl_bool) not f64 — the macro may need a variant or parameter for this. The i64 comparison ops also return bool."
+    }
+  ]
+}

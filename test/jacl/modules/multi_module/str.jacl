@@ -1,1 +1,1 @@
-proc greet [name] { [concat "hi " $name] }
+proc greet {name} { [concat "hi " $name] }

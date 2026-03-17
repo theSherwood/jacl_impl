@@ -1,12 +1,12 @@
 # expect: 99
 # expect: 99
 # expect: 5
-# reset! stores a new value and returns it
+# reset stores a new value and returns it
 def b [box 0]
-[print [reset! $b 99]]
+[print [reset $b 99]]
 # deref confirms the update
 [print [deref $b]]
-# reset! works on atoms too
+# reset works on atoms too
 def a [atom 10]
-[reset! $a 5]
+[reset $a 5]
 [print [deref $a]]

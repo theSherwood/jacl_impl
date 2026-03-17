@@ -5,7 +5,7 @@
 # expect: 15
 # expect: 21
 # 6 chained awaits building a running sum (deep continuation chain)
-proc main [] {
+proc main {} {
   def f1 [spawn { 1 }]
   def s1 [await $f1]
   print $s1

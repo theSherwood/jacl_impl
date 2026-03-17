@@ -2,7 +2,7 @@
 # expect: 3
 # expect: 12
 # parallel with concurrent mode for real worker execution
-proc main [] {
+proc main {} {
   def r [parallel { [+ 1 2] } { [* 3 4] }]
   print [vec-get $r 0]
   print [vec-get $r 1]

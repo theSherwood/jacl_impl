@@ -1,7 +1,7 @@
 # mode: concurrent
 # expect: true
 # expect: fail
-proc main [] {
+proc main {} {
   def r [parallel { 42 } { error "fail" }]
   print [error? $r]
   print [error-val $r]

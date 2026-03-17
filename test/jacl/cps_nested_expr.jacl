@@ -1,6 +1,6 @@
 # expect: 30
 # await nested inside expression arguments: [+ [await $f1] [await $f2]]
-proc main [] {
+proc main {} {
   def f1 [spawn { 10 }]
   def f2 [spawn { 20 }]
   print [+ [await $f1] [await $f2]]

@@ -70,13 +70,13 @@ static int test_bare_cmd_no_args_ast(void) {
   TEST_PASS();
 }
 
-/* Test: $var command — 'proc f [] { 42 }\ndef g $f\n$g' evaluates to 42 */
+/* Test: $var command — 'proc f {} { 42 }\ng = $f\n$g' evaluates to 42 */
 static int test_var_cmd(void) {
   TEST_SETUP();
 
   const char* program =
-    "proc f [] { 42 }\n"
-    "def g $f\n"
+    "proc f {} { 42 }\n"
+    "g = $f\n"
     "print [$g]";
   VMResult result = jacl_run(program, &vm, &arena);
 
@@ -169,12 +169,12 @@ static int test_nested_brackets_in_line(void) {
   TEST_TEARDOWN();
 }
 
-/* Test: explicit brackets still work — '[def x 42]\n[+ $x 1]' evaluates to 43 */
+/* Test: explicit brackets still work — 'x = 42\n[+ $x 1]' evaluates to 43 */
 static int test_explicit_brackets(void) {
   TEST_SETUP();
 
   const char* program =
-    "[def x 42]\n"
+    "x = 42\n"
     "[print [+ $x 1]]";
   VMResult result = jacl_run(program, &vm, &arena);
 
@@ -184,12 +184,12 @@ static int test_explicit_brackets(void) {
   TEST_TEARDOWN();
 }
 
-/* Test: proc definition line-based — 'proc add [a b] { [+ $a $b] }\nadd 3 4' evaluates to 7 */
+/* Test: proc definition line-based — 'proc add {a, b} { [+ $a $b] }\nadd 3 4' evaluates to 7 */
 static int test_proc_line_based(void) {
   TEST_SETUP();
 
   const char* program =
-    "proc add [a b] { [+ $a $b] }\n"
+    "proc add {a, b} { [+ $a $b] }\n"
     "print [add 3 4]";
   VMResult result = jacl_run(program, &vm, &arena);
 
@@ -204,9 +204,9 @@ static int test_multiline_block(void) {
   TEST_SETUP();
 
   const char* program =
-    "proc f [] {\n"
-    "  def x 10\n"
-    "  def y 20\n"
+    "proc f {} {\n"
+    "  x = 10\n"
+    "  y = 20\n"
     "  [+ $x $y]\n"
     "}\n"
     "print [f]";

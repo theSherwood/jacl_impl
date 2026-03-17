@@ -1,5 +1,5 @@
 # expect: Point{x: 1, y: 2}
 # Test basic struct definition and instantiation
-defstruct Point [x :i32] [y :i32]
+struct Point {i32 x, i32 y}
 def p [Point 1 2]
 print $p
