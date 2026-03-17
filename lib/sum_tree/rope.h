@@ -156,6 +156,111 @@ static inline size_t rope_to_str(rope r, uint8_t* buf, size_t buf_len) {
   return rope_st_copy_range(r.root, 0, to_copy, buf);
 }
 
+/* --- Grapheme-safe concat --- */
+
+static inline rope rope_concat(rope left, rope right) {
+  rope_st_set_handlers((rope_st_handlers){
+    .identity  = rope_summary_identity,
+    .combine   = rope_summary_combine,
+    .summarize = rope_summary_summarize
+  });
+
+  size_t lb = rope_byte_count(left);
+  size_t rb = rope_byte_count(right);
+
+  if (lb == 0) return rope_ref(right);
+  if (rb == 0) return rope_ref(left);
+
+  /* O(1) check: decode first codepoint of right */
+  uint8_t peek[4];
+  size_t peek_n = rb < 4 ? rb : 4;
+  rope_st_copy_range(right.root, 0, peek_n, peek);
+  uint32_t first_cp;
+  size_t first_cplen = utf8_decode(peek, peek_n, &first_cp);
+
+  if (first_cplen > 0) {
+    UnicodeGraphemeBreak gbp = unicode_grapheme_break(first_cp);
+    if (gbp == GBP_EXTEND || gbp == GBP_ZWJ || gbp == GBP_SPACINGMARK) {
+      /* Right starts with combining codepoints — fix-up needed.
+         Move combining prefix from right to left's end so grapheme clusters
+         at the junction are not split across separate leaves/subtrees. */
+
+      /* Scan all leading combining codepoints in right */
+      uint8_t scan_buf[128];
+      size_t scan_len = rb < sizeof(scan_buf) ? rb : sizeof(scan_buf);
+      rope_st_copy_range(right.root, 0, scan_len, scan_buf);
+
+      size_t comb_len = 0;
+      {
+        size_t p = 0;
+        while (p < scan_len) {
+          uint32_t cp;
+          size_t n = utf8_decode(scan_buf + p, scan_len - p, &cp);
+          if (n == 0) break;
+          UnicodeGraphemeBreak g = unicode_grapheme_break(cp);
+          if (g != GBP_EXTEND && g != GBP_ZWJ && g != GBP_SPACINGMARK) break;
+          p += n;
+        }
+        comb_len = p;
+      }
+
+      if (comb_len > 0) {
+        /* Get left's rightmost leaf */
+        rope_st_node* ln = left.root.node;
+        while (ln->type == rope_st_NODE_INTERNAL) {
+          rope_st_internal* ni = (rope_st_internal*)ln;
+          ln = ni->children[ni->n_children - 1];
+        }
+        rope_st_leaf* left_last = (rope_st_leaf*)ln;
+
+        /* Build junction buffer: left_last content + combining prefix */
+        size_t junction_len = left_last->count + comb_len;
+        uint8_t junction_buf[ROPE_LEAF_MAX + 128];
+        memcpy(junction_buf, left_last->elements, left_last->count);
+        memcpy(junction_buf + left_last->count, scan_buf, comb_len);
+
+        /* Split left before its rightmost leaf */
+        size_t left_prefix_bytes = lb - left_last->count;
+        rope_st_split_result lsp = rope_st_split(left.root, left_prefix_bytes);
+
+        /* Split right after combining prefix */
+        rope_st_split_result rsp = rope_st_split(right.root, comb_len);
+
+        /* Create junction rope with correct grapheme-safe leaf splitting */
+        rope junction = rope_from_str(junction_buf, junction_len);
+
+        /* Build result: left_prefix + junction + right_rest */
+        rope_st_root tmp;
+        if (lsp.left.node) {
+          tmp = rope_st_concat(lsp.left, junction.root);
+        } else {
+          tmp = rope_st_ref(junction.root);
+        }
+
+        rope_st_root result;
+        if (rsp.right.node) {
+          result = rope_st_concat(tmp, rsp.right);
+          rope_st_unref(tmp);
+        } else {
+          result = tmp;
+        }
+
+        /* Cleanup */
+        rope_st_unref(lsp.left);
+        rope_st_unref(lsp.right);
+        rope_st_unref(rsp.left);
+        rope_st_unref(rsp.right);
+        rope_unref(junction);
+
+        return (rope){.root = result};
+      }
+    }
+  }
+
+  /* No fix-up needed — standard concat */
+  return (rope){.root = rope_st_concat(left.root, right.root)};
+}
+
 /* --- Dimension extractors for search-by-summary --- */
 
 static inline size_t rope_dim_bytes(rope_summary s)     { return s.bytes; }
