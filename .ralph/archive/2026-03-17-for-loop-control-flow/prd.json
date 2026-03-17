@@ -1,0 +1,127 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/for-loop-control-flow",
+  "description": "Complete for-loop forms and add break/continue/return control flow — C-style for, break with value, continue, inlined block bodies for correct return semantics, comprehensive e2e tests.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Compile break as control flow",
+      "description": "As a JACL developer, I want break to exit the nearest enclosing for or while loop so that I can terminate iteration early.",
+      "acceptanceCriteria": [
+        "Parser produces an AST_BREAK node (not AST_LIT_STRING) when encountering break",
+        "break with no argument exits the loop, loop expression evaluates to nil",
+        "break $value exits the loop, loop expression evaluates to $value",
+        "Compiler emits a jump instruction that targets the instruction after the loop",
+        "VM executes the jump correctly",
+        "break outside any loop is a compile-time error",
+        "break works in both for and while loops",
+        "Nested loops: break exits only the innermost loop",
+        "E2e test: for with early break produces correct output",
+        "E2e test: while with break produces correct output",
+        "E2e test: nested loop break exits only inner loop",
+        "E2e test: break $value returns the value from the loop expression",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "break is already lexed as TOKEN_BREAK but parsed as AST_LIT_STRING. Needs: new AST node type, compiler loop context stack for jump patching, new opcode or reuse of OP_JUMP. The compiler must track a stack of loop contexts so break knows where to jump. Use forward-jump patching (same technique as if/else). break $value requires leaving the value on the stack before jumping."
+    },
+    {
+      "id": "US-002",
+      "title": "Compile continue as control flow",
+      "description": "As a JACL developer, I want continue to skip to the next iteration of the nearest enclosing loop so that I can skip specific elements.",
+      "acceptanceCriteria": [
+        "Parser produces an AST_CONTINUE node (not AST_LIT_STRING) when encountering continue",
+        "Compiler emits a jump instruction that targets the loop's increment/next-iteration point",
+        "VM executes the jump correctly",
+        "continue outside any loop is a compile-time error",
+        "continue works in both for and while loops",
+        "Nested loops: continue affects only the innermost loop",
+        "E2e test: for with continue skips correct elements",
+        "E2e test: while with continue skips to next iteration",
+        "E2e test: nested loop continue affects only inner loop",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Same infrastructure as break (loop context stack, jump patching). continue jumps to the loop's continue point: for collection-based loops this is the next-element advancement, for while loops it's the condition re-check, for C-style for it's the step expression. Reuses the loop context stack from US-001."
+    },
+    {
+      "id": "US-003",
+      "title": "Inline block-form for bodies (fix return semantics)",
+      "description": "As a JACL developer, I want return inside a for block body to exit the enclosing proc, not just the loop body, matching the spec and while loop behavior.",
+      "acceptanceCriteria": [
+        "Block-form for $items { body } inlines the body into the enclosing function's bytecode (not wrapped in a closure)",
+        "Block-form for $items name { body } also inlines the body",
+        "return inside an inlined for-body exits the enclosing proc",
+        "return $value inside an inlined for-body returns the value from the enclosing proc",
+        "Lambda-form for $items [\\\\ body] remains closure-based — return exits the lambda",
+        "HOF-form for $items $callback remains closure-based — return exits the callback proc",
+        "Existing for-loop tests continue to pass (implicit $it, explicit binding, HOF, empty vec, upvalue capture)",
+        "E2e test: return from inside a for block exits the enclosing proc",
+        "E2e test: return $value from inside a for block returns the value from the proc",
+        "E2e test: return from lambda-form for only exits the lambda",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Currently for block bodies are wrapped in closures and called via OP_EACH. Inlining means the compiler emits the iteration loop directly (like while): get collection length, loop counter, get element, bind as local ($it or named), compile body inline, increment counter, loop back. This is a significant compiler change — the for block forms switch from OP_EACH-based to direct loop emission. Lambda and HOF forms continue using OP_EACH unchanged. break/continue from US-001/US-002 must work with the inlined loop."
+    },
+    {
+      "id": "US-004",
+      "title": "C-style for loop",
+      "description": "As a JACL developer, I want to write C-style for loops with init, condition, and step expressions so that I can do counted/index-based iteration.",
+      "acceptanceCriteria": [
+        "Syntax: for {init; cond; step} { body } where init, cond, step are separated by ;",
+        "Compiler distinguishes this form: first arg is a {} block with semicolons → C-style loop",
+        "Init expression runs once before the loop",
+        "Condition is checked before each iteration; loop exits when condition is falsy",
+        "Step expression runs after each iteration body",
+        "Loop variable declared in init is scoped to the loop (not visible after loop ends)",
+        "break works inside C-style for",
+        "continue skips to the step expression, then re-checks condition",
+        "return exits the enclosing proc",
+        "E2e test: basic counting for {mut i 0; ($i < 5); set i ($i + 1)} { print $i } → 0 1 2 3 4",
+        "E2e test: C-style for with break",
+        "E2e test: C-style for with continue",
+        "E2e test: nested C-style for loops",
+        "All existing tests still pass (no regressions)"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "The parser needs to detect when for's first arg is a {} block — this distinguishes C-style from collection-based forms. The block contains three ;-separated sections. The compiler emits: init code, then loop (condition check → body → step → jump back). continue target is the step expression. break target is after the loop. Loop variable scoping: wrap in a begin/end scope so the init variable is not visible after the loop."
+    },
+    {
+      "id": "US-005",
+      "title": "Comprehensive e2e test suite for all for forms",
+      "description": "As a maintainer, I want a complete test suite covering all for forms and control flow interactions to prevent regressions.",
+      "acceptanceCriteria": [
+        "Tests in test/test_compiler.c (compile-and-run style checking stdout output)",
+        "Test: collection for + implicit $it (existing — verify still passes)",
+        "Test: collection for + explicit binding (existing — verify still passes)",
+        "Test: collection for + HOF callback (existing — verify still passes)",
+        "Test: for over empty collection (existing — verify still passes)",
+        "Test: upvalue capture in for body (existing — verify still passes)",
+        "Test: C-style for basic counting",
+        "Test: C-style for with break",
+        "Test: C-style for with continue",
+        "Test: C-style for nested",
+        "Test: break exits for loop (value is nil)",
+        "Test: break $value returns value from for expression",
+        "Test: break exits while loop",
+        "Test: break in nested loops exits only innermost",
+        "Test: continue in for skips element",
+        "Test: continue in while skips to next check",
+        "Test: continue in nested loops affects only innermost",
+        "Test: return from for block exits enclosing proc",
+        "Test: return from lambda-form for exits only the lambda",
+        "Test: break outside loop is compile error",
+        "Test: continue outside loop is compile error",
+        "All tests pass"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "This story adds any tests not already covered by US-001 through US-004. It is the final verification sweep — ensures all combinations are tested and all existing tests still pass. Tests should be in test_compiler.c using the standard compile-and-run-check-stdout pattern."
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+# Ralph Progress Log
+Started: Mon Mar 16 20:45:23 UTC 2026
+
+## Codebase Patterns
+- While loops are compiled inline (not closure-wrapped) — condition/body/loop-back pattern with OP_JUMP_IF_FALSE + OP_LOOP
+- Break/continue use OP_JUMP forward-patching (break) and OP_LOOP backward-jump (continue) — same technique as if/else
+- OP_CHECK_ERROR after each body statement pops the value if not an error — net stack effect of loop body is zero
+- Loop context stack (LoopContext) tracks break jump patches per nesting level
+- Both bracket syntax `[break $val]` and bare command syntax `break $val` are supported — compiler handles AST_BREAK node AND command head "break"
+- For break with value: break pushes value then jumps past OP_NIL; normal exit pushes nil then jumps over break landing zone
+- For-loops are compiled as inlined loops (like while) with hidden locals: __col, __len, __idx, $it/name — uses OP_SET_LOCAL to update element each iteration
+- LoopContext.is_for_loop distinguishes for vs while; for-loops use forward-jump patching for continue (while uses backward OP_LOOP)
+- OP_CLOSE_LOOP pops N values under the top of stack — used by break to clean up for-loop hidden locals while preserving break value
+- For HOF callback form `[for $coll $callback]`, reuse OP_EACH via compiler__compile_hof_builtin
+- Test pattern: compile-and-run via jacl_run(), capture stdout with PrintCapture, ASSERT_STR_EQ
+- For compile-error tests: compile_source() returns CompileResult, check error_count and strstr(error_message)
+- `return` keyword: AST_RETURN node, compiles to push value (or nil) + OP_RETURN — works in both bracket `[return $val]` and bare `return $val` forms
+- Since for-loop bodies are inlined, `return` inside a for block naturally exits the enclosing proc via OP_RETURN (no special handling needed)
+- HOF callback form uses OP_EACH (separate call frame), so `return` in callback exits only the callback proc
+- Lambda shorthand `\` is specified in SYNTAX_REDESIGN.md but NOT implemented — use named `proc` + `$callback` for HOF form tests
+- Proc/variable names must be ≤ 7 chars (inline string limit) — use short names in tests
+- C-style for `[for {init; cond; step} { body }]` detected by `args[0]->type == AST_BLOCK && args[1]->type == AST_BLOCK` — must be checked BEFORE collection-based form detection
+- C-style for uses `begin_scope`/`end_scope` for init variable scoping; `is_for_loop=true` so continue uses forward-jump patching and break uses OP_CLOSE_LOOP
+- After loop, init vars become out-of-scope locals → accessing them is a **runtime** error (not compile-time), because undefined vars fall through to global lookup
+- Mutable variable update command is `set!` not `set` — use `[set! varname expr]` syntax in tests
+
+---
+
+## 2026-03-16 - US-001
+- Implemented break and continue as control flow for while loops
+- Files changed:
+  - src/ast.c: Added AST_BREAK, AST_CONTINUE node types with data fields
+  - src/parser.c: Parse "break" [value] and "continue" as distinct AST nodes in parser__parse_bare_command
+  - src/compiler.c: Added LoopContext stack, modified while compilation to push/pop context, added break/continue compilation with forward-jump patching, added compile-time error for break/continue outside loops, updated AST walkers (analyze__walk_body, analyze__collect_procs, ast__contains_suspension) to handle new node types
+  - test/test_compiler.c: 9 new e2e tests — break basic, break with value, break nil value, nested loops, break outside loop error (bracket + bare), bare break with value, continue basic, continue outside loop error
+- **Learnings for future iterations:**
+  - break value requires a "skip_break" jump in the normal exit path so that both paths (normal exit → nil, break → value) converge correctly
+  - continue in while loops jumps back to loop_start (condition re-check); for for-loops it should jump to the step/advance point instead
+  - The continue statement in a command context needs to emit OP_NIL after OP_LOOP to satisfy OP_CHECK_ERROR's expectation of a value on the stack (even though OP_LOOP has already jumped away, this prevents compiler validation issues)
+  - All AST walkers with switch(node->type) have default cases, so new node types are safe — but adding explicit AST_BREAK cases to recursive walkers is important when the break has a value child expression
+---
+
+## 2026-03-16 - US-002
+- Implemented `for` as an inlined collection-based loop with continue support
+- Files changed:
+  - src/bytecode.c: Added OP_CLOSE_LOOP opcode (pops N values under TOS)
+  - src/vm.c: Implemented OP_CLOSE_LOOP in VM dispatch
+  - src/compiler.c: Extended LoopContext with continue_patches, local_count_at_loop, is_for_loop; added `for` handler (3 forms: implicit $it, explicit binding, HOF callback); modified break to emit OP_CLOSE_LOOP for for-loop cleanup; modified continue to use forward-jump patching for for-loops
+  - test/test_bytecode.c: Updated opcode ordinal assertions for OP_CLOSE_LOOP + OP_HALT shift
+  - test/test_compiler.c: 10 new e2e tests — for implicit $it, for explicit binding, for empty collection, continue for basic (bracket + bare), continue nested for-for, break for basic, break for with value, continue mixed while+for nested, for HOF callback
+- **Learnings for future iterations:**
+  - `for` syntax does not exist in the old codebase — it was planned in the syntax redesign but never merged. Had to implement it from scratch as part of this story to satisfy the acceptance criteria
+  - For inlined for-loops, break needs OP_CLOSE_LOOP because break value sits ON TOP of hidden locals (__col, __len, __idx, $it). A simple OP_POP_N would pop the value too. OP_CLOSE_LOOP slides TOS down past N stack entries
+  - Continue in for-loops uses forward-jump patching (like break) because the increment code is AFTER the body. While-loop continue uses backward OP_LOOP because condition is BEFORE the body
+  - Pre-allocated element slot with OP_SET_LOCAL avoids creating new locals each iteration and keeps the stack layout stable
+  - Adding opcodes shifts OP_HALT — test_bytecode.c has ordinal assertions that must be updated
+---
+
+## 2026-03-16 - US-003
+- Implemented `return` keyword and verified inlined for-loop return semantics
+- Files changed:
+  - src/ast.c: Added AST_RETURN node type with optional value child, added pretty-printer case
+  - src/parser.c: Parse `return [value]` in parser__parse_bare_command (same pattern as break)
+  - src/compiler.c: Added `[return]`/`[return $val]` bracket-form handler (push value + OP_RETURN); added AST_RETURN case in compile_node switch (same logic); updated 3 AST walkers (analyze__walk_body, analyze__collect_procs, ast__contains_suspension) with AST_RETURN cases
+  - test/test_compiler.c: 5 new e2e tests — return from for block, return $value from for block, return from HOF callback for (exits callback only), bare return from for block, return nil from for block
+- **Learnings for future iterations:**
+  - For-loop bodies were already inlined (from US-002), so `return` inside them naturally exits the enclosing proc — OP_RETURN destroys the entire call frame including loop hidden locals
+  - HOF callback form (OP_EACH) runs each iteration in a separate call frame, so `return` exits only the callback's frame — this is the correct lambda/HOF semantics
+  - The `\` lambda shorthand from SYNTAX_REDESIGN.md is not yet implemented — tests must use named proc + $callback HOF pattern
+  - Proc and variable names have a 7-byte inline string limit — `sum-until` (9 chars) fails, use `sumto` instead
+  - AST_RETURN follows the same pattern as AST_BREAK: optional value child, compile to emit value + control flow opcode
+---
+
+## 2026-03-17 - US-004
+Thread: (no thread URL — local agent)
+- Implemented C-style for loop `[for {init; cond; step} { body }]`
+- Files changed:
+  - src/compiler.c: Added C-style for detection at the top of the `for` handler — checks `args[0]->type == AST_BLOCK && args[1]->type == AST_BLOCK`. Uses begin_scope/end_scope for init variable scoping, is_for_loop=true for forward-jump continue patching, OP_CLOSE_LOOP for break cleanup
+  - test/test_compiler.c: 5 new e2e tests — basic counting (0..4), break, continue, nested loops, scope (init var not visible after loop)
+- **Learnings for future iterations:**
+  - C-style for detection must come BEFORE collection-based form detection since both can have `args[1]->type == AST_BLOCK`; distinguish by `args[0]->type == AST_BLOCK`
+  - Mutable variable update uses `set!` command (not `set`) — syntax `[set! varname expr]`
+  - Init variable scoping: after end_scope, accessing the var is a runtime error (not compile-time), because undeclared vars fall through to global lookup
+  - is_for_loop=true for C-style for ensures continue uses forward-jump patching (correct, since step is after body) and break uses OP_CLOSE_LOOP to clean up init locals under break value
+  - The `OP_NIL + skip_break + break_landing + convergence` pattern: both normal-exit and break paths converge at the same point; skip_break is a 0-byte forward jump in the no-break case
+---
+
+## 2026-03-17 - US-005
+Thread: (no thread URL — local agent)
+- Comprehensive e2e test suite verification and gap-filling for all for-loop forms and control flow
+- Audited all 20 acceptance criteria against existing tests from US-001–US-004
+- Added 5 new tests to fill gaps:
+  - `test_break_for_nil_value` — break from for-loop expression evaluates to nil
+  - `test_break_nested_for_loops` — break in nested for-for loops exits only innermost
+  - `test_continue_bare_outside_loop_error` — bare continue outside loop is compile error
+  - `test_for_cstyle_return` — return from C-style for body exits enclosing proc
+  - `test_for_cstyle_break_value` — break $value from C-style for loop expression
+- Files changed:
+  - test/test_compiler.c: 5 new e2e tests + test table registrations
+  - .ralph/prd.json: US-005 passes set to true
+- **Learnings for future iterations:**
+  - US-001–US-004 already had good coverage; the main gaps were combination/edge-case tests (nil break value from for, nested for-for break, C-style for with return/break-value)
+  - Bare-form compile-error tests are easily missed — bracket form `[continue]` and bare form `continue` both need coverage
+  - C-style for body is inlined like collection-based for, so return exits the enclosing proc (same semantics)
+---
