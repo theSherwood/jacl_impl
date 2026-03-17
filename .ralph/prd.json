@@ -185,7 +185,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "The current slice builtin in vm.c does byte-based slicing. Change to grapheme-based. Reuse the grapheme iteration helper from US-008 (jacl_grapheme_nth or similar). For the byte range: find byte offset of grapheme 'start' and byte offset of grapheme 'end'. For inline/flat: extract bytes from that range and pass to jacl_string_new(). For rope: rope_slice(r, byte_start, byte_end - byte_start) produces a new rope, then wrap it. Note: the sliced bytes are already NFD (parent string was NFD), so jacl_string_new can skip re-normalization — or just let the unicode_is_nfd() quick-check handle it (it'll return true and skip)."
     },
     {
@@ -210,7 +210,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "The current OP_CONCAT in vm.c handles inline+inline and inline+heap combinations. Extend it for all 9 combos. Strategy: (1) compute total byte length from both operands, (2) if total ≤128: extract bytes from both into a stack buffer, pass to jacl_string_new() — this handles inline/flat routing and interning, (3) if total >128: convert both operands to ropes (non-rope operands via rope_from_str on their bytes), then rope_concat — the rope_concat invariant from US-002 handles grapheme boundaries, wrap result in JaclRopeString. For extracting bytes: use jacl_string_data() for inline/flat, rope_to_str() for rope. For the grapheme boundary check on flat results: check if right operand's first byte starts a combining codepoint — if so, recompute grapheme count on the concatenated buffer instead of summing. For rope results, US-002's rope_concat handles this automatically."
     },
     {
