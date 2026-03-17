@@ -84,10 +84,7 @@ static inline void gc__ms_push_const(GCMarkStack *ms, JaclVal v) {
  * ====================================================================== */
 
 static inline void gc__finalize_dead(GCHeader *hdr) {
-    if (hdr->obj_type == OBJ_ROPE_STRING) {
-        JaclRopeString *rs = (JaclRopeString *)(hdr + 1);
-        rope_unref(rs->r);
-    }
+    (void)hdr;
 }
 
 /* ======================================================================
@@ -105,8 +102,28 @@ static void gc__trace_object(void *payload, GCMarkStack *ms) {
     case OBJ_HEAP_U64:
     case OBJ_HEAP_F64:
     case OBJ_BIGNUM:
-    case OBJ_ROPE_STRING:  /* rope internals are RC-managed, not GC-traced */
+    case OBJ_ROPE_LEAF:
         break;
+
+    /* --- Rope string: trace root node of the rope tree --- */
+    case OBJ_ROPE_STRING: {
+        JaclRopeString *rs = (JaclRopeString *)payload;
+        if (rs->r.root.node) {
+            gc__ms_push(ms, rs->r.root.node);
+        }
+        break;
+    }
+
+    /* --- Rope internal: trace children array --- */
+    case OBJ_ROPE_INTERNAL: {
+        rope_st_internal *node = (rope_st_internal *)payload;
+        for (size_t i = 0; i < node->n_children; i++) {
+            if (node->children[i]) {
+                gc__ms_push(ms, node->children[i]);
+            }
+        }
+        break;
+    }
 
     /* --- Closure: trace captured upvalues + chunk constants --- */
     case OBJ_CLOSURE: {
