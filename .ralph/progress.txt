@@ -84,3 +84,22 @@ Thread: (no thread URL — local agent)
   - is_for_loop=true for C-style for ensures continue uses forward-jump patching (correct, since step is after body) and break uses OP_CLOSE_LOOP to clean up init locals under break value
   - The `OP_NIL + skip_break + break_landing + convergence` pattern: both normal-exit and break paths converge at the same point; skip_break is a 0-byte forward jump in the no-break case
 ---
+
+## 2026-03-17 - US-005
+Thread: (no thread URL — local agent)
+- Comprehensive e2e test suite verification and gap-filling for all for-loop forms and control flow
+- Audited all 20 acceptance criteria against existing tests from US-001–US-004
+- Added 5 new tests to fill gaps:
+  - `test_break_for_nil_value` — break from for-loop expression evaluates to nil
+  - `test_break_nested_for_loops` — break in nested for-for loops exits only innermost
+  - `test_continue_bare_outside_loop_error` — bare continue outside loop is compile error
+  - `test_for_cstyle_return` — return from C-style for body exits enclosing proc
+  - `test_for_cstyle_break_value` — break $value from C-style for loop expression
+- Files changed:
+  - test/test_compiler.c: 5 new e2e tests + test table registrations
+  - .ralph/prd.json: US-005 passes set to true
+- **Learnings for future iterations:**
+  - US-001–US-004 already had good coverage; the main gaps were combination/edge-case tests (nil break value from for, nested for-for break, C-style for with return/break-value)
+  - Bare-form compile-error tests are easily missed — bracket form `[continue]` and bare form `continue` both need coverage
+  - C-style for body is inlined like collection-based for, so return exits the enclosing proc (same semantics)
+---

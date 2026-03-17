@@ -27,7 +27,7 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | 1   | Lexer                     | **COMPLETE** | Token stream (23 token types)                                                             |
 | 2   | Parser & AST              | **COMPLETE** | Recursive descent parser, arena-allocated AST                                             |
 | 3   | Bytecode Compiler & VM    | **COMPLETE** | Opcodes, compiler, stack VM, `jacl_run` pipeline                                          |
-| 4   | Variables, Procs, Control | **COMPLETE** | `proc`, `if`, closures, lexical scoping                                                   |
+| 4   | Variables, Procs, Control | **COMPLETE** | `proc`, `if`, closures, lexical scoping, `for`/`while` loops, `break`/`continue`/`return` |
 | 5   | String System             | **COMPLETE** | Heap interned strings, interpolation end-to-end                                           |
 | 6   | Line-Based Syntax Sugar   | **COMPLETE** | Implicit brackets, line/semicolon/comma delimiters                                        |
 | 7   | Arity Checking            | **COMPLETE** | Compile-time arity checks, variadic procs                                                 |

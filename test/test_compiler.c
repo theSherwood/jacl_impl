@@ -6662,6 +6662,156 @@ static int test_for_cstyle_scope(void) {
   TEST_PASS();
 }
 
+/* ===== For-loop PRD US-005: Comprehensive e2e test suite ===== */
+
+/* Test: break from for loop — loop expression evaluates to nil */
+static int test_break_for_nil_value(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* break with no value — for expression evaluates to nil */
+  VMResult result = jacl_run(
+    "r = [for [vec 1 2 3] {\n"
+    "  if [== $it 2] { [break] }\n"
+    "}]\n"
+    "[print $r]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "nil\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: break in nested for-for loops exits only innermost */
+static int test_break_nested_for_loops(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* Outer for runs over 1,2. Inner for breaks at 20.
+     Expected: 10 10 */
+  VMResult result = jacl_run(
+    "for [vec 1 2] x {\n"
+    "  for [vec 10 20 30] y {\n"
+    "    if [== $y 20] { [break] }\n"
+    "    [print $y]\n"
+    "  }\n"
+    "}\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n10\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: continue bare form outside loop is compile error */
+static int test_continue_bare_outside_loop_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  CompileResult cr = compile_source("continue", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+  ASSERT(strstr(cr.error_message, "continue outside of loop") != NULL);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: return from C-style for body exits enclosing proc */
+static int test_for_cstyle_return(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* proc returns from C-style for — should not reach "done" */
+  VMResult result = jacl_run(
+    "proc find {} {\n"
+    "  [for {i : 0; [< $i 10]; [set i [+ $i 1]]} {\n"
+    "    if [== $i 3] { [return $i] }\n"
+    "  }]\n"
+    "  999\n"
+    "}\n"
+    "print [find]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "3\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: break $value from C-style for loop expression */
+static int test_for_cstyle_break_value(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  PrintCapture cap = { .len = 0 };
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  /* break with value — for expression evaluates to 42 */
+  VMResult result = jacl_run(
+    "r = [for {i : 0; [< $i 10]; [set i [+ $i 1]]} {\n"
+    "  if [== $i 3] { [break 42] }\n"
+    "}]\n"
+    "[print $r]\n", &vm, &arena);
+
+  ASSERT_INT_EQ(result, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ===== Syntax Redesign US-007: Builtin renames (set/reset/swap) ===== */
 
 /* Test: set (without !) works for mutable local reassignment */
@@ -8037,6 +8187,12 @@ int main(void) {
     { "for_cstyle_continue",             test_for_cstyle_continue },
     { "for_cstyle_nested",               test_for_cstyle_nested },
     { "for_cstyle_scope",                test_for_cstyle_scope },
+    /* For-loop PRD US-005: Comprehensive e2e test suite */
+    { "break_for_nil_value",             test_break_for_nil_value },
+    { "break_nested_for_loops",          test_break_nested_for_loops },
+    { "continue_bare_outside_loop_error", test_continue_bare_outside_loop_error },
+    { "for_cstyle_return",               test_for_cstyle_return },
+    { "for_cstyle_break_value",          test_for_cstyle_break_value },
     /* Syntax Redesign US-007: Builtin renames (set/reset/swap) */
     { "set_without_bang",             test_set_without_bang },
     { "set_bang_still_works",         test_set_bang_still_works },

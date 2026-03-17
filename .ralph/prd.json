@@ -120,7 +120,7 @@
         "All tests pass"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "This story adds any tests not already covered by US-001 through US-004. It is the final verification sweep — ensures all combinations are tested and all existing tests still pass. Tests should be in test_compiler.c using the standard compile-and-run-check-stdout pattern."
     }
   ]
