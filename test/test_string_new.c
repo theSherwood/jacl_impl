@@ -14,7 +14,7 @@ static void fill_ascii(char* buf, size_t len) {
 static int test_tier_inline(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -32,7 +32,7 @@ static int test_tier_inline(void) {
 static int test_tier_flat_8(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -50,7 +50,7 @@ static int test_tier_flat_8(void) {
 static int test_tier_flat_128(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -71,7 +71,7 @@ static int test_tier_flat_128(void) {
 static int test_tier_rope_129(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -92,7 +92,7 @@ static int test_tier_rope_129(void) {
 static int test_nfc_expansion_to_rope(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -119,7 +119,7 @@ static int test_nfc_expansion_to_rope(void) {
 static int test_interning_dedup(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -140,7 +140,7 @@ static int test_interning_dedup(void) {
 static int test_invalid_utf8_returns_nil(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -166,7 +166,7 @@ static int test_invalid_utf8_returns_nil(void) {
 static int test_empty_string(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -184,7 +184,7 @@ static int test_empty_string(void) {
 static int test_nfd_applied(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -215,7 +215,7 @@ static int test_nfd_applied(void) {
 static int test_ascii_fast_path(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -238,7 +238,7 @@ static int test_ascii_fast_path(void) {
 static int test_rope_content_and_hash(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 

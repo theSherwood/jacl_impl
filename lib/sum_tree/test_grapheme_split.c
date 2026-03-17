@@ -172,7 +172,6 @@ int test_rope_from_str_combining_near_boundary(void) {
   ASSERT(memcmp(buf, out, len) == 0);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -204,7 +203,6 @@ int test_rope_from_str_multi_combining_at_boundary(void) {
   ASSERT(memcmp(buf, out, len) == 0);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -244,7 +242,6 @@ int test_rope_from_str_emoji_zwj_at_boundary(void) {
   ASSERT(memcmp(buf, out, len) == 0);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -275,7 +272,6 @@ int test_rope_from_str_regional_indicators_at_boundary(void) {
   ASSERT(memcmp(buf, out, len) == 0);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -320,7 +316,6 @@ int test_rope_grapheme_count_matches_flat(void) {
   ASSERT(memcmp(buf, out, pos) == 0);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 

@@ -114,7 +114,7 @@ static int test_index_negative(void) {
 static int test_index_combining_inline(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -157,7 +157,7 @@ static int test_index_combining_inline(void) {
 static int test_index_combining_heap(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -200,7 +200,7 @@ static int test_index_combining_heap(void) {
 static int test_index_rope(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -274,7 +274,7 @@ static int test_index_heap_via_run(void) {
 static int test_index_grapheme_cluster_via_vm(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 

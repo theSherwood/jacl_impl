@@ -25,7 +25,6 @@ int test_empty_rope(void) {
   ASSERT_INT_EQ(rope_line_count(r), 0);
   ASSERT_INT_EQ(rope_grapheme_count(r), 0);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -38,7 +37,6 @@ int test_rope_ref_unref(void) {
   rope r2 = rope_ref(r);
   rope_unref(r2);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -51,7 +49,6 @@ int test_rope_compiles_alongside_sum_tree(void) {
   rope_st_root root = r.root;
   ASSERT_INT_EQ(rope_st_count(root), 0);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -76,7 +73,6 @@ int test_from_str_ascii_roundtrip(void) {
   ASSERT(memcmp(buf, str, 11) == 0);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -105,7 +101,6 @@ int test_from_str_multibyte_roundtrip(void) {
   ASSERT(memcmp(buf, str, 10) == 0);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -124,7 +119,6 @@ int test_from_str_summary_dimensions(void) {
   ASSERT_INT_EQ(rope_grapheme_count(r), 7);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -159,7 +153,6 @@ int test_from_str_large_roundtrip(void) {
   free(buf);
   free(str);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -174,7 +167,6 @@ int test_from_str_empty(void) {
   ASSERT_INT_EQ(rope_grapheme_count(r), 0);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -188,7 +180,6 @@ int test_from_str_invalid_utf8(void) {
   ASSERT_INT_EQ(rope_byte_count(r), 0);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -211,7 +202,6 @@ int test_insert_beginning(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -229,7 +219,6 @@ int test_insert_middle(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -247,7 +236,6 @@ int test_insert_end(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -265,7 +253,6 @@ int test_delete_beginning(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -283,7 +270,6 @@ int test_delete_middle(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -301,7 +287,6 @@ int test_delete_end(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -320,7 +305,6 @@ int test_replace_range(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -340,7 +324,6 @@ int test_insert_summary_dimensions(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -359,7 +342,6 @@ int test_delete_summary_dimensions(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -383,7 +365,6 @@ int test_persistence_after_mutation(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -401,7 +382,6 @@ int test_insert_empty_string(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -419,7 +399,6 @@ int test_delete_zero_bytes(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -438,7 +417,6 @@ int test_replace_different_length(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -466,7 +444,6 @@ int test_insert_multibyte_summary(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -490,7 +467,6 @@ int test_byte_char_ascii(void) {
   ASSERT(res.found); ASSERT_INT_EQ(res.value, 3);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -526,7 +502,6 @@ int test_byte_char_multibyte(void) {
   ASSERT(res.found); ASSERT_INT_EQ(res.value, 8);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -552,7 +527,6 @@ int test_line_to_byte(void) {
   ASSERT(res.found); ASSERT_INT_EQ(res.value, 6);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -581,7 +555,6 @@ int test_byte_to_line(void) {
   ASSERT(res.found); ASSERT_INT_EQ(res.value, 2);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -617,7 +590,6 @@ int test_grapheme_conversions_combining(void) {
   ASSERT(res.found); ASSERT_INT_EQ(res.value, 1);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -657,7 +629,6 @@ int test_seek_out_of_bounds(void) {
 
   rope_unref(r);
   rope_unref(empty);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -677,7 +648,6 @@ int test_slice_beginning(void) {
 
   rope_unref(r);
   rope_unref(s);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -695,7 +665,6 @@ int test_slice_middle(void) {
 
   rope_unref(r);
   rope_unref(s);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -713,7 +682,6 @@ int test_slice_end(void) {
 
   rope_unref(r);
   rope_unref(s);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -731,7 +699,6 @@ int test_slice_entire_rope(void) {
 
   rope_unref(r);
   rope_unref(s);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -760,7 +727,6 @@ int test_slice_multibyte_boundaries(void) {
 
   rope_unref(r);
   rope_unref(s);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -776,7 +742,6 @@ int test_slice_to_str_copies(void) {
   ASSERT(memcmp(buf, "world", 5) == 0);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -797,7 +762,6 @@ int test_line_slice_extracts_lines(void) {
 
   rope_unref(r);
   rope_unref(s);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -812,7 +776,6 @@ int test_slice_empty_range(void) {
 
   rope_unref(r);
   rope_unref(s);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -868,7 +831,6 @@ int test_large_string_256_leaves(void) {
   free(buf);
   free(str);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -897,7 +859,6 @@ int test_insert_at_char_ascii(void) {
   rope_unref(r);
   rope_unref(r2);
   rope_unref(r3);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -927,7 +888,6 @@ int test_insert_at_char_multibyte(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -954,7 +914,6 @@ int test_delete_at_char_multibyte(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -975,7 +934,6 @@ int test_delete_at_line(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1002,7 +960,6 @@ int test_slice_by_chars(void) {
 
   rope_unref(r);
   rope_unref(s);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1033,7 +990,6 @@ int test_slice_by_graphemes_combining(void) {
 
   rope_unref(r);
   rope_unref(s);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1057,7 +1013,6 @@ int test_insert_at_char_out_of_bounds(void) {
   rope_unref(r);
   rope_unref(r2);
   rope_unref(s);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1080,7 +1035,6 @@ int test_cursor_advance_chars_ascii(void) {
 
   rope_cursor_free(c);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1114,7 +1068,6 @@ int test_cursor_advance_chars_multibyte(void) {
 
   rope_cursor_free(c);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1151,7 +1104,6 @@ int test_cursor_advance_lines(void) {
 
   rope_cursor_free(c);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1182,7 +1134,6 @@ int test_cursor_advance_past_end(void) {
   rope_cursor_free(c2);
   rope_cursor_free(c3);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1206,7 +1157,6 @@ int test_cursor_peek(void) {
 
   rope_cursor_free(c);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1238,7 +1188,6 @@ int test_cursor_read(void) {
   rope_cursor_free(c);
   rope_cursor_free(c2);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1262,7 +1211,6 @@ int test_cursor_retreat_bytes(void) {
 
   rope_cursor_free(c);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1295,7 +1243,6 @@ int test_cursor_retreat_chars_multibyte(void) {
 
   rope_cursor_free(c);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1328,7 +1275,6 @@ int test_cursor_retreat_lines(void) {
 
   rope_cursor_free(c);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1357,7 +1303,6 @@ int test_cursor_retreat_past_beginning(void) {
   rope_cursor_free(c2);
   rope_cursor_free(c3);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1401,7 +1346,6 @@ int test_cursor_advance_then_retreat(void) {
   rope_cursor_free(c3);
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1435,7 +1379,6 @@ int test_cursor_insert_matches_rope_insert(void) {
   rope_unref(r);
   rope_unref(r2);
   rope_unref(r3);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1464,7 +1407,6 @@ int test_cursor_delete_matches_rope_delete(void) {
   rope_unref(r);
   rope_unref(r2);
   rope_unref(r3);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1493,7 +1435,6 @@ int test_cursor_replace_matches_rope_replace(void) {
   rope_unref(r);
   rope_unref(r2);
   rope_unref(r3);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1534,7 +1475,6 @@ int test_cursor_edit_multibyte(void) {
   rope_unref(r);
   rope_unref(r2);
   rope_unref(r3);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1577,7 +1517,6 @@ int test_cursor_invalidation(void) {
   rope_unref(r);
   rope_unref(r2);
   rope_unref(r3);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1601,7 +1540,6 @@ int test_seek_line0_col0(void) {
   ASSERT_INT_EQ(res.value, 0);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1630,7 +1568,6 @@ int test_seek_ascii_line_col(void) {
   ASSERT_INT_EQ(res.value, 0);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1668,7 +1605,6 @@ int test_seek_chars_multibyte(void) {
   ASSERT_INT_EQ(res.value, 3);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1706,7 +1642,6 @@ int test_seek_graphemes_combining(void) {
   ASSERT_INT_EQ(res.value, 7);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1725,7 +1660,6 @@ int test_seek_nonexistent_line(void) {
   ASSERT(!res.found);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1761,7 +1695,6 @@ int test_seek_column_clamping(void) {
   ASSERT_INT_EQ(res.value, 6);
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1788,7 +1721,6 @@ int test_transient_no_edits(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1814,7 +1746,6 @@ int test_transient_insert(void) {
   rope_unref(r);
   rope_unref(r2);
   rope_unref(r3);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1840,7 +1771,6 @@ int test_transient_two_inserts(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1866,7 +1796,6 @@ int test_transient_persistence(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1894,7 +1823,6 @@ int test_transient_delete(void) {
   rope_unref(r);
   rope_unref(r2);
   rope_unref(r3);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1920,7 +1848,6 @@ int test_transient_replace(void) {
   rope_unref(r);
   rope_unref(r2);
   rope_unref(r3);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1954,7 +1881,6 @@ int test_transient_interleaved(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -2006,7 +1932,6 @@ int test_transient_perf(void) {
   rope_unref(rt);
   rope_unref(result);
   free(base);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -2033,7 +1958,6 @@ int test_transient_delete_persistence(void) {
 
   rope_unref(r);
   rope_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 

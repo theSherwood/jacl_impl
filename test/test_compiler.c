@@ -21,7 +21,7 @@ static int test_compile_int(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("42", &arena, &heap);
 
@@ -49,7 +49,7 @@ static int test_compile_zero_int(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("0", &arena, &heap);
 
@@ -70,7 +70,7 @@ static int test_compile_float(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("3.14", &arena, &heap);
 
@@ -98,7 +98,7 @@ static int test_compile_short_string(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("hello", &arena, &heap);
 
@@ -122,7 +122,7 @@ static int test_compile_string_7_bytes(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("abcdefg", &arena, &heap);
 
@@ -146,7 +146,7 @@ static int test_compile_long_string_heap(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("\"abcdefgh\"", &arena, &heap);
 
@@ -166,7 +166,7 @@ static int test_compile_multi_statement(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Two statements separated by newline: "42\n99" */
   CompileResult cr = compile_source("42\n99", &arena, &heap);
@@ -201,7 +201,7 @@ static int test_compile_multi_semicolons(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("1; 2; 3", &arena, &heap);
 
@@ -230,7 +230,7 @@ static int test_compile_single_no_pop(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("100", &arena, &heap);
 
@@ -254,7 +254,7 @@ static int test_compile_halt_at_end(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("1; 2", &arena, &heap);
 
@@ -274,7 +274,7 @@ static int test_compile_empty(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("", &arena, &heap);
 
@@ -294,7 +294,7 @@ static int test_compile_const_pool_indices(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("10\n20\n30", &arena, &heap);
 
@@ -327,7 +327,7 @@ static int test_compile_line_tracking(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("42\n99", &arena, &heap);
 
@@ -352,7 +352,7 @@ static int test_compile_parse_error_propagated(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* "[" is an unclosed bracket, should produce parse error */
   CompileResult cr = compile_source("[", &arena, &heap);
@@ -373,7 +373,7 @@ static int test_compile_add(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[+ 1 2]", &arena, &heap);
 
@@ -405,7 +405,7 @@ static int test_compile_sub(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[- 10 3]", &arena, &heap);
 
@@ -430,7 +430,7 @@ static int test_compile_mul_div_mod(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Test * */
   CompileResult cr = compile_source("[* 4 5]", &arena, &heap);
@@ -475,7 +475,7 @@ static int test_compile_unary_neg(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[- 5]", &arena, &heap);
 
@@ -501,7 +501,7 @@ static int test_compile_nested_arithmetic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[+ 1 [* 2 3]]", &arena, &heap);
 
@@ -533,7 +533,7 @@ static int test_compile_f32_arithmetic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[+ 1.5 2.5]", &arena, &heap);
 
@@ -557,7 +557,7 @@ static int test_compile_eq(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[== 1 2]", &arena, &heap);
 
@@ -583,7 +583,7 @@ static int test_compile_lt_gt_le_ge(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Test < */
   CompileResult cr = compile_source("[< 1 2]", &arena, &heap);
@@ -641,7 +641,7 @@ static int test_compile_f32_comparison(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[< 1.5 2.5]", &arena, &heap);
 
@@ -665,7 +665,7 @@ static int test_compile_print(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[print 42]", &arena, &heap);
 
@@ -693,7 +693,7 @@ static int test_compile_print_no_args(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Bare "print" has no args - parser wraps as AST_COMMAND{head: "print", args: [], argc: 0}
      which goes to the bare-expression path, not compile_command.
@@ -730,7 +730,7 @@ static int test_compile_print_nested(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[print [+ 1 2]]", &arena, &heap);
 
@@ -762,7 +762,7 @@ static int test_compile_def(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("x = 42", &arena, &heap);
 
@@ -795,7 +795,7 @@ static int test_compile_def_expr(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("x = [+ 1 2]", &arena, &heap);
 
@@ -827,7 +827,7 @@ static int test_compile_def_wrong_argc(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Too few args: def x */
   CompileResult cr = compile_source("def x", &arena, &heap);
@@ -857,7 +857,7 @@ static int test_compile_def_non_string_name(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* def 42 10 - first arg is int, not string */
   CompileResult cr = compile_source("def 42 10", &arena, &heap);
@@ -875,7 +875,7 @@ static int test_compile_var_ref(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("$x", &arena, &heap);
 
@@ -920,7 +920,7 @@ static int test_def_print_var(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("x = 42\n[print $x]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -948,7 +948,7 @@ static int test_def_expr_print_var(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("x = [+ 1 2]\n[print $x]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -978,7 +978,7 @@ static int test_var_true_false_nil(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1027,7 +1027,7 @@ static int test_var_undefined(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("$nope", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -1055,7 +1055,7 @@ static int test_nested_print_add_mul(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[print [+ 1 [* 2 3]]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -1083,7 +1083,7 @@ static int test_nested_both_args(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[+ [* 2 3] [- 10 4]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -1110,7 +1110,7 @@ static int test_deeply_nested(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[+ 1 [+ 2 [+ 3 4]]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -1137,7 +1137,7 @@ static int test_multi_def_print(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("x = 10\ny = 20\n[print [+ $x $y]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -1165,7 +1165,7 @@ static int test_multi_semicolons_def_print(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("a = 1; b = 2; [print [+ $a $b]]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -1193,7 +1193,7 @@ static int test_intermediate_results_popped(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Three statements: 10, 20, 30 — only the last should remain on stack */
   CompileResult cr = compile_source("10\n20\n30", &arena, &heap);
@@ -1221,7 +1221,7 @@ static int test_final_result_available(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("x = 5\n[+ $x 10]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -1250,7 +1250,7 @@ static int test_runtime_error_add_bool_i32(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[+ $true 1]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -1278,7 +1278,7 @@ static int test_runtime_error_lt_bool_i32(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[< $true 1]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -1304,7 +1304,7 @@ static int test_runtime_error_print_undefined(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[print $undef]", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
@@ -1333,7 +1333,7 @@ static int test_runtime_error_line_number(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Error on line 2: def x $true; [+ $x 1] */
   CompileResult cr = compile_source("x = $true\n[+ $x 1]", &arena, &heap);
@@ -1360,7 +1360,7 @@ static int test_runtime_error_unknown_command(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* [foo 42] compiles to GET_GLOBAL("foo"), CONST(42), CALL(1) */
   VM vm;
@@ -1384,7 +1384,7 @@ static int test_compile_long_string_no_error_msg(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("\"abcdefgh\"", &arena, &heap);
 
@@ -1404,7 +1404,7 @@ static int test_vm_returns_runtime_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Multiple error types all return VM_RUNTIME_ERROR */
 
@@ -1436,7 +1436,7 @@ static int test_local_def_in_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* { x = 42; [print $x] } should print "42\n" */
   PrintCapture cap = { .len = 0 };
@@ -1462,7 +1462,7 @@ static int test_local_not_visible_outside(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1485,7 +1485,7 @@ static int test_local_shadowing(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1512,7 +1512,7 @@ static int test_local_nested_scopes(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1539,7 +1539,7 @@ static int test_local_same_scope_shadow(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1567,7 +1567,7 @@ static int test_local_top_level_still_global(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* At top level, def should use OP_DEF_GLOBAL */
   CompileResult cr = compile_source("x = 42", &arena, &heap);
@@ -1588,7 +1588,7 @@ static int test_local_top_level_var_ref_global(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("$x", &arena, &heap);
 
@@ -1608,7 +1608,7 @@ static int test_local_max_exceeded(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Build source: { x = 0; x = 1; ...; x = 256 } — 257 defs */
   char source[8192];
@@ -1640,7 +1640,7 @@ static int test_local_empty_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1665,7 +1665,7 @@ static int test_if_then_branch(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1689,7 +1689,7 @@ static int test_if_else_branch(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1713,7 +1713,7 @@ static int test_if_no_else_nil(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1736,7 +1736,7 @@ static int test_if_nested(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1760,7 +1760,7 @@ static int test_if_nil_falsy(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1783,7 +1783,7 @@ static int test_if_zero_truthy(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1806,7 +1806,7 @@ static int test_if_empty_string_truthy(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1830,7 +1830,7 @@ static int test_if_as_expression(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1853,7 +1853,7 @@ static int test_if_wrong_argc_1(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1875,7 +1875,7 @@ static int test_if_wrong_argc_4(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1897,7 +1897,7 @@ static int test_if_then_not_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1919,7 +1919,7 @@ static int test_if_else_not_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1943,7 +1943,7 @@ static int test_proc_basic_call(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -1968,7 +1968,7 @@ static int test_proc_print_param(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -1994,7 +1994,7 @@ static int test_proc_zero_params(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2019,7 +2019,7 @@ static int test_proc_implicit_return(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2043,7 +2043,7 @@ static int test_proc_multi_stmt_body(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2071,7 +2071,7 @@ static int test_proc_redefine(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2095,7 +2095,7 @@ static int test_proc_wrong_argc(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Too few args */
   VM vm;
@@ -2121,7 +2121,7 @@ static int test_proc_call_arg_mismatch(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2145,7 +2145,7 @@ static int test_proc_def_returns_nil(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2171,7 +2171,7 @@ static int test_proc_new_syntax_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2196,7 +2196,7 @@ static int test_proc_new_syntax_typed(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2220,7 +2220,7 @@ static int test_proc_new_syntax_zero_params(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2245,7 +2245,7 @@ static int test_proc_new_syntax_multi_stmt(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2277,7 +2277,7 @@ static int test_proc_new_syntax_closure(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2304,7 +2304,7 @@ static int test_proc_new_syntax_implicit_return(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2330,7 +2330,7 @@ static int test_while_zero_iterations(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2353,7 +2353,7 @@ static int test_while_nil_falsy(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2376,7 +2376,7 @@ static int test_while_iterative_sum(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2412,7 +2412,7 @@ static int test_while_returns_nil(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2445,7 +2445,7 @@ static int test_while_wrong_argc_1(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[while $true]", &arena, &heap);
   ASSERT(cr.error_count > 0);
@@ -2463,7 +2463,7 @@ static int test_while_wrong_argc_3(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[while $true { 1 } { 2 }]", &arena, &heap);
   ASSERT(cr.error_count > 0);
@@ -2481,7 +2481,7 @@ static int test_while_body_not_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[while $true 42]", &arena, &heap);
   ASSERT(cr.error_count > 0);
@@ -2499,7 +2499,7 @@ static int test_while_countdown(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2534,7 +2534,7 @@ static int test_closure_capture_local(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2567,7 +2567,7 @@ static int test_closure_independent_captures(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2602,7 +2602,7 @@ static int test_closure_nested_3_levels(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2638,7 +2638,7 @@ static int test_closure_capture_multiple(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2671,7 +2671,7 @@ static int test_closure_not_global(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2708,7 +2708,7 @@ static int test_recursion_factorial(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2740,7 +2740,7 @@ static int test_recursion_fibonacci(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -2772,7 +2772,7 @@ static int test_recursion_depth_limit(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -2817,7 +2817,7 @@ static int test_spawn_captures_mut_pinned(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* mut x captured via $x in spawn body (read only, no set!) */
   const char* program =
@@ -2847,7 +2847,7 @@ static int test_spawn_local_mut_not_pinned(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* mut x declared inside spawn body — local, no pinning needed */
   const char* program =
@@ -2879,7 +2879,7 @@ static int test_spawn_captures_def_not_pinned(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   const char* program =
     "proc main {} {\n"
@@ -2908,7 +2908,7 @@ static int test_spawn_transitive_capture_pinned(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* proc f captures mut x, proc g calls f, g is called in spawn body */
   const char* program =
@@ -2940,7 +2940,7 @@ static int test_spawn_transitive_varref_pinned(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* proc f captures mut x, spawn body uses $f (var ref) */
   const char* program =
@@ -2970,7 +2970,7 @@ static int test_spawn_transitive_def_not_pinned(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* proc f captures def x (immutable), spawn calls f — NOT pinned */
   const char* program =
@@ -3116,7 +3116,7 @@ static int test_use_private_compile_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Importing a private name should produce a parse error propagated to compile */
   CompileResult cr = compile_source("use \"mod.jacl\" [_helper]", &arena, &heap);
@@ -3148,7 +3148,7 @@ static int test_module_populate_exports(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Compile a source with def, proc, mut, and private names */
   const char* source = "def x 42\n"
@@ -3215,7 +3215,7 @@ static int test_compile_module_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Create a temp module file */
   const char* dir = "/tmp/jacl_test_m14";
@@ -3297,7 +3297,7 @@ static int test_compile_module_mutable_export(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   const char* dir = "/tmp/jacl_test_m14b";
   mkdir(dir, 0755);
@@ -3374,7 +3374,7 @@ static int test_compile_module_private_excluded(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   const char* dir = "/tmp/jacl_test_m14c";
   mkdir(dir, 0755);
@@ -3443,7 +3443,7 @@ static int test_compile_module_cached(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   const char* dir = "/tmp/jacl_test_m14d";
   mkdir(dir, 0755);
@@ -3511,7 +3511,7 @@ static int test_compile_module_typed_exports(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   const char* dir = "/tmp/jacl_test_m14e";
   mkdir(dir, 0755);
@@ -3955,7 +3955,7 @@ static int test_nonmodule_mut_no_box(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   BytecodeChunk chunk;
   chunk_init(&chunk, &arena);
@@ -4136,7 +4136,7 @@ static int test_compile_program_single_file(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   JaclInternTable intern; intern_table_init(&intern, &arena);
 
   const char* dir = "/tmp/jacl_us009a";
@@ -4169,7 +4169,7 @@ static int test_compile_program_with_dep(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   JaclInternTable intern; intern_table_init(&intern, &arena);
 
   const char* dir = "/tmp/jacl_us009b";
@@ -4204,7 +4204,7 @@ static int test_compile_program_topo_order(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   JaclInternTable intern; intern_table_init(&intern, &arena);
 
   const char* dir = "/tmp/jacl_us009c";
@@ -4237,7 +4237,7 @@ static int test_compile_program_not_found(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   JaclInternTable intern; intern_table_init(&intern, &arena);
 
   ProgramResult pr = jacl_compile_program(
@@ -4258,7 +4258,7 @@ static int test_single_file_api_unchanged(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("def x 42\n[+ $x 1]\n", &arena, &heap);
 
@@ -4277,7 +4277,7 @@ static int test_compile_program_root_exports(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   JaclInternTable intern; intern_table_init(&intern, &arena);
 
   const char* dir = "/tmp/jacl_us009e";
@@ -4322,7 +4322,7 @@ static int test_exec_program_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   JaclInternTable intern; intern_table_init(&intern, &arena);
 
   const char* dir = "/tmp/jacl_us010a";
@@ -4362,7 +4362,7 @@ static int test_exec_program_namespace(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   JaclInternTable intern; intern_table_init(&intern, &arena);
 
   const char* dir = "/tmp/jacl_us010b";
@@ -4402,7 +4402,7 @@ static int test_exec_program_side_effects_once(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   JaclInternTable intern; intern_table_init(&intern, &arena);
 
   const char* dir = "/tmp/jacl_us010c";
@@ -4442,7 +4442,7 @@ static int test_exec_program_dep_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   JaclInternTable intern; intern_table_init(&intern, &arena);
 
   const char* dir = "/tmp/jacl_us010d";
@@ -4482,7 +4482,7 @@ static int test_exec_program_mutable_import(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   JaclInternTable intern; intern_table_init(&intern, &arena);
 
   const char* dir = "/tmp/jacl_us010e";
@@ -4551,7 +4551,7 @@ static int test_defstruct_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}", &arena, &heap);
@@ -4569,7 +4569,7 @@ static int test_defstruct_duplicate_name(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
@@ -4588,7 +4588,7 @@ static int test_defstruct_duplicate_field(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Bad {i32 x, i32 x}", &arena, &heap);
@@ -4606,7 +4606,7 @@ static int test_defstruct_undefined_field_type(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Line {Point start, Point end}", &arena, &heap);
@@ -4624,7 +4624,7 @@ static int test_defstruct_nested_type(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
@@ -4643,7 +4643,7 @@ static int test_defstruct_type_annotation(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* def Point p $x — struct name as type annotation with dyn RHS.
      Verifies that 'Point' is accepted as a type keyword after struct. */
@@ -4665,7 +4665,7 @@ static int test_defstruct_all_field_types(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, str g}",
@@ -4684,7 +4684,7 @@ static int test_defstruct_forward_ref_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Line {Point start, Point end}\n"
@@ -4704,7 +4704,7 @@ static int test_struct_new_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
@@ -4722,7 +4722,7 @@ static int test_struct_new_arity_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
@@ -4740,7 +4740,7 @@ static int test_struct_new_type_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
@@ -4758,7 +4758,7 @@ static int test_struct_new_runtime(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -4783,7 +4783,7 @@ static int test_struct_get_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -4807,7 +4807,7 @@ static int test_struct_get_unknown_field(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
@@ -4826,7 +4826,7 @@ static int test_struct_get_nested(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -4852,7 +4852,7 @@ static int test_struct_set_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -4877,7 +4877,7 @@ static int test_struct_set_unknown_field(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
@@ -4896,7 +4896,7 @@ static int test_struct_set_type_mismatch(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
@@ -4915,7 +4915,7 @@ static int test_struct_set_preserves_other_fields(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -4941,7 +4941,7 @@ static int test_struct_dyn_assign(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -4964,7 +4964,7 @@ static int test_struct_dyn_field_access(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -4988,7 +4988,7 @@ static int test_struct_dyn_field_set(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5012,7 +5012,7 @@ static int test_struct_in_vec(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5038,7 +5038,7 @@ static int test_inline_struct_runtime(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5062,7 +5062,7 @@ static int test_inline_struct_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Wrapper {struct{x:i32,y:i32} pos}", &arena, &heap);
@@ -5085,7 +5085,7 @@ static int test_inline_struct_equivalence(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct A {struct{x:i32,y:i32} p}\n"
@@ -5106,7 +5106,7 @@ static int test_inline_struct_nested(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct C {struct{start:struct{x:i32,y:i32},end:struct{x:i32,y:i32}} d}",
@@ -5129,7 +5129,7 @@ static int test_struct_module_import(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   JaclInternTable intern; intern_table_init(&intern, &arena);
 
   const char* dir = "/tmp/jacl_us009a";
@@ -5178,7 +5178,7 @@ static int test_struct_new_syntax_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}", &arena, &heap);
@@ -5195,7 +5195,7 @@ static int test_struct_new_syntax_runtime(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5218,7 +5218,7 @@ static int test_struct_new_syntax_all_types(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct AllTypes {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, str g}",
@@ -5236,7 +5236,7 @@ static int test_struct_new_syntax_nested(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
@@ -5255,7 +5255,7 @@ static int test_struct_new_syntax_construct_and_access(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   PrintCapture cap = { .len = 0 };
   VM vm;
@@ -5284,7 +5284,7 @@ static int test_struct_new_syntax_duplicate_field(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
       "struct Bad {i32 x, i32 x}", &arena, &heap);
@@ -5304,7 +5304,7 @@ static int test_if_new_then_branch(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5329,7 +5329,7 @@ static int test_if_new_else_branch(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5353,7 +5353,7 @@ static int test_if_new_no_else_nil(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5376,7 +5376,7 @@ static int test_if_new_infix_condition(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5407,7 +5407,7 @@ static int test_if_new_elif(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5432,7 +5432,7 @@ static int test_if_new_elif_else(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5457,7 +5457,7 @@ static int test_if_new_elif_chain(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5484,7 +5484,7 @@ static int test_if_new_as_expression(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5512,7 +5512,7 @@ static int test_while_new_iterative_sum(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5544,7 +5544,7 @@ static int test_while_new_infix_condition(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5574,7 +5574,7 @@ static int test_while_new_returns_nil(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5597,7 +5597,7 @@ static int test_if_while_combined_new(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5633,7 +5633,7 @@ static int test_for_implicit_it(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5661,7 +5661,7 @@ static int test_for_explicit_binding(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5689,7 +5689,7 @@ static int test_for_hof_callback(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5717,7 +5717,7 @@ static int test_for_empty_vec(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5745,7 +5745,7 @@ static int test_for_variable_collection(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5774,7 +5774,7 @@ static int test_for_returns_nil(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5802,7 +5802,7 @@ static int test_for_upvalue_capture(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5831,7 +5831,7 @@ static int test_each_still_works(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5861,7 +5861,7 @@ static int test_break_while_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5892,7 +5892,7 @@ static int test_break_while_with_value(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5923,7 +5923,7 @@ static int test_break_while_nil_value(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5952,7 +5952,7 @@ static int test_break_nested_loops(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -5991,7 +5991,7 @@ static int test_break_outside_loop_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[break]", &arena, &heap);
   ASSERT(cr.error_count > 0);
@@ -6009,7 +6009,7 @@ static int test_break_bare_outside_loop_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("break", &arena, &heap);
   ASSERT(cr.error_count > 0);
@@ -6027,7 +6027,7 @@ static int test_break_bare_with_value(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6060,7 +6060,7 @@ static int test_continue_while_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6094,7 +6094,7 @@ static int test_continue_outside_loop_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("[continue]", &arena, &heap);
   ASSERT(cr.error_count > 0);
@@ -6114,7 +6114,7 @@ static int test_for_empty_collection(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6143,7 +6143,7 @@ static int test_continue_for_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6174,7 +6174,7 @@ static int test_continue_for_bare(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6205,7 +6205,7 @@ static int test_continue_nested_loops(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6239,7 +6239,7 @@ static int test_break_for_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6270,7 +6270,7 @@ static int test_break_for_with_value(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6301,7 +6301,7 @@ static int test_continue_mixed_nested(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6340,7 +6340,7 @@ static int test_return_from_for_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6374,7 +6374,7 @@ static int test_return_value_from_for_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6410,7 +6410,7 @@ static int test_return_from_hof_for(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6449,7 +6449,7 @@ static int test_return_bare_from_for_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6483,7 +6483,7 @@ static int test_return_nil_from_for_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6519,7 +6519,7 @@ static int test_for_cstyle_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6547,7 +6547,7 @@ static int test_for_cstyle_break(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6578,7 +6578,7 @@ static int test_for_cstyle_continue(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6609,7 +6609,7 @@ static int test_for_cstyle_nested(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6641,7 +6641,7 @@ static int test_for_cstyle_scope(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6669,7 +6669,7 @@ static int test_break_for_nil_value(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6700,7 +6700,7 @@ static int test_break_nested_for_loops(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6734,7 +6734,7 @@ static int test_continue_bare_outside_loop_error(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source("continue", &arena, &heap);
   ASSERT(cr.error_count > 0);
@@ -6752,7 +6752,7 @@ static int test_for_cstyle_return(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6786,7 +6786,7 @@ static int test_for_cstyle_break_value(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6819,7 +6819,7 @@ static int test_set_without_bang(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6849,7 +6849,7 @@ static int test_set_bang_still_works(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6879,7 +6879,7 @@ static int test_reset_without_bang(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6907,7 +6907,7 @@ static int test_reset_bang_still_works(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6934,7 +6934,7 @@ static int test_swap_without_bang(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6963,7 +6963,7 @@ static int test_swap_bang_still_works(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -6991,7 +6991,7 @@ static int test_set_global_without_bang(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7020,7 +7020,7 @@ static int test_set_multiple_reassign(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7054,7 +7054,7 @@ static int test_bind_equals_def(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7081,7 +7081,7 @@ static int test_bind_typed_equals(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7108,7 +7108,7 @@ static int test_bind_colon_mut(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7136,7 +7136,7 @@ static int test_bind_typed_colon(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7164,7 +7164,7 @@ static int test_bind_double_colon_set(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7192,7 +7192,7 @@ static int test_bind_mixed_with_commands(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7224,7 +7224,7 @@ static int test_bind_in_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7255,7 +7255,7 @@ static int test_bind_expr_values(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7284,7 +7284,7 @@ static int test_arrow_basic_get(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7312,7 +7312,7 @@ static int test_arrow_chained_get(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7341,7 +7341,7 @@ static int test_arrow_on_expr_result(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7368,7 +7368,7 @@ static int test_arrow_in_infix_mode(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7395,7 +7395,7 @@ static int test_arrow_in_bracket_cmd(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7422,7 +7422,7 @@ static int test_arrow_old_dot_compat(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* [. $p x] inside brackets is now a parse error — use $p->x instead */
   CompileResult cr = compile_source(
@@ -7445,7 +7445,7 @@ static int test_pipe_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7471,7 +7471,7 @@ static int test_pipe_multi_stage(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7498,7 +7498,7 @@ static int test_pipe_with_builtins(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7524,7 +7524,7 @@ static int test_pipe_in_block(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7551,7 +7551,7 @@ static int test_pipe_with_vars(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7579,7 +7579,7 @@ static int test_pipe_in_proc_body(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7608,7 +7608,7 @@ static int test_lambda_basic_call(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7634,7 +7634,7 @@ static int test_lambda_arithmetic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7660,7 +7660,7 @@ static int test_lambda_each_compat(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7686,7 +7686,7 @@ static int test_lambda_upvalue(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7713,7 +7713,7 @@ static int test_lambda_as_value(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7740,7 +7740,7 @@ static int test_lambda_in_pipe(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7768,7 +7768,7 @@ static int test_dollar_paren_compile_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7794,7 +7794,7 @@ static int test_dollar_paren_compile_vars(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7820,7 +7820,7 @@ static int test_dollar_paren_compile_nested(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7846,7 +7846,7 @@ static int test_dollar_paren_compile_existing(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7872,7 +7872,7 @@ static int test_line_continuation_compile(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);
@@ -7898,7 +7898,7 @@ static int test_blank_lines_compile(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   VM vm;
   vm_init(&vm, &arena);

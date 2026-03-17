@@ -138,7 +138,7 @@ static int test_slice_negative_clamped(void) {
 static int test_slice_combining_marks(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -204,7 +204,7 @@ static int test_slice_combining_via_vm(void) {
 static int test_slice_rope(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -241,7 +241,7 @@ static int test_slice_rope(void) {
 static int test_slice_rope_across_leaves(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -276,7 +276,7 @@ static int test_slice_rope_across_leaves(void) {
 static int test_slice_rope_to_inline(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 

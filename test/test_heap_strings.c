@@ -85,7 +85,7 @@ static VMResult run_capture(const char* src, PrintCapture* cap) {
 static int test_nfd_nfc_roundtrip(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -111,7 +111,7 @@ static int test_nfd_nfc_roundtrip(void) {
 static int test_nfd_ascii_unchanged(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -131,7 +131,7 @@ static int test_nfd_ascii_unchanged(void) {
 static int test_nfd_hangul(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -154,7 +154,7 @@ static int test_nfd_hangul(void) {
 static int test_invalid_utf8_overlong(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -172,7 +172,7 @@ static int test_invalid_utf8_overlong(void) {
 static int test_invalid_utf8_surrogate(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -190,7 +190,7 @@ static int test_invalid_utf8_surrogate(void) {
 static int test_invalid_utf8_truncated(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -208,7 +208,7 @@ static int test_invalid_utf8_truncated(void) {
 static int test_invalid_utf8_continuation(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -228,7 +228,7 @@ static int test_invalid_utf8_continuation(void) {
 static int test_tier_7_inline(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -247,7 +247,7 @@ static int test_tier_7_inline(void) {
 static int test_tier_8_flat(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -266,7 +266,7 @@ static int test_tier_8_flat(void) {
 static int test_tier_128_flat(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -287,7 +287,7 @@ static int test_tier_128_flat(void) {
 static int test_tier_129_rope(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -310,7 +310,7 @@ static int test_tier_129_rope(void) {
 static int test_grapheme_len_ascii(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -329,7 +329,7 @@ static int test_grapheme_len_ascii(void) {
 static int test_grapheme_len_combining(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -351,7 +351,7 @@ static int test_grapheme_len_combining(void) {
 static int test_grapheme_len_emoji(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -375,7 +375,7 @@ static int test_grapheme_len_emoji(void) {
 static int test_grapheme_len_zwj(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -402,7 +402,7 @@ static int test_grapheme_len_zwj(void) {
 static int test_grapheme_len_regional(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -426,7 +426,7 @@ static int test_grapheme_len_regional(void) {
 static int test_grapheme_index_combining(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -458,7 +458,7 @@ static int test_grapheme_index_combining(void) {
 static int test_grapheme_slice_combining(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -493,7 +493,7 @@ static int test_grapheme_slice_combining(void) {
 static int test_concat_inline_inline_inline(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -514,7 +514,7 @@ static int test_concat_inline_inline_inline(void) {
 static int test_concat_inline_flat(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -536,7 +536,7 @@ static int test_concat_inline_flat(void) {
 static int test_concat_flat_flat_rope(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -558,7 +558,7 @@ static int test_concat_flat_flat_rope(void) {
 static int test_concat_rope_rope(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -582,7 +582,7 @@ static int test_concat_rope_rope(void) {
 static int test_concat_grapheme_boundary(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -620,7 +620,7 @@ static int test_concat_grapheme_boundary(void) {
 static int test_eq_inline_inline(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -642,7 +642,7 @@ static int test_eq_inline_inline(void) {
 static int test_eq_flat_flat(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -664,7 +664,7 @@ static int test_eq_flat_flat(void) {
 static int test_eq_inline_flat(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -684,7 +684,7 @@ static int test_eq_inline_flat(void) {
 static int test_eq_rope_rope(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -704,7 +704,7 @@ static int test_eq_rope_rope(void) {
 static int test_eq_rope_flat(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -736,7 +736,7 @@ static int test_eq_rope_flat(void) {
 static int test_eq_rope_inline(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -758,7 +758,7 @@ static int test_eq_rope_inline(void) {
 static int test_cmp_inline(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -779,7 +779,7 @@ static int test_cmp_inline(void) {
 static int test_cmp_rope_flat(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -808,7 +808,7 @@ static int test_cmp_rope_flat(void) {
 static int test_rope_leaf_no_grapheme_split(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Build a 300-byte string with combining marks near ROPE_LEAF_MAX (256) boundary.
      Pattern: 253 * 'a' + e + combining acute (0xCC 0x81) + ... more padding.
@@ -846,7 +846,7 @@ static int test_rope_leaf_no_grapheme_split(void) {
 static int test_rope_hash_consistency(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -884,7 +884,7 @@ static int test_rope_hash_consistency(void) {
 static int test_large_rope_concat(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -909,7 +909,7 @@ static int test_large_rope_concat(void) {
 static int test_large_rope_slice(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -943,7 +943,7 @@ static int test_large_rope_slice(void) {
 static int test_large_rope_index(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -1036,7 +1036,7 @@ static int test_gc_rope_stress(void) {
 static int test_eq_combining_cross_tier(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 
@@ -1095,7 +1095,7 @@ static int test_vm_index_slice(void) {
 static int test_rope_structural_sharing(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
   arena_t arena = { .allocator = tracked_allocator };
   JaclInternTable table; intern_table_init(&table, &arena);
 

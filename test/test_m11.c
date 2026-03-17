@@ -117,7 +117,7 @@ static int test_val_i64_roundtrip(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   JaclVal v = jacl_i64(&heap, 123456789LL);
   ASSERT(jacl_is_i64(v));
@@ -135,7 +135,7 @@ static int test_val_i64_negative(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   JaclVal v = jacl_i64(&heap, -987654321LL);
   ASSERT(jacl_is_i64(v));
@@ -152,7 +152,7 @@ static int test_val_u64_roundtrip(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   JaclVal v = jacl_u64(&heap, 999999999999ULL);
   ASSERT(jacl_is_u64(v));
@@ -170,7 +170,7 @@ static int test_val_f64_roundtrip(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   JaclVal v = jacl_f64(&heap, 3.14159);
   ASSERT(jacl_is_f64(v));
@@ -188,7 +188,7 @@ static int test_val_predicates_exclusive(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   JaclVal u32v = jacl_u32(1);
   JaclVal i64v = jacl_i64(&heap, 1);

@@ -118,16 +118,28 @@
 
 static Allocator ST_ALLOCATOR_VAR = STREE_ALLOCATOR;
 
-/* Wire into rc.h template */
-#define RC_ALLOCATOR ST_ALLOCATOR_VAR
-#define RC_NAME      STREE_NAME
-#include "../rc/rc.h"
+/* --- Node allocation via STREE_GC_ALLOC ---
+ * Caller may define STREE_GC_ALLOC(obj_type, payload_size),
+ * STREE_GC_OBJ_INTERNAL, STREE_GC_OBJ_LEAF before including.
+ * If not defined, falls back to allocator-based malloc (ignores obj_type). */
 
-/* RC function aliases */
-#define ST_RC_ALLOC ST_NS(_rc_alloc)
-#define ST_RC_REF   ST_NS(_rc_ref)
-#define ST_RC_UNREF ST_NS(_rc_unref)
-#define ST_RC_COUNT ST_NS(_rc_count)
+#ifndef STREE_GC_ALLOC
+#define STREE_GC_ALLOC(t, sz)  ST_ALLOCATOR_VAR.alloc(ST_ALLOCATOR_VAR.ctx, (sz))
+#define _STREE_GC_ALLOC_DEFAULTED 1
+#endif
+
+#ifndef STREE_GC_OBJ_INTERNAL
+#define STREE_GC_OBJ_INTERNAL 0
+#define _STREE_GC_OBJ_INTERNAL_DEFAULTED 1
+#endif
+
+#ifndef STREE_GC_OBJ_LEAF
+#define STREE_GC_OBJ_LEAF 0
+#define _STREE_GC_OBJ_LEAF_DEFAULTED 1
+#endif
+
+#define ST_ALLOC_LEAF(sz)      STREE_GC_ALLOC(STREE_GC_OBJ_LEAF, (sz))
+#define ST_ALLOC_INTERNAL(sz)  STREE_GC_ALLOC(STREE_GC_OBJ_INTERNAL, (sz))
 
 /* --- Handler typedefs --- */
 
@@ -219,14 +231,11 @@ typedef struct ST_SEARCH_RESULT {
   bool            found;
 } ST_SEARCH_RESULT;
 
-/* --- Forward declaration for destructor --- */
-
-static void ST_NODE_DESTROY(void* arg);
 
 /* --- Node construction helpers --- */
 
 static inline ST_LEAF* ST_MK_LEAF(const STREE_T* elems, size_t count) {
-  ST_LEAF* leaf = (ST_LEAF*)ST_RC_ALLOC(sizeof(ST_LEAF), ST_NODE_DESTROY);
+  ST_LEAF* leaf = (ST_LEAF*)ST_ALLOC_LEAF(sizeof(ST_LEAF));
   leaf->header  = (ST_NODE){.type = ST_NODE_LEAF_VAL};
   leaf->count   = count;
   if (count > 0 && elems) {
@@ -237,7 +246,7 @@ static inline ST_LEAF* ST_MK_LEAF(const STREE_T* elems, size_t count) {
 }
 
 static inline ST_INTERNAL* ST_MK_INTERNAL(ST_NODE** children, size_t n_children) {
-  ST_INTERNAL* node = (ST_INTERNAL*)ST_RC_ALLOC(sizeof(ST_INTERNAL), ST_NODE_DESTROY);
+  ST_INTERNAL* node = (ST_INTERNAL*)ST_ALLOC_INTERNAL(sizeof(ST_INTERNAL));
   node->header      = (ST_NODE){.type = ST_NODE_INTERNAL_VAL};
   node->n_children  = n_children;
   node->count       = 0;
@@ -245,7 +254,6 @@ static inline ST_INTERNAL* ST_MK_INTERNAL(ST_NODE** children, size_t n_children)
 
   for (size_t i = 0; i < n_children; i++) {
     node->children[i] = children[i];
-    ST_RC_REF(children[i]);
 
     size_t cc;
     STREE_SUMMARY_T cs;
@@ -268,7 +276,7 @@ static inline ST_INTERNAL* ST_MK_INTERNAL(ST_NODE** children, size_t n_children)
 
 /* Like MK_INTERNAL but does NOT ref children — caller transfers ownership */
 static inline ST_INTERNAL* ST_MK_INTERNAL_NREF(ST_NODE** children, size_t n_children) {
-  ST_INTERNAL* node = (ST_INTERNAL*)ST_RC_ALLOC(sizeof(ST_INTERNAL), ST_NODE_DESTROY);
+  ST_INTERNAL* node = (ST_INTERNAL*)ST_ALLOC_INTERNAL(sizeof(ST_INTERNAL));
   node->header      = (ST_NODE){.type = ST_NODE_INTERNAL_VAL};
   node->n_children  = n_children;
   node->count       = 0;
@@ -297,20 +305,6 @@ static inline ST_INTERNAL* ST_MK_INTERNAL_NREF(ST_NODE** children, size_t n_chil
   return node;
 }
 
-/* --- Node destruction --- */
-
-static void ST_NODE_DESTROY(void* arg) {
-  ST_NODE* node = (ST_NODE*)arg;
-  if (!node) return;
-
-  if (node->type == ST_NODE_INTERNAL_VAL) {
-    ST_INTERNAL* n = (ST_INTERNAL*)node;
-    for (size_t i = 0; i < n->n_children; i++) {
-      ST_RC_UNREF(n->children[i]);
-    }
-  }
-  /* Leaf nodes have no children to free */
-}
 
 /* --- Helper: count elements in a node --- */
 
@@ -336,12 +330,11 @@ static inline ST_ROOT ST_EMPTY(void) {
 /* --- Public API: ref/unref --- */
 
 static inline ST_ROOT ST_REF(ST_ROOT root) {
-  if (root.node) ST_RC_REF(root.node);
   return root;
 }
 
 static inline void ST_UNREF(ST_ROOT root) {
-  if (root.node) ST_RC_UNREF(root.node);
+  (void)root;
 }
 
 /* --- Public API: count --- */
@@ -399,10 +392,6 @@ static inline ST_ROOT ST_FROM_ARRAY(const STREE_T* elems, size_t count) {
       size_t chunk = n_current - i;
       if (chunk > STREE_LEAF_MAX) chunk = STREE_LEAF_MAX;
       ST_INTERNAL* internal = ST_MK_INTERNAL(current + i, chunk);
-      /* MK_INTERNAL refs children, but we own them from creation — release our ref */
-      for (size_t j = 0; j < chunk; j++) {
-        ST_RC_UNREF(current[i + j]);
-      }
       next[n_next++] = (ST_NODE*)internal;
     }
 
@@ -499,9 +488,9 @@ static inline ST_ROOT ST_SET(ST_ROOT root, size_t index, STREE_T value) {
 
   /* Clone the leaf and update element */
   ST_LEAF* old_leaf = (ST_LEAF*)node;
-  ST_LEAF* new_leaf = (ST_LEAF*)ST_RC_ALLOC(sizeof(ST_LEAF), ST_NODE_DESTROY);
+  ST_LEAF* new_leaf = (ST_LEAF*)ST_ALLOC_LEAF(sizeof(ST_LEAF));
   *new_leaf = *old_leaf;
-  /* Reset header (it's the rc payload, so we got a fresh rc header) */
+  /* Reset header (fresh allocation has its own rc/gc header) */
   new_leaf->header = (ST_NODE){.type = ST_NODE_LEAF_VAL};
   new_leaf->elements[idx] = value;
   new_leaf->summary = ST_HANDLER_STATE.summarize(new_leaf->elements, new_leaf->count);
@@ -511,7 +500,7 @@ static inline ST_ROOT ST_SET(ST_ROOT root, size_t index, STREE_T value) {
   /* Rebuild path upward */
   for (int d = depth - 1; d >= 0; d--) {
     ST_INTERNAL* old_int = (ST_INTERNAL*)path[d];
-    ST_INTERNAL* new_int = (ST_INTERNAL*)ST_RC_ALLOC(sizeof(ST_INTERNAL), ST_NODE_DESTROY);
+    ST_INTERNAL* new_int = (ST_INTERNAL*)ST_ALLOC_INTERNAL(sizeof(ST_INTERNAL));
     new_int->header     = (ST_NODE){.type = ST_NODE_INTERNAL_VAL};
     new_int->n_children = old_int->n_children;
     new_int->count      = old_int->count;
@@ -524,7 +513,6 @@ static inline ST_ROOT ST_SET(ST_ROOT root, size_t index, STREE_T value) {
       } else {
         new_int->children[i]     = old_int->children[i];
         new_int->child_counts[i] = old_int->child_counts[i];
-        ST_RC_REF(old_int->children[i]);
       }
 
       STREE_SUMMARY_T cs;
@@ -548,7 +536,6 @@ static inline ST_ROOT ST_MK_ROOT(ST_NODE** nodes, size_t n_nodes, size_t leaf_he
   if (n_nodes == 0) return ST_EMPTY();
 
   if (n_nodes == 1) {
-    ST_RC_REF(nodes[0]);
     return (ST_ROOT){
       .node   = nodes[0],
       .count  = ST_NODE_COUNT(nodes[0]),
@@ -573,7 +560,6 @@ static inline ST_ROOT ST_MK_ROOT(ST_NODE** nodes, size_t n_nodes, size_t leaf_he
 
   for (size_t i = 0; i < n_nodes; i++) {
     current[i] = nodes[i];
-    ST_RC_REF(nodes[i]);
   }
   size_t n_current = n_nodes;
   size_t height = leaf_height;
@@ -584,9 +570,6 @@ static inline ST_ROOT ST_MK_ROOT(ST_NODE** nodes, size_t n_nodes, size_t leaf_he
       size_t chunk = n_current - i;
       if (chunk > STREE_LEAF_MAX) chunk = STREE_LEAF_MAX;
       ST_INTERNAL* internal = ST_MK_INTERNAL(current + i, chunk);
-      for (size_t j = 0; j < chunk; j++) {
-        ST_RC_UNREF(current[i + j]);
-      }
       next_buf[n_next++] = (ST_NODE*)internal;
     }
     ST_NODE** tmp = current;
@@ -650,7 +633,6 @@ static inline ST_SPLIT_RESULT ST_SPLIT(ST_ROOT root, size_t index) {
     /* Split at leaf boundary — entire leaf goes right */
     left_sub  = NULL;
     right_sub = node;
-    ST_RC_REF(right_sub);
   } else {
     ST_LEAF* leaf = (ST_LEAF*)node;
     left_sub  = (ST_NODE*)ST_MK_LEAF(leaf->elements, idx);
@@ -669,7 +651,6 @@ static inline ST_SPLIT_RESULT ST_SPLIT(ST_ROOT root, size_t index) {
       ST_NODE* lchildren[STREE_LEAF_MAX];
       for (size_t i = 0; i < ci; i++) {
         lchildren[i] = old->children[i];
-        ST_RC_REF(lchildren[i]);
       }
       if (left_sub) lchildren[ci] = left_sub; /* transfer */
       new_left_sub = (ST_NODE*)ST_MK_INTERNAL_NREF(lchildren, n_left);
@@ -688,7 +669,6 @@ static inline ST_SPLIT_RESULT ST_SPLIT(ST_ROOT root, size_t index) {
       if (right_sub) rchildren[rc++] = right_sub; /* transfer */
       for (size_t i = ci + 1; i < old->n_children; i++) {
         rchildren[rc] = old->children[i];
-        ST_RC_REF(rchildren[rc]);
         rc++;
       }
       new_right_sub = (ST_NODE*)ST_MK_INTERNAL_NREF(rchildren, n_right);
@@ -705,10 +685,7 @@ static inline ST_SPLIT_RESULT ST_SPLIT(ST_ROOT root, size_t index) {
   while (left_sub && left_sub->type == ST_NODE_INTERNAL_VAL) {
     ST_INTERNAL* n = (ST_INTERNAL*)left_sub;
     if (n->n_children != 1) break;
-    ST_NODE* child = n->children[0];
-    ST_RC_REF(child);
-    ST_RC_UNREF(left_sub);
-    left_sub = child;
+    left_sub = n->children[0];
     left_height--;
   }
 
@@ -716,10 +693,7 @@ static inline ST_SPLIT_RESULT ST_SPLIT(ST_ROOT root, size_t index) {
   while (right_sub && right_sub->type == ST_NODE_INTERNAL_VAL) {
     ST_INTERNAL* n = (ST_INTERNAL*)right_sub;
     if (n->n_children != 1) break;
-    ST_NODE* child = n->children[0];
-    ST_RC_REF(child);
-    ST_RC_UNREF(right_sub);
-    right_sub = child;
+    right_sub = n->children[0];
     right_height--;
   }
 
@@ -818,9 +792,7 @@ static inline ST_ROOT ST_CONCAT(ST_ROOT left, ST_ROOT right) {
     if (!merged_a) {
       /* Can't merge — keep both as siblings */
       merged_a = bottom;
-      ST_RC_REF(merged_a);
       overflow = right.node;
-      ST_RC_REF(overflow);
     }
 
     /* Walk back up the right spine */
@@ -834,7 +806,6 @@ static inline ST_ROOT ST_CONCAT(ST_ROOT left, ST_ROOT right) {
       /* Shared children [0..ri-1] */
       for (size_t i = 0; i < ri; i++) {
         new_children[nc] = old->children[i];
-        ST_RC_REF(new_children[nc]);
         nc++;
       }
 
@@ -903,9 +874,7 @@ static inline ST_ROOT ST_CONCAT(ST_ROOT left, ST_ROOT right) {
     if (!merged_a) {
       /* Can't merge — keep both as siblings */
       overflow = left.node;
-      ST_RC_REF(overflow);
       merged_a = bottom;
-      ST_RC_REF(merged_a);
     }
 
     /* Walk back up the left spine */
@@ -927,7 +896,6 @@ static inline ST_ROOT ST_CONCAT(ST_ROOT left, ST_ROOT right) {
       /* Shared children [1..n-1] */
       for (size_t i = 1; i < old->n_children; i++) {
         new_children[nc] = old->children[i];
-        ST_RC_REF(new_children[nc]);
         nc++;
       }
 
@@ -1122,6 +1090,22 @@ static inline size_t ST_COPY_RANGE(ST_ROOT root, size_t start_index, size_t coun
   return copied;
 }
 
+/* --- RC compatibility stubs ---
+ * Consumers like rope.h reference the expanded RC function names directly
+ * (e.g. rope_st_rc_ref, rope_st_rc_unref). Since RC has been removed,
+ * provide no-op stubs here while ST_NS() is still available. */
+
+static inline void* ST_NS(_rc_alloc)(int sz, void (*dtor)(void*)) {
+  (void)dtor;
+  return ST_ALLOC_INTERNAL(sz);
+}
+
+static inline void* ST_NS(_rc_ref)(void* p) { return p; }
+static inline void  ST_NS(_rc_unref)(void* p) { (void)p; }
+static inline intptr_t ST_NS(_rc_count)(void* p) { (void)p; return 2; }
+
+static inline void ST_NODE_DESTROY(void* arg) { (void)arg; }
+
 /* --- Cleanup all internal macros --- */
 
 #undef STREE_T
@@ -1182,10 +1166,8 @@ static inline size_t ST_COPY_RANGE(ST_ROOT root, size_t start_index, size_t coun
 #undef ST_HANDLER_STATE
 #undef ST_ALLOCATOR_VAR
 
-#undef ST_RC_ALLOC
-#undef ST_RC_REF
-#undef ST_RC_UNREF
-#undef ST_RC_COUNT
+#undef ST_ALLOC_LEAF
+#undef ST_ALLOC_INTERNAL
 
 #undef ST_LEAF_MIN
 
@@ -1197,4 +1179,18 @@ static inline size_t ST_COPY_RANGE(ST_ROOT root, size_t start_index, size_t coun
 #ifdef STREE_ALLOC_DEFAULTED
 #undef STREE_ALLOCATOR
 #undef STREE_ALLOC_DEFAULTED
+#endif
+
+#undef STREE_GC_ALLOC
+#undef STREE_GC_OBJ_INTERNAL
+#undef STREE_GC_OBJ_LEAF
+
+#ifdef _STREE_GC_ALLOC_DEFAULTED
+#undef _STREE_GC_ALLOC_DEFAULTED
+#endif
+#ifdef _STREE_GC_OBJ_INTERNAL_DEFAULTED
+#undef _STREE_GC_OBJ_INTERNAL_DEFAULTED
+#endif
+#ifdef _STREE_GC_OBJ_LEAF_DEFAULTED
+#undef _STREE_GC_OBJ_LEAF_DEFAULTED
 #endif

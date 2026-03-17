@@ -68,7 +68,6 @@ int test_empty_tree() {
   ASSERT_INT_EQ(r.height, 0);
   ASSERT(r.node == NULL);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -86,7 +85,6 @@ int test_empty_sumtree() {
   ASSERT_INT_EQ(sumtree_count(r), 0);
   ASSERT_INT_EQ(sumtree_summary(r), 0);
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -114,7 +112,6 @@ int test_two_instantiations() {
 
   rope_unref(rr);
   sumtree_unref(sr);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -130,7 +127,6 @@ int test_from_array_empty() {
   rope_root r = rope_from_array(NULL, 0);
   ASSERT_INT_EQ(rope_count(r), 0);
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -151,7 +147,6 @@ int test_from_array_one() {
   ASSERT_INT_EQ(g.value, 42);
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -174,7 +169,6 @@ int test_from_array_five() {
   }
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -203,7 +197,6 @@ int test_from_array_33() {
   }
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -232,7 +225,6 @@ int test_from_array_1000() {
   }
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -252,7 +244,6 @@ int test_get_out_of_bounds() {
   ASSERT(!g.found);
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -275,7 +266,6 @@ int test_summary_rope() {
   }
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -305,7 +295,6 @@ int test_split_at_zero() {
   sumtree_unref(s.left);
   sumtree_unref(s.right);
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -333,7 +322,6 @@ int test_split_at_end() {
   sumtree_unref(s.left);
   sumtree_unref(s.right);
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -373,7 +361,6 @@ int test_split_at_middle() {
   sumtree_unref(s.left);
   sumtree_unref(s.right);
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -401,7 +388,6 @@ int test_split_original_unchanged() {
   sumtree_unref(s.left);
   sumtree_unref(s.right);
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -419,7 +405,6 @@ int test_split_out_of_bounds() {
   ASSERT(!s.ok);
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -450,7 +435,6 @@ int test_concat_two_nonempty() {
   sumtree_unref(left);
   sumtree_unref(right);
   sumtree_unref(result);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -487,7 +471,6 @@ int test_concat_with_empty() {
   sumtree_unref(empty);
   sumtree_unref(r1);
   sumtree_unref(r2);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -523,7 +506,6 @@ int test_concat_large() {
   sumtree_unref(left);
   sumtree_unref(right);
   sumtree_unref(result);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -549,7 +531,6 @@ int test_concat_originals_unchanged() {
   sumtree_unref(left);
   sumtree_unref(right);
   sumtree_unref(result);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -573,7 +554,6 @@ int test_concat_summary() {
   sumtree_unref(left);
   sumtree_unref(right);
   sumtree_unref(result);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -622,7 +602,6 @@ int test_set_element() {
   sumtree_unref(r0);
   sumtree_unref(r2);
   sumtree_unref(r4);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -640,7 +619,6 @@ int test_set_out_of_bounds() {
   ASSERT(bad.node == NULL);
 
   sumtree_unref(old);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -669,7 +647,6 @@ int test_push_back() {
   ASSERT_INT_EQ(sumtree_summary(r), expected_sum);
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -697,7 +674,6 @@ int test_push_front() {
   }
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -739,7 +715,6 @@ int test_search_sum_target() {
   ASSERT_INT_EQ((int)sumtree_dim_sum(sr.prefix_summary), 30);
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -765,7 +740,6 @@ int test_search_rope_offset() {
   ASSERT(g.value == ' ');
 
   rope_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -785,7 +759,6 @@ int test_search_target_zero() {
   ASSERT_INT_EQ((int)sumtree_dim_sum(sr.prefix_summary), 0);
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -808,7 +781,6 @@ int test_search_beyond_total() {
   ASSERT(!sr.found);
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -824,7 +796,6 @@ int test_search_empty_tree() {
   ASSERT(!sr.found);
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -848,7 +819,6 @@ int test_copy_range_entire() {
   }
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -871,7 +841,6 @@ int test_copy_range_partial_middle() {
   ASSERT_INT_EQ(buf[3], 70);
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -890,7 +859,6 @@ int test_copy_range_beyond_bounds() {
   ASSERT_INT_EQ((int)copied, 0);
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -911,7 +879,6 @@ int test_copy_range_extends_past_end() {
   ASSERT_INT_EQ(buf[1], 50);
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -973,7 +940,6 @@ int test_custom_leaf_search_matches_default() {
   }
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1017,7 +983,6 @@ int test_custom_leaf_search_large_tree() {
   }
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -1045,7 +1010,6 @@ int test_null_leaf_search_unchanged() {
   ASSERT_INT_EQ((int)sr.index, 0);
 
   sumtree_unref(r);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 

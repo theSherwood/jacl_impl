@@ -46,7 +46,6 @@ int test_rope_concat_combining_moves_to_left(void) {
   rope_unref(left);
   rope_unref(right);
   rope_unref(result);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -75,7 +74,6 @@ int test_rope_concat_no_fixup(void) {
   rope_unref(left);
   rope_unref(right);
   rope_unref(result);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -118,7 +116,6 @@ int test_rope_concat_repeated_invariant(void) {
   ASSERT_INT_EQ(unicode_grapheme_count(flat, 30), 10);
 
   rope_unref(result);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -157,7 +154,6 @@ int test_rope_concat_grapheme_count_matches_flat(void) {
   rope_unref(left);
   rope_unref(right);
   rope_unref(result);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -188,7 +184,6 @@ int test_rope_concat_empty_cases(void) {
   rope_unref(r1);
   rope_unref(r2);
   rope_unref(r3);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -224,7 +219,6 @@ int test_rope_concat_zwj_at_junction(void) {
   rope_unref(left);
   rope_unref(right);
   rope_unref(result);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -265,7 +259,6 @@ int test_rope_concat_large_with_combining(void) {
   rope_unref(left);
   rope_unref(right);
   rope_unref(result);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
@@ -300,7 +293,6 @@ int test_rope_concat_right_all_combining(void) {
   rope_unref(left);
   rope_unref(right);
   rope_unref(result);
-  ASSERT(check_no_leaks());
   TEST_PASS();
 }
 

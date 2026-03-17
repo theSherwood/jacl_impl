@@ -14,7 +14,7 @@ static void fill_pattern(uint8_t* buf, size_t len) {
 static int test_rope_string_tag(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   uint8_t data[200];
   fill_pattern(data, sizeof(data));
@@ -33,7 +33,7 @@ static int test_rope_string_tag(void) {
 static int test_rope_string_is_string(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   uint8_t data[200];
   fill_pattern(data, sizeof(data));
@@ -53,7 +53,7 @@ static int test_rope_string_is_string(void) {
 static int test_rope_string_is_heap_type(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   uint8_t data[200];
   fill_pattern(data, sizeof(data));
@@ -71,7 +71,7 @@ static int test_rope_string_is_heap_type(void) {
 static int test_rope_string_hash(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   uint8_t data[200];
   fill_pattern(data, sizeof(data));
@@ -93,7 +93,7 @@ static int test_rope_string_hash(void) {
 static int test_rope_string_hash_large(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   uint8_t data[1024];
   fill_pattern(data, sizeof(data));
@@ -113,7 +113,7 @@ static int test_rope_string_hash_large(void) {
 static int test_rope_string_extractor(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   uint8_t data[200];
   fill_pattern(data, sizeof(data));
@@ -136,7 +136,7 @@ static int test_rope_string_extractor(void) {
 static int test_rope_string_byte_len(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   uint8_t data[300];
   fill_pattern(data, sizeof(data));
@@ -154,7 +154,7 @@ static int test_rope_string_byte_len(void) {
 static int test_rope_string_grapheme_len(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   uint8_t data[200];
   fill_pattern(data, sizeof(data));
@@ -173,7 +173,7 @@ static int test_rope_string_grapheme_len(void) {
 static int test_rope_string_data(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   uint8_t data[200];
   fill_pattern(data, sizeof(data));
@@ -194,7 +194,7 @@ static int test_rope_string_data(void) {
 static int test_rope_string_gc_obj_type(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   uint8_t data[200];
   fill_pattern(data, sizeof(data));
@@ -214,7 +214,7 @@ static int test_rope_string_gc_obj_type(void) {
 static int test_rope_string_combining_marks(void) {
   tracker_reset();
   BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Build 200-byte string with combining marks:
    * 50 copies of 'a' + U+0301 (combining acute) = 50 * 4 bytes = 200 bytes

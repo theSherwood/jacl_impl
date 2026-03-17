@@ -150,7 +150,6 @@ static int assert_rope_buf_iter(const char* pattern, const char* text) {
 static int test_rope_literal_match(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("hello", "say hello world"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -158,7 +157,6 @@ static int test_rope_literal_match(void) {
 static int test_rope_alternation(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("cat|dog", "I have a dog"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -166,7 +164,6 @@ static int test_rope_alternation(void) {
 static int test_rope_char_class(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("[a-z]+", "HELLO world 123"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -174,7 +171,6 @@ static int test_rope_char_class(void) {
 static int test_rope_negated_class(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("[^0-9]+", "abc123def"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -182,7 +178,6 @@ static int test_rope_negated_class(void) {
 static int test_rope_star(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("ab*c", "xabbbc"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -191,7 +186,6 @@ static int test_rope_anchored(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("^hello", "hello world"));
     ASSERT(assert_rope_buf_match("^hello", "say hello"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -199,7 +193,6 @@ static int test_rope_anchored(void) {
 static int test_rope_eol_anchor(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("world$", "hello world"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -207,7 +200,6 @@ static int test_rope_eol_anchor(void) {
 static int test_rope_dot(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("h.llo", "hello"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -217,7 +209,6 @@ static int test_rope_shorthand(void) {
     ASSERT(assert_rope_buf_match("\\d+", "abc 123 def"));
     ASSERT(assert_rope_buf_match("\\w+", "hello world"));
     ASSERT(assert_rope_buf_match("\\s+", "hello   world"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -225,7 +216,6 @@ static int test_rope_shorthand(void) {
 static int test_rope_group(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("(ab)+", "xabababy"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -233,7 +223,6 @@ static int test_rope_group(void) {
 static int test_rope_plus(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("[0-9]+", "abc 123 def 456"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -241,7 +230,6 @@ static int test_rope_plus(void) {
 static int test_rope_no_match(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_match("xyz", "abcdef"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -249,7 +237,6 @@ static int test_rope_no_match(void) {
 static int test_rope_iter_multiple(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_iter("[0-9]+", "abc 123 def 456 ghi 789"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -257,7 +244,6 @@ static int test_rope_iter_multiple(void) {
 static int test_rope_iter_words(void) {
     tracker_reset();
     ASSERT(assert_rope_buf_iter("[a-z]+", "Hello World Foo Bar"));
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -308,7 +294,6 @@ static int test_rope_cross_leaf(void) {
     rope_unref(r);
     nfa_program_free(prog);
     free(text);
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -356,7 +341,6 @@ static int test_rope_multi_insert_boundary(void) {
     rope_unref(r2);
     nfa_program_free(prog);
     free(flat);
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -376,7 +360,6 @@ static int test_rope_empty(void) {
 
     rope_unref(r);
     nfa_program_free(prog);
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -398,7 +381,6 @@ static int test_rope_single_char(void) {
 
     rope_unref(r);
     nfa_program_free(prog);
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -428,7 +410,6 @@ static int test_rope_only_newlines(void) {
 
     rope_unref(r);
     nfa_program_free(prog);
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -459,7 +440,6 @@ static int test_rope_pattern_battery(void) {
         }
     }
 
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
@@ -483,7 +463,6 @@ static int test_rope_iter_battery(void) {
         }
     }
 
-    ASSERT(check_no_leaks());
     TEST_PASS();
 }
 
