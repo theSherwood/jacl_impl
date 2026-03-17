@@ -4264,6 +4264,7 @@ static VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL);
   if (cr.error_count > 0) {
     vm->error_message = cr.error_message ? cr.error_message : "compile error";
+    intern_table_destroy(&intern_table);
     return VM_RUNTIME_ERROR;
   }
 
@@ -4275,12 +4276,16 @@ static VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
        which produces the main CPS closure on the stack. Execute the chunk to
        get the closure, then call it with a resolve_k continuation. */
     VMResult r = vm_exec(vm, &cr.chunk);
-    if (r != VM_OK) return r;
+    if (r != VM_OK) {
+      intern_table_destroy(&intern_table);
+      return r;
+    }
 
     /* The main CPS closure is on the stack */
     JaclVal main_cl_val = vm->stack[0];
     if (!jacl_is_closure(main_cl_val)) {
       vm->error_message = "internal error: CPS top-level did not produce closure";
+      intern_table_destroy(&intern_table);
       return VM_RUNTIME_ERROR;
     }
     JaclClosure *main_cl = jacl_as_closure(main_cl_val);
@@ -4330,10 +4335,13 @@ static VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
       vm->stack[0] = (JaclVal)cfut->result;
       vm->stack_top = 1;
     }
+    intern_table_destroy(&intern_table);
     return r;
   }
 
-  return vm_exec(vm, &cr.chunk);
+  VMResult result = vm_exec(vm, &cr.chunk);
+  intern_table_destroy(&intern_table);
+  return result;
 }
 
 #endif /* VM_C */

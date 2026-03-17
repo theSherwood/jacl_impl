@@ -41,6 +41,7 @@ typedef struct {
   uint32_t         count;
   uint32_t         cap;
   arena_t*         arena;
+  platform_rwlock_t lock;    /* read-write lock for concurrent access */
 } JaclInternTable;
 
 /* Initialize an intern table */
@@ -51,6 +52,12 @@ static void intern_table_init(JaclInternTable* table, arena_t* arena) {
   table->entries = (JaclHeapString**)arena_alloc(arena,
       INTERN_INIT_CAP * sizeof(JaclHeapString*));
   memset(table->entries, 0, INTERN_INIT_CAP * sizeof(JaclHeapString*));
+  RWLOCK_INIT(table->lock);
+}
+
+/* Destroy an intern table (releases rwlock resources) */
+static void intern_table_destroy(JaclInternTable* table) {
+  RWLOCK_DESTROY(table->lock);
 }
 
 /* Internal: find or insert slot */
@@ -97,18 +104,32 @@ static void intern__resize(JaclInternTable* table) {
 
 /* Intern a string: returns JaclVal with JACL_TAG_STRING tag.
  * String data is allocated on the GC heap (Phase 1: immortal).
- * Intern table bookkeeping (entries array) remains arena-backed. */
+ * Intern table bookkeeping (entries array) remains arena-backed.
+ * Thread-safe: uses read lock for lookups, write lock for inserts. */
 static JaclVal jacl_intern(ThreadHeap* heap, JaclInternTable* table,
                             const char* data, uint32_t length) {
   uint32_t hash = string__fnv1a(data, length);
 
-  /* Look for existing entry */
+  /* Fast path: read lock for lookup */
+  RWLOCK_RDLOCK(table->lock);
   JaclHeapString** slot = intern__find_slot(
       table->entries, table->cap, data, length, hash);
-
   if (*slot != NULL) {
-    /* Already interned — return same pointer */
-    return jacl_string_ptr(*slot);
+    JaclVal result = jacl_string_ptr(*slot);
+    RWLOCK_RDUNLOCK(table->lock);
+    return result;
+  }
+  RWLOCK_RDUNLOCK(table->lock);
+
+  /* Slow path: acquire write lock for insertion */
+  RWLOCK_WRLOCK(table->lock);
+
+  /* Re-probe under write lock — another thread may have inserted */
+  slot = intern__find_slot(table->entries, table->cap, data, length, hash);
+  if (*slot != NULL) {
+    JaclVal result = jacl_string_ptr(*slot);
+    RWLOCK_WRUNLOCK(table->lock);
+    return result;
   }
 
   /* Resize if load factor > 0.75 */
@@ -130,6 +151,7 @@ static JaclVal jacl_intern(ThreadHeap* heap, JaclInternTable* table,
   *slot = str;
   table->count++;
 
+  RWLOCK_WRUNLOCK(table->lock);
   return jacl_string_ptr(str);
 }
 

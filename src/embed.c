@@ -208,6 +208,7 @@ JACL_EMBED_FN void jacl_vm_free(JaclVM* vm) {
   vm->vm.call_native = NULL;
   vm->vm.native_fn_count = 0;
   embed__free_all_trampolines(vm);
+  intern_table_destroy(&vm->intern_table);
   vm_destroy(&vm->vm);
   arena_destroy(&vm->arena);
   free(vm);
