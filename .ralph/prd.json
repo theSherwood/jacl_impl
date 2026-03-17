@@ -282,7 +282,7 @@
         "All tests pass"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "Follow the existing test pattern from test/test_string.c — use test_helpers.h, tracker_reset(), check_no_leaks(), PrintCapture for stdout verification. For tier boundary tests: construct strings of exact byte lengths (7, 8, 128, 129) and verify the tag. For grapheme tests: use raw UTF-8 byte sequences for combining marks (e.g., 0xCC 0x81 for U+0301 combining acute). For rope tests: construct strings >256 bytes (ROPE_LEAF_MAX) to ensure multiple leaves. For hash consistency: create the same content as both a flat string and a rope (by concatenating smaller pieces), verify hashes match. For GC test: create rope strings in a loop, trigger gc_collect(), verify no use-after-free. Add test_heap_strings to the TESTS array in build.sh."
     }
   ]

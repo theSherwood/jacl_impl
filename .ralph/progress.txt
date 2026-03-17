@@ -35,6 +35,9 @@ Started: Tue Mar 17 11:40:18 UTC 2026
 - JACL variable assignment: `name = value` (not `def name value`); commands: `[print ...]` (not bare `print ...`)
 - OP_PRINT for rope strings >256 bytes: use `rope_cursor` to stream chunks (read + advance_bytes in loop) — avoids buffer overflow
 - Compiler `AST_INTERP_STRING` empty string path should use `jacl_string_new()` for consistency with NFD pipeline
+- `rope_offset_result` struct has `.value` (not `.offset`) and `.found` fields
+- Use `tracked_malloc(size)` / `tracked_free(ptr)` for direct test allocations instead of `tracked_allocator.alloc(ctx, size)`
+- JACL proc + while loop inside proc body can cause VM_STACK_OVERFLOW — prefer recursive procs or top-level while loops in tests
 
 ---
 
@@ -276,4 +279,36 @@ Thread: N/A (autonomous agent)
   - JACL variable syntax: `name = value` (not `def name value`); command syntax: `[print ...]` (not `print ...` as statement)
   - OP_PRINT for rope strings: must use `rope_cursor` chunked streaming (read + advance_bytes) — cannot use `jacl_string_data()` for strings > stack buffer size
   - Most US-012 acceptance criteria were already satisfied by US-006 (unified constructor), US-010 (tier-aware concat), and US-004 (rope GC integration)
+---
+
+## 2026-03-17 - US-013
+Thread: N/A (autonomous agent)
+- Created comprehensive test file `test/test_heap_strings.c` with 43 tests covering all three-tier string acceptance criteria:
+  - 3 NFD normalization tests: NFC→NFD roundtrip, ASCII unchanged, Hangul decomposition
+  - 4 invalid UTF-8 rejection tests: overlong, surrogate, truncated, invalid continuation
+  - 4 tier routing boundary tests: 7-byte inline, 8-byte flat, 128-byte flat, 129-byte rope
+  - 5 grapheme length tests: ASCII, combining marks, emoji, ZWJ sequences, regional indicators (flags)
+  - 2 grapheme index/slice tests: combining mark boundaries with correct cluster extraction
+  - 4 concat tier transition tests: inline→inline, inline→flat, flat→rope, rope→rope
+  - 1 concat grapheme boundary test: combining mark at junction reduces grapheme count
+  - 6 equality tests across all tier-pair combinations: inline×inline, flat×flat, inline×flat, rope×rope, rope×flat, rope×inline
+  - 2 comparison tests across tiers: inline ordering, rope vs flat
+  - 1 rope leaf splitting test: combining marks near ROPE_LEAF_MAX boundary preserved
+  - 1 rope hash consistency test: same content via direct creation vs concat → same hash
+  - 3 large rope operation tests (>10KB): concat, slice, index
+  - 1 M5 compatibility test: basic string ops via jacl_run
+  - 2 GC rope tracing tests: recursive concat building ropes, while-loop stress with GC pressure
+  - 1 cross-tier combining marks equality test
+  - 2 VM integration tests: equality/comparison operators, index/slice builtins
+  - 1 structural sharing test: rope concat preserves equality
+- Zero memory leaks in all tests (tracked allocator verification)
+- Added test to `build.sh` TESTS array
+- Files changed: `test/test_heap_strings.c`, `build.sh`
+- All 61 tests pass (6 pre-existing lib failures unchanged)
+- **Learnings for future iterations:**
+  - `rope_offset_result` uses `.value` field (not `.offset`) for the byte offset result
+  - `tracked_malloc(size)` / `tracked_free(ptr)` are simpler than going through `tracked_allocator.alloc(ctx, size)` for test allocations
+  - JACL proc + while loop can cause stack overflow — use recursive procs (like `rep {s, n}`) or top-level while loops for VM integration tests
+  - JACL while syntax: `[while condition { body }]` with brackets, variables use `$var`
+  - JACL proc syntax: `proc name {args} { body }` with braces around args, not parentheses
 ---
