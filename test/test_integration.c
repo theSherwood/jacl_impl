@@ -93,7 +93,7 @@ static int test_compile_error_reported(void) {
   vm_init(&vm, &arena);
 
   /* Long variable name > 7 bytes is a compile error */
-  VMResult result = jacl_run("[def abcdefgh 42]", &vm, &arena);
+  VMResult result = jacl_run("def abcdefgh 42", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
@@ -114,7 +114,7 @@ static int test_runtime_error_with_line(void) {
   vm_init(&vm, &arena);
 
   /* Type mismatch on line 2 */
-  VMResult result = jacl_run("[def x $true]\n[+ $x 1]", &vm, &arena);
+  VMResult result = jacl_run("x = $true\n[+ $x 1]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
@@ -167,16 +167,16 @@ static int test_comprehensive_program(void) {
   arena_t arena = { .allocator = tracked_allocator };
 
   const char* program =
-    "[def x 10]\n"
-    "[def y 20]\n"
-    "[def sum [+ $x $y]]\n"
+    "x = 10\n"
+    "y = 20\n"
+    "sum = [+ $x $y]\n"
     "[print $sum]\n"
     "[print [* $x 2]]\n"
-    "[def gt [> $x 5]]\n"
+    "gt = [> $x 5]\n"
     "[print $gt]\n"
     "[print [== $x 10]]\n"
     "[print [< $y 100]]\n"
-    "[def z [+ [* $x $y] 5]]\n"
+    "z = [+ [* $x $y] 5]\n"
     "[print $z]\n"
     "[print [- $z $sum]]";
 
@@ -237,7 +237,7 @@ static int test_semicolons_pipeline(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
-  VMResult result = jacl_run("[def a 3]; [def b 7]; [print [+ $a $b]]",
+  VMResult result = jacl_run("a = 3\nb = 7\n[print [+ $a $b]]",
                              &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -325,11 +325,11 @@ static int test_var_ref_command_call(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
-  /* proc greet [] { 42 } defines a proc that returns 42.
+  /* proc greet {} { 42 } defines a proc that returns 42.
      def f $greet binds f to the greet closure (via $greet var ref).
      [$f] calls f (zero-arg), which calls greet, returning 42. */
   VMResult result = jacl_run(
-    "proc greet [] { 42 }\n"
+    "proc greet {} { 42 }\n"
     "def f $greet\n"
     "[print [$f]]",
     &vm, &arena);

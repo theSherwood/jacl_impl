@@ -2,7 +2,7 @@
 # expect: false
 # filter on map: keep entries where value > 0
 def m [map-set [map-set [map] "a" 5] "b" 0]
-proc pos [k v] { [> $v 0] }
+proc pos {k, v} { [> $v 0] }
 def m2 [filter $m $pos]
 print [map-get $m2 "a"]
 print [map-has $m2 "b"]

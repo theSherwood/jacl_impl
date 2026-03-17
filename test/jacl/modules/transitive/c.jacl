@@ -1,1 +1,1 @@
-proc double [x] { [* $x 2] }
+proc double {x} { [* $x 2] }

@@ -1,1 +1,1 @@
-proc i64 add [i64 a i64 b] { [+ $a $b] }
+proc i64 add {i64 a, i64 b} { [+ $a $b] }

@@ -73,7 +73,7 @@ static int test_e2e_native_fn_register_and_call(void) {
   ASSERT_INT_EQ(jacl_as_i32(r2), 70); /* 7 * 10 */
 
   /* Use it inside a JACL proc */
-  JaclVal r3 = jacl_eval(vm, "proc sq [n] { [mul $n $n] }");
+  JaclVal r3 = jacl_eval(vm, "proc sq {n} { [mul $n $n] }");
   ASSERT(!jacl_is_error(r3));
 
   JaclVal r4 = jacl_eval(vm, "[sq 9]");
@@ -138,7 +138,7 @@ static int test_e2e_native_fn_error_propagation(void) {
   ASSERT(jacl_is_error(r1));
 
   /* Error returned inside a proc propagates out */
-  JaclVal def_r = jacl_eval(vm, "proc wrap [] { [fail] }");
+  JaclVal def_r = jacl_eval(vm, "proc wrap {} { [fail] }");
   ASSERT(!jacl_is_error(def_r));
 
   JaclVal r2 = jacl_eval(vm, "[wrap]");
@@ -159,7 +159,7 @@ static int test_e2e_native_fn_reentrant(void) {
   ASSERT(vm != NULL);
 
   /* Define a JACL proc that the native will call */
-  JaclVal def_r = jacl_eval(vm, "proc triple [x] { [* $x 3] }");
+  JaclVal def_r = jacl_eval(vm, "proc triple {x} { [* $x 3] }");
   ASSERT(!jacl_is_error(def_r));
 
   /* Register native fn that re-enters JACL via jacl_call_named_val */
@@ -171,7 +171,7 @@ static int test_e2e_native_fn_reentrant(void) {
   ASSERT_INT_EQ(jacl_as_i32(r1), 21);
 
   /* Chain: call native from a JACL proc that itself is called from C */
-  JaclVal def2 = jacl_eval(vm, "proc chain [n] { [ctrpl [+ $n 1]] }");
+  JaclVal def2 = jacl_eval(vm, "proc chain {n} { [ctrpl [+ $n 1]] }");
   ASSERT(!jacl_is_error(def2));
 
   JaclVal r2 = jacl_eval(vm, "[chain 4]");
@@ -197,10 +197,10 @@ static int test_e2e_jacl_call_named(void) {
   ASSERT(vm != NULL);
 
   /* Define several JACL procs */
-  JaclVal d1 = jacl_eval(vm, "proc add [a b] { [+ $a $b] }");
+  JaclVal d1 = jacl_eval(vm, "proc add {a, b} { [+ $a $b] }");
   ASSERT(!jacl_is_error(d1));
 
-  JaclVal d2 = jacl_eval(vm, "proc greet [n] { $n }");
+  JaclVal d2 = jacl_eval(vm, "proc greet {n} { $n }");
   ASSERT(!jacl_is_error(d2));
 
   /* Call by name from C */

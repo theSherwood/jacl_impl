@@ -2,7 +2,7 @@
 # expect: 100
 # expect: 200
 # parallel bodies that internally use spawn+await
-proc main [] {
+proc main {} {
   def r [parallel { def f [spawn { 100 }]; await $f } { def g [spawn { 200 }]; await $g }]
   print [vec-get $r 0]
   print [vec-get $r 1]

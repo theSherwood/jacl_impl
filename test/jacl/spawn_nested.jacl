@@ -1,7 +1,7 @@
 # mode: concurrent
 # expect: 100
 # spawn a task that itself spawns and awaits an inner task
-proc main [] {
+proc main {} {
   def f [spawn {
     def g [spawn { [* 10 10] }]
     await $g

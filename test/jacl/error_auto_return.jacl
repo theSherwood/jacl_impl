@@ -1,6 +1,6 @@
 # expect: true
 # Test: error as non-final statement auto-returns from function
-proc foo [] {
+proc foo {} {
   [error "fail"]
   [print "never"]
   42

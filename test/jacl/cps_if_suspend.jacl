@@ -1,7 +1,7 @@
 # expect: took-true
 # expect: 42
 # await inside if branch, code after if uses result
-proc main [] {
+proc main {} {
   def f [spawn { 1 }]
   def val [await $f]
   def result [if [== $val 1] {

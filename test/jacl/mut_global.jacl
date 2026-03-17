@@ -1,6 +1,6 @@
 # expect: 2
-# mut/set! on mutable globals
+# mut/set on mutable globals
 mut counter 0
-set! counter 1
-set! counter [+ $counter 1]
+set counter 1
+set counter [+ $counter 1]
 print [+ $counter 0]

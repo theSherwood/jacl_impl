@@ -2,12 +2,12 @@
 # expect: 99
 # Test: nested struct survives after outer struct is no longer referenced.
 # Extract inner struct, let outer become garbage, verify inner is still valid.
-defstruct Point [x :i32] [y :i32]
-defstruct Line [start :Point] [end :Point]
+struct Point {i32 x, i32 y}
+struct Line {Point start, Point end}
 
-proc getpt [] {
+proc getpt {} {
   def ln [Line [Point 42 99] [Point 0 0]]
-  [. $ln start]
+  $ln->start
 }
 
 def pt [getpt]
@@ -18,5 +18,5 @@ def b [Point 2 2]
 def c [Point 3 3]
 def d [Line $a $b]
 def e [Line $b $c]
-print [. $pt x]
-print [. $pt y]
+print $pt->x
+print $pt->y

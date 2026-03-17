@@ -1,6 +1,6 @@
 # expect: fail
 # Test: auto-returned error preserves payload
-proc foo [] {
+proc foo {} {
   [error "fail"]
   [print "never"]
   42

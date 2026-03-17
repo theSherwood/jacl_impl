@@ -363,7 +363,7 @@ static int test_auto_return_basic(void) {
   PrintCapture cap;
   /* Error in non-final position causes early return */
   ASSERT(run_ok(
-    "proc foo [] {\n"
+    "proc foo {} {\n"
     "  [error \"fail\"]\n"
     "  [print \"never\"]\n"
     "  42\n"
@@ -377,7 +377,7 @@ static int test_auto_return_no_print(void) {
   PrintCapture cap;
   /* Verify "never" is truly not printed */
   ASSERT(run_ok(
-    "proc foo [] {\n"
+    "proc foo {} {\n"
     "  [error \"fail\"]\n"
     "  [print \"never\"]\n"
     "  42\n"
@@ -392,8 +392,8 @@ static int test_auto_return_nested(void) {
   PrintCapture cap;
   /* Errors from nested calls propagate up */
   ASSERT(run_ok(
-    "proc inner [] { [error \"deep\"] }\n"
-    "proc outer [] {\n"
+    "proc inner {} { [error \"deep\"] }\n"
+    "proc outer {} {\n"
     "  [inner]\n"
     "  [print \"never\"]\n"
     "  99\n"
@@ -407,7 +407,7 @@ static int test_auto_return_final_expr(void) {
   PrintCapture cap;
   /* Final expression is NOT affected — error flag returned normally */
   ASSERT(run_ok(
-    "proc foo [] { [error \"end\"] }\n"
+    "proc foo {} { [error \"end\"] }\n"
     "[print [error? [foo]]]",
     &cap, "true\n"));
   TEST_PASS();
@@ -417,7 +417,7 @@ static int test_auto_return_nonerror_continues(void) {
   PrintCapture cap;
   /* Non-error statements pop and continue normally */
   ASSERT(run_ok(
-    "proc foo [] {\n"
+    "proc foo {} {\n"
     "  [+ 1 2]\n"
     "  [print \"reached\"]\n"
     "  42\n"
@@ -504,7 +504,7 @@ static int test_stack_trace_basic(void) {
   PrintCapture cap;
   /* Stack trace from error in a function shows the function name */
   ASSERT(run_ok(
-    "proc foo [] { [error \"x\"] }\n"
+    "proc foo {} { [error \"x\"] }\n"
     "[try { [foo] } e {\n"
     "  def t [stack-trace]\n"
     "  [print [length $t]]\n"
@@ -521,8 +521,8 @@ static int test_stack_trace_nested(void) {
   PrintCapture cap;
   /* Nested call chain produces multi-line trace */
   ASSERT(run_ok(
-    "proc inner [] { [error \"x\"] }\n"
-    "proc outer [] { [inner] }\n"
+    "proc inner {} { [error \"x\"] }\n"
+    "proc outer {} { [inner] }\n"
     "[try { [outer] } e {\n"
     "  def t [stack-trace]\n"
     "  [print $t]\n"
@@ -538,7 +538,7 @@ static int test_stack_trace_in_handler(void) {
   PrintCapture cap;
   /* stack-trace inside try handler returns the caught error's trace */
   ASSERT(run_ok(
-    "proc fail [] { [error \"boom\"] }\n"
+    "proc fail {} { [error \"boom\"] }\n"
     "[try { [fail] } e {\n"
     "  def t [stack-trace]\n"
     "  [print [error? $e]]\n"
@@ -562,7 +562,7 @@ static int test_div_zero_stack_trace(void) {
   PrintCapture cap;
   /* Div-by-zero captures a stack trace */
   ASSERT(run_ok(
-    "proc divbad [] { [/ 1 0] }\n"
+    "proc divbad {} { [/ 1 0] }\n"
     "[try { [divbad] } e {\n"
     "  def t [stack-trace]\n"
     "  [print [length $t]]\n"
@@ -643,7 +643,7 @@ static int test_e2e_try_with_proc(void) {
   PrintCapture cap;
   /* Full pipeline: proc that errors, caught by try, payload extracted */
   ASSERT(run_ok(
-    "proc risky [] {\n"
+    "proc risky {} {\n"
     "  [error \"danger\"]\n"
     "  42\n"
     "}\n"
@@ -657,7 +657,7 @@ static int test_e2e_try_no_error_passthrough(void) {
   PrintCapture cap;
   /* Proc succeeds, try returns body value */
   ASSERT(run_ok(
-    "proc safe [] { 42 }\n"
+    "proc safe {} { 42 }\n"
     "def result [try { [safe] } e { 0 }]\n"
     "[print $result]",
     &cap, "42\n"));
@@ -668,7 +668,7 @@ static int test_e2e_nested_try_propagation(void) {
   PrintCapture cap;
   /* Inner try catches, returns clean value; outer try not triggered */
   ASSERT(run_ok(
-    "proc fail [] { [error \"x\"] }\n"
+    "proc fail {} { [error \"x\"] }\n"
     "def r [try {\n"
     "  def inner [try { [fail] } e { \"recovered\" }]\n"
     "  [concat $inner \"!\"]\n"

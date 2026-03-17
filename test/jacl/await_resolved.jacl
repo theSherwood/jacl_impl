@@ -2,7 +2,7 @@
 # expect: 99
 # In single-threaded mode spawn resolves immediately;
 # await on already-resolved future must not deadlock
-proc main [] {
+proc main {} {
   def f [spawn { 99 }]
   print [future? $f]
   print [await $f]

@@ -233,8 +233,79 @@ static void ast__pp_node(AstStrBuf* b, AstNode* node) {
       break;
     }
     case AST_COMMAND: {
+      /* Detect [. $var field] → print as $var->field to avoid rejected [. ...] */
+      AstNode* head = node->data.command.head;
+      if (head->type == AST_LIT_STRING &&
+          head->data.lit_string.length == 1 &&
+          head->data.lit_string.value[0] == '.' &&
+          node->data.command.arg_count == 2) {
+        ast__pp_node(b, node->data.command.args[0]);
+        ast__buf_cstr(b, "->");
+        ast__buf_str(b, node->data.command.args[1]->data.lit_string.value,
+                     node->data.command.args[1]->data.lit_string.length);
+        break;
+      }
+      /* Detect proc commands: print as bare command with {params} to avoid
+         [proc ...] rejection. Format: proc [type] name {params} {body} */
+      if (head->type == AST_LIT_STRING &&
+          head->data.lit_string.length == 4 &&
+          memcmp(head->data.lit_string.value, "proc", 4) == 0 &&
+          node->data.command.arg_count >= 2) {
+        /* Lambda (anonymous proc): name is "" → print as [\\ body...] */
+        AstNode* name_node = node->data.command.args[0];
+        if (name_node->type == AST_LIT_STRING &&
+            name_node->data.lit_string.length == 0 &&
+            node->data.command.arg_count == 3) {
+          /* args: [0]=name(""), [1]=params, [2]=body_block */
+          AstNode* body_block = node->data.command.args[2];
+          ast__buf_cstr(b, "[\\ ");
+          if (body_block->type == AST_BLOCK && body_block->data.block.count == 1) {
+            /* Single-command body: unwrap the block and print command directly */
+            AstNode* cmd = body_block->data.block.commands[0];
+            if (cmd->type == AST_COMMAND) {
+              ast__pp_node(b, cmd->data.command.head);
+              for (uint32_t i = 0; i < cmd->data.command.arg_count; i++) {
+                ast__buf_char(b, ' ');
+                ast__pp_node(b, cmd->data.command.args[i]);
+              }
+            } else {
+              ast__pp_node(b, cmd);
+            }
+          } else {
+            ast__pp_node(b, body_block);
+          }
+          ast__buf_char(b, ']');
+          break;
+        }
+        ast__buf_cstr(b, "proc");
+        /* The last arg is the body block, the second-to-last is params.
+           Everything before params is name (and optional return type). */
+        uint32_t params_idx = node->data.command.arg_count - 2;
+        uint32_t body_idx   = node->data.command.arg_count - 1;
+        /* Print name (and optional return type) */
+        for (uint32_t i = 0; i < params_idx; i++) {
+          ast__buf_char(b, ' ');
+          ast__pp_node(b, node->data.command.args[i]);
+        }
+        /* Print params as {head arg1 arg2 ...} */
+        AstNode* params = node->data.command.args[params_idx];
+        ast__buf_cstr(b, " {");
+        if (params->type == AST_COMMAND &&
+            params->data.command.head->data.lit_string.length > 0) {
+          ast__pp_node(b, params->data.command.head);
+          for (uint32_t i = 0; i < params->data.command.arg_count; i++) {
+            ast__buf_char(b, ' ');
+            ast__pp_node(b, params->data.command.args[i]);
+          }
+        }
+        ast__buf_char(b, '}');
+        /* Print body block */
+        ast__buf_char(b, ' ');
+        ast__pp_node(b, node->data.command.args[body_idx]);
+        break;
+      }
       ast__buf_char(b, '[');
-      ast__pp_node(b, node->data.command.head);
+      ast__pp_node(b, head);
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
         ast__buf_char(b, ' ');
         ast__pp_node(b, node->data.command.args[i]);
@@ -300,17 +371,19 @@ static void ast__pp_node(AstStrBuf* b, AstNode* node) {
       break;
     }
     case AST_DEFSTRUCT: {
-      ast__buf_cstr(b, "defstruct ");
+      ast__buf_cstr(b, "struct ");
       ast__buf_str(b, node->data.defstruct.name, node->data.defstruct.name_len);
+      ast__buf_cstr(b, " {");
       for (uint32_t i = 0; i < node->data.defstruct.field_count; i++) {
-        ast__buf_cstr(b, " [");
-        ast__buf_str(b, node->data.defstruct.field_names[i],
-                     node->data.defstruct.field_name_lens[i]);
-        ast__buf_cstr(b, " :");
+        if (i > 0) ast__buf_char(b, ',');
+        ast__buf_char(b, ' ');
         ast__buf_str(b, node->data.defstruct.field_types[i],
                      node->data.defstruct.field_type_lens[i]);
-        ast__buf_char(b, ']');
+        ast__buf_char(b, ' ');
+        ast__buf_str(b, node->data.defstruct.field_names[i],
+                     node->data.defstruct.field_name_lens[i]);
       }
+      ast__buf_char(b, '}');
       break;
     }
     case AST_ERROR: {

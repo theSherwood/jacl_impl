@@ -12,19 +12,19 @@
 # US-007: Multi-cycle GC correctness — chain 10 sequential spawn/await
 # calls with intermediate heap allocations, forcing multiple GC cycles.
 # Verify all intermediate values survive correctly across cycles.
-proc fib [n] {
-  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }
+proc fib {n} {
+  if [<= $n 1] { [+ $n 0] } else { [+ [fib [- $n 1]] [fib [- $n 2]]] }
 }
 
-proc run [i n] {
+proc run {i, n} {
   if [< $i $n] {
     def r [await [spawn { [fib 10] }]]
     print $r
     [run [+ $i 1] $n]
-  } { 0 }
+  } else { 0 }
 }
 
-proc main [] {
+proc main {} {
   [run 0 10]
 }
 main

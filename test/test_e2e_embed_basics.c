@@ -203,7 +203,7 @@ static int test_e2e_globals_persist(void) {
   ASSERT_INT_EQ(jacl_as_i32(r2), 15);
 
   /* Third eval: define a proc using the global */
-  JaclVal r3 = jacl_eval(vm, "proc getx [] { $x }");
+  JaclVal r3 = jacl_eval(vm, "proc getx {} { $x }");
   ASSERT(!jacl_is_error(r3));
 
   /* Fourth eval: call the proc */
@@ -247,7 +247,7 @@ static int test_e2e_independent_vms(void) {
   ASSERT_INT_EQ(jacl_as_i32(v2), 222);
 
   /* Define a proc in vm1 only */
-  jacl_eval(vm1, "proc sq [n] { [* $n $n] }");
+  jacl_eval(vm1, "proc sq {n} { [* $n $n] }");
   JaclVal sq1 = jacl_eval(vm1, "[sq 5]");
   ASSERT(!jacl_is_error(sq1));
   ASSERT_INT_EQ(jacl_as_i32(sq1), 25);

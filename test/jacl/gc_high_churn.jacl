@@ -7,27 +7,27 @@
 # High-churn GC stress: 510 parallel tasks across 5 rounds,
 # each computing fib(8). Uses recursive CPS loop (previously
 # required flat sequential calls due to CPS recursion bug).
-proc fib [n] {
-  if [< $n 2] { [+ $n 0] } {
+proc fib {n} {
+  if [< $n 2] { [+ $n 0] } else {
     [+ [fib [- $n 1]] [fib [- $n 2]]]
   }
 }
 
-proc p10 [] {
+proc p10 {} {
   def r [parallel { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] }]
   [+ [+ [+ [+ [vec-get $r 0] [vec-get $r 1]] [+ [vec-get $r 2] [vec-get $r 3]]] [+ [+ [vec-get $r 4] [vec-get $r 5]] [+ [vec-get $r 6] [vec-get $r 7]]]] [+ [vec-get $r 8] [vec-get $r 9]]]
 }
 
 # Recursive loop: calls p10 n times, accumulating the sum.
 # Exercises recursive CPS + suspending calls under GC pressure.
-proc loop [n acc] {
-  if [== $n 0] { [+ $acc 0] } {
+proc loop {n, acc} {
+  if [== $n 0] { [+ $acc 0] } else {
     def v [p10]
     [loop [- $n 1] [+ $acc $v]]
   }
 }
 
-proc main [] {
+proc main {} {
   print [loop 10 0]
   print [loop 10 0]
   print [loop 10 0]

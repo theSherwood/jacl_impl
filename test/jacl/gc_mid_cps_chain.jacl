@@ -4,10 +4,10 @@
 # upvalues are the only reference to heap objects. GC must trace through
 # the CPS continuation closures to find these objects.
 # fib(12)=144, fib(11)=89, fib(10)=55 => step1 returns 144+89+55+233+89 = 610
-proc fib [n] {
-  if [<= $n 1] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }
+proc fib {n} {
+  if [<= $n 1] { [+ $n 0] } else { [+ [fib [- $n 1]] [fib [- $n 2]]] }
 }
-proc step1 [] {
+proc step1 {} {
   def a [await [spawn { [fib 12] }]]
   def b [await [spawn { [fib 11] }]]
   def c [await [spawn { [fib 10] }]]
@@ -15,7 +15,7 @@ proc step1 [] {
   def e [await [spawn { [fib 11] }]]
   [+ [+ [+ $a $b] [+ $c $d]] $e]
 }
-proc main [] {
+proc main {} {
   def result [step1]
   print $result
 }

@@ -1,4 +1,4 @@
 # expect: nil
-# each on empty map calls proc zero times, returns nil
-proc cb [k v] { [print $k] }
-print [each [map] $cb]
+# for on empty map calls proc zero times, returns nil
+proc cb {k, v} { [print $k] }
+print [for [map] $cb]

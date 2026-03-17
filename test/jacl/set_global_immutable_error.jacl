@@ -1,4 +1,4 @@
 # expect-error: cannot mutate immutable binding 'x'
-# set! on a def global is a compile error
+# set on a def global is a compile error
 def x 10
-set! x 42
+set x 42

@@ -2,5 +2,5 @@
 # expect: 5
 use "state.jacl" [cnt]
 print [deref $cnt]
-[reset! $cnt 5]
+[reset $cnt 5]
 print [deref $cnt]

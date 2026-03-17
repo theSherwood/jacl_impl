@@ -133,7 +133,7 @@ static int test_e2e_gc_handle_struct(void) {
   ASSERT(vm != NULL);
 
   /* Define a struct with a string field and an i32 field */
-  JaclVal def_r = jacl_eval(vm, "defstruct Item [name :str] [val :i32]");
+  JaclVal def_r = jacl_eval(vm, "struct Item {str name, i32 val}");
   ASSERT(!jacl_is_error(def_r));
 
   /* Create struct from C with a heap string name (>7 bytes) */
@@ -183,9 +183,9 @@ static int test_e2e_gc_handle_closure(void) {
   /*
    * Define a higher-order proc that returns a named inner closure.
    * The inner proc captures n (upvalue cell on GC heap) from the outer scope.
-   * Pattern from procs.jacl: proc outer [n] { proc inner [x] { [+ $x $n] } }
+   * Pattern from procs.jacl: proc outer {n} { proc inner {x} { [+ $x $n] } }
    */
-  JaclVal r1 = jacl_eval(vm, "proc mkadd [n] { proc inner [x] { [+ $x $n] } }");
+  JaclVal r1 = jacl_eval(vm, "proc mkadd {n} { proc inner {x} { [+ $x $n] } }");
   ASSERT(!jacl_is_error(r1));
 
   /* Call mkadd 10 — returns inner closure (only live in our C variable) */

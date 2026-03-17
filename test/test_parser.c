@@ -1180,14 +1180,14 @@ static int test_multi_realistic_program(void) {
     "def result [+ $x 10]\n"
     "\n"
     "# Procedure definition\n"
-    "proc greet {\n"
+    "proc greet {} {\n"
     "  print \"hello $name\"\n"
     "}\n"
     "\n"
     "# Conditional\n"
     "if [> $x 0] {\n"
     "  print \"positive\"\n"
-    "} {\n"
+    "} else {\n"
     "  print \"non-positive\"\n"
     "}\n"
     "\n"
@@ -1224,13 +1224,13 @@ static int test_multi_realistic_program(void) {
   ASSERT(arith->data.command.args[1]->type == AST_LIT_INT);
   ASSERT_INT_EQ(arith->data.command.args[1]->data.lit_int.value, 10);
 
-  /* 3: proc greet { print "hello $name" } */
+  /* 3: proc greet {} { print "hello $name" } */
   ASSERT(r.nodes[3]->type == AST_COMMAND);
   ASSERT(memcmp(r.nodes[3]->data.command.head->data.lit_string.value, "proc", 4) == 0);
-  ASSERT_U32_EQ(r.nodes[3]->data.command.arg_count, 2);
+  ASSERT_U32_EQ(r.nodes[3]->data.command.arg_count, 3);
   ASSERT(r.nodes[3]->data.command.args[0]->type == AST_LIT_STRING);
   ASSERT(memcmp(r.nodes[3]->data.command.args[0]->data.lit_string.value, "greet", 5) == 0);
-  AstNode* proc_body = r.nodes[3]->data.command.args[1];
+  AstNode* proc_body = r.nodes[3]->data.command.args[2];
   ASSERT(proc_body->type == AST_BLOCK);
   ASSERT_U32_EQ(proc_body->data.block.count, 1);
   /* The print command inside the block */
@@ -1240,7 +1240,7 @@ static int test_multi_realistic_program(void) {
   ASSERT_U32_EQ(print_cmd->data.command.arg_count, 1);
   ASSERT(print_cmd->data.command.args[0]->type == AST_INTERP_STRING);
 
-  /* 4: if [> $x 0] { print "positive" } { print "non-positive" } */
+  /* 4: if [> $x 0] { print "positive" } else { print "non-positive" } */
   ASSERT(r.nodes[4]->type == AST_COMMAND);
   ASSERT(memcmp(r.nodes[4]->data.command.head->data.lit_string.value, "if", 2) == 0);
   ASSERT_U32_EQ(r.nodes[4]->data.command.arg_count, 3);
@@ -1604,7 +1604,7 @@ static int test_roundtrip_blocks(void) {
   setup();
   ASSERT(roundtrip_ok("if $cond { print yes }"));
   ASSERT(roundtrip_ok("if $x { print yes; print no }"));
-  ASSERT(roundtrip_ok("proc greet { print hello }"));
+  ASSERT(roundtrip_ok("proc greet {} { print hello }"));
   ASSERT(roundtrip_ok("if $x { if $y { inner } }"));
   teardown();
   ASSERT(check_no_leaks());
@@ -1628,16 +1628,204 @@ static int test_roundtrip_complex(void) {
     "def x 42\n"
     "def name \"world\"\n"
     "def result [+ $x 10]\n"
-    "proc greet {\n"
+    "proc greet {} {\n"
     "  print \"hello $name\"\n"
     "}\n"
     "if [> $x 0] {\n"
     "  print \"positive\"\n"
-    "} {\n"
+    "} else {\n"
     "  print \"non-positive\"\n"
     "}\n"
     "greet\n"
   ));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ---- US-013: Comprehensive new-syntax roundtrip and nesting tests ---- */
+
+static int test_roundtrip_binding_ops(void) {
+  setup();
+  /* Binding ops desugar to def/mut/set — roundtrip on desugared form */
+  ASSERT(roundtrip_ok("x = 5"));
+  ASSERT(roundtrip_ok("x : 0"));
+  ASSERT(roundtrip_ok("x :: 10"));
+  ASSERT(roundtrip_ok("x = [+ 1 2]"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_pipe(void) {
+  setup();
+  /* Pipe desugars to nested commands */
+  ASSERT(roundtrip_ok("get-data | filter | print"));
+  ASSERT(roundtrip_ok("a | b $x"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_lambda(void) {
+  setup();
+  /* Lambda desugars to proc — roundtrip on desugared form */
+  ASSERT(roundtrip_ok("for [vec 1 2 3] [\\ print $it]"));
+  ASSERT(roundtrip_ok("[\\ + $it 1]"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_arrow(void) {
+  setup();
+  ASSERT(roundtrip_ok("print $p->x"));
+  ASSERT(roundtrip_ok("print $p->x->y"));
+  ASSERT(roundtrip_ok("[foo $point->name]"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_dollar_paren(void) {
+  setup();
+  ASSERT(roundtrip_ok("print \"total: $(1 + 2)\""));
+  ASSERT(roundtrip_ok("print \"val: $($x * $y)\""));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_new_proc(void) {
+  setup();
+  ASSERT(roundtrip_ok("proc add {i32 a, i32 b} { [+ $a $b] }"));
+  ASSERT(roundtrip_ok("proc greet {} { print hello }"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_new_struct(void) {
+  setup();
+  ASSERT(roundtrip_ok("struct Pt {i32 x, i32 y}"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_roundtrip_new_if_while(void) {
+  setup();
+  ASSERT(roundtrip_ok("if $cond { print yes } else { print no }"));
+  ASSERT(roundtrip_ok("while $running { tick }"));
+  ASSERT(roundtrip_ok("if $a { 1 } elif $b { 2 } else { 3 }"));
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_nesting_block_with_infix(void) {
+  /* {} containing () */
+  setup();
+  ParseResult r = parse("if ($x > 0) { print yes }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  /* head = "if" */
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "if", 2) == 0);
+  /* first arg is a command (infix > desugars to [> $x 0]) */
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_nesting_block_with_bracket(void) {
+  /* {} containing [] */
+  setup();
+  ParseResult r = parse("if [> $x 0] { print [+ $x 1] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  /* condition is bracket command */
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  /* body block inner print has nested bracket command arg */
+  AstNode* body = n->data.command.args[1];
+  ASSERT(body->type == AST_BLOCK);
+  AstNode* print_cmd = body->data.block.commands[0];
+  ASSERT(print_cmd->data.command.args[0]->type == AST_COMMAND);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_nesting_infix_with_bracket(void) {
+  /* () containing [] */
+  setup();
+  AstNode* n = parse_expr("($x + [len $v])");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  /* head = "+" */
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "+", 1) == 0);
+  /* right operand is bracket command */
+  ASSERT(n->data.command.args[1]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.args[1]->data.command.head->data.lit_string.value, "len", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_nesting_all_three_modes(void) {
+  /* All modes: bare command (top-level) with () infix, {} block, [] bracket */
+  setup();
+  ParseResult r = parse("if ($x > 0) {\n  print [+ $x 1]\n}");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  /* condition: infix > */
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.args[0]->data.command.head->data.lit_string.value, ">", 1) == 0);
+  /* body: block containing print with bracket command */
+  AstNode* body = n->data.command.args[1];
+  ASSERT(body->type == AST_BLOCK);
+  AstNode* inner = body->data.block.commands[0];
+  ASSERT(inner->data.command.args[0]->type == AST_COMMAND);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_nesting_pipe_with_lambda(void) {
+  /* Pipe + lambda: data | map [\ + $it 1] */
+  setup();
+  ParseResult r = parse("data | map [\\ + $it 1]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  /* Pipe desugars to: [map [data] [\...]] */
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "map", 3) == 0);
+  /* second arg is the lambda (desugared proc) */
+  AstNode* lambda = n->data.command.args[1];
+  ASSERT(lambda->type == AST_COMMAND);
+  ASSERT(memcmp(lambda->data.command.head->data.lit_string.value, "proc", 4) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_nesting_arrow_in_infix_in_block(void) {
+  /* Arrow inside infix inside block: if ($p->x > 0) { ... } */
+  setup();
+  ParseResult r = parse("if ($p->x > 0) { print yes }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* cond = r.nodes[0]->data.command.args[0];
+  ASSERT(cond->type == AST_COMMAND);
+  /* left of > is [get $p x] (arrow desugar) */
+  ASSERT(cond->data.command.args[0]->type == AST_COMMAND);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1793,6 +1981,1765 @@ static int test_use_non_private_ok(void) {
   TEST_PASS();
 }
 
+/* ---- Syntax Redesign US-002: Infix mode () ---- */
+
+static int test_infix_simple_add(void) {
+  setup();
+  /* ($x + 3) → AST_COMMAND head="+", args=[$x, 3] */
+  AstNode* n = parse_expr("($x + 3)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(n->data.command.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.head->data.lit_string.length, 1);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[0]->data.var_ref.name, "x", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(n->data.command.args[1]->data.lit_int.value, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_no_precedence(void) {
+  setup();
+  /* ($x + 3 * 2) → [* [+ $x 3] 2] — left-to-right, no precedence */
+  AstNode* n = parse_expr("($x + 3 * 2)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  /* Outer: * */
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "*", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* Left: [+ $x 3] */
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_COMMAND);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(left->data.command.arg_count, 2);
+  ASSERT(left->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(left->data.command.args[0]->data.var_ref.name, "x", 1) == 0);
+  ASSERT(left->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(left->data.command.args[1]->data.lit_int.value, 3);
+  /* Right: 2 */
+  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(n->data.command.args[1]->data.lit_int.value, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_explicit_grouping(void) {
+  setup();
+  /* (1 + (2 * 3)) → [+ 1 [* 2 3]] */
+  AstNode* n = parse_expr("(1 + (2 * 3))");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* Left: 1 */
+  ASSERT(n->data.command.args[0]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(n->data.command.args[0]->data.lit_int.value, 1);
+  /* Right: [* 2 3] */
+  AstNode* right = n->data.command.args[1];
+  ASSERT(right->type == AST_COMMAND);
+  ASSERT(memcmp(right->data.command.head->data.lit_string.value, "*", 1) == 0);
+  ASSERT_U32_EQ(right->data.command.arg_count, 2);
+  ASSERT(right->data.command.args[0]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(right->data.command.args[0]->data.lit_int.value, 2);
+  ASSERT(right->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(right->data.command.args[1]->data.lit_int.value, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_unary_neg(void) {
+  setup();
+  /* (- $x + $y) → [+ [neg $x] $y] */
+  AstNode* n = parse_expr("(- $x + $y)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* Left: [neg $x] */
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_COMMAND);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "neg", 3) == 0);
+  ASSERT_U32_EQ(left->data.command.arg_count, 1);
+  ASSERT(left->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(left->data.command.args[0]->data.var_ref.name, "x", 1) == 0);
+  /* Right: $y */
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[1]->data.var_ref.name, "y", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_arithmetic_ops(void) {
+  setup();
+  /* ($a - $b) → [- $a $b] */
+  AstNode* n = parse_expr("($a - $b)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "-", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+
+  /* ($a * $b) → [* $a $b] */
+  setup();
+  n = parse_expr("($a * $b)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "*", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+
+  /* ($a / $b) → [/ $a $b] */
+  setup();
+  n = parse_expr("($a / $b)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "/", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+
+  /* ($a % $b) → [% $a $b] */
+  setup();
+  n = parse_expr("($a % $b)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "%", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+
+  TEST_PASS();
+}
+
+static int test_infix_comparison_ops(void) {
+  setup();
+  /* ($a == $b) → [== $a $b] */
+  AstNode* n = parse_expr("($a == $b)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "==", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.head->data.lit_string.length, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+
+  /* ($a < $b) → [< $a $b] */
+  setup();
+  n = parse_expr("($a < $b)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "<", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+
+  /* ($a > $b) → [> $a $b] */
+  setup();
+  n = parse_expr("($a > $b)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, ">", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+
+  /* ($a <= $b) → [<= $a $b] */
+  setup();
+  n = parse_expr("($a <= $b)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "<=", 2) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+
+  /* ($a >= $b) → [>= $a $b] */
+  setup();
+  n = parse_expr("($a >= $b)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, ">=", 2) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+
+  TEST_PASS();
+}
+
+static int test_infix_logical_and(void) {
+  setup();
+  /* ($a && $b) → [and $a $b] */
+  AstNode* n = parse_expr("($a && $b)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "and", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.head->data.lit_string.length, 3);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[0]->data.var_ref.name, "a", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[1]->data.var_ref.name, "b", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_logical_or(void) {
+  setup();
+  /* ($a || $b) → [or $a $b] */
+  AstNode* n = parse_expr("($a || $b)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "or", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.head->data.lit_string.length, 2);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_logical_not(void) {
+  setup();
+  /* (~ $a) → [not $a] */
+  AstNode* n = parse_expr("(~ $a)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "not", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.head->data.lit_string.length, 3);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[0]->data.var_ref.name, "a", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_nested_bracket(void) {
+  setup();
+  /* ($x + [vec-len $v]) → [+ $x [vec-len $v]] */
+  AstNode* n = parse_expr("($x + [vec-len $v])");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[0]->data.var_ref.name, "x", 1) == 0);
+  AstNode* right = n->data.command.args[1];
+  ASSERT(right->type == AST_COMMAND);
+  ASSERT(memcmp(right->data.command.head->data.lit_string.value, "vec-len", 7) == 0);
+  ASSERT_U32_EQ(right->data.command.arg_count, 1);
+  ASSERT(right->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(right->data.command.args[0]->data.var_ref.name, "v", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_var_refs(void) {
+  setup();
+  /* ($x + $y) → [+ $x $y] */
+  AstNode* n = parse_expr("($x + $y)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[0]->data.var_ref.name, "x", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[1]->data.var_ref.name, "y", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_single_value(void) {
+  setup();
+  /* ($x) → just the var ref, no command wrapping */
+  AstNode* n = parse_expr("($x)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.var_ref.name, "x", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+
+  /* (42) → just the int literal */
+  setup();
+  n = parse_expr("(42)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_LIT_INT);
+  ASSERT_INT_EQ(n->data.lit_int.value, 42);
+  teardown();
+  ASSERT(check_no_leaks());
+
+  TEST_PASS();
+}
+
+static int test_infix_in_bracket_cmd(void) {
+  setup();
+  /* [foo ($x + 1)] → command with infix arg */
+  AstNode* n = parse_expr("[foo ($x + 1)]");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "foo", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  AstNode* arg = n->data.command.args[0];
+  ASSERT(arg->type == AST_COMMAND);
+  ASSERT(memcmp(arg->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(arg->data.command.arg_count, 2);
+  ASSERT(arg->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(arg->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(arg->data.command.args[1]->data.lit_int.value, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_in_bare_cmd(void) {
+  setup();
+  /* print ($x + 1) → bare command with infix arg */
+  ParseResult r = parse("print ($x + 1)");
+  ASSERT_U32_EQ(r.count, 1);
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "print", 5) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  AstNode* arg = n->data.command.args[0];
+  ASSERT(arg->type == AST_COMMAND);
+  ASSERT(memcmp(arg->data.command.head->data.lit_string.value, "+", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_chain_three_ops(void) {
+  setup();
+  /* ($a + $b - $c) → [- [+ $a $b] $c] — left-to-right */
+  AstNode* n = parse_expr("($a + $b - $c)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "-", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_COMMAND);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[1]->data.var_ref.name, "c", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_double_neg(void) {
+  setup();
+  /* (- - $x) → [neg [neg $x]] — double negation */
+  AstNode* n = parse_expr("(- - $x)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "neg", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  AstNode* inner = n->data.command.args[0];
+  ASSERT(inner->type == AST_COMMAND);
+  ASSERT(memcmp(inner->data.command.head->data.lit_string.value, "neg", 3) == 0);
+  ASSERT_U32_EQ(inner->data.command.arg_count, 1);
+  ASSERT(inner->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(inner->data.command.args[0]->data.var_ref.name, "x", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_logical_chain(void) {
+  setup();
+  /* ($a && $b || $c) → [or [and $a $b] $c] — left-to-right */
+  AstNode* n = parse_expr("($a && $b || $c)");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "or", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_COMMAND);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "and", 3) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[1]->data.var_ref.name, "c", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_unclosed_paren(void) {
+  setup();
+  /* ($x + 3 → parse error */
+  AstNode* n = parse_expr("($x + 3");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_ERROR);
+  ASSERT(n->data.error.message != NULL);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_empty_parens(void) {
+  setup();
+  /* () → parse error */
+  AstNode* n = parse_expr("()");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_ERROR);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_infix_in_block(void) {
+  setup();
+  /* { ($x + 1) } → block containing infix expression */
+  AstNode* n = parse_expr("{ ($x + 1) }");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_BLOCK);
+  ASSERT_U32_EQ(n->data.block.count, 1);
+  AstNode* cmd = n->data.block.commands[0];
+  ASSERT(cmd->type == AST_COMMAND);
+  ASSERT(memcmp(cmd->data.command.head->data.lit_string.value, "+", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ---- Syntax Redesign US-003: New proc syntax ---- */
+
+/* Helper: verify AST_COMMAND shape for proc */
+static void assert_proc_head(AstNode* n) {
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(n->data.command.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "proc", 4) == 0);
+}
+
+static int test_proc_basic_new_syntax(void) {
+  setup();
+  /* proc add {a, b} {[+ $a $b]} → AST_COMMAND(proc, [add, params, body]) */
+  ParseResult r = parse("proc add {a, b} { [+ $a $b] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  assert_proc_head(n);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3); /* name, params, body */
+  /* arg[0]: name "add" */
+  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "add", 3) == 0);
+  /* arg[1]: params AST_COMMAND with flat list [a b] */
+  AstNode* params = n->data.command.args[1];
+  ASSERT(params->type == AST_COMMAND);
+  ASSERT(memcmp(params->data.command.head->data.lit_string.value, "a", 1) == 0);
+  ASSERT_U32_EQ(params->data.command.arg_count, 1);
+  ASSERT(memcmp(params->data.command.args[0]->data.lit_string.value, "b", 1) == 0);
+  /* arg[2]: body AST_BLOCK */
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  ASSERT_U32_EQ(n->data.command.args[2]->data.block.count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_typed_params(void) {
+  setup();
+  /* proc i64 add {i64 a, i64 b} {[+ $a $b]} → 4 args (type, name, params, body) */
+  ParseResult r = parse("proc i64 add {i64 a, i64 b} { [+ $a $b] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  assert_proc_head(n);
+  ASSERT_U32_EQ(n->data.command.arg_count, 4); /* type, name, params, body */
+  /* arg[0]: return type "i64" */
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "i64", 3) == 0);
+  /* arg[1]: name "add" */
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "add", 3) == 0);
+  /* arg[2]: params flat list [i64 a i64 b] */
+  AstNode* params = n->data.command.args[2];
+  ASSERT(params->type == AST_COMMAND);
+  /* head = "i64", args = ["a", "i64", "b"] */
+  ASSERT(memcmp(params->data.command.head->data.lit_string.value, "i64", 3) == 0);
+  ASSERT_U32_EQ(params->data.command.arg_count, 3);
+  ASSERT(memcmp(params->data.command.args[0]->data.lit_string.value, "a", 1) == 0);
+  ASSERT(memcmp(params->data.command.args[1]->data.lit_string.value, "i64", 3) == 0);
+  ASSERT(memcmp(params->data.command.args[2]->data.lit_string.value, "b", 1) == 0);
+  /* arg[3]: body AST_BLOCK */
+  ASSERT(n->data.command.args[3]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_zero_params_new(void) {
+  setup();
+  /* proc greet {} { print "hello" } → empty params */
+  ParseResult r = parse("proc greet {} { print \"hello\" }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  assert_proc_head(n);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  /* params: empty AST_COMMAND */
+  AstNode* params = n->data.command.args[1];
+  ASSERT(params->type == AST_COMMAND);
+  ASSERT_U32_EQ(params->data.command.head->data.lit_string.length, 0);
+  ASSERT_U32_EQ(params->data.command.arg_count, 0);
+  /* body has one command */
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  ASSERT_U32_EQ(n->data.command.args[2]->data.block.count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_untyped_params(void) {
+  setup();
+  /* proc add {a, b} {[+ $a $b]} — untyped params */
+  ParseResult r = parse("proc add {a, b} { [+ $a $b] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* params = r.nodes[0]->data.command.args[1];
+  ASSERT(params->type == AST_COMMAND);
+  /* Flat list: head="a", args=["b"] */
+  ASSERT(memcmp(params->data.command.head->data.lit_string.value, "a", 1) == 0);
+  ASSERT_U32_EQ(params->data.command.arg_count, 1);
+  ASSERT(memcmp(params->data.command.args[0]->data.lit_string.value, "b", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_old_syntax_rejected(void) {
+  setup();
+  /* Old syntax: [proc add [a b] { [+ $a $b] }] — now rejected */
+  ParseResult r = parse("[proc add [a b] { [+ $a $b] }]");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_in_block(void) {
+  setup();
+  /* proc defined inside a block */
+  ParseResult r = parse("{ proc add {a, b} { [+ $a $b] } }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* blk = r.nodes[0];
+  ASSERT(blk->type == AST_BLOCK);
+  ASSERT_U32_EQ(blk->data.block.count, 1);
+  AstNode* proc_cmd = blk->data.block.commands[0];
+  assert_proc_head(proc_cmd);
+  ASSERT_U32_EQ(proc_cmd->data.command.arg_count, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_multiline(void) {
+  setup();
+  /* Multiline proc definition */
+  ParseResult r = parse(
+    "proc add {a, b} {\n"
+    "  [+ $a $b]\n"
+    "}\n"
+  );
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  assert_proc_head(n);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_mixed_typed_untyped(void) {
+  setup();
+  /* proc foo {i64 a, b} → flat list [i64 a b] */
+  ParseResult r = parse("proc foo {i64 a, b} { $a }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* params = r.nodes[0]->data.command.args[1];
+  ASSERT(params->type == AST_COMMAND);
+  /* head="i64", args=["a", "b"] */
+  ASSERT(memcmp(params->data.command.head->data.lit_string.value, "i64", 3) == 0);
+  ASSERT_U32_EQ(params->data.command.arg_count, 2);
+  ASSERT(memcmp(params->data.command.args[0]->data.lit_string.value, "a", 1) == 0);
+  ASSERT(memcmp(params->data.command.args[1]->data.lit_string.value, "b", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_single_param(void) {
+  setup();
+  /* proc double {n} {[* $n 2]} → single param */
+  ParseResult r = parse("proc double {n} { [* $n 2] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* params = r.nodes[0]->data.command.args[1];
+  ASSERT(params->type == AST_COMMAND);
+  ASSERT(memcmp(params->data.command.head->data.lit_string.value, "n", 1) == 0);
+  ASSERT_U32_EQ(params->data.command.arg_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_proc_bare_cmd_one_block_not_new(void) {
+  setup();
+  /* proc greet { print hello } — only one block → now rejected (proc requires two {} blocks) */
+  ParseResult r = parse("proc greet { print hello }");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ---- Syntax Redesign US-004: New struct syntax ---- */
+
+static int test_struct_basic_new_syntax(void) {
+  setup();
+  /* struct Point {i32 x, i32 y} */
+  ParseResult r = parse("struct Point {i32 x, i32 y}");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_DEFSTRUCT);
+  ASSERT_U32_EQ(n->data.defstruct.field_count, 2);
+  ASSERT(memcmp(n->data.defstruct.name, "Point", 5) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[0], "i32", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[0], "x", 1) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[1], "i32", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[1], "y", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_mixed_types(void) {
+  setup();
+  /* struct Record {i64 id, str name, f32 score} */
+  ParseResult r = parse("struct Record {i64 id, str name, f32 score}");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_DEFSTRUCT);
+  ASSERT_U32_EQ(n->data.defstruct.field_count, 3);
+  ASSERT(memcmp(n->data.defstruct.field_types[0], "i64", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[0], "id", 2) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[1], "str", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[1], "name", 4) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[2], "f32", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[2], "score", 5) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_single_field(void) {
+  setup();
+  /* struct Wrapper {i32 val} */
+  ParseResult r = parse("struct Wrapper {i32 val}");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_DEFSTRUCT);
+  ASSERT_U32_EQ(n->data.defstruct.field_count, 1);
+  ASSERT(memcmp(n->data.defstruct.field_types[0], "i32", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[0], "val", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_old_syntax_rejected(void) {
+  setup();
+  /* Old defstruct syntax is now rejected */
+  ParseResult r = parse("defstruct Point [x :i32] [y :i32]");
+  ASSERT(r.error_count > 0);
+  /* Also test struct with bracket fields → error */
+  ParseResult r2 = parse("struct Point [x :i32]");
+  ASSERT(r2.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_duplicate_field_new(void) {
+  setup();
+  /* Duplicate field name → error */
+  ParseResult r = parse("struct Bad {i32 x, i32 x}");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_empty_fields_error(void) {
+  setup();
+  /* Empty fields → error */
+  ParseResult r = parse("struct Empty {}");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_struct_type_field(void) {
+  setup();
+  /* A struct field referencing another struct by name */
+  ParseResult r = parse("struct Line {Point start, Point end}");
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_DEFSTRUCT);
+  ASSERT_U32_EQ(n->data.defstruct.field_count, 2);
+  ASSERT(memcmp(n->data.defstruct.field_types[0], "Point", 5) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[0], "start", 5) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[1], "Point", 5) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[1], "end", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_multiline_new(void) {
+  setup();
+  /* Multiline struct definition */
+  ParseResult r = parse(
+    "struct Vec3 {\n"
+    "  f32 x,\n"
+    "  f32 y,\n"
+    "  f32 z\n"
+    "}\n"
+  );
+  ASSERT_U32_EQ(r.error_count, 0);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_DEFSTRUCT);
+  ASSERT_U32_EQ(n->data.defstruct.field_count, 3);
+  ASSERT(memcmp(n->data.defstruct.field_types[0], "f32", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[0], "x", 1) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_types[2], "f32", 3) == 0);
+  ASSERT(memcmp(n->data.defstruct.field_names[2], "z", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ---- Syntax Redesign US-005: New if/elif/else and while syntax ---- */
+
+static int test_if_basic_new(void) {
+  setup();
+  /* if $cond { body } — no else, 2-arg if */
+  ParseResult r = parse("if $true { 42 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* condition: $true */
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  /* then block */
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  ASSERT_U32_EQ(n->data.command.args[1]->data.block.count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_else_new(void) {
+  setup();
+  /* if $cond { 1 } else { 2 } — 3-arg if */
+  ParseResult r = parse("if $true { 1 } else { 2 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_elif_else_new(void) {
+  setup();
+  /* if $a { 1 } elif $b { 2 } else { 3 }
+     Desugars to: [if $a {1} {[if $b {2} {3}]}] */
+  ParseResult r = parse("if $a { 1 } elif $b { 2 } else { 3 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  /* else branch is a block containing the nested if */
+  AstNode* else_blk = n->data.command.args[2];
+  ASSERT(else_blk->type == AST_BLOCK);
+  ASSERT_U32_EQ(else_blk->data.block.count, 1);
+  AstNode* nested = else_blk->data.block.commands[0];
+  ASSERT(nested->type == AST_COMMAND);
+  ASSERT(memcmp(nested->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(nested->data.command.arg_count, 3);
+  ASSERT(nested->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(nested->data.command.args[1]->type == AST_BLOCK);
+  ASSERT(nested->data.command.args[2]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_elif_chain_new(void) {
+  setup();
+  /* if $a { 1 } elif $b { 2 } elif $c { 3 } else { 4 } — double elif */
+  ParseResult r = parse("if $a { 1 } elif $b { 2 } elif $c { 3 } else { 4 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  /* First elif desugars to nested if in else block */
+  AstNode* elif1_blk = n->data.command.args[2];
+  ASSERT(elif1_blk->type == AST_BLOCK);
+  AstNode* elif1 = elif1_blk->data.block.commands[0];
+  ASSERT(elif1->type == AST_COMMAND);
+  ASSERT_U32_EQ(elif1->data.command.arg_count, 3);
+  /* Second elif desugars to nested if in else block */
+  AstNode* elif2_blk = elif1->data.command.args[2];
+  ASSERT(elif2_blk->type == AST_BLOCK);
+  AstNode* elif2 = elif2_blk->data.block.commands[0];
+  ASSERT(elif2->type == AST_COMMAND);
+  ASSERT_U32_EQ(elif2->data.command.arg_count, 3);
+  ASSERT(elif2->data.command.args[2]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_infix_condition(void) {
+  setup();
+  /* if ($n > 0) { "positive" } else { "non-positive" } */
+  ParseResult r = parse("if ($n > 0) { \"positive\" } else { \"non-positive\" }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  /* condition is infix: [> $n 0] */
+  AstNode* cond = n->data.command.args[0];
+  ASSERT(cond->type == AST_COMMAND);
+  ASSERT(memcmp(cond->data.command.head->data.lit_string.value, ">", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_command_condition(void) {
+  setup();
+  /* if [> $x 0] { 1 } else { 2 } — bracket command condition */
+  ParseResult r = parse("if [> $x 0] { 1 } else { 2 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  AstNode* cond = n->data.command.args[0];
+  ASSERT(cond->type == AST_COMMAND);
+  ASSERT(memcmp(cond->data.command.head->data.lit_string.value, ">", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_multiline_new(void) {
+  setup();
+  /* Multiline if/else with newlines between } else { */
+  ParseResult r = parse(
+    "if $cond {\n"
+    "  print \"yes\"\n"
+    "}\n"
+    "else {\n"
+    "  print \"no\"\n"
+    "}\n"
+  );
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_nested_new(void) {
+  setup();
+  /* Nested if inside then branch */
+  ParseResult r = parse(
+    "if $outer {\n"
+    "  if $inner { 1 } else { 2 }\n"
+    "}\n"
+  );
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  AstNode* then_blk = n->data.command.args[1];
+  ASSERT(then_blk->type == AST_BLOCK);
+  ASSERT_U32_EQ(then_blk->data.block.count, 1);
+  AstNode* inner = then_blk->data.block.commands[0];
+  ASSERT(inner->type == AST_COMMAND);
+  ASSERT(memcmp(inner->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(inner->data.command.arg_count, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_old_bracket_compat(void) {
+  setup();
+  /* Old bracket syntax still works: [if cond {then} {else}] */
+  AstNode* n = parse_expr("[if $true { 1 } { 2 }]");
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_while_basic_new(void) {
+  setup();
+  /* while $cond { body } — 2-arg while */
+  ParseResult r = parse("while $running { print \"loop\" }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "while", 5) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_while_infix_condition(void) {
+  setup();
+  /* while ($i < 10) { body } — infix condition */
+  ParseResult r = parse("while ($i < 10) { print $i }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "while", 5) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* condition is infix: [< $i 10] */
+  AstNode* cond = n->data.command.args[0];
+  ASSERT(cond->type == AST_COMMAND);
+  ASSERT(memcmp(cond->data.command.head->data.lit_string.value, "<", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_while_multiline_new(void) {
+  setup();
+  /* Multiline while */
+  ParseResult r = parse(
+    "while ($i < 5) {\n"
+    "  print $i\n"
+    "  def i [+ $i 1]\n"
+    "}\n"
+  );
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "while", 5) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* body has 2 commands */
+  AstNode* body = n->data.command.args[1];
+  ASSERT(body->type == AST_BLOCK);
+  ASSERT_U32_EQ(body->data.block.count, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_while_old_bracket_compat(void) {
+  setup();
+  /* Old bracket syntax still works: [while cond {body}] */
+  AstNode* n = parse_expr("[while $true { 1 }]");
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "while", 5) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_if_elif_no_else(void) {
+  setup();
+  /* if $a { 1 } elif $b { 2 } — no else, elif still desugars to nested if */
+  ParseResult r = parse("if $a { 1 } elif $b { 2 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  AstNode* else_blk = n->data.command.args[2];
+  ASSERT(else_blk->type == AST_BLOCK);
+  AstNode* nested = else_blk->data.block.commands[0];
+  ASSERT(nested->type == AST_COMMAND);
+  ASSERT(memcmp(nested->data.command.head->data.lit_string.value, "if", 2) == 0);
+  ASSERT_U32_EQ(nested->data.command.arg_count, 2); /* no else on nested */
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ====================== Syntax Redesign US-006: for command ====================== */
+
+/* for $items { body } — implicit $it form: parses as 2-arg command */
+static int test_for_implicit_it(void) {
+  setup();
+  ParseResult r = parse("for $v { [print $it] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "for", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for $items name { body } — explicit binding: parses as 3-arg command */
+static int test_for_explicit_binding(void) {
+  setup();
+  ParseResult r = parse("for $v item { [print $item] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "for", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "item", 4) == 0);
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for $items $callback — HOF form: parses as 2-arg command */
+static int test_for_hof_form(void) {
+  setup();
+  ParseResult r = parse("[for $v $cb]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "for", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* for with inline collection: for [vec 1 2 3] { body } */
+static int test_for_inline_collection(void) {
+  setup();
+  ParseResult r = parse("for [vec 1 2 3] { [print $it] }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "for", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND); /* [vec 1 2 3] */
+  ASSERT(n->data.command.args[1]->type == AST_BLOCK);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ---- Syntax Redesign US-008: Binding operators (=, :, ::) ---- */
+
+/* x = 5 → [def x 5] */
+static int test_binding_equals_def(void) {
+  setup();
+  ParseResult r = parse("x = 5");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* i64 x = 5 → [def i64 x 5] */
+static int test_binding_typed_equals(void) {
+  setup();
+  ParseResult r = parse("i64 x = 5");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "i64", 3) == 0);
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[2]->type == AST_LIT_INT);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* x : 0 → [mut x 0] */
+static int test_binding_colon_mut(void) {
+  setup();
+  ParseResult r = parse("x : 0");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "mut", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* i64 x : 0 → [mut i64 x 0] */
+static int test_binding_typed_colon(void) {
+  setup();
+  ParseResult r = parse("i64 x : 0");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "mut", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "i64", 3) == 0);
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[2]->type == AST_LIT_INT);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* x :: ($x + 1) → [set x ($x + 1)] */
+static int test_binding_double_colon_set(void) {
+  setup();
+  ParseResult r = parse("x :: ($x + 1)");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "set", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_COMMAND); /* infix expression */
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Binding operators inside {} block */
+static int test_binding_in_block(void) {
+  setup();
+  ParseResult r = parse("{ x = 5; y : 0 }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* blk = r.nodes[0];
+  ASSERT(blk->type == AST_BLOCK);
+  ASSERT_U32_EQ(blk->data.block.count, 2);
+  /* first: [def x 5] */
+  ASSERT(blk->data.block.commands[0]->type == AST_COMMAND);
+  ASSERT(memcmp(blk->data.block.commands[0]->data.command.head->data.lit_string.value, "def", 3) == 0);
+  /* second: [mut y 0] */
+  ASSERT(blk->data.block.commands[1]->type == AST_COMMAND);
+  ASSERT(memcmp(blk->data.block.commands[1]->data.command.head->data.lit_string.value, "mut", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* def/mut/set command forms still work */
+static int test_binding_def_cmd_still_works(void) {
+  setup();
+  ParseResult r = parse("def x 5");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Binding with expression value: x = [vec 1 2 3] */
+static int test_binding_expr_value(void) {
+  setup();
+  ParseResult r = parse("x = [vec 1 2 3]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_COMMAND); /* [vec 1 2 3] */
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Binding operators not active inside [] */
+static int test_binding_not_in_brackets(void) {
+  setup();
+  ParseResult r = parse("[x = 5]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  /* Inside [], = is just an atom — head is "x", args are "=" and 5 */
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "x", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ---- Syntax Redesign US-009: Arrow field access (->) ---- */
+
+/* $point->x parses as [. $point x] internally */
+static int test_arrow_basic(void) {
+  setup();
+  /* [. $point x] in brackets is now rejected — use $point->x instead */
+  ParseResult r = parse("[. $point x]");
+  ASSERT(r.error_count > 0);
+  /* Arrow syntax works */
+  ParseResult r2 = parse("$point->x");
+  ASSERT_U32_EQ(r2.error_count, 0);
+  ASSERT_U32_EQ(r2.count, 1);
+  AstNode* n = r2.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, ".", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[0]->data.var_ref.name, "point", 5) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* $a->b->c parses as [. [. $a b] c] — chained access */
+static int test_arrow_chained(void) {
+  setup();
+  ParseResult r = parse("$a->b->c");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* outer = r.nodes[0];
+  ASSERT(outer->type == AST_COMMAND);
+  ASSERT(memcmp(outer->data.command.head->data.lit_string.value, ".", 1) == 0);
+  ASSERT_U32_EQ(outer->data.command.arg_count, 2);
+  /* outer field is "c" */
+  ASSERT(memcmp(outer->data.command.args[1]->data.lit_string.value, "c", 1) == 0);
+  /* inner is [. $a b] */
+  AstNode* inner = outer->data.command.args[0];
+  ASSERT(inner->type == AST_COMMAND);
+  ASSERT(memcmp(inner->data.command.head->data.lit_string.value, ".", 1) == 0);
+  ASSERT_U32_EQ(inner->data.command.arg_count, 2);
+  ASSERT(inner->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(inner->data.command.args[1]->data.lit_string.value, "b", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* [get-point]->x — field access on command result */
+static int test_arrow_on_command(void) {
+  setup();
+  ParseResult r = parse("[foo $a]->x");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, ".", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* first arg is the [foo $a] command */
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.args[0]->data.command.head->data.lit_string.value, "foo", 3) == 0);
+  /* second arg is field name "x" */
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ($point->x + 1) — arrow inside infix mode */
+static int test_arrow_in_infix(void) {
+  setup();
+  ParseResult r = parse("($point->x + 1)");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  /* Should be [+ [. $point x] 1] */
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* first arg is [. $point x] */
+  AstNode* dot = n->data.command.args[0];
+  ASSERT(dot->type == AST_COMMAND);
+  ASSERT(memcmp(dot->data.command.head->data.lit_string.value, ".", 1) == 0);
+  ASSERT(dot->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(dot->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* [foo $point->x] — arrow inside bracket command args */
+static int test_arrow_in_bracket_cmd(void) {
+  setup();
+  ParseResult r = parse("[foo $point->x]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "foo", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  /* the arg is [. $point x] */
+  AstNode* dot = n->data.command.args[0];
+  ASSERT(dot->type == AST_COMMAND);
+  ASSERT(memcmp(dot->data.command.head->data.lit_string.value, ".", 1) == 0);
+  ASSERT(dot->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(dot->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Old [. $struct field] syntax is now rejected */
+static int test_arrow_old_dot_rejected(void) {
+  setup();
+  ParseResult r = parse("[. $p x]");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ---- Syntax Redesign US-010: Pipe threading (|) ---- */
+
+/* foo $a | bar $b  →  [bar [foo $a] $b] */
+static int test_pipe_basic(void) {
+  setup();
+  ParseResult r = parse("foo $a | bar $b");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "bar", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* first arg is [foo $a] */
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_COMMAND);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "foo", 3) == 0);
+  ASSERT_U32_EQ(left->data.command.arg_count, 1);
+  ASSERT(left->data.command.args[0]->type == AST_VAR_REF);
+  /* second arg is $b */
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.command.args[1]->data.var_ref.name, "b", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* a | b | c  →  [c [b [a]]] */
+static int test_pipe_multi_stage(void) {
+  setup();
+  ParseResult r = parse("a | b | c");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  /* Outermost: [c [b [a]]] */
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "c", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  /* inner: [b [a]] */
+  AstNode* mid = n->data.command.args[0];
+  ASSERT(mid->type == AST_COMMAND);
+  ASSERT(memcmp(mid->data.command.head->data.lit_string.value, "b", 1) == 0);
+  ASSERT_U32_EQ(mid->data.command.arg_count, 1);
+  /* innermost: [a] */
+  AstNode* inner = mid->data.command.args[0];
+  ASSERT(inner->type == AST_COMMAND);
+  ASSERT(memcmp(inner->data.command.head->data.lit_string.value, "a", 1) == 0);
+  ASSERT_U32_EQ(inner->data.command.arg_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* + 1 2 | * 3  →  [* [+ 1 2] 3] */
+static int test_pipe_with_args(void) {
+  setup();
+  ParseResult r = parse("+ 1 2 | * 3");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "*", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* first arg is [+ 1 2] */
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_COMMAND);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(left->data.command.arg_count, 2);
+  ASSERT(left->data.command.args[0]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(left->data.command.args[0]->data.lit_int.value, 1);
+  ASSERT(left->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(left->data.command.args[1]->data.lit_int.value, 2);
+  /* second arg is 3 */
+  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(n->data.command.args[1]->data.lit_int.value, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Pipe in block: { foo $a | bar $b } */
+static int test_pipe_in_block(void) {
+  setup();
+  ParseResult r = parse("{ foo $a | bar $b }");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* block = r.nodes[0];
+  ASSERT(block->type == AST_BLOCK);
+  ASSERT_U32_EQ(block->data.block.count, 1);
+  AstNode* n = block->data.block.commands[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "bar", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Zero-arg pipe: vec 1 2 3 | vlen  →  [vlen [vec 1 2 3]] */
+static int test_pipe_zero_arg_right(void) {
+  setup();
+  ParseResult r = parse("vec 1 2 3 | vlen");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "vlen", 4) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_COMMAND);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "vec", 3) == 0);
+  ASSERT_U32_EQ(left->data.command.arg_count, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Pipe inside [] still treats | as literal (no pipe semantics) */
+static int test_pipe_literal_in_brackets(void) {
+  setup();
+  ParseResult r = parse("[foo | bar]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "foo", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* | is parsed as literal string "|" inside brackets */
+  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "|", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "bar", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ---- US-011: Lambda shorthand (\\) ---- */
+
+static int test_lambda_basic(void) {
+  /* [\\ + $it 2] → [proc "" [it] { [+ $it 2] }] */
+  setup();
+  AstNode* n = parse_expr("[\\ + $it 2]");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  /* head = "proc" */
+  ASSERT(n->data.command.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "proc", 4) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  /* arg0 = name "" (anonymous) */
+  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
+  ASSERT_U32_EQ(n->data.command.args[0]->data.lit_string.length, 0);
+  /* arg1 = params [it] */
+  ASSERT(n->data.command.args[1]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.args[1]->data.command.head->data.lit_string.value, "it", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.args[1]->data.command.arg_count, 0);
+  /* arg2 = body block containing [+ $it 2] */
+  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
+  ASSERT_U32_EQ(n->data.command.args[2]->data.block.count, 1);
+  AstNode* body = n->data.command.args[2]->data.block.commands[0];
+  ASSERT(body->type == AST_COMMAND);
+  ASSERT(memcmp(body->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(body->data.command.arg_count, 2);
+  ASSERT(body->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(body->data.command.args[1]->type == AST_LIT_INT);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_lambda_as_callback(void) {
+  /* for $items [\\ print $it] — lambda used as callback */
+  setup();
+  ParseResult r = parse("for $items [\\ print $it]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "for", 3) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* second arg is lambda */
+  AstNode* lambda = n->data.command.args[1];
+  ASSERT(lambda->type == AST_COMMAND);
+  ASSERT(memcmp(lambda->data.command.head->data.lit_string.value, "proc", 4) == 0);
+  ASSERT_U32_EQ(lambda->data.command.arg_count, 3);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_lambda_single_arg(void) {
+  /* [\\ print $it] — single-arg body */
+  setup();
+  AstNode* n = parse_expr("[\\ print $it]");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "proc", 4) == 0);
+  AstNode* body = n->data.command.args[2]->data.block.commands[0];
+  ASSERT(body->type == AST_COMMAND);
+  ASSERT(memcmp(body->data.command.head->data.lit_string.value, "print", 5) == 0);
+  ASSERT_U32_EQ(body->data.command.arg_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_lambda_nested_bracket(void) {
+  /* [\\ + $it [vec-len $v]] — nested [] inside lambda */
+  setup();
+  AstNode* n = parse_expr("[\\ + $it [len $v]]");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "proc", 4) == 0);
+  AstNode* body = n->data.command.args[2]->data.block.commands[0];
+  ASSERT(body->type == AST_COMMAND);
+  ASSERT(memcmp(body->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(body->data.command.arg_count, 2);
+  /* second arg is nested command [len $v] */
+  ASSERT(body->data.command.args[1]->type == AST_COMMAND);
+  ASSERT(memcmp(body->data.command.args[1]->data.command.head->data.lit_string.value, "len", 3) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_lambda_in_pipe(void) {
+  /* Lambda used in pipe: $items | filter [\\ > $it 2] */
+  setup();
+  ParseResult r = parse("vec 1 2 3 | filter [\\ > $it 2]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  /* pipe desugars: [filter [vec 1 2 3] [\\ > $it 2]] */
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "filter", 6) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* second arg is lambda */
+  AstNode* lambda = n->data.command.args[1];
+  ASSERT(lambda->type == AST_COMMAND);
+  ASSERT(memcmp(lambda->data.command.head->data.lit_string.value, "proc", 4) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_lambda_no_args(void) {
+  /* [\\ $it] — lambda with just a variable ref (no extra args) */
+  setup();
+  AstNode* n = parse_expr("[\\ $it]");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "proc", 4) == 0);
+  AstNode* body = n->data.command.args[2]->data.block.commands[0];
+  ASSERT(body->type == AST_COMMAND);
+  /* head is $it (var ref), no args */
+  ASSERT(body->data.command.head->type == AST_VAR_REF);
+  ASSERT_U32_EQ(body->data.command.arg_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ---- US-012: $(expr) string interpolation and line continuation ---- */
+
+static int test_dollar_paren_basic(void) {
+  /* "val: $(1 + 2)" — basic $(expr) in string */
+  setup();
+  AstNode* n = parse_expr("\"val: $(1 + 2)\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  ASSERT_U32_EQ(n->data.interp_string.count, 2);
+  /* first segment: "val: " */
+  ASSERT(n->data.interp_string.segments[0]->type == AST_LIT_STRING);
+  /* second segment: infix result [+ 1 2] */
+  AstNode* expr = n->data.interp_string.segments[1];
+  ASSERT(expr->type == AST_COMMAND);
+  ASSERT(memcmp(expr->data.command.head->data.lit_string.value, "+", 1) == 0);
+  ASSERT_U32_EQ(expr->data.command.arg_count, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_paren_vars(void) {
+  /* "total: $($x * $y)" — $(expr) with variables */
+  setup();
+  AstNode* n = parse_expr("\"total: $($x * $y)\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  ASSERT_U32_EQ(n->data.interp_string.count, 2);
+  AstNode* expr = n->data.interp_string.segments[1];
+  ASSERT(expr->type == AST_COMMAND);
+  ASSERT(memcmp(expr->data.command.head->data.lit_string.value, "*", 1) == 0);
+  ASSERT(expr->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(expr->data.command.args[1]->type == AST_VAR_REF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_paren_with_bracket(void) {
+  /* "v: $($x + $[len $v])" — $(expr) nesting with $[] */
+  setup();
+  AstNode* n = parse_expr("\"v: $($x + $[len $v])\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  /* segments: "v: ", then $(expr) with + */
+  AstNode* expr = n->data.interp_string.segments[1];
+  ASSERT(expr->type == AST_COMMAND);
+  ASSERT(memcmp(expr->data.command.head->data.lit_string.value, "+", 1) == 0);
+  /* right operand should be a command [len $v] */
+  ASSERT(expr->data.command.args[1]->type == AST_COMMAND);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_paren_single_value(void) {
+  /* "$($x)" — single value (no binary op) */
+  setup();
+  AstNode* n = parse_expr("\"$($x)\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  /* The $( ) with just a var ref */
+  AstNode* expr = n->data.interp_string.segments[0];
+  ASSERT(expr->type == AST_VAR_REF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_dollar_paren_existing_interp(void) {
+  /* Existing $var interp still works */
+  setup();
+  AstNode* n = parse_expr("\"hello $name\"");
+  ASSERT(n != NULL);
+  ASSERT(n->type == AST_INTERP_STRING);
+  ASSERT_U32_EQ(n->data.interp_string.count, 2);
+  ASSERT(n->data.interp_string.segments[1]->type == AST_VAR_REF);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_line_continuation(void) {
+  /* \ at end of line continues command */
+  setup();
+  ParseResult r = parse("print \\\n  42");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "print", 5) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  ASSERT(n->data.command.args[0]->type == AST_LIT_INT);
+  ASSERT(n->data.command.args[0]->data.lit_int.value == 42);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_blank_lines_no_empty(void) {
+  /* Blank lines (multiple newlines) don't produce empty commands */
+  setup();
+  ParseResult r = parse("\n\n\nprint 1\n\n\nprint 2\n\n");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -1901,6 +3848,21 @@ int main(void) {
     {"roundtrip_blocks",      test_roundtrip_blocks},
     {"roundtrip_interp",      test_roundtrip_interp},
     {"roundtrip_complex",     test_roundtrip_complex},
+    /* US-013: New-syntax roundtrip and cross-mode nesting */
+    {"rt_binding_ops",        test_roundtrip_binding_ops},
+    {"rt_pipe",               test_roundtrip_pipe},
+    {"rt_lambda",             test_roundtrip_lambda},
+    {"rt_arrow",              test_roundtrip_arrow},
+    {"rt_dollar_paren",       test_roundtrip_dollar_paren},
+    {"rt_new_proc",           test_roundtrip_new_proc},
+    {"rt_new_struct",         test_roundtrip_new_struct},
+    {"rt_new_if_while",       test_roundtrip_new_if_while},
+    {"nest_block_infix",      test_nesting_block_with_infix},
+    {"nest_block_bracket",    test_nesting_block_with_bracket},
+    {"nest_infix_bracket",    test_nesting_infix_with_bracket},
+    {"nest_all_three_modes",  test_nesting_all_three_modes},
+    {"nest_pipe_lambda",      test_nesting_pipe_with_lambda},
+    {"nest_arrow_infix_blk",  test_nesting_arrow_in_infix_in_block},
     /* M14 US-002: use declarations */
     {"use_basic",             test_use_basic},
     {"use_single_name",       test_use_single_name},
@@ -1916,6 +3878,106 @@ int main(void) {
     {"use_private_err",       test_use_private_name_error},
     {"use_private_mixed",     test_use_private_name_mixed},
     {"use_non_private_ok",    test_use_non_private_ok},
+    /* Syntax Redesign US-002: Infix mode () */
+    {"infix_simple_add",      test_infix_simple_add},
+    {"infix_no_precedence",   test_infix_no_precedence},
+    {"infix_explicit_group",  test_infix_explicit_grouping},
+    {"infix_unary_neg",       test_infix_unary_neg},
+    {"infix_arithmetic_ops",  test_infix_arithmetic_ops},
+    {"infix_comparison_ops",  test_infix_comparison_ops},
+    {"infix_logical_and",     test_infix_logical_and},
+    {"infix_logical_or",      test_infix_logical_or},
+    {"infix_logical_not",     test_infix_logical_not},
+    {"infix_nested_bracket",  test_infix_nested_bracket},
+    {"infix_var_refs",        test_infix_var_refs},
+    {"infix_single_value",    test_infix_single_value},
+    {"infix_in_bracket_cmd",  test_infix_in_bracket_cmd},
+    {"infix_in_bare_cmd",     test_infix_in_bare_cmd},
+    {"infix_chain_three_ops", test_infix_chain_three_ops},
+    {"infix_double_neg",      test_infix_double_neg},
+    {"infix_logical_chain",   test_infix_logical_chain},
+    {"infix_unclosed_paren",  test_infix_unclosed_paren},
+    {"infix_empty_parens",    test_infix_empty_parens},
+    {"infix_in_block",        test_infix_in_block},
+    /* Syntax Redesign US-003: New proc syntax */
+    {"proc_basic_new",        test_proc_basic_new_syntax},
+    {"proc_typed_params",     test_proc_typed_params},
+    {"proc_zero_params_new",  test_proc_zero_params_new},
+    {"proc_untyped_params",   test_proc_untyped_params},
+    {"proc_old_syntax_rejected",test_proc_old_syntax_rejected},
+    {"proc_in_block",         test_proc_in_block},
+    {"proc_multiline",        test_proc_multiline},
+    {"proc_mixed_type_untype",test_proc_mixed_typed_untyped},
+    {"proc_single_param",     test_proc_single_param},
+    {"proc_one_block_old",    test_proc_bare_cmd_one_block_not_new},
+    /* Syntax Redesign US-004: New struct syntax */
+    {"struct_basic_new",      test_struct_basic_new_syntax},
+    {"struct_mixed_types",    test_struct_mixed_types},
+    {"struct_single_field",   test_struct_single_field},
+    {"struct_old_rejected",   test_struct_old_syntax_rejected},
+    {"struct_dup_field_new",  test_struct_duplicate_field_new},
+    {"struct_empty_err",      test_struct_empty_fields_error},
+    {"struct_type_field",     test_struct_struct_type_field},
+    {"struct_multiline_new",  test_struct_multiline_new},
+    /* Syntax Redesign US-005: New if/elif/else and while syntax */
+    {"if_basic_new",          test_if_basic_new},
+    {"if_else_new",           test_if_else_new},
+    {"if_elif_else_new",      test_if_elif_else_new},
+    {"if_elif_chain_new",     test_if_elif_chain_new},
+    {"if_infix_condition",    test_if_infix_condition},
+    {"if_cmd_condition",      test_if_command_condition},
+    {"if_multiline_new",      test_if_multiline_new},
+    {"if_nested_new",         test_if_nested_new},
+    {"if_old_bracket_compat", test_if_old_bracket_compat},
+    {"if_elif_no_else",       test_if_elif_no_else},
+    {"while_basic_new",       test_while_basic_new},
+    {"while_infix_cond",      test_while_infix_condition},
+    {"while_multiline_new",   test_while_multiline_new},
+    {"while_old_bracket_compat", test_while_old_bracket_compat},
+    /* Syntax Redesign US-006: for command */
+    {"for_implicit_it",         test_for_implicit_it},
+    {"for_explicit_binding",    test_for_explicit_binding},
+    {"for_hof_form",            test_for_hof_form},
+    {"for_inline_collection",   test_for_inline_collection},
+    /* Syntax Redesign US-008: Binding operators (=, :, ::) */
+    {"bind_equals_def",         test_binding_equals_def},
+    {"bind_typed_equals",       test_binding_typed_equals},
+    {"bind_colon_mut",          test_binding_colon_mut},
+    {"bind_typed_colon",        test_binding_typed_colon},
+    {"bind_dcolon_set",         test_binding_double_colon_set},
+    {"bind_in_block",           test_binding_in_block},
+    {"bind_def_cmd_works",      test_binding_def_cmd_still_works},
+    {"bind_expr_value",         test_binding_expr_value},
+    {"bind_not_in_brackets",    test_binding_not_in_brackets},
+    /* Syntax Redesign US-009: Arrow field access (->) */
+    {"arrow_basic",             test_arrow_basic},
+    {"arrow_chained",           test_arrow_chained},
+    {"arrow_on_command",        test_arrow_on_command},
+    {"arrow_in_infix",          test_arrow_in_infix},
+    {"arrow_in_bracket_cmd",    test_arrow_in_bracket_cmd},
+    {"arrow_old_dot_rejected",  test_arrow_old_dot_rejected},
+    /* Syntax Redesign US-010: Pipe threading (|) */
+    {"pipe_basic",              test_pipe_basic},
+    {"pipe_multi_stage",        test_pipe_multi_stage},
+    {"pipe_with_args",          test_pipe_with_args},
+    {"pipe_in_block",           test_pipe_in_block},
+    {"pipe_zero_arg_right",     test_pipe_zero_arg_right},
+    {"pipe_literal_in_bracket", test_pipe_literal_in_brackets},
+    /* Syntax Redesign US-011: Lambda shorthand (\) */
+    {"lambda_basic",            test_lambda_basic},
+    {"lambda_as_callback",      test_lambda_as_callback},
+    {"lambda_single_arg",       test_lambda_single_arg},
+    {"lambda_nested_bracket",   test_lambda_nested_bracket},
+    {"lambda_in_pipe",          test_lambda_in_pipe},
+    {"lambda_no_args",          test_lambda_no_args},
+    /* Syntax Redesign US-012: $(expr) interpolation & line continuation */
+    {"dollar_paren_basic",      test_dollar_paren_basic},
+    {"dollar_paren_vars",       test_dollar_paren_vars},
+    {"dollar_paren_bracket",    test_dollar_paren_with_bracket},
+    {"dollar_paren_single",     test_dollar_paren_single_value},
+    {"dollar_paren_existing",   test_dollar_paren_existing_interp},
+    {"line_continuation",       test_line_continuation},
+    {"blank_lines_no_empty",    test_blank_lines_no_empty},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;
