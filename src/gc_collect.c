@@ -80,6 +80,17 @@ static inline void gc__ms_push_const(GCMarkStack *ms, JaclVal v) {
 }
 
 /* ======================================================================
+ * Object finalization: release external resources before sweep zeroes memory
+ * ====================================================================== */
+
+static inline void gc__finalize_dead(GCHeader *hdr) {
+    if (hdr->obj_type == OBJ_ROPE_STRING) {
+        JaclRopeString *rs = (JaclRopeString *)(hdr + 1);
+        rope_unref(rs->r);
+    }
+}
+
+/* ======================================================================
  * Object tracing: push an object's children onto the mark stack
  * ====================================================================== */
 
@@ -94,6 +105,7 @@ static void gc__trace_object(void *payload, GCMarkStack *ms) {
     case OBJ_HEAP_U64:
     case OBJ_HEAP_F64:
     case OBJ_BIGNUM:
+    case OBJ_ROPE_STRING:  /* rope internals are RC-managed, not GC-traced */
         break;
 
     /* --- Closure: trace captured upvalues + chunk constants --- */
@@ -377,7 +389,8 @@ static size_t gc_sweep(ThreadHeap *heap) {
                     old_gen_bytes += total;
                 }
             } else {
-                /* Dead object — zero its memory for safe future walking */
+                /* Dead object — finalize external resources, then zero */
+                gc__finalize_dead(hdr);
                 memset(ptr, 0, total);
             }
 
@@ -654,7 +667,8 @@ static size_t gc_sweep_minor(ThreadHeap *heap) {
                     hdr->survive_count = sc + 1;
                 }
             } else {
-                /* Dead young object — zero memory */
+                /* Dead young object — finalize external resources, then zero */
+                gc__finalize_dead(hdr);
                 memset(ptr, 0, total);
             }
 
@@ -771,6 +785,7 @@ static size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
                            (hdr->epoch >= watermark);
 
             if (!is_live) {
+                gc__finalize_dead(hdr);
                 memset(ptr, 0, total);
             }
 

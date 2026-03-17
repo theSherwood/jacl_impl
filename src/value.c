@@ -59,6 +59,7 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_FUTURE         ((uint64_t)0x11 << JACL_TAG_SHIFT)
 #define JACL_TAG_STRUCT         ((uint64_t)0x12 << JACL_TAG_SHIFT)
 #define JACL_TAG_NATIVE_FN     ((uint64_t)0x13 << JACL_TAG_SHIFT)
+#define JACL_TAG_ROPE_STRING   ((uint64_t)0x14 << JACL_TAG_SHIFT)
 
 /* --- Heap structs for 64-bit numeric types --- */
 
@@ -170,7 +171,8 @@ static inline void *jacl_as_ptr(JaclVal v) {
 
 static inline bool jacl_is_string(JaclVal v) {
     uint64_t tag = v & JACL_TYPE_MASK;
-    return tag == JACL_TAG_INLINE_STRING || tag == JACL_TAG_STRING;
+    return tag == JACL_TAG_INLINE_STRING || tag == JACL_TAG_STRING
+        || tag == JACL_TAG_ROPE_STRING;
 }
 
 static inline bool jacl_is_vector(JaclVal v) {

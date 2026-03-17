@@ -145,7 +145,26 @@ static inline JaclHeapString* jacl_as_heap_string(JaclVal v) {
   return (JaclHeapString*)jacl_as_ptr(v);
 }
 
-/* --- Unified string API (works for both inline and heap strings) --- */
+/* --- Rope string wrapper (GC-managed, RC rope internals) --- */
+
+typedef struct {
+  uint32_t hash;  /* precomputed FNV-1a hash over all rope bytes */
+  rope     r;     /* rope tree (RC-managed internals) */
+} JaclRopeString;
+
+static inline bool jacl_is_rope_string(JaclVal v) {
+  return (v & JACL_TYPE_MASK) == JACL_TAG_ROPE_STRING;
+}
+
+static inline JaclRopeString* jacl_as_rope_string(JaclVal v) {
+  return (JaclRopeString*)jacl_as_ptr(v);
+}
+
+static inline JaclVal jacl_rope_string_ptr(JaclRopeString* p) {
+  return JACL_TAG_ROPE_STRING | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+/* --- Unified string API (works for inline, heap, and rope strings) --- */
 
 /* Returns grapheme cluster count. For inline strings (≤7 bytes),
  * computed on-the-fly. For heap strings, returns cached grapheme_len. */
@@ -162,13 +181,21 @@ static inline uint32_t jacl_string_len(JaclVal v) {
     }
     return (uint32_t)unicode_grapheme_count(buf, len);
   }
+  if ((v & JACL_TYPE_MASK) == JACL_TAG_ROPE_STRING) {
+    JaclRopeString* rs = (JaclRopeString*)jacl_as_ptr(v);
+    return (uint32_t)rope_grapheme_count(rs->r);
+  }
   return jacl_as_heap_string(v)->grapheme_len;
 }
 
-/* Returns byte length for both inline and heap strings. */
+/* Returns byte length for inline, heap, and rope strings. */
 static inline uint32_t jacl_string_byte_len(JaclVal v) {
   if (jacl_is_inline_string(v)) {
     return (uint32_t)jacl_inline_string_len(v);
+  }
+  if ((v & JACL_TYPE_MASK) == JACL_TAG_ROPE_STRING) {
+    JaclRopeString* rs = (JaclRopeString*)jacl_as_ptr(v);
+    return (uint32_t)rope_byte_count(rs->r);
   }
   return jacl_as_heap_string(v)->byte_len;
 }
@@ -182,6 +209,13 @@ static uint32_t jacl_string_data(JaclVal v, char* buf, size_t buflen) {
       buf[i] = (char)((payload >> (i * 8)) & 0xFF);
     }
     return len;
+  }
+  if ((v & JACL_TYPE_MASK) == JACL_TAG_ROPE_STRING) {
+    JaclRopeString* rs = (JaclRopeString*)jacl_as_ptr(v);
+    size_t total = rope_byte_count(rs->r);
+    size_t to_copy = buflen < total ? buflen : total;
+    rope_to_str(rs->r, (uint8_t*)buf, to_copy);
+    return (uint32_t)total;
   }
   JaclHeapString* hs = jacl_as_heap_string(v);
   uint32_t copy = hs->byte_len < (uint32_t)buflen ? hs->byte_len : (uint32_t)buflen;
@@ -226,6 +260,47 @@ static int jacl_string_cmp(JaclVal a, JaclVal b) {
   uint32_t len_a = jacl_string_byte_len(a);
   uint32_t len_b = jacl_string_byte_len(b);
 
+  /* Rope strings: full implementation in US-011 */
+  bool a_rope = (a & JACL_TYPE_MASK) == JACL_TAG_ROPE_STRING;
+  bool b_rope = (b & JACL_TYPE_MASK) == JACL_TAG_ROPE_STRING;
+  if (a_rope || b_rope) {
+    /* Materialize to temporary buffers for comparison */
+    char *ma = NULL, *mb = NULL;
+    char sa[128], sb[128];
+    const char *da, *db;
+
+    if (a_rope) {
+      ma = len_a <= sizeof(sa) ? sa : (char*)malloc(len_a);
+      jacl_string_data(a, ma, len_a);
+      da = ma;
+    } else if (jacl_is_inline_string(a)) {
+      jacl_string_data(a, sa, sizeof(sa));
+      da = sa;
+    } else {
+      da = jacl_as_heap_string(a)->data;
+    }
+
+    if (b_rope) {
+      mb = len_b <= sizeof(sb) ? sb : (char*)malloc(len_b);
+      jacl_string_data(b, mb, len_b);
+      db = mb;
+    } else if (jacl_is_inline_string(b)) {
+      jacl_string_data(b, sb, sizeof(sb));
+      db = sb;
+    } else {
+      db = jacl_as_heap_string(b)->data;
+    }
+
+    uint32_t min_len = len_a < len_b ? len_a : len_b;
+    int result = min_len > 0 ? memcmp(da, db, min_len) : 0;
+    if (a_rope && ma != sa) free(ma);
+    if (b_rope && mb != sb) free(mb);
+    if (result != 0) return result;
+    if (len_a < len_b) return -1;
+    if (len_a > len_b) return 1;
+    return 0;
+  }
+
   char buf_a[8], buf_b[8];
   const char* data_a;
   const char* data_b;
@@ -250,6 +325,41 @@ static int jacl_string_cmp(JaclVal a, JaclVal b) {
   if (len_a < len_b) return -1;
   if (len_a > len_b) return 1;
   return 0;
+}
+
+/* --- Compute FNV-1a hash over rope bytes in chunks (no large allocation) --- */
+
+static uint32_t rope_string__compute_hash(rope r) {
+  uint32_t hash = 2166136261u;
+  size_t total = rope_byte_count(r);
+  uint8_t chunk[256];
+  size_t pos = 0;
+  while (pos < total) {
+    size_t n = total - pos;
+    if (n > sizeof(chunk)) n = sizeof(chunk);
+    rope_st_copy_range(r.root, pos, n, chunk);
+    for (size_t i = 0; i < n; i++) {
+      hash ^= chunk[i];
+      hash *= 16777619u;
+    }
+    pos += n;
+  }
+  return hash;
+}
+
+/* --- Create a JaclRopeString on the GC heap from raw bytes --- */
+
+static JaclVal jacl_rope_string_create(ThreadHeap* heap,
+                                        const uint8_t* data, size_t len) {
+  rope r = rope_from_str(data, len);
+  uint32_t hash = rope_string__compute_hash(r);
+
+  JaclRopeString* rs = (JaclRopeString*)gc_alloc(
+      heap, OBJ_ROPE_STRING, sizeof(JaclRopeString));
+  rs->hash = hash;
+  rs->r    = r;
+
+  return jacl_rope_string_ptr(rs);
 }
 
 #endif /* STRING_C */

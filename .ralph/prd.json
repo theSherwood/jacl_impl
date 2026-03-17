@@ -41,7 +41,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "rope_concat is in lib/sum_tree/rope.h. The rope is a persistent data structure (RC-based), so modifying a leaf requires creating new nodes up to the root — this is standard for persistent trees and costs O(log n). The implementation approach: after rope_st_concat, access the leftmost leaf of the right subtree and the rightmost leaf of the left subtree. Scan the right leaf's prefix for extending codepoints. If found, create a new right leaf without those bytes and a new left leaf with those bytes appended. Use rope_st_mk_leaf to create new leaves. The rope uses RC (reference counting) — use rc_retain/rc_release as needed. The combining-mark check uses unicode_grapheme_break() — GBP_EXTEND, GBP_ZWJ, GBP_SPACINGMARK indicate non-starter codepoints."
     },
     {
@@ -60,7 +60,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "This is a struct layout change that affects all code touching JaclHeapString. The field rename (length → byte_len) will cause compile errors everywhere the old name is used — fix them all. Key locations: jacl_intern() (string.c:121-125), intern__find_slot (string.c:59-69), jacl_string_len (string.c:147-152), jacl_string_data (string.c:154-168), jacl_string_eq (string.c:170-201), jacl_string_cmp (string.c:203-231). Also check vm.c OP_CONCAT handler and any code that reads heap string length. The unicode_grapheme_count function is in lib/unicode/unicode.h — it takes (const uint8_t*, size_t) and returns size_t. For inline strings (≤7 bytes), computing grapheme count on-the-fly is fast since the data is at most 7 bytes. Unity build: all src/*.c files are included via src/jacl.c."
     },
     {
@@ -82,7 +82,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Look at how JACL_TAG_STRING (0x05) is defined and follow the same pattern for JACL_TAG_ROPE_STRING. The tag system uses bits 63-56 of the 64-bit JaclVal. Check src/value.c for the existing tag definitions (JACL_TAG_INLINE_STRING=0x04, JACL_TAG_STRING=0x05). The GC object kinds are in gc.c — add OBJ_ROPE_STRING following the pattern of OBJ_STRING. The rope lib uses RC (reference counting) for its internal nodes — the GC only needs to own the JaclRopeString wrapper. On GC free, call rope_release() or equivalent to drop the RC. For hashing: use string__fnv1a pattern but iterate rope leaves via rope_cursor or rope_to_str. The rope struct is defined in lib/sum_tree/rope.h as { rope_st_root root; }."
     },
     {

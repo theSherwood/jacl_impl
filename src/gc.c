@@ -29,7 +29,8 @@ typedef enum {
     OBJ_FUTURE_WAITER,
     OBJ_PARALLEL_AGG,
     OBJ_RACE_AGG,
-    OBJ_STRUCT
+    OBJ_STRUCT,
+    OBJ_ROPE_STRING
 } GCObjType;
 
 /* --- GC object header (8 bytes, prepended before payload) ---
@@ -84,7 +85,8 @@ static inline bool jacl_is_heap_type(JaclVal v) {
         || tag == JACL_TAG_U64
         || tag == JACL_TAG_F64
         || tag == JACL_TAG_FUTURE
-        || tag == JACL_TAG_STRUCT;
+        || tag == JACL_TAG_STRUCT
+        || tag == JACL_TAG_ROPE_STRING;
 }
 
 /* ======================================================================

@@ -21,6 +21,13 @@
 /* --- Unicode library (needed by string.c for grapheme counting) --- */
 #include "../lib/unicode/unicode.h"
 
+/* --- Rope library (needed by string.c for JaclRopeString) ---
+ * Override STREE_ALLOCATOR with a brace-enclosed initializer to avoid
+ * the get_libc_allocator() function call in a static initializer
+ * (not valid in -std=c99). */
+#define STREE_ALLOCATOR {libc_alloc, libc_realloc, libc_free, NULL}
+#include "../lib/sum_tree/rope.h"
+
 /* --- JACL pipeline (order matters) --- */
 #include "value.c"
 #include "gc.c"
