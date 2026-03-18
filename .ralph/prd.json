@@ -89,7 +89,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "TOKEN_DOTDOT is already lexed. Parser change: when parsing a destructuring pattern and encountering TOKEN_DOTDOT, consume the following identifier as the rest-name. For positional rest: OP_DESTRUCTURE_VEC_REST N pops vector, pushes elements 0..N-1 individually, then pushes a new vector containing elements N..end. For named rest: after extracting explicitly named fields, collect remaining fields into a new map. The named-rest case for structs requires knowing all field names (from StructTypeRegistry) to determine which are 'remaining'."
     },
     {
