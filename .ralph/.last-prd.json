@@ -174,7 +174,7 @@
         "All tests pass"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "The rope must be >128 bytes to be a rope. Build a string with many multi-codepoint graphemes (ZWJ family emoji are 25 bytes each, 6 of them = 150 bytes). Use rope_slice from rope.h. Verify completeness by checking that each result's first codepoint is not an Extend/ZWJ/SpacingMark character (unless empty)."
     },
     {
@@ -190,7 +190,7 @@
         "All tests pass"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "Use THREAD_CREATE/THREAD_JOIN from platform.h. For passing values between threads: use a shared struct with the JaclVal and a mutex/condition or simple flag. The GC handle API is in include/jacl.h: jacl_handle_new(vm, val), jacl_handle_get(h), jacl_handle_free(vm, h). Epoch watermarking is automatic — the gc__thread_epoch protects recently-allocated objects from collection. Trigger GC between send and receive by calling gc_collect() on the receiving thread's heap."
     }
   ]
