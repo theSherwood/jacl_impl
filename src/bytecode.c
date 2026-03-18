@@ -149,6 +149,9 @@ typedef enum {
   OP_DESTRUCTURE_NAMED, /* destructure struct/map by field names: uint8_t N, then N x uint16_t const_idx */
   OP_DESTRUCTURE_VEC_REST, /* destructure vector with rest: uint8_t N; pop vec, push N elements + rest vector */
   OP_DESTRUCTURE_NAMED_REST, /* destructure named with rest: uint8_t N, N x uint16_t const_idx; pop struct/map, push N fields + rest map */
+  OP_SPREAD,          /* pop vector, push each element; save count in vm->spread_counts */
+  OP_CALL_SPREAD,     /* call with spread: uint8_t fixed_args, uint8_t num_spreads */
+  OP_FOLD_SPREAD,     /* fold binary op with spread: uint8_t op_id, uint8_t fixed_args, uint8_t num_spreads */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -410,6 +413,9 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_DESTRUCTURE_NAMED: return "OP_DESTRUCTURE_NAMED";
     case OP_DESTRUCTURE_VEC_REST: return "OP_DESTRUCTURE_VEC_REST";
     case OP_DESTRUCTURE_NAMED_REST: return "OP_DESTRUCTURE_NAMED_REST";
+    case OP_SPREAD:          return "OP_SPREAD";
+    case OP_CALL_SPREAD:     return "OP_CALL_SPREAD";
+    case OP_FOLD_SPREAD:     return "OP_FOLD_SPREAD";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";

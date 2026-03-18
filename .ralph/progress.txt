@@ -94,3 +94,22 @@ Started: Wed Mar 18 17:37:32 UTC 2026
   - `dyn d = $p` at global scope doesn't actually produce TYPE_DYN: the compiler's effective_type logic infers struct type from RHS. To test true dyn, use a proc with `dyn` parameter type.
   - When adding fields to the compiler's arrays from StructTypeRegistry, the field name pointers are valid for the function lifetime (they point into the registry's defs array).
 ---
+
+## 2026-03-18 - US-006
+- Implemented splat/spread in juxtaposition: `[+ ..$nums]`, `[proc_name ..$args]`
+- Files changed:
+  - src/ast.c: Added AST_SPREAD node type with `spread.expr` data, pretty-print support
+  - src/parser.c: Added TOKEN_DOTDOT detection in `parser__parse_command()` arg loop to create AST_SPREAD nodes
+  - src/bytecode.c: Added OP_SPREAD, OP_CALL_SPREAD, OP_FOLD_SPREAD opcodes
+  - src/compiler.c: Added early spread detection in `compiler__compile_command()` with two paths: OP_FOLD_SPREAD for binary builtins (+,-,*,/), OP_CALL_SPREAD for user-defined procs. Generic path resolves head as local/global (not literal string).
+  - src/vm.c: Added spread_counts[32] side buffer to VM struct. Added OP_SPREAD handler (pops vec, pushes elements, saves count). Added OP_CALL_SPREAD handler (computes total args from side buffer, dispatches call). Added OP_FOLD_SPREAD handler (left-folds with binary op).
+  - test/test_splat.c: 10 e2e tests (basic, mixed, multiple, empty, multiply, proc, non-vector error, single, single-only, proc-mixed)
+  - test/test_bytecode.c: Updated opcode enum assertions
+  - build.sh: Added test to runner
+- **Learnings for future iterations:**
+  - Spread uses a side buffer `vm->spread_counts[32]` instead of encoding counts on the stack, to keep the stack layout clean for call dispatch.
+  - Two compilation paths: OP_FOLD_SPREAD for known binary builtins (avoids call overhead), OP_CALL_SPREAD for everything else.
+  - Generic spread call must resolve head the same way as normal call path: for AST_LIT_STRING heads, look up as local/global variable to get the closure, not push as string literal.
+  - OP_FOLD_SPREAD format: `uint8_t op_id, uint8_t fixed_args, uint8_t num_spreads`. op_id: 0=add, 1=sub, 2=mul, 3=div.
+  - OP_CALL_SPREAD format: `uint8_t fixed_args, uint8_t num_spreads`.
+---

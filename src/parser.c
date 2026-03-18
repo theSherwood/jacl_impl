@@ -470,6 +470,23 @@ static AstNode* parser__parse_command(Parser* p) {
       p->pos = saved_pos;
       break;
     }
+    /* Spread expression: ..expr */
+    if (parser__peek(p)->type == TOKEN_DOTDOT) {
+      Token* dotdot = parser__advance(p); /* consume '..' */
+      AstNode* inner = parser__parse_expr(p);
+      if (inner == NULL) {
+        AstNode* err = parser__error(p, "expected expression after '..' in spread", dotdot);
+        parser__sync_bracket(p);
+        return err;
+      }
+      AstNode* spread = ast_alloc(p->arena);
+      spread->type  = AST_SPREAD;
+      spread->start = parser__token_start(dotdot);
+      spread->end   = inner->end;
+      spread->data.spread.expr = inner;
+      parser__arr_push(&args, spread);
+      continue;
+    }
     AstNode* arg = parser__parse_expr(p);
     if (arg == NULL) {
       break;

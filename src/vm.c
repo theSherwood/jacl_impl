@@ -98,6 +98,9 @@ typedef struct {
   void*      native_fn_ctx;     /* JaclVM_s* for dispatch callback */
   int8_t*    native_fn_arities; /* arity per native fn (-1 = variadic) */
   uint32_t   native_fn_count;   /* number of registered native functions */
+  /* Spread count side buffer for OP_SPREAD / OP_CALL_SPREAD / OP_FOLD_SPREAD */
+  uint32_t   spread_counts[32]; /* small stack of spread element counts */
+  uint32_t   spread_count_top;  /* top index in spread_counts */
 } VM;
 
 /* --- API --- */
@@ -272,6 +275,7 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->native_fn_ctx     = NULL;
   vm->native_fn_arities = NULL;
   vm->native_fn_count   = 0;
+  vm->spread_count_top  = 0;
 
   /* Initialize GC heap and make it available for collection templates */
   gc_block_pool_init(&vm->block_pool);
@@ -4367,6 +4371,165 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         vm->stack_top -= field_count;
         result = vm__push(vm, jacl_struct_val(s));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_SPREAD: {
+        JaclVal vec_val;
+        result = vm__pop(vm, &vec_val);
+        if (result != VM_OK) return result;
+        if (!jacl_is_vector(vec_val)) {
+          vm__set_error(vm, "spread requires a vector, got %s",
+                       vm__type_name(vec_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
+        uint32_t len = jacl_vec_count(vec);
+        /* Stack overflow check */
+        if (vm->stack_top + len >= VM_STACK_MAX) {
+          vm__set_error(vm, "spread exceeds stack capacity");
+          return VM_RUNTIME_ERROR;
+        }
+        /* Push each element individually */
+        for (uint32_t i = 0; i < len; i++) {
+          jacl_vec_get_result gr = jacl_vec_get(vec, i);
+          result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
+          if (result != VM_OK) return result;
+        }
+        /* Save count in side buffer */
+        if (vm->spread_count_top >= 32) {
+          vm__set_error(vm, "too many nested spread operations");
+          return VM_RUNTIME_ERROR;
+        }
+        vm->spread_counts[vm->spread_count_top++] = len;
+        break;
+      }
+
+      case OP_CALL_SPREAD: {
+        uint8_t fixed_args = vm__read_byte(vm);
+        uint8_t num_spreads = vm__read_byte(vm);
+        /* Compute total args */
+        uint32_t total_args = fixed_args;
+        for (uint8_t i = 0; i < num_spreads; i++) {
+          if (vm->spread_count_top == 0) {
+            vm__set_error(vm, "spread count underflow");
+            return VM_RUNTIME_ERROR;
+          }
+          total_args += vm->spread_counts[--vm->spread_count_top];
+        }
+        /* Locate callee */
+        JaclVal callee = vm->stack[vm->stack_top - total_args - 1];
+
+        if (jacl_is_native_fn(callee)) {
+          uint32_t fn_idx = jacl_as_native_fn_index(callee);
+          if (fn_idx >= vm->native_fn_count || !vm->call_native) {
+            vm__set_error(vm, "invalid native function index %u", fn_idx);
+            return VM_RUNTIME_ERROR;
+          }
+          int8_t arity = vm->native_fn_arities[fn_idx];
+          if (arity >= 0 && total_args != (uint32_t)arity) {
+            vm__set_error(vm, "expected %d arguments but got %d",
+                         (int)arity, (int)total_args);
+            return VM_RUNTIME_ERROR;
+          }
+          JaclVal* args = &vm->stack[vm->stack_top - total_args];
+          JaclVal ret = vm->call_native(vm->native_fn_ctx, fn_idx,
+                                         args, (int)total_args);
+          vm->stack_top -= (total_args + 1);
+          result = vm__push(vm, ret);
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        if (!jacl_is_closure(callee)) {
+          vm__set_error(vm, "cannot call %s value", vm__type_name(callee));
+          return VM_RUNTIME_ERROR;
+        }
+
+        JaclClosure* closure = jacl_as_closure(callee);
+        if (total_args != closure->param_count) {
+          vm__set_error(vm, "expected %d arguments but got %d",
+                       (int)closure->param_count, (int)total_args);
+          return VM_RUNTIME_ERROR;
+        }
+        if (vm->frame_count >= VM_FRAMES_MAX) {
+          vm__set_error(vm, "stack overflow");
+          return VM_RUNTIME_ERROR;
+        }
+
+        CallFrame* new_frame = &vm->frames[vm->frame_count++];
+        new_frame->closure    = closure;
+        new_frame->return_ip  = vm->ip;
+        new_frame->stack_base = vm->stack_top - total_args;
+        new_frame->chunk      = &closure->chunk;
+        frame     = new_frame;
+        vm->ip    = frame->chunk->code;
+        vm->chunk = frame->chunk;
+        break;
+      }
+
+      case OP_FOLD_SPREAD: {
+        uint8_t op_id = vm__read_byte(vm);
+        uint8_t fixed_args = vm__read_byte(vm);
+        uint8_t num_spreads = vm__read_byte(vm);
+        /* Compute total args */
+        uint32_t total_args = fixed_args;
+        for (uint8_t i = 0; i < num_spreads; i++) {
+          if (vm->spread_count_top == 0) {
+            vm__set_error(vm, "spread count underflow");
+            return VM_RUNTIME_ERROR;
+          }
+          total_args += vm->spread_counts[--vm->spread_count_top];
+        }
+        if (total_args < 1) {
+          vm__set_error(vm, "fold requires at least 1 argument");
+          return VM_RUNTIME_ERROR;
+        }
+        /* Fold values on stack left-to-right */
+        uint32_t base = vm->stack_top - total_args;
+        JaclVal acc = vm->stack[base];
+        for (uint32_t i = 1; i < total_args; i++) {
+          JaclVal val = vm->stack[base + i];
+          JaclVal res;
+          if (jacl_is_i32(acc) && jacl_is_i32(val)) {
+            switch (op_id) {
+              case 0: res = jacl_add_i32(acc, val); break;
+              case 1: res = jacl_sub_i32(acc, val); break;
+              case 2: res = jacl_mul_i32(acc, val); break;
+              case 3: res = jacl_div_i32(acc, val); break;
+              default: vm__set_error(vm, "unknown fold op"); return VM_RUNTIME_ERROR;
+            }
+          } else if (jacl_is_f32(acc) && jacl_is_f32(val)) {
+            switch (op_id) {
+              case 0: res = jacl_add_f32(acc, val); break;
+              case 1: res = jacl_sub_f32(acc, val); break;
+              case 2: res = jacl_mul_f32(acc, val); break;
+              case 3: res = jacl_div_f32(acc, val); break;
+              default: vm__set_error(vm, "unknown fold op"); return VM_RUNTIME_ERROR;
+            }
+          } else if (jacl_is_u32(acc) && jacl_is_u32(val)) {
+            switch (op_id) {
+              case 0: res = jacl_u32_add(acc, val); break;
+              case 1: res = jacl_u32_sub(acc, val); break;
+              case 2: res = jacl_u32_mul(acc, val); break;
+              case 3: res = jacl_u32_div(acc, val); break;
+              default: vm__set_error(vm, "unknown fold op"); return VM_RUNTIME_ERROR;
+            }
+          } else {
+            static const char* op_names[] = { "+", "-", "*", "/" };
+            vm__set_error(vm,
+              "type error in '%s': expected matching numeric types, got %s and %s",
+              op_names[op_id < 4 ? op_id : 0], vm__type_name(acc), vm__type_name(val));
+            return VM_RUNTIME_ERROR;
+          }
+          if (jacl_is_error(res)) {
+            vm__capture_trace(vm);
+          }
+          acc = res;
+        }
+        vm->stack_top = base;
+        result = vm__push(vm, acc);
         if (result != VM_OK) return result;
         break;
       }

@@ -108,6 +108,7 @@ TESTS=(
     "test/test_destructure_wildcard.c|destructure_wildcard|"
     "test/test_destructure_rest.c|destructure_rest|"
     "test/test_destructure_spread_all.c|destructure_spread_all|"
+    "test/test_splat.c|splat|"
 )
 
 # Filter tests if --lib flag is set

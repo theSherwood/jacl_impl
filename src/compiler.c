@@ -3525,6 +3525,88 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
      Individual handlers (e.g. typed def) set it explicitly for their RHS. */
   c->expected_type = TYPE_DYN;
 
+  /* Check if any arg is a spread expression */
+  int has_spread = 0;
+  for (uint32_t i = 0; i < argc; i++) {
+    if (args[i]->type == AST_SPREAD) { has_spread = 1; break; }
+  }
+
+  /* --- Spread call path: handles both builtins and user procs --- */
+  if (has_spread) {
+    /* Check for known binary builtins → use OP_FOLD_SPREAD */
+    int fold_op = -1;
+    if (compiler__head_matches(head, "+", 1))      fold_op = 0;
+    else if (compiler__head_matches(head, "*", 1)) fold_op = 2;
+    else if (compiler__head_matches(head, "-", 1)) fold_op = 1;
+    else if (compiler__head_matches(head, "/", 1)) fold_op = 3;
+
+    if (fold_op >= 0) {
+      /* Compile all args (fixed + spread) onto stack */
+      uint8_t fixed_args = 0;
+      uint8_t num_spreads = 0;
+      for (uint32_t i = 0; i < argc; i++) {
+        if (args[i]->type == AST_SPREAD) {
+          compiler__compile_node(c, args[i]->data.spread.expr);
+          compiler__emit_byte(c, OP_SPREAD, line);
+          num_spreads++;
+        } else {
+          compiler__compile_node(c, args[i]);
+          fixed_args++;
+        }
+      }
+      compiler__emit_byte(c, OP_FOLD_SPREAD, line);
+      compiler__emit_byte(c, (uint8_t)fold_op, line);
+      compiler__emit_byte(c, fixed_args, line);
+      compiler__emit_byte(c, num_spreads, line);
+      c->last_expr_type = TYPE_DYN;
+      return;
+    }
+
+    /* Generic spread call: resolve head as callable, args, then OP_CALL_SPREAD */
+    if (head->type == AST_LIT_STRING) {
+      uint32_t name_len = head->data.lit_string.length;
+      if (name_len > 7) {
+        compiler__error(c, line, col, "command name exceeds 7-byte inline limit");
+        return;
+      }
+      JaclVal name_val = jacl_inline_string(head->data.lit_string.value, name_len);
+      int local_slot = compiler__resolve_local(c, name_val);
+      if (local_slot != -1) {
+        if (c->locals[local_slot].is_mutable) {
+          compiler__emit_byte(c, OP_GET_CELL_LOCAL, line);
+        } else {
+          compiler__emit_byte(c, OP_GET_LOCAL, line);
+        }
+        compiler__emit_byte(c, (uint8_t)local_slot, line);
+      } else {
+        JaclVal gkey = compiler__global_name_val(c,
+            head->data.lit_string.value, name_len);
+        uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
+        compiler__emit_byte(c, OP_GET_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+      }
+    } else {
+      compiler__compile_node(c, head);
+    }
+    uint8_t fixed_args = 0;
+    uint8_t num_spreads = 0;
+    for (uint32_t i = 0; i < argc; i++) {
+      if (args[i]->type == AST_SPREAD) {
+        compiler__compile_node(c, args[i]->data.spread.expr);
+        compiler__emit_byte(c, OP_SPREAD, line);
+        num_spreads++;
+      } else {
+        compiler__compile_node(c, args[i]);
+        fixed_args++;
+      }
+    }
+    compiler__emit_byte(c, OP_CALL_SPREAD, line);
+    compiler__emit_byte(c, fixed_args, line);
+    compiler__emit_byte(c, num_spreads, line);
+    c->last_expr_type = TYPE_DYN;
+    return;
+  }
+
   /* Arithmetic builtins */
   if (compiler__head_matches(head, "+", 1)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "+", "2 arguments", argc); return; }
@@ -6690,6 +6772,12 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
     case AST_DESTRUCTURE_NAMED: {
       compiler__error(c, line, node->start.column,
                       "destructuring pattern can only appear in def or mut");
+      break;
+    }
+
+    case AST_SPREAD: {
+      compiler__error(c, line, node->start.column,
+                      "spread expression can only appear inside command arguments");
       break;
     }
 

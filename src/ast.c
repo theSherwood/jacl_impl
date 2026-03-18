@@ -30,6 +30,7 @@ typedef enum {
   AST_RETURN,        /* return or return $value */
   AST_DESTRUCTURE_VEC, /* [a b c] positional destructuring pattern */
   AST_DESTRUCTURE_NAMED, /* {x, y} named struct/map destructuring pattern */
+  AST_SPREAD,        /* ..expr spread in command args */
   AST_ERROR          /* parse error with recovery */
 } AstNodeType;
 
@@ -79,6 +80,7 @@ struct AstNode {
              uint32_t count;
              const char* rest_name; uint32_t rest_name_len;
              int spread_all; } destructure_named;
+    struct { AstNode* expr; }                                      spread;
     struct { const char* message; }                                error;
   } data;
 };
@@ -467,6 +469,11 @@ static void ast__pp_node(AstStrBuf* b, AstNode* node) {
         ast__buf_cstr(b, "..");
       }
       ast__buf_char(b, '}');
+      break;
+    }
+    case AST_SPREAD: {
+      ast__buf_cstr(b, "..");
+      ast__pp_node(b, node->data.spread.expr);
       break;
     }
     case AST_ERROR: {

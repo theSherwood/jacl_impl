@@ -132,7 +132,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Parser change: in parser__parse_command() when inside [], if TOKEN_DOTDOT is encountered, parse the following expression and wrap in AST_SPREAD. Compiler: for each AST_SPREAD child in a command, compile the inner expression then emit OP_SPREAD. Track number of fixed args and number of spreads. After all args compiled, emit OP_CALL_SPREAD with the fixed-arg count; VM sums fixed + spread counts at runtime. The VM execution of OP_SPREAD: check jacl_is_vector, get length, check stack capacity, iterate and push each element, push count. OP_CALL_SPREAD: pop spread counts, sum with fixed count for total arity, proceed like OP_CALL."
     },
     {
