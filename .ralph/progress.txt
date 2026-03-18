@@ -17,6 +17,9 @@ Started: Wed Mar 18 17:37:32 UTC 2026
 - Vectors print as `[vec 1 2 3]` (with `vec` prefix); empty vector prints as `[vec]`.
 - Map iteration API: `jacl_map_iter_init()`, `jacl_map_next_leaf()`, `jacl_map_key_from_leaf()`, `jacl_map_value_from_leaf()`.
 - Keyword form `[def [a b c] expr]` parses inner `[a b c]` as AST_COMMAND. Rest pattern `..name` in keyword form is NOT supported (only operator form `[a ..rest] = expr` works for rest patterns).
+- Spread-all `{..}` is a compiler-driven feature: parser sets `spread_all` flag on AST_DESTRUCTURE_NAMED, compiler expands field list from StructTypeRegistry. Requires known struct type (compile error on dyn).
+- `vm__struct_read_field` needs `&vm->heap` (not NULL) in OP_DESTRUCTURE_NAMED/REST handlers so i64/u64/f64 fields produce proper boxed JaclVal for globals/dyn contexts.
+- Global scope `dyn d = $p` still infers struct type (effective_type from RHS). To test with true dyn, use a proc with `dyn` parameter.
 
 ---
 
@@ -74,4 +77,20 @@ Started: Wed Mar 18 17:37:32 UTC 2026
   - For named rest in global scope, a single OP_DESTRUCTURE_NAMED_REST produces all values + rest map, processed in reverse order same as vector rest global pattern.
   - Map key comparison for rest exclusion: use jacl_string_data + memcmp since jacl_equal is not available from vm.c context.
   - Keyword form `[def [a b ..rest] expr]` does NOT work — rest pattern only works with operator form (`[a b ..rest] = expr`) because keyword form inner brackets parse as AST_COMMAND which doesn't understand TOKEN_DOTDOT.
+---
+
+## 2026-03-18 - US-005
+- Implemented spread-all destructuring: `{..} = $struct` imports all fields, `{x, ..} = $struct` imports explicit + remaining
+- Files changed:
+  - src/ast.c: Added `spread_all` flag to destructure_named data, updated pretty-print
+  - src/parser.c: Handle `..` without following word in named destructuring as spread-all (vs `..name` for rest)
+  - src/compiler.c: Added `spread_all` param to `compiler__compile_destructure_named`, expansion logic from StructTypeRegistry, same-scope shadowing check, updated all 4 call sites
+  - src/vm.c: Fixed pre-existing bug: OP_DESTRUCTURE_NAMED and OP_DESTRUCTURE_NAMED_REST now pass `&vm->heap` to `vm__struct_read_field` (was NULL, breaking i64/u64/f64 fields)
+  - test/test_destructure_spread_all.c: 10 e2e tests (basic, explicit-plus, different struct, no-dup, dyn error, shadow error, global, explicit-global, nested, single-field)
+  - build.sh: Added test to runner
+- **Learnings for future iterations:**
+  - Spread-all is entirely compiler-driven: parser sets a flag, compiler expands field names from StructTypeRegistry before reusing the normal extraction path.
+  - OP_DESTRUCTURE_NAMED/REST had a pre-existing bug: passing NULL for heap to vm__struct_read_field caused i64/u64/f64 struct fields to produce raw bits instead of boxed JaclVal. Fixed by passing &vm->heap.
+  - `dyn d = $p` at global scope doesn't actually produce TYPE_DYN: the compiler's effective_type logic infers struct type from RHS. To test true dyn, use a proc with `dyn` parameter type.
+  - When adding fields to the compiler's arrays from StructTypeRegistry, the field name pointers are valid for the function lifetime (they point into the registry's defs array).
 ---

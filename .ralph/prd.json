@@ -109,7 +109,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Compiler-driven feature: the parser recognizes the pattern, but the compiler enumerates fields from StructTypeRegistry. For `{x, ..}`: compiler gets all fields from the struct type, removes `x` from the list, emits extraction for the rest. Same-scope shadowing check uses existing compiler__add_local error path. Once struct type is known, this desugars to extracting each field by name — reuses OP_STRUCT_GET_FIELD path from US-002."
     },
     {
