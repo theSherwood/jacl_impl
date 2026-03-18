@@ -77,7 +77,8 @@ struct AstNode {
     struct { const char** names; uint32_t* name_lens;
              const char** types; uint32_t* type_lens;
              uint32_t count;
-             const char* rest_name; uint32_t rest_name_len; } destructure_named;
+             const char* rest_name; uint32_t rest_name_len;
+             int spread_all; } destructure_named;
     struct { const char* message; }                                error;
   } data;
 };
@@ -461,6 +462,9 @@ static void ast__pp_node(AstStrBuf* b, AstNode* node) {
         ast__buf_cstr(b, "..");
         ast__buf_str(b, node->data.destructure_named.rest_name,
                      node->data.destructure_named.rest_name_len);
+      } else if (node->data.destructure_named.spread_all) {
+        if (node->data.destructure_named.count > 0) ast__buf_cstr(b, ", ");
+        ast__buf_cstr(b, "..");
       }
       ast__buf_char(b, '}');
       break;

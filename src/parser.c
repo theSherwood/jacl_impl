@@ -1794,6 +1794,7 @@ static AstNode* parser__parse_destructure_named_pattern(Parser* p) {
   uint32_t count = 0;
   const char* rest_name = NULL;
   uint32_t rest_name_len = 0;
+  int spread_all = 0;
 
   while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
     /* Skip commas and newlines */
@@ -1806,18 +1807,21 @@ static AstNode* parser__parse_destructure_named_pattern(Parser* p) {
       continue;
     }
 
-    /* Check for rest pattern: ..name */
+    /* Check for rest pattern: ..name, or spread-all: .. */
     if (parser__peek(p)->type == TOKEN_DOTDOT) {
       Token* dotdot = parser__advance(p); /* consume '..' */
-      if (rest_name) {
+      if (rest_name || spread_all) {
         return parser__error(p, "duplicate rest pattern '..' in destructuring", dotdot);
       }
-      if (parser__at_end(p) || parser__peek(p)->type != TOKEN_WORD) {
-        return parser__error(p, "expected name after '..' in named destructuring pattern", dotdot);
+      /* If next token is a word, this is a rest pattern ..name */
+      if (!parser__at_end(p) && parser__peek(p)->type == TOKEN_WORD) {
+        Token* rn = parser__advance(p); /* consume rest name */
+        rest_name = rn->payload.text;
+        rest_name_len = rn->length;
+      } else {
+        /* Spread-all pattern {..} or {x, ..} */
+        spread_all = 1;
       }
-      Token* rn = parser__advance(p); /* consume rest name */
-      rest_name = rn->payload.text;
-      rest_name_len = rn->length;
       continue;
     }
 
@@ -1902,6 +1906,7 @@ static AstNode* parser__parse_destructure_named_pattern(Parser* p) {
   node->data.destructure_named.count         = count;
   node->data.destructure_named.rest_name     = rest_name;
   node->data.destructure_named.rest_name_len = rest_name_len;
+  node->data.destructure_named.spread_all    = spread_all;
   return node;
 }
 

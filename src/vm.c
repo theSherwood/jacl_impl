@@ -1447,7 +1447,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
                   (int)sdef->name_len, sdef->name, (int)flen, fname);
               return VM_RUNTIME_ERROR;
             }
-            JaclVal field_val = vm__struct_read_field(NULL, s,
+            JaclVal field_val = vm__struct_read_field(&vm->heap, s,
                 sdef->fields[fi].offset, sdef->fields[fi].type);
             result = vm__push(vm, field_val);
             if (result != VM_OK) return result;
@@ -1507,7 +1507,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
                   (int)sdef->name_len, sdef->name, (int)flen, fname);
               return VM_RUNTIME_ERROR;
             }
-            JaclVal field_val = vm__struct_read_field(NULL, s,
+            JaclVal field_val = vm__struct_read_field(&vm->heap, s,
                 sdef->fields[fi].offset, sdef->fields[fi].type);
             result = vm__push(vm, field_val);
             if (result != VM_OK) return result;
@@ -1531,7 +1531,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (!is_explicit) {
               JaclVal key = jacl_inline_string(sdef->fields[fi].name,
                                                sdef->fields[fi].name_len);
-              JaclVal val = vm__struct_read_field(NULL, s,
+              JaclVal val = vm__struct_read_field(&vm->heap, s,
                   sdef->fields[fi].offset, sdef->fields[fi].type);
               rest_map = jacl_map_set(rest_map, key, val);
             }

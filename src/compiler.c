@@ -3153,6 +3153,7 @@ static void compiler__compile_destructure_named(
     const char** d_types, uint32_t* d_type_lens,
     uint32_t d_count,
     const char* rest_name, uint32_t rest_name_len,
+    int spread_all,
     AstNode* value_expr,
     bool is_mutable,
     uint32_t line, uint32_t col)
@@ -3213,6 +3214,80 @@ static void compiler__compile_destructure_named(
         }
       }
     }
+  }
+
+  /* --- Spread-all expansion: {..} or {x, ..} --- */
+  const char* exp_names[STRUCT_MAX_FIELDS];
+  uint32_t    exp_name_lens[STRUCT_MAX_FIELDS];
+  const char* exp_types[STRUCT_MAX_FIELDS];
+  uint32_t    exp_type_lens[STRUCT_MAX_FIELDS];
+  uint32_t    exp_count = 0;
+
+  if (spread_all) {
+    if (!use_struct_path || !sdef) {
+      compiler__error(c, line, col,
+                      "spread-all {..} requires a known struct type; got dyn");
+      return;
+    }
+    /* Build expanded field list: explicit fields + all remaining struct fields */
+
+    /* Copy explicit fields first */
+    for (uint32_t i = 0; i < d_count; i++) {
+      exp_names[exp_count]     = d_names[i];
+      exp_name_lens[exp_count] = d_name_lens[i];
+      exp_types[exp_count]     = (d_types ? d_types[i] : NULL);
+      exp_type_lens[exp_count] = (d_type_lens ? d_type_lens[i] : 0);
+      exp_count++;
+    }
+
+    /* Add remaining struct fields not already listed */
+    for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+      int already_listed = 0;
+      for (uint32_t i = 0; i < d_count; i++) {
+        if (sdef->fields[fi].name_len == d_name_lens[i] &&
+            memcmp(sdef->fields[fi].name, d_names[i], d_name_lens[i]) == 0) {
+          already_listed = 1;
+          break;
+        }
+      }
+      if (!already_listed) {
+        if (sdef->fields[fi].name_len > 7) {
+          compiler__error(c, line, col,
+                          "variable name exceeds 7-byte inline limit");
+          return;
+        }
+        exp_names[exp_count]     = sdef->fields[fi].name;
+        exp_name_lens[exp_count] = sdef->fields[fi].name_len;
+        exp_types[exp_count]     = NULL;
+        exp_type_lens[exp_count] = 0;
+        exp_count++;
+      }
+    }
+
+    /* Check for same-scope shadowing */
+    if (c->scope_depth > 0) {
+      for (uint32_t i = 0; i < exp_count; i++) {
+        JaclVal check_name = jacl_inline_string(exp_names[i], exp_name_lens[i]);
+        for (int j = (int)c->local_count - 1; j >= 0; j--) {
+          if (c->locals[j].depth < c->scope_depth) break;
+          if (c->locals[j].name == check_name) {
+            char err_msg[128];
+            snprintf(err_msg, sizeof(err_msg),
+                     "spread-all would shadow existing variable '%.*s'",
+                     (int)exp_name_lens[i], exp_names[i]);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+        }
+      }
+    }
+
+    /* Replace parameters with expanded list */
+    d_names     = exp_names;
+    d_name_lens = exp_name_lens;
+    d_types     = exp_types;
+    d_type_lens = exp_type_lens;
+    d_count     = exp_count;
   }
 
   if (c->scope_depth > 0) {
@@ -3659,6 +3734,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           args[0]->data.destructure_named.count,
           args[0]->data.destructure_named.rest_name,
           args[0]->data.destructure_named.rest_name_len,
+          args[0]->data.destructure_named.spread_all,
           args[1], true, line, col);
       return;
     }
@@ -3686,7 +3762,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       if (valid) {
         compiler__compile_destructure_named(
             c, d_names_arr, d_name_lens_arr, NULL, NULL, d_count,
-            NULL, 0,
+            NULL, 0, 0,
             args[1], true, line, col);
         return;
       }
@@ -4052,6 +4128,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           args[0]->data.destructure_named.count,
           args[0]->data.destructure_named.rest_name,
           args[0]->data.destructure_named.rest_name_len,
+          args[0]->data.destructure_named.spread_all,
           args[1], false, line, col);
       return;
     }
@@ -4079,7 +4156,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       if (valid) {
         compiler__compile_destructure_named(
             c, d_names_arr, d_name_lens_arr, NULL, NULL, d_count,
-            NULL, 0,
+            NULL, 0, 0,
             args[1], false, line, col);
         return;
       }
