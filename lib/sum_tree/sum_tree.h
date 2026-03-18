@@ -71,8 +71,6 @@
 #define ST_COPY_RANGE    ST_NS(_copy_range)
 
 /* Internal helpers */
-#define ST_NODE_DESTROY     ST_NS(_node_destroy)
-#define ST_ROOT_DESTROY     ST_NS(_root_destroy)
 #define ST_MK_LEAF          ST_NS(_mk_leaf)
 #define ST_MK_INTERNAL      ST_NS(_mk_internal)
 #define ST_MK_ROOT          ST_NS(_mk_root)
@@ -284,7 +282,7 @@ static inline ST_INTERNAL* ST_MK_INTERNAL_NREF(ST_NODE** children, size_t n_chil
 
   for (size_t i = 0; i < n_children; i++) {
     node->children[i] = children[i];
-    /* No RC_REF — caller transfers ownership */
+    /* Caller transfers ownership — no ref increment needed under GC */
 
     size_t cc;
     STREE_SUMMARY_T cs;
@@ -1130,8 +1128,6 @@ static inline size_t ST_COPY_RANGE(ST_ROOT root, size_t start_index, size_t coun
 #undef ST_SEARCH
 #undef ST_COPY_RANGE
 
-#undef ST_NODE_DESTROY
-#undef ST_ROOT_DESTROY
 #undef ST_MK_LEAF
 #undef ST_MK_INTERNAL
 #undef ST_MK_ROOT
