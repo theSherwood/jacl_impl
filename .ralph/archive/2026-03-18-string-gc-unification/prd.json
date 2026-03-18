@@ -1,0 +1,197 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/string-gc-unification",
+  "description": "Unify rope string allocation under GC (replacing RC), add intern table thread safety with weak-reference eviction, and close test coverage gaps.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Add platform_rwlock_t to platform.h",
+      "description": "As a runtime developer, I need a cross-platform read-write lock primitive so that the intern table can allow concurrent readers with exclusive writers.",
+      "acceptanceCriteria": [
+        "platform_rwlock_t type defined with three backends: POSIX (pthread_rwlock_t), Windows (SRWLOCK), Emscripten (no-op int stub)",
+        "Macros provided: RWLOCK_INIT(rw), RWLOCK_DESTROY(rw), RWLOCK_RDLOCK(rw), RWLOCK_RDUNLOCK(rw), RWLOCK_WRLOCK(rw), RWLOCK_WRUNLOCK(rw)",
+        "Follows the same conditional-compilation pattern (#if EMSCRIPTEN / #elif _WIN32 / #else POSIX) as existing platform_mutex_t in the same file",
+        "Emscripten stubs compile to no-ops (single-threaded environment)",
+        "Unit test creates rwlock, acquires read lock from two threads simultaneously, acquires write lock exclusively",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Model after the existing platform_mutex_t block in lib/platform/platform.h. POSIX uses pthread_rwlock_init/destroy/rdlock/wrlock/unlock. Windows uses InitializeSRWLock/AcquireSRWLockShared/ReleaseSRWLockShared/AcquireSRWLockExclusive/ReleaseSRWLockExclusive (no destroy needed). Emscripten stubs are no-ops with int type."
+    },
+    {
+      "id": "US-002",
+      "title": "Add OBJ_ROPE_LEAF and OBJ_ROPE_INTERNAL to GCObjType and wire STREE_GC_ALLOC defines",
+      "description": "As a runtime developer, I want the GC to know about rope node types and have the template wiring ready so rope nodes can be allocated via gc_alloc.",
+      "acceptanceCriteria": [
+        "OBJ_ROPE_LEAF (value 19) and OBJ_ROPE_INTERNAL (value 20) added to GCObjType enum in gc.c",
+        "In collections.c (or string.c), add the STREE_GC_ALLOC template defines following the exact pattern of RRB_VEC_GC_ALLOC and HAMT_GC_ALLOC: STREE_GC_ALLOC(t, sz) calls gc_alloc(gc__current_heap, t, sz), STREE_GC_OBJ_INTERNAL = OBJ_ROPE_INTERNAL, STREE_GC_OBJ_LEAF = OBJ_ROPE_LEAF",
+        "Compiles without errors"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "The GCObjType enum is in src/gc.c lines 14-34. Currently has 19 values (0-18), OBJ_ROPE_STRING is 18. Add the two new values after it. The template define pattern is in src/collections.c lines 21-30 (RRB) and 34-42 (HAMT). gc__current_heap is a static JACL_THREAD_LOCAL ThreadHeap* in gc.c."
+    },
+    {
+      "id": "US-003",
+      "title": "Replace RC with GC allocation in sum_tree.h",
+      "description": "As a runtime developer, I want sum_tree.h to allocate nodes via STREE_GC_ALLOC instead of the RC template, since sum_tree is only used by JACL.",
+      "acceptanceCriteria": [
+        "The #include \"../rc/rc.h\" line is removed from sum_tree.h",
+        "RC_NAME and RC_ALLOCATOR defines are removed from sum_tree.h",
+        "ST_RC_ALLOC macro is removed; ST_MK_LEAF calls STREE_GC_ALLOC(STREE_GC_OBJ_LEAF, sizeof(ST_LEAF)) and ST_MK_INTERNAL calls STREE_GC_ALLOC(STREE_GC_OBJ_INTERNAL, sizeof(ST_INTERNAL))",
+        "All ~20 ST_RC_REF call sites across sum_tree.h are deleted — structural sharing is now implicit via GC reachability",
+        "All ST_RC_UNREF call sites across sum_tree.h are deleted",
+        "ST_NODE_DESTROY destructor function is removed",
+        "ST_RC_COUNT macro is removed",
+        "Compiles without warnings with -Wall -Wextra"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "This is a mechanical but wide-reaching change. Every ST_RC_REF(child) call just gets deleted — the GC's tracing keeps shared nodes alive. Every ST_RC_UNREF(node) call gets deleted — the GC sweep handles dead nodes. ST_NODE_DESTROY was the RC destructor that cascaded unref to children; with GC tracing this is unnecessary. Key sites: ST_MK_INTERNAL (line ~240 refs children), ST_FROM_ARRAY (line ~403 unrefs after parent creation), ST_SET (lines ~527, ~576), ST_SPLIT (lines ~672, ~691, ~709, ~720), ST_CONCAT (lines ~821, ~837, ~906, ~930)."
+    },
+    {
+      "id": "US-004",
+      "title": "Remove RC from rope.h",
+      "description": "As a runtime developer, I want rope.h to stop using RC operations since its backing sum_tree now uses GC allocation.",
+      "acceptanceCriteria": [
+        "rope_ref() becomes a no-op: returns r unchanged, no RC increment",
+        "rope_unref() becomes a no-op: empty function body, no cascade-unref",
+        "All rope_st_ref() and rope_st_unref() calls in rope.h operations (concat, split, slice, from_str) are removed",
+        "No reference to rc.h remains anywhere in rope.h or sum_tree.h",
+        "Compiles without warnings with -Wall -Wextra"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "rope_ref is at rope.h ~line 66 (calls rope_st_ref which calls ST_RC_REF on root.node). rope_unref is at ~line 78 (calls rope_st_unref). Both become no-ops. In rope operations: rope_slice (~line 470) has multiple rope_st_unref calls for split results — delete them. rope_concat (~line 161) has ref/unref around grafting — delete them. rope_from_str (~line 102) may have creation refs — delete them."
+    },
+    {
+      "id": "US-005",
+      "title": "Add GC tracing for rope nodes and remove rope finalization",
+      "description": "As a runtime developer, I need the GC mark phase to trace rope internal nodes so structurally-shared subtrees remain alive, and remove the old RC finalization.",
+      "acceptanceCriteria": [
+        "gc__trace_object in gc_collect.c handles OBJ_ROPE_LEAF: no child pointers, just break",
+        "gc__trace_object handles OBJ_ROPE_INTERNAL: iterates node->children[0..n_children-1], pushes each non-NULL child onto mark stack via gc__ms_push",
+        "gc__trace_object for existing OBJ_ROPE_STRING now pushes rs->r.root.node onto mark stack (was previously a no-op)",
+        "gc__finalize_dead no longer calls rope_unref() for OBJ_ROPE_STRING — remove the finalization case entirely",
+        "All existing tests pass: test_heap_strings.c, test_rope_string.c, test_concat_tiers.c, test_string_eq_cmp.c, test_compiler_vm_integration.c",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "gc__trace_object is in gc_collect.c ~line 97. OBJ_ROPE_STRING case currently has a comment 'rope internals are RC-managed, not GC-traced' and just breaks — change it to push rs->r.root.node. The finalization in gc__finalize_dead (~line 86) calls rope_unref(rs->r) for OBJ_ROPE_STRING — remove this since rope_unref is now a no-op and rope nodes are GC-managed. For OBJ_ROPE_INTERNAL tracing: the struct is rope_st_internal (from sum_tree.h), cast payload to that type and iterate children[0..n_children-1]. For OBJ_ROPE_LEAF: no child pointers in rope_st_leaf, just break. This story is the critical correctness gate — all existing tests must pass after this."
+    },
+    {
+      "id": "US-006",
+      "title": "Intern table read-write lock",
+      "description": "As a runtime developer, I want the intern table to be safe for concurrent access so multiple threads can intern and look up strings without data races.",
+      "acceptanceCriteria": [
+        "JaclInternTable struct in src/string.c gains a platform_rwlock_t lock field",
+        "jacl_intern_table_init() calls RWLOCK_INIT on the lock",
+        "jacl_intern_table_destroy() calls RWLOCK_DESTROY on the lock",
+        "Intern lookup path (jacl_intern when string already exists) acquires read lock, releases after probe completes",
+        "Intern insert path (jacl_intern when string is new) escalates to write lock for insertion",
+        "Intern table resize (when load factor > 0.75) happens under write lock",
+        "No deadlocks: lock acquisition order is always rwlock only (no nested locks)",
+        "All existing string tests still pass"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "JaclInternTable is in src/string.c. The jacl_intern function does lookup (probe the table) and conditional insert. For the read-to-write escalation: acquire read lock, probe, if found release read lock and return. If not found, release read lock, acquire write lock, re-probe (another thread may have inserted), insert if still missing, release write lock. This avoids holding both locks. The resize path is already inside the insert path and will naturally be under the write lock."
+    },
+    {
+      "id": "US-007",
+      "title": "Intern table weak-reference eviction",
+      "description": "As a runtime developer, I want the GC to reclaim interned strings no longer referenced by live code, preventing unbounded memory growth.",
+      "acceptanceCriteria": [
+        "Intern table entries are treated as weak roots: NOT scanned during mark phase's strong-root enumeration (remove intern table from root scanning in gc_collect.c)",
+        "New function gc_sweep_intern_table(JaclInternTable* table, uint8_t current_mark) called after mark phase but before sweep phase, during full GC only (not minor GC)",
+        "gc_sweep_intern_table acquires write lock on the intern table",
+        "For each non-NULL non-tombstone entry: if gc_header_of(entry)->mark != current_mark, set entry to tombstone sentinel ((JaclHeapString*)1) and decrement table->count",
+        "gc_sweep_intern_table only runs when intern table load factor (including tombstones) exceeds 0.75",
+        "Lookup in jacl_intern probes past tombstone entries (same as past occupied entries, but does not match)",
+        "Insert in jacl_intern can reuse tombstone slots for new entries",
+        "When tombstone ratio exceeds 25% of capacity at next insert, a compaction pass rehashes live entries under write lock and removes tombstones",
+        "All existing string tests still pass"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "The intern table is currently scanned as a root in gc_collect.c mark phase — find where table entries are pushed onto the mark stack and remove that. The tombstone sentinel (JaclHeapString*)1 is never a valid pointer due to alignment (GC objects are 8-byte aligned). For the linear probe: NULL means 'stop probing' in current code — with tombstones, we need: NULL = empty (stop), tombstone = deleted (continue probing), valid pointer = occupied (check match). Compaction: allocate new entries array from arena, rehash all live (non-NULL, non-tombstone) entries into it, swap, update count. Deferred compaction means gc_sweep_intern_table just marks tombstones; actual compaction triggers on next insert that sees tombstone_count > capacity/4."
+    },
+    {
+      "id": "US-008",
+      "title": "Test: GC tracing of rope trees with structural sharing",
+      "description": "As a runtime developer, I want tests verifying rope nodes are correctly traced and collected by the GC, including structurally-shared subtrees.",
+      "acceptanceCriteria": [
+        "Test: create a rope string (>128 bytes), store in a local, trigger full GC — rope and all nodes survive",
+        "Test: create a rope string, set the local to nil, trigger full GC — JaclRopeString and all rope nodes are collected (verified via heap stats or object count)",
+        "Test: create rope A and rope B via jacl_string_concat sharing subtrees, drop rope A, trigger GC — rope B and shared nodes survive, nodes exclusive to A are collected",
+        "Test: create a large rope (>10KB), trigger minor GC, verify young-gen rope nodes are promoted after 2 cycles",
+        "All tests use existing test harness and pass"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "Use the existing test framework from test/test_helpers.h. For verifying collection: before/after heap stats if available, or check that allocating new objects after GC reuses the space. For structural sharing test: create two large strings (>256 bytes each), concat them to get a rope that shares subtrees with both originals, then nil out one original and trigger GC."
+    },
+    {
+      "id": "US-009",
+      "title": "Test: Intern table eviction",
+      "description": "As a runtime developer, I want tests verifying dead interned strings are evicted from the intern table after GC.",
+      "acceptanceCriteria": [
+        "Test: intern 100 strings (8-128 bytes each), verify table->count == 100",
+        "Test: drop all references to interned strings, trigger full GC with load factor > 0.75, verify table->count has decreased",
+        "Test: after eviction, re-intern a previously evicted string — verify it creates a new JaclHeapString (different pointer than original)",
+        "Test: tombstone compaction — intern strings, evict most, trigger insert that causes compaction, verify tombstones are removed and survivors rehashed",
+        "All tests pass"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "To force load factor > 0.75 for eviction: intern enough strings relative to table capacity. The initial table capacity can be found in jacl_intern_table_init. To drop all references: ensure the interned JaclVal values are not stored in any GC root (not on VM stack, not in globals, not in handles)."
+    },
+    {
+      "id": "US-010",
+      "title": "Test: Concurrent intern table access",
+      "description": "As a runtime developer, I want tests verifying the intern table handles concurrent access correctly under worst-case conditions.",
+      "acceptanceCriteria": [
+        "Test: spawn 8 threads, each interning 1000 unique strings — no crashes, no lost entries, final table->count == 8000",
+        "Test: spawn 8 threads, all interning the same 100 strings — no crashes, no duplicates, final table->count == 100",
+        "Test: spawn 4 reader threads doing lookups + 4 writer threads doing inserts — no crashes, all inserted strings findable after join",
+        "Test: concurrent interning during GC eviction — spawn interning threads while triggering GC cycles, verify no corruption",
+        "All tests pass"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "Use THREAD_CREATE/THREAD_JOIN from lib/platform/platform.h. Each thread needs its own ThreadHeap for gc_alloc. The intern table is shared across threads (that's the point). For the GC eviction concurrency test: have one thread triggering gc_collect in a loop while others intern — the rwlock in the intern table should serialize eviction with inserts."
+    },
+    {
+      "id": "US-011",
+      "title": "Test: Rope slice grapheme safety",
+      "description": "As a runtime developer, I want a test verifying rope slicing never produces a partial grapheme cluster.",
+      "acceptanceCriteria": [
+        "Test: create a rope containing multi-codepoint graphemes: ZWJ emoji sequences (family emoji), regional indicator pairs (flags), combining mark sequences (e + U+0301)",
+        "For each byte offset in [0, rope_byte_len]: call rope_slice with offset and 1-grapheme length — verify result is either empty or a complete grapheme",
+        "Test: slice at every grapheme boundary — concatenating all grapheme slices reproduces the original rope content",
+        "All tests pass"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "The rope must be >128 bytes to be a rope. Build a string with many multi-codepoint graphemes (ZWJ family emoji are 25 bytes each, 6 of them = 150 bytes). Use rope_slice from rope.h. Verify completeness by checking that each result's first codepoint is not an Extend/ZWJ/SpacingMark character (unless empty)."
+    },
+    {
+      "id": "US-012",
+      "title": "Test: Cross-thread string passing",
+      "description": "As a runtime developer, I want tests verifying string values of all three tiers can be safely passed between threads.",
+      "acceptanceCriteria": [
+        "Test: thread A creates an inline string, passes JaclVal to thread B via shared variable, thread B reads and verifies content",
+        "Test: thread A creates an interned string, pins with jacl_handle_new, passes to thread B, thread B reads and verifies, then jacl_handle_free",
+        "Test: thread A creates a rope string, pins with handle, passes to thread B, thread B reads and verifies full content via cursor",
+        "Test: thread A creates a rope, thread B creates a rope, both pass to thread C which concatenates them — result correct, no crash",
+        "All tests trigger at least one GC cycle between send and receive to verify epoch watermarking protects in-flight values",
+        "All tests pass"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "Use THREAD_CREATE/THREAD_JOIN from platform.h. For passing values between threads: use a shared struct with the JaclVal and a mutex/condition or simple flag. The GC handle API is in include/jacl.h: jacl_handle_new(vm, val), jacl_handle_get(h), jacl_handle_free(vm, h). Epoch watermarking is automatic — the gc__thread_epoch protects recently-allocated objects from collection. Trigger GC between send and receive by calling gc_collect() on the receiving thread's heap."
+    }
+  ]
+}
