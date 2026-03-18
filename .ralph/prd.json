@@ -46,7 +46,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Parser change: in the def/mut path, check if the next token is TOKEN_LBRACE — if so, parse comma-separated field names (with optional type prefixes) as a destructuring pattern. For struct extraction: use StructTypeRegistry to look up field offsets and emit OP_STRUCT_GET_FIELD for each. For map extraction: emit OP_MAP_GET with the field name as a string key. The compiler needs the RHS type to decide which path — if it can infer the struct type from the expression, use struct path; otherwise fall back to map path."
     },
     {
@@ -66,7 +66,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Builds on US-001. The parser already parses the pattern — it just needs to recognize bare `_` as a special token (not a variable name). The compiler change is small: when iterating pattern positions, if the name is `_`, skip emitting the extraction and local-add. For the skip mask: could encode as a bitmask operand to OP_DESTRUCTURE_VEC, or emit individual OP_VEC_GET only for non-wildcard positions (simpler)."
     },
     {

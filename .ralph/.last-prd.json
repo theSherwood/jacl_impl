@@ -66,7 +66,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Builds on US-001. The parser already parses the pattern — it just needs to recognize bare `_` as a special token (not a variable name). The compiler change is small: when iterating pattern positions, if the name is `_`, skip emitting the extraction and local-add. For the skip mask: could encode as a bitmask operand to OP_DESTRUCTURE_VEC, or emit individual OP_VEC_GET only for non-wildcard positions (simpler)."
     },
     {

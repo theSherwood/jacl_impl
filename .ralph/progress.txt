@@ -10,6 +10,8 @@ Started: Wed Mar 18 17:37:32 UTC 2026
 - Locals are stack positions: `compiler__add_local()` just records metadata, the value must already be on the stack at the right position.
 - Mut locals use cells: OP_MAKE_CELL wraps top-of-stack, creating a mutable reference. Access via OP_GET_CELL_LOCAL/OP_SET_CELL_LOCAL.
 - Globals (scope_depth==0): use OP_DEF_GLOBAL with name index constant. OP_DEF_GLOBAL pops value, pushes nil.
+- OP_DESTRUCTURE_VEC encoding: `count (uint8), skip_mask (uint8)`. skip_mask bit i = wildcard at position i (not pushed).
+- Compile errors return VM_RUNTIME_ERROR from jacl_run() — no separate VM_COMPILE_ERROR value exists.
 
 ---
 
@@ -29,4 +31,22 @@ Started: Wed Mar 18 17:37:32 UTC 2026
   - Global destructuring processes elements in reverse order (top-of-stack first), with OP_POP to discard intermediate nils from OP_DEF_GLOBAL.
   - Typed destructuring in operator form (`[i64 a, i64 b] = $v`) requires dedicated parser since commas aren't handled in bracket command parsing.
   - For keyword form (`def [a b c] $v`), the pattern parses as AST_COMMAND — compiler detects and converts by extracting names from head + args.
+---
+
+## 2026-03-18 - US-002
+- Implemented named struct/map destructuring (committed in previous iteration, PRD updated here)
+---
+
+## 2026-03-18 - US-003
+- Implemented wildcard `_` pattern in destructuring
+- Files changed:
+  - src/bytecode.c: Updated OP_DESTRUCTURE_VEC comment to document skip_mask operand
+  - src/vm.c: OP_DESTRUCTURE_VEC now reads uint8_t skip_mask after count; skips pushing for masked bit positions
+  - src/compiler.c: compiler__compile_destructure_vec computes skip_mask from `_` names, skips add_local/extraction for wildcards in all paths (def/mut/global). compiler__compile_destructure_named rejects `_` with compile error.
+  - test/test_destructure_wildcard.c: 10 e2e tests (basic, keyword, multiple, at-end, $_-reference error, named-error, mut, global, length-mismatch, all-wildcards)
+  - build.sh: Added test to runner
+- **Learnings for future iterations:**
+  - OP_DESTRUCTURE_VEC format is now: `count, skip_mask`. skip_mask is a uint8_t bitmask (supports up to 8 positions). Bit i set = position i is wildcard (not pushed to stack).
+  - Compile errors from jacl_run() return VM_RUNTIME_ERROR (no separate VM_COMPILE_ERROR enum value).
+  - For global scope wildcards with the reverse-processing loop, need to track first_non_wildcard flag separately since the loop skips wildcards and the old `i > 0` check for OP_POP doesn't work.
 ---
