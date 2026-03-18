@@ -145,7 +145,7 @@ typedef enum {
   OP_STRUCT_GET_DYN,/* runtime field access: followed by uint16_t const_idx (field name) */
   OP_STRUCT_SET_DYN,/* runtime field mutation: followed by uint16_t const_idx (field name) */
   OP_CLOSE_LOOP,    /* pop N values under top-of-stack: followed by uint8_t count */
-  OP_DESTRUCTURE_VEC, /* destructure vector: followed by uint8_t N; pop vec, push N elements */
+  OP_DESTRUCTURE_VEC, /* destructure vector: uint8_t N, uint8_t skip_mask; pop vec, push non-skipped elements */
   OP_DESTRUCTURE_NAMED, /* destructure struct/map by field names: uint8_t N, then N x uint16_t const_idx */
   OP_HALT           /* stop execution */
 } OpCode;

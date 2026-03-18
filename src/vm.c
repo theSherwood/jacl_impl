@@ -1352,6 +1352,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
       case OP_DESTRUCTURE_VEC: {
         uint8_t n = vm__read_byte(vm);
+        uint8_t skip_mask = vm__read_byte(vm);
         JaclVal vec_val;
         result = vm__pop(vm, &vec_val);
         if (result != VM_OK) return result;
@@ -1369,8 +1370,9 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
               (unsigned)n, (unsigned)vec_len);
           return VM_RUNTIME_ERROR;
         }
-        /* Push elements 0..N-1 onto stack */
+        /* Push elements 0..N-1 onto stack, skipping positions in skip_mask */
         for (uint8_t i = 0; i < n; i++) {
+          if (skip_mask & (1u << i)) continue; /* wildcard position */
           jacl_vec_get_result gr = jacl_vec_get(vec, (uint32_t)i);
           result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
           if (result != VM_OK) return result;

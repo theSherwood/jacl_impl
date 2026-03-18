@@ -2871,9 +2871,12 @@ static void compiler__compile_destructure_vec(
     bool is_mutable,
     uint32_t line, uint32_t col)
 {
-  /* Validate binding names */
+  /* Compute wildcard skip mask and validate binding names */
+  uint8_t skip_mask = 0;
   for (uint32_t i = 0; i < d_count; i++) {
-    if (d_name_lens[i] > 7) {
+    if (d_name_lens[i] == 1 && d_names[i][0] == '_') {
+      skip_mask |= (uint8_t)(1u << i);
+    } else if (d_name_lens[i] > 7) {
       compiler__error(c, line, col,
                       "variable name exceeds 7-byte inline limit");
       return;
@@ -2886,10 +2889,12 @@ static void compiler__compile_destructure_vec(
   if (c->scope_depth > 0) {
     /* --- Local scope --- */
     if (!is_mutable) {
-      /* def: OP_DESTRUCTURE_VEC pushes all elements as locals */
+      /* def: OP_DESTRUCTURE_VEC pushes non-wildcard elements as locals */
       compiler__emit_byte(c, OP_DESTRUCTURE_VEC, line);
       compiler__emit_byte(c, (uint8_t)d_count, line);
+      compiler__emit_byte(c, skip_mask, line);
       for (uint32_t i = 0; i < d_count; i++) {
+        if (skip_mask & (1u << i)) continue; /* wildcard: no local */
         JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
         compiler__add_local(c, name_val, line, col);
         if (d_types && d_types[i]) {
@@ -2907,6 +2912,7 @@ static void compiler__compile_destructure_vec(
       uint32_t vec_slot = c->local_count - 1;
 
       for (uint32_t i = 0; i < d_count; i++) {
+        if (skip_mask & (1u << i)) continue; /* wildcard: skip */
         /* Push the vector again from temp local */
         compiler__emit_byte(c, OP_GET_LOCAL, line);
         compiler__emit_byte(c, (uint8_t)vec_slot, line);
@@ -2936,9 +2942,18 @@ static void compiler__compile_destructure_vec(
     /* --- Global scope --- */
     compiler__emit_byte(c, OP_DESTRUCTURE_VEC, line);
     compiler__emit_byte(c, (uint8_t)d_count, line);
-    /* Elements are on stack: elem0 (bottom) ... elemN-1 (top).
-       Process in reverse so we consume from top of stack. */
+    compiler__emit_byte(c, skip_mask, line);
+    /* Non-skipped elements are on stack (bottom to top).
+       Process in reverse so we consume from top of stack.
+       Only process non-wildcard positions. */
+    int first_non_wildcard = 1;
     for (int i = (int)d_count - 1; i >= 0; i--) {
+      if (skip_mask & (1u << i)) continue; /* wildcard: skip */
+      if (!first_non_wildcard) {
+        /* Pop the nil pushed by previous OP_DEF_GLOBAL */
+        compiler__emit_byte(c, OP_POP, line);
+      }
+      first_non_wildcard = 0;
       if (is_mutable && c->current_module) {
         compiler__emit_byte(c, OP_BOX, line);
       }
@@ -2960,11 +2975,10 @@ static void compiler__compile_destructure_vec(
           }
         }
       }
-      if (i > 0) {
-        /* Pop the nil pushed by OP_DEF_GLOBAL before processing next */
-        compiler__emit_byte(c, OP_POP, line);
-      }
-      /* else: leave final nil as return value */
+    }
+    /* If all positions were wildcards, push nil as return value */
+    if (first_non_wildcard) {
+      compiler__emit_byte(c, OP_NIL, line);
     }
   }
 
@@ -2990,6 +3004,11 @@ static void compiler__compile_destructure_named(
 {
   /* Validate binding names */
   for (uint32_t i = 0; i < d_count; i++) {
+    if (d_name_lens[i] == 1 && d_names[i][0] == '_') {
+      compiler__error(c, line, col,
+                      "'_' is meaningless in named destructuring; just omit the field");
+      return;
+    }
     if (d_name_lens[i] > 7) {
       compiler__error(c, line, col,
                       "variable name exceeds 7-byte inline limit");

@@ -105,6 +105,7 @@ TESTS=(
     "test/test_cross_thread_string.c|cross_thread_string|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "test/test_destructure_vec.c|destructure_vec|"
     "test/test_destructure_named.c|destructure_named|"
+    "test/test_destructure_wildcard.c|destructure_wildcard|"
 )
 
 # Filter tests if --lib flag is set
