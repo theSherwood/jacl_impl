@@ -1380,6 +1380,43 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_DESTRUCTURE_VEC_REST: {
+        uint8_t n = vm__read_byte(vm);
+        JaclVal vec_val;
+        result = vm__pop(vm, &vec_val);
+        if (result != VM_OK) return result;
+        if (!jacl_is_vector(vec_val)) {
+          vm__set_error(vm,
+              "destructuring requires a vector, got %s",
+              vm__type_name(vec_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
+        uint32_t vec_len = jacl_vec_count(vec);
+        if (vec_len < n) {
+          vm__set_error(vm,
+              "destructuring rest: expected at least %u elements, got %u",
+              (unsigned)n, (unsigned)vec_len);
+          return VM_RUNTIME_ERROR;
+        }
+        /* Push first N elements individually */
+        for (uint8_t i = 0; i < n; i++) {
+          jacl_vec_get_result gr = jacl_vec_get(vec, (uint32_t)i);
+          result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
+          if (result != VM_OK) return result;
+        }
+        /* Collect remaining elements into a new vector */
+        gc__current_heap = &vm->heap;
+        jacl_vec_root* rest = jacl_vec_empty();
+        for (uint32_t i = n; i < vec_len; i++) {
+          jacl_vec_get_result gr = jacl_vec_get(vec, i);
+          rest = jacl_vec_push_back(rest, gr.found ? gr.value : JACL_NIL);
+        }
+        result = vm__push(vm, jacl_vector_ptr(rest));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_DESTRUCTURE_NAMED: {
         uint8_t n = vm__read_byte(vm);
         /* Read N constant indices for field names */
@@ -1430,6 +1467,124 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             result = vm__push(vm, jacl_map_get(map, key_val));
             if (result != VM_OK) return result;
           }
+        } else {
+          vm__set_error(vm,
+              "named destructuring requires a struct or map, got %s",
+              vm__type_name(src_val));
+          return VM_RUNTIME_ERROR;
+        }
+        break;
+      }
+
+      case OP_DESTRUCTURE_NAMED_REST: {
+        uint8_t n = vm__read_byte(vm);
+        /* Read N constant indices for explicit field names to extract */
+        uint16_t name_indices[256];
+        for (uint8_t i = 0; i < n; i++) {
+          name_indices[i] = vm__read_u16(vm);
+        }
+        JaclVal src_val;
+        result = vm__pop(vm, &src_val);
+        if (result != VM_OK) return result;
+
+        if (jacl_is_struct(src_val)) {
+          JaclStruct* s = jacl_as_struct_ptr(src_val);
+          StructTypeDef* sdef = &vm->struct_registry->defs[s->type_idx];
+
+          /* Push N explicit field values */
+          for (uint8_t i = 0; i < n; i++) {
+            JaclVal fname_val = frame->chunk->constants[name_indices[i]];
+            char fname[64]; uint32_t flen;
+            flen = jacl_string_data(fname_val, fname, sizeof(fname));
+            uint32_t fi;
+            for (fi = 0; fi < sdef->field_count; fi++) {
+              if (sdef->fields[fi].name_len == flen &&
+                  memcmp(sdef->fields[fi].name, fname, flen) == 0) break;
+            }
+            if (fi == sdef->field_count) {
+              vm__set_error(vm,
+                  "destructuring: struct '%.*s' has no field '%.*s'",
+                  (int)sdef->name_len, sdef->name, (int)flen, fname);
+              return VM_RUNTIME_ERROR;
+            }
+            JaclVal field_val = vm__struct_read_field(NULL, s,
+                sdef->fields[fi].offset, sdef->fields[fi].type);
+            result = vm__push(vm, field_val);
+            if (result != VM_OK) return result;
+          }
+
+          /* Build rest map from remaining fields */
+          gc__current_heap = &vm->heap;
+          jacl_map_node* rest_map = NULL;
+          for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+            /* Check if this field is in the explicit list */
+            int is_explicit = 0;
+            for (uint8_t ei = 0; ei < n; ei++) {
+              JaclVal ename_val = frame->chunk->constants[name_indices[ei]];
+              char ename[64]; uint32_t elen;
+              elen = jacl_string_data(ename_val, ename, sizeof(ename));
+              if (sdef->fields[fi].name_len == elen &&
+                  memcmp(sdef->fields[fi].name, ename, elen) == 0) {
+                is_explicit = 1; break;
+              }
+            }
+            if (!is_explicit) {
+              JaclVal key = jacl_inline_string(sdef->fields[fi].name,
+                                               sdef->fields[fi].name_len);
+              JaclVal val = vm__struct_read_field(NULL, s,
+                  sdef->fields[fi].offset, sdef->fields[fi].type);
+              rest_map = jacl_map_set(rest_map, key, val);
+            }
+          }
+          result = vm__push(vm, jacl_map_ptr(rest_map));
+          if (result != VM_OK) return result;
+
+        } else if (jacl_is_map(src_val)) {
+          jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(src_val);
+
+          /* Push N explicit field values */
+          for (uint8_t i = 0; i < n; i++) {
+            JaclVal key_val = frame->chunk->constants[name_indices[i]];
+            if (!jacl_map_has(map, key_val)) {
+              char fname[64]; uint32_t flen;
+              flen = jacl_string_data(key_val, fname, sizeof(fname));
+              vm__set_error(vm,
+                  "destructuring: map has no key '%.*s'",
+                  (int)flen, fname);
+              return VM_RUNTIME_ERROR;
+            }
+            result = vm__push(vm, jacl_map_get(map, key_val));
+            if (result != VM_OK) return result;
+          }
+
+          /* Build rest map from remaining entries */
+          gc__current_heap = &vm->heap;
+          jacl_map_node* rest_map = NULL;
+          jacl_map_iter it = jacl_map_iter_init(map);
+          jacl_map_iter_result ir;
+          do {
+            ir = jacl_map_next_leaf(&it);
+            if (!ir.item) break;
+            JaclVal key = jacl_map_key_from_leaf(ir.item);
+            /* Check if this key is in the explicit list */
+            int is_explicit = 0;
+            char kbuf[64]; uint32_t klen;
+            klen = jacl_string_data(key, kbuf, sizeof(kbuf));
+            for (uint8_t ei = 0; ei < n; ei++) {
+              JaclVal ename_val = frame->chunk->constants[name_indices[ei]];
+              char ebuf[64]; uint32_t elen;
+              elen = jacl_string_data(ename_val, ebuf, sizeof(ebuf));
+              if (klen == elen && memcmp(kbuf, ebuf, klen) == 0) {
+                is_explicit = 1; break;
+              }
+            }
+            if (!is_explicit) {
+              JaclVal val = jacl_map_value_from_leaf(ir.item);
+              rest_map = jacl_map_set(rest_map, key, val);
+            }
+          } while (ir.item);
+          result = vm__push(vm, jacl_map_ptr(rest_map));
+          if (result != VM_OK) return result;
         } else {
           vm__set_error(vm,
               "named destructuring requires a struct or map, got %s",

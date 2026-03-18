@@ -2856,21 +2856,32 @@ static void compiler__compile_hof_builtin(Compiler* c, const char* name,
 /* --- Internal: Compile a vector destructuring binding ---
  *
  * Handles both def and mut forms. Compiles the value expression,
- * emits OP_DESTRUCTURE_VEC, and creates bindings for each name.
+ * emits OP_DESTRUCTURE_VEC or OP_DESTRUCTURE_VEC_REST, and creates bindings.
  *
  * For def (immutable): OP_DESTRUCTURE_VEC pushes all elements, each becomes a local.
  * For mut (mutable): elements extracted individually and wrapped in cells.
  * For globals (scope_depth==0): each element stored with OP_DEF_GLOBAL.
+ * rest_name/rest_name_len: if non-NULL, collects remaining elements into a vector.
  */
 static void compiler__compile_destructure_vec(
     Compiler* c,
     const char** d_names, uint32_t* d_name_lens,
     const char** d_types, uint32_t* d_type_lens,
     uint32_t d_count,
+    const char* rest_name, uint32_t rest_name_len,
     AstNode* value_expr,
     bool is_mutable,
     uint32_t line, uint32_t col)
 {
+  int has_rest = (rest_name != NULL && rest_name_len > 0);
+
+  /* Validate rest name length */
+  if (has_rest && rest_name_len > 7) {
+    compiler__error(c, line, col,
+                    "variable name exceeds 7-byte inline limit");
+    return;
+  }
+
   /* Compute wildcard skip mask and validate binding names */
   uint8_t skip_mask = 0;
   for (uint32_t i = 0; i < d_count; i++) {
@@ -2883,102 +2894,244 @@ static void compiler__compile_destructure_vec(
     }
   }
 
+  /* Rest pattern is incompatible with wildcards in skip_mask (simplification) */
+
   /* Compile RHS — pushes one value (should be a vector) onto stack */
   compiler__compile_node(c, value_expr);
 
-  if (c->scope_depth > 0) {
-    /* --- Local scope --- */
-    if (!is_mutable) {
-      /* def: OP_DESTRUCTURE_VEC pushes non-wildcard elements as locals */
-      compiler__emit_byte(c, OP_DESTRUCTURE_VEC, line);
-      compiler__emit_byte(c, (uint8_t)d_count, line);
-      compiler__emit_byte(c, skip_mask, line);
-      for (uint32_t i = 0; i < d_count; i++) {
-        if (skip_mask & (1u << i)) continue; /* wildcard: no local */
-        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
-        compiler__add_local(c, name_val, line, col);
-        if (d_types && d_types[i]) {
-          JaclType t;
-          if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
-            c->locals[c->local_count - 1].type = t;
+  if (has_rest) {
+    /* --- Rest pattern: use OP_DESTRUCTURE_VEC_REST ---
+       Pushes d_count individual elements + 1 rest vector onto stack */
+    if (c->scope_depth > 0) {
+      /* --- Local scope --- */
+      if (!is_mutable) {
+        /* def: OP_DESTRUCTURE_VEC_REST pushes N elements + rest vector */
+        compiler__emit_byte(c, OP_DESTRUCTURE_VEC_REST, line);
+        compiler__emit_byte(c, (uint8_t)d_count, line);
+        /* Register locals for positional elements */
+        for (uint32_t i = 0; i < d_count; i++) {
+          if (d_name_lens[i] == 1 && d_names[i][0] == '_') {
+            /* Wildcard: still on stack from OP_DESTRUCTURE_VEC_REST,
+               but we need a placeholder local to keep stack alignment */
+            JaclVal wc_name = jacl_inline_string("", 0);
+            compiler__add_local(c, wc_name, line, col);
+          } else {
+            JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+            compiler__add_local(c, name_val, line, col);
+            if (d_types && d_types[i]) {
+              JaclType t;
+              if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+                c->locals[c->local_count - 1].type = t;
+              }
+            }
           }
         }
-      }
-    } else {
-      /* mut: extract each element individually, wrap in cell.
-         Store vec as temporary local to allow repeated access. */
-      JaclVal temp_name = jacl_inline_string("", 0);
-      compiler__add_local(c, temp_name, line, col);
-      uint32_t vec_slot = c->local_count - 1;
+        /* Register local for rest vector */
+        JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+        compiler__add_local(c, rest_val, line, col);
+        c->locals[c->local_count - 1].type = TYPE_VEC;
+      } else {
+        /* mut: store vec as temp, extract elements + rest individually */
+        JaclVal temp_name = jacl_inline_string("", 0);
+        compiler__add_local(c, temp_name, line, col);
+        uint32_t vec_slot = c->local_count - 1;
 
-      for (uint32_t i = 0; i < d_count; i++) {
-        if (skip_mask & (1u << i)) continue; /* wildcard: skip */
-        /* Push the vector again from temp local */
+        for (uint32_t i = 0; i < d_count; i++) {
+          if (d_name_lens[i] == 1 && d_names[i][0] == '_') continue;
+          compiler__emit_byte(c, OP_GET_LOCAL, line);
+          compiler__emit_byte(c, (uint8_t)vec_slot, line);
+          uint16_t idx = chunk_add_constant(c->chunk, jacl_i32((int32_t)i));
+          compiler__emit_byte(c, OP_CONST, line);
+          compiler__emit_u16(c, idx, line);
+          compiler__emit_byte(c, OP_VEC_GET, line);
+          compiler__emit_byte(c, OP_MAKE_CELL, line);
+          JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          compiler__add_local(c, name_val, line, col);
+          c->locals[c->local_count - 1].is_mutable = true;
+          if (d_types && d_types[i]) {
+            JaclType t;
+            if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+              c->locals[c->local_count - 1].type = t;
+            }
+          }
+        }
+        /* Rest: use OP_DESTRUCTURE_VEC_REST on a copy to get the rest vector,
+           or manually build it with vec-slice. Simpler: push vec, emit
+           OP_DESTRUCTURE_VEC_REST, pop the N elements, keep the rest vector. */
+        /* Actually, use OP_VEC_SLICE to create rest vector: vec[d_count..] */
         compiler__emit_byte(c, OP_GET_LOCAL, line);
         compiler__emit_byte(c, (uint8_t)vec_slot, line);
-        /* Push index */
-        uint16_t idx = chunk_add_constant(c->chunk, jacl_i32((int32_t)i));
+        /* Push start index (d_count) */
+        uint16_t start_idx = chunk_add_constant(c->chunk, jacl_i32((int32_t)d_count));
         compiler__emit_byte(c, OP_CONST, line);
-        compiler__emit_u16(c, idx, line);
-        /* Extract element */
-        compiler__emit_byte(c, OP_VEC_GET, line);
-        /* Wrap in cell for mutable binding */
+        compiler__emit_u16(c, start_idx, line);
+        /* Push end index — use vec-len for "to end" */
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)vec_slot, line);
+        compiler__emit_byte(c, OP_VEC_LEN, line);
+        /* Emit OP_VEC_SLICE */
+        compiler__emit_byte(c, OP_VEC_SLICE, line);
         compiler__emit_byte(c, OP_MAKE_CELL, line);
-        /* Register local */
-        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
-        compiler__add_local(c, name_val, line, col);
+        JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+        compiler__add_local(c, rest_val, line, col);
         c->locals[c->local_count - 1].is_mutable = true;
-        if (d_types && d_types[i]) {
-          JaclType t;
-          if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
-            c->locals[c->local_count - 1].type = t;
-          }
-        }
+        c->locals[c->local_count - 1].type = TYPE_VEC;
       }
-    }
-    /* def/mut returns nil */
-    compiler__emit_byte(c, OP_NIL, line);
-  } else {
-    /* --- Global scope --- */
-    compiler__emit_byte(c, OP_DESTRUCTURE_VEC, line);
-    compiler__emit_byte(c, (uint8_t)d_count, line);
-    compiler__emit_byte(c, skip_mask, line);
-    /* Non-skipped elements are on stack (bottom to top).
-       Process in reverse so we consume from top of stack.
-       Only process non-wildcard positions. */
-    int first_non_wildcard = 1;
-    for (int i = (int)d_count - 1; i >= 0; i--) {
-      if (skip_mask & (1u << i)) continue; /* wildcard: skip */
-      if (!first_non_wildcard) {
-        /* Pop the nil pushed by previous OP_DEF_GLOBAL */
-        compiler__emit_byte(c, OP_POP, line);
-      }
-      first_non_wildcard = 0;
+      compiler__emit_byte(c, OP_NIL, line);
+    } else {
+      /* --- Global scope with rest --- */
+      compiler__emit_byte(c, OP_DESTRUCTURE_VEC_REST, line);
+      compiler__emit_byte(c, (uint8_t)d_count, line);
+      /* Stack: elem0 ... elemN-1 rest_vec (bottom to top)
+         Process in reverse: rest first, then elements. */
+      /* Define rest global (top of stack) */
       if (is_mutable && c->current_module) {
         compiler__emit_byte(c, OP_BOX, line);
       }
-      JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
-      JaclVal global_key = compiler__global_name_val(c, d_names[i],
-                                                      d_name_lens[i]);
-      uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
+      JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+      JaclVal rest_gkey = compiler__global_name_val(c, rest_name, rest_name_len);
+      uint16_t rest_idx = chunk_add_constant(c->chunk, rest_gkey);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
-      compiler__emit_u16(c, name_idx, line);
-      /* OP_DEF_GLOBAL pops value, pushes nil */
-      compiler__set_global_arity(c, name_val, -1);
+      compiler__emit_u16(c, rest_idx, line);
+      compiler__set_global_arity(c, rest_val, -1);
       if (is_mutable) {
         Compiler* root = c;
         while (root->enclosing) root = root->enclosing;
         for (uint32_t j = 0; j < root->global_arity_count; j++) {
-          if (root->global_arities[j].name == name_val) {
+          if (root->global_arities[j].name == rest_val) {
             root->global_arities[j].is_mutable = true;
             break;
           }
         }
       }
+      /* Now define positional elements in reverse order */
+      for (int i = (int)d_count - 1; i >= 0; i--) {
+        compiler__emit_byte(c, OP_POP, line); /* pop nil from previous OP_DEF_GLOBAL */
+        if (d_name_lens[i] == 1 && d_names[i][0] == '_') {
+          /* Wildcard: just pop the value */
+          compiler__emit_byte(c, OP_POP, line);
+          compiler__emit_byte(c, OP_NIL, line); /* push nil placeholder */
+          continue;
+        }
+        if (is_mutable && c->current_module) {
+          compiler__emit_byte(c, OP_BOX, line);
+        }
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal global_key = compiler__global_name_val(c, d_names[i],
+                                                        d_name_lens[i]);
+        uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
+        compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+        compiler__set_global_arity(c, name_val, -1);
+        if (is_mutable) {
+          Compiler* root = c;
+          while (root->enclosing) root = root->enclosing;
+          for (uint32_t j = 0; j < root->global_arity_count; j++) {
+            if (root->global_arities[j].name == name_val) {
+              root->global_arities[j].is_mutable = true;
+              break;
+            }
+          }
+        }
+      }
     }
-    /* If all positions were wildcards, push nil as return value */
-    if (first_non_wildcard) {
+  } else {
+    /* --- No rest pattern: original logic --- */
+
+    if (c->scope_depth > 0) {
+      /* --- Local scope --- */
+      if (!is_mutable) {
+        /* def: OP_DESTRUCTURE_VEC pushes non-wildcard elements as locals */
+        compiler__emit_byte(c, OP_DESTRUCTURE_VEC, line);
+        compiler__emit_byte(c, (uint8_t)d_count, line);
+        compiler__emit_byte(c, skip_mask, line);
+        for (uint32_t i = 0; i < d_count; i++) {
+          if (skip_mask & (1u << i)) continue; /* wildcard: no local */
+          JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          compiler__add_local(c, name_val, line, col);
+          if (d_types && d_types[i]) {
+            JaclType t;
+            if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+              c->locals[c->local_count - 1].type = t;
+            }
+          }
+        }
+      } else {
+        /* mut: extract each element individually, wrap in cell.
+           Store vec as temporary local to allow repeated access. */
+        JaclVal temp_name = jacl_inline_string("", 0);
+        compiler__add_local(c, temp_name, line, col);
+        uint32_t vec_slot = c->local_count - 1;
+
+        for (uint32_t i = 0; i < d_count; i++) {
+          if (skip_mask & (1u << i)) continue; /* wildcard: skip */
+          /* Push the vector again from temp local */
+          compiler__emit_byte(c, OP_GET_LOCAL, line);
+          compiler__emit_byte(c, (uint8_t)vec_slot, line);
+          /* Push index */
+          uint16_t idx = chunk_add_constant(c->chunk, jacl_i32((int32_t)i));
+          compiler__emit_byte(c, OP_CONST, line);
+          compiler__emit_u16(c, idx, line);
+          /* Extract element */
+          compiler__emit_byte(c, OP_VEC_GET, line);
+          /* Wrap in cell for mutable binding */
+          compiler__emit_byte(c, OP_MAKE_CELL, line);
+          /* Register local */
+          JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          compiler__add_local(c, name_val, line, col);
+          c->locals[c->local_count - 1].is_mutable = true;
+          if (d_types && d_types[i]) {
+            JaclType t;
+            if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+              c->locals[c->local_count - 1].type = t;
+            }
+          }
+        }
+      }
+      /* def/mut returns nil */
       compiler__emit_byte(c, OP_NIL, line);
+    } else {
+      /* --- Global scope --- */
+      compiler__emit_byte(c, OP_DESTRUCTURE_VEC, line);
+      compiler__emit_byte(c, (uint8_t)d_count, line);
+      compiler__emit_byte(c, skip_mask, line);
+      /* Non-skipped elements are on stack (bottom to top).
+         Process in reverse so we consume from top of stack.
+         Only process non-wildcard positions. */
+      int first_non_wildcard = 1;
+      for (int i = (int)d_count - 1; i >= 0; i--) {
+        if (skip_mask & (1u << i)) continue; /* wildcard: skip */
+        if (!first_non_wildcard) {
+          /* Pop the nil pushed by previous OP_DEF_GLOBAL */
+          compiler__emit_byte(c, OP_POP, line);
+        }
+        first_non_wildcard = 0;
+        if (is_mutable && c->current_module) {
+          compiler__emit_byte(c, OP_BOX, line);
+        }
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal global_key = compiler__global_name_val(c, d_names[i],
+                                                        d_name_lens[i]);
+        uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
+        compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+        /* OP_DEF_GLOBAL pops value, pushes nil */
+        compiler__set_global_arity(c, name_val, -1);
+        if (is_mutable) {
+          Compiler* root = c;
+          while (root->enclosing) root = root->enclosing;
+          for (uint32_t j = 0; j < root->global_arity_count; j++) {
+            if (root->global_arities[j].name == name_val) {
+              root->global_arities[j].is_mutable = true;
+              break;
+            }
+          }
+        }
+      }
+      /* If all positions were wildcards, push nil as return value */
+      if (first_non_wildcard) {
+        compiler__emit_byte(c, OP_NIL, line);
+      }
     }
   }
 
@@ -2992,16 +3145,27 @@ static void compiler__compile_destructure_vec(
  * For dyn/map types: emits OP_DESTRUCTURE_NAMED (runtime resolved).
  * For mut: wraps each extracted value in a cell.
  * For globals: defines each extracted value as a global.
+ * rest_name/rest_name_len: if non-NULL, collects remaining fields into a map.
  */
 static void compiler__compile_destructure_named(
     Compiler* c,
     const char** d_names, uint32_t* d_name_lens,
     const char** d_types, uint32_t* d_type_lens,
     uint32_t d_count,
+    const char* rest_name, uint32_t rest_name_len,
     AstNode* value_expr,
     bool is_mutable,
     uint32_t line, uint32_t col)
 {
+  int has_rest = (rest_name != NULL && rest_name_len > 0);
+
+  /* Validate rest name length */
+  if (has_rest && rest_name_len > 7) {
+    compiler__error(c, line, col,
+                    "variable name exceeds 7-byte inline limit");
+    return;
+  }
+
   /* Validate binding names */
   for (uint32_t i = 0; i < d_count; i++) {
     if (d_name_lens[i] == 1 && d_names[i][0] == '_') {
@@ -3097,6 +3261,28 @@ static void compiler__compile_destructure_named(
             c->locals[c->local_count - 1].struct_type_idx = sdef->fields[fi].struct_type_idx;
         }
       }
+
+      /* Rest: build map from remaining struct fields */
+      if (has_rest) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)src_slot, line);
+        /* Emit OP_DESTRUCTURE_NAMED_REST with explicit field names to exclude */
+        compiler__emit_byte(c, OP_DESTRUCTURE_NAMED_REST, line);
+        compiler__emit_byte(c, (uint8_t)d_count, line);
+        for (uint32_t i = 0; i < d_count; i++) {
+          JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
+          compiler__emit_u16(c, key_idx, line);
+        }
+        if (is_mutable) {
+          compiler__emit_byte(c, OP_MAKE_CELL, line);
+        }
+        JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+        compiler__add_local(c, rest_val, line, col);
+        if (is_mutable)
+          c->locals[c->local_count - 1].is_mutable = true;
+        c->locals[c->local_count - 1].type = TYPE_MAP;
+      }
     } else {
       /* Dyn/map path: extract each field one at a time with runtime resolution.
          Use OP_DESTRUCTURE_NAMED with count=1 per field so missing-key errors
@@ -3126,45 +3312,124 @@ static void compiler__compile_destructure_named(
           }
         }
       }
+
+      /* Rest: build map from remaining fields */
+      if (has_rest) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)src_slot, line);
+        /* Emit OP_DESTRUCTURE_NAMED_REST with explicit field names to exclude */
+        compiler__emit_byte(c, OP_DESTRUCTURE_NAMED_REST, line);
+        compiler__emit_byte(c, (uint8_t)d_count, line);
+        for (uint32_t i = 0; i < d_count; i++) {
+          JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
+          compiler__emit_u16(c, key_idx, line);
+        }
+        if (is_mutable) {
+          compiler__emit_byte(c, OP_MAKE_CELL, line);
+        }
+        JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+        compiler__add_local(c, rest_val, line, col);
+        if (is_mutable)
+          c->locals[c->local_count - 1].is_mutable = true;
+        c->locals[c->local_count - 1].type = TYPE_MAP;
+      }
     }
 
     /* def/mut returns nil */
     compiler__emit_byte(c, OP_NIL, line);
   } else {
     /* --- Global scope --- */
-    /* Use OP_DESTRUCTURE_NAMED to push all field values, then define globals */
-    compiler__emit_byte(c, OP_DESTRUCTURE_NAMED, line);
-    compiler__emit_byte(c, (uint8_t)d_count, line);
-    for (uint32_t i = 0; i < d_count; i++) {
-      JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
-      uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
-      compiler__emit_u16(c, key_idx, line);
-    }
-    /* Elements are on stack: elem0 (bottom) ... elemN-1 (top).
-       Process in reverse so we consume from top of stack. */
-    for (int i = (int)d_count - 1; i >= 0; i--) {
+    /* NOTE: The RHS value is already on the stack from compile_node above. */
+    if (!has_rest) {
+      compiler__emit_byte(c, OP_DESTRUCTURE_NAMED, line);
+      compiler__emit_byte(c, (uint8_t)d_count, line);
+      for (uint32_t i = 0; i < d_count; i++) {
+        JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
+        compiler__emit_u16(c, key_idx, line);
+      }
+      /* Elements are on stack: elem0 (bottom) ... elemN-1 (top).
+         Process in reverse so we consume from top of stack. */
+      for (int i = (int)d_count - 1; i >= 0; i--) {
+        if (is_mutable && c->current_module) {
+          compiler__emit_byte(c, OP_BOX, line);
+        }
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal global_key = compiler__global_name_val(c, d_names[i],
+                                                        d_name_lens[i]);
+        uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
+        compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+        compiler__set_global_arity(c, name_val, -1);
+        if (is_mutable) {
+          Compiler* root = c;
+          while (root->enclosing) root = root->enclosing;
+          for (uint32_t j = 0; j < root->global_arity_count; j++) {
+            if (root->global_arities[j].name == name_val) {
+              root->global_arities[j].is_mutable = true;
+              break;
+            }
+          }
+        }
+        if (i > 0) {
+          compiler__emit_byte(c, OP_POP, line);
+        }
+      }
+    } else {
+      /* Rest path: OP_DESTRUCTURE_NAMED_REST pushes N fields + 1 rest map */
+      compiler__emit_byte(c, OP_DESTRUCTURE_NAMED_REST, line);
+      compiler__emit_byte(c, (uint8_t)d_count, line);
+      for (uint32_t i = 0; i < d_count; i++) {
+        JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
+        compiler__emit_u16(c, key_idx, line);
+      }
+      /* Stack: elem0 ... elemN-1 rest_map (bottom to top)
+         Process in reverse: rest first, then elements. */
+      /* Define rest global (top of stack) */
       if (is_mutable && c->current_module) {
         compiler__emit_byte(c, OP_BOX, line);
       }
-      JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
-      JaclVal global_key = compiler__global_name_val(c, d_names[i],
-                                                      d_name_lens[i]);
-      uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
+      JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+      JaclVal rest_gkey = compiler__global_name_val(c, rest_name, rest_name_len);
+      uint16_t rest_idx = chunk_add_constant(c->chunk, rest_gkey);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
-      compiler__emit_u16(c, name_idx, line);
-      compiler__set_global_arity(c, name_val, -1);
+      compiler__emit_u16(c, rest_idx, line);
+      compiler__set_global_arity(c, rest_val, -1);
       if (is_mutable) {
         Compiler* root = c;
         while (root->enclosing) root = root->enclosing;
         for (uint32_t j = 0; j < root->global_arity_count; j++) {
-          if (root->global_arities[j].name == name_val) {
+          if (root->global_arities[j].name == rest_val) {
             root->global_arities[j].is_mutable = true;
             break;
           }
         }
       }
-      if (i > 0) {
-        compiler__emit_byte(c, OP_POP, line);
+      /* Now define positional elements in reverse order */
+      for (int i = (int)d_count - 1; i >= 0; i--) {
+        compiler__emit_byte(c, OP_POP, line); /* pop nil from previous OP_DEF_GLOBAL */
+        if (is_mutable && c->current_module) {
+          compiler__emit_byte(c, OP_BOX, line);
+        }
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal global_key = compiler__global_name_val(c, d_names[i],
+                                                        d_name_lens[i]);
+        uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
+        compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+        compiler__set_global_arity(c, name_val, -1);
+        if (is_mutable) {
+          Compiler* root = c;
+          while (root->enclosing) root = root->enclosing;
+          for (uint32_t j = 0; j < root->global_arity_count; j++) {
+            if (root->global_arities[j].name == name_val) {
+              root->global_arities[j].is_mutable = true;
+              break;
+            }
+          }
+        }
       }
     }
   }
@@ -3347,6 +3612,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           args[0]->data.destructure_vec.types,
           args[0]->data.destructure_vec.type_lens,
           args[0]->data.destructure_vec.count,
+          args[0]->data.destructure_vec.rest_name,
+          args[0]->data.destructure_vec.rest_name_len,
           args[1], true, line, col);
       return;
     }
@@ -3377,6 +3644,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       compiler__compile_destructure_vec(
           c, d_names, d_name_lens, NULL, NULL, d_count,
+          NULL, 0,
           args[1], true, line, col);
       return;
     }
@@ -3389,6 +3657,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           args[0]->data.destructure_named.types,
           args[0]->data.destructure_named.type_lens,
           args[0]->data.destructure_named.count,
+          args[0]->data.destructure_named.rest_name,
+          args[0]->data.destructure_named.rest_name_len,
           args[1], true, line, col);
       return;
     }
@@ -3416,6 +3686,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       if (valid) {
         compiler__compile_destructure_named(
             c, d_names_arr, d_name_lens_arr, NULL, NULL, d_count,
+            NULL, 0,
             args[1], true, line, col);
         return;
       }
@@ -3732,6 +4003,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           args[0]->data.destructure_vec.types,
           args[0]->data.destructure_vec.type_lens,
           args[0]->data.destructure_vec.count,
+          args[0]->data.destructure_vec.rest_name,
+          args[0]->data.destructure_vec.rest_name_len,
           args[1], false, line, col);
       return;
     }
@@ -3764,6 +4037,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       compiler__compile_destructure_vec(
           c, d_names, d_name_lens, NULL, NULL, d_count,
+          NULL, 0,
           args[1], false, line, col);
       return;
     }
@@ -3776,6 +4050,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           args[0]->data.destructure_named.types,
           args[0]->data.destructure_named.type_lens,
           args[0]->data.destructure_named.count,
+          args[0]->data.destructure_named.rest_name,
+          args[0]->data.destructure_named.rest_name_len,
           args[1], false, line, col);
       return;
     }
@@ -3803,6 +4079,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       if (valid) {
         compiler__compile_destructure_named(
             c, d_names_arr, d_name_lens_arr, NULL, NULL, d_count,
+            NULL, 0,
             args[1], false, line, col);
         return;
       }

@@ -147,6 +147,8 @@ typedef enum {
   OP_CLOSE_LOOP,    /* pop N values under top-of-stack: followed by uint8_t count */
   OP_DESTRUCTURE_VEC, /* destructure vector: uint8_t N, uint8_t skip_mask; pop vec, push non-skipped elements */
   OP_DESTRUCTURE_NAMED, /* destructure struct/map by field names: uint8_t N, then N x uint16_t const_idx */
+  OP_DESTRUCTURE_VEC_REST, /* destructure vector with rest: uint8_t N; pop vec, push N elements + rest vector */
+  OP_DESTRUCTURE_NAMED_REST, /* destructure named with rest: uint8_t N, N x uint16_t const_idx; pop struct/map, push N fields + rest map */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -406,6 +408,8 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_CLOSE_LOOP:      return "OP_CLOSE_LOOP";
     case OP_DESTRUCTURE_VEC: return "OP_DESTRUCTURE_VEC";
     case OP_DESTRUCTURE_NAMED: return "OP_DESTRUCTURE_NAMED";
+    case OP_DESTRUCTURE_VEC_REST: return "OP_DESTRUCTURE_VEC_REST";
+    case OP_DESTRUCTURE_NAMED_REST: return "OP_DESTRUCTURE_NAMED_REST";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";

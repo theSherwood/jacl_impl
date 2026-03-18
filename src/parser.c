@@ -1610,6 +1610,8 @@ static AstNode* parser__parse_destructure_vec_pattern(Parser* p) {
   const char** types = (const char**)arena_alloc(p->arena, sizeof(const char*) * cap);
   uint32_t* type_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * cap);
   uint32_t count = 0;
+  const char* rest_name = NULL;
+  uint32_t rest_name_len = 0;
 
   while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACKET) {
     /* Skip commas and newlines */
@@ -1620,6 +1622,26 @@ static AstNode* parser__parse_destructure_vec_pattern(Parser* p) {
     if (parser__peek(p)->type == TOKEN_NEWLINE) {
       parser__advance(p);
       continue;
+    }
+
+    /* Check for rest pattern: ..name */
+    if (parser__peek(p)->type == TOKEN_DOTDOT) {
+      Token* dotdot = parser__advance(p); /* consume '..' */
+      if (rest_name) {
+        return parser__error(p, "duplicate rest pattern '..' in destructuring", dotdot);
+      }
+      if (parser__at_end(p) || parser__peek(p)->type != TOKEN_WORD) {
+        return parser__error(p, "expected name after '..' in destructuring pattern", dotdot);
+      }
+      Token* rn = parser__advance(p); /* consume rest name */
+      rest_name = rn->payload.text;
+      rest_name_len = rn->length;
+      continue;
+    }
+
+    /* Error if we already have a rest and there are more positional elements */
+    if (rest_name) {
+      return parser__error(p, "rest pattern '..' must be last in destructuring", parser__peek(p));
     }
 
     /* Check for typed entry: type name */
@@ -1696,11 +1718,13 @@ static AstNode* parser__parse_destructure_vec_pattern(Parser* p) {
   node->type  = AST_DESTRUCTURE_VEC;
   node->start = start;
   node->end   = parser__token_end(close);
-  node->data.destructure_vec.names     = names;
-  node->data.destructure_vec.name_lens = name_lens;
-  node->data.destructure_vec.types     = types;
-  node->data.destructure_vec.type_lens = type_lens;
-  node->data.destructure_vec.count     = count;
+  node->data.destructure_vec.names         = names;
+  node->data.destructure_vec.name_lens     = name_lens;
+  node->data.destructure_vec.types         = types;
+  node->data.destructure_vec.type_lens     = type_lens;
+  node->data.destructure_vec.count         = count;
+  node->data.destructure_vec.rest_name     = rest_name;
+  node->data.destructure_vec.rest_name_len = rest_name_len;
   return node;
 }
 
@@ -1737,8 +1761,9 @@ static int parser__lookahead_is_named_destructure_binding(Parser* p) {
     } else if (t == TOKEN_EOF) {
       break;
     } else if (depth == 1) {
-      /* Inside the top-level braces: only words, commas, newlines are valid */
-      if (t != TOKEN_WORD && t != TOKEN_COMMA && t != TOKEN_NEWLINE) {
+      /* Inside the top-level braces: words, commas, newlines, and dotdot are valid */
+      if (t != TOKEN_WORD && t != TOKEN_COMMA && t != TOKEN_NEWLINE &&
+          t != TOKEN_DOTDOT) {
         has_non_pattern = 1;
       }
     }
@@ -1767,6 +1792,8 @@ static AstNode* parser__parse_destructure_named_pattern(Parser* p) {
   const char** types = (const char**)arena_alloc(p->arena, sizeof(const char*) * cap);
   uint32_t* type_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * cap);
   uint32_t count = 0;
+  const char* rest_name = NULL;
+  uint32_t rest_name_len = 0;
 
   while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
     /* Skip commas and newlines */
@@ -1776,6 +1803,21 @@ static AstNode* parser__parse_destructure_named_pattern(Parser* p) {
     }
     if (parser__peek(p)->type == TOKEN_NEWLINE) {
       parser__advance(p);
+      continue;
+    }
+
+    /* Check for rest pattern: ..name */
+    if (parser__peek(p)->type == TOKEN_DOTDOT) {
+      Token* dotdot = parser__advance(p); /* consume '..' */
+      if (rest_name) {
+        return parser__error(p, "duplicate rest pattern '..' in destructuring", dotdot);
+      }
+      if (parser__at_end(p) || parser__peek(p)->type != TOKEN_WORD) {
+        return parser__error(p, "expected name after '..' in named destructuring pattern", dotdot);
+      }
+      Token* rn = parser__advance(p); /* consume rest name */
+      rest_name = rn->payload.text;
+      rest_name_len = rn->length;
       continue;
     }
 
@@ -1853,11 +1895,13 @@ static AstNode* parser__parse_destructure_named_pattern(Parser* p) {
   node->type  = AST_DESTRUCTURE_NAMED;
   node->start = start;
   node->end   = parser__token_end(close);
-  node->data.destructure_named.names     = names;
-  node->data.destructure_named.name_lens = name_lens;
-  node->data.destructure_named.types     = types;
-  node->data.destructure_named.type_lens = type_lens;
-  node->data.destructure_named.count     = count;
+  node->data.destructure_named.names         = names;
+  node->data.destructure_named.name_lens     = name_lens;
+  node->data.destructure_named.types         = types;
+  node->data.destructure_named.type_lens     = type_lens;
+  node->data.destructure_named.count         = count;
+  node->data.destructure_named.rest_name     = rest_name;
+  node->data.destructure_named.rest_name_len = rest_name_len;
   return node;
 }
 

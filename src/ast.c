@@ -72,10 +72,12 @@ struct AstNode {
     struct { AstNode* value; /* NULL if no value */ }              return_stmt;
     struct { const char** names; uint32_t* name_lens;
              const char** types; uint32_t* type_lens;
-             uint32_t count; }                                    destructure_vec;
+             uint32_t count;
+             const char* rest_name; uint32_t rest_name_len; } destructure_vec;
     struct { const char** names; uint32_t* name_lens;
              const char** types; uint32_t* type_lens;
-             uint32_t count; }                                    destructure_named;
+             uint32_t count;
+             const char* rest_name; uint32_t rest_name_len; } destructure_named;
     struct { const char* message; }                                error;
   } data;
 };
@@ -432,6 +434,12 @@ static void ast__pp_node(AstStrBuf* b, AstNode* node) {
         ast__buf_str(b, node->data.destructure_vec.names[i],
                      node->data.destructure_vec.name_lens[i]);
       }
+      if (node->data.destructure_vec.rest_name) {
+        if (node->data.destructure_vec.count > 0) ast__buf_char(b, ' ');
+        ast__buf_cstr(b, "..");
+        ast__buf_str(b, node->data.destructure_vec.rest_name,
+                     node->data.destructure_vec.rest_name_len);
+      }
       ast__buf_char(b, ']');
       break;
     }
@@ -447,6 +455,12 @@ static void ast__pp_node(AstStrBuf* b, AstNode* node) {
         }
         ast__buf_str(b, node->data.destructure_named.names[i],
                      node->data.destructure_named.name_lens[i]);
+      }
+      if (node->data.destructure_named.rest_name) {
+        if (node->data.destructure_named.count > 0) ast__buf_cstr(b, ", ");
+        ast__buf_cstr(b, "..");
+        ast__buf_str(b, node->data.destructure_named.rest_name,
+                     node->data.destructure_named.rest_name_len);
       }
       ast__buf_char(b, '}');
       break;
