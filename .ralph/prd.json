@@ -22,7 +22,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "Destructuring `def [a b c] $expr` compiles to: compile RHS (pushes one value), emit OP_DESTRUCTURE_VEC 3 which pops the vector and pushes elements 0,1,2 onto stack, then each becomes a local via the normal def path. For globals (scope_depth==0), each extracted value needs OP_DEF_GLOBAL. Parser change: in the def/mut path, check if the next token after `def` is TOKEN_LBRACKET — if so, parse as destructuring pattern instead of a variable name. The operator desugaring (= and :) already converts to def/mut AST nodes, so destructuring works with operators automatically."
     },
     {
