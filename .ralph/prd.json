@@ -179,7 +179,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Model on JaclFuture: same pattern of GC object with state field and closure payload. Tag 0x15 is next available after JACL_TAG_ROPE_STRING (0x14). GC tracing: add case OBJ_STREAM in gc__trace_object in gc_collect.c — push next_fn and cached_value if non-nil. For print: add jacl_is_stream check in print dispatch. C-level tests can create a stream manually via jacl_stream(heap) and set next_fn to a test closure, without needing the full yield/CPS machinery."
     },
     {

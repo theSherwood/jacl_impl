@@ -242,6 +242,14 @@ static void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
+    /* --- Stream: trace next_fn and cached_value --- */
+    case OBJ_STREAM: {
+        JaclStream *stream = (JaclStream *)payload;
+        gc__ms_push_val(ms, stream->next_fn);
+        gc__ms_push_val(ms, stream->cached_value);
+        break;
+    }
+
     /* --- Struct: trace reference-type fields --- */
     case OBJ_STRUCT: {
         JaclStruct *s = (JaclStruct *)payload;

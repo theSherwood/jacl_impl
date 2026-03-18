@@ -179,6 +179,7 @@ static const char* vm__type_name(JaclVal v) {
   if (jacl_is_vector(v))        return "vector";
   if (jacl_is_map(v))           return "map";
   if (jacl_is_future(v))        return "future";
+  if (jacl_is_stream(v))       return "stream";
   if (jacl_is_native_fn(v))    return "native-fn";
   return "unknown";
 }
@@ -545,6 +546,8 @@ static void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
       vm__fmt_value(buf, (JaclVal)fut->result);
       vm__fmt_append(buf, ">", 1);
     }
+  } else if (jacl_is_stream(val)) {
+    vm__fmt_append(buf, "<stream>", 8);
   } else if (jacl_is_native_fn(val)) {
     n = snprintf(tmp, sizeof(tmp), "<native-fn #%u>",
                  jacl_as_native_fn_index(val));
@@ -1042,7 +1045,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, JACL_NIL);
           if (result != VM_OK) return result;
           break;
-        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val)) {
+        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena);
           vm__fmt_value(&fmt, val);
@@ -1870,7 +1873,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           /* Already a string — push back unchanged */
           result = vm__push(vm, val);
           if (result != VM_OK) return result;
-        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val)) {
+        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena);
           vm__fmt_value(&fmt, val);

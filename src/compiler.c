@@ -47,7 +47,8 @@ typedef enum {
   TYPE_VEC,
   TYPE_MAP,
   TYPE_CLOSURE,
-  TYPE_STRUCT
+  TYPE_STRUCT,
+  TYPE_STREAM
 } JaclType;
 
 static bool is_type_keyword(const char* word, size_t len) {
@@ -62,6 +63,8 @@ static bool is_type_keyword(const char* word, size_t len) {
     if (memcmp(word, "dyn", 3) == 0) return true;
   } else if (len == 4) {
     if (memcmp(word, "bool", 4) == 0) return true;
+  } else if (len == 6) {
+    if (memcmp(word, "stream", 6) == 0) return true;
   }
   return false;
 }
@@ -78,6 +81,8 @@ static JaclType type_from_keyword(const char* word, size_t len) {
     if (memcmp(word, "dyn", 3) == 0) return TYPE_DYN;
   } else if (len == 4) {
     if (memcmp(word, "bool", 4) == 0) return TYPE_BOOL;
+  } else if (len == 6) {
+    if (memcmp(word, "stream", 6) == 0) return TYPE_STREAM;
   }
   return TYPE_DYN;
 }
@@ -98,6 +103,7 @@ static const char* type_name(JaclType t) {
     case TYPE_MAP:     return "map";
     case TYPE_CLOSURE: return "closure";
     case TYPE_STRUCT:  return "struct";
+    case TYPE_STREAM:  return "stream";
   }
   return "unknown";
 }

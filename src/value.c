@@ -60,6 +60,7 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_STRUCT         ((uint64_t)0x12 << JACL_TAG_SHIFT)
 #define JACL_TAG_NATIVE_FN     ((uint64_t)0x13 << JACL_TAG_SHIFT)
 #define JACL_TAG_ROPE_STRING   ((uint64_t)0x14 << JACL_TAG_SHIFT)
+#define JACL_TAG_STREAM        ((uint64_t)0x15 << JACL_TAG_SHIFT)
 
 /* --- Heap structs for 64-bit numeric types --- */
 
@@ -256,6 +257,15 @@ static inline JaclVal jacl_native_fn(uint32_t index) {
 
 static inline uint32_t jacl_as_native_fn_index(JaclVal v) {
     return (uint32_t)(v & JACL_PAYLOAD_MASK);
+}
+
+/* Stream */
+static inline bool jacl_is_stream(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_STREAM;
+}
+
+static inline JaclVal jacl_stream_ptr(void *p) {
+    return JACL_TAG_STREAM | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
 }
 
 /* --- Inline string constructor --- */

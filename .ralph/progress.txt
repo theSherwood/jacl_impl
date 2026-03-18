@@ -129,3 +129,20 @@ Started: Wed Mar 18 17:37:32 UTC 2026
   - `length` builtin only works on strings, not vectors. Use `[print $vec]` to inspect vectors (prints as `[vec 1 2 3]`).
   - `each` is not a builtin — avoid using it in tests.
 ---
+
+## 2026-03-18 - US-008
+- Implemented stream value type and GC integration
+- Files changed:
+  - src/value.c: Added JACL_TAG_STREAM (0x15), jacl_is_stream(), jacl_stream_ptr()
+  - src/gc.c: Added OBJ_STREAM to GCObjType, JaclStream struct (state, next_fn, cached_value), jacl_as_stream(), jacl_stream() constructor
+  - src/gc_collect.c: Added OBJ_STREAM trace case (pushes next_fn and cached_value)
+  - src/compiler.c: Added TYPE_STREAM to JaclType enum, updated is_type_keyword/type_from_keyword/type_name for 'stream'
+  - src/vm.c: Added stream to type_name, print dispatch ("<stream>"), and print collection checks
+  - test/test_stream_type.c: 8 C-API tests (create, print, identity-eq, type-name, states, gc-survives, type-keyword, tag-value)
+  - build.sh: Added test to runner
+- **Learnings for future iterations:**
+  - JaclStream is modeled on JaclFuture: GC-allocated object with state + payload fields.
+  - Stream equality uses reference identity (default tag+payload comparison in jacl_val_eq).
+  - VMFormatBuf has `data` field (not `buf`).
+  - Stream states: STREAM_PENDING=0, STREAM_CONSUMED=1, STREAM_EXHAUSTED=2, STREAM_ERROR=3.
+---
