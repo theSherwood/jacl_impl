@@ -1557,6 +1557,154 @@ static AstNode* parser__parse_while_form(Parser* p, AstNode* while_head) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Check if current position starts a destructuring binding
+ *
+ * Returns true if the current TOKEN_LBRACKET is followed by a matching
+ * TOKEN_RBRACKET and then TOKEN_EQUALS or TOKEN_COLON (e.g. [a b c] = expr).
+ * Does NOT advance the parser position.
+ * ------------------------------------------------------------------------- */
+
+static int parser__lookahead_is_destructure_binding(Parser* p) {
+  if (parser__peek(p)->type != TOKEN_LBRACKET) return 0;
+  uint32_t saved = p->pos;
+  int depth = 0;
+  int result = 0;
+  while (p->pos < p->count) {
+    TokenType t = p->tokens[p->pos].type;
+    if (t == TOKEN_LBRACKET) depth++;
+    else if (t == TOKEN_RBRACKET) {
+      depth--;
+      if (depth == 0) {
+        p->pos++;
+        if (p->pos < p->count) {
+          TokenType after = p->tokens[p->pos].type;
+          result = (after == TOKEN_EQUALS || after == TOKEN_COLON);
+        }
+        break;
+      }
+    } else if (t == TOKEN_EOF) {
+      break;
+    }
+    p->pos++;
+  }
+  p->pos = saved;
+  return result;
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Parse a destructuring vector pattern [a b c] or [i64 a, i64 b]
+ *
+ * Called when we know the current token is '[' and this is a destructuring
+ * context. Supports optional type prefixes and comma separators.
+ * Returns AST_DESTRUCTURE_VEC node.
+ * ------------------------------------------------------------------------- */
+
+static AstNode* parser__parse_destructure_vec_pattern(Parser* p) {
+  Token* open = parser__advance(p); /* consume '[' */
+  SourcePos start = parser__token_start(open);
+
+  /* Collect binding entries */
+  uint32_t cap = 8;
+  const char** names = (const char**)arena_alloc(p->arena, sizeof(const char*) * cap);
+  uint32_t* name_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * cap);
+  const char** types = (const char**)arena_alloc(p->arena, sizeof(const char*) * cap);
+  uint32_t* type_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * cap);
+  uint32_t count = 0;
+
+  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACKET) {
+    /* Skip commas and newlines */
+    if (parser__peek(p)->type == TOKEN_COMMA) {
+      parser__advance(p);
+      continue;
+    }
+    if (parser__peek(p)->type == TOKEN_NEWLINE) {
+      parser__advance(p);
+      continue;
+    }
+
+    /* Check for typed entry: type name */
+    const char* entry_type = NULL;
+    uint32_t entry_type_len = 0;
+    Token* tok = parser__peek(p);
+
+    if (tok->type == TOKEN_WORD && p->pos + 1 < p->count) {
+      Token* next = &p->tokens[p->pos + 1];
+      /* If current is a type keyword and next is also a word, treat as typed */
+      if (next->type == TOKEN_WORD &&
+          (tok->length == 3 || tok->length == 4)) {
+        /* Quick check for known type keywords */
+        int is_type = 0;
+        if (tok->length == 3) {
+          is_type = (memcmp(tok->payload.text, "i32", 3) == 0 ||
+                     memcmp(tok->payload.text, "i64", 3) == 0 ||
+                     memcmp(tok->payload.text, "u32", 3) == 0 ||
+                     memcmp(tok->payload.text, "u64", 3) == 0 ||
+                     memcmp(tok->payload.text, "f32", 3) == 0 ||
+                     memcmp(tok->payload.text, "f64", 3) == 0 ||
+                     memcmp(tok->payload.text, "str", 3) == 0 ||
+                     memcmp(tok->payload.text, "dyn", 3) == 0);
+        } else if (tok->length == 4) {
+          is_type = (memcmp(tok->payload.text, "bool", 4) == 0);
+        }
+        if (is_type) {
+          entry_type = tok->payload.text;
+          entry_type_len = tok->length;
+          parser__advance(p); /* consume type */
+          tok = parser__peek(p);
+        }
+      }
+    }
+
+    /* Expect a binding name (word) */
+    if (tok->type != TOKEN_WORD) {
+      return parser__error(p, "expected variable name in destructuring pattern", tok);
+    }
+    parser__advance(p); /* consume name */
+
+    /* Grow arrays if needed */
+    if (count >= cap) {
+      uint32_t new_cap = cap * 2;
+      const char** new_names = (const char**)arena_alloc(p->arena, sizeof(const char*) * new_cap);
+      uint32_t* new_name_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * new_cap);
+      const char** new_types = (const char**)arena_alloc(p->arena, sizeof(const char*) * new_cap);
+      uint32_t* new_type_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * new_cap);
+      memcpy(new_names, names, sizeof(const char*) * count);
+      memcpy(new_name_lens, name_lens, sizeof(uint32_t) * count);
+      memcpy(new_types, types, sizeof(const char*) * count);
+      memcpy(new_type_lens, type_lens, sizeof(uint32_t) * count);
+      names = new_names;
+      name_lens = new_name_lens;
+      types = new_types;
+      type_lens = new_type_lens;
+      cap = new_cap;
+    }
+
+    names[count] = tok->payload.text;
+    name_lens[count] = tok->length;
+    types[count] = entry_type;
+    type_lens[count] = entry_type_len;
+    count++;
+  }
+
+  /* Expect closing bracket */
+  if (parser__peek(p)->type != TOKEN_RBRACKET) {
+    return parser__error(p, "expected ']' to close destructuring pattern", open);
+  }
+  Token* close = parser__advance(p);
+
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_DESTRUCTURE_VEC;
+  node->start = start;
+  node->end   = parser__token_end(close);
+  node->data.destructure_vec.names     = names;
+  node->data.destructure_vec.name_lens = name_lens;
+  node->data.destructure_vec.types     = types;
+  node->data.destructure_vec.type_lens = type_lens;
+  node->data.destructure_vec.count     = count;
+  return node;
+}
+
+/* -------------------------------------------------------------------------
  * Internal: Parse a top-level bare command
  *
  * Reads the first expression as the command head, then collects subsequent
@@ -1618,6 +1766,45 @@ static AstNode* parser__parse_bare_command(Parser* p) {
         node->end = val->end;
       }
     }
+    return node;
+  }
+
+  /* Destructuring binding: [a b c] = expr  or  [a b c] : expr
+     Detects [pattern] followed by = or : and desugars to [def pattern expr]
+     or [mut pattern expr]. */
+  if (parser__lookahead_is_destructure_binding(p)) {
+    AstNode* pattern = parser__parse_destructure_vec_pattern(p);
+    if (pattern->type == AST_ERROR) return pattern;
+
+    Token* op = parser__advance(p); /* consume = or : */
+    const char* cmd_name;
+    uint32_t cmd_len;
+    if (op->type == TOKEN_EQUALS) { cmd_name = "def"; cmd_len = 3; }
+    else                           { cmd_name = "mut"; cmd_len = 3; }
+
+    NodeArray args;
+    parser__arr_init(&args, p->arena);
+    parser__arr_push(&args, pattern); /* destructure pattern */
+    while (!parser__is_command_end(p)) {
+      AstNode* arg = parser__parse_expr(p);
+      if (arg == NULL) break;
+      parser__arr_push(&args, arg);
+    }
+
+    AstNode* cmd_head = ast_alloc(p->arena);
+    cmd_head->type = AST_LIT_STRING;
+    cmd_head->start = pattern->start;
+    cmd_head->end   = pattern->end;
+    cmd_head->data.lit_string.value  = cmd_name;
+    cmd_head->data.lit_string.length = cmd_len;
+
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_COMMAND;
+    node->start = pattern->start;
+    node->end   = (args.count > 0) ? args.nodes[args.count - 1]->end : pattern->end;
+    node->data.command.head      = cmd_head;
+    node->data.command.args      = args.nodes;
+    node->data.command.arg_count = args.count;
     return node;
   }
 

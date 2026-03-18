@@ -103,6 +103,7 @@ TESTS=(
     "test/test_concurrent_intern.c|concurrent_intern|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "test/test_rope_slice_grapheme.c|rope_slice_grapheme|"
     "test/test_cross_thread_string.c|cross_thread_string|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
+    "test/test_destructure_vec.c|destructure_vec|"
 )
 
 # Filter tests if --lib flag is set

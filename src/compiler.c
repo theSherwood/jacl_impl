@@ -2853,6 +2853,124 @@ static void compiler__compile_hof_builtin(Compiler* c, const char* name,
   compiler__emit_byte(c, opcode, line);
 }
 
+/* --- Internal: Compile a vector destructuring binding ---
+ *
+ * Handles both def and mut forms. Compiles the value expression,
+ * emits OP_DESTRUCTURE_VEC, and creates bindings for each name.
+ *
+ * For def (immutable): OP_DESTRUCTURE_VEC pushes all elements, each becomes a local.
+ * For mut (mutable): elements extracted individually and wrapped in cells.
+ * For globals (scope_depth==0): each element stored with OP_DEF_GLOBAL.
+ */
+static void compiler__compile_destructure_vec(
+    Compiler* c,
+    const char** d_names, uint32_t* d_name_lens,
+    const char** d_types, uint32_t* d_type_lens,
+    uint32_t d_count,
+    AstNode* value_expr,
+    bool is_mutable,
+    uint32_t line, uint32_t col)
+{
+  /* Validate binding names */
+  for (uint32_t i = 0; i < d_count; i++) {
+    if (d_name_lens[i] > 7) {
+      compiler__error(c, line, col,
+                      "variable name exceeds 7-byte inline limit");
+      return;
+    }
+  }
+
+  /* Compile RHS — pushes one value (should be a vector) onto stack */
+  compiler__compile_node(c, value_expr);
+
+  if (c->scope_depth > 0) {
+    /* --- Local scope --- */
+    if (!is_mutable) {
+      /* def: OP_DESTRUCTURE_VEC pushes all elements as locals */
+      compiler__emit_byte(c, OP_DESTRUCTURE_VEC, line);
+      compiler__emit_byte(c, (uint8_t)d_count, line);
+      for (uint32_t i = 0; i < d_count; i++) {
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        compiler__add_local(c, name_val, line, col);
+        if (d_types && d_types[i]) {
+          JaclType t;
+          if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+            c->locals[c->local_count - 1].type = t;
+          }
+        }
+      }
+    } else {
+      /* mut: extract each element individually, wrap in cell.
+         Store vec as temporary local to allow repeated access. */
+      JaclVal temp_name = jacl_inline_string("", 0);
+      compiler__add_local(c, temp_name, line, col);
+      uint32_t vec_slot = c->local_count - 1;
+
+      for (uint32_t i = 0; i < d_count; i++) {
+        /* Push the vector again from temp local */
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)vec_slot, line);
+        /* Push index */
+        uint16_t idx = chunk_add_constant(c->chunk, jacl_i32((int32_t)i));
+        compiler__emit_byte(c, OP_CONST, line);
+        compiler__emit_u16(c, idx, line);
+        /* Extract element */
+        compiler__emit_byte(c, OP_VEC_GET, line);
+        /* Wrap in cell for mutable binding */
+        compiler__emit_byte(c, OP_MAKE_CELL, line);
+        /* Register local */
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        compiler__add_local(c, name_val, line, col);
+        c->locals[c->local_count - 1].is_mutable = true;
+        if (d_types && d_types[i]) {
+          JaclType t;
+          if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+            c->locals[c->local_count - 1].type = t;
+          }
+        }
+      }
+    }
+    /* def/mut returns nil */
+    compiler__emit_byte(c, OP_NIL, line);
+  } else {
+    /* --- Global scope --- */
+    compiler__emit_byte(c, OP_DESTRUCTURE_VEC, line);
+    compiler__emit_byte(c, (uint8_t)d_count, line);
+    /* Elements are on stack: elem0 (bottom) ... elemN-1 (top).
+       Process in reverse so we consume from top of stack. */
+    for (int i = (int)d_count - 1; i >= 0; i--) {
+      if (is_mutable && c->current_module) {
+        compiler__emit_byte(c, OP_BOX, line);
+      }
+      JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+      JaclVal global_key = compiler__global_name_val(c, d_names[i],
+                                                      d_name_lens[i]);
+      uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
+      compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+      compiler__emit_u16(c, name_idx, line);
+      /* OP_DEF_GLOBAL pops value, pushes nil */
+      compiler__set_global_arity(c, name_val, -1);
+      if (is_mutable) {
+        Compiler* root = c;
+        while (root->enclosing) root = root->enclosing;
+        for (uint32_t j = 0; j < root->global_arity_count; j++) {
+          if (root->global_arities[j].name == name_val) {
+            root->global_arities[j].is_mutable = true;
+            break;
+          }
+        }
+      }
+      if (i > 0) {
+        /* Pop the nil pushed by OP_DEF_GLOBAL before processing next */
+        compiler__emit_byte(c, OP_POP, line);
+      }
+      /* else: leave final nil as return value */
+    }
+  }
+
+  c->last_expr_type = TYPE_NIL;
+}
+
 /* --- Internal: Compile a command invocation --- */
 
 static void compiler__compile_command(Compiler* c, AstNode* node) {
@@ -3019,6 +3137,49 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* mut — mutable local binding with cell auto-boxing */
   if (compiler__head_matches(head, "mut", 3)) {
+    /* --- Destructuring: [mut [a b c] value] or [mut DESTRUCTURE_VEC value] --- */
+    if (argc == 2 && args[0]->type == AST_DESTRUCTURE_VEC) {
+      compiler__compile_destructure_vec(
+          c,
+          args[0]->data.destructure_vec.names,
+          args[0]->data.destructure_vec.name_lens,
+          args[0]->data.destructure_vec.types,
+          args[0]->data.destructure_vec.type_lens,
+          args[0]->data.destructure_vec.count,
+          args[1], true, line, col);
+      return;
+    }
+    if (argc == 2 && args[0]->type == AST_COMMAND) {
+      AstNode* pat = args[0];
+      uint32_t d_count = 1 + pat->data.command.arg_count;
+      if (d_count > 255) {
+        compiler__error(c, line, col, "too many bindings in destructuring");
+        return;
+      }
+      const char* d_names[256];
+      uint32_t d_name_lens[256];
+      if (pat->data.command.head->type != AST_LIT_STRING) {
+        compiler__error(c, line, col,
+                        "destructuring pattern elements must be names");
+        return;
+      }
+      d_names[0] = pat->data.command.head->data.lit_string.value;
+      d_name_lens[0] = pat->data.command.head->data.lit_string.length;
+      for (uint32_t i = 0; i < pat->data.command.arg_count; i++) {
+        if (pat->data.command.args[i]->type != AST_LIT_STRING) {
+          compiler__error(c, line, col,
+                          "destructuring pattern elements must be names");
+          return;
+        }
+        d_names[1 + i] = pat->data.command.args[i]->data.lit_string.value;
+        d_name_lens[1 + i] = pat->data.command.args[i]->data.lit_string.length;
+      }
+      compiler__compile_destructure_vec(
+          c, d_names, d_name_lens, NULL, NULL, d_count,
+          args[1], true, line, col);
+      return;
+    }
+
     JaclType declared_type = TYPE_DYN;
     uint32_t name_arg_idx  = 0;
     uint32_t value_arg_idx = 1;
@@ -3318,8 +3479,54 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* def builtin — supports [def name value] and [def TYPE name value] */
+  /* def builtin — supports [def name value] and [def TYPE name value]
+     and [def [a b c] value] for vector destructuring */
   if (compiler__head_matches(head, "def", 3)) {
+    /* --- Destructuring: [def [a b c] value] or [def DESTRUCTURE_VEC value] --- */
+    if (argc == 2 && args[0]->type == AST_DESTRUCTURE_VEC) {
+      compiler__compile_destructure_vec(
+          c,
+          args[0]->data.destructure_vec.names,
+          args[0]->data.destructure_vec.name_lens,
+          args[0]->data.destructure_vec.types,
+          args[0]->data.destructure_vec.type_lens,
+          args[0]->data.destructure_vec.count,
+          args[1], false, line, col);
+      return;
+    }
+    if (argc == 2 && args[0]->type == AST_COMMAND) {
+      /* keyword form: def [a b c] expr — convert AST_COMMAND to name arrays */
+      AstNode* pat = args[0];
+      uint32_t d_count = 1 + pat->data.command.arg_count; /* head + args */
+      if (d_count > 255) {
+        compiler__error(c, line, col, "too many bindings in destructuring");
+        return;
+      }
+      const char* d_names[256];
+      uint32_t d_name_lens[256];
+      /* head is first name */
+      if (pat->data.command.head->type != AST_LIT_STRING) {
+        compiler__error(c, line, col,
+                        "destructuring pattern elements must be names");
+        return;
+      }
+      d_names[0] = pat->data.command.head->data.lit_string.value;
+      d_name_lens[0] = pat->data.command.head->data.lit_string.length;
+      for (uint32_t i = 0; i < pat->data.command.arg_count; i++) {
+        if (pat->data.command.args[i]->type != AST_LIT_STRING) {
+          compiler__error(c, line, col,
+                          "destructuring pattern elements must be names");
+          return;
+        }
+        d_names[1 + i] = pat->data.command.args[i]->data.lit_string.value;
+        d_name_lens[1 + i] = pat->data.command.args[i]->data.lit_string.length;
+      }
+      compiler__compile_destructure_vec(
+          c, d_names, d_name_lens, NULL, NULL, d_count,
+          args[1], false, line, col);
+      return;
+    }
+
     JaclType declared_type = TYPE_DYN;
     uint32_t name_arg_idx  = 0;
     uint32_t value_arg_idx = 1;
@@ -5836,6 +6043,12 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, OP_NIL, line);
       }
       compiler__emit_byte(c, OP_RETURN, line);
+      break;
+    }
+
+    case AST_DESTRUCTURE_VEC: {
+      compiler__error(c, line, node->start.column,
+                      "destructuring pattern can only appear in def or mut");
       break;
     }
 

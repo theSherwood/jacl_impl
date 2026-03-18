@@ -1350,6 +1350,34 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_DESTRUCTURE_VEC: {
+        uint8_t n = vm__read_byte(vm);
+        JaclVal vec_val;
+        result = vm__pop(vm, &vec_val);
+        if (result != VM_OK) return result;
+        if (!jacl_is_vector(vec_val)) {
+          vm__set_error(vm,
+              "destructuring requires a vector, got %s",
+              vm__type_name(vec_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
+        uint32_t vec_len = jacl_vec_count(vec);
+        if (vec_len != n) {
+          vm__set_error(vm,
+              "destructuring length mismatch: expected %u elements, got %u",
+              (unsigned)n, (unsigned)vec_len);
+          return VM_RUNTIME_ERROR;
+        }
+        /* Push elements 0..N-1 onto stack */
+        for (uint8_t i = 0; i < n; i++) {
+          jacl_vec_get_result gr = jacl_vec_get(vec, (uint32_t)i);
+          result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
+          if (result != VM_OK) return result;
+        }
+        break;
+      }
+
       case OP_CONCAT: {
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;
