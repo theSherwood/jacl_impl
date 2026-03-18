@@ -1164,7 +1164,13 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         JaclClosure* closure = jacl_as_closure(callee);
 
-        if (arg_count != closure->param_count) {
+        if (closure->variadic) {
+          if (arg_count < closure->min_args) {
+            vm__set_error(vm, "expected at least %d arguments but got %d",
+                         (int)closure->min_args, (int)arg_count);
+            return VM_RUNTIME_ERROR;
+          }
+        } else if (arg_count != closure->param_count) {
           vm__set_error(vm, "expected %d arguments but got %d",
                        (int)closure->param_count, (int)arg_count);
           return VM_RUNTIME_ERROR;
@@ -1220,7 +1226,13 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         JaclClosure* closure = jacl_as_closure(callee);
 
-        if (arg_count != closure->param_count) {
+        if (closure->variadic) {
+          if (arg_count < closure->min_args) {
+            vm__set_error(vm, "expected at least %d arguments but got %d",
+                         (int)closure->min_args, (int)arg_count);
+            return VM_RUNTIME_ERROR;
+          }
+        } else if (arg_count != closure->param_count) {
           vm__set_error(vm, "expected %d arguments but got %d",
                        (int)closure->param_count, (int)arg_count);
           return VM_RUNTIME_ERROR;
@@ -4448,7 +4460,13 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
 
         JaclClosure* closure = jacl_as_closure(callee);
-        if (total_args != closure->param_count) {
+        if (closure->variadic) {
+          if (total_args < closure->min_args) {
+            vm__set_error(vm, "expected at least %d arguments but got %d",
+                         (int)closure->min_args, (int)total_args);
+            return VM_RUNTIME_ERROR;
+          }
+        } else if (total_args != closure->param_count) {
           vm__set_error(vm, "expected %d arguments but got %d",
                        (int)closure->param_count, (int)total_args);
           return VM_RUNTIME_ERROR;
@@ -4531,6 +4549,21 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm->stack_top = base;
         result = vm__push(vm, acc);
         if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_COLLECT_VARIADIC: {
+        uint8_t min_arity = vm__read_byte(vm);
+        uint32_t actual_count = vm->stack_top - frame->stack_base;
+        uint32_t extra = actual_count > min_arity ? actual_count - min_arity : 0;
+        /* Create vector from excess args */
+        jacl_vec_root* vec = jacl_vec_empty();
+        for (uint32_t i = 0; i < extra; i++) {
+          vec = jacl_vec_push_back(vec, vm->stack[frame->stack_base + min_arity + i]);
+        }
+        /* Collapse: set rest param slot and adjust stack_top */
+        vm->stack[frame->stack_base + min_arity] = jacl_vector_ptr(vec);
+        vm->stack_top = frame->stack_base + min_arity + 1;
         break;
       }
 

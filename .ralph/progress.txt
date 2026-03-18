@@ -113,3 +113,19 @@ Started: Wed Mar 18 17:37:32 UTC 2026
   - OP_FOLD_SPREAD format: `uint8_t op_id, uint8_t fixed_args, uint8_t num_spreads`. op_id: 0=add, 1=sub, 2=mul, 3=div.
   - OP_CALL_SPREAD format: `uint8_t fixed_args, uint8_t num_spreads`.
 ---
+
+## 2026-03-18 - US-007
+- Implemented variadic proc parameters: `proc f {a, ..rest} { ... }`
+- Files changed:
+  - src/bytecode.c: Added OP_COLLECT_VARIADIC opcode
+  - src/compiler.c: Added `..` marker handling in proc param walker (alongside existing `&`), with optional type annotation support. Emits OP_COLLECT_VARIADIC as first instruction in variadic proc body. Sets known_arity=-1 for variadic procs to skip compile-time arity checks.
+  - src/vm.c: Modified OP_CALL, OP_TAIL_CALL, OP_CALL_SPREAD to accept variadic procs (arg_count >= min_args). Added OP_COLLECT_VARIADIC handler: creates vector from excess args, adjusts stack.
+  - test/test_variadic.c: 10 e2e tests (basic, mixed, zero, too-few, not-last error, multiple-rest error, splat, rest-only, splat-mixed, nested)
+  - test/test_bytecode.c: Updated opcode enum assertions
+  - build.sh: Added test to runner
+- **Learnings for future iterations:**
+  - OP_COLLECT_VARIADIC format: `uint8_t min_arity`. Computes actual_count from stack_top - stack_base. Creates vector from excess args, sets rest param slot, adjusts stack_top.
+  - Variadic procs use existing `variadic` and `min_args` fields on JaclClosure. param_count = min_args + 1 (includes rest param).
+  - `length` builtin only works on strings, not vectors. Use `[print $vec]` to inspect vectors (prints as `[vec 1 2 3]`).
+  - `each` is not a builtin — avoid using it in tests.
+---

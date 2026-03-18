@@ -4429,18 +4429,38 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       const char* word = elem->data.lit_string.value;
       uint32_t wlen = elem->data.lit_string.length;
 
-      /* Check for variadic marker & */
-      if (wlen == 1 && word[0] == '&') {
-        is_variadic = true;
-        /* Next element is the rest param name (always dyn) */
-        fi++;
-        if (fi >= flat_count) {
-          compiler__error(c, line, col, "expected parameter name after &");
+      /* Check for variadic marker & or .. */
+      if ((wlen == 1 && word[0] == '&') ||
+          (wlen == 2 && word[0] == '.' && word[1] == '.')) {
+        if (is_variadic) {
+          compiler__error(c, line, col, "multiple rest parameters not allowed");
           return;
         }
+        is_variadic = true;
+        fi++;
+        if (fi >= flat_count) {
+          compiler__error(c, line, col, "expected parameter name after rest marker");
+          return;
+        }
+        /* Check for optional type annotation: ..type name */
         elem = flat_elems[fi];
+        JaclType rest_type = TYPE_DYN;
+        if (elem->type == AST_LIT_STRING && fi + 1 < flat_count) {
+          JaclType maybe_type;
+          if (compiler__resolve_type(c, elem->data.lit_string.value,
+                                     elem->data.lit_string.length, &maybe_type)) {
+            rest_type = maybe_type;
+            fi++;
+            elem = flat_elems[fi];
+          }
+        }
         if (elem->type != AST_LIT_STRING || elem->data.lit_string.length > 7) {
           compiler__error(c, line, col, "proc parameter name invalid");
+          return;
+        }
+        /* rest param must be last */
+        if (fi != flat_count - 1) {
+          compiler__error(c, line, col, "rest parameter must be last");
           return;
         }
         if (param_count >= COMPILER_MAX_PROC_PARAMS) {
@@ -4449,7 +4469,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
         }
         param_names_arr[param_count] = jacl_inline_string(
             elem->data.lit_string.value, elem->data.lit_string.length);
-        param_types_arr[param_count] = TYPE_DYN;
+        param_types_arr[param_count] = rest_type;
         param_count++;
         continue;
       }
@@ -4559,6 +4579,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       body_compiler.locals[body_compiler.local_count - 1].type = param_types_arr[i];
     }
 
+    /* For variadic procs, emit OP_COLLECT_VARIADIC as first instruction */
+    if (is_variadic) {
+      compiler__emit_byte(&body_compiler, OP_COLLECT_VARIADIC, line);
+      compiler__emit_byte(&body_compiler, min_args, line);
+    }
+
     if (proc_suspends_early) {
       /* CPS-transformed proc: compile body with CPS */
       body_compiler.is_cps = true;
@@ -4659,7 +4685,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->scope_depth > 0 && !c->force_global_procs) {
       /* Local scope: closure is on stack as local */
       compiler__add_local(c, name_val, line, col);
-      c->locals[c->local_count - 1].known_arity = (int16_t)user_param_count;
+      c->locals[c->local_count - 1].known_arity = is_variadic ? -1 : (int16_t)user_param_count;
       c->locals[c->local_count - 1].return_type = proc_return_type;
       c->locals[c->local_count - 1].param_types = stored_param_types;
       c->locals[c->local_count - 1].suspends    = proc_suspends;
@@ -4673,7 +4699,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       uint16_t name_idx = chunk_add_constant(c->chunk, proc_key);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
-      compiler__set_global_arity(c, name_val, (int16_t)user_param_count);
+      compiler__set_global_arity(c, name_val, is_variadic ? -1 : (int16_t)user_param_count);
       /* Store param types, return type, and suspension in GlobalArity */
       {
         GlobalArity* ga = compiler__find_global(c, name_val);

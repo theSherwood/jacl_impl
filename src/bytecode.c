@@ -152,6 +152,7 @@ typedef enum {
   OP_SPREAD,          /* pop vector, push each element; save count in vm->spread_counts */
   OP_CALL_SPREAD,     /* call with spread: uint8_t fixed_args, uint8_t num_spreads */
   OP_FOLD_SPREAD,     /* fold binary op with spread: uint8_t op_id, uint8_t fixed_args, uint8_t num_spreads */
+  OP_COLLECT_VARIADIC, /* at variadic proc entry: uint8_t min_arity — collect excess args into vector */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -416,6 +417,7 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_SPREAD:          return "OP_SPREAD";
     case OP_CALL_SPREAD:     return "OP_CALL_SPREAD";
     case OP_FOLD_SPREAD:     return "OP_FOLD_SPREAD";
+    case OP_COLLECT_VARIADIC: return "OP_COLLECT_VARIADIC";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";

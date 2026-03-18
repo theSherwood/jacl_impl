@@ -109,6 +109,7 @@ TESTS=(
     "test/test_destructure_rest.c|destructure_rest|"
     "test/test_destructure_spread_all.c|destructure_spread_all|"
     "test/test_splat.c|splat|"
+    "test/test_variadic.c|variadic|"
 )
 
 # Filter tests if --lib flag is set

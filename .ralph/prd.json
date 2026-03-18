@@ -154,7 +154,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Parser: when parsing proc params in {}, if TOKEN_DOTDOT appears, consume the following identifier (with optional type prefix) as the rest param. Mark the proc's AST with is_variadic=true and rest_param_name. Compiler: emit OP_COLLECT_VARIADIC min_arity as first instruction in variadic proc body. This opcode reads actual arg count, creates vector from excess args, stores in rest param's local slot. The proc's registered arity should store min_arity + variadic flag so OP_CALL can skip the too-many-args check."
     },
     {
