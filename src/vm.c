@@ -1378,6 +1378,65 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_DESTRUCTURE_NAMED: {
+        uint8_t n = vm__read_byte(vm);
+        /* Read N constant indices for field names */
+        uint16_t name_indices[256];
+        for (uint8_t i = 0; i < n; i++) {
+          name_indices[i] = vm__read_u16(vm);
+        }
+        JaclVal src_val;
+        result = vm__pop(vm, &src_val);
+        if (result != VM_OK) return result;
+
+        if (jacl_is_struct(src_val)) {
+          JaclStruct* s = jacl_as_struct_ptr(src_val);
+          StructTypeDef* sdef = &vm->struct_registry->defs[s->type_idx];
+          for (uint8_t i = 0; i < n; i++) {
+            JaclVal name_val = frame->chunk->constants[name_indices[i]];
+            char fname[64]; uint32_t flen;
+            flen = jacl_string_data(name_val, fname, sizeof(fname));
+            /* Find field by name */
+            uint32_t fi;
+            for (fi = 0; fi < sdef->field_count; fi++) {
+              if (sdef->fields[fi].name_len == flen &&
+                  memcmp(sdef->fields[fi].name, fname, flen) == 0) break;
+            }
+            if (fi == sdef->field_count) {
+              vm__set_error(vm,
+                  "destructuring: struct '%.*s' has no field '%.*s'",
+                  (int)sdef->name_len, sdef->name, (int)flen, fname);
+              return VM_RUNTIME_ERROR;
+            }
+            JaclVal field_val = vm__struct_read_field(NULL, s,
+                sdef->fields[fi].offset, sdef->fields[fi].type);
+            result = vm__push(vm, field_val);
+            if (result != VM_OK) return result;
+          }
+        } else if (jacl_is_map(src_val)) {
+          jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(src_val);
+          for (uint8_t i = 0; i < n; i++) {
+            JaclVal key_val = frame->chunk->constants[name_indices[i]];
+            if (!jacl_map_has(map, key_val)) {
+              char fname[64]; uint32_t flen;
+              flen = jacl_string_data(key_val, fname, sizeof(fname));
+              vm__set_error(vm,
+                  "destructuring: map has no key '%.*s'",
+                  (int)flen, fname);
+              return VM_RUNTIME_ERROR;
+            }
+            result = vm__push(vm, jacl_map_get(map, key_val));
+            if (result != VM_OK) return result;
+          }
+        } else {
+          vm__set_error(vm,
+              "named destructuring requires a struct or map, got %s",
+              vm__type_name(src_val));
+          return VM_RUNTIME_ERROR;
+        }
+        break;
+      }
+
       case OP_CONCAT: {
         JaclVal b, a;
         result = vm__pop(vm, &b); if (result != VM_OK) return result;

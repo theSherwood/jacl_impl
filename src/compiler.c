@@ -2971,6 +2971,188 @@ static void compiler__compile_destructure_vec(
   c->last_expr_type = TYPE_NIL;
 }
 
+/* -------------------------------------------------------------------------
+ * Compile named struct/map destructuring: def {x, y} $expr or mut {x, y} $expr
+ *
+ * For known struct types: emits OP_STRUCT_GET per field (compile-time resolved).
+ * For dyn/map types: emits OP_DESTRUCTURE_NAMED (runtime resolved).
+ * For mut: wraps each extracted value in a cell.
+ * For globals: defines each extracted value as a global.
+ */
+static void compiler__compile_destructure_named(
+    Compiler* c,
+    const char** d_names, uint32_t* d_name_lens,
+    const char** d_types, uint32_t* d_type_lens,
+    uint32_t d_count,
+    AstNode* value_expr,
+    bool is_mutable,
+    uint32_t line, uint32_t col)
+{
+  /* Validate binding names */
+  for (uint32_t i = 0; i < d_count; i++) {
+    if (d_name_lens[i] > 7) {
+      compiler__error(c, line, col,
+                      "variable name exceeds 7-byte inline limit");
+      return;
+    }
+  }
+
+  /* Compile RHS — pushes one value (struct or map) onto stack */
+  compiler__compile_node(c, value_expr);
+  JaclType rhs_type = c->last_expr_type;
+  uint32_t rhs_struct_idx = c->last_struct_idx;
+
+  /* Determine if we can use compile-time struct field resolution */
+  int use_struct_path = 0;
+  StructTypeDef* sdef = NULL;
+
+  if (rhs_type == TYPE_STRUCT && rhs_struct_idx != UINT32_MAX) {
+    StructTypeRegistry* reg = compiler__get_struct_registry(c);
+    if (reg && rhs_struct_idx < reg->count) {
+      sdef = &reg->defs[rhs_struct_idx];
+      use_struct_path = 1;
+      /* Validate all field names at compile time */
+      for (uint32_t i = 0; i < d_count; i++) {
+        uint32_t fi;
+        for (fi = 0; fi < sdef->field_count; fi++) {
+          if (sdef->fields[fi].name_len == d_name_lens[i] &&
+              memcmp(sdef->fields[fi].name, d_names[i], d_name_lens[i]) == 0)
+            break;
+        }
+        if (fi == sdef->field_count) {
+          char err_msg[128];
+          snprintf(err_msg, sizeof(err_msg),
+                   "struct '%.*s' has no field '%.*s'",
+                   (int)sdef->name_len, sdef->name,
+                   (int)d_name_lens[i], d_names[i]);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+      }
+    }
+  }
+
+  if (c->scope_depth > 0) {
+    /* --- Local scope --- */
+    /* Store source value in temp local for repeated access */
+    JaclVal temp_name = jacl_inline_string("", 0);
+    compiler__add_local(c, temp_name, line, col);
+    uint32_t src_slot = c->local_count - 1;
+    if (rhs_type == TYPE_STRUCT) {
+      c->locals[src_slot].type = TYPE_STRUCT;
+      c->locals[src_slot].struct_type_idx = rhs_struct_idx;
+    }
+
+    if (use_struct_path) {
+      /* Struct path: extract each field with compile-time resolved offsets */
+      for (uint32_t i = 0; i < d_count; i++) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)src_slot, line);
+
+        uint32_t fi;
+        for (fi = 0; fi < sdef->field_count; fi++) {
+          if (sdef->fields[fi].name_len == d_name_lens[i] &&
+              memcmp(sdef->fields[fi].name, d_names[i], d_name_lens[i]) == 0)
+            break;
+        }
+        compiler__emit_byte(c, OP_STRUCT_GET, line);
+        compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
+        compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
+
+        if (is_mutable) {
+          compiler__emit_byte(c, OP_MAKE_CELL, line);
+        }
+
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        compiler__add_local(c, name_val, line, col);
+        if (is_mutable)
+          c->locals[c->local_count - 1].is_mutable = true;
+        if (d_types && d_types[i]) {
+          JaclType t;
+          if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+            c->locals[c->local_count - 1].type = t;
+          }
+        } else {
+          c->locals[c->local_count - 1].type = sdef->fields[fi].type;
+          if (sdef->fields[fi].type == TYPE_STRUCT)
+            c->locals[c->local_count - 1].struct_type_idx = sdef->fields[fi].struct_type_idx;
+        }
+      }
+    } else {
+      /* Dyn/map path: extract each field one at a time with runtime resolution.
+         Use OP_DESTRUCTURE_NAMED with count=1 per field so missing-key errors
+         are caught, and mutable wrapping works naturally. */
+      for (uint32_t i = 0; i < d_count; i++) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)src_slot, line);
+
+        compiler__emit_byte(c, OP_DESTRUCTURE_NAMED, line);
+        compiler__emit_byte(c, 1, line);
+        JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
+        compiler__emit_u16(c, key_idx, line);
+
+        if (is_mutable) {
+          compiler__emit_byte(c, OP_MAKE_CELL, line);
+        }
+
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        compiler__add_local(c, name_val, line, col);
+        if (is_mutable)
+          c->locals[c->local_count - 1].is_mutable = true;
+        if (d_types && d_types[i]) {
+          JaclType t;
+          if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+            c->locals[c->local_count - 1].type = t;
+          }
+        }
+      }
+    }
+
+    /* def/mut returns nil */
+    compiler__emit_byte(c, OP_NIL, line);
+  } else {
+    /* --- Global scope --- */
+    /* Use OP_DESTRUCTURE_NAMED to push all field values, then define globals */
+    compiler__emit_byte(c, OP_DESTRUCTURE_NAMED, line);
+    compiler__emit_byte(c, (uint8_t)d_count, line);
+    for (uint32_t i = 0; i < d_count; i++) {
+      JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+      uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
+      compiler__emit_u16(c, key_idx, line);
+    }
+    /* Elements are on stack: elem0 (bottom) ... elemN-1 (top).
+       Process in reverse so we consume from top of stack. */
+    for (int i = (int)d_count - 1; i >= 0; i--) {
+      if (is_mutable && c->current_module) {
+        compiler__emit_byte(c, OP_BOX, line);
+      }
+      JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+      JaclVal global_key = compiler__global_name_val(c, d_names[i],
+                                                      d_name_lens[i]);
+      uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
+      compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+      compiler__emit_u16(c, name_idx, line);
+      compiler__set_global_arity(c, name_val, -1);
+      if (is_mutable) {
+        Compiler* root = c;
+        while (root->enclosing) root = root->enclosing;
+        for (uint32_t j = 0; j < root->global_arity_count; j++) {
+          if (root->global_arities[j].name == name_val) {
+            root->global_arities[j].is_mutable = true;
+            break;
+          }
+        }
+      }
+      if (i > 0) {
+        compiler__emit_byte(c, OP_POP, line);
+      }
+    }
+  }
+
+  c->last_expr_type = TYPE_NIL;
+}
+
 /* --- Internal: Compile a command invocation --- */
 
 static void compiler__compile_command(Compiler* c, AstNode* node) {
@@ -3178,6 +3360,46 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           c, d_names, d_name_lens, NULL, NULL, d_count,
           args[1], true, line, col);
       return;
+    }
+    /* --- Named destructuring: [mut {x, y} value] --- */
+    if (argc == 2 && args[0]->type == AST_DESTRUCTURE_NAMED) {
+      compiler__compile_destructure_named(
+          c,
+          args[0]->data.destructure_named.names,
+          args[0]->data.destructure_named.name_lens,
+          args[0]->data.destructure_named.types,
+          args[0]->data.destructure_named.type_lens,
+          args[0]->data.destructure_named.count,
+          args[1], true, line, col);
+      return;
+    }
+    /* --- Named destructuring from block: [mut {x, y} value] (keyword form) --- */
+    if (argc == 2 && args[0]->type == AST_BLOCK) {
+      AstNode* blk = args[0];
+      uint32_t d_count = blk->data.block.count;
+      if (d_count == 0 || d_count > 255) {
+        compiler__error(c, line, col, "invalid destructuring pattern");
+        return;
+      }
+      const char* d_names_arr[256];
+      uint32_t d_name_lens_arr[256];
+      int valid = 1;
+      for (uint32_t i = 0; i < d_count; i++) {
+        AstNode* cmd = blk->data.block.commands[i];
+        if (cmd->type == AST_COMMAND && cmd->data.command.arg_count == 0 &&
+            cmd->data.command.head->type == AST_LIT_STRING) {
+          d_names_arr[i] = cmd->data.command.head->data.lit_string.value;
+          d_name_lens_arr[i] = cmd->data.command.head->data.lit_string.length;
+        } else {
+          valid = 0; break;
+        }
+      }
+      if (valid) {
+        compiler__compile_destructure_named(
+            c, d_names_arr, d_name_lens_arr, NULL, NULL, d_count,
+            args[1], true, line, col);
+        return;
+      }
     }
 
     JaclType declared_type = TYPE_DYN;
@@ -3525,6 +3747,46 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           c, d_names, d_name_lens, NULL, NULL, d_count,
           args[1], false, line, col);
       return;
+    }
+    /* --- Named destructuring: [def {x, y} value] --- */
+    if (argc == 2 && args[0]->type == AST_DESTRUCTURE_NAMED) {
+      compiler__compile_destructure_named(
+          c,
+          args[0]->data.destructure_named.names,
+          args[0]->data.destructure_named.name_lens,
+          args[0]->data.destructure_named.types,
+          args[0]->data.destructure_named.type_lens,
+          args[0]->data.destructure_named.count,
+          args[1], false, line, col);
+      return;
+    }
+    /* --- Named destructuring from block: [def {x, y} value] (keyword form) --- */
+    if (argc == 2 && args[0]->type == AST_BLOCK) {
+      AstNode* blk = args[0];
+      uint32_t d_count = blk->data.block.count;
+      if (d_count == 0 || d_count > 255) {
+        compiler__error(c, line, col, "invalid destructuring pattern");
+        return;
+      }
+      const char* d_names_arr[256];
+      uint32_t d_name_lens_arr[256];
+      int valid = 1;
+      for (uint32_t i = 0; i < d_count; i++) {
+        AstNode* cmd = blk->data.block.commands[i];
+        if (cmd->type == AST_COMMAND && cmd->data.command.arg_count == 0 &&
+            cmd->data.command.head->type == AST_LIT_STRING) {
+          d_names_arr[i] = cmd->data.command.head->data.lit_string.value;
+          d_name_lens_arr[i] = cmd->data.command.head->data.lit_string.length;
+        } else {
+          valid = 0; break;
+        }
+      }
+      if (valid) {
+        compiler__compile_destructure_named(
+            c, d_names_arr, d_name_lens_arr, NULL, NULL, d_count,
+            args[1], false, line, col);
+        return;
+      }
     }
 
     JaclType declared_type = TYPE_DYN;
@@ -6047,6 +6309,12 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_DESTRUCTURE_VEC: {
+      compiler__error(c, line, node->start.column,
+                      "destructuring pattern can only appear in def or mut");
+      break;
+    }
+
+    case AST_DESTRUCTURE_NAMED: {
       compiler__error(c, line, node->start.column,
                       "destructuring pattern can only appear in def or mut");
       break;

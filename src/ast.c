@@ -29,6 +29,7 @@ typedef enum {
   AST_CONTINUE,      /* continue */
   AST_RETURN,        /* return or return $value */
   AST_DESTRUCTURE_VEC, /* [a b c] positional destructuring pattern */
+  AST_DESTRUCTURE_NAMED, /* {x, y} named struct/map destructuring pattern */
   AST_ERROR          /* parse error with recovery */
 } AstNodeType;
 
@@ -72,6 +73,9 @@ struct AstNode {
     struct { const char** names; uint32_t* name_lens;
              const char** types; uint32_t* type_lens;
              uint32_t count; }                                    destructure_vec;
+    struct { const char** names; uint32_t* name_lens;
+             const char** types; uint32_t* type_lens;
+             uint32_t count; }                                    destructure_named;
     struct { const char* message; }                                error;
   } data;
 };
@@ -429,6 +433,22 @@ static void ast__pp_node(AstStrBuf* b, AstNode* node) {
                      node->data.destructure_vec.name_lens[i]);
       }
       ast__buf_char(b, ']');
+      break;
+    }
+    case AST_DESTRUCTURE_NAMED: {
+      ast__buf_char(b, '{');
+      for (uint32_t i = 0; i < node->data.destructure_named.count; i++) {
+        if (i > 0) ast__buf_cstr(b, ", ");
+        if (node->data.destructure_named.types &&
+            node->data.destructure_named.types[i]) {
+          ast__buf_str(b, node->data.destructure_named.types[i],
+                       node->data.destructure_named.type_lens[i]);
+          ast__buf_char(b, ' ');
+        }
+        ast__buf_str(b, node->data.destructure_named.names[i],
+                     node->data.destructure_named.name_lens[i]);
+      }
+      ast__buf_char(b, '}');
       break;
     }
     case AST_ERROR: {

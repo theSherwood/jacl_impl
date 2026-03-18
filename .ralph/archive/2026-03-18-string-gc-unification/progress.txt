@@ -1,86 +1,31 @@
 # Ralph Progress Log
-Started: Tue Mar 17 18:47:43 UTC 2026
+Started: 2026-03-18
 
 ## Codebase Patterns
-- platform.h uses three-way conditional compilation: `#ifdef __EMSCRIPTEN__` / `#elif defined(_WIN32)` / `#else` (POSIX)
-- Tests use `test_helpers.h` with ASSERT macros and return 1 for pass, 0 for fail
-- build.sh entries with threads need explicit `-lpthread` flag in the extra_cflags field
-- Thread tests use `THREAD_CREATE/THREAD_JOIN` from platform.h, `SLEEP_MILLISECONDS` for timing
-- GC template defines follow pattern: `#define FOO_GC_ALLOC(t, sz) gc_alloc(gc__current_heap, (t), (sz))`
-- sum_tree.h now uses GC allocation via STREE_GC_ALLOC macros (RC fully removed); rope.h ref/unref are no-ops
-- Rope functions need a GC heap via gc__current_heap — always set up VM before rope operations
-- Cross-thread GC pinning uses vm->gc_handle_slots array (scanned during mark phase)
+- Unity build: jacl.c includes all .c files in order (value.c -> gc.c -> rope.h -> string.c -> collections.c -> compiler.c -> vm.c -> gc_collect.c)
+- Tests use test_helpers.h with ASSERT macros, return 1 for pass / 0 for fail
+- E2e tests use jacl_run() with PrintCapture to verify compiled+executed JACL source output
+- E2e embedding tests use jacl_vm_new() / jacl_eval() / jacl_vm_free() API
+- build.sh compiles all tests in parallel, runs sequentially, reports summary
+- TOKEN_DOTDOT already lexed in lexer.c but not compiled
+- Existing CPS transform handles await/spawn/parallel/race — yield follows same pattern
+- GC object types in gc.c enum, value tags in value.c, type enum in compiler.c
+- Struct types tracked in StructTypeRegistry with field names, types, offsets
+- Operator desugaring (= : ::) converts to def/mut/set AST nodes in parser
+- Named destructuring ({x,y} = expr) uses same desugaring: parser detects {pattern} = or : and creates AST_DESTRUCTURE_NAMED → [def/mut pattern expr]
+- Keyword form [def {x, y} expr] parses braces as AST_BLOCK; compiler detects simple block-of-words and converts to named destructuring
+- For struct types known at compile time: compiler uses OP_STRUCT_GET per field (offset-based). For dyn/map: uses OP_DESTRUCTURE_NAMED opcode (runtime field lookup with error on missing keys)
+- jacl_run() returns VM_RUNTIME_ERROR for both parse errors and compile errors — no separate compile error enum
 
 ---
 
-## 2026-03-17 - US-001
-- Implemented platform_rwlock_t with three backends: POSIX (pthread_rwlock_t), Windows (SRWLOCK), Emscripten (no-op int stub)
-- Provided macros: RWLOCK_INIT, RWLOCK_DESTROY, RWLOCK_RDLOCK, RWLOCK_RDUNLOCK, RWLOCK_WRLOCK, RWLOCK_WRUNLOCK
-- Files changed: lib/platform/platform.h, lib/platform/test_rwlock.c, build.sh
+## 2026-03-18 - US-002
+- Implemented named struct/map destructuring: `def {x, y} $point` and `{x, y} = $point`
+- Files changed: src/ast.c, src/parser.c, src/compiler.c, src/bytecode.c, src/vm.c, test/test_bytecode.c, test/test_destructure_named.c (new), build.sh
 - **Learnings for future iterations:**
-  - POSIX rwlock uses pthread_rwlock_unlock for both read and write unlock (same function)
-  - Windows SRWLOCK has no destroy function (no-op)
-  - Test binaries can't run from /tmp due to noexec mount — compile into workspace dir
-  - The test_helpers.h has unused static functions that generate warnings — these are expected
----
-
-## 2026-03-17 - US-002
-- Added OBJ_ROPE_LEAF (19) and OBJ_ROPE_INTERNAL (20) to GCObjType enum in gc.c
-- Added STREE_GC_ALLOC, STREE_GC_OBJ_INTERNAL, STREE_GC_OBJ_LEAF defines in collections.c (after HAMT block)
-- Files changed: src/gc.c, src/collections.c
-- **Learnings for future iterations:**
-  - rope.h is included in jacl.c (line 29) BEFORE gc.c (line 33) and collections.c (line 39) — the STREE_GC_ALLOC defines are not visible to sum_tree.h at include time; US-003 will need to handle this (likely by moving rope.h include or restructuring)
-  - The unity build order in jacl.c is: value.c → gc.c → rope.h → string.c → collections.c → compiler.c → vm.c → gc_collect.c (rope.h moved after gc.c)
----
-
-## 2026-03-18 - US-003
-- RC-to-GC conversion in sum_tree.h was already completed in prior heap-strings iteration
-- Cleaned up dead ST_NODE_DESTROY/ST_ROOT_DESTROY macro definitions (functions already removed)
-- Updated stale RC comment to reference GC
-- Files changed: lib/sum_tree/sum_tree.h
-- **Learnings for future iterations:**
-  - The heap-strings archive (2026-03-17) did the bulk of the RC removal work; this PRD's US-003 was a verification/cleanup pass
-  - jacl.c include order already puts gc.c before rope.h, so STREE_GC_ALLOC defines are visible
-  - All 65 tests pass after cleanup
----
-
-## 2026-03-18 - US-004
-- RC removal from rope.h was already completed in prior heap-strings iteration
-- rope_ref() and rope_unref() are already no-ops, no rope_st_ref/rope_st_unref calls remain, no rc.h references
-- No code changes needed — all acceptance criteria already met
-- **Learnings for future iterations:**
-  - rope_ref() is used widely as a "return this rope" pattern in rope operations (concat, slice, etc.) — it's effectively an identity function now
----
-
-## 2026-03-18 - US-003/US-004/US-005/US-006/US-007/US-008/US-009/US-010
-- All stories were already implemented in the prior heap-strings iteration
-- Verified all acceptance criteria met, all 65 tests pass
-- Marked all as passing in prd.json
----
-
-## 2026-03-18 - US-011
-- Implemented test_rope_slice_grapheme.c with 4 tests covering grapheme safety:
-  1. Rope with ZWJ emoji, flags, combining marks — correct grapheme count
-  2. Single-grapheme slices are always complete (non-continuation first byte)
-  3. Concatenating all grapheme slices reproduces original content
-  4. Byte-offset slicing rejects mid-codepoint offsets
-- Files changed: test/test_rope_slice_grapheme.c, build.sh
-- **Learnings for future iterations:**
-  - Rope functions (rope_from_str, rope_slice, etc.) need a GC heap via gc__current_heap — use VM setup
-  - ZWJ family emoji is 18 bytes per grapheme — useful for building >128 byte ropes with few graphemes
-  - rope_slice validates codepoint boundaries and returns empty on mid-codepoint offsets
----
-
-## 2026-03-18 - US-012
-- Implemented test_cross_thread_string.c with 4 tests:
-  1. Inline string: create in thread A, read in thread B (NaN-boxed, inherently safe)
-  2. Interned string: pin with gc_handle_slots, pass to thread B, GC cycle between, verify
-  3. Rope string: pin with handle, pass to thread B, GC cycle, verify via cursor
-  4. Two threads create ropes, main thread concatenates after GC — correct result
-- Files changed: test/test_cross_thread_string.c, build.sh
-- **Learnings for future iterations:**
-  - GC handle slots are wired via vm->gc_handle_slots/gc_handle_count — scanned during mark phase
-  - For cross-thread tests, creator threads must keep their ThreadHeap alive until receiver is done (GC walks heap blocks)
-  - volatile int + SLEEP_MILLISECONDS provides a simple spin-wait for thread coordination
-  - All 67 tests pass after adding this test
+  - {pattern} in keyword form [def {x,y} expr] is parsed as AST_BLOCK by the expression parser; the compiler converts it by checking block commands are bare words
+  - OP_DESTRUCTURE_NAMED handles both struct and map at runtime: struct uses type registry field lookup, map uses HAMT key lookup with error on missing keys
+  - Compile-time struct field validation catches missing fields early when struct type is known
+  - For mutable destructuring in local scope, each field is extracted one at a time (OP_DESTRUCTURE_NAMED count=1) to allow OP_MAKE_CELL wrapping
+  - For global scope, all fields are extracted at once then defined in reverse stack order (matching vec destructuring pattern)
 ---
