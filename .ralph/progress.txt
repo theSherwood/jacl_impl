@@ -49,3 +49,36 @@ Started: Tue Mar 17 18:47:43 UTC 2026
 - **Learnings for future iterations:**
   - rope_ref() is used widely as a "return this rope" pattern in rope operations (concat, slice, etc.) — it's effectively an identity function now
 ---
+
+## 2026-03-18 - US-003/US-004/US-005/US-006/US-007/US-008/US-009/US-010
+- All stories were already implemented in the prior heap-strings iteration
+- Verified all acceptance criteria met, all 65 tests pass
+- Marked all as passing in prd.json
+---
+
+## 2026-03-18 - US-011
+- Implemented test_rope_slice_grapheme.c with 4 tests covering grapheme safety:
+  1. Rope with ZWJ emoji, flags, combining marks — correct grapheme count
+  2. Single-grapheme slices are always complete (non-continuation first byte)
+  3. Concatenating all grapheme slices reproduces original content
+  4. Byte-offset slicing rejects mid-codepoint offsets
+- Files changed: test/test_rope_slice_grapheme.c, build.sh
+- **Learnings for future iterations:**
+  - Rope functions (rope_from_str, rope_slice, etc.) need a GC heap via gc__current_heap — use VM setup
+  - ZWJ family emoji is 18 bytes per grapheme — useful for building >128 byte ropes with few graphemes
+  - rope_slice validates codepoint boundaries and returns empty on mid-codepoint offsets
+---
+
+## 2026-03-18 - US-012
+- Implemented test_cross_thread_string.c with 4 tests:
+  1. Inline string: create in thread A, read in thread B (NaN-boxed, inherently safe)
+  2. Interned string: pin with gc_handle_slots, pass to thread B, GC cycle between, verify
+  3. Rope string: pin with handle, pass to thread B, GC cycle, verify via cursor
+  4. Two threads create ropes, main thread concatenates after GC — correct result
+- Files changed: test/test_cross_thread_string.c, build.sh
+- **Learnings for future iterations:**
+  - GC handle slots are wired via vm->gc_handle_slots/gc_handle_count — scanned during mark phase
+  - For cross-thread tests, creator threads must keep their ThreadHeap alive until receiver is done (GC walks heap blocks)
+  - volatile int + SLEEP_MILLISECONDS provides a simple spin-wait for thread coordination
+  - All 67 tests pass after adding this test
+---
