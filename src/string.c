@@ -136,7 +136,7 @@ static JaclVal jacl_intern(ThreadHeap* heap, JaclInternTable* table,
   RWLOCK_RDLOCK(table->lock);
   JaclHeapString** slot = intern__find_slot(
       table->entries, table->cap, data, length, hash);
-  if (*slot != NULL) {
+  if (*slot != NULL && *slot != INTERN_TOMBSTONE) {
     JaclVal result = jacl_string_ptr(*slot);
     RWLOCK_RDUNLOCK(table->lock);
     return result;
@@ -148,7 +148,7 @@ static JaclVal jacl_intern(ThreadHeap* heap, JaclInternTable* table,
 
   /* Re-probe under write lock — another thread may have inserted */
   slot = intern__find_slot(table->entries, table->cap, data, length, hash);
-  if (*slot != NULL) {
+  if (*slot != NULL && *slot != INTERN_TOMBSTONE) {
     JaclVal result = jacl_string_ptr(*slot);
     RWLOCK_WRUNLOCK(table->lock);
     return result;

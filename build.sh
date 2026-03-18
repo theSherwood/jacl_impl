@@ -99,6 +99,7 @@ TESTS=(
     "test/test_compiler_vm_integration.c|compiler_vm_integration|"
     "test/test_heap_strings.c|heap_strings|"
     "test/test_gc_rope_tracing.c|gc_rope_tracing|"
+    "test/test_intern_eviction.c|intern_eviction|"
 )
 
 # Filter tests if --lib flag is set
