@@ -7,7 +7,7 @@ Started: Tue Mar 17 18:47:43 UTC 2026
 - build.sh entries with threads need explicit `-lpthread` flag in the extra_cflags field
 - Thread tests use `THREAD_CREATE/THREAD_JOIN` from platform.h, `SLEEP_MILLISECONDS` for timing
 - GC template defines follow pattern: `#define FOO_GC_ALLOC(t, sz) gc_alloc(gc__current_heap, (t), (sz))`
-- RC-based data structures (sum_tree, rope) use template includes of `../rc/rc.h` with RC_NAME and RC_ALLOCATOR defines
+- sum_tree.h now uses GC allocation via STREE_GC_ALLOC macros (RC fully removed); rope.h ref/unref are no-ops
 
 ---
 
@@ -28,5 +28,24 @@ Started: Tue Mar 17 18:47:43 UTC 2026
 - Files changed: src/gc.c, src/collections.c
 - **Learnings for future iterations:**
   - rope.h is included in jacl.c (line 29) BEFORE gc.c (line 33) and collections.c (line 39) — the STREE_GC_ALLOC defines are not visible to sum_tree.h at include time; US-003 will need to handle this (likely by moving rope.h include or restructuring)
-  - The unity build order in jacl.c is: rope.h → value.c → gc.c → string.c → collections.c → compiler.c → vm.c → gc_collect.c
+  - The unity build order in jacl.c is: value.c → gc.c → rope.h → string.c → collections.c → compiler.c → vm.c → gc_collect.c (rope.h moved after gc.c)
+---
+
+## 2026-03-18 - US-003
+- RC-to-GC conversion in sum_tree.h was already completed in prior heap-strings iteration
+- Cleaned up dead ST_NODE_DESTROY/ST_ROOT_DESTROY macro definitions (functions already removed)
+- Updated stale RC comment to reference GC
+- Files changed: lib/sum_tree/sum_tree.h
+- **Learnings for future iterations:**
+  - The heap-strings archive (2026-03-17) did the bulk of the RC removal work; this PRD's US-003 was a verification/cleanup pass
+  - jacl.c include order already puts gc.c before rope.h, so STREE_GC_ALLOC defines are visible
+  - All 65 tests pass after cleanup
+---
+
+## 2026-03-18 - US-004
+- RC removal from rope.h was already completed in prior heap-strings iteration
+- rope_ref() and rope_unref() are already no-ops, no rope_st_ref/rope_st_unref calls remain, no rc.h references
+- No code changes needed — all acceptance criteria already met
+- **Learnings for future iterations:**
+  - rope_ref() is used widely as a "return this rope" pattern in rope operations (concat, slice, etc.) — it's effectively an identity function now
 ---

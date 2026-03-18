@@ -101,6 +101,7 @@ TESTS=(
     "test/test_gc_rope_tracing.c|gc_rope_tracing|"
     "test/test_intern_eviction.c|intern_eviction|"
     "test/test_concurrent_intern.c|concurrent_intern|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
+    "test/test_rope_slice_grapheme.c|rope_slice_grapheme|"
 )
 
 # Filter tests if --lib flag is set

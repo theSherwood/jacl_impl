@@ -47,7 +47,7 @@
         "Compiles without warnings with -Wall -Wextra"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "This is a mechanical but wide-reaching change. Every ST_RC_REF(child) call just gets deleted — the GC's tracing keeps shared nodes alive. Every ST_RC_UNREF(node) call gets deleted — the GC sweep handles dead nodes. ST_NODE_DESTROY was the RC destructor that cascaded unref to children; with GC tracing this is unnecessary. Key sites: ST_MK_INTERNAL (line ~240 refs children), ST_FROM_ARRAY (line ~403 unrefs after parent creation), ST_SET (lines ~527, ~576), ST_SPLIT (lines ~672, ~691, ~709, ~720), ST_CONCAT (lines ~821, ~837, ~906, ~930)."
     },
     {
@@ -62,7 +62,7 @@
         "Compiles without warnings with -Wall -Wextra"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "rope_ref is at rope.h ~line 66 (calls rope_st_ref which calls ST_RC_REF on root.node). rope_unref is at ~line 78 (calls rope_st_unref). Both become no-ops. In rope operations: rope_slice (~line 470) has multiple rope_st_unref calls for split results — delete them. rope_concat (~line 161) has ref/unref around grafting — delete them. rope_from_str (~line 102) may have creation refs — delete them."
     },
     {
@@ -78,7 +78,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "gc__trace_object is in gc_collect.c ~line 97. OBJ_ROPE_STRING case currently has a comment 'rope internals are RC-managed, not GC-traced' and just breaks — change it to push rs->r.root.node. The finalization in gc__finalize_dead (~line 86) calls rope_unref(rs->r) for OBJ_ROPE_STRING — remove this since rope_unref is now a no-op and rope nodes are GC-managed. For OBJ_ROPE_INTERNAL tracing: the struct is rope_st_internal (from sum_tree.h), cast payload to that type and iterate children[0..n_children-1]. For OBJ_ROPE_LEAF: no child pointers in rope_st_leaf, just break. This story is the critical correctness gate — all existing tests must pass after this."
     },
     {
@@ -96,7 +96,7 @@
         "All existing string tests still pass"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "JaclInternTable is in src/string.c. The jacl_intern function does lookup (probe the table) and conditional insert. For the read-to-write escalation: acquire read lock, probe, if found release read lock and return. If not found, release read lock, acquire write lock, re-probe (another thread may have inserted), insert if still missing, release write lock. This avoids holding both locks. The resize path is already inside the insert path and will naturally be under the write lock."
     },
     {
@@ -115,7 +115,7 @@
         "All existing string tests still pass"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "The intern table is currently scanned as a root in gc_collect.c mark phase — find where table entries are pushed onto the mark stack and remove that. The tombstone sentinel (JaclHeapString*)1 is never a valid pointer due to alignment (GC objects are 8-byte aligned). For the linear probe: NULL means 'stop probing' in current code — with tombstones, we need: NULL = empty (stop), tombstone = deleted (continue probing), valid pointer = occupied (check match). Compaction: allocate new entries array from arena, rehash all live (non-NULL, non-tombstone) entries into it, swap, update count. Deferred compaction means gc_sweep_intern_table just marks tombstones; actual compaction triggers on next insert that sees tombstone_count > capacity/4."
     },
     {
@@ -130,7 +130,7 @@
         "All tests use existing test harness and pass"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Use the existing test framework from test/test_helpers.h. For verifying collection: before/after heap stats if available, or check that allocating new objects after GC reuses the space. For structural sharing test: create two large strings (>256 bytes each), concat them to get a rope that shares subtrees with both originals, then nil out one original and trigger GC."
     },
     {
@@ -145,7 +145,7 @@
         "All tests pass"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "To force load factor > 0.75 for eviction: intern enough strings relative to table capacity. The initial table capacity can be found in jacl_intern_table_init. To drop all references: ensure the interned JaclVal values are not stored in any GC root (not on VM stack, not in globals, not in handles)."
     },
     {
@@ -160,7 +160,7 @@
         "All tests pass"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Use THREAD_CREATE/THREAD_JOIN from lib/platform/platform.h. Each thread needs its own ThreadHeap for gc_alloc. The intern table is shared across threads (that's the point). For the GC eviction concurrency test: have one thread triggering gc_collect in a loop while others intern — the rwlock in the intern table should serialize eviction with inserts."
     },
     {
