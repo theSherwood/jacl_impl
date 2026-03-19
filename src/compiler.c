@@ -6126,6 +6126,44 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* count — count elements in stream or vector */
+  if (compiler__head_matches(head, "count", 5)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "count", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_COUNT, line);
+    c->last_expr_type = TYPE_I32;
+    return;
+  }
+
+  /* take — take first N elements from stream or vector */
+  if (compiler__head_matches(head, "take", 4)) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "take", "2 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    JaclType col_type = c->last_expr_type;
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_TAKE, line);
+    c->last_expr_type = col_type;
+    return;
+  }
+
+  /* first — get first element from stream or vector */
+  if (compiler__head_matches(head, "first", 5)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "first", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_FIRST, line);
+    c->last_expr_type = TYPE_DYN;
+    return;
+  }
+
   /* parallel — suspension point (CPS transform in US-003+, context checks now) */
   if (compiler__head_matches(head, "parallel", 8)) {
     if (argc < 2) {
