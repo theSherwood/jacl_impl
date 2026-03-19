@@ -720,7 +720,7 @@ static int test_each_type_err(void) {
   ASSERT(run_err(
     "proc p {x} { [+ $x 0] }\n"
     "[for 42 $p]",
-    "expected vector or map"));
+    "expected vector, map, or stream"));
   TEST_PASS();
 }
 
