@@ -156,6 +156,7 @@ typedef enum {
   OP_YIELD,           /* pop value + continuation; package into stream element */
   OP_STREAM_NEXT,     /* pop stream; pull next element (call next_fn or return cached) */
   OP_COLLECT,         /* pop collection; if stream, materialize to vector; if vector, identity */
+  OP_IS_STREAM_EXHAUSTED, /* pop stream, push true if exhausted, else false */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -425,6 +426,7 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_YIELD:           return "OP_YIELD";
     case OP_STREAM_NEXT:     return "OP_STREAM_NEXT";
     case OP_COLLECT:         return "OP_COLLECT";
+    case OP_IS_STREAM_EXHAUSTED: return "OP_IS_STREAM_EXHAUSTED";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";

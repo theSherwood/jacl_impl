@@ -918,10 +918,12 @@ static bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
             (len == 5 && memcmp(name, "spawn", 5) == 0)) {
           return false;
         }
-        /* Check if this is a call to a known suspending proc */
+        /* Check if this is a call to a known suspending proc.
+           Generator calls return a stream immediately — they don't suspend. */
         if (map && len <= 7) {
           JaclVal name_val = jacl_inline_string(name, len);
-          if (suspension_map_lookup(map, name_val)) return true;
+          if (suspension_map_lookup(map, name_val) &&
+              !suspension_map_is_generator(map, name_val)) return true;
         }
       }
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
@@ -4913,6 +4915,11 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
     closure->is_generator  = body_compiler.has_yield;
 
+    /* Generators return streams — override return type for type tracking */
+    if (body_compiler.has_yield && proc_return_type == TYPE_DYN) {
+      proc_return_type = TYPE_STREAM;
+    }
+
     /* Store closure in parent's constant pool */
     uint16_t closure_idx = chunk_add_constant(c->chunk, jacl_closure(closure));
 
@@ -5254,13 +5261,109 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    /* Begin scope for hidden locals (__col, __len, __idx, $it/name) */
+    /* Begin scope for hidden locals */
     compiler__begin_scope(c);
     uint32_t saved_local_count = c->local_count;
 
     /* Compile collection → local __col */
     compiler__compile_node(c, args[0]);
+    JaclType col_type = c->last_expr_type;
     compiler__add_local(c, jacl_inline_string("__col", 5), line, col);
+
+    uint8_t col_slot = (uint8_t)(saved_local_count);
+
+    if (col_type == TYPE_STREAM) {
+      /* ====== Stream-specific inlined for loop ======
+         Hidden locals: __col (stream), elem
+         Loop: STREAM_NEXT → check exhausted → bind → body → LOOP */
+
+      /* Element placeholder → local $it/name (starts as nil) */
+      compiler__emit_byte(c, OP_NIL, line);
+      JaclVal bind_val = jacl_inline_string(bind_name, bind_name_len);
+      compiler__add_local(c, bind_val, line, col);
+      uint8_t elem_slot = (uint8_t)(saved_local_count + 1);
+
+      /* Push loop context */
+      LoopContext* lctx = &c->loop_stack[c->loop_depth++];
+      lctx->break_patch_count = 0;
+      lctx->continue_patch_count = 0;
+      lctx->local_count_at_loop = saved_local_count;
+      lctx->is_for_loop = true;
+
+      /* --- Loop start --- */
+      uint32_t loop_start = c->chunk->code_count;
+      lctx->loop_start = loop_start;
+
+      /* Pull next element: push stream, OP_STREAM_NEXT */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, col_slot, line);
+      compiler__emit_byte(c, OP_STREAM_NEXT, line);
+
+      /* Check exhaustion: push stream, OP_IS_STREAM_EXHAUSTED */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, col_slot, line);
+      compiler__emit_byte(c, OP_IS_STREAM_EXHAUSTED, line);
+
+      /* If NOT exhausted, jump to body */
+      uint32_t not_done_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+
+      /* Exhausted path: pop nil from STREAM_NEXT, jump to normal exit */
+      compiler__emit_byte(c, OP_POP, line);
+      uint32_t exit_jump = compiler__emit_jump(c, OP_JUMP, line);
+
+      /* --- Body start (not exhausted) --- */
+      compiler__patch_jump(c, not_done_jump);
+
+      /* Bind element: SET_LOCAL + POP */
+      compiler__emit_byte(c, OP_SET_LOCAL, line);
+      compiler__emit_byte(c, elem_slot, line);
+      compiler__emit_byte(c, OP_POP, line);
+
+      /* Compile body statements inline */
+      uint32_t body_count = body_block->data.block.count;
+      for (uint32_t i = 0; i < body_count; i++) {
+        compiler__compile_node(c, body_block->data.block.commands[i]);
+        compiler__emit_check_error(c, line);
+      }
+
+      /* --- Continue target --- */
+      for (uint32_t i = 0; i < lctx->continue_patch_count; i++) {
+        compiler__patch_jump(c, lctx->continue_patches[i]);
+      }
+
+      /* Loop back to start */
+      compiler__emit_byte(c, OP_LOOP, line);
+      uint32_t back_offset = c->chunk->code_count - loop_start + 2;
+      compiler__emit_byte(c, (uint8_t)((back_offset >> 8) & 0xFF), line);
+      compiler__emit_byte(c, (uint8_t)(back_offset & 0xFF), line);
+
+      /* --- Normal exit --- */
+      compiler__patch_jump(c, exit_jump);
+
+      /* End scope: pop hidden locals (__col, elem) */
+      compiler__end_scope(c, line);
+
+      /* Normal exit: push nil */
+      compiler__emit_byte(c, OP_NIL, line);
+
+      /* Jump over break landing zone */
+      uint32_t skip_break = compiler__emit_jump(c, OP_JUMP, line);
+
+      /* Break landing zone */
+      for (uint32_t i = 0; i < lctx->break_patch_count; i++) {
+        compiler__patch_jump(c, lctx->break_patches[i]);
+      }
+
+      /* Convergence */
+      compiler__patch_jump(c, skip_break);
+
+      /* Pop loop context */
+      c->loop_depth--;
+      return;
+    }
+
+    /* ====== Vector-based inlined for loop (original path) ======
+       Hidden locals: __col, __len, __idx, $it/name */
 
     /* Compute length → local __len */
     compiler__emit_byte(c, OP_GET_LOCAL, line);
@@ -5277,7 +5380,6 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclVal bind_val = jacl_inline_string(bind_name, bind_name_len);
     compiler__add_local(c, bind_val, line, col);
 
-    uint8_t col_slot = (uint8_t)(saved_local_count);
     uint8_t len_slot = (uint8_t)(saved_local_count + 1);
     uint8_t idx_slot = (uint8_t)(saved_local_count + 2);
     uint8_t elem_slot = (uint8_t)(saved_local_count + 3);

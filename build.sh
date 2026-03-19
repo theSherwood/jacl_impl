@@ -113,6 +113,7 @@ TESTS=(
     "test/test_stream_type.c|stream_type|"
     "test/test_yield.c|yield|"
     "test/test_collect.c|collect|"
+    "test/test_stream_for.c|stream_for|"
 )
 
 # Filter tests if --lib flag is set
