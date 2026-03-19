@@ -244,7 +244,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "Current for-loop compilation (compiler.c lines 3888-4013) handles collection forms via iteration opcodes. Stream path replaces index-based iteration with pull-based loop: (1) OP_STREAM_NEXT, (2) check exhausted, (3) bind element, execute body, jump to (1). For break: LOOP_EXIT jump skips to after loop — stream remains partially consumed. Compiler can emit different bytecode for TYPE_STREAM vs TYPE_VEC, or runtime-dispatch opcode for TYPE_DYN."
     },
     {

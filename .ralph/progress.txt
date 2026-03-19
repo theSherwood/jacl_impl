@@ -11,6 +11,7 @@ Started: Thu Mar 19 08:54:03 UTC 2026
 - Build system (`build.sh`) compiles all tests in parallel, runs sequentially. Add new test entries as `"test/test_foo.c|foo|"`.
 - New builtins follow the pattern: add OP_X to bytecode.c enum + name table, add `compiler__head_matches` check in `compiler__compile_command`, add `case OP_X:` in `vm__run`. Update test/test_bytecode.c opcode enum test when adding new opcodes before OP_HALT.
 - OP_COLLECT implements the stream-to-vector protocol by inlining the OP_STREAM_NEXT logic in a loop: save caller context, invoke generator/continuation, handle VM_YIELD/VM_OK/error, restore context, repeat until EXHAUSTED.
+- Stream-aware for loops: compiler emits TYPE_STREAM-specific path using OP_STREAM_NEXT + OP_IS_STREAM_EXHAUSTED in a pull loop. HOF/lambda callback forms (`for $stream $callback` and `for $stream [\ ...]`) dispatch through OP_EACH which already handles streams in the VM.
 
 ---
 
@@ -47,4 +48,20 @@ Started: Thu Mar 19 08:54:03 UTC 2026
   - Stream consumption loop: inline the OP_STREAM_NEXT save/restore/call pattern rather than trying to emit bytecode for the loop. The key is preserving caller_stack_top/frame_count/ip/chunk across each iteration.
   - `if false { [yield x] }` in a generator still triggers yield: the CPS transform sees the yield during suspension analysis regardless of the condition, so the generator flag is set and `if false` may not prevent execution in CPS mode. Use loop-based generators with 0 iterations for "empty stream" tests instead.
   - When adding opcodes before OP_HALT, update test/test_bytecode.c's opcode_enum test which hardcodes expected numeric values.
+---
+
+## 2026-03-19 - US-011
+- Implemented stream-aware for loop: `for` iterates over streams lazily, one element at a time
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_stream_for.c, build.sh
+- **What was implemented:**
+  - Compiler emits TYPE_STREAM-specific path: OP_STREAM_NEXT + OP_IS_STREAM_EXHAUSTED pull loop with hidden __col + elem locals
+  - break mid-stream stops consumption (stream not exhausted), continue jumps to next pull
+  - return from enclosing proc stops stream consumption
+  - Implicit $it binding, explicit named binding, HOF callback, and lambda forms all work
+  - OP_EACH in VM already handles stream iteration for HOF/lambda callback forms
+  - 11 e2e tests covering all forms and control flow
+- **Learnings for future iterations:**
+  - Stream for-loop uses only 2 hidden locals (__col, elem) vs 4 for vector (__col, __len, __idx, elem) — no index needed since OP_STREAM_NEXT is pull-based
+  - HOF/lambda forms (`for $stream $callback`, `for $stream [\ ...]`) delegate to OP_EACH which already dispatches on stream vs vector type in the VM
+  - OP_IS_STREAM_EXHAUSTED checks stream->state after OP_STREAM_NEXT — must re-fetch __col since stream_next consumes from the stream object
 ---
