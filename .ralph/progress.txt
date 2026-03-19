@@ -1,148 +1,24 @@
 # Ralph Progress Log
-Started: Wed Mar 18 17:37:32 UTC 2026
+Started: Thu Mar 19 08:54:03 UTC 2026
 
 ## Codebase Patterns
-- Parser desugaring: `name = val` → `[def name val]`, `name : val` → `[mut name val]`, `name :: val` → `[set name val]`. Operator forms handled in `parser__parse_bare_command()`.
-- New opcodes: add to enum in bytecode.c BEFORE OP_HALT, add name in `bytecode__opcode_name()`, add VM handler in vm.c dispatch switch, update test_bytecode.c enum value assertions.
-- Compiler builtins: handled in `compiler__compile_command()` via `compiler__head_matches(head, "name", len)` pattern.
-- AST_COMMAND for patterns: when `def [a b c] expr` is written in keyword form, `[a b c]` parses as AST_COMMAND with head=first-element, args=remaining-elements. Compiler detects and converts.
-- Tests: e2e tests use `jacl_run()` with PrintCapture helper. Pattern: `run_capture(src, &cap)` returns VMResult, check cap.buf for output.
-- Locals are stack positions: `compiler__add_local()` just records metadata, the value must already be on the stack at the right position.
-- Mut locals use cells: OP_MAKE_CELL wraps top-of-stack, creating a mutable reference. Access via OP_GET_CELL_LOCAL/OP_SET_CELL_LOCAL.
-- Globals (scope_depth==0): use OP_DEF_GLOBAL with name index constant. OP_DEF_GLOBAL pops value, pushes nil.
-- OP_DESTRUCTURE_VEC encoding: `count (uint8), skip_mask (uint8)`. skip_mask bit i = wildcard at position i (not pushed).
-- OP_DESTRUCTURE_VEC_REST encoding: `count (uint8)`. Pushes N positional elements + 1 rest vector.
-- OP_DESTRUCTURE_NAMED_REST encoding: `count (uint8), N x uint16_t const_idx`. Pops struct/map, pushes N explicit fields + 1 rest map.
-- Compile errors return VM_RUNTIME_ERROR from jacl_run() — no separate VM_COMPILE_ERROR value exists.
-- Vectors print as `[vec 1 2 3]` (with `vec` prefix); empty vector prints as `[vec]`.
-- Map iteration API: `jacl_map_iter_init()`, `jacl_map_next_leaf()`, `jacl_map_key_from_leaf()`, `jacl_map_value_from_leaf()`.
-- Keyword form `[def [a b c] expr]` parses inner `[a b c]` as AST_COMMAND. Rest pattern `..name` in keyword form is NOT supported (only operator form `[a ..rest] = expr` works for rest patterns).
-- Spread-all `{..}` is a compiler-driven feature: parser sets `spread_all` flag on AST_DESTRUCTURE_NAMED, compiler expands field list from StructTypeRegistry. Requires known struct type (compile error on dyn).
-- `vm__struct_read_field` needs `&vm->heap` (not NULL) in OP_DESTRUCTURE_NAMED/REST handlers so i64/u64/f64 fields produce proper boxed JaclVal for globals/dyn contexts.
-- Global scope `dyn d = $p` still infers struct type (effective_type from RHS). To test with true dyn, use a proc with `dyn` parameter.
+- Unity build: `src/jacl.c` includes all source files. Tests include `../src/jacl.c` directly. Compile tests as single translation units (e.g., `gcc test/test_foo.c -o test_foo -lm`), never pass individual .c source files alongside.
+- Mutable variables (`mut`) use heap-allocated `JaclMutableRef` cells. The stack holds the cell pointer, mutations update the cell's value. This means mutations are visible across yields without needing special handling.
+- Generator/yield uses coroutine-style stack save/restore, NOT CPS. The `is_generator` flag on closures triggers stream creation at call time. `OP_STREAM_NEXT` manages the PENDING→CONSUMED→EXHAUSTED state machine.
+- Stream state is saved in `JaclStream` struct: up to 32 stack slots, 8 call frames, and 8 deferred arguments. GC traces all saved state.
+- While loop bodies need `compiler__begin_scope`/`compiler__end_scope` to properly clean up `def` locals each iteration (important for generators that yield inside loops).
+- Some test suites (compiler, heap_strings, m4, m5, jacl_harness) time out under 10s but pass given more time. Use longer timeouts or skip these in quick validation.
+- Build system (`build.sh`) compiles all tests in parallel, runs sequentially. Add new test entries as `"test/test_foo.c|foo|"`.
 
 ---
 
-## 2026-03-18 - US-001
-- Implemented positional vector destructuring: `def [a b c] $v` and `[a b c] = $v`
-- Files changed:
-  - src/ast.c: Added AST_DESTRUCTURE_VEC node type with names/types/count data, pretty-print support
-  - src/bytecode.c: Added OP_DESTRUCTURE_VEC opcode (pops vec, validates type+length, pushes N elements)
-  - src/parser.c: Added lookahead detection for `[...] = expr` form, dedicated destructuring pattern parser with comma/type support
-  - src/compiler.c: Added `compiler__compile_destructure_vec()` helper, destructuring branches in both def and mut paths (handles AST_DESTRUCTURE_VEC and AST_COMMAND patterns)
-  - src/vm.c: Added OP_DESTRUCTURE_VEC handler with runtime type/length checks
-  - test/test_destructure_vec.c: 11 e2e tests (basic operator/keyword, expr RHS, nested scope, mut, length mismatch error, non-vector error, global, single, strings, typed)
-  - test/test_bytecode.c: Updated opcode enum value assertions
-  - build.sh: Added test to runner
+## 2026-03-19 - US-009
+- Implemented OP_YIELD opcode and coroutine-based stream creation
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, src/gc.c, src/gc_collect.c, src/runtime.c, src/embed.c, test/test_yield.c, test/test_bytecode.c, build.sh
 - **Learnings for future iterations:**
-  - Mut destructuring for locals needs special handling: can't use OP_DESTRUCTURE_VEC directly because each element needs OP_MAKE_CELL wrapping. Solution: store vec as temp local (empty name), extract elements individually with OP_GET_LOCAL + OP_VEC_GET + OP_MAKE_CELL.
-  - Global destructuring processes elements in reverse order (top-of-stack first), with OP_POP to discard intermediate nils from OP_DEF_GLOBAL.
-  - Typed destructuring in operator form (`[i64 a, i64 b] = $v`) requires dedicated parser since commas aren't handled in bracket command parsing.
-  - For keyword form (`def [a b c] $v`), the pattern parses as AST_COMMAND — compiler detects and converts by extracting names from head + args.
----
-
-## 2026-03-18 - US-002
-- Implemented named struct/map destructuring (committed in previous iteration, PRD updated here)
----
-
-## 2026-03-18 - US-003
-- Implemented wildcard `_` pattern in destructuring
-- Files changed:
-  - src/bytecode.c: Updated OP_DESTRUCTURE_VEC comment to document skip_mask operand
-  - src/vm.c: OP_DESTRUCTURE_VEC now reads uint8_t skip_mask after count; skips pushing for masked bit positions
-  - src/compiler.c: compiler__compile_destructure_vec computes skip_mask from `_` names, skips add_local/extraction for wildcards in all paths (def/mut/global). compiler__compile_destructure_named rejects `_` with compile error.
-  - test/test_destructure_wildcard.c: 10 e2e tests (basic, keyword, multiple, at-end, $_-reference error, named-error, mut, global, length-mismatch, all-wildcards)
-  - build.sh: Added test to runner
-- **Learnings for future iterations:**
-  - OP_DESTRUCTURE_VEC format is now: `count, skip_mask`. skip_mask is a uint8_t bitmask (supports up to 8 positions). Bit i set = position i is wildcard (not pushed to stack).
-  - Compile errors from jacl_run() return VM_RUNTIME_ERROR (no separate VM_COMPILE_ERROR enum value).
-  - For global scope wildcards with the reverse-processing loop, need to track first_non_wildcard flag separately since the loop skips wildcards and the old `i > 0` check for OP_POP doesn't work.
----
-
-## 2026-03-18 - US-004
-- Implemented rest patterns `..name` in both vector and named destructuring
-- Files changed:
-  - src/ast.c: Added rest_name/rest_name_len fields to both destructure_vec and destructure_named data, pretty-print support for `..rest`
-  - src/parser.c: Added `..name` parsing in both vec and named destructuring patterns, with validation (not-last, no-duplicate, requires-name). Updated named destructuring lookahead to allow TOKEN_DOTDOT.
-  - src/bytecode.c: Added OP_DESTRUCTURE_VEC_REST and OP_DESTRUCTURE_NAMED_REST opcodes
-  - src/compiler.c: Updated compiler__compile_destructure_vec with rest_name params and full rest support (def/mut/global). Updated compiler__compile_destructure_named with rest_name params and rest support using OP_DESTRUCTURE_NAMED_REST. Fixed all call sites (4 for vec, 4 for named) to pass rest params.
-  - src/vm.c: Added OP_DESTRUCTURE_VEC_REST handler (pushes N elements + rest vector). Added OP_DESTRUCTURE_NAMED_REST handler (pushes N fields + rest map, handles both structs and maps).
-  - test/test_destructure_rest.c: 14 e2e tests (vec basic, two-pos, empty, many, mut, not-last error, duplicate error, unnamed error, named struct rest, named map rest, named mut, excludes-check, vec global, named global)
-  - test/test_bytecode.c: Updated opcode enum assertions
-  - build.sh: Added test to runner
-- **Learnings for future iterations:**
-  - OP_DESTRUCTURE_VEC_REST format: `uint8_t count`. Pushes count positional elements + 1 rest vector. Validates vec_len >= count.
-  - OP_DESTRUCTURE_NAMED_REST format: `uint8_t count, count x uint16_t const_idx`. Pops struct/map, pushes N explicit field values + rest map (all entries not in explicit list). Works for both struct (field iteration) and map (iterator-based).
-  - For named rest in local scope, explicit fields are extracted first (struct with OP_STRUCT_GET or map with OP_DESTRUCTURE_NAMED), then rest is collected with OP_DESTRUCTURE_NAMED_REST from the temp-local source.
-  - For named rest in global scope, a single OP_DESTRUCTURE_NAMED_REST produces all values + rest map, processed in reverse order same as vector rest global pattern.
-  - Map key comparison for rest exclusion: use jacl_string_data + memcmp since jacl_equal is not available from vm.c context.
-  - Keyword form `[def [a b ..rest] expr]` does NOT work — rest pattern only works with operator form (`[a b ..rest] = expr`) because keyword form inner brackets parse as AST_COMMAND which doesn't understand TOKEN_DOTDOT.
----
-
-## 2026-03-18 - US-005
-- Implemented spread-all destructuring: `{..} = $struct` imports all fields, `{x, ..} = $struct` imports explicit + remaining
-- Files changed:
-  - src/ast.c: Added `spread_all` flag to destructure_named data, updated pretty-print
-  - src/parser.c: Handle `..` without following word in named destructuring as spread-all (vs `..name` for rest)
-  - src/compiler.c: Added `spread_all` param to `compiler__compile_destructure_named`, expansion logic from StructTypeRegistry, same-scope shadowing check, updated all 4 call sites
-  - src/vm.c: Fixed pre-existing bug: OP_DESTRUCTURE_NAMED and OP_DESTRUCTURE_NAMED_REST now pass `&vm->heap` to `vm__struct_read_field` (was NULL, breaking i64/u64/f64 fields)
-  - test/test_destructure_spread_all.c: 10 e2e tests (basic, explicit-plus, different struct, no-dup, dyn error, shadow error, global, explicit-global, nested, single-field)
-  - build.sh: Added test to runner
-- **Learnings for future iterations:**
-  - Spread-all is entirely compiler-driven: parser sets a flag, compiler expands field names from StructTypeRegistry before reusing the normal extraction path.
-  - OP_DESTRUCTURE_NAMED/REST had a pre-existing bug: passing NULL for heap to vm__struct_read_field caused i64/u64/f64 struct fields to produce raw bits instead of boxed JaclVal. Fixed by passing &vm->heap.
-  - `dyn d = $p` at global scope doesn't actually produce TYPE_DYN: the compiler's effective_type logic infers struct type from RHS. To test true dyn, use a proc with `dyn` parameter type.
-  - When adding fields to the compiler's arrays from StructTypeRegistry, the field name pointers are valid for the function lifetime (they point into the registry's defs array).
----
-
-## 2026-03-18 - US-006
-- Implemented splat/spread in juxtaposition: `[+ ..$nums]`, `[proc_name ..$args]`
-- Files changed:
-  - src/ast.c: Added AST_SPREAD node type with `spread.expr` data, pretty-print support
-  - src/parser.c: Added TOKEN_DOTDOT detection in `parser__parse_command()` arg loop to create AST_SPREAD nodes
-  - src/bytecode.c: Added OP_SPREAD, OP_CALL_SPREAD, OP_FOLD_SPREAD opcodes
-  - src/compiler.c: Added early spread detection in `compiler__compile_command()` with two paths: OP_FOLD_SPREAD for binary builtins (+,-,*,/), OP_CALL_SPREAD for user-defined procs. Generic path resolves head as local/global (not literal string).
-  - src/vm.c: Added spread_counts[32] side buffer to VM struct. Added OP_SPREAD handler (pops vec, pushes elements, saves count). Added OP_CALL_SPREAD handler (computes total args from side buffer, dispatches call). Added OP_FOLD_SPREAD handler (left-folds with binary op).
-  - test/test_splat.c: 10 e2e tests (basic, mixed, multiple, empty, multiply, proc, non-vector error, single, single-only, proc-mixed)
-  - test/test_bytecode.c: Updated opcode enum assertions
-  - build.sh: Added test to runner
-- **Learnings for future iterations:**
-  - Spread uses a side buffer `vm->spread_counts[32]` instead of encoding counts on the stack, to keep the stack layout clean for call dispatch.
-  - Two compilation paths: OP_FOLD_SPREAD for known binary builtins (avoids call overhead), OP_CALL_SPREAD for everything else.
-  - Generic spread call must resolve head the same way as normal call path: for AST_LIT_STRING heads, look up as local/global variable to get the closure, not push as string literal.
-  - OP_FOLD_SPREAD format: `uint8_t op_id, uint8_t fixed_args, uint8_t num_spreads`. op_id: 0=add, 1=sub, 2=mul, 3=div.
-  - OP_CALL_SPREAD format: `uint8_t fixed_args, uint8_t num_spreads`.
----
-
-## 2026-03-18 - US-007
-- Implemented variadic proc parameters: `proc f {a, ..rest} { ... }`
-- Files changed:
-  - src/bytecode.c: Added OP_COLLECT_VARIADIC opcode
-  - src/compiler.c: Added `..` marker handling in proc param walker (alongside existing `&`), with optional type annotation support. Emits OP_COLLECT_VARIADIC as first instruction in variadic proc body. Sets known_arity=-1 for variadic procs to skip compile-time arity checks.
-  - src/vm.c: Modified OP_CALL, OP_TAIL_CALL, OP_CALL_SPREAD to accept variadic procs (arg_count >= min_args). Added OP_COLLECT_VARIADIC handler: creates vector from excess args, adjusts stack.
-  - test/test_variadic.c: 10 e2e tests (basic, mixed, zero, too-few, not-last error, multiple-rest error, splat, rest-only, splat-mixed, nested)
-  - test/test_bytecode.c: Updated opcode enum assertions
-  - build.sh: Added test to runner
-- **Learnings for future iterations:**
-  - OP_COLLECT_VARIADIC format: `uint8_t min_arity`. Computes actual_count from stack_top - stack_base. Creates vector from excess args, sets rest param slot, adjusts stack_top.
-  - Variadic procs use existing `variadic` and `min_args` fields on JaclClosure. param_count = min_args + 1 (includes rest param).
-  - `length` builtin only works on strings, not vectors. Use `[print $vec]` to inspect vectors (prints as `[vec 1 2 3]`).
-  - `each` is not a builtin — avoid using it in tests.
----
-
-## 2026-03-18 - US-008
-- Implemented stream value type and GC integration
-- Files changed:
-  - src/value.c: Added JACL_TAG_STREAM (0x15), jacl_is_stream(), jacl_stream_ptr()
-  - src/gc.c: Added OBJ_STREAM to GCObjType, JaclStream struct (state, next_fn, cached_value), jacl_as_stream(), jacl_stream() constructor
-  - src/gc_collect.c: Added OBJ_STREAM trace case (pushes next_fn and cached_value)
-  - src/compiler.c: Added TYPE_STREAM to JaclType enum, updated is_type_keyword/type_from_keyword/type_name for 'stream'
-  - src/vm.c: Added stream to type_name, print dispatch ("<stream>"), and print collection checks
-  - test/test_stream_type.c: 8 C-API tests (create, print, identity-eq, type-name, states, gc-survives, type-keyword, tag-value)
-  - build.sh: Added test to runner
-- **Learnings for future iterations:**
-  - JaclStream is modeled on JaclFuture: GC-allocated object with state + payload fields.
-  - Stream equality uses reference identity (default tag+payload comparison in jacl_val_eq).
-  - VMFormatBuf has `data` field (not `buf`).
-  - Stream states: STREAM_PENDING=0, STREAM_CONSUMED=1, STREAM_EXHAUSTED=2, STREAM_ERROR=3.
+  - Generator yield uses coroutine stack saving, not CPS transform. OP_YIELD returns VM_YIELD, OP_STREAM_NEXT saves/restores entire generator stack between calls.
+  - JaclStream extended with coroutine state (saved_stack, saved_frames, resume_ip, resume_chunk, args).
+  - Fixed TYPE_STREAM not handled in struct__type_size, struct__type_align (compiler.c), and embed__val_matches_field_type (embed.c) — always add new types to these switch statements.
+  - Fixed unused `agg` variable in runtime.c runtime__parallel_task_exec.
+  - While body scope added (begin_scope/end_scope) to properly handle def locals in loops with generators.
 ---

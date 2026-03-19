@@ -201,7 +201,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "Most complex story. OP_YIELD mirrors OP_AWAIT: where await pops (continuation, future) and registers continuation as waiter, yield pops (continuation, value) and packages into stream. CPS transform creates continuation same way — compiler__compile_cps_stmts already splits remaining statements into continuation closure. Key difference: emit OP_YIELD instead of OP_AWAIT. VM handler: set stream->cached_value = yielded_value, stream->next_fn = continuation, return to caller. Generator entry: when a yield-containing proc is called, wrap body as stream whose first next_fn executes body up to first yield. Synchronous: producer and consumer same thread, OP_STREAM_NEXT calls continuation directly via runtime__setup_call + vm__run."
     },
     {
