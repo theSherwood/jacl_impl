@@ -982,10 +982,14 @@ static bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
 #define STREAM_EXHAUSTED 2
 #define STREAM_ERROR     3
 
+#define STREAM_KIND_GENERATOR 0
+#define STREAM_KIND_FILTER    1
+
 #define STREAM_MAX_ARGS          8
 
 typedef struct {
     uint32_t  state;         /* STREAM_PENDING / CONSUMED / EXHAUSTED / ERROR */
+    uint32_t  kind;          /* STREAM_KIND_GENERATOR / FILTER */
     JaclVal   next_fn;       /* CPS continuation closure (nil when exhausted/error) */
     JaclVal   cached_value;  /* cached current element */
     /* Deferred first-call arguments (saved at generator creation, used on first pull) */
@@ -1000,6 +1004,7 @@ static inline JaclStream *jacl_as_stream(JaclVal v) {
 static JaclVal jacl_stream(ThreadHeap *heap) {
     JaclStream *s = (JaclStream *)gc_alloc(heap, OBJ_STREAM, sizeof(JaclStream));
     s->state        = STREAM_PENDING;
+    s->kind         = STREAM_KIND_GENERATOR;
     s->next_fn      = JACL_NIL;
     s->cached_value = JACL_NIL;
     s->arg_count    = 0;

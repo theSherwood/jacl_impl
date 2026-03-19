@@ -3120,6 +3120,7 @@ static void compiler__compile_hof_builtin(Compiler* c, const char* name,
     return;
   }
   compiler__compile_node(c, args[0]);
+  JaclType col_type = c->last_expr_type;
   {
     bool saved = c->in_non_suspending_callback;
     c->in_non_suspending_callback = true;
@@ -3127,6 +3128,8 @@ static void compiler__compile_hof_builtin(Compiler* c, const char* name,
     c->in_non_suspending_callback = saved;
   }
   compiler__emit_byte(c, opcode, line);
+  /* Preserve collection type: stream→stream, vec→vec */
+  c->last_expr_type = col_type;
 }
 
 /* --- Internal: Compile a vector destructuring binding ---
