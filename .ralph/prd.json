@@ -1,7 +1,7 @@
 {
   "project": "JACL",
   "branchName": "ralph/destructuring-splat-streams",
-  "description": "Implement destructuring, splat/spread, variadic procs, and streams — core language features forming a dependency chain that unlocks lazy evaluation and the foundation for shell interop.",
+  "description": "Implement destructuring, splat/spread, variadic procs, and streams \u2014 core language features forming a dependency chain that unlocks lazy evaluation and the foundation for shell interop.",
   "userStories": [
     {
       "id": "US-001",
@@ -23,7 +23,7 @@
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Destructuring `def [a b c] $expr` compiles to: compile RHS (pushes one value), emit OP_DESTRUCTURE_VEC 3 which pops the vector and pushes elements 0,1,2 onto stack, then each becomes a local via the normal def path. For globals (scope_depth==0), each extracted value needs OP_DEF_GLOBAL. Parser change: in the def/mut path, check if the next token after `def` is TOKEN_LBRACKET — if so, parse as destructuring pattern instead of a variable name. The operator desugaring (= and :) already converts to def/mut AST nodes, so destructuring works with operators automatically."
+      "notes": "Destructuring `def [a b c] $expr` compiles to: compile RHS (pushes one value), emit OP_DESTRUCTURE_VEC 3 which pops the vector and pushes elements 0,1,2 onto stack, then each becomes a local via the normal def path. For globals (scope_depth==0), each extracted value needs OP_DEF_GLOBAL. Parser change: in the def/mut path, check if the next token after `def` is TOKEN_LBRACKET \u2014 if so, parse as destructuring pattern instead of a variable name. The operator desugaring (= and :) already converts to def/mut AST nodes, so destructuring works with operators automatically."
     },
     {
       "id": "US-002",
@@ -47,7 +47,7 @@
       ],
       "priority": 2,
       "passes": true,
-      "notes": "Parser change: in the def/mut path, check if the next token is TOKEN_LBRACE — if so, parse comma-separated field names (with optional type prefixes) as a destructuring pattern. For struct extraction: use StructTypeRegistry to look up field offsets and emit OP_STRUCT_GET_FIELD for each. For map extraction: emit OP_MAP_GET with the field name as a string key. The compiler needs the RHS type to decide which path — if it can infer the struct type from the expression, use struct path; otherwise fall back to map path."
+      "notes": "Parser change: in the def/mut path, check if the next token is TOKEN_LBRACE \u2014 if so, parse comma-separated field names (with optional type prefixes) as a destructuring pattern. For struct extraction: use StructTypeRegistry to look up field offsets and emit OP_STRUCT_GET_FIELD for each. For map extraction: emit OP_MAP_GET with the field name as a string key. The compiler needs the RHS type to decide which path \u2014 if it can infer the struct type from the expression, use struct path; otherwise fall back to map path."
     },
     {
       "id": "US-003",
@@ -56,9 +56,9 @@
       "acceptanceCriteria": [
         "Parser recognizes `_` as a wildcard in positional destructuring patterns: `def [_ b _] $v`",
         "Wildcard positions are marked in the AST node (e.g., null name or special flag)",
-        "Compiler skips binding creation for wildcard positions — no local variable allocated, no extraction bytecode emitted for those positions",
+        "Compiler skips binding creation for wildcard positions \u2014 no local variable allocated, no extraction bytecode emitted for those positions",
         "OP_DESTRUCTURE_VEC updated to support skip mask: skipped positions don't push values onto stack",
-        "`_` does not create a binding — referencing `$_` after destructuring is an undefined variable error",
+        "`_` does not create a binding \u2014 referencing `$_` after destructuring is an undefined variable error",
         "Multiple `_` in the same pattern is allowed (they don't conflict with each other)",
         "`def {x, _} $point` is a compile error with message indicating `_` is meaningless in named destructuring (just omit the field)",
         "E2e test file test/test_destructure_wildcard.c: tests using jacl_run() verify wildcard skipping, multiple wildcards, $_-reference error, named-destructuring-with-wildcard error",
@@ -67,7 +67,7 @@
       ],
       "priority": 3,
       "passes": true,
-      "notes": "Builds on US-001. The parser already parses the pattern — it just needs to recognize bare `_` as a special token (not a variable name). The compiler change is small: when iterating pattern positions, if the name is `_`, skip emitting the extraction and local-add. For the skip mask: could encode as a bitmask operand to OP_DESTRUCTURE_VEC, or emit individual OP_VEC_GET only for non-wildcard positions (simpler)."
+      "notes": "Builds on US-001. The parser already parses the pattern \u2014 it just needs to recognize bare `_` as a special token (not a variable name). The compiler change is small: when iterating pattern positions, if the name is `_`, skip emitting the extraction and local-add. For the skip mask: could encode as a bitmask operand to OP_DESTRUCTURE_VEC, or emit individual OP_VEC_GET only for non-wildcard positions (simpler)."
     },
     {
       "id": "US-004",
@@ -78,11 +78,11 @@
         "New opcode OP_DESTRUCTURE_VEC_REST with operand N: extracts first N elements individually, collects remaining into a new vector",
         "`def [head ..rest] [vec 1 2 3 4]` binds head=1, rest=[vec 2 3 4]",
         "`def [a b ..rest] [vec 1 2]` binds a=1, b=2, rest=[vec] (empty vector)",
-        "`..rest` must be the last element in positional pattern — compile error otherwise",
+        "`..rest` must be the last element in positional pattern \u2014 compile error otherwise",
         "Named rest: `def {x, ..rest} $point` binds x from field, rest is a map of remaining fields",
         "`..` without a name (`def [head ..]`) is a compile error in positional patterns",
         "Compile error if `..rest` appears more than once in a pattern",
-        "Rest collection creates a new vector (positional) or new map (named) — not a view/slice",
+        "Rest collection creates a new vector (positional) or new map (named) \u2014 not a view/slice",
         "`mut [head ..rest] $v` creates mutable bindings for both head and rest",
         "E2e test file test/test_destructure_rest.c: tests using jacl_run() verify rest collection for vectors (basic, empty rest, many elements), named rest for structs/maps, error cases (not-last, unnamed, duplicate), mut rest",
         "All existing tests pass",
@@ -100,9 +100,9 @@
         "Parser recognizes `{..}` (TOKEN_LBRACE TOKEN_DOTDOT TOKEN_RBRACE) as a spread-all destructuring pattern",
         "Parser also recognizes `{x, ..}` as explicit-plus-spread-all",
         "Compiler resolves the struct type from the RHS expression and looks up all field names in StructTypeRegistry",
-        "Compile error if the RHS type is dyn/unknown — spread-all requires a known struct type",
+        "Compile error if the RHS type is dyn/unknown \u2014 spread-all requires a known struct type",
         "`def {..} $point` where Point has fields x,y creates bindings x and y in scope",
-        "`def {x, ..} $point` binds x explicitly, plus all other fields (y) — no duplicate binding for x",
+        "`def {x, ..} $point` binds x explicitly, plus all other fields (y) \u2014 no duplicate binding for x",
         "Shadowing rules apply: if x already exists in the same scope, `def {..} $point` is a compile error",
         "E2e test file test/test_destructure_spread_all.c: tests using jacl_run() verify spread-all basic, explicit-plus-spread, shadowing error, dyn-type error, works with different struct types",
         "All existing tests pass",
@@ -110,7 +110,7 @@
       ],
       "priority": 5,
       "passes": true,
-      "notes": "Compiler-driven feature: the parser recognizes the pattern, but the compiler enumerates fields from StructTypeRegistry. For `{x, ..}`: compiler gets all fields from the struct type, removes `x` from the list, emits extraction for the rest. Same-scope shadowing check uses existing compiler__add_local error path. Once struct type is known, this desugars to extracting each field by name — reuses OP_STRUCT_GET_FIELD path from US-002."
+      "notes": "Compiler-driven feature: the parser recognizes the pattern, but the compiler enumerates fields from StructTypeRegistry. For `{x, ..}`: compiler gets all fields from the struct type, removes `x` from the list, emits extraction for the rest. Same-scope shadowing check uses existing compiler__add_local error path. Once struct type is known, this desugars to extracting each field by name \u2014 reuses OP_STRUCT_GET_FIELD path from US-002."
     },
     {
       "id": "US-006",
@@ -180,7 +180,7 @@
       ],
       "priority": 8,
       "passes": true,
-      "notes": "Model on JaclFuture: same pattern of GC object with state field and closure payload. Tag 0x15 is next available after JACL_TAG_ROPE_STRING (0x14). GC tracing: add case OBJ_STREAM in gc__trace_object in gc_collect.c — push next_fn and cached_value if non-nil. For print: add jacl_is_stream check in print dispatch. C-level tests can create a stream manually via jacl_stream(heap) and set next_fn to a test closure, without needing the full yield/CPS machinery."
+      "notes": "Model on JaclFuture: same pattern of GC object with state field and closure payload. Tag 0x15 is next available after JACL_TAG_ROPE_STRING (0x14). GC tracing: add case OBJ_STREAM in gc__trace_object in gc_collect.c \u2014 push next_fn and cached_value if non-nil. For print: add jacl_is_stream check in print dispatch. C-level tests can create a stream manually via jacl_stream(heap) and set next_fn to a test closure, without needing the full yield/CPS machinery."
     },
     {
       "id": "US-009",
@@ -202,11 +202,11 @@
       ],
       "priority": 9,
       "passes": true,
-      "notes": "Most complex story. OP_YIELD mirrors OP_AWAIT: where await pops (continuation, future) and registers continuation as waiter, yield pops (continuation, value) and packages into stream. CPS transform creates continuation same way — compiler__compile_cps_stmts already splits remaining statements into continuation closure. Key difference: emit OP_YIELD instead of OP_AWAIT. VM handler: set stream->cached_value = yielded_value, stream->next_fn = continuation, return to caller. Generator entry: when a yield-containing proc is called, wrap body as stream whose first next_fn executes body up to first yield. Synchronous: producer and consumer same thread, OP_STREAM_NEXT calls continuation directly via runtime__setup_call + vm__run."
+      "notes": "Most complex story. OP_YIELD mirrors OP_AWAIT: where await pops (continuation, future) and registers continuation as waiter, yield pops (continuation, value) and packages into stream. CPS transform creates continuation same way \u2014 compiler__compile_cps_stmts already splits remaining statements into continuation closure. Key difference: emit OP_YIELD instead of OP_AWAIT. VM handler: set stream->cached_value = yielded_value, stream->next_fn = continuation, return to caller. Generator entry: when a yield-containing proc is called, wrap body as stream whose first next_fn executes body up to first yield. Synchronous: producer and consumer same thread, OP_STREAM_NEXT calls continuation directly via runtime__setup_call + vm__run."
     },
     {
       "id": "US-010",
-      "title": "collect — stream to vector materialization",
+      "title": "collect \u2014 stream to vector materialization",
       "description": "As a JACL programmer, I want to materialize a stream into a vector using collect.",
       "acceptanceCriteria": [
         "'collect' registered as a builtin command",
@@ -245,7 +245,7 @@
       ],
       "priority": 11,
       "passes": true,
-      "notes": "Current for-loop compilation (compiler.c lines 3888-4013) handles collection forms via iteration opcodes. Stream path replaces index-based iteration with pull-based loop: (1) OP_STREAM_NEXT, (2) check exhausted, (3) bind element, execute body, jump to (1). For break: LOOP_EXIT jump skips to after loop — stream remains partially consumed. Compiler can emit different bytecode for TYPE_STREAM vs TYPE_VEC, or runtime-dispatch opcode for TYPE_DYN."
+      "notes": "Current for-loop compilation (compiler.c lines 3888-4013) handles collection forms via iteration opcodes. Stream path replaces index-based iteration with pull-based loop: (1) OP_STREAM_NEXT, (2) check exhausted, (3) bind element, execute body, jump to (1). For break: LOOP_EXIT jump skips to after loop \u2014 stream remains partially consumed. Compiler can emit different bytecode for TYPE_STREAM vs TYPE_VEC, or runtime-dispatch opcode for TYPE_DYN."
     },
     {
       "id": "US-012",
@@ -265,7 +265,7 @@
       ],
       "priority": 12,
       "passes": true,
-      "notes": "Stream filter creates new stream whose next_fn closure: (1) pulls from source via OP_STREAM_NEXT, (2) calls predicate, (3) if true yields, (4) if false loops. Closure captures source stream and predicate as upvalues. Recommend native proc creating JaclStream with C-level next function for simplicity. OP_FILTER dispatches on type: vector → eager, stream → create lazy filter stream."
+      "notes": "Stream filter creates new stream whose next_fn closure: (1) pulls from source via OP_STREAM_NEXT, (2) calls predicate, (3) if true yields, (4) if false loops. Closure captures source stream and predicate as upvalues. Recommend native proc creating JaclStream with C-level next function for simplicity. OP_FILTER dispatches on type: vector \u2192 eager, stream \u2192 create lazy filter stream."
     },
     {
       "id": "US-013",
@@ -277,7 +277,7 @@
         "Each pull on transformed stream pulls one element from source, applies fn, returns result",
         "transform on a vector returns a new vector (unchanged eager behavior)",
         "Compose with pipes: `$stream | transform [\\ * $it 2]`",
-        "Chaining: `$s | filter $p | transform $f | collect` — fully lazy, single pass",
+        "Chaining: `$s | filter $p | transform $f | collect` \u2014 fully lazy, single pass",
         "Type tracking: transforming TYPE_STREAM produces TYPE_STREAM, TYPE_VEC produces TYPE_VEC",
         "E2e test file test/test_stream_transform.c: tests using jacl_run() verify lazy transform, transform + collect correct vector, chained filter + transform pipeline, transform on vector unchanged, pipe composition",
         "All existing transform tests still pass",
@@ -285,7 +285,7 @@
       ],
       "priority": 13,
       "passes": true,
-      "notes": "Same pattern as US-012 but simpler: transform-stream next_fn pulls one element and applies function — no predicate loop. Shares implementation approach (native proc creating JaclStream). OP_TRANSFORM dispatches on type."
+      "notes": "Same pattern as US-012 but simpler: transform-stream next_fn pulls one element and applies function \u2014 no predicate loop. Shares implementation approach (native proc creating JaclStream). OP_TRANSFORM dispatches on type."
     },
     {
       "id": "US-014",
@@ -299,18 +299,18 @@
         "'first' on stream: pulls one element, returns it (nil if empty)",
         "'first' on vector: returns first element (unchanged)",
         "All compose with pipes: `$stream | take 5 | collect`",
-        "Type tracking: take on stream → stream, take on vector → vector; count → i64; first → dyn",
-        "E2e test file test/test_stream_seq_ops.c: tests using jacl_run() verify count on stream and vector, take on stream (lazy — only N pulls), take on vector, first on stream and vector, take + collect pipeline, empty stream cases",
+        "Type tracking: take on stream \u2192 stream, take on vector \u2192 vector; count \u2192 i64; first \u2192 dyn",
+        "E2e test file test/test_stream_seq_ops.c: tests using jacl_run() verify count on stream and vector, take on stream (lazy \u2014 only N pulls), take on vector, first on stream and vector, take + collect pipeline, empty stream cases",
         "All existing tests pass",
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": "count: loop OP_STREAM_NEXT until exhausted, incrementing counter. take: create stream with counter upvalue; each pull decrements, pulls source, yields; counter 0 → exhausted. first: single OP_STREAM_NEXT pull. All native builtins. take creates lazy wrapper stream, same pattern as filter/transform."
+      "passes": true,
+      "notes": "count: loop OP_STREAM_NEXT until exhausted, incrementing counter. take: create stream with counter upvalue; each pull decrements, pulls source, yields; counter 0 \u2192 exhausted. first: single OP_STREAM_NEXT pull. All native builtins. take creates lazy wrapper stream, same pattern as filter/transform."
     },
     {
       "id": "US-015",
-      "title": "lines — string to line stream",
+      "title": "lines \u2014 string to line stream",
       "description": "As a JACL programmer, I want to split strings into line streams.",
       "acceptanceCriteria": [
         "'lines' registered as a builtin command",
@@ -325,7 +325,7 @@
       ],
       "priority": 15,
       "passes": false,
-      "notes": "Create stream whose next_fn closure captures source string and current-index upvalue. Each call scans from current-index to next \\n (or \\r\\n), yields substring, advances index. Index at end → exhausted. Skip final empty line by checking last char. Stream-to-stream lines (splitting incoming byte stream on newline boundaries) deferred to shell interop pass."
+      "notes": "Create stream whose next_fn closure captures source string and current-index upvalue. Each call scans from current-index to next \\n (or \\r\\n), yields substring, advances index. Index at end \u2192 exhausted. Skip final empty line by checking last char. Stream-to-stream lines (splitting incoming byte stream on newline boundaries) deferred to shell interop pass."
     },
     {
       "id": "US-016",
@@ -335,7 +335,7 @@
         "Compiler checks argument type for vec-get, vec-set, vec-slice, vec-len, vec-push, vec-concat: if TYPE_STREAM, emit compile error",
         "Error message: 'vec-get requires a vector; got stream (use collect to materialize)'",
         "`collect $stream | vec-get 0` compiles successfully (collect changes type from stream to vec)",
-        "When type is TYPE_DYN, no compile error — runtime dispatch handles it (runtime error if stream passed to vec-only op)",
+        "When type is TYPE_DYN, no compile error \u2014 runtime dispatch handles it (runtime error if stream passed to vec-only op)",
         "Runtime error message for dyn-typed stream-to-vec-op matches compile-time message",
         "Existing typed code still compiles correctly (no false positives)",
         "OP_SPREAD updated to also accept streams: eagerly consumes stream into arguments (per resolved question 5B)",
@@ -345,7 +345,7 @@
       ],
       "priority": 16,
       "passes": false,
-      "notes": "Compiler: in compilation of vec-get/vec-set/vec-slice/vec-len/vec-push/vec-concat builtins, after resolving collection arg type, check if TYPE_STREAM → emit error with helpful message. Runtime: in VM handlers, add jacl_is_stream() check before jacl_is_vector(), with descriptive error. For splat+stream: update OP_SPREAD in vm.c to handle jacl_is_stream() by pulling all elements via OP_STREAM_NEXT into temporary buffer, then pushing onto stack (with stack overflow check)."
+      "notes": "Compiler: in compilation of vec-get/vec-set/vec-slice/vec-len/vec-push/vec-concat builtins, after resolving collection arg type, check if TYPE_STREAM \u2192 emit error with helpful message. Runtime: in VM handlers, add jacl_is_stream() check before jacl_is_vector(), with descriptive error. For splat+stream: update OP_SPREAD in vm.c to handle jacl_is_stream() by pulling all elements via OP_STREAM_NEXT into temporary buffer, then pushing onto stack (with stack overflow check)."
     }
   ]
 }

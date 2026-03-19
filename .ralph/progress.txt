@@ -101,3 +101,32 @@ Started: Thu Mar 19 08:54:03 UTC 2026
   - The `def` path in compiler.c only preserves unboxed types (i64/u64/f64) and TYPE_STRUCT as effective_type — other types like TYPE_STREAM fall back to TYPE_DYN. This means `def s [expr]` where expr has TYPE_STREAM will make `s` have TYPE_DYN unless TYPE_STREAM is explicitly added to the inference condition. This caused `for $s { ... }` to take the vector path instead of the stream path. Fixed by adding `rhs_type == TYPE_STREAM` to the inference condition in both def and mut paths.
   - GC tracing for transform streams requires no changes: existing OBJ_STREAM trace already covers all args[].
 ---
+
+## 2026-03-19 - Test Suite Fixes
+- Fixed 15 test functions with infinite while loops across 4 test files (test_compiler.c, test_m4.c, test_m5.c, test_heap_strings.c)
+- Fixed compiler bug: `continue` in while-loops with body-scope locals didn't pop those locals before jumping back
+- Files changed: src/compiler.c, test/test_compiler.c, test/test_heap_strings.c, test/test_m4.c, test/test_m5.c
+- **Root causes:**
+  - `=` (def/immutable) used to "update" loop variables creates a shadowed binding leaving the outer variable unchanged → infinite loops. Must use `:` (mut) + `::` (set).
+  - `continue` in while-loops emitted OP_LOOP backward jump without popping body-scope locals (e.g., `def` bindings inside the loop body), corrupting the stack.
+- **Learnings for future iterations:**
+  - While-loop variable updates MUST use `:` (mut) for init and `::` (set) for update, never `=` (def).
+  - `continue` scope cleanup: for while-loops, pop `c->local_count - lctx->local_count_at_loop` locals via OP_POP_N before OP_LOOP. Do NOT apply this to for-loops — `local_count_at_loop` is set before for-loop hidden locals, so cleaning up would destroy iterator state.
+  - `break` in while-loops with body-scope locals has the same issue in theory but existing tests don't exercise it. The for-loop break cleanup (`OP_CLOSE_LOOP`) already handles for-loop hidden locals correctly.
+---
+
+## 2026-03-19 - US-014
+- Implemented count, take, first sequence operations on both streams and vectors
+- Files changed: src/bytecode.c, src/gc.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_stream_seq_ops.c, build.sh
+- **What was implemented:**
+  - OP_COUNT, OP_TAKE, OP_FIRST opcodes added to bytecode enum and name table
+  - STREAM_KIND_TAKE (=3) for lazy take streams, handler in vm__pull_stream_one()
+  - count: vector → vec-len, stream → consumes and counts (generator CPS loop + derived stream pull helper)
+  - take: vector → vec_slice(0, n), stream → lazy STREAM_KIND_TAKE derived stream with mutable counter in args[1]
+  - first: vector → get(0), stream → single pull (generator CPS + derived stream pull helper)
+  - 19 e2e tests covering all operations on vectors and streams, empty cases, composition/pipes
+- **Learnings for future iterations:**
+  - STREAM_KIND_TAKE uses args[1] as a mutable i32 counter (decremented on each pull). This is safe because jacl_i32 is an inline tagged value, no GC concern.
+  - count on streams is destructive — consumes the entire stream. first consumes one element.
+  - For generator streams in count/first, must inline the CPS protocol loop (same as OP_COLLECT/OP_STREAM_NEXT patterns). Derived streams use the unified vm__pull_stream_one helper.
+---
