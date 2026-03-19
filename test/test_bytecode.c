@@ -146,7 +146,9 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_CALL_SPREAD,      130);
   ASSERT_INT_EQ(OP_FOLD_SPREAD,      131);
   ASSERT_INT_EQ(OP_COLLECT_VARIADIC, 132);
-  ASSERT_INT_EQ(OP_HALT,             133);
+  ASSERT_INT_EQ(OP_YIELD,            133);
+  ASSERT_INT_EQ(OP_STREAM_NEXT,      134);
+  ASSERT_INT_EQ(OP_HALT,             135);
   TEST_PASS();
 }
 

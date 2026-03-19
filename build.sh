@@ -111,6 +111,7 @@ TESTS=(
     "test/test_splat.c|splat|"
     "test/test_variadic.c|variadic|"
     "test/test_stream_type.c|stream_type|"
+    "test/test_yield.c|yield|"
 )
 
 # Filter tests if --lib flag is set

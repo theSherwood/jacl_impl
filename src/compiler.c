@@ -160,7 +160,8 @@ static uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t 
     case TYPE_VEC:
     case TYPE_MAP:
     case TYPE_CLOSURE:
-    case TYPE_DYN:     return 8; /* JaclVal / pointer */
+    case TYPE_DYN:
+    case TYPE_STREAM:  return 8; /* JaclVal / pointer */
     case TYPE_STRUCT:
       if (reg && struct_idx < reg->count) {
         return reg->defs[struct_idx].total_size;
@@ -184,7 +185,8 @@ static uint32_t struct__type_align(JaclType t, StructTypeRegistry* reg, uint32_t
     case TYPE_VEC:
     case TYPE_MAP:
     case TYPE_CLOSURE:
-    case TYPE_DYN:     return 8;
+    case TYPE_DYN:
+    case TYPE_STREAM:  return 8;
     case TYPE_STRUCT:
       if (reg && struct_idx < reg->count) {
         return reg->defs[struct_idx].alignment;
@@ -1121,6 +1123,7 @@ struct Compiler {
   StructTypeRegistry* struct_registry; /* shared struct type registry (root compiler owns) */
   LoopContext          loop_stack[COMPILER_LOOP_DEPTH_MAX];
   uint32_t             loop_depth;     /* current nesting depth (0 = not in loop) */
+  bool                 has_yield;      /* true if current proc body contains yield */
 };
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -1155,6 +1158,7 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->module_prefix_len = 0;
   c->struct_registry   = NULL;
   c->loop_depth        = 0;
+  c->has_yield         = false;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -1641,7 +1645,8 @@ static bool compiler__node_is_suspension(Compiler* c, AstNode* node) {
       const char* name = head->data.lit_string.value;
       uint32_t len = head->data.lit_string.length;
 
-      /* Direct suspension points */
+      /* Direct suspension points (yield is NOT a suspension point — it uses
+         coroutine-style save/restore, not CPS) */
       if ((len == 5 && memcmp(name, "await", 5) == 0) ||
           (len == 8 && memcmp(name, "parallel", 8) == 0) ||
           (len == 4 && memcmp(name, "race", 4) == 0)) {
@@ -1869,6 +1874,15 @@ static bool compiler__is_def_with_suspension(Compiler* c, AstNode* node,
 /**
  * Check if a statement is a direct [await expr] call.
  */
+static bool compiler__is_direct_yield(AstNode* node, AstNode** out_value_expr) {
+  if (node->type != AST_COMMAND) return false;
+  AstNode* head = node->data.command.head;
+  if (!compiler__head_matches(head, "yield", 5)) return false;
+  if (node->data.command.arg_count != 1) return false;
+  *out_value_expr = node->data.command.args[0];
+  return true;
+}
+
 static bool compiler__is_direct_await(AstNode* node, AstNode** out_future_expr) {
   if (node->type != AST_COMMAND) return false;
   AstNode* head = node->data.command.head;
@@ -4550,6 +4564,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     closure->variadic     = is_variadic;
     closure->pinned       = false;
     closure->pin_worker_id = -1;
+    closure->is_generator  = false; /* set after body compilation */
 
     /* Allocate and fill param_names from parsed array */
     if (param_count > 0) {
@@ -4640,8 +4655,9 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       c->first_error = body_compiler.first_error;
     }
 
-    /* Set upvalue count on the closure */
+    /* Set upvalue count and generator flag on the closure */
     closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
+    closure->is_generator  = body_compiler.has_yield;
 
     /* Store closure in parent's constant pool */
     uint16_t closure_idx = chunk_add_constant(c->chunk, jacl_closure(closure));
@@ -4798,13 +4814,14 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     /* OP_JUMP_IF_FALSE to exit */
     uint32_t exit_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
 
-    /* Compile body statements directly (no extra scope, so def rebinds
-       at the same scope level as the surrounding code) */
+    /* Scope for while body: ensures locals (def) are cleaned up each iteration */
+    compiler__begin_scope(c);
     uint32_t body_count = args[1]->data.block.count;
     for (uint32_t i = 0; i < body_count; i++) {
       compiler__compile_node(c, args[1]->data.block.commands[i]);
       compiler__emit_check_error(c, line);
     }
+    compiler__end_scope(c, line);
 
     /* OP_LOOP back to loop_start */
     compiler__emit_byte(c, OP_LOOP, line);
@@ -5699,6 +5716,32 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_POP, line);
     compiler__emit_byte(c, OP_NIL, line);
+    return;
+  }
+
+  /* yield — generator suspension: compiles value, emits OP_YIELD.
+     On resume, the stream_next handler pushes nil as the yield expression result. */
+  if (compiler__head_matches(head, "yield", 5)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "yield", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_YIELD, line);
+    c->has_yield = true;
+    c->last_expr_type = TYPE_NIL;
+    return;
+  }
+
+  /* stream_next — pull next element from a stream */
+  if (compiler__head_matches(head, "stream_next", 11)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "stream_next", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_STREAM_NEXT, line);
+    c->last_expr_type = TYPE_DYN;
     return;
   }
 

@@ -829,6 +829,7 @@ static bool embed__val_matches_field_type(JaclVal val, int field_type) {
     case TYPE_STRUCT:  return jacl_is_struct(val);
     case TYPE_DYN:     return true; /* any value accepted */
     case TYPE_NIL:     return jacl_is_nil(val);
+    case TYPE_STREAM:  return jacl_is_stream(val);
   }
   return false;
 }
