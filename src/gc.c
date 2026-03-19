@@ -982,8 +982,9 @@ static bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
 #define STREAM_EXHAUSTED 2
 #define STREAM_ERROR     3
 
-#define STREAM_KIND_GENERATOR 0
-#define STREAM_KIND_FILTER    1
+#define STREAM_KIND_GENERATOR  0
+#define STREAM_KIND_FILTER     1
+#define STREAM_KIND_TRANSFORM  2
 
 #define STREAM_MAX_ARGS          8
 

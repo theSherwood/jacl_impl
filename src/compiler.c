@@ -4181,7 +4181,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclType effective_type;
     if (declared_type != TYPE_DYN) {
       effective_type = declared_type;
-    } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT) {
+    } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT ||
+               rhs_type == TYPE_STREAM) {
       effective_type = rhs_type;
     } else {
       effective_type = TYPE_DYN;
@@ -4577,8 +4578,9 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclType effective_type;
     if (declared_type != TYPE_DYN) {
       effective_type = declared_type;
-    } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT) {
-      /* Infer unboxed types and struct types from RHS */
+    } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT ||
+               rhs_type == TYPE_STREAM) {
+      /* Infer unboxed types, struct types, and stream types from RHS */
       effective_type = rhs_type;
     } else {
       effective_type = TYPE_DYN;

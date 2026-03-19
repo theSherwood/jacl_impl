@@ -755,6 +755,61 @@ static StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         }
     }
 
+    /* --- Transform stream: pull from source, apply fn, return result --- */
+    if (stream->kind == STREAM_KIND_TRANSFORM) {
+        JaclVal source = stream->args[0];
+        JaclVal fn_val = stream->args[1];
+        JaclClosure* fn = jacl_as_closure(fn_val);
+
+        JaclVal elem;
+        StreamPullResult pr = vm__pull_stream_one(vm, source, &elem);
+        if (pr == STREAM_PULL_EXHAUSTED) {
+            stream->state = STREAM_EXHAUSTED;
+            *out_value = JACL_NIL;
+            return STREAM_PULL_EXHAUSTED;
+        }
+        if (pr == STREAM_PULL_ERROR) return STREAM_PULL_ERROR;
+
+        /* Call transform closure with elem */
+        VMResult r;
+        r = vm__push(vm, fn_val);
+        if (r != VM_OK) return STREAM_PULL_ERROR;
+        r = vm__push(vm, elem);
+        if (r != VM_OK) return STREAM_PULL_ERROR;
+
+        if (vm->frame_count >= VM_FRAMES_MAX) {
+            vm__set_error(vm, "stack overflow");
+            return STREAM_PULL_ERROR;
+        }
+        uint32_t cf_count = vm->frame_count;
+        CallFrame* cf = &vm->frames[vm->frame_count++];
+        cf->closure    = fn;
+        cf->return_ip  = vm->ip;
+        cf->stack_base = vm->stack_top - 1;
+        cf->chunk      = &fn->chunk;
+
+        uint8_t* save_ip = vm->ip;
+        BytecodeChunk* save_chunk = vm->chunk;
+        vm->ip    = fn->chunk.code;
+        vm->chunk = &fn->chunk;
+
+        VMResult inner = vm__run(vm, cf_count);
+        if (inner != VM_OK) {
+            stream->state = STREAM_ERROR;
+            return STREAM_PULL_ERROR;
+        }
+
+        JaclVal transformed;
+        r = vm__pop(vm, &transformed);
+        if (r != VM_OK) return STREAM_PULL_ERROR;
+
+        vm->ip    = save_ip;
+        vm->chunk = save_chunk;
+
+        *out_value = transformed;
+        return STREAM_PULL_VALUE;
+    }
+
     /* --- Generator stream: CPS protocol --- */
     uint32_t caller_stack_top   = vm->stack_top;
     uint32_t caller_frame_count = vm->frame_count;
@@ -2977,9 +3032,26 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, jacl_map_ptr(result_map));
           if (result != VM_OK) return result;
 
+        } else if (jacl_is_stream(coll_val)) {
+          /* Lazy transform: create a new transform stream wrapping source + fn */
+          if (closure->param_count != 1) {
+            vm__set_error(vm,
+              "transform on stream requires a proc with 1 parameter, got %d",
+              (int)closure->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+          JaclVal transform_stream_val = jacl_stream(&vm->heap);
+          JaclStream* ts = jacl_as_stream(transform_stream_val);
+          ts->kind      = STREAM_KIND_TRANSFORM;
+          ts->args[0]   = coll_val;     /* source stream */
+          ts->args[1]   = closure_val;  /* transform closure */
+          ts->arg_count = 2;
+          result = vm__push(vm, transform_stream_val);
+          if (result != VM_OK) return result;
+
         } else {
           vm__set_error(vm,
-            "type error in 'transform': expected vector or map as first argument, got %s",
+            "type error in 'transform': expected vector, map, or stream, got %s",
             vm__type_name(coll_val));
           return VM_RUNTIME_ERROR;
         }
