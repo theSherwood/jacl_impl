@@ -6002,6 +6002,18 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* collect — materialize stream into vector (identity on vectors) */
+  if (compiler__head_matches(head, "collect", 7)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "collect", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_COLLECT, line);
+    c->last_expr_type = TYPE_VEC;
+    return;
+  }
+
   /* parallel — suspension point (CPS transform in US-003+, context checks now) */
   if (compiler__head_matches(head, "parallel", 8)) {
     if (argc < 2) {

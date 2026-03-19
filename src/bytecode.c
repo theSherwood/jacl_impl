@@ -155,6 +155,7 @@ typedef enum {
   OP_COLLECT_VARIADIC, /* at variadic proc entry: uint8_t min_arity — collect excess args into vector */
   OP_YIELD,           /* pop value + continuation; package into stream element */
   OP_STREAM_NEXT,     /* pop stream; pull next element (call next_fn or return cached) */
+  OP_COLLECT,         /* pop collection; if stream, materialize to vector; if vector, identity */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -423,6 +424,7 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_COLLECT_VARIADIC: return "OP_COLLECT_VARIADIC";
     case OP_YIELD:           return "OP_YIELD";
     case OP_STREAM_NEXT:     return "OP_STREAM_NEXT";
+    case OP_COLLECT:         return "OP_COLLECT";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";

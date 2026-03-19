@@ -112,6 +112,7 @@ TESTS=(
     "test/test_variadic.c|variadic|"
     "test/test_stream_type.c|stream_type|"
     "test/test_yield.c|yield|"
+    "test/test_collect.c|collect|"
 )
 
 # Filter tests if --lib flag is set
