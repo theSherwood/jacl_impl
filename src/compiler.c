@@ -605,6 +605,7 @@ typedef struct {
 typedef struct {
   JaclVal name;
   bool    suspends;
+  bool    is_generator; /* true if proc contains yield (calling returns stream) */
 } SuspensionEntry;
 
 typedef struct {
@@ -621,16 +622,28 @@ static bool suspension_map_lookup(SuspensionMap* map, JaclVal name) {
   return false;
 }
 
-static void suspension_map_set(SuspensionMap* map, JaclVal name, bool suspends) {
+static bool suspension_map_is_generator(SuspensionMap* map, JaclVal name) {
+  for (uint32_t i = 0; i < map->count; i++) {
+    if (map->entries[i].name == name) {
+      return map->entries[i].is_generator;
+    }
+  }
+  return false;
+}
+
+static void suspension_map_set(SuspensionMap* map, JaclVal name,
+                               bool suspends, bool is_generator) {
   for (uint32_t i = 0; i < map->count; i++) {
     if (map->entries[i].name == name) {
       map->entries[i].suspends = suspends;
+      map->entries[i].is_generator = is_generator;
       return;
     }
   }
   if (map->count < SUSPENSION_MAP_MAX) {
     map->entries[map->count].name = name;
     map->entries[map->count].suspends = suspends;
+    map->entries[map->count].is_generator = is_generator;
     map->count++;
   }
 }
@@ -639,6 +652,7 @@ static void suspension_map_set(SuspensionMap* map, JaclVal name, bool suspends) 
 typedef struct {
   JaclVal  name;
   bool     direct_suspends;   /* directly contains await/parallel/race */
+  bool     has_yield;          /* directly contains yield */
   bool     has_indirect_call; /* calls through $var (unknown closure) */
   JaclVal  callees[SUSPENSION_CALLEES_MAX];
   uint32_t callee_count;
@@ -668,6 +682,17 @@ static void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
             (len == 8 && memcmp(name, "parallel", 8) == 0) ||
             (len == 4 && memcmp(name, "race", 4) == 0)) {
           info->direct_suspends = true;
+          /* Still recurse into args (they might contain calls) */
+          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            analyze__walk_body(node->data.command.args[i], info);
+          }
+          return;
+        }
+
+        /* Yield is a suspension point (needs CPS) and marks proc as generator */
+        if (len == 5 && memcmp(name, "yield", 5) == 0) {
+          info->direct_suspends = true;
+          info->has_yield = true;
           /* Still recurse into args (they might contain calls) */
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
             analyze__walk_body(node->data.command.args[i], info);
@@ -764,6 +789,7 @@ static void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list) {
           ProcSuspendInfo* info = &list->procs[list->count++];
           info->name = proc_name;
           info->direct_suspends = false;
+          info->has_yield = false;
           info->has_indirect_call = false;
           info->callee_count = 0;
 
@@ -825,7 +851,8 @@ static SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t coun
   /* Step 2: Initialize suspension map from direct suspension */
   for (uint32_t i = 0; i < proc_list.count; i++) {
     suspension_map_set(&map, proc_list.procs[i].name,
-                       proc_list.procs[i].direct_suspends);
+                       proc_list.procs[i].direct_suspends,
+                       proc_list.procs[i].has_yield);
   }
 
   /* Step 3: Fixpoint propagation.
@@ -844,10 +871,12 @@ static SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t coun
     for (uint32_t i = 0; i < proc_list.count; i++) {
       if (suspension_map_lookup(&map, proc_list.procs[i].name)) continue;
 
-      /* Rule 1: direct call to suspending proc */
+      /* Rule 1: direct call to suspending proc (skip generators —
+         calling a generator just creates a stream, doesn't suspend caller) */
       for (uint32_t j = 0; j < proc_list.procs[i].callee_count; j++) {
-        if (suspension_map_lookup(&map, proc_list.procs[i].callees[j])) {
-          suspension_map_set(&map, proc_list.procs[i].name, true);
+        if (suspension_map_lookup(&map, proc_list.procs[i].callees[j]) &&
+            !suspension_map_is_generator(&map, proc_list.procs[i].callees[j])) {
+          suspension_map_set(&map, proc_list.procs[i].name, true, false);
           changed = true;
           break;
         }
@@ -857,7 +886,7 @@ static SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t coun
       if (any_suspending &&
           !suspension_map_lookup(&map, proc_list.procs[i].name) &&
           proc_list.procs[i].has_indirect_call) {
-        suspension_map_set(&map, proc_list.procs[i].name, true);
+        suspension_map_set(&map, proc_list.procs[i].name, true, false);
         changed = true;
       }
     }
@@ -879,7 +908,8 @@ static bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
         uint32_t len = head->data.lit_string.length;
         if ((len == 5 && memcmp(name, "await", 5) == 0) ||
             (len == 8 && memcmp(name, "parallel", 8) == 0) ||
-            (len == 4 && memcmp(name, "race", 4) == 0)) {
+            (len == 4 && memcmp(name, "race", 4) == 0) ||
+            (len == 5 && memcmp(name, "yield", 5) == 0)) {
           return true;
         }
         /* Don't recurse into nested proc or spawn definitions
@@ -1645,11 +1675,11 @@ static bool compiler__node_is_suspension(Compiler* c, AstNode* node) {
       const char* name = head->data.lit_string.value;
       uint32_t len = head->data.lit_string.length;
 
-      /* Direct suspension points (yield is NOT a suspension point — it uses
-         coroutine-style save/restore, not CPS) */
+      /* Direct suspension points */
       if ((len == 5 && memcmp(name, "await", 5) == 0) ||
           (len == 8 && memcmp(name, "parallel", 8) == 0) ||
-          (len == 4 && memcmp(name, "race", 4) == 0)) {
+          (len == 4 && memcmp(name, "race", 4) == 0) ||
+          (len == 5 && memcmp(name, "yield", 5) == 0)) {
         return true;
       }
 
@@ -1658,17 +1688,23 @@ static bool compiler__node_is_suspension(Compiler* c, AstNode* node) {
         return false;
       }
 
-      /* Call to known-suspending proc */
+      /* Call to known-suspending proc (exclude generators — calling a
+         generator just creates a stream, doesn't suspend the caller) */
       if (len <= 7 && c->suspension_map) {
         JaclVal name_val = jacl_inline_string(name, len);
-        /* Check locals first */
-        int slot = compiler__resolve_local(c, name_val);
-        if (slot != -1 && c->locals[slot].suspends) return true;
-        /* Check globals */
-        GlobalArity* ga = compiler__find_global(c, name_val);
-        if (ga && ga->suspends) return true;
-        /* Check suspension map */
-        if (suspension_map_lookup(c->suspension_map, name_val)) return true;
+        /* Skip if callee is a generator */
+        if (suspension_map_is_generator(c->suspension_map, name_val)) {
+          /* Not a suspension point — fall through to recurse into args */
+        } else {
+          /* Check locals first */
+          int slot = compiler__resolve_local(c, name_val);
+          if (slot != -1 && c->locals[slot].suspends) return true;
+          /* Check globals */
+          GlobalArity* ga = compiler__find_global(c, name_val);
+          if (ga && ga->suspends) return true;
+          /* Check suspension map */
+          if (suspension_map_lookup(c->suspension_map, name_val)) return true;
+        }
       }
     }
 
@@ -2025,10 +2061,11 @@ static bool compiler__is_suspending_call(Compiler* c, AstNode* node) {
   if (head->type == AST_LIT_STRING) {
     const char* name = head->data.lit_string.value;
     uint32_t len = head->data.lit_string.length;
-    /* Skip built-in suspension points handled separately */
+    /* Skip built-in suspension points and generators handled separately */
     if ((len == 5 && memcmp(name, "await", 5) == 0) ||
         (len == 8 && memcmp(name, "parallel", 8) == 0) ||
         (len == 4 && memcmp(name, "race", 4) == 0) ||
+        (len == 5 && memcmp(name, "yield", 5) == 0) ||
         (len == 3 && memcmp(name, "def", 3) == 0) ||
         (len == 4 && memcmp(name, "proc", 4) == 0)) {
       return false;
@@ -2122,6 +2159,196 @@ static void compiler__compile_suspending_call_cps(Compiler* c,
   /* Tail call with argc + 1 (extra __k param) — reuses frame */
   compiler__emit_byte(c, OP_TAIL_CALL, line);
   compiler__emit_byte(c, (uint8_t)(argc + 1), line);
+}
+
+/**
+ * Check if an AST node is a [while cond body] with suspension in the body.
+ */
+static bool compiler__is_while_with_suspension(Compiler* c, AstNode* node) {
+  if (node->type != AST_COMMAND) return false;
+  AstNode* head = node->data.command.head;
+  if (!compiler__head_matches(head, "while", 5)) return false;
+  uint32_t argc = node->data.command.arg_count;
+  if (argc != 2) return false;
+  AstNode* body = node->data.command.args[1];
+  return body->type == AST_BLOCK && compiler__node_is_suspension(c, body);
+}
+
+/**
+ * CPS-compile a while loop whose body contains suspension points (yield).
+ *
+ * Transforms:   while cond { ...yield... }; remaining...
+ * Into:         loop_cell = cell(nil)
+ *               loop_fn = proc(__k) { if cond: body-CPS(loopback); else: __k(nil) }
+ *               store loop_fn in loop_cell
+ *               tail-call loop_fn(remaining_continuation)
+ *
+ * The loopback closure (used as __k inside body) calls loop_fn(__k) again
+ * via the self-referencing cell, achieving recursion without stack growth.
+ */
+static void compiler__compile_cps_while(Compiler* c, AstNode* while_node,
+                                         AstNode** remaining_stmts,
+                                         uint32_t remaining_count,
+                                         uint32_t line) {
+  AstNode* cond_node = while_node->data.command.args[0];
+  AstNode* body_block = while_node->data.command.args[1];
+  uint32_t body_count = body_block->data.block.count;
+  AstNode** body_stmts = body_block->data.block.commands;
+
+  /* --- Step 1: Allocate cell for loop function self-reference --- */
+  compiler__emit_byte(c, OP_NIL, line);
+  compiler__emit_byte(c, OP_MAKE_CELL, line);
+  JaclVal loop_cell_name = jacl_inline_string("__wlp", 5);
+  compiler__add_local(c, loop_cell_name, line, 0);
+
+  /* --- Step 2: Build the loop closure --- */
+  JaclClosure* loop_cl = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
+  chunk_init(&loop_cl->chunk, c->arena);
+  loop_cl->param_count   = 1;  /* __k = post-while continuation */
+  loop_cl->upvalue_count = 0;
+  loop_cl->upvalues      = NULL;
+  loop_cl->name          = "__while_loop";
+  loop_cl->min_args      = 1;
+  loop_cl->variadic      = false;
+  loop_cl->pinned        = false;
+  loop_cl->pin_worker_id = -1;
+  loop_cl->is_generator  = false;
+  JaclVal k_param = jacl_inline_string("__k", 3);
+  loop_cl->param_names = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal));
+  loop_cl->param_names[0] = k_param;
+
+  Compiler loop_compiler;
+  compiler__init(&loop_compiler, &loop_cl->chunk, c->arena, c->intern_table, c->heap);
+  loop_compiler.scope_depth    = 1;
+  loop_compiler.enclosing      = c;
+  loop_compiler.suspension_map = c->suspension_map;
+  loop_compiler.is_cps         = true;
+  loop_compiler.has_yield      = true;  /* propagate generator flag */
+  { Compiler* root = c; while (root->enclosing) root = root->enclosing;
+    memcpy(loop_compiler.global_arities, root->global_arities,
+           sizeof(GlobalArity) * root->global_arity_count);
+    loop_compiler.global_arity_count = root->global_arity_count;
+  }
+
+  /* __k parameter at slot 0 */
+  compiler__add_local(&loop_compiler, k_param, line, 0);
+  loop_compiler.locals[loop_compiler.local_count - 1].is_param = true;
+
+  /* Compile condition */
+  compiler__compile_node(&loop_compiler, cond_node);
+  uint32_t exit_jump = compiler__emit_jump(&loop_compiler, OP_JUMP_IF_FALSE, line);
+
+  /* --- True branch: compile body with CPS, looping back at end --- */
+
+  /* Build loopback closure: proc __r { get_cell __wlp; get __k; tail_call 1 }
+     This closure is called at the end of the body, and it re-invokes the loop
+     function with the same post-while continuation (__k). */
+  JaclClosure* lb_cl = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
+  chunk_init(&lb_cl->chunk, c->arena);
+  lb_cl->param_count   = 1;
+  lb_cl->upvalue_count = 0;
+  lb_cl->upvalues      = NULL;
+  lb_cl->name          = "__loop_back";
+  lb_cl->min_args      = 1;
+  lb_cl->variadic      = false;
+  lb_cl->pinned        = false;
+  lb_cl->pin_worker_id = -1;
+  lb_cl->is_generator  = false;
+  JaclVal r_param = jacl_inline_string("__r", 3);
+  lb_cl->param_names = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal));
+  lb_cl->param_names[0] = r_param;
+
+  Compiler lb_compiler;
+  compiler__init(&lb_compiler, &lb_cl->chunk, c->arena, c->intern_table, c->heap);
+  lb_compiler.scope_depth = 1;
+  lb_compiler.enclosing   = &loop_compiler;
+  /* Add __r param at slot 0 */
+  compiler__add_local(&lb_compiler, r_param, line, 0);
+  lb_compiler.locals[lb_compiler.local_count - 1].is_param = true;
+
+  /* Body: get loop_fn from cell, get __k from enclosing, tail-call loop_fn(__k) */
+  JaclVal wlp_name = jacl_inline_string("__wlp", 5);
+  int uv_loop = compiler__resolve_upvalue(&lb_compiler, wlp_name);
+  compiler__emit_byte(&lb_compiler, OP_GET_CELL_UPVALUE, line);
+  compiler__emit_byte(&lb_compiler, (uint8_t)uv_loop, line);
+
+  int uv_k = compiler__resolve_upvalue(&lb_compiler, k_param);
+  compiler__emit_byte(&lb_compiler, OP_GET_UPVALUE, line);
+  compiler__emit_byte(&lb_compiler, (uint8_t)uv_k, line);
+
+  compiler__emit_byte(&lb_compiler, OP_TAIL_CALL, line);
+  compiler__emit_byte(&lb_compiler, 1, line);
+
+  /* Propagate errors */
+  c->error_count += lb_compiler.error_count;
+  if (!c->first_error && lb_compiler.first_error) c->first_error = lb_compiler.first_error;
+
+  /* Emit OP_CLOSURE for loopback in loop_compiler */
+  lb_cl->upvalue_count = (uint8_t)lb_compiler.upvalue_count;
+  uint16_t lb_idx = chunk_add_constant(loop_compiler.chunk, jacl_closure(lb_cl));
+  compiler__emit_byte(&loop_compiler, OP_CLOSURE, line);
+  compiler__emit_u16(&loop_compiler, lb_idx, line);
+  for (uint32_t i = 0; i < lb_compiler.upvalue_count; i++) {
+    compiler__emit_byte(&loop_compiler, lb_compiler.upvalues[i].is_local, line);
+    compiler__emit_byte(&loop_compiler, lb_compiler.upvalues[i].index, line);
+  }
+
+  /* Shadow __k with the loopback closure so body CPS tail-calls it */
+  uint32_t saved_local_count = loop_compiler.local_count;
+  compiler__add_local(&loop_compiler, jacl_inline_string("__k", 3), line, 0);
+
+  /* Compile body statements with CPS (yield becomes suspension point) */
+  compiler__begin_scope(&loop_compiler);
+  compiler__compile_cps_stmts(&loop_compiler, body_stmts, body_count, line);
+  compiler__end_scope(&loop_compiler, line);
+
+  /* Restore local count (shadow __k is cleaned up — unreachable code follows) */
+  loop_compiler.local_count = saved_local_count;
+
+  /* --- False branch (exit): tail-call __k(nil) --- */
+  compiler__patch_jump(&loop_compiler, exit_jump);
+  /* Access original __k at slot 0 (the parameter) directly */
+  compiler__emit_byte(&loop_compiler, OP_GET_LOCAL, line);
+  compiler__emit_byte(&loop_compiler, 0, line);
+  compiler__emit_byte(&loop_compiler, OP_NIL, line);
+  compiler__emit_byte(&loop_compiler, OP_TAIL_CALL, line);
+  compiler__emit_byte(&loop_compiler, 1, line);
+
+  /* Propagate errors from loop compiler */
+  c->error_count += loop_compiler.error_count;
+  if (!c->first_error && loop_compiler.first_error) c->first_error = loop_compiler.first_error;
+
+  /* --- Step 3: Emit OP_CLOSURE for loop_fn in parent and store in cell --- */
+  loop_cl->upvalue_count = (uint8_t)loop_compiler.upvalue_count;
+  uint16_t loop_idx = chunk_add_constant(c->chunk, jacl_closure(loop_cl));
+  compiler__emit_byte(c, OP_CLOSURE, line);
+  compiler__emit_u16(c, loop_idx, line);
+  for (uint32_t i = 0; i < loop_compiler.upvalue_count; i++) {
+    compiler__emit_byte(c, loop_compiler.upvalues[i].is_local, line);
+    compiler__emit_byte(c, loop_compiler.upvalues[i].index, line);
+  }
+
+  /* Store loop closure in the cell */
+  int loop_cell_slot = compiler__resolve_local(c, loop_cell_name);
+  compiler__emit_byte(c, OP_SET_CELL_LOCAL, line);
+  compiler__emit_byte(c, (uint8_t)loop_cell_slot, line);
+
+  /* --- Step 4: Call loop_fn(post_while_continuation) --- */
+  /* Push loop_fn (get from cell) */
+  compiler__emit_byte(c, OP_GET_CELL_LOCAL, line);
+  compiler__emit_byte(c, (uint8_t)loop_cell_slot, line);
+
+  /* Push __k for loop_fn: either remaining_continuation or enclosing __k */
+  if (remaining_count == 0) {
+    compiler__emit_get_k(c, line);
+  } else {
+    JaclVal cont_param = jacl_inline_string("__r", 3);
+    compiler__emit_continuation(c, cont_param, remaining_stmts, remaining_count, line);
+  }
+
+  /* Tail-call loop_fn(post_while_continuation) */
+  compiler__emit_byte(c, OP_TAIL_CALL, line);
+  compiler__emit_byte(c, 1, line);
 }
 
 /**
@@ -2533,6 +2760,33 @@ static void compiler__compile_cps_stmts(Compiler* c, AstNode** stmts,
 
     compiler__emit_byte(c, OP_RACE, susp_stmt->start.line);
     compiler__emit_byte(c, (uint8_t)race_argc, susp_stmt->start.line);
+    return;
+  }
+
+  /* Case 1d: Direct [yield expr] — generator CPS suspension */
+  AstNode* yield_value_expr = NULL;
+  if (compiler__is_direct_yield(susp_stmt, &yield_value_expr)) {
+    /* Compile the value to yield */
+    compiler__compile_node(c, yield_value_expr);
+
+    /* Push continuation for remaining stmts (or __k if tail position) */
+    if (remaining_count == 0) {
+      compiler__emit_get_k(c, line);
+    } else {
+      compiler__emit_continuation(c, cont_param, remaining, remaining_count, line);
+    }
+
+    /* OP_YIELD: pops continuation then value, stores both, returns VM_YIELD */
+    compiler__emit_byte(c, OP_YIELD, susp_stmt->start.line);
+    c->has_yield = true;
+    return;
+  }
+
+  /* Case 1e: [while cond { ... yield ... }] — CPS while loop */
+  if (compiler__is_while_with_suspension(c, susp_stmt)) {
+    compiler__compile_cps_while(c, susp_stmt, remaining, remaining_count,
+                                 susp_stmt->start.line);
+    c->has_yield = true;
     return;
   }
 
@@ -5719,14 +5973,17 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* yield — generator suspension: compiles value, emits OP_YIELD.
-     On resume, the stream_next handler pushes nil as the yield expression result. */
+  /* yield — generator suspension point.
+     In CPS mode, yield is handled by compiler__compile_cps_stmts.
+     This path is a fallback for non-CPS contexts (shouldn't normally be reached
+     for generators, but compile defensively). Stack: [value, continuation]. */
   if (compiler__head_matches(head, "yield", 5)) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "yield", "1 argument", argc);
       return;
     }
     compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_NIL, line);  /* nil continuation (no CPS context) */
     compiler__emit_byte(c, OP_YIELD, line);
     c->has_yield = true;
     c->last_expr_type = TYPE_NIL;

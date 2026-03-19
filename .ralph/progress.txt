@@ -4,8 +4,8 @@ Started: Thu Mar 19 08:54:03 UTC 2026
 ## Codebase Patterns
 - Unity build: `src/jacl.c` includes all source files. Tests include `../src/jacl.c` directly. Compile tests as single translation units (e.g., `gcc test/test_foo.c -o test_foo -lm`), never pass individual .c source files alongside.
 - Mutable variables (`mut`) use heap-allocated `JaclMutableRef` cells. The stack holds the cell pointer, mutations update the cell's value. This means mutations are visible across yields without needing special handling.
-- Generator/yield uses coroutine-style stack save/restore, NOT CPS. The `is_generator` flag on closures triggers stream creation at call time. `OP_STREAM_NEXT` manages the PENDING→CONSUMED→EXHAUSTED state machine.
-- Stream state is saved in `JaclStream` struct: up to 32 stack slots, 8 call frames, and 8 deferred arguments. GC traces all saved state.
+- Generator/yield uses CPS (continuation-passing style). The `is_generator` flag on closures triggers stream creation at call time. `OP_STREAM_NEXT` manages the PENDING→CONSUMED→EXHAUSTED state machine via CPS continuations.
+- JaclStream stores: state, next_fn (CPS continuation or generator closure), cached_value, and deferred args. No coroutine state needed — CPS closures capture all state via upvalues.
 - While loop bodies need `compiler__begin_scope`/`compiler__end_scope` to properly clean up `def` locals each iteration (important for generators that yield inside loops).
 - Some test suites (compiler, heap_strings, m4, m5, jacl_harness) time out under 10s but pass given more time. Use longer timeouts or skip these in quick validation.
 - Build system (`build.sh`) compiles all tests in parallel, runs sequentially. Add new test entries as `"test/test_foo.c|foo|"`.
@@ -13,12 +13,22 @@ Started: Thu Mar 19 08:54:03 UTC 2026
 ---
 
 ## 2026-03-19 - US-009
-- Implemented OP_YIELD opcode and coroutine-based stream creation
+- Implemented OP_YIELD opcode and stream creation (initially coroutine-based)
 - Files changed: src/bytecode.c, src/compiler.c, src/vm.c, src/gc.c, src/gc_collect.c, src/runtime.c, src/embed.c, test/test_yield.c, test/test_bytecode.c, build.sh
+
+## 2026-03-19 - US-009 CPS Refactor
+- Refactored yield/generator from coroutine stack save/restore to CPS (continuation-passing style)
+- Files changed: src/compiler.c, src/vm.c, src/gc.c, src/gc_collect.c
+- **Key design decisions:**
+  - Generators are CPS-compiled: yield is a suspension point like await. The compiler adds __k as hidden last parameter.
+  - OP_YIELD pops (continuation, value) from stack. Continuation is the CPS closure for remaining body.
+  - OP_STREAM_NEXT creates a terminal_k closure (OP_RETURN only) and calls generator/continuation.
+  - While loops with yield use recursive CPS: loop function with self-referencing mutable cell. Loopback closure shadows __k to re-invoke loop.
+  - Suspension analysis: generators have `is_generator=true` in SuspensionMap. Calling a generator does NOT propagate suspension to the caller (it just creates a stream).
+  - JaclStream simplified: removed saved_stack, saved_frames, resume_ip, resume_chunk. Only stores next_fn, cached_value, args.
+  - Generator arity check in OP_CALL moved before is_generator check; uses min_args (excludes hidden __k).
 - **Learnings for future iterations:**
-  - Generator yield uses coroutine stack saving, not CPS transform. OP_YIELD returns VM_YIELD, OP_STREAM_NEXT saves/restores entire generator stack between calls.
-  - JaclStream extended with coroutine state (saved_stack, saved_frames, resume_ip, resume_chunk, args).
+  - CPS while-loop transformation: create cell for self-reference, build loop closure with __k param, build loopback closure that re-calls loop via cell, shadow __k with loopback before compiling body CPS.
   - Fixed TYPE_STREAM not handled in struct__type_size, struct__type_align (compiler.c), and embed__val_matches_field_type (embed.c) — always add new types to these switch statements.
   - Fixed unused `agg` variable in runtime.c runtime__parallel_task_exec.
-  - While body scope added (begin_scope/end_scope) to properly handle def locals in loops with generators.
 ---

@@ -982,33 +982,15 @@ static bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
 #define STREAM_EXHAUSTED 2
 #define STREAM_ERROR     3
 
-#define STREAM_MAX_SAVED_STACK  32
-#define STREAM_MAX_SAVED_FRAMES  8
 #define STREAM_MAX_ARGS          8
-
-/* Forward-declare CallFrame (defined in vm.c) so JaclStream can embed it. */
-typedef struct {
-  void*          closure;     /* JaclClosure* */
-  uint8_t*       return_ip;
-  uint32_t       stack_base;
-  void*          chunk;       /* BytecodeChunk* */
-} StreamSavedFrame;
 
 typedef struct {
     uint32_t  state;         /* STREAM_PENDING / CONSUMED / EXHAUSTED / ERROR */
-    JaclVal   next_fn;       /* generator closure (nil when exhausted/error) */
+    JaclVal   next_fn;       /* CPS continuation closure (nil when exhausted/error) */
     JaclVal   cached_value;  /* cached current element */
-    /* Deferred first-call arguments */
+    /* Deferred first-call arguments (saved at generator creation, used on first pull) */
     JaclVal   args[STREAM_MAX_ARGS];
     uint8_t   arg_count;
-    /* Coroutine saved state (for yield/resume) */
-    JaclVal   saved_stack[STREAM_MAX_SAVED_STACK];
-    uint32_t  saved_stack_count;
-    StreamSavedFrame saved_frames[STREAM_MAX_SAVED_FRAMES];
-    uint32_t  saved_frame_count;
-    uint32_t  saved_stack_base;  /* caller_stack_top when state was saved */
-    uint8_t*  resume_ip;
-    void*     resume_chunk;      /* BytecodeChunk* */
 } JaclStream;
 
 static inline JaclStream *jacl_as_stream(JaclVal v) {
@@ -1021,11 +1003,6 @@ static JaclVal jacl_stream(ThreadHeap *heap) {
     s->next_fn      = JACL_NIL;
     s->cached_value = JACL_NIL;
     s->arg_count    = 0;
-    s->saved_stack_count = 0;
-    s->saved_frame_count = 0;
-    s->saved_stack_base  = 0;
-    s->resume_ip    = NULL;
-    s->resume_chunk = NULL;
     return jacl_stream_ptr(s);
 }
 

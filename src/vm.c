@@ -102,8 +102,9 @@ typedef struct {
   /* Spread count side buffer for OP_SPREAD / OP_CALL_SPREAD / OP_FOLD_SPREAD */
   uint32_t   spread_counts[32]; /* small stack of spread element counts */
   uint32_t   spread_count_top;  /* top index in spread_counts */
-  /* Generator/yield support */
+  /* Generator/yield support (CPS-based) */
   JaclVal    yield_value;        /* yielded value (set by OP_YIELD) */
+  JaclVal    yield_continuation; /* CPS continuation after yield (set by OP_YIELD) */
 } VM;
 
 /* --- API --- */
@@ -281,6 +282,7 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->native_fn_count   = 0;
   vm->spread_count_top  = 0;
   vm->yield_value        = JACL_NIL;
+  vm->yield_continuation = JACL_NIL;
 
   /* Initialize GC heap and make it available for collection templates */
   gc_block_pool_init(&vm->block_pool);
@@ -644,6 +646,30 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
   vm->ip        = chunk->code;
 
   return vm__run(vm, 0);
+}
+
+/**
+ * Create a terminal continuation closure for CPS generators.
+ * When called (via tail-call from the generator body), it simply returns,
+ * causing vm__run to return VM_OK which signals stream exhaustion.
+ * The closure has 1 parameter (the result, ignored) and body = [OP_RETURN].
+ */
+static JaclVal vm__make_terminal_k(VM* vm) {
+  JaclClosure* k = (JaclClosure*)gc_alloc(&vm->heap, OBJ_CLOSURE,
+                        sizeof(JaclClosure));
+  chunk_init(&k->chunk, vm->arena);
+  chunk_write(&k->chunk, OP_RETURN, 0);
+  k->param_count   = 1;
+  k->upvalue_count = 0;
+  k->upvalues      = NULL;
+  k->name          = "__terminal_k";
+  k->min_args      = 1;
+  k->variadic      = false;
+  k->pinned        = false;
+  k->pin_worker_id = -1;
+  k->is_generator  = false;
+  k->param_names   = NULL;
+  return jacl_closure(k);
 }
 
 /**
@@ -1171,20 +1197,15 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         JaclClosure* closure = jacl_as_closure(callee);
 
-        if (closure->variadic) {
-          if (arg_count < closure->min_args) {
-            vm__set_error(vm, "expected at least %d arguments but got %d",
+        /* Generator: calling a generator proc creates a stream instead of executing.
+           Check this BEFORE arity check because generator has hidden __k param. */
+        if (closure->is_generator) {
+          /* Arity check against min_args (excludes hidden __k) */
+          if (arg_count != closure->min_args) {
+            vm__set_error(vm, "expected %d arguments but got %d",
                          (int)closure->min_args, (int)arg_count);
             return VM_RUNTIME_ERROR;
           }
-        } else if (arg_count != closure->param_count) {
-          vm__set_error(vm, "expected %d arguments but got %d",
-                       (int)closure->param_count, (int)arg_count);
-          return VM_RUNTIME_ERROR;
-        }
-
-        /* Generator: calling a generator proc creates a stream instead of executing */
-        if (closure->is_generator) {
           JaclVal stream_val = jacl_stream(&vm->heap);
           JaclStream* stream = jacl_as_stream(stream_val);
           stream->next_fn = callee;
@@ -1196,6 +1217,18 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, stream_val);
           if (result != VM_OK) return result;
           break;
+        }
+
+        if (closure->variadic) {
+          if (arg_count < closure->min_args) {
+            vm__set_error(vm, "expected at least %d arguments but got %d",
+                         (int)closure->min_args, (int)arg_count);
+            return VM_RUNTIME_ERROR;
+          }
+        } else if (arg_count != closure->param_count) {
+          vm__set_error(vm, "expected %d arguments but got %d",
+                       (int)closure->param_count, (int)arg_count);
+          return VM_RUNTIME_ERROR;
         }
 
         if (vm->frame_count >= VM_FRAMES_MAX) {
@@ -4576,29 +4609,22 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_YIELD: {
-        /* Pop yielded value and return VM_YIELD to suspend generator */
+        /* CPS yield: pop continuation closure, then yielded value.
+           Store both and return VM_YIELD to suspend generator. */
+        JaclVal continuation;
+        result = vm__pop(vm, &continuation);
+        if (result != VM_OK) return result;
         JaclVal value;
         result = vm__pop(vm, &value);
         if (result != VM_OK) return result;
         vm->yield_value = value;
-#ifdef DEBUG_YIELD
-        fprintf(stderr, "[YIELD] value=%ld stack_top=%u frame_count=%u stack_base=%u\n",
-                (long)jacl_as_i32(value), vm->stack_top, vm->frame_count, frame->stack_base);
-        for (uint32_t di = frame->stack_base; di < vm->stack_top; di++) {
-          JaclVal sv = vm->stack[di];
-          if (jacl_is_i32(sv)) fprintf(stderr, "  stack[%u] = int(%ld)\n", di, (long)jacl_as_i32(sv));
-          else if (jacl_is_cell(sv)) {
-            JaclMutableRef* ref = jacl_as_cell(sv);
-            if (jacl_is_i32(ref->value)) fprintf(stderr, "  stack[%u] = cell(int %ld)\n", di, (long)jacl_as_i32(ref->value));
-            else fprintf(stderr, "  stack[%u] = cell(?)\n", di);
-          }
-          else fprintf(stderr, "  stack[%u] = other\n", di);
-        }
-#endif
+        vm->yield_continuation = continuation;
         return VM_YIELD;
       }
 
       case OP_STREAM_NEXT: {
+        /* CPS-based stream_next: calls generator/continuation closures
+           and interprets VM_YIELD (yield) or VM_OK (exhaustion). */
         JaclVal stream_val;
         result = vm__pop(vm, &stream_val);
         if (result != VM_OK) return result;
@@ -4620,8 +4646,12 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint8_t* caller_ip = vm->ip;
         BytecodeChunk* caller_chunk = vm->chunk;
 
+        /* Create terminal continuation — when called, generator is done */
+        JaclVal terminal_k = vm__make_terminal_k(vm);
+
         if (stream->state == STREAM_PENDING) {
-          /* First call: set up the generator call frame */
+          /* First call: invoke generator closure with saved args + terminal_k.
+             Generator was CPS-compiled with __k as hidden last param. */
           if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
             vm__set_error(vm, "stream has no next function");
             return VM_RUNTIME_ERROR;
@@ -4633,6 +4663,9 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             result = vm__push(vm, stream->args[i]);
             if (result != VM_OK) return result;
           }
+          result = vm__push(vm, terminal_k); /* __k = terminal continuation */
+          if (result != VM_OK) return result;
+
           if (vm->frame_count >= VM_FRAMES_MAX) {
             vm__set_error(vm, "stack overflow");
             return VM_RUNTIME_ERROR;
@@ -4640,96 +4673,42 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           CallFrame* new_frame = &vm->frames[vm->frame_count++];
           new_frame->closure    = gen_cl;
           new_frame->return_ip  = NULL;
-          new_frame->stack_base = vm->stack_top - stream->arg_count;
+          new_frame->stack_base = vm->stack_top - stream->arg_count - 1; /* args + __k */
           new_frame->chunk      = &gen_cl->chunk;
           vm->ip    = gen_cl->chunk.code;
           vm->chunk = &gen_cl->chunk;
         } else {
-          /* Resume: restore saved coroutine state */
-#ifdef DEBUG_YIELD
-          fprintf(stderr, "[RESUME] caller_stack_top=%u saved_stack_base=%u saved_stack_count=%u\n",
-                  caller_stack_top, stream->saved_stack_base, stream->saved_stack_count);
-          for (uint32_t di = 0; di < stream->saved_stack_count; di++) {
-            JaclVal sv = stream->saved_stack[di];
-            if (jacl_is_i32(sv)) fprintf(stderr, "  restore[%u] = int(%ld)\n", di, (long)jacl_as_i32(sv));
-            else if (jacl_is_cell(sv)) {
-              JaclMutableRef* ref = jacl_as_cell(sv);
-              if (jacl_is_i32(ref->value)) fprintf(stderr, "  restore[%u] = cell(int %ld)\n", di, (long)jacl_as_i32(ref->value));
-              else fprintf(stderr, "  restore[%u] = cell(?)\n", di);
-            }
-            else if (jacl_is_closure(sv)) fprintf(stderr, "  restore[%u] = closure\n", di);
-            else fprintf(stderr, "  restore[%u] = other(tag=%lx)\n", di, (unsigned long)sv);
+          /* CONSUMED: call the yield continuation with nil (yield expr result).
+             The continuation was captured by CPS and already has __k as upvalue. */
+          if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+            vm__set_error(vm, "stream continuation is invalid");
+            return VM_RUNTIME_ERROR;
           }
-#endif
-          uint32_t offset = caller_stack_top - stream->saved_stack_base;
-          memcpy(&vm->stack[caller_stack_top], stream->saved_stack,
-                 stream->saved_stack_count * sizeof(JaclVal));
-          vm->stack_top = caller_stack_top + stream->saved_stack_count;
-
-          for (uint32_t i = 0; i < stream->saved_frame_count; i++) {
-            StreamSavedFrame* sf = &stream->saved_frames[i];
-            CallFrame* cf = &vm->frames[caller_frame_count + i];
-            cf->closure    = (JaclClosure*)sf->closure;
-            cf->return_ip  = sf->return_ip;
-            cf->stack_base = sf->stack_base + offset;
-            cf->chunk      = (BytecodeChunk*)sf->chunk;
-          }
-          vm->frame_count = caller_frame_count + stream->saved_frame_count;
-
-          /* Push nil as the result of the yield expression */
-          result = vm__push(vm, JACL_NIL);
+          JaclClosure* cont_cl = jacl_as_closure(stream->next_fn);
+          result = vm__push(vm, stream->next_fn); /* callee slot */
+          if (result != VM_OK) return result;
+          result = vm__push(vm, JACL_NIL); /* __r = nil (yield expression result) */
           if (result != VM_OK) return result;
 
-          vm->ip    = stream->resume_ip;
-          vm->chunk = (BytecodeChunk*)stream->resume_chunk;
+          if (vm->frame_count >= VM_FRAMES_MAX) {
+            vm__set_error(vm, "stack overflow");
+            return VM_RUNTIME_ERROR;
+          }
+          CallFrame* new_frame = &vm->frames[vm->frame_count++];
+          new_frame->closure    = cont_cl;
+          new_frame->return_ip  = NULL;
+          new_frame->stack_base = vm->stack_top - 1; /* 1 param */
+          new_frame->chunk      = &cont_cl->chunk;
+          vm->ip    = cont_cl->chunk.code;
+          vm->chunk = &cont_cl->chunk;
         }
 
-        /* Run generator until yield or return */
+        /* Run generator/continuation until yield or return */
         VMResult inner = vm__run(vm, caller_frame_count);
 
         if (inner == VM_YIELD) {
-          /* Save generator's coroutine state to stream */
-#ifdef DEBUG_YIELD
-          fprintf(stderr, "[SAVE] yield_value=%ld caller_stack_top=%u vm_stack_top=%u\n",
-                  (long)jacl_as_i32(vm->yield_value), caller_stack_top, vm->stack_top);
-          for (uint32_t di = caller_stack_top; di < vm->stack_top; di++) {
-            JaclVal sv = vm->stack[di];
-            if (jacl_is_i32(sv)) fprintf(stderr, "  save[%u] = int(%ld)\n", di, (long)jacl_as_i32(sv));
-            else if (jacl_is_cell(sv)) {
-              JaclMutableRef* ref = jacl_as_cell(sv);
-              if (jacl_is_i32(ref->value)) fprintf(stderr, "  save[%u] = cell(int %ld)\n", di, (long)jacl_as_i32(ref->value));
-              else fprintf(stderr, "  save[%u] = cell(?)\n", di);
-            }
-            else if (jacl_is_closure(sv)) fprintf(stderr, "  save[%u] = closure\n", di);
-            else fprintf(stderr, "  save[%u] = other(tag=%lx)\n", di, (unsigned long)sv);
-          }
-#endif
-          uint32_t gen_stack_count = vm->stack_top - caller_stack_top;
-          if (gen_stack_count > STREAM_MAX_SAVED_STACK) {
-            vm__set_error(vm, "generator stack too deep (%u slots)", gen_stack_count);
-            return VM_RUNTIME_ERROR;
-          }
-          memcpy(stream->saved_stack, &vm->stack[caller_stack_top],
-                 gen_stack_count * sizeof(JaclVal));
-          stream->saved_stack_count = gen_stack_count;
-
-          uint32_t gen_frame_count = vm->frame_count - caller_frame_count;
-          if (gen_frame_count > STREAM_MAX_SAVED_FRAMES) {
-            vm__set_error(vm, "generator frames too deep (%u frames)", gen_frame_count);
-            return VM_RUNTIME_ERROR;
-          }
-          for (uint32_t i = 0; i < gen_frame_count; i++) {
-            CallFrame* cf = &vm->frames[caller_frame_count + i];
-            StreamSavedFrame* sf = &stream->saved_frames[i];
-            sf->closure    = cf->closure;
-            sf->return_ip  = cf->return_ip;
-            sf->stack_base = cf->stack_base;
-            sf->chunk      = cf->chunk;
-          }
-          stream->saved_frame_count = gen_frame_count;
-          stream->saved_stack_base  = caller_stack_top;
-          stream->resume_ip    = vm->ip;
-          stream->resume_chunk = vm->chunk;
+          /* CPS yield: continuation stored in vm->yield_continuation */
+          stream->next_fn = vm->yield_continuation;
           stream->state = STREAM_CONSUMED;
           stream->cached_value = vm->yield_value;
 
@@ -4745,7 +4724,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (result != VM_OK) return result;
           break;
         } else if (inner == VM_OK) {
-          /* Generator returned normally — stream exhausted */
+          /* Generator exhausted (terminal_k was called) */
           stream->state = STREAM_EXHAUSTED;
           stream->next_fn = JACL_NIL;
           stream->cached_value = JACL_NIL;
