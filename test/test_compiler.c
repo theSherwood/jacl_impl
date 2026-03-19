@@ -2384,13 +2384,13 @@ static int test_while_iterative_sum(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
 
-  /* Sum 1..5 using def rebinding in while loop */
+  /* Sum 1..5 using mutable variables in while loop */
   const char* program =
-    "i = 1\n"
-    "sum = 0\n"
+    "i : 1\n"
+    "sum : 0\n"
     "[while [<= $i 5] {\n"
-    "  sum = [+ $sum $i]\n"
-    "  i = [+ $i 1]\n"
+    "  sum :: [+ $sum $i]\n"
+    "  i :: [+ $i 1]\n"
     "}]\n"
     "[print $sum]";
 
@@ -2422,9 +2422,9 @@ static int test_while_returns_nil(void) {
 
   /* Print the result of a while loop — should be nil */
   const char* program =
-    "i = 0\n"
+    "i : 0\n"
     "[print [while [< $i 3] {\n"
-    "  i = [+ $i 1]\n"
+    "  i :: [+ $i 1]\n"
     "}]]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2508,10 +2508,10 @@ static int test_while_countdown(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "n = 3\n"
+    "n : 3\n"
     "[while [> $n 0] {\n"
     "  [print $n]\n"
-    "  n = [- $n 1]\n"
+    "  n :: [- $n 1]\n"
     "}]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -5520,11 +5520,11 @@ static int test_while_new_iterative_sum(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "i = 1\n"
-    "sum = 0\n"
+    "i : 1\n"
+    "sum : 0\n"
     "while [<= $i 5] {\n"
-    "  sum = [+ $sum $i]\n"
-    "  i = [+ $i 1]\n"
+    "  sum :: [+ $sum $i]\n"
+    "  i :: [+ $i 1]\n"
     "}\n"
     "[print $sum]", &vm, &arena);
 
@@ -5552,10 +5552,10 @@ static int test_while_new_infix_condition(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "i = 3\n"
+    "i : 3\n"
     "while ($i > 0) {\n"
     "  [print $i]\n"
-    "  i = [- $i 1]\n"
+    "  i :: [- $i 1]\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -5605,14 +5605,14 @@ static int test_if_while_combined_new(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "i = 1\n"
+    "i : 1\n"
     "while [<= $i 4] {\n"
     "  if [== [% $i 2] 0] {\n"
     "    [print \"even\"]\n"
     "  } else {\n"
     "    [print \"odd\"]\n"
     "  }\n"
-    "  i = [+ $i 1]\n"
+    "  i :: [+ $i 1]\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -5869,11 +5869,11 @@ static int test_break_while_basic(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "i = 0\n"
+    "i : 0\n"
     "while $true {\n"
     "  if [>= $i 3] { [break] }\n"
     "  [print $i]\n"
-    "  i = [+ $i 1]\n"
+    "  i :: [+ $i 1]\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -5900,10 +5900,10 @@ static int test_break_while_with_value(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "i = 0\n"
+    "i : 0\n"
     "result = [while $true {\n"
     "  if [>= $i 5] { [break $i] }\n"
-    "  i = [+ $i 1]\n"
+    "  i :: [+ $i 1]\n"
     "}]\n"
     "[print $result]\n", &vm, &arena);
 
@@ -5962,16 +5962,16 @@ static int test_break_nested_loops(void) {
 
   /* Outer loop runs 3 times, inner loop breaks after 2 iterations */
   VMResult result = jacl_run(
-    "i = 0\n"
+    "i : 0\n"
     "while [< $i 3] {\n"
-    "  j = 0\n"
+    "  j : 0\n"
     "  while $true {\n"
     "    if [>= $j 2] { [break] }\n"
     "    [print $i]\n"
     "    [print $j]\n"
-    "    j = [+ $j 1]\n"
+    "    j :: [+ $j 1]\n"
     "  }\n"
-    "  i = [+ $i 1]\n"
+    "  i :: [+ $i 1]\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -6035,12 +6035,12 @@ static int test_break_bare_with_value(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "i = 0\n"
+    "i : 0\n"
     "result = [while $true {\n"
     "  if [>= $i 3] {\n"
     "    break $i\n"
     "  }\n"
-    "  i = [+ $i 1]\n"
+    "  i :: [+ $i 1]\n"
     "}]\n"
     "[print $result]\n", &vm, &arena);
 
@@ -6070,10 +6070,10 @@ static int test_continue_while_basic(void) {
 
   /* Print 0,1,3,4 — skip 2 */
   VMResult result = jacl_run(
-    "i = 0\n"
+    "i : 0\n"
     "while [< $i 5] {\n"
     "  old = $i\n"
-    "  i = [+ $i 1]\n"
+    "  i :: [+ $i 1]\n"
     "  if [== $old 2] { [continue] }\n"
     "  [print $old]\n"
     "}\n", &vm, &arena);
@@ -6312,9 +6312,9 @@ static int test_continue_mixed_nested(void) {
   /* Outer while iterates twice. Inner for skips element 2.
      Expected: 1 3 1 3 done */
   VMResult result = jacl_run(
-    "n = 0\n"
+    "n : 0\n"
     "while [< $n 2] {\n"
-    "  n = [+ $n 1]\n"
+    "  n :: [+ $n 1]\n"
     "  for [vec 1 2 3] {\n"
     "    if [== $it 2] { [continue] }\n"
     "    [print $it]\n"

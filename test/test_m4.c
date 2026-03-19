@@ -277,11 +277,11 @@ static int test_while_iterative_sum(void) {
   vm.print_ctx = &cap;
 
   const char* program =
-    "i = 1\n"
-    "sum = 0\n"
+    "i : 1\n"
+    "sum : 0\n"
     "[while [<= $i 10] {\n"
-    "  sum = [+ $sum $i]\n"
-    "  i = [+ $i 1]\n"
+    "  sum :: [+ $sum $i]\n"
+    "  i :: [+ $i 1]\n"
     "}]\n"
     "[print $sum]";
 

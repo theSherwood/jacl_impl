@@ -5525,7 +5525,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, "too many continue statements in loop");
       }
     } else {
-      /* While-loop: backward-jump to condition check */
+      /* While-loop: pop body-scope locals, then backward-jump to condition */
+      uint32_t cleanup = c->local_count - lctx->local_count_at_loop;
+      if (cleanup > 0) {
+        compiler__emit_byte(c, OP_POP_N, line);
+        compiler__emit_byte(c, (uint8_t)cleanup, line);
+      }
       compiler__emit_byte(c, OP_LOOP, line);
       uint32_t offset = c->chunk->code_count - lctx->loop_start + 2;
       compiler__emit_byte(c, (uint8_t)((offset >> 8) & 0xFF), line);
@@ -7194,7 +7199,12 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
                           "too many continue statements in loop");
         }
       } else {
-        /* While-loop: backward-jump to condition check */
+        /* While-loop: pop body-scope locals, then backward-jump to condition */
+        uint32_t cleanup = c->local_count - lctx->local_count_at_loop;
+        if (cleanup > 0) {
+          compiler__emit_byte(c, OP_POP_N, line);
+          compiler__emit_byte(c, (uint8_t)cleanup, line);
+        }
         compiler__emit_byte(c, OP_LOOP, line);
         uint32_t offset = c->chunk->code_count - lctx->loop_start + 2;
         compiler__emit_byte(c, (uint8_t)((offset >> 8) & 0xFF), line);
