@@ -220,7 +220,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Recommend native builtin proc for simplicity: register 'collect' with arity 1, implementation checks jacl_is_stream or jacl_is_vector, loops pulling from stream into RRB vector builder. Since collect calls OP_STREAM_NEXT which may call CPS continuations, the implementation needs to handle the synchronous call protocol."
     },
     {
