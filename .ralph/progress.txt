@@ -5,7 +5,9 @@ Started: Thu Mar 19 08:54:03 UTC 2026
 - Unity build: `src/jacl.c` includes all source files. Tests include `../src/jacl.c` directly. Compile tests as single translation units (e.g., `gcc test/test_foo.c -o test_foo -lm`), never pass individual .c source files alongside.
 - Mutable variables (`mut`) use heap-allocated `JaclMutableRef` cells. The stack holds the cell pointer, mutations update the cell's value. This means mutations are visible across yields without needing special handling.
 - Generator/yield uses CPS (continuation-passing style). The `is_generator` flag on closures triggers stream creation at call time. `OP_STREAM_NEXT` manages the PENDING→CONSUMED→EXHAUSTED state machine via CPS continuations.
-- JaclStream stores: state, next_fn (CPS continuation or generator closure), cached_value, and deferred args. No coroutine state needed — CPS closures capture all state via upvalues.
+- JaclStream stores: state, kind, next_fn (CPS continuation or generator closure), cached_value, and deferred args. `kind` distinguishes STREAM_KIND_GENERATOR (CPS-based) from derived streams like STREAM_KIND_FILTER. No coroutine state needed — CPS closures capture all state via upvalues.
+- Derived stream pattern (filter/transform/take/lines): create a new JaclStream with kind=STREAM_KIND_X, store source stream + closure in args[]. The `vm__pull_stream_one()` helper handles all stream kinds (generator CPS protocol + derived stream logic). OP_STREAM_NEXT/OP_COLLECT/OP_EACH dispatch non-generator streams to this helper.
+- `compiler__compile_hof_builtin()` preserves `last_expr_type` through the compilation: saves collection type before compiling callback, restores after emitting opcode. This means filter/transform on streams produce TYPE_STREAM and on vectors produce TYPE_VEC.
 - While loop bodies need `compiler__begin_scope`/`compiler__end_scope` to properly clean up `def` locals each iteration (important for generators that yield inside loops).
 - Some test suites (compiler, heap_strings, m4, m5, jacl_harness) time out under 10s but pass given more time. Use longer timeouts or skip these in quick validation.
 - Build system (`build.sh`) compiles all tests in parallel, runs sequentially. Add new test entries as `"test/test_foo.c|foo|"`.
@@ -64,4 +66,22 @@ Started: Thu Mar 19 08:54:03 UTC 2026
   - Stream for-loop uses only 2 hidden locals (__col, elem) vs 4 for vector (__col, __len, __idx, elem) — no index needed since OP_STREAM_NEXT is pull-based
   - HOF/lambda forms (`for $stream $callback`, `for $stream [\ ...]`) delegate to OP_EACH which already dispatches on stream vs vector type in the VM
   - OP_IS_STREAM_EXHAUSTED checks stream->state after OP_STREAM_NEXT — must re-fetch __col since stream_next consumes from the stream object
+---
+
+## 2026-03-19 - US-012
+- Implemented stream-aware filter: `filter` on a stream returns a new lazy filter stream
+- Files changed: src/gc.c, src/vm.c, src/compiler.c, test/test_stream_filter.c, build.sh
+- **What was implemented:**
+  - Added `kind` field to JaclStream (STREAM_KIND_GENERATOR=0, STREAM_KIND_FILTER=1)
+  - Added `vm__pull_stream_one()` helper function that handles pulling from any stream kind (generator CPS protocol + filter predicate loop)
+  - OP_FILTER: added stream branch creating lazy filter stream with source + predicate in args[]
+  - OP_STREAM_NEXT/OP_COLLECT/OP_EACH: dispatch non-generator streams to the unified pull helper
+  - compiler: `compiler__compile_hof_builtin` preserves collection type as `last_expr_type`
+  - 10 e2e tests: lazy filter, collect, chained, vector unchanged, no-matches, pipe, for-each, for-inline, loop generator, empty stream
+- **Learnings for future iterations:**
+  - Filter streams are lazy: no elements consumed until the result stream is iterated. Creating the stream just packages source + predicate.
+  - `vm__pull_stream_one()` handles recursion naturally: chained filter streams recurse through the helper to reach the source generator. Same helper works for future derived streams (transform, take, lines).
+  - Pipe syntax `def v [gen] | filter ...` doesn't work because `def` consumes the expression. Use line-mode pipes: `[gen] | filter ... | collect | print`, or nested brackets: `def v [collect [filter [gen] $pred]]`.
+  - Type annotations on generator proc params (e.g., `{i64 n}`) can cause type comparison errors with `mut` locals (which default to TYPE_DYN). Use untyped params in generators to avoid this.
+  - GC tracing for filter streams requires no changes: the existing OBJ_STREAM trace in gc_collect.c already traces all args[], which includes the source stream and predicate closure references.
 ---

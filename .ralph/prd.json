@@ -264,7 +264,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "Stream filter creates new stream whose next_fn closure: (1) pulls from source via OP_STREAM_NEXT, (2) calls predicate, (3) if true yields, (4) if false loops. Closure captures source stream and predicate as upvalues. Recommend native proc creating JaclStream with C-level next function for simplicity. OP_FILTER dispatches on type: vector → eager, stream → create lazy filter stream."
     },
     {
