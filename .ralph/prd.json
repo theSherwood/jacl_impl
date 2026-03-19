@@ -284,7 +284,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "Same pattern as US-012 but simpler: transform-stream next_fn pulls one element and applies function — no predicate loop. Shares implementation approach (native proc creating JaclStream). OP_TRANSFORM dispatches on type."
     },
     {

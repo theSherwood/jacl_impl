@@ -8,6 +8,7 @@ Started: Thu Mar 19 08:54:03 UTC 2026
 - JaclStream stores: state, kind, next_fn (CPS continuation or generator closure), cached_value, and deferred args. `kind` distinguishes STREAM_KIND_GENERATOR (CPS-based) from derived streams like STREAM_KIND_FILTER. No coroutine state needed — CPS closures capture all state via upvalues.
 - Derived stream pattern (filter/transform/take/lines): create a new JaclStream with kind=STREAM_KIND_X, store source stream + closure in args[]. The `vm__pull_stream_one()` helper handles all stream kinds (generator CPS protocol + derived stream logic). OP_STREAM_NEXT/OP_COLLECT/OP_EACH dispatch non-generator streams to this helper.
 - `compiler__compile_hof_builtin()` preserves `last_expr_type` through the compilation: saves collection type before compiling callback, restores after emitting opcode. This means filter/transform on streams produce TYPE_STREAM and on vectors produce TYPE_VEC.
+- The `def`/`mut` effective_type inference in compiler.c only auto-infers unboxed types, TYPE_STRUCT, and TYPE_STREAM. Other boxed types (TYPE_VEC, TYPE_MAP, TYPE_CLOSURE) fall back to TYPE_DYN. If adding a new type that needs compile-time dispatch (like TYPE_STREAM for for-loops), add it to the inference condition.
 - While loop bodies need `compiler__begin_scope`/`compiler__end_scope` to properly clean up `def` locals each iteration (important for generators that yield inside loops).
 - Some test suites (compiler, heap_strings, m4, m5, jacl_harness) time out under 10s but pass given more time. Use longer timeouts or skip these in quick validation.
 - Build system (`build.sh`) compiles all tests in parallel, runs sequentially. Add new test entries as `"test/test_foo.c|foo|"`.
@@ -84,4 +85,19 @@ Started: Thu Mar 19 08:54:03 UTC 2026
   - Pipe syntax `def v [gen] | filter ...` doesn't work because `def` consumes the expression. Use line-mode pipes: `[gen] | filter ... | collect | print`, or nested brackets: `def v [collect [filter [gen] $pred]]`.
   - Type annotations on generator proc params (e.g., `{i64 n}`) can cause type comparison errors with `mut` locals (which default to TYPE_DYN). Use untyped params in generators to avoid this.
   - GC tracing for filter streams requires no changes: the existing OBJ_STREAM trace in gc_collect.c already traces all args[], which includes the source stream and predicate closure references.
+---
+
+## 2026-03-19 - US-013
+- Implemented stream-aware transform: `transform` on a stream returns a new lazy transform stream
+- Files changed: src/gc.c, src/vm.c, src/compiler.c, test/test_stream_transform.c, build.sh
+- **What was implemented:**
+  - Added STREAM_KIND_TRANSFORM (=2) constant to gc.c
+  - Added transform stream handling in `vm__pull_stream_one()`: pulls one element from source, applies transform fn, returns result
+  - OP_TRANSFORM: added stream branch creating lazy transform stream with source + fn in args[]
+  - compiler.c: added TYPE_STREAM to effective_type inference in both `def` and `mut` paths so `def s [transform ...]` preserves TYPE_STREAM type
+  - 9 e2e tests: lazy transform, collect, chained pipeline, vector unchanged, pipe, for-each, empty stream, transform+filter, loop generator
+- **Learnings for future iterations:**
+  - Transform streams follow the same derived-stream pattern as filter: create JaclStream with kind=STREAM_KIND_TRANSFORM, store source + closure in args[], dispatch through `vm__pull_stream_one()`. The difference from filter is simpler: no predicate loop, just pull-apply-return.
+  - The `def` path in compiler.c only preserves unboxed types (i64/u64/f64) and TYPE_STRUCT as effective_type — other types like TYPE_STREAM fall back to TYPE_DYN. This means `def s [expr]` where expr has TYPE_STREAM will make `s` have TYPE_DYN unless TYPE_STREAM is explicitly added to the inference condition. This caused `for $s { ... }` to take the vector path instead of the stream path. Fixed by adding `rhs_type == TYPE_STREAM` to the inference condition in both def and mut paths.
+  - GC tracing for transform streams requires no changes: existing OBJ_STREAM trace already covers all args[].
 ---
