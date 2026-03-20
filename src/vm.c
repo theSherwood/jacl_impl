@@ -2306,8 +2306,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
-          vm__set_error(vm, "type error in 'vec-get': expected vector, got %s",
-                       vm__type_name(vec_val));
+          if (jacl_is_stream(vec_val))
+            vm__set_error(vm, "vec-get requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-get': expected vector, got %s",
+                         vm__type_name(vec_val));
           return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_i32(idx_val)) {
@@ -2332,8 +2335,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
         if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
-          vm__set_error(vm, "type error in 'vec-len': expected vector, got %s",
-                       vm__type_name(vec_val));
+          if (jacl_is_stream(vec_val))
+            vm__set_error(vm, "vec-len requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-len': expected vector, got %s",
+                         vm__type_name(vec_val));
           return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
@@ -2349,8 +2355,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(elem)) { result = vm__push(vm, elem); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
-          vm__set_error(vm, "type error in 'vec-push': expected vector, got %s",
-                       vm__type_name(vec_val));
+          if (jacl_is_stream(vec_val))
+            vm__set_error(vm, "vec-push requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-push': expected vector, got %s",
+                         vm__type_name(vec_val));
           return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
@@ -2370,8 +2379,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(elem)) { result = vm__push(vm, elem); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
-          vm__set_error(vm, "type error in 'vec-set': expected vector, got %s",
-                       vm__type_name(vec_val));
+          if (jacl_is_stream(vec_val))
+            vm__set_error(vm, "vec-set requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-set': expected vector, got %s",
+                         vm__type_name(vec_val));
           return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_i32(idx_val)) {
@@ -2411,13 +2423,19 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(a_val)) { result = vm__push(vm, a_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(b_val)) { result = vm__push(vm, b_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(a_val)) {
-          vm__set_error(vm, "type error in 'vec-concat': expected vector, got %s",
-                       vm__type_name(a_val));
+          if (jacl_is_stream(a_val))
+            vm__set_error(vm, "vec-concat requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-concat': expected vector, got %s",
+                         vm__type_name(a_val));
           return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_vector(b_val)) {
-          vm__set_error(vm, "type error in 'vec-concat': expected vector, got %s",
-                       vm__type_name(b_val));
+          if (jacl_is_stream(b_val))
+            vm__set_error(vm, "vec-concat requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-concat': expected vector, got %s",
+                         vm__type_name(b_val));
           return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* va = (jacl_vec_root*)jacl_as_ptr(a_val);
@@ -2438,8 +2456,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(start_val)) { result = vm__push(vm, start_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(end_val)) { result = vm__push(vm, end_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
-          vm__set_error(vm, "type error in 'vec-slice': expected vector, got %s",
-                       vm__type_name(vec_val));
+          if (jacl_is_stream(vec_val))
+            vm__set_error(vm, "vec-slice requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-slice': expected vector, got %s",
+                         vm__type_name(vec_val));
           return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_i32(start_val)) {
@@ -4955,27 +4976,158 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_SPREAD: {
-        JaclVal vec_val;
-        result = vm__pop(vm, &vec_val);
+        JaclVal spread_val;
+        result = vm__pop(vm, &spread_val);
         if (result != VM_OK) return result;
-        if (!jacl_is_vector(vec_val)) {
-          vm__set_error(vm, "spread requires a vector, got %s",
-                       vm__type_name(vec_val));
+
+        uint32_t len = 0;
+
+        if (jacl_is_vector(spread_val)) {
+          jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(spread_val);
+          len = jacl_vec_count(vec);
+          if (vm->stack_top + len >= VM_STACK_MAX) {
+            vm__set_error(vm, "spread exceeds stack capacity");
+            return VM_RUNTIME_ERROR;
+          }
+          for (uint32_t i = 0; i < len; i++) {
+            jacl_vec_get_result gr = jacl_vec_get(vec, i);
+            result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
+            if (result != VM_OK) return result;
+          }
+        } else if (jacl_is_stream(spread_val)) {
+          /* Eagerly consume stream, collect into vector, then push elements */
+          JaclStream* stream = jacl_as_stream(spread_val);
+
+          if (stream->kind != STREAM_KIND_GENERATOR) {
+            /* Derived stream: use pull helper */
+            gc__current_heap = &vm->heap;
+            jacl_vec_root* tmp_vec = jacl_vec_empty();
+            while (stream->state != STREAM_EXHAUSTED) {
+              JaclVal elem;
+              StreamPullResult pr = vm__pull_stream_one(vm, spread_val, &elem);
+              if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
+              if (pr == STREAM_PULL_EXHAUSTED) break;
+              gc__current_heap = &vm->heap;
+              tmp_vec = jacl_vec_push_back(tmp_vec, elem);
+            }
+            frame = &vm->frames[vm->frame_count - 1];
+            len = jacl_vec_count(tmp_vec);
+            if (vm->stack_top + len >= VM_STACK_MAX) {
+              vm__set_error(vm, "spread exceeds stack capacity");
+              return VM_RUNTIME_ERROR;
+            }
+            for (uint32_t i = 0; i < len; i++) {
+              jacl_vec_get_result gr = jacl_vec_get(tmp_vec, i);
+              result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
+              if (result != VM_OK) return result;
+            }
+          } else {
+            /* Generator stream: inline CPS protocol */
+            gc__current_heap = &vm->heap;
+            jacl_vec_root* tmp_vec = jacl_vec_empty();
+
+            while (stream->state != STREAM_EXHAUSTED) {
+              uint32_t caller_stack_top = vm->stack_top;
+              uint32_t caller_frame_count = vm->frame_count;
+              uint8_t* caller_ip = vm->ip;
+              BytecodeChunk* caller_chunk = vm->chunk;
+
+              JaclVal terminal_k = vm__make_terminal_k(vm);
+
+              if (stream->state == STREAM_PENDING) {
+                if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+                  vm__set_error(vm, "stream has no next function");
+                  return VM_RUNTIME_ERROR;
+                }
+                JaclClosure* gen_cl = jacl_as_closure(stream->next_fn);
+                result = vm__push(vm, stream->next_fn);
+                if (result != VM_OK) return result;
+                for (uint8_t i = 0; i < stream->arg_count; i++) {
+                  result = vm__push(vm, stream->args[i]);
+                  if (result != VM_OK) return result;
+                }
+                result = vm__push(vm, terminal_k);
+                if (result != VM_OK) return result;
+                if (vm->frame_count >= VM_FRAMES_MAX) {
+                  vm__set_error(vm, "stack overflow");
+                  return VM_RUNTIME_ERROR;
+                }
+                CallFrame* new_frame = &vm->frames[vm->frame_count++];
+                new_frame->closure    = gen_cl;
+                new_frame->return_ip  = NULL;
+                new_frame->stack_base = vm->stack_top - stream->arg_count - 1;
+                new_frame->chunk      = &gen_cl->chunk;
+                vm->ip    = gen_cl->chunk.code;
+                vm->chunk = &gen_cl->chunk;
+              } else {
+                if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+                  vm__set_error(vm, "stream continuation is invalid");
+                  return VM_RUNTIME_ERROR;
+                }
+                JaclClosure* cont_cl = jacl_as_closure(stream->next_fn);
+                result = vm__push(vm, stream->next_fn);
+                if (result != VM_OK) return result;
+                result = vm__push(vm, JACL_NIL);
+                if (result != VM_OK) return result;
+                if (vm->frame_count >= VM_FRAMES_MAX) {
+                  vm__set_error(vm, "stack overflow");
+                  return VM_RUNTIME_ERROR;
+                }
+                CallFrame* new_frame = &vm->frames[vm->frame_count++];
+                new_frame->closure    = cont_cl;
+                new_frame->return_ip  = NULL;
+                new_frame->stack_base = vm->stack_top - 1;
+                new_frame->chunk      = &cont_cl->chunk;
+                vm->ip    = cont_cl->chunk.code;
+                vm->chunk = &cont_cl->chunk;
+              }
+
+              VMResult inner = vm__run(vm, caller_frame_count);
+
+              if (inner == VM_YIELD) {
+                stream->next_fn = vm->yield_continuation;
+                stream->state = STREAM_CONSUMED;
+                stream->cached_value = vm->yield_value;
+                vm->stack_top   = caller_stack_top;
+                vm->frame_count = caller_frame_count;
+                vm->ip    = caller_ip;
+                vm->chunk = caller_chunk;
+                frame = &vm->frames[vm->frame_count - 1];
+                gc__current_heap = &vm->heap;
+                tmp_vec = jacl_vec_push_back(tmp_vec, vm->yield_value);
+              } else if (inner == VM_OK) {
+                stream->state = STREAM_EXHAUSTED;
+                stream->next_fn = JACL_NIL;
+                stream->cached_value = JACL_NIL;
+                vm->stack_top   = caller_stack_top;
+                vm->frame_count = caller_frame_count;
+                vm->ip    = caller_ip;
+                vm->chunk = caller_chunk;
+                frame = &vm->frames[vm->frame_count - 1];
+              } else {
+                stream->state = STREAM_ERROR;
+                stream->next_fn = JACL_NIL;
+                return inner;
+              }
+            }
+
+            len = jacl_vec_count(tmp_vec);
+            if (vm->stack_top + len >= VM_STACK_MAX) {
+              vm__set_error(vm, "spread exceeds stack capacity");
+              return VM_RUNTIME_ERROR;
+            }
+            for (uint32_t i = 0; i < len; i++) {
+              jacl_vec_get_result gr = jacl_vec_get(tmp_vec, i);
+              result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
+              if (result != VM_OK) return result;
+            }
+          }
+        } else {
+          vm__set_error(vm, "spread requires a vector or stream, got %s",
+                       vm__type_name(spread_val));
           return VM_RUNTIME_ERROR;
         }
-        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
-        uint32_t len = jacl_vec_count(vec);
-        /* Stack overflow check */
-        if (vm->stack_top + len >= VM_STACK_MAX) {
-          vm__set_error(vm, "spread exceeds stack capacity");
-          return VM_RUNTIME_ERROR;
-        }
-        /* Push each element individually */
-        for (uint32_t i = 0; i < len; i++) {
-          jacl_vec_get_result gr = jacl_vec_get(vec, i);
-          result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
-          if (result != VM_OK) return result;
-        }
+
         /* Save count in side buffer */
         if (vm->spread_count_top >= 32) {
           vm__set_error(vm, "too many nested spread operations");

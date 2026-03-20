@@ -118,6 +118,7 @@ TESTS=(
     "test/test_stream_transform.c|stream_transform|"
     "test/test_stream_seq_ops.c|stream_seq_ops|"
     "test/test_lines.c|lines|"
+    "test/test_stream_type_enforce.c|stream_type_enforce|"
 )
 
 # Filter tests if --lib flag is set

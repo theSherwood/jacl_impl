@@ -5656,6 +5656,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_STREAM) {
+      compiler__error(c, line, col, "vec-get requires a vector; got stream (use collect to materialize)");
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_VEC_GET, line);
     return;
@@ -5668,6 +5672,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_STREAM) {
+      compiler__error(c, line, col, "vec-len requires a vector; got stream (use collect to materialize)");
+      return;
+    }
     compiler__emit_byte(c, OP_VEC_LEN, line);
     return;
   }
@@ -5679,6 +5687,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_STREAM) {
+      compiler__error(c, line, col, "vec-push requires a vector; got stream (use collect to materialize)");
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_VEC_PUSH, line);
     return;
@@ -5691,6 +5703,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_STREAM) {
+      compiler__error(c, line, col, "vec-set requires a vector; got stream (use collect to materialize)");
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__compile_node(c, args[2]);
     compiler__emit_byte(c, OP_VEC_SET, line);
@@ -5704,6 +5720,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_STREAM) {
+      compiler__error(c, line, col, "vec-concat requires a vector; got stream (use collect to materialize)");
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_VEC_CONCAT, line);
     return;
@@ -5716,6 +5736,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_STREAM) {
+      compiler__error(c, line, col, "vec-slice requires a vector; got stream (use collect to materialize)");
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__compile_node(c, args[2]);
     compiler__emit_byte(c, OP_VEC_SLICE, line);
