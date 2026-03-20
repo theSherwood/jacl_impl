@@ -6164,6 +6164,18 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* lines — split string into lazy line stream */
+  if (compiler__head_matches(head, "lines", 5)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "lines", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_LINES, line);
+    c->last_expr_type = TYPE_STREAM;
+    return;
+  }
+
   /* parallel — suspension point (CPS transform in US-003+, context checks now) */
   if (compiler__head_matches(head, "parallel", 8)) {
     if (argc < 2) {

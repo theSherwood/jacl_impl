@@ -810,6 +810,56 @@ static StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         return STREAM_PULL_VALUE;
     }
 
+    /* --- Lines stream: yield one line at a time from source string --- */
+    if (stream->kind == STREAM_KIND_LINES) {
+        JaclVal src_str = stream->args[0];
+        int32_t cur_idx = jacl_as_i32(stream->args[1]);
+        uint32_t byte_len = jacl_string_byte_len(src_str);
+
+        if ((uint32_t)cur_idx >= byte_len) {
+            stream->state = STREAM_EXHAUSTED;
+            *out_value = JACL_NIL;
+            return STREAM_PULL_EXHAUSTED;
+        }
+
+        /* Copy string data to scan for newlines */
+        char sbuf[4096];
+        char* data = sbuf;
+        if (byte_len > sizeof(sbuf)) {
+            data = (char*)arena_alloc(vm->arena, byte_len);
+        }
+        jacl_string_data(src_str, data, byte_len);
+
+        /* Find end of current line */
+        uint32_t start = (uint32_t)cur_idx;
+        uint32_t end = start;
+        while (end < byte_len && data[end] != '\n') {
+            end++;
+        }
+        /* Handle \r\n */
+        uint32_t line_end = end;
+        if (line_end > start && data[line_end - 1] == '\r') {
+            line_end--;
+        }
+        /* Advance past the newline */
+        uint32_t next_idx = end < byte_len ? end + 1 : end;
+
+        /* Skip trailing empty line: if we're at the very end and line is empty */
+        if (line_end == start && next_idx >= byte_len) {
+            stream->state = STREAM_EXHAUSTED;
+            *out_value = JACL_NIL;
+            return STREAM_PULL_EXHAUSTED;
+        }
+
+        stream->args[1] = jacl_i32((int32_t)next_idx);
+
+        /* Create substring */
+        JaclVal line_str = jacl_string_new(&vm->heap, vm->intern_table,
+                                           data + start, line_end - start);
+        *out_value = line_str;
+        return STREAM_PULL_VALUE;
+    }
+
     /* --- Take stream: pull from source, decrement remaining count --- */
     if (stream->kind == STREAM_KIND_TAKE) {
         int32_t remaining = jacl_as_i32(stream->args[1]);
@@ -5695,6 +5745,33 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm__set_error(vm, "first requires a vector or stream, got %s",
                      vm__type_name(coll_val));
         return VM_RUNTIME_ERROR;
+      }
+
+      case OP_LINES: {
+        JaclVal str_val;
+        result = vm__pop(vm, &str_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(str_val)) {
+          result = vm__push(vm, str_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        if (!jacl_is_string(str_val)) {
+          vm__set_error(vm, "lines requires a string, got %s",
+                       vm__type_name(str_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        JaclVal lines_stream_val = jacl_stream(&vm->heap);
+        JaclStream* ls = jacl_as_stream(lines_stream_val);
+        ls->kind      = STREAM_KIND_LINES;
+        ls->args[0]   = str_val;       /* source string */
+        ls->args[1]   = jacl_i32(0);   /* current byte index */
+        ls->arg_count  = 2;
+        result = vm__push(vm, lines_stream_val);
+        if (result != VM_OK) return result;
+        break;
       }
 
       case OP_COLLECT_VARIADIC: {

@@ -160,6 +160,7 @@ typedef enum {
   OP_COUNT,         /* pop collection/stream, push i32 count */
   OP_TAKE,          /* pop count + collection/stream; take first N elements */
   OP_FIRST,         /* pop collection/stream, push first element or nil */
+  OP_LINES,         /* pop string, push lazy line stream */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -433,6 +434,7 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_COUNT:               return "OP_COUNT";
     case OP_TAKE:                return "OP_TAKE";
     case OP_FIRST:               return "OP_FIRST";
+    case OP_LINES:               return "OP_LINES";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";
