@@ -1,0 +1,4 @@
+# expect: 6
+# spread vector into + fold
+nums = [vec 1 2 3]
+print [+ ..$nums]

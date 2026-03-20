@@ -1,0 +1,3 @@
+# expect: a
+# collect converts stream to vector, then vec-get works
+print [vec-get [collect [lines "a\nb\nc"]] 0]

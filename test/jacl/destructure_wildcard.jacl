@@ -1,0 +1,6 @@
+# expect: 1
+# expect: 3
+# wildcard _ skips elements in destructuring
+def [a _ c] [vec 1 2 3]
+print $a
+print $c

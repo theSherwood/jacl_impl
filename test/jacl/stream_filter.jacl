@@ -1,0 +1,10 @@
+# expect: [vec 3 4 5]
+# filter stream lazily
+proc gen {} {
+  [yield 1]
+  [yield 2]
+  [yield 3]
+  [yield 4]
+  [yield 5]
+}
+print [collect [filter [gen] [\ > $it 2]]]

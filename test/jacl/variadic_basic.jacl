@@ -1,0 +1,6 @@
+# expect: 3
+# expect: [vec 1 2 3]
+# variadic proc collects extra args into a vector
+proc f {..args} { $args }
+print [vec-len [f 1 2 3]]
+print [f 1 2 3]

@@ -1,0 +1,3 @@
+# expect: [vec "hello" "world"]
+# lines handles \r\n line endings
+print [collect [lines "hello\r\nworld"]]

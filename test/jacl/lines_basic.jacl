@@ -1,0 +1,3 @@
+# expect: [vec "a" "b" "c"]
+# lines splits string into lazy line stream
+print [collect [lines "a\nb\nc"]]
