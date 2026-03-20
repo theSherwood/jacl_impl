@@ -1,0 +1,6 @@
+# expect: 1
+# expect: [vec 2 3 4]
+# rest pattern captures remaining elements
+[first ..rest] = [vec 1 2 3 4]
+print $first
+print $rest

@@ -32,7 +32,8 @@ typedef enum {
     OBJ_STRUCT,
     OBJ_ROPE_STRING,
     OBJ_ROPE_LEAF,
-    OBJ_ROPE_INTERNAL
+    OBJ_ROPE_INTERNAL,
+    OBJ_STREAM
 } GCObjType;
 
 /* --- GC object header (8 bytes, prepended before payload) ---
@@ -970,6 +971,47 @@ static bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
     }
     future_unlock(f);
     return added;
+}
+
+/* ======================================================================
+ * JaclStream: lazy sequence value type
+ * ====================================================================== */
+
+#define STREAM_PENDING   0
+#define STREAM_CONSUMED  1
+#define STREAM_EXHAUSTED 2
+#define STREAM_ERROR     3
+
+#define STREAM_KIND_GENERATOR  0
+#define STREAM_KIND_FILTER     1
+#define STREAM_KIND_TRANSFORM  2
+#define STREAM_KIND_TAKE       3
+#define STREAM_KIND_LINES      4
+
+#define STREAM_MAX_ARGS          8
+
+typedef struct {
+    uint32_t  state;         /* STREAM_PENDING / CONSUMED / EXHAUSTED / ERROR */
+    uint32_t  kind;          /* STREAM_KIND_GENERATOR / FILTER */
+    JaclVal   next_fn;       /* CPS continuation closure (nil when exhausted/error) */
+    JaclVal   cached_value;  /* cached current element */
+    /* Deferred first-call arguments (saved at generator creation, used on first pull) */
+    JaclVal   args[STREAM_MAX_ARGS];
+    uint8_t   arg_count;
+} JaclStream;
+
+static inline JaclStream *jacl_as_stream(JaclVal v) {
+    return (JaclStream *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+}
+
+static JaclVal jacl_stream(ThreadHeap *heap) {
+    JaclStream *s = (JaclStream *)gc_alloc(heap, OBJ_STREAM, sizeof(JaclStream));
+    s->state        = STREAM_PENDING;
+    s->kind         = STREAM_KIND_GENERATOR;
+    s->next_fn      = JACL_NIL;
+    s->cached_value = JACL_NIL;
+    s->arg_count    = 0;
+    return jacl_stream_ptr(s);
 }
 
 /* ======================================================================

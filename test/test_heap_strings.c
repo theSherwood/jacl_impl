@@ -1016,11 +1016,11 @@ static int test_gc_rope_stress(void) {
   /* Create and discard many rope strings via repeated top-level concat
      to exercise GC sweep of rope objects */
   VMResult r = run_capture(
-    "s = \"start\"\n"
-    "i = 0\n"
+    "s : \"start\"\n"
+    "i : 0\n"
     "[while [< $i 30] {\n"
-    "  s = [concat $s \"abcdefghijklmnopqrstuvwxyz\"]\n"
-    "  i = [+ $i 1]\n"
+    "  s :: [concat $s \"abcdefghijklmnopqrstuvwxyz\"]\n"
+    "  i :: [+ $i 1]\n"
     "}]\n"
     "[print [byte-length $s]]",
     &cap);

@@ -1,0 +1,10 @@
+# expect: [vec 6 8 10]
+# chained stream pipeline: generate, filter, transform, collect
+proc gen {} {
+  [yield 1]
+  [yield 2]
+  [yield 3]
+  [yield 4]
+  [yield 5]
+}
+print [collect [transform [filter [gen] [\ > $it 2]] [\ * $it 2]]]

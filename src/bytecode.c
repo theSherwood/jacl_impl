@@ -145,6 +145,22 @@ typedef enum {
   OP_STRUCT_GET_DYN,/* runtime field access: followed by uint16_t const_idx (field name) */
   OP_STRUCT_SET_DYN,/* runtime field mutation: followed by uint16_t const_idx (field name) */
   OP_CLOSE_LOOP,    /* pop N values under top-of-stack: followed by uint8_t count */
+  OP_DESTRUCTURE_VEC, /* destructure vector: uint8_t N, uint8_t skip_mask; pop vec, push non-skipped elements */
+  OP_DESTRUCTURE_NAMED, /* destructure struct/map by field names: uint8_t N, then N x uint16_t const_idx */
+  OP_DESTRUCTURE_VEC_REST, /* destructure vector with rest: uint8_t N; pop vec, push N elements + rest vector */
+  OP_DESTRUCTURE_NAMED_REST, /* destructure named with rest: uint8_t N, N x uint16_t const_idx; pop struct/map, push N fields + rest map */
+  OP_SPREAD,          /* pop vector, push each element; save count in vm->spread_counts */
+  OP_CALL_SPREAD,     /* call with spread: uint8_t fixed_args, uint8_t num_spreads */
+  OP_FOLD_SPREAD,     /* fold binary op with spread: uint8_t op_id, uint8_t fixed_args, uint8_t num_spreads */
+  OP_COLLECT_VARIADIC, /* at variadic proc entry: uint8_t min_arity — collect excess args into vector */
+  OP_YIELD,           /* pop value + continuation; package into stream element */
+  OP_STREAM_NEXT,     /* pop stream; pull next element (call next_fn or return cached) */
+  OP_COLLECT,         /* pop collection; if stream, materialize to vector; if vector, identity */
+  OP_IS_STREAM_EXHAUSTED, /* pop stream, push true if exhausted, else false */
+  OP_COUNT,         /* pop collection/stream, push i32 count */
+  OP_TAKE,          /* pop count + collection/stream; take first N elements */
+  OP_FIRST,         /* pop collection/stream, push first element or nil */
+  OP_LINES,         /* pop string, push lazy line stream */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -263,6 +279,7 @@ typedef struct {
   bool          pinned;       /* true if closure must run on a specific worker thread
                                  (set when concurrent body touches mutable globals) */
   int8_t        pin_worker_id; /* worker ID to pin to (-1 = not yet assigned) */
+  bool          is_generator;  /* true if proc body contains yield */
 } JaclClosure;
 
 static inline JaclVal jacl_closure(JaclClosure* cl) {
@@ -402,6 +419,22 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_STRUCT_GET_DYN:  return "OP_STRUCT_GET_DYN";
     case OP_STRUCT_SET_DYN:  return "OP_STRUCT_SET_DYN";
     case OP_CLOSE_LOOP:      return "OP_CLOSE_LOOP";
+    case OP_DESTRUCTURE_VEC: return "OP_DESTRUCTURE_VEC";
+    case OP_DESTRUCTURE_NAMED: return "OP_DESTRUCTURE_NAMED";
+    case OP_DESTRUCTURE_VEC_REST: return "OP_DESTRUCTURE_VEC_REST";
+    case OP_DESTRUCTURE_NAMED_REST: return "OP_DESTRUCTURE_NAMED_REST";
+    case OP_SPREAD:          return "OP_SPREAD";
+    case OP_CALL_SPREAD:     return "OP_CALL_SPREAD";
+    case OP_FOLD_SPREAD:     return "OP_FOLD_SPREAD";
+    case OP_COLLECT_VARIADIC: return "OP_COLLECT_VARIADIC";
+    case OP_YIELD:           return "OP_YIELD";
+    case OP_STREAM_NEXT:     return "OP_STREAM_NEXT";
+    case OP_COLLECT:         return "OP_COLLECT";
+    case OP_IS_STREAM_EXHAUSTED: return "OP_IS_STREAM_EXHAUSTED";
+    case OP_COUNT:               return "OP_COUNT";
+    case OP_TAKE:                return "OP_TAKE";
+    case OP_FIRST:               return "OP_FIRST";
+    case OP_LINES:               return "OP_LINES";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";

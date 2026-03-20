@@ -1210,7 +1210,7 @@ static void runtime__parallel_task_exec(void *data) {
     WorkerThread *self = rt__current_worker;
     VM *vm = &self->vm;
     JaclClosure *cl = ptd->closure;
-    ParallelAgg *agg = as_parallel_agg(ptd->agg_val);
+    (void)as_parallel_agg(ptd->agg_val); /* validate tag */
 
     if (ptd->is_cps) {
         /* CPS closure: create parallel_k that directly completes the slot.

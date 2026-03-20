@@ -285,11 +285,11 @@ static int test_string_while_loop(void) {
 
   const char* program =
     "s = \"hello\"\n"
-    "i = 0\n"
-    "r = \"\"\n"
+    "i : 0\n"
+    "r : \"\"\n"
     "[while [< $i [length $s]] {\n"
-    "  r = [concat $r [index $s $i]]\n"
-    "  i = [+ $i 1]\n"
+    "  r :: [concat $r [index $s $i]]\n"
+    "  i :: [+ $i 1]\n"
     "}]\n"
     "[print $r]";
   VMResult result = jacl_run(program, &vm, &arena);

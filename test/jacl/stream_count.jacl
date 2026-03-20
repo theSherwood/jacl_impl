@@ -1,0 +1,10 @@
+# expect: 3
+# expect: 5
+# count elements in stream and vector
+proc gen {} {
+  [yield 1]
+  [yield 2]
+  [yield 3]
+}
+print [count [gen]]
+print [count [vec 10 20 30 40 50]]

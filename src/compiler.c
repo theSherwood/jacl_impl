@@ -47,7 +47,8 @@ typedef enum {
   TYPE_VEC,
   TYPE_MAP,
   TYPE_CLOSURE,
-  TYPE_STRUCT
+  TYPE_STRUCT,
+  TYPE_STREAM
 } JaclType;
 
 static bool is_type_keyword(const char* word, size_t len) {
@@ -62,6 +63,8 @@ static bool is_type_keyword(const char* word, size_t len) {
     if (memcmp(word, "dyn", 3) == 0) return true;
   } else if (len == 4) {
     if (memcmp(word, "bool", 4) == 0) return true;
+  } else if (len == 6) {
+    if (memcmp(word, "stream", 6) == 0) return true;
   }
   return false;
 }
@@ -78,6 +81,8 @@ static JaclType type_from_keyword(const char* word, size_t len) {
     if (memcmp(word, "dyn", 3) == 0) return TYPE_DYN;
   } else if (len == 4) {
     if (memcmp(word, "bool", 4) == 0) return TYPE_BOOL;
+  } else if (len == 6) {
+    if (memcmp(word, "stream", 6) == 0) return TYPE_STREAM;
   }
   return TYPE_DYN;
 }
@@ -98,6 +103,7 @@ static const char* type_name(JaclType t) {
     case TYPE_MAP:     return "map";
     case TYPE_CLOSURE: return "closure";
     case TYPE_STRUCT:  return "struct";
+    case TYPE_STREAM:  return "stream";
   }
   return "unknown";
 }
@@ -154,7 +160,8 @@ static uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t 
     case TYPE_VEC:
     case TYPE_MAP:
     case TYPE_CLOSURE:
-    case TYPE_DYN:     return 8; /* JaclVal / pointer */
+    case TYPE_DYN:
+    case TYPE_STREAM:  return 8; /* JaclVal / pointer */
     case TYPE_STRUCT:
       if (reg && struct_idx < reg->count) {
         return reg->defs[struct_idx].total_size;
@@ -178,7 +185,8 @@ static uint32_t struct__type_align(JaclType t, StructTypeRegistry* reg, uint32_t
     case TYPE_VEC:
     case TYPE_MAP:
     case TYPE_CLOSURE:
-    case TYPE_DYN:     return 8;
+    case TYPE_DYN:
+    case TYPE_STREAM:  return 8;
     case TYPE_STRUCT:
       if (reg && struct_idx < reg->count) {
         return reg->defs[struct_idx].alignment;
@@ -597,6 +605,7 @@ typedef struct {
 typedef struct {
   JaclVal name;
   bool    suspends;
+  bool    is_generator; /* true if proc contains yield (calling returns stream) */
 } SuspensionEntry;
 
 typedef struct {
@@ -613,16 +622,28 @@ static bool suspension_map_lookup(SuspensionMap* map, JaclVal name) {
   return false;
 }
 
-static void suspension_map_set(SuspensionMap* map, JaclVal name, bool suspends) {
+static bool suspension_map_is_generator(SuspensionMap* map, JaclVal name) {
+  for (uint32_t i = 0; i < map->count; i++) {
+    if (map->entries[i].name == name) {
+      return map->entries[i].is_generator;
+    }
+  }
+  return false;
+}
+
+static void suspension_map_set(SuspensionMap* map, JaclVal name,
+                               bool suspends, bool is_generator) {
   for (uint32_t i = 0; i < map->count; i++) {
     if (map->entries[i].name == name) {
       map->entries[i].suspends = suspends;
+      map->entries[i].is_generator = is_generator;
       return;
     }
   }
   if (map->count < SUSPENSION_MAP_MAX) {
     map->entries[map->count].name = name;
     map->entries[map->count].suspends = suspends;
+    map->entries[map->count].is_generator = is_generator;
     map->count++;
   }
 }
@@ -631,6 +652,7 @@ static void suspension_map_set(SuspensionMap* map, JaclVal name, bool suspends) 
 typedef struct {
   JaclVal  name;
   bool     direct_suspends;   /* directly contains await/parallel/race */
+  bool     has_yield;          /* directly contains yield */
   bool     has_indirect_call; /* calls through $var (unknown closure) */
   JaclVal  callees[SUSPENSION_CALLEES_MAX];
   uint32_t callee_count;
@@ -660,6 +682,17 @@ static void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
             (len == 8 && memcmp(name, "parallel", 8) == 0) ||
             (len == 4 && memcmp(name, "race", 4) == 0)) {
           info->direct_suspends = true;
+          /* Still recurse into args (they might contain calls) */
+          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            analyze__walk_body(node->data.command.args[i], info);
+          }
+          return;
+        }
+
+        /* Yield is a suspension point (needs CPS) and marks proc as generator */
+        if (len == 5 && memcmp(name, "yield", 5) == 0) {
+          info->direct_suspends = true;
+          info->has_yield = true;
           /* Still recurse into args (they might contain calls) */
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
             analyze__walk_body(node->data.command.args[i], info);
@@ -756,6 +789,7 @@ static void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list) {
           ProcSuspendInfo* info = &list->procs[list->count++];
           info->name = proc_name;
           info->direct_suspends = false;
+          info->has_yield = false;
           info->has_indirect_call = false;
           info->callee_count = 0;
 
@@ -817,7 +851,8 @@ static SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t coun
   /* Step 2: Initialize suspension map from direct suspension */
   for (uint32_t i = 0; i < proc_list.count; i++) {
     suspension_map_set(&map, proc_list.procs[i].name,
-                       proc_list.procs[i].direct_suspends);
+                       proc_list.procs[i].direct_suspends,
+                       proc_list.procs[i].has_yield);
   }
 
   /* Step 3: Fixpoint propagation.
@@ -836,10 +871,12 @@ static SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t coun
     for (uint32_t i = 0; i < proc_list.count; i++) {
       if (suspension_map_lookup(&map, proc_list.procs[i].name)) continue;
 
-      /* Rule 1: direct call to suspending proc */
+      /* Rule 1: direct call to suspending proc (skip generators —
+         calling a generator just creates a stream, doesn't suspend caller) */
       for (uint32_t j = 0; j < proc_list.procs[i].callee_count; j++) {
-        if (suspension_map_lookup(&map, proc_list.procs[i].callees[j])) {
-          suspension_map_set(&map, proc_list.procs[i].name, true);
+        if (suspension_map_lookup(&map, proc_list.procs[i].callees[j]) &&
+            !suspension_map_is_generator(&map, proc_list.procs[i].callees[j])) {
+          suspension_map_set(&map, proc_list.procs[i].name, true, false);
           changed = true;
           break;
         }
@@ -849,7 +886,7 @@ static SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t coun
       if (any_suspending &&
           !suspension_map_lookup(&map, proc_list.procs[i].name) &&
           proc_list.procs[i].has_indirect_call) {
-        suspension_map_set(&map, proc_list.procs[i].name, true);
+        suspension_map_set(&map, proc_list.procs[i].name, true, false);
         changed = true;
       }
     }
@@ -871,7 +908,8 @@ static bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
         uint32_t len = head->data.lit_string.length;
         if ((len == 5 && memcmp(name, "await", 5) == 0) ||
             (len == 8 && memcmp(name, "parallel", 8) == 0) ||
-            (len == 4 && memcmp(name, "race", 4) == 0)) {
+            (len == 4 && memcmp(name, "race", 4) == 0) ||
+            (len == 5 && memcmp(name, "yield", 5) == 0)) {
           return true;
         }
         /* Don't recurse into nested proc or spawn definitions
@@ -880,10 +918,12 @@ static bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
             (len == 5 && memcmp(name, "spawn", 5) == 0)) {
           return false;
         }
-        /* Check if this is a call to a known suspending proc */
+        /* Check if this is a call to a known suspending proc.
+           Generator calls return a stream immediately — they don't suspend. */
         if (map && len <= 7) {
           JaclVal name_val = jacl_inline_string(name, len);
-          if (suspension_map_lookup(map, name_val)) return true;
+          if (suspension_map_lookup(map, name_val) &&
+              !suspension_map_is_generator(map, name_val)) return true;
         }
       }
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
@@ -1115,6 +1155,7 @@ struct Compiler {
   StructTypeRegistry* struct_registry; /* shared struct type registry (root compiler owns) */
   LoopContext          loop_stack[COMPILER_LOOP_DEPTH_MAX];
   uint32_t             loop_depth;     /* current nesting depth (0 = not in loop) */
+  bool                 has_yield;      /* true if current proc body contains yield */
 };
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -1149,6 +1190,7 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->module_prefix_len = 0;
   c->struct_registry   = NULL;
   c->loop_depth        = 0;
+  c->has_yield         = false;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -1638,7 +1680,8 @@ static bool compiler__node_is_suspension(Compiler* c, AstNode* node) {
       /* Direct suspension points */
       if ((len == 5 && memcmp(name, "await", 5) == 0) ||
           (len == 8 && memcmp(name, "parallel", 8) == 0) ||
-          (len == 4 && memcmp(name, "race", 4) == 0)) {
+          (len == 4 && memcmp(name, "race", 4) == 0) ||
+          (len == 5 && memcmp(name, "yield", 5) == 0)) {
         return true;
       }
 
@@ -1647,17 +1690,23 @@ static bool compiler__node_is_suspension(Compiler* c, AstNode* node) {
         return false;
       }
 
-      /* Call to known-suspending proc */
+      /* Call to known-suspending proc (exclude generators — calling a
+         generator just creates a stream, doesn't suspend the caller) */
       if (len <= 7 && c->suspension_map) {
         JaclVal name_val = jacl_inline_string(name, len);
-        /* Check locals first */
-        int slot = compiler__resolve_local(c, name_val);
-        if (slot != -1 && c->locals[slot].suspends) return true;
-        /* Check globals */
-        GlobalArity* ga = compiler__find_global(c, name_val);
-        if (ga && ga->suspends) return true;
-        /* Check suspension map */
-        if (suspension_map_lookup(c->suspension_map, name_val)) return true;
+        /* Skip if callee is a generator */
+        if (suspension_map_is_generator(c->suspension_map, name_val)) {
+          /* Not a suspension point — fall through to recurse into args */
+        } else {
+          /* Check locals first */
+          int slot = compiler__resolve_local(c, name_val);
+          if (slot != -1 && c->locals[slot].suspends) return true;
+          /* Check globals */
+          GlobalArity* ga = compiler__find_global(c, name_val);
+          if (ga && ga->suspends) return true;
+          /* Check suspension map */
+          if (suspension_map_lookup(c->suspension_map, name_val)) return true;
+        }
       }
     }
 
@@ -1863,6 +1912,15 @@ static bool compiler__is_def_with_suspension(Compiler* c, AstNode* node,
 /**
  * Check if a statement is a direct [await expr] call.
  */
+static bool compiler__is_direct_yield(AstNode* node, AstNode** out_value_expr) {
+  if (node->type != AST_COMMAND) return false;
+  AstNode* head = node->data.command.head;
+  if (!compiler__head_matches(head, "yield", 5)) return false;
+  if (node->data.command.arg_count != 1) return false;
+  *out_value_expr = node->data.command.args[0];
+  return true;
+}
+
 static bool compiler__is_direct_await(AstNode* node, AstNode** out_future_expr) {
   if (node->type != AST_COMMAND) return false;
   AstNode* head = node->data.command.head;
@@ -2005,10 +2063,11 @@ static bool compiler__is_suspending_call(Compiler* c, AstNode* node) {
   if (head->type == AST_LIT_STRING) {
     const char* name = head->data.lit_string.value;
     uint32_t len = head->data.lit_string.length;
-    /* Skip built-in suspension points handled separately */
+    /* Skip built-in suspension points and generators handled separately */
     if ((len == 5 && memcmp(name, "await", 5) == 0) ||
         (len == 8 && memcmp(name, "parallel", 8) == 0) ||
         (len == 4 && memcmp(name, "race", 4) == 0) ||
+        (len == 5 && memcmp(name, "yield", 5) == 0) ||
         (len == 3 && memcmp(name, "def", 3) == 0) ||
         (len == 4 && memcmp(name, "proc", 4) == 0)) {
       return false;
@@ -2102,6 +2161,196 @@ static void compiler__compile_suspending_call_cps(Compiler* c,
   /* Tail call with argc + 1 (extra __k param) — reuses frame */
   compiler__emit_byte(c, OP_TAIL_CALL, line);
   compiler__emit_byte(c, (uint8_t)(argc + 1), line);
+}
+
+/**
+ * Check if an AST node is a [while cond body] with suspension in the body.
+ */
+static bool compiler__is_while_with_suspension(Compiler* c, AstNode* node) {
+  if (node->type != AST_COMMAND) return false;
+  AstNode* head = node->data.command.head;
+  if (!compiler__head_matches(head, "while", 5)) return false;
+  uint32_t argc = node->data.command.arg_count;
+  if (argc != 2) return false;
+  AstNode* body = node->data.command.args[1];
+  return body->type == AST_BLOCK && compiler__node_is_suspension(c, body);
+}
+
+/**
+ * CPS-compile a while loop whose body contains suspension points (yield).
+ *
+ * Transforms:   while cond { ...yield... }; remaining...
+ * Into:         loop_cell = cell(nil)
+ *               loop_fn = proc(__k) { if cond: body-CPS(loopback); else: __k(nil) }
+ *               store loop_fn in loop_cell
+ *               tail-call loop_fn(remaining_continuation)
+ *
+ * The loopback closure (used as __k inside body) calls loop_fn(__k) again
+ * via the self-referencing cell, achieving recursion without stack growth.
+ */
+static void compiler__compile_cps_while(Compiler* c, AstNode* while_node,
+                                         AstNode** remaining_stmts,
+                                         uint32_t remaining_count,
+                                         uint32_t line) {
+  AstNode* cond_node = while_node->data.command.args[0];
+  AstNode* body_block = while_node->data.command.args[1];
+  uint32_t body_count = body_block->data.block.count;
+  AstNode** body_stmts = body_block->data.block.commands;
+
+  /* --- Step 1: Allocate cell for loop function self-reference --- */
+  compiler__emit_byte(c, OP_NIL, line);
+  compiler__emit_byte(c, OP_MAKE_CELL, line);
+  JaclVal loop_cell_name = jacl_inline_string("__wlp", 5);
+  compiler__add_local(c, loop_cell_name, line, 0);
+
+  /* --- Step 2: Build the loop closure --- */
+  JaclClosure* loop_cl = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
+  chunk_init(&loop_cl->chunk, c->arena);
+  loop_cl->param_count   = 1;  /* __k = post-while continuation */
+  loop_cl->upvalue_count = 0;
+  loop_cl->upvalues      = NULL;
+  loop_cl->name          = "__while_loop";
+  loop_cl->min_args      = 1;
+  loop_cl->variadic      = false;
+  loop_cl->pinned        = false;
+  loop_cl->pin_worker_id = -1;
+  loop_cl->is_generator  = false;
+  JaclVal k_param = jacl_inline_string("__k", 3);
+  loop_cl->param_names = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal));
+  loop_cl->param_names[0] = k_param;
+
+  Compiler loop_compiler;
+  compiler__init(&loop_compiler, &loop_cl->chunk, c->arena, c->intern_table, c->heap);
+  loop_compiler.scope_depth    = 1;
+  loop_compiler.enclosing      = c;
+  loop_compiler.suspension_map = c->suspension_map;
+  loop_compiler.is_cps         = true;
+  loop_compiler.has_yield      = true;  /* propagate generator flag */
+  { Compiler* root = c; while (root->enclosing) root = root->enclosing;
+    memcpy(loop_compiler.global_arities, root->global_arities,
+           sizeof(GlobalArity) * root->global_arity_count);
+    loop_compiler.global_arity_count = root->global_arity_count;
+  }
+
+  /* __k parameter at slot 0 */
+  compiler__add_local(&loop_compiler, k_param, line, 0);
+  loop_compiler.locals[loop_compiler.local_count - 1].is_param = true;
+
+  /* Compile condition */
+  compiler__compile_node(&loop_compiler, cond_node);
+  uint32_t exit_jump = compiler__emit_jump(&loop_compiler, OP_JUMP_IF_FALSE, line);
+
+  /* --- True branch: compile body with CPS, looping back at end --- */
+
+  /* Build loopback closure: proc __r { get_cell __wlp; get __k; tail_call 1 }
+     This closure is called at the end of the body, and it re-invokes the loop
+     function with the same post-while continuation (__k). */
+  JaclClosure* lb_cl = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
+  chunk_init(&lb_cl->chunk, c->arena);
+  lb_cl->param_count   = 1;
+  lb_cl->upvalue_count = 0;
+  lb_cl->upvalues      = NULL;
+  lb_cl->name          = "__loop_back";
+  lb_cl->min_args      = 1;
+  lb_cl->variadic      = false;
+  lb_cl->pinned        = false;
+  lb_cl->pin_worker_id = -1;
+  lb_cl->is_generator  = false;
+  JaclVal r_param = jacl_inline_string("__r", 3);
+  lb_cl->param_names = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal));
+  lb_cl->param_names[0] = r_param;
+
+  Compiler lb_compiler;
+  compiler__init(&lb_compiler, &lb_cl->chunk, c->arena, c->intern_table, c->heap);
+  lb_compiler.scope_depth = 1;
+  lb_compiler.enclosing   = &loop_compiler;
+  /* Add __r param at slot 0 */
+  compiler__add_local(&lb_compiler, r_param, line, 0);
+  lb_compiler.locals[lb_compiler.local_count - 1].is_param = true;
+
+  /* Body: get loop_fn from cell, get __k from enclosing, tail-call loop_fn(__k) */
+  JaclVal wlp_name = jacl_inline_string("__wlp", 5);
+  int uv_loop = compiler__resolve_upvalue(&lb_compiler, wlp_name);
+  compiler__emit_byte(&lb_compiler, OP_GET_CELL_UPVALUE, line);
+  compiler__emit_byte(&lb_compiler, (uint8_t)uv_loop, line);
+
+  int uv_k = compiler__resolve_upvalue(&lb_compiler, k_param);
+  compiler__emit_byte(&lb_compiler, OP_GET_UPVALUE, line);
+  compiler__emit_byte(&lb_compiler, (uint8_t)uv_k, line);
+
+  compiler__emit_byte(&lb_compiler, OP_TAIL_CALL, line);
+  compiler__emit_byte(&lb_compiler, 1, line);
+
+  /* Propagate errors */
+  c->error_count += lb_compiler.error_count;
+  if (!c->first_error && lb_compiler.first_error) c->first_error = lb_compiler.first_error;
+
+  /* Emit OP_CLOSURE for loopback in loop_compiler */
+  lb_cl->upvalue_count = (uint8_t)lb_compiler.upvalue_count;
+  uint16_t lb_idx = chunk_add_constant(loop_compiler.chunk, jacl_closure(lb_cl));
+  compiler__emit_byte(&loop_compiler, OP_CLOSURE, line);
+  compiler__emit_u16(&loop_compiler, lb_idx, line);
+  for (uint32_t i = 0; i < lb_compiler.upvalue_count; i++) {
+    compiler__emit_byte(&loop_compiler, lb_compiler.upvalues[i].is_local, line);
+    compiler__emit_byte(&loop_compiler, lb_compiler.upvalues[i].index, line);
+  }
+
+  /* Shadow __k with the loopback closure so body CPS tail-calls it */
+  uint32_t saved_local_count = loop_compiler.local_count;
+  compiler__add_local(&loop_compiler, jacl_inline_string("__k", 3), line, 0);
+
+  /* Compile body statements with CPS (yield becomes suspension point) */
+  compiler__begin_scope(&loop_compiler);
+  compiler__compile_cps_stmts(&loop_compiler, body_stmts, body_count, line);
+  compiler__end_scope(&loop_compiler, line);
+
+  /* Restore local count (shadow __k is cleaned up — unreachable code follows) */
+  loop_compiler.local_count = saved_local_count;
+
+  /* --- False branch (exit): tail-call __k(nil) --- */
+  compiler__patch_jump(&loop_compiler, exit_jump);
+  /* Access original __k at slot 0 (the parameter) directly */
+  compiler__emit_byte(&loop_compiler, OP_GET_LOCAL, line);
+  compiler__emit_byte(&loop_compiler, 0, line);
+  compiler__emit_byte(&loop_compiler, OP_NIL, line);
+  compiler__emit_byte(&loop_compiler, OP_TAIL_CALL, line);
+  compiler__emit_byte(&loop_compiler, 1, line);
+
+  /* Propagate errors from loop compiler */
+  c->error_count += loop_compiler.error_count;
+  if (!c->first_error && loop_compiler.first_error) c->first_error = loop_compiler.first_error;
+
+  /* --- Step 3: Emit OP_CLOSURE for loop_fn in parent and store in cell --- */
+  loop_cl->upvalue_count = (uint8_t)loop_compiler.upvalue_count;
+  uint16_t loop_idx = chunk_add_constant(c->chunk, jacl_closure(loop_cl));
+  compiler__emit_byte(c, OP_CLOSURE, line);
+  compiler__emit_u16(c, loop_idx, line);
+  for (uint32_t i = 0; i < loop_compiler.upvalue_count; i++) {
+    compiler__emit_byte(c, loop_compiler.upvalues[i].is_local, line);
+    compiler__emit_byte(c, loop_compiler.upvalues[i].index, line);
+  }
+
+  /* Store loop closure in the cell */
+  int loop_cell_slot = compiler__resolve_local(c, loop_cell_name);
+  compiler__emit_byte(c, OP_SET_CELL_LOCAL, line);
+  compiler__emit_byte(c, (uint8_t)loop_cell_slot, line);
+
+  /* --- Step 4: Call loop_fn(post_while_continuation) --- */
+  /* Push loop_fn (get from cell) */
+  compiler__emit_byte(c, OP_GET_CELL_LOCAL, line);
+  compiler__emit_byte(c, (uint8_t)loop_cell_slot, line);
+
+  /* Push __k for loop_fn: either remaining_continuation or enclosing __k */
+  if (remaining_count == 0) {
+    compiler__emit_get_k(c, line);
+  } else {
+    JaclVal cont_param = jacl_inline_string("__r", 3);
+    compiler__emit_continuation(c, cont_param, remaining_stmts, remaining_count, line);
+  }
+
+  /* Tail-call loop_fn(post_while_continuation) */
+  compiler__emit_byte(c, OP_TAIL_CALL, line);
+  compiler__emit_byte(c, 1, line);
 }
 
 /**
@@ -2516,6 +2765,33 @@ static void compiler__compile_cps_stmts(Compiler* c, AstNode** stmts,
     return;
   }
 
+  /* Case 1d: Direct [yield expr] — generator CPS suspension */
+  AstNode* yield_value_expr = NULL;
+  if (compiler__is_direct_yield(susp_stmt, &yield_value_expr)) {
+    /* Compile the value to yield */
+    compiler__compile_node(c, yield_value_expr);
+
+    /* Push continuation for remaining stmts (or __k if tail position) */
+    if (remaining_count == 0) {
+      compiler__emit_get_k(c, line);
+    } else {
+      compiler__emit_continuation(c, cont_param, remaining, remaining_count, line);
+    }
+
+    /* OP_YIELD: pops continuation then value, stores both, returns VM_YIELD */
+    compiler__emit_byte(c, OP_YIELD, susp_stmt->start.line);
+    c->has_yield = true;
+    return;
+  }
+
+  /* Case 1e: [while cond { ... yield ... }] — CPS while loop */
+  if (compiler__is_while_with_suspension(c, susp_stmt)) {
+    compiler__compile_cps_while(c, susp_stmt, remaining, remaining_count,
+                                 susp_stmt->start.line);
+    c->has_yield = true;
+    return;
+  }
+
   /* Case 2: [def name [await expr]] */
   JaclVal def_name;
   AstNode* value_node = NULL;
@@ -2844,6 +3120,7 @@ static void compiler__compile_hof_builtin(Compiler* c, const char* name,
     return;
   }
   compiler__compile_node(c, args[0]);
+  JaclType col_type = c->last_expr_type;
   {
     bool saved = c->in_non_suspending_callback;
     c->in_non_suspending_callback = true;
@@ -2851,6 +3128,667 @@ static void compiler__compile_hof_builtin(Compiler* c, const char* name,
     c->in_non_suspending_callback = saved;
   }
   compiler__emit_byte(c, opcode, line);
+  /* Preserve collection type: stream→stream, vec→vec */
+  c->last_expr_type = col_type;
+}
+
+/* --- Internal: Compile a vector destructuring binding ---
+ *
+ * Handles both def and mut forms. Compiles the value expression,
+ * emits OP_DESTRUCTURE_VEC or OP_DESTRUCTURE_VEC_REST, and creates bindings.
+ *
+ * For def (immutable): OP_DESTRUCTURE_VEC pushes all elements, each becomes a local.
+ * For mut (mutable): elements extracted individually and wrapped in cells.
+ * For globals (scope_depth==0): each element stored with OP_DEF_GLOBAL.
+ * rest_name/rest_name_len: if non-NULL, collects remaining elements into a vector.
+ */
+static void compiler__compile_destructure_vec(
+    Compiler* c,
+    const char** d_names, uint32_t* d_name_lens,
+    const char** d_types, uint32_t* d_type_lens,
+    uint32_t d_count,
+    const char* rest_name, uint32_t rest_name_len,
+    AstNode* value_expr,
+    bool is_mutable,
+    uint32_t line, uint32_t col)
+{
+  int has_rest = (rest_name != NULL && rest_name_len > 0);
+
+  /* Validate rest name length */
+  if (has_rest && rest_name_len > 7) {
+    compiler__error(c, line, col,
+                    "variable name exceeds 7-byte inline limit");
+    return;
+  }
+
+  /* Compute wildcard skip mask and validate binding names */
+  uint8_t skip_mask = 0;
+  for (uint32_t i = 0; i < d_count; i++) {
+    if (d_name_lens[i] == 1 && d_names[i][0] == '_') {
+      skip_mask |= (uint8_t)(1u << i);
+    } else if (d_name_lens[i] > 7) {
+      compiler__error(c, line, col,
+                      "variable name exceeds 7-byte inline limit");
+      return;
+    }
+  }
+
+  /* Rest pattern is incompatible with wildcards in skip_mask (simplification) */
+
+  /* Compile RHS — pushes one value (should be a vector) onto stack */
+  compiler__compile_node(c, value_expr);
+
+  if (has_rest) {
+    /* --- Rest pattern: use OP_DESTRUCTURE_VEC_REST ---
+       Pushes d_count individual elements + 1 rest vector onto stack */
+    if (c->scope_depth > 0) {
+      /* --- Local scope --- */
+      if (!is_mutable) {
+        /* def: OP_DESTRUCTURE_VEC_REST pushes N elements + rest vector */
+        compiler__emit_byte(c, OP_DESTRUCTURE_VEC_REST, line);
+        compiler__emit_byte(c, (uint8_t)d_count, line);
+        /* Register locals for positional elements */
+        for (uint32_t i = 0; i < d_count; i++) {
+          if (d_name_lens[i] == 1 && d_names[i][0] == '_') {
+            /* Wildcard: still on stack from OP_DESTRUCTURE_VEC_REST,
+               but we need a placeholder local to keep stack alignment */
+            JaclVal wc_name = jacl_inline_string("", 0);
+            compiler__add_local(c, wc_name, line, col);
+          } else {
+            JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+            compiler__add_local(c, name_val, line, col);
+            if (d_types && d_types[i]) {
+              JaclType t;
+              if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+                c->locals[c->local_count - 1].type = t;
+              }
+            }
+          }
+        }
+        /* Register local for rest vector */
+        JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+        compiler__add_local(c, rest_val, line, col);
+        c->locals[c->local_count - 1].type = TYPE_VEC;
+      } else {
+        /* mut: store vec as temp, extract elements + rest individually */
+        JaclVal temp_name = jacl_inline_string("", 0);
+        compiler__add_local(c, temp_name, line, col);
+        uint32_t vec_slot = c->local_count - 1;
+
+        for (uint32_t i = 0; i < d_count; i++) {
+          if (d_name_lens[i] == 1 && d_names[i][0] == '_') continue;
+          compiler__emit_byte(c, OP_GET_LOCAL, line);
+          compiler__emit_byte(c, (uint8_t)vec_slot, line);
+          uint16_t idx = chunk_add_constant(c->chunk, jacl_i32((int32_t)i));
+          compiler__emit_byte(c, OP_CONST, line);
+          compiler__emit_u16(c, idx, line);
+          compiler__emit_byte(c, OP_VEC_GET, line);
+          compiler__emit_byte(c, OP_MAKE_CELL, line);
+          JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          compiler__add_local(c, name_val, line, col);
+          c->locals[c->local_count - 1].is_mutable = true;
+          if (d_types && d_types[i]) {
+            JaclType t;
+            if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+              c->locals[c->local_count - 1].type = t;
+            }
+          }
+        }
+        /* Rest: use OP_DESTRUCTURE_VEC_REST on a copy to get the rest vector,
+           or manually build it with vec-slice. Simpler: push vec, emit
+           OP_DESTRUCTURE_VEC_REST, pop the N elements, keep the rest vector. */
+        /* Actually, use OP_VEC_SLICE to create rest vector: vec[d_count..] */
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)vec_slot, line);
+        /* Push start index (d_count) */
+        uint16_t start_idx = chunk_add_constant(c->chunk, jacl_i32((int32_t)d_count));
+        compiler__emit_byte(c, OP_CONST, line);
+        compiler__emit_u16(c, start_idx, line);
+        /* Push end index — use vec-len for "to end" */
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)vec_slot, line);
+        compiler__emit_byte(c, OP_VEC_LEN, line);
+        /* Emit OP_VEC_SLICE */
+        compiler__emit_byte(c, OP_VEC_SLICE, line);
+        compiler__emit_byte(c, OP_MAKE_CELL, line);
+        JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+        compiler__add_local(c, rest_val, line, col);
+        c->locals[c->local_count - 1].is_mutable = true;
+        c->locals[c->local_count - 1].type = TYPE_VEC;
+      }
+      compiler__emit_byte(c, OP_NIL, line);
+    } else {
+      /* --- Global scope with rest --- */
+      compiler__emit_byte(c, OP_DESTRUCTURE_VEC_REST, line);
+      compiler__emit_byte(c, (uint8_t)d_count, line);
+      /* Stack: elem0 ... elemN-1 rest_vec (bottom to top)
+         Process in reverse: rest first, then elements. */
+      /* Define rest global (top of stack) */
+      if (is_mutable && c->current_module) {
+        compiler__emit_byte(c, OP_BOX, line);
+      }
+      JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+      JaclVal rest_gkey = compiler__global_name_val(c, rest_name, rest_name_len);
+      uint16_t rest_idx = chunk_add_constant(c->chunk, rest_gkey);
+      compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+      compiler__emit_u16(c, rest_idx, line);
+      compiler__set_global_arity(c, rest_val, -1);
+      if (is_mutable) {
+        Compiler* root = c;
+        while (root->enclosing) root = root->enclosing;
+        for (uint32_t j = 0; j < root->global_arity_count; j++) {
+          if (root->global_arities[j].name == rest_val) {
+            root->global_arities[j].is_mutable = true;
+            break;
+          }
+        }
+      }
+      /* Now define positional elements in reverse order */
+      for (int i = (int)d_count - 1; i >= 0; i--) {
+        compiler__emit_byte(c, OP_POP, line); /* pop nil from previous OP_DEF_GLOBAL */
+        if (d_name_lens[i] == 1 && d_names[i][0] == '_') {
+          /* Wildcard: just pop the value */
+          compiler__emit_byte(c, OP_POP, line);
+          compiler__emit_byte(c, OP_NIL, line); /* push nil placeholder */
+          continue;
+        }
+        if (is_mutable && c->current_module) {
+          compiler__emit_byte(c, OP_BOX, line);
+        }
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal global_key = compiler__global_name_val(c, d_names[i],
+                                                        d_name_lens[i]);
+        uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
+        compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+        compiler__set_global_arity(c, name_val, -1);
+        if (is_mutable) {
+          Compiler* root = c;
+          while (root->enclosing) root = root->enclosing;
+          for (uint32_t j = 0; j < root->global_arity_count; j++) {
+            if (root->global_arities[j].name == name_val) {
+              root->global_arities[j].is_mutable = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+  } else {
+    /* --- No rest pattern: original logic --- */
+
+    if (c->scope_depth > 0) {
+      /* --- Local scope --- */
+      if (!is_mutable) {
+        /* def: OP_DESTRUCTURE_VEC pushes non-wildcard elements as locals */
+        compiler__emit_byte(c, OP_DESTRUCTURE_VEC, line);
+        compiler__emit_byte(c, (uint8_t)d_count, line);
+        compiler__emit_byte(c, skip_mask, line);
+        for (uint32_t i = 0; i < d_count; i++) {
+          if (skip_mask & (1u << i)) continue; /* wildcard: no local */
+          JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          compiler__add_local(c, name_val, line, col);
+          if (d_types && d_types[i]) {
+            JaclType t;
+            if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+              c->locals[c->local_count - 1].type = t;
+            }
+          }
+        }
+      } else {
+        /* mut: extract each element individually, wrap in cell.
+           Store vec as temporary local to allow repeated access. */
+        JaclVal temp_name = jacl_inline_string("", 0);
+        compiler__add_local(c, temp_name, line, col);
+        uint32_t vec_slot = c->local_count - 1;
+
+        for (uint32_t i = 0; i < d_count; i++) {
+          if (skip_mask & (1u << i)) continue; /* wildcard: skip */
+          /* Push the vector again from temp local */
+          compiler__emit_byte(c, OP_GET_LOCAL, line);
+          compiler__emit_byte(c, (uint8_t)vec_slot, line);
+          /* Push index */
+          uint16_t idx = chunk_add_constant(c->chunk, jacl_i32((int32_t)i));
+          compiler__emit_byte(c, OP_CONST, line);
+          compiler__emit_u16(c, idx, line);
+          /* Extract element */
+          compiler__emit_byte(c, OP_VEC_GET, line);
+          /* Wrap in cell for mutable binding */
+          compiler__emit_byte(c, OP_MAKE_CELL, line);
+          /* Register local */
+          JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          compiler__add_local(c, name_val, line, col);
+          c->locals[c->local_count - 1].is_mutable = true;
+          if (d_types && d_types[i]) {
+            JaclType t;
+            if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+              c->locals[c->local_count - 1].type = t;
+            }
+          }
+        }
+      }
+      /* def/mut returns nil */
+      compiler__emit_byte(c, OP_NIL, line);
+    } else {
+      /* --- Global scope --- */
+      compiler__emit_byte(c, OP_DESTRUCTURE_VEC, line);
+      compiler__emit_byte(c, (uint8_t)d_count, line);
+      compiler__emit_byte(c, skip_mask, line);
+      /* Non-skipped elements are on stack (bottom to top).
+         Process in reverse so we consume from top of stack.
+         Only process non-wildcard positions. */
+      int first_non_wildcard = 1;
+      for (int i = (int)d_count - 1; i >= 0; i--) {
+        if (skip_mask & (1u << i)) continue; /* wildcard: skip */
+        if (!first_non_wildcard) {
+          /* Pop the nil pushed by previous OP_DEF_GLOBAL */
+          compiler__emit_byte(c, OP_POP, line);
+        }
+        first_non_wildcard = 0;
+        if (is_mutable && c->current_module) {
+          compiler__emit_byte(c, OP_BOX, line);
+        }
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal global_key = compiler__global_name_val(c, d_names[i],
+                                                        d_name_lens[i]);
+        uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
+        compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+        /* OP_DEF_GLOBAL pops value, pushes nil */
+        compiler__set_global_arity(c, name_val, -1);
+        if (is_mutable) {
+          Compiler* root = c;
+          while (root->enclosing) root = root->enclosing;
+          for (uint32_t j = 0; j < root->global_arity_count; j++) {
+            if (root->global_arities[j].name == name_val) {
+              root->global_arities[j].is_mutable = true;
+              break;
+            }
+          }
+        }
+      }
+      /* If all positions were wildcards, push nil as return value */
+      if (first_non_wildcard) {
+        compiler__emit_byte(c, OP_NIL, line);
+      }
+    }
+  }
+
+  c->last_expr_type = TYPE_NIL;
+}
+
+/* -------------------------------------------------------------------------
+ * Compile named struct/map destructuring: def {x, y} $expr or mut {x, y} $expr
+ *
+ * For known struct types: emits OP_STRUCT_GET per field (compile-time resolved).
+ * For dyn/map types: emits OP_DESTRUCTURE_NAMED (runtime resolved).
+ * For mut: wraps each extracted value in a cell.
+ * For globals: defines each extracted value as a global.
+ * rest_name/rest_name_len: if non-NULL, collects remaining fields into a map.
+ */
+static void compiler__compile_destructure_named(
+    Compiler* c,
+    const char** d_names, uint32_t* d_name_lens,
+    const char** d_types, uint32_t* d_type_lens,
+    uint32_t d_count,
+    const char* rest_name, uint32_t rest_name_len,
+    int spread_all,
+    AstNode* value_expr,
+    bool is_mutable,
+    uint32_t line, uint32_t col)
+{
+  int has_rest = (rest_name != NULL && rest_name_len > 0);
+
+  /* Validate rest name length */
+  if (has_rest && rest_name_len > 7) {
+    compiler__error(c, line, col,
+                    "variable name exceeds 7-byte inline limit");
+    return;
+  }
+
+  /* Validate binding names */
+  for (uint32_t i = 0; i < d_count; i++) {
+    if (d_name_lens[i] == 1 && d_names[i][0] == '_') {
+      compiler__error(c, line, col,
+                      "'_' is meaningless in named destructuring; just omit the field");
+      return;
+    }
+    if (d_name_lens[i] > 7) {
+      compiler__error(c, line, col,
+                      "variable name exceeds 7-byte inline limit");
+      return;
+    }
+  }
+
+  /* Compile RHS — pushes one value (struct or map) onto stack */
+  compiler__compile_node(c, value_expr);
+  JaclType rhs_type = c->last_expr_type;
+  uint32_t rhs_struct_idx = c->last_struct_idx;
+
+  /* Determine if we can use compile-time struct field resolution */
+  int use_struct_path = 0;
+  StructTypeDef* sdef = NULL;
+
+  if (rhs_type == TYPE_STRUCT && rhs_struct_idx != UINT32_MAX) {
+    StructTypeRegistry* reg = compiler__get_struct_registry(c);
+    if (reg && rhs_struct_idx < reg->count) {
+      sdef = &reg->defs[rhs_struct_idx];
+      use_struct_path = 1;
+      /* Validate all field names at compile time */
+      for (uint32_t i = 0; i < d_count; i++) {
+        uint32_t fi;
+        for (fi = 0; fi < sdef->field_count; fi++) {
+          if (sdef->fields[fi].name_len == d_name_lens[i] &&
+              memcmp(sdef->fields[fi].name, d_names[i], d_name_lens[i]) == 0)
+            break;
+        }
+        if (fi == sdef->field_count) {
+          char err_msg[128];
+          snprintf(err_msg, sizeof(err_msg),
+                   "struct '%.*s' has no field '%.*s'",
+                   (int)sdef->name_len, sdef->name,
+                   (int)d_name_lens[i], d_names[i]);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+      }
+    }
+  }
+
+  /* --- Spread-all expansion: {..} or {x, ..} --- */
+  const char* exp_names[STRUCT_MAX_FIELDS];
+  uint32_t    exp_name_lens[STRUCT_MAX_FIELDS];
+  const char* exp_types[STRUCT_MAX_FIELDS];
+  uint32_t    exp_type_lens[STRUCT_MAX_FIELDS];
+  uint32_t    exp_count = 0;
+
+  if (spread_all) {
+    if (!use_struct_path || !sdef) {
+      compiler__error(c, line, col,
+                      "spread-all {..} requires a known struct type; got dyn");
+      return;
+    }
+    /* Build expanded field list: explicit fields + all remaining struct fields */
+
+    /* Copy explicit fields first */
+    for (uint32_t i = 0; i < d_count; i++) {
+      exp_names[exp_count]     = d_names[i];
+      exp_name_lens[exp_count] = d_name_lens[i];
+      exp_types[exp_count]     = (d_types ? d_types[i] : NULL);
+      exp_type_lens[exp_count] = (d_type_lens ? d_type_lens[i] : 0);
+      exp_count++;
+    }
+
+    /* Add remaining struct fields not already listed */
+    for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+      int already_listed = 0;
+      for (uint32_t i = 0; i < d_count; i++) {
+        if (sdef->fields[fi].name_len == d_name_lens[i] &&
+            memcmp(sdef->fields[fi].name, d_names[i], d_name_lens[i]) == 0) {
+          already_listed = 1;
+          break;
+        }
+      }
+      if (!already_listed) {
+        if (sdef->fields[fi].name_len > 7) {
+          compiler__error(c, line, col,
+                          "variable name exceeds 7-byte inline limit");
+          return;
+        }
+        exp_names[exp_count]     = sdef->fields[fi].name;
+        exp_name_lens[exp_count] = sdef->fields[fi].name_len;
+        exp_types[exp_count]     = NULL;
+        exp_type_lens[exp_count] = 0;
+        exp_count++;
+      }
+    }
+
+    /* Check for same-scope shadowing */
+    if (c->scope_depth > 0) {
+      for (uint32_t i = 0; i < exp_count; i++) {
+        JaclVal check_name = jacl_inline_string(exp_names[i], exp_name_lens[i]);
+        for (int j = (int)c->local_count - 1; j >= 0; j--) {
+          if (c->locals[j].depth < c->scope_depth) break;
+          if (c->locals[j].name == check_name) {
+            char err_msg[128];
+            snprintf(err_msg, sizeof(err_msg),
+                     "spread-all would shadow existing variable '%.*s'",
+                     (int)exp_name_lens[i], exp_names[i]);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+        }
+      }
+    }
+
+    /* Replace parameters with expanded list */
+    d_names     = exp_names;
+    d_name_lens = exp_name_lens;
+    d_types     = exp_types;
+    d_type_lens = exp_type_lens;
+    d_count     = exp_count;
+  }
+
+  if (c->scope_depth > 0) {
+    /* --- Local scope --- */
+    /* Store source value in temp local for repeated access */
+    JaclVal temp_name = jacl_inline_string("", 0);
+    compiler__add_local(c, temp_name, line, col);
+    uint32_t src_slot = c->local_count - 1;
+    if (rhs_type == TYPE_STRUCT) {
+      c->locals[src_slot].type = TYPE_STRUCT;
+      c->locals[src_slot].struct_type_idx = rhs_struct_idx;
+    }
+
+    if (use_struct_path) {
+      /* Struct path: extract each field with compile-time resolved offsets */
+      for (uint32_t i = 0; i < d_count; i++) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)src_slot, line);
+
+        uint32_t fi;
+        for (fi = 0; fi < sdef->field_count; fi++) {
+          if (sdef->fields[fi].name_len == d_name_lens[i] &&
+              memcmp(sdef->fields[fi].name, d_names[i], d_name_lens[i]) == 0)
+            break;
+        }
+        compiler__emit_byte(c, OP_STRUCT_GET, line);
+        compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
+        compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
+
+        if (is_mutable) {
+          compiler__emit_byte(c, OP_MAKE_CELL, line);
+        }
+
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        compiler__add_local(c, name_val, line, col);
+        if (is_mutable)
+          c->locals[c->local_count - 1].is_mutable = true;
+        if (d_types && d_types[i]) {
+          JaclType t;
+          if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+            c->locals[c->local_count - 1].type = t;
+          }
+        } else {
+          c->locals[c->local_count - 1].type = sdef->fields[fi].type;
+          if (sdef->fields[fi].type == TYPE_STRUCT)
+            c->locals[c->local_count - 1].struct_type_idx = sdef->fields[fi].struct_type_idx;
+        }
+      }
+
+      /* Rest: build map from remaining struct fields */
+      if (has_rest) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)src_slot, line);
+        /* Emit OP_DESTRUCTURE_NAMED_REST with explicit field names to exclude */
+        compiler__emit_byte(c, OP_DESTRUCTURE_NAMED_REST, line);
+        compiler__emit_byte(c, (uint8_t)d_count, line);
+        for (uint32_t i = 0; i < d_count; i++) {
+          JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
+          compiler__emit_u16(c, key_idx, line);
+        }
+        if (is_mutable) {
+          compiler__emit_byte(c, OP_MAKE_CELL, line);
+        }
+        JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+        compiler__add_local(c, rest_val, line, col);
+        if (is_mutable)
+          c->locals[c->local_count - 1].is_mutable = true;
+        c->locals[c->local_count - 1].type = TYPE_MAP;
+      }
+    } else {
+      /* Dyn/map path: extract each field one at a time with runtime resolution.
+         Use OP_DESTRUCTURE_NAMED with count=1 per field so missing-key errors
+         are caught, and mutable wrapping works naturally. */
+      for (uint32_t i = 0; i < d_count; i++) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)src_slot, line);
+
+        compiler__emit_byte(c, OP_DESTRUCTURE_NAMED, line);
+        compiler__emit_byte(c, 1, line);
+        JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
+        compiler__emit_u16(c, key_idx, line);
+
+        if (is_mutable) {
+          compiler__emit_byte(c, OP_MAKE_CELL, line);
+        }
+
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        compiler__add_local(c, name_val, line, col);
+        if (is_mutable)
+          c->locals[c->local_count - 1].is_mutable = true;
+        if (d_types && d_types[i]) {
+          JaclType t;
+          if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+            c->locals[c->local_count - 1].type = t;
+          }
+        }
+      }
+
+      /* Rest: build map from remaining fields */
+      if (has_rest) {
+        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, (uint8_t)src_slot, line);
+        /* Emit OP_DESTRUCTURE_NAMED_REST with explicit field names to exclude */
+        compiler__emit_byte(c, OP_DESTRUCTURE_NAMED_REST, line);
+        compiler__emit_byte(c, (uint8_t)d_count, line);
+        for (uint32_t i = 0; i < d_count; i++) {
+          JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
+          compiler__emit_u16(c, key_idx, line);
+        }
+        if (is_mutable) {
+          compiler__emit_byte(c, OP_MAKE_CELL, line);
+        }
+        JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+        compiler__add_local(c, rest_val, line, col);
+        if (is_mutable)
+          c->locals[c->local_count - 1].is_mutable = true;
+        c->locals[c->local_count - 1].type = TYPE_MAP;
+      }
+    }
+
+    /* def/mut returns nil */
+    compiler__emit_byte(c, OP_NIL, line);
+  } else {
+    /* --- Global scope --- */
+    /* NOTE: The RHS value is already on the stack from compile_node above. */
+    if (!has_rest) {
+      compiler__emit_byte(c, OP_DESTRUCTURE_NAMED, line);
+      compiler__emit_byte(c, (uint8_t)d_count, line);
+      for (uint32_t i = 0; i < d_count; i++) {
+        JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
+        compiler__emit_u16(c, key_idx, line);
+      }
+      /* Elements are on stack: elem0 (bottom) ... elemN-1 (top).
+         Process in reverse so we consume from top of stack. */
+      for (int i = (int)d_count - 1; i >= 0; i--) {
+        if (is_mutable && c->current_module) {
+          compiler__emit_byte(c, OP_BOX, line);
+        }
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal global_key = compiler__global_name_val(c, d_names[i],
+                                                        d_name_lens[i]);
+        uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
+        compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+        compiler__set_global_arity(c, name_val, -1);
+        if (is_mutable) {
+          Compiler* root = c;
+          while (root->enclosing) root = root->enclosing;
+          for (uint32_t j = 0; j < root->global_arity_count; j++) {
+            if (root->global_arities[j].name == name_val) {
+              root->global_arities[j].is_mutable = true;
+              break;
+            }
+          }
+        }
+        if (i > 0) {
+          compiler__emit_byte(c, OP_POP, line);
+        }
+      }
+    } else {
+      /* Rest path: OP_DESTRUCTURE_NAMED_REST pushes N fields + 1 rest map */
+      compiler__emit_byte(c, OP_DESTRUCTURE_NAMED_REST, line);
+      compiler__emit_byte(c, (uint8_t)d_count, line);
+      for (uint32_t i = 0; i < d_count; i++) {
+        JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
+        compiler__emit_u16(c, key_idx, line);
+      }
+      /* Stack: elem0 ... elemN-1 rest_map (bottom to top)
+         Process in reverse: rest first, then elements. */
+      /* Define rest global (top of stack) */
+      if (is_mutable && c->current_module) {
+        compiler__emit_byte(c, OP_BOX, line);
+      }
+      JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+      JaclVal rest_gkey = compiler__global_name_val(c, rest_name, rest_name_len);
+      uint16_t rest_idx = chunk_add_constant(c->chunk, rest_gkey);
+      compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+      compiler__emit_u16(c, rest_idx, line);
+      compiler__set_global_arity(c, rest_val, -1);
+      if (is_mutable) {
+        Compiler* root = c;
+        while (root->enclosing) root = root->enclosing;
+        for (uint32_t j = 0; j < root->global_arity_count; j++) {
+          if (root->global_arities[j].name == rest_val) {
+            root->global_arities[j].is_mutable = true;
+            break;
+          }
+        }
+      }
+      /* Now define positional elements in reverse order */
+      for (int i = (int)d_count - 1; i >= 0; i--) {
+        compiler__emit_byte(c, OP_POP, line); /* pop nil from previous OP_DEF_GLOBAL */
+        if (is_mutable && c->current_module) {
+          compiler__emit_byte(c, OP_BOX, line);
+        }
+        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal global_key = compiler__global_name_val(c, d_names[i],
+                                                        d_name_lens[i]);
+        uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
+        compiler__emit_byte(c, OP_DEF_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+        compiler__set_global_arity(c, name_val, -1);
+        if (is_mutable) {
+          Compiler* root = c;
+          while (root->enclosing) root = root->enclosing;
+          for (uint32_t j = 0; j < root->global_arity_count; j++) {
+            if (root->global_arities[j].name == name_val) {
+              root->global_arities[j].is_mutable = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  c->last_expr_type = TYPE_NIL;
 }
 
 /* --- Internal: Compile a command invocation --- */
@@ -2865,6 +3803,88 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
   /* Reset expected_type so sub-expressions don't inherit parent context.
      Individual handlers (e.g. typed def) set it explicitly for their RHS. */
   c->expected_type = TYPE_DYN;
+
+  /* Check if any arg is a spread expression */
+  int has_spread = 0;
+  for (uint32_t i = 0; i < argc; i++) {
+    if (args[i]->type == AST_SPREAD) { has_spread = 1; break; }
+  }
+
+  /* --- Spread call path: handles both builtins and user procs --- */
+  if (has_spread) {
+    /* Check for known binary builtins → use OP_FOLD_SPREAD */
+    int fold_op = -1;
+    if (compiler__head_matches(head, "+", 1))      fold_op = 0;
+    else if (compiler__head_matches(head, "*", 1)) fold_op = 2;
+    else if (compiler__head_matches(head, "-", 1)) fold_op = 1;
+    else if (compiler__head_matches(head, "/", 1)) fold_op = 3;
+
+    if (fold_op >= 0) {
+      /* Compile all args (fixed + spread) onto stack */
+      uint8_t fixed_args = 0;
+      uint8_t num_spreads = 0;
+      for (uint32_t i = 0; i < argc; i++) {
+        if (args[i]->type == AST_SPREAD) {
+          compiler__compile_node(c, args[i]->data.spread.expr);
+          compiler__emit_byte(c, OP_SPREAD, line);
+          num_spreads++;
+        } else {
+          compiler__compile_node(c, args[i]);
+          fixed_args++;
+        }
+      }
+      compiler__emit_byte(c, OP_FOLD_SPREAD, line);
+      compiler__emit_byte(c, (uint8_t)fold_op, line);
+      compiler__emit_byte(c, fixed_args, line);
+      compiler__emit_byte(c, num_spreads, line);
+      c->last_expr_type = TYPE_DYN;
+      return;
+    }
+
+    /* Generic spread call: resolve head as callable, args, then OP_CALL_SPREAD */
+    if (head->type == AST_LIT_STRING) {
+      uint32_t name_len = head->data.lit_string.length;
+      if (name_len > 7) {
+        compiler__error(c, line, col, "command name exceeds 7-byte inline limit");
+        return;
+      }
+      JaclVal name_val = jacl_inline_string(head->data.lit_string.value, name_len);
+      int local_slot = compiler__resolve_local(c, name_val);
+      if (local_slot != -1) {
+        if (c->locals[local_slot].is_mutable) {
+          compiler__emit_byte(c, OP_GET_CELL_LOCAL, line);
+        } else {
+          compiler__emit_byte(c, OP_GET_LOCAL, line);
+        }
+        compiler__emit_byte(c, (uint8_t)local_slot, line);
+      } else {
+        JaclVal gkey = compiler__global_name_val(c,
+            head->data.lit_string.value, name_len);
+        uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
+        compiler__emit_byte(c, OP_GET_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+      }
+    } else {
+      compiler__compile_node(c, head);
+    }
+    uint8_t fixed_args = 0;
+    uint8_t num_spreads = 0;
+    for (uint32_t i = 0; i < argc; i++) {
+      if (args[i]->type == AST_SPREAD) {
+        compiler__compile_node(c, args[i]->data.spread.expr);
+        compiler__emit_byte(c, OP_SPREAD, line);
+        num_spreads++;
+      } else {
+        compiler__compile_node(c, args[i]);
+        fixed_args++;
+      }
+    }
+    compiler__emit_byte(c, OP_CALL_SPREAD, line);
+    compiler__emit_byte(c, fixed_args, line);
+    compiler__emit_byte(c, num_spreads, line);
+    c->last_expr_type = TYPE_DYN;
+    return;
+  }
 
   /* Arithmetic builtins */
   if (compiler__head_matches(head, "+", 1)) {
@@ -3019,6 +4039,96 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* mut — mutable local binding with cell auto-boxing */
   if (compiler__head_matches(head, "mut", 3)) {
+    /* --- Destructuring: [mut [a b c] value] or [mut DESTRUCTURE_VEC value] --- */
+    if (argc == 2 && args[0]->type == AST_DESTRUCTURE_VEC) {
+      compiler__compile_destructure_vec(
+          c,
+          args[0]->data.destructure_vec.names,
+          args[0]->data.destructure_vec.name_lens,
+          args[0]->data.destructure_vec.types,
+          args[0]->data.destructure_vec.type_lens,
+          args[0]->data.destructure_vec.count,
+          args[0]->data.destructure_vec.rest_name,
+          args[0]->data.destructure_vec.rest_name_len,
+          args[1], true, line, col);
+      return;
+    }
+    if (argc == 2 && args[0]->type == AST_COMMAND) {
+      AstNode* pat = args[0];
+      uint32_t d_count = 1 + pat->data.command.arg_count;
+      if (d_count > 255) {
+        compiler__error(c, line, col, "too many bindings in destructuring");
+        return;
+      }
+      const char* d_names[256];
+      uint32_t d_name_lens[256];
+      if (pat->data.command.head->type != AST_LIT_STRING) {
+        compiler__error(c, line, col,
+                        "destructuring pattern elements must be names");
+        return;
+      }
+      d_names[0] = pat->data.command.head->data.lit_string.value;
+      d_name_lens[0] = pat->data.command.head->data.lit_string.length;
+      for (uint32_t i = 0; i < pat->data.command.arg_count; i++) {
+        if (pat->data.command.args[i]->type != AST_LIT_STRING) {
+          compiler__error(c, line, col,
+                          "destructuring pattern elements must be names");
+          return;
+        }
+        d_names[1 + i] = pat->data.command.args[i]->data.lit_string.value;
+        d_name_lens[1 + i] = pat->data.command.args[i]->data.lit_string.length;
+      }
+      compiler__compile_destructure_vec(
+          c, d_names, d_name_lens, NULL, NULL, d_count,
+          NULL, 0,
+          args[1], true, line, col);
+      return;
+    }
+    /* --- Named destructuring: [mut {x, y} value] --- */
+    if (argc == 2 && args[0]->type == AST_DESTRUCTURE_NAMED) {
+      compiler__compile_destructure_named(
+          c,
+          args[0]->data.destructure_named.names,
+          args[0]->data.destructure_named.name_lens,
+          args[0]->data.destructure_named.types,
+          args[0]->data.destructure_named.type_lens,
+          args[0]->data.destructure_named.count,
+          args[0]->data.destructure_named.rest_name,
+          args[0]->data.destructure_named.rest_name_len,
+          args[0]->data.destructure_named.spread_all,
+          args[1], true, line, col);
+      return;
+    }
+    /* --- Named destructuring from block: [mut {x, y} value] (keyword form) --- */
+    if (argc == 2 && args[0]->type == AST_BLOCK) {
+      AstNode* blk = args[0];
+      uint32_t d_count = blk->data.block.count;
+      if (d_count == 0 || d_count > 255) {
+        compiler__error(c, line, col, "invalid destructuring pattern");
+        return;
+      }
+      const char* d_names_arr[256];
+      uint32_t d_name_lens_arr[256];
+      int valid = 1;
+      for (uint32_t i = 0; i < d_count; i++) {
+        AstNode* cmd = blk->data.block.commands[i];
+        if (cmd->type == AST_COMMAND && cmd->data.command.arg_count == 0 &&
+            cmd->data.command.head->type == AST_LIT_STRING) {
+          d_names_arr[i] = cmd->data.command.head->data.lit_string.value;
+          d_name_lens_arr[i] = cmd->data.command.head->data.lit_string.length;
+        } else {
+          valid = 0; break;
+        }
+      }
+      if (valid) {
+        compiler__compile_destructure_named(
+            c, d_names_arr, d_name_lens_arr, NULL, NULL, d_count,
+            NULL, 0, 0,
+            args[1], true, line, col);
+        return;
+      }
+    }
+
     JaclType declared_type = TYPE_DYN;
     uint32_t name_arg_idx  = 0;
     uint32_t value_arg_idx = 1;
@@ -3071,7 +4181,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclType effective_type;
     if (declared_type != TYPE_DYN) {
       effective_type = declared_type;
-    } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT) {
+    } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT ||
+               rhs_type == TYPE_STREAM) {
       effective_type = rhs_type;
     } else {
       effective_type = TYPE_DYN;
@@ -3318,8 +4429,101 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* def builtin — supports [def name value] and [def TYPE name value] */
+  /* def builtin — supports [def name value] and [def TYPE name value]
+     and [def [a b c] value] for vector destructuring */
   if (compiler__head_matches(head, "def", 3)) {
+    /* --- Destructuring: [def [a b c] value] or [def DESTRUCTURE_VEC value] --- */
+    if (argc == 2 && args[0]->type == AST_DESTRUCTURE_VEC) {
+      compiler__compile_destructure_vec(
+          c,
+          args[0]->data.destructure_vec.names,
+          args[0]->data.destructure_vec.name_lens,
+          args[0]->data.destructure_vec.types,
+          args[0]->data.destructure_vec.type_lens,
+          args[0]->data.destructure_vec.count,
+          args[0]->data.destructure_vec.rest_name,
+          args[0]->data.destructure_vec.rest_name_len,
+          args[1], false, line, col);
+      return;
+    }
+    if (argc == 2 && args[0]->type == AST_COMMAND) {
+      /* keyword form: def [a b c] expr — convert AST_COMMAND to name arrays */
+      AstNode* pat = args[0];
+      uint32_t d_count = 1 + pat->data.command.arg_count; /* head + args */
+      if (d_count > 255) {
+        compiler__error(c, line, col, "too many bindings in destructuring");
+        return;
+      }
+      const char* d_names[256];
+      uint32_t d_name_lens[256];
+      /* head is first name */
+      if (pat->data.command.head->type != AST_LIT_STRING) {
+        compiler__error(c, line, col,
+                        "destructuring pattern elements must be names");
+        return;
+      }
+      d_names[0] = pat->data.command.head->data.lit_string.value;
+      d_name_lens[0] = pat->data.command.head->data.lit_string.length;
+      for (uint32_t i = 0; i < pat->data.command.arg_count; i++) {
+        if (pat->data.command.args[i]->type != AST_LIT_STRING) {
+          compiler__error(c, line, col,
+                          "destructuring pattern elements must be names");
+          return;
+        }
+        d_names[1 + i] = pat->data.command.args[i]->data.lit_string.value;
+        d_name_lens[1 + i] = pat->data.command.args[i]->data.lit_string.length;
+      }
+      compiler__compile_destructure_vec(
+          c, d_names, d_name_lens, NULL, NULL, d_count,
+          NULL, 0,
+          args[1], false, line, col);
+      return;
+    }
+    /* --- Named destructuring: [def {x, y} value] --- */
+    if (argc == 2 && args[0]->type == AST_DESTRUCTURE_NAMED) {
+      compiler__compile_destructure_named(
+          c,
+          args[0]->data.destructure_named.names,
+          args[0]->data.destructure_named.name_lens,
+          args[0]->data.destructure_named.types,
+          args[0]->data.destructure_named.type_lens,
+          args[0]->data.destructure_named.count,
+          args[0]->data.destructure_named.rest_name,
+          args[0]->data.destructure_named.rest_name_len,
+          args[0]->data.destructure_named.spread_all,
+          args[1], false, line, col);
+      return;
+    }
+    /* --- Named destructuring from block: [def {x, y} value] (keyword form) --- */
+    if (argc == 2 && args[0]->type == AST_BLOCK) {
+      AstNode* blk = args[0];
+      uint32_t d_count = blk->data.block.count;
+      if (d_count == 0 || d_count > 255) {
+        compiler__error(c, line, col, "invalid destructuring pattern");
+        return;
+      }
+      const char* d_names_arr[256];
+      uint32_t d_name_lens_arr[256];
+      int valid = 1;
+      for (uint32_t i = 0; i < d_count; i++) {
+        AstNode* cmd = blk->data.block.commands[i];
+        if (cmd->type == AST_COMMAND && cmd->data.command.arg_count == 0 &&
+            cmd->data.command.head->type == AST_LIT_STRING) {
+          d_names_arr[i] = cmd->data.command.head->data.lit_string.value;
+          d_name_lens_arr[i] = cmd->data.command.head->data.lit_string.length;
+        } else {
+          valid = 0; break;
+        }
+      }
+      if (valid) {
+        compiler__compile_destructure_named(
+            c, d_names_arr, d_name_lens_arr, NULL, NULL, d_count,
+            NULL, 0, 0,
+            args[1], false, line, col);
+        return;
+      }
+    }
+
     JaclType declared_type = TYPE_DYN;
     uint32_t name_arg_idx  = 0;
     uint32_t value_arg_idx = 1;
@@ -3374,8 +4578,9 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclType effective_type;
     if (declared_type != TYPE_DYN) {
       effective_type = declared_type;
-    } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT) {
-      /* Infer unboxed types and struct types from RHS */
+    } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT ||
+               rhs_type == TYPE_STREAM) {
+      /* Infer unboxed types, struct types, and stream types from RHS */
       effective_type = rhs_type;
     } else {
       effective_type = TYPE_DYN;
@@ -3505,18 +4710,38 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       const char* word = elem->data.lit_string.value;
       uint32_t wlen = elem->data.lit_string.length;
 
-      /* Check for variadic marker & */
-      if (wlen == 1 && word[0] == '&') {
-        is_variadic = true;
-        /* Next element is the rest param name (always dyn) */
-        fi++;
-        if (fi >= flat_count) {
-          compiler__error(c, line, col, "expected parameter name after &");
+      /* Check for variadic marker & or .. */
+      if ((wlen == 1 && word[0] == '&') ||
+          (wlen == 2 && word[0] == '.' && word[1] == '.')) {
+        if (is_variadic) {
+          compiler__error(c, line, col, "multiple rest parameters not allowed");
           return;
         }
+        is_variadic = true;
+        fi++;
+        if (fi >= flat_count) {
+          compiler__error(c, line, col, "expected parameter name after rest marker");
+          return;
+        }
+        /* Check for optional type annotation: ..type name */
         elem = flat_elems[fi];
+        JaclType rest_type = TYPE_DYN;
+        if (elem->type == AST_LIT_STRING && fi + 1 < flat_count) {
+          JaclType maybe_type;
+          if (compiler__resolve_type(c, elem->data.lit_string.value,
+                                     elem->data.lit_string.length, &maybe_type)) {
+            rest_type = maybe_type;
+            fi++;
+            elem = flat_elems[fi];
+          }
+        }
         if (elem->type != AST_LIT_STRING || elem->data.lit_string.length > 7) {
           compiler__error(c, line, col, "proc parameter name invalid");
+          return;
+        }
+        /* rest param must be last */
+        if (fi != flat_count - 1) {
+          compiler__error(c, line, col, "rest parameter must be last");
           return;
         }
         if (param_count >= COMPILER_MAX_PROC_PARAMS) {
@@ -3525,7 +4750,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
         }
         param_names_arr[param_count] = jacl_inline_string(
             elem->data.lit_string.value, elem->data.lit_string.length);
-        param_types_arr[param_count] = TYPE_DYN;
+        param_types_arr[param_count] = rest_type;
         param_count++;
         continue;
       }
@@ -3600,6 +4825,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     closure->variadic     = is_variadic;
     closure->pinned       = false;
     closure->pin_worker_id = -1;
+    closure->is_generator  = false; /* set after body compilation */
 
     /* Allocate and fill param_names from parsed array */
     if (param_count > 0) {
@@ -3633,6 +4859,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__add_local(&body_compiler, closure->param_names[i], line, col);
       body_compiler.locals[body_compiler.local_count - 1].is_param = true;
       body_compiler.locals[body_compiler.local_count - 1].type = param_types_arr[i];
+    }
+
+    /* For variadic procs, emit OP_COLLECT_VARIADIC as first instruction */
+    if (is_variadic) {
+      compiler__emit_byte(&body_compiler, OP_COLLECT_VARIADIC, line);
+      compiler__emit_byte(&body_compiler, min_args, line);
     }
 
     if (proc_suspends_early) {
@@ -3684,8 +4916,14 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       c->first_error = body_compiler.first_error;
     }
 
-    /* Set upvalue count on the closure */
+    /* Set upvalue count and generator flag on the closure */
     closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
+    closure->is_generator  = body_compiler.has_yield;
+
+    /* Generators return streams — override return type for type tracking */
+    if (body_compiler.has_yield && proc_return_type == TYPE_DYN) {
+      proc_return_type = TYPE_STREAM;
+    }
 
     /* Store closure in parent's constant pool */
     uint16_t closure_idx = chunk_add_constant(c->chunk, jacl_closure(closure));
@@ -3735,7 +4973,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->scope_depth > 0 && !c->force_global_procs) {
       /* Local scope: closure is on stack as local */
       compiler__add_local(c, name_val, line, col);
-      c->locals[c->local_count - 1].known_arity = (int16_t)user_param_count;
+      c->locals[c->local_count - 1].known_arity = is_variadic ? -1 : (int16_t)user_param_count;
       c->locals[c->local_count - 1].return_type = proc_return_type;
       c->locals[c->local_count - 1].param_types = stored_param_types;
       c->locals[c->local_count - 1].suspends    = proc_suspends;
@@ -3749,7 +4987,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       uint16_t name_idx = chunk_add_constant(c->chunk, proc_key);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
-      compiler__set_global_arity(c, name_val, (int16_t)user_param_count);
+      compiler__set_global_arity(c, name_val, is_variadic ? -1 : (int16_t)user_param_count);
       /* Store param types, return type, and suspension in GlobalArity */
       {
         GlobalArity* ga = compiler__find_global(c, name_val);
@@ -3842,13 +5080,14 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     /* OP_JUMP_IF_FALSE to exit */
     uint32_t exit_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
 
-    /* Compile body statements directly (no extra scope, so def rebinds
-       at the same scope level as the surrounding code) */
+    /* Scope for while body: ensures locals (def) are cleaned up each iteration */
+    compiler__begin_scope(c);
     uint32_t body_count = args[1]->data.block.count;
     for (uint32_t i = 0; i < body_count; i++) {
       compiler__compile_node(c, args[1]->data.block.commands[i]);
       compiler__emit_check_error(c, line);
     }
+    compiler__end_scope(c, line);
 
     /* OP_LOOP back to loop_start */
     compiler__emit_byte(c, OP_LOOP, line);
@@ -4027,13 +5266,109 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    /* Begin scope for hidden locals (__col, __len, __idx, $it/name) */
+    /* Begin scope for hidden locals */
     compiler__begin_scope(c);
     uint32_t saved_local_count = c->local_count;
 
     /* Compile collection → local __col */
     compiler__compile_node(c, args[0]);
+    JaclType col_type = c->last_expr_type;
     compiler__add_local(c, jacl_inline_string("__col", 5), line, col);
+
+    uint8_t col_slot = (uint8_t)(saved_local_count);
+
+    if (col_type == TYPE_STREAM) {
+      /* ====== Stream-specific inlined for loop ======
+         Hidden locals: __col (stream), elem
+         Loop: STREAM_NEXT → check exhausted → bind → body → LOOP */
+
+      /* Element placeholder → local $it/name (starts as nil) */
+      compiler__emit_byte(c, OP_NIL, line);
+      JaclVal bind_val = jacl_inline_string(bind_name, bind_name_len);
+      compiler__add_local(c, bind_val, line, col);
+      uint8_t elem_slot = (uint8_t)(saved_local_count + 1);
+
+      /* Push loop context */
+      LoopContext* lctx = &c->loop_stack[c->loop_depth++];
+      lctx->break_patch_count = 0;
+      lctx->continue_patch_count = 0;
+      lctx->local_count_at_loop = saved_local_count;
+      lctx->is_for_loop = true;
+
+      /* --- Loop start --- */
+      uint32_t loop_start = c->chunk->code_count;
+      lctx->loop_start = loop_start;
+
+      /* Pull next element: push stream, OP_STREAM_NEXT */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, col_slot, line);
+      compiler__emit_byte(c, OP_STREAM_NEXT, line);
+
+      /* Check exhaustion: push stream, OP_IS_STREAM_EXHAUSTED */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, col_slot, line);
+      compiler__emit_byte(c, OP_IS_STREAM_EXHAUSTED, line);
+
+      /* If NOT exhausted, jump to body */
+      uint32_t not_done_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+
+      /* Exhausted path: pop nil from STREAM_NEXT, jump to normal exit */
+      compiler__emit_byte(c, OP_POP, line);
+      uint32_t exit_jump = compiler__emit_jump(c, OP_JUMP, line);
+
+      /* --- Body start (not exhausted) --- */
+      compiler__patch_jump(c, not_done_jump);
+
+      /* Bind element: SET_LOCAL + POP */
+      compiler__emit_byte(c, OP_SET_LOCAL, line);
+      compiler__emit_byte(c, elem_slot, line);
+      compiler__emit_byte(c, OP_POP, line);
+
+      /* Compile body statements inline */
+      uint32_t body_count = body_block->data.block.count;
+      for (uint32_t i = 0; i < body_count; i++) {
+        compiler__compile_node(c, body_block->data.block.commands[i]);
+        compiler__emit_check_error(c, line);
+      }
+
+      /* --- Continue target --- */
+      for (uint32_t i = 0; i < lctx->continue_patch_count; i++) {
+        compiler__patch_jump(c, lctx->continue_patches[i]);
+      }
+
+      /* Loop back to start */
+      compiler__emit_byte(c, OP_LOOP, line);
+      uint32_t back_offset = c->chunk->code_count - loop_start + 2;
+      compiler__emit_byte(c, (uint8_t)((back_offset >> 8) & 0xFF), line);
+      compiler__emit_byte(c, (uint8_t)(back_offset & 0xFF), line);
+
+      /* --- Normal exit --- */
+      compiler__patch_jump(c, exit_jump);
+
+      /* End scope: pop hidden locals (__col, elem) */
+      compiler__end_scope(c, line);
+
+      /* Normal exit: push nil */
+      compiler__emit_byte(c, OP_NIL, line);
+
+      /* Jump over break landing zone */
+      uint32_t skip_break = compiler__emit_jump(c, OP_JUMP, line);
+
+      /* Break landing zone */
+      for (uint32_t i = 0; i < lctx->break_patch_count; i++) {
+        compiler__patch_jump(c, lctx->break_patches[i]);
+      }
+
+      /* Convergence */
+      compiler__patch_jump(c, skip_break);
+
+      /* Pop loop context */
+      c->loop_depth--;
+      return;
+    }
+
+    /* ====== Vector-based inlined for loop (original path) ======
+       Hidden locals: __col, __len, __idx, $it/name */
 
     /* Compute length → local __len */
     compiler__emit_byte(c, OP_GET_LOCAL, line);
@@ -4050,7 +5385,6 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclVal bind_val = jacl_inline_string(bind_name, bind_name_len);
     compiler__add_local(c, bind_val, line, col);
 
-    uint8_t col_slot = (uint8_t)(saved_local_count);
     uint8_t len_slot = (uint8_t)(saved_local_count + 1);
     uint8_t idx_slot = (uint8_t)(saved_local_count + 2);
     uint8_t elem_slot = (uint8_t)(saved_local_count + 3);
@@ -4191,7 +5525,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, "too many continue statements in loop");
       }
     } else {
-      /* While-loop: backward-jump to condition check */
+      /* While-loop: pop body-scope locals, then backward-jump to condition */
+      uint32_t cleanup = c->local_count - lctx->local_count_at_loop;
+      if (cleanup > 0) {
+        compiler__emit_byte(c, OP_POP_N, line);
+        compiler__emit_byte(c, (uint8_t)cleanup, line);
+      }
       compiler__emit_byte(c, OP_LOOP, line);
       uint32_t offset = c->chunk->code_count - lctx->loop_start + 2;
       compiler__emit_byte(c, (uint8_t)((offset >> 8) & 0xFF), line);
@@ -4317,6 +5656,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_STREAM) {
+      compiler__error(c, line, col, "vec-get requires a vector; got stream (use collect to materialize)");
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_VEC_GET, line);
     return;
@@ -4329,6 +5672,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_STREAM) {
+      compiler__error(c, line, col, "vec-len requires a vector; got stream (use collect to materialize)");
+      return;
+    }
     compiler__emit_byte(c, OP_VEC_LEN, line);
     return;
   }
@@ -4340,6 +5687,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_STREAM) {
+      compiler__error(c, line, col, "vec-push requires a vector; got stream (use collect to materialize)");
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_VEC_PUSH, line);
     return;
@@ -4352,6 +5703,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_STREAM) {
+      compiler__error(c, line, col, "vec-set requires a vector; got stream (use collect to materialize)");
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__compile_node(c, args[2]);
     compiler__emit_byte(c, OP_VEC_SET, line);
@@ -4365,6 +5720,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_STREAM) {
+      compiler__error(c, line, col, "vec-concat requires a vector; got stream (use collect to materialize)");
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_VEC_CONCAT, line);
     return;
@@ -4377,6 +5736,10 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_STREAM) {
+      compiler__error(c, line, col, "vec-slice requires a vector; got stream (use collect to materialize)");
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__compile_node(c, args[2]);
     compiler__emit_byte(c, OP_VEC_SLICE, line);
@@ -4743,6 +6106,97 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_POP, line);
     compiler__emit_byte(c, OP_NIL, line);
+    return;
+  }
+
+  /* yield — generator suspension point.
+     In CPS mode, yield is handled by compiler__compile_cps_stmts.
+     This path is a fallback for non-CPS contexts (shouldn't normally be reached
+     for generators, but compile defensively). Stack: [value, continuation]. */
+  if (compiler__head_matches(head, "yield", 5)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "yield", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_NIL, line);  /* nil continuation (no CPS context) */
+    compiler__emit_byte(c, OP_YIELD, line);
+    c->has_yield = true;
+    c->last_expr_type = TYPE_NIL;
+    return;
+  }
+
+  /* stream_next — pull next element from a stream */
+  if (compiler__head_matches(head, "stream_next", 11)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "stream_next", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_STREAM_NEXT, line);
+    c->last_expr_type = TYPE_DYN;
+    return;
+  }
+
+  /* collect — materialize stream into vector (identity on vectors) */
+  if (compiler__head_matches(head, "collect", 7)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "collect", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_COLLECT, line);
+    c->last_expr_type = TYPE_VEC;
+    return;
+  }
+
+  /* count — count elements in stream or vector */
+  if (compiler__head_matches(head, "count", 5)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "count", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_COUNT, line);
+    c->last_expr_type = TYPE_I32;
+    return;
+  }
+
+  /* take — take first N elements from stream or vector */
+  if (compiler__head_matches(head, "take", 4)) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "take", "2 arguments", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    JaclType col_type = c->last_expr_type;
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_TAKE, line);
+    c->last_expr_type = col_type;
+    return;
+  }
+
+  /* first — get first element from stream or vector */
+  if (compiler__head_matches(head, "first", 5)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "first", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_FIRST, line);
+    c->last_expr_type = TYPE_DYN;
+    return;
+  }
+
+  /* lines — split string into lazy line stream */
+  if (compiler__head_matches(head, "lines", 5)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "lines", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_LINES, line);
+    c->last_expr_type = TYPE_STREAM;
     return;
   }
 
@@ -5819,7 +7273,12 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
                           "too many continue statements in loop");
         }
       } else {
-        /* While-loop: backward-jump to condition check */
+        /* While-loop: pop body-scope locals, then backward-jump to condition */
+        uint32_t cleanup = c->local_count - lctx->local_count_at_loop;
+        if (cleanup > 0) {
+          compiler__emit_byte(c, OP_POP_N, line);
+          compiler__emit_byte(c, (uint8_t)cleanup, line);
+        }
         compiler__emit_byte(c, OP_LOOP, line);
         uint32_t offset = c->chunk->code_count - lctx->loop_start + 2;
         compiler__emit_byte(c, (uint8_t)((offset >> 8) & 0xFF), line);
@@ -5836,6 +7295,24 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, OP_NIL, line);
       }
       compiler__emit_byte(c, OP_RETURN, line);
+      break;
+    }
+
+    case AST_DESTRUCTURE_VEC: {
+      compiler__error(c, line, node->start.column,
+                      "destructuring pattern can only appear in def or mut");
+      break;
+    }
+
+    case AST_DESTRUCTURE_NAMED: {
+      compiler__error(c, line, node->start.column,
+                      "destructuring pattern can only appear in def or mut");
+      break;
+    }
+
+    case AST_SPREAD: {
+      compiler__error(c, line, node->start.column,
+                      "spread expression can only appear inside command arguments");
       break;
     }
 

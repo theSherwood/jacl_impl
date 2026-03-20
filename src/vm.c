@@ -26,7 +26,8 @@
 typedef enum {
   VM_OK,
   VM_RUNTIME_ERROR,
-  VM_STACK_OVERFLOW
+  VM_STACK_OVERFLOW,
+  VM_YIELD          /* generator yielded a value */
 } VMResult;
 
 /* --- Print callback --- */
@@ -98,6 +99,12 @@ typedef struct {
   void*      native_fn_ctx;     /* JaclVM_s* for dispatch callback */
   int8_t*    native_fn_arities; /* arity per native fn (-1 = variadic) */
   uint32_t   native_fn_count;   /* number of registered native functions */
+  /* Spread count side buffer for OP_SPREAD / OP_CALL_SPREAD / OP_FOLD_SPREAD */
+  uint32_t   spread_counts[32]; /* small stack of spread element counts */
+  uint32_t   spread_count_top;  /* top index in spread_counts */
+  /* Generator/yield support (CPS-based) */
+  JaclVal    yield_value;        /* yielded value (set by OP_YIELD) */
+  JaclVal    yield_continuation; /* CPS continuation after yield (set by OP_YIELD) */
 } VM;
 
 /* --- API --- */
@@ -176,6 +183,7 @@ static const char* vm__type_name(JaclVal v) {
   if (jacl_is_vector(v))        return "vector";
   if (jacl_is_map(v))           return "map";
   if (jacl_is_future(v))        return "future";
+  if (jacl_is_stream(v))       return "stream";
   if (jacl_is_native_fn(v))    return "native-fn";
   return "unknown";
 }
@@ -272,6 +280,9 @@ static void vm_init(VM* vm, arena_t* arena) {
   vm->native_fn_ctx     = NULL;
   vm->native_fn_arities = NULL;
   vm->native_fn_count   = 0;
+  vm->spread_count_top  = 0;
+  vm->yield_value        = JACL_NIL;
+  vm->yield_continuation = JACL_NIL;
 
   /* Initialize GC heap and make it available for collection templates */
   gc_block_pool_init(&vm->block_pool);
@@ -541,6 +552,8 @@ static void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
       vm__fmt_value(buf, (JaclVal)fut->result);
       vm__fmt_append(buf, ">", 1);
     }
+  } else if (jacl_is_stream(val)) {
+    vm__fmt_append(buf, "<stream>", 8);
   } else if (jacl_is_native_fn(val)) {
     n = snprintf(tmp, sizeof(tmp), "<native-fn #%u>",
                  jacl_as_native_fn_index(val));
@@ -633,6 +646,332 @@ static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
   vm->ip        = chunk->code;
 
   return vm__run(vm, 0);
+}
+
+/**
+ * Create a terminal continuation closure for CPS generators.
+ * When called (via tail-call from the generator body), it simply returns,
+ * causing vm__run to return VM_OK which signals stream exhaustion.
+ * The closure has 1 parameter (the result, ignored) and body = [OP_RETURN].
+ */
+static JaclVal vm__make_terminal_k(VM* vm) {
+  JaclClosure* k = (JaclClosure*)gc_alloc(&vm->heap, OBJ_CLOSURE,
+                        sizeof(JaclClosure));
+  chunk_init(&k->chunk, vm->arena);
+  chunk_write(&k->chunk, OP_RETURN, 0);
+  k->param_count   = 1;
+  k->upvalue_count = 0;
+  k->upvalues      = NULL;
+  k->name          = "__terminal_k";
+  k->min_args      = 1;
+  k->variadic      = false;
+  k->pinned        = false;
+  k->pin_worker_id = -1;
+  k->is_generator  = false;
+  k->param_names   = NULL;
+  return jacl_closure(k);
+}
+
+/* --- Stream pull helper: unified pull from any stream kind --- */
+
+typedef enum {
+    STREAM_PULL_VALUE,     /* Got a value */
+    STREAM_PULL_EXHAUSTED, /* Stream is done */
+    STREAM_PULL_ERROR      /* Error occurred (vm->error_msg set) */
+} StreamPullResult;
+
+/**
+ * Pull one element from any stream kind (generator, filter, etc.).
+ * Saves and restores VM caller context internally.
+ * On STREAM_PULL_VALUE: *out_value = yielded element.
+ * On STREAM_PULL_EXHAUSTED: *out_value = JACL_NIL.
+ */
+static StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
+                                            JaclVal* out_value) {
+    JaclStream* stream = jacl_as_stream(stream_val);
+
+    if (stream->state == STREAM_EXHAUSTED) {
+        *out_value = JACL_NIL;
+        return STREAM_PULL_EXHAUSTED;
+    }
+
+    /* --- Filter stream: pull from source, apply predicate, loop --- */
+    if (stream->kind == STREAM_KIND_FILTER) {
+        JaclVal source = stream->args[0];
+        JaclVal predicate_val = stream->args[1];
+        JaclClosure* predicate = jacl_as_closure(predicate_val);
+
+        for (;;) {
+            JaclVal elem;
+            StreamPullResult pr = vm__pull_stream_one(vm, source, &elem);
+            if (pr == STREAM_PULL_EXHAUSTED) {
+                stream->state = STREAM_EXHAUSTED;
+                *out_value = JACL_NIL;
+                return STREAM_PULL_EXHAUSTED;
+            }
+            if (pr == STREAM_PULL_ERROR) return STREAM_PULL_ERROR;
+
+            /* Call predicate closure with elem */
+            VMResult r;
+            r = vm__push(vm, predicate_val);
+            if (r != VM_OK) return STREAM_PULL_ERROR;
+            r = vm__push(vm, elem);
+            if (r != VM_OK) return STREAM_PULL_ERROR;
+
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return STREAM_PULL_ERROR;
+            }
+            uint32_t cf_count = vm->frame_count;
+            CallFrame* cf = &vm->frames[vm->frame_count++];
+            cf->closure    = predicate;
+            cf->return_ip  = vm->ip;
+            cf->stack_base = vm->stack_top - 1;
+            cf->chunk      = &predicate->chunk;
+
+            uint8_t* save_ip = vm->ip;
+            BytecodeChunk* save_chunk = vm->chunk;
+            vm->ip    = predicate->chunk.code;
+            vm->chunk = &predicate->chunk;
+
+            VMResult inner = vm__run(vm, cf_count);
+            if (inner != VM_OK) {
+                stream->state = STREAM_ERROR;
+                return STREAM_PULL_ERROR;
+            }
+
+            JaclVal pred_result;
+            r = vm__pop(vm, &pred_result);
+            if (r != VM_OK) return STREAM_PULL_ERROR;
+
+            vm->ip    = save_ip;
+            vm->chunk = save_chunk;
+
+            if (!vm__is_falsy(pred_result)) {
+                *out_value = elem;
+                return STREAM_PULL_VALUE;
+            }
+            /* predicate falsy — try next element */
+        }
+    }
+
+    /* --- Transform stream: pull from source, apply fn, return result --- */
+    if (stream->kind == STREAM_KIND_TRANSFORM) {
+        JaclVal source = stream->args[0];
+        JaclVal fn_val = stream->args[1];
+        JaclClosure* fn = jacl_as_closure(fn_val);
+
+        JaclVal elem;
+        StreamPullResult pr = vm__pull_stream_one(vm, source, &elem);
+        if (pr == STREAM_PULL_EXHAUSTED) {
+            stream->state = STREAM_EXHAUSTED;
+            *out_value = JACL_NIL;
+            return STREAM_PULL_EXHAUSTED;
+        }
+        if (pr == STREAM_PULL_ERROR) return STREAM_PULL_ERROR;
+
+        /* Call transform closure with elem */
+        VMResult r;
+        r = vm__push(vm, fn_val);
+        if (r != VM_OK) return STREAM_PULL_ERROR;
+        r = vm__push(vm, elem);
+        if (r != VM_OK) return STREAM_PULL_ERROR;
+
+        if (vm->frame_count >= VM_FRAMES_MAX) {
+            vm__set_error(vm, "stack overflow");
+            return STREAM_PULL_ERROR;
+        }
+        uint32_t cf_count = vm->frame_count;
+        CallFrame* cf = &vm->frames[vm->frame_count++];
+        cf->closure    = fn;
+        cf->return_ip  = vm->ip;
+        cf->stack_base = vm->stack_top - 1;
+        cf->chunk      = &fn->chunk;
+
+        uint8_t* save_ip = vm->ip;
+        BytecodeChunk* save_chunk = vm->chunk;
+        vm->ip    = fn->chunk.code;
+        vm->chunk = &fn->chunk;
+
+        VMResult inner = vm__run(vm, cf_count);
+        if (inner != VM_OK) {
+            stream->state = STREAM_ERROR;
+            return STREAM_PULL_ERROR;
+        }
+
+        JaclVal transformed;
+        r = vm__pop(vm, &transformed);
+        if (r != VM_OK) return STREAM_PULL_ERROR;
+
+        vm->ip    = save_ip;
+        vm->chunk = save_chunk;
+
+        *out_value = transformed;
+        return STREAM_PULL_VALUE;
+    }
+
+    /* --- Lines stream: yield one line at a time from source string --- */
+    if (stream->kind == STREAM_KIND_LINES) {
+        JaclVal src_str = stream->args[0];
+        int32_t cur_idx = jacl_as_i32(stream->args[1]);
+        uint32_t byte_len = jacl_string_byte_len(src_str);
+
+        if ((uint32_t)cur_idx >= byte_len) {
+            stream->state = STREAM_EXHAUSTED;
+            *out_value = JACL_NIL;
+            return STREAM_PULL_EXHAUSTED;
+        }
+
+        /* Copy string data to scan for newlines */
+        char sbuf[4096];
+        char* data = sbuf;
+        if (byte_len > sizeof(sbuf)) {
+            data = (char*)arena_alloc(vm->arena, byte_len);
+        }
+        jacl_string_data(src_str, data, byte_len);
+
+        /* Find end of current line */
+        uint32_t start = (uint32_t)cur_idx;
+        uint32_t end = start;
+        while (end < byte_len && data[end] != '\n') {
+            end++;
+        }
+        /* Handle \r\n */
+        uint32_t line_end = end;
+        if (line_end > start && data[line_end - 1] == '\r') {
+            line_end--;
+        }
+        /* Advance past the newline */
+        uint32_t next_idx = end < byte_len ? end + 1 : end;
+
+        /* Skip trailing empty line: if we're at the very end and line is empty */
+        if (line_end == start && next_idx >= byte_len) {
+            stream->state = STREAM_EXHAUSTED;
+            *out_value = JACL_NIL;
+            return STREAM_PULL_EXHAUSTED;
+        }
+
+        stream->args[1] = jacl_i32((int32_t)next_idx);
+
+        /* Create substring */
+        JaclVal line_str = jacl_string_new(&vm->heap, vm->intern_table,
+                                           data + start, line_end - start);
+        *out_value = line_str;
+        return STREAM_PULL_VALUE;
+    }
+
+    /* --- Take stream: pull from source, decrement remaining count --- */
+    if (stream->kind == STREAM_KIND_TAKE) {
+        int32_t remaining = jacl_as_i32(stream->args[1]);
+
+        if (remaining <= 0) {
+            stream->state = STREAM_EXHAUSTED;
+            *out_value = JACL_NIL;
+            return STREAM_PULL_EXHAUSTED;
+        }
+
+        JaclVal source = stream->args[0];
+        JaclVal elem;
+        StreamPullResult pr = vm__pull_stream_one(vm, source, &elem);
+        if (pr == STREAM_PULL_EXHAUSTED) {
+            stream->state = STREAM_EXHAUSTED;
+            *out_value = JACL_NIL;
+            return STREAM_PULL_EXHAUSTED;
+        }
+        if (pr == STREAM_PULL_ERROR) return STREAM_PULL_ERROR;
+
+        stream->args[1] = jacl_i32(remaining - 1);
+        *out_value = elem;
+        return STREAM_PULL_VALUE;
+    }
+
+    /* --- Generator stream: CPS protocol --- */
+    uint32_t caller_stack_top   = vm->stack_top;
+    uint32_t caller_frame_count = vm->frame_count;
+    uint8_t* caller_ip          = vm->ip;
+    BytecodeChunk* caller_chunk = vm->chunk;
+
+    JaclVal terminal_k = vm__make_terminal_k(vm);
+    VMResult r;
+
+    if (stream->state == STREAM_PENDING) {
+        if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+            vm__set_error(vm, "stream has no next function");
+            return STREAM_PULL_ERROR;
+        }
+        JaclClosure* gen_cl = jacl_as_closure(stream->next_fn);
+        r = vm__push(vm, stream->next_fn);
+        if (r != VM_OK) return STREAM_PULL_ERROR;
+        for (uint8_t i = 0; i < stream->arg_count; i++) {
+            r = vm__push(vm, stream->args[i]);
+            if (r != VM_OK) return STREAM_PULL_ERROR;
+        }
+        r = vm__push(vm, terminal_k);
+        if (r != VM_OK) return STREAM_PULL_ERROR;
+
+        if (vm->frame_count >= VM_FRAMES_MAX) {
+            vm__set_error(vm, "stack overflow");
+            return STREAM_PULL_ERROR;
+        }
+        CallFrame* nf = &vm->frames[vm->frame_count++];
+        nf->closure    = gen_cl;
+        nf->return_ip  = NULL;
+        nf->stack_base = vm->stack_top - stream->arg_count - 1;
+        nf->chunk      = &gen_cl->chunk;
+        vm->ip    = gen_cl->chunk.code;
+        vm->chunk = &gen_cl->chunk;
+    } else {
+        /* CONSUMED: call the yield continuation */
+        if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+            vm__set_error(vm, "stream continuation is invalid");
+            return STREAM_PULL_ERROR;
+        }
+        JaclClosure* cont_cl = jacl_as_closure(stream->next_fn);
+        r = vm__push(vm, stream->next_fn);
+        if (r != VM_OK) return STREAM_PULL_ERROR;
+        r = vm__push(vm, JACL_NIL);
+        if (r != VM_OK) return STREAM_PULL_ERROR;
+
+        if (vm->frame_count >= VM_FRAMES_MAX) {
+            vm__set_error(vm, "stack overflow");
+            return STREAM_PULL_ERROR;
+        }
+        CallFrame* nf = &vm->frames[vm->frame_count++];
+        nf->closure    = cont_cl;
+        nf->return_ip  = NULL;
+        nf->stack_base = vm->stack_top - 1;
+        nf->chunk      = &cont_cl->chunk;
+        vm->ip    = cont_cl->chunk.code;
+        vm->chunk = &cont_cl->chunk;
+    }
+
+    VMResult inner = vm__run(vm, caller_frame_count);
+
+    if (inner == VM_YIELD) {
+        stream->next_fn      = vm->yield_continuation;
+        stream->state        = STREAM_CONSUMED;
+        stream->cached_value = vm->yield_value;
+        vm->stack_top   = caller_stack_top;
+        vm->frame_count = caller_frame_count;
+        vm->ip          = caller_ip;
+        vm->chunk       = caller_chunk;
+        *out_value = vm->yield_value;
+        return STREAM_PULL_VALUE;
+    } else if (inner == VM_OK) {
+        stream->state        = STREAM_EXHAUSTED;
+        stream->next_fn      = JACL_NIL;
+        stream->cached_value = JACL_NIL;
+        vm->stack_top   = caller_stack_top;
+        vm->frame_count = caller_frame_count;
+        vm->ip          = caller_ip;
+        vm->chunk       = caller_chunk;
+        *out_value = JACL_NIL;
+        return STREAM_PULL_EXHAUSTED;
+    } else {
+        stream->state   = STREAM_ERROR;
+        stream->next_fn = JACL_NIL;
+        return STREAM_PULL_ERROR;
+    }
 }
 
 /**
@@ -1038,7 +1377,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, JACL_NIL);
           if (result != VM_OK) return result;
           break;
-        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val)) {
+        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena);
           vm__fmt_value(&fmt, val);
@@ -1160,7 +1499,35 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         JaclClosure* closure = jacl_as_closure(callee);
 
-        if (arg_count != closure->param_count) {
+        /* Generator: calling a generator proc creates a stream instead of executing.
+           Check this BEFORE arity check because generator has hidden __k param. */
+        if (closure->is_generator) {
+          /* Arity check against min_args (excludes hidden __k) */
+          if (arg_count != closure->min_args) {
+            vm__set_error(vm, "expected %d arguments but got %d",
+                         (int)closure->min_args, (int)arg_count);
+            return VM_RUNTIME_ERROR;
+          }
+          JaclVal stream_val = jacl_stream(&vm->heap);
+          JaclStream* stream = jacl_as_stream(stream_val);
+          stream->next_fn = callee;
+          stream->arg_count = (uint8_t)(arg_count <= STREAM_MAX_ARGS ? arg_count : STREAM_MAX_ARGS);
+          for (uint8_t i = 0; i < stream->arg_count; i++) {
+            stream->args[i] = vm->stack[vm->stack_top - arg_count + i];
+          }
+          vm->stack_top -= (arg_count + 1); /* pop args + callee */
+          result = vm__push(vm, stream_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        if (closure->variadic) {
+          if (arg_count < closure->min_args) {
+            vm__set_error(vm, "expected at least %d arguments but got %d",
+                         (int)closure->min_args, (int)arg_count);
+            return VM_RUNTIME_ERROR;
+          }
+        } else if (arg_count != closure->param_count) {
           vm__set_error(vm, "expected %d arguments but got %d",
                        (int)closure->param_count, (int)arg_count);
           return VM_RUNTIME_ERROR;
@@ -1216,7 +1583,13 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         JaclClosure* closure = jacl_as_closure(callee);
 
-        if (arg_count != closure->param_count) {
+        if (closure->variadic) {
+          if (arg_count < closure->min_args) {
+            vm__set_error(vm, "expected at least %d arguments but got %d",
+                         (int)closure->min_args, (int)arg_count);
+            return VM_RUNTIME_ERROR;
+          }
+        } else if (arg_count != closure->param_count) {
           vm__set_error(vm, "expected %d arguments but got %d",
                        (int)closure->param_count, (int)arg_count);
           return VM_RUNTIME_ERROR;
@@ -1288,6 +1661,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         cl->min_args     = template->min_args;
         cl->variadic     = template->variadic;
         cl->pinned       = template->pinned;
+        cl->is_generator = template->is_generator;
         /* All pinned closures run on thread 0 (the main worker thread).
            This ensures all non-local mutable state reads and writes go
            through a single worker, avoiding per-worker env isolation issues. */
@@ -1346,6 +1720,250 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           JaclVal top = vm->stack[vm->stack_top - 1];
           vm->stack_top -= count;
           vm->stack[vm->stack_top - 1] = top;
+        }
+        break;
+      }
+
+      case OP_DESTRUCTURE_VEC: {
+        uint8_t n = vm__read_byte(vm);
+        uint8_t skip_mask = vm__read_byte(vm);
+        JaclVal vec_val;
+        result = vm__pop(vm, &vec_val);
+        if (result != VM_OK) return result;
+        if (!jacl_is_vector(vec_val)) {
+          vm__set_error(vm,
+              "destructuring requires a vector, got %s",
+              vm__type_name(vec_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
+        uint32_t vec_len = jacl_vec_count(vec);
+        if (vec_len != n) {
+          vm__set_error(vm,
+              "destructuring length mismatch: expected %u elements, got %u",
+              (unsigned)n, (unsigned)vec_len);
+          return VM_RUNTIME_ERROR;
+        }
+        /* Push elements 0..N-1 onto stack, skipping positions in skip_mask */
+        for (uint8_t i = 0; i < n; i++) {
+          if (skip_mask & (1u << i)) continue; /* wildcard position */
+          jacl_vec_get_result gr = jacl_vec_get(vec, (uint32_t)i);
+          result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
+          if (result != VM_OK) return result;
+        }
+        break;
+      }
+
+      case OP_DESTRUCTURE_VEC_REST: {
+        uint8_t n = vm__read_byte(vm);
+        JaclVal vec_val;
+        result = vm__pop(vm, &vec_val);
+        if (result != VM_OK) return result;
+        if (!jacl_is_vector(vec_val)) {
+          vm__set_error(vm,
+              "destructuring requires a vector, got %s",
+              vm__type_name(vec_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
+        uint32_t vec_len = jacl_vec_count(vec);
+        if (vec_len < n) {
+          vm__set_error(vm,
+              "destructuring rest: expected at least %u elements, got %u",
+              (unsigned)n, (unsigned)vec_len);
+          return VM_RUNTIME_ERROR;
+        }
+        /* Push first N elements individually */
+        for (uint8_t i = 0; i < n; i++) {
+          jacl_vec_get_result gr = jacl_vec_get(vec, (uint32_t)i);
+          result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
+          if (result != VM_OK) return result;
+        }
+        /* Collect remaining elements into a new vector */
+        gc__current_heap = &vm->heap;
+        jacl_vec_root* rest = jacl_vec_empty();
+        for (uint32_t i = n; i < vec_len; i++) {
+          jacl_vec_get_result gr = jacl_vec_get(vec, i);
+          rest = jacl_vec_push_back(rest, gr.found ? gr.value : JACL_NIL);
+        }
+        result = vm__push(vm, jacl_vector_ptr(rest));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_DESTRUCTURE_NAMED: {
+        uint8_t n = vm__read_byte(vm);
+        /* Read N constant indices for field names */
+        uint16_t name_indices[256];
+        for (uint8_t i = 0; i < n; i++) {
+          name_indices[i] = vm__read_u16(vm);
+        }
+        JaclVal src_val;
+        result = vm__pop(vm, &src_val);
+        if (result != VM_OK) return result;
+
+        if (jacl_is_struct(src_val)) {
+          JaclStruct* s = jacl_as_struct_ptr(src_val);
+          StructTypeDef* sdef = &vm->struct_registry->defs[s->type_idx];
+          for (uint8_t i = 0; i < n; i++) {
+            JaclVal name_val = frame->chunk->constants[name_indices[i]];
+            char fname[64]; uint32_t flen;
+            flen = jacl_string_data(name_val, fname, sizeof(fname));
+            /* Find field by name */
+            uint32_t fi;
+            for (fi = 0; fi < sdef->field_count; fi++) {
+              if (sdef->fields[fi].name_len == flen &&
+                  memcmp(sdef->fields[fi].name, fname, flen) == 0) break;
+            }
+            if (fi == sdef->field_count) {
+              vm__set_error(vm,
+                  "destructuring: struct '%.*s' has no field '%.*s'",
+                  (int)sdef->name_len, sdef->name, (int)flen, fname);
+              return VM_RUNTIME_ERROR;
+            }
+            JaclVal field_val = vm__struct_read_field(&vm->heap, s,
+                sdef->fields[fi].offset, sdef->fields[fi].type);
+            result = vm__push(vm, field_val);
+            if (result != VM_OK) return result;
+          }
+        } else if (jacl_is_map(src_val)) {
+          jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(src_val);
+          for (uint8_t i = 0; i < n; i++) {
+            JaclVal key_val = frame->chunk->constants[name_indices[i]];
+            if (!jacl_map_has(map, key_val)) {
+              char fname[64]; uint32_t flen;
+              flen = jacl_string_data(key_val, fname, sizeof(fname));
+              vm__set_error(vm,
+                  "destructuring: map has no key '%.*s'",
+                  (int)flen, fname);
+              return VM_RUNTIME_ERROR;
+            }
+            result = vm__push(vm, jacl_map_get(map, key_val));
+            if (result != VM_OK) return result;
+          }
+        } else {
+          vm__set_error(vm,
+              "named destructuring requires a struct or map, got %s",
+              vm__type_name(src_val));
+          return VM_RUNTIME_ERROR;
+        }
+        break;
+      }
+
+      case OP_DESTRUCTURE_NAMED_REST: {
+        uint8_t n = vm__read_byte(vm);
+        /* Read N constant indices for explicit field names to extract */
+        uint16_t name_indices[256];
+        for (uint8_t i = 0; i < n; i++) {
+          name_indices[i] = vm__read_u16(vm);
+        }
+        JaclVal src_val;
+        result = vm__pop(vm, &src_val);
+        if (result != VM_OK) return result;
+
+        if (jacl_is_struct(src_val)) {
+          JaclStruct* s = jacl_as_struct_ptr(src_val);
+          StructTypeDef* sdef = &vm->struct_registry->defs[s->type_idx];
+
+          /* Push N explicit field values */
+          for (uint8_t i = 0; i < n; i++) {
+            JaclVal fname_val = frame->chunk->constants[name_indices[i]];
+            char fname[64]; uint32_t flen;
+            flen = jacl_string_data(fname_val, fname, sizeof(fname));
+            uint32_t fi;
+            for (fi = 0; fi < sdef->field_count; fi++) {
+              if (sdef->fields[fi].name_len == flen &&
+                  memcmp(sdef->fields[fi].name, fname, flen) == 0) break;
+            }
+            if (fi == sdef->field_count) {
+              vm__set_error(vm,
+                  "destructuring: struct '%.*s' has no field '%.*s'",
+                  (int)sdef->name_len, sdef->name, (int)flen, fname);
+              return VM_RUNTIME_ERROR;
+            }
+            JaclVal field_val = vm__struct_read_field(&vm->heap, s,
+                sdef->fields[fi].offset, sdef->fields[fi].type);
+            result = vm__push(vm, field_val);
+            if (result != VM_OK) return result;
+          }
+
+          /* Build rest map from remaining fields */
+          gc__current_heap = &vm->heap;
+          jacl_map_node* rest_map = NULL;
+          for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+            /* Check if this field is in the explicit list */
+            int is_explicit = 0;
+            for (uint8_t ei = 0; ei < n; ei++) {
+              JaclVal ename_val = frame->chunk->constants[name_indices[ei]];
+              char ename[64]; uint32_t elen;
+              elen = jacl_string_data(ename_val, ename, sizeof(ename));
+              if (sdef->fields[fi].name_len == elen &&
+                  memcmp(sdef->fields[fi].name, ename, elen) == 0) {
+                is_explicit = 1; break;
+              }
+            }
+            if (!is_explicit) {
+              JaclVal key = jacl_inline_string(sdef->fields[fi].name,
+                                               sdef->fields[fi].name_len);
+              JaclVal val = vm__struct_read_field(&vm->heap, s,
+                  sdef->fields[fi].offset, sdef->fields[fi].type);
+              rest_map = jacl_map_set(rest_map, key, val);
+            }
+          }
+          result = vm__push(vm, jacl_map_ptr(rest_map));
+          if (result != VM_OK) return result;
+
+        } else if (jacl_is_map(src_val)) {
+          jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(src_val);
+
+          /* Push N explicit field values */
+          for (uint8_t i = 0; i < n; i++) {
+            JaclVal key_val = frame->chunk->constants[name_indices[i]];
+            if (!jacl_map_has(map, key_val)) {
+              char fname[64]; uint32_t flen;
+              flen = jacl_string_data(key_val, fname, sizeof(fname));
+              vm__set_error(vm,
+                  "destructuring: map has no key '%.*s'",
+                  (int)flen, fname);
+              return VM_RUNTIME_ERROR;
+            }
+            result = vm__push(vm, jacl_map_get(map, key_val));
+            if (result != VM_OK) return result;
+          }
+
+          /* Build rest map from remaining entries */
+          gc__current_heap = &vm->heap;
+          jacl_map_node* rest_map = NULL;
+          jacl_map_iter it = jacl_map_iter_init(map);
+          jacl_map_iter_result ir;
+          do {
+            ir = jacl_map_next_leaf(&it);
+            if (!ir.item) break;
+            JaclVal key = jacl_map_key_from_leaf(ir.item);
+            /* Check if this key is in the explicit list */
+            int is_explicit = 0;
+            char kbuf[64]; uint32_t klen;
+            klen = jacl_string_data(key, kbuf, sizeof(kbuf));
+            for (uint8_t ei = 0; ei < n; ei++) {
+              JaclVal ename_val = frame->chunk->constants[name_indices[ei]];
+              char ebuf[64]; uint32_t elen;
+              elen = jacl_string_data(ename_val, ebuf, sizeof(ebuf));
+              if (klen == elen && memcmp(kbuf, ebuf, klen) == 0) {
+                is_explicit = 1; break;
+              }
+            }
+            if (!is_explicit) {
+              JaclVal val = jacl_map_value_from_leaf(ir.item);
+              rest_map = jacl_map_set(rest_map, key, val);
+            }
+          } while (ir.item);
+          result = vm__push(vm, jacl_map_ptr(rest_map));
+          if (result != VM_OK) return result;
+        } else {
+          vm__set_error(vm,
+              "named destructuring requires a struct or map, got %s",
+              vm__type_name(src_val));
+          return VM_RUNTIME_ERROR;
         }
         break;
       }
@@ -1610,7 +2228,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           /* Already a string — push back unchanged */
           result = vm__push(vm, val);
           if (result != VM_OK) return result;
-        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val)) {
+        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena);
           vm__fmt_value(&fmt, val);
@@ -1688,8 +2306,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
-          vm__set_error(vm, "type error in 'vec-get': expected vector, got %s",
-                       vm__type_name(vec_val));
+          if (jacl_is_stream(vec_val))
+            vm__set_error(vm, "vec-get requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-get': expected vector, got %s",
+                         vm__type_name(vec_val));
           return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_i32(idx_val)) {
@@ -1714,8 +2335,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &vec_val); if (result != VM_OK) return result;
         if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
-          vm__set_error(vm, "type error in 'vec-len': expected vector, got %s",
-                       vm__type_name(vec_val));
+          if (jacl_is_stream(vec_val))
+            vm__set_error(vm, "vec-len requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-len': expected vector, got %s",
+                         vm__type_name(vec_val));
           return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
@@ -1731,8 +2355,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(vec_val)) { result = vm__push(vm, vec_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(elem)) { result = vm__push(vm, elem); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
-          vm__set_error(vm, "type error in 'vec-push': expected vector, got %s",
-                       vm__type_name(vec_val));
+          if (jacl_is_stream(vec_val))
+            vm__set_error(vm, "vec-push requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-push': expected vector, got %s",
+                         vm__type_name(vec_val));
           return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(vec_val);
@@ -1752,8 +2379,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(idx_val)) { result = vm__push(vm, idx_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(elem)) { result = vm__push(vm, elem); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
-          vm__set_error(vm, "type error in 'vec-set': expected vector, got %s",
-                       vm__type_name(vec_val));
+          if (jacl_is_stream(vec_val))
+            vm__set_error(vm, "vec-set requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-set': expected vector, got %s",
+                         vm__type_name(vec_val));
           return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_i32(idx_val)) {
@@ -1793,13 +2423,19 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(a_val)) { result = vm__push(vm, a_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(b_val)) { result = vm__push(vm, b_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(a_val)) {
-          vm__set_error(vm, "type error in 'vec-concat': expected vector, got %s",
-                       vm__type_name(a_val));
+          if (jacl_is_stream(a_val))
+            vm__set_error(vm, "vec-concat requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-concat': expected vector, got %s",
+                         vm__type_name(a_val));
           return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_vector(b_val)) {
-          vm__set_error(vm, "type error in 'vec-concat': expected vector, got %s",
-                       vm__type_name(b_val));
+          if (jacl_is_stream(b_val))
+            vm__set_error(vm, "vec-concat requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-concat': expected vector, got %s",
+                         vm__type_name(b_val));
           return VM_RUNTIME_ERROR;
         }
         jacl_vec_root* va = (jacl_vec_root*)jacl_as_ptr(a_val);
@@ -1820,8 +2456,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(start_val)) { result = vm__push(vm, start_val); if (result != VM_OK) return result; break; }
         if (jacl_is_error(end_val)) { result = vm__push(vm, end_val); if (result != VM_OK) return result; break; }
         if (!jacl_is_vector(vec_val)) {
-          vm__set_error(vm, "type error in 'vec-slice': expected vector, got %s",
-                       vm__type_name(vec_val));
+          if (jacl_is_stream(vec_val))
+            vm__set_error(vm, "vec-slice requires a vector; got stream (use collect to materialize)");
+          else
+            vm__set_error(vm, "type error in 'vec-slice': expected vector, got %s",
+                         vm__type_name(vec_val));
           return VM_RUNTIME_ERROR;
         }
         if (!jacl_is_i32(start_val)) {
@@ -2142,9 +2781,184 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             vm->chunk = saved_chunk;
             frame = &vm->frames[vm->frame_count - 1];
           }
+        } else if (jacl_is_stream(coll_val)) {
+          if (closure->param_count != 1) {
+            vm__set_error(vm,
+              "each on stream requires a proc with 1 parameter, got %d",
+              (int)closure->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+
+          JaclStream* stream = jacl_as_stream(coll_val);
+
+          /* Derived streams (filter, etc.) use unified pull helper */
+          if (stream->kind != STREAM_KIND_GENERATOR) {
+            while (stream->state != STREAM_EXHAUSTED) {
+              JaclVal elem;
+              StreamPullResult pr = vm__pull_stream_one(vm, coll_val, &elem);
+              if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
+              if (pr == STREAM_PULL_EXHAUSTED) break;
+
+              /* Call callback with elem */
+              result = vm__push(vm, closure_val);
+              if (result != VM_OK) return result;
+              result = vm__push(vm, elem);
+              if (result != VM_OK) return result;
+
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_RUNTIME_ERROR;
+              }
+              uint32_t cb_fc = vm->frame_count;
+              CallFrame* cf = &vm->frames[vm->frame_count++];
+              cf->closure    = closure;
+              cf->return_ip  = vm->ip;
+              cf->stack_base = vm->stack_top - 1;
+              cf->chunk      = &closure->chunk;
+
+              uint8_t* cb_ip = vm->ip;
+              BytecodeChunk* cb_chunk = vm->chunk;
+              vm->ip    = closure->chunk.code;
+              vm->chunk = &closure->chunk;
+
+              VMResult call_result = vm__run(vm, cb_fc);
+              if (call_result != VM_OK) return call_result;
+
+              JaclVal discard;
+              result = vm__pop(vm, &discard);
+              if (result != VM_OK) return result;
+
+              vm->ip    = cb_ip;
+              vm->chunk = cb_chunk;
+              frame = &vm->frames[vm->frame_count - 1];
+            }
+          } else {
+          /* Generator stream: inline CPS protocol */
+          while (stream->state != STREAM_EXHAUSTED) {
+            /* --- Pull next element from stream (inline stream_next) --- */
+            uint32_t pull_stack_top = vm->stack_top;
+            uint32_t pull_frame_count = vm->frame_count;
+            uint8_t* pull_ip = vm->ip;
+            BytecodeChunk* pull_chunk = vm->chunk;
+
+            JaclVal terminal_k = vm__make_terminal_k(vm);
+
+            if (stream->state == STREAM_PENDING) {
+              if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+                vm__set_error(vm, "stream has no next function");
+                return VM_RUNTIME_ERROR;
+              }
+              JaclClosure* gen_cl = jacl_as_closure(stream->next_fn);
+              result = vm__push(vm, stream->next_fn);
+              if (result != VM_OK) return result;
+              for (uint8_t ai = 0; ai < stream->arg_count; ai++) {
+                result = vm__push(vm, stream->args[ai]);
+                if (result != VM_OK) return result;
+              }
+              result = vm__push(vm, terminal_k);
+              if (result != VM_OK) return result;
+
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_RUNTIME_ERROR;
+              }
+              CallFrame* nf = &vm->frames[vm->frame_count++];
+              nf->closure    = gen_cl;
+              nf->return_ip  = NULL;
+              nf->stack_base = vm->stack_top - stream->arg_count - 1;
+              nf->chunk      = &gen_cl->chunk;
+              vm->ip    = gen_cl->chunk.code;
+              vm->chunk = &gen_cl->chunk;
+            } else {
+              /* CONSUMED */
+              if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+                vm__set_error(vm, "stream continuation is invalid");
+                return VM_RUNTIME_ERROR;
+              }
+              JaclClosure* cont_cl = jacl_as_closure(stream->next_fn);
+              result = vm__push(vm, stream->next_fn);
+              if (result != VM_OK) return result;
+              result = vm__push(vm, JACL_NIL);
+              if (result != VM_OK) return result;
+
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_RUNTIME_ERROR;
+              }
+              CallFrame* nf = &vm->frames[vm->frame_count++];
+              nf->closure    = cont_cl;
+              nf->return_ip  = NULL;
+              nf->stack_base = vm->stack_top - 1;
+              nf->chunk      = &cont_cl->chunk;
+              vm->ip    = cont_cl->chunk.code;
+              vm->chunk = &cont_cl->chunk;
+            }
+
+            VMResult pull_inner = vm__run(vm, pull_frame_count);
+
+            if (pull_inner == VM_YIELD) {
+              stream->next_fn = vm->yield_continuation;
+              stream->state = STREAM_CONSUMED;
+              stream->cached_value = vm->yield_value;
+              vm->stack_top   = pull_stack_top;
+              vm->frame_count = pull_frame_count;
+              vm->ip    = pull_ip;
+              vm->chunk = pull_chunk;
+              frame = &vm->frames[vm->frame_count - 1];
+            } else if (pull_inner == VM_OK) {
+              stream->state = STREAM_EXHAUSTED;
+              stream->next_fn = JACL_NIL;
+              stream->cached_value = JACL_NIL;
+              vm->stack_top   = pull_stack_top;
+              vm->frame_count = pull_frame_count;
+              vm->ip    = pull_ip;
+              vm->chunk = pull_chunk;
+              frame = &vm->frames[vm->frame_count - 1];
+              break; /* stream done */
+            } else {
+              stream->state = STREAM_ERROR;
+              stream->next_fn = JACL_NIL;
+              return pull_inner;
+            }
+
+            /* --- Call callback with yielded value --- */
+            JaclVal elem = vm->yield_value;
+            result = vm__push(vm, closure_val);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, elem);
+            if (result != VM_OK) return result;
+
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+            uint32_t cb_frame_count = vm->frame_count;
+            CallFrame* cf = &vm->frames[vm->frame_count++];
+            cf->closure    = closure;
+            cf->return_ip  = vm->ip;
+            cf->stack_base = vm->stack_top - 1;
+            cf->chunk      = &closure->chunk;
+
+            uint8_t* cb_saved_ip = vm->ip;
+            BytecodeChunk* cb_saved_chunk = vm->chunk;
+            vm->ip    = closure->chunk.code;
+            vm->chunk = &closure->chunk;
+
+            VMResult call_result = vm__run(vm, cb_frame_count);
+            if (call_result != VM_OK) return call_result;
+
+            JaclVal discard;
+            result = vm__pop(vm, &discard);
+            if (result != VM_OK) return result;
+
+            vm->ip    = cb_saved_ip;
+            vm->chunk = cb_saved_chunk;
+            frame = &vm->frames[vm->frame_count - 1];
+          }
+          } /* end generator vs derived */
         } else {
           vm__set_error(vm,
-            "type error in 'each': expected vector or map, got %s",
+            "type error in 'each': expected vector, map, or stream, got %s",
             vm__type_name(coll_val));
           return VM_RUNTIME_ERROR;
         }
@@ -2314,9 +3128,26 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, jacl_map_ptr(result_map));
           if (result != VM_OK) return result;
 
+        } else if (jacl_is_stream(coll_val)) {
+          /* Lazy transform: create a new transform stream wrapping source + fn */
+          if (closure->param_count != 1) {
+            vm__set_error(vm,
+              "transform on stream requires a proc with 1 parameter, got %d",
+              (int)closure->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+          JaclVal transform_stream_val = jacl_stream(&vm->heap);
+          JaclStream* ts = jacl_as_stream(transform_stream_val);
+          ts->kind      = STREAM_KIND_TRANSFORM;
+          ts->args[0]   = coll_val;     /* source stream */
+          ts->args[1]   = closure_val;  /* transform closure */
+          ts->arg_count = 2;
+          result = vm__push(vm, transform_stream_val);
+          if (result != VM_OK) return result;
+
         } else {
           vm__set_error(vm,
-            "type error in 'transform': expected vector or map as first argument, got %s",
+            "type error in 'transform': expected vector, map, or stream, got %s",
             vm__type_name(coll_val));
           return VM_RUNTIME_ERROR;
         }
@@ -2470,9 +3301,26 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, jacl_map_ptr(result_map));
           if (result != VM_OK) return result;
 
+        } else if (jacl_is_stream(coll_val)) {
+          /* Lazy filter: create a new filter stream wrapping source + predicate */
+          if (closure->param_count != 1) {
+            vm__set_error(vm,
+              "filter on stream requires a proc with 1 parameter, got %d",
+              (int)closure->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+          JaclVal filter_stream_val = jacl_stream(&vm->heap);
+          JaclStream* fs = jacl_as_stream(filter_stream_val);
+          fs->kind      = STREAM_KIND_FILTER;
+          fs->args[0]   = coll_val;     /* source stream */
+          fs->args[1]   = closure_val;  /* predicate closure */
+          fs->arg_count = 2;
+          result = vm__push(vm, filter_stream_val);
+          if (result != VM_OK) return result;
+
         } else {
           vm__set_error(vm,
-            "type error in 'filter': expected vector or map, got %s",
+            "type error in 'filter': expected vector, map, or stream, got %s",
             vm__type_name(coll_val));
           return VM_RUNTIME_ERROR;
         }
@@ -4124,6 +4972,972 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         vm->stack_top -= field_count;
         result = vm__push(vm, jacl_struct_val(s));
         if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_SPREAD: {
+        JaclVal spread_val;
+        result = vm__pop(vm, &spread_val);
+        if (result != VM_OK) return result;
+
+        uint32_t len = 0;
+
+        if (jacl_is_vector(spread_val)) {
+          jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(spread_val);
+          len = jacl_vec_count(vec);
+          if (vm->stack_top + len >= VM_STACK_MAX) {
+            vm__set_error(vm, "spread exceeds stack capacity");
+            return VM_RUNTIME_ERROR;
+          }
+          for (uint32_t i = 0; i < len; i++) {
+            jacl_vec_get_result gr = jacl_vec_get(vec, i);
+            result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
+            if (result != VM_OK) return result;
+          }
+        } else if (jacl_is_stream(spread_val)) {
+          /* Eagerly consume stream, collect into vector, then push elements */
+          JaclStream* stream = jacl_as_stream(spread_val);
+
+          if (stream->kind != STREAM_KIND_GENERATOR) {
+            /* Derived stream: use pull helper */
+            gc__current_heap = &vm->heap;
+            jacl_vec_root* tmp_vec = jacl_vec_empty();
+            while (stream->state != STREAM_EXHAUSTED) {
+              JaclVal elem;
+              StreamPullResult pr = vm__pull_stream_one(vm, spread_val, &elem);
+              if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
+              if (pr == STREAM_PULL_EXHAUSTED) break;
+              gc__current_heap = &vm->heap;
+              tmp_vec = jacl_vec_push_back(tmp_vec, elem);
+            }
+            frame = &vm->frames[vm->frame_count - 1];
+            len = jacl_vec_count(tmp_vec);
+            if (vm->stack_top + len >= VM_STACK_MAX) {
+              vm__set_error(vm, "spread exceeds stack capacity");
+              return VM_RUNTIME_ERROR;
+            }
+            for (uint32_t i = 0; i < len; i++) {
+              jacl_vec_get_result gr = jacl_vec_get(tmp_vec, i);
+              result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
+              if (result != VM_OK) return result;
+            }
+          } else {
+            /* Generator stream: inline CPS protocol */
+            gc__current_heap = &vm->heap;
+            jacl_vec_root* tmp_vec = jacl_vec_empty();
+
+            while (stream->state != STREAM_EXHAUSTED) {
+              uint32_t caller_stack_top = vm->stack_top;
+              uint32_t caller_frame_count = vm->frame_count;
+              uint8_t* caller_ip = vm->ip;
+              BytecodeChunk* caller_chunk = vm->chunk;
+
+              JaclVal terminal_k = vm__make_terminal_k(vm);
+
+              if (stream->state == STREAM_PENDING) {
+                if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+                  vm__set_error(vm, "stream has no next function");
+                  return VM_RUNTIME_ERROR;
+                }
+                JaclClosure* gen_cl = jacl_as_closure(stream->next_fn);
+                result = vm__push(vm, stream->next_fn);
+                if (result != VM_OK) return result;
+                for (uint8_t i = 0; i < stream->arg_count; i++) {
+                  result = vm__push(vm, stream->args[i]);
+                  if (result != VM_OK) return result;
+                }
+                result = vm__push(vm, terminal_k);
+                if (result != VM_OK) return result;
+                if (vm->frame_count >= VM_FRAMES_MAX) {
+                  vm__set_error(vm, "stack overflow");
+                  return VM_RUNTIME_ERROR;
+                }
+                CallFrame* new_frame = &vm->frames[vm->frame_count++];
+                new_frame->closure    = gen_cl;
+                new_frame->return_ip  = NULL;
+                new_frame->stack_base = vm->stack_top - stream->arg_count - 1;
+                new_frame->chunk      = &gen_cl->chunk;
+                vm->ip    = gen_cl->chunk.code;
+                vm->chunk = &gen_cl->chunk;
+              } else {
+                if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+                  vm__set_error(vm, "stream continuation is invalid");
+                  return VM_RUNTIME_ERROR;
+                }
+                JaclClosure* cont_cl = jacl_as_closure(stream->next_fn);
+                result = vm__push(vm, stream->next_fn);
+                if (result != VM_OK) return result;
+                result = vm__push(vm, JACL_NIL);
+                if (result != VM_OK) return result;
+                if (vm->frame_count >= VM_FRAMES_MAX) {
+                  vm__set_error(vm, "stack overflow");
+                  return VM_RUNTIME_ERROR;
+                }
+                CallFrame* new_frame = &vm->frames[vm->frame_count++];
+                new_frame->closure    = cont_cl;
+                new_frame->return_ip  = NULL;
+                new_frame->stack_base = vm->stack_top - 1;
+                new_frame->chunk      = &cont_cl->chunk;
+                vm->ip    = cont_cl->chunk.code;
+                vm->chunk = &cont_cl->chunk;
+              }
+
+              VMResult inner = vm__run(vm, caller_frame_count);
+
+              if (inner == VM_YIELD) {
+                stream->next_fn = vm->yield_continuation;
+                stream->state = STREAM_CONSUMED;
+                stream->cached_value = vm->yield_value;
+                vm->stack_top   = caller_stack_top;
+                vm->frame_count = caller_frame_count;
+                vm->ip    = caller_ip;
+                vm->chunk = caller_chunk;
+                frame = &vm->frames[vm->frame_count - 1];
+                gc__current_heap = &vm->heap;
+                tmp_vec = jacl_vec_push_back(tmp_vec, vm->yield_value);
+              } else if (inner == VM_OK) {
+                stream->state = STREAM_EXHAUSTED;
+                stream->next_fn = JACL_NIL;
+                stream->cached_value = JACL_NIL;
+                vm->stack_top   = caller_stack_top;
+                vm->frame_count = caller_frame_count;
+                vm->ip    = caller_ip;
+                vm->chunk = caller_chunk;
+                frame = &vm->frames[vm->frame_count - 1];
+              } else {
+                stream->state = STREAM_ERROR;
+                stream->next_fn = JACL_NIL;
+                return inner;
+              }
+            }
+
+            len = jacl_vec_count(tmp_vec);
+            if (vm->stack_top + len >= VM_STACK_MAX) {
+              vm__set_error(vm, "spread exceeds stack capacity");
+              return VM_RUNTIME_ERROR;
+            }
+            for (uint32_t i = 0; i < len; i++) {
+              jacl_vec_get_result gr = jacl_vec_get(tmp_vec, i);
+              result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
+              if (result != VM_OK) return result;
+            }
+          }
+        } else {
+          vm__set_error(vm, "spread requires a vector or stream, got %s",
+                       vm__type_name(spread_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Save count in side buffer */
+        if (vm->spread_count_top >= 32) {
+          vm__set_error(vm, "too many nested spread operations");
+          return VM_RUNTIME_ERROR;
+        }
+        vm->spread_counts[vm->spread_count_top++] = len;
+        break;
+      }
+
+      case OP_CALL_SPREAD: {
+        uint8_t fixed_args = vm__read_byte(vm);
+        uint8_t num_spreads = vm__read_byte(vm);
+        /* Compute total args */
+        uint32_t total_args = fixed_args;
+        for (uint8_t i = 0; i < num_spreads; i++) {
+          if (vm->spread_count_top == 0) {
+            vm__set_error(vm, "spread count underflow");
+            return VM_RUNTIME_ERROR;
+          }
+          total_args += vm->spread_counts[--vm->spread_count_top];
+        }
+        /* Locate callee */
+        JaclVal callee = vm->stack[vm->stack_top - total_args - 1];
+
+        if (jacl_is_native_fn(callee)) {
+          uint32_t fn_idx = jacl_as_native_fn_index(callee);
+          if (fn_idx >= vm->native_fn_count || !vm->call_native) {
+            vm__set_error(vm, "invalid native function index %u", fn_idx);
+            return VM_RUNTIME_ERROR;
+          }
+          int8_t arity = vm->native_fn_arities[fn_idx];
+          if (arity >= 0 && total_args != (uint32_t)arity) {
+            vm__set_error(vm, "expected %d arguments but got %d",
+                         (int)arity, (int)total_args);
+            return VM_RUNTIME_ERROR;
+          }
+          JaclVal* args = &vm->stack[vm->stack_top - total_args];
+          JaclVal ret = vm->call_native(vm->native_fn_ctx, fn_idx,
+                                         args, (int)total_args);
+          vm->stack_top -= (total_args + 1);
+          result = vm__push(vm, ret);
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        if (!jacl_is_closure(callee)) {
+          vm__set_error(vm, "cannot call %s value", vm__type_name(callee));
+          return VM_RUNTIME_ERROR;
+        }
+
+        JaclClosure* closure = jacl_as_closure(callee);
+        if (closure->variadic) {
+          if (total_args < closure->min_args) {
+            vm__set_error(vm, "expected at least %d arguments but got %d",
+                         (int)closure->min_args, (int)total_args);
+            return VM_RUNTIME_ERROR;
+          }
+        } else if (total_args != closure->param_count) {
+          vm__set_error(vm, "expected %d arguments but got %d",
+                       (int)closure->param_count, (int)total_args);
+          return VM_RUNTIME_ERROR;
+        }
+        if (vm->frame_count >= VM_FRAMES_MAX) {
+          vm__set_error(vm, "stack overflow");
+          return VM_RUNTIME_ERROR;
+        }
+
+        CallFrame* new_frame = &vm->frames[vm->frame_count++];
+        new_frame->closure    = closure;
+        new_frame->return_ip  = vm->ip;
+        new_frame->stack_base = vm->stack_top - total_args;
+        new_frame->chunk      = &closure->chunk;
+        frame     = new_frame;
+        vm->ip    = frame->chunk->code;
+        vm->chunk = frame->chunk;
+        break;
+      }
+
+      case OP_FOLD_SPREAD: {
+        uint8_t op_id = vm__read_byte(vm);
+        uint8_t fixed_args = vm__read_byte(vm);
+        uint8_t num_spreads = vm__read_byte(vm);
+        /* Compute total args */
+        uint32_t total_args = fixed_args;
+        for (uint8_t i = 0; i < num_spreads; i++) {
+          if (vm->spread_count_top == 0) {
+            vm__set_error(vm, "spread count underflow");
+            return VM_RUNTIME_ERROR;
+          }
+          total_args += vm->spread_counts[--vm->spread_count_top];
+        }
+        if (total_args < 1) {
+          vm__set_error(vm, "fold requires at least 1 argument");
+          return VM_RUNTIME_ERROR;
+        }
+        /* Fold values on stack left-to-right */
+        uint32_t base = vm->stack_top - total_args;
+        JaclVal acc = vm->stack[base];
+        for (uint32_t i = 1; i < total_args; i++) {
+          JaclVal val = vm->stack[base + i];
+          JaclVal res;
+          if (jacl_is_i32(acc) && jacl_is_i32(val)) {
+            switch (op_id) {
+              case 0: res = jacl_add_i32(acc, val); break;
+              case 1: res = jacl_sub_i32(acc, val); break;
+              case 2: res = jacl_mul_i32(acc, val); break;
+              case 3: res = jacl_div_i32(acc, val); break;
+              default: vm__set_error(vm, "unknown fold op"); return VM_RUNTIME_ERROR;
+            }
+          } else if (jacl_is_f32(acc) && jacl_is_f32(val)) {
+            switch (op_id) {
+              case 0: res = jacl_add_f32(acc, val); break;
+              case 1: res = jacl_sub_f32(acc, val); break;
+              case 2: res = jacl_mul_f32(acc, val); break;
+              case 3: res = jacl_div_f32(acc, val); break;
+              default: vm__set_error(vm, "unknown fold op"); return VM_RUNTIME_ERROR;
+            }
+          } else if (jacl_is_u32(acc) && jacl_is_u32(val)) {
+            switch (op_id) {
+              case 0: res = jacl_u32_add(acc, val); break;
+              case 1: res = jacl_u32_sub(acc, val); break;
+              case 2: res = jacl_u32_mul(acc, val); break;
+              case 3: res = jacl_u32_div(acc, val); break;
+              default: vm__set_error(vm, "unknown fold op"); return VM_RUNTIME_ERROR;
+            }
+          } else {
+            static const char* op_names[] = { "+", "-", "*", "/" };
+            vm__set_error(vm,
+              "type error in '%s': expected matching numeric types, got %s and %s",
+              op_names[op_id < 4 ? op_id : 0], vm__type_name(acc), vm__type_name(val));
+            return VM_RUNTIME_ERROR;
+          }
+          if (jacl_is_error(res)) {
+            vm__capture_trace(vm);
+          }
+          acc = res;
+        }
+        vm->stack_top = base;
+        result = vm__push(vm, acc);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_YIELD: {
+        /* CPS yield: pop continuation closure, then yielded value.
+           Store both and return VM_YIELD to suspend generator. */
+        JaclVal continuation;
+        result = vm__pop(vm, &continuation);
+        if (result != VM_OK) return result;
+        JaclVal value;
+        result = vm__pop(vm, &value);
+        if (result != VM_OK) return result;
+        vm->yield_value = value;
+        vm->yield_continuation = continuation;
+        return VM_YIELD;
+      }
+
+      case OP_STREAM_NEXT: {
+        /* CPS-based stream_next: calls generator/continuation closures
+           and interprets VM_YIELD (yield) or VM_OK (exhaustion). */
+        JaclVal stream_val;
+        result = vm__pop(vm, &stream_val);
+        if (result != VM_OK) return result;
+        if (!jacl_is_stream(stream_val)) {
+          vm__set_error(vm, "stream_next requires a stream, got %s",
+                       vm__type_name(stream_val));
+          return VM_RUNTIME_ERROR;
+        }
+        JaclStream* stream = jacl_as_stream(stream_val);
+        if (stream->state == STREAM_EXHAUSTED) {
+          result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        /* Derived streams (filter, etc.) use the unified helper */
+        if (stream->kind != STREAM_KIND_GENERATOR) {
+          JaclVal pulled;
+          StreamPullResult pr = vm__pull_stream_one(vm, stream_val, &pulled);
+          if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
+          result = vm__push(vm, pulled);
+          if (result != VM_OK) return result;
+          frame = &vm->frames[vm->frame_count - 1];
+          break;
+        }
+
+        /* Save caller context */
+        uint32_t caller_stack_top = vm->stack_top;
+        uint32_t caller_frame_count = vm->frame_count;
+        uint8_t* caller_ip = vm->ip;
+        BytecodeChunk* caller_chunk = vm->chunk;
+
+        /* Create terminal continuation — when called, generator is done */
+        JaclVal terminal_k = vm__make_terminal_k(vm);
+
+        if (stream->state == STREAM_PENDING) {
+          /* First call: invoke generator closure with saved args + terminal_k.
+             Generator was CPS-compiled with __k as hidden last param. */
+          if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+            vm__set_error(vm, "stream has no next function");
+            return VM_RUNTIME_ERROR;
+          }
+          JaclClosure* gen_cl = jacl_as_closure(stream->next_fn);
+          result = vm__push(vm, stream->next_fn); /* callee slot */
+          if (result != VM_OK) return result;
+          for (uint8_t i = 0; i < stream->arg_count; i++) {
+            result = vm__push(vm, stream->args[i]);
+            if (result != VM_OK) return result;
+          }
+          result = vm__push(vm, terminal_k); /* __k = terminal continuation */
+          if (result != VM_OK) return result;
+
+          if (vm->frame_count >= VM_FRAMES_MAX) {
+            vm__set_error(vm, "stack overflow");
+            return VM_RUNTIME_ERROR;
+          }
+          CallFrame* new_frame = &vm->frames[vm->frame_count++];
+          new_frame->closure    = gen_cl;
+          new_frame->return_ip  = NULL;
+          new_frame->stack_base = vm->stack_top - stream->arg_count - 1; /* args + __k */
+          new_frame->chunk      = &gen_cl->chunk;
+          vm->ip    = gen_cl->chunk.code;
+          vm->chunk = &gen_cl->chunk;
+        } else {
+          /* CONSUMED: call the yield continuation with nil (yield expr result).
+             The continuation was captured by CPS and already has __k as upvalue. */
+          if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+            vm__set_error(vm, "stream continuation is invalid");
+            return VM_RUNTIME_ERROR;
+          }
+          JaclClosure* cont_cl = jacl_as_closure(stream->next_fn);
+          result = vm__push(vm, stream->next_fn); /* callee slot */
+          if (result != VM_OK) return result;
+          result = vm__push(vm, JACL_NIL); /* __r = nil (yield expression result) */
+          if (result != VM_OK) return result;
+
+          if (vm->frame_count >= VM_FRAMES_MAX) {
+            vm__set_error(vm, "stack overflow");
+            return VM_RUNTIME_ERROR;
+          }
+          CallFrame* new_frame = &vm->frames[vm->frame_count++];
+          new_frame->closure    = cont_cl;
+          new_frame->return_ip  = NULL;
+          new_frame->stack_base = vm->stack_top - 1; /* 1 param */
+          new_frame->chunk      = &cont_cl->chunk;
+          vm->ip    = cont_cl->chunk.code;
+          vm->chunk = &cont_cl->chunk;
+        }
+
+        /* Run generator/continuation until yield or return */
+        VMResult inner = vm__run(vm, caller_frame_count);
+
+        if (inner == VM_YIELD) {
+          /* CPS yield: continuation stored in vm->yield_continuation */
+          stream->next_fn = vm->yield_continuation;
+          stream->state = STREAM_CONSUMED;
+          stream->cached_value = vm->yield_value;
+
+          /* Restore caller state */
+          vm->stack_top   = caller_stack_top;
+          vm->frame_count = caller_frame_count;
+          vm->ip    = caller_ip;
+          vm->chunk = caller_chunk;
+          frame = &vm->frames[vm->frame_count - 1];
+
+          /* Push yielded value */
+          result = vm__push(vm, vm->yield_value);
+          if (result != VM_OK) return result;
+          break;
+        } else if (inner == VM_OK) {
+          /* Generator exhausted (terminal_k was called) */
+          stream->state = STREAM_EXHAUSTED;
+          stream->next_fn = JACL_NIL;
+          stream->cached_value = JACL_NIL;
+          vm->stack_top   = caller_stack_top;
+          vm->frame_count = caller_frame_count;
+          vm->ip    = caller_ip;
+          vm->chunk = caller_chunk;
+          frame = &vm->frames[vm->frame_count - 1];
+          result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
+          break;
+        } else {
+          /* Error */
+          stream->state = STREAM_ERROR;
+          stream->next_fn = JACL_NIL;
+          return inner;
+        }
+      }
+
+      case OP_COLLECT: {
+        /* collect: materialize a stream into a vector, or identity on vectors */
+        JaclVal coll_val;
+        result = vm__pop(vm, &coll_val);
+        if (result != VM_OK) return result;
+
+        if (jacl_is_vector(coll_val)) {
+          /* Identity: return vector unchanged */
+          result = vm__push(vm, coll_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        if (!jacl_is_stream(coll_val)) {
+          vm__set_error(vm, "collect requires a stream or vector, got %s",
+                       vm__type_name(coll_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        JaclStream* stream = jacl_as_stream(coll_val);
+
+        /* Derived streams (filter, etc.) use the unified pull helper */
+        if (stream->kind != STREAM_KIND_GENERATOR) {
+          gc__current_heap = &vm->heap;
+          jacl_vec_root* collect_vec = jacl_vec_empty();
+          while (stream->state != STREAM_EXHAUSTED) {
+            JaclVal elem;
+            StreamPullResult pr = vm__pull_stream_one(vm, coll_val, &elem);
+            if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
+            if (pr == STREAM_PULL_EXHAUSTED) break;
+            gc__current_heap = &vm->heap;
+            collect_vec = jacl_vec_push_back(collect_vec, elem);
+          }
+          frame = &vm->frames[vm->frame_count - 1];
+          result = vm__push(vm, jacl_vector_ptr(collect_vec));
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        gc__current_heap = &vm->heap;
+        jacl_vec_root* collect_vec = jacl_vec_empty();
+
+        while (stream->state != STREAM_EXHAUSTED) {
+          /* Save caller context */
+          uint32_t caller_stack_top = vm->stack_top;
+          uint32_t caller_frame_count = vm->frame_count;
+          uint8_t* caller_ip = vm->ip;
+          BytecodeChunk* caller_chunk = vm->chunk;
+
+          JaclVal terminal_k = vm__make_terminal_k(vm);
+
+          if (stream->state == STREAM_PENDING) {
+            if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+              vm__set_error(vm, "stream has no next function");
+              return VM_RUNTIME_ERROR;
+            }
+            JaclClosure* gen_cl = jacl_as_closure(stream->next_fn);
+            result = vm__push(vm, stream->next_fn);
+            if (result != VM_OK) return result;
+            for (uint8_t i = 0; i < stream->arg_count; i++) {
+              result = vm__push(vm, stream->args[i]);
+              if (result != VM_OK) return result;
+            }
+            result = vm__push(vm, terminal_k);
+            if (result != VM_OK) return result;
+
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+            CallFrame* new_frame = &vm->frames[vm->frame_count++];
+            new_frame->closure    = gen_cl;
+            new_frame->return_ip  = NULL;
+            new_frame->stack_base = vm->stack_top - stream->arg_count - 1;
+            new_frame->chunk      = &gen_cl->chunk;
+            vm->ip    = gen_cl->chunk.code;
+            vm->chunk = &gen_cl->chunk;
+          } else {
+            /* CONSUMED: call continuation */
+            if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+              vm__set_error(vm, "stream continuation is invalid");
+              return VM_RUNTIME_ERROR;
+            }
+            JaclClosure* cont_cl = jacl_as_closure(stream->next_fn);
+            result = vm__push(vm, stream->next_fn);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, JACL_NIL);
+            if (result != VM_OK) return result;
+
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+            CallFrame* new_frame = &vm->frames[vm->frame_count++];
+            new_frame->closure    = cont_cl;
+            new_frame->return_ip  = NULL;
+            new_frame->stack_base = vm->stack_top - 1;
+            new_frame->chunk      = &cont_cl->chunk;
+            vm->ip    = cont_cl->chunk.code;
+            vm->chunk = &cont_cl->chunk;
+          }
+
+          VMResult inner = vm__run(vm, caller_frame_count);
+
+          if (inner == VM_YIELD) {
+            stream->next_fn = vm->yield_continuation;
+            stream->state = STREAM_CONSUMED;
+            stream->cached_value = vm->yield_value;
+            vm->stack_top   = caller_stack_top;
+            vm->frame_count = caller_frame_count;
+            vm->ip    = caller_ip;
+            vm->chunk = caller_chunk;
+            frame = &vm->frames[vm->frame_count - 1];
+            gc__current_heap = &vm->heap;
+            collect_vec = jacl_vec_push_back(collect_vec, vm->yield_value);
+          } else if (inner == VM_OK) {
+            stream->state = STREAM_EXHAUSTED;
+            stream->next_fn = JACL_NIL;
+            stream->cached_value = JACL_NIL;
+            vm->stack_top   = caller_stack_top;
+            vm->frame_count = caller_frame_count;
+            vm->ip    = caller_ip;
+            vm->chunk = caller_chunk;
+            frame = &vm->frames[vm->frame_count - 1];
+          } else {
+            stream->state = STREAM_ERROR;
+            stream->next_fn = JACL_NIL;
+            return inner;
+          }
+        }
+
+        result = vm__push(vm, jacl_vector_ptr(collect_vec));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_IS_STREAM_EXHAUSTED: {
+        /* Pop a value. Push true if it's an exhausted stream, else false. */
+        JaclVal sv;
+        result = vm__pop(vm, &sv);
+        if (result != VM_OK) return result;
+        bool exhausted = false;
+        if (jacl_is_stream(sv)) {
+          JaclStream* s = jacl_as_stream(sv);
+          exhausted = (s->state == STREAM_EXHAUSTED);
+        }
+        result = vm__push(vm, exhausted ? JACL_TRUE : JACL_FALSE);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_COUNT: {
+        JaclVal coll_val;
+        result = vm__pop(vm, &coll_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(coll_val)) {
+          result = vm__push(vm, coll_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        if (jacl_is_vector(coll_val)) {
+          jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(coll_val);
+          result = vm__push(vm, jacl_i32((int32_t)jacl_vec_count(vec)));
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        if (jacl_is_stream(coll_val)) {
+          JaclStream* stream = jacl_as_stream(coll_val);
+          int32_t cnt = 0;
+
+          if (stream->kind != STREAM_KIND_GENERATOR) {
+            while (stream->state != STREAM_EXHAUSTED) {
+              JaclVal elem;
+              StreamPullResult pr = vm__pull_stream_one(vm, coll_val, &elem);
+              if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
+              if (pr == STREAM_PULL_EXHAUSTED) break;
+              cnt++;
+            }
+            frame = &vm->frames[vm->frame_count - 1];
+            result = vm__push(vm, jacl_i32(cnt));
+            if (result != VM_OK) return result;
+            break;
+          }
+
+          /* Generator stream: inline CPS protocol loop */
+          while (stream->state != STREAM_EXHAUSTED) {
+            uint32_t caller_stack_top = vm->stack_top;
+            uint32_t caller_frame_count = vm->frame_count;
+            uint8_t* caller_ip = vm->ip;
+            BytecodeChunk* caller_chunk = vm->chunk;
+
+            JaclVal terminal_k = vm__make_terminal_k(vm);
+
+            if (stream->state == STREAM_PENDING) {
+              if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+                vm__set_error(vm, "stream has no next function");
+                return VM_RUNTIME_ERROR;
+              }
+              JaclClosure* gen_cl = jacl_as_closure(stream->next_fn);
+              result = vm__push(vm, stream->next_fn);
+              if (result != VM_OK) return result;
+              for (uint8_t i = 0; i < stream->arg_count; i++) {
+                result = vm__push(vm, stream->args[i]);
+                if (result != VM_OK) return result;
+              }
+              result = vm__push(vm, terminal_k);
+              if (result != VM_OK) return result;
+
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_RUNTIME_ERROR;
+              }
+              CallFrame* new_frame = &vm->frames[vm->frame_count++];
+              new_frame->closure    = gen_cl;
+              new_frame->return_ip  = NULL;
+              new_frame->stack_base = vm->stack_top - stream->arg_count - 1;
+              new_frame->chunk      = &gen_cl->chunk;
+              vm->ip    = gen_cl->chunk.code;
+              vm->chunk = &gen_cl->chunk;
+            } else {
+              if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+                vm__set_error(vm, "stream continuation is invalid");
+                return VM_RUNTIME_ERROR;
+              }
+              JaclClosure* cont_cl = jacl_as_closure(stream->next_fn);
+              result = vm__push(vm, stream->next_fn);
+              if (result != VM_OK) return result;
+              result = vm__push(vm, JACL_NIL);
+              if (result != VM_OK) return result;
+
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_RUNTIME_ERROR;
+              }
+              CallFrame* new_frame = &vm->frames[vm->frame_count++];
+              new_frame->closure    = cont_cl;
+              new_frame->return_ip  = NULL;
+              new_frame->stack_base = vm->stack_top - 1;
+              new_frame->chunk      = &cont_cl->chunk;
+              vm->ip    = cont_cl->chunk.code;
+              vm->chunk = &cont_cl->chunk;
+            }
+
+            VMResult inner = vm__run(vm, caller_frame_count);
+
+            if (inner == VM_YIELD) {
+              stream->next_fn = vm->yield_continuation;
+              stream->state = STREAM_CONSUMED;
+              stream->cached_value = vm->yield_value;
+              vm->stack_top   = caller_stack_top;
+              vm->frame_count = caller_frame_count;
+              vm->ip    = caller_ip;
+              vm->chunk = caller_chunk;
+              frame = &vm->frames[vm->frame_count - 1];
+              cnt++;
+            } else if (inner == VM_OK) {
+              stream->state = STREAM_EXHAUSTED;
+              stream->next_fn = JACL_NIL;
+              stream->cached_value = JACL_NIL;
+              vm->stack_top   = caller_stack_top;
+              vm->frame_count = caller_frame_count;
+              vm->ip    = caller_ip;
+              vm->chunk = caller_chunk;
+              frame = &vm->frames[vm->frame_count - 1];
+            } else {
+              stream->state = STREAM_ERROR;
+              stream->next_fn = JACL_NIL;
+              return inner;
+            }
+          }
+
+          result = vm__push(vm, jacl_i32(cnt));
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        vm__set_error(vm, "count requires a vector or stream, got %s",
+                     vm__type_name(coll_val));
+        return VM_RUNTIME_ERROR;
+      }
+
+      case OP_TAKE: {
+        JaclVal n_val, coll_val;
+        result = vm__pop(vm, &n_val);
+        if (result != VM_OK) return result;
+        result = vm__pop(vm, &coll_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(coll_val)) {
+          result = vm__push(vm, coll_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        if (jacl_is_error(n_val)) {
+          result = vm__push(vm, n_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        if (!jacl_is_i32(n_val)) {
+          vm__set_error(vm, "take requires an integer count, got %s",
+                       vm__type_name(n_val));
+          return VM_RUNTIME_ERROR;
+        }
+        int32_t n = jacl_as_i32(n_val);
+        if (n < 0) n = 0;
+
+        if (jacl_is_vector(coll_val)) {
+          jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(coll_val);
+          uint32_t len = jacl_vec_count(vec);
+          uint32_t take_n = (uint32_t)n < len ? (uint32_t)n : len;
+          if (take_n == 0) {
+            gc__current_heap = &vm->heap;
+            result = vm__push(vm, jacl_vector_ptr(jacl_vec_empty()));
+          } else {
+            gc__current_heap = &vm->heap;
+            jacl_vec_root* new_vec = jacl_vec_slice(vec, 0, take_n);
+            if (new_vec == NULL) {
+              result = vm__push(vm, jacl_vector_ptr(jacl_vec_empty()));
+            } else {
+              result = vm__push(vm, jacl_vector_ptr(new_vec));
+            }
+          }
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        if (jacl_is_stream(coll_val)) {
+          JaclVal take_stream_val = jacl_stream(&vm->heap);
+          JaclStream* ts = jacl_as_stream(take_stream_val);
+          ts->kind      = STREAM_KIND_TAKE;
+          ts->args[0]   = coll_val;     /* source stream */
+          ts->args[1]   = jacl_i32(n);  /* remaining count */
+          ts->arg_count  = 2;
+          result = vm__push(vm, take_stream_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        vm__set_error(vm, "take requires a vector or stream, got %s",
+                     vm__type_name(coll_val));
+        return VM_RUNTIME_ERROR;
+      }
+
+      case OP_FIRST: {
+        JaclVal coll_val;
+        result = vm__pop(vm, &coll_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(coll_val)) {
+          result = vm__push(vm, coll_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        if (jacl_is_vector(coll_val)) {
+          jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(coll_val);
+          if (jacl_vec_count(vec) == 0) {
+            result = vm__push(vm, JACL_NIL);
+          } else {
+            jacl_vec_get_result gr = jacl_vec_get(vec, 0);
+            result = vm__push(vm, gr.found ? gr.value : JACL_NIL);
+          }
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        if (jacl_is_stream(coll_val)) {
+          JaclStream* stream = jacl_as_stream(coll_val);
+
+          if (stream->state == STREAM_EXHAUSTED) {
+            result = vm__push(vm, JACL_NIL);
+            if (result != VM_OK) return result;
+            break;
+          }
+
+          /* Derived streams: single pull */
+          if (stream->kind != STREAM_KIND_GENERATOR) {
+            JaclVal pulled;
+            StreamPullResult pr = vm__pull_stream_one(vm, coll_val, &pulled);
+            if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
+            if (pr == STREAM_PULL_EXHAUSTED) pulled = JACL_NIL;
+            frame = &vm->frames[vm->frame_count - 1];
+            result = vm__push(vm, pulled);
+            if (result != VM_OK) return result;
+            break;
+          }
+
+          /* Generator stream: single CPS pull */
+          {
+            uint32_t caller_stack_top = vm->stack_top;
+            uint32_t caller_frame_count = vm->frame_count;
+            uint8_t* caller_ip = vm->ip;
+            BytecodeChunk* caller_chunk = vm->chunk;
+
+            JaclVal terminal_k = vm__make_terminal_k(vm);
+
+            if (stream->state == STREAM_PENDING) {
+              if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+                vm__set_error(vm, "stream has no next function");
+                return VM_RUNTIME_ERROR;
+              }
+              JaclClosure* gen_cl = jacl_as_closure(stream->next_fn);
+              result = vm__push(vm, stream->next_fn);
+              if (result != VM_OK) return result;
+              for (uint8_t i = 0; i < stream->arg_count; i++) {
+                result = vm__push(vm, stream->args[i]);
+                if (result != VM_OK) return result;
+              }
+              result = vm__push(vm, terminal_k);
+              if (result != VM_OK) return result;
+
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_RUNTIME_ERROR;
+              }
+              CallFrame* new_frame = &vm->frames[vm->frame_count++];
+              new_frame->closure    = gen_cl;
+              new_frame->return_ip  = NULL;
+              new_frame->stack_base = vm->stack_top - stream->arg_count - 1;
+              new_frame->chunk      = &gen_cl->chunk;
+              vm->ip    = gen_cl->chunk.code;
+              vm->chunk = &gen_cl->chunk;
+            } else {
+              if (stream->next_fn == JACL_NIL || !jacl_is_closure(stream->next_fn)) {
+                vm__set_error(vm, "stream continuation is invalid");
+                return VM_RUNTIME_ERROR;
+              }
+              JaclClosure* cont_cl = jacl_as_closure(stream->next_fn);
+              result = vm__push(vm, stream->next_fn);
+              if (result != VM_OK) return result;
+              result = vm__push(vm, JACL_NIL);
+              if (result != VM_OK) return result;
+
+              if (vm->frame_count >= VM_FRAMES_MAX) {
+                vm__set_error(vm, "stack overflow");
+                return VM_RUNTIME_ERROR;
+              }
+              CallFrame* new_frame = &vm->frames[vm->frame_count++];
+              new_frame->closure    = cont_cl;
+              new_frame->return_ip  = NULL;
+              new_frame->stack_base = vm->stack_top - 1;
+              new_frame->chunk      = &cont_cl->chunk;
+              vm->ip    = cont_cl->chunk.code;
+              vm->chunk = &cont_cl->chunk;
+            }
+
+            VMResult inner = vm__run(vm, caller_frame_count);
+
+            JaclVal first_val = JACL_NIL;
+            if (inner == VM_YIELD) {
+              stream->next_fn = vm->yield_continuation;
+              stream->state = STREAM_CONSUMED;
+              stream->cached_value = vm->yield_value;
+              first_val = vm->yield_value;
+            } else if (inner == VM_OK) {
+              stream->state = STREAM_EXHAUSTED;
+              stream->next_fn = JACL_NIL;
+              stream->cached_value = JACL_NIL;
+            } else {
+              stream->state = STREAM_ERROR;
+              stream->next_fn = JACL_NIL;
+              return inner;
+            }
+
+            vm->stack_top   = caller_stack_top;
+            vm->frame_count = caller_frame_count;
+            vm->ip    = caller_ip;
+            vm->chunk = caller_chunk;
+            frame = &vm->frames[vm->frame_count - 1];
+            result = vm__push(vm, first_val);
+            if (result != VM_OK) return result;
+          }
+          break;
+        }
+
+        vm__set_error(vm, "first requires a vector or stream, got %s",
+                     vm__type_name(coll_val));
+        return VM_RUNTIME_ERROR;
+      }
+
+      case OP_LINES: {
+        JaclVal str_val;
+        result = vm__pop(vm, &str_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(str_val)) {
+          result = vm__push(vm, str_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        if (!jacl_is_string(str_val)) {
+          vm__set_error(vm, "lines requires a string, got %s",
+                       vm__type_name(str_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        JaclVal lines_stream_val = jacl_stream(&vm->heap);
+        JaclStream* ls = jacl_as_stream(lines_stream_val);
+        ls->kind      = STREAM_KIND_LINES;
+        ls->args[0]   = str_val;       /* source string */
+        ls->args[1]   = jacl_i32(0);   /* current byte index */
+        ls->arg_count  = 2;
+        result = vm__push(vm, lines_stream_val);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_COLLECT_VARIADIC: {
+        uint8_t min_arity = vm__read_byte(vm);
+        uint32_t actual_count = vm->stack_top - frame->stack_base;
+        uint32_t extra = actual_count > min_arity ? actual_count - min_arity : 0;
+        /* Create vector from excess args */
+        jacl_vec_root* vec = jacl_vec_empty();
+        for (uint32_t i = 0; i < extra; i++) {
+          vec = jacl_vec_push_back(vec, vm->stack[frame->stack_base + min_arity + i]);
+        }
+        /* Collapse: set rest param slot and adjust stack_top */
+        vm->stack[frame->stack_base + min_arity] = jacl_vector_ptr(vec);
+        vm->stack_top = frame->stack_base + min_arity + 1;
         break;
       }
 
