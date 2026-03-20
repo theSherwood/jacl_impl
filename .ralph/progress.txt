@@ -130,3 +130,21 @@ Started: Thu Mar 19 08:54:03 UTC 2026
   - count on streams is destructive — consumes the entire stream. first consumes one element.
   - For generator streams in count/first, must inline the CPS protocol loop (same as OP_COLLECT/OP_STREAM_NEXT patterns). Derived streams use the unified vm__pull_stream_one helper.
 ---
+
+## 2026-03-19 - US-015
+- Implemented `lines` builtin: splits a string into a lazy line stream
+- Files changed: src/bytecode.c, src/gc.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_lines.c, build.sh
+- **What was implemented:**
+  - OP_LINES opcode added to bytecode enum and name table
+  - STREAM_KIND_LINES (=4) for lazy line streams, handler in vm__pull_stream_one()
+  - lines: pops string, creates stream with args[0]=source string, args[1]=current byte index (jacl_i32)
+  - Handles \n and \r\n line endings, skips trailing empty line
+  - Lazy: scans one line at a time from current index, yields substring, advances index
+  - 11 e2e tests: basic split, CRLF, no trailing empty, for iteration, collect, filter pipeline, empty string, single line, take, first, count
+- **Learnings for future iterations:**
+  - STREAM_KIND_LINES uses args[1] as mutable byte index (jacl_i32 inline tagged, no GC concern — same pattern as STREAM_KIND_TAKE's counter)
+  - jacl_string_data(val, buf, buflen) copies string bytes to a buffer for scanning. For strings >4096 bytes, arena_alloc a temp buffer.
+  - jacl_string_new(heap, intern_table, data, length) creates a new string from a char* + length — used to yield each line as a new string value.
+  - String values in vectors print with quotes (e.g., `[vec "a" "b"]`), not bare words.
+  - JACL has no `!=` or `!` operator — use `>`, `<`, `==` for filter predicates.
+---

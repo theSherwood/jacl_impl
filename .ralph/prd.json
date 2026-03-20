@@ -324,7 +324,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 15,
-      "passes": false,
+      "passes": true,
       "notes": "Create stream whose next_fn closure captures source string and current-index upvalue. Each call scans from current-index to next \\n (or \\r\\n), yields substring, advances index. Index at end \u2192 exhausted. Skip final empty line by checking last char. Stream-to-stream lines (splitting incoming byte stream on newline boundaries) deferred to shell interop pass."
     },
     {
