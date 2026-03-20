@@ -344,7 +344,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 16,
-      "passes": false,
+      "passes": true,
       "notes": "Compiler: in compilation of vec-get/vec-set/vec-slice/vec-len/vec-push/vec-concat builtins, after resolving collection arg type, check if TYPE_STREAM \u2192 emit error with helpful message. Runtime: in VM handlers, add jacl_is_stream() check before jacl_is_vector(), with descriptive error. For splat+stream: update OP_SPREAD in vm.c to handle jacl_is_stream() by pulling all elements via OP_STREAM_NEXT into temporary buffer, then pushing onto stack (with stack overflow check)."
     }
   ]

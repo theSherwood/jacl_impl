@@ -148,3 +148,18 @@ Started: Thu Mar 19 08:54:03 UTC 2026
   - String values in vectors print with quotes (e.g., `[vec "a" "b"]`), not bare words.
   - JACL has no `!=` or `!` operator — use `>`, `<`, `==` for filter predicates.
 ---
+
+## 2026-03-20 - US-016
+- Implemented compile-time stream/vector type enforcement and stream-aware spread
+- Files changed: src/compiler.c, src/vm.c, test/test_stream_type_enforce.c, build.sh
+- **What was implemented:**
+  - Compiler: TYPE_STREAM check after compiling first arg of vec-get, vec-len, vec-push, vec-set, vec-concat, vec-slice — emits compile error with "use collect to materialize" hint
+  - VM: stream-specific runtime error messages for all vec-* ops (when TYPE_DYN value turns out to be a stream at runtime)
+  - OP_SPREAD: now accepts streams in addition to vectors — eagerly consumes stream (derived via pull helper, generator via CPS protocol) into temp vector, then pushes elements to stack
+  - 17 e2e tests: 6 compile-time errors, 2 collect-then-vec-op success, 6 runtime dyn-typed errors, 2 stream spread (derived + generator), 1 no false positives
+- **Learnings for future iterations:**
+  - Compile-time checks only fire when c->last_expr_type == TYPE_STREAM. If type is TYPE_DYN (e.g., proc return), no compile error — falls through to runtime check.
+  - Spread syntax is `..` (two dots), not `...` — `..$var` or `..[expr]`. Spread creates AST_SPREAD node compiled via OP_SPREAD + OP_CALL_SPREAD or OP_FOLD_SPREAD.
+  - `+` builtin only takes 2 args; fold-spread handles variadic via OP_FOLD_SPREAD. String `+` fold doesn't work (type error); use numeric values for spread+fold tests.
+  - Proc names must be ≤7 bytes to fit inline string representation (e.g., "id" not "identity").
+---
