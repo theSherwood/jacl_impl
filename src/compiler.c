@@ -3826,6 +3826,27 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     else if (compiler__head_matches(head, "-", 1)) fold_op = 1;
     else if (compiler__head_matches(head, "/", 1)) fold_op = 3;
 
+    /* vec with spread args → OP_VEC_SPREAD */
+    if (compiler__head_matches(head, "vec", 3)) {
+      uint8_t fixed_args = 0;
+      uint8_t num_spreads = 0;
+      for (uint32_t i = 0; i < argc; i++) {
+        if (args[i]->type == AST_SPREAD) {
+          compiler__compile_node(c, args[i]->data.spread.expr);
+          compiler__emit_byte(c, OP_SPREAD, line);
+          num_spreads++;
+        } else {
+          compiler__compile_node(c, args[i]);
+          fixed_args++;
+        }
+      }
+      compiler__emit_byte(c, OP_VEC_SPREAD, line);
+      compiler__emit_byte(c, fixed_args, line);
+      compiler__emit_byte(c, num_spreads, line);
+      c->last_expr_type = TYPE_DYN;
+      return;
+    }
+
     if (fold_op >= 0) {
       /* Compile all args (fixed + spread) onto stack */
       uint8_t fixed_args = 0;

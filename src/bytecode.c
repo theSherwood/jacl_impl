@@ -57,6 +57,7 @@ typedef enum {
   OP_VEC_SET,       /* pop elem + index + vec, push new vec or nil */
   OP_VEC_CONCAT,    /* pop vec2 + vec1, push concatenated vec */
   OP_VEC_SLICE,     /* pop end + start + vec, push sub-vector */
+  OP_VEC_SPREAD,    /* construct vec from spread args: uint8_t fixed_args, uint8_t num_spreads */
   OP_MAP,           /* construct map: followed by uint8_t pair count */
   OP_MAP_GET,       /* pop key + map, push value or nil */
   OP_MAP_HAS,       /* pop key + map, push bool */
@@ -337,6 +338,7 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_VEC_SET:         return "OP_VEC_SET";
     case OP_VEC_CONCAT:      return "OP_VEC_CONCAT";
     case OP_VEC_SLICE:       return "OP_VEC_SLICE";
+    case OP_VEC_SPREAD:      return "OP_VEC_SPREAD";
     case OP_MAP:             return "OP_MAP";
     case OP_MAP_GET:         return "OP_MAP_GET";
     case OP_MAP_HAS:         return "OP_MAP_HAS";

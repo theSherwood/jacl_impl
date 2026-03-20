@@ -2299,6 +2299,29 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_VEC_SPREAD: {
+        uint8_t fixed_args = vm__read_byte(vm);
+        uint8_t num_spreads = vm__read_byte(vm);
+        uint32_t total_args = fixed_args;
+        for (uint8_t i = 0; i < num_spreads; i++) {
+          if (vm->spread_count_top == 0) {
+            vm__set_error(vm, "spread count underflow");
+            return VM_RUNTIME_ERROR;
+          }
+          total_args += vm->spread_counts[--vm->spread_count_top];
+        }
+        uint32_t base = vm->stack_top - total_args;
+        gc__current_heap = &vm->heap;
+        jacl_vec_root* vec = jacl_vec_empty();
+        for (uint32_t i = 0; i < total_args; i++) {
+          vec = jacl_vec_push_back(vec, vm->stack[base + i]);
+        }
+        vm->stack_top = base;
+        result = vm__push(vm, jacl_vector_ptr(vec));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_VEC_GET: {
         JaclVal idx_val, vec_val;
         result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;

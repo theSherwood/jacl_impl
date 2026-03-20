@@ -167,6 +167,33 @@ static int test_spread_proc_mixed(void) {
   TEST_PASS();
 }
 
+/* --- Test: spread into vec constructor --- */
+static int test_spread_vec(void) {
+  PrintCapture cap;
+  VMResult r = run_capture(
+    "def g [vec 2 7]\n"
+    "print [vec 10 100 ..$g]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 10 100 2 7]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: spread only args into vec --- */
+static int test_spread_vec_only(void) {
+  PrintCapture cap;
+  VMResult r = run_capture(
+    "def a [vec 1 2]\n"
+    "def b [vec 3 4]\n"
+    "print [vec ..$a ..$b]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 1 2 3 4]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
 
 int main(void) {
@@ -181,6 +208,8 @@ int main(void) {
     { "spread_single",       test_spread_single },
     { "spread_single_only",  test_spread_single_only },
     { "spread_proc_mixed",   test_spread_proc_mixed },
+    { "spread_vec",          test_spread_vec },
+    { "spread_vec_only",     test_spread_vec_only },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
