@@ -1516,6 +1516,26 @@ static AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
     node->data.command.arg_count = 3;
     return node;
 
+  } else if (parser__peek(p)->type == TOKEN_LBRACE) {
+    /* Trailing block without 'else' keyword — treat as else branch
+       so that `if cond {} {}` behaves the same as `[if cond {} {}]`. */
+    AstNode* else_block = parser__parse_block(p);
+    if (else_block->type == AST_ERROR) return else_block;
+
+    AstNode** args = ast_alloc_array(p->arena, 3);
+    args[0] = cond;
+    args[1] = then_block;
+    args[2] = else_block;
+
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_COMMAND;
+    node->start = start;
+    node->end   = else_block->end;
+    node->data.command.head      = if_head;
+    node->data.command.args      = args;
+    node->data.command.arg_count = 3;
+    return node;
+
   } else {
     /* No else clause — 2-arg if */
     AstNode** args = ast_alloc_array(p->arena, 2);

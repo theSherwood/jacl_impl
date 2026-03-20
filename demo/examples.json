@@ -1,0 +1,1591 @@
+[
+  {
+    "name": "arithmetic",
+    "category": "arithmetic",
+    "code": "# expect: 30\n# expect: 5\n# expect: 200\n# expect: 5\n# expect: 1\n# expect: true\n# expect: false\n# expect: true\n# expect: true\n# addition\nprint [+ 10 20]\n# subtraction\nprint [- 10 5]\n# multiplication\nprint [* 10 20]\n# division\nprint [/ 10 2]\n# modulo\nprint [% 10 3]\n# comparisons\nprint [> 10 5]\nprint [< 10 5]\nprint [== 42 42]\nprint [<= 5 5]\n",
+    "concurrent": false,
+    "description": "addition"
+  },
+  {
+    "name": "arity_alias",
+    "category": "arity",
+    "code": "# expect-error: proc 'f' expects 3 arguments but got 1\n# call through variable alias with wrong arity produces compile error\nproc add3 {a, b, c} { [+ [+ $a $b] $c] }\ndef f $add3\n[$f 1]\n",
+    "concurrent": false,
+    "description": "expect-error: proc 'f' expects 3 arguments but got 1"
+  },
+  {
+    "name": "arity_alias_correct",
+    "category": "arity",
+    "code": "# expect: 6\n# expect: 20\n# call through alias with correct arity compiles and runs\nproc add3 {a, b, c} { [+ [+ $a $b] $c] }\ndef f $add3\nprint [$f 1 2 3]\n# alias chain propagation: def g $f inherits arity\ndef g $f\nprint [$g 5 7 8]\n",
+    "concurrent": false,
+    "description": "call through alias with correct arity compiles and runs"
+  },
+  {
+    "name": "arity_builtins",
+    "category": "arity",
+    "code": "# expect-error: builtin '+' expects 2 arguments but got 1\n# builtin with wrong arity produces compile error\n[+ 1]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin '+' expects 2 arguments but got 1"
+  },
+  {
+    "name": "arity_correct",
+    "category": "arity",
+    "code": "# expect: 6\n# expect: 20\n# expect: 0\n# direct calls with correct arg counts compile and run\nproc add3 {a, b, c} { [+ [+ $a $b] $c] }\nprint [add3 1 2 3]\nproc double {n} { [* $n 2] }\nprint [double 10]\nproc zero {} { 0 }\nprint [zero]\n",
+    "concurrent": false,
+    "description": "direct calls with correct arg counts compile and run"
+  },
+  {
+    "name": "arity_direct",
+    "category": "arity",
+    "code": "# expect-error: proc 'add3' expects 3 arguments but got 2\n# direct call with too few args produces compile error\nproc add3 {a, b, c} { [+ [+ $a $b] $c] }\n[add3 1 2]\n",
+    "concurrent": false,
+    "description": "expect-error: proc 'add3' expects 3 arguments but got 2"
+  },
+  {
+    "name": "arity_direct_many",
+    "category": "arity",
+    "code": "# expect-error: proc 'double' expects 1 arguments but got 3\n# direct call with too many args produces compile error\nproc double {n} { [* $n 2] }\n[double 1 2 3]\n",
+    "concurrent": false,
+    "description": "expect-error: proc 'double' expects 1 arguments but got 3"
+  },
+  {
+    "name": "arity_nested",
+    "category": "arity",
+    "code": "# expect: 6\n# expect: 20\n# nested proc definitions with separate arities checked independently\nproc outer {a, b} {\n  proc inner {x, y, z} { [+ [+ $x $y] $z] }\n  [inner $a $b 3]\n}\nprint [outer 1 2]\nproc double {n} { [* $n 2] }\nprint [double 10]\n",
+    "concurrent": false,
+    "description": "nested proc definitions with separate arities checked independently"
+  },
+  {
+    "name": "arity_unknown",
+    "category": "arity",
+    "code": "# expect: 15\n# call through unknown-arity variable compiles without error\nproc mkadd {x} {\n  proc inner {y} { [+ $x $y] }\n}\ndef f [mkadd 10]\n# f's arity is unknown at compile time (bound to a command result)\n# so the compiler does not reject this call\nprint [$f 5]\n",
+    "concurrent": false,
+    "description": "call through unknown-arity variable compiles without error"
+  },
+  {
+    "name": "async_error_parallel",
+    "category": "async",
+    "code": "# mode: concurrent\n# expect: true\n# expect: par-err\n# expect: 99\n# parallel error in async context — CPS error propagation from spawn+await in parallel body (US-004)\nproc main {} {\n  def x 42\n  def r [parallel { [+ $x 0] } { def f [spawn { error \"par-err\" }]; await $f }]\n  print [error? $r]\n  print [error-val $r]\n  def g [spawn { 99 }]\n  def v [await $g]\n  print $v\n}\nmain\n",
+    "concurrent": true,
+    "description": "parallel error in async context — CPS error propagation from spawn+await in parallel body (US-004)"
+  },
+  {
+    "name": "async_error_propagation",
+    "category": "async",
+    "code": "# mode: concurrent\n# expect: true\n# expect: deep-err\n# error in a deeply nested async call chain propagates to the top-level awaiter\n# Uses named suspending procs called from spawn bodies (US-003)\nproc deep {} {\n  error \"deep-err\"\n}\nproc mid {} {\n  def f [spawn { deep }]\n  await $f\n}\nproc main {} {\n  def f1 [spawn { mid }]\n  def r [await $f1]\n  print [error? $r]\n  print [error-val $r]\n}\nmain\n",
+    "concurrent": true,
+    "description": "error in a deeply nested async call chain propagates to the top-level awaiter"
+  },
+  {
+    "name": "async_error_spawn",
+    "category": "async",
+    "code": "# mode: concurrent\n# expect: true\n# expect: task failure\n# spawn a task that calls [error \"msg\"], await it, verify error? is true and error-val returns the message\nproc fail {} {\n  error \"task failure\"\n}\nproc main {} {\n  def f [spawn { fail }]\n  def result [await $f]\n  print [error? $result]\n  print [error-val $result]\n}\nmain\n",
+    "concurrent": true,
+    "description": "spawn a task that calls [error \"msg\"], await it, verify error? is true and error-val returns the message"
+  },
+  {
+    "name": "async_try_before_spawn",
+    "category": "async",
+    "code": "# expect: caught: sync-err\n# expect: 42\n# try/catch wrapping non-async code works alongside spawn/await\nproc main {} {\n  def x [try { [error \"sync-err\"] } e { [concat \"caught: \" [error-val $e]] }]\n  print $x\n  def f [spawn { 42 }]\n  print [await $f]\n}\nmain\n",
+    "concurrent": true,
+    "description": "try/catch wrapping non-async code works alongside spawn/await"
+  },
+  {
+    "name": "atom_create",
+    "category": "atom",
+    "code": "# expect: true\n# expect: false\n# expect: false\n# expect: true\n# atom? on an atom returns true\n[print [atom? [atom 0]]]\n# atom? on a non-atom returns false\n[print [atom? 0]]\n# atom? on a box returns false\n[print [atom? [box 0]]]\n# atom creates an atom containing the value\ndef a [atom 99]\n[print [atom? $a]]\n",
+    "concurrent": false,
+    "description": "atom? on an atom returns true"
+  },
+  {
+    "name": "await_error",
+    "category": "await",
+    "code": "# expect: true\n# expect: oops\n# spawn a task that errors, await it, check with error? and error-val\nproc main {} {\n  def f [spawn { error \"oops\" }]\n  def result [await $f]\n  print [error? $result]\n  print [error-val $result]\n}\nmain\n",
+    "concurrent": true,
+    "description": "spawn a task that errors, await it, check with error? and error-val"
+  },
+  {
+    "name": "await_resolved",
+    "category": "await",
+    "code": "# expect: true\n# expect: 99\n# In single-threaded mode spawn resolves immediately;\n# await on already-resolved future must not deadlock\nproc main {} {\n  def f [spawn { 99 }]\n  print [future? $f]\n  print [await $f]\n}\nmain\n",
+    "concurrent": true,
+    "description": "In single-threaded mode spawn resolves immediately;"
+  },
+  {
+    "name": "bare_commands",
+    "category": "bare",
+    "code": "# expect: hello\n# expect: 7\n# expect: 30\n# bare command with args\nprint hello\n# nested brackets in line mode\nprint [+ 1 [* 2 3]]\n# proc call as bare command (zero-arg)\nproc greet {} {\n  print 30\n}\ngreet\n",
+    "concurrent": false,
+    "description": "bare command with args"
+  },
+  {
+    "name": "barrier_stress",
+    "category": "barrier",
+    "code": "# mode: concurrent\n# expect: 50\n# expect: 50\n# expect: 50\n# expect: 50\n# US-007: Write barrier stress test — spawn N workers that concurrently\n# swap! atoms in a tight loop while other workers allocate heavily,\n# forcing GC. Verify all final atom values are consistent.\nproc add1 {x} { [+ $x 1] }\n\nproc bump {a, i, n} {\n  if [< $i $n] {\n    [swap $a $add1]\n    [bump $a [+ $i 1] $n]\n  } else { 0 }\n}\n\nproc trash {i, n} {\n  if [< $i $n] {\n    def v [vec 1 2 3 4 5 6 7 8 9 10]\n    [trash [+ $i 1] $n]\n  } else { 0 }\n}\n\nproc main {} {\n  def a1 [atom 0]\n  def a2 [atom 0]\n  def a3 [atom 0]\n  def a4 [atom 0]\n  def f1 [spawn { [bump $a1 0 50] }]\n  def f2 [spawn { [bump $a2 0 50] }]\n  def f3 [spawn { [bump $a3 0 50] }]\n  def f4 [spawn { [bump $a4 0 50] }]\n  def g1 [spawn { [trash 0 100] }]\n  def g2 [spawn { [trash 0 100] }]\n  [await $f1]\n  [await $f2]\n  [await $f3]\n  [await $f4]\n  [await $g1]\n  [await $g2]\n  print [deref $a1]\n  print [deref $a2]\n  print [deref $a3]\n  print [deref $a4]\n}\nmain\n",
+    "concurrent": true,
+    "description": "US-007: Write barrier stress test — spawn N workers that concurrently"
+  },
+  {
+    "name": "box_create",
+    "category": "box",
+    "code": "# expect: true\n# expect: false\n# expect: false\n# expect: true\n# box? on a box returns true\n[print [box? [box 42]]]\n# box? on a non-box returns false\n[print [box? 42]]\n# box? on an atom returns false\n[print [box? [atom 0]]]\n# box creates a box containing the value\ndef b [box 42]\n[print [box? $b]]\n",
+    "concurrent": false,
+    "description": "box? on a box returns true"
+  },
+  {
+    "name": "collect_stream",
+    "category": "collect",
+    "code": "# expect: [vec 1 2 3]\n# expect: [vec 1 2 3]\n# collect materializes stream to vector; identity on vectors\nproc gen {} {\n  [yield 1]\n  [yield 2]\n  [yield 3]\n}\nprint [collect [gen]]\nv = [vec 1 2 3]\nprint [collect $v]\n",
+    "concurrent": false,
+    "description": "collect materializes stream to vector; identity on vectors"
+  },
+  {
+    "name": "control_flow",
+    "category": "control",
+    "code": "# expect: yes\n# expect: no\n# expect: 55\n# if/else with true condition\nprint [if $true { \"yes\" } { \"no\" }]\n# if/else with false condition\nprint [if $false { \"yes\" } { \"no\" }]\n# while loop: sum 1..10\ndef sum 0\ndef i 1\nwhile [<= $i 10] {\n  def sum [+ $sum $i]\n  def i [+ $i 1]\n}\nprint [+ $sum 0]\n",
+    "concurrent": false,
+    "description": "if/else with true condition"
+  },
+  {
+    "name": "cps_capture_parallel",
+    "category": "cps",
+    "code": "# expect: 52\n# expect: 10\n# pre-await variable used in parallel body after await\nproc main {} {\n  def x 42\n  def f [spawn { 10 }]\n  def y [await $f]\n  def r [parallel { [+ $x $y] } { [+ $y 0] }]\n  print [vec-get $r 0]\n  print [vec-get $r 1]\n}\nmain\n",
+    "concurrent": true,
+    "description": "pre-await variable used in parallel body after await"
+  },
+  {
+    "name": "cps_closure_capture",
+    "category": "cps",
+    "code": "# expect: 30\n# closures capturing variables across suspension points\nproc main {} {\n  def x 10\n  def f [spawn { 20 }]\n  def y [await $f]\n  proc adder {} { [+ $x $y] }\n  print [adder]\n}\nmain\n",
+    "concurrent": true,
+    "description": "closures capturing variables across suspension points"
+  },
+  {
+    "name": "cps_deep_chain",
+    "category": "cps",
+    "code": "# expect: 1\n# expect: 3\n# expect: 6\n# expect: 10\n# expect: 15\n# expect: 21\n# 6 chained awaits building a running sum (deep continuation chain)\nproc main {} {\n  def f1 [spawn { 1 }]\n  def s1 [await $f1]\n  print $s1\n  def f2 [spawn { [+ $s1 2] }]\n  def s2 [await $f2]\n  print $s2\n  def f3 [spawn { [+ $s2 3] }]\n  def s3 [await $f3]\n  print $s3\n  def f4 [spawn { [+ $s3 4] }]\n  def s4 [await $f4]\n  print $s4\n  def f5 [spawn { [+ $s4 5] }]\n  def s5 [await $f5]\n  print $s5\n  def f6 [spawn { [+ $s5 6] }]\n  def s6 [await $f6]\n  print $s6\n}\nmain\n",
+    "concurrent": true,
+    "description": "6 chained awaits building a running sum (deep continuation chain)"
+  },
+  {
+    "name": "cps_deep_tail_call",
+    "category": "cps",
+    "code": "# expect: 500500\n# mode: concurrent\n# Deep CPS recursion via tail-call optimization.\n# Computes sum 1..1000 = 500500 via recursive spawn/await.\n# This would have hit stack overflow at ~65 iterations without TCO.\nproc sum {n} {\n  if [== $n 0] {\n    0\n  } else {\n    def f [spawn { [+ $n 0] }]\n    def v [await $f]\n    def rest [sum [- $n 1]]\n    [+ $v $rest]\n  }\n}\nproc main {} {\n  def r [sum 1000]\n  print $r\n}\nmain\n",
+    "concurrent": true,
+    "description": "Deep CPS recursion via tail-call optimization."
+  },
+  {
+    "name": "cps_if_suspend",
+    "category": "cps",
+    "code": "# expect: took-true\n# expect: 42\n# await inside if branch, code after if uses result\nproc main {} {\n  def f [spawn { 1 }]\n  def val [await $f]\n  def result [if [== $val 1] {\n    def g [spawn { 42 }]\n    print \"took-true\"\n    await $g\n  } {\n    def h [spawn { 99 }]\n    print \"took-false\"\n    await $h\n  }]\n  print $result\n}\nmain\n",
+    "concurrent": true,
+    "description": "await inside if branch, code after if uses result"
+  },
+  {
+    "name": "cps_nested_expr",
+    "category": "cps",
+    "code": "# expect: 30\n# await nested inside expression arguments: [+ [await $f1] [await $f2]]\nproc main {} {\n  def f1 [spawn { 10 }]\n  def f2 [spawn { 20 }]\n  print [+ [await $f1] [await $f2]]\n}\nmain\n",
+    "concurrent": true,
+    "description": "await nested inside expression arguments: [+ [await $f1] [await $f2]]"
+  },
+  {
+    "name": "cps_propagation",
+    "category": "cps",
+    "code": "# expect: 100\n# proc A calls suspending proc B which calls suspending proc C (transitive CPS)\nproc comp {} {\n  def f [spawn { 10 }]\n  [* [await $f] 10]\n}\nproc relay {} {\n  def r [comp]\n  [+ $r 0]\n}\nproc main {} {\n  def result [relay]\n  print $result\n}\nmain\n",
+    "concurrent": true,
+    "description": "proc A calls suspending proc B which calls suspending proc C (transitive CPS)"
+  },
+  {
+    "name": "cps_recursive_parallel",
+    "category": "cps",
+    "code": "# expect: 6\n# mode: concurrent\n# Recursive proc with parallel in body — exercises 3 levels of recursion.\n# Tests CPS transform for recursive procs with suspending parallel operations.\nproc sum {n} {\n  if [== $n 0] {\n    0\n  } else {\n    def r [parallel { [+ $n 0] } { [sum [- $n 1]] }]\n    def cur [vec-get $r 0]\n    def rest [vec-get $r 1]\n    [+ $cur $rest]\n  }\n}\nproc main {} {\n  def r [sum 3]\n  print $r\n}\nmain\n",
+    "concurrent": true,
+    "description": "Recursive proc with parallel in body — exercises 3 levels of recursion."
+  },
+  {
+    "name": "cps_recursive_spawn",
+    "category": "cps",
+    "code": "# expect: 6\n# mode: concurrent\n# Recursive proc with spawn/await in body — exercises 3 levels of recursion.\n# Tests CPS transform for recursive procs with suspending operations.\nproc sum {n} {\n  if [== $n 0] {\n    0\n  } else {\n    def f [spawn { [+ $n 0] }]\n    def v [await $f]\n    def rest [sum [- $n 1]]\n    [+ $v $rest]\n  }\n}\nproc main {} {\n  def r [sum 3]\n  print $r\n}\nmain\n",
+    "concurrent": true,
+    "description": "Recursive proc with spawn/await in body — exercises 3 levels of recursion."
+  },
+  {
+    "name": "cps_sequential",
+    "category": "cps",
+    "code": "# expect: 10\n# expect: 30\n# expect: 60\n# multiple sequential awaits produce correct intermediate results\nproc main {} {\n  def f1 [spawn { 10 }]\n  def a [await $f1]\n  print $a\n  def f2 [spawn { [+ $a 20] }]\n  def b [await $f2]\n  print $b\n  def f3 [spawn { [+ $b 30] }]\n  def c [await $f3]\n  print $c\n}\nmain\n",
+    "concurrent": true,
+    "description": "multiple sequential awaits produce correct intermediate results"
+  },
+  {
+    "name": "cps_variable_capture",
+    "category": "cps",
+    "code": "# expect: 10\n# expect: 20\n# expect: 30\n# variables defined before await are accessible after await\nproc main {} {\n  def a 10\n  def b 20\n  def f [spawn { 30 }]\n  def c [await $f]\n  print $a\n  print $b\n  print $c\n}\nmain\n",
+    "concurrent": true,
+    "description": "variables defined before await are accessible after await"
+  },
+  {
+    "name": "deref_basic",
+    "category": "deref",
+    "code": "# expect: 42\n# expect: hello\n# expect: 0\n# deref reads the value inside a box\n[print [deref [box 42]]]\n# deref reads the value inside a box containing a string\n[print [deref [box \"hello\"]]]\n# deref reads the value inside an atom\n[print [deref [atom 0]]]\n",
+    "concurrent": false,
+    "description": "deref reads the value inside a box"
+  },
+  {
+    "name": "destructure_named",
+    "category": "destructure",
+    "code": "# expect: 10\n# expect: 20\n# named struct destructuring\nstruct Point {i32 x, i32 y}\np = [Point 10 20]\n{x, y} = $p\nprint $x\nprint $y\n",
+    "concurrent": false,
+    "description": "named struct destructuring"
+  },
+  {
+    "name": "destructure_rest",
+    "category": "destructure",
+    "code": "# expect: 1\n# expect: [vec 2 3 4]\n# rest pattern captures remaining elements\n[first ..rest] = [vec 1 2 3 4]\nprint $first\nprint $rest\n",
+    "concurrent": false,
+    "description": "rest pattern captures remaining elements"
+  },
+  {
+    "name": "destructure_vec",
+    "category": "destructure",
+    "code": "# expect: 1\n# expect: 2\n# expect: 3\n# positional vector destructuring\ndef [a b c] [vec 1 2 3]\nprint $a\nprint $b\nprint $c\n",
+    "concurrent": false,
+    "description": "positional vector destructuring"
+  },
+  {
+    "name": "destructure_wildcard",
+    "category": "destructure",
+    "code": "# expect: 1\n# expect: 3\n# wildcard _ skips elements in destructuring\ndef [a _ c] [vec 1 2 3]\nprint $a\nprint $c\n",
+    "concurrent": false,
+    "description": "wildcard _ skips elements in destructuring"
+  },
+  {
+    "name": "each_arity",
+    "category": "each",
+    "code": "# expect-error: for requires: $collection { body }, $collection name { body }, or $collection $callback\n# compile-time arity check: for requires at least 2 args\n[for [vec 1]]\n",
+    "concurrent": false,
+    "description": "expect-error: for requires: $collection { body }, $collection name { body }, or $collection $callback"
+  },
+  {
+    "name": "each_empty",
+    "category": "each",
+    "code": "# expect: nil\n# for on empty vector calls proc zero times, returns nil\nproc cb {x} { [print $x] }\nprint [for [vec] $cb]\n",
+    "concurrent": false,
+    "description": "for on empty vector calls proc zero times, returns nil"
+  },
+  {
+    "name": "each_empty_map",
+    "category": "each",
+    "code": "# expect: nil\n# for on empty map calls proc zero times, returns nil\nproc cb {k, v} { [print $k] }\nprint [for [map] $cb]\n",
+    "concurrent": false,
+    "description": "for on empty map calls proc zero times, returns nil"
+  },
+  {
+    "name": "each_map",
+    "category": "each",
+    "code": "# expect: a 1\n# each iterates over map key-value pairs\nproc cb {k, v} { [print \"$k $v\"] }\nfor [map-set [map] \"a\" 1] $cb\n",
+    "concurrent": false,
+    "description": "each iterates over map key-value pairs"
+  },
+  {
+    "name": "each_nil",
+    "category": "each",
+    "code": "# expect: nil\n# for returns nil\nproc cb {x} { [+ $x 0] }\nprint [for [vec 1 2 3] $cb]\n",
+    "concurrent": false,
+    "description": "for returns nil"
+  },
+  {
+    "name": "each_vec",
+    "category": "each",
+    "code": "# expect: 1\n# expect: 2\n# expect: 3\n# each iterates over vector elements, calling proc with each element\nproc cb {x} { [print $x] }\nfor [vec 1 2 3] $cb\n",
+    "concurrent": false,
+    "description": "each iterates over vector elements, calling proc with each element"
+  },
+  {
+    "name": "eq_cross_type",
+    "category": "eq",
+    "code": "# expect: false\n# expect: false\n# expect: false\n# cross-type equality: collection vs collection, collection vs scalar\nprint [== [vec 1] [map-set [map] \"a\" 1]]\nprint [== [vec 1] 1]\nprint [== [map-set [map] \"a\" 1] \"a\"]\n",
+    "concurrent": false,
+    "description": "cross-type equality: collection vs collection, collection vs scalar"
+  },
+  {
+    "name": "eq_map",
+    "category": "eq",
+    "code": "# expect: true\n# expect: true\n# expect: false\n# structural equality for maps (insertion order irrelevant)\nprint [== [map-set [map] \"a\" 1] [map-set [map] \"a\" 1]]\nprint [== [map \"a\" 1 \"b\" 2] [map \"b\" 2 \"a\" 1]]\nprint [== [map-set [map] \"a\" 1] [map-set [map] \"a\" 2]]\n",
+    "concurrent": false,
+    "description": "structural equality for maps (insertion order irrelevant)"
+  },
+  {
+    "name": "eq_nested",
+    "category": "eq",
+    "code": "# expect: true\n# expect: false\n# nested/recursive structural equality\nprint [== [vec [vec 1] [vec 2]] [vec [vec 1] [vec 2]]]\nprint [== [vec [vec 1] [vec 2]] [vec [vec 1] [vec 3]]]\n",
+    "concurrent": false,
+    "description": "nested/recursive structural equality"
+  },
+  {
+    "name": "eq_vec",
+    "category": "eq",
+    "code": "# expect: true\n# expect: false\n# expect: false\n# structural equality for vectors\nprint [== [vec 1 2 3] [vec 1 2 3]]\nprint [== [vec 1 2] [vec 1 2 3]]\nprint [== [vec 1 2 3] [vec 1 2]]\n",
+    "concurrent": false,
+    "description": "structural equality for vectors"
+  },
+  {
+    "name": "error_auto_return",
+    "category": "error",
+    "code": "# expect: true\n# Test: error as non-final statement auto-returns from function\nproc foo {} {\n  [error \"fail\"]\n  [print \"never\"]\n  42\n}\n[print [error? [foo]]]\n",
+    "concurrent": false,
+    "description": "Test: error as non-final statement auto-returns from function"
+  },
+  {
+    "name": "error_auto_return_payload",
+    "category": "error",
+    "code": "# expect: fail\n# Test: auto-returned error preserves payload\nproc foo {} {\n  [error \"fail\"]\n  [print \"never\"]\n  42\n}\n[print [error-val [foo]]]\n",
+    "concurrent": false,
+    "description": "Test: auto-returned error preserves payload"
+  },
+  {
+    "name": "error_basic",
+    "category": "error",
+    "code": "# expect-error: cannot call\n# calling a non-callable value (integer)\ndef x 42\n[x 1]\n",
+    "concurrent": false,
+    "description": "expect-error: cannot call"
+  },
+  {
+    "name": "error_create",
+    "category": "error",
+    "code": "# expect: true\n# Test: error creates error-flagged values\nprint [error? [error \"something went wrong\"]]\n",
+    "concurrent": false,
+    "description": "Test: error creates error-flagged values"
+  },
+  {
+    "name": "error_create_int",
+    "category": "error",
+    "code": "# expect: true\n# Test: error with integer payload\nprint [error? [error 42]]\n",
+    "concurrent": false,
+    "description": "Test: error with integer payload"
+  },
+  {
+    "name": "error_create_nil",
+    "category": "error",
+    "code": "# expect: true\n# Test: error with nil payload\nprint [error? [error $nil]]\n",
+    "concurrent": false,
+    "description": "Test: error with nil payload"
+  },
+  {
+    "name": "error_final_expr",
+    "category": "error",
+    "code": "# expect: true\n# Test: final expression in a function returns error flag normally (no auto-return)\nproc foo {} {\n  [error \"final\"]\n}\n[print [error? [foo]]]\n",
+    "concurrent": false,
+    "description": "Test: final expression in a function returns error flag normally (no auto-return)"
+  },
+  {
+    "name": "error_nested_return",
+    "category": "error",
+    "code": "# expect: true\n# Test: errors from nested function calls propagate up\nproc inner {} {\n  [error \"deep\"]\n}\nproc outer {} {\n  [inner]\n  [print \"never\"]\n  99\n}\n[print [error? [outer]]]\n",
+    "concurrent": false,
+    "description": "Test: errors from nested function calls propagate up"
+  },
+  {
+    "name": "error_no_error_continue",
+    "category": "error",
+    "code": "# expect: done\n# expect: 99\n# Test: non-error statements pop and continue normally\nproc foo {} {\n  [print \"done\"]\n  99\n}\n[print [foo]]\n",
+    "concurrent": false,
+    "description": "Test: non-error statements pop and continue normally"
+  },
+  {
+    "name": "error_pred",
+    "category": "error",
+    "code": "# expect: false\n# Test: error? returns false for non-error values\nprint [error? 42]\n",
+    "concurrent": false,
+    "description": "Test: error? returns false for non-error values"
+  },
+  {
+    "name": "error_pred_nil",
+    "category": "error",
+    "code": "# expect: false\n# Test: error? returns false for nil\nprint [error? $nil]\n",
+    "concurrent": false,
+    "description": "Test: error? returns false for nil"
+  },
+  {
+    "name": "error_print",
+    "category": "error",
+    "code": "# expect: <error: oops>\n# Test: print formats error-flagged values with payload\n[print [error \"oops\"]]\n",
+    "concurrent": false,
+    "description": "Test: print formats error-flagged values with payload"
+  },
+  {
+    "name": "error_print_int",
+    "category": "error",
+    "code": "# expect: <error: 42>\n# Test: print formats error-flagged integer\n[print [error 42]]\n",
+    "concurrent": false,
+    "description": "Test: print formats error-flagged integer"
+  },
+  {
+    "name": "error_print_vec",
+    "category": "error",
+    "code": "# expect: <error: [vec 1 2 3]>\n# Test: print formats error-flagged vector with nested content\n[print [error [vec 1 2 3]]]\n",
+    "concurrent": false,
+    "description": "Test: print formats error-flagged vector with nested content"
+  },
+  {
+    "name": "error_prop_map",
+    "category": "error",
+    "code": "# expect: true\n# expect: true\n# expect: true\n# expect: true\n# expect: true\n# expect: true\n# expect: true\n# Test: error propagation through map ops\ndef e [error \"x\"]\nprint [error? [map-get $e \"k\"]]\nprint [error? [map-has $e \"k\"]]\nprint [error? [map-len $e]]\nprint [error? [map-set $e \"k\" 1]]\nprint [error? [map-remove $e \"k\"]]\nprint [error? [map-keys $e]]\nprint [error? [map-vals $e]]\n",
+    "concurrent": false,
+    "description": "Test: error propagation through map ops"
+  },
+  {
+    "name": "error_prop_str",
+    "category": "error",
+    "code": "# expect: true\n# expect: true\n# expect: true\n# expect: true\n# Test: error propagation through string ops\ndef e [error \"x\"]\nprint [error? [concat $e \"y\"]]\nprint [error? [length $e]]\nprint [error? [to-string $e]]\nprint [error? [concat \"y\" [error \"z\"]]]\n",
+    "concurrent": false,
+    "description": "Test: error propagation through string ops"
+  },
+  {
+    "name": "error_prop_vec",
+    "category": "error",
+    "code": "# expect: true\n# expect: true\n# expect: true\n# expect: true\n# expect: true\n# expect: true\n# expect: true\n# Test: error propagation through vector ops\ndef e [error \"x\"]\nprint [error? [vec-get $e 0]]\nprint [error? [vec-len $e]]\nprint [error? [vec-push $e 1]]\nprint [error? [vec-set $e 0 1]]\nprint [error? [vec-concat $e [vec]]]\nprint [error? [vec-slice $e 0 1]]\nprint [error? [vec-push [vec] [error \"x\"]]]\n",
+    "concurrent": false,
+    "description": "Test: error propagation through vector ops"
+  },
+  {
+    "name": "error_val",
+    "category": "error",
+    "code": "# expect: oops\n# Test: error-val extracts payload from error (clears error flag)\nprint [error-val [error \"oops\"]]\n",
+    "concurrent": false,
+    "description": "Test: error-val extracts payload from error (clears error flag)"
+  },
+  {
+    "name": "error_val_int",
+    "category": "error",
+    "code": "# expect: 42\n# Test: error-val extracts integer payload from error\nprint [error-val [error 42]]\n",
+    "concurrent": false,
+    "description": "Test: error-val extracts integer payload from error"
+  },
+  {
+    "name": "error_val_noerr",
+    "category": "error",
+    "code": "# expect: 42\n# Test: error-val on non-error returns unchanged\nprint [error-val 42]\n",
+    "concurrent": false,
+    "description": "Test: error-val on non-error returns unchanged"
+  },
+  {
+    "name": "filter_arity",
+    "category": "filter",
+    "code": "# expect-error: builtin 'filter' expects 2 arguments but got 1\n# compile-time arity check: filter requires exactly 2 args\n[filter [vec 1]]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'filter' expects 2 arguments but got 1"
+  },
+  {
+    "name": "filter_empty",
+    "category": "filter",
+    "code": "# expect: 0\n# filtering an empty vector returns an empty vector\nproc gt2 {x} { [> $x 2] }\ndef v2 [filter [vec] $gt2]\nprint [vec-len $v2]\n",
+    "concurrent": false,
+    "description": "filtering an empty vector returns an empty vector"
+  },
+  {
+    "name": "filter_map",
+    "category": "filter",
+    "code": "# expect: 5\n# expect: false\n# filter on map: keep entries where value > 0\ndef m [map-set [map-set [map] \"a\" 5] \"b\" 0]\nproc pos {k, v} { [> $v 0] }\ndef m2 [filter $m $pos]\nprint [map-get $m2 \"a\"]\nprint [map-has $m2 \"b\"]\n",
+    "concurrent": false,
+    "description": "filter on map: keep entries where value > 0"
+  },
+  {
+    "name": "filter_vec",
+    "category": "filter",
+    "code": "# expect: 3\n# expect: 4\n# expect: 5\n# filter vector: keep elements greater than 2\ndef v [vec 1 2 3 4 5]\nproc gt2 {x} { [> $x 2] }\ndef v2 [filter $v $gt2]\nprint [vec-get $v2 0]\nprint [vec-get $v2 1]\nprint [vec-get $v2 2]\n",
+    "concurrent": false,
+    "description": "filter vector: keep elements greater than 2"
+  },
+  {
+    "name": "gc_high_churn",
+    "category": "gc",
+    "code": "# mode: concurrent\n# expect: 2100\n# expect: 2100\n# expect: 2100\n# expect: 2100\n# expect: 2310\n# High-churn GC stress: 510 parallel tasks across 5 rounds,\n# each computing fib(8). Uses recursive CPS loop (previously\n# required flat sequential calls due to CPS recursion bug).\nproc fib {n} {\n  if [< $n 2] { [+ $n 0] } else {\n    [+ [fib [- $n 1]] [fib [- $n 2]]]\n  }\n}\n\nproc p10 {} {\n  def r [parallel { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] } { [fib 8] }]\n  [+ [+ [+ [+ [vec-get $r 0] [vec-get $r 1]] [+ [vec-get $r 2] [vec-get $r 3]]] [+ [+ [vec-get $r 4] [vec-get $r 5]] [+ [vec-get $r 6] [vec-get $r 7]]]] [+ [vec-get $r 8] [vec-get $r 9]]]\n}\n\n# Recursive loop: calls p10 n times, accumulating the sum.\n# Exercises recursive CPS + suspending calls under GC pressure.\nproc loop {n, acc} {\n  if [== $n 0] { [+ $acc 0] } else {\n    def v [p10]\n    [loop [- $n 1] [+ $acc $v]]\n  }\n}\n\nproc main {} {\n  print [loop 10 0]\n  print [loop 10 0]\n  print [loop 10 0]\n  print [loop 10 0]\n  print [loop 11 0]\n}\nmain\n",
+    "concurrent": true,
+    "description": "High-churn GC stress: 510 parallel tasks across 5 rounds,"
+  },
+  {
+    "name": "gc_memory_bounded",
+    "category": "gc",
+    "code": "# mode: concurrent\n# expect: done\n# US-007: Memory boundedness test — run many iterations where each spawns\n# tasks that allocate and discard large vectors. If block recycling works,\n# the program completes without OOM.\nproc batch {} {\n  def v1 [vec 1 2 3 4 5 6 7 8 9 10]\n  def v2 [vec 11 12 13 14 15 16 17 18 19 20]\n  def v3 [vec 21 22 23 24 25 26 27 28 29 30]\n  [+ [vec-len $v1] [+ [vec-len $v2] [vec-len $v3]]]\n}\n\nproc loop {i, n} {\n  if [< $i $n] {\n    def f1 [spawn { [batch] }]\n    def f2 [spawn { [batch] }]\n    def f3 [spawn { [batch] }]\n    [await $f1]\n    [await $f2]\n    [await $f3]\n    [loop [+ $i 1] $n]\n  } else { 0 }\n}\n\nproc main {} {\n  [loop 0 50]\n  print \"done\"\n}\nmain\n",
+    "concurrent": true,
+    "description": "US-007: Memory boundedness test — run many iterations where each spawns"
+  },
+  {
+    "name": "gc_mid_cps_chain",
+    "category": "gc",
+    "code": "# mode: concurrent\n# expect: 610\n# US-007: Mid-CPS-chain GC — chain of 3+ continuations where intermediate\n# upvalues are the only reference to heap objects. GC must trace through\n# the CPS continuation closures to find these objects.\n# fib(12)=144, fib(11)=89, fib(10)=55 => step1 returns 144+89+55+233+89 = 610\nproc fib {n} {\n  if [<= $n 1] { [+ $n 0] } else { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n}\nproc step1 {} {\n  def a [await [spawn { [fib 12] }]]\n  def b [await [spawn { [fib 11] }]]\n  def c [await [spawn { [fib 10] }]]\n  def d [await [spawn { [fib 13] }]]\n  def e [await [spawn { [fib 11] }]]\n  [+ [+ [+ $a $b] [+ $c $d]] $e]\n}\nproc main {} {\n  def result [step1]\n  print $result\n}\nmain\n",
+    "concurrent": true,
+    "description": "US-007: Mid-CPS-chain GC — chain of 3+ continuations where intermediate"
+  },
+  {
+    "name": "gc_multi_cycle",
+    "category": "gc",
+    "code": "# mode: concurrent\n# expect: 55\n# expect: 55\n# expect: 55\n# expect: 55\n# expect: 55\n# expect: 55\n# expect: 55\n# expect: 55\n# expect: 55\n# expect: 55\n# US-007: Multi-cycle GC correctness — chain 10 sequential spawn/await\n# calls with intermediate heap allocations, forcing multiple GC cycles.\n# Verify all intermediate values survive correctly across cycles.\nproc fib {n} {\n  if [<= $n 1] { [+ $n 0] } else { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n}\n\nproc run {i, n} {\n  if [< $i $n] {\n    def r [await [spawn { [fib 10] }]]\n    print $r\n    [run [+ $i 1] $n]\n  } else { 0 }\n}\n\nproc main {} {\n  [run 0 10]\n}\nmain\n",
+    "concurrent": true,
+    "description": "US-007: Multi-cycle GC correctness — chain 10 sequential spawn/await"
+  },
+  {
+    "name": "gc_parallel_join",
+    "category": "gc",
+    "code": "# mode: concurrent\n# expect: 233\n# expect: 89\n# expect: 34\n# expect: 13\n# US-007: Parallel join under GC pressure — parallel N tasks with heavy\n# allocation, trigger GC between completion and join, verify result vector\n# survives and contains correct values.\nproc fib {n} {\n  if [<= $n 1] { [+ $n 0] } else { [+ [fib [- $n 1]] [fib [- $n 2]]] }\n}\nproc main {} {\n  def r [parallel { [fib 13] } { [fib 11] } { [fib 9] } { [fib 7] }]\n  print [vec-get $r 0]\n  print [vec-get $r 1]\n  print [vec-get $r 2]\n  print [vec-get $r 3]\n}\nmain\n",
+    "concurrent": true,
+    "description": "US-007: Parallel join under GC pressure — parallel N tasks with heavy"
+  },
+  {
+    "name": "gc_stress_atom",
+    "category": "gc",
+    "code": "# mode: concurrent\n# expect: 500\n# US-011: Atom contention under GC — 50 tasks each swap! a shared atom 10\n# times while allocating garbage to trigger GC. CAS retries on contention.\n# Final value = 50 * 10 = 500 (no lost updates).\n\nproc add1 {x} { [+ $x 1] }\n\nproc trash {i, n} {\n  if [< $i $n] {\n    def v [vec 1 2 3 4 5 6 7 8 9 10 11 12 13]\n    def w [vec-push [vec-push $v 14] 15]\n    [trash [+ $i 1] $n]\n  } else { 0 }\n}\n\nproc bump {a, i, n} {\n  if [< $i $n] {\n    [swap $a $add1]\n    def v [vec 1 2 3 4 5 6 7 8 9 10]\n    [bump $a [+ $i 1] $n]\n  } else { 0 }\n}\n\nproc s10 {a} {\n  def f0 [spawn { [bump $a 0 10] [trash 0 20] }]\n  def f1 [spawn { [bump $a 0 10] [trash 0 20] }]\n  def f2 [spawn { [bump $a 0 10] [trash 0 20] }]\n  def f3 [spawn { [bump $a 0 10] [trash 0 20] }]\n  def f4 [spawn { [bump $a 0 10] [trash 0 20] }]\n  def f5 [spawn { [bump $a 0 10] [trash 0 20] }]\n  def f6 [spawn { [bump $a 0 10] [trash 0 20] }]\n  def f7 [spawn { [bump $a 0 10] [trash 0 20] }]\n  def f8 [spawn { [bump $a 0 10] [trash 0 20] }]\n  def f9 [spawn { [bump $a 0 10] [trash 0 20] }]\n  [await $f0]\n  [await $f1]\n  [await $f2]\n  [await $f3]\n  [await $f4]\n  [await $f5]\n  [await $f6]\n  [await $f7]\n  [await $f8]\n  [await $f9]\n}\n\nproc main {} {\n  def a [atom 0]\n  [s10 $a]\n  [s10 $a]\n  [s10 $a]\n  [s10 $a]\n  [s10 $a]\n  print [deref $a]\n}\nmain\n",
+    "concurrent": true,
+    "description": "US-011: Atom contention under GC — 50 tasks each swap! a shared atom 10"
+  },
+  {
+    "name": "gc_stress_deep_cps",
+    "category": "gc",
+    "code": "# mode: concurrent\n# expect: 210\n# US-012: Deep CPS recursion with concurrent suspension under GC.\n# Recursive proc spawns a subtask at each level, awaits it, then recurses.\n# 20 levels deep. Each level allocates garbage to trigger GC.\n# Final result = 1+2+...+20 = 210.\n# Tests that CPS continuations are properly rooted through all GC cycles.\n\nproc trash {i, n} {\n  if [< $i $n] {\n    def v [vec 1 2 3 4 5 6 7 8 9 10 11 12 13]\n    def w [vec-push [vec-push $v 14] 15]\n    [trash [+ $i 1] $n]\n  } else { 0 }\n}\n\nproc work {lvl} {\n  [trash 0 15]\n  [+ $lvl 0]\n}\n\nproc deep {lvl, max} {\n  if [> $lvl $max] {\n    0\n  } else {\n    [trash 0 10]\n    def lv $lvl\n    def f [spawn { [work $lv] }]\n    def r [await $f]\n    def rest [deep [+ $lvl 1] $max]\n    [+ $r $rest]\n  }\n}\n\nproc main {} {\n  print [deep 1 20]\n}\nmain\n",
+    "concurrent": true,
+    "description": "US-012: Deep CPS recursion with concurrent suspension under GC."
+  },
+  {
+    "name": "gc_stress_persistent",
+    "category": "gc",
+    "code": "# mode: concurrent\n# expect: 1513350\n# US-010: E2E stress test — parallel with large persistent data structures.\n# Creates a 1000-element vector and 100-entry map, passes to parallel branches\n# that read and derive new collections. Verifies persistence and correctness\n# under concurrent GC pressure.\n# Sum: 499500*3 + 4950*3 = 1513350\n\n# Build a 10-element vector starting at offset o\nproc v10 {o} {\n  [vec $o [+ $o 1] [+ $o 2] [+ $o 3] [+ $o 4] [+ $o 5] [+ $o 6] [+ $o 7] [+ $o 8] [+ $o 9]]\n}\n\n# Concat 10 chunks of 10 onto v (adds 100 elements starting at s)\nproc c100 {v, s} {\n  def a [vec-concat $v [v10 $s]]\n  def b [vec-concat $a [v10 [+ $s 10]]]\n  def c [vec-concat $b [v10 [+ $s 20]]]\n  def d [vec-concat $c [v10 [+ $s 30]]]\n  def e [vec-concat $d [v10 [+ $s 40]]]\n  def f [vec-concat $e [v10 [+ $s 50]]]\n  def g [vec-concat $f [v10 [+ $s 60]]]\n  def h [vec-concat $g [v10 [+ $s 70]]]\n  def j [vec-concat $h [v10 [+ $s 80]]]\n  [vec-concat $j [v10 [+ $s 90]]]\n}\n\n# Build 1000-element vector [0..999]\nproc mkv {} {\n  def a [c100 [vec] 0]\n  def b [c100 $a 100]\n  def c [c100 $b 200]\n  def d [c100 $c 300]\n  def e [c100 $d 400]\n  def f [c100 $e 500]\n  def g [c100 $f 600]\n  def h [c100 $g 700]\n  def j [c100 $h 800]\n  [c100 $j 900]\n}\n\n# Build 100-entry map {0:0, 1:1, ..., 99:99}\nproc mkm {} {\n  def a [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map] 0 0] 1 1] 2 2] 3 3] 4 4] 5 5] 6 6] 7 7] 8 8] 9 9]\n  def b [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $a 10 10] 11 11] 12 12] 13 13] 14 14] 15 15] 16 16] 17 17] 18 18] 19 19]\n  def c [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $b 20 20] 21 21] 22 22] 23 23] 24 24] 25 25] 26 26] 27 27] 28 28] 29 29]\n  def d [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $c 30 30] 31 31] 32 32] 33 33] 34 34] 35 35] 36 36] 37 37] 38 38] 39 39]\n  def e [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $d 40 40] 41 41] 42 42] 43 43] 44 44] 45 45] 46 46] 47 47] 48 48] 49 49]\n  def f [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $e 50 50] 51 51] 52 52] 53 53] 54 54] 55 55] 56 56] 57 57] 58 58] 59 59]\n  def g [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $f 60 60] 61 61] 62 62] 63 63] 64 64] 65 65] 66 66] 67 67] 68 68] 69 69]\n  def h [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $g 70 70] 71 71] 72 72] 73 73] 74 74] 75 75] 76 76] 77 77] 78 78] 79 79]\n  def j [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $h 80 80] 81 81] 82 82] 83 83] 84 84] 85 85] 86 86] 87 87] 88 88] 89 89]\n  [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $j 90 90] 91 91] 92 92] 93 93] 94 94] 95 95] 96 96] 97 97] 98 98] 99 99]\n}\n\n# Sum 10 vector elements starting at index i\nproc s10 {v, i} {\n  [+ [+ [+ [+ [vec-get $v $i] [vec-get $v [+ $i 1]]] [+ [vec-get $v [+ $i 2]] [vec-get $v [+ $i 3]]]] [+ [+ [vec-get $v [+ $i 4]] [vec-get $v [+ $i 5]]] [+ [vec-get $v [+ $i 6]] [vec-get $v [+ $i 7]]]]] [+ [vec-get $v [+ $i 8]] [vec-get $v [+ $i 9]]]]\n}\n\n# Sum 100 vector elements starting at s\nproc sv100 {v, s} {\n  def a [s10 $v $s]\n  def b [s10 $v [+ $s 10]]\n  def c [s10 $v [+ $s 20]]\n  def d [s10 $v [+ $s 30]]\n  def e [s10 $v [+ $s 40]]\n  def f [s10 $v [+ $s 50]]\n  def g [s10 $v [+ $s 60]]\n  def h [s10 $v [+ $s 70]]\n  def j [s10 $v [+ $s 80]]\n  def k [s10 $v [+ $s 90]]\n  [+ [+ [+ [+ $a $b] [+ $c $d]] [+ [+ $e $f] [+ $g $h]]] [+ $j $k]]\n}\n\n# Sum all 1000 vector elements\nproc sumv {v} {\n  def a [sv100 $v 0]\n  def b [sv100 $v 100]\n  def c [sv100 $v 200]\n  def d [sv100 $v 300]\n  def e [sv100 $v 400]\n  def f [sv100 $v 500]\n  def g [sv100 $v 600]\n  def h [sv100 $v 700]\n  def j [sv100 $v 800]\n  def k [sv100 $v 900]\n  [+ [+ [+ [+ $a $b] [+ $c $d]] [+ [+ $e $f] [+ $g $h]]] [+ $j $k]]\n}\n\n# Sum 10 map values starting at key i\nproc sm10 {m, i} {\n  [+ [+ [+ [+ [map-get $m $i] [map-get $m [+ $i 1]]] [+ [map-get $m [+ $i 2]] [map-get $m [+ $i 3]]]] [+ [+ [map-get $m [+ $i 4]] [map-get $m [+ $i 5]]] [+ [map-get $m [+ $i 6]] [map-get $m [+ $i 7]]]]] [+ [map-get $m [+ $i 8]] [map-get $m [+ $i 9]]]]\n}\n\n# Sum all 100 map values\nproc summ {m} {\n  def a [sm10 $m 0]\n  def b [sm10 $m 10]\n  def c [sm10 $m 20]\n  def d [sm10 $m 30]\n  def e [sm10 $m 40]\n  def f [sm10 $m 50]\n  def g [sm10 $m 60]\n  def h [sm10 $m 70]\n  def j [sm10 $m 80]\n  def k [sm10 $m 90]\n  [+ [+ [+ [+ $a $b] [+ $c $d]] [+ [+ $e $f] [+ $g $h]]] [+ $j $k]]\n}\n\n# Generate garbage to trigger GC\nproc trash {i, n} {\n  if [< $i $n] {\n    def v [vec 1 2 3 4 5 6 7 8 9 10]\n    def w [vec-push [vec-push [vec-push $v 11] 12] 13]\n    [trash [+ $i 1] $n]\n  } else { 0 }\n}\n\nproc main {} {\n  def v [mkv]\n  def m [mkm]\n  def r [parallel { [trash 0 20]; [sumv $v] } { def d [c100 $v 1000]; [sumv $v] } { [trash 0 20]; [summ $m] } { def d [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set [map-set $m 100 100] 101 101] 102 102] 103 103] 104 104] 105 105] 106 106] 107 107] 108 108] 109 109]; [summ $m] }]\n  def s0 [vec-get $r 0]\n  def s1 [vec-get $r 1]\n  def s2 [vec-get $r 2]\n  def s3 [vec-get $r 3]\n  def sv [sumv $v]\n  def sm [summ $m]\n  print [+ [+ [+ [+ [+ $s0 $s1] $s2] $s3] $sv] $sm]\n}\nmain\n",
+    "concurrent": true,
+    "description": "US-010: E2E stress test — parallel with large persistent data structures."
+  },
+  {
+    "name": "gc_stress_race",
+    "category": "gc",
+    "code": "# mode: concurrent\n# expect: 800\n# US-013: Race with GC and write barriers — runs 8 sequential races,\n# each with 5 branches allocating different amounts of garbage.\n# All branches return the same value (100) for deterministic output.\n# Winner result = 100 per race, 8 races = 800. GC triggered by\n# heavy allocation across race branches.\n\nproc trash {i, n} {\n  if [< $i $n] {\n    def v [vec 1 2 3 4 5 6 7 8 9 10 11 12 13]\n    def w [vec-push [vec-push $v 14] 15]\n    [trash [+ $i 1] $n]\n  } else { 0 }\n}\n\nproc work {n} {\n  [trash 0 $n]\n  100\n}\n\nproc r5 {} {\n  [race { [work 5] } { [work 10] } { [work 20] } { [work 30] } { [work 40] }]\n}\n\nproc main {} {\n  def r0 [r5]\n  def r1 [r5]\n  def r2 [r5]\n  def r3 [r5]\n  def r4 [r5]\n  def r5v [r5]\n  def r6 [r5]\n  def r7 [r5]\n  print [+ [+ [+ $r0 $r1] [+ $r2 $r3]] [+ [+ $r4 $r5v] [+ $r6 $r7]]]\n}\nmain\n",
+    "concurrent": true,
+    "description": "US-013: Race with GC and write barriers — runs 8 sequential races,"
+  },
+  {
+    "name": "gc_stress_spawn",
+    "category": "gc",
+    "code": "# mode: concurrent\n# expect: 5050\n# US-009: GC stress test — spawn 100 tasks producing garbage under concurrent GC.\n# Each task allocates vectors (garbage after use) and returns its index.\n# Final sum = 1+2+...+100 = 5050.\n\nproc trash {i, n} {\n  if [< $i $n] {\n    def v [vec 1 2 3 4 5 6 7 8 9 10]\n    def w [vec-push [vec-push [vec-push $v 11] 12] 13]\n    [trash [+ $i 1] $n]\n  } else { 0 }\n}\n\nproc work {id} {\n  [trash 0 30]\n  [+ $id 0]\n}\n\nproc s10 {base} {\n  def a0 [+ $base 1]\n  def a1 [+ $base 2]\n  def a2 [+ $base 3]\n  def a3 [+ $base 4]\n  def a4 [+ $base 5]\n  def a5 [+ $base 6]\n  def a6 [+ $base 7]\n  def a7 [+ $base 8]\n  def a8 [+ $base 9]\n  def a9 [+ $base 10]\n  def f0 [spawn { [work $a0] }]\n  def f1 [spawn { [work $a1] }]\n  def f2 [spawn { [work $a2] }]\n  def f3 [spawn { [work $a3] }]\n  def f4 [spawn { [work $a4] }]\n  def f5 [spawn { [work $a5] }]\n  def f6 [spawn { [work $a6] }]\n  def f7 [spawn { [work $a7] }]\n  def f8 [spawn { [work $a8] }]\n  def f9 [spawn { [work $a9] }]\n  def r0 [await $f0]\n  def r1 [await $f1]\n  def r2 [await $f2]\n  def r3 [await $f3]\n  def r4 [await $f4]\n  def r5 [await $f5]\n  def r6 [await $f6]\n  def r7 [await $f7]\n  def r8 [await $f8]\n  def r9 [await $f9]\n  [+ [+ [+ [+ $r0 $r1] [+ $r2 $r3]] [+ [+ $r4 $r5] [+ $r6 $r7]]] [+ $r8 $r9]]\n}\n\nproc main {} {\n  def r0 [s10 0]\n  def r1 [s10 10]\n  def r2 [s10 20]\n  def r3 [s10 30]\n  def r4 [s10 40]\n  def r5 [s10 50]\n  def r6 [s10 60]\n  def r7 [s10 70]\n  def r8 [s10 80]\n  def r9 [s10 90]\n  print [+ [+ [+ [+ $r0 $r1] [+ $r2 $r3]] [+ [+ $r4 $r5] [+ $r6 $r7]]] [+ $r8 $r9]]\n}\nmain\n",
+    "concurrent": true,
+    "description": "US-009: GC stress test — spawn 100 tasks producing garbage under concurrent GC."
+  },
+  {
+    "name": "line_continuation",
+    "category": "line",
+    "code": "# expect: 42\n# expect: 7\n# backslash continuation joins the next line\ndef x \\\n42\nprint [+ $x 0]\n# continuation in command\nprint [+ \\\n3 4]\n",
+    "concurrent": false,
+    "description": "backslash continuation joins the next line"
+  },
+  {
+    "name": "lines_basic",
+    "category": "lines",
+    "code": "# expect: [vec \"a\" \"b\" \"c\"]\n# lines splits string into lazy line stream\nprint [collect [lines \"a\\nb\\nc\"]]\n",
+    "concurrent": false,
+    "description": "lines splits string into lazy line stream"
+  },
+  {
+    "name": "lines_crlf",
+    "category": "lines",
+    "code": "# expect: [vec \"hello\" \"world\"]\n# lines handles \\r\\n line endings\nprint [collect [lines \"hello\\r\\nworld\"]]\n",
+    "concurrent": false,
+    "description": "lines handles \\r\\n line endings"
+  },
+  {
+    "name": "lines_for",
+    "category": "lines",
+    "code": "# expect: hello\n# expect: world\n# iterate lines with for\nfor [lines \"hello\\nworld\"] {\n  print $it\n}\n",
+    "concurrent": false,
+    "description": "iterate lines with for"
+  },
+  {
+    "name": "map_arity_get",
+    "category": "map",
+    "code": "# expect-error: builtin 'map-get' expects 2 arguments but got 1\n# map-get arity error\nmap-get [map]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'map-get' expects 2 arguments but got 1"
+  },
+  {
+    "name": "map_arity_has",
+    "category": "map",
+    "code": "# expect-error: builtin 'map-has' expects 2 arguments but got 1\n# map-has arity error\nmap-has [map]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'map-has' expects 2 arguments but got 1"
+  },
+  {
+    "name": "map_arity_keys",
+    "category": "map",
+    "code": "# expect-error: builtin 'map-keys' expects 1 argument but got 2\n[map-keys [map] \"extra\"]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'map-keys' expects 1 argument but got 2"
+  },
+  {
+    "name": "map_arity_len",
+    "category": "map",
+    "code": "# expect-error: builtin 'map-len' expects 1 argument but got 0\n# map-len arity error\nmap-len\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'map-len' expects 1 argument but got 0"
+  },
+  {
+    "name": "map_arity_odd",
+    "category": "map",
+    "code": "# expect-error: builtin 'map' expects an even number of arguments but got 3\n# map with odd args is a compile-time arity error\nmap \"a\" 1 \"b\"\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'map' expects an even number of arguments but got 3"
+  },
+  {
+    "name": "map_arity_remove",
+    "category": "map",
+    "code": "# expect-error: builtin 'map-remove' expects 2 arguments but got 1\n[map-remove [map]]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'map-remove' expects 2 arguments but got 1"
+  },
+  {
+    "name": "map_arity_set",
+    "category": "map",
+    "code": "# expect-error: builtin 'map-set' expects 3 arguments but got 2\n[map-set [map] \"a\"]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'map-set' expects 3 arguments but got 2"
+  },
+  {
+    "name": "map_arity_vals",
+    "category": "map",
+    "code": "# expect-error: builtin 'map-vals' expects 1 argument but got 2\n[map-vals [map] \"extra\"]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'map-vals' expects 1 argument but got 2"
+  },
+  {
+    "name": "map_construct",
+    "category": "map",
+    "code": "# expect: 0\n# expect: 2\n# expect: 0\n# map constructor and map-len\nprint [map-len [map]]\nprint [map-len [map \"a\" 1 \"b\" 2]]\nprint [map-len [map]]\n",
+    "concurrent": false,
+    "description": "map constructor and map-len"
+  },
+  {
+    "name": "map_construct_single",
+    "category": "map",
+    "code": "# expect: 1\n# expect: 1\n# [map \"a\" 1] creates a 1-pair map (M8a fix)\ndef m [map \"a\" 1]\nprint [map-len $m]\nprint [map-get $m \"a\"]\n",
+    "concurrent": false,
+    "description": "[map \"a\" 1] creates a 1-pair map (M8a fix)"
+  },
+  {
+    "name": "map_get",
+    "category": "map",
+    "code": "# expect: 1\n# expect: 2\n# map-get returns value for existing key\ndef m [map \"a\" 1 \"b\" 2]\nprint [map-get $m \"a\"]\nprint [map-get $m \"b\"]\n",
+    "concurrent": false,
+    "description": "map-get returns value for existing key"
+  },
+  {
+    "name": "map_get_missing",
+    "category": "map",
+    "code": "# expect: nil\n# expect: nil\n# map-get returns nil for missing keys\ndef m [map-set [map] \"a\" 1]\nprint [map-get $m \"missing\"]\nprint [map-get [map] \"x\"]\n",
+    "concurrent": false,
+    "description": "map-get returns nil for missing keys"
+  },
+  {
+    "name": "map_has",
+    "category": "map",
+    "code": "# expect: true\n# expect: false\n# expect: false\n# map-has returns bool for key existence\ndef m [map \"a\" 1 \"b\" 2]\nprint [map-has $m \"a\"]\nprint [map-has $m \"missing\"]\nprint [map-has [map] \"x\"]\n",
+    "concurrent": false,
+    "description": "map-has returns bool for key existence"
+  },
+  {
+    "name": "map_keys",
+    "category": "map",
+    "code": "# expect: 2\n# expect: 0\n# map-keys returns a vector of keys\ndef m [map \"x\" 10 \"y\" 20]\nprint [vec-len [map-keys $m]]\nprint [vec-len [map-keys [map]]]\n",
+    "concurrent": false,
+    "description": "map-keys returns a vector of keys"
+  },
+  {
+    "name": "map_map_key",
+    "category": "map",
+    "code": "# expect: nested\nprint [map-get [map [map \"x\" 1] \"nested\"] [map \"x\" 1]]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "map_mixed_keys",
+    "category": "map",
+    "code": "# expect: one\n# expect: yes\n# expect: 3\n# non-string keys: integer and boolean keys\ndef m [map 1 \"one\" $true \"yes\"]\nprint [map-get $m 1]\nprint [map-get $m $true]\nprint [map-len [map 1 \"a\" 2 \"b\" 3 \"c\"]]\n",
+    "concurrent": false,
+    "description": "non-string keys: integer and boolean keys"
+  },
+  {
+    "name": "map_nested_key",
+    "category": "map",
+    "code": "# expect: deep\n# nested collection as map key\ndef k [vec [vec 1 2] [vec 3]]\ndef m [map $k \"deep\"]\nprint [map-get $m [vec [vec 1 2] [vec 3]]]\n",
+    "concurrent": false,
+    "description": "nested collection as map key"
+  },
+  {
+    "name": "map_persist",
+    "category": "map",
+    "code": "# expect: 2\n# expect: 1\n# expect: 2\n# original map unchanged after set/remove (persistent semantics)\ndef m [map \"a\" 1 \"b\" 2]\ndef m2 [map-set $m \"c\" 3]\ndef m3 [map-remove $m \"a\"]\nprint [map-len $m]\nprint [map-get $m \"a\"]\nprint [map-len $m]\n",
+    "concurrent": false,
+    "description": "original map unchanged after set/remove (persistent semantics)"
+  },
+  {
+    "name": "map_remove",
+    "category": "map",
+    "code": "# expect: 1\n# expect: nil\n# expect: 2\n# map-remove removes existing key, absent key returns map unchanged\ndef m [map \"a\" 1 \"b\" 2]\ndef m2 [map-remove $m \"a\"]\nprint [map-len $m2]\nprint [map-get $m2 \"a\"]\ndef m3 [map-remove $m \"missing\"]\nprint [map-len $m3]\n",
+    "concurrent": false,
+    "description": "map-remove removes existing key, absent key returns map unchanged"
+  },
+  {
+    "name": "map_set",
+    "category": "map",
+    "code": "# expect: 3\n# expect: 99\n# map-set adds new key and overwrites existing key\ndef m [map \"a\" 1 \"b\" 2]\ndef m2 [map-set $m \"c\" 3]\nprint [map-get $m2 \"c\"]\ndef m3 [map-set $m \"a\" 99]\nprint [map-get $m3 \"a\"]\n",
+    "concurrent": false,
+    "description": "map-set adds new key and overwrites existing key"
+  },
+  {
+    "name": "map_transform_empty",
+    "category": "map",
+    "code": "# expect: 0\n# transforming an empty vector returns an empty vector\nproc inc {x} { [+ $x 1] }\ndef v2 [transform [vec] $inc]\nprint [vec-len $v2]\n",
+    "concurrent": false,
+    "description": "transforming an empty vector returns an empty vector"
+  },
+  {
+    "name": "map_transform_map",
+    "category": "map",
+    "code": "# expect: 10\n# transform on map: proc receives key and value, returns [key new-value]\ndef m [map-set [map] \"a\" 5]\nproc double {k, v} { [vec $k [* $v 2]] }\ndef m2 [transform $m $double]\nprint [map-get $m2 \"a\"]\n",
+    "concurrent": false,
+    "description": "transform on map: proc receives key and value, returns [key new-value]"
+  },
+  {
+    "name": "map_transform_vec",
+    "category": "map",
+    "code": "# expect: 2\n# expect: 3\n# expect: 4\n# transform on vector: apply proc to each element\ndef v [vec 1 2 3]\nproc inc {x} { [+ $x 1] }\ndef v2 [transform $v $inc]\nprint [vec-get $v2 0]\nprint [vec-get $v2 1]\nprint [vec-get $v2 2]\n",
+    "concurrent": false,
+    "description": "transform on vector: apply proc to each element"
+  },
+  {
+    "name": "map_vals",
+    "category": "map",
+    "code": "# expect: 2\n# expect: 0\n# map-vals returns a vector of values\ndef m [map \"x\" 10 \"y\" 20]\nprint [vec-len [map-vals $m]]\nprint [vec-len [map-vals [map]]]\n",
+    "concurrent": false,
+    "description": "map-vals returns a vector of values"
+  },
+  {
+    "name": "map_vec_key",
+    "category": "map",
+    "code": "# expect: a\nprint [map-get [map [vec 1] \"a\"] [vec 1]]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "mut_capture_spawn",
+    "category": "mut",
+    "code": "# expect: 42\n# mode: concurrent\n# Closure capturing a local mut binding (read via $x, no set) inside spawn body\n# should be pinned to owning thread — correct value is read\nproc main {} {\n  mut x 42\n  def f [spawn {\n    [+ $x 0]\n  }]\n  def r [await $f]\n  print $r\n}\nmain\n",
+    "concurrent": true,
+    "description": "Closure capturing a local mut binding (read via $x, no set) inside spawn body"
+  },
+  {
+    "name": "mut_closure_bidirectional",
+    "category": "mut",
+    "code": "# expect: 42\n# expect: 42\nproc test {} {\n  mut x 0\n  proc set-x {} { set x 42 }\n  [set-x]\n  print $x\n  [+ $x 0]\n}\nprint [test]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "mut_closure_shared",
+    "category": "mut",
+    "code": "# expect: 2\nproc make {} {\n  mut n 0\n  proc inc {} { set n [+ $n 1] }\n  proc get {} { [+ $n 0] }\n  [inc]\n  [inc]\n  [get]\n}\nprint [make]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "mut_global",
+    "category": "mut",
+    "code": "# expect: 2\n# mut/set on mutable globals\nmut counter 0\nset counter 1\nset counter [+ $counter 1]\nprint [+ $counter 0]\n",
+    "concurrent": false,
+    "description": "mut/set on mutable globals"
+  },
+  {
+    "name": "mut_local_basic",
+    "category": "mut",
+    "code": "# expect: 42\n# expect: 0\n# mut local binding with cell auto-boxing\nproc t-mut {} {\n  mut x 42\n  print [+ $x 0]\n  mut y 0\n  print [+ $y 0]\n}\n[t-mut]\n",
+    "concurrent": false,
+    "description": "mut local binding with cell auto-boxing"
+  },
+  {
+    "name": "mut_transitive_spawn",
+    "category": "mut",
+    "code": "# expect: 42\n# mode: concurrent\n# Nested closure with box used in spawn — correct result (US-003)\n# proc f captures mut x, spawn body calls $f — transitive capture pinned\nproc main {} {\n  mut x 42\n  proc f {} {\n    [+ $x 0]\n  }\n  def r [await [spawn { [$f] }]]\n  print $r\n}\nmain\n",
+    "concurrent": true,
+    "description": "Nested closure with box used in spawn — correct result (US-003)"
+  },
+  {
+    "name": "parallel_await_error",
+    "category": "parallel",
+    "code": "# mode: concurrent\n# expect: true\n# expect: par-err\n# parallel body with spawn+await+error — CPS error propagation (US-004)\nproc main {} {\n  def r [parallel { 30 } { def f [spawn { error \"par-err\" }]; await $f }]\n  print [error? $r]\n  print [error-val $r]\n}\nmain\n",
+    "concurrent": true,
+    "description": "parallel body with spawn+await+error — CPS error propagation (US-004)"
+  },
+  {
+    "name": "parallel_concurrent",
+    "category": "parallel",
+    "code": "# mode: concurrent\n# expect: 3\n# expect: 12\n# parallel with concurrent mode for real worker execution\nproc main {} {\n  def r [parallel { [+ 1 2] } { [* 3 4] }]\n  print [vec-get $r 0]\n  print [vec-get $r 1]\n}\nmain\n",
+    "concurrent": true,
+    "description": "parallel with concurrent mode for real worker execution"
+  },
+  {
+    "name": "parallel_error",
+    "category": "parallel",
+    "code": "# mode: concurrent\n# expect: true\n# expect: fail\n# one parallel body errors, result is error (first-error-wins)\nproc main {} {\n  def r [parallel { 42 } { error \"fail\" }]\n  print [error? $r]\n  print [error-val $r]\n}\nmain\n",
+    "concurrent": true,
+    "description": "one parallel body errors, result is error (first-error-wins)"
+  },
+  {
+    "name": "parallel_error_cont",
+    "category": "parallel",
+    "code": "# mode: concurrent\n# expect: true\n# expect: fail\nproc main {} {\n  def r [parallel { 42 } { error \"fail\" }]\n  print [error? $r]\n  print [error-val $r]\n}\nmain\n",
+    "concurrent": true,
+    "description": ""
+  },
+  {
+    "name": "parallel_gc_pressure",
+    "category": "parallel",
+    "code": "# mode: concurrent\n# expect: 144\n# expect: 55\n# expect: 21\n# expect: 8\n# US-002 regression: parallel result vector must survive GC between\n# completion and join continuation execution. Heavy allocation in each\n# body creates GC pressure; concurrent mode exercises real worker threads.\nproc fib {n} {\n  if [< $n 2] { [+ $n 0] } else {\n    [+ [fib [- $n 1]] [fib [- $n 2]]]\n  }\n}\nproc main {} {\n  def r [parallel { [fib 12] } { [fib 10] } { [fib 8] } { [fib 6] }]\n  print [vec-get $r 0]\n  print [vec-get $r 1]\n  print [vec-get $r 2]\n  print [vec-get $r 3]\n}\nmain\n",
+    "concurrent": true,
+    "description": "US-002 regression: parallel result vector must survive GC between"
+  },
+  {
+    "name": "parallel_order",
+    "category": "parallel",
+    "code": "# expect: 55\n# expect: 5\n# expect: 42\n# parallel preserves input order in result vector (not completion order)\nproc fib {n} {\n  if [< $n 2] { [+ $n 0] } else {\n    [+ [fib [- $n 1]] [fib [- $n 2]]]\n  }\n}\nproc main {} {\n  def r [parallel { [fib 10] } { [+ 2 3] } { 42 }]\n  print [vec-get $r 0]\n  print [vec-get $r 1]\n  print [vec-get $r 2]\n}\nmain\n",
+    "concurrent": true,
+    "description": "parallel preserves input order in result vector (not completion order)"
+  },
+  {
+    "name": "parallel_two",
+    "category": "parallel",
+    "code": "# expect: [vec 10 20]\n# parallel with 2 bodies, print result vector\nproc main {} {\n  def r [parallel { 10 } { 20 }]\n  print $r\n}\nmain\n",
+    "concurrent": true,
+    "description": "parallel with 2 bodies, print result vector"
+  },
+  {
+    "name": "parallel_with_await",
+    "category": "parallel",
+    "code": "# mode: concurrent\n# expect: 100\n# expect: 200\n# parallel bodies that internally use spawn+await\nproc main {} {\n  def r [parallel { def f [spawn { 100 }]; await $f } { def g [spawn { 200 }]; await $g }]\n  print [vec-get $r 0]\n  print [vec-get $r 1]\n}\nmain\n",
+    "concurrent": true,
+    "description": "parallel bodies that internally use spawn+await"
+  },
+  {
+    "name": "print_box_atom",
+    "category": "print",
+    "code": "# expect: <box: 42>\n# expect: <atom: 0>\n# expect: <box: [vec 1 2 3]>\n# expect: <atom: \"hello\">\n# expect: 99\n# Print box\n[print [box 42]]\n# Print atom\n[print [atom 0]]\n# Nested container: box holding a vector\n[print [box [vec 1 2 3]]]\n# Atom holding a string\n[print [atom \"hello\"]]\n# Cell transparency: mut local prints contained value directly\nproc t {} {\n  mut x 99\n  [print $x]\n}\n[t]\n",
+    "concurrent": false,
+    "description": "Print box"
+  },
+  {
+    "name": "print_map",
+    "category": "print",
+    "code": "# expect: [map]\n# expect: [map \"a\" 1]\n# print displays maps in constructor syntax with quoted string keys\nprint [map]\nprint [map-set [map] \"a\" 1]\n",
+    "concurrent": false,
+    "description": "print displays maps in constructor syntax with quoted string keys"
+  },
+  {
+    "name": "print_nested",
+    "category": "print",
+    "code": "# expect: [vec [vec 1] [map \"x\" 2]]\n# nested constructor syntax\nprint [vec [vec 1] [map-set [map] \"x\" 2]]\n",
+    "concurrent": false,
+    "description": "nested constructor syntax"
+  },
+  {
+    "name": "print_typed",
+    "category": "print",
+    "code": "# expect: 42\n# expect: 255\n# expect: 1000000\n# expect: 99\n# expect: 3.14\n# expect: 2.718\n# expect: x is 42\n# expect: pi is 3.14\n\n# i64 via to-string and print\ndef i64 a 42\nprint [to-string $a]\n\n# u32 via to-string and print\ndef u32 b 255\nprint [to-string $b]\n\n# u64 via to-string and print\ndef u64 c 1000000\nprint [to-string $c]\n\n# i32 via to-string and print (existing, no regression)\ndef i32 d 99\nprint [to-string $d]\n\n# f64 via to-string and print\ndef f64 e 3.14\nprint [to-string $e]\n\n# f32 via to-string and print (existing, no regression)\ndef f32 f 2.718\nprint [to-string $f]\n\n# string interpolation with typed values\nprint \"x is $a\"\nprint \"pi is $e\"\n",
+    "concurrent": false,
+    "description": "i64 via to-string and print"
+  },
+  {
+    "name": "print_vec",
+    "category": "print",
+    "code": "# expect: [vec 1 2 3]\n# expect: [vec]\n# print displays vectors in constructor syntax\nprint [vec 1 2 3]\nprint [vec]\n",
+    "concurrent": false,
+    "description": "print displays vectors in constructor syntax"
+  },
+  {
+    "name": "procs",
+    "category": "procs",
+    "code": "# expect: 20\n# expect: 3628800\n# expect: 15\n# expect: 100\n# proc definition and call\nproc double {n} { [* $n 2] }\nprint [double 10]\n# recursion (factorial)\nproc fact {n} {\n  [if [== $n 0] { 1 } { [* $n [fact [- $n 1]]] }]\n}\nprint [fact 10]\n# closures (make-adder)\nproc mkadd {x} {\n  proc inner {y} { [+ $x $y] }\n}\ndef add10 [mkadd 10]\nprint [add10 5]\nprint [add10 90]\n",
+    "concurrent": false,
+    "description": "proc definition and call"
+  },
+  {
+    "name": "race_basic",
+    "category": "race",
+    "code": "# mode: concurrent\n# expect: 10\n# race two bodies, both return same value for deterministic concurrent output\nproc main {} {\n  def r [race { 10 } { 10 }]\n  print $r\n}\nmain\n",
+    "concurrent": true,
+    "description": "race two bodies, both return same value for deterministic concurrent output"
+  },
+  {
+    "name": "race_concurrent",
+    "category": "race",
+    "code": "# mode: concurrent\n# expect: 42\n# race with concurrent mode - both bodies return same value for deterministic output\nproc main {} {\n  def r [race { 42 } { 42 }]\n  print $r\n}\nmain\n",
+    "concurrent": true,
+    "description": "race with concurrent mode - both bodies return same value for deterministic output"
+  },
+  {
+    "name": "race_error",
+    "category": "race",
+    "code": "# mode: concurrent\n# expect: true\n# expect: boom\n# race where both bodies error, result is error regardless of winner\nproc main {} {\n  def r [race { error \"boom\" } { error \"boom\" }]\n  print [error? $r]\n  print [error-val $r]\n}\nmain\n",
+    "concurrent": true,
+    "description": "race where both bodies error, result is error regardless of winner"
+  },
+  {
+    "name": "reset_basic",
+    "category": "reset",
+    "code": "# expect: 99\n# expect: 99\n# expect: 5\n# reset stores a new value and returns it\ndef b [box 0]\n[print [reset $b 99]]\n# deref confirms the update\n[print [deref $b]]\n# reset works on atoms too\ndef a [atom 10]\n[reset $a 5]\n[print [deref $a]]\n",
+    "concurrent": false,
+    "description": "reset stores a new value and returns it"
+  },
+  {
+    "name": "separators",
+    "category": "separators",
+    "code": "# expect: 3\n# expect: 30\n# expect: 9\n# expect: 15\n# semicolon separator\ndef x 1; def y 2; print [+ $x $y]\n# comma separator\ndef a 10, def b 20, print [+ $a $b]\n# newline separator\ndef c 3\ndef d 3\nprint [* $c $d]\n# mixed separators\ndef e 5; def f 5, def g 5\nprint [+ [+ $e $f] $g]\n",
+    "concurrent": false,
+    "description": "semicolon separator"
+  },
+  {
+    "name": "set_concurrent_parallel",
+    "category": "set",
+    "code": "# expect: 10\n# expect: 20\n# mode: concurrent\n# set inside parallel bodies — each body is pinned to the parent worker\nmut x 0\nproc main {} {\n  def r [parallel {\n    set x 10\n    [+ $x 0]\n  } {\n    set x 20\n    [+ $x 0]\n  }]\n  print [vec-get $r 0]\n  print [vec-get $r 1]\n}\nmain\n",
+    "concurrent": true,
+    "description": "set inside parallel bodies — each body is pinned to the parent worker"
+  },
+  {
+    "name": "set_concurrent_spawn",
+    "category": "set",
+    "code": "# expect: 42\n# mode: concurrent\n# set inside a spawn body is pinned to the parent worker thread\nmut x 0\nproc main {} {\n  def f [spawn {\n    set x 42\n    [+ $x 0]\n  }]\n  def r [await $f]\n  print $r\n}\nmain\n",
+    "concurrent": true,
+    "description": "set inside a spawn body is pinned to the parent worker thread"
+  },
+  {
+    "name": "set_global_immutable_error",
+    "category": "set",
+    "code": "# expect-error: cannot mutate immutable binding 'x'\n# set on a def global is a compile error\ndef x 10\nset x 42\n",
+    "concurrent": false,
+    "description": "expect-error: cannot mutate immutable binding 'x'"
+  },
+  {
+    "name": "set_immutable_error",
+    "category": "set",
+    "code": "# expect-error: cannot mutate immutable binding 'x'\n# set on a def binding is a compile error\nproc t-imm {} {\n  def x 10\n  set x 42\n}\n[t-imm]\n",
+    "concurrent": false,
+    "description": "expect-error: cannot mutate immutable binding 'x'"
+  },
+  {
+    "name": "set_local",
+    "category": "set",
+    "code": "# expect: 42\n# expect: 15\n# set on mutable locals\nproc t-set {} {\n  mut x 0\n  set x 42\n  print [+ $x 0]\n  mut y 10\n  set y [+ $y 5]\n  print [+ $y 0]\n}\n[t-set]\n",
+    "concurrent": false,
+    "description": "set on mutable locals"
+  },
+  {
+    "name": "set_local_in_spawn",
+    "category": "set",
+    "code": "# expect: 42\n# mode: concurrent\n# set targeting a local mut inside spawn does not need pinning\nproc main {} {\n  def f [spawn {\n    mut x 0\n    set x 42\n    [+ $x 0]\n  }]\n  def r [await $f]\n  print $r\n}\nmain\n",
+    "concurrent": true,
+    "description": "set targeting a local mut inside spawn does not need pinning"
+  },
+  {
+    "name": "set_param_error",
+    "category": "set",
+    "code": "# expect-error: cannot mutate parameter 'x'\n# set on a function parameter is a compile error\nproc t-par {x} {\n  set x 42\n}\n[t-par 10]\n",
+    "concurrent": false,
+    "description": "expect-error: cannot mutate parameter 'x'"
+  },
+  {
+    "name": "spawn_basic",
+    "category": "spawn",
+    "code": "# mode: concurrent\n# expect: 42\n# spawn a simple computation on a worker, await the result\nproc main {} {\n  def f [spawn { [+ 20 22] }]\n  print [await $f]\n}\nmain\n",
+    "concurrent": true,
+    "description": "spawn a simple computation on a worker, await the result"
+  },
+  {
+    "name": "spawn_heavy",
+    "category": "spawn",
+    "code": "# mode: concurrent\n# expect: 610\n# spawn fibonacci computation to exercise heavy allocation and GC under concurrency\nproc fib {n} {\n  if [< $n 2] { [+ $n 0] } else {\n    [+ [fib [- $n 1]] [fib [- $n 2]]]\n  }\n}\nproc main {} {\n  def f [spawn { [fib 15] }]\n  print [await $f]\n}\nmain\n",
+    "concurrent": true,
+    "description": "spawn fibonacci computation to exercise heavy allocation and GC under concurrency"
+  },
+  {
+    "name": "spawn_multi",
+    "category": "spawn",
+    "code": "# mode: concurrent\n# expect: 10\n# expect: 20\n# expect: 30\n# spawn multiple tasks, await each sequentially, print in order\nproc main {} {\n  def f1 [spawn { 10 }]\n  def f2 [spawn { 20 }]\n  def f3 [spawn { 30 }]\n  print [await $f1]\n  print [await $f2]\n  print [await $f3]\n}\nmain\n",
+    "concurrent": true,
+    "description": "spawn multiple tasks, await each sequentially, print in order"
+  },
+  {
+    "name": "spawn_nested",
+    "category": "spawn",
+    "code": "# mode: concurrent\n# expect: 100\n# spawn a task that itself spawns and awaits an inner task\nproc main {} {\n  def f [spawn {\n    def g [spawn { [* 10 10] }]\n    await $g\n  }]\n  print [await $f]\n}\nmain\n",
+    "concurrent": true,
+    "description": "spawn a task that itself spawns and awaits an inner task"
+  },
+  {
+    "name": "spawn_susp_proc",
+    "category": "spawn",
+    "code": "# expect: 42\n# spawn body calling a named suspending proc (US-003)\nproc slow {} {\n  def f [spawn { 42 }]\n  await $f\n}\nproc main {} {\n  def f [spawn { slow }]\n  def r [await $f]\n  print $r\n}\nmain\n",
+    "concurrent": true,
+    "description": "spawn body calling a named suspending proc (US-003)"
+  },
+  {
+    "name": "spawn_value",
+    "category": "spawn",
+    "code": "# expect: true\n# expect: 10\n# spawn returns a future; await extracts the value\nproc main {} {\n  def f [spawn { 10 }]\n  print [future? $f]\n  print [await $f]\n}\nmain\n",
+    "concurrent": true,
+    "description": "spawn returns a future; await extracts the value"
+  },
+  {
+    "name": "spread_basic",
+    "category": "spread",
+    "code": "# expect: 6\n# spread vector into + fold\nnums = [vec 1 2 3]\nprint [+ ..$nums]\n",
+    "concurrent": false,
+    "description": "spread vector into + fold"
+  },
+  {
+    "name": "spread_proc",
+    "category": "spread",
+    "code": "# expect: 60\n# spread vector into user proc\nproc add3 {a, b, c} { [+ [+ $a $b] $c] }\nargs = [vec 10 20 30]\nprint [add3 ..$args]\n",
+    "concurrent": false,
+    "description": "spread vector into user proc"
+  },
+  {
+    "name": "spread_stream",
+    "category": "spread",
+    "code": "# expect: 60\n# spread eagerly consumes a generator stream into arguments\nproc gen {} {\n  [yield 10]\n  [yield 20]\n  [yield 30]\n}\ns = [gen]\nprint [+ ..$s]\n",
+    "concurrent": false,
+    "description": "spread eagerly consumes a generator stream into arguments"
+  },
+  {
+    "name": "stack_trace_basic",
+    "category": "stack",
+    "code": "# expect: caught\n# expect:   at foo (line 6)\n# expect:   at <main> (line 9)\n# Test: stack-trace captures call chain at error creation\nproc foo {} {\n  [error \"oops\"]\n}\n[try {\n  [foo]\n} e {\n  [print \"caught\"]\n  [print [stack-trace]]\n}]\n",
+    "concurrent": false,
+    "description": "Test: stack-trace captures call chain at error creation"
+  },
+  {
+    "name": "stack_trace_empty",
+    "category": "stack",
+    "code": "# expect: empty\n# Test: stack-trace returns empty string when no error created\ndef t [stack-trace]\n[if [== [length $t] 0] { [print \"empty\"] } { [print \"not empty\"] }]\n",
+    "concurrent": false,
+    "description": "Test: stack-trace returns empty string when no error created"
+  },
+  {
+    "name": "stack_trace_nested",
+    "category": "stack",
+    "code": "# expect: caught\n# expect:   at inner (line 7)\n# expect:   at outer (line 10)\n# expect:   at <main> (line 13)\n# Test: stack-trace from nested calls shows full call chain\nproc inner {} {\n  [error \"deep\"]\n}\nproc outer {} {\n  [inner]\n}\n[try {\n  [outer]\n} e {\n  [print \"caught\"]\n  [print [stack-trace]]\n}]\n",
+    "concurrent": false,
+    "description": "Test: stack-trace from nested calls shows full call chain"
+  },
+  {
+    "name": "stream_count",
+    "category": "stream",
+    "code": "# expect: 3\n# expect: 5\n# count elements in stream and vector\nproc gen {} {\n  [yield 1]\n  [yield 2]\n  [yield 3]\n}\nprint [count [gen]]\nprint [count [vec 10 20 30 40 50]]\n",
+    "concurrent": false,
+    "description": "count elements in stream and vector"
+  },
+  {
+    "name": "stream_filter",
+    "category": "stream",
+    "code": "# expect: [vec 3 4 5]\n# filter stream lazily\nproc gen {} {\n  [yield 1]\n  [yield 2]\n  [yield 3]\n  [yield 4]\n  [yield 5]\n}\nprint [collect [filter [gen] [\\ > $it 2]]]\n",
+    "concurrent": false,
+    "description": "filter stream lazily"
+  },
+  {
+    "name": "stream_first",
+    "category": "stream",
+    "code": "# expect: 1\n# expect: 10\n# first element from stream and vector\nproc gen {} {\n  [yield 1]\n  [yield 2]\n  [yield 3]\n}\nprint [first [gen]]\nprint [first [vec 10 20 30]]\n",
+    "concurrent": false,
+    "description": "first element from stream and vector"
+  },
+  {
+    "name": "stream_for",
+    "category": "stream",
+    "code": "# expect: 10\n# expect: 20\n# expect: 30\n# for loop over a stream\nproc gen {} {\n  [yield 10]\n  [yield 20]\n  [yield 30]\n}\nfor [gen] {\n  print $it\n}\n",
+    "concurrent": false,
+    "description": "for loop over a stream"
+  },
+  {
+    "name": "stream_pipeline",
+    "category": "stream",
+    "code": "# expect: [vec 6 8 10]\n# chained stream pipeline: generate, filter, transform, collect\nproc gen {} {\n  [yield 1]\n  [yield 2]\n  [yield 3]\n  [yield 4]\n  [yield 5]\n}\nprint [collect [transform [filter [gen] [\\ > $it 2]] [\\ * $it 2]]]\n",
+    "concurrent": false,
+    "description": "chained stream pipeline: generate, filter, transform, collect"
+  },
+  {
+    "name": "stream_take",
+    "category": "stream",
+    "code": "# expect: [vec 1 2]\n# take first N elements from stream\nproc gen {} {\n  [yield 1]\n  [yield 2]\n  [yield 3]\n  [yield 4]\n  [yield 5]\n}\nprint [collect [take [gen] 2]]\n",
+    "concurrent": false,
+    "description": "take first N elements from stream"
+  },
+  {
+    "name": "stream_transform",
+    "category": "stream",
+    "code": "# expect: [vec 2 4 6]\n# transform stream lazily (double each element)\nproc gen {} {\n  [yield 1]\n  [yield 2]\n  [yield 3]\n}\nprint [collect [transform [gen] [\\ * $it 2]]]\n",
+    "concurrent": false,
+    "description": "transform stream lazily (double each element)"
+  },
+  {
+    "name": "strings",
+    "category": "strings",
+    "code": "# expect: hello world\n# expect: hello JACL\n# expect: hello world\n# expect: 5\n# expect: h\n# expect: world\n# string literal\nprint \"hello world\"\n# string interpolation\ndef name \"JACL\"\nprint \"hello $name\"\n# concat\nprint [concat \"hello \" \"world\"]\n# length\nprint [length \"hello\"]\n# index\nprint [index \"hello\" 0]\n# slice\nprint [slice \"hello world\" 6 11]\n",
+    "concurrent": false,
+    "description": "string literal"
+  },
+  {
+    "name": "struct_all_types",
+    "category": "struct",
+    "code": "# expect: 42\n# expect: 1000000\n# expect: 7\n# expect: 9999999\n# expect: 3\n# expect: 2.71828\n# expect: hello\n# Test struct with all supported field types\nstruct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, str g}\n\ndef s [All 42 1000000 7 9999999 3.0 2.71828 \"hello\"]\nprint $s->a\nprint $s->b\nprint $s->c\nprint $s->d\nprint $s->e\nprint $s->f\nprint $s->g\n",
+    "concurrent": false,
+    "description": "Test struct with all supported field types"
+  },
+  {
+    "name": "struct_basic",
+    "category": "struct",
+    "code": "# expect: Point{x: 1, y: 2}\n# Test basic struct definition and instantiation\nstruct Point {i32 x, i32 y}\ndef p [Point 1 2]\nprint $p\n",
+    "concurrent": false,
+    "description": "Test basic struct definition and instantiation"
+  },
+  {
+    "name": "struct_dyn",
+    "category": "struct",
+    "code": "# expect: Point{x: 1, y: 2}\n# expect: 1\n# expect: 99\n# Test struct boxing and dyn interop\nstruct Point {i32 x, i32 y}\ndef dyn d [Point 1 2]\nprint $d\nprint $d->x\n. $d x 99\nprint $d->x\n",
+    "concurrent": false,
+    "description": "Test struct boxing and dyn interop"
+  },
+  {
+    "name": "struct_field_access",
+    "category": "struct",
+    "code": "# expect: 10\n# expect: 20\n# Test struct field access with dot command\nstruct Point {i32 x, i32 y}\ndef p [Point 10 20]\nprint $p->x\nprint $p->y\n",
+    "concurrent": false,
+    "description": "Test struct field access with dot command"
+  },
+  {
+    "name": "struct_field_nested",
+    "category": "struct",
+    "code": "# expect: 5\n# Test nested struct field access\nstruct Point {i32 x, i32 y}\nstruct Line {Point start, Point end}\ndef ln [Line [Point 5 6] [Point 10 20]]\nprint $ln->start->x\n",
+    "concurrent": false,
+    "description": "Test nested struct field access"
+  },
+  {
+    "name": "struct_gc_nested",
+    "category": "struct",
+    "code": "# expect: 42\n# expect: 99\n# Test: nested struct survives after outer struct is no longer referenced.\n# Extract inner struct, let outer become garbage, verify inner is still valid.\nstruct Point {i32 x, i32 y}\nstruct Line {Point start, Point end}\n\nproc getpt {} {\n  def ln [Line [Point 42 99] [Point 0 0]]\n  $ln->start\n}\n\ndef pt [getpt]\n# ln is now garbage — only pt (the inner Point) is still live\n# Allocate more to trigger GC\ndef a [Point 1 1]\ndef b [Point 2 2]\ndef c [Point 3 3]\ndef d [Line $a $b]\ndef e [Line $b $c]\nprint $pt->x\nprint $pt->y\n",
+    "concurrent": false,
+    "description": "Test: nested struct survives after outer struct is no longer referenced."
+  },
+  {
+    "name": "struct_gc_stress",
+    "category": "struct",
+    "code": "# expect: done\n# Stress test: allocate many structs in a loop, verify memory is reclaimed.\n# Each iteration creates structs that become garbage, triggering GC.\nstruct Point {i32 x, i32 y}\nstruct Line {Point start, Point end}\n\nproc batch {} {\n  def p1 [Point 1 2]\n  def p2 [Point 3 4]\n  def ln [Line $p1 $p2]\n  def p3 [Point 5 6]\n  def p4 [Point 7 8]\n  def l2 [Line $p3 $p4]\n  [+ $ln->start->x $l2->end->y]\n}\n\nproc loop {i, n} {\n  if [< $i $n] {\n    [batch]\n    [batch]\n    [batch]\n    [loop [+ $i 1] $n]\n  } else { 0 }\n}\n\n[loop 0 50]\nprint \"done\"\n",
+    "concurrent": false,
+    "description": "Stress test: allocate many structs in a loop, verify memory is reclaimed."
+  },
+  {
+    "name": "struct_in_map",
+    "category": "struct",
+    "code": "# expect: Point{x: 0, y: 0}\n# Test structs stored as map values\nstruct Point {i32 x, i32 y}\ndef m [map \"origin\" [Point 0 0]]\ndef p [map-get $m \"origin\"]\nprint $p\n",
+    "concurrent": false,
+    "description": "Test structs stored as map values"
+  },
+  {
+    "name": "struct_in_vec",
+    "category": "struct",
+    "code": "# expect: Point{x: 3, y: 4}\n# expect: 3\n# Test structs stored in vec\nstruct Point {i32 x, i32 y}\ndef v [vec [Point 1 2] [Point 3 4]]\ndef p [vec-get $v 1]\nprint $p\nprint $p->x\n",
+    "concurrent": false,
+    "description": "Test structs stored in vec"
+  },
+  {
+    "name": "struct_inline",
+    "category": "struct",
+    "code": "# expect: 42\n# Test inline anonymous struct type in defstruct field\nstruct Point {i32 x, i32 y}\nstruct Wrapper {struct{x:i32,y:i32} pos}\ndef w [Wrapper [Point 42 10]]\nprint $w->pos->x\n",
+    "concurrent": false,
+    "description": "Test inline anonymous struct type in defstruct field"
+  },
+  {
+    "name": "struct_nested_set",
+    "category": "struct",
+    "code": "# expect: 99\n# expect: 6\n# Test nested struct field mutation\nstruct Point {i32 x, i32 y}\nstruct Line {Point start, Point end}\ndef ln [Line [Point 5 6] [Point 10 20]]\n. $ln->start x 99\nprint $ln->start->x\nprint $ln->start->y\n",
+    "concurrent": false,
+    "description": "Test nested struct field mutation"
+  },
+  {
+    "name": "struct_proc",
+    "category": "struct",
+    "code": "# expect: 30\n# expect: Point{x: 100, y: 200}\n# Test struct as proc parameter and return value\nstruct Point {i32 x, i32 y}\n\nproc sum {Point, p} {\n  [+ $p->x $p->y]\n}\n\nproc mk {i32 a, i32 b} {\n  [Point $a $b]\n}\n\ndef p [Point 10 20]\nprint [sum $p]\nprint [mk 100 200]\n",
+    "concurrent": false,
+    "description": "Test struct as proc parameter and return value"
+  },
+  {
+    "name": "struct_set",
+    "category": "struct",
+    "code": "# expect: 99\n# expect: 20\n# Test struct field mutation via 3-arg dot syntax\nstruct Point {i32 x, i32 y}\ndef p [Point 10 20]\n. $p x 99\nprint $p->x\nprint $p->y\n",
+    "concurrent": false,
+    "description": "Test struct field mutation via 3-arg dot syntax"
+  },
+  {
+    "name": "struct_types",
+    "category": "struct",
+    "code": "# expect: Pair{a: 10, b: 20}\n# Test struct with i32 fields\nstruct Pair {i32 a, i32 b}\ndef r [Pair 10 20]\nprint $r\n",
+    "concurrent": false,
+    "description": "Test struct with i32 fields"
+  },
+  {
+    "name": "swap_basic",
+    "category": "swap",
+    "code": "# expect: 1\n# expect: 1\n# expect: 11\n# swap applies closure to current value, stores result, returns result\ndef b [box 0]\nproc inc {x} { [+ $x 1] }\n[print [swap $b $inc]]\n# deref confirms the update\n[print [deref $b]]\n# swap works on atoms\ndef a [atom 10]\n[swap $a $inc]\n[print [deref $a]]\n",
+    "concurrent": false,
+    "description": "swap applies closure to current value, stores result, returns result"
+  },
+  {
+    "name": "to_error",
+    "category": "to",
+    "code": "# expect-error: type error: cannot convert str to i64\ndef str s \"hello\"\ndef i64 x [to i64 $s]\n",
+    "concurrent": false,
+    "description": "expect-error: type error: cannot convert str to i64"
+  },
+  {
+    "name": "tostring_map",
+    "category": "tostring",
+    "code": "# expect: [map]\n# expect: [map \"a\" 1]\n# to-string returns constructor syntax for maps\nprint [to-string [map]]\nprint [to-string [map-set [map] \"a\" 1]]\n",
+    "concurrent": false,
+    "description": "to-string returns constructor syntax for maps"
+  },
+  {
+    "name": "tostring_vec",
+    "category": "tostring",
+    "code": "# expect: [vec 1 2]\n# expect: [vec]\n# to-string returns constructor syntax for vectors\nprint [to-string [vec 1 2]]\nprint [to-string [vec]]\n",
+    "concurrent": false,
+    "description": "to-string returns constructor syntax for vectors"
+  },
+  {
+    "name": "transform_arity",
+    "category": "transform",
+    "code": "# expect-error: builtin 'transform' expects 2 arguments\ntransform [vec 1]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'transform' expects 2 arguments"
+  },
+  {
+    "name": "try_arity",
+    "category": "try",
+    "code": "# expect-error: builtin 'try' expects 3 arguments but got 1\n[try { 42 }]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'try' expects 3 arguments but got 1"
+  },
+  {
+    "name": "try_basic",
+    "category": "try",
+    "code": "# expect: caught: oops\n[print [try { [error \"oops\"] } e { [concat \"caught: \" [error-val $e]] }]]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "try_multi_stmt",
+    "category": "try",
+    "code": "# expect: x\n[print [try { [error \"x\"]; [print \"skip\"]; 1 } e { [error-val $e] }]]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "try_nested",
+    "category": "try",
+    "code": "# expect: inner caught\n[print [try {\n  [try {\n    [error \"inner\"]\n  } e1 {\n    [concat [error-val $e1] \" caught\"]\n  }]\n} e2 {\n  [concat \"outer: \" [error-val $e2]]\n}]]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "try_no_error",
+    "category": "try",
+    "code": "# expect: 42\n[print [try { 42 } e { 0 }]]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "type_conversions",
+    "category": "type",
+    "code": "# expect: 42\ndef i32 n 42\ndef i64 big [to i64 $n]\nprint [to-string $big]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "type_enforce_collect_ok",
+    "category": "type",
+    "code": "# expect: a\n# collect converts stream to vector, then vec-get works\nprint [vec-get [collect [lines \"a\\nb\\nc\"]] 0]\n",
+    "concurrent": false,
+    "description": "collect converts stream to vector, then vec-get works"
+  },
+  {
+    "name": "type_enforce_vec_get",
+    "category": "type",
+    "code": "# expect-error: vec-get requires a vector; got stream (use collect to materialize)\n# compile-time error: stream passed to vec-get\n[vec-get [lines \"a\\nb\"] 0]\n",
+    "concurrent": false,
+    "description": "expect-error: vec-get requires a vector; got stream (use collect to materialize)"
+  },
+  {
+    "name": "typed_arith_error",
+    "category": "typed",
+    "code": "# expect-error: type error: cannot add i64 and f64\ndef i64 a 10\ndef f64 b 20.0\n[+ $a $b]\n",
+    "concurrent": false,
+    "description": "expect-error: type error: cannot add i64 and f64"
+  },
+  {
+    "name": "typed_arithmetic",
+    "category": "typed",
+    "code": "# expect: 30\ndef i64 a 10\ndef i64 b 20\nprint [to-string [+ $a $b]]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "typed_closure",
+    "category": "typed",
+    "code": "# expect: 150\n# expect: 200\n# expect: 25\ndef i64 base 100\nproc i64 addto {i64 n} { [+ $base $n] }\nprint [to-string [addto 50]]\nprint [to-string [addto 100]]\nproc i64 half {i64 n} { [/ $n 2] }\nprint [to-string [half 50]]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "typed_collection",
+    "category": "typed",
+    "code": "# expect: [vec 10 20 30]\n# expect: 20\n# expect: 42\ndef i32 a 10\ndef i32 b 20\ndef i32 c 30\ndef v [vec $a $b $c]\nprint [to-string $v]\nprint [to-string [vec-get $v 1]]\ndef m [map \"key\" 42]\nprint [to-string [map-get $m \"key\"]]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "typed_conversion_chain",
+    "category": "typed",
+    "code": "# expect: 42\n# expect: 42\n# expect: 42\ndef i32 x 42\ndef i64 y [to i64 $x]\nprint [to-string $y]\ndef f64 z [to f64 $y]\nprint [to-string $z]\ndef i32 back [to i32 $z]\nprint [to-string $back]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "typed_conversion_error",
+    "category": "typed",
+    "code": "# expect-error: type error: cannot convert str to i32\ndef str s \"hello\"\ndef i32 n [to i32 $s]\n",
+    "concurrent": false,
+    "description": "expect-error: type error: cannot convert str to i32"
+  },
+  {
+    "name": "typed_def_basic",
+    "category": "typed",
+    "code": "# expect: 42\ndef i64 x 42\nprint [to-string $x]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "typed_def_error",
+    "category": "typed",
+    "code": "# expect-error: type error: expected i64, got str\ndef i64 x \"hello\"\n",
+    "concurrent": false,
+    "description": "expect-error: type error: expected i64, got str"
+  },
+  {
+    "name": "typed_f32",
+    "category": "typed",
+    "code": "# expect: 4\n# expect: 1\n# expect: 3.75\n# expect: 0.5\ndef f32 a 2.5\ndef f32 b 1.5\nprint [to-string [+ $a $b]]\nprint [to-string [- $a $b]]\nprint [to-string [* $a $b]]\ndef f32 c 1.0\ndef f32 d 2.0\nprint [to-string [/ $c $d]]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "typed_f64",
+    "category": "typed",
+    "code": "# expect: 4\n# expect: 1\n# expect: 3.75\n# expect: 1.25\ndef f64 a 2.5\ndef f64 b 1.5\nprint [to-string [+ $a $b]]\nprint [to-string [- $a $b]]\nprint [to-string [* $a $b]]\ndef f64 c 5.0\ndef f64 d 4.0\nprint [to-string [/ $c $d]]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "typed_i32",
+    "category": "typed",
+    "code": "# expect: 15\n# expect: 5\n# expect: 50\n# expect: 2\n# expect: -10\n# expect: 2147483647\ndef i32 a 10\ndef i32 b 5\nprint [to-string [+ $a $b]]\nprint [to-string [- $a $b]]\nprint [to-string [* $a $b]]\nprint [to-string [/ $a $b]]\nprint [to-string [- $a]]\ndef i32 big 2147483647\nprint [to-string $big]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "typed_mut_basic",
+    "category": "typed",
+    "code": "# expect: 42\nmut i64 x 0\nset x 42\nprint [to-string $x]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "typed_proc",
+    "category": "typed",
+    "code": "# expect: 7\nproc i64 add {i64 a, i64 b} { [+ $a $b] }\nprint [to-string [add 3 4]]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "typed_proc_error",
+    "category": "typed",
+    "code": "# expect-error: type error: argument 1 of add expected i64, got str\nproc i64 add {i64 a, i64 b} { [+ $a $b] }\n[add \"x\" 2]\n",
+    "concurrent": false,
+    "description": "expect-error: type error: argument 1 of add expected i64, got str"
+  },
+  {
+    "name": "typed_set_error",
+    "category": "typed",
+    "code": "# expect-error: type error: cannot assign str to i64 binding 'x'\nmut i64 x 0\nset x \"hello\"\n",
+    "concurrent": false,
+    "description": "expect-error: type error: cannot assign str to i64 binding 'x'"
+  },
+  {
+    "name": "typed_u64",
+    "category": "typed",
+    "code": "# expect: 300\n# expect: 100\n# expect: 20000\n# expect: 1000000000000\ndef u64 a 200\ndef u64 b 100\nprint [to-string [+ $a $b]]\nprint [to-string [- $a $b]]\nprint [to-string [* $a $b]]\ndef u64 big 1000000\ndef u64 huge [* $big $big]\nprint [to-string $huge]\n",
+    "concurrent": false,
+    "description": ""
+  },
+  {
+    "name": "upvalue_deep_chain",
+    "category": "upvalue",
+    "code": "# expect: 1111\n# expect: 111\n# expect: 110\n# 3+ levels of nested closures across suspension points with variable capture at each level\n# Verifies bounds checks don't false-positive on valid deep upvalue chains\nproc main {} {\n  def a 1\n  def f1 [spawn { 10 }]\n  def b [await $f1]\n  # b=10, a=1 — both captured by continuation\n  def f2 [spawn { 100 }]\n  def c [await $f2]\n  # c=100, b=10, a=1 — all captured across two suspension points\n  def f3 [spawn { 1000 }]\n  def d [await $f3]\n  # d=1000, c=100, b=10, a=1 — deep chain: 3 suspension points\n  print [+ $a [+ $b [+ $c [+ $d 0]]]]\n  # Use nested parallel bodies to create closure nesting across suspension boundary\n  def r [parallel { [+ $a [+ $b [+ $c 0]]] } { [+ $b [+ $c 0]] }]\n  print [vec-get $r 0]\n  print [vec-get $r 1]\n}\nmain\n",
+    "concurrent": true,
+    "description": "3+ levels of nested closures across suspension points with variable capture at each level"
+  },
+  {
+    "name": "upvalue_multi_capture",
+    "category": "upvalue",
+    "code": "# expect: 30\n# expect: 50\n# expect: 70\n# Multiple pre-await variables captured by different parallel/spawn body closures\n# in the same continuation — verifies all upvalue indices resolve correctly\nproc main {} {\n  def x 10\n  def y 20\n  def z 30\n  def f [spawn { 40 }]\n  def w [await $f]\n  # w=40, x=10, y=20, z=30 all available as upvalues in continuation\n  # Each parallel body captures a different subset of pre-await variables\n  def r [parallel { [+ $x $y] } { [+ $y $z] } { [+ $z $w] }]\n  print [vec-get $r 0]\n  print [vec-get $r 1]\n  print [vec-get $r 2]\n}\nmain\n",
+    "concurrent": true,
+    "description": "Multiple pre-await variables captured by different parallel/spawn body closures"
+  },
+  {
+    "name": "variables",
+    "category": "variables",
+    "code": "# expect: 42\n# expect: 42\n# expect: 42\n# def and $var usage\ndef x 42\nprint [+ $x 0]\n# $var as command call\nproc get42 {} { 42 }\ndef f $get42\nprint [$f]\n# reassignment via def\ndef y 10\ndef y 42\nprint [+ $y 0]\n",
+    "concurrent": false,
+    "description": "def and $var usage"
+  },
+  {
+    "name": "variadic_basic",
+    "category": "variadic",
+    "code": "# expect: 3\n# expect: [vec 1 2 3]\n# variadic proc collects extra args into a vector\nproc f {..args} { $args }\nprint [vec-len [f 1 2 3]]\nprint [f 1 2 3]\n",
+    "concurrent": false,
+    "description": "variadic proc collects extra args into a vector"
+  },
+  {
+    "name": "vec_arity_concat",
+    "category": "vec",
+    "code": "# expect-error: builtin 'vec-concat' expects 2 arguments but got 1\n[vec-concat [vec]]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'vec-concat' expects 2 arguments but got 1"
+  },
+  {
+    "name": "vec_arity_get",
+    "category": "vec",
+    "code": "# expect-error: builtin 'vec-get' expects 2 arguments but got 1\nvec-get [vec 1]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'vec-get' expects 2 arguments but got 1"
+  },
+  {
+    "name": "vec_arity_len",
+    "category": "vec",
+    "code": "# expect-error: builtin 'vec-len' expects 1 argument but got 2\nvec-len [vec 1] [vec 2]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'vec-len' expects 1 argument but got 2"
+  },
+  {
+    "name": "vec_arity_push",
+    "category": "vec",
+    "code": "# expect-error: builtin 'vec-push' expects 2 arguments but got 1\n[vec-push [vec]]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'vec-push' expects 2 arguments but got 1"
+  },
+  {
+    "name": "vec_arity_set",
+    "category": "vec",
+    "code": "# expect-error: builtin 'vec-set' expects 3 arguments but got 2\n[vec-set [vec 1 2] 0]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'vec-set' expects 3 arguments but got 2"
+  },
+  {
+    "name": "vec_arity_slice",
+    "category": "vec",
+    "code": "# expect-error: builtin 'vec-slice' expects 3 arguments but got 2\n[vec-slice [vec 1 2 3] 1]\n",
+    "concurrent": false,
+    "description": "expect-error: builtin 'vec-slice' expects 3 arguments but got 2"
+  },
+  {
+    "name": "vec_concat",
+    "category": "vec",
+    "code": "# expect: 5\n# expect: 1\n# expect: 4\n# vec-concat concatenates two vectors\ndef v1 [vec 1 2 3]\ndef v2 [vec 4 5]\ndef joined [vec-concat $v1 $v2]\nprint [vec-len $joined]\nprint [vec-get $joined 0]\nprint [vec-get $joined 3]\n",
+    "concurrent": false,
+    "description": "vec-concat concatenates two vectors"
+  },
+  {
+    "name": "vec_construct",
+    "category": "vec",
+    "code": "# expect: 0\n# expect: 3\n# expect: 0\n# vec constructor and vec-len\nprint [vec-len [vec]]\nprint [vec-len [vec 1 2 3]]\nprint [vec-len [vec]]\n",
+    "concurrent": false,
+    "description": "vec constructor and vec-len"
+  },
+  {
+    "name": "vec_get",
+    "category": "vec",
+    "code": "# expect: 10\n# expect: 20\n# expect: 30\n# vec-get basic access\ndef v [vec 10 20 30]\nprint [vec-get $v 0]\nprint [vec-get $v 1]\nprint [vec-get $v 2]\n",
+    "concurrent": false,
+    "description": "vec-get basic access"
+  },
+  {
+    "name": "vec_get_oob",
+    "category": "vec",
+    "code": "# expect: nil\n# expect: nil\n# vec-get out of bounds returns nil\ndef v [vec 1 2 3]\nprint [vec-get $v 99]\nprint [vec-get $v 3]\n",
+    "concurrent": false,
+    "description": "vec-get out of bounds returns nil"
+  },
+  {
+    "name": "vec_mixed",
+    "category": "vec",
+    "code": "# expect: 42\n# expect: hello\n# expect: true\n# expect: 3\n# vec with mixed value types\ndef v [vec 42 \"hello\" $true]\nprint [vec-get $v 0]\nprint [vec-get $v 1]\nprint [vec-get $v 2]\nprint [vec-len $v]\n",
+    "concurrent": false,
+    "description": "vec with mixed value types"
+  },
+  {
+    "name": "vec_persist",
+    "category": "vec",
+    "code": "# expect: 3\n# expect: 1\n# expect: 4\n# expect: 99\n# original vector unchanged after push/set (persistent semantics)\ndef v [vec 1 2 3]\ndef pushed [vec-push $v 4]\ndef setted [vec-set $v 0 99]\nprint [vec-len $v]\nprint [vec-get $v 0]\nprint [vec-len $pushed]\nprint [vec-get $setted 0]\n",
+    "concurrent": false,
+    "description": "original vector unchanged after push/set (persistent semantics)"
+  },
+  {
+    "name": "vec_push",
+    "category": "vec",
+    "code": "# expect: 4\n# expect: 10\n# vec-push appends element to vector\ndef v [vec 1 2 3]\nprint [vec-len [vec-push $v 4]]\nprint [vec-get [vec-push $v 10] 3]\n",
+    "concurrent": false,
+    "description": "vec-push appends element to vector"
+  },
+  {
+    "name": "vec_set",
+    "category": "vec",
+    "code": "# expect: 99\n# expect: 3\n# vec-set replaces element at index, other elements unchanged\ndef v [vec 1 2 3]\nprint [vec-get [vec-set $v 0 99] 0]\nprint [vec-get [vec-set $v 1 99] 2]\n",
+    "concurrent": false,
+    "description": "vec-set replaces element at index, other elements unchanged"
+  },
+  {
+    "name": "vec_set_neg",
+    "category": "vec",
+    "code": "# expect-error: vec-set: negative index -1\n# vec-set with negative index produces runtime error\ndef v [vec 1 2 3]\ndef i [- 0 1]\nvec-set $v $i \"x\"\n",
+    "concurrent": false,
+    "description": "expect-error: vec-set: negative index -1"
+  },
+  {
+    "name": "vec_set_oob",
+    "category": "vec",
+    "code": "# expect: [vec 1 2 3 nil nil \"x\"]\n# vec-set out-of-bounds grows vector with nil fill\ndef v [vec 1 2 3]\nprint [vec-set $v 5 \"x\"]\n",
+    "concurrent": false,
+    "description": "vec-set out-of-bounds grows vector with nil fill"
+  },
+  {
+    "name": "vec_slice",
+    "category": "vec",
+    "code": "# expect: 2\n# expect: 2\n# expect: 3\n# expect: 0\n# vec-slice returns sub-vector [start, end)\ndef v [vec 1 2 3 4 5]\ndef s [vec-slice $v 1 3]\nprint [vec-len $s]\nprint [vec-get $s 0]\nprint [vec-get $s 1]\n# empty slice\nprint [vec-len [vec-slice $v 3 3]]\n",
+    "concurrent": false,
+    "description": "vec-slice returns sub-vector [start, end)"
+  },
+  {
+    "name": "yield_basic",
+    "category": "yield",
+    "code": "# expect: [vec 1 2 3]\n# generator with yield creates a stream, collect materializes it\nproc gen {} {\n  [yield 1]\n  [yield 2]\n  [yield 3]\n}\nprint [collect [gen]]\n",
+    "concurrent": false,
+    "description": "generator with yield creates a stream, collect materializes it"
+  }
+]
