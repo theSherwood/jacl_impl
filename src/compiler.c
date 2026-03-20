@@ -2904,7 +2904,14 @@ static void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
 
   compiler__begin_scope(c);
 
-  if (count == 0) {
+  bool trailing_semi = block_node->data.block.trailing_semi;
+
+  if (count == 0 || trailing_semi) {
+    /* All commands run for side effects; block evaluates to nil */
+    for (uint32_t i = 0; i < count; i++) {
+      compiler__compile_node(c, block_node->data.block.commands[i]);
+      compiler__emit_check_error(c, line);
+    }
     compiler__end_scope(c, line);
     compiler__emit_byte(c, OP_NIL, line);
     return;
@@ -6863,15 +6870,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_BLOCK: {
-      compiler__begin_scope(c);
-      uint32_t count = node->data.block.count;
-      for (uint32_t i = 0; i < count; i++) {
-        compiler__compile_node(c, node->data.block.commands[i]);
-        compiler__emit_check_error(c, line);
-      }
-      compiler__end_scope(c, line);
-      /* Block evaluates to nil */
-      compiler__emit_byte(c, OP_NIL, line);
+      compiler__compile_block_expr(c, node);
       break;
     }
 

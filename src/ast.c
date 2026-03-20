@@ -60,7 +60,7 @@ struct AstNode {
     struct { float     value; }                                    lit_float;
     struct { const char* value;   uint32_t length; }               lit_string;
     struct { const char* name;    uint32_t length; }               var_ref;
-    struct { AstNode**   commands; uint32_t count; }               block;
+    struct { AstNode**   commands; uint32_t count; bool trailing_semi; } block;
     struct { AstNode**   segments; uint32_t count; }               interp_string;
     struct { const char* path; uint32_t path_len;
              const char** names; uint32_t* name_lens;

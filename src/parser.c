@@ -2321,14 +2321,21 @@ static AstNode* parser__parse_block(Parser* p) {
   NodeArray commands;
   parser__arr_init(&commands, p->arena);
 
+  bool trailing_semi = false;
   while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
     /* Skip newlines, semicolons, and commas between commands */
+    bool saw_semi = false;
     while (parser__peek(p)->type == TOKEN_NEWLINE ||
            parser__peek(p)->type == TOKEN_SEMICOLON ||
            parser__peek(p)->type == TOKEN_COMMA) {
+      if (parser__peek(p)->type == TOKEN_SEMICOLON)
+        saw_semi = true;
       parser__advance(p);
     }
-    if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
+    if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) {
+      trailing_semi = saw_semi;
+      break;
+    }
 
     AstNode* cmd = parser__parse_piped_command(p);
     if (cmd != NULL) {
@@ -2352,8 +2359,9 @@ static AstNode* parser__parse_block(Parser* p) {
   node->type  = AST_BLOCK;
   node->start = block_start;
   node->end   = parser__token_end(close);
-  node->data.block.commands = commands.nodes;
-  node->data.block.count    = commands.count;
+  node->data.block.commands      = commands.nodes;
+  node->data.block.count         = commands.count;
+  node->data.block.trailing_semi = trailing_semi;
   return node;
 }
 
