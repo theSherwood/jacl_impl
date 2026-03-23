@@ -1367,9 +1367,21 @@ static AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
   NodeArray args;
   parser__arr_init(&args, p->arena);
 
-  /* Detect pattern: word { (name only) vs word word { (return_type + name).
-     p->pos points to the first word after 'proc'. */
-  if (p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
+  /* Detect pattern:
+     { ...           → anonymous proc (current token is already '{')
+     word { ...      → proc name {params} {body}
+     word word { ... → proc type name {params} {body}
+     p->pos points to the first token after 'proc'. */
+  if (p->tokens[p->pos].type == TOKEN_LBRACE) {
+    /* Anonymous proc: proc {params} {body} — synthesize empty name */
+    AstNode* name = ast_alloc(p->arena);
+    name->type = AST_LIT_STRING;
+    name->start = proc_head->start;
+    name->end   = proc_head->end;
+    name->data.lit_string.value  = "";
+    name->data.lit_string.length = 0;
+    parser__arr_push(&args, name);
+  } else if (p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
     /* proc name {params} {body} — no return type */
     AstNode* name = parser__parse_atom(p);
     parser__arr_push(&args, name);
