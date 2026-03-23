@@ -233,6 +233,9 @@ static void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
     heap->gc_cycle_count          = 0;
 }
 
+/* Forward-declare thread-local (defined later in this file) */
+static JACL_THREAD_LOCAL ThreadHeap *gc__current_heap;
+
 static void gc_heap_destroy(ThreadHeap *heap) {
     GCBlock *b = heap->blocks;
     while (b) {
@@ -248,6 +251,10 @@ static void gc_heap_destroy(ThreadHeap *heap) {
     heap->current_block = NULL;
     heap->cursor = NULL;
     heap->limit = NULL;
+    /* Clear thread-local if it points to this heap, to prevent use-after-free */
+    if (gc__current_heap == heap) {
+        gc__current_heap = NULL;
+    }
 }
 
 /* --- Emergency GC callback (set by vm.c or runtime.c) --- */

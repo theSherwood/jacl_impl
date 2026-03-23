@@ -462,7 +462,7 @@ static size_t gc_sweep(ThreadHeap *heap) {
 
 static void gc_sweep_intern_table(JaclInternTable *table,
                                    uint8_t current_mark) {
-    RWLOCK_WRLOCK(table->lock);
+    MUTEX_LOCK(table->lock);
 
     bool should_evict =
         (table->count + table->tombstone_count) * 4 > table->cap * 3;
@@ -484,7 +484,7 @@ static void gc_sweep_intern_table(JaclInternTable *table,
         }
     }
 
-    RWLOCK_WRUNLOCK(table->lock);
+    MUTEX_UNLOCK(table->lock);
 }
 
 /* ======================================================================

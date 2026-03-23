@@ -46,7 +46,7 @@ typedef struct {
   uint32_t         tombstone_count; /* tombstone entries */
   uint32_t         cap;
   arena_t*         arena;
-  platform_rwlock_t lock;    /* read-write lock for concurrent access */
+  platform_mutex_t lock;    /* mutex for concurrent access */
 } JaclInternTable;
 
 /* Initialize an intern table */
@@ -58,12 +58,12 @@ static void intern_table_init(JaclInternTable* table, arena_t* arena) {
   table->entries = (JaclHeapString**)arena_alloc(arena,
       INTERN_INIT_CAP * sizeof(JaclHeapString*));
   memset(table->entries, 0, INTERN_INIT_CAP * sizeof(JaclHeapString*));
-  RWLOCK_INIT(table->lock);
+  MUTEX_INIT(table->lock);
 }
 
-/* Destroy an intern table (releases rwlock resources) */
+/* Destroy an intern table (releases mutex resources) */
 static void intern_table_destroy(JaclInternTable* table) {
-  RWLOCK_DESTROY(table->lock);
+  MUTEX_DESTROY(table->lock);
 }
 
 /* Internal: find or insert slot.
@@ -132,25 +132,26 @@ static JaclVal jacl_intern(ThreadHeap* heap, JaclInternTable* table,
                             const char* data, uint32_t length) {
   uint32_t hash = string__fnv1a(data, length);
 
-  /* Fast path: read lock for lookup */
-  RWLOCK_RDLOCK(table->lock);
+  /* Allocate new heap string BEFORE acquiring lock.
+     gc_alloc may trigger GC, which calls gc_sweep_intern_table
+     and takes the same lock — so we must not hold it here. */
+  JaclHeapString* str = (JaclHeapString*)gc_alloc(
+      heap, OBJ_STRING, sizeof(JaclHeapString) + length);
+  str->byte_len     = length;
+  str->grapheme_len = (uint32_t)unicode_grapheme_count(
+      (const uint8_t*)data, (size_t)length);
+  str->hash         = hash;
+  memcpy(str->data, data, length);
+
+  MUTEX_LOCK(table->lock);
+
+  /* Check if already inserted (by this or another thread) */
   JaclHeapString** slot = intern__find_slot(
       table->entries, table->cap, data, length, hash);
   if (*slot != NULL && *slot != INTERN_TOMBSTONE) {
     JaclVal result = jacl_string_ptr(*slot);
-    RWLOCK_RDUNLOCK(table->lock);
-    return result;
-  }
-  RWLOCK_RDUNLOCK(table->lock);
-
-  /* Slow path: acquire write lock for insertion */
-  RWLOCK_WRLOCK(table->lock);
-
-  /* Re-probe under write lock — another thread may have inserted */
-  slot = intern__find_slot(table->entries, table->cap, data, length, hash);
-  if (*slot != NULL && *slot != INTERN_TOMBSTONE) {
-    JaclVal result = jacl_string_ptr(*slot);
-    RWLOCK_WRUNLOCK(table->lock);
+    MUTEX_UNLOCK(table->lock);
+    /* str is now orphaned but will be collected by GC */
     return result;
   }
 
@@ -167,15 +168,6 @@ static JaclVal jacl_intern(ThreadHeap* heap, JaclInternTable* table,
     slot = intern__find_slot(table->entries, table->cap, data, length, hash);
   }
 
-  /* Allocate new heap string on GC heap */
-  JaclHeapString* str = (JaclHeapString*)gc_alloc(
-      heap, OBJ_STRING, sizeof(JaclHeapString) + length);
-  str->byte_len     = length;
-  str->grapheme_len = (uint32_t)unicode_grapheme_count(
-      (const uint8_t*)data, (size_t)length);
-  str->hash         = hash;
-  memcpy(str->data, data, length);
-
   /* Reuse tombstone slot if available */
   if (*slot == INTERN_TOMBSTONE) {
     table->tombstone_count--;
@@ -183,7 +175,7 @@ static JaclVal jacl_intern(ThreadHeap* heap, JaclInternTable* table,
   *slot = str;
   table->count++;
 
-  RWLOCK_WRUNLOCK(table->lock);
+  MUTEX_UNLOCK(table->lock);
   return jacl_string_ptr(str);
 }
 
