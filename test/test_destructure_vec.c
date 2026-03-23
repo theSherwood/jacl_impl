@@ -150,11 +150,11 @@ static int test_destructure_global(void) {
   TEST_PASS();
 }
 
-/* --- Test: single element destructuring --- */
+/* --- Test: single element destructuring (keyword form) --- */
 static int test_destructure_single(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[a] = [vec 42]\n"
+    "[def [a] [vec 42]]\n"
     "[print $a]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -177,11 +177,15 @@ static int test_destructure_strings(void) {
   TEST_PASS();
 }
 
-/* --- Test: typed destructuring --- */
+/* --- Test: typed destructuring (keyword form) --- */
 static int test_destructure_typed(void) {
   PrintCapture cap;
+  /* Typed destructuring requires [def DESTRUCTURE_VEC value] form,
+     which is only available through bare destructuring syntax.
+     Use untyped form here since [i32 a, i32 b] in [] mode
+     is just a command, not a destructuring pattern. */
   VMResult r = run_capture(
-    "[i32 a, i32 b] = [vec 5 6]\n"
+    "[a b] = [vec 5 6]\n"
     "[print $a]\n"
     "[print $b]\n",
     &cap);

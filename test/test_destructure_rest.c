@@ -36,7 +36,7 @@ static VMResult run_capture(const char* src, PrintCapture* cap) {
 static int test_vec_rest_basic(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[head ..rest] = [vec 1 2 3 4]\n"
+    "[def [head ..rest] [vec 1 2 3 4]]\n"
     "[print $head]\n"
     "[print $rest]\n",
     &cap);
@@ -50,7 +50,7 @@ static int test_vec_rest_basic(void) {
 static int test_vec_rest_two_pos(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[a b ..rest] = [vec 10 20 30 40 50]\n"
+    "[def [a b ..rest] [vec 10 20 30 40 50]]\n"
     "[print $a]\n"
     "[print $b]\n"
     "[print $rest]\n",
@@ -65,7 +65,7 @@ static int test_vec_rest_two_pos(void) {
 static int test_vec_rest_empty(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[a b ..rest] = [vec 1 2]\n"
+    "[def [a b ..rest] [vec 1 2]]\n"
     "[print $a]\n"
     "[print $b]\n"
     "[print $rest]\n",
@@ -80,7 +80,7 @@ static int test_vec_rest_empty(void) {
 static int test_vec_rest_many(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[h ..rest] = [vec 1 2 3 4 5 6 7 8]\n"
+    "[def [h ..rest] [vec 1 2 3 4 5 6 7 8]]\n"
     "[print $h]\n"
     "[print [vec-len $rest]]\n",
     &cap);
@@ -94,7 +94,7 @@ static int test_vec_rest_many(void) {
 static int test_vec_rest_mut(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[head ..rest] : [vec 10 20 30]\n"
+    "[mut [head ..rest] [vec 10 20 30]]\n"
     "[print $head]\n"
     "[print $rest]\n"
     "head :: 99\n"
@@ -110,7 +110,7 @@ static int test_vec_rest_mut(void) {
 static int test_vec_rest_not_last(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[..rest a] = [vec 1 2 3]\n",
+    "[def [..rest a] [vec 1 2 3]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
@@ -121,7 +121,7 @@ static int test_vec_rest_not_last(void) {
 static int test_vec_rest_duplicate(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[a ..r1 ..r2] = [vec 1 2 3]\n",
+    "[def [a ..r1 ..r2] [vec 1 2 3]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
@@ -132,7 +132,7 @@ static int test_vec_rest_duplicate(void) {
 static int test_vec_rest_unnamed(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[head ..] = [vec 1 2 3]\n",
+    "[def [head ..] [vec 1 2 3]]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
@@ -145,7 +145,7 @@ static int test_named_rest_struct(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y, i32 z}\n"
     "p = [Point 10 20 30]\n"
-    "{x, ..rest} = $p\n"
+    "[def {x, ..rest} $p]\n"
     "[print $x]\n"
     "[print [map-get $rest \"y\"]]\n"
     "[print [map-get $rest \"z\"]]\n",
@@ -161,7 +161,7 @@ static int test_named_rest_map(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "m = [map \"x\" 100 \"y\" 200 \"z\" 300]\n"
-    "{x, ..rest} = $m\n"
+    "[def {x, ..rest} $m]\n"
     "[print $x]\n"
     "[print [map-get $rest \"y\"]]\n"
     "[print [map-get $rest \"z\"]]\n",
@@ -177,7 +177,7 @@ static int test_named_rest_mut(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "m = [map \"a\" 1 \"b\" 2 \"c\" 3]\n"
-    "{a, ..rest} : $m\n"
+    "[mut {a, ..rest} $m]\n"
     "[print $a]\n"
     "a :: 99\n"
     "[print $a]\n"
@@ -194,7 +194,7 @@ static int test_named_rest_excludes(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "m = [map \"a\" 1 \"b\" 2 \"c\" 3]\n"
-    "{a, b, ..rest} = $m\n"
+    "[def {a, b, ..rest} $m]\n"
     "[print $a]\n"
     "[print $b]\n"
     "[print [map-has $rest \"a\"]]\n"
@@ -211,7 +211,7 @@ static int test_named_rest_excludes(void) {
 static int test_vec_rest_global(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "[head ..rest] = [vec 5 6 7]\n"
+    "[def [head ..rest] [vec 5 6 7]]\n"
     "[print $head]\n"
     "[print $rest]\n",
     &cap);
@@ -226,7 +226,7 @@ static int test_named_rest_global(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "m = [map \"x\" 10 \"y\" 20 \"z\" 30]\n"
-    "{x, ..rest} = $m\n"
+    "[def {x, ..rest} $m]\n"
     "[print $x]\n"
     "[print [map-get $rest \"y\"]]\n",
     &cap);

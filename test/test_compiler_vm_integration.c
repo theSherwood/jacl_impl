@@ -92,7 +92,7 @@ static int test_interpolation_empty(void) {
 static int test_to_string_via_interpolation(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "x = true\n"
+    "x = $true\n"
     "y = 123\n"
     "[print \"$x $y\"]",
     &cap);

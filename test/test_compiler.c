@@ -837,17 +837,8 @@ static int test_compile_def_wrong_argc(void) {
   arena_destroy(&arena);
   ASSERT(check_no_leaks());
 
-  /* Too many args: x = 1 2 */
-  tracker_reset();
-  arena = (arena_t){ .allocator = tracked_allocator };
-  gc_block_pool_init(&pool);
-  gc_heap_init(&heap, &pool);
-  cr = compile_source("x = 1 2", &arena, &heap);
-  ASSERT(cr.error_count > 0);
-  gc_heap_destroy(&heap);
-  gc_block_pool_destroy(&pool);
-  arena_destroy(&arena);
-  ASSERT(check_no_leaks());
+  /* x = 1 2 is now [= [x] [1 2]] — valid parse, runtime error */
+  /* (no compile-time error expected with new uniform operator parsing) */
 
   TEST_PASS();
 }

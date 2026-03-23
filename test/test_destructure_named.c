@@ -33,13 +33,13 @@ static VMResult run_capture(const char* src, PrintCapture* cap) {
   return result;
 }
 
-/* --- Test: struct destructuring with operator form --- */
+/* --- Test: struct destructuring with keyword form (basic) --- */
 static int test_struct_destructure_basic(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "p = [Point 10 20]\n"
-    "{x, y} = $p\n"
+    "[def {x, y} $p]\n"
     "[print $x]\n"
     "[print $y]\n",
     &cap);
@@ -70,7 +70,7 @@ static int test_map_destructure_basic(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "m = [map \"x\" 100 \"y\" 200]\n"
-    "{x, y} = $m\n"
+    "[def {x, y} $m]\n"
     "[print $x]\n"
     "[print $y]\n",
     &cap);
@@ -86,7 +86,7 @@ static int test_field_order_independence(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "p = [Point 10 20]\n"
-    "{y, x} = $p\n"
+    "[def {y, x} $p]\n"
     "[print $x]\n"
     "[print $y]\n",
     &cap);
@@ -102,7 +102,7 @@ static int test_mut_destructure(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "p = [Point 10 20]\n"
-    "{x, y} : $p\n"
+    "[mut {x, y} $p]\n"
     "[print $x]\n"
     "[print $y]\n"
     "x :: 99\n"
@@ -120,7 +120,7 @@ static int test_typed_destructure(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "p = [Point 5 6]\n"
-    "{i32 x, i32 y} = $p\n"
+    "[def {i32 x, i32 y} $p]\n"
     "[print $x]\n"
     "[print $y]\n",
     &cap);
@@ -137,7 +137,7 @@ static int test_nested_scope(void) {
     "struct Point {i32 x, i32 y}\n"
     "p = [Point 1 2]\n"
     "proc show {} {\n"
-    "  {x, y} = $p\n"
+    "  [def {x, y} $p]\n"
     "  [print $x]\n"
     "  [print $y]\n"
     "}\n"
@@ -155,7 +155,7 @@ static int test_missing_struct_field_compile_error(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "p = [Point 1 2]\n"
-    "{x, z} = $p\n",
+    "[def {x, z} $p]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
@@ -167,7 +167,7 @@ static int test_missing_map_key_runtime_error(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "m = [map \"x\" 100]\n"
-    "{x, y} = $m\n",
+    "[def {x, y} $m]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
@@ -179,7 +179,7 @@ static int test_non_struct_map_error(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "m = 42\n"
-    "{x, y} = $m\n",
+    "[def {x, y} $m]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
@@ -192,7 +192,7 @@ static int test_global_scope_destructure(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "p = [Point 100 200]\n"
-    "{x, y} = $p\n"
+    "[def {x, y} $p]\n"
     "[print $x]\n"
     "[print $y]\n",
     &cap);

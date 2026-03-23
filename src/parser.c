@@ -540,16 +540,23 @@ static void parser__sync_paren(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
- * Internal: Check if a token is a binary infix operator
+ * Internal: Check if a token is a symbolic operator
  *
- * TOKEN_OPERATOR covers +, -, *, /, %, ==, !=, <, >, <=, >=
- * TOKEN_AND covers &&, TOKEN_OR covers ||
+ * Uniform operator set used in both () and {} modes:
+ *   TOKEN_OPERATOR: +, -, *, /, %, ==, !=, <, >, <=, >=
+ *   TOKEN_AND: &&   TOKEN_OR: ||
+ *   TOKEN_PIPE: |   TOKEN_EQUALS: =
+ *   TOKEN_COLON: :  TOKEN_DOUBLE_COLON: ::
  * ------------------------------------------------------------------------- */
 
-static int parser__is_infix_binary_op(Token* tok) {
+static int parser__is_operator(Token* tok) {
   return tok->type == TOKEN_OPERATOR
       || tok->type == TOKEN_AND
-      || tok->type == TOKEN_OR;
+      || tok->type == TOKEN_OR
+      || tok->type == TOKEN_PIPE
+      || tok->type == TOKEN_EQUALS
+      || tok->type == TOKEN_COLON
+      || tok->type == TOKEN_DOUBLE_COLON;
 }
 
 /* -------------------------------------------------------------------------
@@ -627,8 +634,8 @@ static AstNode* parser__parse_infix_operand(Parser* p) {
     head->type = AST_LIT_STRING;
     head->start = parser__token_start(op);
     head->end   = parser__token_end(op);
-    head->data.lit_string.value  = "neg";
-    head->data.lit_string.length = 3;
+    head->data.lit_string.value  = "-";
+    head->data.lit_string.length = 1;
 
     AstNode** args = ast_alloc_array(p->arena, 1);
     args[0] = operand;
@@ -655,8 +662,8 @@ static AstNode* parser__parse_infix_operand(Parser* p) {
     head->type = AST_LIT_STRING;
     head->start = parser__token_start(op);
     head->end   = parser__token_end(op);
-    head->data.lit_string.value  = "not";
-    head->data.lit_string.length = 3;
+    head->data.lit_string.value  = "~";
+    head->data.lit_string.length = 1;
 
     AstNode** args = ast_alloc_array(p->arena, 1);
     args[0] = operand;
@@ -784,22 +791,10 @@ static AstNode* parser__parse_infix(Parser* p) {
   /* Loop: binary operator + right operand, left-to-right */
   while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RPAREN) {
     Token* op_tok = parser__peek(p);
-    if (!parser__is_infix_binary_op(op_tok)) {
+    if (!parser__is_operator(op_tok)) {
       break;
     }
     parser__advance(p); /* consume operator */
-
-    /* Determine operator name: && → "and", || → "or", else literal */
-    const char* op_name;
-    uint32_t op_name_len;
-    if (op_tok->type == TOKEN_AND) {
-      op_name = "and"; op_name_len = 3;
-    } else if (op_tok->type == TOKEN_OR) {
-      op_name = "or"; op_name_len = 2;
-    } else {
-      op_name = op_tok->payload.text;
-      op_name_len = op_tok->length;
-    }
 
     /* Parse right operand */
     AstNode* right = parser__parse_infix_operand(p);
@@ -815,8 +810,8 @@ static AstNode* parser__parse_infix(Parser* p) {
     head->type = AST_LIT_STRING;
     head->start = parser__token_start(op_tok);
     head->end   = parser__token_end(op_tok);
-    head->data.lit_string.value  = op_name;
-    head->data.lit_string.length = op_name_len;
+    head->data.lit_string.value  = op_tok->payload.text;
+    head->data.lit_string.length = op_tok->length;
 
     AstNode** args = ast_alloc_array(p->arena, 2);
     args[0] = left;
@@ -931,7 +926,13 @@ static AstNode* parser__parse_expr(Parser* p) {
 static int parser__is_command_end(Parser* p) {
   TokenType t = parser__peek(p)->type;
   return t == TOKEN_NEWLINE || t == TOKEN_SEMICOLON || t == TOKEN_COMMA
-      || t == TOKEN_EOF || t == TOKEN_RBRACE || t == TOKEN_PIPE;
+      || t == TOKEN_EOF || t == TOKEN_RBRACE;
+}
+
+/* Check if current token ends a command operand (command-end OR operator) */
+static int parser__is_operand_end(Parser* p) {
+  if (parser__is_command_end(p)) return 1;
+  return parser__is_operator(parser__peek(p));
 }
 
 /* -------------------------------------------------------------------------
@@ -1948,15 +1949,15 @@ static AstNode* parser__parse_destructure_named_pattern(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
- * Internal: Parse a top-level bare command
+ * Internal: Parse a command-mode operand (head + args until operator or end)
  *
- * Reads the first expression as the command head, then collects subsequent
- * expressions as arguments until a command delimiter (newline, semicolon,
- * or EOF). If the head is already a bracketed command with no trailing
- * arguments, it is returned directly without wrapping.
+ * In {} mode, an operand is a command: head followed by arguments.
+ * Stops at any operator token or command delimiter.
+ * Bare words are wrapped as zero-arg commands (they are calls).
+ * Non-word atoms ($var, literals, [], (), {}) are returned bare.
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_bare_command(Parser* p) {
+static AstNode* parser__parse_cmd_operand(Parser* p) {
   /* break [value] → AST_BREAK */
   Token* peek = parser__peek(p);
   if (peek->type == TOKEN_BREAK ||
@@ -1969,7 +1970,7 @@ static AstNode* parser__parse_bare_command(Parser* p) {
     node->end   = parser__token_end(kw);
     node->data.break_stmt.value = NULL;
     /* Optional value argument */
-    if (!parser__is_command_end(p)) {
+    if (!parser__is_operand_end(p)) {
       AstNode* val = parser__parse_expr(p);
       if (val != NULL) {
         node->data.break_stmt.value = val;
@@ -2002,91 +2003,13 @@ static AstNode* parser__parse_bare_command(Parser* p) {
     node->end   = parser__token_end(kw);
     node->data.return_stmt.value = NULL;
     /* Optional value argument */
-    if (!parser__is_command_end(p)) {
+    if (!parser__is_operand_end(p)) {
       AstNode* val = parser__parse_expr(p);
       if (val != NULL) {
         node->data.return_stmt.value = val;
         node->end = val->end;
       }
     }
-    return node;
-  }
-
-  /* Destructuring binding: [a b c] = expr  or  [a b c] : expr
-     Detects [pattern] followed by = or : and desugars to [def pattern expr]
-     or [mut pattern expr]. */
-  if (parser__lookahead_is_destructure_binding(p)) {
-    AstNode* pattern = parser__parse_destructure_vec_pattern(p);
-    if (pattern->type == AST_ERROR) return pattern;
-
-    Token* op = parser__advance(p); /* consume = or : */
-    const char* cmd_name;
-    uint32_t cmd_len;
-    if (op->type == TOKEN_EQUALS) { cmd_name = "def"; cmd_len = 3; }
-    else                           { cmd_name = "mut"; cmd_len = 3; }
-
-    NodeArray args;
-    parser__arr_init(&args, p->arena);
-    parser__arr_push(&args, pattern); /* destructure pattern */
-    while (!parser__is_command_end(p)) {
-      AstNode* arg = parser__parse_expr(p);
-      if (arg == NULL) break;
-      parser__arr_push(&args, arg);
-    }
-
-    AstNode* cmd_head = ast_alloc(p->arena);
-    cmd_head->type = AST_LIT_STRING;
-    cmd_head->start = pattern->start;
-    cmd_head->end   = pattern->end;
-    cmd_head->data.lit_string.value  = cmd_name;
-    cmd_head->data.lit_string.length = cmd_len;
-
-    AstNode* node = ast_alloc(p->arena);
-    node->type  = AST_COMMAND;
-    node->start = pattern->start;
-    node->end   = (args.count > 0) ? args.nodes[args.count - 1]->end : pattern->end;
-    node->data.command.head      = cmd_head;
-    node->data.command.args      = args.nodes;
-    node->data.command.arg_count = args.count;
-    return node;
-  }
-
-  /* Named destructuring binding: {x, y} = expr  or  {x, y} : expr
-     Detects {pattern} followed by = or : and desugars to [def pattern expr]
-     or [mut pattern expr]. */
-  if (parser__lookahead_is_named_destructure_binding(p)) {
-    AstNode* pattern = parser__parse_destructure_named_pattern(p);
-    if (pattern->type == AST_ERROR) return pattern;
-
-    Token* op = parser__advance(p); /* consume = or : */
-    const char* cmd_name;
-    uint32_t cmd_len;
-    if (op->type == TOKEN_EQUALS) { cmd_name = "def"; cmd_len = 3; }
-    else                           { cmd_name = "mut"; cmd_len = 3; }
-
-    NodeArray args;
-    parser__arr_init(&args, p->arena);
-    parser__arr_push(&args, pattern); /* destructure pattern */
-    while (!parser__is_command_end(p)) {
-      AstNode* arg = parser__parse_expr(p);
-      if (arg == NULL) break;
-      parser__arr_push(&args, arg);
-    }
-
-    AstNode* cmd_head = ast_alloc(p->arena);
-    cmd_head->type = AST_LIT_STRING;
-    cmd_head->start = pattern->start;
-    cmd_head->end   = pattern->end;
-    cmd_head->data.lit_string.value  = cmd_name;
-    cmd_head->data.lit_string.length = cmd_len;
-
-    AstNode* node = ast_alloc(p->arena);
-    node->type  = AST_COMMAND;
-    node->start = pattern->start;
-    node->end   = (args.count > 0) ? args.nodes[args.count - 1]->end : pattern->end;
-    node->data.command.head      = cmd_head;
-    node->data.command.args      = args.nodes;
-    node->data.command.arg_count = args.count;
     return node;
   }
 
@@ -2098,18 +2021,24 @@ static AstNode* parser__parse_bare_command(Parser* p) {
   if (head->type == AST_ERROR) return head;
 
   /* proc syntax: proc [type] name {params} {body} — always requires two {} blocks */
-  if (head_token_type == TOKEN_PROC && !parser__is_command_end(p) &&
+  if (head_token_type == TOKEN_PROC && !parser__is_operand_end(p) &&
       parser__peek(p)->type == TOKEN_WORD) {
     return parser__parse_proc_form(p, head);
   }
 
+  /* Anonymous proc: proc {params} {body} — no name, next token is { */
+  if (head_token_type == TOKEN_PROC && !parser__is_operand_end(p) &&
+      parser__peek(p)->type == TOKEN_LBRACE) {
+    return parser__parse_proc_form(p, head);
+  }
+
   /* New if syntax: if condition { body } [elif condition { body }]* [else { body }] */
-  if (head_token_type == TOKEN_IF && !parser__is_command_end(p)) {
+  if (head_token_type == TOKEN_IF && !parser__is_operand_end(p)) {
     return parser__parse_if_form(p, head);
   }
 
   /* New while syntax: while condition { body } */
-  if (head_token_type == TOKEN_WHILE && !parser__is_command_end(p)) {
+  if (head_token_type == TOKEN_WHILE && !parser__is_operand_end(p)) {
     return parser__parse_while_form(p, head);
   }
 
@@ -2121,98 +2050,11 @@ static AstNode* parser__parse_bare_command(Parser* p) {
                          &p->tokens[p->pos > 0 ? p->pos - 1 : 0]);
   }
 
-  /* Binding operator desugaring (command mode only):
-     name = val      →  [def name val]
-     type name = val  →  [def type name val]
-     name : val      →  [mut name val]
-     type name : val  →  [mut type name val]
-     name :: val     →  [set name val]
-  */
-  if (head_token_type == TOKEN_WORD) {
-    Token* next = parser__peek(p);
-
-    /* Untyped binding: name = val, name : val, name :: val */
-    if (next->type == TOKEN_EQUALS || next->type == TOKEN_COLON ||
-        next->type == TOKEN_DOUBLE_COLON) {
-      const char* cmd_name;
-      uint32_t cmd_len;
-      if (next->type == TOKEN_EQUALS)       { cmd_name = "def"; cmd_len = 3; }
-      else if (next->type == TOKEN_COLON)    { cmd_name = "mut"; cmd_len = 3; }
-      else                                    { cmd_name = "set"; cmd_len = 3; }
-
-      parser__advance(p); /* consume operator */
-
-      NodeArray args;
-      parser__arr_init(&args, p->arena);
-      parser__arr_push(&args, head); /* name becomes first arg */
-      while (!parser__is_command_end(p)) {
-        AstNode* arg = parser__parse_expr(p);
-        if (arg == NULL) break;
-        parser__arr_push(&args, arg);
-      }
-
-      AstNode* cmd_head = ast_alloc(p->arena);
-      cmd_head->type = AST_LIT_STRING;
-      cmd_head->start = head->start;
-      cmd_head->end   = head->end;
-      cmd_head->data.lit_string.value  = cmd_name;
-      cmd_head->data.lit_string.length = cmd_len;
-
-      AstNode* node = ast_alloc(p->arena);
-      node->type  = AST_COMMAND;
-      node->start = head->start;
-      node->end   = (args.count > 0) ? args.nodes[args.count - 1]->end : head->end;
-      node->data.command.head      = cmd_head;
-      node->data.command.args      = args.nodes;
-      node->data.command.arg_count = args.count;
-      return node;
-    }
-
-    /* Typed binding: type name = val, type name : val */
-    if (next->type == TOKEN_WORD && p->pos + 1 < p->count) {
-      Token* after_name = &p->tokens[p->pos + 1];
-      if (after_name->type == TOKEN_EQUALS || after_name->type == TOKEN_COLON) {
-        const char* cmd_name;
-        uint32_t cmd_len;
-        if (after_name->type == TOKEN_EQUALS) { cmd_name = "def"; cmd_len = 3; }
-        else                                   { cmd_name = "mut"; cmd_len = 3; }
-
-        AstNode* name_node = parser__parse_expr(p); /* parse name */
-        parser__advance(p); /* consume operator */
-
-        NodeArray args;
-        parser__arr_init(&args, p->arena);
-        parser__arr_push(&args, head);      /* type */
-        parser__arr_push(&args, name_node); /* name */
-        while (!parser__is_command_end(p)) {
-          AstNode* arg = parser__parse_expr(p);
-          if (arg == NULL) break;
-          parser__arr_push(&args, arg);
-        }
-
-        AstNode* cmd_head = ast_alloc(p->arena);
-        cmd_head->type = AST_LIT_STRING;
-        cmd_head->start = head->start;
-        cmd_head->end   = head->end;
-        cmd_head->data.lit_string.value  = cmd_name;
-        cmd_head->data.lit_string.length = cmd_len;
-
-        AstNode* node = ast_alloc(p->arena);
-        node->type  = AST_COMMAND;
-        node->start = head->start;
-        node->end   = args.nodes[args.count - 1]->end;
-        node->data.command.head      = cmd_head;
-        node->data.command.args      = args.nodes;
-        node->data.command.arg_count = args.count;
-        return node;
-      }
-    }
-  }
-
+  /* Collect arguments until operator or command-end */
   NodeArray args;
   parser__arr_init(&args, p->arena);
 
-  while (!parser__is_command_end(p)) {
+  while (!parser__is_operand_end(p)) {
     AstNode* arg = parser__parse_expr(p);
     if (arg == NULL) break;
     parser__arr_push(&args, arg);
@@ -2220,9 +2062,7 @@ static AstNode* parser__parse_bare_command(Parser* p) {
 
   /* Single expression with no trailing args */
   if (args.count == 0) {
-    /* Bare word at statement position → zero-arg command call.
-       'exit' on its own line desugars to '[exit]'.
-       '$var' is a value read; use '[$var]' for invocation. */
+    /* Bare word → zero-arg command call (e.g. 'exit' → '[exit]') */
     if (head_token_type == TOKEN_WORD) {
       AstNode* node = ast_alloc(p->arena);
       node->type  = AST_COMMAND;
@@ -2239,11 +2079,7 @@ static AstNode* parser__parse_bare_command(Parser* p) {
   AstNode* node = ast_alloc(p->arena);
   node->type  = AST_COMMAND;
   node->start = head->start;
-  if (args.count > 0) {
-    node->end = args.nodes[args.count - 1]->end;
-  } else {
-    node->end = head->end;
-  }
+  node->end   = args.nodes[args.count - 1]->end;
   node->data.command.head      = head;
   node->data.command.args      = args.nodes;
   node->data.command.arg_count = args.count;
@@ -2251,57 +2087,44 @@ static AstNode* parser__parse_bare_command(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
- * Internal: Parse piped command chain: cmd1 | cmd2 | cmd3
+ * Internal: Parse command-mode expression with uniform operator loop
  *
- * Wraps parser__parse_bare_command, then handles pipe chaining.
- * Pipes thread the left result as the first argument of the right command:
- *   foo $a | bar $b  →  [bar [foo $a] $b]
- *   a | b | c        →  [c [b [a]]]
+ * Parses: operand [op operand]* left-to-right, no precedence.
+ * Each operator becomes [op left right] in the AST.
+ * In {} mode, operands are commands (head + args).
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_piped_command(Parser* p) {
-  AstNode* left = parser__parse_bare_command(p);
+static AstNode* parser__parse_cmd_expr(Parser* p) {
+  AstNode* left = parser__parse_cmd_operand(p);
   if (left == NULL || left->type == AST_ERROR) return left;
 
-  while (parser__peek(p)->type == TOKEN_PIPE) {
-    parser__advance(p); /* consume | */
+  while (!parser__at_end(p) && parser__is_operator(parser__peek(p))) {
+    Token* op_tok = parser__advance(p); /* consume operator */
 
-    /* Skip newlines after pipe for multi-line pipe chains */
-    while (parser__peek(p)->type == TOKEN_NEWLINE) {
-      parser__advance(p);
-    }
-
-    AstNode* right = parser__parse_bare_command(p);
+    AstNode* right = parser__parse_cmd_operand(p);
     if (right == NULL || right->type == AST_ERROR) return right;
 
-    if (right->type == AST_COMMAND) {
-      /* Insert left as first arg of right command */
-      uint32_t old_count = right->data.command.arg_count;
-      uint32_t new_count = old_count + 1;
-      AstNode** new_args = (AstNode**)arena_alloc(p->arena,
-                                                    sizeof(AstNode*) * new_count);
-      new_args[0] = left;
-      for (uint32_t i = 0; i < old_count; i++) {
-        new_args[i + 1] = right->data.command.args[i];
-      }
-      right->data.command.args      = new_args;
-      right->data.command.arg_count = new_count;
-      right->start = left->start;
-    } else {
-      /* Wrap non-command as call with left as first arg */
-      AstNode* node = ast_alloc(p->arena);
-      node->type  = AST_COMMAND;
-      node->start = left->start;
-      node->end   = right->end;
-      node->data.command.head = right;
-      AstNode** new_args = (AstNode**)arena_alloc(p->arena, sizeof(AstNode*));
-      new_args[0] = left;
-      node->data.command.args      = new_args;
-      node->data.command.arg_count = 1;
-      right = node;
-    }
+    /* Build AST_COMMAND: [op left right] */
+    AstNode* op_head = ast_alloc(p->arena);
+    op_head->type = AST_LIT_STRING;
+    op_head->start = parser__token_start(op_tok);
+    op_head->end   = parser__token_end(op_tok);
+    op_head->data.lit_string.value  = op_tok->payload.text;
+    op_head->data.lit_string.length = op_tok->length;
 
-    left = right;
+    AstNode** args = ast_alloc_array(p->arena, 2);
+    args[0] = left;
+    args[1] = right;
+
+    AstNode* cmd = ast_alloc(p->arena);
+    cmd->type  = AST_COMMAND;
+    cmd->start = left->start;
+    cmd->end   = right->end;
+    cmd->data.command.head      = op_head;
+    cmd->data.command.args      = args;
+    cmd->data.command.arg_count = 2;
+
+    left = cmd;
   }
 
   return left;
@@ -2337,7 +2160,7 @@ static AstNode* parser__parse_block(Parser* p) {
       break;
     }
 
-    AstNode* cmd = parser__parse_piped_command(p);
+    AstNode* cmd = parser__parse_cmd_expr(p);
     if (cmd != NULL) {
       parser__arr_push(&commands, cmd);
     } else {
@@ -2478,19 +2301,8 @@ static AstNode* parser__parse_interp_string(Parser* p) {
       /* Binary operator loop — left-to-right, no precedence */
       while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RPAREN) {
         Token* op_tok = parser__peek(p);
-        if (!parser__is_infix_binary_op(op_tok)) break;
+        if (!parser__is_operator(op_tok)) break;
         parser__advance(p); /* consume operator */
-
-        const char* op_name;
-        uint32_t op_name_len;
-        if (op_tok->type == TOKEN_AND) {
-          op_name = "and"; op_name_len = 3;
-        } else if (op_tok->type == TOKEN_OR) {
-          op_name = "or"; op_name_len = 2;
-        } else {
-          op_name = op_tok->payload.text;
-          op_name_len = op_tok->length;
-        }
 
         AstNode* right = parser__parse_infix_operand(p);
         if (right == NULL) {
@@ -2505,8 +2317,8 @@ static AstNode* parser__parse_interp_string(Parser* p) {
         head->type = AST_LIT_STRING;
         head->start = parser__token_start(op_tok);
         head->end   = parser__token_end(op_tok);
-        head->data.lit_string.value  = op_name;
-        head->data.lit_string.length = op_name_len;
+        head->data.lit_string.value  = op_tok->payload.text;
+        head->data.lit_string.length = op_tok->length;
 
         AstNode** args = ast_alloc_array(p->arena, 2);
         args[0] = left;
@@ -2598,7 +2410,7 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
     } else if (parser__peek(&p)->type == TOKEN_STRUCT) {
       cmd = parser__parse_defstruct(&p);
     } else {
-      cmd = parser__parse_piped_command(&p);
+      cmd = parser__parse_cmd_expr(&p);
     }
     if (cmd != NULL) {
       parser__arr_push(&top_level, cmd);

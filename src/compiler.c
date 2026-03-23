@@ -3798,6 +3798,114 @@ static void compiler__compile_destructure_named(
   c->last_expr_type = TYPE_NIL;
 }
 
+/* --- Internal: Rewrite operator node [op LHS RHS] into [target ...args]
+ *
+ * For = → def, : → mut, :: → set:
+ *   [= name val]         →  [def name val]
+ *   [= [type name] val]  →  [def type name val]  (typed binding)
+ *   [= pattern val]      →  [def pattern val]    (destructuring)
+ *
+ * For | (pipe):
+ *   [| [cmd1 a] [cmd2 b]]  →  [cmd2 [cmd1 a] b]  (first-arg threading)
+ *   [| [cmd1 a] val]       →  [val [cmd1 a]]      (wrap as call)
+ * ----------------------------------------------------------------------- */
+
+static void compiler__compile_command(Compiler* c, AstNode* node);
+
+static void compiler__rewrite_binding_op(Compiler* c, AstNode* node,
+                                          const char* target, uint32_t target_len) {
+  AstNode* lhs = node->data.command.args[0];
+  AstNode* rhs = node->data.command.args[1];
+  uint32_t line = node->start.line;
+
+  /* Build synthetic command: [target ...normalized_args] */
+  AstNode* new_head = ast_alloc(c->arena);
+  new_head->type = AST_LIT_STRING;
+  new_head->start = node->data.command.head->start;
+  new_head->end   = node->data.command.head->end;
+  new_head->data.lit_string.value  = target;
+  new_head->data.lit_string.length = target_len;
+
+  AstNode* synth = ast_alloc(c->arena);
+  synth->type  = AST_COMMAND;
+  synth->start = node->start;
+  synth->end   = node->end;
+  synth->data.command.head = new_head;
+
+  /* Determine arg shape based on LHS type */
+  if (lhs->type == AST_COMMAND && lhs->data.command.arg_count == 1 &&
+      lhs->data.command.head->type == AST_LIT_STRING &&
+      compiler__is_type_annotation(c,
+          lhs->data.command.head->data.lit_string.value,
+          lhs->data.command.head->data.lit_string.length)) {
+    /* LHS is [type name] → typed binding: [target type name RHS] */
+    AstNode** new_args = ast_alloc_array(c->arena, 3);
+    new_args[0] = lhs->data.command.head;
+    new_args[1] = lhs->data.command.args[0];
+    new_args[2] = rhs;
+    synth->data.command.args      = new_args;
+    synth->data.command.arg_count = 3;
+  } else if (lhs->type == AST_COMMAND && lhs->data.command.arg_count > 0) {
+    /* LHS is a multi-word command like [a b c] → destructuring: [target [a b c] RHS] */
+    AstNode** new_args = ast_alloc_array(c->arena, 2);
+    new_args[0] = lhs;
+    new_args[1] = rhs;
+    synth->data.command.args      = new_args;
+    synth->data.command.arg_count = 2;
+  } else if (lhs->type == AST_COMMAND && lhs->data.command.arg_count == 0) {
+    /* LHS is a zero-arg command [name] → unwrap to [target name RHS] */
+    AstNode** new_args = ast_alloc_array(c->arena, 2);
+    new_args[0] = lhs->data.command.head;
+    new_args[1] = rhs;
+    synth->data.command.args      = new_args;
+    synth->data.command.arg_count = 2;
+  } else {
+    /* LHS is a destructuring pattern, block, or other node → [target LHS RHS] */
+    AstNode** new_args = ast_alloc_array(c->arena, 2);
+    new_args[0] = lhs;
+    new_args[1] = rhs;
+    synth->data.command.args      = new_args;
+    synth->data.command.arg_count = 2;
+  }
+
+  compiler__compile_command(c, synth);
+  (void)line;
+}
+
+static void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
+  AstNode* lhs = node->data.command.args[0];
+  AstNode* rhs = node->data.command.args[1];
+
+  /* Build synthetic command: thread LHS result as first arg of RHS */
+  AstNode* synth = ast_alloc(c->arena);
+  synth->type  = AST_COMMAND;
+  synth->start = node->start;
+  synth->end   = node->end;
+
+  if (rhs->type == AST_COMMAND) {
+    /* [| [cmd1 a] [cmd2 b]] → [cmd2 [cmd1 a] b] */
+    uint32_t old_count = rhs->data.command.arg_count;
+    uint32_t new_count = old_count + 1;
+    AstNode** new_args = ast_alloc_array(c->arena, new_count);
+    new_args[0] = lhs;
+    for (uint32_t i = 0; i < old_count; i++) {
+      new_args[1 + i] = rhs->data.command.args[i];
+    }
+    synth->data.command.head      = rhs->data.command.head;
+    synth->data.command.args      = new_args;
+    synth->data.command.arg_count = new_count;
+  } else {
+    /* [| [cmd1 a] val] → [val [cmd1 a]] */
+    AstNode** new_args = ast_alloc_array(c->arena, 1);
+    new_args[0] = lhs;
+    synth->data.command.head      = rhs;
+    synth->data.command.args      = new_args;
+    synth->data.command.arg_count = 1;
+  }
+
+  compiler__compile_command(c, synth);
+}
+
 /* --- Internal: Compile a command invocation --- */
 
 static void compiler__compile_command(Compiler* c, AstNode* node) {
@@ -3910,6 +4018,95 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_byte(c, OP_CALL_SPREAD, line);
     compiler__emit_byte(c, fixed_args, line);
     compiler__emit_byte(c, num_spreads, line);
+    c->last_expr_type = TYPE_DYN;
+    return;
+  }
+
+  /* --- Operator forms from uniform parsing --- */
+
+  /* = → def (immutable binding) */
+  if (compiler__head_matches(head, "=", 1)) {
+    if (argc != 2) {
+      compiler__error(c, line, col, "'=' requires exactly 2 operands");
+      return;
+    }
+    compiler__rewrite_binding_op(c, node, "def", 3);
+    return;
+  }
+
+  /* : → mut (mutable binding) */
+  if (compiler__head_matches(head, ":", 1)) {
+    if (argc != 2) {
+      compiler__error(c, line, col, "':' requires exactly 2 operands");
+      return;
+    }
+    compiler__rewrite_binding_op(c, node, "mut", 3);
+    return;
+  }
+
+  /* :: → set (reassignment) */
+  if (compiler__head_matches(head, "::", 2)) {
+    if (argc != 2) {
+      compiler__error(c, line, col, "'::' requires exactly 2 operands");
+      return;
+    }
+    compiler__rewrite_binding_op(c, node, "set", 3);
+    return;
+  }
+
+  /* | → pipe threading */
+  if (compiler__head_matches(head, "|", 1)) {
+    if (argc != 2) {
+      compiler__error(c, line, col, "'|' requires exactly 2 operands");
+      return;
+    }
+    compiler__compile_pipe_op(c, node);
+    return;
+  }
+
+  /* && → short-circuit logical AND: if LHS { RHS } { false } */
+  if (compiler__head_matches(head, "&&", 2)) {
+    if (argc != 2) {
+      compiler__error(c, line, col, "'&&' requires exactly 2 operands");
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    uint32_t false_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+    compiler__compile_node(c, args[1]);
+    uint32_t end_jump = compiler__emit_jump(c, OP_JUMP, line);
+    compiler__patch_jump(c, false_jump);
+    compiler__emit_byte(c, OP_FALSE, line);
+    compiler__patch_jump(c, end_jump);
+    c->last_expr_type = TYPE_DYN;
+    return;
+  }
+
+  /* || → short-circuit logical OR: if LHS { true } { RHS } */
+  if (compiler__head_matches(head, "||", 2)) {
+    if (argc != 2) {
+      compiler__error(c, line, col, "'||' requires exactly 2 operands");
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    uint32_t true_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+    compiler__emit_byte(c, OP_TRUE, line);
+    uint32_t end_jump = compiler__emit_jump(c, OP_JUMP, line);
+    compiler__patch_jump(c, true_jump);
+    compiler__compile_node(c, args[1]);
+    compiler__patch_jump(c, end_jump);
+    c->last_expr_type = TYPE_DYN;
+    return;
+  }
+
+  /* ~ → logical NOT: if expr { false } { true } */
+  if (compiler__head_matches(head, "~", 1) && argc == 1) {
+    compiler__compile_node(c, args[0]);
+    uint32_t false_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+    compiler__emit_byte(c, OP_FALSE, line);
+    uint32_t end_jump = compiler__emit_jump(c, OP_JUMP, line);
+    compiler__patch_jump(c, false_jump);
+    compiler__emit_byte(c, OP_TRUE, line);
+    compiler__patch_jump(c, end_jump);
     c->last_expr_type = TYPE_DYN;
     return;
   }
@@ -4082,33 +4279,102 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     if (argc == 2 && args[0]->type == AST_COMMAND) {
+      /* keyword form: mut [a b c] expr — convert AST_COMMAND to name arrays
+       * Also handles rest patterns: [mut [head ..rest] expr] */
       AstNode* pat = args[0];
-      uint32_t d_count = 1 + pat->data.command.arg_count;
-      if (d_count > 255) {
+      uint32_t total_elems = 1 + pat->data.command.arg_count;
+      if (total_elems > 255) {
         compiler__error(c, line, col, "too many bindings in destructuring");
         return;
       }
       const char* d_names[256];
       uint32_t d_name_lens[256];
-      if (pat->data.command.head->type != AST_LIT_STRING) {
+      const char* rest_name = NULL;
+      uint32_t rest_name_len = 0;
+      int rest_seen = 0;
+      uint32_t d_count = 0;
+      if (pat->data.command.head->type == AST_SPREAD) {
+        AstNode* inner = pat->data.command.head->data.spread.expr;
+        if (inner && inner->type == AST_LIT_STRING) {
+          rest_name = inner->data.lit_string.value;
+          rest_name_len = inner->data.lit_string.length;
+        }
+        rest_seen = 1;
+      } else if (pat->data.command.head->type == AST_LIT_STRING &&
+                 pat->data.command.head->data.lit_string.length == 2 &&
+                 pat->data.command.head->data.lit_string.value[0] == '.' &&
+                 pat->data.command.head->data.lit_string.value[1] == '.') {
+        /* ".." as head — [..rest ...] or [.. ...] */
+        rest_seen = 1;
+        if (pat->data.command.arg_count >= 1 &&
+            pat->data.command.args[0]->type == AST_LIT_STRING) {
+          rest_name = pat->data.command.args[0]->data.lit_string.value;
+          rest_name_len = pat->data.command.args[0]->data.lit_string.length;
+          for (uint32_t i = 1; i < pat->data.command.arg_count; i++) {
+            if (pat->data.command.args[i]->type == AST_LIT_STRING) {
+              d_names[d_count] = pat->data.command.args[i]->data.lit_string.value;
+              d_name_lens[d_count] = pat->data.command.args[i]->data.lit_string.length;
+              d_count++;
+            }
+          }
+        }
+        if (d_count > 0) {
+          compiler__error(c, line, col,
+                          "rest pattern '..' must be the last element in destructuring");
+          return;
+        }
+        compiler__compile_destructure_vec(
+            c, d_names, d_name_lens, NULL, NULL, d_count,
+            rest_name, rest_name_len,
+            args[1], true, line, col);
+        return;
+      } else if (pat->data.command.head->type != AST_LIT_STRING) {
         compiler__error(c, line, col,
                         "destructuring pattern elements must be names");
         return;
+      } else {
+        d_names[0] = pat->data.command.head->data.lit_string.value;
+        d_name_lens[0] = pat->data.command.head->data.lit_string.length;
+        d_count = 1;
       }
-      d_names[0] = pat->data.command.head->data.lit_string.value;
-      d_name_lens[0] = pat->data.command.head->data.lit_string.length;
       for (uint32_t i = 0; i < pat->data.command.arg_count; i++) {
-        if (pat->data.command.args[i]->type != AST_LIT_STRING) {
+        AstNode* elem = pat->data.command.args[i];
+        if (elem->type == AST_SPREAD) {
+          if (rest_seen) {
+            compiler__error(c, line, col,
+                            "duplicate rest pattern '..' in destructuring");
+            return;
+          }
+          AstNode* inner = elem->data.spread.expr;
+          if (inner && inner->type == AST_LIT_STRING) {
+            rest_name = inner->data.lit_string.value;
+            rest_name_len = inner->data.lit_string.length;
+          }
+          rest_seen = 1;
+        } else if (elem->type == AST_LIT_STRING) {
+          if (rest_seen) {
+            compiler__error(c, line, col,
+                            "rest pattern '..' must be the last element in destructuring");
+            return;
+          }
+          d_names[d_count] = elem->data.lit_string.value;
+          d_name_lens[d_count] = elem->data.lit_string.length;
+          d_count++;
+        } else {
           compiler__error(c, line, col,
                           "destructuring pattern elements must be names");
           return;
         }
-        d_names[1 + i] = pat->data.command.args[i]->data.lit_string.value;
-        d_name_lens[1 + i] = pat->data.command.args[i]->data.lit_string.length;
+      }
+      if (rest_seen && pat->data.command.head->type == AST_SPREAD &&
+          pat->data.command.arg_count > 0) {
+        compiler__error(c, line, col,
+                        "rest pattern '..' must be the last element in destructuring");
+        return;
       }
       compiler__compile_destructure_vec(
           c, d_names, d_name_lens, NULL, NULL, d_count,
-          NULL, 0,
+          rest_name, rest_name_len,
           args[1], true, line, col);
       return;
     }
@@ -4127,31 +4393,89 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           args[1], true, line, col);
       return;
     }
-    /* --- Named destructuring from block: [mut {x, y} value] (keyword form) --- */
+    /* --- Named destructuring from block: [mut {x, y} value] (keyword form)
+     * Also handles rest patterns: [mut {x, ..rest} value]
+     * spread-all: [mut {..} value]
+     * and typed fields: [mut {i32 x, i32 y} value] --- */
     if (argc == 2 && args[0]->type == AST_BLOCK) {
       AstNode* blk = args[0];
-      uint32_t d_count = blk->data.block.count;
-      if (d_count == 0 || d_count > 255) {
+      uint32_t blk_count = blk->data.block.count;
+      if (blk_count == 0 || blk_count > 255) {
         compiler__error(c, line, col, "invalid destructuring pattern");
         return;
       }
       const char* d_names_arr[256];
       uint32_t d_name_lens_arr[256];
+      const char* d_types_arr[256];
+      uint32_t d_type_lens_arr[256];
+      const char* rest_nm = NULL;
+      uint32_t rest_nm_len = 0;
+      int spread_all_flag = 0;
+      int has_types = 0;
+      uint32_t d_count = 0;
       int valid = 1;
-      for (uint32_t i = 0; i < d_count; i++) {
+      for (uint32_t i = 0; i < blk_count; i++) {
         AstNode* cmd = blk->data.block.commands[i];
-        if (cmd->type == AST_COMMAND && cmd->data.command.arg_count == 0 &&
-            cmd->data.command.head->type == AST_LIT_STRING) {
-          d_names_arr[i] = cmd->data.command.head->data.lit_string.value;
-          d_name_lens_arr[i] = cmd->data.command.head->data.lit_string.length;
+        /* Handle bare ".." token (AST_LIT_STRING, not wrapped in AST_COMMAND)
+           — this is how {..} parses since ".." is not a TOKEN_WORD */
+        if (cmd->type == AST_LIT_STRING &&
+            cmd->data.lit_string.length == 2 &&
+            cmd->data.lit_string.value[0] == '.' &&
+            cmd->data.lit_string.value[1] == '.') {
+          spread_all_flag = 1;
+          continue;
+        }
+        if (cmd->type != AST_COMMAND) { valid = 0; break; }
+        const char* head_str = NULL;
+        uint32_t head_len = 0;
+        if (cmd->data.command.head->type == AST_LIT_STRING) {
+          head_str = cmd->data.command.head->data.lit_string.value;
+          head_len = cmd->data.command.head->data.lit_string.length;
+        } else {
+          valid = 0; break;
+        }
+        /* Check for rest pattern: ..name (bare command form in block) */
+        if (head_len == 2 && head_str[0] == '.' && head_str[1] == '.') {
+          if (cmd->data.command.arg_count == 0) {
+            /* spread-all: {..} — head is ".." in a command with no args */
+            spread_all_flag = 1;
+          } else if (cmd->data.command.arg_count == 1 &&
+                     cmd->data.command.args[0]->type == AST_LIT_STRING) {
+            /* rest pattern: ..name */
+            rest_nm = cmd->data.command.args[0]->data.lit_string.value;
+            rest_nm_len = cmd->data.command.args[0]->data.lit_string.length;
+          } else {
+            valid = 0; break;
+          }
+          continue;
+        }
+        /* Check for typed field: type name (head=type, args=[name]) */
+        if (cmd->data.command.arg_count == 1 &&
+            cmd->data.command.args[0]->type == AST_LIT_STRING) {
+          d_types_arr[d_count] = head_str;
+          d_type_lens_arr[d_count] = head_len;
+          d_names_arr[d_count] = cmd->data.command.args[0]->data.lit_string.value;
+          d_name_lens_arr[d_count] = cmd->data.command.args[0]->data.lit_string.length;
+          has_types = 1;
+          d_count++;
+        } else if (cmd->data.command.arg_count == 0) {
+          /* simple name */
+          d_names_arr[d_count] = head_str;
+          d_name_lens_arr[d_count] = head_len;
+          d_types_arr[d_count] = NULL;
+          d_type_lens_arr[d_count] = 0;
+          d_count++;
         } else {
           valid = 0; break;
         }
       }
       if (valid) {
         compiler__compile_destructure_named(
-            c, d_names_arr, d_name_lens_arr, NULL, NULL, d_count,
-            NULL, 0, 0,
+            c, d_names_arr, d_name_lens_arr,
+            has_types ? d_types_arr : NULL,
+            has_types ? d_type_lens_arr : NULL,
+            d_count,
+            rest_nm, rest_nm_len, spread_all_flag,
             args[1], true, line, col);
         return;
       }
@@ -4475,35 +4799,113 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     if (argc == 2 && args[0]->type == AST_COMMAND) {
-      /* keyword form: def [a b c] expr — convert AST_COMMAND to name arrays */
+      /* keyword form: def [a b c] expr — convert AST_COMMAND to name arrays
+       * Also handles rest patterns: [def [head ..rest] expr] where ..rest
+       * is parsed as AST_SPREAD */
       AstNode* pat = args[0];
-      uint32_t d_count = 1 + pat->data.command.arg_count; /* head + args */
-      if (d_count > 255) {
+      uint32_t total_elems = 1 + pat->data.command.arg_count; /* head + args */
+      if (total_elems > 255) {
         compiler__error(c, line, col, "too many bindings in destructuring");
         return;
       }
       const char* d_names[256];
       uint32_t d_name_lens[256];
+      const char* rest_name = NULL;
+      uint32_t rest_name_len = 0;
+      int rest_seen = 0;
+      uint32_t d_count = 0;
       /* head is first name */
-      if (pat->data.command.head->type != AST_LIT_STRING) {
+      if (pat->data.command.head->type == AST_SPREAD) {
+        /* ..rest as first element (AST_SPREAD from bracket arg parsing) */
+        AstNode* inner = pat->data.command.head->data.spread.expr;
+        if (inner && inner->type == AST_LIT_STRING) {
+          rest_name = inner->data.lit_string.value;
+          rest_name_len = inner->data.lit_string.length;
+        }
+        rest_seen = 1;
+      } else if (pat->data.command.head->type == AST_LIT_STRING &&
+                 pat->data.command.head->data.lit_string.length == 2 &&
+                 pat->data.command.head->data.lit_string.value[0] == '.' &&
+                 pat->data.command.head->data.lit_string.value[1] == '.') {
+        /* ".." as head — parsed when [..rest] or [..] is the inner bracket.
+           The head becomes AST_LIT_STRING("..") and rest name (if any) is
+           the first arg. */
+        rest_seen = 1;
+        if (pat->data.command.arg_count >= 1 &&
+            pat->data.command.args[0]->type == AST_LIT_STRING) {
+          rest_name = pat->data.command.args[0]->data.lit_string.value;
+          rest_name_len = pat->data.command.args[0]->data.lit_string.length;
+          /* Remaining args after the rest name are positional names after rest
+             — this is an error (rest not last), but we collect them so the
+             compile_destructure_vec function can detect the issue. */
+          for (uint32_t i = 1; i < pat->data.command.arg_count; i++) {
+            if (pat->data.command.args[i]->type == AST_LIT_STRING) {
+              d_names[d_count] = pat->data.command.args[i]->data.lit_string.value;
+              d_name_lens[d_count] = pat->data.command.args[i]->data.lit_string.length;
+              d_count++;
+            }
+          }
+        }
+        /* rest_seen means rest is NOT at the end — report error */
+        if (d_count > 0) {
+          compiler__error(c, line, col,
+                          "rest pattern '..' must be the last element in destructuring");
+          return;
+        }
+        compiler__compile_destructure_vec(
+            c, d_names, d_name_lens, NULL, NULL, d_count,
+            rest_name, rest_name_len,
+            args[1], false, line, col);
+        return;
+      } else if (pat->data.command.head->type != AST_LIT_STRING) {
         compiler__error(c, line, col,
                         "destructuring pattern elements must be names");
         return;
+      } else {
+        d_names[0] = pat->data.command.head->data.lit_string.value;
+        d_name_lens[0] = pat->data.command.head->data.lit_string.length;
+        d_count = 1;
       }
-      d_names[0] = pat->data.command.head->data.lit_string.value;
-      d_name_lens[0] = pat->data.command.head->data.lit_string.length;
       for (uint32_t i = 0; i < pat->data.command.arg_count; i++) {
-        if (pat->data.command.args[i]->type != AST_LIT_STRING) {
+        AstNode* elem = pat->data.command.args[i];
+        if (elem->type == AST_SPREAD) {
+          /* ..rest pattern */
+          if (rest_seen) {
+            compiler__error(c, line, col,
+                            "duplicate rest pattern '..' in destructuring");
+            return;
+          }
+          AstNode* inner = elem->data.spread.expr;
+          if (inner && inner->type == AST_LIT_STRING) {
+            rest_name = inner->data.lit_string.value;
+            rest_name_len = inner->data.lit_string.length;
+          }
+          rest_seen = 1;
+        } else if (elem->type == AST_LIT_STRING) {
+          if (rest_seen) {
+            compiler__error(c, line, col,
+                            "rest pattern '..' must be the last element in destructuring");
+            return;
+          }
+          d_names[d_count] = elem->data.lit_string.value;
+          d_name_lens[d_count] = elem->data.lit_string.length;
+          d_count++;
+        } else {
           compiler__error(c, line, col,
                           "destructuring pattern elements must be names");
           return;
         }
-        d_names[1 + i] = pat->data.command.args[i]->data.lit_string.value;
-        d_name_lens[1 + i] = pat->data.command.args[i]->data.lit_string.length;
+      }
+      if (rest_seen && pat->data.command.head->type == AST_SPREAD &&
+          pat->data.command.arg_count > 0) {
+        /* rest was first (head), but there are more elements after it */
+        compiler__error(c, line, col,
+                        "rest pattern '..' must be the last element in destructuring");
+        return;
       }
       compiler__compile_destructure_vec(
           c, d_names, d_name_lens, NULL, NULL, d_count,
-          NULL, 0,
+          rest_name, rest_name_len,
           args[1], false, line, col);
       return;
     }
@@ -4522,31 +4924,89 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           args[1], false, line, col);
       return;
     }
-    /* --- Named destructuring from block: [def {x, y} value] (keyword form) --- */
+    /* --- Named destructuring from block: [def {x, y} value] (keyword form)
+     * Also handles rest patterns: [def {x, ..rest} value]
+     * spread-all: [def {..} value]
+     * and typed fields: [def {i32 x, i32 y} value] --- */
     if (argc == 2 && args[0]->type == AST_BLOCK) {
       AstNode* blk = args[0];
-      uint32_t d_count = blk->data.block.count;
-      if (d_count == 0 || d_count > 255) {
+      uint32_t blk_count = blk->data.block.count;
+      if (blk_count == 0 || blk_count > 255) {
         compiler__error(c, line, col, "invalid destructuring pattern");
         return;
       }
       const char* d_names_arr[256];
       uint32_t d_name_lens_arr[256];
+      const char* d_types_arr[256];
+      uint32_t d_type_lens_arr[256];
+      const char* rest_nm = NULL;
+      uint32_t rest_nm_len = 0;
+      int spread_all_flag = 0;
+      int has_types = 0;
+      uint32_t d_count = 0;
       int valid = 1;
-      for (uint32_t i = 0; i < d_count; i++) {
+      for (uint32_t i = 0; i < blk_count; i++) {
         AstNode* cmd = blk->data.block.commands[i];
-        if (cmd->type == AST_COMMAND && cmd->data.command.arg_count == 0 &&
-            cmd->data.command.head->type == AST_LIT_STRING) {
-          d_names_arr[i] = cmd->data.command.head->data.lit_string.value;
-          d_name_lens_arr[i] = cmd->data.command.head->data.lit_string.length;
+        /* Handle bare ".." token (AST_LIT_STRING, not wrapped in AST_COMMAND)
+           — this is how {..} parses since ".." is not a TOKEN_WORD */
+        if (cmd->type == AST_LIT_STRING &&
+            cmd->data.lit_string.length == 2 &&
+            cmd->data.lit_string.value[0] == '.' &&
+            cmd->data.lit_string.value[1] == '.') {
+          spread_all_flag = 1;
+          continue;
+        }
+        if (cmd->type != AST_COMMAND) { valid = 0; break; }
+        const char* head_str = NULL;
+        uint32_t head_len = 0;
+        if (cmd->data.command.head->type == AST_LIT_STRING) {
+          head_str = cmd->data.command.head->data.lit_string.value;
+          head_len = cmd->data.command.head->data.lit_string.length;
+        } else {
+          valid = 0; break;
+        }
+        /* Check for rest pattern: ..name (bare command form in block) */
+        if (head_len == 2 && head_str[0] == '.' && head_str[1] == '.') {
+          if (cmd->data.command.arg_count == 0) {
+            /* spread-all: {..} — head is ".." in a command with no args */
+            spread_all_flag = 1;
+          } else if (cmd->data.command.arg_count == 1 &&
+                     cmd->data.command.args[0]->type == AST_LIT_STRING) {
+            /* rest pattern: ..name */
+            rest_nm = cmd->data.command.args[0]->data.lit_string.value;
+            rest_nm_len = cmd->data.command.args[0]->data.lit_string.length;
+          } else {
+            valid = 0; break;
+          }
+          continue;
+        }
+        /* Check for typed field: type name (head=type, args=[name]) */
+        if (cmd->data.command.arg_count == 1 &&
+            cmd->data.command.args[0]->type == AST_LIT_STRING) {
+          d_types_arr[d_count] = head_str;
+          d_type_lens_arr[d_count] = head_len;
+          d_names_arr[d_count] = cmd->data.command.args[0]->data.lit_string.value;
+          d_name_lens_arr[d_count] = cmd->data.command.args[0]->data.lit_string.length;
+          has_types = 1;
+          d_count++;
+        } else if (cmd->data.command.arg_count == 0) {
+          /* simple name */
+          d_names_arr[d_count] = head_str;
+          d_name_lens_arr[d_count] = head_len;
+          d_types_arr[d_count] = NULL;
+          d_type_lens_arr[d_count] = 0;
+          d_count++;
         } else {
           valid = 0; break;
         }
       }
       if (valid) {
         compiler__compile_destructure_named(
-            c, d_names_arr, d_name_lens_arr, NULL, NULL, d_count,
-            NULL, 0, 0,
+            c, d_names_arr, d_name_lens_arr,
+            has_types ? d_types_arr : NULL,
+            has_types ? d_type_lens_arr : NULL,
+            d_count,
+            rest_nm, rest_nm_len, spread_all_flag,
             args[1], false, line, col);
         return;
       }

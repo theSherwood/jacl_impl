@@ -38,7 +38,7 @@ static int test_spread_all_basic(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "p = [Point 10 20]\n"
-    "{..} = $p\n"
+    "[def {..} $p]\n"
     "[print $x]\n"
     "[print $y]\n",
     &cap);
@@ -54,7 +54,7 @@ static int test_spread_all_explicit_plus(void) {
   VMResult r = run_capture(
     "struct Vec3 {i32 x, i32 y, i32 z}\n"
     "v = [Vec3 1 2 3]\n"
-    "{x, ..} = $v\n"
+    "[def {x, ..} $v]\n"
     "[print $x]\n"
     "[print $y]\n"
     "[print $z]\n",
@@ -71,7 +71,7 @@ static int test_spread_all_different_struct(void) {
   VMResult r = run_capture(
     "struct Color {i32 r, i32 g, i32 b}\n"
     "c = [Color 255 128 0]\n"
-    "{..} = $c\n"
+    "[def {..} $c]\n"
     "[print $r]\n"
     "[print $g]\n"
     "[print $b]\n",
@@ -88,7 +88,7 @@ static int test_spread_all_no_dup(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "p = [Point 10 20]\n"
-    "{y, ..} = $p\n"
+    "[def {y, ..} $p]\n"
     "[print $x]\n"
     "[print $y]\n",
     &cap);
@@ -104,7 +104,7 @@ static int test_spread_all_dyn_error(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "proc test {dyn d} {\n"
-    "  {..} = $d\n"
+    "  [def {..} $d]\n"
     "}\n"
     "[test [Point 10 20]]\n",
     &cap);
@@ -121,7 +121,7 @@ static int test_spread_all_shadow_error(void) {
     "proc test {} {\n"
     "  x = 99\n"
     "  p = [Point 10 20]\n"
-    "  {..} = $p\n"
+    "  [def {..} $p]\n"
     "  [print $x]\n"
     "}\n"
     "[test]\n",
@@ -137,7 +137,7 @@ static int test_spread_all_global(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "p = [Point 42 99]\n"
-    "{..} = $p\n"
+    "[def {..} $p]\n"
     "[print $x]\n"
     "[print $y]\n",
     &cap);
@@ -153,7 +153,7 @@ static int test_spread_all_explicit_global(void) {
   VMResult r = run_capture(
     "struct Vec3 {i32 x, i32 y, i32 z}\n"
     "v = [Vec3 5 6 7]\n"
-    "{z, ..} = $v\n"
+    "[def {z, ..} $v]\n"
     "[print $x]\n"
     "[print $y]\n"
     "[print $z]\n",
@@ -170,7 +170,7 @@ static int test_spread_all_nested(void) {
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
     "proc show {Point p} {\n"
-    "  {..} = $p\n"
+    "  [def {..} $p]\n"
     "  [print $x]\n"
     "  [print $y]\n"
     "}\n"
@@ -188,7 +188,7 @@ static int test_spread_all_single_field(void) {
   VMResult r = run_capture(
     "struct Wrapper {i64 val}\n"
     "w = [Wrapper 100]\n"
-    "{..} = $w\n"
+    "[def {..} $w]\n"
     "[print $val]\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
