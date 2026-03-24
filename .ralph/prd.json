@@ -109,7 +109,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "The dispatch table references labels emitted later during body compilation. Use forward-jump placeholders that get backpatched, same pattern as existing if/while compilation."
     },
     {

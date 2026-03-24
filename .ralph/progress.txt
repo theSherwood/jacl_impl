@@ -15,6 +15,8 @@ Started: Mon Mar 24 2026
 - State machine objects: `gc_alloc_state_machine(heap, field_count)` returns tagged JaclVal; access via `jacl_as_state_machine(val)`; fields at `sm->fields[i]`, resume at `sm->resume_point`
 - New opcodes go before OP_HALT (always last); debug names are in `bytecode__opcode_name()` switch; update test_bytecode.c enum assertions when adding opcodes
 - SM function convention: state machine object lives in frame slot 0 (`frame->stack_base + 0`), resume value in slot 1
+- SM dispatch table: `compiler__emit_sm_dispatch_table(c, suspension_count, line)` emits chained OP_GET_RESUME_POINT + OP_EQ + OP_JUMP_IF_FALSE + OP_JUMP checks; backpatch via `c->sm_dispatch.label_patches[i]`; resume_point 0 = initial entry (falls through), 1..N = after suspension points
+- OP_GET_RESUME_POINT / OP_SET_RESUME_POINT: no operands, read/write `sm->resume_point` as i32 from state object in frame slot 0
 
 ---
 
@@ -106,4 +108,21 @@ Started: Mon Mar 24 2026
   - There are 8 distinct nested compiler creation sites that must all propagate new Compiler fields — easy to miss the module compiler (`mc`) and the two top-level body compilers
   - The pattern is always `nested.field = c->field` (or `c.field` for stack-allocated compilers)
   - `compiler__init` sets all booleans to false, so propagation is only needed where the parent might have it set to true
+---
+
+## 2026-03-24 - US-006
+- Implemented `compiler__emit_sm_dispatch_table` in compiler.c — emits entry dispatch for SM functions
+- Added `OP_GET_RESUME_POINT` and `OP_SET_RESUME_POINT` opcodes to bytecode.c (no operand; read/write `sm->resume_point` as i32)
+- Added VM handlers in vm.c for both new opcodes
+- Added `SMDispatchContext` struct: holds `label_patches[]` array and `label_count` for backpatching forward jumps
+- Added `sm_dispatch` and `sm_analysis` fields to Compiler struct, initialized in `compiler__init`
+- Dispatch pattern: for each resume point 1..N, emits OP_GET_RESUME_POINT + OP_CONST(resume_id) + OP_EQ + OP_JUMP_IF_FALSE(skip) + OP_JUMP(label); case 0 falls through
+- Updated test/test_bytecode.c: new opcode enum assertions (OP_GET_RESUME_POINT=144, OP_SET_RESUME_POINT=145, OP_HALT=146)
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c
+- All 83 tests pass, compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - `resume_point` is a uint32_t in JaclStateMachine struct (not a JaclVal in fields[]), so it needs its own opcodes (OP_GET_RESUME_POINT / OP_SET_RESUME_POINT) rather than using OP_GET_STATE_FIELD
+  - OP_EQ consumes both operands, so resume_point must be reloaded for each dispatch case check
+  - Resume point mapping: 0 = initial entry, suspension_point_id + 1 = resume after that suspension — body compiler sets resume_point to `sp_id + 1` before suspending
+  - Backpatch via `compiler__patch_jump(c, c->sm_dispatch.label_patches[i])` after emitting the code following each suspension point
 ---
