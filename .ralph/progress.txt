@@ -12,6 +12,9 @@ Started: Mon Mar 24 2026
 - `def`/`mut` support typed form with 3 args: [def type name value] — name is at args[1] when argc==3
 - Named procs (`proc name {params} {body}`) create a local binding for the proc name in the enclosing scope — extract but don't recurse into body
 - `compiler__analyze_suspensions` takes (body, param_names, param_count) — params are placed first in the StateLayout
+- State machine objects: `gc_alloc_state_machine(heap, field_count)` returns tagged JaclVal; access via `jacl_as_state_machine(val)`; fields at `sm->fields[i]`, resume at `sm->resume_point`
+- New opcodes go before OP_HALT (always last); debug names are in `bytecode__opcode_name()` switch; update test_bytecode.c enum assertions when adding opcodes
+- SM function convention: state machine object lives in frame slot 0 (`frame->stack_base + 0`), resume value in slot 1
 
 ---
 
@@ -50,4 +53,37 @@ Started: Mon Mar 24 2026
   - `_` wildcards in destructuring become empty-string names in compiler; skip both `_` and empty in state layout
   - For-each loops can't contain suspensions (compiler errors) so hidden locals (__col, __len, __idx) don't need state fields
   - Named procs create a local for the name — easy to miss since the walker skips proc body
+---
+
+## 2026-03-24 - US-003
+- Added `OBJ_STATE_MACHINE` to `GCObjType` enum in gc.c
+- Defined `JaclStateMachine` struct: resume_point (uint32_t), field_count (uint32_t), error_k (JaclVal), sm_closure (JaclVal), fields[] (trailing JaclVal array)
+- Added `gc_alloc_state_machine(heap, field_count)` constructor: single allocation for struct + trailing fields, all fields initialized to JACL_NIL, resume_point to 0
+- Added `JACL_TAG_STATE_MACHINE` (0x16) to value.c tag constants
+- Added helpers: `jacl_is_state_machine(val)`, `jacl_as_state_machine(val)`, `jacl_state_machine_ptr(ptr)`
+- Updated `jacl_is_heap_type()` to include `JACL_TAG_STATE_MACHINE`
+- Added GC tracing case in gc_collect.c: traces error_k, sm_closure, and all fields[0..field_count-1]
+- GC sweep is type-agnostic (zero-fills dead objects) — no sweep changes needed
+- Files changed: src/value.c, src/gc.c, src/gc_collect.c
+- All 83 tests pass, compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - Internal-only GC objects (like ParallelAgg, RaceAgg) reuse JACL_TAG_FUTURE for pointer tagging — but state machine needs its own tag since it's referenced from streams and used in type checks
+  - GC sweep is fully generic (memset zero) — only tracing needs a new case
+  - Follow the ParallelAgg pattern for variable-size GC objects: sizeof(Struct) + count * sizeof(JaclVal) trailing array
+---
+
+## 2026-03-24 - US-004
+- Added `OP_GET_STATE_FIELD` (142) and `OP_SET_STATE_FIELD` (143) to OpCode enum in bytecode.c, shifting OP_HALT to 144
+- Added opcode name entries in `bytecode__opcode_name()` switch statement
+- Added VM handlers in vm.c: both read state machine object from `frame->stack_base + 0`, then access `sm->fields[field_index]`
+  - GET: pushes field value onto stack
+  - SET: pops value from stack, writes to field
+- Updated test/test_bytecode.c opcode enum assertions for new opcodes and shifted OP_HALT
+- Files changed: src/bytecode.c, src/vm.c, test/test_bytecode.c
+- All 83 tests pass, compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - New opcodes go before OP_HALT in the enum — OP_HALT is always the last opcode
+  - The debug name table is a switch statement (`bytecode__opcode_name`), not an array
+  - State machine opcodes use `frame->stack_base + 0` to access the state object (slot 0 of the SM function frame), same pattern as OP_GET_LOCAL with slot 0
+  - Adding opcodes shifts OP_HALT's numeric value — remember to update the test assertion for OP_HALT
 ---
