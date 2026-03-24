@@ -5964,6 +5964,26 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_GET_STATE_FIELD: {
+        uint8_t field_index = vm__read_byte(vm);
+        JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JaclStateMachine *sm = jacl_as_state_machine(state_val);
+        result = vm__push(vm, sm->fields[field_index]);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_SET_STATE_FIELD: {
+        uint8_t field_index = vm__read_byte(vm);
+        JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JaclStateMachine *sm = jacl_as_state_machine(state_val);
+        JaclVal value;
+        result = vm__pop(vm, &value);
+        if (result != VM_OK) return result;
+        sm->fields[field_index] = value;
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }
