@@ -1631,6 +1631,7 @@ struct Compiler {
   bool             in_non_suspending_callback; /* error if suspension inside */
   SuspensionMap*   suspension_map;  /* pre-computed suspension analysis */
   bool             is_cps;          /* true if this proc is CPS-transformed */
+  bool             use_state_machines; /* true: SM compilation for suspending funcs */
   bool             in_concurrent_body; /* true inside spawn/parallel/race body */
   bool             pin_all_closures;  /* true when concurrent body touches mutable globals */
   bool             force_global_procs; /* procs emit OP_DEF_GLOBAL even at scope>0 */
@@ -1667,6 +1668,7 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->in_non_suspending_callback = false;
   c->suspension_map  = NULL;
   c->is_cps          = false;
+  c->use_state_machines = false;
   c->in_concurrent_body = false;
   c->pin_all_closures   = false;
   c->force_global_procs = false;
@@ -2283,6 +2285,7 @@ static void compiler__emit_continuation(Compiler* c,
   cont_compiler.enclosing      = c;
   cont_compiler.suspension_map = c->suspension_map;
   cont_compiler.is_cps         = true;
+  cont_compiler.use_state_machines = c->use_state_machines;
   cont_compiler.in_concurrent_body = c->in_concurrent_body;
   cont_compiler.pin_all_closures   = c->pin_all_closures;
 
@@ -2491,6 +2494,7 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   body_compiler.scope_depth    = 1;
   body_compiler.enclosing      = c;
   body_compiler.suspension_map = c->suspension_map;
+  body_compiler.use_state_machines = c->use_state_machines;
   body_compiler.pin_all_closures = needs_pinning;
 
   /* Copy global arities for suspension lookups */
@@ -2715,6 +2719,7 @@ static void compiler__compile_cps_while(Compiler* c, AstNode* while_node,
   loop_compiler.scope_depth    = 1;
   loop_compiler.enclosing      = c;
   loop_compiler.suspension_map = c->suspension_map;
+  loop_compiler.use_state_machines = c->use_state_machines;
   loop_compiler.is_cps         = true;
   loop_compiler.has_yield      = true;  /* propagate generator flag */
   { Compiler* root = c; while (root->enclosing) root = root->enclosing;
@@ -5823,6 +5828,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     body_compiler.enclosing      = c;
     body_compiler.return_type    = proc_return_type;
     body_compiler.suspension_map = c->suspension_map;
+    body_compiler.use_state_machines = c->use_state_machines;
 
     /* Copy global arities to body compiler for suspension lookups */
     {
@@ -7288,6 +7294,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     body_compiler.scope_depth    = 1;
     body_compiler.enclosing      = c;
     body_compiler.suspension_map = c->suspension_map;
+    body_compiler.use_state_machines = c->use_state_machines;
     body_compiler.pin_all_closures = needs_pinning;
 
     /* Copy global arities for suspension lookups */
@@ -8441,6 +8448,7 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     body.enclosing         = &c;
     body.suspension_map    = &suspension_map;
     body.is_cps            = true;
+    body.use_state_machines = c.use_state_machines;
     body.force_global_procs = true;
 
     /* Copy global arities */
@@ -8599,6 +8607,7 @@ static bool compiler__compile_module(const char* canonical_path,
   Compiler mc;
   compiler__init(&mc, chunk, arena, importer->intern_table, importer->heap);
   mc.suspension_map  = &suspension_map;
+  mc.use_state_machines = importer->use_state_machines;
   mc.module_cache    = importer->module_cache;
   mc.current_module  = mod;
   mc.import_stack    = importer->import_stack;
@@ -8832,6 +8841,7 @@ static ProgramResult jacl_compile_program(const char* root_path,
     body.enclosing         = &c;
     body.suspension_map    = &suspension_map;
     body.is_cps            = true;
+    body.use_state_machines = c.use_state_machines;
     body.force_global_procs = true;
     body.module_cache      = &cache;
     body.current_module    = root_mod;
