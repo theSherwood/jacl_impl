@@ -1607,6 +1607,13 @@ typedef struct {
   bool     is_for_loop;         /* true for inlined for-loops */
 } LoopContext;
 
+/* --- State machine dispatch table context (US-006) --- */
+
+typedef struct {
+  uint32_t label_patches[SM_MAX_SUSPENSION_POINTS]; /* jump offsets to backpatch */
+  uint32_t label_count;                             /* number of resume points (= suspension_count) */
+} SMDispatchContext;
+
 /* --- Internal: Compiler state --- */
 
 typedef struct Compiler Compiler;
@@ -1648,6 +1655,8 @@ struct Compiler {
   LoopContext          loop_stack[COMPILER_LOOP_DEPTH_MAX];
   uint32_t             loop_depth;     /* current nesting depth (0 = not in loop) */
   bool                 has_yield;      /* true if current proc body contains yield */
+  SMDispatchContext     sm_dispatch;    /* dispatch table jump patches for SM compilation */
+  SuspensionAnalysis*  sm_analysis;    /* suspension analysis for current SM function (or NULL) */
 };
 
 static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -1684,6 +1693,8 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->struct_registry   = NULL;
   c->loop_depth        = 0;
   c->has_yield         = false;
+  memset(&c->sm_dispatch, 0, sizeof(SMDispatchContext));
+  c->sm_analysis       = NULL;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -2140,6 +2151,66 @@ static void compiler__emit_check_error(Compiler* c, uint32_t line) {
   } else {
     compiler__emit_u16(c, 0, line);
   }
+}
+
+/* --- Internal: State machine dispatch table (US-006) --- */
+
+/**
+ * Emit the entry dispatch table for a state machine function.
+ *
+ * On entry, the SM function receives the state object in slot 0.
+ * This function emits chained conditional jumps that compare
+ * state->resume_point against each known resume point ID (1..N).
+ * Case 0 (initial entry) falls through to the function body start.
+ *
+ * The jump targets are forward-jump placeholders that must be backpatched
+ * later during body compilation when the compiler reaches each suspension
+ * point. The patch offsets are stored in c->sm_dispatch.label_patches[].
+ *
+ * @param c                Compiler for the SM function body
+ * @param suspension_count Number of suspension points (from SuspensionAnalysis)
+ * @param line             Source line for debug info
+ */
+static void compiler__emit_sm_dispatch_table(Compiler* c,
+                                              uint32_t suspension_count,
+                                              uint32_t line) {
+  if (suspension_count == 0) return;
+
+  c->sm_dispatch.label_count = suspension_count;
+
+  /* For each resume point 1..N, emit:
+   *   OP_GET_RESUME_POINT        ; push state->resume_point as i32
+   *   OP_CONST <resume_id>       ; push integer constant (resume_id = sp_index + 1)
+   *   OP_EQ                      ; compare (pops both, pushes bool)
+   *   OP_JUMP_IF_FALSE <skip>    ; if not equal, skip to next check
+   *   OP_JUMP <label_N>          ; forward jump to resume point (backpatched later)
+   * skip:
+   *
+   * Case 0 (resume_point == 0) falls through to function body start.
+   */
+  for (uint32_t i = 0; i < suspension_count; i++) {
+    uint32_t resume_id = i + 1;  /* resume_point 0 = initial entry, 1..N = after yields */
+
+    /* Load resume_point from state object */
+    compiler__emit_byte(c, OP_GET_RESUME_POINT, line);
+
+    /* Push the resume ID constant */
+    compiler__emit_constant(c, jacl_i32((int32_t)resume_id), line);
+
+    /* Compare */
+    compiler__emit_byte(c, OP_EQ, line);
+
+    /* Skip to next check if not equal */
+    uint32_t skip_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
+
+    /* Forward jump to resume label (to be backpatched) */
+    c->sm_dispatch.label_patches[i] = compiler__emit_jump(c, OP_JUMP, line);
+
+    /* Patch the skip jump to land here (next check) */
+    compiler__patch_jump(c, skip_jump);
+  }
+
+  /* Fall through: resume_point == 0, begin function body from the start */
 }
 
 /* --- Internal: CPS transform helpers --- */

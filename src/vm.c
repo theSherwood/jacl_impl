@@ -5984,6 +5984,24 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_GET_RESUME_POINT: {
+        JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JaclStateMachine *sm = jacl_as_state_machine(state_val);
+        result = vm__push(vm, jacl_i32((int32_t)sm->resume_point));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_SET_RESUME_POINT: {
+        JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JaclStateMachine *sm = jacl_as_state_machine(state_val);
+        JaclVal value;
+        result = vm__pop(vm, &value);
+        if (result != VM_OK) return result;
+        sm->resume_point = (uint32_t)jacl_as_i32(value);
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }

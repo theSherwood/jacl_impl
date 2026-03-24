@@ -164,6 +164,8 @@ typedef enum {
   OP_LINES,         /* pop string, push lazy line stream */
   OP_GET_STATE_FIELD, /* uint8_t field_index; read state_obj from frame slot 0, push fields[index] */
   OP_SET_STATE_FIELD, /* uint8_t field_index; read state_obj from frame slot 0, pop value, write fields[index] */
+  OP_GET_RESUME_POINT, /* no operand; read state_obj from frame slot 0, push resume_point as i32 */
+  OP_SET_RESUME_POINT, /* no operand; pop i32 value, write to state_obj resume_point */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -441,6 +443,8 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_LINES:               return "OP_LINES";
     case OP_GET_STATE_FIELD:     return "OP_GET_STATE_FIELD";
     case OP_SET_STATE_FIELD:     return "OP_SET_STATE_FIELD";
+    case OP_GET_RESUME_POINT:    return "OP_GET_RESUME_POINT";
+    case OP_SET_RESUME_POINT:    return "OP_SET_RESUME_POINT";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";
