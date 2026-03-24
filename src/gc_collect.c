@@ -253,6 +253,17 @@ static void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
+    /* --- State machine: trace error_k, sm_closure, and all field slots --- */
+    case OBJ_STATE_MACHINE: {
+        JaclStateMachine *sm = (JaclStateMachine *)payload;
+        gc__ms_push_val(ms, sm->error_k);
+        gc__ms_push_val(ms, sm->sm_closure);
+        for (uint32_t i = 0; i < sm->field_count; i++) {
+            gc__ms_push_val(ms, sm->fields[i]);
+        }
+        break;
+    }
+
     /* --- Struct: trace reference-type fields --- */
     case OBJ_STRUCT: {
         JaclStruct *s = (JaclStruct *)payload;

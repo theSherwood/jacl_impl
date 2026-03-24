@@ -33,7 +33,8 @@ typedef enum {
     OBJ_ROPE_STRING,
     OBJ_ROPE_LEAF,
     OBJ_ROPE_INTERNAL,
-    OBJ_STREAM
+    OBJ_STREAM,
+    OBJ_STATE_MACHINE
 } GCObjType;
 
 /* --- GC object header (8 bytes, prepended before payload) ---
@@ -89,7 +90,8 @@ static inline bool jacl_is_heap_type(JaclVal v) {
         || tag == JACL_TAG_F64
         || tag == JACL_TAG_FUTURE
         || tag == JACL_TAG_STRUCT
-        || tag == JACL_TAG_ROPE_STRING;
+        || tag == JACL_TAG_ROPE_STRING
+        || tag == JACL_TAG_STATE_MACHINE;
 }
 
 /* ======================================================================
@@ -1093,6 +1095,43 @@ static JaclVal jacl_race_agg(ThreadHeap *heap, JaclVal continuation) {
     agg->settled      = 0;
     agg->continuation = continuation;
     return race_agg_ptr(agg);
+}
+
+/* ======================================================================
+ * JaclStateMachine: heap-allocated state for state machine coroutines
+ *
+ * Holds the resume point, error handler, reference to the compiled SM
+ * closure, and a trailing array of local/parameter fields that persist
+ * across suspension points.
+ * ====================================================================== */
+
+typedef struct {
+    uint32_t resume_point;   /* next dispatch index (0 = initial entry) */
+    uint32_t field_count;    /* number of trailing field slots */
+    JaclVal  error_k;        /* error handler continuation (or JACL_NIL) */
+    JaclVal  sm_closure;     /* compiled state machine closure */
+    JaclVal  fields[];       /* trailing array: fields[0..field_count-1] */
+} JaclStateMachine;
+
+/* --- Pointer accessor --- */
+
+static inline JaclStateMachine *jacl_as_state_machine(JaclVal v) {
+    return (JaclStateMachine *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+}
+
+/* --- Constructor: allocate a state machine with field_count trailing slots --- */
+
+static JaclVal gc_alloc_state_machine(ThreadHeap *heap, uint32_t field_count) {
+    size_t sz = sizeof(JaclStateMachine) + field_count * sizeof(JaclVal);
+    JaclStateMachine *sm = (JaclStateMachine *)gc_alloc(heap, OBJ_STATE_MACHINE, sz);
+    sm->resume_point = 0;
+    sm->field_count  = field_count;
+    sm->error_k      = JACL_NIL;
+    sm->sm_closure   = JACL_NIL;
+    for (uint32_t i = 0; i < field_count; i++) {
+        sm->fields[i] = JACL_NIL;
+    }
+    return jacl_state_machine_ptr(sm);
 }
 
 #endif /* GC_C */
