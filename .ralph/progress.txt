@@ -1,4 +1,53 @@
 # Ralph Progress Log
 Started: Mon Mar 24 2026
 
+## Codebase Patterns
+- Suspension operations (yield, await, parallel, race) are AST_COMMAND nodes with string heads — match by comparing head->data.lit_string.value
+- Nested proc/spawn definitions are separate closure scopes — do NOT recurse into them during analysis
+- The existing `analyze__walk_body` and `ast__contains_suspension` follow identical recursion patterns — new analysis passes should mirror their structure
+- Use `memset(&struct, 0, sizeof(struct))` for struct initialization in this codebase
+- Tests use `compile_source()` helper + tracked_allocator pattern from test_helpers.h
+- Build with `bash build.sh` — compiles all test files in parallel then runs them sequentially
+- Destructuring has 4 AST forms: AST_DESTRUCTURE_VEC, AST_DESTRUCTURE_NAMED, AST_COMMAND (bracket keyword form), AST_BLOCK (curly keyword form) — handle all 4 when extracting binding names
+- `def`/`mut` support typed form with 3 args: [def type name value] — name is at args[1] when argc==3
+- Named procs (`proc name {params} {body}`) create a local binding for the proc name in the enclosing scope — extract but don't recurse into body
+- `compiler__analyze_suspensions` takes (body, param_names, param_count) — params are placed first in the StateLayout
+
+---
+
+## 2026-03-24 - US-001
+- Implemented `compiler__analyze_suspensions` function and supporting types in compiler.c
+- Added: `SuspensionPointType` enum (SUSPEND_YIELD/AWAIT/PARALLEL/RACE), `SuspensionPoint` struct (id, type, node, line, column), `SuspensionAnalysis` struct (suspension_count, suspension_points array)
+- Added `sm__walk_suspensions` recursive AST walker that finds all suspension points at any nesting depth
+- Skips nested proc/spawn definitions (separate closure scopes)
+- Assigns sequential IDs (0, 1, 2, ...) to each suspension point
+- Functions with zero suspension points get suspension_count == 0
+- Files changed: src/compiler.c (+173 lines, inserted after existing suspension analysis at ~line 897)
+- **Learnings for future iterations:**
+  - The existing `analyze__walk_body` function is the template for AST walking — mirror its case coverage
+  - AST_SPREAD nodes don't need special handling (their expr is walked by the parent command's arg recursion)
+  - The compiler uses `#ifndef COMPILER_C` / `#define COMPILER_C` include guards — it's a unity build included via jacl.c
+---
+
+## 2026-03-24 - US-002
+- Added `StateField` struct (name, field_index, is_mutable, is_param) and `StateLayout` struct (field_count, fields array) to compiler.c
+- Added `state_layout` field to `SuspensionAnalysis` — produced alongside suspension point data
+- Implemented `sm__add_state_field` helper (skips empty names and duplicates)
+- Implemented `sm__walk_locals` recursive AST walker that collects ALL local declarations:
+  - def/mut: simple, typed (3-arg), destructure vec, destructure named, command form, block form
+  - for: implicit "it" binding, explicit named binding, C-style for (recurses into init block)
+  - try: catch binding name
+  - proc: named proc binding (but does NOT recurse into body/params)
+  - spawn: skipped entirely (separate scope)
+- Updated `compiler__analyze_suspensions` signature to accept (body, param_names, param_count)
+  - Pass 1: finds suspension points (existing)
+  - Pass 2: builds StateLayout (only for suspending functions — suspension_count > 0)
+  - Parameters placed first in layout, then body locals in declaration order
+- Conservative strategy: all locals get a field regardless of liveness across suspension points
+- Files changed: src/compiler.c (+286 lines), .ralph/prd.json, .ralph/progress.txt
+- **Learnings for future iterations:**
+  - Destructuring has 4 AST forms — must handle all 4 for complete local collection
+  - `_` wildcards in destructuring become empty-string names in compiler; skip both `_` and empty in state layout
+  - For-each loops can't contain suspensions (compiler errors) so hidden locals (__col, __len, __idx) don't need state fields
+  - Named procs create a local for the name — easy to miss since the walker skips proc body
 ---

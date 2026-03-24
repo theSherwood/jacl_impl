@@ -19,7 +19,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -37,7 +37,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
