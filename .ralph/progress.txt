@@ -87,3 +87,23 @@ Started: Mon Mar 24 2026
   - State machine opcodes use `frame->stack_base + 0` to access the state object (slot 0 of the SM function frame), same pattern as OP_GET_LOCAL with slot 0
   - Adding opcodes shifts OP_HALT's numeric value — remember to update the test assertion for OP_HALT
 ---
+
+## 2026-03-24 - US-005
+- Added `bool use_state_machines` field to Compiler struct (default false)
+- Initialized to false in `compiler__init`
+- Propagated to all 8 nested compiler creation sites:
+  - Continuation compiler (CPS continuation closures)
+  - Spawn/parallel/race body compiler
+  - While loop compiler (CPS while)
+  - Proc body compiler
+  - Spawn body compiler
+  - Top-level main body compiler
+  - Module top-level main body compiler
+  - Module compiler (`mc` from importer)
+- Files changed: src/compiler.c (+10 lines)
+- All 83 tests pass, compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - There are 8 distinct nested compiler creation sites that must all propagate new Compiler fields — easy to miss the module compiler (`mc`) and the two top-level body compilers
+  - The pattern is always `nested.field = c->field` (or `c.field` for stack-allocated compilers)
+  - `compiler__init` sets all booleans to false, so propagation is only needed where the parent might have it set to true
+---
