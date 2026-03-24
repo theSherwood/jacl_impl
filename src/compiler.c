@@ -895,6 +895,179 @@ static SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t coun
   return map;
 }
 
+/* --- State machine suspension point analysis --- */
+
+#define SM_MAX_SUSPENSION_POINTS 256
+
+typedef enum {
+  SUSPEND_YIELD,
+  SUSPEND_AWAIT,
+  SUSPEND_PARALLEL,
+  SUSPEND_RACE
+} SuspensionPointType;
+
+typedef struct {
+  uint32_t            id;        /* sequential index: 0, 1, 2, ... */
+  SuspensionPointType type;      /* yield, await, parallel, or race */
+  AstNode*            node;      /* AST node of the suspension point */
+  uint32_t            line;      /* source line */
+  uint32_t            column;    /* source column */
+} SuspensionPoint;
+
+typedef struct {
+  uint32_t        suspension_count;
+  SuspensionPoint suspension_points[SM_MAX_SUSPENSION_POINTS];
+} SuspensionAnalysis;
+
+/* Walk an AST subtree to find suspension points for state machine compilation.
+   Does NOT recurse into nested proc/spawn definitions (separate closure scopes).
+   Assigns sequential IDs to each discovered suspension point. */
+static void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis) {
+  if (!node) return;
+
+  switch (node->type) {
+    case AST_COMMAND: {
+      AstNode* head = node->data.command.head;
+      if (head->type == AST_LIT_STRING) {
+        const char* name = head->data.lit_string.value;
+        uint32_t len = head->data.lit_string.length;
+
+        /* yield is a suspension point */
+        if (len == 5 && memcmp(name, "yield", 5) == 0) {
+          if (analysis->suspension_count < SM_MAX_SUSPENSION_POINTS) {
+            SuspensionPoint* sp =
+                &analysis->suspension_points[analysis->suspension_count];
+            sp->id     = analysis->suspension_count;
+            sp->type   = SUSPEND_YIELD;
+            sp->node   = node;
+            sp->line   = node->start.line;
+            sp->column = node->start.column;
+            analysis->suspension_count++;
+          }
+          /* Still recurse into args (they might contain nested suspension) */
+          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            sm__walk_suspensions(node->data.command.args[i], analysis);
+          }
+          return;
+        }
+
+        /* await is a suspension point */
+        if (len == 5 && memcmp(name, "await", 5) == 0) {
+          if (analysis->suspension_count < SM_MAX_SUSPENSION_POINTS) {
+            SuspensionPoint* sp =
+                &analysis->suspension_points[analysis->suspension_count];
+            sp->id     = analysis->suspension_count;
+            sp->type   = SUSPEND_AWAIT;
+            sp->node   = node;
+            sp->line   = node->start.line;
+            sp->column = node->start.column;
+            analysis->suspension_count++;
+          }
+          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            sm__walk_suspensions(node->data.command.args[i], analysis);
+          }
+          return;
+        }
+
+        /* parallel is a suspension point */
+        if (len == 8 && memcmp(name, "parallel", 8) == 0) {
+          if (analysis->suspension_count < SM_MAX_SUSPENSION_POINTS) {
+            SuspensionPoint* sp =
+                &analysis->suspension_points[analysis->suspension_count];
+            sp->id     = analysis->suspension_count;
+            sp->type   = SUSPEND_PARALLEL;
+            sp->node   = node;
+            sp->line   = node->start.line;
+            sp->column = node->start.column;
+            analysis->suspension_count++;
+          }
+          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            sm__walk_suspensions(node->data.command.args[i], analysis);
+          }
+          return;
+        }
+
+        /* race is a suspension point */
+        if (len == 4 && memcmp(name, "race", 4) == 0) {
+          if (analysis->suspension_count < SM_MAX_SUSPENSION_POINTS) {
+            SuspensionPoint* sp =
+                &analysis->suspension_points[analysis->suspension_count];
+            sp->id     = analysis->suspension_count;
+            sp->type   = SUSPEND_RACE;
+            sp->node   = node;
+            sp->line   = node->start.line;
+            sp->column = node->start.column;
+            analysis->suspension_count++;
+          }
+          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            sm__walk_suspensions(node->data.command.args[i], analysis);
+          }
+          return;
+        }
+
+        /* Do NOT recurse into nested proc or spawn definitions —
+           they are separate closure scopes with their own analysis */
+        if ((len == 4 && memcmp(name, "proc", 4) == 0) ||
+            (len == 5 && memcmp(name, "spawn", 5) == 0)) {
+          return;
+        }
+      }
+
+      /* Recurse into arguments for all other commands */
+      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+        sm__walk_suspensions(node->data.command.args[i], analysis);
+      }
+      break;
+    }
+    case AST_BLOCK: {
+      for (uint32_t i = 0; i < node->data.block.count; i++) {
+        sm__walk_suspensions(node->data.block.commands[i], analysis);
+      }
+      break;
+    }
+    case AST_INTERP_STRING: {
+      for (uint32_t i = 0; i < node->data.interp_string.count; i++) {
+        sm__walk_suspensions(node->data.interp_string.segments[i], analysis);
+      }
+      break;
+    }
+    case AST_BREAK: {
+      if (node->data.break_stmt.value) {
+        sm__walk_suspensions(node->data.break_stmt.value, analysis);
+      }
+      break;
+    }
+    case AST_RETURN: {
+      if (node->data.return_stmt.value) {
+        sm__walk_suspensions(node->data.return_stmt.value, analysis);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+/* Analyze a function body's AST for state machine suspension points.
+   Returns a SuspensionAnalysis with all suspension points numbered sequentially.
+   Functions with zero suspension points get suspension_count == 0. */
+static SuspensionAnalysis compiler__analyze_suspensions(AstNode* body) {
+  SuspensionAnalysis analysis;
+  memset(&analysis, 0, sizeof(analysis));
+
+  if (!body) return analysis;
+
+  if (body->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < body->data.block.count; i++) {
+      sm__walk_suspensions(body->data.block.commands[i], &analysis);
+    }
+  } else {
+    sm__walk_suspensions(body, &analysis);
+  }
+
+  return analysis;
+}
+
 /* Check if an AST subtree contains any suspension points.
    When map is non-NULL, also checks if named proc calls are suspending. */
 static bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
