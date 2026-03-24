@@ -998,7 +998,7 @@ static int test_gc_rope_strings(void) {
      then use the result to verify no corruption */
   VMResult r = run_capture(
     "proc rep {s, n} {\n"
-    "  [if [== $n 0] { \"\" } { [concat $s [rep $s [- $n 1]]] }]\n"
+    "  if [== $n 0] { \"\" } { concat $s [rep $s [- $n 1]] }\n"
     "}\n"
     "big = [rep \"abcdefghijklmnopqrstuvwxyz\" 20]\n"
     "[print [byte-length $big]]",

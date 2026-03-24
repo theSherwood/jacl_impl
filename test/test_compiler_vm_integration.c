@@ -172,7 +172,7 @@ static int test_print_large_concat_string(void) {
      Use a recursive proc. */
   VMResult r = run_capture(
     "proc rep {s, n} {\n"
-    "  [if [== $n 0] { \"\" } { [concat $s [rep $s [- $n 1]]] }]\n"
+    "  if [== $n 0] { \"\" } { concat $s [rep $s [- $n 1]] }\n"
     "}\n"
     "big = [rep \"abcdefghij\" 20]\n"
     "[print [byte-length $big]]\n"
@@ -221,7 +221,7 @@ static int test_closure_captures_rope(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc rep {s, n} {\n"
-    "  [if [== $n 0] { \"\" } { [concat $s [rep $s [- $n 1]]] }]\n"
+    "  if [== $n 0] { \"\" } { concat $s [rep $s [- $n 1]] }\n"
     "}\n"
     "big = [rep \"abcdefghij\" 20]\n"
     "proc mkget {val} {\n"

@@ -2,12 +2,12 @@
 # expect: 610
 # spawn fibonacci computation to exercise heavy allocation and GC under concurrency
 proc fib {n} {
-  if [< $n 2] { [+ $n 0] } else {
-    [+ [fib [- $n 1]] [fib [- $n 2]]]
+  if [< $n 2] { + $n 0 } else {
+    + [fib [- $n 1]] [fib [- $n 2]]
   }
 }
 proc main {} {
-  def f [spawn { [fib 15] }]
+  def f [spawn { fib 15 }]
   print [await $f]
 }
 main

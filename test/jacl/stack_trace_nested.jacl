@@ -4,14 +4,14 @@
 # expect:   at <main> (line 13)
 # Test: stack-trace from nested calls shows full call chain
 proc inner {} {
-  [error "deep"]
+  error "deep"
 }
 proc outer {} {
-  [inner]
+  inner
 }
-[try {
-  [outer]
+try {
+  outer
 } e {
-  [print "caught"]
-  [print [stack-trace]]
-}]
+  print "caught"
+  print [stack-trace]
+}

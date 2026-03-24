@@ -6,10 +6,10 @@ proc sum {n} {
   if [== $n 0] {
     0
   } else {
-    def f [spawn { [+ $n 0] }]
+    def f [spawn { + $n 0 }]
     def v [await $f]
     def rest [sum [- $n 1]]
-    [+ $v $rest]
+    + $v $rest
   }
 }
 proc main {} {

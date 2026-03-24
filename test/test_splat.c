@@ -102,7 +102,7 @@ static int test_spread_multiply(void) {
 static int test_spread_proc(void) {
   PrintCapture cap;
   VMResult r = run_capture(
-    "proc add3 {a, b, c} { [+ [+ $a $b] $c] }\n"
+    "proc add3 {a, b, c} { + [+ $a $b] $c }\n"
     "args = [vec 10 20 30]\n"
     "[print [add3 ..$args]]\n",
     &cap);
@@ -154,9 +154,9 @@ static int test_spread_proc_mixed(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc greet {a, b, c} {\n"
-    "  [print $a]\n"
-    "  [print $b]\n"
-    "  [print $c]\n"
+    "  print $a\n"
+    "  print $b\n"
+    "  print $c\n"
     "}\n"
     "rest = [vec 2 3]\n"
     "[greet 1 ..$rest]\n",

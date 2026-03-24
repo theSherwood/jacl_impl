@@ -3,7 +3,7 @@
 # expect: 11
 # swap applies closure to current value, stores result, returns result
 def b [box 0]
-proc inc {x} { [+ $x 1] }
+proc inc {x} { + $x 1 }
 [print [swap $b $inc]]
 # deref confirms the update
 [print [deref $b]]

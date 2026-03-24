@@ -1,2 +1,2 @@
 use "shared.jacl" [val]
-proc cfn {x} { [* $x $val] }
+proc cfn {x} { * $x $val }

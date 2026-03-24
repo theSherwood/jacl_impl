@@ -1,6 +1,6 @@
 # expect: true
 # Test: final expression in a function returns error flag normally (no auto-return)
 proc foo {} {
-  [error "final"]
+  error "final"
 }
 [print [error? [foo]]]

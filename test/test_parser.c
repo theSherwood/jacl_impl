@@ -1803,12 +1803,17 @@ static int test_nesting_pipe_with_lambda(void) {
   ParseResult r = parse("data | map [\\ + $it 1]");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
-  /* Pipe desugars to: [map [data] [\...]] */
+  /* Pipe kept as [| [data] [map [\...]]] — compiler desugars */
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "map", 3) == 0);
-  /* second arg is the lambda (desugared proc) */
-  AstNode* lambda = n->data.command.args[1];
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "|", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* right side is [map [\...]] */
+  AstNode* right = n->data.command.args[1];
+  ASSERT(right->type == AST_COMMAND);
+  ASSERT(memcmp(right->data.command.head->data.lit_string.value, "map", 3) == 0);
+  /* the lambda is an arg to map */
+  AstNode* lambda = right->data.command.args[0];
   ASSERT(lambda->type == AST_COMMAND);
   ASSERT(memcmp(lambda->data.command.head->data.lit_string.value, "proc", 4) == 0);
   teardown();
@@ -2055,16 +2060,16 @@ static int test_infix_explicit_grouping(void) {
 
 static int test_infix_unary_neg(void) {
   setup();
-  /* (- $x + $y) → [+ [neg $x] $y] */
+  /* (- $x + $y) → [+ [- $x] $y] — parser keeps "-" as-is */
   AstNode* n = parse_expr("(- $x + $y)");
   ASSERT(n != NULL);
   ASSERT(n->type == AST_COMMAND);
   ASSERT(memcmp(n->data.command.head->data.lit_string.value, "+", 1) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  /* Left: [neg $x] */
+  /* Left: [- $x] (unary neg, kept as "-") */
   AstNode* left = n->data.command.args[0];
   ASSERT(left->type == AST_COMMAND);
-  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "neg", 3) == 0);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "-", 1) == 0);
   ASSERT_U32_EQ(left->data.command.arg_count, 1);
   ASSERT(left->data.command.args[0]->type == AST_VAR_REF);
   ASSERT(memcmp(left->data.command.args[0]->data.var_ref.name, "x", 1) == 0);
@@ -2169,12 +2174,12 @@ static int test_infix_comparison_ops(void) {
 
 static int test_infix_logical_and(void) {
   setup();
-  /* ($a && $b) → [and $a $b] */
+  /* ($a && $b) → [&& $a $b] — parser keeps "&&" as-is */
   AstNode* n = parse_expr("($a && $b)");
   ASSERT(n != NULL);
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "and", 3) == 0);
-  ASSERT_U32_EQ(n->data.command.head->data.lit_string.length, 3);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "&&", 2) == 0);
+  ASSERT_U32_EQ(n->data.command.head->data.lit_string.length, 2);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
   ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
   ASSERT(memcmp(n->data.command.args[0]->data.var_ref.name, "a", 1) == 0);
@@ -2187,11 +2192,11 @@ static int test_infix_logical_and(void) {
 
 static int test_infix_logical_or(void) {
   setup();
-  /* ($a || $b) → [or $a $b] */
+  /* ($a || $b) → [|| $a $b] — parser keeps "||" as-is */
   AstNode* n = parse_expr("($a || $b)");
   ASSERT(n != NULL);
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "or", 2) == 0);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "||", 2) == 0);
   ASSERT_U32_EQ(n->data.command.head->data.lit_string.length, 2);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
   ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
@@ -2203,12 +2208,12 @@ static int test_infix_logical_or(void) {
 
 static int test_infix_logical_not(void) {
   setup();
-  /* (~ $a) → [not $a] */
+  /* (~ $a) → [~ $a] — parser keeps "~" as-is */
   AstNode* n = parse_expr("(~ $a)");
   ASSERT(n != NULL);
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "not", 3) == 0);
-  ASSERT_U32_EQ(n->data.command.head->data.lit_string.length, 3);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "~", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.head->data.lit_string.length, 1);
   ASSERT_U32_EQ(n->data.command.arg_count, 1);
   ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
   ASSERT(memcmp(n->data.command.args[0]->data.var_ref.name, "a", 1) == 0);
@@ -2335,15 +2340,15 @@ static int test_infix_chain_three_ops(void) {
 
 static int test_infix_double_neg(void) {
   setup();
-  /* (- - $x) → [neg [neg $x]] — double negation */
+  /* (- - $x) → [- [- $x]] — double negation, parser keeps "-" as-is */
   AstNode* n = parse_expr("(- - $x)");
   ASSERT(n != NULL);
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "neg", 3) == 0);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "-", 1) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 1);
   AstNode* inner = n->data.command.args[0];
   ASSERT(inner->type == AST_COMMAND);
-  ASSERT(memcmp(inner->data.command.head->data.lit_string.value, "neg", 3) == 0);
+  ASSERT(memcmp(inner->data.command.head->data.lit_string.value, "-", 1) == 0);
   ASSERT_U32_EQ(inner->data.command.arg_count, 1);
   ASSERT(inner->data.command.args[0]->type == AST_VAR_REF);
   ASSERT(memcmp(inner->data.command.args[0]->data.var_ref.name, "x", 1) == 0);
@@ -2354,15 +2359,15 @@ static int test_infix_double_neg(void) {
 
 static int test_infix_logical_chain(void) {
   setup();
-  /* ($a && $b || $c) → [or [and $a $b] $c] — left-to-right */
+  /* ($a && $b || $c) → [|| [&& $a $b] $c] — left-to-right, raw operators */
   AstNode* n = parse_expr("($a && $b || $c)");
   ASSERT(n != NULL);
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "or", 2) == 0);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "||", 2) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
   AstNode* left = n->data.command.args[0];
   ASSERT(left->type == AST_COMMAND);
-  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "and", 3) == 0);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "&&", 2) == 0);
   ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
   ASSERT(memcmp(n->data.command.args[1]->data.var_ref.name, "c", 1) == 0);
   teardown();
@@ -2419,8 +2424,8 @@ static void assert_proc_head(AstNode* n) {
 
 static int test_proc_basic_new_syntax(void) {
   setup();
-  /* proc add {a, b} {[+ $a $b]} → AST_COMMAND(proc, [add, params, body]) */
-  ParseResult r = parse("proc add {a, b} { [+ $a $b] }");
+  /* proc add {a, b} {+ $a $b} → AST_COMMAND(proc, [add, params, body]) */
+  ParseResult r = parse("proc add {a, b} { + $a $b }");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
@@ -2445,8 +2450,8 @@ static int test_proc_basic_new_syntax(void) {
 
 static int test_proc_typed_params(void) {
   setup();
-  /* proc i64 add {i64 a, i64 b} {[+ $a $b]} → 4 args (type, name, params, body) */
-  ParseResult r = parse("proc i64 add {i64 a, i64 b} { [+ $a $b] }");
+  /* proc i64 add {i64 a, i64 b} {+ $a $b} → 4 args (type, name, params, body) */
+  ParseResult r = parse("proc i64 add {i64 a, i64 b} { + $a $b }");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
@@ -2496,8 +2501,8 @@ static int test_proc_zero_params_new(void) {
 
 static int test_proc_untyped_params(void) {
   setup();
-  /* proc add {a, b} {[+ $a $b]} — untyped params */
-  ParseResult r = parse("proc add {a, b} { [+ $a $b] }");
+  /* proc add {a, b} {+ $a $b} — untyped params */
+  ParseResult r = parse("proc add {a, b} { + $a $b }");
   ASSERT_U32_EQ(r.error_count, 0);
   AstNode* params = r.nodes[0]->data.command.args[1];
   ASSERT(params->type == AST_COMMAND);
@@ -2512,8 +2517,8 @@ static int test_proc_untyped_params(void) {
 
 static int test_proc_old_syntax_rejected(void) {
   setup();
-  /* Old syntax: [proc add [a b] { [+ $a $b] }] — now rejected */
-  ParseResult r = parse("[proc add [a b] { [+ $a $b] }]");
+  /* Old syntax: [proc add [a b] { + $a $b }] — now rejected */
+  ParseResult r = parse("[proc add [a b] { + $a $b }]");
   ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
@@ -2523,7 +2528,7 @@ static int test_proc_old_syntax_rejected(void) {
 static int test_proc_in_block(void) {
   setup();
   /* proc defined inside a block */
-  ParseResult r = parse("{ proc add {a, b} { [+ $a $b] } }");
+  ParseResult r = parse("{ proc add {a, b} { + $a $b } }");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* blk = r.nodes[0];
@@ -2574,8 +2579,8 @@ static int test_proc_mixed_typed_untyped(void) {
 
 static int test_proc_single_param(void) {
   setup();
-  /* proc double {n} {[* $n 2]} → single param */
-  ParseResult r = parse("proc double {n} { [* $n 2] }");
+  /* proc double {n} {* $n 2} → single param */
+  ParseResult r = parse("proc double {n} { * $n 2 }");
   ASSERT_U32_EQ(r.error_count, 0);
   AstNode* params = r.nodes[0]->data.command.args[1];
   ASSERT(params->type == AST_COMMAND);
@@ -3020,7 +3025,7 @@ static int test_if_elif_no_else(void) {
 /* for $items { body } — implicit $it form: parses as 2-arg command */
 static int test_for_implicit_it(void) {
   setup();
-  ParseResult r = parse("for $v { [print $it] }");
+  ParseResult r = parse("for $v { print $it }");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
@@ -3037,7 +3042,7 @@ static int test_for_implicit_it(void) {
 /* for $items name { body } — explicit binding: parses as 3-arg command */
 static int test_for_explicit_binding(void) {
   setup();
-  ParseResult r = parse("for $v item { [print $item] }");
+  ParseResult r = parse("for $v item { print $item }");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
@@ -3073,7 +3078,7 @@ static int test_for_hof_form(void) {
 /* for with inline collection: for [vec 1 2 3] { body } */
 static int test_for_inline_collection(void) {
   setup();
-  ParseResult r = parse("for [vec 1 2 3] { [print $it] }");
+  ParseResult r = parse("for [vec 1 2 3] { print $it }");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
@@ -3089,7 +3094,7 @@ static int test_for_inline_collection(void) {
 
 /* ---- Syntax Redesign US-008: Binding operators (=, :, ::) ---- */
 
-/* x = 5 → [def x 5] */
+/* x = 5 → [= [x] 5] — left operand is zero-arg command in bare mode */
 static int test_binding_equals_def(void) {
   setup();
   ParseResult r = parse("x = 5");
@@ -3097,17 +3102,19 @@ static int test_binding_equals_def(void) {
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "=", 1) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
-  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  /* left: [x] (command, not lit_string — bare mode operands are commands) */
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.args[0]->data.command.head->data.lit_string.value, "x", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.args[0]->data.command.arg_count, 0);
   ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* i64 x = 5 → [def i64 x 5] */
+/* i64 x = 5 → [= [i64 x] 5] — left side is command [i64 x] */
 static int test_binding_typed_equals(void) {
   setup();
   ParseResult r = parse("i64 x = 5");
@@ -3115,17 +3122,22 @@ static int test_binding_typed_equals(void) {
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "def", 3) == 0);
-  ASSERT_U32_EQ(n->data.command.arg_count, 3);
-  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "i64", 3) == 0);
-  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
-  ASSERT(n->data.command.args[2]->type == AST_LIT_INT);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "=", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* left: [i64 x] */
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_COMMAND);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "i64", 3) == 0);
+  ASSERT_U32_EQ(left->data.command.arg_count, 1);
+  ASSERT(memcmp(left->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  /* right: 5 */
+  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* x : 0 → [mut x 0] */
+/* x : 0 → [: [x] 0] — left operand is zero-arg command */
 static int test_binding_colon_mut(void) {
   setup();
   ParseResult r = parse("x : 0");
@@ -3133,16 +3145,17 @@ static int test_binding_colon_mut(void) {
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "mut", 3) == 0);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, ":", 1) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.args[0]->data.command.head->data.lit_string.value, "x", 1) == 0);
   ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* i64 x : 0 → [mut i64 x 0] */
+/* i64 x : 0 → [: [i64 x] 0] — left side is command [i64 x] */
 static int test_binding_typed_colon(void) {
   setup();
   ParseResult r = parse("i64 x : 0");
@@ -3150,17 +3163,22 @@ static int test_binding_typed_colon(void) {
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "mut", 3) == 0);
-  ASSERT_U32_EQ(n->data.command.arg_count, 3);
-  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "i64", 3) == 0);
-  ASSERT(memcmp(n->data.command.args[1]->data.lit_string.value, "x", 1) == 0);
-  ASSERT(n->data.command.args[2]->type == AST_LIT_INT);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, ":", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* left: [i64 x] */
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_COMMAND);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "i64", 3) == 0);
+  ASSERT_U32_EQ(left->data.command.arg_count, 1);
+  ASSERT(memcmp(left->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  /* right: 0 */
+  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* x :: ($x + 1) → [set x ($x + 1)] */
+/* x :: ($x + 1) → [:: [x] ($x + 1)] — left is zero-arg command */
 static int test_binding_double_colon_set(void) {
   setup();
   ParseResult r = parse("x :: ($x + 1)");
@@ -3168,9 +3186,10 @@ static int test_binding_double_colon_set(void) {
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "set", 3) == 0);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "::", 2) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.args[0]->data.command.head->data.lit_string.value, "x", 1) == 0);
   ASSERT(n->data.command.args[1]->type == AST_COMMAND); /* infix expression */
   teardown();
   ASSERT(check_no_leaks());
@@ -3186,12 +3205,12 @@ static int test_binding_in_block(void) {
   AstNode* blk = r.nodes[0];
   ASSERT(blk->type == AST_BLOCK);
   ASSERT_U32_EQ(blk->data.block.count, 2);
-  /* first: [def x 5] */
+  /* first: [= x 5] — parser keeps "=", compiler rewrites */
   ASSERT(blk->data.block.commands[0]->type == AST_COMMAND);
-  ASSERT(memcmp(blk->data.block.commands[0]->data.command.head->data.lit_string.value, "def", 3) == 0);
-  /* second: [mut y 0] */
+  ASSERT(memcmp(blk->data.block.commands[0]->data.command.head->data.lit_string.value, "=", 1) == 0);
+  /* second: [: y 0] — parser keeps ":", compiler rewrites */
   ASSERT(blk->data.block.commands[1]->type == AST_COMMAND);
-  ASSERT(memcmp(blk->data.block.commands[1]->data.command.head->data.lit_string.value, "mut", 3) == 0);
+  ASSERT(memcmp(blk->data.block.commands[1]->data.command.head->data.lit_string.value, ":", 1) == 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -3212,7 +3231,7 @@ static int test_binding_def_cmd_still_works(void) {
   TEST_PASS();
 }
 
-/* Binding with expression value: x = [vec 1 2 3] */
+/* Binding with expression value: x = [vec 1 2 3] → [= [x] [vec 1 2 3]] */
 static int test_binding_expr_value(void) {
   setup();
   ParseResult r = parse("x = [vec 1 2 3]");
@@ -3220,9 +3239,11 @@ static int test_binding_expr_value(void) {
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "def", 3) == 0);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "=", 1) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "x", 1) == 0);
+  /* left: [x] (command) */
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.args[0]->data.command.head->data.lit_string.value, "x", 1) == 0);
   ASSERT(n->data.command.args[1]->type == AST_COMMAND); /* [vec 1 2 3] */
   teardown();
   ASSERT(check_no_leaks());
@@ -3369,7 +3390,7 @@ static int test_arrow_old_dot_rejected(void) {
 
 /* ---- Syntax Redesign US-010: Pipe threading (|) ---- */
 
-/* foo $a | bar $b  →  [bar [foo $a] $b] */
+/* foo $a | bar $b  →  [| [foo $a] [bar $b]] — compiler desugars pipe */
 static int test_pipe_basic(void) {
   setup();
   ParseResult r = parse("foo $a | bar $b");
@@ -3377,49 +3398,63 @@ static int test_pipe_basic(void) {
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "bar", 3) == 0);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "|", 1) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  /* first arg is [foo $a] */
+  /* left: [foo $a] */
   AstNode* left = n->data.command.args[0];
   ASSERT(left->type == AST_COMMAND);
   ASSERT(memcmp(left->data.command.head->data.lit_string.value, "foo", 3) == 0);
   ASSERT_U32_EQ(left->data.command.arg_count, 1);
   ASSERT(left->data.command.args[0]->type == AST_VAR_REF);
-  /* second arg is $b */
-  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
-  ASSERT(memcmp(n->data.command.args[1]->data.var_ref.name, "b", 1) == 0);
+  /* right: [bar $b] */
+  AstNode* right = n->data.command.args[1];
+  ASSERT(right->type == AST_COMMAND);
+  ASSERT(memcmp(right->data.command.head->data.lit_string.value, "bar", 3) == 0);
+  ASSERT_U32_EQ(right->data.command.arg_count, 1);
+  ASSERT(right->data.command.args[0]->type == AST_VAR_REF);
+  ASSERT(memcmp(right->data.command.args[0]->data.var_ref.name, "b", 1) == 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* a | b | c  →  [c [b [a]]] */
+/* a | b | c  →  [| [| [a] [b]] [c]] — left-to-right, compiler desugars */
 static int test_pipe_multi_stage(void) {
   setup();
   ParseResult r = parse("a | b | c");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
-  /* Outermost: [c [b [a]]] */
+  /* Outermost: [| ... [c]] */
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "c", 1) == 0);
-  ASSERT_U32_EQ(n->data.command.arg_count, 1);
-  /* inner: [b [a]] */
-  AstNode* mid = n->data.command.args[0];
-  ASSERT(mid->type == AST_COMMAND);
-  ASSERT(memcmp(mid->data.command.head->data.lit_string.value, "b", 1) == 0);
-  ASSERT_U32_EQ(mid->data.command.arg_count, 1);
-  /* innermost: [a] */
-  AstNode* inner = mid->data.command.args[0];
-  ASSERT(inner->type == AST_COMMAND);
-  ASSERT(memcmp(inner->data.command.head->data.lit_string.value, "a", 1) == 0);
-  ASSERT_U32_EQ(inner->data.command.arg_count, 0);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "|", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* right: [c] */
+  AstNode* right = n->data.command.args[1];
+  ASSERT(right->type == AST_COMMAND);
+  ASSERT(memcmp(right->data.command.head->data.lit_string.value, "c", 1) == 0);
+  ASSERT_U32_EQ(right->data.command.arg_count, 0);
+  /* left: [| [a] [b]] */
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_COMMAND);
+  ASSERT(memcmp(left->data.command.head->data.lit_string.value, "|", 1) == 0);
+  ASSERT_U32_EQ(left->data.command.arg_count, 2);
+  /* left-left: [a] */
+  AstNode* ll = left->data.command.args[0];
+  ASSERT(ll->type == AST_COMMAND);
+  ASSERT(memcmp(ll->data.command.head->data.lit_string.value, "a", 1) == 0);
+  ASSERT_U32_EQ(ll->data.command.arg_count, 0);
+  /* left-right: [b] */
+  AstNode* lr = left->data.command.args[1];
+  ASSERT(lr->type == AST_COMMAND);
+  ASSERT(memcmp(lr->data.command.head->data.lit_string.value, "b", 1) == 0);
+  ASSERT_U32_EQ(lr->data.command.arg_count, 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* + 1 2 | * 3  →  [* [+ 1 2] 3] */
+/* + 1 2 | * 3  →  [| [+ 1 2] [* 3]] — compiler desugars pipe */
 static int test_pipe_with_args(void) {
   setup();
   ParseResult r = parse("+ 1 2 | * 3");
@@ -3427,9 +3462,9 @@ static int test_pipe_with_args(void) {
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "*", 1) == 0);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "|", 1) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  /* first arg is [+ 1 2] */
+  /* left: [+ 1 2] */
   AstNode* left = n->data.command.args[0];
   ASSERT(left->type == AST_COMMAND);
   ASSERT(memcmp(left->data.command.head->data.lit_string.value, "+", 1) == 0);
@@ -3438,15 +3473,19 @@ static int test_pipe_with_args(void) {
   ASSERT_INT_EQ(left->data.command.args[0]->data.lit_int.value, 1);
   ASSERT(left->data.command.args[1]->type == AST_LIT_INT);
   ASSERT_INT_EQ(left->data.command.args[1]->data.lit_int.value, 2);
-  /* second arg is 3 */
-  ASSERT(n->data.command.args[1]->type == AST_LIT_INT);
-  ASSERT_INT_EQ(n->data.command.args[1]->data.lit_int.value, 3);
+  /* right: [* 3] */
+  AstNode* right = n->data.command.args[1];
+  ASSERT(right->type == AST_COMMAND);
+  ASSERT(memcmp(right->data.command.head->data.lit_string.value, "*", 1) == 0);
+  ASSERT_U32_EQ(right->data.command.arg_count, 1);
+  ASSERT(right->data.command.args[0]->type == AST_LIT_INT);
+  ASSERT_INT_EQ(right->data.command.args[0]->data.lit_int.value, 3);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* Pipe in block: { foo $a | bar $b } */
+/* Pipe in block: { foo $a | bar $b } → [| [foo $a] [bar $b]] */
 static int test_pipe_in_block(void) {
   setup();
   ParseResult r = parse("{ foo $a | bar $b }");
@@ -3457,16 +3496,16 @@ static int test_pipe_in_block(void) {
   ASSERT_U32_EQ(block->data.block.count, 1);
   AstNode* n = block->data.block.commands[0];
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "bar", 3) == 0);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "|", 1) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  ASSERT(n->data.command.args[0]->type == AST_COMMAND);
-  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[0]->type == AST_COMMAND); /* [foo $a] */
+  ASSERT(n->data.command.args[1]->type == AST_COMMAND); /* [bar $b] */
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* Zero-arg pipe: vec 1 2 3 | vlen  →  [vlen [vec 1 2 3]] */
+/* Zero-arg pipe: vec 1 2 3 | vlen  →  [| [vec 1 2 3] [vlen]] */
 static int test_pipe_zero_arg_right(void) {
   setup();
   ParseResult r = parse("vec 1 2 3 | vlen");
@@ -3474,12 +3513,18 @@ static int test_pipe_zero_arg_right(void) {
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "vlen", 4) == 0);
-  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "|", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* left: [vec 1 2 3] */
   AstNode* left = n->data.command.args[0];
   ASSERT(left->type == AST_COMMAND);
   ASSERT(memcmp(left->data.command.head->data.lit_string.value, "vec", 3) == 0);
   ASSERT_U32_EQ(left->data.command.arg_count, 3);
+  /* right: [vlen] */
+  AstNode* right = n->data.command.args[1];
+  ASSERT(right->type == AST_COMMAND);
+  ASSERT(memcmp(right->data.command.head->data.lit_string.value, "vlen", 4) == 0);
+  ASSERT_U32_EQ(right->data.command.arg_count, 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -3594,18 +3639,22 @@ static int test_lambda_nested_bracket(void) {
 }
 
 static int test_lambda_in_pipe(void) {
-  /* Lambda used in pipe: $items | filter [\\ > $it 2] */
+  /* Lambda used in pipe: vec 1 2 3 | filter [\\ > $it 2] */
   setup();
   ParseResult r = parse("vec 1 2 3 | filter [\\ > $it 2]");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
-  /* pipe desugars: [filter [vec 1 2 3] [\\ > $it 2]] */
+  /* pipe kept as [| [vec 1 2 3] [filter [\\ > $it 2]]] */
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "filter", 6) == 0);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "|", 1) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  /* second arg is lambda */
-  AstNode* lambda = n->data.command.args[1];
+  /* right side: [filter [\...]] */
+  AstNode* right = n->data.command.args[1];
+  ASSERT(right->type == AST_COMMAND);
+  ASSERT(memcmp(right->data.command.head->data.lit_string.value, "filter", 6) == 0);
+  /* filter's arg is lambda */
+  AstNode* lambda = right->data.command.args[0];
   ASSERT(lambda->type == AST_COMMAND);
   ASSERT(memcmp(lambda->data.command.head->data.lit_string.value, "proc", 4) == 0);
   teardown();

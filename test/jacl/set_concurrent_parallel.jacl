@@ -6,10 +6,10 @@ mut x 0
 proc main {} {
   def r [parallel {
     set x 10
-    [+ $x 0]
+    + $x 0
   } {
     set x 20
-    [+ $x 0]
+    + $x 0
   }]
   print [vec-get $r 0]
   print [vec-get $r 1]

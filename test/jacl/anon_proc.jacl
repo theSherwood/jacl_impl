@@ -21,6 +21,6 @@ addb = proc {n} {+ $base $n}
 print [addb 5]
 
 # anonymous proc used with higher-order function
-proc apply {f, x} { [f $x] }
-dbl = proc {n} { [* $n 2] }
+proc apply {f, x} { f $x }
+dbl = proc {n} { * $n 2 }
 print [apply $dbl 60]

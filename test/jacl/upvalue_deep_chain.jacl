@@ -16,7 +16,7 @@ proc main {} {
   # d=1000, c=100, b=10, a=1 — deep chain: 3 suspension points
   print [+ $a [+ $b [+ $c [+ $d 0]]]]
   # Use nested parallel bodies to create closure nesting across suspension boundary
-  def r [parallel { [+ $a [+ $b [+ $c 0]]] } { [+ $b [+ $c 0]] }]
+  def r [parallel { + $a [+ $b [+ $c 0]] } { + $b [+ $c 0] }]
   print [vec-get $r 0]
   print [vec-get $r 1]
 }

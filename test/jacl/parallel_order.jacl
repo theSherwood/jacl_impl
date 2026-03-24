@@ -3,12 +3,12 @@
 # expect: 42
 # parallel preserves input order in result vector (not completion order)
 proc fib {n} {
-  if [< $n 2] { [+ $n 0] } else {
-    [+ [fib [- $n 1]] [fib [- $n 2]]]
+  if [< $n 2] { + $n 0 } else {
+    + [fib [- $n 1]] [fib [- $n 2]]
   }
 }
 proc main {} {
-  def r [parallel { [fib 10] } { [+ 2 3] } { 42 }]
+  def r [parallel { fib 10 } { + 2 3 } { 42 }]
   print [vec-get $r 0]
   print [vec-get $r 1]
   print [vec-get $r 2]

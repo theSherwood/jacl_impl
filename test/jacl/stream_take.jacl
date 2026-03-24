@@ -1,10 +1,10 @@
 # expect: [vec 1 2]
 # take first N elements from stream
 proc gen {} {
-  [yield 1]
-  [yield 2]
-  [yield 3]
-  [yield 4]
-  [yield 5]
+  yield 1
+  yield 2
+  yield 3
+  yield 4
+  yield 5
 }
 print [collect [take [gen] 2]]

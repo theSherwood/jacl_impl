@@ -4,7 +4,7 @@ proc main {} {
   def x 10
   def f [spawn { 20 }]
   def y [await $f]
-  proc adder {} { [+ $x $y] }
+  proc adder {} { + $x $y }
   print [adder]
 }
 main

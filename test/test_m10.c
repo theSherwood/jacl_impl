@@ -90,7 +90,7 @@ static int test_mut_local_int(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  mut x 42\n"
-    "  [print $x]\n"
+    "  print $x\n"
     "}\n"
     "[t]",
     &cap, "42\n"));
@@ -102,7 +102,7 @@ static int test_mut_local_zero(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  mut y 0\n"
-    "  [print $y]\n"
+    "  print $y\n"
     "}\n"
     "[t]",
     &cap, "0\n"));
@@ -114,7 +114,7 @@ static int test_mut_local_string(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  mut s \"hello\"\n"
-    "  [print $s]\n"
+    "  print $s\n"
     "}\n"
     "[t]",
     &cap, "hello\n"));
@@ -126,7 +126,7 @@ static int test_mut_local_nil(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  mut n $nil\n"
-    "  [print $n]\n"
+    "  print $n\n"
     "}\n"
     "[t]",
     &cap, "nil\n"));
@@ -138,7 +138,7 @@ static int test_mut_returns_nil(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  r = [mut x 42]\n"
-    "  [print $r]\n"
+    "  print $r\n"
     "}\n"
     "[t]",
     &cap, "nil\n"));
@@ -153,7 +153,7 @@ static int test_set_local_basic(void) {
     "proc t {} {\n"
     "  mut x 0\n"
     "  x :: 42\n"
-    "  [print $x]\n"
+    "  print $x\n"
     "}\n"
     "[t]",
     &cap, "42\n"));
@@ -166,7 +166,7 @@ static int test_set_local_expr(void) {
     "proc t {} {\n"
     "  mut y 10\n"
     "  y :: [+ $y 5]\n"
-    "  [print $y]\n"
+    "  print $y\n"
     "}\n"
     "[t]",
     &cap, "15\n"));
@@ -181,7 +181,7 @@ static int test_set_local_multiple(void) {
     "  x :: 1\n"
     "  x :: 2\n"
     "  x :: 3\n"
-    "  [print $x]\n"
+    "  print $x\n"
     "}\n"
     "[t]",
     &cap, "3\n"));
@@ -194,7 +194,7 @@ static int test_set_returns_nil(void) {
     "proc t {} {\n"
     "  mut x 0\n"
     "  r = [set x 42]\n"
-    "  [print $r]\n"
+    "  print $r\n"
     "}\n"
     "[t]",
     &cap, "nil\n"));
@@ -272,11 +272,11 @@ static int test_closure_shared_mutation(void) {
   ASSERT(run_ok(
     "proc test {} {\n"
     "  mut n 0\n"
-    "  proc inc {} { [set n [+ $n 1]] }\n"
-    "  proc get {} { [+ $n 0] }\n"
-    "  [inc]\n"
-    "  [inc]\n"
-    "  [print [get]]\n"
+    "  proc inc {} { set n [+ $n 1] }\n"
+    "  proc get {} { + $n 0 }\n"
+    "  inc\n"
+    "  inc\n"
+    "  print [get]\n"
     "}\n"
     "[test]",
     &cap, "2\n"));
@@ -289,9 +289,9 @@ static int test_closure_bidirectional(void) {
   ASSERT(run_ok(
     "proc test {} {\n"
     "  mut x 0\n"
-    "  proc get {} { [+ $x 0] }\n"
+    "  proc get {} { + $x 0 }\n"
     "  x :: 42\n"
-    "  [print [get]]\n"
+    "  print [get]\n"
     "}\n"
     "[test]",
     &cap, "42\n"));
@@ -304,11 +304,11 @@ static int test_closure_multiple_sharing(void) {
   ASSERT(run_ok(
     "proc test {} {\n"
     "  mut v 0\n"
-    "  proc add1 {} { [set v [+ $v 1]] }\n"
-    "  proc add2 {} { [set v [+ $v 10]] }\n"
-    "  [add1]\n"
-    "  [add2]\n"
-    "  [print [+ $v 0]]\n"
+    "  proc add1 {} { set v [+ $v 1] }\n"
+    "  proc add2 {} { set v [+ $v 10] }\n"
+    "  add1\n"
+    "  add2\n"
+    "  print [+ $v 0]\n"
     "}\n"
     "[test]",
     &cap, "11\n"));
@@ -322,11 +322,11 @@ static int test_closure_transitive(void) {
     "proc outer {} {\n"
     "  mut x 0\n"
     "  proc mid {} {\n"
-    "    proc inn {} { [set x [+ $x 1]] }\n"
-    "    [inn]\n"
+    "    proc inn {} { set x [+ $x 1] }\n"
+    "    inn\n"
     "  }\n"
-    "  [mid]\n"
-    "  [print [+ $x 0]]\n"
+    "  mid\n"
+    "  print [+ $x 0]\n"
     "}\n"
     "[outer]",
     &cap, "1\n"));
@@ -447,7 +447,7 @@ static int test_swap_box(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "def b [box 0]\n"
-    "proc inc {x} { [+ $x 1] }\n"
+    "proc inc {x} { + $x 1 }\n"
     "[swap $b $inc]\n"
     "[print [deref $b]]",
     &cap, "1\n"));
@@ -458,7 +458,7 @@ static int test_swap_atom(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "def a [atom 10]\n"
-    "proc dbl {x} { [* $x 2] }\n"
+    "proc dbl {x} { * $x 2 }\n"
     "[swap $a $dbl]\n"
     "[print [deref $a]]",
     &cap, "20\n"));
@@ -469,7 +469,7 @@ static int test_swap_returns_result(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "def b [box 5]\n"
-    "proc inc {x} { [+ $x 1] }\n"
+    "proc inc {x} { + $x 1 }\n"
     "[print [swap $b $inc]]",
     &cap, "6\n"));
   TEST_PASS();
@@ -477,7 +477,7 @@ static int test_swap_returns_result(void) {
 
 static int test_swap_wrong_container(void) {
   ASSERT(run_err(
-    "proc f {x} { [+ $x 0] }\n"
+    "proc f {x} { + $x 0 }\n"
     "[swap 42 $f]",
     "swap!: expected box or atom"));
   TEST_PASS();
@@ -486,7 +486,7 @@ static int test_swap_wrong_container(void) {
 static int test_swap_error_propagation(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc f {x} { [+ $x 0] }\n"
+    "proc f {x} { + $x 0 }\n"
     "[print [error? [swap [error \"x\"] $f]]]",
     &cap, "true\n"));
   TEST_PASS();
@@ -530,7 +530,7 @@ static int test_print_cell_transparent(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  mut x 42\n"
-    "  [print $x]\n"
+    "  print $x\n"
     "}\n"
     "[t]",
     &cap, "42\n"));
@@ -548,7 +548,7 @@ static int test_arity_set(void) {
   ASSERT(run_err(
     "proc t {} {\n"
     "  mut x 0\n"
-    "  [set x]\n"
+    "  set x\n"
     "}\n",
     "set"));
   TEST_PASS();
@@ -597,12 +597,12 @@ static int test_e2e_counter_pattern(void) {
   ASSERT(run_ok(
     "proc mkctr {} {\n"
     "  mut n 0\n"
-    "  proc inc {} { [set n [+ $n 1]] }\n"
-    "  proc get {} { [+ $n 0] }\n"
-    "  [inc]\n"
-    "  [inc]\n"
-    "  [inc]\n"
-    "  [+ $n 0]\n"
+    "  proc inc {} { set n [+ $n 1] }\n"
+    "  proc get {} { + $n 0 }\n"
+    "  inc\n"
+    "  inc\n"
+    "  inc\n"
+    "  + $n 0\n"
     "}\n"
     "[print [mkctr]]",
     &cap, "3\n"));
@@ -614,7 +614,7 @@ static int test_e2e_box_accumulator(void) {
   /* Box as accumulator passed around */
   ASSERT(run_ok(
     "def b [box 0]\n"
-    "proc add {x} { [reset $b [+ [deref $b] $x]] }\n"
+    "proc add {x} { reset $b [+ [deref $b] $x] }\n"
     "[add 10]\n"
     "[add 20]\n"
     "[add 30]\n"
@@ -628,7 +628,7 @@ static int test_e2e_swap_chain(void) {
   /* Multiple swap! calls on same container */
   ASSERT(run_ok(
     "def b [box 1]\n"
-    "proc dbl {x} { [* $x 2] }\n"
+    "proc dbl {x} { * $x 2 }\n"
     "[swap $b $dbl]\n"
     "[swap $b $dbl]\n"
     "[swap $b $dbl]\n"
@@ -642,7 +642,7 @@ static int test_e2e_global_mut_with_proc(void) {
   /* Global mut variable modified by procs */
   ASSERT(run_ok(
     "mut total 0\n"
-    "proc add {x} { [set total [+ $total $x]] }\n"
+    "proc add {x} { set total [+ $total $x] }\n"
     "[add 5]\n"
     "[add 15]\n"
     "[print $total]",

@@ -37,11 +37,11 @@ static int test_filter_stream_lazy(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  [yield 1]\n"
-    "  [yield 2]\n"
-    "  [yield 3]\n"
-    "  [yield 4]\n"
-    "  [yield 5]\n"
+    "  yield 1\n"
+    "  yield 2\n"
+    "  yield 3\n"
+    "  yield 4\n"
+    "  yield 5\n"
     "}\n"
     "def s [filter [gen] [\\ > $it 3]]\n"
     "print \"<stream>\"\n"
@@ -60,10 +60,10 @@ static int test_filter_collect(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  [yield 10]\n"
-    "  [yield 20]\n"
-    "  [yield 30]\n"
-    "  [yield 40]\n"
+    "  yield 10\n"
+    "  yield 20\n"
+    "  yield 30\n"
+    "  yield 40\n"
     "}\n"
     "def v [collect [filter [gen] [\\ > $it 15]]]\n"
     "[print $v]\n",
@@ -81,7 +81,7 @@ static int test_filter_chained(void) {
     "proc gen {} {\n"
     "  mut i 0\n"
     "  while [< $i 10] {\n"
-    "    [yield $i]\n"
+    "    yield $i\n"
     "    set i [+ $i 1]\n"
     "  }\n"
     "}\n"
@@ -114,9 +114,9 @@ static int test_filter_no_matches(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  [yield 1]\n"
-    "  [yield 2]\n"
-    "  [yield 3]\n"
+    "  yield 1\n"
+    "  yield 2\n"
+    "  yield 3\n"
     "}\n"
     "def v [collect [filter [gen] [\\ > $it 100]]]\n"
     "[print $v]\n",
@@ -132,10 +132,10 @@ static int test_filter_pipe(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  [yield 5]\n"
-    "  [yield 10]\n"
-    "  [yield 15]\n"
-    "  [yield 20]\n"
+    "  yield 5\n"
+    "  yield 10\n"
+    "  yield 15\n"
+    "  yield 20\n"
     "}\n"
     "[gen] | filter [\\ > $it 7] | collect | print\n",
     &cap);
@@ -150,10 +150,10 @@ static int test_filter_for_each(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  [yield 1]\n"
-    "  [yield 2]\n"
-    "  [yield 3]\n"
-    "  [yield 4]\n"
+    "  yield 1\n"
+    "  yield 2\n"
+    "  yield 3\n"
+    "  yield 4\n"
     "}\n"
     "for [filter [gen] [\\ > $it 2]] [\\ print $it]\n",
     &cap);
@@ -168,12 +168,12 @@ static int test_filter_for_inline(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  [yield 10]\n"
-    "  [yield 20]\n"
-    "  [yield 30]\n"
+    "  yield 10\n"
+    "  yield 20\n"
+    "  yield 30\n"
     "}\n"
     "for [filter [gen] [\\ > $it 10]] {\n"
-    "  [print $it]\n"
+    "  print $it\n"
     "}\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -189,11 +189,11 @@ static int test_filter_loop_generator(void) {
     "proc range {n} {\n"
     "  mut i 0\n"
     "  while [< $i $n] {\n"
-    "    [yield $i]\n"
+    "    yield $i\n"
     "    set i [+ $i 1]\n"
     "  }\n"
     "}\n"
-    "proc even {x} { [== [% $x 2] 0] }\n"
+    "proc even {x} { == [% $x 2] 0 }\n"
     "def v [collect [filter [range 8] $even]]\n"
     "[print $v]\n",
     &cap);
@@ -210,7 +210,7 @@ static int test_filter_empty_stream(void) {
     "proc gen {} {\n"
     "  mut i 0\n"
     "  while [< $i 0] {\n"
-    "    [yield $i]\n"
+    "    yield $i\n"
     "    set i [+ $i 1]\n"
     "  }\n"
     "}\n"

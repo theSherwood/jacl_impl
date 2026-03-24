@@ -1,5 +1,5 @@
 # expect: 0
 # transforming an empty vector returns an empty vector
-proc inc {x} { [+ $x 1] }
+proc inc {x} { + $x 1 }
 def v2 [transform [vec] $inc]
 print [vec-len $v2]

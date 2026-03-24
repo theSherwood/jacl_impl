@@ -159,7 +159,7 @@ static int test_e2e_tramp_basic_call(void) {
   ASSERT(vm != NULL);
 
   /* Define a simple add proc */
-  jacl_eval(vm, "proc add {a, b} { [+ $a $b] }");
+  jacl_eval(vm, "proc add {a, b} { + $a $b }");
   JaclVal cl = jacl_eval(vm, "$add");
   ASSERT(jacl_is_closure(cl));
 
@@ -224,7 +224,7 @@ static int test_e2e_tramp_various_signatures(void) {
   jacl_trampoline_free_val(vm, t_id);
 
   /* i32(i32,i32,i32) would need a 3-arg proc — skip, test 2-arg instead */
-  jacl_eval(vm, "proc mul {a, b} { [* $a $b] }");
+  jacl_eval(vm, "proc mul {a, b} { * $a $b }");
   JaclVal cl_mul = jacl_eval(vm, "$mul");
   JaclTrampoline* t_mul = jacl_trampoline_new_val(vm, cl_mul, "i32(i32,i32)");
   ASSERT(t_mul != NULL);
@@ -250,7 +250,7 @@ static int test_e2e_tramp_free_releases_closure(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  jacl_eval(vm, "proc dbl {x} { [* $x 2] }");
+  jacl_eval(vm, "proc dbl {x} { * $x 2 }");
   JaclVal cl = jacl_eval(vm, "$dbl");
   ASSERT(jacl_is_closure(cl));
 
@@ -313,7 +313,7 @@ static int test_e2e_tramp_qsort(void) {
    * Returns positive when a > b, negative when a < b, 0 when equal.
    * This is the classic a-b ascending comparator.
    */
-  JaclVal r = jacl_eval(vm, "proc qcmp {a, b} { [- [dref $a] [dref $b]] }");
+  JaclVal r = jacl_eval(vm, "proc qcmp {a, b} { - [dref $a] [dref $b] }");
   ASSERT(!jacl_is_error(r));
   JaclVal cl = jacl_eval(vm, "$qcmp");
   ASSERT(jacl_is_closure(cl));

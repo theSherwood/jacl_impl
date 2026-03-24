@@ -3,7 +3,7 @@
 # spawn a task that itself spawns and awaits an inner task
 proc main {} {
   def f [spawn {
-    def g [spawn { [* 10 10] }]
+    def g [spawn { * 10 10 }]
     await $g
   }]
   print [await $f]

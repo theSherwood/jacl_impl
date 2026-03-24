@@ -978,7 +978,7 @@ static int test_var_true_false_nil(void) {
   vm.print_ctx = &cap;
 
   /* $true used as condition → truthy */
-  VMResult result = jacl_run("[if $true { [print 1] } { [print 0] }]",
+  VMResult result = jacl_run("[if $true { print 1 } { print 0 }]",
                              &vm, &arena);
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "1\n");
@@ -989,7 +989,7 @@ static int test_var_true_false_nil(void) {
   vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
-  result = jacl_run("[if $false { [print 1] } { [print 0] }]",
+  result = jacl_run("[if $false { print 1 } { print 0 }]",
                     &vm, &arena);
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "0\n");
@@ -1000,7 +1000,7 @@ static int test_var_true_false_nil(void) {
   vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
-  result = jacl_run("[if $nil { [print 1] } { [print 0] }]",
+  result = jacl_run("[if $nil { print 1 } { print 0 }]",
                     &vm, &arena);
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "0\n");
@@ -1429,13 +1429,13 @@ static int test_local_def_in_block(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
-  /* { x = 42; [print $x] } should print "42\n" */
+  /* { x = 42; print $x } should print "42\n" */
   PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
-  VMResult result = jacl_run("{ x = 42; [print $x] }", &vm, &arena);
+  VMResult result = jacl_run("{ x = 42; print $x }", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "42\n");
@@ -1484,7 +1484,7 @@ static int test_local_shadowing(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "x = 1\n{ x = 2; [print $x] }\n[print $x]",
+    "x = 1\n{ x = 2; print $x }\n[print $x]",
     &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -1511,7 +1511,7 @@ static int test_local_nested_scopes(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "{ a = 10; { b = 20; [print [+ $a $b]] }; [print $a] }",
+    "{ a = 10; { b = 20; print [+ $a $b] }; print $a }",
     &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -1539,7 +1539,7 @@ static int test_local_same_scope_shadow(void) {
   vm.print_ctx = &cap;
   /* Redefining x in the same scope creates a new local; $x resolves to the latest */
   VMResult result = jacl_run(
-    "{ x = 1; x = 2; [print $x] }",
+    "{ x = 1; x = 2; print $x }",
     &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -1722,7 +1722,7 @@ static int test_if_no_else_nil(void) {
   TEST_PASS();
 }
 
-/* Test: nested if works — [if $true { [if $false { 1 } { 2 }] }] returns i32(2) */
+/* Test: nested if works — [if $true { if $false { 1 } { 2 } }] returns i32(2) */
 static int test_if_nested(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -1731,7 +1731,7 @@ static int test_if_nested(void) {
 
   VM vm;
   vm_init(&vm, &arena);
-  VMResult result = jacl_run("[if $true { [if $false { 1 } { 2 }] }]", &vm, &arena);
+  VMResult result = jacl_run("[if $true { if $false { 1 } { 2 } }]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -1929,7 +1929,7 @@ static int test_if_else_not_block(void) {
 
 /* ===== US-006 (M4): Compile and execute proc definition ===== */
 
-/* Test: proc add {a, b} { [+ $a $b] } then [add 1 2] returns i32(3) */
+/* Test: proc add {a, b} { + $a $b } then [add 1 2] returns i32(3) */
 static int test_proc_basic_call(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -1939,7 +1939,7 @@ static int test_proc_basic_call(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "proc add {a, b} { [+ $a $b] }\n[add 1 2]", &vm, &arena);
+    "proc add {a, b} { + $a $b }\n[add 1 2]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -1954,7 +1954,7 @@ static int test_proc_basic_call(void) {
   TEST_PASS();
 }
 
-/* Test: proc greet {name} { [print $name] } then [greet hello] prints "hello\n" */
+/* Test: proc greet {name} { print $name } then [greet hello] prints "hello\n" */
 static int test_proc_print_param(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -1967,7 +1967,7 @@ static int test_proc_print_param(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "proc greet {name} { [print $name] }\n[greet hello]", &vm, &arena);
+    "proc greet {name} { print $name }\n[greet hello]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "hello\n");
@@ -2015,7 +2015,7 @@ static int test_proc_implicit_return(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "proc double {n} { [* $n 2] }\n[double 5]", &vm, &arena);
+    "proc double {n} { * $n 2 }\n[double 5]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -2042,7 +2042,7 @@ static int test_proc_multi_stmt_body(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "proc foo {x} { [print $x]; [+ $x 1] }\n[foo 10]", &vm, &arena);
+    "proc foo {x} { print $x; + $x 1 }\n[foo 10]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n");
@@ -2117,7 +2117,7 @@ static int test_proc_call_arg_mismatch(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "proc add {a, b} { [+ $a $b] }\n[add 1]", &vm, &arena);
+    "proc add {a, b} { + $a $b }\n[add 1]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
@@ -2157,7 +2157,7 @@ static int test_proc_def_returns_nil(void) {
 
 /* ===== Syntax Redesign US-003: New proc syntax ===== */
 
-/* Test: proc add {a, b} { [+ $a $b] } then [add 1 2] returns 3 */
+/* Test: proc add {a, b} { + $a $b } then [add 1 2] returns 3 */
 static int test_proc_new_syntax_basic(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -2167,7 +2167,7 @@ static int test_proc_new_syntax_basic(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "proc add {a, b} { [+ $a $b] }\n[add 1 2]", &vm, &arena);
+    "proc add {a, b} { + $a $b }\n[add 1 2]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -2192,7 +2192,7 @@ static int test_proc_new_syntax_typed(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n[add 1 2]", &vm, &arena);
+    "proc i64 add {i64 a, i64 b} { + $a $b }\n[add 1 2]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -2245,7 +2245,7 @@ static int test_proc_new_syntax_multi_stmt(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "proc greet {name} {\n"
-    "  [print $name]\n"
+    "  print $name\n"
     "  42\n"
     "}\n"
     "[greet hello]", &vm, &arena);
@@ -2274,7 +2274,7 @@ static int test_proc_new_syntax_closure(void) {
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
     "x = 10\n"
-    "proc add_x {n} { [+ $n $x] }\n"
+    "proc add_x {n} { + $n $x }\n"
     "[add_x 5]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -2300,7 +2300,7 @@ static int test_proc_new_syntax_implicit_return(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult result = jacl_run(
-    "proc double {n} { [* $n 2] }\n[double 7]", &vm, &arena);
+    "proc double {n} { * $n 2 }\n[double 7]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
   ASSERT_U32_EQ(vm.stack_top, 1);
@@ -2501,7 +2501,7 @@ static int test_while_countdown(void) {
   const char* program =
     "n : 3\n"
     "[while [> $n 0] {\n"
-    "  [print $n]\n"
+    "  print $n\n"
     "  n :: [- $n 1]\n"
     "}]";
 
@@ -2535,7 +2535,7 @@ static int test_closure_capture_local(void) {
 
   const char* program =
     "proc mkadd {x} {\n"
-    "  proc inner {y} { [+ $x $y] }\n"
+    "  proc inner {y} { + $x $y }\n"
     "}\n"
     "add10 = [mkadd 10]\n"
     "[print [add10 5]]";
@@ -2568,7 +2568,7 @@ static int test_closure_independent_captures(void) {
 
   const char* program =
     "proc mkadd {x} {\n"
-    "  proc inner {y} { [+ $x $y] }\n"
+    "  proc inner {y} { + $x $y }\n"
     "}\n"
     "add5 = [mkadd 5]\n"
     "add20 = [mkadd 20]\n"
@@ -2604,7 +2604,7 @@ static int test_closure_nested_3_levels(void) {
   const char* program =
     "proc outer {a} {\n"
     "  proc middle {b} {\n"
-    "    proc inner {c} { [+ [+ $a $b] $c] }\n"
+    "    proc inner {c} { + [+ $a $b] $c }\n"
     "  }\n"
     "}\n"
     "mid = [outer 100]\n"
@@ -2639,7 +2639,7 @@ static int test_closure_capture_multiple(void) {
 
   const char* program =
     "proc make-fn {a, b} {\n"
-    "  proc inner {c} { [+ [+ $a $b] $c] }\n"
+    "  proc inner {c} { + [+ $a $b] $c }\n"
     "}\n"
     "f = [make-fn 10 20]\n"
     "[print [f 3]]";
@@ -2674,7 +2674,7 @@ static int test_closure_not_global(void) {
   const char* program =
     "x = 99\n"
     "proc wrap {x} {\n"
-    "  proc inner {} { [+ $x 0] }\n"
+    "  proc inner {} { + $x 0 }\n"
     "}\n"
     "f = [wrap 5]\n"
     "[print [f]]";
@@ -2709,7 +2709,7 @@ static int test_recursion_factorial(void) {
 
   const char* program =
     "proc fact {n} {\n"
-    "  [if [== $n 0] { 1 } { [* $n [fact [- $n 1]]] }]\n"
+    "  if [== $n 0] { 1 } { * $n [fact [- $n 1]] }\n"
     "}\n"
     "[print [fact 10]]";
 
@@ -2741,7 +2741,7 @@ static int test_recursion_fibonacci(void) {
 
   const char* program =
     "proc fib {n} {\n"
-    "  [if [< $n 2] { [+ $n 0] } { [+ [fib [- $n 1]] [fib [- $n 2]]] }]\n"
+    "  if [< $n 2] { + $n 0 } { + [fib [- $n 1]] [fib [- $n 2]] }\n"
     "}\n"
     "[print [fib 10]]";
 
@@ -2770,7 +2770,7 @@ static int test_recursion_depth_limit(void) {
 
   /* Infinite recursion with no base case */
   const char* program =
-    "proc inf {n} { [inf [+ $n 1]] }\n"
+    "proc inf {n} { inf [+ $n 1] }\n"
     "[inf 0]";
 
   VMResult result = jacl_run(program, &vm, &arena);
@@ -2814,7 +2814,7 @@ static int test_spawn_captures_mut_pinned(void) {
   const char* program =
     "proc main {} {\n"
     "  x : 42\n"
-    "  [spawn { [+ $x 1] }]\n"
+    "  [spawn { + $x 1 }]\n"
     "}\n"
     "[main]";
 
@@ -2843,11 +2843,11 @@ static int test_spawn_local_mut_not_pinned(void) {
   /* mut x declared inside spawn body — local, no pinning needed */
   const char* program =
     "proc main {} {\n"
-    "  [spawn {\n"
+    "  spawn {\n"
     "    x : 42\n"
     "    x :: 99\n"
     "    $x\n"
-    "  }]\n"
+    "  }\n"
     "}\n"
     "[main]";
 
@@ -2875,7 +2875,7 @@ static int test_spawn_captures_def_not_pinned(void) {
   const char* program =
     "proc main {} {\n"
     "  x = 42\n"
-    "  [spawn { [+ $x 1] }]\n"
+    "  [spawn { + $x 1 }]\n"
     "}\n"
     "[main]";
 
@@ -2906,7 +2906,7 @@ static int test_spawn_transitive_capture_pinned(void) {
     "proc main {} {\n"
     "  x : 42\n"
     "  proc f {} { $x }\n"
-    "  [spawn { [f] }]\n"
+    "  [spawn { f }]\n"
     "}\n"
     "[main]";
 
@@ -2968,7 +2968,7 @@ static int test_spawn_transitive_def_not_pinned(void) {
     "proc main {} {\n"
     "  x = 42\n"
     "  proc f {} { $x }\n"
-    "  [spawn { [f] }]\n"
+    "  [spawn { f }]\n"
     "}\n"
     "[main]";
 
@@ -3143,7 +3143,7 @@ static int test_module_populate_exports(void) {
 
   /* Compile a source with def, proc, mut, and private names */
   const char* source = "def x 42\n"
-                       "proc add {a, b} { [+ $a $b] }\n"
+                       "proc add {a, b} { + $a $b }\n"
                        "mut cnt 0\n"
                        "def _priv 99\n";
   LexResult tokens = lexer_lex(source, &arena);
@@ -3211,7 +3211,7 @@ static int test_compile_module_basic(void) {
   /* Create a temp module file */
   const char* dir = "/tmp/jacl_test_m14";
   mkdir(dir, 0755);
-  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add {a, b} { [+ $a $b] }\n");
+  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add {a, b} { + $a $b }\n");
 
   /* Create an importer module path */
   char importer_path[1024];
@@ -3507,7 +3507,7 @@ static int test_compile_module_typed_exports(void) {
   const char* dir = "/tmp/jacl_test_m14e";
   mkdir(dir, 0755);
   write_temp_jacl(dir, "math.jacl",
-                  "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n");
+                  "proc i64 add {i64 a, i64 b} { + $a $b }\n");
   write_temp_jacl(dir, "main.jacl", "");
 
   char importer_path[1024];
@@ -3617,7 +3617,7 @@ static int test_import_registers_globals(void) {
   char real_importer[1024];
 
   setup_module_ctx("/tmp/jacl_us007a", "lib.jacl",
-                   "def x 42\nproc add {a, b} { [+ $a $b] }\n",
+                   "def x 42\nproc add {a, b} { + $a $b }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -3744,7 +3744,7 @@ static int test_import_typed_propagation(void) {
   char real_importer[1024];
 
   setup_module_ctx("/tmp/jacl_us007d", "math.jacl",
-                   "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n",
+                   "proc i64 add {i64 a, i64 b} { + $a $b }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -3788,7 +3788,7 @@ static int test_import_arity_check(void) {
   char real_importer[1024];
 
   setup_module_ctx("/tmp/jacl_us007e", "lib.jacl",
-                   "proc add {a, b} { [+ $a $b] }\n",
+                   "proc add {a, b} { + $a $b }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -3825,7 +3825,7 @@ static int test_import_type_check(void) {
   char real_importer[1024];
 
   setup_module_ctx("/tmp/jacl_us007f", "math.jacl",
-                   "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n",
+                   "proc i64 add {i64 a, i64 b} { + $a $b }\n",
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
@@ -4165,7 +4165,7 @@ static int test_compile_program_with_dep(void) {
 
   const char* dir = "/tmp/jacl_us009b";
   mkdir(dir, 0755);
-  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add {a, b} { [+ $a $b] }\n");
+  write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add {a, b} { + $a $b }\n");
   write_temp_jacl(dir, "main.jacl", "use \"lib.jacl\" [add x]\n[add $x 1]\n");
 
   ProgramResult pr = jacl_compile_program(
@@ -4273,7 +4273,7 @@ static int test_compile_program_root_exports(void) {
 
   const char* dir = "/tmp/jacl_us009e";
   mkdir(dir, 0755);
-  write_temp_jacl(dir, "main.jacl", "def x 42\nproc add {a, b} { [+ $a $b] }\n");
+  write_temp_jacl(dir, "main.jacl", "def x 42\nproc add {a, b} { + $a $b }\n");
 
   ProgramResult pr = jacl_compile_program(
       "/tmp/jacl_us009e/main.jacl", &arena, &intern, &heap);
@@ -4319,7 +4319,7 @@ static int test_exec_program_basic(void) {
   const char* dir = "/tmp/jacl_us010a";
   mkdir(dir, 0755);
   write_temp_jacl(dir, "lib.jacl",
-    "proc add {a, b} { [+ $a $b] }\n");
+    "proc add {a, b} { + $a $b }\n");
   write_temp_jacl(dir, "main.jacl",
     "use \"lib.jacl\" [add]\n[print [add 1 2]]\n");
 
@@ -5545,7 +5545,7 @@ static int test_while_new_infix_condition(void) {
   VMResult result = jacl_run(
     "i : 3\n"
     "while ($i > 0) {\n"
-    "  [print $i]\n"
+    "  print $i\n"
     "  i :: [- $i 1]\n"
     "}\n", &vm, &arena);
 
@@ -5599,9 +5599,9 @@ static int test_if_while_combined_new(void) {
     "i : 1\n"
     "while [<= $i 4] {\n"
     "  if [== [% $i 2] 0] {\n"
-    "    [print \"even\"]\n"
+    "    print \"even\"\n"
     "  } else {\n"
-    "    [print \"odd\"]\n"
+    "    print \"odd\"\n"
     "  }\n"
     "  i :: [+ $i 1]\n"
     "}\n", &vm, &arena);
@@ -5633,7 +5633,7 @@ static int test_for_implicit_it(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "for [vec 10 20 30] {\n"
-    "  [print $it]\n"
+    "  print $it\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -5661,7 +5661,7 @@ static int test_for_explicit_binding(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "for [vec 1 2 3] x {\n"
-    "  [print $x]\n"
+    "  print $x\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -5689,7 +5689,7 @@ static int test_for_hof_callback(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "v = [vec 10 20 30]\n"
-    "proc p {x} { [print $x] }\n"
+    "proc p {x} { print $x }\n"
     "[for $v $p]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -5717,7 +5717,7 @@ static int test_for_empty_vec(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "for [vec] {\n"
-    "  [print $it]\n"
+    "  print $it\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -5746,7 +5746,7 @@ static int test_for_variable_collection(void) {
   VMResult result = jacl_run(
     "v = [vec 5 10 15]\n"
     "for $v {\n"
-    "  [print $it]\n"
+    "  print $it\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -5774,7 +5774,7 @@ static int test_for_returns_nil(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "v = [vec 1]\n"
-    "proc p {x} { [+ $x 0] }\n"
+    "proc p {x} { + $x 0 }\n"
     "[print [for $v $p]]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -5803,7 +5803,7 @@ static int test_for_upvalue_capture(void) {
   VMResult result = jacl_run(
     "offset = 100\n"
     "for [vec 1 2 3] {\n"
-    "  [print [+ $offset $it]]\n"
+    "  print [+ $offset $it]\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -5831,7 +5831,7 @@ static int test_each_still_works(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "v = [vec 10 20 30]\n"
-    "proc p {x} { [print $x] }\n"
+    "proc p {x} { print $x }\n"
     "[for $v $p]", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -5862,8 +5862,8 @@ static int test_break_while_basic(void) {
   VMResult result = jacl_run(
     "i : 0\n"
     "while $true {\n"
-    "  if [>= $i 3] { [break] }\n"
-    "  [print $i]\n"
+    "  if [>= $i 3] { break }\n"
+    "  print $i\n"
     "  i :: [+ $i 1]\n"
     "}\n", &vm, &arena);
 
@@ -5893,7 +5893,7 @@ static int test_break_while_with_value(void) {
   VMResult result = jacl_run(
     "i : 0\n"
     "result = [while $true {\n"
-    "  if [>= $i 5] { [break $i] }\n"
+    "  if [>= $i 5] { break $i }\n"
     "  i :: [+ $i 1]\n"
     "}]\n"
     "[print $result]\n", &vm, &arena);
@@ -5923,7 +5923,7 @@ static int test_break_while_nil_value(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "result = [while $true {\n"
-    "  [break]\n"
+    "  break\n"
     "}]\n"
     "[print $result]\n", &vm, &arena);
 
@@ -5957,9 +5957,9 @@ static int test_break_nested_loops(void) {
     "while [< $i 3] {\n"
     "  j : 0\n"
     "  while $true {\n"
-    "    if [>= $j 2] { [break] }\n"
-    "    [print $i]\n"
-    "    [print $j]\n"
+    "    if [>= $j 2] { break }\n"
+    "    print $i\n"
+    "    print $j\n"
     "    j :: [+ $j 1]\n"
     "  }\n"
     "  i :: [+ $i 1]\n"
@@ -6065,8 +6065,8 @@ static int test_continue_while_basic(void) {
     "while [< $i 5] {\n"
     "  old = $i\n"
     "  i :: [+ $i 1]\n"
-    "  if [== $old 2] { [continue] }\n"
-    "  [print $old]\n"
+    "  if [== $old 2] { continue }\n"
+    "  print $old\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -6114,7 +6114,7 @@ static int test_for_empty_collection(void) {
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
     "for [vec] {\n"
-    "  [print $it]\n"
+    "  print $it\n"
     "}\n"
     "print \"done\"\n", &vm, &arena);
 
@@ -6145,8 +6145,8 @@ static int test_continue_for_basic(void) {
   /* Print 1, 2, 4, 5 — skip 3 */
   VMResult result = jacl_run(
     "for [vec 1 2 3 4 5] {\n"
-    "  if [== $it 3] { [continue] }\n"
-    "  [print $it]\n"
+    "  if [== $it 3] { continue }\n"
+    "  print $it\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -6177,7 +6177,7 @@ static int test_continue_for_bare(void) {
   VMResult result = jacl_run(
     "for [vec 1 2 3] {\n"
     "  if [== $it 2] { continue }\n"
-    "  [print $it]\n"
+    "  print $it\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -6209,8 +6209,8 @@ static int test_continue_nested_loops(void) {
   VMResult result = jacl_run(
     "for [vec 1 2] x {\n"
     "  for [vec 10 20 30] y {\n"
-    "    if [== $y 20] { [continue] }\n"
-    "    [print $y]\n"
+    "    if [== $y 20] { continue }\n"
+    "    print $y\n"
     "  }\n"
     "}\n", &vm, &arena);
 
@@ -6241,8 +6241,8 @@ static int test_break_for_basic(void) {
   /* Print 1, 2 — break at 3 */
   VMResult result = jacl_run(
     "for [vec 1 2 3 4 5] {\n"
-    "  if [== $it 3] { [break] }\n"
-    "  [print $it]\n"
+    "  if [== $it 3] { break }\n"
+    "  print $it\n"
     "}\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -6272,7 +6272,7 @@ static int test_break_for_with_value(void) {
   /* break with value from for loop — the for expression evaluates to 30 */
   VMResult result = jacl_run(
     "result = [for [vec 10 20 30 40] {\n"
-    "  if [== $it 30] { [break $it] }\n"
+    "  if [== $it 30] { break $it }\n"
     "}]\n"
     "[print $result]\n", &vm, &arena);
 
@@ -6307,8 +6307,8 @@ static int test_continue_mixed_nested(void) {
     "while [< $n 2] {\n"
     "  n :: [+ $n 1]\n"
     "  for [vec 1 2 3] {\n"
-    "    if [== $it 2] { [continue] }\n"
-    "    [print $it]\n"
+    "    if [== $it 2] { continue }\n"
+    "    print $it\n"
     "  }\n"
     "}\n"
     "print \"done\"\n", &vm, &arena);
@@ -6343,7 +6343,7 @@ static int test_return_from_for_block(void) {
   VMResult result = jacl_run(
     "proc find {items} {\n"
     "  for $items {\n"
-    "    if [== $it 3] { [return $it] }\n"
+    "    if [== $it 3] { return $it }\n"
     "  }\n"
     "  999\n"
     "}\n"
@@ -6378,8 +6378,8 @@ static int test_return_value_from_for_block(void) {
     "proc sumto {items limit} {\n"
     "  acc : 0\n"
     "  for $items x {\n"
-    "    if [> $x $limit] { [return $acc] }\n"
-    "    [set acc [+ $acc $x]]\n"
+    "    if [> $x $limit] { return $acc }\n"
+    "    set acc [+ $acc $x]\n"
     "  }\n"
     "  $acc\n"
     "}\n"
@@ -6414,8 +6414,8 @@ static int test_return_from_hof_for(void) {
   VMResult result = jacl_run(
     "proc testfn {} {\n"
     "  proc cb {x} {\n"
-    "    if [== $x 2] { [return \"skip\"] }\n"
-    "    [print $x]\n"
+    "    if [== $x 2] { return \"skip\" }\n"
+    "    print $x\n"
     "  }\n"
     "  [for [vec 1 2 3] $cb]\n"
     "  print \"done\"\n"
@@ -6486,7 +6486,7 @@ static int test_return_nil_from_for_block(void) {
   VMResult result = jacl_run(
     "proc find {items} {\n"
     "  for $items {\n"
-    "    if [== $it 3] { [return] }\n"
+    "    if [== $it 3] { return }\n"
     "  }\n"
     "  999\n"
     "}\n"
@@ -6518,8 +6518,8 @@ static int test_for_cstyle_basic(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "[for {i : 0; [< $i 5]; [set i [+ $i 1]]} {\n"
-    "  [print $i]\n"
+    "[for {i : 0; [< $i 5]; set i [+ $i 1]} {\n"
+    "  print $i\n"
     "}]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -6548,9 +6548,9 @@ static int test_for_cstyle_break(void) {
 
   /* Print 0 1 2 then break */
   VMResult result = jacl_run(
-    "[for {i : 0; [< $i 10]; [set i [+ $i 1]]} {\n"
-    "  if [== $i 3] { [break] }\n"
-    "  [print $i]\n"
+    "[for {i : 0; [< $i 10]; set i [+ $i 1]} {\n"
+    "  if [== $i 3] { break }\n"
+    "  print $i\n"
     "}]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -6579,9 +6579,9 @@ static int test_for_cstyle_continue(void) {
 
   /* Print 0 1 3 4 — skip 2 */
   VMResult result = jacl_run(
-    "[for {i : 0; [< $i 5]; [set i [+ $i 1]]} {\n"
-    "  if [== $i 2] { [continue] }\n"
-    "  [print $i]\n"
+    "[for {i : 0; [< $i 5]; set i [+ $i 1]} {\n"
+    "  if [== $i 2] { continue }\n"
+    "  print $i\n"
     "}]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -6610,10 +6610,10 @@ static int test_for_cstyle_nested(void) {
 
   /* Outer i=0..1, inner j=0..1: prints 00 01 10 11 */
   VMResult result = jacl_run(
-    "[for {i : 0; [< $i 2]; [set i [+ $i 1]]} {\n"
-    "  [for {j : 0; [< $j 2]; [set j [+ $j 1]]} {\n"
-    "    [print [+ [* $i 10] $j]]\n"
-    "  }]\n"
+    "[for {i : 0; [< $i 2]; set i [+ $i 1]} {\n"
+    "  for {j : 0; [< $j 2]; set j [+ $j 1]} {\n"
+    "    print [+ [* $i 10] $j]\n"
+    "  }\n"
     "}]\n", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -6639,7 +6639,7 @@ static int test_for_cstyle_scope(void) {
 
   /* $i should not be visible after the loop; this should be a runtime error */
   VMResult result = jacl_run(
-    "[for {i : 0; [< $i 3]; [set i [+ $i 1]]} { [print $i] }]\n"
+    "[for {i : 0; [< $i 3]; set i [+ $i 1]} { print $i }]\n"
     "[print $i]\n",  /* $i is undefined here */
     &vm, &arena);
 
@@ -6671,7 +6671,7 @@ static int test_break_for_nil_value(void) {
   /* break with no value — for expression evaluates to nil */
   VMResult result = jacl_run(
     "r = [for [vec 1 2 3] {\n"
-    "  if [== $it 2] { [break] }\n"
+    "  if [== $it 2] { break }\n"
     "}]\n"
     "[print $r]\n", &vm, &arena);
 
@@ -6704,8 +6704,8 @@ static int test_break_nested_for_loops(void) {
   VMResult result = jacl_run(
     "for [vec 1 2] x {\n"
     "  for [vec 10 20 30] y {\n"
-    "    if [== $y 20] { [break] }\n"
-    "    [print $y]\n"
+    "    if [== $y 20] { break }\n"
+    "    print $y\n"
     "  }\n"
     "}\n", &vm, &arena);
 
@@ -6754,9 +6754,9 @@ static int test_for_cstyle_return(void) {
   /* proc returns from C-style for — should not reach "done" */
   VMResult result = jacl_run(
     "proc find {} {\n"
-    "  [for {i : 0; [< $i 10]; [set i [+ $i 1]]} {\n"
-    "    if [== $i 3] { [return $i] }\n"
-    "  }]\n"
+    "  for {i : 0; [< $i 10]; set i [+ $i 1]} {\n"
+    "    if [== $i 3] { return $i }\n"
+    "  }\n"
     "  999\n"
     "}\n"
     "print [find]\n", &vm, &arena);
@@ -6787,8 +6787,8 @@ static int test_for_cstyle_break_value(void) {
 
   /* break with value — for expression evaluates to 42 */
   VMResult result = jacl_run(
-    "r = [for {i : 0; [< $i 10]; [set i [+ $i 1]]} {\n"
-    "  if [== $i 3] { [break 42] }\n"
+    "r = [for {i : 0; [< $i 10]; set i [+ $i 1]} {\n"
+    "  if [== $i 3] { break 42 }\n"
     "}]\n"
     "[print $r]\n", &vm, &arena);
 
@@ -6820,8 +6820,8 @@ static int test_set_without_bang(void) {
   VMResult result = jacl_run(
     "{\n"
     "  x : 10\n"
-    "  [set x 42]\n"
-    "  [print $x]\n"
+    "  set x 42\n"
+    "  print $x\n"
     "}", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -6851,7 +6851,7 @@ static int test_set_bang_still_works(void) {
     "{\n"
     "  x : 10\n"
     "  x :: 99\n"
-    "  [print $x]\n"
+    "  print $x\n"
     "}", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -6933,7 +6933,7 @@ static int test_swap_without_bang(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "proc inc {x} { [+ $x 1] }\n"
+    "proc inc {x} { + $x 1 }\n"
     "b = [atom 10]\n"
     "[swap $b $inc]\n"
     "[print [deref $b]]", &vm, &arena);
@@ -6962,7 +6962,7 @@ static int test_swap_bang_still_works(void) {
   vm.print_fn = capture_print;
   vm.print_ctx = &cap;
   VMResult result = jacl_run(
-    "proc inc {x} { [+ $x 1] }\n"
+    "proc inc {x} { + $x 1 }\n"
     "b = [atom 10]\n"
     "[swap! $b $inc]\n"
     "[print [deref $b]]", &vm, &arena);
@@ -7021,10 +7021,10 @@ static int test_set_multiple_reassign(void) {
   VMResult result = jacl_run(
     "{\n"
     "  x : 0\n"
-    "  [set x 1]\n"
-    "  [set x 2]\n"
-    "  [set x 3]\n"
-    "  [print $x]\n"
+    "  set x 1\n"
+    "  set x 2\n"
+    "  set x 3\n"
+    "  print $x\n"
     "}", &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -7226,7 +7226,7 @@ static int test_bind_in_block(void) {
     "proc test {} {\n"
     "  x = 10\n"
     "  y = 20\n"
-    "  [print ($x + $y)]\n"
+    "  print ($x + $y)\n"
     "}\n"
     "[test]\n", &vm, &arena);
 
@@ -7341,7 +7341,7 @@ static int test_arrow_on_expr_result(void) {
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "proc mkpt {} { [Point 42 99] }\n"
+      "proc mkpt {} { Point 42 99 }\n"
       "print [mkpt]->x",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);

@@ -124,6 +124,11 @@ static void intern__compact(JaclInternTable* table) {
   intern__rehash(table, table->cap);
 }
 
+/* Thread-local flag: when true, gc_sweep_intern_table is skipped.
+ * Set during jacl_intern to prevent GC (triggered by gc_alloc)
+ * from evicting intern table entries while we're about to insert. */
+static JACL_THREAD_LOCAL bool gc__interning = false;
+
 /* Intern a string: returns JaclVal with JACL_TAG_STRING tag.
  * String data is allocated on the GC heap (Phase 1: immortal).
  * Intern table bookkeeping (entries array) remains arena-backed.
@@ -134,9 +139,13 @@ static JaclVal jacl_intern(ThreadHeap* heap, JaclInternTable* table,
 
   /* Allocate new heap string BEFORE acquiring lock.
      gc_alloc may trigger GC, which calls gc_sweep_intern_table
-     and takes the same lock — so we must not hold it here. */
+     and takes the same lock — so we must not hold it here.
+     Set gc__interning to prevent the GC from evicting intern
+     entries during this allocation. */
+  gc__interning = true;
   JaclHeapString* str = (JaclHeapString*)gc_alloc(
       heap, OBJ_STRING, sizeof(JaclHeapString) + length);
+  gc__interning = false;
   str->byte_len     = length;
   str->grapheme_len = (uint32_t)unicode_grapheme_count(
       (const uint8_t*)data, (size_t)length);

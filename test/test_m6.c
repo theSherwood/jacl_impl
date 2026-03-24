@@ -142,12 +142,12 @@ static int test_backslash_continuation(void) {
   TEST_TEARDOWN();
 }
 
-/* Test: continuation in block — '{ def x 1, def y 2, [+ $x $y] }' evaluates to 3 */
+/* Test: continuation in block — '{ def x 1, def y 2, + $x $y }' evaluates to 3 */
 static int test_block_with_commas(void) {
   TEST_SETUP();
 
   const char* program =
-    "print [if $true { def x 1, def y 2, [+ $x $y] } { 0 }]";
+    "print [if $true { def x 1, def y 2, + $x $y } { 0 }]";
   VMResult result = jacl_run(program, &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_OK);
@@ -184,12 +184,12 @@ static int test_explicit_brackets(void) {
   TEST_TEARDOWN();
 }
 
-/* Test: proc definition line-based — 'proc add {a, b} { [+ $a $b] }\nadd 3 4' evaluates to 7 */
+/* Test: proc definition line-based — 'proc add {a, b} { + $a $b }\nadd 3 4' evaluates to 7 */
 static int test_proc_line_based(void) {
   TEST_SETUP();
 
   const char* program =
-    "proc add {a, b} { [+ $a $b] }\n"
+    "proc add {a, b} { + $a $b }\n"
     "print [add 3 4]";
   VMResult result = jacl_run(program, &vm, &arena);
 
@@ -207,7 +207,7 @@ static int test_multiline_block(void) {
     "proc f {} {\n"
     "  x = 10\n"
     "  y = 20\n"
-    "  [+ $x $y]\n"
+    "  + $x $y\n"
     "}\n"
     "print [f]";
   VMResult result = jacl_run(program, &vm, &arena);

@@ -312,7 +312,7 @@ static int test_def_i64_local(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  def i64 x 100\n"
-    "  [print [to-string $x]]\n"
+    "  print [to-string $x]\n"
     "}\n"
     "[t]",
     &cap, "100\n"));
@@ -324,7 +324,7 @@ static int test_def_f64_local(void) {
   ASSERT(run_ok(
     "proc t {} {\n"
     "  def f64 x 2.5\n"
-    "  [print [to-string $x]]\n"
+    "  print [to-string $x]\n"
     "}\n"
     "[t]",
     &cap, "2.5\n"));
@@ -397,7 +397,7 @@ static int test_set_typed_to_typed_ok(void) {
     "  mut i64 x 0\n"
     "  def i64 y 99\n"
     "  x :: $y\n"
-    "  [print [to-string $x]]\n"
+    "  print [to-string $x]\n"
     "}\n"
     "[t]",
     &cap, "99\n"));
@@ -423,8 +423,8 @@ static int test_mut_i64_local(void) {
     "proc t {} {\n"
     "  mut i64 n 0\n"
     "  n :: 10\n"
-    "  [set n [+ $n 5]]\n"
-    "  [print [to-string $n]]\n"
+    "  set n [+ $n 5]\n"
+    "  print [to-string $n]\n"
     "}\n"
     "[t]",
     &cap, "15\n"));
@@ -754,7 +754,7 @@ static int test_to_arity_error(void) {
 static int test_proc_i64_return(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n"
+    "proc i64 add {i64 a, i64 b} { + $a $b }\n"
     "[print [to-string [add 3 4]]]",
     &cap, "7\n"));
   TEST_PASS();
@@ -763,7 +763,7 @@ static int test_proc_i64_return(void) {
 static int test_proc_f64_return(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc f64 avg {f64 a, f64 b} { [/ [+ $a $b] 2.0] }\n"
+    "proc f64 avg {f64 a, f64 b} { / [+ $a $b] 2.0 }\n"
     "[print [to-string [avg 10.0 20.0]]]",
     &cap, "15\n"));
   TEST_PASS();
@@ -773,7 +773,7 @@ static int test_proc_callsite_contextual_typing(void) {
   PrintCapture cap;
   /* Literals at call site adopt param types */
   ASSERT(run_ok(
-    "proc i64 dbl {i64 n} { [+ $n $n] }\n"
+    "proc i64 dbl {i64 n} { + $n $n }\n"
     "[print [to-string [dbl 21]]]",
     &cap, "42\n"));
   TEST_PASS();
@@ -781,7 +781,7 @@ static int test_proc_callsite_contextual_typing(void) {
 
 static int test_proc_callsite_type_error(void) {
   ASSERT(run_err(
-    "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n"
+    "proc i64 add {i64 a, i64 b} { + $a $b }\n"
     "[add \"x\" 2]",
     "type error: argument 1 of add expected i64, got str"));
   TEST_PASS();
@@ -789,7 +789,7 @@ static int test_proc_callsite_type_error(void) {
 
 static int test_proc_callsite_dyn_error(void) {
   ASSERT(run_err(
-    "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n"
+    "proc i64 add {i64 a, i64 b} { + $a $b }\n"
     "def x 42\n"
     "[add $x 2]",
     "type error:"));
@@ -807,7 +807,7 @@ static int test_proc_return_type_at_callsite(void) {
   PrintCapture cap;
   /* Return type propagates: def y [add 1 2] where add returns i64 -> y is i64 */
   ASSERT(run_ok(
-    "proc i64 add {i64 a, i64 b} { [+ $a $b] }\n"
+    "proc i64 add {i64 a, i64 b} { + $a $b }\n"
     "def y [add 1 2]\n"
     "[print [to-string $y]]",
     &cap, "3\n"));
@@ -819,8 +819,8 @@ static int test_proc_mixed_params(void) {
   /* Mixed typed/untyped params */
   ASSERT(run_ok(
     "proc f {i64 n, label} {\n"
-    "  [print $label]\n"
-    "  [print [to-string $n]]\n"
+    "  print $label\n"
+    "  print [to-string $n]\n"
     "}\n"
     "[f 42 \"val:\"]",
     &cap, "val:\n42\n"));
@@ -830,7 +830,7 @@ static int test_proc_mixed_params(void) {
 static int test_proc_untyped_unchanged(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "proc add {a, b} { [+ $a $b] }\n"
+    "proc add {a, b} { + $a $b }\n"
     "[print [add 3 4]]",
     &cap, "7\n"));
   TEST_PASS();
@@ -865,7 +865,7 @@ static int test_contextual_literal_in_set(void) {
     "proc t {} {\n"
     "  mut i64 x 0\n"
     "  x :: 99\n"
-    "  [print [to-string $x]]\n"
+    "  print [to-string $x]\n"
     "}\n"
     "[t]",
     &cap, "99\n"));
@@ -905,11 +905,11 @@ static int test_typed_closure_capture(void) {
   ASSERT(run_ok(
     "proc test {} {\n"
     "  mut i64 n 0\n"
-    "  proc inc {} { [set n [+ $n 1]] }\n"
-    "  proc i64 get {} { [+ $n 0] }\n"
-    "  [inc]\n"
-    "  [inc]\n"
-    "  [print [to-string [get]]]\n"
+    "  proc inc {} { set n [+ $n 1] }\n"
+    "  proc i64 get {} { + $n 0 }\n"
+    "  inc\n"
+    "  inc\n"
+    "  print [to-string [get]]\n"
     "}\n"
     "[test]",
     &cap, "2\n"));
@@ -921,8 +921,8 @@ static int test_typed_closure_param(void) {
   /* Closure with typed params */
   ASSERT(run_ok(
     "proc test {} {\n"
-    "  proc i64 add {i64 a, i64 b} { [+ $a $b] }\n"
-    "  [print [to-string [add 10 20]]]\n"
+    "  proc i64 add {i64 a, i64 b} { + $a $b }\n"
+    "  print [to-string [add 10 20]]\n"
     "}\n"
     "[test]",
     &cap, "30\n"));
@@ -936,11 +936,11 @@ static int test_typed_upvalue_transitive(void) {
     "proc outer {} {\n"
     "  mut i64 x 0\n"
     "  proc mid {} {\n"
-    "    proc inn {} { [set x [+ $x 10]] }\n"
-    "    [inn]\n"
+    "    proc inn {} { set x [+ $x 10] }\n"
+    "    inn\n"
     "  }\n"
-    "  [mid]\n"
-    "  [print [to-string [+ $x 0]]]\n"
+    "  mid\n"
+    "  print [to-string [+ $x 0]]\n"
     "}\n"
     "[outer]",
     &cap, "10\n"));
@@ -1018,7 +1018,7 @@ static int test_typed_in_try(void) {
      before try boundary since try operates on tagged values */
   ASSERT(run_ok(
     "def i64 x 42\n"
-    "def r [try { [to-string [+ $x 1]] } err { \"error\" }]\n"
+    "def r [try { to-string [+ $x 1] } err { \"error\" }]\n"
     "[print $r]",
     &cap, "43\n"));
   TEST_PASS();
@@ -1054,11 +1054,11 @@ static int test_typed_while_loop(void) {
     "proc t {} {\n"
     "  mut i64 i 0\n"
     "  mut i64 s 0\n"
-    "  [while [< $i 5] {\n"
-    "    [set s [+ $s $i]]\n"
-    "    [set i [+ $i 1]]\n"
-    "  }]\n"
-    "  [print [to-string [+ $s 0]]]\n"
+    "  while [< $i 5] {\n"
+    "    set s [+ $s $i]\n"
+    "    set i [+ $i 1]\n"
+    "  }\n"
+    "  print [to-string [+ $s 0]]\n"
     "}\n"
     "[t]",
     &cap, "10\n"));
@@ -1106,8 +1106,8 @@ static int test_proc_chain_typed(void) {
   PrintCapture cap;
   /* Typed proc calling another typed proc — return type propagates */
   ASSERT(run_ok(
-    "proc i64 dbl {i64 n} { [* $n 2] }\n"
-    "proc i64 quad {i64 n} { [dbl [dbl $n]] }\n"
+    "proc i64 dbl {i64 n} { * $n 2 }\n"
+    "proc i64 quad {i64 n} { dbl [dbl $n] }\n"
     "[print [to-string [quad 5]]]",
     &cap, "20\n"));
   TEST_PASS();

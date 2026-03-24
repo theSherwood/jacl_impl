@@ -2,7 +2,7 @@
 # expect: 99
 # Test: non-error statements pop and continue normally
 proc foo {} {
-  [print "done"]
+  print "done"
   99
 }
 [print [foo]]

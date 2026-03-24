@@ -3,7 +3,7 @@
 # expect: 5
 # filter vector: keep elements greater than 2
 def v [vec 1 2 3 4 5]
-proc gt2 {x} { [> $x 2] }
+proc gt2 {x} { > $x 2 }
 def v2 [filter $v $gt2]
 print [vec-get $v2 0]
 print [vec-get $v2 1]

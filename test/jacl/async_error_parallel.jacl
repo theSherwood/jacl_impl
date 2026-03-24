@@ -5,7 +5,7 @@
 # parallel error in async context — CPS error propagation from spawn+await in parallel body (US-004)
 proc main {} {
   def x 42
-  def r [parallel { [+ $x 0] } { def f [spawn { error "par-err" }]; await $f }]
+  def r [parallel { + $x 0 } { def f [spawn { error "par-err" }]; await $f }]
   print [error? $r]
   print [error-val $r]
   def g [spawn { 99 }]

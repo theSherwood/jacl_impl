@@ -9,19 +9,19 @@ proc main {} {
   def f1 [spawn { 1 }]
   def s1 [await $f1]
   print $s1
-  def f2 [spawn { [+ $s1 2] }]
+  def f2 [spawn { + $s1 2 }]
   def s2 [await $f2]
   print $s2
-  def f3 [spawn { [+ $s2 3] }]
+  def f3 [spawn { + $s2 3 }]
   def s3 [await $f3]
   print $s3
-  def f4 [spawn { [+ $s3 4] }]
+  def f4 [spawn { + $s3 4 }]
   def s4 [await $f4]
   print $s4
-  def f5 [spawn { [+ $s4 5] }]
+  def f5 [spawn { + $s4 5 }]
   def s5 [await $f5]
   print $s5
-  def f6 [spawn { [+ $s5 6] }]
+  def f6 [spawn { + $s5 6 }]
   def s6 [await $f6]
   print $s6
 }

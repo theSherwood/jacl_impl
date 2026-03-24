@@ -35,17 +35,17 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE intern_unique_fn(void *arg) {
 
 static THREAD_PROC_RETURN THREAD_PROC_TYPE intern_shared_fn(void *arg) {
     InternArgs *a = (InternArgs *)arg;
-    ThreadHeap heap;
-    gc_heap_init(&heap, a->pool);
-    gc__current_heap = &heap;
+    gc_heap_init(&a->heap, a->pool);
+    gc__current_heap = &a->heap;
 
     for (int i = 0; i < a->n_strings; i++) {
         char buf[64];
         int len = snprintf(buf, sizeof(buf), "shared_%04d", i);
-        jacl_intern(&heap, a->table, buf, (uint32_t)len);
+        jacl_intern(&a->heap, a->table, buf, (uint32_t)len);
     }
 
-    gc_heap_destroy(&heap);
+    /* Heap destroyed by caller after all threads join — blocks must
+     * remain valid while other threads may read intern table entries. */
     return 0;
 }
 
@@ -129,6 +129,12 @@ static int test_concurrent_shared_100(void) {
     }
 
     ASSERT_U32_EQ(table.count, 100);
+
+    /* Destroy thread heaps after verification — blocks must stay valid
+     * while intern table entries reference them. */
+    for (int i = 0; i < 8; i++) {
+        gc_heap_destroy(&args[i].heap);
+    }
 
     intern_table_destroy(&table);
     gc_block_pool_destroy(&pool);

@@ -5,7 +5,7 @@ mut x 0
 proc main {} {
   def f [spawn {
     set x 42
-    [+ $x 0]
+    + $x 0
   }]
   def r [await $f]
   print $r

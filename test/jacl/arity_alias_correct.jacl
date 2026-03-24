@@ -1,7 +1,7 @@
 # expect: 6
 # expect: 20
 # call through alias with correct arity compiles and runs
-proc add3 {a, b, c} { [+ [+ $a $b] $c] }
+proc add3 {a, b, c} { + [+ $a $b] $c }
 def f $add3
 print [$f 1 2 3]
 # alias chain propagation: def g $f inherits arity

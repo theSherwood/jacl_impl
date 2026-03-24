@@ -460,8 +460,24 @@ static size_t gc_sweep(ThreadHeap *heap) {
  * retroactively marked live to prevent dangling pointers after sweep.
  * ====================================================================== */
 
+/* Check if a pointer falls within any of this heap's blocks. */
+static bool gc__ptr_in_heap(ThreadHeap *heap, void *ptr) {
+    uint8_t *p = (uint8_t *)ptr;
+    for (GCBlock *b = heap->blocks; b; b = b->next) {
+        if (p >= b->payload && p < b->payload + GC_BLOCK_SIZE)
+            return true;
+    }
+    return false;
+}
+
 static void gc_sweep_intern_table(JaclInternTable *table,
-                                   uint8_t current_mark) {
+                                   ThreadHeap *heap) {
+    /* Skip sweep if we're inside jacl_intern — the allocation that
+     * triggered this GC is about to insert into the table, and
+     * evicting entries now would create spurious duplicates. */
+    if (gc__interning) return;
+
+    uint8_t current_mark = heap->current_mark;
     MUTEX_LOCK(table->lock);
 
     bool should_evict =
@@ -470,6 +486,10 @@ static void gc_sweep_intern_table(JaclInternTable *table,
     for (uint32_t i = 0; i < table->cap; i++) {
         JaclHeapString *entry = table->entries[i];
         if (entry == NULL || entry == INTERN_TOMBSTONE) continue;
+
+        /* Only evict entries allocated on this heap.
+         * Other heaps' entries have independent mark bits. */
+        if (!gc__ptr_in_heap(heap, entry)) continue;
 
         GCHeader *hdr = gc_header_of(entry);
         if (hdr->mark != current_mark) {
@@ -521,7 +541,7 @@ static void gc_collect(ThreadHeap *heap, VM *vm) {
 
     /* Evict dead intern table entries before sweep zeroes their memory */
     if (vm && vm->intern_table) {
-        gc_sweep_intern_table(vm->intern_table, heap->current_mark);
+        gc_sweep_intern_table(vm->intern_table, heap);
     }
 
     size_t bytes_survived = gc_sweep(heap);

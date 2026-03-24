@@ -5,7 +5,7 @@ proc main {} {
   def x 42
   def f [spawn { 10 }]
   def y [await $f]
-  def r [parallel { [+ $x $y] } { [+ $y 0] }]
+  def r [parallel { + $x $y } { + $y 0 }]
   print [vec-get $r 0]
   print [vec-get $r 1]
 }

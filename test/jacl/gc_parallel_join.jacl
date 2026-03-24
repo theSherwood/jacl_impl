@@ -7,10 +7,10 @@
 # allocation, trigger GC between completion and join, verify result vector
 # survives and contains correct values.
 proc fib {n} {
-  if [<= $n 1] { [+ $n 0] } else { [+ [fib [- $n 1]] [fib [- $n 2]]] }
+  if [<= $n 1] { + $n 0 } else { + [fib [- $n 1]] [fib [- $n 2]] }
 }
 proc main {} {
-  def r [parallel { [fib 13] } { [fib 11] } { [fib 9] } { [fib 7] }]
+  def r [parallel { fib 13 } { fib 11 } { fib 9 } { fib 7 }]
   print [vec-get $r 0]
   print [vec-get $r 1]
   print [vec-get $r 2]

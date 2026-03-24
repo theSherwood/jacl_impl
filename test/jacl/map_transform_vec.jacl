@@ -3,7 +3,7 @@
 # expect: 4
 # transform on vector: apply proc to each element
 def v [vec 1 2 3]
-proc inc {x} { [+ $x 1] }
+proc inc {x} { + $x 1 }
 def v2 [transform $v $inc]
 print [vec-get $v2 0]
 print [vec-get $v2 1]

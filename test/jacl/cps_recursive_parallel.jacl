@@ -6,10 +6,10 @@ proc sum {n} {
   if [== $n 0] {
     0
   } else {
-    def r [parallel { [+ $n 0] } { [sum [- $n 1]] }]
+    def r [parallel { + $n 0 } { sum [- $n 1] }]
     def cur [vec-get $r 0]
     def rest [vec-get $r 1]
-    [+ $cur $rest]
+    + $cur $rest
   }
 }
 proc main {} {

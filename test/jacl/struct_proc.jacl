@@ -4,11 +4,11 @@
 struct Point {i32 x, i32 y}
 
 proc sum {Point, p} {
-  [+ $p->x $p->y]
+  + $p->x $p->y
 }
 
 proc mk {i32 a, i32 b} {
-  [Point $a $b]
+  Point $a $b
 }
 
 def p [Point 10 20]

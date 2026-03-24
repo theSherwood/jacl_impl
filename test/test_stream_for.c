@@ -37,12 +37,12 @@ static int test_for_stream_implicit_it(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  [yield 10]\n"
-    "  [yield 20]\n"
-    "  [yield 30]\n"
+    "  yield 10\n"
+    "  yield 20\n"
+    "  yield 30\n"
     "}\n"
     "for [gen] {\n"
-    "  [print $it]\n"
+    "  print $it\n"
     "}\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -56,12 +56,12 @@ static int test_for_stream_explicit_binding(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  [yield 1]\n"
-    "  [yield 2]\n"
-    "  [yield 3]\n"
+    "  yield 1\n"
+    "  yield 2\n"
+    "  yield 3\n"
     "}\n"
     "for [gen] x {\n"
-    "  [print $x]\n"
+    "  print $x\n"
     "}\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -75,16 +75,16 @@ static int test_for_stream_break(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  [yield 1]\n"
-    "  [yield 2]\n"
-    "  [yield 3]\n"
-    "  [yield 4]\n"
+    "  yield 1\n"
+    "  yield 2\n"
+    "  yield 3\n"
+    "  yield 4\n"
     "}\n"
     "for [gen] {\n"
     "  if [> $it 2] {\n"
     "    break\n"
     "  }\n"
-    "  [print $it]\n"
+    "  print $it\n"
     "}\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -98,16 +98,16 @@ static int test_for_stream_continue(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  [yield 1]\n"
-    "  [yield 2]\n"
-    "  [yield 3]\n"
-    "  [yield 4]\n"
+    "  yield 1\n"
+    "  yield 2\n"
+    "  yield 3\n"
+    "  yield 4\n"
     "}\n"
     "for [gen] {\n"
     "  if [== $it 2] {\n"
     "    continue\n"
     "  }\n"
-    "  [print $it]\n"
+    "  print $it\n"
     "}\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -121,9 +121,9 @@ static int test_for_stream_return(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  [yield 1]\n"
-    "  [yield 2]\n"
-    "  [yield 3]\n"
+    "  yield 1\n"
+    "  yield 2\n"
+    "  yield 3\n"
     "}\n"
     "proc process {} {\n"
     "  for [gen] {\n"
@@ -147,12 +147,12 @@ static int test_for_stream_loop_generator(void) {
     "proc range {n} {\n"
     "  mut i 0\n"
     "  while [< $i $n] {\n"
-    "    [yield $i]\n"
+    "    yield $i\n"
     "    i :: [+ $i 1]\n"
     "  }\n"
     "}\n"
     "for [range 5] {\n"
-    "  [print $it]\n"
+    "  print $it\n"
     "}\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -166,7 +166,7 @@ static int test_for_vector_unchanged(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "for [vec 10 20 30] {\n"
-    "  [print $it]\n"
+    "  print $it\n"
     "}\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
@@ -180,9 +180,9 @@ static int test_for_stream_lambda(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  [yield 5]\n"
-    "  [yield 6]\n"
-    "  [yield 7]\n"
+    "  yield 5\n"
+    "  yield 6\n"
+    "  yield 7\n"
     "}\n"
     "for [gen] [\\ print $it]\n",
     &cap);
@@ -197,10 +197,10 @@ static int test_for_stream_hof_callback(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc gen {} {\n"
-    "  [yield 100]\n"
-    "  [yield 200]\n"
+    "  yield 100\n"
+    "  yield 200\n"
     "}\n"
-    "proc p {x} { [print $x] }\n"
+    "proc p {x} { print $x }\n"
     "def s [gen]\n"
     "for $s $p\n",
     &cap);
@@ -217,12 +217,12 @@ static int test_for_stream_empty(void) {
     "proc range {n} {\n"
     "  mut i 0\n"
     "  while [< $i $n] {\n"
-    "    [yield $i]\n"
+    "    yield $i\n"
     "    i :: [+ $i 1]\n"
     "  }\n"
     "}\n"
     "for [range 0] {\n"
-    "  [print $it]\n"
+    "  print $it\n"
     "}\n"
     "[print \"done\"]\n",
     &cap);
@@ -237,11 +237,11 @@ static int test_for_stream_strings(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "proc words {} {\n"
-    "  [yield \"hello\"]\n"
-    "  [yield \"world\"]\n"
+    "  yield \"hello\"\n"
+    "  yield \"world\"\n"
     "}\n"
     "for [words] {\n"
-    "  [print $it]\n"
+    "  print $it\n"
     "}\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);

@@ -3,11 +3,11 @@
 # expect:   at <main> (line 9)
 # Test: stack-trace captures call chain at error creation
 proc foo {} {
-  [error "oops"]
+  error "oops"
 }
-[try {
-  [foo]
+try {
+  foo
 } e {
-  [print "caught"]
-  [print [stack-trace]]
-}]
+  print "caught"
+  print [stack-trace]
+}

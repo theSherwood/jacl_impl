@@ -1,6 +1,6 @@
 # expect: 10
 # transform on map: proc receives key and value, returns [key new-value]
 def m [map-set [map] "a" 5]
-proc double {k, v} { [vec $k [* $v 2]] }
+proc double {k, v} { vec $k [* $v 2] }
 def m2 [transform $m $double]
 print [map-get $m2 "a"]
