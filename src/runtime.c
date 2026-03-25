@@ -1098,12 +1098,87 @@ static void runtime__schedule_continuation(void *runtime_ptr,
     }
 }
 
+/* ======================================================================
+ * State machine task data and execution (US-014)
+ * ====================================================================== */
+
+typedef struct {
+    JaclVal state_machine;  /* tagged state machine object */
+    JaclVal result;         /* resume value (future result) */
+} SMTaskData;
+
+static void runtime__state_machine_task_exec(void *data) {
+    SMTaskData *smd = (SMTaskData *)data;
+    WorkerThread *self = rt__current_worker;
+    VM *vm = &self->vm;
+
+    JaclStateMachine *sm = jacl_as_state_machine(smd->state_machine);
+    JaclClosure *sm_cl = jacl_as_closure(sm->sm_closure);
+
+    /* Set up: call sm_closure(state_obj, resume_value) */
+    JaclVal args[2];
+    args[0] = smd->state_machine;
+    args[1] = smd->result;
+    runtime__setup_call(vm, sm_cl, 2, args);
+
+    VMResult r = vm__run(vm, 0);
+
+    /* If SM function returned error, forward to error_k on the state object.
+       Only check when the function actually completed (frame_count == 0).
+       When frame_count > 0, the SM suspended at another OP_AWAIT_SM. */
+    bool errored = (r != VM_OK) ||
+        (vm->frame_count == 0 && vm->stack_top > 0 &&
+         jacl_is_error(vm->stack[vm->stack_top - 1]));
+    if (errored && !jacl_is_nil(sm->error_k)) {
+        if (jacl_is_closure(sm->error_k)) {
+            JaclClosure *err_cl = jacl_as_closure(sm->error_k);
+            JaclVal err;
+            if (vm->stack_top > 0 && jacl_is_error(vm->stack[vm->stack_top - 1]))
+                err = vm->stack[vm->stack_top - 1];
+            else
+                err = jacl_set_error(jacl_inline_string("error", 5));
+            runtime__schedule_continuation(self->runtime, err_cl, err);
+        }
+    }
+    free(smd);
+}
+
+static void runtime__schedule_sm_resumption(void *runtime_ptr,
+                                             JaclVal state_machine,
+                                             JaclVal result) {
+    Runtime *rt = (Runtime *)runtime_ptr;
+
+    SMTaskData *smd = (SMTaskData *)malloc(sizeof(SMTaskData));
+    smd->state_machine = state_machine;
+    smd->result        = result;
+
+    RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
+    task->fn       = runtime__state_machine_task_exec;
+    task->data     = smd;
+    task->gc_root  = state_machine;
+    task->gc_root2 = result;
+
+    /* Respect pinning from the SM closure */
+    JaclStateMachine *sm = jacl_as_state_machine(state_machine);
+    JaclClosure *sm_cl = jacl_as_closure(sm->sm_closure);
+    if (sm_cl->pinned && sm_cl->pin_worker_id >= 0) {
+        runtime__push_pinned(rt, task, sm_cl->pin_worker_id);
+    } else {
+        runtime__push_inbox(rt, task);
+    }
+}
+
 static void runtime__schedule_waiters(void *runtime_ptr,
                                        FutureWaiter *waiters,
                                        JaclVal result) {
     while (waiters) {
-        JaclClosure *cont = jacl_as_closure(waiters->continuation);
-        runtime__schedule_continuation(runtime_ptr, cont, result);
+        JaclVal cont = waiters->continuation;
+        if (jacl_is_state_machine(cont)) {
+            runtime__schedule_sm_resumption(runtime_ptr, cont, result);
+        } else {
+            JaclClosure *cl = jacl_as_closure(cont);
+            runtime__schedule_continuation(runtime_ptr, cl, result);
+        }
         waiters = waiters->next;
     }
 }
