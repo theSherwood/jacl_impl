@@ -1038,7 +1038,8 @@ typedef struct {
     volatile uint32_t errored;       /* 0 or 1 (first-error-wins CAS) */
     volatile uint64_t error_val;     /* first error value (JaclVal) */
     uint32_t          count;         /* total N */
-    JaclVal           continuation;  /* join continuation closure */
+    JaclVal           continuation;  /* join continuation closure (CPS path) */
+    JaclVal           state_machine; /* state machine object (SM path, or NIL) */
     JaclVal           results[];     /* trailing array of N result slots */
 } ParallelAgg;
 
@@ -1059,11 +1060,12 @@ static JaclVal jacl_parallel_agg(ThreadHeap *heap, uint32_t count,
                                   JaclVal continuation) {
     size_t sz = sizeof(ParallelAgg) + count * sizeof(JaclVal);
     ParallelAgg *agg = (ParallelAgg *)gc_alloc(heap, OBJ_PARALLEL_AGG, sz);
-    agg->completed    = 0;
-    agg->errored      = 0;
-    agg->error_val    = (uint64_t)JACL_NIL;
-    agg->count        = count;
-    agg->continuation = continuation;
+    agg->completed     = 0;
+    agg->errored       = 0;
+    agg->error_val     = (uint64_t)JACL_NIL;
+    agg->count         = count;
+    agg->continuation  = continuation;
+    agg->state_machine = JACL_NIL;
     for (uint32_t i = 0; i < count; i++) {
         agg->results[i] = JACL_NIL;
     }

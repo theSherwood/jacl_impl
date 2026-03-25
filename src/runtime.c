@@ -904,6 +904,11 @@ static JaclVal runtime__create_parallel_k(ThreadHeap *heap, arena_t *arena,
     return jacl_closure(cl);
 }
 
+/* Forward declaration for SM resumption (used by parallel slot completion) */
+static void runtime__schedule_sm_resumption(void *runtime_ptr,
+                                             JaclVal state_machine,
+                                             JaclVal result);
+
 /* --- Parallel slot completion logic (called from OP_COMPLETE_PARALLEL) --- */
 
 static void runtime__complete_parallel_slot(void *runtime_ptr, VM *vm,
@@ -945,7 +950,6 @@ static void runtime__complete_parallel_slot(void *runtime_ptr, VM *vm,
 
     /* If we're the last task to complete, schedule the join continuation */
     if (desired == agg->count) {
-        JaclClosure *cont = jacl_as_closure(agg->continuation);
         JaclVal cont_arg;
 
         if (ATOMIC_LOAD_EXPLICIT(&agg->errored, MEM_ACQUIRE)) {
@@ -960,7 +964,14 @@ static void runtime__complete_parallel_slot(void *runtime_ptr, VM *vm,
             cont_arg = jacl_vector_ptr(vec);
         }
 
-        runtime__schedule_continuation(rt, cont, cont_arg);
+        if (!jacl_is_nil(agg->state_machine)) {
+            /* SM path: resume parent state machine with results */
+            runtime__schedule_sm_resumption(rt, agg->state_machine, cont_arg);
+        } else {
+            /* CPS path: schedule continuation closure */
+            JaclClosure *cont = jacl_as_closure(agg->continuation);
+            runtime__schedule_continuation(rt, cont, cont_arg);
+        }
     }
 }
 

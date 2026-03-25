@@ -3904,7 +3904,9 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
 
         /* Validate types */
-        if (!jacl_is_closure(continuation) && !jacl_is_nil(continuation)) {
+        bool par_sm_mode = jacl_is_state_machine(continuation);
+        if (!jacl_is_closure(continuation) && !jacl_is_nil(continuation)
+            && !par_sm_mode) {
           vm__set_error(vm, "OP_PARALLEL: continuation is not a closure");
           return VM_RUNTIME_ERROR;
         }
@@ -3918,7 +3920,12 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         if (vm->runtime) {
           /* Runtime mode: create aggregate, submit N tasks, suspend */
-          JaclVal agg_val = jacl_parallel_agg(&vm->heap, n, continuation);
+          JaclVal cont_for_agg = par_sm_mode ? JACL_NIL : continuation;
+          JaclVal agg_val = jacl_parallel_agg(&vm->heap, n, cont_for_agg);
+          if (par_sm_mode) {
+            ParallelAgg *agg = as_parallel_agg(agg_val);
+            agg->state_machine = continuation;  /* store SM object */
+          }
 
           for (uint8_t i = 0; i < n; i++) {
             JaclClosure *cl = jacl_as_closure(closures[i]);
@@ -4055,7 +4062,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
 
           /* Call continuation(cont_arg) — set up inline frame */
-          if (jacl_is_closure(continuation)) {
+          if (par_sm_mode) {
+            /* SM mode: push result directly, inline code continues */
+            result = vm__push(vm, cont_arg);
+            if (result != VM_OK) return result;
+          } else if (jacl_is_closure(continuation)) {
             JaclClosure *cont_cl = jacl_as_closure(continuation);
             result = vm__push(vm, continuation);
             if (result != VM_OK) return result;

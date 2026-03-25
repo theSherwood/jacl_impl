@@ -7471,6 +7471,36 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           "cannot suspend inside non-suspending callback");
       return;
     }
+    if (c->sm_analysis) {
+      /* SM parallel: compile bodies, set resume_point, push state object,
+         emit OP_PARALLEL. Two paths like SM await:
+         Inline (single-threaded): result on stack, jump past resume push.
+         Resume (runtime): dispatch table lands at resume label, push __rv. */
+      for (uint32_t i = 0; i < argc; i++) {
+        compiler__compile_parallel_body(c, args[i], line, col);
+      }
+      uint32_t sp_idx = c->sm_suspension_idx++;
+      compiler__emit_constant(c, jacl_i32((int32_t)(sp_idx + 1)), line);
+      compiler__emit_byte(c, OP_SET_RESUME_POINT, line);
+      /* Push state machine object as "continuation" — VM detects SM path */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, 0, line);
+      compiler__emit_byte(c, OP_PARALLEL, line);
+      compiler__emit_byte(c, (uint8_t)argc, line);
+      /* Inline path: result already on stack; jump past resume value push */
+      uint32_t skip_jump = compiler__emit_jump(c, OP_JUMP, line);
+      /* Resume label: dispatch table backpatch lands here */
+      if (sp_idx < c->sm_dispatch.label_count) {
+        compiler__patch_jump(c, c->sm_dispatch.label_patches[sp_idx]);
+      }
+      /* Push resume value from slot 1 (__rv) onto stack */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, 1, line);
+      /* Common path: result on stack */
+      compiler__patch_jump(c, skip_jump);
+      c->last_expr_type = TYPE_DYN;
+      return;
+    }
     /* Compile each body as a closure, emit OP_PARALLEL.
        In CPS context: handled by compile_cps_stmts Case 1b.
        This path is reached only for non-CPS compilation (shouldn't happen

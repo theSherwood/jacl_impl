@@ -228,6 +228,7 @@ static void gc__trace_object(void *payload, GCMarkStack *ms) {
     case OBJ_PARALLEL_AGG: {
         ParallelAgg *agg = (ParallelAgg *)payload;
         gc__ms_push_val(ms, agg->continuation);
+        gc__ms_push_val(ms, agg->state_machine);
         uint64_t ev = ATOMIC_LOAD_EXPLICIT(&agg->error_val, MEM_ACQUIRE);
         gc__ms_push_val(ms, (JaclVal)ev);
         for (uint32_t i = 0; i < agg->count; i++) {

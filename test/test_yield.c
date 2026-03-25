@@ -1626,6 +1626,115 @@ static int test_sm_async_cps_still_works(void) {
   TEST_PASS();
 }
 
+/* ===== US-017: SM parallel join tests ===== */
+
+/* --- Test: SM parallel with 3 bodies, single-threaded (inline result) --- */
+static int test_sm_parallel_basic(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  def results [parallel { 10 } { 20 } { 30 }]\n"
+    "  [yield $results]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec [vec 10 20 30]]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: parent locals survive across parallel --- */
+static int test_sm_parallel_locals_survive(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  def before 42\n"
+    "  [yield $before]\n"
+    "  def results [parallel { 10 } { 20 }]\n"
+    "  [yield $before]\n"
+    "  [yield $results]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 42 42 [vec 10 20]]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: parallel with computed bodies --- */
+static int test_sm_parallel_computed(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  def results [parallel { [+ 5 5] } { [* 3 7] } { [- 100 70] }]\n"
+    "  [yield $results]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec [vec 10 21 30]]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM parallel in while loop (bodies use constants, not SM state) --- */
+static int test_sm_parallel_in_while(void) {
+  PrintCapture cap;
+  /* Parallel bodies cannot capture SM state fields (they're closures, not SM code).
+     Use constant values in bodies, yield loop counter separately. */
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  mut i 0\n"
+    "  while [< $i 2] {\n"
+    "    def r [parallel { 100 } { 200 }]\n"
+    "    [yield $r]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec [vec 100 200] [vec 100 200]]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM parallel with yield before and after --- */
+static int test_sm_parallel_yield_around(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  [yield 1]\n"
+    "  def results [parallel { 10 } { 20 }]\n"
+    "  [yield $results]\n"
+    "  [yield 99]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 1 [vec 10 20] 99]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM parallel with error propagation --- */
+static int test_sm_parallel_error(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  def results [parallel { 10 } { [error \"oops\"] } { 30 }]\n"
+    "  [yield [error? $results]]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec true]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Main --- */
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
 
@@ -1685,6 +1794,12 @@ int main(void) {
     { "sm_async_nested_sm",           test_sm_async_nested_sm },
     { "sm_async_inline_resolved",     test_sm_async_inline_resolved },
     { "sm_async_cps_still_works",     test_sm_async_cps_still_works },
+    { "sm_parallel_basic",            test_sm_parallel_basic },
+    { "sm_parallel_locals_survive",   test_sm_parallel_locals_survive },
+    { "sm_parallel_computed",         test_sm_parallel_computed },
+    { "sm_parallel_in_while",         test_sm_parallel_in_while },
+    { "sm_parallel_yield_around",     test_sm_parallel_yield_around },
+    { "sm_parallel_error",            test_sm_parallel_error },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
