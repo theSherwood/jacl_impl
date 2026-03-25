@@ -43,6 +43,9 @@ Started: Mon Mar 24 2026
 - SM task executor: `runtime__state_machine_task_exec` calls `sm_closure(state_obj, resume_value)` via `runtime__setup_call(vm, sm_cl, 2, args)` — args[0]=state_obj, args[1]=result
 - SM error handling: if SM task errors and `sm->error_k` is a closure, schedule it with the error value via `runtime__schedule_continuation`
 - SM pinning: respects `sm_cl->pinned` / `sm_cl->pin_worker_id` from the SM closure for worker affinity
+- Concurrent SM test pattern: compile_with_sm → wrap chunk in param_count=0 closure → runtime_init → configure workers (print_fn, intern_table, struct_registry) → runtime__submit_spawn_task → spin-wait on completion future
+- SM generators with await inside OP_COLLECT only work single-threaded (spawn resolves synchronously); runtime mode async await inside generators deadlocks because OP_COLLECT treats VM_OK return as exhaustion
+- Pure async SM functions (await only, no yield) cannot be called directly — param_count=2 causes arity mismatch; only generators (yield+await or yield-only) currently work as SM entry points
 
 ---
 
@@ -331,4 +334,25 @@ Started: Mon Mar 24 2026
   - SM generator error propagation pattern: VM_OK + error on stack (NOT VM_RUNTIME_ERROR) because OP_CHECK_ERROR unwinds frames and returns normally
   - In OP_COLLECT loop, cannot push result mid-loop and break — post-loop code always runs, must use flag variable
   - Derived streams (filter/transform/take) get error propagation for free via vm__pull_stream_one returning STREAM_PULL_ERROR
+---
+
+## 2026-03-25 - US-016
+- Added 6 comprehensive end-to-end async state machine tests to test/test_yield.c
+- Tests cover all acceptance criteria:
+  - `test_sm_async_3_sequential_awaits`: generator with 3 sequential awaits (spawn→await→yield), verifies correct result [vec 60] with single SM allocation
+  - `test_sm_async_concurrent_workers`: SM generators running on worker threads via Runtime (2 workers), thread-safe print capture, verifies [vec 0 1 2 3 4]
+  - `test_sm_async_spawn_await_process`: spawn→await→process→yield pattern, multiple spawn/await cycles in one generator, verifies [vec 84 142]
+  - `test_sm_async_nested_sm`: nested SM generators — inner SM with await+yield called from outer SM via collect, verifies [vec [vec 10 20 30] 99]
+  - `test_sm_async_inline_resolved`: single-threaded await on resolved future continues inline, verifies [vec 77]
+  - `test_sm_async_cps_still_works`: CPS path unchanged when use_state_machines=false, verifies [vec 1 2 3]
+- Added `ThreadSafePrint` struct and `capture_print_ts` for thread-safe output capture in concurrent tests
+- Concurrent test pattern: compile with SM → wrap chunk in param_count=0 closure → runtime_init(2) → configure worker VMs → submit → wait → verify
+- Files changed: test/test_yield.c (+198 lines)
+- All 83 test suites pass (54 yield tests), compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - SM generators with `await` inside OP_COLLECT only work in single-threaded mode (spawn resolves synchronously, so await sees resolved futures); in runtime mode, async spawn + await inside a generator would deadlock because OP_COLLECT treats VM_OK as exhaustion
+  - For concurrent SM tests without await, wrap the entire program in a non-CPS closure (param_count=0) and submit via runtime__submit_spawn_task
+  - Worker VMs need intern_table and struct_registry set before execution — copy from compile-time VM
+  - Pure async SM functions (await only, no yield) cannot be called directly — param_count=2 causes arity mismatch at call site; only generators (yield+await) work as SM functions currently
+  - `runtime__setup_call` does NOT check arity — it just sets up stack and frame, so incorrect argc would silently corrupt execution
 ---
