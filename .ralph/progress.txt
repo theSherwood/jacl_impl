@@ -409,3 +409,26 @@ Started: Mon Mar 24 2026
   - RaceAgg.state_machine is the SM equivalent of RaceAgg.continuation — exactly one should be non-nil
   - SM path decision (SUSPEND_YIELD or SUSPEND_AWAIT check) correctly excludes SUSPEND_RACE/SUSPEND_PARALLEL — race/parallel in functions with only those suspensions stay on CPS path since SM entry points require yield or await
 ---
+
+## 2026-03-25 - US-019
+- Verified that mixed yield + await in the same function works correctly — NO code changes needed
+- All infrastructure was already in place from US-007 (yield SM), US-009 (while loops), US-012/US-013 (await SM)
+- Suspension analysis already assigns sequential IDs across both yield and await points (US-001)
+- Dispatch table already handles both resume-from-yield and resume-from-await (US-006/US-007/US-013)
+- Added 7 tests covering all acceptance criteria:
+  - `sm_mixed_await_yield_loop`: while loop with spawn→await→yield per iteration, correct [100,101,102]
+  - `sm_mixed_interleaved`: yield, spawn→await→yield, yield, spawn→await→yield pattern, correct [1,11,3,21]
+  - `sm_mixed_multi_await_loop`: while loop with 2 awaits + 1 yield per iteration, correct [30,30]
+  - `sm_mixed_yield_around_loop`: yield before loop, await+yield in loop, yield after loop, correct [0,50,51,99]
+  - `sm_mixed_await_yield_if`: await+yield in if-then branch (cond=1), correct [10,11]
+  - `sm_mixed_await_yield_if_false`: await+yield in if-else branch (cond=0), correct [20]
+  - `sm_mixed_pipeline`: await+yield while-loop generator piped through filter + take + collect
+- Files changed: test/test_yield.c (+110 lines), .ralph/prd.json, .ralph/progress.txt
+- All 81 test suites pass (67 yield tests), compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - Mixed yield+await requires NO additional compiler or VM changes — the SM yield handler (OP_YIELD_SM) and SM await handler (OP_AWAIT_SM) compose independently in the same dispatch table
+  - In single-threaded mode, spawn resolves synchronously so await always sees resolved futures — inline path (no suspension) is taken
+  - JACL conditionals: use `[== $cond 1]` with numeric args, not `$cond` with `true`/`false` literals
+  - Pipe syntax for tests: `[gen] | filter [\\ > $it 11] | take 2 | collect | print` (backslash shorthand)
+  - spawn bodies inside SM functions cannot capture SM state fields — use only constants in spawn bodies
+---

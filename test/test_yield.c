@@ -1735,6 +1735,173 @@ static int test_sm_parallel_error(void) {
   TEST_PASS();
 }
 
+/* ===== US-019: Mixed suspension: yield + await in same function ===== */
+
+/* --- Test: async generator that awaits then yields in a while loop --- */
+static int test_sm_mixed_await_yield_loop(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  mut i 0\n"
+    "  while [< $i 3] {\n"
+    "    def f [spawn { 100 }]\n"
+    "    def result [await $f]\n"
+    "    [yield [+ $result $i]]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  /* 100+0=100, 100+1=101, 100+2=102 */
+  ASSERT_STR_EQ(cap.buf, "[vec 100 101 102]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: interleaved yield and await produce correct sequence --- */
+static int test_sm_mixed_interleaved(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  [yield 1]\n"
+    "  def f1 [spawn { 10 }]\n"
+    "  def a [await $f1]\n"
+    "  [yield [+ $a 1]]\n"
+    "  [yield 3]\n"
+    "  def f2 [spawn { 20 }]\n"
+    "  def b [await $f2]\n"
+    "  [yield [+ $b 1]]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  /* yield 1, await 10 → yield 11, yield 3, await 20 → yield 21 */
+  ASSERT_STR_EQ(cap.buf, "[vec 1 11 3 21]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: await+yield loop with multiple awaits per iteration --- */
+static int test_sm_mixed_multi_await_loop(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  mut i 0\n"
+    "  while [< $i 2] {\n"
+    "    def f1 [spawn { 10 }]\n"
+    "    def f2 [spawn { 20 }]\n"
+    "    def a [await $f1]\n"
+    "    def b [await $f2]\n"
+    "    [yield [+ $a $b]]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  /* Each iteration: await 10 + await 20 = yield 30 */
+  ASSERT_STR_EQ(cap.buf, "[vec 30 30]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: yield before loop, await+yield in loop, yield after loop --- */
+static int test_sm_mixed_yield_around_loop(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  [yield 0]\n"
+    "  mut i 0\n"
+    "  while [< $i 2] {\n"
+    "    def f [spawn { 50 }]\n"
+    "    def val [await $f]\n"
+    "    [yield [+ $val $i]]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "  [yield 99]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  /* yield 0, loop: 50+0=50, 50+1=51, yield 99 */
+  ASSERT_STR_EQ(cap.buf, "[vec 0 50 51 99]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: await+yield in if branches (cond=1, true branch) --- */
+static int test_sm_mixed_await_yield_if(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {cond} {\n"
+    "  if [== $cond 1] {\n"
+    "    def f [spawn { 10 }]\n"
+    "    def a [await $f]\n"
+    "    [yield $a]\n"
+    "    [yield [+ $a 1]]\n"
+    "  } else {\n"
+    "    def f [spawn { 20 }]\n"
+    "    def b [await $f]\n"
+    "    [yield $b]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [gen 1]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  /* cond=1: await 10 → yield 10, yield 11 */
+  ASSERT_STR_EQ(cap.buf, "[vec 10 11]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: await+yield in if-else (cond=0, false branch) --- */
+static int test_sm_mixed_await_yield_if_false(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {cond} {\n"
+    "  if [== $cond 1] {\n"
+    "    def f [spawn { 10 }]\n"
+    "    def a [await $f]\n"
+    "    [yield $a]\n"
+    "    [yield [+ $a 1]]\n"
+    "  } else {\n"
+    "    def f [spawn { 20 }]\n"
+    "    def b [await $f]\n"
+    "    [yield $b]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [gen 0]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  /* cond=0: await 20 → yield 20 */
+  ASSERT_STR_EQ(cap.buf, "[vec 20]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: pipeline on mixed await+yield generator --- */
+static int test_sm_mixed_pipeline(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  mut i 0\n"
+    "  while [< $i 5] {\n"
+    "    def f [spawn { 10 }]\n"
+    "    def val [await $f]\n"
+    "    [yield [+ $val $i]]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[gen] | filter [\\ > $it 11] | take 2 | collect | print\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  /* Yields: 10,11,12,13,14 → filter >11: 12,13 → take 2: 12,13 */
+  ASSERT_STR_EQ(cap.buf, "[vec 12 13]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Main --- */
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
 
@@ -1800,6 +1967,13 @@ int main(void) {
     { "sm_parallel_in_while",         test_sm_parallel_in_while },
     { "sm_parallel_yield_around",     test_sm_parallel_yield_around },
     { "sm_parallel_error",            test_sm_parallel_error },
+    { "sm_mixed_await_yield_loop",    test_sm_mixed_await_yield_loop },
+    { "sm_mixed_interleaved",         test_sm_mixed_interleaved },
+    { "sm_mixed_multi_await_loop",    test_sm_mixed_multi_await_loop },
+    { "sm_mixed_yield_around_loop",   test_sm_mixed_yield_around_loop },
+    { "sm_mixed_await_yield_if",      test_sm_mixed_await_yield_if },
+    { "sm_mixed_await_yield_if_false",test_sm_mixed_await_yield_if_false },
+    { "sm_mixed_pipeline",            test_sm_mixed_pipeline },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
