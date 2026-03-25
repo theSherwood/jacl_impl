@@ -1080,7 +1080,8 @@ static JaclVal jacl_parallel_agg(ThreadHeap *heap, uint32_t count,
  * Uses CAS on settled flag to determine the single winner. */
 typedef struct {
     volatile uint32_t settled;       /* 0 = not settled, 1 = winner determined */
-    JaclVal           continuation;  /* race continuation closure */
+    JaclVal           continuation;  /* race continuation closure (CPS path) */
+    JaclVal           state_machine; /* state machine object (SM path, or NIL) */
 } RaceAgg;
 
 /* Tag/untag helpers — same tagging scheme as ParallelAgg */
@@ -1096,8 +1097,9 @@ static inline RaceAgg *as_race_agg(JaclVal v) {
 /* Constructor: allocate a pending race aggregate */
 static JaclVal jacl_race_agg(ThreadHeap *heap, JaclVal continuation) {
     RaceAgg *agg = (RaceAgg *)gc_alloc(heap, OBJ_RACE_AGG, sizeof(RaceAgg));
-    agg->settled      = 0;
-    agg->continuation = continuation;
+    agg->settled       = 0;
+    agg->continuation  = continuation;
+    agg->state_machine = JACL_NIL;
     return race_agg_ptr(agg);
 }
 

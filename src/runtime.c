@@ -1035,8 +1035,14 @@ static void runtime__complete_race_slot(void *runtime_ptr, VM *vm,
     /* CAS settled: winner (0->1) schedules continuation, losers discard */
     uint32_t expected = 0;
     if (ATOMIC_CAS(&agg->settled, &expected, 1, MEM_ACQ_REL, MEM_RELAXED)) {
-        JaclClosure *cont = jacl_as_closure(agg->continuation);
-        runtime__schedule_continuation(rt, cont, task_result);
+        if (!jacl_is_nil(agg->state_machine)) {
+            /* SM path: resume parent state machine with winner result */
+            runtime__schedule_sm_resumption(rt, agg->state_machine, task_result);
+        } else {
+            /* CPS path: schedule continuation closure */
+            JaclClosure *cont = jacl_as_closure(agg->continuation);
+            runtime__schedule_continuation(rt, cont, task_result);
+        }
     }
 }
 
@@ -1386,7 +1392,6 @@ static void runtime__race_task_exec(void *data) {
     WorkerThread *self = rt__current_worker;
     VM *vm = &self->vm;
     JaclClosure *cl = rtd->closure;
-    RaceAgg *agg = as_race_agg(rtd->agg_val);
 
     if (rtd->is_cps) {
         /* CPS closure: create race_k that directly settles the race.
@@ -1417,13 +1422,8 @@ static void runtime__race_task_exec(void *data) {
             task_result = jacl_set_error(jacl_inline_string("error", 5));
         }
 
-        /* CAS settled: winner (0->1) schedules continuation, losers discard */
-        uint32_t expected = 0;
-        if (ATOMIC_CAS(&agg->settled, &expected, 1,
-                        MEM_ACQ_REL, MEM_RELAXED)) {
-            JaclClosure *cont = jacl_as_closure(agg->continuation);
-            runtime__schedule_continuation(self->runtime, cont, task_result);
-        }
+        runtime__complete_race_slot(self->runtime, vm,
+                                     rtd->agg_val, task_result);
     }
 
     free(rtd);

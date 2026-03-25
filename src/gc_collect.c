@@ -240,6 +240,7 @@ static void gc__trace_object(void *payload, GCMarkStack *ms) {
     case OBJ_RACE_AGG: {
         RaceAgg *agg = (RaceAgg *)payload;
         gc__ms_push_val(ms, agg->continuation);
+        gc__ms_push_val(ms, agg->state_machine);
         break;
     }
 

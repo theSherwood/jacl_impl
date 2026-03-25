@@ -4112,7 +4112,9 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
 
         /* Validate types */
-        if (!jacl_is_closure(continuation) && !jacl_is_nil(continuation)) {
+        bool race_sm_mode = jacl_is_state_machine(continuation);
+        if (!jacl_is_closure(continuation) && !jacl_is_nil(continuation)
+            && !race_sm_mode) {
           vm__set_error(vm, "OP_RACE: continuation is not a closure");
           return VM_RUNTIME_ERROR;
         }
@@ -4126,7 +4128,12 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         if (vm->runtime) {
           /* Runtime mode: create race aggregate, submit N tasks, suspend */
-          JaclVal agg_val = jacl_race_agg(&vm->heap, continuation);
+          JaclVal cont_for_agg = race_sm_mode ? JACL_NIL : continuation;
+          JaclVal agg_val = jacl_race_agg(&vm->heap, cont_for_agg);
+          if (race_sm_mode) {
+            RaceAgg *agg = as_race_agg(agg_val);
+            agg->state_machine = continuation;  /* store SM object */
+          }
 
           for (uint8_t i = 0; i < n; i++) {
             JaclClosure *cl = jacl_as_closure(closures[i]);
@@ -4232,7 +4239,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
 
           /* Call continuation(winner_result) */
-          if (jacl_is_closure(continuation)) {
+          if (race_sm_mode) {
+            /* SM mode: push result directly, inline code continues */
+            result = vm__push(vm, winner_result);
+            if (result != VM_OK) return result;
+          } else if (jacl_is_closure(continuation)) {
             JaclClosure *cont_cl = jacl_as_closure(continuation);
             result = vm__push(vm, continuation);
             if (result != VM_OK) return result;
