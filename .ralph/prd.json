@@ -280,8 +280,8 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "SM generators propagate errors through OP_COLLECT, OP_STREAM_NEXT, and vm__pull_stream_one. Error detected as VM_OK with error value on stack."
     },
     {
       "id": "US-016",

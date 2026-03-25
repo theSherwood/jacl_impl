@@ -315,3 +315,20 @@ Started: Mon Mar 24 2026
   - When `frame_count > 0` after vm__run, the SM suspended again (nested await) — NOT an error
   - GC root scanning covers deque tasks, inbox tasks, and currently-executing tasks — SM values are traced through task->gc_root
 ---
+
+## US-015: Error propagation via error_k on state object
+- **Status:** PASS ✓
+- **Commit:** feat: US-015 - Error propagation via error_k on state object
+- **What was done:**
+  - Added error value detection in OP_COLLECT for SM generators (vm.c ~line 5718): when vm__run returns VM_OK but stack has error value, surface error instead of vector
+  - Added error value detection in OP_STREAM_NEXT SM path (vm.c ~line 5430): sets stream to STREAM_ERROR and pushes error
+  - Added error value detection in vm__pull_stream_one (vm.c ~line 990): returns STREAM_PULL_ERROR for derived stream pipelines
+  - 4 new tests: sm_error_after_yield, sm_error_in_collect, sm_error_through_filter, sm_error_before_yield
+- **Bug fix:** OP_COLLECT initially pushed error in loop then fell through to also push the vector — fixed by storing error in sm_error_val variable and choosing which to push after the loop
+- Files changed: src/vm.c (+50 lines), test/test_yield.c (+85 lines)
+- All 83 test suites pass, compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - SM generator error propagation pattern: VM_OK + error on stack (NOT VM_RUNTIME_ERROR) because OP_CHECK_ERROR unwinds frames and returns normally
+  - In OP_COLLECT loop, cannot push result mid-loop and break — post-loop code always runs, must use flag variable
+  - Derived streams (filter/transform/take) get error propagation for free via vm__pull_stream_one returning STREAM_PULL_ERROR
+---
