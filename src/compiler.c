@@ -1084,6 +1084,15 @@ static void sm__add_state_field(StateLayout* layout, JaclVal name,
   layout->field_count++;
 }
 
+/* Look up a variable name in the StateLayout.
+   Returns the field index (0..field_count-1) or -1 if not found. */
+static int sm__find_field(const StateLayout* layout, JaclVal name) {
+  for (uint32_t i = 0; i < layout->field_count; i++) {
+    if (layout->fields[i].name == name) return (int)layout->fields[i].field_index;
+  }
+  return -1;
+}
+
 /* Collect names from an AST_DESTRUCTURE_VEC node into the state layout. */
 static void sm__collect_destructure_vec_names(AstNode* dv, StateLayout* layout,
                                               bool is_mutable) {
@@ -1655,6 +1664,7 @@ struct Compiler {
   LoopContext          loop_stack[COMPILER_LOOP_DEPTH_MAX];
   uint32_t             loop_depth;     /* current nesting depth (0 = not in loop) */
   bool                 has_yield;      /* true if current proc body contains yield */
+  uint32_t             sm_suspension_idx; /* next suspension point index for SM yield emission */
   SMDispatchContext     sm_dispatch;    /* dispatch table jump patches for SM compilation */
   SuspensionAnalysis*  sm_analysis;    /* suspension analysis for current SM function (or NULL) */
 };
@@ -1693,6 +1703,7 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->struct_registry   = NULL;
   c->loop_depth        = 0;
   c->has_yield         = false;
+  c->sm_suspension_idx = 0;
   memset(&c->sm_dispatch, 0, sizeof(SMDispatchContext));
   c->sm_analysis       = NULL;
 }
@@ -2211,6 +2222,59 @@ static void compiler__emit_sm_dispatch_table(Compiler* c,
   }
 
   /* Fall through: resume_point == 0, begin function body from the start */
+}
+
+/* --- Internal: State machine body compilation (US-007) --- */
+
+/* Forward declarations needed by SM compilation */
+static void compiler__compile_node(Compiler* c, AstNode* node);
+static void compiler__emit_check_error(Compiler* c, uint32_t line);
+static int  compiler__head_matches(AstNode* head, const char* name, uint32_t len);
+
+/**
+ * Compile a generator body as a state machine function.
+ *
+ * The SM function receives (state_obj, resume_value) in frame slots 0 and 1.
+ * All user locals and parameters are stored in the state object fields,
+ * accessed via OP_GET_STATE_FIELD/OP_SET_STATE_FIELD (handled by SM-aware
+ * AST_VAR_REF/def/mut/set handlers).
+ *
+ * Body compilation:
+ *   1. Emit dispatch table (jumps to resume points 1..N)
+ *   2. Compile body statements via compile_node — yield handler emits
+ *      OP_YIELD_SM with resume_point update and dispatch label backpatching
+ *   3. After all statements: emit OP_NIL + OP_RETURN (generator exhausted)
+ */
+static void compiler__compile_sm_body(Compiler* c, AstNode* body_block,
+                                       uint32_t line) {
+  SuspensionAnalysis* analysis = c->sm_analysis;
+  if (!analysis || analysis->suspension_count == 0) {
+    /* No suspensions — shouldn't be called, but handle gracefully */
+    compiler__emit_byte(c, OP_NIL, line);
+    compiler__emit_byte(c, OP_RETURN, line);
+    return;
+  }
+
+  /* Emit dispatch table: resume_point → jump to resume label */
+  compiler__emit_sm_dispatch_table(c, analysis->suspension_count, line);
+
+  /* Initialize suspension point counter for yield handler */
+  c->sm_suspension_idx = 0;
+
+  /* Compile body statements — the SM-aware yield handler (in compile_command)
+     emits OP_YIELD_SM with resume_point updates and dispatch label backpatching.
+     Variable accesses are redirected to state fields by the SM-aware handlers. */
+  uint32_t stmt_count = body_block->data.block.count;
+  AstNode** stmts = body_block->data.block.commands;
+
+  for (uint32_t i = 0; i < stmt_count; i++) {
+    compiler__compile_node(c, stmts[i]);
+    compiler__emit_check_error(c, line);
+  }
+
+  /* Generator exhausted: return nil */
+  compiler__emit_byte(c, OP_NIL, line);
+  compiler__emit_byte(c, OP_RETURN, line);
 }
 
 /* --- Internal: CPS transform helpers --- */
@@ -5109,7 +5173,26 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
     JaclVal name_val = jacl_inline_string(args[name_arg_idx]->data.lit_string.value, name_len);
 
-    if (c->scope_depth > 0) {
+    if (c->sm_analysis) {
+      /* SM mode: write value to state field directly (no cell needed) */
+      int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
+      if (field_idx >= 0) {
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)field_idx, line);
+        /* mut returns nil */
+        compiler__emit_byte(c, OP_NIL, line);
+      } else {
+        /* Name not in state layout — shouldn't happen, fall through to cell */
+        if (is_unboxed_type(effective_type)) {
+          compiler__emit_byte(c, OP_TO_DYN, line);
+          compiler__emit_byte(c, (uint8_t)effective_type, line);
+        }
+        compiler__emit_byte(c, OP_MAKE_CELL, line);
+        compiler__add_local(c, name_val, line, col);
+        c->locals[c->local_count - 1].is_mutable = true;
+        compiler__emit_byte(c, OP_NIL, line);
+      }
+    } else if (c->scope_depth > 0) {
       /* Local scope: box unboxed types for cell storage, then wrap in cell */
       if (is_unboxed_type(effective_type)) {
         compiler__emit_byte(c, OP_TO_DYN, line);
@@ -5174,6 +5257,17 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     JaclVal name_val = jacl_inline_string(args[0]->data.lit_string.value, name_len);
     char err_msg[128];
+
+    /* SM mode: write directly to state field */
+    if (c->sm_analysis) {
+      int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
+      if (field_idx >= 0) {
+        compiler__compile_node(c, args[1]);
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)field_idx, line);
+        return;
+      }
+    }
 
     /* Resolve local */
     int local_slot = compiler__resolve_local(c, name_val);
@@ -5643,7 +5737,20 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
     int16_t rhs_arity = compiler__node_known_arity(c, args[value_arg_idx]);
 
-    if (c->scope_depth > 0) {
+    if (c->sm_analysis) {
+      /* SM mode: write value to state object field instead of local slot */
+      int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
+      if (field_idx >= 0) {
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)field_idx, line);
+        /* def returns nil */
+        compiler__emit_byte(c, OP_NIL, line);
+      } else {
+        /* Name not in state layout — shouldn't happen, but fall through */
+        compiler__add_local(c, name_val, line, col);
+        compiler__emit_byte(c, OP_NIL, line);
+      }
+    } else if (c->scope_depth > 0) {
       /* Local variable: value is on stack as the local slot */
       compiler__add_local(c, name_val, line, col);
       c->locals[c->local_count - 1].known_arity = rhs_arity;
@@ -5853,9 +5960,27 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       proc_suspends_early = suspension_map_lookup(c->suspension_map, name_val_check);
     }
 
-    /* For CPS-transformed procs, add __k as hidden last parameter */
+    /* Check for state machine compilation mode.
+       When use_state_machines is true, analyze the body for suspension points.
+       If it contains yield, use the SM path instead of CPS. */
     uint8_t user_param_count = param_count; /* original param count for callers */
-    if (proc_suspends_early) {
+    bool use_sm_path = false;
+    SuspensionAnalysis sm_analysis_data;
+    memset(&sm_analysis_data, 0, sizeof(sm_analysis_data));
+
+    if (proc_suspends_early && c->use_state_machines) {
+      sm_analysis_data = compiler__analyze_suspensions(
+          args[body_arg_idx], param_names_arr, user_param_count);
+      for (uint32_t si = 0; si < sm_analysis_data.suspension_count; si++) {
+        if (sm_analysis_data.suspension_points[si].type == SUSPEND_YIELD) {
+          use_sm_path = true;
+          break;
+        }
+      }
+    }
+
+    /* For CPS-transformed procs (not SM), add __k as hidden last parameter */
+    if (proc_suspends_early && !use_sm_path) {
       if (param_count >= COMPILER_MAX_PROC_PARAMS) {
         compiler__error(c, line, col, "too many proc parameters for CPS transform");
         return;
@@ -5868,7 +5993,6 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Allocate closure */
     JaclClosure* closure = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
     chunk_init(&closure->chunk, c->arena);
-    closure->param_count  = param_count;
     closure->upvalue_count = 0;
     closure->upvalues     = NULL;
     /* Copy proc name to a null-terminated arena string */
@@ -5881,15 +6005,28 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     closure->pinned       = false;
     closure->pin_worker_id = -1;
     closure->is_generator  = false; /* set after body compilation */
+    closure->sm_field_count = 0;
 
-    /* Allocate and fill param_names from parsed array */
-    if (param_count > 0) {
-      closure->param_names = (JaclVal*)arena_alloc(c->arena,
-                                sizeof(JaclVal) * param_count);
-      memcpy(closure->param_names, param_names_arr,
-             sizeof(JaclVal) * param_count);
+    if (use_sm_path) {
+      /* SM generator: closure takes (state_obj, resume_value) internally.
+         param_count stays as user's count for display; min_args used for arity checks.
+         The body bytecode expects state_obj in slot 0, resume_value in slot 1. */
+      closure->param_count = 2;
+      closure->param_names = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
+      closure->param_names[0] = jacl_inline_string("__sm", 4);
+      closure->param_names[1] = jacl_inline_string("__rv", 4);
+      closure->sm_field_count = (uint8_t)sm_analysis_data.state_layout.field_count;
     } else {
-      closure->param_names = NULL;
+      closure->param_count = param_count;
+      /* Allocate and fill param_names from parsed array */
+      if (param_count > 0) {
+        closure->param_names = (JaclVal*)arena_alloc(c->arena,
+                                  sizeof(JaclVal) * param_count);
+        memcpy(closure->param_names, param_names_arr,
+               sizeof(JaclVal) * param_count);
+      } else {
+        closure->param_names = NULL;
+      }
     }
 
     /* Create body compiler with function-level scope */
@@ -5910,20 +6047,36 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       body_compiler.global_arity_count = root->global_arity_count;
     }
 
-    /* Add params as locals in body compiler (slots 0..N-1) with types */
-    for (uint8_t i = 0; i < param_count; i++) {
-      compiler__add_local(&body_compiler, closure->param_names[i], line, col);
+    if (use_sm_path) {
+      /* SM: add internal params (__sm, __rv) as locals in slots 0 and 1 */
+      compiler__add_local(&body_compiler, jacl_inline_string("__sm", 4), line, col);
       body_compiler.locals[body_compiler.local_count - 1].is_param = true;
-      body_compiler.locals[body_compiler.local_count - 1].type = param_types_arr[i];
+      compiler__add_local(&body_compiler, jacl_inline_string("__rv", 4), line, col);
+      body_compiler.locals[body_compiler.local_count - 1].is_param = true;
+    } else {
+      /* Normal: add params as locals in body compiler (slots 0..N-1) with types */
+      for (uint8_t i = 0; i < param_count; i++) {
+        compiler__add_local(&body_compiler, closure->param_names[i], line, col);
+        body_compiler.locals[body_compiler.local_count - 1].is_param = true;
+        body_compiler.locals[body_compiler.local_count - 1].type = param_types_arr[i];
+      }
     }
 
     /* For variadic procs, emit OP_COLLECT_VARIADIC as first instruction */
-    if (is_variadic) {
+    if (is_variadic && !use_sm_path) {
       compiler__emit_byte(&body_compiler, OP_COLLECT_VARIADIC, line);
       compiler__emit_byte(&body_compiler, min_args, line);
     }
 
-    if (proc_suspends_early) {
+    if (use_sm_path) {
+      /* State machine compilation for generator body */
+      SuspensionAnalysis* analysis_ptr =
+          (SuspensionAnalysis*)arena_alloc(c->arena, sizeof(SuspensionAnalysis));
+      *analysis_ptr = sm_analysis_data;
+      body_compiler.sm_analysis = analysis_ptr;
+
+      compiler__compile_sm_body(&body_compiler, args[body_arg_idx], line);
+    } else if (proc_suspends_early) {
       /* CPS-transformed proc: compile body with CPS */
       body_compiler.is_cps = true;
 
@@ -7174,6 +7327,24 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "yield", "1 argument", argc);
       return;
     }
+    if (c->sm_analysis) {
+      /* SM yield: compile value, set resume_point, emit OP_YIELD_SM,
+         backpatch dispatch label, push nil as yield expression result */
+      compiler__compile_node(c, args[0]);
+      uint32_t sp_idx = c->sm_suspension_idx++;
+      compiler__emit_constant(c, jacl_i32((int32_t)(sp_idx + 1)), line);
+      compiler__emit_byte(c, OP_SET_RESUME_POINT, line);
+      compiler__emit_byte(c, OP_YIELD_SM, line);
+      /* Dispatch table label lands here after resume */
+      if (sp_idx < c->sm_dispatch.label_count) {
+        compiler__patch_jump(c, c->sm_dispatch.label_patches[sp_idx]);
+      }
+      /* Push nil as yield expression result (popped by check_error) */
+      compiler__emit_byte(c, OP_NIL, line);
+      c->has_yield = true;
+      c->last_expr_type = TYPE_NIL;
+      return;
+    }
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_NIL, line);  /* nil continuation (no CPS context) */
     compiler__emit_byte(c, OP_YIELD, line);
@@ -7827,6 +7998,18 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
         break;
       }
       JaclVal name_val = jacl_inline_string(node->data.var_ref.name, name_len);
+
+      /* SM mode: resolve variables from state object fields first */
+      if (c->sm_analysis) {
+        int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
+        if (field_idx >= 0) {
+          compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+          compiler__emit_byte(c, (uint8_t)field_idx, line);
+          /* Look up type info from state layout */
+          c->last_expr_type = TYPE_DYN;
+          break;
+        }
+      }
 
       int local_slot = compiler__resolve_local(c, name_val);
       if (local_slot != -1) {

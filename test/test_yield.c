@@ -251,6 +251,268 @@ static int test_yield_computed(void) {
   TEST_PASS();
 }
 
+/* ===== US-007: State machine generator compilation ===== */
+
+/* Helper: compile source with use_state_machines = true */
+static CompileResult compile_with_sm(const char* src, arena_t* arena,
+                                      JaclInternTable* intern_table,
+                                      ThreadHeap* heap) {
+  LexResult tokens = lexer_lex(src, arena);
+  ParseResult parse = parser_parse(tokens, arena);
+
+  CompileResult cr;
+  chunk_init(&cr.chunk, arena);
+  cr.error_count = parse.error_count;
+  cr.suspending = false;
+
+  SuspensionMap suspension_map = compiler__analyze_suspension(
+      parse.nodes, parse.count);
+
+  Compiler c;
+  compiler__init(&c, &cr.chunk, arena, intern_table, heap);
+  c.suspension_map = &suspension_map;
+  c.use_state_machines = true;  /* Enable SM compilation */
+
+  StructTypeRegistry* reg = (StructTypeRegistry*)arena_alloc(arena, sizeof(StructTypeRegistry));
+  reg->count = 0;
+  c.struct_registry = reg;
+
+  for (uint32_t i = 0; i < parse.count; i++) {
+    compiler__compile_node(&c, parse.nodes[i]);
+    compiler__emit_byte(&c, OP_CHECK_ERROR, parse.nodes[i]->start.line);
+    compiler__emit_u16(&c, 0, parse.nodes[i]->start.line);
+  }
+  compiler__emit_byte(&c, OP_HALT, 0);
+
+  cr.error_count = c.error_count;
+  cr.error_message = c.first_error;
+  cr.struct_registry = c.struct_registry;
+  return cr;
+}
+
+/* --- Test: SM compilation produces correct bytecode structure --- */
+static int test_sm_compile_basic(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  VM vm;
+  vm_init(&vm, &arena);
+
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  CompileResult cr = compile_with_sm(
+    "proc gen {} {\n"
+    "  [yield 1]\n"
+    "  [yield 2]\n"
+    "  [yield 3]\n"
+    "}\n",
+    &arena, &intern_table, &vm.heap);
+
+  ASSERT_INT_EQ(cr.error_count, 0);
+
+  /* The chunk should have a closure constant. Find the generator closure. */
+  JaclClosure* gen_cl = NULL;
+  for (uint16_t i = 0; i < cr.chunk.const_count; i++) {
+    if (jacl_is_closure(cr.chunk.constants[i])) {
+      JaclClosure* cl = jacl_as_closure(cr.chunk.constants[i]);
+      if (cl->name && strcmp(cl->name, "gen") == 0) {
+        gen_cl = cl;
+        break;
+      }
+    }
+  }
+  ASSERT(gen_cl != NULL);
+
+  /* SM generator should have param_count = 2 (state_obj, resume_value) */
+  ASSERT_INT_EQ(gen_cl->param_count, 2);
+
+  /* sm_field_count should be 0 (no params, no locals in this generator) */
+  ASSERT_INT_EQ(gen_cl->sm_field_count, 0);
+
+  /* is_generator should be true */
+  ASSERT(gen_cl->is_generator);
+
+  /* Check the bytecode contains OP_YIELD_SM (not OP_YIELD) */
+  int yield_sm_count = 0;
+  int yield_cps_count = 0;
+  for (uint32_t i = 0; i < gen_cl->chunk.code_count; i++) {
+    if (gen_cl->chunk.code[i] == OP_YIELD_SM) yield_sm_count++;
+    if (gen_cl->chunk.code[i] == OP_YIELD) yield_cps_count++;
+  }
+  ASSERT_INT_EQ(yield_sm_count, 3);
+  ASSERT_INT_EQ(yield_cps_count, 0);
+
+  intern_table_destroy(&intern_table);
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM compilation with params stores fields in state object --- */
+static int test_sm_compile_with_params(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  VM vm;
+  vm_init(&vm, &arena);
+
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  CompileResult cr = compile_with_sm(
+    "proc gen {x y} {\n"
+    "  [yield $x]\n"
+    "  [yield $y]\n"
+    "}\n",
+    &arena, &intern_table, &vm.heap);
+
+  ASSERT_INT_EQ(cr.error_count, 0);
+
+  JaclClosure* gen_cl = NULL;
+  for (uint16_t i = 0; i < cr.chunk.const_count; i++) {
+    if (jacl_is_closure(cr.chunk.constants[i])) {
+      JaclClosure* cl = jacl_as_closure(cr.chunk.constants[i]);
+      if (cl->name && strcmp(cl->name, "gen") == 0) {
+        gen_cl = cl;
+        break;
+      }
+    }
+  }
+  ASSERT(gen_cl != NULL);
+
+  /* SM with 2 user params: sm_field_count should be 2 */
+  ASSERT_INT_EQ(gen_cl->sm_field_count, 2);
+
+  /* Bytecode should contain OP_GET_STATE_FIELD for param access */
+  int get_sf_count = 0;
+  for (uint32_t i = 0; i < gen_cl->chunk.code_count; i++) {
+    if (gen_cl->chunk.code[i] == OP_GET_STATE_FIELD) get_sf_count++;
+  }
+  ASSERT(get_sf_count >= 2); /* at least once per param reference */
+
+  /* OP_YIELD_SM count should be 2 */
+  int yield_sm_count = 0;
+  for (uint32_t i = 0; i < gen_cl->chunk.code_count; i++) {
+    if (gen_cl->chunk.code[i] == OP_YIELD_SM) yield_sm_count++;
+  }
+  ASSERT_INT_EQ(yield_sm_count, 2);
+
+  intern_table_destroy(&intern_table);
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM generator can be manually driven via the VM --- */
+static int test_sm_manual_drive(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  VM vm;
+  vm_init(&vm, &arena);
+
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  CompileResult cr = compile_with_sm(
+    "proc gen {x} {\n"
+    "  [yield $x]\n"
+    "  [yield [+ $x 10]]\n"
+    "}\n",
+    &arena, &intern_table, &vm.heap);
+
+  ASSERT_INT_EQ(cr.error_count, 0);
+
+  /* Find the generator closure */
+  JaclClosure* gen_cl = NULL;
+  for (uint16_t i = 0; i < cr.chunk.const_count; i++) {
+    if (jacl_is_closure(cr.chunk.constants[i])) {
+      JaclClosure* cl = jacl_as_closure(cr.chunk.constants[i]);
+      if (cl->name && strcmp(cl->name, "gen") == 0) {
+        gen_cl = cl;
+        break;
+      }
+    }
+  }
+  ASSERT(gen_cl != NULL);
+  ASSERT_INT_EQ(gen_cl->sm_field_count, 1); /* one param: x */
+
+  /* Create a state machine object with 1 field (for param x) */
+  JaclVal sm_val = gc_alloc_state_machine(&vm.heap, 1);
+  JaclStateMachine* sm = jacl_as_state_machine(sm_val);
+  sm->fields[0] = jacl_i32(5); /* x = 5 */
+  sm->sm_closure = jacl_closure(gen_cl);
+
+  /* Call SM function: gen(state_obj, nil) — first call */
+  vm__push(&vm, jacl_closure(gen_cl));  /* callee slot */
+  vm__push(&vm, sm_val);                /* slot 0: state object */
+  vm__push(&vm, JACL_NIL);             /* slot 1: resume value */
+
+  CallFrame* frame = &vm.frames[vm.frame_count++];
+  frame->closure    = gen_cl;
+  frame->return_ip  = NULL;
+  frame->stack_base = vm.stack_top - 2; /* 2 params */
+  frame->chunk      = &gen_cl->chunk;
+  vm.ip    = gen_cl->chunk.code;
+  vm.chunk = &gen_cl->chunk;
+
+  VMResult r = vm__run(&vm, 0);
+
+  ASSERT_INT_EQ(r, VM_YIELD);
+  /* First yield: should be x = 5 */
+  ASSERT_INT_EQ(jacl_as_i32(vm.yield_value), 5);
+  /* resume_point should be 1 */
+  ASSERT_INT_EQ(sm->resume_point, 1);
+
+  /* Reset stack and call again for second yield */
+  vm.stack_top = 0;
+  vm.frame_count = 0;
+
+  vm__push(&vm, jacl_closure(gen_cl));
+  vm__push(&vm, sm_val);
+  vm__push(&vm, JACL_NIL);
+
+  frame = &vm.frames[vm.frame_count++];
+  frame->closure    = gen_cl;
+  frame->return_ip  = NULL;
+  frame->stack_base = vm.stack_top - 2;
+  frame->chunk      = &gen_cl->chunk;
+  vm.ip    = gen_cl->chunk.code;
+  vm.chunk = &gen_cl->chunk;
+
+  r = vm__run(&vm, 0);
+
+  ASSERT_INT_EQ(r, VM_YIELD);
+  /* Second yield: should be x + 10 = 15 */
+  ASSERT_INT_EQ(jacl_as_i32(vm.yield_value), 15);
+  ASSERT_INT_EQ(sm->resume_point, 2);
+
+  /* Third call: generator exhausted, should return VM_OK */
+  vm.stack_top = 0;
+  vm.frame_count = 0;
+
+  vm__push(&vm, jacl_closure(gen_cl));
+  vm__push(&vm, sm_val);
+  vm__push(&vm, JACL_NIL);
+
+  frame = &vm.frames[vm.frame_count++];
+  frame->closure    = gen_cl;
+  frame->return_ip  = NULL;
+  frame->stack_base = vm.stack_top - 2;
+  frame->chunk      = &gen_cl->chunk;
+  vm.ip    = gen_cl->chunk.code;
+  vm.chunk = &gen_cl->chunk;
+
+  r = vm__run(&vm, 0);
+  ASSERT_INT_EQ(r, VM_OK);
+
+  intern_table_destroy(&intern_table);
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Main --- */
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
 
@@ -266,6 +528,9 @@ int main(void) {
     { "yield_multiple_streams", test_yield_multiple_streams },
     { "yield_strings",          test_yield_strings },
     { "yield_computed",         test_yield_computed },
+    { "sm_compile_basic",       test_sm_compile_basic },
+    { "sm_compile_with_params", test_sm_compile_with_params },
+    { "sm_manual_drive",        test_sm_manual_drive },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

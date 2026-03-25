@@ -6002,6 +6002,18 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_YIELD_SM: {
+        /* State machine yield: pop yielded value, return VM_YIELD.
+           No continuation closure — the SM function is re-entered via
+           the dispatch table on the next stream_next call. */
+        JaclVal value;
+        result = vm__pop(vm, &value);
+        if (result != VM_OK) return result;
+        vm->yield_value = value;
+        vm->yield_continuation = JACL_NIL;
+        return VM_YIELD;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }
