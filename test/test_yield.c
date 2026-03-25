@@ -1353,6 +1353,87 @@ static int test_sm_await_cps_unchanged(void) {
   TEST_PASS();
 }
 
+/* ===== US-015: Error propagation via error_k on state object ===== */
+
+/* --- Test: generator that errors after a yield — error propagates via stream_next --- */
+static int test_sm_error_after_yield(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  [yield 1]\n"
+    "  [yield 2]\n"
+    "  [error \"boom\"]\n"
+    "  [yield 3]\n"
+    "}\n"
+    "def s [gen]\n"
+    "[print [stream_next $s]]\n"
+    "[print [stream_next $s]]\n"
+    "def third [stream_next $s]\n"
+    "[print [error? $third]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\n2\ntrue\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: generator that errors on first call — error propagates via collect --- */
+static int test_sm_error_in_collect(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  [yield 10]\n"
+    "  [error \"fail\"]\n"
+    "  [yield 20]\n"
+    "}\n"
+    "def result [collect [gen]]\n"
+    "[print [error? $result]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: generator error propagates through filter pipeline --- */
+static int test_sm_error_through_filter(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  [yield 1]\n"
+    "  [yield 2]\n"
+    "  [error \"pipe-err\"]\n"
+    "}\n"
+    "def s [gen]\n"
+    "[print [stream_next $s]]\n"
+    "[print [stream_next $s]]\n"
+    "def third [stream_next $s]\n"
+    "[print [error? $third]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\n2\ntrue\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: generator that throws before any yield — error on first stream_next --- */
+static int test_sm_error_before_yield(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  [error \"early\"]\n"
+    "  [yield 1]\n"
+    "}\n"
+    "def s [gen]\n"
+    "def first [stream_next $s]\n"
+    "[print [error? $first]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Main --- */
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
 
@@ -1402,6 +1483,10 @@ int main(void) {
     { "sm_e2e_sequential_awaits", test_sm_e2e_sequential_awaits },
     { "sm_e2e_await_then_yields", test_sm_e2e_await_then_yields },
     { "sm_await_cps_unchanged",  test_sm_await_cps_unchanged },
+    { "sm_error_after_yield",    test_sm_error_after_yield },
+    { "sm_error_in_collect",     test_sm_error_in_collect },
+    { "sm_error_through_filter", test_sm_error_through_filter },
+    { "sm_error_before_yield",   test_sm_error_before_yield },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

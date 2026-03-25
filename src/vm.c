@@ -985,6 +985,18 @@ static StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         *out_value = vm->yield_value;
         return STREAM_PULL_VALUE;
     } else if (inner == VM_OK) {
+        /* Check if SM function returned an error value */
+        if (is_sm && vm->stack_top > caller_stack_top) {
+            JaclVal sm_ret = vm->stack[vm->stack_top - 1];
+            if (jacl_is_error(sm_ret)) {
+                stream->state = STREAM_ERROR;
+                vm->stack_top   = caller_stack_top;
+                vm->frame_count = caller_frame_count;
+                vm->ip          = caller_ip;
+                vm->chunk       = caller_chunk;
+                return STREAM_PULL_ERROR;
+            }
+        }
         stream->state        = STREAM_EXHAUSTED;
         if (!is_sm) stream->next_fn = JACL_NIL;
         stream->cached_value = JACL_NIL;
@@ -5426,6 +5438,23 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (result != VM_OK) return result;
             break;
           } else if (inner == VM_OK) {
+            /* Check if SM function returned an error value (error propagated
+               through OP_CHECK_ERROR frame unwinding returns VM_OK). */
+            JaclVal sm_ret = JACL_NIL;
+            if (vm->stack_top > caller_stack_top) {
+              sm_ret = vm->stack[vm->stack_top - 1];
+            }
+            if (jacl_is_error(sm_ret)) {
+              stream->state = STREAM_ERROR;
+              vm->stack_top   = caller_stack_top;
+              vm->frame_count = caller_frame_count;
+              vm->ip    = caller_ip;
+              vm->chunk = caller_chunk;
+              frame = &vm->frames[vm->frame_count - 1];
+              result = vm__push(vm, sm_ret);
+              if (result != VM_OK) return result;
+              break;
+            }
             stream->state = STREAM_EXHAUSTED;
             stream->cached_value = JACL_NIL;
             vm->stack_top   = caller_stack_top;
@@ -5584,6 +5613,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         gc__current_heap = &vm->heap;
         jacl_vec_root* collect_vec = jacl_vec_empty();
         bool is_sm_gen = !jacl_is_nil(stream->state_machine);
+        JaclVal sm_error_val = JACL_NIL;
 
         while (stream->state != STREAM_EXHAUSTED) {
           /* Save caller context */
@@ -5685,6 +5715,20 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
             gc__current_heap = &vm->heap;
             collect_vec = jacl_vec_push_back(collect_vec, vm->yield_value);
           } else if (inner == VM_OK) {
+            /* Check if SM function returned an error value */
+            if (is_sm_gen && vm->stack_top > caller_stack_top) {
+              JaclVal sm_ret = vm->stack[vm->stack_top - 1];
+              if (jacl_is_error(sm_ret)) {
+                stream->state = STREAM_ERROR;
+                sm_error_val = sm_ret;
+                vm->stack_top   = caller_stack_top;
+                vm->frame_count = caller_frame_count;
+                vm->ip    = caller_ip;
+                vm->chunk = caller_chunk;
+                frame = &vm->frames[vm->frame_count - 1];
+                break;
+              }
+            }
             stream->state = STREAM_EXHAUSTED;
             if (!is_sm_gen) stream->next_fn = JACL_NIL;
             stream->cached_value = JACL_NIL;
@@ -5700,7 +5744,11 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
         }
 
-        result = vm__push(vm, jacl_vector_ptr(collect_vec));
+        if (!jacl_is_nil(sm_error_val)) {
+          result = vm__push(vm, sm_error_val);
+        } else {
+          result = vm__push(vm, jacl_vector_ptr(collect_vec));
+        }
         if (result != VM_OK) return result;
         break;
       }
