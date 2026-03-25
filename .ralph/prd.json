@@ -187,7 +187,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Control flow flattening: each yield gets a unique resume label, and the dispatch table at function entry jumps directly to the right nesting level."
     },
     {

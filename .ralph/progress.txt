@@ -31,6 +31,7 @@ Started: Mon Mar 24 2026
 - SM stream pull: check `!jacl_is_nil(stream->state_machine)` to detect SM generator; call `sm_closure(state_obj, nil)` — same call for both PENDING and CONSUMED states
 - JaclStream has `state_machine` field (JaclVal) — traced by GC in gc_collect.c OBJ_STREAM case
 - `[print ...]` appends a trailing `\n` — test assertions must account for it
+- SM if-statements: NO special handling needed — normal if compilation (OP_JUMP_IF_FALSE/OP_JUMP) + SM yield + dispatch table compose correctly for arbitrary nesting
 
 ---
 
@@ -201,4 +202,26 @@ Started: Mon Mar 24 2026
   - While loops in SM mode need NO special handling — the normal while handler, OP_LOOP backward jump, SM-aware def/mut/set/var_ref, and SM yield all compose correctly
   - The dispatch table can jump directly into any nesting level (inside a while body) and execution flows naturally from there (through loop back-edge, condition re-evaluation, etc.)
   - When debugging SM generators, step through stream_next calls incrementally (1, 2, 3, 4...) to find the exact resume point that fails
+---
+
+## 2026-03-25 - US-010
+- Yield inside if-statements and nested control flow works in SM mode with NO code changes to the compiler or VM
+- The normal if compilation (OP_JUMP_IF_FALSE/OP_JUMP) + SM yield handler + dispatch table backpatching compose correctly
+- The dispatch table jumps directly to the resume label inside any nesting level (if-then, if-else, while>if, while>if>if)
+- After resuming mid-branch, execution continues normally through surrounding control flow (back-edges, condition checks, jumps)
+- Added 8 tests covering all acceptance criteria:
+  - sm_if_then_yield: yield in then-branch (cond true → yields values)
+  - sm_if_then_yield_false: yield in then-branch (cond false → skips yields)
+  - sm_if_else_yield: yields in both then and else branches, tested for both paths
+  - sm_if_multi_yield_both: multiple yields in both branches with pre/post-if yields
+  - sm_while_if_yield: while > if > yield (evens filter pattern)
+  - sm_while_if_else_yield: while > if/else with yields in both branches
+  - sm_nested_3_levels: while > if > if > yield (3 levels deep)
+  - sm_while_if_multi_yield: while > if with multiple yields per branch
+- Files changed: test/test_yield.c (+223 lines)
+- All 83 test suites pass (30 yield tests), compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - If-statements in SM mode need NO special handling — the normal if compiler, SM-aware variable handlers, and SM yield handler all compose correctly with the dispatch table
+  - This is the key design win of state machine compilation: arbitrary nesting "just works" because the dispatch table can jump to any code position, and all state survives in the state object
+  - The CPS path required special `compiler__compile_cps_if()` with join continuations for if-with-suspension; SM mode eliminates all that complexity
 ---
