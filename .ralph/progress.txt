@@ -46,6 +46,12 @@ Started: Mon Mar 24 2026
 - Concurrent SM test pattern: compile_with_sm → wrap chunk in param_count=0 closure → runtime_init → configure workers (print_fn, intern_table, struct_registry) → runtime__submit_spawn_task → spin-wait on completion future
 - SM generators with await inside OP_COLLECT only work single-threaded (spawn resolves synchronously); runtime mode async await inside generators deadlocks because OP_COLLECT treats VM_OK return as exhaustion
 - Pure async SM functions (await only, no yield) cannot be called directly — param_count=2 causes arity mismatch; only generators (yield+await or yield-only) currently work as SM entry points
+- SM parallel sequence: compile bodies → OP_CONST(resume_id) + OP_SET_RESUME_POINT → OP_GET_LOCAL 0 (push state obj) → OP_PARALLEL n → OP_JUMP(skip) → [resume label: OP_GET_LOCAL 1 (__rv)] → skip: — same two-path pattern as SM await
+- ParallelAgg has `state_machine` field (JaclVal) — when non-nil, `runtime__complete_parallel_slot` resumes SM instead of scheduling continuation closure
+- OP_PARALLEL validation: allows closure, nil, OR state_machine as "continuation" value; detects SM via `jacl_is_state_machine()`
+- SM parallel in single-threaded mode: runs bodies sequentially, pushes result vector directly onto stack (like nil continuation path)
+- SM parallel + OP_COLLECT limitation: same as SM await — OP_PARALLEL returns VM_OK in runtime mode, OP_COLLECT treats VM_OK as generator exhaustion; SM parallel inside generators only works single-threaded
+- Parallel body closures inside SM functions cannot capture SM state fields (same as spawn bodies) — test with constant values in parallel bodies
 
 ---
 
@@ -355,4 +361,27 @@ Started: Mon Mar 24 2026
   - Worker VMs need intern_table and struct_registry set before execution — copy from compile-time VM
   - Pure async SM functions (await only, no yield) cannot be called directly — param_count=2 causes arity mismatch at call site; only generators (yield+await) work as SM functions currently
   - `runtime__setup_call` does NOT check arity — it just sets up stack and frame, so incorrect argc would silently corrupt execution
+---
+
+## 2026-03-25 - US-017
+- Converted parallel join to state machine resumption
+- Added `state_machine` field (JaclVal) to ParallelAgg struct in gc.c, initialized to JACL_NIL
+- Updated `jacl_parallel_agg()` constructor to initialize new field
+- Added GC tracing for `agg->state_machine` in gc_collect.c OBJ_PARALLEL_AGG case
+- Added SM parallel handler in compiler.c: same two-path pattern as SM await (set resume_point, push state obj, OP_PARALLEL, OP_JUMP skip, resume label pushes __rv)
+- Updated OP_PARALLEL VM handler:
+  - Validates state_machine values alongside closures and nil
+  - Runtime mode: sets `agg->state_machine = continuation` when SM detected, passes NIL as agg->continuation
+  - Single-threaded mode: pushes result vector directly (like nil continuation path)
+- Updated `runtime__complete_parallel_slot`: when `agg->state_machine` is non-nil, calls `runtime__schedule_sm_resumption` instead of `runtime__schedule_continuation`
+- Added forward declaration of `runtime__schedule_sm_resumption` before `runtime__complete_parallel_slot` (C99 requires declarations before use)
+- 6 new tests: sm_parallel_basic, sm_parallel_locals_survive, sm_parallel_computed, sm_parallel_in_while, sm_parallel_yield_around, sm_parallel_error
+- Files changed: src/gc.c, src/gc_collect.c, src/compiler.c, src/vm.c, src/runtime.c, test/test_yield.c
+- All 83 test suites pass (60 yield tests), compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - SM parallel follows exact same two-path pattern as SM await: inline (single-threaded) pushes result and jumps past resume label; resume (runtime) dispatch lands at resume label and pushes __rv
+  - Parallel body closures cannot capture SM state fields — same limitation as spawn bodies inside SM functions
+  - SM parallel + OP_COLLECT has same limitation as SM await + OP_COLLECT: OP_PARALLEL returns VM_OK in runtime mode, OP_COLLECT treats VM_OK as generator exhaustion
+  - Forward declarations needed in runtime.c when calling functions defined later in the file (C99 requirement)
+  - ParallelAgg.state_machine is the SM equivalent of ParallelAgg.continuation — exactly one should be non-nil
 ---
