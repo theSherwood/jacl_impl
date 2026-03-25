@@ -128,7 +128,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "This story handles the simplest case: sequential yields with no control flow. Nested if/while come in US-009/US-010."
     },
     {

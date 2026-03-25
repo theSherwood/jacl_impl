@@ -17,6 +17,14 @@ Started: Mon Mar 24 2026
 - SM function convention: state machine object lives in frame slot 0 (`frame->stack_base + 0`), resume value in slot 1
 - SM dispatch table: `compiler__emit_sm_dispatch_table(c, suspension_count, line)` emits chained OP_GET_RESUME_POINT + OP_EQ + OP_JUMP_IF_FALSE + OP_JUMP checks; backpatch via `c->sm_dispatch.label_patches[i]`; resume_point 0 = initial entry (falls through), 1..N = after suspension points
 - OP_GET_RESUME_POINT / OP_SET_RESUME_POINT: no operands, read/write `sm->resume_point` as i32 from state object in frame slot 0
+- OP_YIELD_SM: pops yielded value, stores in vm->yield_value, sets vm->yield_continuation = JACL_NIL, returns VM_YIELD — no continuation closure needed
+- SM yield sequence: compile value → OP_CONST(resume_id) + OP_SET_RESUME_POINT → OP_YIELD_SM → [resume label] → OP_NIL (yield expr result for check_error)
+- SM variable resolution: when `c->sm_analysis` is set, AST_VAR_REF checks state layout first via `sm__find_field()` before falling through to normal local resolution
+- SM def/mut: when `c->sm_analysis` is set, writes value to state field via OP_SET_STATE_FIELD instead of creating a stack local; no cells needed for mut in SM mode
+- SM set/`::`: when `c->sm_analysis` is set, resolves to OP_SET_STATE_FIELD for state layout names before checking locals
+- SM generator closure: `param_count = 2` (internal __sm, __rv), `min_args = user_param_count` (for call-site arity checks), `sm_field_count = state_layout.field_count`
+- OP_CHECK_ERROR pops the top-of-stack value if it's NOT an error — this is how statement results are cleaned up between statements in a block
+- `arena_alloc` zero-initializes memory (`memset(ptr, 0, size)`) — no need to explicitly zero-init struct fields after arena allocation
 
 ---
 
@@ -125,4 +133,31 @@ Started: Mon Mar 24 2026
   - OP_EQ consumes both operands, so resume_point must be reloaded for each dispatch case check
   - Resume point mapping: 0 = initial entry, suspension_point_id + 1 = resume after that suspension — body compiler sets resume_point to `sp_id + 1` before suspending
   - Backpatch via `compiler__patch_jump(c, c->sm_dispatch.label_patches[i])` after emitting the code following each suspension point
+---
+
+## 2026-03-24 - US-007
+- Implemented state machine codegen for generator bodies with basic sequential yield
+- Added `OP_YIELD_SM` opcode to bytecode.c — pops value, returns VM_YIELD without continuation
+- Added VM handler for OP_YIELD_SM in vm.c
+- Added `sm_field_count` field to JaclClosure struct (default 0 via arena zero-init)
+- Added `sm__find_field()` helper to look up variable names in StateLayout
+- Added `sm_suspension_idx` field to Compiler struct for tracking yield point index during SM body compilation
+- Modified AST_VAR_REF handler: when `c->sm_analysis` is set, checks state layout first and emits OP_GET_STATE_FIELD
+- Modified `def` handler: when `c->sm_analysis` is set, writes to state field via OP_SET_STATE_FIELD (no stack local)
+- Modified `mut` handler: when `c->sm_analysis` is set, writes to state field directly (no cell wrapping needed)
+- Modified `set`/`::` handler: when `c->sm_analysis` is set, resolves to OP_SET_STATE_FIELD for state layout names
+- Modified `yield` handler in compile_command: when `c->sm_analysis` is set, emits SM yield sequence (set resume_point + OP_YIELD_SM + backpatch + push nil)
+- Added `compiler__compile_sm_body`: emits dispatch table, compiles body statements normally (SM-aware handlers do the work), emits exhaustion return
+- Restructured proc compilation: when `use_state_machines && proc has yield`, runs suspension analysis, creates SM closure with 2 internal params (__sm, __rv), compiles body via SM path
+- Updated test_bytecode.c for OP_YIELD_SM (opcode 146, OP_HALT shifted to 147)
+- Added 3 tests: sm_compile_basic, sm_compile_with_params, sm_manual_drive
+- Files changed: src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_yield.c
+- All 83 tests pass, compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - OP_CHECK_ERROR pops the top-of-stack if not an error — crucial for understanding stack management between statements
+  - SM yield must push OP_NIL after the resume label so check_error has a value to pop
+  - Generator call-site arity checking uses `closure->min_args`, not `param_count` — so SM closures can have param_count=2 while min_args reflects user params
+  - `arena_alloc` zero-initializes, so `sm_field_count=0` is automatic for non-SM closures
+  - For SM generators, the proc compilation flow has 3 decision points: (1) CPS __k param addition (skip for SM), (2) closure param setup (override for SM), (3) body compilation (SM vs CPS vs normal)
+  - The `use_sm_path` flag is determined by running `compiler__analyze_suspensions` and checking for SUSPEND_YIELD points
 ---
