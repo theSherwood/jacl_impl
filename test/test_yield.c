@@ -753,6 +753,221 @@ static int test_sm_while_empty(void) {
   TEST_PASS();
 }
 
+/* ===== US-010: Yield inside if-statements and nested control flow (SM) ===== */
+
+/* --- Test: yield inside if-then branch (condition true) --- */
+static int test_sm_if_then_yield(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {cond} {\n"
+    "  if [== $cond 1] {\n"
+    "    [yield 1]\n"
+    "    [yield 2]\n"
+    "  }\n"
+    "  [yield 99]\n"
+    "}\n"
+    "[print [collect [gen 1]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 1 2 99]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: yield inside if-then branch (condition false, no else) --- */
+static int test_sm_if_then_yield_false(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {cond} {\n"
+    "  if [== $cond 1] {\n"
+    "    [yield 1]\n"
+    "    [yield 2]\n"
+    "  }\n"
+    "  [yield 99]\n"
+    "}\n"
+    "[print [collect [gen 0]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 99]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: yield in both then and else branches --- */
+static int test_sm_if_else_yield(void) {
+  PrintCapture cap;
+  /* True path: yields 1, 2 then 99 */
+  VMResult r = run_capture_sm(
+    "proc gen {cond} {\n"
+    "  if [== $cond 1] {\n"
+    "    [yield 1]\n"
+    "    [yield 2]\n"
+    "  } else {\n"
+    "    [yield 3]\n"
+    "  }\n"
+    "  [yield 99]\n"
+    "}\n"
+    "[print [collect [gen 1]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 1 2 99]\n");
+  ASSERT(check_no_leaks());
+
+  /* False path: yields 3 then 99 */
+  r = run_capture_sm(
+    "proc gen {cond} {\n"
+    "  if [== $cond 1] {\n"
+    "    [yield 1]\n"
+    "    [yield 2]\n"
+    "  } else {\n"
+    "    [yield 3]\n"
+    "  }\n"
+    "  [yield 99]\n"
+    "}\n"
+    "[print [collect [gen 0]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 3 99]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: multiple yields in both branches, each with unique resume point --- */
+static int test_sm_if_multi_yield_both(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {cond} {\n"
+    "  [yield 0]\n"
+    "  if [== $cond 1] {\n"
+    "    [yield 10]\n"
+    "    [yield 11]\n"
+    "    [yield 12]\n"
+    "  } else {\n"
+    "    [yield 20]\n"
+    "    [yield 21]\n"
+    "  }\n"
+    "  [yield 99]\n"
+    "}\n"
+    "[print [collect [gen 1]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 0 10 11 12 99]\n");
+  ASSERT(check_no_leaks());
+
+  r = run_capture_sm(
+    "proc gen {cond} {\n"
+    "  [yield 0]\n"
+    "  if [== $cond 1] {\n"
+    "    [yield 10]\n"
+    "    [yield 11]\n"
+    "    [yield 12]\n"
+    "  } else {\n"
+    "    [yield 20]\n"
+    "    [yield 21]\n"
+    "  }\n"
+    "  [yield 99]\n"
+    "}\n"
+    "[print [collect [gen 0]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 0 20 21 99]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: while containing if containing yield --- */
+static int test_sm_while_if_yield(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc evens {n} {\n"
+    "  mut i 0\n"
+    "  while [< $i $n] {\n"
+    "    if [== [% $i 2] 0] {\n"
+    "      [yield $i]\n"
+    "    }\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [evens 6]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 0 2 4]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: while containing if/else with yields in both branches --- */
+static int test_sm_while_if_else_yield(void) {
+  PrintCapture cap;
+  /* 3 iterations WITH parameter */
+  VMResult r = run_capture_sm(
+    "proc gen {n} {\n"
+    "  mut i 0\n"
+    "  while [< $i $n] {\n"
+    "    if [== [% $i 2] 0] {\n"
+    "      [yield [+ $i 100]]\n"
+    "    } else {\n"
+    "      [yield [+ $i 200]]\n"
+    "    }\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [gen 5]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  /* 0→100, 1→201, 2→102, 3→203, 4→104 */
+  ASSERT_STR_EQ(cap.buf, "[vec 100 201 102 203 104]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: yield in 3 levels of nesting (while > if > if) --- */
+static int test_sm_nested_3_levels(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc deep {n} {\n"
+    "  mut i 0\n"
+    "  while [< $i $n] {\n"
+    "    if [> $i 0] {\n"
+    "      if [== [% $i 3] 0] {\n"
+    "        [yield [* $i 10]]\n"
+    "      }\n"
+    "    }\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [deep 10]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  /* i=3→30, i=6→60, i=9→90 */
+  ASSERT_STR_EQ(cap.buf, "[vec 30 60 90]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: if inside while with multiple yields per branch --- */
+static int test_sm_while_if_multi_yield(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc pairs {n} {\n"
+    "  mut i 0\n"
+    "  while [< $i $n] {\n"
+    "    if [== [% $i 2] 0] {\n"
+    "      [yield $i]\n"
+    "      [yield [+ $i 1000]]\n"
+    "    }\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [pairs 4]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  /* i=0→0,1000  i=2→2,1002 */
+  ASSERT_STR_EQ(cap.buf, "[vec 0 1000 2 1002]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Main --- */
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
 
@@ -780,6 +995,14 @@ int main(void) {
     { "sm_while_fibonacci",     test_sm_while_fibonacci },
     { "sm_while_multi_yield",   test_sm_while_multi_yield },
     { "sm_while_empty",         test_sm_while_empty },
+    { "sm_if_then_yield",       test_sm_if_then_yield },
+    { "sm_if_then_yield_false", test_sm_if_then_yield_false },
+    { "sm_if_else_yield",       test_sm_if_else_yield },
+    { "sm_if_multi_yield_both", test_sm_if_multi_yield_both },
+    { "sm_while_if_yield",      test_sm_while_if_yield },
+    { "sm_while_if_else_yield", test_sm_while_if_else_yield },
+    { "sm_nested_3_levels",     test_sm_nested_3_levels },
+    { "sm_while_if_multi_yield",test_sm_while_if_multi_yield },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
