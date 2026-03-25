@@ -225,3 +225,23 @@ Started: Mon Mar 24 2026
   - This is the key design win of state machine compilation: arbitrary nesting "just works" because the dispatch table can jump to any code position, and all state survives in the state object
   - The CPS path required special `compiler__compile_cps_if()` with join continuations for if-with-suspension; SM mode eliminates all that complexity
 ---
+
+## 2026-03-25 - US-011
+- Verified that derived streams (filter, transform, take) work correctly with SM generators — NO code changes needed
+- The `vm__pull_stream_one` unified pull mechanism (implemented in US-008) already handles SM generators transparently for all derived stream types
+- Derived streams recursively pull from source via `vm__pull_stream_one`, which detects SM generators via `!jacl_is_nil(stream->state_machine)` and calls `sm_closure(state_obj, nil)`
+- Added 7 tests covering all acceptance criteria:
+  - sm_filter_collect: filter on SM generator (sequential yields), collect produces correct subset
+  - sm_transform_collect: transform on SM generator, collect produces mapped values
+  - sm_take_collect: take N from SM generator, collect produces first N values
+  - sm_chained_pipeline: generator | filter | transform | collect full pipeline with while-loop generator
+  - sm_filter_while_gen: while-loop SM generator through filter (evens filter pattern)
+  - sm_filter_take: SM generator | filter | take pipeline
+  - sm_collect_transform: OP_COLLECT on derived transform stream with SM source
+- Files changed: test/test_yield.c (+145 lines), .ralph/prd.json, .ralph/progress.txt
+- All 83 test suites pass (37 yield tests), compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - Derived streams are fully agnostic to CPS vs SM generators — the recursive `vm__pull_stream_one` handles both transparently
+  - Pipe syntax (`[gen] | filter pred | transform fn | collect | print`) works with SM generators — the pipe compiles to the same opcodes, SM detection happens at runtime
+  - No new opcodes, no VM changes, no compiler changes needed — the US-008 infrastructure was complete
+---

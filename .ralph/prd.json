@@ -207,7 +207,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "The pull helper vm__pull_stream_one already handles generator vs derived dispatch. Just need to add the SM generator case alongside the existing CPS generator case."
     },
     {

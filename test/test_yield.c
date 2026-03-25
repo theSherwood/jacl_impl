@@ -968,6 +968,144 @@ static int test_sm_while_if_multi_yield(void) {
   TEST_PASS();
 }
 
+/* ===== US-011: Derived streams with SM generators ===== */
+
+/* --- Test: SM generator piped through filter + collect --- */
+static int test_sm_filter_collect(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  [yield 1]\n"
+    "  [yield 2]\n"
+    "  [yield 3]\n"
+    "  [yield 4]\n"
+    "  [yield 5]\n"
+    "}\n"
+    "def v [collect [filter [gen] [\\ > $it 3]]]\n"
+    "[print $v]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 4 5]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM generator piped through transform + collect --- */
+static int test_sm_transform_collect(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  [yield 1]\n"
+    "  [yield 2]\n"
+    "  [yield 3]\n"
+    "}\n"
+    "def v [collect [transform [gen] [\\ * $it 10]]]\n"
+    "[print $v]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 10 20 30]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM generator piped through take + collect --- */
+static int test_sm_take_collect(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  [yield 10]\n"
+    "  [yield 20]\n"
+    "  [yield 30]\n"
+    "  [yield 40]\n"
+    "  [yield 50]\n"
+    "}\n"
+    "def v [collect [take [gen] 3]]\n"
+    "[print $v]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 10 20 30]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM generator | filter | transform | collect chained pipeline --- */
+static int test_sm_chained_pipeline(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {n} {\n"
+    "  mut i 0\n"
+    "  while [< $i $n] {\n"
+    "    [yield $i]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[gen 10] | filter [\\ > $it 4] | transform [\\ * $it 2] | collect | print\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  /* values 5,6,7,8,9 → doubled: 10,12,14,16,18 */
+  ASSERT_STR_EQ(cap.buf, "[vec 10 12 14 16 18]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM generator with while loop through filter + collect --- */
+static int test_sm_filter_while_gen(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc counter {n} {\n"
+    "  mut i 0\n"
+    "  while [< $i $n] {\n"
+    "    [yield $i]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [filter [counter 8] [\\ == [% $it 2] 0]]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  /* evens from 0..7: 0, 2, 4, 6 */
+  ASSERT_STR_EQ(cap.buf, "[vec 0 2 4 6]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM generator | filter | take pipeline --- */
+static int test_sm_filter_take(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  [yield 1]\n"
+    "  [yield 2]\n"
+    "  [yield 3]\n"
+    "  [yield 4]\n"
+    "  [yield 5]\n"
+    "  [yield 6]\n"
+    "  [yield 7]\n"
+    "}\n"
+    "[gen] | filter [\\ > $it 3] | take 2 | collect | print\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 4 5]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: OP_COLLECT on SM generator via derived stream (transform) --- */
+static int test_sm_collect_transform(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  [yield 5]\n"
+    "  [yield 10]\n"
+    "  [yield 15]\n"
+    "}\n"
+    "[print [collect [transform [gen] [\\ + $it 1]]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 6 11 16]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Main --- */
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
 
@@ -1003,6 +1141,13 @@ int main(void) {
     { "sm_while_if_else_yield", test_sm_while_if_else_yield },
     { "sm_nested_3_levels",     test_sm_nested_3_levels },
     { "sm_while_if_multi_yield",test_sm_while_if_multi_yield },
+    { "sm_filter_collect",      test_sm_filter_collect },
+    { "sm_transform_collect",   test_sm_transform_collect },
+    { "sm_take_collect",        test_sm_take_collect },
+    { "sm_chained_pipeline",    test_sm_chained_pipeline },
+    { "sm_filter_while_gen",    test_sm_filter_while_gen },
+    { "sm_filter_take",         test_sm_filter_take },
+    { "sm_collect_transform",   test_sm_collect_transform },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
