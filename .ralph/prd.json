@@ -224,7 +224,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "This is the VM-side opcode. Compiler emission for await comes in the next story. Scheduler support for SM resumption comes in US-014."
     },
     {

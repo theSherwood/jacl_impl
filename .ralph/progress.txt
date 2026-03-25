@@ -32,6 +32,8 @@ Started: Mon Mar 24 2026
 - JaclStream has `state_machine` field (JaclVal) — traced by GC in gc_collect.c OBJ_STREAM case
 - `[print ...]` appends a trailing `\n` — test assertions must account for it
 - SM if-statements: NO special handling needed — normal if compilation (OP_JUMP_IF_FALSE/OP_JUMP) + SM yield + dispatch table compose correctly for arbitrary nesting
+- OP_AWAIT_SM: pops future, reads state obj from slot 0; resolved → push result + continue inline; pending (runtime) → register SM as waiter via `jacl_future_add_waiter(fut, state_val, &heap)` + return VM_OK
+- FutureWaiter.continuation is a JaclVal — can hold SM values or closures; GC traces both via `gc__ms_push_val`
 
 ---
 
@@ -244,4 +246,21 @@ Started: Mon Mar 24 2026
   - Derived streams are fully agnostic to CPS vs SM generators — the recursive `vm__pull_stream_one` handles both transparently
   - Pipe syntax (`[gen] | filter pred | transform fn | collect | print`) works with SM generators — the pipe compiles to the same opcodes, SM detection happens at runtime
   - No new opcodes, no VM changes, no compiler changes needed — the US-008 infrastructure was complete
+---
+
+## 2026-03-25 - US-012
+- Added `OP_AWAIT_SM` opcode (147) to bytecode.c enum, shifting OP_HALT to 148
+- Added debug name entry in `bytecode__opcode_name()` switch
+- Added VM handler in vm.c with three paths:
+  - Resolved/Error: pushes future result onto stack, continues execution inline (no task scheduling overhead)
+  - Pending (runtime mode): registers state machine object as waiter via `jacl_future_add_waiter(fut, state_val, &vm->heap)`, returns VM_OK to suspend; handles race condition (future resolved between check and add)
+  - Pending (single-threaded): pushes nil (shouldn't happen — spawn resolves synchronously)
+- Updated test/test_bytecode.c: OP_AWAIT_SM = 147, OP_HALT = 148
+- Files changed: src/bytecode.c (+2 lines), src/vm.c (+49 lines), test/test_bytecode.c (+1 line)
+- All 83 test suites pass, compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - FutureWaiter.continuation is a JaclVal — can store any GC-managed value (closure or state machine); GC traces it via `gc__ms_push_val` which is type-agnostic
+  - SM await differs from CPS await: resolved futures continue inline (no task scheduling) since the SM function body is one continuous function, not a chain of closures
+  - The `jacl_future_add_waiter` race condition pattern (check state → add waiter → check return) must be replicated for SM waiters, same as CPS
+  - US-014 will need to update `runtime__schedule_waiters` to detect SM values vs closure values in the waiter list and dispatch accordingly
 ---
