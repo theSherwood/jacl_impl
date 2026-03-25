@@ -39,6 +39,10 @@ Started: Mon Mar 24 2026
 - Proc SM path decision: triggers for SUSPEND_YIELD or SUSPEND_AWAIT — any function with yield or await uses SM when use_state_machines=true
 - SM closures capturing: spawn/closure bodies inside SM functions CANNOT capture SM state fields via upvalues — those variables are in the state object, not in local slots; avoid tests that have spawn bodies referencing SM-scope variables
 - `def x [await expr]` in SM mode: no special handling needed — await handler leaves result on stack, def handler stores to state field via OP_SET_STATE_FIELD
+- SM scheduler resumption: `runtime__schedule_waiters` detects SM objects via `jacl_is_state_machine(cont)` and routes to `runtime__schedule_sm_resumption` instead of `runtime__schedule_continuation`
+- SM task executor: `runtime__state_machine_task_exec` calls `sm_closure(state_obj, resume_value)` via `runtime__setup_call(vm, sm_cl, 2, args)` — args[0]=state_obj, args[1]=result
+- SM error handling: if SM task errors and `sm->error_k` is a closure, schedule it with the error value via `runtime__schedule_continuation`
+- SM pinning: respects `sm_cl->pinned` / `sm_cl->pin_worker_id` from the SM closure for worker affinity
 
 ---
 
@@ -292,4 +296,22 @@ Started: Mon Mar 24 2026
   - spawn bodies inside SM functions cannot capture SM state fields — upvalue resolution doesn't find state fields; tests must use constant spawn bodies
   - `def x [await expr]` needs no special handling in SM mode — the normal await handler + def handler compose correctly
   - The await expression result is TYPE_DYN (future result type unknown at compile time)
+---
+
+## 2026-03-25 - US-014
+- Implemented scheduler support for state machine resumption in runtime.c
+- Added `SMTaskData` struct: holds state_machine (JaclVal) and result (JaclVal)
+- Added `runtime__state_machine_task_exec`: calls sm_closure(state_obj, resume_value), handles errors via error_k
+- Added `runtime__schedule_sm_resumption`: creates SM task with proper GC roots and pinning
+- Modified `runtime__schedule_waiters`: detects SM objects via `jacl_is_state_machine(cont)` and routes to SM handler vs closure handler
+- GC safety: task->gc_root = state_machine, task->gc_root2 = result — both scanned during mark phase
+- Error handling: if SM function errors, checks sm->error_k; if it's a closure, schedules it with error value
+- Worker pinning: reads pin settings from sm->sm_closure for thread affinity
+- Files changed: src/runtime.c (+77 lines)
+- All 83 test suites pass, compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - `runtime__setup_call` takes argc and argv array — for SM calls, pass 2 args: [state_obj, resume_value]
+  - Error detection pattern (same as CPS): check `r != VM_OK` OR `frame_count == 0 && stack_top > 0 && is_error(stack[top-1])`
+  - When `frame_count > 0` after vm__run, the SM suspended again (nested await) — NOT an error
+  - GC root scanning covers deque tasks, inbox tasks, and currently-executing tasks — SM values are traced through task->gc_root
 ---

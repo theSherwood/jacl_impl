@@ -261,7 +261,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": "This enables end-to-end async SM: compiler emits OP_AWAIT_SM (US-013), VM registers SM waiter (US-012), scheduler resumes SM (this story)."
     },
     {
