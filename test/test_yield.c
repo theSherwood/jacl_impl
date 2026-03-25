@@ -1106,6 +1106,253 @@ static int test_sm_collect_transform(void) {
   TEST_PASS();
 }
 
+/* ===== US-013: SM compilation for await ===== */
+
+/* --- Test: SM compilation emits OP_AWAIT_SM for await-only proc --- */
+static int test_sm_compile_await(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  VM vm;
+  vm_init(&vm, &arena);
+
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  CompileResult cr = compile_with_sm(
+    "proc fetch {} {\n"
+    "  def f [spawn { 42 }]\n"
+    "  [await $f]\n"
+    "}\n",
+    &arena, &intern_table, &vm.heap);
+
+  ASSERT_INT_EQ(cr.error_count, 0);
+
+  /* Find the fetch closure */
+  JaclClosure* cl = NULL;
+  for (uint16_t i = 0; i < cr.chunk.const_count; i++) {
+    if (jacl_is_closure(cr.chunk.constants[i])) {
+      JaclClosure* c = jacl_as_closure(cr.chunk.constants[i]);
+      if (c->name && strcmp(c->name, "fetch") == 0) {
+        cl = c;
+        break;
+      }
+    }
+  }
+  ASSERT(cl != NULL);
+
+  /* SM async function: param_count = 2 (state_obj, resume_value) */
+  ASSERT_INT_EQ(cl->param_count, 2);
+  ASSERT(cl->is_sm_compiled);
+
+  /* Check bytecode contains OP_AWAIT_SM (not OP_AWAIT) */
+  int await_sm_count = 0;
+  int await_cps_count = 0;
+  for (uint32_t i = 0; i < cl->chunk.code_count; i++) {
+    if (cl->chunk.code[i] == OP_AWAIT_SM) await_sm_count++;
+    if (cl->chunk.code[i] == OP_AWAIT) await_cps_count++;
+  }
+  ASSERT_INT_EQ(await_sm_count, 1);
+  ASSERT_INT_EQ(await_cps_count, 0);
+
+  intern_table_destroy(&intern_table);
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM compilation for mixed yield+await in same function --- */
+static int test_sm_compile_mixed_yield_await(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  VM vm;
+  vm_init(&vm, &arena);
+
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  CompileResult cr = compile_with_sm(
+    "proc gen {} {\n"
+    "  def f [spawn { 42 }]\n"
+    "  def result [await $f]\n"
+    "  [yield $result]\n"
+    "  [yield 99]\n"
+    "}\n",
+    &arena, &intern_table, &vm.heap);
+
+  ASSERT_INT_EQ(cr.error_count, 0);
+
+  JaclClosure* cl = NULL;
+  for (uint16_t i = 0; i < cr.chunk.const_count; i++) {
+    if (jacl_is_closure(cr.chunk.constants[i])) {
+      JaclClosure* c = jacl_as_closure(cr.chunk.constants[i]);
+      if (c->name && strcmp(c->name, "gen") == 0) {
+        cl = c;
+        break;
+      }
+    }
+  }
+  ASSERT(cl != NULL);
+
+  /* SM with both yield and await: param_count = 2, is_generator = true */
+  ASSERT_INT_EQ(cl->param_count, 2);
+  ASSERT(cl->is_sm_compiled);
+  ASSERT(cl->is_generator);
+
+  /* Check bytecode contains both OP_AWAIT_SM and OP_YIELD_SM */
+  int await_sm_count = 0;
+  int yield_sm_count = 0;
+  for (uint32_t i = 0; i < cl->chunk.code_count; i++) {
+    if (cl->chunk.code[i] == OP_AWAIT_SM) await_sm_count++;
+    if (cl->chunk.code[i] == OP_YIELD_SM) yield_sm_count++;
+  }
+  ASSERT_INT_EQ(await_sm_count, 1);
+  ASSERT_INT_EQ(yield_sm_count, 2);
+
+  /* sm_field_count should be 2 (f, result) */
+  ASSERT_INT_EQ(cl->sm_field_count, 2);
+
+  intern_table_destroy(&intern_table);
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM compilation for sequential awaits --- */
+static int test_sm_compile_sequential_awaits(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  VM vm;
+  vm_init(&vm, &arena);
+
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  CompileResult cr = compile_with_sm(
+    "proc multi {} {\n"
+    "  def f1 [spawn { 10 }]\n"
+    "  def f2 [spawn { 20 }]\n"
+    "  def f3 [spawn { 30 }]\n"
+    "  def a [await $f1]\n"
+    "  def b [await $f2]\n"
+    "  def c [await $f3]\n"
+    "  [yield [+ $a [+ $b $c]]]\n"
+    "}\n",
+    &arena, &intern_table, &vm.heap);
+
+  ASSERT_INT_EQ(cr.error_count, 0);
+
+  JaclClosure* cl = NULL;
+  for (uint16_t i = 0; i < cr.chunk.const_count; i++) {
+    if (jacl_is_closure(cr.chunk.constants[i])) {
+      JaclClosure* c = jacl_as_closure(cr.chunk.constants[i]);
+      if (c->name && strcmp(c->name, "multi") == 0) {
+        cl = c;
+        break;
+      }
+    }
+  }
+  ASSERT(cl != NULL);
+
+  /* 3 awaits + 1 yield = 4 suspension points → 4 resume points in dispatch */
+  int await_sm_count = 0;
+  int yield_sm_count = 0;
+  for (uint32_t i = 0; i < cl->chunk.code_count; i++) {
+    if (cl->chunk.code[i] == OP_AWAIT_SM) await_sm_count++;
+    if (cl->chunk.code[i] == OP_YIELD_SM) yield_sm_count++;
+  }
+  ASSERT_INT_EQ(await_sm_count, 3);
+  ASSERT_INT_EQ(yield_sm_count, 1);
+
+  /* sm_field_count: f1, f2, f3, a, b, c = 6 */
+  ASSERT_INT_EQ(cl->sm_field_count, 6);
+
+  intern_table_destroy(&intern_table);
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: E2E yield+await generator with resolved future (single-threaded) --- */
+static int test_sm_e2e_yield_await(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  def f [spawn { 42 }]\n"
+    "  def result [await $f]\n"
+    "  [yield $result]\n"
+    "  [yield 99]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 42 99]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: E2E sequential awaits then yield (single-threaded) --- */
+static int test_sm_e2e_sequential_awaits(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  def f1 [spawn { 10 }]\n"
+    "  def f2 [spawn { 20 }]\n"
+    "  def a [await $f1]\n"
+    "  def b [await $f2]\n"
+    "  [yield [+ $a $b]]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 30]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: E2E sequential awaits then yields in same function --- */
+static int test_sm_e2e_await_then_yields(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  def f1 [spawn { 100 }]\n"
+    "  def f2 [spawn { 200 }]\n"
+    "  def f3 [spawn { 300 }]\n"
+    "  def a [await $f1]\n"
+    "  [yield $a]\n"
+    "  def b [await $f2]\n"
+    "  [yield $b]\n"
+    "  def c [await $f3]\n"
+    "  [yield $c]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 100 200 300]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: CPS path unchanged when use_state_machines is false --- */
+static int test_sm_await_cps_unchanged(void) {
+  PrintCapture cap;
+  /* Run without SM flag — uses CPS path (or placeholder) */
+  VMResult r = run_capture(
+    "proc main {} {\n"
+    "  def f [spawn { 55 }]\n"
+    "  def val [await $f]\n"
+    "  [print $val]\n"
+    "}\n"
+    "[main]\n",
+    &cap);
+  /* CPS await is placeholder (returns nil), so val will be nil */
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Main --- */
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
 
@@ -1148,6 +1395,13 @@ int main(void) {
     { "sm_filter_while_gen",    test_sm_filter_while_gen },
     { "sm_filter_take",         test_sm_filter_take },
     { "sm_collect_transform",   test_sm_collect_transform },
+    { "sm_compile_await",        test_sm_compile_await },
+    { "sm_compile_mixed_yield_await", test_sm_compile_mixed_yield_await },
+    { "sm_compile_sequential_awaits", test_sm_compile_sequential_awaits },
+    { "sm_e2e_yield_await",      test_sm_e2e_yield_await },
+    { "sm_e2e_sequential_awaits", test_sm_e2e_sequential_awaits },
+    { "sm_e2e_await_then_yields", test_sm_e2e_await_then_yields },
+    { "sm_await_cps_unchanged",  test_sm_await_cps_unchanged },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

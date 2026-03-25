@@ -5964,7 +5964,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Check for state machine compilation mode.
        When use_state_machines is true, analyze the body for suspension points.
-       If it contains yield, use the SM path instead of CPS. */
+       If it contains yield or await, use the SM path instead of CPS. */
     uint8_t user_param_count = param_count; /* original param count for callers */
     bool use_sm_path = false;
     SuspensionAnalysis sm_analysis_data;
@@ -5974,7 +5974,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       sm_analysis_data = compiler__analyze_suspensions(
           args[body_arg_idx], param_names_arr, user_param_count);
       for (uint32_t si = 0; si < sm_analysis_data.suspension_count; si++) {
-        if (sm_analysis_data.suspension_points[si].type == SUSPEND_YIELD) {
+        if (sm_analysis_data.suspension_points[si].type == SUSPEND_YIELD ||
+            sm_analysis_data.suspension_points[si].type == SUSPEND_AWAIT) {
           use_sm_path = true;
           break;
         }
@@ -7298,7 +7299,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* await — suspension point (CPS transform in US-003+, context checks now) */
+  /* await — suspension point (CPS transform or SM) */
   if (compiler__head_matches(head, "await", 5)) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "await", "1 argument", argc);
@@ -7314,7 +7315,30 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
           "cannot suspend inside non-suspending callback");
       return;
     }
-    /* Placeholder: compile arg then replace with nil (OP_AWAIT in US-006) */
+    if (c->sm_analysis) {
+      /* SM await: compile future, set resume_point, emit OP_AWAIT_SM.
+         Inline (resolved): OP_AWAIT_SM pushes result, jump past resume push.
+         Resume (pending):  dispatch table lands at resume label, push __rv. */
+      compiler__compile_node(c, args[0]);
+      uint32_t sp_idx = c->sm_suspension_idx++;
+      compiler__emit_constant(c, jacl_i32((int32_t)(sp_idx + 1)), line);
+      compiler__emit_byte(c, OP_SET_RESUME_POINT, line);
+      compiler__emit_byte(c, OP_AWAIT_SM, line);
+      /* Inline path: result already on stack; jump past resume value push */
+      uint32_t skip_jump = compiler__emit_jump(c, OP_JUMP, line);
+      /* Resume label: dispatch table backpatch lands here */
+      if (sp_idx < c->sm_dispatch.label_count) {
+        compiler__patch_jump(c, c->sm_dispatch.label_patches[sp_idx]);
+      }
+      /* Push resume value from slot 1 (__rv) onto stack */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, 1, line);
+      /* Common path: result on stack */
+      compiler__patch_jump(c, skip_jump);
+      c->last_expr_type = TYPE_DYN;
+      return;
+    }
+    /* Placeholder for CPS path: compile arg then replace with nil */
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_POP, line);
     compiler__emit_byte(c, OP_NIL, line);
