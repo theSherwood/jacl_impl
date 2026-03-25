@@ -34,6 +34,11 @@ Started: Mon Mar 24 2026
 - SM if-statements: NO special handling needed — normal if compilation (OP_JUMP_IF_FALSE/OP_JUMP) + SM yield + dispatch table compose correctly for arbitrary nesting
 - OP_AWAIT_SM: pops future, reads state obj from slot 0; resolved → push result + continue inline; pending (runtime) → register SM as waiter via `jacl_future_add_waiter(fut, state_val, &heap)` + return VM_OK
 - FutureWaiter.continuation is a JaclVal — can hold SM values or closures; GC traces both via `gc__ms_push_val`
+- SM await sequence: compile future → OP_CONST(resume_id) + OP_SET_RESUME_POINT → OP_AWAIT_SM → OP_JUMP(skip) → [resume label: OP_GET_LOCAL 1 (__rv)] → skip: — two paths converge with result on stack
+- SM await vs SM yield: yield has one path (always suspends, resume pushes OP_NIL); await has two paths (inline resolved pushes result from OP_AWAIT_SM, resume pushes __rv from slot 1) — requires OP_JUMP to skip resume push on inline path
+- Proc SM path decision: triggers for SUSPEND_YIELD or SUSPEND_AWAIT — any function with yield or await uses SM when use_state_machines=true
+- SM closures capturing: spawn/closure bodies inside SM functions CANNOT capture SM state fields via upvalues — those variables are in the state object, not in local slots; avoid tests that have spawn bodies referencing SM-scope variables
+- `def x [await expr]` in SM mode: no special handling needed — await handler leaves result on stack, def handler stores to state field via OP_SET_STATE_FIELD
 
 ---
 
@@ -263,4 +268,28 @@ Started: Mon Mar 24 2026
   - SM await differs from CPS await: resolved futures continue inline (no task scheduling) since the SM function body is one continuous function, not a chain of closures
   - The `jacl_future_add_waiter` race condition pattern (check state → add waiter → check return) must be replicated for SM waiters, same as CPS
   - US-014 will need to update `runtime__schedule_waiters` to detect SM values vs closure values in the waiter list and dispatch accordingly
+---
+
+## 2026-03-25 - US-013
+- Implemented compiler emission of OP_AWAIT_SM for await in state machine mode
+- Modified proc compilation decision point: SM path now triggers for SUSPEND_AWAIT in addition to SUSPEND_YIELD
+- Added SM await handler in compiler__compile_command: compile future → set resume_point → OP_AWAIT_SM → OP_JUMP(skip) → [resume label: OP_GET_LOCAL 1] → skip
+- Two-path design: inline (resolved future) pushes result from OP_AWAIT_SM and jumps past resume label; resume (pending future) dispatch lands at resume label and pushes __rv from slot 1
+- `def x [await expr]` works automatically: await handler leaves result on stack, def handler stores to state field
+- CPS await placeholder unchanged when use_state_machines=false
+- Added 7 tests:
+  - sm_compile_await: bytecode verification for await-only SM function (OP_AWAIT_SM emitted, not OP_AWAIT)
+  - sm_compile_mixed_yield_await: both OP_YIELD_SM and OP_AWAIT_SM in same function
+  - sm_compile_sequential_awaits: 3 awaits + 1 yield = 4 suspension points
+  - sm_e2e_yield_await: generator with await on resolved future then yields (single-threaded)
+  - sm_e2e_sequential_awaits: 2 sequential awaits then yield, correct result
+  - sm_e2e_await_then_yields: 3 spawn/await/yield sequences producing [100,200,300]
+  - sm_await_cps_unchanged: CPS path still works with SM disabled
+- Files changed: src/compiler.c (+25 lines), test/test_yield.c (+257 lines)
+- All 83 test suites pass (44 yield tests), compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - SM await needs two code paths (inline + resume) unlike SM yield (one path) — the OP_JUMP + OP_GET_LOCAL 1 pattern bridges them
+  - spawn bodies inside SM functions cannot capture SM state fields — upvalue resolution doesn't find state fields; tests must use constant spawn bodies
+  - `def x [await expr]` needs no special handling in SM mode — the normal await handler + def handler compose correctly
+  - The await expression result is TYPE_DYN (future result type unknown at compile time)
 ---
