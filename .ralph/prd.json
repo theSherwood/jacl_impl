@@ -149,7 +149,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "This wires up the runtime side. Combined with US-007, basic sequential generators should work end-to-end."
     },
     {

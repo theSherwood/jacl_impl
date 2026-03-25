@@ -25,6 +25,11 @@ Started: Mon Mar 24 2026
 - SM generator closure: `param_count = 2` (internal __sm, __rv), `min_args = user_param_count` (for call-site arity checks), `sm_field_count = state_layout.field_count`
 - OP_CHECK_ERROR pops the top-of-stack value if it's NOT an error — this is how statement results are cleaned up between statements in a block
 - `arena_alloc` zero-initializes memory (`memset(ptr, 0, size)`) — no need to explicitly zero-init struct fields after arena allocation
+- OP_CLOSURE copies template fields one by one — when adding new JaclClosure fields, MUST also add the copy in OP_CLOSURE (vm.c ~line 1700)
+- SM generators at call site: OP_CALL detects `closure->is_sm_compiled`, allocates OBJ_STATE_MACHINE, copies args to SM fields, stores on `stream->state_machine`
+- SM stream pull: check `!jacl_is_nil(stream->state_machine)` to detect SM generator; call `sm_closure(state_obj, nil)` — same call for both PENDING and CONSUMED states
+- JaclStream has `state_machine` field (JaclVal) — traced by GC in gc_collect.c OBJ_STREAM case
+- `[print ...]` appends a trailing `\n` — test assertions must account for it
 
 ---
 
@@ -160,4 +165,24 @@ Started: Mon Mar 24 2026
   - `arena_alloc` zero-initializes, so `sm_field_count=0` is automatic for non-SM closures
   - For SM generators, the proc compilation flow has 3 decision points: (1) CPS __k param addition (skip for SM), (2) closure param setup (override for SM), (3) body compilation (SM vs CPS vs normal)
   - The `use_sm_path` flag is determined by running `compiler__analyze_suspensions` and checking for SUSPEND_YIELD points
+---
+
+## 2026-03-25 - US-008
+- Wired up runtime side: SM generators now work end-to-end with stream_next, collect, and derived streams
+- Added `state_machine` field (JaclVal) to JaclStream struct in gc.c, initialized to JACL_NIL
+- Added `is_sm_compiled` bool field to JaclClosure struct in bytecode.c (set by compiler for SM closures)
+- Modified OP_CALL generator path in vm.c: when `closure->is_sm_compiled`, allocates OBJ_STATE_MACHINE, copies call-site args into SM fields, stores on `stream->state_machine`
+- Modified OP_CLOSURE in vm.c to copy `is_sm_compiled` and `sm_field_count` from template closure
+- Added SM generator path in OP_STREAM_NEXT: detects SM via `!jacl_is_nil(stream->state_machine)`, calls `sm_closure(state_obj, nil)`
+- Added SM generator path in OP_COLLECT: same SM detection, inline loop calls SM closure per iteration
+- Added SM generator path in `vm__pull_stream_one`: handles SM generators for derived stream pipelines (filter, transform, take)
+- Updated GC tracing in gc_collect.c: OBJ_STREAM case now traces `stream->state_machine`
+- Added 3 end-to-end tests: sm_e2e_basic_collect, sm_e2e_with_params, sm_e2e_exhaustion
+- Files changed: src/bytecode.c, src/compiler.c, src/gc.c, src/gc_collect.c, src/vm.c, test/test_yield.c
+- All 83 tests pass, compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - OP_CLOSURE copies JaclClosure fields one-by-one from template — adding a new field to JaclClosure requires updating the copy in OP_CLOSURE (vm.c ~line 1700), otherwise the runtime closure won't have the field set
+  - SM generators use the same call pattern (sm_closure(state_obj, nil)) for both PENDING and CONSUMED states — the dispatch table handles routing via resume_point
+  - `[print ...]` appends `\n` to output — test string assertions must include it
+  - `compile_with_sm` test helper gives `use_state_machines = true` to the compiler but the top-level code (outside procs) compiles normally — SM only activates for proc bodies with suspension points
 ---
