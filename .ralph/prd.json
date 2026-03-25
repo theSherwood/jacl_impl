@@ -168,7 +168,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "This is where state machines really shine vs CPS — no loopback closure, no self-referencing cell, just a backward jump."
     },
     {

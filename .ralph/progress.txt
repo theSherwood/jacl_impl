@@ -21,7 +21,8 @@ Started: Mon Mar 24 2026
 - SM yield sequence: compile value → OP_CONST(resume_id) + OP_SET_RESUME_POINT → OP_YIELD_SM → [resume label] → OP_NIL (yield expr result for check_error)
 - SM variable resolution: when `c->sm_analysis` is set, AST_VAR_REF checks state layout first via `sm__find_field()` before falling through to normal local resolution
 - SM def/mut: when `c->sm_analysis` is set, writes value to state field via OP_SET_STATE_FIELD instead of creating a stack local; no cells needed for mut in SM mode
-- SM set/`::`: when `c->sm_analysis` is set, resolves to OP_SET_STATE_FIELD for state layout names before checking locals
+- SM set/`::`: when `c->sm_analysis` is set, resolves to OP_SET_STATE_FIELD for state layout names before checking locals; MUST emit OP_NIL after OP_SET_STATE_FIELD so check_error has a value to consume
+- SM while loops: normal while compilation (OP_LOOP backward jump) works in SM mode — no special handling needed; all variables in state object survive across yields; dispatch table jumps directly into loop body after resume
 - SM generator closure: `param_count = 2` (internal __sm, __rv), `min_args = user_param_count` (for call-site arity checks), `sm_field_count = state_layout.field_count`
 - OP_CHECK_ERROR pops the top-of-stack value if it's NOT an error — this is how statement results are cleaned up between statements in a block
 - `arena_alloc` zero-initializes memory (`memset(ptr, 0, size)`) — no need to explicitly zero-init struct fields after arena allocation
@@ -185,4 +186,19 @@ Started: Mon Mar 24 2026
   - SM generators use the same call pattern (sm_closure(state_obj, nil)) for both PENDING and CONSUMED states — the dispatch table handles routing via resume_point
   - `[print ...]` appends `\n` to output — test string assertions must include it
   - `compile_with_sm` test helper gives `use_state_machines = true` to the compiler but the top-level code (outside procs) compiles normally — SM only activates for proc bodies with suspension points
+---
+
+## 2026-03-25 - US-009
+- Yield inside while loops works in SM mode using the normal while compilation path (OP_LOOP backward jump)
+- Fixed bug: SM set/`::` handler was missing OP_NIL after OP_SET_STATE_FIELD — caused stack corruption when resuming into while loop body with mutations after yield
+- No new opcodes or VM changes needed — normal while compilation + SM-aware variable/def/mut/set handlers + SM yield compose correctly
+- CPS while path (`compiler__compile_cps_while`) is naturally bypassed in SM mode since `compiler__compile_sm_body` calls `compiler__compile_node` (normal path), not `compiler__compile_cps_stmts`
+- Added 6 SM while-loop tests: basic counter, collect, range with 2 params, fibonacci (def+yield+multi-mutation), multi-yield per iteration, empty loop
+- Files changed: src/compiler.c (+2 lines), test/test_yield.c (+136 lines), .ralph/prd.json, .ralph/progress.txt
+- All 83 test suites pass (22 yield tests), compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - Every SM code path that consumes a stack value (OP_SET_STATE_FIELD) must push a result value (typically OP_NIL) if the expression result will be consumed by check_error — the normal opcodes (OP_SET_CELL_LOCAL) push nil internally, but OP_SET_STATE_FIELD just pops
+  - While loops in SM mode need NO special handling — the normal while handler, OP_LOOP backward jump, SM-aware def/mut/set/var_ref, and SM yield all compose correctly
+  - The dispatch table can jump directly into any nesting level (inside a while body) and execution flows naturally from there (through loop back-edge, condition re-evaluation, etc.)
+  - When debugging SM generators, step through stream_next calls incrementally (1, 2, 3, 4...) to find the exact resume point that fails
 ---
