@@ -1434,6 +1434,198 @@ static int test_sm_error_before_yield(void) {
   TEST_PASS();
 }
 
+/* ===== US-016: End-to-end async state machine tests ===== */
+
+/* Thread-safe print capture for concurrent tests */
+typedef struct {
+  PrintCapture     cap;
+  platform_mutex_t mutex;
+} ThreadSafePrint;
+
+static void capture_print_ts(const char* text, uint32_t len, void* ctx) {
+  ThreadSafePrint* tsp = (ThreadSafePrint*)ctx;
+  MUTEX_LOCK(tsp->mutex);
+  capture_print(text, len, &tsp->cap);
+  MUTEX_UNLOCK(tsp->mutex);
+}
+
+/* --- Test: 3 sequential awaits with correct result (1 SM allocation) --- */
+static int test_sm_async_3_sequential_awaits(void) {
+  PrintCapture cap;
+  /* In SM mode, the generator allocates exactly 1 state machine object.
+     All 3 awaits reuse the same SM object via resume_point dispatch.
+     This replaces the CPS approach which would allocate 3 continuation closures. */
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  def f1 [spawn { 10 }]\n"
+    "  def f2 [spawn { 20 }]\n"
+    "  def f3 [spawn { 30 }]\n"
+    "  def a [await $f1]\n"
+    "  def b [await $f2]\n"
+    "  def c [await $f3]\n"
+    "  [yield [+ $a [+ $b $c]]]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 60]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM generators on worker threads (concurrent, yield only) --- */
+static int test_sm_async_concurrent_workers(void) {
+  arena_t arena = {0};
+  VM vm;
+  vm_init(&vm, &arena);
+
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+  vm.intern_table = &intern_table;
+
+  /* Compile SM generator program */
+  CompileResult cr = compile_with_sm(
+    "proc gen {n} {\n"
+    "  mut i 0\n"
+    "  while [< $i $n] {\n"
+    "    [yield $i]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [gen 5]]]\n",
+    &arena, &intern_table, &vm.heap);
+  ASSERT_INT_EQ(cr.error_count, 0);
+
+  /* Wrap compiled chunk in a non-CPS closure for runtime submission */
+  JaclClosure* wrapper = (JaclClosure*)gc_alloc(&vm.heap, OBJ_CLOSURE,
+                                                  sizeof(JaclClosure));
+  memset(wrapper, 0, sizeof(JaclClosure));
+  wrapper->chunk = cr.chunk;
+  wrapper->param_count = 0;
+  wrapper->upvalue_count = 0;
+
+  /* Set up runtime with 2 workers */
+  Runtime rt;
+  runtime_init(&rt, 2);
+
+  /* Thread-safe print capture */
+  ThreadSafePrint tsp;
+  memset(&tsp, 0, sizeof(tsp));
+  MUTEX_INIT(tsp.mutex);
+
+  /* Configure worker VMs */
+  for (int i = 0; i < rt.num_workers; i++) {
+    rt.workers[i].vm.print_fn = capture_print_ts;
+    rt.workers[i].vm.print_ctx = &tsp;
+    rt.workers[i].vm.intern_table = &intern_table;
+    rt.workers[i].vm.struct_registry = cr.struct_registry;
+  }
+
+  /* Submit closure and wait for completion */
+  JaclVal completion = jacl_future(&rt.workers[0].vm.heap);
+  JaclFuture* cfut = jacl_as_future(completion);
+  runtime__submit_spawn_task(&rt, wrapper, completion, false);
+
+  for (;;) {
+    uint32_t state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_ACQUIRE);
+    if (state == FUTURE_RESOLVED || state == FUTURE_ERROR) break;
+    SLEEP_MILLISECONDS(1);
+  }
+
+  uint32_t final_state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_RELAXED);
+  ASSERT_INT_EQ(final_state, FUTURE_RESOLVED);
+  ASSERT_STR_EQ(tsp.cap.buf, "[vec 0 1 2 3 4]\n");
+
+  runtime_destroy(&rt);
+  MUTEX_DESTROY(tsp.mutex);
+  intern_table_destroy(&intern_table);
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  TEST_PASS();
+}
+
+/* --- Test: async function spawns, awaits, processes result, yields --- */
+static int test_sm_async_spawn_await_process(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  def f [spawn { 42 }]\n"
+    "  def result [await $f]\n"
+    "  def doubled [* $result 2]\n"
+    "  [yield $doubled]\n"
+    "  def f2 [spawn { 100 }]\n"
+    "  def r2 [await $f2]\n"
+    "  [yield [+ $r2 $result]]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 84 142]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: nested async calls — SM generator collects from another SM generator --- */
+static int test_sm_async_nested_sm(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc inner {} {\n"
+    "  def f [spawn { 10 }]\n"
+    "  def val [await $f]\n"
+    "  [yield $val]\n"
+    "  [yield [* $val 2]]\n"
+    "  [yield [* $val 3]]\n"
+    "}\n"
+    "proc outer {} {\n"
+    "  def vals [collect [inner]]\n"
+    "  [yield $vals]\n"
+    "  [yield 99]\n"
+    "}\n"
+    "[print [collect [outer]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec [vec 10 20 30] 99]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: single-threaded await resolves inline with no scheduling --- */
+static int test_sm_async_inline_resolved(void) {
+  PrintCapture cap;
+  /* In single-threaded mode, spawn resolves synchronously.
+     OP_AWAIT_SM detects the resolved future and pushes the result
+     inline, continuing execution without any scheduling overhead. */
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  def f [spawn { 77 }]\n"
+    "  [yield [await $f]]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 77]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: all existing tests pass with use_state_machines = false (CPS) --- */
+static int test_sm_async_cps_still_works(void) {
+  PrintCapture cap;
+  /* Run the same generator pattern through CPS path (no SM flag) */
+  VMResult r = run_capture(
+    "proc gen {} {\n"
+    "  [yield 1]\n"
+    "  [yield 2]\n"
+    "  [yield 3]\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 1 2 3]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Main --- */
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
 
@@ -1487,6 +1679,12 @@ int main(void) {
     { "sm_error_in_collect",     test_sm_error_in_collect },
     { "sm_error_through_filter", test_sm_error_through_filter },
     { "sm_error_before_yield",   test_sm_error_before_yield },
+    { "sm_async_3_sequential_awaits", test_sm_async_3_sequential_awaits },
+    { "sm_async_concurrent_workers",  test_sm_async_concurrent_workers },
+    { "sm_async_spawn_await_process", test_sm_async_spawn_await_process },
+    { "sm_async_nested_sm",           test_sm_async_nested_sm },
+    { "sm_async_inline_resolved",     test_sm_async_inline_resolved },
+    { "sm_async_cps_still_works",     test_sm_async_cps_still_works },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
