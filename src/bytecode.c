@@ -167,6 +167,7 @@ typedef enum {
   OP_GET_RESUME_POINT, /* no operand; read state_obj from frame slot 0, push resume_point as i32 */
   OP_SET_RESUME_POINT, /* no operand; pop i32 value, write to state_obj resume_point */
   OP_YIELD_SM,       /* SM yield: pop value, store in vm->yield_value, return VM_YIELD (no continuation) */
+  OP_AWAIT_SM,       /* SM await: pop future, read state_obj from frame slot 0; if resolved: push result; if pending: register SM waiter, return VM_OK */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -449,6 +450,7 @@ static const char* bytecode__opcode_name(uint8_t op) {
     case OP_GET_RESUME_POINT:    return "OP_GET_RESUME_POINT";
     case OP_SET_RESUME_POINT:    return "OP_SET_RESUME_POINT";
     case OP_YIELD_SM:            return "OP_YIELD_SM";
+    case OP_AWAIT_SM:            return "OP_AWAIT_SM";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";

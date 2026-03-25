@@ -6142,6 +6142,55 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         return VM_YIELD;
       }
 
+      case OP_AWAIT_SM: {
+        /* State machine await: pop future from stack, read state object
+           from frame slot 0.  If future is already resolved, push the
+           result and continue execution inline.  If pending in runtime
+           mode, register the state machine object as a future waiter and
+           return VM_OK to suspend the current task.  Scheduler support
+           for resuming SM waiters is in runtime.c (US-014). */
+        JaclVal future_val;
+        result = vm__pop(vm, &future_val);
+        if (result != VM_OK) return result;
+
+        if (!jacl_is_future(future_val)) {
+          vm__set_error(vm, "await requires a future value, got %s",
+                       vm__type_name(future_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JaclFuture *fut = jacl_as_future(future_val);
+        uint32_t fstate = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_ACQUIRE);
+
+        if (fstate == FUTURE_RESOLVED || fstate == FUTURE_ERROR) {
+          /* Already settled — push result and continue inline. */
+          JaclVal await_result = (JaclVal)fut->result;
+          result = vm__push(vm, await_result);
+          if (result != VM_OK) return result;
+        } else if (vm->runtime) {
+          /* PENDING in runtime mode — register state machine as waiter
+             on the future and suspend by returning VM_OK. */
+          bool added = jacl_future_add_waiter(fut, state_val, &vm->heap);
+          if (!added) {
+            /* Race: future resolved between our check and add_waiter.
+               Push result and continue inline. */
+            JaclVal await_result = (JaclVal)fut->result;
+            result = vm__push(vm, await_result);
+            if (result != VM_OK) return result;
+          } else {
+            /* Successfully registered — suspend current task. */
+            return VM_OK;
+          }
+        } else {
+          /* PENDING in single-threaded mode — shouldn't happen since
+             spawn resolves synchronously.  Push nil as fallback. */
+          result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
+        }
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }
