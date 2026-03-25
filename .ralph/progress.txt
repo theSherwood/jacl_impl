@@ -52,6 +52,10 @@ Started: Mon Mar 24 2026
 - SM parallel in single-threaded mode: runs bodies sequentially, pushes result vector directly onto stack (like nil continuation path)
 - SM parallel + OP_COLLECT limitation: same as SM await — OP_PARALLEL returns VM_OK in runtime mode, OP_COLLECT treats VM_OK as generator exhaustion; SM parallel inside generators only works single-threaded
 - Parallel body closures inside SM functions cannot capture SM state fields (same as spawn bodies) — test with constant values in parallel bodies
+- SM race sequence: compile bodies → OP_CONST(resume_id) + OP_SET_RESUME_POINT → OP_GET_LOCAL 0 (push state obj) → OP_RACE n → OP_JUMP(skip) → [resume label: OP_GET_LOCAL 1 (__rv)] → skip: — same two-path pattern as SM await/parallel
+- RaceAgg has `state_machine` field (JaclVal) — when non-nil, `runtime__complete_race_slot` resumes SM instead of scheduling continuation closure
+- OP_RACE validation: allows closure, nil, OR state_machine as "continuation" value; detects SM via `jacl_is_state_machine()`
+- SM race in single-threaded mode: runs bodies sequentially, first result wins, pushes winner directly onto stack (like nil continuation path)
 
 ---
 
@@ -384,4 +388,24 @@ Started: Mon Mar 24 2026
   - SM parallel + OP_COLLECT has same limitation as SM await + OP_COLLECT: OP_PARALLEL returns VM_OK in runtime mode, OP_COLLECT treats VM_OK as generator exhaustion
   - Forward declarations needed in runtime.c when calling functions defined later in the file (C99 requirement)
   - ParallelAgg.state_machine is the SM equivalent of ParallelAgg.continuation — exactly one should be non-nil
+---
+
+## 2026-03-25 - US-018
+- Converted race join to state machine resumption, mirroring the parallel SM pattern
+- Added `state_machine` field (JaclVal) to RaceAgg struct in gc.c, initialized to JACL_NIL
+- Updated GC tracing for `agg->state_machine` in gc_collect.c OBJ_RACE_AGG case
+- Added SM race handler in compiler.c: same two-path pattern as SM parallel/await (set resume_point, push state obj, OP_RACE, OP_JUMP skip, resume label pushes __rv)
+- Updated OP_RACE VM handler:
+  - Validates state_machine values alongside closures and nil
+  - Runtime mode: sets `agg->state_machine = continuation` when SM detected, passes NIL as agg->continuation
+  - Single-threaded mode: pushes winner result directly (like nil continuation path)
+- Updated `runtime__complete_race_slot`: when `agg->state_machine` is non-nil, calls `runtime__schedule_sm_resumption` instead of `runtime__schedule_continuation`
+- Refactored non-CPS race body completion in `runtime__race_task_exec` to route through `runtime__complete_race_slot` (eliminates duplicated CAS logic, ensures SM path is used)
+- Files changed: src/gc.c, src/gc_collect.c, src/compiler.c, src/vm.c, src/runtime.c
+- All tests pass (pre-existing parser/e2e_struct_tramp failures unchanged), compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - Race SM follows identical pattern to parallel SM — only difference is race uses CAS settled (first-wins) vs parallel's atomic counter (all-complete)
+  - Non-CPS race body completion had duplicated CAS+schedule logic inline in runtime__race_task_exec — refactored to go through runtime__complete_race_slot for consistency and SM support
+  - RaceAgg.state_machine is the SM equivalent of RaceAgg.continuation — exactly one should be non-nil
+  - SM path decision (SUSPEND_YIELD or SUSPEND_AWAIT check) correctly excludes SUSPEND_RACE/SUSPEND_PARALLEL — race/parallel in functions with only those suspensions stay on CPS path since SM entry points require yield or await
 ---
