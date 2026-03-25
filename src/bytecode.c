@@ -286,7 +286,8 @@ typedef struct {
                                  (set when concurrent body touches mutable globals) */
   int8_t        pin_worker_id; /* worker ID to pin to (-1 = not yet assigned) */
   bool          is_generator;  /* true if proc body contains yield */
-  uint8_t       sm_field_count; /* state machine field count (0 = CPS, >0 = SM-compiled) */
+  bool          is_sm_compiled; /* true if compiled as state machine (not CPS) */
+  uint8_t       sm_field_count; /* state machine field count for SM-compiled closures */
 } JaclClosure;
 
 static inline JaclVal jacl_closure(JaclClosure* cl) {

@@ -6016,6 +6016,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       closure->param_names[0] = jacl_inline_string("__sm", 4);
       closure->param_names[1] = jacl_inline_string("__rv", 4);
       closure->sm_field_count = (uint8_t)sm_analysis_data.state_layout.field_count;
+      closure->is_sm_compiled = true;
     } else {
       closure->param_count = param_count;
       /* Allocate and fill param_names from parsed array */

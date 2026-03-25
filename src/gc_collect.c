@@ -247,6 +247,7 @@ static void gc__trace_object(void *payload, GCMarkStack *ms) {
         JaclStream *stream = (JaclStream *)payload;
         gc__ms_push_val(ms, stream->next_fn);
         gc__ms_push_val(ms, stream->cached_value);
+        gc__ms_push_val(ms, stream->state_machine);
         for (uint8_t i = 0; i < stream->arg_count; i++) {
             gc__ms_push_val(ms, stream->args[i]);
         }

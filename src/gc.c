@@ -1004,6 +1004,7 @@ typedef struct {
     uint32_t  kind;          /* STREAM_KIND_GENERATOR / FILTER */
     JaclVal   next_fn;       /* CPS continuation closure (nil when exhausted/error) */
     JaclVal   cached_value;  /* cached current element */
+    JaclVal   state_machine; /* SM generator: state machine object (nil for CPS) */
     /* Deferred first-call arguments (saved at generator creation, used on first pull) */
     JaclVal   args[STREAM_MAX_ARGS];
     uint8_t   arg_count;
@@ -1015,11 +1016,12 @@ static inline JaclStream *jacl_as_stream(JaclVal v) {
 
 static JaclVal jacl_stream(ThreadHeap *heap) {
     JaclStream *s = (JaclStream *)gc_alloc(heap, OBJ_STREAM, sizeof(JaclStream));
-    s->state        = STREAM_PENDING;
-    s->kind         = STREAM_KIND_GENERATOR;
-    s->next_fn      = JACL_NIL;
-    s->cached_value = JACL_NIL;
-    s->arg_count    = 0;
+    s->state         = STREAM_PENDING;
+    s->kind          = STREAM_KIND_GENERATOR;
+    s->next_fn       = JACL_NIL;
+    s->cached_value  = JACL_NIL;
+    s->state_machine = JACL_NIL;
+    s->arg_count     = 0;
     return jacl_stream_ptr(s);
 }
 

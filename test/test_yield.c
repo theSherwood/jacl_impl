@@ -513,6 +513,116 @@ static int test_sm_manual_drive(void) {
   TEST_PASS();
 }
 
+/* ===== US-008: End-to-end SM generator with stream/collect ===== */
+
+/* Helper: compile + run source with use_state_machines = true, capture output */
+static VMResult run_capture_sm(const char* src, PrintCapture* cap) {
+  cap->len = 0;
+  cap->buf[0] = '\0';
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn = capture_print;
+  vm.print_ctx = cap;
+
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+  vm.intern_table = &intern_table;
+
+  CompileResult cr = compile_with_sm(src, &arena, &intern_table, &vm.heap);
+  if (cr.error_count > 0) {
+    intern_table_destroy(&intern_table);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    return VM_RUNTIME_ERROR;
+  }
+
+  vm.struct_registry = cr.struct_registry;
+  VMResult result = vm_exec(&vm, &cr.chunk);
+  intern_table_destroy(&intern_table);
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  return result;
+}
+
+/* --- Test: SM generator yielding 3 values, collected end-to-end --- */
+static int test_sm_e2e_basic_collect(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  VM vm;
+  vm_init(&vm, &arena);
+
+  PrintCapture cap;
+  cap.len = 0;
+  cap.buf[0] = '\0';
+  vm.print_fn = capture_print;
+  vm.print_ctx = &cap;
+
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+  vm.intern_table = &intern_table;
+
+  const char* src =
+    "proc gen {} {\n"
+    "  [yield 10]\n"
+    "  [yield 20]\n"
+    "  [yield 30]\n"
+    "}\n"
+    "[print [collect [gen]]]\n";
+
+  CompileResult cr = compile_with_sm(src, &arena, &intern_table, &vm.heap);
+  ASSERT_INT_EQ(cr.error_count, 0);
+
+  vm.struct_registry = cr.struct_registry;
+  VMResult r = vm_exec(&vm, &cr.chunk);
+
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 10 20 30]\n");
+
+  intern_table_destroy(&intern_table);
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM generator with params, collected end-to-end --- */
+static int test_sm_e2e_with_params(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {x y} {\n"
+    "  [yield $x]\n"
+    "  [yield [+ $x $y]]\n"
+    "  [yield $y]\n"
+    "}\n"
+    "[print [collect [gen 3 7]]]\n",
+    &cap);
+
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 3 10 7]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM generator exhaustion returns nil for stream_next --- */
+static int test_sm_e2e_exhaustion(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc gen {} {\n"
+    "  [yield 1]\n"
+    "}\n"
+    "def s [gen]\n"
+    "[print [stream_next $s]]\n"
+    "[print [stream_next $s]]\n",
+    &cap);
+
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\nnil\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Main --- */
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
 
@@ -531,6 +641,9 @@ int main(void) {
     { "sm_compile_basic",       test_sm_compile_basic },
     { "sm_compile_with_params", test_sm_compile_with_params },
     { "sm_manual_drive",        test_sm_manual_drive },
+    { "sm_e2e_basic_collect",   test_sm_e2e_basic_collect },
+    { "sm_e2e_with_params",     test_sm_e2e_with_params },
+    { "sm_e2e_exhaustion",      test_sm_e2e_exhaustion },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
