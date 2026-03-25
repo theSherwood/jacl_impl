@@ -5265,6 +5265,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__compile_node(c, args[1]);
         compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
         compiler__emit_byte(c, (uint8_t)field_idx, line);
+        /* set returns nil (consumed by check_error) */
+        compiler__emit_byte(c, OP_NIL, line);
         return;
       }
     }

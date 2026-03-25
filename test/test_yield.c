@@ -623,6 +623,136 @@ static int test_sm_e2e_exhaustion(void) {
   TEST_PASS();
 }
 
+/* ===== US-009: Yield inside while loops (state machine) ===== */
+
+/* --- Test: SM while loop yielding 0..N --- */
+static int test_sm_while_basic(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc counter {n} {\n"
+    "  mut i 0\n"
+    "  while [< $i $n] {\n"
+    "    [yield $i]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "def s [counter 4]\n"
+    "[print [stream_next $s]]\n"
+    "[print [stream_next $s]]\n"
+    "[print [stream_next $s]]\n"
+    "[print [stream_next $s]]\n"
+    "[print [stream_next $s]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "0\n1\n2\n3\nnil\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM while loop with mut counter via collect --- */
+static int test_sm_while_collect(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc counter {n} {\n"
+    "  mut i 0\n"
+    "  while [< $i $n] {\n"
+    "    [yield $i]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [counter 5]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 0 1 2 3 4]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM while loop with two params (range) --- */
+static int test_sm_while_range(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc range {start, end} {\n"
+    "  mut i $start\n"
+    "  while [< $i $end] {\n"
+    "    [yield $i]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [range 3 7]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 3 4 5 6]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM while loop with multiple mut variables (fibonacci) --- */
+static int test_sm_while_fibonacci(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc fibs {} {\n"
+    "  mut a 0\n"
+    "  mut b 1\n"
+    "  [yield $a]\n"
+    "  [yield $b]\n"
+    "  mut i 0\n"
+    "  while [< $i 3] {\n"
+    "    def c [+ $a $b]\n"
+    "    [yield $c]\n"
+    "    a :: $b\n"
+    "    b :: $c\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [fibs]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  /* fib: 0, 1, 1, 2, 3 */
+  ASSERT_STR_EQ(cap.buf, "[vec 0 1 1 2 3]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM while loop with multiple yields per iteration --- */
+static int test_sm_while_multi_yield(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc pairs {n} {\n"
+    "  mut i 0\n"
+    "  while [< $i $n] {\n"
+    "    [yield $i]\n"
+    "    [yield [+ $i 100]]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [pairs 3]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 0 100 1 101 2 102]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* --- Test: SM while loop yielding zero iterations (empty) --- */
+static int test_sm_while_empty(void) {
+  PrintCapture cap;
+  VMResult r = run_capture_sm(
+    "proc empty {} {\n"
+    "  mut i 0\n"
+    "  while [< $i 0] {\n"
+    "    [yield $i]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [empty]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Main --- */
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
 
@@ -644,6 +774,12 @@ int main(void) {
     { "sm_e2e_basic_collect",   test_sm_e2e_basic_collect },
     { "sm_e2e_with_params",     test_sm_e2e_with_params },
     { "sm_e2e_exhaustion",      test_sm_e2e_exhaustion },
+    { "sm_while_basic",         test_sm_while_basic },
+    { "sm_while_collect",       test_sm_while_collect },
+    { "sm_while_range",         test_sm_while_range },
+    { "sm_while_fibonacci",     test_sm_while_fibonacci },
+    { "sm_while_multi_yield",   test_sm_while_multi_yield },
+    { "sm_while_empty",         test_sm_while_empty },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
