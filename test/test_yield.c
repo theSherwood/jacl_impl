@@ -253,7 +253,7 @@ static int test_yield_computed(void) {
 
 /* ===== US-007: State machine generator compilation ===== */
 
-/* Helper: compile source with use_state_machines = true */
+/* Helper: compile source with SM compilation (always on) */
 static CompileResult compile_with_sm(const char* src, arena_t* arena,
                                       JaclInternTable* intern_table,
                                       ThreadHeap* heap) {
@@ -271,7 +271,6 @@ static CompileResult compile_with_sm(const char* src, arena_t* arena,
   Compiler c;
   compiler__init(&c, &cr.chunk, arena, intern_table, heap);
   c.suspension_map = &suspension_map;
-  c.use_state_machines = true;  /* Enable SM compilation */
 
   StructTypeRegistry* reg = (StructTypeRegistry*)arena_alloc(arena, sizeof(StructTypeRegistry));
   reg->count = 0;
@@ -515,7 +514,7 @@ static int test_sm_manual_drive(void) {
 
 /* ===== US-008: End-to-end SM generator with stream/collect ===== */
 
-/* Helper: compile + run source with use_state_machines = true, capture output */
+/* Helper: compile + run source with SM compilation, capture output */
 static VMResult run_capture_sm(const char* src, PrintCapture* cap) {
   cap->len = 0;
   cap->buf[0] = '\0';
@@ -1335,10 +1334,10 @@ static int test_sm_e2e_await_then_yields(void) {
   TEST_PASS();
 }
 
-/* --- Test: CPS path unchanged when use_state_machines is false --- */
+/* --- Test: SM await via jacl_run pipeline --- */
 static int test_sm_await_cps_unchanged(void) {
   PrintCapture cap;
-  /* Run without SM flag — uses CPS path (or placeholder) */
+  /* Run through jacl_run pipeline — uses SM path */
   VMResult r = run_capture(
     "proc main {} {\n"
     "  def f [spawn { 55 }]\n"
@@ -1347,7 +1346,6 @@ static int test_sm_await_cps_unchanged(void) {
     "}\n"
     "[main]\n",
     &cap);
-  /* CPS await is placeholder (returns nil), so val will be nil */
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1524,7 +1522,7 @@ static int test_sm_async_concurrent_workers(void) {
   /* Submit closure and wait for completion */
   JaclVal completion = jacl_future(&rt.workers[0].vm.heap);
   JaclFuture* cfut = jacl_as_future(completion);
-  runtime__submit_spawn_task(&rt, wrapper, completion, false);
+  runtime__submit_spawn_task(&rt, wrapper, completion);
 
   for (;;) {
     uint32_t state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_ACQUIRE);
@@ -1608,10 +1606,10 @@ static int test_sm_async_inline_resolved(void) {
   TEST_PASS();
 }
 
-/* --- Test: all existing tests pass with use_state_machines = false (CPS) --- */
+/* --- Test: generator pattern via jacl_run pipeline --- */
 static int test_sm_async_cps_still_works(void) {
   PrintCapture cap;
-  /* Run the same generator pattern through CPS path (no SM flag) */
+  /* Run generator pattern through jacl_run pipeline (SM path) */
   VMResult r = run_capture(
     "proc gen {} {\n"
     "  [yield 1]\n"

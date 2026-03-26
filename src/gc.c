@@ -1038,8 +1038,7 @@ typedef struct {
     volatile uint32_t errored;       /* 0 or 1 (first-error-wins CAS) */
     volatile uint64_t error_val;     /* first error value (JaclVal) */
     uint32_t          count;         /* total N */
-    JaclVal           continuation;  /* join continuation closure (CPS path) */
-    JaclVal           state_machine; /* state machine object (SM path, or NIL) */
+    JaclVal           state_machine; /* state machine object for join resumption */
     JaclVal           results[];     /* trailing array of N result slots */
 } ParallelAgg;
 
@@ -1057,15 +1056,14 @@ static inline ParallelAgg *as_parallel_agg(JaclVal v) {
 
 /* Constructor: allocate a pending parallel aggregate with N result slots */
 static JaclVal jacl_parallel_agg(ThreadHeap *heap, uint32_t count,
-                                  JaclVal continuation) {
+                                  JaclVal state_machine) {
     size_t sz = sizeof(ParallelAgg) + count * sizeof(JaclVal);
     ParallelAgg *agg = (ParallelAgg *)gc_alloc(heap, OBJ_PARALLEL_AGG, sz);
     agg->completed     = 0;
     agg->errored       = 0;
     agg->error_val     = (uint64_t)JACL_NIL;
     agg->count         = count;
-    agg->continuation  = continuation;
-    agg->state_machine = JACL_NIL;
+    agg->state_machine = state_machine;
     for (uint32_t i = 0; i < count; i++) {
         agg->results[i] = JACL_NIL;
     }
@@ -1080,8 +1078,7 @@ static JaclVal jacl_parallel_agg(ThreadHeap *heap, uint32_t count,
  * Uses CAS on settled flag to determine the single winner. */
 typedef struct {
     volatile uint32_t settled;       /* 0 = not settled, 1 = winner determined */
-    JaclVal           continuation;  /* race continuation closure (CPS path) */
-    JaclVal           state_machine; /* state machine object (SM path, or NIL) */
+    JaclVal           state_machine; /* state machine object for join resumption */
 } RaceAgg;
 
 /* Tag/untag helpers — same tagging scheme as ParallelAgg */
@@ -1095,11 +1092,10 @@ static inline RaceAgg *as_race_agg(JaclVal v) {
 }
 
 /* Constructor: allocate a pending race aggregate */
-static JaclVal jacl_race_agg(ThreadHeap *heap, JaclVal continuation) {
+static JaclVal jacl_race_agg(ThreadHeap *heap, JaclVal state_machine) {
     RaceAgg *agg = (RaceAgg *)gc_alloc(heap, OBJ_RACE_AGG, sizeof(RaceAgg));
     agg->settled       = 0;
-    agg->continuation  = continuation;
-    agg->state_machine = JACL_NIL;
+    agg->state_machine = state_machine;
     return race_agg_ptr(agg);
 }
 

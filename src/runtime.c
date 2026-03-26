@@ -853,11 +853,9 @@ static JaclVal runtime__create_resolve_closure(ThreadHeap *heap, arena_t *arena,
 /* ======================================================================
  * Parallel-slot completion closure (parallel_k)
  *
- * Replaces resolve_k for CPS parallel bodies. When called with the
- * body's result, directly completes the parallel aggregation slot
+ * Used as error_k on SM parallel body state machines. When called with
+ * the body's result, directly completes the parallel aggregation slot
  * (stores result, handles errors, increments counter, schedules join).
- * This avoids the internal-future-poll that breaks when CPS bodies
- * suspend at inner awaits.
  *
  * Bytecode:
  *   OP_GET_UPVALUE  0   ; push agg_val
@@ -964,22 +962,16 @@ static void runtime__complete_parallel_slot(void *runtime_ptr, VM *vm,
             cont_arg = jacl_vector_ptr(vec);
         }
 
-        if (!jacl_is_nil(agg->state_machine)) {
-            /* SM path: resume parent state machine with results */
-            runtime__schedule_sm_resumption(rt, agg->state_machine, cont_arg);
-        } else {
-            /* CPS path: schedule continuation closure */
-            JaclClosure *cont = jacl_as_closure(agg->continuation);
-            runtime__schedule_continuation(rt, cont, cont_arg);
-        }
+        /* Resume parent state machine with results */
+        runtime__schedule_sm_resumption(rt, agg->state_machine, cont_arg);
     }
 }
 
 /* ======================================================================
  * Race-slot completion closure (race_k)
  *
- * Replaces resolve_k for CPS race bodies. When called with the
- * body's result, CAS-settles the race and schedules the winner.
+ * Used as error_k on SM race body state machines. When called with
+ * the body's result, CAS-settles the race and schedules the winner.
  *
  * Bytecode:
  *   OP_GET_UPVALUE  0   ; push agg_val
@@ -1032,25 +1024,17 @@ static void runtime__complete_race_slot(void *runtime_ptr, VM *vm,
     Runtime *rt = (Runtime *)runtime_ptr;
     RaceAgg *agg = as_race_agg(agg_val);
 
-    /* CAS settled: winner (0->1) schedules continuation, losers discard */
+    /* CAS settled: winner (0->1) resumes parent SM, losers discard */
     uint32_t expected = 0;
     if (ATOMIC_CAS(&agg->settled, &expected, 1, MEM_ACQ_REL, MEM_RELAXED)) {
-        if (!jacl_is_nil(agg->state_machine)) {
-            /* SM path: resume parent state machine with winner result */
-            runtime__schedule_sm_resumption(rt, agg->state_machine, task_result);
-        } else {
-            /* CPS path: schedule continuation closure */
-            JaclClosure *cont = jacl_as_closure(agg->continuation);
-            runtime__schedule_continuation(rt, cont, task_result);
-        }
+        /* Resume parent state machine with winner result */
+        runtime__schedule_sm_resumption(rt, agg->state_machine, task_result);
     }
 }
 
 /* ======================================================================
- * Continuation scheduling — used by OP_AWAIT and future resolution
- *
- * When a future resolves, registered waiter continuations need to be
- * scheduled as tasks so workers can execute them.
+ * Continuation scheduling — used by internal closures (resolve_k,
+ * parallel_k, race_k) that complete futures/aggregates.
  * ====================================================================== */
 
 typedef struct {
@@ -1066,29 +1050,7 @@ static void runtime__continuation_task_exec(void *data) {
     /* Set up: call continuation(result) */
     runtime__setup_call(vm, ctd->continuation, 1, &ctd->result);
 
-    VMResult r = vm__run(vm, 0);
-
-    /* If continuation failed, __k was not called. Forward error to __k
-       to prevent completion future from hanging. __k is upvalue 0.
-       Only check for errors when the continuation actually completed
-       (frame_count == 0). When frame_count > 0, the continuation
-       suspended via OP_AWAIT/OP_PARALLEL/OP_RACE and the stack contains
-       leftover values from in-progress frames — not meaningful errors. */
-    bool errored = (r != VM_OK) ||
-        (vm->frame_count == 0 && vm->stack_top > 0 &&
-         jacl_is_error(vm->stack[vm->stack_top - 1]));
-    if (errored && ctd->continuation->upvalue_count > 0) {
-        JaclVal k_val = ctd->continuation->upvalues[0];
-        if (jacl_is_closure(k_val)) {
-            JaclClosure *k_cl = jacl_as_closure(k_val);
-            JaclVal err;
-            if (vm->stack_top > 0 && jacl_is_error(vm->stack[vm->stack_top - 1]))
-                err = vm->stack[vm->stack_top - 1];
-            else
-                err = jacl_set_error(jacl_inline_string("error", 5));
-            runtime__schedule_continuation(self->runtime, k_cl, err);
-        }
-    }
+    vm__run(vm, 0);
     free(ctd);
 }
 
@@ -1140,22 +1102,22 @@ static void runtime__state_machine_task_exec(void *data) {
 
     VMResult r = vm__run(vm, 0);
 
-    /* If SM function returned error, forward to error_k on the state object.
-       Only check when the function actually completed (frame_count == 0).
-       When frame_count > 0, the SM suspended at another OP_AWAIT_SM. */
-    bool errored = (r != VM_OK) ||
-        (vm->frame_count == 0 && vm->stack_top > 0 &&
-         jacl_is_error(vm->stack[vm->stack_top - 1]));
-    if (errored && !jacl_is_nil(sm->error_k)) {
-        if (jacl_is_closure(sm->error_k)) {
-            JaclClosure *err_cl = jacl_as_closure(sm->error_k);
-            JaclVal err;
-            if (vm->stack_top > 0 && jacl_is_error(vm->stack[vm->stack_top - 1]))
-                err = vm->stack[vm->stack_top - 1];
-            else
-                err = jacl_set_error(jacl_inline_string("error", 5));
-            runtime__schedule_continuation(self->runtime, err_cl, err);
+    /* Check if SM function completed (frame_count == 0) or suspended
+       (frame_count > 0 means it hit OP_AWAIT_SM again). */
+    bool completed = (vm->frame_count == 0);
+    if (completed && !jacl_is_nil(sm->error_k) && jacl_is_closure(sm->error_k)) {
+        /* SM has a completion callback (set for spawn/parallel/race bodies).
+           Call it with the result (success or error). */
+        JaclClosure *k = jacl_as_closure(sm->error_k);
+        JaclVal result;
+        if (r != VM_OK) {
+            result = jacl_set_error(jacl_inline_string("error", 5));
+        } else if (vm->stack_top > 0) {
+            result = vm->stack[vm->stack_top - 1];
+        } else {
+            result = JACL_NIL;
         }
+        runtime__schedule_continuation(self->runtime, k, result);
     }
     free(smd);
 }
@@ -1189,13 +1151,7 @@ static void runtime__schedule_waiters(void *runtime_ptr,
                                        FutureWaiter *waiters,
                                        JaclVal result) {
     while (waiters) {
-        JaclVal cont = waiters->continuation;
-        if (jacl_is_state_machine(cont)) {
-            runtime__schedule_sm_resumption(runtime_ptr, cont, result);
-        } else {
-            JaclClosure *cl = jacl_as_closure(cont);
-            runtime__schedule_continuation(runtime_ptr, cl, result);
-        }
+        runtime__schedule_sm_resumption(runtime_ptr, waiters->continuation, result);
         waiters = waiters->next;
     }
 }
@@ -1207,7 +1163,6 @@ static void runtime__schedule_waiters(void *runtime_ptr,
 typedef struct {
     JaclClosure *closure;
     JaclVal      future_val;
-    bool         is_cps;
 } SpawnTaskData;
 
 static void runtime__spawn_task_exec(void *data) {
@@ -1217,26 +1172,47 @@ static void runtime__spawn_task_exec(void *data) {
     JaclClosure *cl = std->closure;
     JaclFuture *fut = jacl_as_future(std->future_val);
 
-    if (std->is_cps) {
-        /* CPS closure: create resolve_k and pass as __k argument */
+    if (cl->is_sm_compiled) {
+        /* SM closure: create state machine, set error_k to resolve_k,
+           call sm_closure(state_obj, nil). If SM completes on first run,
+           resolve directly. If it suspends, error_k handles later completion. */
+        JaclVal sm_val = gc_alloc_state_machine(&vm->heap, cl->sm_field_count);
+        JaclStateMachine *sm = jacl_as_state_machine(sm_val);
+        sm->sm_closure = jacl_closure_ptr(cl);
+
         JaclVal resolve_k = runtime__create_resolve_closure(
             &vm->heap, &self->arena, std->future_val);
+        sm->error_k = resolve_k;
 
-        runtime__setup_call(vm, cl, 1, &resolve_k);
+        JaclVal args[2];
+        args[0] = sm_val;
+        args[1] = JACL_NIL;
+        runtime__setup_call(vm, cl, 2, args);
 
         VMResult r = vm__run(vm, 0);
-        /* For CPS, the resolve_k closure resolves the future during execution
-           (via OP_RESOLVE_FUTURE which also schedules waiters).
-           If vm__run returned with an error before __k was called, error the future. */
-        if (r != VM_OK) {
-            uint32_t state = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED);
-            if (state == FUTURE_PENDING) {
-                JaclVal err = jacl_set_error(jacl_inline_string("error", 5));
-                FutureWaiter *waiters = jacl_future_error(fut, err,
-                                  &self->grey_buf, &self->runtime->gc_active);
-                runtime__schedule_waiters(self->runtime, waiters, err);
+
+        /* If SM completed on first run, resolve directly */
+        if (vm->frame_count == 0) {
+            uint32_t fstate = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_RELAXED);
+            if (fstate == FUTURE_PENDING) {
+                if (r == VM_OK && vm->stack_top > 0 &&
+                    !jacl_is_error(vm->stack[vm->stack_top - 1])) {
+                    JaclVal result = vm->stack[vm->stack_top - 1];
+                    FutureWaiter *waiters = jacl_future_resolve(fut, result,
+                                        &self->grey_buf, &self->runtime->gc_active);
+                    runtime__schedule_waiters(self->runtime, waiters, result);
+                } else {
+                    JaclVal err = (vm->stack_top > 0 && jacl_is_error(vm->stack[vm->stack_top - 1]))
+                        ? vm->stack[vm->stack_top - 1]
+                        : jacl_set_error(jacl_inline_string("error", 5));
+                    FutureWaiter *waiters = jacl_future_error(fut, err,
+                                      &self->grey_buf, &self->runtime->gc_active);
+                    runtime__schedule_waiters(self->runtime, waiters, err);
+                }
             }
         }
+        /* If frame_count > 0: SM suspended at OP_AWAIT_SM, will be resumed
+           later by runtime__state_machine_task_exec which uses error_k */
     } else {
         /* Non-CPS closure: call directly, resolve future with return value */
         runtime__setup_call(vm, cl, 0, NULL);
@@ -1260,13 +1236,12 @@ static void runtime__spawn_task_exec(void *data) {
 }
 
 static void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
-                                        JaclVal future_val, bool is_cps) {
+                                        JaclVal future_val) {
     Runtime *rt = (Runtime *)runtime_ptr;
 
     SpawnTaskData *std = (SpawnTaskData *)malloc(sizeof(SpawnTaskData));
     std->closure    = closure;
     std->future_val = future_val;
-    std->is_cps     = is_cps;
 
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
     task->fn       = runtime__spawn_task_exec;
@@ -1294,7 +1269,6 @@ typedef struct {
     JaclClosure  *closure;
     JaclVal       agg_val;      /* tagged pointer to ParallelAgg */
     uint32_t      index;        /* position in results array */
-    bool          is_cps;
 } ParallelTaskData;
 
 static void runtime__parallel_task_exec(void *data) {
@@ -1304,27 +1278,35 @@ static void runtime__parallel_task_exec(void *data) {
     JaclClosure *cl = ptd->closure;
     (void)as_parallel_agg(ptd->agg_val); /* validate tag */
 
-    if (ptd->is_cps) {
-        /* CPS closure: create parallel_k that directly completes the slot.
-           This handles both synchronous completion (body returns without
-           suspending) and asynchronous completion (body suspends at an
-           inner await — parallel_k runs later when the future resolves). */
+    if (cl->is_sm_compiled) {
+        /* SM closure: create state machine, set error_k to parallel_k */
+        JaclVal sm_val = gc_alloc_state_machine(&vm->heap, cl->sm_field_count);
+        JaclStateMachine *sm = jacl_as_state_machine(sm_val);
+        sm->sm_closure = jacl_closure_ptr(cl);
+
         JaclVal parallel_k = runtime__create_parallel_k(
             &vm->heap, &self->arena, ptd->agg_val, ptd->index);
+        sm->error_k = parallel_k;
 
-        runtime__setup_call(vm, cl, 1, &parallel_k);
+        JaclVal args[2];
+        args[0] = sm_val;
+        args[1] = JACL_NIL;
+        runtime__setup_call(vm, cl, 2, args);
 
         VMResult r = vm__run(vm, 0);
 
-        /* If VM errored before __k was called, complete slot with error */
-        if (r != VM_OK) {
-            JaclVal err = jacl_set_error(jacl_inline_string("error", 5));
+        /* If SM completed on first run, complete slot directly */
+        if (vm->frame_count == 0) {
+            JaclVal task_result;
+            if (r == VM_OK && vm->stack_top > 0) {
+                task_result = vm->stack[vm->stack_top - 1];
+            } else {
+                task_result = jacl_set_error(jacl_inline_string("error", 5));
+            }
             runtime__complete_parallel_slot(self->runtime, vm,
-                                             ptd->agg_val, ptd->index, err);
+                                             ptd->agg_val, ptd->index, task_result);
         }
-        /* If VM_OK: either parallel_k already ran (synchronous completion)
-           or the body suspended and parallel_k will run later. Either way,
-           the slot completion is handled by parallel_k. */
+        /* If frame_count > 0: SM suspended, error_k (parallel_k) handles later */
     } else {
         /* Non-CPS closure: call directly, complete slot via shared helper */
         JaclVal task_result;
@@ -1349,15 +1331,13 @@ static void runtime__parallel_task_exec(void *data) {
 static void runtime__submit_parallel_task(void *runtime_ptr,
                                            JaclClosure *closure,
                                            JaclVal agg_val,
-                                           uint32_t index,
-                                           bool is_cps) {
+                                           uint32_t index) {
     Runtime *rt = (Runtime *)runtime_ptr;
 
     ParallelTaskData *ptd = (ParallelTaskData *)malloc(sizeof(ParallelTaskData));
     ptd->closure  = closure;
     ptd->agg_val  = agg_val;
     ptd->index    = index;
-    ptd->is_cps   = is_cps;
 
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
     task->fn       = runtime__parallel_task_exec;
@@ -1384,7 +1364,6 @@ static void runtime__submit_parallel_task(void *runtime_ptr,
 typedef struct {
     JaclClosure  *closure;
     JaclVal       agg_val;      /* tagged pointer to RaceAgg */
-    bool          is_cps;
 } RaceTaskData;
 
 static void runtime__race_task_exec(void *data) {
@@ -1393,21 +1372,33 @@ static void runtime__race_task_exec(void *data) {
     VM *vm = &self->vm;
     JaclClosure *cl = rtd->closure;
 
-    if (rtd->is_cps) {
-        /* CPS closure: create race_k that directly settles the race.
-           Handles both synchronous and asynchronous (suspend) completion. */
+    if (cl->is_sm_compiled) {
+        /* SM closure: create state machine, set error_k to race_k */
+        JaclVal sm_val = gc_alloc_state_machine(&vm->heap, cl->sm_field_count);
+        JaclStateMachine *sm = jacl_as_state_machine(sm_val);
+        sm->sm_closure = jacl_closure_ptr(cl);
+
         JaclVal race_k = runtime__create_race_k(
             &vm->heap, &self->arena, rtd->agg_val);
+        sm->error_k = race_k;
 
-        runtime__setup_call(vm, cl, 1, &race_k);
+        JaclVal args[2];
+        args[0] = sm_val;
+        args[1] = JACL_NIL;
+        runtime__setup_call(vm, cl, 2, args);
 
         VMResult r = vm__run(vm, 0);
 
-        /* If VM errored before __k was called, try to settle with error */
-        if (r != VM_OK) {
-            JaclVal err = jacl_set_error(jacl_inline_string("error", 5));
+        /* If SM completed on first run, settle race directly */
+        if (vm->frame_count == 0) {
+            JaclVal task_result;
+            if (r == VM_OK && vm->stack_top > 0) {
+                task_result = vm->stack[vm->stack_top - 1];
+            } else {
+                task_result = jacl_set_error(jacl_inline_string("error", 5));
+            }
             runtime__complete_race_slot(self->runtime, vm,
-                                         rtd->agg_val, err);
+                                         rtd->agg_val, task_result);
         }
     } else {
         JaclVal task_result = JACL_NIL;
@@ -1431,14 +1422,12 @@ static void runtime__race_task_exec(void *data) {
 
 static void runtime__submit_race_task(void *runtime_ptr,
                                        JaclClosure *closure,
-                                       JaclVal agg_val,
-                                       bool is_cps) {
+                                       JaclVal agg_val) {
     Runtime *rt = (Runtime *)runtime_ptr;
 
     RaceTaskData *rtd = (RaceTaskData *)malloc(sizeof(RaceTaskData));
     rtd->closure  = closure;
     rtd->agg_val  = agg_val;
-    rtd->is_cps   = is_cps;
 
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
     task->fn       = runtime__race_task_exec;
@@ -1455,7 +1444,7 @@ static void runtime__submit_race_task(void *runtime_ptr,
 }
 
 /* ======================================================================
- * rt_run_to_completion: submit a CPS closure as a task and block until
+ * rt_run_to_completion: submit a closure as a task and block until
  * its completion future resolves.
  * ====================================================================== */
 
@@ -1465,18 +1454,17 @@ static VMResult rt_run_to_completion(Runtime *rt, JaclClosure *closure,
     JaclVal completion = jacl_future(&rt->workers[0].vm.heap);
     JaclFuture *cfut = jacl_as_future(completion);
 
-    bool is_cps = (closure->param_count == 1);
-    runtime__submit_spawn_task(rt, closure, completion, is_cps);
+    runtime__submit_spawn_task(rt, closure, completion);
 
-    /* Block until the completion future resolves (spin/yield) */
-    for (;;) {
+    /* Block until the completion future resolves (with timeout) */
+    for (int ms = 0; ms < 5000; ms++) {
         uint32_t state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_ACQUIRE);
         if (state == FUTURE_RESOLVED || state == FUTURE_ERROR) break;
         SLEEP_MILLISECONDS(1);
     }
 
     uint32_t state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_RELAXED);
-    if (state == FUTURE_ERROR) {
+    if (state == FUTURE_ERROR || state == FUTURE_PENDING) {
         return VM_RUNTIME_ERROR;
     }
     return VM_OK;

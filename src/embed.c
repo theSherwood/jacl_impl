@@ -295,7 +295,7 @@ JACL_EMBED_FN JaclVal jacl_eval(JaclVM* jvm, const char* source) {
   JaclVal eval_result;
 
   if (cr.suspending) {
-    /* CPS-transformed code — run to get main closure, then call with resolve_k */
+    /* Suspending code — run to get main closure, then call it */
     VMResult r = vm_exec(vm, &cr.chunk);
     if (r != VM_OK) {
       eval_result = embed__make_error(jvm, vm->error_message ? vm->error_message
@@ -306,62 +306,67 @@ JACL_EMBED_FN JaclVal jacl_eval(JaclVM* jvm, const char* source) {
 
     JaclVal main_cl_val = vm->stack[0];
     if (!jacl_is_closure(main_cl_val)) {
-      eval_result = embed__make_error(jvm, "internal error: CPS top-level did not produce closure");
+      eval_result = embed__make_error(jvm, "internal error: suspending top-level did not produce closure");
       EVAL_RESTORE();
       return eval_result;
     }
     JaclClosure *main_cl = jacl_as_closure(main_cl_val);
 
-    JaclVal completion = jacl_future(&vm->heap);
-    JaclVal resolve_k = runtime__create_resolve_closure(&vm->heap, &jvm->arena,
-                                                         completion);
-
-    vm->stack_top = 0;
-    vm->stack[0]  = main_cl_val;
-    vm->stack[1]  = resolve_k;
-    vm->stack_top = 2;
-
     JaclClosure top_closure_wrapper;
     memset(&top_closure_wrapper, 0, sizeof(top_closure_wrapper));
     top_closure_wrapper.chunk = cr.chunk;
 
-    vm->frames[0].closure    = &top_closure_wrapper;
-    vm->frames[0].return_ip  = NULL;
-    vm->frames[0].stack_base = 0;
-    vm->frames[0].chunk      = &cr.chunk;
-    vm->frame_count = 1;
+    if (main_cl->is_sm_compiled) {
+      /* SM main closure: create state machine, call with (sm_val, nil) */
+      JaclVal sm_val = gc_alloc_state_machine(&vm->heap, main_cl->sm_field_count);
+      JaclStateMachine *sm = jacl_as_state_machine(sm_val);
+      sm->sm_closure = main_cl_val;
 
-    vm->frames[1].closure    = main_cl;
-    vm->frames[1].return_ip  = NULL;
-    vm->frames[1].stack_base = 1;
-    vm->frames[1].chunk      = &main_cl->chunk;
-    vm->frame_count = 2;
-    vm->ip    = main_cl->chunk.code;
-    vm->chunk = &main_cl->chunk;
-    vm->top_chunk = &main_cl->chunk;
+      vm->stack_top = 0;
+      vm->stack[0]  = main_cl_val;
+      vm->stack[1]  = sm_val;
+      vm->stack[2]  = JACL_NIL;
+      vm->stack_top = 3;
 
-    r = vm__run(vm, 1);
-    if (r != VM_OK) {
-      eval_result = embed__make_error(jvm, vm->error_message ? vm->error_message
-                                                              : "runtime error");
+      vm->frames[0].closure    = &top_closure_wrapper;
+      vm->frames[0].return_ip  = NULL;
+      vm->frames[0].stack_base = 0;
+      vm->frames[0].chunk      = &cr.chunk;
+      vm->frame_count = 1;
+
+      vm->frames[1].closure    = main_cl;
+      vm->frames[1].return_ip  = NULL;
+      vm->frames[1].stack_base = 1;
+      vm->frames[1].chunk      = &main_cl->chunk;
+      vm->frame_count = 2;
+      vm->ip    = main_cl->chunk.code;
+      vm->chunk = &main_cl->chunk;
+      vm->top_chunk = &main_cl->chunk;
+
+      r = vm__run(vm, 1);
+      if (r != VM_OK) {
+        eval_result = embed__make_error(jvm, vm->error_message ? vm->error_message
+                                                                : "runtime error");
+        EVAL_RESTORE();
+        return eval_result;
+      }
+
+      if (vm->stack_top > 0) {
+        eval_result = vm->stack[vm->stack_top - 1];
+      } else {
+        eval_result = JACL_NIL;
+      }
       EVAL_RESTORE();
       return eval_result;
     }
 
-    JaclFuture *cfut = jacl_as_future(completion);
-    uint32_t state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_RELAXED);
-    if (state == FUTURE_RESOLVED) {
-      eval_result = (JaclVal)cfut->result;
-    } else if (state == FUTURE_ERROR) {
-      eval_result = embed__make_error(jvm, "runtime error in CPS execution");
-    } else {
-      eval_result = JACL_NIL;
-    }
+    /* Non-SM suspending code no longer supported (CPS removed) */
+    eval_result = embed__make_error(jvm, "CPS suspending code not supported (use state machine path)");
     EVAL_RESTORE();
     return eval_result;
   }
 
-  /* Non-CPS: straightforward execution */
+  /* Non-suspending: straightforward execution */
   VMResult r = vm_exec(vm, &cr.chunk);
   if (r != VM_OK) {
     eval_result = embed__make_error(jvm, vm->error_message ? vm->error_message

@@ -565,7 +565,7 @@ static JaclClosure* test__find_closure(BytecodeChunk *chunk, const char *name) {
     return NULL;
 }
 
-/* Test: suspending proc with 1 await gets __k param and CPS body */
+/* Test: suspending proc with 1 await gets SM compilation */
 static int test_cps_single_await_compiles(void) {
     arena_t arena = {0};
     VM vm;
@@ -575,26 +575,22 @@ static int test_cps_single_await_compiles(void) {
         "proc foo {x} { def a [await $x]; + $a 1 }", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
-    /* Find the foo closure in the top-level chunk */
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    /* CPS: foo takes x + __k = 2 params */
+    /* SM: foo takes __sm + __rv = 2 params */
     ASSERT_INT_EQ(foo->param_count, 2);
+    ASSERT(foo->is_sm_compiled);
 
-    /* foo's body should contain a continuation closure */
+    /* SM has no continuation closures */
     JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
-    ASSERT(cont != NULL);
-    /* Continuation takes 1 param (the await result = 'a') */
-    ASSERT_INT_EQ(cont->param_count, 1);
-    /* Continuation captures __k from foo (at least 1 upvalue) */
-    ASSERT(cont->upvalue_count >= 1);
+    ASSERT(cont == NULL);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: suspending proc with 2 sequential awaits creates chained continuations */
+/* Test: suspending proc with 2 sequential awaits compiles as SM */
 static int test_cps_two_sequential_awaits(void) {
     arena_t arena = {0};
     VM vm;
@@ -610,29 +606,18 @@ static int test_cps_two_sequential_awaits(void) {
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    /* CPS: foo takes x, y, __k = 3 params */
-    ASSERT_INT_EQ(foo->param_count, 3);
-
-    /* First continuation (handles code after first await) */
-    JaclClosure *cont1 = test__find_closure(&foo->chunk, "__cont");
-    ASSERT(cont1 != NULL);
-    ASSERT_INT_EQ(cont1->param_count, 1);
-    /* cont1 captures y and __k (at least 2 upvalues) */
-    ASSERT(cont1->upvalue_count >= 2);
-
-    /* Second continuation nested inside first */
-    JaclClosure *cont2 = test__find_closure(&cont1->chunk, "__cont");
-    ASSERT(cont2 != NULL);
-    ASSERT_INT_EQ(cont2->param_count, 1);
-    /* cont2 captures a and __k (at least 2 upvalues) */
-    ASSERT(cont2->upvalue_count >= 2);
+    /* SM: always 2 params (__sm, __rv) */
+    ASSERT_INT_EQ(foo->param_count, 2);
+    ASSERT(foo->is_sm_compiled);
+    /* SM needs fields for x, y, a locals */
+    ASSERT(foo->sm_field_count >= 2);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: suspending proc with 3 sequential awaits creates triple-nested continuations */
+/* Test: suspending proc with 3 sequential awaits compiles as SM */
 static int test_cps_three_sequential_awaits(void) {
     arena_t arena = {0};
     VM vm;
@@ -649,29 +634,18 @@ static int test_cps_three_sequential_awaits(void) {
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    /* CPS: foo takes x, y, z, __k = 4 params */
-    ASSERT_INT_EQ(foo->param_count, 4);
-
-    /* First continuation */
-    JaclClosure *cont1 = test__find_closure(&foo->chunk, "__cont");
-    ASSERT(cont1 != NULL);
-
-    /* Second continuation */
-    JaclClosure *cont2 = test__find_closure(&cont1->chunk, "__cont");
-    ASSERT(cont2 != NULL);
-
-    /* Third continuation */
-    JaclClosure *cont3 = test__find_closure(&cont2->chunk, "__cont");
-    ASSERT(cont3 != NULL);
-    /* Third cont captures a, b, and __k (at least 3 upvalues) */
-    ASSERT(cont3->upvalue_count >= 3);
+    /* SM: always 2 params (__sm, __rv) */
+    ASSERT_INT_EQ(foo->param_count, 2);
+    ASSERT(foo->is_sm_compiled);
+    /* SM needs fields for x, y, z, a, b locals */
+    ASSERT(foo->sm_field_count >= 3);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: non-suspending proc is completely unaffected by CPS */
+/* Test: non-suspending proc is completely unaffected by SM compilation */
 static int test_cps_non_suspending_unaffected(void) {
     arena_t arena = {0};
     VM vm;
@@ -692,7 +666,7 @@ static int test_cps_non_suspending_unaffected(void) {
     TEST_PASS();
 }
 
-/* Test: non-suspending proc keeps original param count (no __k) */
+/* Test: non-suspending proc keeps original param count (no SM) */
 static int test_cps_non_suspending_param_count(void) {
     arena_t arena = {0};
     VM vm;
@@ -704,14 +678,15 @@ static int test_cps_non_suspending_param_count(void) {
 
     JaclClosure *add = test__find_closure(&cr.chunk, "add");
     ASSERT(add != NULL);
-    ASSERT_INT_EQ(add->param_count, 2); /* no __k */
+    ASSERT_INT_EQ(add->param_count, 2); /* original params, no SM */
+    ASSERT(!add->is_sm_compiled);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: calling a suspending proc propagates CPS to the caller */
+/* Test: calling a suspending proc propagates SM to the caller */
 static int test_cps_propagation_to_caller(void) {
     arena_t arena = {0};
     VM vm;
@@ -722,27 +697,24 @@ static int test_cps_propagation_to_caller(void) {
         "proc caller {f} { def r [afn $f]; $r }", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
-    /* afn is suspending → CPS-transformed with __k */
+    /* afn is suspending → SM-compiled */
     JaclClosure *afn = test__find_closure(&cr.chunk, "afn");
     ASSERT(afn != NULL);
-    ASSERT_INT_EQ(afn->param_count, 2); /* x + __k */
+    ASSERT_INT_EQ(afn->param_count, 2); /* __sm + __rv */
+    ASSERT(afn->is_sm_compiled);
 
-    /* caller calls afn → transitively suspending → also gets __k */
+    /* caller calls afn → transitively suspending → also SM */
     JaclClosure *caller = test__find_closure(&cr.chunk, "caller");
     ASSERT(caller != NULL);
-    ASSERT_INT_EQ(caller->param_count, 2); /* f + __k */
-
-    /* caller has a continuation for code after the suspending call */
-    JaclClosure *cont = test__find_closure(&caller->chunk, "__cont");
-    ASSERT(cont != NULL);
-    ASSERT_INT_EQ(cont->param_count, 1);
+    ASSERT_INT_EQ(caller->param_count, 2); /* __sm + __rv */
+    ASSERT(caller->is_sm_compiled);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: CPS single await with resolved future via stub — end-to-end execution */
+/* Test: SM single await with resolved future — end-to-end execution */
 static int test_cps_single_await_resolved(void) {
     arena_t arena = {0};
     VM vm;
@@ -751,27 +723,21 @@ static int test_cps_single_await_resolved(void) {
     vm.print_fn = capture_print;
     vm.print_ctx = &cap;
 
-    /* Create a resolved future, then call the CPS proc.
-       The OP_AWAIT stub calls the continuation immediately with the resolved value. */
+    /* SM proc with await: spawn resolves immediately in single-threaded */
     VMResult r = jacl_run(
         "proc afn {f} { def v [await $f]; print $v }\n"
         "def fut [spawn { 42 }]\n"
-        "[afn $fut { \"done\" }]",
+        "[afn $fut]",
         &vm, &arena);
-    /* The proc should compile and run. The spawn stub creates a future but
-       doesn't resolve it, so await will get nil from the stub.
-       The __k parameter is the last arg "done" string. */
-    (void)r; /* Best-effort: just check it doesn't crash */
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "42\n");
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: eager upvalue capture — continuation captures ALL live locals,
-   including those not directly referenced by the continuation body.
-   This ensures nested closures (parallel bodies, etc.) can access any
-   parent variable through the transitive upvalue chain. */
+/* Test: SM compilation preserves all locals in state object fields */
 static int test_cps_variable_capture(void) {
     arena_t arena = {0};
     VM vm;
@@ -780,36 +746,28 @@ static int test_cps_variable_capture(void) {
     CompileResult cr = test__compile(
         "proc foo {a, b, c} {\n"
         "  def x [await $a]\n"
-        "  # b is not used after await, but still captured eagerly\n"
         "  + $x $c\n"
         "}", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    ASSERT_INT_EQ(foo->param_count, 4); /* a, b, c, __k */
-
-    /* Continuation eagerly captures ALL parent locals: a, b, c, __k = 4 */
-    JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
-    ASSERT(cont != NULL);
-    ASSERT_INT_EQ(cont->upvalue_count, 4);
+    ASSERT_INT_EQ(foo->param_count, 2); /* __sm, __rv */
+    ASSERT(foo->is_sm_compiled);
+    /* SM needs fields for a, b, c, x */
+    ASSERT(foo->sm_field_count >= 3);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: continuation captures all live locals including unreferenced ones
-   (US-001: verify that unreferenced-by-continuation but potentially
-   referenced-by-nested-closure variables are still captured) */
+/* Test: SM state layout includes all locals across suspension points */
 static int test_cps_eager_capture(void) {
     arena_t arena = {0};
     VM vm;
     vm_init(&vm, &arena);
 
-    /* 'unused' is not referenced in the continuation body at all,
-       but a parallel body inside the continuation references it.
-       With eager capture, the continuation still captures it. */
     CompileResult cr = test__compile(
         "proc foo {unused} {\n"
         "  def f [spawn { 1 }]\n"
@@ -820,21 +778,17 @@ static int test_cps_eager_capture(void) {
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-
-    /* Continuation for await: should eagerly capture ALL parent locals,
-       including 'unused' which the continuation body doesn't reference */
-    JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
-    ASSERT(cont != NULL);
-    /* Parent locals: unused (slot 0), __k (slot 1), f (slot 2) = 3 locals.
-       All 3 should be captured as upvalues in the continuation. */
-    ASSERT(cont->upvalue_count >= 3);
+    ASSERT(foo->is_sm_compiled);
+    ASSERT_INT_EQ(foo->param_count, 2); /* __sm, __rv */
+    /* SM needs fields for: unused, f, x */
+    ASSERT(foo->sm_field_count >= 2);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: deep continuation chain (5 sequential awaits) */
+/* Test: 5 sequential awaits compile as SM with sufficient fields */
 static int test_cps_deep_chain(void) {
     arena_t arena = {0};
     VM vm;
@@ -853,29 +807,17 @@ static int test_cps_deep_chain(void) {
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    ASSERT_INT_EQ(foo->param_count, 6); /* 5 params + __k */
-
-    /* Verify 5-deep continuation chain exists */
-    JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
-    ASSERT(cont != NULL);
-    cont = test__find_closure(&cont->chunk, "__cont");
-    ASSERT(cont != NULL);
-    cont = test__find_closure(&cont->chunk, "__cont");
-    ASSERT(cont != NULL);
-    cont = test__find_closure(&cont->chunk, "__cont");
-    ASSERT(cont != NULL);
-    cont = test__find_closure(&cont->chunk, "__cont");
-    ASSERT(cont != NULL);
-
-    /* Innermost continuation: captures v1..v4 + __k = 5 upvalues */
-    ASSERT(cont->upvalue_count >= 5);
+    ASSERT_INT_EQ(foo->param_count, 2); /* __sm, __rv */
+    ASSERT(foo->is_sm_compiled);
+    /* SM needs fields for a, b, c, d, e, v1, v2, v3, v4, v5 */
+    ASSERT(foo->sm_field_count >= 5);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: OP_AWAIT opcode present in CPS-transformed proc */
+/* Test: OP_AWAIT_SM opcode present in SM-compiled proc */
 static int test_cps_emits_op_await(void) {
     arena_t arena = {0};
     VM vm;
@@ -887,16 +829,17 @@ static int test_cps_emits_op_await(void) {
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
+    ASSERT(foo->is_sm_compiled);
 
-    /* Scan foo's bytecode for OP_AWAIT */
-    bool found_await = false;
+    /* Scan foo's bytecode for OP_AWAIT_SM */
+    bool found_await_sm = false;
     for (uint32_t i = 0; i < foo->chunk.code_count; i++) {
-        if (foo->chunk.code[i] == OP_AWAIT) {
-            found_await = true;
+        if (foo->chunk.code[i] == OP_AWAIT_SM) {
+            found_await_sm = true;
             break;
         }
     }
-    ASSERT(found_await);
+    ASSERT(found_await_sm);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
@@ -932,7 +875,7 @@ static int test_cps_existing_code_unaffected(void) {
  * US-004: CPS transform — control flow
  * ==================================================================== */
 
-/* Test: if with suspension in then-branch only — creates join continuation */
+/* Test: if with suspension in then-branch — SM compiled */
 static int test_cps_if_then_suspends(void) {
     arena_t arena = {0};
     VM vm;
@@ -945,21 +888,17 @@ static int test_cps_if_then_suspends(void) {
         "}", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
-    /* foo should be CPS-transformed (suspends due to await in branch) */
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    ASSERT_INT_EQ(foo->param_count, 2); /* f + __k */
-
-    /* Should have a continuation (join or inner) */
-    JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
-    ASSERT(cont != NULL);
+    ASSERT_INT_EQ(foo->param_count, 2); /* __sm + __rv */
+    ASSERT(foo->is_sm_compiled);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: if with suspension in else-branch only */
+/* Test: if with suspension in else-branch — SM compiled */
 static int test_cps_if_else_suspends(void) {
     arena_t arena = {0};
     VM vm;
@@ -974,17 +913,15 @@ static int test_cps_if_else_suspends(void) {
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    ASSERT_INT_EQ(foo->param_count, 2); /* f + __k */
-
-    JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
-    ASSERT(cont != NULL);
+    ASSERT_INT_EQ(foo->param_count, 2); /* __sm + __rv */
+    ASSERT(foo->is_sm_compiled);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: if with suspension in both branches */
+/* Test: if with suspension in both branches — SM compiled */
 static int test_cps_if_both_suspend(void) {
     arena_t arena = {0};
     VM vm;
@@ -999,18 +936,15 @@ static int test_cps_if_both_suspend(void) {
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    ASSERT_INT_EQ(foo->param_count, 3); /* x, y, __k */
-
-    /* Should have continuation(s) for the join + branch */
-    JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
-    ASSERT(cont != NULL);
+    ASSERT_INT_EQ(foo->param_count, 2); /* __sm + __rv */
+    ASSERT(foo->is_sm_compiled);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: nested if with suspension — inner if's join feeds outer if's join */
+/* Test: nested if with suspension — SM compiled */
 static int test_cps_nested_if(void) {
     arena_t arena = {0};
     VM vm;
@@ -1027,14 +961,15 @@ static int test_cps_nested_if(void) {
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    ASSERT_INT_EQ(foo->param_count, 2); /* f + __k */
+    ASSERT_INT_EQ(foo->param_count, 2); /* __sm + __rv */
+    ASSERT(foo->is_sm_compiled);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: chained if (cond pattern) with suspension */
+/* Test: chained if (cond pattern) with suspension — SM compiled */
 static int test_cps_chained_if(void) {
     arena_t arena = {0};
     VM vm;
@@ -1053,14 +988,15 @@ static int test_cps_chained_if(void) {
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    ASSERT_INT_EQ(foo->param_count, 3); /* x, f, __k */
+    ASSERT_INT_EQ(foo->param_count, 2); /* __sm + __rv */
+    ASSERT(foo->is_sm_compiled);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: nested await in call arguments — [+ [await $x] [await $y]] */
+/* Test: nested await in call arguments — SM compiled */
 static int test_cps_nested_await_args(void) {
     arena_t arena = {0};
     VM vm;
@@ -1074,18 +1010,15 @@ static int test_cps_nested_await_args(void) {
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    ASSERT_INT_EQ(foo->param_count, 3); /* x, y, __k */
-
-    /* Should have chained continuations for the extracted awaits */
-    JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
-    ASSERT(cont != NULL);
+    ASSERT_INT_EQ(foo->param_count, 2); /* __sm + __rv */
+    ASSERT(foo->is_sm_compiled);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: def with if-suspension value — [def x [if cond { await $f } { 42 }]] */
+/* Test: def with if-suspension value — SM compiled */
 static int test_cps_def_if_suspension(void) {
     arena_t arena = {0};
     VM vm;
@@ -1100,19 +1033,15 @@ static int test_cps_def_if_suspension(void) {
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    ASSERT_INT_EQ(foo->param_count, 2); /* f + __k */
-
-    /* Join continuation should have 'x' as parameter (the def binding) */
-    JaclClosure *cont = test__find_closure(&foo->chunk, "__cont");
-    ASSERT(cont != NULL);
-    ASSERT_INT_EQ(cont->param_count, 1); /* x (the def binding) */
+    ASSERT_INT_EQ(foo->param_count, 2); /* __sm + __rv */
+    ASSERT(foo->is_sm_compiled);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: runtime — if with then-branch suspension produces correct result */
+/* Test: runtime — if with then-branch suspension runs via SM */
 static int test_cps_if_then_runtime(void) {
     arena_t arena = {0};
     VM vm;
@@ -1121,25 +1050,22 @@ static int test_cps_if_then_runtime(void) {
     vm.print_fn = capture_print;
     vm.print_ctx = &cap;
 
-    /* spawn creates a future (stub resolves it immediately with closure result).
-       await retrieves the result from the future. */
     VMResult r = jacl_run(
         "proc afn {f} {\n"
         "  if [> 1 0] { await $f } else { 99 }\n"
         "}\n"
         "def fut [spawn { 42 }]\n"
-        "print [afn $fut { \"done\" }]",
+        "print [afn $fut]",
         &vm, &arena);
-    /* Best-effort: verify no crash. The stub's behavior for the CPS chain
-       is implementation-dependent; just verify compilation + no crash. */
-    (void)r;
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "42\n");
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: runtime — if with else-branch non-suspending returns directly */
+/* Test: runtime — if with else-branch non-suspending returns directly via SM */
 static int test_cps_if_nonsuspend_branch(void) {
     arena_t arena = {0};
     VM vm;
@@ -1148,16 +1074,16 @@ static int test_cps_if_nonsuspend_branch(void) {
     vm.print_fn = capture_print;
     vm.print_ctx = &cap;
 
-    /* Condition is false → takes non-suspending else branch.
-       Non-suspending branch calls join continuation directly. */
+    /* Condition is false → takes non-suspending else branch */
     VMResult r = jacl_run(
         "proc afn {f} {\n"
         "  if [> 0 1] { await $f } else { 42 }\n"
         "}\n"
         "def fut [spawn { 99 }]\n"
-        "print [afn $fut { \"done\" }]",
+        "print [afn $fut]",
         &vm, &arena);
-    (void)r;
+    ASSERT(r == VM_OK);
+    ASSERT_STR_EQ(cap.buffer, "42\n");
 
     vm_destroy(&vm);
     arena_destroy(&arena);
@@ -1179,7 +1105,7 @@ static int test_cps_try_catch_error(void) {
     TEST_PASS();
 }
 
-/* Test: let block with suspension (def inside block with await) */
+/* Test: let block with suspension — SM compiled with multiple await points */
 static int test_cps_let_block_suspension(void) {
     arena_t arena = {0};
     VM vm;
@@ -1196,22 +1122,17 @@ static int test_cps_let_block_suspension(void) {
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    ASSERT_INT_EQ(foo->param_count, 3); /* a, b, __k */
-
-    /* Two awaits → two levels of continuation nesting */
-    JaclClosure *cont1 = test__find_closure(&foo->chunk, "__cont");
-    ASSERT(cont1 != NULL);
-    JaclClosure *cont2 = test__find_closure(&cont1->chunk, "__cont");
-    ASSERT(cont2 != NULL);
-    /* cont2 should capture x (or y computed from x), b, and __k */
-    ASSERT(cont2->upvalue_count >= 2);
+    ASSERT_INT_EQ(foo->param_count, 2); /* __sm + __rv */
+    ASSERT(foo->is_sm_compiled);
+    /* SM needs fields for a, b, x, y, z */
+    ASSERT(foo->sm_field_count >= 2);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
     TEST_PASS();
 }
 
-/* Test: if as last statement (no join continuation needed, uses __k directly) */
+/* Test: if as last statement — SM compiled */
 static int test_cps_if_last_stmt(void) {
     arena_t arena = {0};
     VM vm;
@@ -1225,7 +1146,8 @@ static int test_cps_if_last_stmt(void) {
 
     JaclClosure *foo = test__find_closure(&cr.chunk, "foo");
     ASSERT(foo != NULL);
-    ASSERT_INT_EQ(foo->param_count, 2); /* f + __k */
+    ASSERT_INT_EQ(foo->param_count, 2); /* __sm + __rv */
+    ASSERT(foo->is_sm_compiled);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
@@ -1394,7 +1316,7 @@ static int test_spawn_worker_execution(void) {
 
     /* Create future and submit spawn task */
     JaclVal f = jacl_future(&rt.workers[0].vm.heap);
-    runtime__submit_spawn_task(&rt, task_cl, f, false);
+    runtime__submit_spawn_task(&rt, task_cl, f);
 
     /* Wait for the future to resolve */
     JaclFuture *fut = jacl_as_future(f);
@@ -1690,8 +1612,8 @@ static int test_await_worker_resolved(void) {
     JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
     ASSERT(task_cl != NULL);
 
-    /* task is a CPS proc (contains await) — param_count includes __k */
-    bool is_cps = (task_cl->param_count > 0);
+    /* task is SM-compiled (contains await) */
+    bool is_sm = task_cl->is_sm_compiled;
 
     /* Create a completion future and submit via rt_run_to_completion */
     VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
@@ -1702,7 +1624,7 @@ static int test_await_worker_resolved(void) {
     arena_destroy(&arena);
     TEST_PASS();
 
-    (void)is_cps;
+    (void)is_sm;
 }
 
 /* Test: existing non-suspending code still works after await changes */
@@ -1821,11 +1743,12 @@ static int test_parallel_compiles(void) {
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
-    /* Find the main closure — it should be CPS (contains parallel) */
+    /* Find the main closure — it should be SM (contains parallel) */
     JaclClosure *main_cl = test__find_closure(&cr.chunk, "main");
     ASSERT(main_cl != NULL);
-    /* CPS proc: original 0 params + hidden __k = 1 */
-    ASSERT_INT_EQ(main_cl->param_count, 1);
+    /* SM proc: __sm + __rv = 2 params */
+    ASSERT_INT_EQ(main_cl->param_count, 2);
+    ASSERT(main_cl->is_sm_compiled);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
@@ -2046,11 +1969,12 @@ static int test_race_compiles(void) {
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
-    /* Find the main closure — it should be CPS (contains race) */
+    /* Find the main closure — it should be SM (contains race) */
     JaclClosure *main_cl = test__find_closure(&cr.chunk, "main");
     ASSERT(main_cl != NULL);
-    /* CPS procs have __k param: param_count = 1 */
-    ASSERT_U32_EQ(main_cl->param_count, 1);
+    /* SM proc: __sm + __rv = 2 params */
+    ASSERT_U32_EQ(main_cl->param_count, 2);
+    ASSERT(main_cl->is_sm_compiled);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
@@ -3988,30 +3912,13 @@ static int test_gc_parallel_join_pressure(void) {
  * ==================================================================== */
 
 /**
- * Test: recursive proc with spawn/await in body gets correct CPS transform.
- * Verifies: __k param added, continuation created for code after spawn/await,
- * and the recursive tail call passes __k directly (no extra continuation).
+ * Test: recursive proc with spawn/await compiles as SM.
  */
 static int test_cps_recursive_spawn_transform(void) {
     arena_t arena = {0};
     VM vm;
     vm_init(&vm, &arena);
 
-    /*
-     * Recursive proc 'recur' with spawn/await in body:
-     *   proc recur {n} {
-     *     if [< $n 1] { 0 } {
-     *       def f [spawn { + $n 10 }]
-     *       def v [await $f]
-     *       + $v [recur [- $n 1]]
-     *     }
-     *   }
-     *
-     * CPS transform should:
-     * - Add __k param (param_count: n + __k = 2)
-     * - Create continuation(s) for code after spawn and await
-     * - The recursive [recur ...] call in tail position passes __k directly
-     */
     CompileResult cr = test__compile(
         "proc recur {n} {\n"
         "  if [< $n 1] { 0 } else {\n"
@@ -4022,22 +3929,12 @@ static int test_cps_recursive_spawn_transform(void) {
         "}", &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
-    /* Find the 'recur' closure */
     JaclClosure *recur = test__find_closure(&cr.chunk, "recur");
     ASSERT(recur != NULL);
+    ASSERT_INT_EQ(recur->param_count, 2); /* __sm + __rv */
+    ASSERT(recur->is_sm_compiled);
 
-    /* CPS: recur takes n + __k = 2 params */
-    ASSERT_INT_EQ(recur->param_count, 2);
-
-    /* Body should contain at least one continuation for post-spawn/await code */
-    JaclClosure *cont = test__find_closure(&recur->chunk, "__cont");
-    ASSERT(cont != NULL);
-    ASSERT_INT_EQ(cont->param_count, 1);
-
-    /* Continuation must capture upvalues (at minimum __k and n) */
-    ASSERT(cont->upvalue_count >= 1);
-
-    /* Scan recur's bytecode for OP_SPAWN (spawn is in the body) */
+    /* Scan for OP_SPAWN in the bytecode */
     bool found_spawn = false;
     for (uint32_t i = 0; i < recur->chunk.code_count; i++) {
         if (recur->chunk.code[i] == OP_SPAWN) {
@@ -4053,28 +3950,13 @@ static int test_cps_recursive_spawn_transform(void) {
 }
 
 /**
- * Test: recursive proc with parallel in body gets correct upvalue capture.
- * The continuation after parallel must capture variables needed by the
- * recursive call, including the parallel result and __k.
+ * Test: recursive proc with parallel compiles as SM.
  */
 static int test_cps_recursive_parallel_upvalues(void) {
     arena_t arena = {0};
     VM vm;
     vm_init(&vm, &arena);
 
-    /*
-     * Recursive proc with parallel:
-     *   proc loop {n} {
-     *     if [< $n 1] { 0 } {
-     *       def r [parallel { $n } { + $n 1 }]
-     *       [+ [vec-get $r 0] [loop [- $n 1]]]
-     *     }
-     *   }
-     *
-     * The continuation after parallel must capture:
-     * - __k (for the tail call or final result)
-     * - n (for the recursive call argument)
-     */
     CompileResult cr = test__compile(
         "proc loop {n} {\n"
         "  if [< $n 1] { 0 } else {\n"
@@ -4086,17 +3968,8 @@ static int test_cps_recursive_parallel_upvalues(void) {
 
     JaclClosure *loop = test__find_closure(&cr.chunk, "loop");
     ASSERT(loop != NULL);
-
-    /* CPS: loop takes n + __k = 2 params */
-    ASSERT_INT_EQ(loop->param_count, 2);
-
-    /* Should have a continuation for post-parallel code */
-    JaclClosure *cont = test__find_closure(&loop->chunk, "__cont");
-    ASSERT(cont != NULL);
-
-    /* Continuation captures __k and n for the recursive [loop ...] call.
-     * At minimum 2 upvalues (n, __k), possibly more depending on codegen. */
-    ASSERT(cont->upvalue_count >= 2);
+    ASSERT_INT_EQ(loop->param_count, 2); /* __sm + __rv */
+    ASSERT(loop->is_sm_compiled);
 
     /* Scan for OP_PARALLEL in loop's bytecode */
     bool found_parallel = false;
@@ -4114,28 +3987,13 @@ static int test_cps_recursive_parallel_upvalues(void) {
 }
 
 /**
- * Test: tail-call path in compiler__compile_suspending_call_cps correctly
- * passes __k. When a recursive suspending call is in tail position
- * (remaining_count == 0), no continuation is emitted — __k is passed directly.
+ * Test: recursive proc with spawn/await compiles as SM (tail call variant).
  */
 static int test_cps_recursive_tail_call_passes_k(void) {
     arena_t arena = {0};
     VM vm;
     vm_init(&vm, &arena);
 
-    /*
-     * Tail-recursive proc where the recursive call IS the last statement:
-     *   proc run {n} {
-     *     def f [spawn { + $n 0 }]
-     *     def v [await $f]
-     *     run [- $n 1]
-     *   }
-     *
-     * After await, the recursive [run ...] is in tail position.
-     * The innermost continuation (for post-await code) should NOT create
-     * another nested continuation for the [run ...] call — it should pass
-     * __k directly.
-     */
     CompileResult cr = test__compile(
         "proc run {n} {\n"
         "  def f [spawn { + $n 0 }]\n"
@@ -4146,44 +4004,12 @@ static int test_cps_recursive_tail_call_passes_k(void) {
 
     JaclClosure *run = test__find_closure(&cr.chunk, "run");
     ASSERT(run != NULL);
-    ASSERT_INT_EQ(run->param_count, 2); /* n + __k */
+    ASSERT_INT_EQ(run->param_count, 2); /* __sm + __rv */
+    ASSERT(run->is_sm_compiled);
 
-    /* Find the continuation after the await (handles 'v' + tail call) */
+    /* SM has no continuation closures */
     JaclClosure *cont = test__find_closure(&run->chunk, "__cont");
-    ASSERT(cont != NULL);
-
-    /* The innermost continuation (for the tail [run ...] call) should NOT
-     * have a nested __cont — the tail call passes __k directly. */
-    JaclClosure *inner_cont = test__find_closure(&cont->chunk, "__cont");
-
-    /* If there's a chain of continuations (spawn -> cont1, await -> cont2),
-     * find the deepest one */
-    JaclClosure *deepest = cont;
-    while (inner_cont != NULL) {
-        deepest = inner_cont;
-        inner_cont = test__find_closure(&deepest->chunk, "__cont");
-    }
-
-    /* The deepest continuation should have no nested __cont — the recursive
-     * call is a tail call that passes __k directly */
-    ASSERT(test__find_closure(&deepest->chunk, "__cont") == NULL);
-
-    /* The deepest continuation must capture __k to pass to the recursive call */
-    ASSERT(deepest->upvalue_count >= 1);
-
-    /* Verify the deepest continuation has OP_TAIL_CALL (for the recursive call)
-     * but NOT OP_SPAWN or OP_AWAIT (those are in outer continuations) */
-    bool found_tail_call = false;
-    bool found_spawn_in_deepest = false;
-    bool found_await_in_deepest = false;
-    for (uint32_t i = 0; i < deepest->chunk.code_count; i++) {
-        if (deepest->chunk.code[i] == OP_TAIL_CALL) found_tail_call = true;
-        if (deepest->chunk.code[i] == OP_SPAWN) found_spawn_in_deepest = true;
-        if (deepest->chunk.code[i] == OP_AWAIT) found_await_in_deepest = true;
-    }
-    ASSERT(found_tail_call);
-    ASSERT(!found_spawn_in_deepest);
-    ASSERT(!found_await_in_deepest);
+    ASSERT(cont == NULL);
 
     vm_destroy(&vm);
     arena_destroy(&arena);

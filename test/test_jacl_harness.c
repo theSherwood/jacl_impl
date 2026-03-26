@@ -207,17 +207,17 @@ static int run_jacl_test_concurrent(const char* source, Expectations* exp) {
   JaclClosure *closure = NULL;
 
   if (cr.suspending) {
-    /* Execute chunk on temp VM to define procs and extract CPS closure */
+    /* Execute chunk on temp VM to define procs and extract suspending closure */
     VMResult r = vm_exec(&vm, &cr.chunk);
     if (r != VM_OK) {
-      fprintf(stderr, "  Error extracting CPS closure: %s\n",
+      fprintf(stderr, "  Error extracting suspending closure: %s\n",
               vm.error_message ? vm.error_message : "(unknown)");
       vm_destroy(&vm);
       arena_destroy(&arena);
       return 0;
     }
     if (vm.stack_top == 0 || !jacl_is_closure(vm.stack[0])) {
-      fprintf(stderr, "  Top-level CPS did not produce closure\n");
+      fprintf(stderr, "  Top-level suspending code did not produce closure\n");
       vm_destroy(&vm);
       arena_destroy(&arena);
       return 0;
@@ -253,18 +253,23 @@ static int run_jacl_test_concurrent(const char* source, Expectations* exp) {
   /* Step 4: Submit closure and wait for completion */
   JaclVal completion = jacl_future(&rt.workers[0].vm.heap);
   JaclFuture *cfut = jacl_as_future(completion);
-  bool is_cps = (closure->param_count == 1);
-  runtime__submit_spawn_task(&rt, closure, completion, is_cps);
+  runtime__submit_spawn_task(&rt, closure, completion);
 
-  /* Block until completion future resolves */
-  for (;;) {
+  /* Block until completion future resolves (with timeout) */
+  int __timed_out = 1;
+  for (int __ms = 0; __ms < 5000; __ms++) {
     uint32_t state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_ACQUIRE);
-    if (state == FUTURE_RESOLVED || state == FUTURE_ERROR) break;
+    if (state == FUTURE_RESOLVED || state == FUTURE_ERROR) { __timed_out = 0; break; }
     SLEEP_MILLISECONDS(1);
   }
 
   uint32_t final_state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_RELAXED);
-  VMResult result = (final_state == FUTURE_ERROR) ? VM_RUNTIME_ERROR : VM_OK;
+  VMResult result;
+  if (__timed_out) {
+    result = VM_RUNTIME_ERROR;
+  } else {
+    result = (final_state == FUTURE_ERROR) ? VM_RUNTIME_ERROR : VM_OK;
+  }
 
   /* Step 5: Check output */
   if (exp->expect_error) {

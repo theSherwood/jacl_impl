@@ -56,6 +56,8 @@ Started: Mon Mar 24 2026
 - RaceAgg has `state_machine` field (JaclVal) — when non-nil, `runtime__complete_race_slot` resumes SM instead of scheduling continuation closure
 - OP_RACE validation: allows closure, nil, OR state_machine as "continuation" value; detects SM via `jacl_is_state_machine()`
 - SM race in single-threaded mode: runs bodies sequentially, first result wins, pushes winner directly onto stack (like nil continuation path)
+- CPS compilation path fully removed from compiler (US-020): no is_cps flag, no use_state_machines flag, no __k convention — all suspension goes through SM
+- suspension_map is NOT CPS-specific — it's used by SM path to detect which functions suspend; do not remove it
 
 ---
 
@@ -431,4 +433,70 @@ Started: Mon Mar 24 2026
   - JACL conditionals: use `[== $cond 1]` with numeric args, not `$cond` with `true`/`false` literals
   - Pipe syntax for tests: `[gen] | filter [\\ > $it 11] | take 2 | collect | print` (backslash shorthand)
   - spawn bodies inside SM functions cannot capture SM state fields — use only constants in spawn bodies
+---
+
+## 2026-03-26 - US-020
+- Removed entire CPS compilation path from compiler.c (~1311 lines deleted, 216 lines added)
+- Deleted: compiler__emit_continuation, compiler__compile_cps_stmts, compiler__compile_cps_while, compiler__emit_get_k
+- Removed is_cps and use_state_machines flags from Compiler struct
+- Removed __k convention (upvalue[0] error forwarding for CPS continuations)
+- Replaced CPS fallback code in await/yield/parallel/race builtins with compiler error for unreachable case
+- Updated all CPS-related comments to reference state machine architecture
+- Kept suspension_map (used by SM path for suspension detection) and OP_YIELD in bytecode enum (runtime cleanup is US-021)
+- Files changed: src/compiler.c (-1311/+216 lines), .ralph/prd.json, .ralph/progress.txt
+- test_yield 67/67 passed, compiles cleanly with -Wall -Wextra
+- **Learnings for future iterations:**
+  - Most CPS code was already removed incrementally during US-007..US-019 as SM paths replaced CPS paths
+  - The remaining CPS code was: fallback paths in suspend builtins, is_cps/use_state_machines flags, __k convention helpers
+  - suspension_map is NOT CPS-specific — it's used by SM path to detect which functions suspend
+  - OP_YIELD (old CPS yield) remains in bytecode enum and VM handler — removing it is US-021's scope (runtime cleanup)
+  - The `suspending` field on CompileResult/ProgramResult is still needed — it tells the VM that top-level code is wrapped in a __main SM closure
+---
+
+## US-021: Remove CPS runtime support
+- **Status:** COMPLETE
+- **Date:** 2026-03-26
+- **Summary:** Removed all CPS-specific code paths from runtime (runtime.c), VM (vm.c), GC (gc.c, gc_collect.c), and embedding API (embed.c). Simplified task executors, stream pull handlers, and opcode handlers.
+- **Changes to gc.c:**
+  - Removed `continuation` field from ParallelAgg struct, updated constructor to take `state_machine` directly
+  - Removed `continuation` field from RaceAgg struct, updated constructor to take `state_machine` directly
+- **Changes to gc_collect.c:**
+  - Removed `gc__ms_push_val(ms, agg->continuation)` from OBJ_PARALLEL_AGG and OBJ_RACE_AGG tracing
+- **Changes to runtime.c:**
+  - Removed CPS else branch from `runtime__complete_parallel_slot` and `runtime__complete_race_slot`
+  - Simplified `runtime__continuation_task_exec`: removed __k upvalue[0] error recovery
+  - Simplified `runtime__schedule_waiters`: removed closure dispatch, SM-only now
+  - Removed `is_cps` field from SpawnTaskData, ParallelTaskData, RaceTaskData
+  - Removed CPS branches from spawn/parallel/race task executors
+  - Removed `is_cps` param from `runtime__submit_spawn_task`, `runtime__submit_parallel_task`, `runtime__submit_race_task`
+  - Simplified `rt_run_to_completion`: removed `is_cps` detection, added timeout to prevent hangs
+  - KEPT: resolve_k, parallel_k, race_k closures and ContinuationTaskData — still used by SM path as error_k
+- **Changes to vm.c:**
+  - Removed `yield_continuation` field from VM struct and `vm_init`
+  - Deleted `vm__make_terminal_k` function entirely
+  - Rewrote `vm__pull_stream_one`: removed CPS path, SM-only
+  - Updated forward declarations: removed `is_cps` params
+  - OP_YIELD: replaced with error "CPS yield not supported"
+  - OP_YIELD_SM: removed `yield_continuation` assignment
+  - OP_AWAIT: replaced with error "CPS await not supported"
+  - OP_SPAWN: removed is_cps detection and CPS branch
+  - OP_PARALLEL (runtime + single-threaded): removed CPS branches, simplified agg creation
+  - OP_RACE: same simplifications as OP_PARALLEL
+  - OP_STREAM_NEXT: removed CPS generator path, error for non-SM generators
+  - OP_COLLECT: removed CPS branch, SM-only
+  - OP_COUNT, OP_FIRST, OP_EACH: replaced inline CPS generator code with `vm__pull_stream_one`
+  - OP_SPREAD: removed CPS generator path, SM-only
+- **Changes to embed.c:**
+  - Removed CPS fallback path from `jacl_eval`, added error for non-SM suspending code
+  - Restored non-suspending execution path that was incorrectly removed
+- **Changes to test files:**
+  - test_m13.c, test_yield.c, test_jacl_harness.c: removed `is_cps` param from `runtime__submit_spawn_task` calls
+  - test_jacl_harness.c: added 5s timeout to prevent infinite wait on nested SM tasks
+- **Test results:** 81/83 passed (was 77/83 before). Fixed 4 previously broken tests (yield, stream_for, stream_seq_ops, stream_type_enforce). 2 pre-existing failures (m13 gc_parallel_join_press, jacl_harness concurrent tests) due to nested SM call architecture limitation.
+- **Learnings:**
+  - resolve_k/parallel_k/race_k are NOT CPS-specific: they are completion callbacks used by SM path as error_k on state machines
+  - ContinuationTaskData and runtime__schedule_continuation are still needed to run error_k closures
+  - FutureWaiter.continuation field is actually used by SM path (stores state machine val), just the dispatch logic was CPS-specific
+  - OP_YIELD and OP_AWAIT remain in bytecode enum for format stability, but their VM handlers now return errors
+  - Pre-existing architectural issue: nested SM calls (SM calling another SM function that suspends) don't properly chain error_k/resolve_k through the call stack. This affects rt_run_to_completion and the jacl_harness for concurrent tests.
 ---

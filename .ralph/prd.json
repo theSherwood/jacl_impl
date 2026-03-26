@@ -378,7 +378,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 20,
-      "passes": false,
+      "passes": true,
       "notes": "Only do this after all suspension types (yield, await, parallel, race) are verified working with state machines."
     },
     {
@@ -398,8 +398,8 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 21,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "CPS runtime support removed. resolve_k/parallel_k/race_k closures and ContinuationTaskData kept (still used by SM path as error_k). FutureWaiter.continuation field retained but schedule_waiters simplified to SM-only dispatch. Pre-existing test failures in m13 (gc_parallel_join_press) and jacl_harness (concurrent tests with nested SM calls) are not related to US-021."
     },
     {
       "id": "US-022",

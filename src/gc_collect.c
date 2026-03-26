@@ -224,10 +224,9 @@ static void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
-    /* --- ParallelAgg: trace continuation, error value, and all result slots --- */
+    /* --- ParallelAgg: trace state machine, error value, and all result slots --- */
     case OBJ_PARALLEL_AGG: {
         ParallelAgg *agg = (ParallelAgg *)payload;
-        gc__ms_push_val(ms, agg->continuation);
         gc__ms_push_val(ms, agg->state_machine);
         uint64_t ev = ATOMIC_LOAD_EXPLICIT(&agg->error_val, MEM_ACQUIRE);
         gc__ms_push_val(ms, (JaclVal)ev);
@@ -239,7 +238,6 @@ static void gc__trace_object(void *payload, GCMarkStack *ms) {
 
     case OBJ_RACE_AGG: {
         RaceAgg *agg = (RaceAgg *)payload;
-        gc__ms_push_val(ms, agg->continuation);
         gc__ms_push_val(ms, agg->state_machine);
         break;
     }
