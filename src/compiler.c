@@ -18,7 +18,7 @@ typedef struct {
   BytecodeChunk chunk;
   uint32_t      error_count;
   const char*   error_message;  /* first error message, or NULL */
-  bool          suspending;     /* true if top-level code is CPS-transformed */
+  bool          suspending;     /* true if top-level code is state-machine transformed */
   StructTypeRegistry* struct_registry; /* struct type metadata for VM */
 } CompileResult;
 
@@ -350,7 +350,7 @@ typedef struct {
   uint32_t    module_count;
   uint32_t    error_count;
   const char* error_message; /* first error message, or NULL */
-  bool        suspending;    /* true if root module is CPS-transformed */
+  bool        suspending;    /* true if root module is state-machine transformed */
   StructTypeRegistry* struct_registry; /* struct type metadata for VM */
 } ProgramResult;
 
@@ -689,7 +689,7 @@ static void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
           return;
         }
 
-        /* Yield is a suspension point (needs CPS) and marks proc as generator */
+        /* Yield is a suspension point and marks proc as generator */
         if (len == 5 && memcmp(name, "yield", 5) == 0) {
           info->direct_suspends = true;
           info->has_yield = true;
@@ -1376,8 +1376,10 @@ static SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
     sm__walk_suspensions(body, &analysis);
   }
 
-  /* Pass 2: build state layout (only for suspending functions) */
-  if (analysis.suspension_count > 0) {
+  /* Pass 2: build state layout.  Always build it so that transitively
+     suspending procs (suspension_count == 0 but proc_suspends via callee)
+     still get a proper state layout for their SM compilation. */
+  {
     /* Parameters go first in the layout */
     for (uint8_t i = 0; i < param_count; i++) {
       sm__add_state_field(&analysis.state_layout, param_names[i], false, true);
@@ -1646,8 +1648,6 @@ struct Compiler {
   bool             in_try_body;
   bool             in_non_suspending_callback; /* error if suspension inside */
   SuspensionMap*   suspension_map;  /* pre-computed suspension analysis */
-  bool             is_cps;          /* true if this proc is CPS-transformed */
-  bool             use_state_machines; /* true: SM compilation for suspending funcs */
   bool             in_concurrent_body; /* true inside spawn/parallel/race body */
   bool             pin_all_closures;  /* true when concurrent body touches mutable globals */
   bool             force_global_procs; /* procs emit OP_DEF_GLOBAL even at scope>0 */
@@ -1686,8 +1686,6 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->in_try_body     = false;
   c->in_non_suspending_callback = false;
   c->suspension_map  = NULL;
-  c->is_cps          = false;
-  c->use_state_machines = false;
   c->in_concurrent_body = false;
   c->pin_all_closures   = false;
   c->force_global_procs = false;
@@ -1943,6 +1941,28 @@ static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
       c->upvalues[uv].struct_type_idx = c->enclosing->locals[local].struct_type_idx;
     }
     return uv;
+  }
+
+  /* Check if the variable is an SM state field in the enclosing scope.
+     is_local=2 tells the VM to read from the SM object's fields array
+     at closure creation time, so nested closures can capture SM variables. */
+  if (c->enclosing->sm_analysis) {
+    int field_idx = sm__find_field(&c->enclosing->sm_analysis->state_layout, name);
+    if (field_idx >= 0) {
+      int uv = compiler__add_upvalue(c, (uint8_t)field_idx, 2, name);
+      if (uv != -1) {
+        /* Look up type info from state layout */
+        StateLayout* layout = &c->enclosing->sm_analysis->state_layout;
+        for (uint32_t fi = 0; fi < layout->field_count; fi++) {
+          if (layout->fields[fi].name == name) {
+            c->upvalues[uv].is_mutable = layout->fields[fi].is_mutable;
+            break;
+          }
+        }
+        c->upvalues[uv].type = TYPE_DYN;
+      }
+      return uv;
+    }
   }
 
   /* Check if it's an upvalue in the enclosing scope (transitive capture) */
@@ -2245,18 +2265,28 @@ static int  compiler__head_matches(AstNode* head, const char* name, uint32_t len
  *      OP_YIELD_SM with resume_point update and dispatch label backpatching
  *   3. After all statements: emit OP_NIL + OP_RETURN (generator exhausted)
  */
-static void compiler__compile_sm_body(Compiler* c, AstNode* body_block,
-                                       uint32_t line) {
+/**
+ * Compile a statement list in state machine mode.
+ * When return_last_value is true, the last statement's result is kept on the
+ * stack as the return value (for async functions, spawn/parallel bodies).
+ * When false, all statement results are consumed by check_error and nil is
+ * returned (generator exhaustion pattern).
+ */
+static void compiler__compile_sm_stmts(Compiler* c, AstNode** stmts,
+                                        uint32_t count, uint32_t line,
+                                        bool return_last_value) {
   SuspensionAnalysis* analysis = c->sm_analysis;
-  if (!analysis || analysis->suspension_count == 0) {
-    /* No suspensions — shouldn't be called, but handle gracefully */
+  if (!analysis) {
+    /* No analysis at all — shouldn't be called, but handle gracefully */
     compiler__emit_byte(c, OP_NIL, line);
     compiler__emit_byte(c, OP_RETURN, line);
     return;
   }
 
-  /* Emit dispatch table: resume_point → jump to resume label */
-  compiler__emit_sm_dispatch_table(c, analysis->suspension_count, line);
+  /* Emit dispatch table only when there are direct suspension points */
+  if (analysis->suspension_count > 0) {
+    compiler__emit_sm_dispatch_table(c, analysis->suspension_count, line);
+  }
 
   /* Initialize suspension point counter for yield handler */
   c->sm_suspension_idx = 0;
@@ -2264,24 +2294,32 @@ static void compiler__compile_sm_body(Compiler* c, AstNode* body_block,
   /* Compile body statements — the SM-aware yield handler (in compile_command)
      emits OP_YIELD_SM with resume_point updates and dispatch label backpatching.
      Variable accesses are redirected to state fields by the SM-aware handlers. */
-  uint32_t stmt_count = body_block->data.block.count;
-  AstNode** stmts = body_block->data.block.commands;
-
-  for (uint32_t i = 0; i < stmt_count; i++) {
-    compiler__compile_node(c, stmts[i]);
-    compiler__emit_check_error(c, line);
+  if (return_last_value && count > 0) {
+    for (uint32_t i = 0; i + 1 < count; i++) {
+      compiler__compile_node(c, stmts[i]);
+      compiler__emit_check_error(c, line);
+    }
+    /* Last statement: keep result on stack */
+    compiler__compile_node(c, stmts[count - 1]);
+  } else {
+    for (uint32_t i = 0; i < count; i++) {
+      compiler__compile_node(c, stmts[i]);
+      compiler__emit_check_error(c, line);
+    }
+    /* Generator exhausted: return nil */
+    compiler__emit_byte(c, OP_NIL, line);
   }
-
-  /* Generator exhausted: return nil */
-  compiler__emit_byte(c, OP_NIL, line);
   compiler__emit_byte(c, OP_RETURN, line);
 }
 
-/* --- Internal: CPS transform helpers --- */
+static void compiler__compile_sm_body(Compiler* c, AstNode* body_block,
+                                       uint32_t line) {
+  uint32_t stmt_count = body_block->data.block.count;
+  AstNode** stmts = body_block->data.block.commands;
+  compiler__compile_sm_stmts(c, stmts, stmt_count, line, false);
+}
 
-/* Forward declarations for CPS compilation */
-static void compiler__compile_cps_stmts(Compiler* c, AstNode** stmts,
-                                         uint32_t count, uint32_t line);
+/* Forward declarations */
 static void compiler__compile_node(Compiler* c, AstNode* node);
 static int  compiler__head_matches(AstNode* head, const char* name, uint32_t len);
 static void compiler__emit_check_error(Compiler* c, uint32_t line);
@@ -2289,294 +2327,9 @@ static void compiler__compile_command(Compiler* c, AstNode* node);
 static void compiler__compile_block_expr(Compiler* c, AstNode* block_node);
 
 /**
- * Check if an AST node IS a suspension point or CONTAINS one.
- * Suspension points: await, parallel, race, or calls to known-suspending procs.
- * Does NOT recurse into nested proc/fn definitions.
- */
-static bool compiler__node_is_suspension(Compiler* c, AstNode* node) {
-  if (!node) return false;
-
-  if (node->type == AST_COMMAND) {
-    AstNode* head = node->data.command.head;
-    uint32_t argc = node->data.command.arg_count;
-    AstNode** args = node->data.command.args;
-
-    if (head->type == AST_LIT_STRING) {
-      const char* name = head->data.lit_string.value;
-      uint32_t len = head->data.lit_string.length;
-
-      /* Direct suspension points */
-      if ((len == 5 && memcmp(name, "await", 5) == 0) ||
-          (len == 8 && memcmp(name, "parallel", 8) == 0) ||
-          (len == 4 && memcmp(name, "race", 4) == 0) ||
-          (len == 5 && memcmp(name, "yield", 5) == 0)) {
-        return true;
-      }
-
-      /* Skip nested proc definitions — they have their own CPS */
-      if (len == 4 && memcmp(name, "proc", 4) == 0) {
-        return false;
-      }
-
-      /* Call to known-suspending proc (exclude generators — calling a
-         generator just creates a stream, doesn't suspend the caller) */
-      if (len <= 7 && c->suspension_map) {
-        JaclVal name_val = jacl_inline_string(name, len);
-        /* Skip if callee is a generator */
-        if (suspension_map_is_generator(c->suspension_map, name_val)) {
-          /* Not a suspension point — fall through to recurse into args */
-        } else {
-          /* Check locals first */
-          int slot = compiler__resolve_local(c, name_val);
-          if (slot != -1 && c->locals[slot].suspends) return true;
-          /* Check globals */
-          GlobalArity* ga = compiler__find_global(c, name_val);
-          if (ga && ga->suspends) return true;
-          /* Check suspension map */
-          if (suspension_map_lookup(c->suspension_map, name_val)) return true;
-        }
-      }
-    }
-
-    /* Check if callee is a $var reference to a suspending closure */
-    if (head->type == AST_VAR_REF) {
-      uint32_t vlen = head->data.var_ref.length;
-      if (vlen <= 7) {
-        JaclVal vname = jacl_inline_string(head->data.var_ref.name, vlen);
-        int slot = compiler__resolve_local(c, vname);
-        if (slot != -1 && c->locals[slot].suspends) return true;
-        int uv = compiler__resolve_upvalue(c, vname);
-        if (uv != -1 && c->upvalues[uv].suspends) return true;
-      }
-    }
-
-    /* Recurse into arguments (but skip proc definitions handled above) */
-    for (uint32_t i = 0; i < argc; i++) {
-      if (compiler__node_is_suspension(c, args[i])) return true;
-    }
-  }
-
-  if (node->type == AST_BLOCK) {
-    for (uint32_t i = 0; i < node->data.block.count; i++) {
-      if (compiler__node_is_suspension(c, node->data.block.commands[i]))
-        return true;
-    }
-  }
-
-  return false;
-}
-
-/**
- * Emit code to push __k (continuation parameter) onto the stack.
- * __k is a local in the outermost CPS proc, accessed via local or upvalue.
- */
-static void compiler__emit_get_k(Compiler* c, uint32_t line) {
-  JaclVal k_name = jacl_inline_string("__k", 3);
-  int local = compiler__resolve_local(c, k_name);
-  if (local != -1) {
-    compiler__emit_byte(c, OP_GET_LOCAL, line);
-    compiler__emit_byte(c, (uint8_t)local, line);
-    return;
-  }
-  int uv = compiler__resolve_upvalue(c, k_name);
-  if (uv != -1) {
-    compiler__emit_byte(c, OP_GET_UPVALUE, line);
-    compiler__emit_byte(c, (uint8_t)uv, line);
-    return;
-  }
-  compiler__error(c, line, 0, "internal error: __k not found in CPS context");
-}
-
-/**
- * Create a continuation closure for remaining statements and push it on the stack.
- * The continuation takes 1 parameter (the result of the suspension point).
- * It captures live variables from the enclosing scope via upvalues.
- */
-static void compiler__emit_continuation(Compiler* c,
-                                         JaclVal param_name,
-                                         AstNode** remaining_stmts,
-                                         uint32_t remaining_count,
-                                         uint32_t line) {
-  /* Allocate closure template */
-  JaclClosure* cont = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
-  chunk_init(&cont->chunk, c->arena);
-  cont->param_count  = 1;
-  cont->upvalue_count = 0;
-  cont->upvalues     = NULL;
-  cont->name         = "__cont";
-  cont->min_args     = 1;
-  cont->variadic     = false;
-  cont->pinned       = c->pin_all_closures;
-  cont->pin_worker_id = -1;
-
-  JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal));
-  pnames[0] = param_name;
-  cont->param_names = pnames;
-
-  /* Create nested body compiler */
-  Compiler cont_compiler;
-  compiler__init(&cont_compiler, &cont->chunk, c->arena, c->intern_table, c->heap);
-  cont_compiler.scope_depth    = 1;
-  cont_compiler.enclosing      = c;
-  cont_compiler.suspension_map = c->suspension_map;
-  cont_compiler.is_cps         = true;
-  cont_compiler.use_state_machines = c->use_state_machines;
-  cont_compiler.in_concurrent_body = c->in_concurrent_body;
-  cont_compiler.pin_all_closures   = c->pin_all_closures;
-
-  /* Copy global arities from parent for suspension lookups */
-  {
-    Compiler* root = c;
-    while (root->enclosing) root = root->enclosing;
-    memcpy(cont_compiler.global_arities, root->global_arities,
-           sizeof(GlobalArity) * root->global_arity_count);
-    cont_compiler.global_arity_count = root->global_arity_count;
-  }
-
-  /* Add parameter as local (slot 0) */
-  compiler__add_local(&cont_compiler, param_name, line, 0);
-  cont_compiler.locals[cont_compiler.local_count - 1].is_param = true;
-
-  /* Pre-resolve __k as upvalue 0 so runtime can find it for error recovery */
-  {
-    JaclVal k_name = jacl_inline_string("__k", 3);
-    compiler__resolve_upvalue(&cont_compiler, k_name);
-  }
-
-  /* Compile remaining statements with CPS */
-  compiler__compile_cps_stmts(&cont_compiler, remaining_stmts, remaining_count, line);
-
-  /* Emit OP_RETURN at end of continuation */
-  compiler__emit_byte(&cont_compiler, OP_RETURN, line);
-
-  /* Propagate errors from continuation compiler */
-  c->error_count += cont_compiler.error_count;
-  if (!c->first_error && cont_compiler.first_error) {
-    c->first_error = cont_compiler.first_error;
-  }
-
-  /* Eagerly capture all live locals (depth >= 1) from parent scope into the
-     continuation's upvalue array. This ensures nested closures (parallel bodies,
-     race bodies, spawn bodies) compiled inside the continuation can access
-     any parent variable through the transitive upvalue chain, even if the
-     continuation body doesn't directly reference it. */
-  for (uint32_t i = 0; i < c->local_count; i++) {
-    if (c->locals[i].depth < 1) continue;
-    int uv = compiler__add_upvalue(&cont_compiler, (uint8_t)i, 1,
-                                    c->locals[i].name);
-    if (uv != -1) {
-      cont_compiler.upvalues[uv].is_mutable = c->locals[i].is_mutable;
-      cont_compiler.upvalues[uv].captures_mutable = c->locals[i].captures_mutable;
-      cont_compiler.upvalues[uv].suspends   = c->locals[i].suspends;
-      cont_compiler.upvalues[uv].type       = c->locals[i].type;
-      cont_compiler.upvalues[uv].struct_type_idx = c->locals[i].struct_type_idx;
-    }
-  }
-  /* Also capture parent's upvalues transitively, so variables from
-     grandparent+ scopes are available to nested closures. */
-  for (uint32_t i = 0; i < c->upvalue_count; i++) {
-    int uv = compiler__add_upvalue(&cont_compiler, (uint8_t)i, 0,
-                                    c->upvalues[i].name);
-    if (uv != -1) {
-      cont_compiler.upvalues[uv].is_mutable = c->upvalues[i].is_mutable;
-      cont_compiler.upvalues[uv].captures_mutable = c->upvalues[i].captures_mutable;
-      cont_compiler.upvalues[uv].suspends   = c->upvalues[i].suspends;
-      cont_compiler.upvalues[uv].type       = c->upvalues[i].type;
-      cont_compiler.upvalues[uv].struct_type_idx = c->upvalues[i].struct_type_idx;
-    }
-  }
-
-  /* Set upvalue count on closure */
-  cont->upvalue_count = (uint8_t)cont_compiler.upvalue_count;
-
-  /* Store closure in parent's constant pool */
-  uint16_t closure_idx = chunk_add_constant(c->chunk, jacl_closure(cont));
-
-  /* Emit OP_CLOSURE followed by upvalue descriptors */
-  compiler__emit_byte(c, OP_CLOSURE, line);
-  compiler__emit_u16(c, closure_idx, line);
-  for (uint32_t i = 0; i < cont_compiler.upvalue_count; i++) {
-    compiler__emit_byte(c, cont_compiler.upvalues[i].is_local, line);
-    compiler__emit_byte(c, cont_compiler.upvalues[i].index, line);
-  }
-}
-
-/**
- * Extract information from a def-await pattern: [def name [await expr]]
- * Returns true if the statement matches the pattern.
- */
-static bool compiler__is_def_with_suspension(Compiler* c, AstNode* node,
-                                              JaclVal* out_name,
-                                              AstNode** out_value_node) {
-  if (node->type != AST_COMMAND) return false;
-  AstNode* head = node->data.command.head;
-  if (!compiler__head_matches(head, "def", 3)) return false;
-
-  uint32_t argc = node->data.command.arg_count;
-  uint32_t name_idx = 0;
-  uint32_t value_idx = 1;
-
-  if (argc == 3) {
-    /* Typed def: [def TYPE name value] */
-    name_idx = 1;
-    value_idx = 2;
-  } else if (argc != 2) {
-    return false;
-  }
-
-  AstNode** args = node->data.command.args;
-  if (args[name_idx]->type != AST_LIT_STRING) return false;
-
-  AstNode* value_node = args[value_idx];
-  if (!compiler__node_is_suspension(c, value_node)) return false;
-
-  uint32_t name_len = args[name_idx]->data.lit_string.length;
-  if (name_len > 7) return false;
-
-  *out_name = jacl_inline_string(args[name_idx]->data.lit_string.value, name_len);
-  *out_value_node = value_node;
-  return true;
-}
-
-/**
- * Check if a statement is a direct [await expr] call.
- */
-static bool compiler__is_direct_yield(AstNode* node, AstNode** out_value_expr) {
-  if (node->type != AST_COMMAND) return false;
-  AstNode* head = node->data.command.head;
-  if (!compiler__head_matches(head, "yield", 5)) return false;
-  if (node->data.command.arg_count != 1) return false;
-  *out_value_expr = node->data.command.args[0];
-  return true;
-}
-
-static bool compiler__is_direct_await(AstNode* node, AstNode** out_future_expr) {
-  if (node->type != AST_COMMAND) return false;
-  AstNode* head = node->data.command.head;
-  if (!compiler__head_matches(head, "await", 5)) return false;
-  if (node->data.command.arg_count != 1) return false;
-  *out_future_expr = node->data.command.args[0];
-  return true;
-}
-
-/**
- * Check if a statement is a direct [parallel body1 body2 ...] call.
- */
-static bool compiler__is_direct_parallel(AstNode* node) {
-  if (node->type != AST_COMMAND) return false;
-  AstNode* head = node->data.command.head;
-  return compiler__head_matches(head, "parallel", 8);
-}
-
-static bool compiler__is_direct_race(AstNode* node) {
-  if (node->type != AST_COMMAND) return false;
-  AstNode* head = node->data.command.head;
-  return compiler__head_matches(head, "race", 4);
-}
-
-/**
- * Compile a parallel body block as a closure (same pattern as spawn body).
- * Each body becomes a zero-arg closure (non-CPS) or 1-arg closure (CPS with __k).
+ * Compile a parallel/race body block as a closure.
+ * Each body becomes a zero-arg closure (non-suspending) or an SM closure
+ * (suspending, with __sm/__rv params and state machine compilation).
  * Pushes the closure onto the stack.
  */
 static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
@@ -2604,21 +2357,25 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   closure->pin_worker_id = -1;
 
   /* Pin this body to thread 0 if it mutates non-local variables
-     OR captures a mutable (mut/box) binding from an enclosing scope.
-     Per-worker VM isolation means OP_SET_GLOBAL only modifies the local
-     worker's env — pinning to thread 0 ensures all mutable state reads
-     and writes go through a single worker for consistency.
-     Bodies with only local mutations can safely run on any worker. */
+     OR captures a mutable (mut/box) binding from an enclosing scope. */
   bool needs_pinning = ast__contains_nonlocal_set(body_block)
                     || compiler__body_captures_mutable(c, body_block);
   closure->pinned = needs_pinning;
 
+  SuspensionAnalysis sm_analysis_data;
+  memset(&sm_analysis_data, 0, sizeof(sm_analysis_data));
+
   if (body_suspends) {
-    /* CPS parallel body: hidden __k parameter */
-    closure->param_count = 1;
-    JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal));
-    pnames[0] = jacl_inline_string("__k", 3);
+    /* SM parallel body: analyze suspensions, compile as state machine */
+    sm_analysis_data = compiler__analyze_suspensions(
+        body_block, NULL, 0);
+    closure->param_count = 2;
+    JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
+    pnames[0] = jacl_inline_string("__sm", 4);
+    pnames[1] = jacl_inline_string("__rv", 4);
     closure->param_names = pnames;
+    closure->sm_field_count = (uint8_t)sm_analysis_data.state_layout.field_count;
+    closure->is_sm_compiled = true;
   } else {
     closure->param_count = 0;
   }
@@ -2629,7 +2386,6 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   body_compiler.scope_depth    = 1;
   body_compiler.enclosing      = c;
   body_compiler.suspension_map = c->suspension_map;
-  body_compiler.use_state_machines = c->use_state_machines;
   body_compiler.pin_all_closures = needs_pinning;
 
   /* Copy global arities for suspension lookups */
@@ -2642,21 +2398,19 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   }
 
   if (body_suspends) {
-    /* Add __k as local (slot 0) */
-    compiler__add_local(&body_compiler, jacl_inline_string("__k", 3), line, col);
+    /* SM body: add internal params as locals, compile via SM */
+    compiler__add_local(&body_compiler, jacl_inline_string("__sm", 4), line, col);
     body_compiler.locals[body_compiler.local_count - 1].is_param = true;
-    body_compiler.is_cps = true;
+    compiler__add_local(&body_compiler, jacl_inline_string("__rv", 4), line, col);
+    body_compiler.locals[body_compiler.local_count - 1].is_param = true;
     body_compiler.in_concurrent_body = true;
 
-    if (stmt_count == 0) {
-      compiler__emit_get_k(&body_compiler, line);
-      compiler__emit_byte(&body_compiler, OP_NIL, line);
-      compiler__emit_byte(&body_compiler, OP_TAIL_CALL, line);
-      compiler__emit_byte(&body_compiler, 1, line);
-    } else {
-      compiler__compile_cps_stmts(&body_compiler, stmts, stmt_count, line);
-    }
-    compiler__emit_byte(&body_compiler, OP_RETURN, line);
+    SuspensionAnalysis* analysis_ptr =
+        (SuspensionAnalysis*)arena_alloc(c->arena, sizeof(SuspensionAnalysis));
+    *analysis_ptr = sm_analysis_data;
+    body_compiler.sm_analysis = analysis_ptr;
+
+    compiler__compile_sm_stmts(&body_compiler, stmts, stmt_count, line, true);
   } else {
     /* Non-suspending body: compile as block expression */
     body_compiler.in_concurrent_body = true;
@@ -2682,849 +2436,7 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   }
 }
 
-/**
- * Check if a statement is a call to a known-suspending proc at the top level.
- * Returns true and sets out_node for the call.
- */
-static bool compiler__is_suspending_call(Compiler* c, AstNode* node) {
-  if (node->type != AST_COMMAND) return false;
-  AstNode* head = node->data.command.head;
-
-  if (head->type == AST_LIT_STRING) {
-    const char* name = head->data.lit_string.value;
-    uint32_t len = head->data.lit_string.length;
-    /* Skip built-in suspension points and generators handled separately */
-    if ((len == 5 && memcmp(name, "await", 5) == 0) ||
-        (len == 8 && memcmp(name, "parallel", 8) == 0) ||
-        (len == 4 && memcmp(name, "race", 4) == 0) ||
-        (len == 5 && memcmp(name, "yield", 5) == 0) ||
-        (len == 3 && memcmp(name, "def", 3) == 0) ||
-        (len == 4 && memcmp(name, "proc", 4) == 0)) {
-      return false;
-    }
-    if (len <= 7 && c->suspension_map) {
-      JaclVal name_val = jacl_inline_string(name, len);
-      int slot = compiler__resolve_local(c, name_val);
-      if (slot != -1 && c->locals[slot].suspends) return true;
-      GlobalArity* ga = compiler__find_global(c, name_val);
-      if (ga && ga->suspends) return true;
-      if (suspension_map_lookup(c->suspension_map, name_val)) return true;
-    }
-  }
-
-  /* Variable reference calling a suspending closure */
-  if (head->type == AST_VAR_REF) {
-    uint32_t vlen = head->data.var_ref.length;
-    if (vlen <= 7) {
-      JaclVal vname = jacl_inline_string(head->data.var_ref.name, vlen);
-      int slot = compiler__resolve_local(c, vname);
-      if (slot != -1 && c->locals[slot].suspends) return true;
-      int uv = compiler__resolve_upvalue(c, vname);
-      if (uv != -1 && c->upvalues[uv].suspends) return true;
-    }
-  }
-
-  return false;
-}
-
-/**
- * Compile a call to a suspending proc, passing a continuation as __k.
- * The continuation captures the remaining statements.
- */
-static void compiler__compile_suspending_call_cps(Compiler* c,
-                                                    AstNode* call_node,
-                                                    JaclVal param_name,
-                                                    AstNode** remaining_stmts,
-                                                    uint32_t remaining_count,
-                                                    uint32_t line) {
-  AstNode* head = call_node->data.command.head;
-  uint32_t argc = call_node->data.command.arg_count;
-  AstNode** args = call_node->data.command.args;
-
-  /* Push callee onto stack */
-  if (head->type == AST_LIT_STRING) {
-    uint32_t name_len = head->data.lit_string.length;
-    JaclVal name_val = jacl_inline_string(head->data.lit_string.value, name_len);
-    int local_slot = compiler__resolve_local(c, name_val);
-    if (local_slot != -1) {
-      if (c->locals[local_slot].is_mutable) {
-        compiler__emit_byte(c, OP_GET_CELL_LOCAL, line);
-      } else {
-        compiler__emit_byte(c, OP_GET_LOCAL, line);
-      }
-      compiler__emit_byte(c, (uint8_t)local_slot, line);
-    } else {
-      int uv = compiler__resolve_upvalue(c, name_val);
-      if (uv != -1) {
-        if (c->upvalues[uv].is_mutable) {
-          compiler__emit_byte(c, OP_GET_CELL_UPVALUE, line);
-        } else {
-          compiler__emit_byte(c, OP_GET_UPVALUE, line);
-        }
-        compiler__emit_byte(c, (uint8_t)uv, line);
-      } else {
-        JaclVal gkey = compiler__global_name_val(c,
-            head->data.lit_string.value, name_len);
-        uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
-        compiler__emit_byte(c, OP_GET_GLOBAL, line);
-        compiler__emit_u16(c, name_idx, line);
-      }
-    }
-  } else {
-    /* Variable reference or expression as callee */
-    compiler__compile_node(c, head);
-  }
-
-  /* Push regular arguments */
-  for (uint32_t i = 0; i < argc; i++) {
-    compiler__compile_node(c, args[i]);
-  }
-
-  /* Push continuation as __k (or pass parent __k directly for tail calls) */
-  if (remaining_count == 0) {
-    /* Tail call: pass __k directly so callee returns result to parent __k */
-    compiler__emit_get_k(c, line);
-  } else {
-    compiler__emit_continuation(c, param_name, remaining_stmts, remaining_count, line);
-  }
-
-  /* Tail call with argc + 1 (extra __k param) — reuses frame */
-  compiler__emit_byte(c, OP_TAIL_CALL, line);
-  compiler__emit_byte(c, (uint8_t)(argc + 1), line);
-}
-
-/**
- * Check if an AST node is a [while cond body] with suspension in the body.
- */
-static bool compiler__is_while_with_suspension(Compiler* c, AstNode* node) {
-  if (node->type != AST_COMMAND) return false;
-  AstNode* head = node->data.command.head;
-  if (!compiler__head_matches(head, "while", 5)) return false;
-  uint32_t argc = node->data.command.arg_count;
-  if (argc != 2) return false;
-  AstNode* body = node->data.command.args[1];
-  return body->type == AST_BLOCK && compiler__node_is_suspension(c, body);
-}
-
-/**
- * CPS-compile a while loop whose body contains suspension points (yield).
- *
- * Transforms:   while cond { ...yield... }; remaining...
- * Into:         loop_cell = cell(nil)
- *               loop_fn = proc(__k) { if cond: body-CPS(loopback); else: __k(nil) }
- *               store loop_fn in loop_cell
- *               tail-call loop_fn(remaining_continuation)
- *
- * The loopback closure (used as __k inside body) calls loop_fn(__k) again
- * via the self-referencing cell, achieving recursion without stack growth.
- */
-static void compiler__compile_cps_while(Compiler* c, AstNode* while_node,
-                                         AstNode** remaining_stmts,
-                                         uint32_t remaining_count,
-                                         uint32_t line) {
-  AstNode* cond_node = while_node->data.command.args[0];
-  AstNode* body_block = while_node->data.command.args[1];
-  uint32_t body_count = body_block->data.block.count;
-  AstNode** body_stmts = body_block->data.block.commands;
-
-  /* --- Step 1: Allocate cell for loop function self-reference --- */
-  compiler__emit_byte(c, OP_NIL, line);
-  compiler__emit_byte(c, OP_MAKE_CELL, line);
-  JaclVal loop_cell_name = jacl_inline_string("__wlp", 5);
-  compiler__add_local(c, loop_cell_name, line, 0);
-
-  /* --- Step 2: Build the loop closure --- */
-  JaclClosure* loop_cl = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
-  chunk_init(&loop_cl->chunk, c->arena);
-  loop_cl->param_count   = 1;  /* __k = post-while continuation */
-  loop_cl->upvalue_count = 0;
-  loop_cl->upvalues      = NULL;
-  loop_cl->name          = "__while_loop";
-  loop_cl->min_args      = 1;
-  loop_cl->variadic      = false;
-  loop_cl->pinned        = false;
-  loop_cl->pin_worker_id = -1;
-  loop_cl->is_generator  = false;
-  JaclVal k_param = jacl_inline_string("__k", 3);
-  loop_cl->param_names = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal));
-  loop_cl->param_names[0] = k_param;
-
-  Compiler loop_compiler;
-  compiler__init(&loop_compiler, &loop_cl->chunk, c->arena, c->intern_table, c->heap);
-  loop_compiler.scope_depth    = 1;
-  loop_compiler.enclosing      = c;
-  loop_compiler.suspension_map = c->suspension_map;
-  loop_compiler.use_state_machines = c->use_state_machines;
-  loop_compiler.is_cps         = true;
-  loop_compiler.has_yield      = true;  /* propagate generator flag */
-  { Compiler* root = c; while (root->enclosing) root = root->enclosing;
-    memcpy(loop_compiler.global_arities, root->global_arities,
-           sizeof(GlobalArity) * root->global_arity_count);
-    loop_compiler.global_arity_count = root->global_arity_count;
-  }
-
-  /* __k parameter at slot 0 */
-  compiler__add_local(&loop_compiler, k_param, line, 0);
-  loop_compiler.locals[loop_compiler.local_count - 1].is_param = true;
-
-  /* Compile condition */
-  compiler__compile_node(&loop_compiler, cond_node);
-  uint32_t exit_jump = compiler__emit_jump(&loop_compiler, OP_JUMP_IF_FALSE, line);
-
-  /* --- True branch: compile body with CPS, looping back at end --- */
-
-  /* Build loopback closure: proc __r { get_cell __wlp; get __k; tail_call 1 }
-     This closure is called at the end of the body, and it re-invokes the loop
-     function with the same post-while continuation (__k). */
-  JaclClosure* lb_cl = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
-  chunk_init(&lb_cl->chunk, c->arena);
-  lb_cl->param_count   = 1;
-  lb_cl->upvalue_count = 0;
-  lb_cl->upvalues      = NULL;
-  lb_cl->name          = "__loop_back";
-  lb_cl->min_args      = 1;
-  lb_cl->variadic      = false;
-  lb_cl->pinned        = false;
-  lb_cl->pin_worker_id = -1;
-  lb_cl->is_generator  = false;
-  JaclVal r_param = jacl_inline_string("__r", 3);
-  lb_cl->param_names = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal));
-  lb_cl->param_names[0] = r_param;
-
-  Compiler lb_compiler;
-  compiler__init(&lb_compiler, &lb_cl->chunk, c->arena, c->intern_table, c->heap);
-  lb_compiler.scope_depth = 1;
-  lb_compiler.enclosing   = &loop_compiler;
-  /* Add __r param at slot 0 */
-  compiler__add_local(&lb_compiler, r_param, line, 0);
-  lb_compiler.locals[lb_compiler.local_count - 1].is_param = true;
-
-  /* Body: get loop_fn from cell, get __k from enclosing, tail-call loop_fn(__k) */
-  JaclVal wlp_name = jacl_inline_string("__wlp", 5);
-  int uv_loop = compiler__resolve_upvalue(&lb_compiler, wlp_name);
-  compiler__emit_byte(&lb_compiler, OP_GET_CELL_UPVALUE, line);
-  compiler__emit_byte(&lb_compiler, (uint8_t)uv_loop, line);
-
-  int uv_k = compiler__resolve_upvalue(&lb_compiler, k_param);
-  compiler__emit_byte(&lb_compiler, OP_GET_UPVALUE, line);
-  compiler__emit_byte(&lb_compiler, (uint8_t)uv_k, line);
-
-  compiler__emit_byte(&lb_compiler, OP_TAIL_CALL, line);
-  compiler__emit_byte(&lb_compiler, 1, line);
-
-  /* Propagate errors */
-  c->error_count += lb_compiler.error_count;
-  if (!c->first_error && lb_compiler.first_error) c->first_error = lb_compiler.first_error;
-
-  /* Emit OP_CLOSURE for loopback in loop_compiler */
-  lb_cl->upvalue_count = (uint8_t)lb_compiler.upvalue_count;
-  uint16_t lb_idx = chunk_add_constant(loop_compiler.chunk, jacl_closure(lb_cl));
-  compiler__emit_byte(&loop_compiler, OP_CLOSURE, line);
-  compiler__emit_u16(&loop_compiler, lb_idx, line);
-  for (uint32_t i = 0; i < lb_compiler.upvalue_count; i++) {
-    compiler__emit_byte(&loop_compiler, lb_compiler.upvalues[i].is_local, line);
-    compiler__emit_byte(&loop_compiler, lb_compiler.upvalues[i].index, line);
-  }
-
-  /* Shadow __k with the loopback closure so body CPS tail-calls it */
-  uint32_t saved_local_count = loop_compiler.local_count;
-  compiler__add_local(&loop_compiler, jacl_inline_string("__k", 3), line, 0);
-
-  /* Compile body statements with CPS (yield becomes suspension point) */
-  compiler__begin_scope(&loop_compiler);
-  compiler__compile_cps_stmts(&loop_compiler, body_stmts, body_count, line);
-  compiler__end_scope(&loop_compiler, line);
-
-  /* Restore local count (shadow __k is cleaned up — unreachable code follows) */
-  loop_compiler.local_count = saved_local_count;
-
-  /* --- False branch (exit): tail-call __k(nil) --- */
-  compiler__patch_jump(&loop_compiler, exit_jump);
-  /* Access original __k at slot 0 (the parameter) directly */
-  compiler__emit_byte(&loop_compiler, OP_GET_LOCAL, line);
-  compiler__emit_byte(&loop_compiler, 0, line);
-  compiler__emit_byte(&loop_compiler, OP_NIL, line);
-  compiler__emit_byte(&loop_compiler, OP_TAIL_CALL, line);
-  compiler__emit_byte(&loop_compiler, 1, line);
-
-  /* Propagate errors from loop compiler */
-  c->error_count += loop_compiler.error_count;
-  if (!c->first_error && loop_compiler.first_error) c->first_error = loop_compiler.first_error;
-
-  /* --- Step 3: Emit OP_CLOSURE for loop_fn in parent and store in cell --- */
-  loop_cl->upvalue_count = (uint8_t)loop_compiler.upvalue_count;
-  uint16_t loop_idx = chunk_add_constant(c->chunk, jacl_closure(loop_cl));
-  compiler__emit_byte(c, OP_CLOSURE, line);
-  compiler__emit_u16(c, loop_idx, line);
-  for (uint32_t i = 0; i < loop_compiler.upvalue_count; i++) {
-    compiler__emit_byte(c, loop_compiler.upvalues[i].is_local, line);
-    compiler__emit_byte(c, loop_compiler.upvalues[i].index, line);
-  }
-
-  /* Store loop closure in the cell */
-  int loop_cell_slot = compiler__resolve_local(c, loop_cell_name);
-  compiler__emit_byte(c, OP_SET_CELL_LOCAL, line);
-  compiler__emit_byte(c, (uint8_t)loop_cell_slot, line);
-
-  /* --- Step 4: Call loop_fn(post_while_continuation) --- */
-  /* Push loop_fn (get from cell) */
-  compiler__emit_byte(c, OP_GET_CELL_LOCAL, line);
-  compiler__emit_byte(c, (uint8_t)loop_cell_slot, line);
-
-  /* Push __k for loop_fn: either remaining_continuation or enclosing __k */
-  if (remaining_count == 0) {
-    compiler__emit_get_k(c, line);
-  } else {
-    JaclVal cont_param = jacl_inline_string("__r", 3);
-    compiler__emit_continuation(c, cont_param, remaining_stmts, remaining_count, line);
-  }
-
-  /* Tail-call loop_fn(post_while_continuation) */
-  compiler__emit_byte(c, OP_TAIL_CALL, line);
-  compiler__emit_byte(c, 1, line);
-}
-
-/**
- * Check if an AST node is an [if ...] command with suspension in any branch.
- * Does NOT check the condition — only the then/else blocks.
- */
-static bool compiler__is_if_with_suspension(Compiler* c, AstNode* node) {
-  if (node->type != AST_COMMAND) return false;
-  AstNode* head = node->data.command.head;
-  if (!compiler__head_matches(head, "if", 2)) return false;
-  uint32_t argc = node->data.command.arg_count;
-  AstNode** args = node->data.command.args;
-  if (argc < 2) return false;
-  if (args[1]->type == AST_BLOCK && compiler__node_is_suspension(c, args[1]))
-    return true;
-  if (argc >= 3 && args[2]->type == AST_BLOCK &&
-      compiler__node_is_suspension(c, args[2]))
-    return true;
-  return false;
-}
-
-/**
- * Compile one branch of a CPS if statement.
- * If need_join is true, jk_name is a local holding the join continuation;
- * branches that suspend use it as __k, non-suspending branches call it directly.
- * If need_join is false, branches use the enclosing __k.
- */
-static void compiler__compile_cps_branch(Compiler* c, AstNode* block,
-                                          bool need_join, JaclVal jk_name,
-                                          uint32_t line) {
-  uint32_t bcount = block->data.block.count;
-  AstNode** bstmts = block->data.block.commands;
-  bool branch_suspends = compiler__node_is_suspension(c, block);
-
-  if (branch_suspends) {
-    uint32_t saved_local_count = c->local_count;
-    if (need_join) {
-      /* Shadow __k with join continuation so CPS stmts route through it */
-      int jk = compiler__resolve_local(c, jk_name);
-      compiler__emit_byte(c, OP_GET_LOCAL, line);
-      compiler__emit_byte(c, (uint8_t)jk, line);
-      compiler__add_local(c, jacl_inline_string("__k", 3), line, 0);
-    }
-    compiler__compile_cps_stmts(c, bstmts, bcount, line);
-    /* Remove shadow __k from compiler tracking without emitting POP.
-       The stack slot is cleaned up by the eventual OP_RETURN. */
-    c->local_count = saved_local_count;
-  } else {
-    /* Non-suspending: compile stmts normally, then call k(result) */
-    for (uint32_t i = 0; i + 1 < bcount; i++) {
-      compiler__compile_node(c, bstmts[i]);
-      compiler__emit_check_error(c, line);
-    }
-    /* Push the continuation to call */
-    if (need_join) {
-      int jk = compiler__resolve_local(c, jk_name);
-      compiler__emit_byte(c, OP_GET_LOCAL, line);
-      compiler__emit_byte(c, (uint8_t)jk, line);
-    } else {
-      compiler__emit_get_k(c, line);
-    }
-    /* Push result value */
-    if (bcount > 0) {
-      compiler__compile_node(c, bstmts[bcount - 1]);
-    } else {
-      compiler__emit_byte(c, OP_NIL, line);
-    }
-    /* Tail call k(result) — reuses frame */
-    compiler__emit_byte(c, OP_TAIL_CALL, line);
-    compiler__emit_byte(c, 1, line);
-  }
-}
-
-/**
- * Compile an if-with-suspension in CPS mode.
- * Creates a join continuation for remaining_stmts (if any) and routes
- * each branch's result through it. Non-suspending branches tail-call
- * the join continuation directly.
- *
- * join_param is the parameter name for the join continuation
- * (e.g., "__if_r" for anonymous, or the def name when used for def-with-if).
- */
-static void compiler__compile_cps_if(Compiler* c, AstNode* if_node,
-                                      JaclVal join_param,
-                                      AstNode** remaining_stmts,
-                                      uint32_t remaining_count,
-                                      uint32_t line) {
-  AstNode** args = if_node->data.command.args;
-  uint32_t argc = if_node->data.command.arg_count;
-
-  bool need_join = (remaining_count > 0);
-  JaclVal jk_name = jacl_inline_string("__jk", 4);
-
-  if (need_join) {
-    /* Create join continuation for remaining stmts */
-    compiler__emit_continuation(c, join_param, remaining_stmts,
-                                 remaining_count, line);
-    compiler__add_local(c, jk_name, line, 0);
-  }
-
-  /* Compile condition */
-  compiler__compile_node(c, args[0]);
-
-  /* JUMP_IF_FALSE -> else */
-  uint32_t then_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
-
-  /* Then branch */
-  compiler__compile_cps_branch(c, args[1], need_join, jk_name, line);
-
-  /* JUMP -> end (skip else) */
-  uint32_t else_jump = compiler__emit_jump(c, OP_JUMP, line);
-
-  /* Patch JUMP_IF_FALSE to here */
-  compiler__patch_jump(c, then_jump);
-
-  /* Else branch */
-  if (argc >= 3) {
-    compiler__compile_cps_branch(c, args[2], need_join, jk_name, line);
-  } else {
-    /* No else: call k(nil) */
-    if (need_join) {
-      int jk = compiler__resolve_local(c, jk_name);
-      compiler__emit_byte(c, OP_GET_LOCAL, line);
-      compiler__emit_byte(c, (uint8_t)jk, line);
-    } else {
-      compiler__emit_get_k(c, line);
-    }
-    compiler__emit_byte(c, OP_NIL, line);
-    compiler__emit_byte(c, OP_TAIL_CALL, line);
-    compiler__emit_byte(c, 1, line);
-  }
-
-  /* Patch JUMP to here */
-  compiler__patch_jump(c, else_jump);
-}
-
-/**
- * Check if a command has non-block arguments that contain suspension points.
- * Used to determine if argument extraction is needed.
- */
-static bool compiler__has_suspending_non_block_args(Compiler* c, AstNode* node) {
-  if (node->type != AST_COMMAND) return false;
-  AstNode** args = node->data.command.args;
-  uint32_t argc = node->data.command.arg_count;
-  for (uint32_t i = 0; i < argc; i++) {
-    if (args[i]->type != AST_BLOCK &&
-        compiler__node_is_suspension(c, args[i])) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Shared helper: for each suspending non-block arg in args[0..argc), create a
- * synthetic [def __aN arg] statement and replace the arg with a $__aN var ref.
- * out_new_args must be caller-allocated with argc slots (pre-copied from args).
- * out_defs must be caller-allocated with argc slots (upper bound on susp count).
- * Returns the number of synthetic defs emitted (= number of suspending args).
- */
-static uint32_t compiler__cps_extract_args_helper(
-    Compiler* c, AstNode** args, uint32_t argc,
-    AstNode** out_new_args, AstNode** out_defs) {
-  memcpy(out_new_args, args, sizeof(AstNode*) * argc);
-  uint32_t susp_count = 0;
-  for (uint32_t i = 0; i < argc; i++) {
-    if (args[i]->type == AST_BLOCK || !compiler__node_is_suspension(c, args[i]))
-      continue;
-
-    /* Generate temp name __a0, __a1, etc. */
-    char tmp_name[8];
-    snprintf(tmp_name, sizeof(tmp_name), "__a%u", susp_count);
-    uint32_t name_len = (uint32_t)strlen(tmp_name);
-    char* name_copy = (char*)arena_alloc(c->arena, name_len + 1);
-    memcpy(name_copy, tmp_name, name_len + 1);
-
-    /* Var ref node to replace the suspending arg */
-    AstNode* var_ref = ast_alloc(c->arena);
-    var_ref->type = AST_VAR_REF;
-    var_ref->start = args[i]->start;
-    var_ref->end = args[i]->end;
-    var_ref->data.var_ref.name = name_copy;
-    var_ref->data.var_ref.length = name_len;
-
-    /* Name literal node for def */
-    AstNode* name_node = ast_alloc(c->arena);
-    name_node->type = AST_LIT_STRING;
-    name_node->start = args[i]->start;
-    name_node->end = args[i]->end;
-    name_node->data.lit_string.value = name_copy;
-    name_node->data.lit_string.length = name_len;
-
-    /* def head */
-    AstNode* def_head = ast_alloc(c->arena);
-    def_head->type = AST_LIT_STRING;
-    def_head->start = args[i]->start;
-    def_head->end = args[i]->end;
-    def_head->data.lit_string.value = "def";
-    def_head->data.lit_string.length = 3;
-
-    /* [def name original_arg] command */
-    AstNode** def_args = ast_alloc_array(c->arena, 2);
-    def_args[0] = name_node;
-    def_args[1] = args[i];
-
-    AstNode* def_cmd = ast_alloc(c->arena);
-    def_cmd->type = AST_COMMAND;
-    def_cmd->start = args[i]->start;
-    def_cmd->end = args[i]->end;
-    def_cmd->data.command.head = def_head;
-    def_cmd->data.command.args = def_args;
-    def_cmd->data.command.arg_count = 2;
-
-    out_defs[susp_count] = def_cmd;
-    out_new_args[i] = var_ref;
-    susp_count++;
-  }
-  return susp_count;
-}
-
-/**
- * Extract suspending non-block arguments from a command into temp defs.
- * Creates synthetic AST: [def __a0 susp_arg0]; [def __a1 susp_arg1]; ...;
- * [modified_cmd with $__a0 $__a1 ...]; remaining_stmts.
- * Then compiles the full list through compiler__compile_cps_stmts.
- */
-static void compiler__compile_cps_extract_args(Compiler* c, AstNode* cmd_node,
-                                                AstNode** remaining_stmts,
-                                                uint32_t remaining_count,
-                                                uint32_t line) {
-  uint32_t argc = cmd_node->data.command.arg_count;
-  AstNode** new_args = ast_alloc_array(c->arena, argc);
-  AstNode** defs = ast_alloc_array(c->arena, argc);
-  uint32_t susp_count = compiler__cps_extract_args_helper(
-      c, cmd_node->data.command.args, argc, new_args, defs);
-
-  uint32_t total = susp_count + 1 + remaining_count;
-  AstNode** new_stmts = ast_alloc_array(c->arena, total);
-  for (uint32_t i = 0; i < susp_count; i++) new_stmts[i] = defs[i];
-
-  AstNode* mod_cmd = ast_alloc(c->arena);
-  *mod_cmd = *cmd_node;
-  mod_cmd->data.command.args = new_args;
-  new_stmts[susp_count] = mod_cmd;
-
-  for (uint32_t i = 0; i < remaining_count; i++)
-    new_stmts[susp_count + 1 + i] = remaining_stmts[i];
-
-  compiler__compile_cps_stmts(c, new_stmts, total, line);
-}
-
-/**
- * Extract suspending args from a def's value expression and compile via CPS.
- * Turns [def x [f [await $a] [await $b]]] into:
- *   [def __a0 [await $a]]; [def __a1 [await $b]]; [def x [f $__a0 $__a1]]
- */
-static void compiler__compile_cps_extract_def_value(
-    Compiler* c, AstNode* def_stmt, JaclVal def_name, AstNode* value_node,
-    AstNode** remaining_stmts, uint32_t remaining_count, uint32_t line) {
-  (void)def_name;
-  uint32_t v_argc = value_node->data.command.arg_count;
-  AstNode** new_v_args = ast_alloc_array(c->arena, v_argc);
-  AstNode** defs = ast_alloc_array(c->arena, v_argc);
-  uint32_t susp_count = compiler__cps_extract_args_helper(
-      c, value_node->data.command.args, v_argc, new_v_args, defs);
-
-  uint32_t total = susp_count + 1 + remaining_count;
-  AstNode** new_stmts = ast_alloc_array(c->arena, total);
-  for (uint32_t i = 0; i < susp_count; i++) new_stmts[i] = defs[i];
-
-  AstNode* mod_value = ast_alloc(c->arena);
-  *mod_value = *value_node;
-  mod_value->data.command.args = new_v_args;
-
-  AstNode* mod_def = ast_alloc(c->arena);
-  *mod_def = *def_stmt;
-  uint32_t d_argc = def_stmt->data.command.arg_count;
-  AstNode** mod_def_args = ast_alloc_array(c->arena, d_argc);
-  memcpy(mod_def_args, def_stmt->data.command.args, sizeof(AstNode*) * d_argc);
-  mod_def_args[d_argc - 1] = mod_value;
-  mod_def->data.command.args = mod_def_args;
-  new_stmts[susp_count] = mod_def;
-
-  for (uint32_t i = 0; i < remaining_count; i++)
-    new_stmts[susp_count + 1 + i] = remaining_stmts[i];
-
-  compiler__compile_cps_stmts(c, new_stmts, total, line);
-}
-
-/**
- * CPS-aware compilation of a statement list.
- * Finds the first suspension point, compiles code before it normally,
- * creates a continuation for code after it, and emits OP_AWAIT or CPS call.
- * When no more suspension points exist, calls __k with the final result.
- */
-static void compiler__compile_cps_stmts(Compiler* c, AstNode** stmts,
-                                         uint32_t count, uint32_t line) {
-  if (count == 0) {
-    /* No statements: tail-call __k(nil) */
-    compiler__emit_get_k(c, line);
-    compiler__emit_byte(c, OP_NIL, line);
-    compiler__emit_byte(c, OP_TAIL_CALL, line);
-    compiler__emit_byte(c, 1, line);
-    return;
-  }
-
-  /* Find the first statement containing a suspension point */
-  uint32_t susp_idx = UINT32_MAX;
-  for (uint32_t i = 0; i < count; i++) {
-    if (compiler__node_is_suspension(c, stmts[i])) {
-      susp_idx = i;
-      break;
-    }
-  }
-
-  if (susp_idx == UINT32_MAX) {
-    /* No suspension points — compile all statements normally,
-       then tail-call __k with the block result */
-
-    /* All statements except the last: compile + pop */
-    for (uint32_t i = 0; i + 1 < count; i++) {
-      compiler__compile_node(c, stmts[i]);
-      compiler__emit_check_error(c, line);
-    }
-
-    /* Last statement: push __k first (for tail-call), then compile expression */
-    compiler__emit_get_k(c, line);
-    compiler__compile_node(c, stmts[count - 1]);
-
-    /* Tail-call __k(result) */
-    compiler__emit_byte(c, OP_TAIL_CALL, line);
-    compiler__emit_byte(c, 1, line);
-    return;
-  }
-
-  /* Compile statements before the suspension point normally */
-  for (uint32_t i = 0; i < susp_idx; i++) {
-    compiler__compile_node(c, stmts[i]);
-    compiler__emit_check_error(c, line);
-  }
-
-  AstNode* susp_stmt = stmts[susp_idx];
-  AstNode** remaining = &stmts[susp_idx + 1];
-  uint32_t remaining_count = count - susp_idx - 1;
-
-  /* Determine the continuation parameter name */
-  JaclVal cont_param = jacl_inline_string("__r", 3); /* default for unnamed results */
-
-  /* Case 1: Direct [await expr] */
-  AstNode* future_expr = NULL;
-  if (compiler__is_direct_await(susp_stmt, &future_expr)) {
-    /* Compile the future expression */
-    compiler__compile_node(c, future_expr);
-
-    if (remaining_count == 0) {
-      /* Tail await: pass __k directly as continuation so OP_AWAIT calls
-         __k(result) without an intermediate wrapper. */
-      compiler__emit_get_k(c, line);
-    } else {
-      /* Create continuation for remaining statements */
-      compiler__emit_continuation(c, cont_param, remaining, remaining_count, line);
-    }
-
-    /* Emit OP_AWAIT */
-    compiler__emit_byte(c, OP_AWAIT, susp_stmt->start.line);
-    return;
-  }
-
-  /* Case 1b: Direct [parallel body1 body2 ...] */
-  if (compiler__is_direct_parallel(susp_stmt)) {
-    uint32_t par_argc = susp_stmt->data.command.arg_count;
-    AstNode** par_args = susp_stmt->data.command.args;
-
-    /* Compile each body as a closure (like spawn bodies) */
-    for (uint32_t i = 0; i < par_argc; i++) {
-      compiler__compile_parallel_body(c, par_args[i],
-                                       susp_stmt->start.line,
-                                       susp_stmt->start.column);
-    }
-
-    /* Emit continuation or __k */
-    if (remaining_count == 0) {
-      compiler__emit_get_k(c, line);
-    } else {
-      compiler__emit_continuation(c, cont_param, remaining, remaining_count, line);
-    }
-
-    compiler__emit_byte(c, OP_PARALLEL, susp_stmt->start.line);
-    compiler__emit_byte(c, (uint8_t)par_argc, susp_stmt->start.line);
-    return;
-  }
-
-  /* Case 1c: Direct [race body1 body2 ...] */
-  if (compiler__is_direct_race(susp_stmt)) {
-    uint32_t race_argc = susp_stmt->data.command.arg_count;
-    AstNode** race_args = susp_stmt->data.command.args;
-
-    for (uint32_t i = 0; i < race_argc; i++) {
-      compiler__compile_parallel_body(c, race_args[i],
-                                       susp_stmt->start.line,
-                                       susp_stmt->start.column);
-    }
-
-    if (remaining_count == 0) {
-      compiler__emit_get_k(c, line);
-    } else {
-      compiler__emit_continuation(c, cont_param, remaining, remaining_count, line);
-    }
-
-    compiler__emit_byte(c, OP_RACE, susp_stmt->start.line);
-    compiler__emit_byte(c, (uint8_t)race_argc, susp_stmt->start.line);
-    return;
-  }
-
-  /* Case 1d: Direct [yield expr] — generator CPS suspension */
-  AstNode* yield_value_expr = NULL;
-  if (compiler__is_direct_yield(susp_stmt, &yield_value_expr)) {
-    /* Compile the value to yield */
-    compiler__compile_node(c, yield_value_expr);
-
-    /* Push continuation for remaining stmts (or __k if tail position) */
-    if (remaining_count == 0) {
-      compiler__emit_get_k(c, line);
-    } else {
-      compiler__emit_continuation(c, cont_param, remaining, remaining_count, line);
-    }
-
-    /* OP_YIELD: pops continuation then value, stores both, returns VM_YIELD */
-    compiler__emit_byte(c, OP_YIELD, susp_stmt->start.line);
-    c->has_yield = true;
-    return;
-  }
-
-  /* Case 1e: [while cond { ... yield ... }] — CPS while loop */
-  if (compiler__is_while_with_suspension(c, susp_stmt)) {
-    compiler__compile_cps_while(c, susp_stmt, remaining, remaining_count,
-                                 susp_stmt->start.line);
-    c->has_yield = true;
-    return;
-  }
-
-  /* Case 2: [def name [await expr]] */
-  JaclVal def_name;
-  AstNode* value_node = NULL;
-  if (compiler__is_def_with_suspension(c, susp_stmt, &def_name, &value_node)) {
-    /* Check if the value is a direct await */
-    AstNode* def_future_expr = NULL;
-    if (compiler__is_direct_await(value_node, &def_future_expr)) {
-      /* [def name [await expr]] — name becomes continuation param */
-      compiler__compile_node(c, def_future_expr);
-      compiler__emit_continuation(c, def_name, remaining, remaining_count, line);
-      compiler__emit_byte(c, OP_AWAIT, susp_stmt->start.line);
-      return;
-    }
-
-    /* [def name [parallel ...]] — name becomes continuation param */
-    if (compiler__is_direct_parallel(value_node)) {
-      uint32_t par_argc = value_node->data.command.arg_count;
-      AstNode** par_args = value_node->data.command.args;
-      for (uint32_t i = 0; i < par_argc; i++) {
-        compiler__compile_parallel_body(c, par_args[i],
-                                         susp_stmt->start.line,
-                                         susp_stmt->start.column);
-      }
-      compiler__emit_continuation(c, def_name, remaining, remaining_count, line);
-      compiler__emit_byte(c, OP_PARALLEL, susp_stmt->start.line);
-      compiler__emit_byte(c, (uint8_t)par_argc, susp_stmt->start.line);
-      return;
-    }
-
-    /* [def name [race ...]] — name becomes continuation param */
-    if (compiler__is_direct_race(value_node)) {
-      uint32_t race_argc = value_node->data.command.arg_count;
-      AstNode** race_args = value_node->data.command.args;
-      for (uint32_t i = 0; i < race_argc; i++) {
-        compiler__compile_parallel_body(c, race_args[i],
-                                         susp_stmt->start.line,
-                                         susp_stmt->start.column);
-      }
-      compiler__emit_continuation(c, def_name, remaining, remaining_count, line);
-      compiler__emit_byte(c, OP_RACE, susp_stmt->start.line);
-      compiler__emit_byte(c, (uint8_t)race_argc, susp_stmt->start.line);
-      return;
-    }
-
-    /* [def name [suspending_call ...]] — name becomes continuation param */
-    if (compiler__is_suspending_call(c, value_node)) {
-      compiler__compile_suspending_call_cps(c, value_node, def_name,
-                                             remaining, remaining_count,
-                                             susp_stmt->start.line);
-      return;
-    }
-
-    /* Value is an if-with-suspension — compile CPS if with def name as param */
-    if (compiler__is_if_with_suspension(c, value_node)) {
-      compiler__compile_cps_if(c, value_node, def_name, remaining,
-                                remaining_count, susp_stmt->start.line);
-      return;
-    }
-
-    /* Value has extractable suspending arguments — extract and retry */
-    if (value_node->type == AST_COMMAND &&
-        compiler__has_suspending_non_block_args(c, value_node)) {
-      compiler__compile_cps_extract_def_value(c, susp_stmt, def_name,
-                                               value_node, remaining,
-                                               remaining_count, line);
-      return;
-    }
-
-    /* Fallback: compile def normally and continue with remaining stmts */
-    compiler__compile_node(c, susp_stmt);
-    compiler__emit_check_error(c, line);
-    compiler__compile_cps_stmts(c, remaining, remaining_count, line);
-    return;
-  }
-
-  /* Case 3: Top-level call to suspending proc */
-  if (compiler__is_suspending_call(c, susp_stmt)) {
-    compiler__compile_suspending_call_cps(c, susp_stmt, cont_param,
-                                           remaining, remaining_count,
-                                           susp_stmt->start.line);
-    return;
-  }
-
-  /* Case 4: if-with-suspension in branches */
-  if (compiler__is_if_with_suspension(c, susp_stmt)) {
-    compiler__compile_cps_if(c, susp_stmt, cont_param, remaining,
-                              remaining_count, susp_stmt->start.line);
-    return;
-  }
-
-  /* Case 5: Statement has extractable suspending arguments */
-  if (compiler__has_suspending_non_block_args(c, susp_stmt)) {
-    compiler__compile_cps_extract_args(c, susp_stmt, remaining,
-                                        remaining_count, line);
-    return;
-  }
-
-  /* Case 6: Fallback — compile normally and continue */
-  compiler__compile_node(c, susp_stmt);
-  compiler__emit_check_error(c, line);
-  compiler__compile_cps_stmts(c, remaining, remaining_count, line);
-}
+/* All suspension is state-machine compiled (see US-007..US-019). */
 
 /* --- Internal: Compile block as expression (last stmt value stays on stack) --- */
 
@@ -5955,42 +4867,25 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
     uint8_t min_args = is_variadic ? (uint8_t)(param_count - 1) : param_count;
 
-    /* Check if this proc needs CPS transformation */
+    /* Check if this proc suspends (yield/await/parallel/race) */
     JaclVal name_val_check = jacl_inline_string(proc_name, proc_name_len);
     bool proc_suspends_early = false;
     if (c->suspension_map) {
       proc_suspends_early = suspension_map_lookup(c->suspension_map, name_val_check);
     }
 
-    /* Check for state machine compilation mode.
-       When use_state_machines is true, analyze the body for suspension points.
-       If it contains yield or await, use the SM path instead of CPS. */
-    uint8_t user_param_count = param_count; /* original param count for callers */
+    /* Analyze body for state machine compilation when proc suspends */
+    uint8_t user_param_count = param_count;
     bool use_sm_path = false;
     SuspensionAnalysis sm_analysis_data;
     memset(&sm_analysis_data, 0, sizeof(sm_analysis_data));
 
-    if (proc_suspends_early && c->use_state_machines) {
+    if (proc_suspends_early) {
       sm_analysis_data = compiler__analyze_suspensions(
           args[body_arg_idx], param_names_arr, user_param_count);
-      for (uint32_t si = 0; si < sm_analysis_data.suspension_count; si++) {
-        if (sm_analysis_data.suspension_points[si].type == SUSPEND_YIELD ||
-            sm_analysis_data.suspension_points[si].type == SUSPEND_AWAIT) {
-          use_sm_path = true;
-          break;
-        }
-      }
-    }
-
-    /* For CPS-transformed procs (not SM), add __k as hidden last parameter */
-    if (proc_suspends_early && !use_sm_path) {
-      if (param_count >= COMPILER_MAX_PROC_PARAMS) {
-        compiler__error(c, line, col, "too many proc parameters for CPS transform");
-        return;
-      }
-      param_names_arr[param_count] = jacl_inline_string("__k", 3);
-      param_types_arr[param_count] = TYPE_DYN;
-      param_count++;
+      /* Always SM-compile suspending procs — even if suspension_count == 0
+         (transitively suspending via calling other suspending procs). */
+      use_sm_path = true;
     }
 
     /* Allocate closure */
@@ -6040,7 +4935,6 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     body_compiler.enclosing      = c;
     body_compiler.return_type    = proc_return_type;
     body_compiler.suspension_map = c->suspension_map;
-    body_compiler.use_state_machines = c->use_state_machines;
 
     /* Copy global arities to body compiler for suspension lookups */
     {
@@ -6073,35 +4967,28 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     if (use_sm_path) {
-      /* State machine compilation for generator body */
+      /* State machine compilation for suspending proc body */
       SuspensionAnalysis* analysis_ptr =
           (SuspensionAnalysis*)arena_alloc(c->arena, sizeof(SuspensionAnalysis));
       *analysis_ptr = sm_analysis_data;
       body_compiler.sm_analysis = analysis_ptr;
 
-      compiler__compile_sm_body(&body_compiler, args[body_arg_idx], line);
-    } else if (proc_suspends_early) {
-      /* CPS-transformed proc: compile body with CPS */
-      body_compiler.is_cps = true;
-
-      AstNode* body_block = args[body_arg_idx];
-      uint32_t stmt_count = body_block->data.block.count;
-      AstNode** stmts = body_block->data.block.commands;
-
-      if (stmt_count == 0) {
-        /* Empty body: tail-call __k(nil) */
-        compiler__emit_get_k(&body_compiler, line);
-        compiler__emit_byte(&body_compiler, OP_NIL, line);
-        compiler__emit_byte(&body_compiler, OP_TAIL_CALL, line);
-        compiler__emit_byte(&body_compiler, 1, line);
-      } else {
-        compiler__compile_cps_stmts(&body_compiler, stmts, stmt_count, line);
+      /* Generators (yield) use return_last_value=false (return nil = exhausted).
+         Async / transitively suspending procs use return_last_value=true. */
+      bool has_yield = false;
+      for (uint32_t sp = 0; sp < sm_analysis_data.suspension_count; sp++) {
+        if (sm_analysis_data.suspension_points[sp].type == SUSPEND_YIELD) {
+          has_yield = true;
+          break;
+        }
       }
-
-      /* CPS procs don't use OP_RETURN for the result — they call __k.
-         Emit OP_RETURN after the CPS chain as cleanup (callee returns to caller
-         after __k call completes). */
-      compiler__emit_byte(&body_compiler, OP_RETURN, line);
+      {
+        AstNode* body_block = args[body_arg_idx];
+        uint32_t stmt_count = body_block->data.block.count;
+        AstNode** body_stmts = body_block->data.block.commands;
+        compiler__compile_sm_stmts(&body_compiler, body_stmts, stmt_count,
+                                    line, !has_yield);
+      }
     } else {
       /* Normal non-suspending proc */
       compiler__compile_block_expr(&body_compiler, args[body_arg_idx]);
@@ -6182,7 +5069,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
 
-    /* Bind the name — use user_param_count (excludes hidden __k) for arity checks */
+    /* Bind the name — use user_param_count for arity checks */
     if (c->scope_depth > 0 && !c->force_global_procs) {
       /* Local scope: closure is on stack as local */
       compiler__add_local(c, name_val, line, col);
@@ -7299,7 +6186,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* await — suspension point (CPS transform or SM) */
+  /* await — suspension point (state machine) */
   if (compiler__head_matches(head, "await", 5)) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "await", "1 argument", argc);
@@ -7338,17 +6225,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       c->last_expr_type = TYPE_DYN;
       return;
     }
-    /* Placeholder for CPS path: compile arg then replace with nil */
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_POP, line);
-    compiler__emit_byte(c, OP_NIL, line);
+    compiler__error(c, line, col,
+        "await requires state machine compilation (internal error)");
     return;
   }
 
-  /* yield — generator suspension point.
-     In CPS mode, yield is handled by compiler__compile_cps_stmts.
-     This path is a fallback for non-CPS contexts (shouldn't normally be reached
-     for generators, but compile defensively). Stack: [value, continuation]. */
+  /* yield — generator suspension point (state machine). */
   if (compiler__head_matches(head, "yield", 5)) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "yield", "1 argument", argc);
@@ -7372,11 +6254,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       c->last_expr_type = TYPE_NIL;
       return;
     }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_NIL, line);  /* nil continuation (no CPS context) */
-    compiler__emit_byte(c, OP_YIELD, line);
-    c->has_yield = true;
-    c->last_expr_type = TYPE_NIL;
+    compiler__error(c, line, col,
+        "yield requires state machine compilation (internal error)");
     return;
   }
 
@@ -7454,7 +6333,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* parallel — suspension point (CPS transform in US-003+, context checks now) */
+  /* parallel — suspension point (state machine) */
   if (compiler__head_matches(head, "parallel", 8)) {
     if (argc < 2) {
       compiler__builtin_arity_error(c, line, col, "parallel",
@@ -7501,21 +6380,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       c->last_expr_type = TYPE_DYN;
       return;
     }
-    /* Compile each body as a closure, emit OP_PARALLEL.
-       In CPS context: handled by compile_cps_stmts Case 1b.
-       This path is reached only for non-CPS compilation (shouldn't happen
-       with well-formed programs, but compile defensively). */
-    for (uint32_t i = 0; i < argc; i++) {
-      compiler__compile_parallel_body(c, args[i], line, col);
-    }
-    /* Non-CPS: no continuation available, push nil as placeholder */
-    compiler__emit_byte(c, OP_NIL, line);
-    compiler__emit_byte(c, OP_PARALLEL, line);
-    compiler__emit_byte(c, (uint8_t)argc, line);
+    compiler__error(c, line, col,
+        "parallel requires state machine compilation (internal error)");
     return;
   }
 
-  /* race — suspension point (CPS transform in US-003+, context checks now) */
+  /* race — suspension point (state machine) */
   if (compiler__head_matches(head, "race", 4)) {
     if (argc < 2) {
       compiler__builtin_arity_error(c, line, col, "race",
@@ -7562,12 +6432,8 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       c->last_expr_type = TYPE_DYN;
       return;
     }
-    /* Race bodies compiled as closures (same as parallel) */
-    for (uint32_t i = 0; i < argc; i++) {
-      compiler__compile_parallel_body(c, args[i], line, col);
-    }
-    compiler__emit_byte(c, OP_RACE, line);
-    compiler__emit_byte(c, (uint8_t)argc, line);
+    compiler__error(c, line, col,
+        "race requires state machine compilation (internal error)");
     return;
   }
 
@@ -7586,8 +6452,11 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     uint32_t stmt_count = body_block->data.block.count;
     AstNode** stmts = body_block->data.block.commands;
 
-    /* Check if the spawn body contains await → needs CPS transform */
+    /* Check if the spawn body contains suspension points */
     bool spawn_suspends = ast__contains_suspension(body_block, c->suspension_map);
+
+    SuspensionAnalysis spawn_sm_analysis;
+    memset(&spawn_sm_analysis, 0, sizeof(spawn_sm_analysis));
 
     /* Allocate anonymous closure for the spawn body */
     JaclClosure* closure = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
@@ -7601,18 +6470,21 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     closure->pin_worker_id = -1;
 
     /* Pin spawn body to thread 0 if it mutates non-local variables
-       OR captures a mutable (mut/box) binding from an enclosing scope.
-       Bodies with only local mutations can run on any worker. */
+       OR captures a mutable (mut/box) binding from an enclosing scope. */
     bool needs_pinning = ast__contains_nonlocal_set(body_block)
                       || compiler__body_captures_mutable(c, body_block);
     closure->pinned = needs_pinning;
 
     if (spawn_suspends) {
-      /* CPS spawn: hidden __k parameter */
-      closure->param_count = 1;
-      JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal));
-      pnames[0] = jacl_inline_string("__k", 3);
+      /* SM spawn body: analyze suspensions, compile as state machine */
+      spawn_sm_analysis = compiler__analyze_suspensions(body_block, NULL, 0);
+      closure->param_count = 2;
+      JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
+      pnames[0] = jacl_inline_string("__sm", 4);
+      pnames[1] = jacl_inline_string("__rv", 4);
       closure->param_names = pnames;
+      closure->sm_field_count = (uint8_t)spawn_sm_analysis.state_layout.field_count;
+      closure->is_sm_compiled = true;
     } else {
       closure->param_count = 0;
     }
@@ -7623,7 +6495,6 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     body_compiler.scope_depth    = 1;
     body_compiler.enclosing      = c;
     body_compiler.suspension_map = c->suspension_map;
-    body_compiler.use_state_machines = c->use_state_machines;
     body_compiler.pin_all_closures = needs_pinning;
 
     /* Copy global arities for suspension lookups */
@@ -7636,21 +6507,19 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     if (spawn_suspends) {
-      /* Add __k as local (slot 0) */
-      compiler__add_local(&body_compiler, jacl_inline_string("__k", 3), line, col);
+      /* SM body: add internal params as locals, compile via SM */
+      compiler__add_local(&body_compiler, jacl_inline_string("__sm", 4), line, col);
       body_compiler.locals[body_compiler.local_count - 1].is_param = true;
-      body_compiler.is_cps = true;
+      compiler__add_local(&body_compiler, jacl_inline_string("__rv", 4), line, col);
+      body_compiler.locals[body_compiler.local_count - 1].is_param = true;
       body_compiler.in_concurrent_body = true;
 
-      if (stmt_count == 0) {
-        compiler__emit_get_k(&body_compiler, line);
-        compiler__emit_byte(&body_compiler, OP_NIL, line);
-        compiler__emit_byte(&body_compiler, OP_TAIL_CALL, line);
-        compiler__emit_byte(&body_compiler, 1, line);
-      } else {
-        compiler__compile_cps_stmts(&body_compiler, stmts, stmt_count, line);
-      }
-      compiler__emit_byte(&body_compiler, OP_RETURN, line);
+      SuspensionAnalysis* analysis_ptr =
+          (SuspensionAnalysis*)arena_alloc(c->arena, sizeof(SuspensionAnalysis));
+      *analysis_ptr = spawn_sm_analysis;
+      body_compiler.sm_analysis = analysis_ptr;
+
+      compiler__compile_sm_stmts(&body_compiler, stmts, stmt_count, line, true);
     } else {
       /* Non-suspending spawn body: compile as block expression */
       body_compiler.in_concurrent_body = true;
@@ -8646,7 +7515,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
 
 /**
  * Check if any top-level statement is suspending (uses await/parallel/race
- * or calls a suspending proc). Used to decide if top-level CPS is needed.
+ * or calls a suspending proc). Used to decide if top-level SM wrapping is needed.
  */
 static bool compiler__top_level_suspends(AstNode** stmts, uint32_t count,
                                           SuspensionMap* map) {
@@ -8687,10 +7556,10 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
       parse.nodes, parse.count, &suspension_map);
 
   if (top_suspends) {
-    /* CPS-transform top-level code into a __main closure with __k parameter.
+    /* Wrap top-level suspending code into a __main SM closure.
      * Proc definitions use force_global_procs so they remain globals. */
 
-    /* Phase 1: Register all proc global arities FIRST so CPS body can
+    /* Phase 1: Register all proc global arities FIRST so SM body can
        resolve suspension status of proc calls. */
     for (uint32_t i = 0; i < parse.count; i++) {
       AstNode* node = parse.nodes[i];
@@ -8750,7 +7619,7 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     }
 
     /* Phase 2: Hoist top-level proc definitions into the outer chunk so
-       they are defined via OP_SET_GLOBAL before the CPS closure executes.
+       they are defined via OP_SET_GLOBAL before the SM closure executes.
        This ensures all workers have proc definitions in their env when
        running in concurrent mode. */
     uint32_t non_proc_count = 0;
@@ -8768,19 +7637,32 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
       }
     }
 
-    /* Phase 3: Create __main CPS closure (only non-proc statements) */
+    /* Phase 3: Create __main SM closure (only non-proc statements) */
+    /* Build a synthetic block node for suspension analysis */
+    AstNode fake_block;
+    memset(&fake_block, 0, sizeof(fake_block));
+    fake_block.type = AST_BLOCK;
+    fake_block.data.block.count = non_proc_count;
+    fake_block.data.block.commands = non_proc_stmts;
+
+    SuspensionAnalysis main_sm_analysis = compiler__analyze_suspensions(
+        &fake_block, NULL, 0);
+
     JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
     chunk_init(&main_cl->chunk, arena);
-    main_cl->param_count   = 1; /* __k */
+    main_cl->param_count   = 2; /* __sm, __rv */
     main_cl->upvalue_count = 0;
     main_cl->upvalues      = NULL;
     main_cl->name          = "__main";
-    main_cl->min_args      = 1;
+    main_cl->min_args      = 0;
     main_cl->variadic      = false;
     main_cl->pinned        = false;
     main_cl->pin_worker_id = -1;
-    JaclVal* main_pnames   = (JaclVal*)arena_alloc(arena, sizeof(JaclVal));
-    main_pnames[0]         = jacl_inline_string("__k", 3);
+    main_cl->sm_field_count = (uint8_t)main_sm_analysis.state_layout.field_count;
+    main_cl->is_sm_compiled = true;
+    JaclVal* main_pnames   = (JaclVal*)arena_alloc(arena, sizeof(JaclVal) * 2);
+    main_pnames[0]         = jacl_inline_string("__sm", 4);
+    main_pnames[1]         = jacl_inline_string("__rv", 4);
     main_cl->param_names   = main_pnames;
 
     Compiler body;
@@ -8788,8 +7670,6 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     body.scope_depth       = 1;
     body.enclosing         = &c;
     body.suspension_map    = &suspension_map;
-    body.is_cps            = true;
-    body.use_state_machines = c.use_state_machines;
     body.force_global_procs = true;
 
     /* Copy global arities */
@@ -8797,13 +7677,21 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
            sizeof(GlobalArity) * c.global_arity_count);
     body.global_arity_count = c.global_arity_count;
 
-    /* Add __k as local slot 0 */
-    compiler__add_local(&body, jacl_inline_string("__k", 3), 1, 0);
+    /* Add __sm and __rv as local slots 0 and 1 */
+    compiler__add_local(&body, jacl_inline_string("__sm", 4), 1, 0);
+    body.locals[body.local_count - 1].is_param = true;
+    compiler__add_local(&body, jacl_inline_string("__rv", 4), 1, 0);
     body.locals[body.local_count - 1].is_param = true;
 
-    /* Compile non-proc stmts through CPS */
-    compiler__compile_cps_stmts(&body, non_proc_stmts, non_proc_count, 1);
-    compiler__emit_byte(&body, OP_RETURN, 1);
+    {
+      SuspensionAnalysis* analysis_ptr =
+          (SuspensionAnalysis*)arena_alloc(arena, sizeof(SuspensionAnalysis));
+      *analysis_ptr = main_sm_analysis;
+      body.sm_analysis = analysis_ptr;
+    }
+
+    /* Compile non-proc stmts through SM */
+    compiler__compile_sm_stmts(&body, non_proc_stmts, non_proc_count, 1, true);
 
     /* Propagate errors */
     c.error_count += body.error_count;
@@ -8948,7 +7836,6 @@ static bool compiler__compile_module(const char* canonical_path,
   Compiler mc;
   compiler__init(&mc, chunk, arena, importer->intern_table, importer->heap);
   mc.suspension_map  = &suspension_map;
-  mc.use_state_machines = importer->use_state_machines;
   mc.module_cache    = importer->module_cache;
   mc.current_module  = mod;
   mc.import_stack    = importer->import_stack;
@@ -9087,7 +7974,7 @@ static ProgramResult jacl_compile_program(const char* root_path,
   }
 
   if (top_suspends) {
-    /* CPS-transform top-level code — same logic as compiler_compile */
+    /* Wrap top-level suspending code in SM closure — same logic as compiler_compile */
 
     /* Phase 1: Register proc global arities */
     for (uint32_t i = 0; i < parse.count; i++) {
@@ -9161,19 +8048,31 @@ static ProgramResult jacl_compile_program(const char* root_path,
       }
     }
 
-    /* Phase 3: Create __main CPS closure */
+    /* Phase 3: Create __main SM closure */
+    AstNode fake_block2;
+    memset(&fake_block2, 0, sizeof(fake_block2));
+    fake_block2.type = AST_BLOCK;
+    fake_block2.data.block.count = non_proc_count;
+    fake_block2.data.block.commands = non_proc_stmts;
+
+    SuspensionAnalysis main_sm_analysis2 = compiler__analyze_suspensions(
+        &fake_block2, NULL, 0);
+
     JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
     chunk_init(&main_cl->chunk, arena);
-    main_cl->param_count   = 1;
+    main_cl->param_count   = 2; /* __sm, __rv */
     main_cl->upvalue_count = 0;
     main_cl->upvalues      = NULL;
     main_cl->name          = "__main";
-    main_cl->min_args      = 1;
+    main_cl->min_args      = 0;
     main_cl->variadic      = false;
     main_cl->pinned        = false;
     main_cl->pin_worker_id = -1;
-    JaclVal* main_pnames   = (JaclVal*)arena_alloc(arena, sizeof(JaclVal));
-    main_pnames[0]         = jacl_inline_string("__k", 3);
+    main_cl->sm_field_count = (uint8_t)main_sm_analysis2.state_layout.field_count;
+    main_cl->is_sm_compiled = true;
+    JaclVal* main_pnames   = (JaclVal*)arena_alloc(arena, sizeof(JaclVal) * 2);
+    main_pnames[0]         = jacl_inline_string("__sm", 4);
+    main_pnames[1]         = jacl_inline_string("__rv", 4);
     main_cl->param_names   = main_pnames;
 
     Compiler body;
@@ -9181,8 +8080,6 @@ static ProgramResult jacl_compile_program(const char* root_path,
     body.scope_depth       = 1;
     body.enclosing         = &c;
     body.suspension_map    = &suspension_map;
-    body.is_cps            = true;
-    body.use_state_machines = c.use_state_machines;
     body.force_global_procs = true;
     body.module_cache      = &cache;
     body.current_module    = root_mod;
@@ -9192,11 +8089,19 @@ static ProgramResult jacl_compile_program(const char* root_path,
            sizeof(GlobalArity) * c.global_arity_count);
     body.global_arity_count = c.global_arity_count;
 
-    compiler__add_local(&body, jacl_inline_string("__k", 3), 1, 0);
+    compiler__add_local(&body, jacl_inline_string("__sm", 4), 1, 0);
+    body.locals[body.local_count - 1].is_param = true;
+    compiler__add_local(&body, jacl_inline_string("__rv", 4), 1, 0);
     body.locals[body.local_count - 1].is_param = true;
 
-    compiler__compile_cps_stmts(&body, non_proc_stmts, non_proc_count, 1);
-    compiler__emit_byte(&body, OP_RETURN, 1);
+    {
+      SuspensionAnalysis* analysis_ptr2 =
+          (SuspensionAnalysis*)arena_alloc(arena, sizeof(SuspensionAnalysis));
+      *analysis_ptr2 = main_sm_analysis2;
+      body.sm_analysis = analysis_ptr2;
+    }
+
+    compiler__compile_sm_stmts(&body, non_proc_stmts, non_proc_count, 1, true);
 
     c.error_count += body.error_count;
     if (!c.first_error && body.first_error) {
