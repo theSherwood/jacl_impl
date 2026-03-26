@@ -58,6 +58,11 @@ Started: Mon Mar 24 2026
 - SM race in single-threaded mode: runs bodies sequentially, first result wins, pushes winner directly onto stack (like nil continuation path)
 - CPS compilation path fully removed from compiler (US-020): no is_cps flag, no use_state_machines flag, no __k convention — all suspension goes through SM
 - suspension_map is NOT CPS-specific — it's used by SM path to detect which functions suspend; do not remove it
+- Liveness optimization only applies to yield-only generators — await/parallel/race have diamond control flow (inline resolution vs resume path) that makes stack-local slot numbering inconsistent
+- `compiler__analyze_suspensions` takes `optimize_liveness` bool — pass `false` for conservative (all locals in state) mode
+- At yield resume labels, `c->local_count` is reset to 2 (__sm, __rv) so non-crossing stack locals from the previous segment get fresh slot numbers
+- Liveness analysis uses segment-based approach: segment counter increments at each suspension point; variable crosses if first_write < last_read across segments
+- While/for loops with suspension expand variable ranges to cover the full loop span (handles back-edges from loop iteration)
 
 ---
 
@@ -499,4 +504,24 @@ Started: Mon Mar 24 2026
   - FutureWaiter.continuation field is actually used by SM path (stores state machine val), just the dispatch logic was CPS-specific
   - OP_YIELD and OP_AWAIT remain in bytecode enum for format stability, but their VM handlers now return errors
   - Pre-existing architectural issue: nested SM calls (SM calling another SM function that suspends) don't properly chain error_k/resolve_k through the call stack. This affects rt_run_to_completion and the jacl_harness for concurrent tests.
+---
+
+## 2026-03-26 - US-022
+- Implemented liveness optimization for state object fields in compiler.c
+- Added `FieldLiveness` struct tracking first_write/last_read segments per variable
+- Added `sm__liveness_walk()` AST walker that tracks suspension segments and records variable reads/writes
+- Added `sm__liveness_mark_binding_names()` for handling all destructuring patterns in write tracking
+- Added `sm__optimize_state_layout()` that runs liveness analysis and filters state layout in-place
+- Added `optimize_liveness` parameter to `compiler__analyze_suspensions()` for conservative fallback
+- Only optimizes yield-only generators (await/parallel/race use conservative mode)
+- Added local_count reset at yield resume labels for correct stack-local slot numbering
+- While/for loops with suspension correctly expand variable liveness ranges
+- Files changed: src/compiler.c (+524 lines), test/test_yield.c (+267 lines, 8 new tests)
+- **Learnings for future iterations:**
+  - Stack locals in SM mode only work for yield (single path — always suspends). Await/parallel/race have diamond control flow (inline vs resume) that produces different stack depths on the two paths, making stack-local slot numbering inconsistent.
+  - At each yield resume label, local_count must be reset to 2 (just __sm and __rv) so that stack locals in the next segment get correct slot numbers starting from 2.
+  - The liveness analysis uses a segment-based approach (O(n) single pass): each suspension point increments a segment counter; a variable crosses suspension if its first_write segment < its last_read segment.
+  - While/for loops with suspension require range expansion: any variable touched inside the loop must span the full loop segment range (loop_start to loop_end) to account for the backward jump at loop iteration.
+  - `ast__contains_suspension` needed a forward declaration since the liveness code is positioned earlier in compiler.c
+  - Pre-existing test failure: test_gc_parallel_join_pressure in test_m13.c is not related to this change
 ---

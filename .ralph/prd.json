@@ -416,8 +416,8 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 22,
-      "passes": false,
-      "notes": "Deferred optimization. Not needed for correctness — conservative mode works fine. Implement only after all other stories are done and validated."
+      "passes": true,
+      "notes": "Liveness optimization applied to yield-only generators. Await/parallel/race use conservative mode due to diamond control flow (inline vs resume path). 8 new tests added."
     }
   ]
 }
