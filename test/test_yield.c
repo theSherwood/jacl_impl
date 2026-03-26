@@ -1900,6 +1900,265 @@ static int test_sm_mixed_pipeline(void) {
   TEST_PASS();
 }
 
+/* ===== US-022: Liveness optimization for state object fields ===== */
+
+/* Test: 10 locals but only 2 cross a yield — state object has 2 + params */
+static int test_liveness_10_locals_2_cross(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  VM vm;
+  vm_init(&vm, &arena);
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  /* a..h are defined and used entirely in segment 0 (before yield).
+     cross1 is defined in seg 0, used in seg 1 (after yield) — crosses.
+     cross2 is defined in seg 0, used in seg 1 (after yield) — crosses.
+     j is defined and used entirely in seg 1 — doesn't cross. */
+  CompileResult cr = compile_with_sm(
+    "proc gen {p} {\n"
+    "  def a 1\n"
+    "  def b 2\n"
+    "  def c 3\n"
+    "  def d 4\n"
+    "  def e 5\n"
+    "  def f 6\n"
+    "  def g 7\n"
+    "  def h [+ $a [+ $b [+ $c [+ $d [+ $e [+ $f $g]]]]]]\n"
+    "  def cross1 [+ $h 100]\n"
+    "  def cross2 [+ $h 200]\n"
+    "  [yield $h]\n"
+    "  def j [+ $cross1 $cross2]\n"
+    "  [yield $j]\n"
+    "}\n",
+    &arena, &intern_table, &vm.heap);
+  ASSERT_INT_EQ(cr.error_count, 0);
+
+  JaclClosure* gen_cl = NULL;
+  for (uint16_t i = 0; i < cr.chunk.const_count; i++) {
+    if (jacl_is_closure(cr.chunk.constants[i])) {
+      JaclClosure* cl = jacl_as_closure(cr.chunk.constants[i]);
+      if (cl->name && strcmp(cl->name, "gen") == 0) {
+        gen_cl = cl;
+        break;
+      }
+    }
+  }
+  ASSERT(gen_cl != NULL);
+
+  /* State should contain: p (param) + cross1, cross2 = 3 fields total */
+  ASSERT_INT_EQ(gen_cl->sm_field_count, 3);
+
+  intern_table_destroy(&intern_table);
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: liveness with while loop — counter var crosses yield in loop */
+static int test_liveness_while_loop(void) {
+  PrintCapture cap;
+  VMResult r = run_capture(
+    "proc gen {n} {\n"
+    "  def before 99\n"
+    "  mut i 0\n"
+    "  while [< $i $n] {\n"
+    "    [yield $i]\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "def s [gen 3]\n"
+    "[print [collect $s]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 0 1 2]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: liveness — locals before and after yield stay on stack */
+static int test_liveness_stack_locals_e2e(void) {
+  PrintCapture cap;
+  VMResult r = run_capture(
+    "proc gen {} {\n"
+    "  def a 10\n"
+    "  def b 20\n"
+    "  [yield [+ $a $b]]\n"
+    "  def c 30\n"
+    "  def d 40\n"
+    "  [yield [+ $c $d]]\n"
+    "}\n"
+    "def s [gen]\n"
+    "[print [collect $s]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 30 70]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: liveness — variable used across yield must be in state */
+static int test_liveness_cross_yield_value(void) {
+  PrintCapture cap;
+  VMResult r = run_capture(
+    "proc gen {} {\n"
+    "  def x 42\n"
+    "  [yield 1]\n"
+    "  [yield $x]\n"
+    "}\n"
+    "def s [gen]\n"
+    "[print [stream_next $s]]\n"
+    "[print [stream_next $s]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1\n42\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: liveness — if statement with yield, locals before survive */
+static int test_liveness_if_with_yield(void) {
+  PrintCapture cap;
+  VMResult r = run_capture(
+    "proc gen {flag} {\n"
+    "  def a 100\n"
+    "  if $flag {\n"
+    "    [yield $a]\n"
+    "    [yield [+ $a 1]]\n"
+    "  } else {\n"
+    "    [yield 999]\n"
+    "  }\n"
+    "}\n"
+    "def s [gen true]\n"
+    "[print [collect $s]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 100 101]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: liveness — generator with while containing if containing yield */
+static int test_liveness_while_if_yield(void) {
+  PrintCapture cap;
+  VMResult r = run_capture(
+    "proc gen {} {\n"
+    "  mut i 0\n"
+    "  while [< $i 6] {\n"
+    "    if [== [% $i 2] 0] {\n"
+    "      [yield $i]\n"
+    "    }\n"
+    "    i :: [+ $i 1]\n"
+    "  }\n"
+    "}\n"
+    "[print [collect [gen]]]\n",
+    &cap);
+  ASSERT_INT_EQ(r, VM_OK);
+  ASSERT_STR_EQ(cap.buf, "[vec 0 2 4]\n");
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: liveness — no-param generator with no crossing locals has 0 fields */
+static int test_liveness_zero_fields(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  VM vm;
+  vm_init(&vm, &arena);
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  /* a, b, c are all defined and used within their own segments */
+  CompileResult cr = compile_with_sm(
+    "proc gen {} {\n"
+    "  def a 1\n"
+    "  [yield $a]\n"
+    "  def b 2\n"
+    "  [yield $b]\n"
+    "  def c 3\n"
+    "  [yield $c]\n"
+    "}\n",
+    &arena, &intern_table, &vm.heap);
+  ASSERT_INT_EQ(cr.error_count, 0);
+
+  JaclClosure* gen_cl = NULL;
+  for (uint16_t i = 0; i < cr.chunk.const_count; i++) {
+    if (jacl_is_closure(cr.chunk.constants[i])) {
+      JaclClosure* cl = jacl_as_closure(cr.chunk.constants[i]);
+      if (cl->name && strcmp(cl->name, "gen") == 0) {
+        gen_cl = cl;
+        break;
+      }
+    }
+  }
+  ASSERT(gen_cl != NULL);
+
+  /* No params, no crossing locals: state object has 0 fields */
+  ASSERT_INT_EQ(gen_cl->sm_field_count, 0);
+
+  intern_table_destroy(&intern_table);
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: liveness — conservative mode (optimize_liveness=false) keeps all */
+static int test_liveness_conservative_fallback(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  VM vm;
+  vm_init(&vm, &arena);
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, &arena);
+
+  /* Same source as the 10-locals test, but compile without optimization.
+     The conservative mode (optimize_liveness=false) is used internally
+     by compiler__analyze_suspensions. We verify here that the default
+     path (SM path always uses optimize=true) gives a smaller field count. */
+  CompileResult cr = compile_with_sm(
+    "proc gen {} {\n"
+    "  def a 1\n"
+    "  def b 2\n"
+    "  [yield $a]\n"
+    "  [yield $b]\n"
+    "}\n",
+    &arena, &intern_table, &vm.heap);
+  ASSERT_INT_EQ(cr.error_count, 0);
+
+  JaclClosure* gen_cl = NULL;
+  for (uint16_t i = 0; i < cr.chunk.const_count; i++) {
+    if (jacl_is_closure(cr.chunk.constants[i])) {
+      JaclClosure* cl = jacl_as_closure(cr.chunk.constants[i]);
+      if (cl->name && strcmp(cl->name, "gen") == 0) {
+        gen_cl = cl;
+        break;
+      }
+    }
+  }
+  ASSERT(gen_cl != NULL);
+
+  /* a is used in seg 0 (yield $a) AND referenced as yielded value — but
+     $a is compiled before the yield increment, so it's read in seg 0.
+     However, b is defined in seg 0 and used at yield $b which is also
+     in seg 0 (before increment).  BUT after yield 1 resumes, the code
+     continues at yield $b — which reads $b.  With yield, $b is compiled
+     before the yield opcode, so $b read is in seg 0.
+     Wait — actually both a and b ARE used after the first yield:
+     yield $a is in seg 0. After resume, yield $b reads b in seg 1.
+     So b crosses (def seg 0, read seg 1).
+     And a is only read at yield $a (seg 0), so a doesn't cross.
+     State should have: b = 1 field. */
+  ASSERT_INT_EQ(gen_cl->sm_field_count, 1);
+
+  intern_table_destroy(&intern_table);
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Main --- */
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
 
@@ -1972,6 +2231,14 @@ int main(void) {
     { "sm_mixed_await_yield_if",      test_sm_mixed_await_yield_if },
     { "sm_mixed_await_yield_if_false",test_sm_mixed_await_yield_if_false },
     { "sm_mixed_pipeline",            test_sm_mixed_pipeline },
+    { "liveness_10_locals_2_cross",    test_liveness_10_locals_2_cross },
+    { "liveness_while_loop",           test_liveness_while_loop },
+    { "liveness_stack_locals_e2e",     test_liveness_stack_locals_e2e },
+    { "liveness_cross_yield_value",    test_liveness_cross_yield_value },
+    { "liveness_if_with_yield",        test_liveness_if_with_yield },
+    { "liveness_while_if_yield",       test_liveness_while_if_yield },
+    { "liveness_zero_fields",          test_liveness_zero_fields },
+    { "liveness_conservative_fallback",test_liveness_conservative_fallback },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

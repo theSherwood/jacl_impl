@@ -1354,14 +1354,512 @@ static void sm__walk_locals(AstNode* node, StateLayout* layout) {
   }
 }
 
+/* --- Liveness analysis for state object field optimization (US-022) ---
+ *
+ * After building the full (conservative) StateLayout, this pass determines
+ * which locals actually need to live in the state object.  A local crosses
+ * a suspension boundary if its value from before a suspension is needed
+ * after the suspension (on any execution path).
+ *
+ * Approach (O(n) single pass):
+ *   1. Walk AST in pre-order, incrementing a "segment" counter at each
+ *      suspension point (yield/await/parallel/race).
+ *   2. For each variable definition (def/mut/set/for-bind), record the
+ *      segment as a "write".
+ *   3. For each variable reference (AST_VAR_REF), record the segment as
+ *      a "read".
+ *   4. For while/for loops containing suspension points, expand all
+ *      variable ranges to cover the full loop span (handles back-edges).
+ *   5. A variable crosses suspension if first_write < last_read.
+ *   6. Parameters always cross (they are set at entry = segment 0).
+ *   7. Filter the StateLayout, keeping only crossing locals + params.
+ */
+
+typedef struct {
+  int32_t first_write;  /* earliest segment where defined/written (-1 = unseen) */
+  int32_t last_read;    /* latest segment where read/referenced (-1 = unseen) */
+} FieldLiveness;
+
+/* Update liveness for a variable WRITE (def/mut/set/for-bind). */
+static void sm__liveness_mark_write(FieldLiveness* liveness,
+                                     const StateLayout* layout,
+                                     JaclVal name, int32_t segment) {
+  int idx = sm__find_field(layout, name);
+  if (idx >= 0) {
+    if (liveness[idx].first_write < 0 || segment < liveness[idx].first_write)
+      liveness[idx].first_write = segment;
+  }
+}
+
+/* Update liveness for a variable READ (var_ref). */
+static void sm__liveness_mark_read(FieldLiveness* liveness,
+                                    const StateLayout* layout,
+                                    JaclVal name, int32_t segment) {
+  int idx = sm__find_field(layout, name);
+  if (idx >= 0) {
+    if (liveness[idx].last_read < 0 || segment > liveness[idx].last_read)
+      liveness[idx].last_read = segment;
+  }
+}
+
+/* Helper: extract JaclVal name from an AST_LIT_STRING node. */
+static JaclVal sm__lit_string_name(AstNode* node) {
+  return jacl_inline_string(node->data.lit_string.value,
+                            node->data.lit_string.length);
+}
+
+/* Forward declaration. */
+static void sm__liveness_walk(AstNode* node, const StateLayout* layout,
+                               FieldLiveness* liveness, int32_t* segment);
+
+/* Walk a def/mut binding pattern to mark WRITE on all bound names. */
+static void sm__liveness_mark_binding_names(AstNode* pattern,
+                                             const StateLayout* layout,
+                                             FieldLiveness* liveness,
+                                             int32_t segment) {
+  if (!pattern) return;
+  switch (pattern->type) {
+    case AST_LIT_STRING:
+      sm__liveness_mark_write(liveness, layout,
+          sm__lit_string_name(pattern), segment);
+      break;
+    case AST_DESTRUCTURE_VEC:
+      for (uint32_t i = 0; i < pattern->data.destructure_vec.count; i++) {
+        const char* n = pattern->data.destructure_vec.names[i];
+        uint32_t nl = pattern->data.destructure_vec.name_lens[i];
+        if (nl == 1 && n[0] == '_') continue;
+        sm__liveness_mark_write(liveness, layout,
+            jacl_inline_string(n, nl), segment);
+      }
+      if (pattern->data.destructure_vec.rest_name) {
+        sm__liveness_mark_write(liveness, layout,
+            jacl_inline_string(pattern->data.destructure_vec.rest_name,
+                               pattern->data.destructure_vec.rest_name_len),
+            segment);
+      }
+      break;
+    case AST_DESTRUCTURE_NAMED:
+      for (uint32_t i = 0; i < pattern->data.destructure_named.count; i++) {
+        const char* n = pattern->data.destructure_named.names[i];
+        uint32_t nl = pattern->data.destructure_named.name_lens[i];
+        sm__liveness_mark_write(liveness, layout,
+            jacl_inline_string(n, nl), segment);
+      }
+      if (pattern->data.destructure_named.rest_name) {
+        sm__liveness_mark_write(liveness, layout,
+            jacl_inline_string(pattern->data.destructure_named.rest_name,
+                               pattern->data.destructure_named.rest_name_len),
+            segment);
+      }
+      break;
+    case AST_COMMAND: {
+      /* Bracket destructure [a b c] */
+      AstNode* hd = pattern->data.command.head;
+      if (hd->type == AST_LIT_STRING) {
+        const char* s = hd->data.lit_string.value;
+        uint32_t sl = hd->data.lit_string.length;
+        if (!(sl == 2 && s[0] == '.' && s[1] == '.') &&
+            !(sl == 1 && s[0] == '_')) {
+          sm__liveness_mark_write(liveness, layout,
+              jacl_inline_string(s, sl), segment);
+        }
+      } else if (hd->type == AST_SPREAD && hd->data.spread.expr &&
+                 hd->data.spread.expr->type == AST_LIT_STRING) {
+        sm__liveness_mark_write(liveness, layout,
+            sm__lit_string_name(hd->data.spread.expr), segment);
+      }
+      for (uint32_t i = 0; i < pattern->data.command.arg_count; i++) {
+        AstNode* elem = pattern->data.command.args[i];
+        if (elem->type == AST_LIT_STRING) {
+          const char* s = elem->data.lit_string.value;
+          uint32_t sl = elem->data.lit_string.length;
+          if (sl == 2 && s[0] == '.' && s[1] == '.') continue;
+          if (sl == 1 && s[0] == '_') continue;
+          sm__liveness_mark_write(liveness, layout,
+              jacl_inline_string(s, sl), segment);
+        } else if (elem->type == AST_SPREAD && elem->data.spread.expr &&
+                   elem->data.spread.expr->type == AST_LIT_STRING) {
+          sm__liveness_mark_write(liveness, layout,
+              sm__lit_string_name(elem->data.spread.expr), segment);
+        }
+      }
+      break;
+    }
+    case AST_BLOCK: {
+      /* Curly destructure {a, b, c} */
+      for (uint32_t i = 0; i < pattern->data.block.count; i++) {
+        AstNode* cmd = pattern->data.block.commands[i];
+        if (cmd->type == AST_LIT_STRING) continue;
+        if (cmd->type != AST_COMMAND) continue;
+        AstNode* chd = cmd->data.command.head;
+        if (chd->type != AST_LIT_STRING) continue;
+        const char* hstr = chd->data.lit_string.value;
+        uint32_t hlen = chd->data.lit_string.length;
+        if (hlen == 2 && hstr[0] == '.' && hstr[1] == '.') {
+          if (cmd->data.command.arg_count == 1 &&
+              cmd->data.command.args[0]->type == AST_LIT_STRING) {
+            sm__liveness_mark_write(liveness, layout,
+                sm__lit_string_name(cmd->data.command.args[0]), segment);
+          }
+        } else if (cmd->data.command.arg_count == 1 &&
+                   cmd->data.command.args[0]->type == AST_LIT_STRING) {
+          sm__liveness_mark_write(liveness, layout,
+              sm__lit_string_name(cmd->data.command.args[0]), segment);
+        } else if (cmd->data.command.arg_count == 0) {
+          sm__liveness_mark_write(liveness, layout,
+              jacl_inline_string(hstr, hlen), segment);
+        }
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+/* Forward declaration — defined later in this file. */
+static bool ast__contains_suspension(AstNode* node, SuspensionMap* map);
+
+/* Check if the body of a loop (while/for) directly contains suspension. */
+static bool sm__loop_body_suspends(AstNode* body) {
+  return ast__contains_suspension(body, NULL);
+}
+
+/* Liveness walker: walks AST tracking suspension segments and recording
+   variable reads/writes per segment. */
+static void sm__liveness_walk(AstNode* node, const StateLayout* layout,
+                               FieldLiveness* liveness, int32_t* segment) {
+  if (!node) return;
+
+  switch (node->type) {
+    case AST_VAR_REF: {
+      if (node->data.var_ref.length <= 7) {
+        JaclVal name = jacl_inline_string(node->data.var_ref.name,
+                                          node->data.var_ref.length);
+        sm__liveness_mark_read(liveness, layout, name, *segment);
+      }
+      break;
+    }
+
+    case AST_COMMAND: {
+      AstNode* head = node->data.command.head;
+      uint32_t argc = node->data.command.arg_count;
+      AstNode** args = node->data.command.args;
+
+      if (head->type == AST_LIT_STRING) {
+        const char* hname = head->data.lit_string.value;
+        uint32_t hlen = head->data.lit_string.length;
+
+        /* --- Suspension points: increment segment AFTER evaluating args --- */
+        if ((hlen == 5 && memcmp(hname, "yield", 5) == 0) ||
+            (hlen == 5 && memcmp(hname, "await", 5) == 0) ||
+            (hlen == 8 && memcmp(hname, "parallel", 8) == 0) ||
+            (hlen == 4 && memcmp(hname, "race", 4) == 0)) {
+          /* Walk args (evaluated before suspension) */
+          for (uint32_t i = 0; i < argc; i++) {
+            sm__liveness_walk(args[i], layout, liveness, segment);
+          }
+          /* Suspension occurs — next code is in a new segment */
+          (*segment)++;
+          return;
+        }
+
+        /* --- def / mut: mark binding names as writes --- */
+        if ((hlen == 3 && memcmp(hname, "def", 3) == 0) ||
+            (hlen == 3 && memcmp(hname, "mut", 3) == 0)) {
+          /* Walk RHS first (it may reference variables) */
+          uint32_t val_idx = (argc == 3) ? 2 : 1;
+          if (val_idx < argc) {
+            sm__liveness_walk(args[val_idx], layout, liveness, segment);
+          }
+          /* Mark binding name as write */
+          if (argc >= 2) {
+            uint32_t name_idx = (argc == 3) ? 1 : 0;
+            sm__liveness_mark_binding_names(args[name_idx], layout, liveness,
+                                            *segment);
+          }
+          return;
+        }
+
+        /* --- set: mark target as write, walk value --- */
+        if ((hlen == 3 && memcmp(hname, "set", 3) == 0) ||
+            (hlen == 2 && memcmp(hname, "::", 2) == 0)) {
+          if (argc >= 2) {
+            /* Walk value expression (may read variables) */
+            sm__liveness_walk(args[1], layout, liveness, segment);
+            /* Mark target as write */
+            if (args[0]->type == AST_LIT_STRING) {
+              sm__liveness_mark_write(liveness, layout,
+                  sm__lit_string_name(args[0]), *segment);
+            }
+          }
+          return;
+        }
+
+        /* --- while: handle suspending loops with back-edge expansion --- */
+        if (hlen == 5 && memcmp(hname, "while", 5) == 0) {
+          if (argc >= 2) {
+            AstNode* cond = args[0];
+            AstNode* body = args[argc - 1];
+            bool loop_suspends = sm__loop_body_suspends(body);
+            if (loop_suspends) {
+              /* Record segment at loop entry */
+              int32_t loop_start = *segment;
+              /* Walk condition and body normally */
+              sm__liveness_walk(cond, layout, liveness, segment);
+              sm__liveness_walk(body, layout, liveness, segment);
+              int32_t loop_end = *segment;
+              /* Expand ranges: any field touched during the loop
+                 must span the full loop range due to back-edge */
+              for (uint32_t fi = 0; fi < layout->field_count; fi++) {
+                bool touched =
+                  (liveness[fi].first_write >= loop_start &&
+                   liveness[fi].first_write <= loop_end) ||
+                  (liveness[fi].last_read >= loop_start &&
+                   liveness[fi].last_read <= loop_end);
+                if (touched) {
+                  if (liveness[fi].first_write < 0 ||
+                      loop_start < liveness[fi].first_write)
+                    liveness[fi].first_write = loop_start;
+                  if (liveness[fi].last_read < 0 ||
+                      loop_end > liveness[fi].last_read)
+                    liveness[fi].last_read = loop_end;
+                }
+              }
+            } else {
+              /* Non-suspending loop: walk normally */
+              sm__liveness_walk(cond, layout, liveness, segment);
+              sm__liveness_walk(body, layout, liveness, segment);
+            }
+          }
+          return;
+        }
+
+        /* --- for: loop variable binding + suspending loop handling --- */
+        if (hlen == 3 && memcmp(hname, "for", 3) == 0) {
+          if (argc >= 2) {
+            AstNode* body = args[argc - 1];
+            bool loop_suspends = (body->type == AST_BLOCK) &&
+                                 sm__loop_body_suspends(body);
+            int32_t loop_start = *segment;
+
+            /* Walk collection expression */
+            sm__liveness_walk(args[0], layout, liveness, segment);
+
+            /* Mark for-loop binding variable */
+            if (argc == 3 && args[1]->type == AST_LIT_STRING) {
+              sm__liveness_mark_write(liveness, layout,
+                  sm__lit_string_name(args[1]), *segment);
+            } else if (argc == 2 && body->type == AST_BLOCK &&
+                       !(args[0]->type == AST_BLOCK)) {
+              sm__liveness_mark_write(liveness, layout,
+                  jacl_inline_string("it", 2), *segment);
+            }
+
+            /* Walk body */
+            sm__liveness_walk(body, layout, liveness, segment);
+
+            if (loop_suspends) {
+              int32_t loop_end = *segment;
+              for (uint32_t fi = 0; fi < layout->field_count; fi++) {
+                bool touched =
+                  (liveness[fi].first_write >= loop_start &&
+                   liveness[fi].first_write <= loop_end) ||
+                  (liveness[fi].last_read >= loop_start &&
+                   liveness[fi].last_read <= loop_end);
+                if (touched) {
+                  if (liveness[fi].first_write < 0 ||
+                      loop_start < liveness[fi].first_write)
+                    liveness[fi].first_write = loop_start;
+                  if (liveness[fi].last_read < 0 ||
+                      loop_end > liveness[fi].last_read)
+                    liveness[fi].last_read = loop_end;
+                }
+              }
+            }
+          }
+          return;
+        }
+
+        /* --- try: catch binding --- */
+        if (hlen == 3 && memcmp(hname, "try", 3) == 0) {
+          /* Walk try body */
+          if (argc >= 1) sm__liveness_walk(args[0], layout, liveness, segment);
+          /* Mark catch binding */
+          if (argc == 3 && args[1]->type == AST_LIT_STRING) {
+            sm__liveness_mark_write(liveness, layout,
+                sm__lit_string_name(args[1]), *segment);
+          }
+          /* Walk catch body */
+          if (argc >= 3) sm__liveness_walk(args[2], layout, liveness, segment);
+          return;
+        }
+
+        /* --- proc: named proc = write; don't recurse into body --- */
+        if (hlen == 4 && memcmp(hname, "proc", 4) == 0) {
+          uint32_t name_idx;
+          if (argc == 3) name_idx = 0;
+          else if (argc == 4) name_idx = 1;
+          else return;
+          if (args[name_idx]->type == AST_LIT_STRING) {
+            sm__liveness_mark_write(liveness, layout,
+                sm__lit_string_name(args[name_idx]), *segment);
+          }
+          return;
+        }
+
+        /* --- spawn: separate scope, don't recurse --- */
+        if (hlen == 5 && memcmp(hname, "spawn", 5) == 0) {
+          return;
+        }
+      }
+
+      /* Head might be a var ref */
+      if (head->type == AST_VAR_REF && head->data.var_ref.length <= 7) {
+        sm__liveness_mark_read(liveness, layout,
+            jacl_inline_string(head->data.var_ref.name,
+                               head->data.var_ref.length), *segment);
+      }
+      /* Walk all arguments for any other command */
+      for (uint32_t i = 0; i < argc; i++) {
+        sm__liveness_walk(args[i], layout, liveness, segment);
+      }
+      break;
+    }
+
+    case AST_BLOCK: {
+      for (uint32_t i = 0; i < node->data.block.count; i++) {
+        sm__liveness_walk(node->data.block.commands[i], layout, liveness,
+                          segment);
+      }
+      break;
+    }
+
+    case AST_INTERP_STRING: {
+      for (uint32_t i = 0; i < node->data.interp_string.count; i++) {
+        sm__liveness_walk(node->data.interp_string.segments[i], layout,
+                          liveness, segment);
+      }
+      break;
+    }
+
+    case AST_BREAK: {
+      if (node->data.break_stmt.value) {
+        sm__liveness_walk(node->data.break_stmt.value, layout, liveness,
+                          segment);
+      }
+      break;
+    }
+
+    case AST_RETURN: {
+      if (node->data.return_stmt.value) {
+        sm__liveness_walk(node->data.return_stmt.value, layout, liveness,
+                          segment);
+      }
+      break;
+    }
+
+    case AST_SPREAD: {
+      if (node->data.spread.expr) {
+        sm__liveness_walk(node->data.spread.expr, layout, liveness, segment);
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+}
+
+/* Run liveness analysis and filter the state layout in-place.
+   Keeps only fields that are parameters OR cross a suspension boundary
+   (first_write < last_read with a suspension between them).
+   When suspension_count == 0, skips analysis (no optimisation possible).
+   body is the function body AST, needed for the liveness walk. */
+static void sm__optimize_state_layout(SuspensionAnalysis* analysis,
+                                       AstNode* body) {
+  StateLayout* layout = &analysis->state_layout;
+
+  /* Nothing to optimize if no suspensions or no fields */
+  if (analysis->suspension_count == 0 || layout->field_count == 0) return;
+
+  /* Only optimize yield-only generators.  Await/parallel/race have a
+     diamond control flow (inline resolution vs resume path) that makes
+     stack-local slot numbering inconsistent across the two paths. */
+  for (uint32_t i = 0; i < analysis->suspension_count; i++) {
+    if (analysis->suspension_points[i].type != SUSPEND_YIELD) return;
+  }
+
+  /* Initialize liveness data */
+  FieldLiveness liveness[SM_MAX_STATE_FIELDS];
+  for (uint32_t i = 0; i < layout->field_count; i++) {
+    liveness[i].first_write = -1;
+    liveness[i].last_read   = -1;
+  }
+
+  /* Parameters are implicitly written at segment 0 (function entry) */
+  for (uint32_t i = 0; i < layout->field_count; i++) {
+    if (layout->fields[i].is_param) {
+      liveness[i].first_write = 0;
+    }
+  }
+
+  /* Walk the AST body to collect read/write segment info */
+  int32_t segment = 0;
+  if (body->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < body->data.block.count; i++) {
+      sm__liveness_walk(body->data.block.commands[i], layout, liveness,
+                        &segment);
+    }
+  } else {
+    sm__liveness_walk(body, layout, liveness, &segment);
+  }
+
+  /* Determine which fields cross a suspension boundary.
+     A field crosses if first_write < last_read (value written before
+     a suspension is needed after it).  Parameters always cross. */
+  bool crosses[SM_MAX_STATE_FIELDS];
+  uint32_t keep_count = 0;
+  for (uint32_t i = 0; i < layout->field_count; i++) {
+    if (layout->fields[i].is_param) {
+      crosses[i] = true;  /* params always kept */
+    } else if (liveness[i].first_write >= 0 && liveness[i].last_read >= 0 &&
+               liveness[i].first_write < liveness[i].last_read) {
+      crosses[i] = true;
+    } else {
+      crosses[i] = false;
+    }
+    if (crosses[i]) keep_count++;
+  }
+
+  /* If all fields cross, nothing to filter */
+  if (keep_count == layout->field_count) return;
+
+  /* Compact the layout: remove non-crossing fields, re-index */
+  StateField new_fields[SM_MAX_STATE_FIELDS];
+  uint32_t new_count = 0;
+  for (uint32_t i = 0; i < layout->field_count; i++) {
+    if (crosses[i]) {
+      new_fields[new_count] = layout->fields[i];
+      new_fields[new_count].field_index = new_count;
+      new_count++;
+    }
+  }
+  memcpy(layout->fields, new_fields, sizeof(StateField) * new_count);
+  layout->field_count = new_count;
+}
+
 /* Analyze a function body's AST for state machine compilation.
    Returns suspension points numbered sequentially and, for suspending
    functions, a StateLayout mapping every local to a state object field.
    param_names/param_count describe the function's parameters (placed first
-   in the layout).  Pass NULL/0 for non-function contexts. */
+   in the layout).  Pass NULL/0 for non-function contexts.
+   When optimize_liveness is true, prunes locals that don't cross any
+   suspension boundary (they remain as normal stack locals). */
 static SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
                                                         JaclVal* param_names,
-                                                        uint8_t  param_count) {
+                                                        uint8_t  param_count,
+                                                        bool     optimize_liveness) {
   SuspensionAnalysis analysis;
   memset(&analysis, 0, sizeof(analysis));
 
@@ -1392,6 +1890,12 @@ static SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
     } else {
       sm__walk_locals(body, &analysis.state_layout);
     }
+  }
+
+  /* Pass 3 (optional): liveness optimization — remove locals that don't
+     cross any suspension boundary from the state layout. */
+  if (optimize_liveness) {
+    sm__optimize_state_layout(&analysis, body);
   }
 
   return analysis;
@@ -2368,7 +2872,7 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   if (body_suspends) {
     /* SM parallel body: analyze suspensions, compile as state machine */
     sm_analysis_data = compiler__analyze_suspensions(
-        body_block, NULL, 0);
+        body_block, NULL, 0, true);
     closure->param_count = 2;
     JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
     pnames[0] = jacl_inline_string("__sm", 4);
@@ -4882,7 +5386,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
     if (proc_suspends_early) {
       sm_analysis_data = compiler__analyze_suspensions(
-          args[body_arg_idx], param_names_arr, user_param_count);
+          args[body_arg_idx], param_names_arr, user_param_count, true);
       /* Always SM-compile suspending procs — even if suspension_count == 0
          (transitively suspending via calling other suspending procs). */
       use_sm_path = true;
@@ -6248,6 +6752,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       if (sp_idx < c->sm_dispatch.label_count) {
         compiler__patch_jump(c, c->sm_dispatch.label_patches[sp_idx]);
       }
+      /* On resume, only __sm and __rv exist on the stack.
+         Reset local_count so non-crossing stack locals from the
+         previous segment get fresh slot numbers. */
+      if (c->local_count > 2) {
+        c->local_count = 2;
+      }
       /* Push nil as yield expression result (popped by check_error) */
       compiler__emit_byte(c, OP_NIL, line);
       c->has_yield = true;
@@ -6477,7 +6987,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
     if (spawn_suspends) {
       /* SM spawn body: analyze suspensions, compile as state machine */
-      spawn_sm_analysis = compiler__analyze_suspensions(body_block, NULL, 0);
+      spawn_sm_analysis = compiler__analyze_suspensions(body_block, NULL, 0, true);
       closure->param_count = 2;
       JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
       pnames[0] = jacl_inline_string("__sm", 4);
@@ -7646,7 +8156,7 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     fake_block.data.block.commands = non_proc_stmts;
 
     SuspensionAnalysis main_sm_analysis = compiler__analyze_suspensions(
-        &fake_block, NULL, 0);
+        &fake_block, NULL, 0, true);
 
     JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
     chunk_init(&main_cl->chunk, arena);
@@ -8056,7 +8566,7 @@ static ProgramResult jacl_compile_program(const char* root_path,
     fake_block2.data.block.commands = non_proc_stmts;
 
     SuspensionAnalysis main_sm_analysis2 = compiler__analyze_suspensions(
-        &fake_block2, NULL, 0);
+        &fake_block2, NULL, 0, true);
 
     JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
     chunk_init(&main_cl->chunk, arena);
