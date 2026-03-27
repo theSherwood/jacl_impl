@@ -3895,8 +3895,27 @@ static int test_gc_parallel_join_pressure(void) {
         &arena, &vm);
     ASSERT_U32_EQ(cr.error_count, 0);
 
-    JaclClosure *task_cl = test__find_closure(&cr.chunk, "task");
-    ASSERT(task_cl != NULL);
+    /* Run top-level code to register fib and task in the main VM's env.
+     * Without this, worker VMs cannot resolve 'fib' via OP_GET_GLOBAL
+     * since each worker has its own independent environment. */
+    VMResult top_r = vm_exec(&vm, &cr.chunk);
+    ASSERT(top_r == VM_OK);
+
+    /* Get the properly instantiated task closure from the main VM env */
+    JaclVal task_name = jacl_inline_string("task", 4);
+    bool found = false;
+    JaclVal task_val = vm__env_get(&vm, task_name, &found);
+    ASSERT(found);
+    ASSERT(jacl_is_closure(task_val));
+    JaclClosure *task_cl = jacl_as_closure(task_val);
+
+    /* Register fib on all worker VMs so parallel bodies can resolve it */
+    JaclVal fib_name = jacl_inline_string("fib", 3);
+    JaclVal fib_val = vm__env_get(&vm, fib_name, &found);
+    ASSERT(found);
+    for (int i = 0; i < rt.num_workers; i++) {
+        vm__env_set(&rt.workers[i].vm, fib_name, fib_val);
+    }
 
     VMResult r = rt_run_to_completion(&rt, task_cl, &arena);
     ASSERT(r == VM_OK);
