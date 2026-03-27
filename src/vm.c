@@ -1502,6 +1502,18 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           for (uint8_t i = 0; i < arg_count && i < closure->sm_field_count; i++) {
             sm->fields[i] = vm->stack[vm->stack_top - arg_count + i];
           }
+          /* Propagate error_k from calling SM to inner SM so that if the
+             inner SM suspends and is later resumed on a different worker,
+             it can still signal completion back to the runtime. */
+          if (frame->closure->is_sm_compiled) {
+            JaclVal outer_sm_val = vm->stack[frame->stack_base + 0];
+            if (jacl_is_state_machine(outer_sm_val)) {
+              JaclStateMachine *outer_sm = jacl_as_state_machine(outer_sm_val);
+              if (!jacl_is_nil(outer_sm->error_k)) {
+                sm->error_k = outer_sm->error_k;
+              }
+            }
+          }
           /* Replace stack args with (sm_val, JACL_NIL) */
           uint32_t callee_pos = vm->stack_top - arg_count - 1;
           vm->stack[callee_pos + 1] = sm_val;
