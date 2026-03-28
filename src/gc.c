@@ -1110,7 +1110,7 @@ static JaclVal jacl_race_agg(ThreadHeap *heap, JaclVal state_machine) {
 typedef struct {
     uint32_t resume_point;   /* next dispatch index (0 = initial entry) */
     uint32_t field_count;    /* number of trailing field slots */
-    JaclVal  error_k;        /* error handler continuation (or JACL_NIL) */
+    JaclVal  error_k;        /* completion callback (closure or JACL_NIL) */
     JaclVal  sm_closure;     /* compiled state machine closure */
     JaclVal  fields[];       /* trailing array: fields[0..field_count-1] */
 } JaclStateMachine;

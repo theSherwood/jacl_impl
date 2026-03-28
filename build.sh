@@ -22,17 +22,27 @@ else
 fi
 
 LIB_ONLY=0
+FILTER=""
+CLEAN=0
 for arg in "$@"; do
   case "$arg" in
     --lib) LIB_ONLY=1 ;;
+    --clean) CLEAN=1 ;;
+    --test=*) FILTER="${arg#--test=}" ;;
   esac
 done
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
-BUILD_DIR=$(mktemp -d "${DIR}/.build_XXXXXX")
-trap "rm -rf '$BUILD_DIR'" EXIT
+BUILD_DIR="${DIR}/.build"
+mkdir -p "$BUILD_DIR"
+
+if [ "$CLEAN" -eq 1 ]; then
+  rm -rf "$BUILD_DIR"
+  echo "Build cache cleaned."
+  exit 0
+fi
 
 # Define tests: src|name|flags
 TESTS=(
@@ -131,25 +141,73 @@ if [ "$LIB_ONLY" -eq 1 ]; then
   TESTS=("${FILTERED[@]}")
 fi
 
+# Filter to single test if --test=NAME is set
+if [ -n "$FILTER" ]; then
+  FILTERED=()
+  for entry in "${TESTS[@]}"; do
+    IFS='|' read -r src name extra_cflags <<< "$entry"
+    if [ "$name" = "$FILTER" ]; then
+      FILTERED+=("$entry")
+    fi
+  done
+  if [ ${#FILTERED[@]} -eq 0 ]; then
+    echo "No test matching '$FILTER'"
+    exit 1
+  fi
+  TESTS=("${FILTERED[@]}")
+fi
+
 echo "=== ds test runner ==="
 echo ""
 
+# Find newest source file for cache invalidation
+NEWEST_SRC=$(find src/ lib/ -name '*.c' -o -name '*.h' 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+
 # Phase 1: compile all tests in parallel
 PIDS=()
+NEED_COMPILE=()
 for entry in "${TESTS[@]}"; do
     IFS='|' read -r src name extra_cflags <<< "$entry"
     flags="$CFLAGS"
     if [ -n "$extra_cflags" ]; then
         flags="$extra_cflags"
     fi
+
+    # Check if binary is up-to-date
+    if [ -x "$BUILD_DIR/$name" ]; then
+        skip=1
+        # Check against the test source file itself
+        if [ "$BUILD_DIR/$name" -ot "$src" ]; then
+            skip=0
+        fi
+        # For test/ files that include jacl.c, also check against newest source
+        case "$src" in
+            test/*)
+                if [ -n "$NEWEST_SRC" ] && [ "$BUILD_DIR/$name" -ot "$NEWEST_SRC" ]; then
+                    skip=0
+                fi
+                ;;
+        esac
+        if [ "$skip" -eq 1 ]; then
+            PIDS+=("")
+            NEED_COMPILE+=("0")
+            continue
+        fi
+    fi
+
     $CC $flags "$src" -o "$BUILD_DIR/$name" -lm 2>"$BUILD_DIR/${name}.err" &
     PIDS+=($!)
+    NEED_COMPILE+=("1")
 done
 
 # Wait for all compilations
-COMPILE_OK=1
+COMPILED=0
 for i in "${!TESTS[@]}"; do
     IFS='|' read -r src name extra_cflags <<< "${TESTS[$i]}"
+    if [ "${NEED_COMPILE[$i]}" = "0" ]; then
+        continue
+    fi
+    COMPILED=$((COMPILED + 1))
     if ! wait "${PIDS[$i]}"; then
         printf "%-30s COMPILE FAIL\n" "$name"
         cat "$BUILD_DIR/${name}.err" >&2
@@ -157,6 +215,14 @@ for i in "${!TESTS[@]}"; do
         FAILED_TESTS="$FAILED_TESTS $name"
     fi
 done
+TOTAL=${#TESTS[@]}
+SKIPPED=$((TOTAL - COMPILED))
+if [ "$SKIPPED" -gt 0 ]; then
+    echo "Compiled $COMPILED/$TOTAL tests ($SKIPPED cached)"
+else
+    echo "Compiled $TOTAL tests"
+fi
+echo ""
 
 # Phase 2: run all compiled tests sequentially
 for entry in "${TESTS[@]}"; do

@@ -1105,10 +1105,7 @@ static void runtime__state_machine_task_exec(void *data) {
     /* Check if SM function completed (frame_count == 0) or suspended
        (frame_count > 0 means it hit OP_AWAIT_SM again). */
     bool completed = (vm->frame_count == 0);
-    if (completed && !jacl_is_nil(sm->error_k) && jacl_is_closure(sm->error_k)) {
-        /* SM has a completion callback (set for spawn/parallel/race bodies).
-           Call it with the result (success or error). */
-        JaclClosure *k = jacl_as_closure(sm->error_k);
+    if (completed) {
         JaclVal result;
         if (r != VM_OK) {
             result = jacl_set_error(jacl_inline_string("error", 5));
@@ -1117,7 +1114,13 @@ static void runtime__state_machine_task_exec(void *data) {
         } else {
             result = JACL_NIL;
         }
-        runtime__schedule_continuation(self->runtime, k, result);
+
+        if (!jacl_is_nil(sm->error_k) && jacl_is_closure(sm->error_k)) {
+            /* SM has a completion callback (set for spawn/parallel/race bodies).
+               Call it with the result (success or error). */
+            JaclClosure *k = jacl_as_closure(sm->error_k);
+            runtime__schedule_continuation(self->runtime, k, result);
+        }
     }
     free(smd);
 }

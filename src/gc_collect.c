@@ -909,6 +909,8 @@ static size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
             size_t offset     = (size_t)(ptr - block->payload);
             int    first_line = (int)(offset / GC_LINE_SIZE);
             int    last_line  = (int)((offset + total - 1) / GC_LINE_SIZE);
+            if (last_line >= GC_LINES_PER_BLOCK)
+                last_line = GC_LINES_PER_BLOCK - 1;
             for (int i = first_line; i <= last_line; i++) {
                 new_map[i] = GC_LINE_OCCUPIED;
             }

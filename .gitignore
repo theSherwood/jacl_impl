@@ -7,4 +7,6 @@ a.out
 
 .claude
 .build_*
+.build/
 build/
+*.gch
