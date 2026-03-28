@@ -144,6 +144,9 @@ static void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
 static void runtime__schedule_continuation(void *runtime_ptr,
                                             JaclClosure *continuation,
                                             JaclVal result);
+static void runtime__schedule_sm_resumption(void *runtime_ptr,
+                                             JaclVal state_machine,
+                                             JaclVal result);
 static void runtime__schedule_waiters(void *runtime_ptr,
                                        FutureWaiter *waiters,
                                        JaclVal result);
@@ -1502,16 +1505,16 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           for (uint8_t i = 0; i < arg_count && i < closure->sm_field_count; i++) {
             sm->fields[i] = vm->stack[vm->stack_top - arg_count + i];
           }
-          /* Propagate error_k from calling SM to inner SM so that if the
-             inner SM suspends and is later resumed on a different worker,
-             it can still signal completion back to the runtime. */
+          /* Propagate error_k from caller SM to inner SM so that the
+             completion callback (resolve_k, parallel_k, race_k) is
+             preserved across nested SM-to-SM calls.  This ensures
+             the future/aggregator is resolved when the innermost SM
+             in the call chain completes. */
           if (frame->closure->is_sm_compiled) {
             JaclVal outer_sm_val = vm->stack[frame->stack_base + 0];
             if (jacl_is_state_machine(outer_sm_val)) {
               JaclStateMachine *outer_sm = jacl_as_state_machine(outer_sm_val);
-              if (!jacl_is_nil(outer_sm->error_k)) {
-                sm->error_k = outer_sm->error_k;
-              }
+              sm->error_k = outer_sm->error_k;
             }
           }
           /* Replace stack args with (sm_val, JACL_NIL) */
@@ -1690,13 +1693,19 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
            through a single worker, avoiding per-worker env isolation issues. */
         cl->pin_worker_id = template->pinned ? 0 : -1;
 
+        /* Root cl on the VM stack before the upvalue loop.  If a future
+           upvalue path calls gc_alloc, emergency GC could sweep an
+           unrooted closure.  Rooting early is defensive. */
+        result = vm__push(vm, jacl_closure(cl));
+        if (result != VM_OK) return result;
+
         if (cl->upvalue_count > 0) {
           cl->upvalues = (JaclVal*)(cl + 1); /* trailing array */
           for (uint8_t i = 0; i < cl->upvalue_count; i++) {
             uint8_t is_local = vm__read_byte(vm);
             uint8_t uv_index = vm__read_byte(vm);
             if (is_local == 1) {
-              if (frame->stack_base + uv_index >= vm->stack_top) {
+              if (frame->stack_base + uv_index >= vm->stack_top - 1) {
                 vm__set_error(vm,
                   "OP_CLOSURE: local upvalue index %d out of bounds "
                   "(frame stack_base=%u, stack_top=%u)",
@@ -1706,7 +1715,9 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
               cl->upvalues[i] = vm->stack[frame->stack_base + uv_index];
             } else if (is_local == 2) {
               /* SM state field upvalue: read from the state machine object
-                 at slot 0 of the current frame. uv_index is the field index. */
+                 at slot 0 of the current frame. uv_index is the field index.
+                 For mutable fields the SM field already holds a cell pointer,
+                 so the closure gets shared identity (FR-5 semantics). */
               JaclVal sm_val = vm->stack[frame->stack_base + 0];
               JaclStateMachine* sm = jacl_as_state_machine(sm_val);
               if (uv_index >= sm->field_count) {
@@ -1732,8 +1743,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           cl->upvalues = NULL;
         }
 
-        result = vm__push(vm, jacl_closure(cl));
-        if (result != VM_OK) return result;
+        /* cl is already on the stack from the root push above */
         break;
       }
 
@@ -5516,6 +5526,35 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_GET_STATE_FIELD_CELL: {
+        uint8_t field_index = vm__read_byte(vm);
+        JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JaclStateMachine *sm = jacl_as_state_machine(state_val);
+        JaclVal cell = sm->fields[field_index];
+        JaclMutableRef *ref = jacl_as_cell(cell);
+        result = vm__push(vm, ref->value);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_SET_STATE_FIELD_CELL: {
+        uint8_t field_index = vm__read_byte(vm);
+        JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JaclStateMachine *sm = jacl_as_state_machine(state_val);
+        JaclVal cell = sm->fields[field_index];
+        JaclMutableRef *ref = jacl_as_cell(cell);
+        JaclVal new_val;
+        result = vm__pop(vm, &new_val);
+        if (result != VM_OK) return result;
+        gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                         ref->value, new_val);
+        gc_remembered_set_barrier(vm->remembered_set, cell, new_val);
+        ref->value = new_val;
+        result = vm__push(vm, JACL_NIL);
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_GET_RESUME_POINT: {
         JaclVal state_val = vm->stack[frame->stack_base + 0];
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
@@ -5589,6 +5628,135 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
           /* PENDING in single-threaded mode — shouldn't happen since
              spawn resolves synchronously.  Push nil as fallback. */
           result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
+        }
+        break;
+      }
+
+      case OP_CALL_SUSPEND: {
+        /* Like OP_CALL, but for calls to known suspending procs in SM context.
+           In concurrent mode: spawn the inner SM as a separate task with a
+           future, push the future (OP_AWAIT_SM follows to handle suspension).
+           In single-threaded mode: fall through to synchronous call. */
+        uint8_t arg_count = vm__read_byte(vm);
+        JaclVal callee = vm->stack[vm->stack_top - arg_count - 1];
+
+        if (!jacl_is_closure(callee)) {
+          vm__set_error(vm, "call_suspend requires a closure, got %s",
+                       vm__type_name(callee));
+          return VM_RUNTIME_ERROR;
+        }
+
+        JaclClosure *closure = jacl_as_closure(callee);
+
+        if (vm->runtime && closure->is_sm_compiled && !closure->is_generator) {
+          /* Concurrent mode with SM callee: spawn as separate task */
+
+          /* Arity check against user parameter count */
+          if (arg_count != closure->min_args) {
+            vm__set_error(vm, "expected %d arguments but got %d",
+                         (int)closure->min_args, (int)arg_count);
+            return VM_RUNTIME_ERROR;
+          }
+
+          /* Allocate all GC objects first, rooting each on the stack
+             to survive GC. Only write to them after all allocs complete,
+             since GC evacuation can move objects and stale C pointers. */
+
+          /* 1. Allocate inner SM (root on stack) */
+          JaclVal sm_val = gc_alloc_state_machine(&vm->heap, closure->sm_field_count);
+          result = vm__push(vm, sm_val);
+          if (result != VM_OK) return result;
+
+          /* 2. Allocate future (root on stack) */
+          JaclVal future_val = jacl_future(&vm->heap);
+          result = vm__push(vm, future_val);
+          if (result != VM_OK) return result;
+
+          /* 3. Allocate resolve_k (sm_val + future_val rooted on stack) */
+          JaclVal resolve_k = runtime__create_resolve_closure(
+              &vm->heap, vm->arena, future_val);
+
+          /* All allocs done — now safe to write via re-read pointers.
+             GC may have moved objects, so re-derive C pointers from
+             tagged values (which the GC updates on the stack). */
+          sm_val = vm->stack[vm->stack_top - 2];     /* re-read after GC */
+          future_val = vm->stack[vm->stack_top - 1];  /* re-read after GC */
+          JaclStateMachine *inner_sm = jacl_as_state_machine(sm_val);
+          inner_sm->sm_closure = callee;
+          inner_sm->error_k = resolve_k;
+          for (uint8_t i = 0; i < arg_count && i < closure->sm_field_count; i++) {
+            /* args at: stack_top - 2(roots) - arg_count + i */
+            inner_sm->fields[i] = vm->stack[vm->stack_top - 2 - arg_count + i];
+          }
+
+          /* 4. Submit inner SM as a task */
+          runtime__schedule_sm_resumption(vm->runtime, sm_val, JACL_NIL);
+
+          /* 5. Pop rooted values, pop callee + args, push future */
+          vm->stack_top -= 2; /* pop future_val, sm_val roots */
+          vm->stack_top -= (arg_count + 1); /* pop callee + args */
+          result = vm__push(vm, future_val);
+          if (result != VM_OK) return result;
+        } else {
+          /* Single-threaded or non-SM callee: execute synchronously,
+             wrap result in a resolved future (OP_AWAIT_SM follows). */
+          uint8_t *saved_ip = vm->ip;
+          BytecodeChunk *saved_chunk = vm->chunk;
+          uint32_t saved_frame_count = vm->frame_count;
+
+          /* SM-compiled non-generator: wrap args into SM */
+          if (closure->is_sm_compiled && !closure->is_generator) {
+            if (arg_count != closure->min_args) {
+              vm__set_error(vm, "expected %d arguments but got %d",
+                           (int)closure->min_args, (int)arg_count);
+              return VM_RUNTIME_ERROR;
+            }
+            JaclVal sm_val = gc_alloc_state_machine(&vm->heap, closure->sm_field_count);
+            JaclStateMachine* sm = jacl_as_state_machine(sm_val);
+            sm->sm_closure = callee;
+            for (uint8_t i = 0; i < arg_count && i < closure->sm_field_count; i++) {
+              sm->fields[i] = vm->stack[vm->stack_top - arg_count + i];
+            }
+            uint32_t callee_pos = vm->stack_top - arg_count - 1;
+            vm->stack[callee_pos + 1] = sm_val;
+            vm->stack[callee_pos + 2] = JACL_NIL;
+            vm->stack_top = callee_pos + 3;
+            arg_count = 2;
+          }
+
+          if (vm->frame_count >= VM_FRAMES_MAX) {
+            vm__set_error(vm, "stack overflow");
+            return VM_STACK_OVERFLOW;
+          }
+          CallFrame *sf = &vm->frames[vm->frame_count++];
+          sf->closure    = closure;
+          sf->return_ip  = saved_ip;
+          sf->stack_base = vm->stack_top - (closure->is_sm_compiled ? 2 : arg_count);
+          sf->chunk      = &closure->chunk;
+          vm->ip    = closure->chunk.code;
+          vm->chunk = &closure->chunk;
+
+          VMResult sub = vm__run(vm, saved_frame_count);
+
+          frame = &vm->frames[vm->frame_count - 1];
+          vm->ip    = saved_ip;
+          vm->chunk = saved_chunk;
+
+          /* Wrap result in a resolved future for OP_AWAIT_SM */
+          JaclVal call_result = JACL_NIL;
+          if (sub == VM_OK && vm->stack_top > 0) {
+            call_result = vm->stack[--vm->stack_top];
+          } else if (sub != VM_OK) {
+            vm__set_error(vm, "call_suspend: inner call failed");
+            return VM_RUNTIME_ERROR;
+          }
+
+          JaclVal f = jacl_future(&vm->heap);
+          JaclFuture *fut = jacl_as_future(f);
+          jacl_future_resolve(fut, call_result,
+                              vm->grey_buf, vm->gc_active_ptr);
+          result = vm__push(vm, f);
           if (result != VM_OK) return result;
         }
         break;

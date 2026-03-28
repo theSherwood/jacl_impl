@@ -904,7 +904,8 @@ typedef enum {
   SUSPEND_YIELD,
   SUSPEND_AWAIT,
   SUSPEND_PARALLEL,
-  SUSPEND_RACE
+  SUSPEND_RACE,
+  SUSPEND_CALL       /* call to a known suspending proc */
 } SuspensionPointType;
 
 typedef struct {
@@ -937,8 +938,11 @@ typedef struct {
 
 /* Walk an AST subtree to find suspension points for state machine compilation.
    Does NOT recurse into nested proc/spawn definitions (separate closure scopes).
-   Assigns sequential IDs to each discovered suspension point. */
-static void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis) {
+   Assigns sequential IDs to each discovered suspension point.
+   When map is non-NULL, also treats calls to known suspending procs as
+   suspension points (SUSPEND_CALL). */
+static void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
+                                  SuspensionMap* map) {
   if (!node) return;
 
   switch (node->type) {
@@ -962,7 +966,7 @@ static void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis) {
           }
           /* Still recurse into args (they might contain nested suspension) */
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            sm__walk_suspensions(node->data.command.args[i], analysis);
+            sm__walk_suspensions(node->data.command.args[i], analysis, map);
           }
           return;
         }
@@ -980,7 +984,7 @@ static void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis) {
             analysis->suspension_count++;
           }
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            sm__walk_suspensions(node->data.command.args[i], analysis);
+            sm__walk_suspensions(node->data.command.args[i], analysis, map);
           }
           return;
         }
@@ -998,7 +1002,7 @@ static void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis) {
             analysis->suspension_count++;
           }
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            sm__walk_suspensions(node->data.command.args[i], analysis);
+            sm__walk_suspensions(node->data.command.args[i], analysis, map);
           }
           return;
         }
@@ -1016,7 +1020,7 @@ static void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis) {
             analysis->suspension_count++;
           }
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            sm__walk_suspensions(node->data.command.args[i], analysis);
+            sm__walk_suspensions(node->data.command.args[i], analysis, map);
           }
           return;
         }
@@ -1027,35 +1031,57 @@ static void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis) {
             (len == 5 && memcmp(name, "spawn", 5) == 0)) {
           return;
         }
+
+        /* Call to a known suspending proc is a suspension point */
+        if (map && len <= 7) {
+          JaclVal name_val = jacl_inline_string(name, len);
+          if (suspension_map_lookup(map, name_val) &&
+              !suspension_map_is_generator(map, name_val)) {
+            if (analysis->suspension_count < SM_MAX_SUSPENSION_POINTS) {
+              SuspensionPoint* sp =
+                  &analysis->suspension_points[analysis->suspension_count];
+              sp->id     = analysis->suspension_count;
+              sp->type   = SUSPEND_CALL;
+              sp->node   = node;
+              sp->line   = node->start.line;
+              sp->column = node->start.column;
+              analysis->suspension_count++;
+            }
+            for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+              sm__walk_suspensions(node->data.command.args[i], analysis, map);
+            }
+            return;
+          }
+        }
       }
 
       /* Recurse into arguments for all other commands */
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        sm__walk_suspensions(node->data.command.args[i], analysis);
+        sm__walk_suspensions(node->data.command.args[i], analysis, map);
       }
       break;
     }
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
-        sm__walk_suspensions(node->data.block.commands[i], analysis);
+        sm__walk_suspensions(node->data.block.commands[i], analysis, map);
       }
       break;
     }
     case AST_INTERP_STRING: {
       for (uint32_t i = 0; i < node->data.interp_string.count; i++) {
-        sm__walk_suspensions(node->data.interp_string.segments[i], analysis);
+        sm__walk_suspensions(node->data.interp_string.segments[i], analysis, map);
       }
       break;
     }
     case AST_BREAK: {
       if (node->data.break_stmt.value) {
-        sm__walk_suspensions(node->data.break_stmt.value, analysis);
+        sm__walk_suspensions(node->data.break_stmt.value, analysis, map);
       }
       break;
     }
     case AST_RETURN: {
       if (node->data.return_stmt.value) {
-        sm__walk_suspensions(node->data.return_stmt.value, analysis);
+        sm__walk_suspensions(node->data.return_stmt.value, analysis, map);
       }
       break;
     }
@@ -1091,6 +1117,13 @@ static int sm__find_field(const StateLayout* layout, JaclVal name) {
     if (layout->fields[i].name == name) return (int)layout->fields[i].field_index;
   }
   return -1;
+}
+
+static bool sm__is_field_mutable(const StateLayout* layout, JaclVal name) {
+  for (uint32_t i = 0; i < layout->field_count; i++) {
+    if (layout->fields[i].name == name) return layout->fields[i].is_mutable;
+  }
+  return false;
 }
 
 /* Collect names from an AST_DESTRUCTURE_VEC node into the state layout. */
@@ -1225,10 +1258,12 @@ static void sm__walk_locals(AstNode* node, StateLayout* layout) {
         uint32_t argc = node->data.command.arg_count;
         AstNode** args = node->data.command.args;
 
-        /* def / mut — local bindings */
+        /* def / mut / = / : — local bindings (= is sugar for def, : for mut) */
         if ((hlen == 3 && memcmp(hname, "def", 3) == 0) ||
-            (hlen == 3 && memcmp(hname, "mut", 3) == 0)) {
-          bool is_mut = (hname[0] == 'm');
+            (hlen == 3 && memcmp(hname, "mut", 3) == 0) ||
+            (hlen == 1 && hname[0] == '=') ||
+            (hlen == 1 && hname[0] == ':')) {
+          bool is_mut = (hname[0] == 'm' || hname[0] == ':');
 
           if (argc >= 2 && args[0]->type == AST_DESTRUCTURE_VEC) {
             sm__collect_destructure_vec_names(args[0], layout, is_mut);
@@ -1282,15 +1317,13 @@ static void sm__walk_locals(AstNode* node, StateLayout* layout) {
           return;
         }
 
-        /* try — creates catch binding */
+        /* try — catch binding is scope-local (handler cannot suspend),
+           so do NOT add it to the state layout.  Only recurse into
+           the try-body and handler body for nested bindings. */
         if (hlen == 3 && memcmp(hname, "try", 3) == 0) {
-          if (argc == 3 && args[1]->type == AST_LIT_STRING) {
-            sm__add_state_field(layout,
-                jacl_inline_string(args[1]->data.lit_string.value,
-                                   args[1]->data.lit_string.length),
-                false, false);
-          }
           for (uint32_t i = 0; i < argc; i++) {
+            if (i == 1 && argc == 3 && args[1]->type == AST_LIT_STRING)
+              continue;  /* skip catch binding name */
             sm__walk_locals(args[i], layout);
           }
           return;
@@ -1564,9 +1597,11 @@ static void sm__liveness_walk(AstNode* node, const StateLayout* layout,
           return;
         }
 
-        /* --- def / mut: mark binding names as writes --- */
+        /* --- def / mut / = / : — mark binding names as writes --- */
         if ((hlen == 3 && memcmp(hname, "def", 3) == 0) ||
-            (hlen == 3 && memcmp(hname, "mut", 3) == 0)) {
+            (hlen == 3 && memcmp(hname, "mut", 3) == 0) ||
+            (hlen == 1 && hname[0] == '=') ||
+            (hlen == 1 && hname[0] == ':')) {
           /* Walk RHS first (it may reference variables) */
           uint32_t val_idx = (argc == 3) ? 2 : 1;
           if (val_idx < argc) {
@@ -1681,15 +1716,11 @@ static void sm__liveness_walk(AstNode* node, const StateLayout* layout,
           return;
         }
 
-        /* --- try: catch binding --- */
+        /* --- try: catch binding is scope-local (cannot suspend), skip it --- */
         if (hlen == 3 && memcmp(hname, "try", 3) == 0) {
           /* Walk try body */
           if (argc >= 1) sm__liveness_walk(args[0], layout, liveness, segment);
-          /* Mark catch binding */
-          if (argc == 3 && args[1]->type == AST_LIT_STRING) {
-            sm__liveness_mark_write(liveness, layout,
-                sm__lit_string_name(args[1]), *segment);
-          }
+          /* Skip catch binding name — not a state field */
           /* Walk catch body */
           if (argc >= 3) sm__liveness_walk(args[2], layout, liveness, segment);
           return;
@@ -1859,7 +1890,8 @@ static void sm__optimize_state_layout(SuspensionAnalysis* analysis,
 static SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
                                                         JaclVal* param_names,
                                                         uint8_t  param_count,
-                                                        bool     optimize_liveness) {
+                                                        bool     optimize_liveness,
+                                                        SuspensionMap* map) {
   SuspensionAnalysis analysis;
   memset(&analysis, 0, sizeof(analysis));
 
@@ -1868,10 +1900,10 @@ static SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
   /* Pass 1: find suspension points */
   if (body->type == AST_BLOCK) {
     for (uint32_t i = 0; i < body->data.block.count; i++) {
-      sm__walk_suspensions(body->data.block.commands[i], &analysis);
+      sm__walk_suspensions(body->data.block.commands[i], &analysis, map);
     }
   } else {
-    sm__walk_suspensions(body, &analysis);
+    sm__walk_suspensions(body, &analysis, map);
   }
 
   /* Pass 2: build state layout.  Always build it so that transitively
@@ -2453,16 +2485,14 @@ static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
   if (c->enclosing->sm_analysis) {
     int field_idx = sm__find_field(&c->enclosing->sm_analysis->state_layout, name);
     if (field_idx >= 0) {
+      /* is_local=2: copy SM field value into closure upvalue at creation
+         time.  For mutable fields the SM field holds a cell, so the
+         closure gets the shared cell pointer (FR-5 semantics). */
+      bool is_mut = sm__is_field_mutable(&c->enclosing->sm_analysis->state_layout, name);
       int uv = compiler__add_upvalue(c, (uint8_t)field_idx, 2, name);
       if (uv != -1) {
-        /* Look up type info from state layout */
-        StateLayout* layout = &c->enclosing->sm_analysis->state_layout;
-        for (uint32_t fi = 0; fi < layout->field_count; fi++) {
-          if (layout->fields[fi].name == name) {
-            c->upvalues[uv].is_mutable = layout->fields[fi].is_mutable;
-            break;
-          }
-        }
+        c->upvalues[uv].is_mutable = is_mut;
+        c->upvalues[uv].captures_mutable = is_mut;
         c->upvalues[uv].type = TYPE_DYN;
       }
       return uv;
@@ -2872,7 +2902,7 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   if (body_suspends) {
     /* SM parallel body: analyze suspensions, compile as state machine */
     sm_analysis_data = compiler__analyze_suspensions(
-        body_block, NULL, 0, true);
+        body_block, NULL, 0, true, c->suspension_map);
     closure->param_count = 2;
     JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
     pnames[0] = jacl_inline_string("__sm", 4);
@@ -4590,9 +4620,12 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclVal name_val = jacl_inline_string(args[name_arg_idx]->data.lit_string.value, name_len);
 
     if (c->sm_analysis) {
-      /* SM mode: write value to state field directly (no cell needed) */
+      /* SM mode: wrap value in a cell and store in state field.
+         This preserves shared-mutation semantics (FR-5) — nested
+         closures capture the cell pointer, not a snapshot. */
       int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
       if (field_idx >= 0) {
+        compiler__emit_byte(c, OP_MAKE_CELL, line);
         compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
         compiler__emit_byte(c, (uint8_t)field_idx, line);
         /* mut returns nil */
@@ -4674,15 +4707,21 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclVal name_val = jacl_inline_string(args[0]->data.lit_string.value, name_len);
     char err_msg[128];
 
-    /* SM mode: write directly to state field */
+    /* SM mode: write to state field (through cell if mutable) */
     if (c->sm_analysis) {
       int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
       if (field_idx >= 0) {
+        bool is_mut = sm__is_field_mutable(&c->sm_analysis->state_layout, name_val);
         compiler__compile_node(c, args[1]);
-        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
-        compiler__emit_byte(c, (uint8_t)field_idx, line);
-        /* set returns nil (consumed by check_error) */
-        compiler__emit_byte(c, OP_NIL, line);
+        if (is_mut) {
+          /* Write through cell with barrier; pushes NIL internally */
+          compiler__emit_byte(c, OP_SET_STATE_FIELD_CELL, line);
+          compiler__emit_byte(c, (uint8_t)field_idx, line);
+        } else {
+          compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+          compiler__emit_byte(c, (uint8_t)field_idx, line);
+          compiler__emit_byte(c, OP_NIL, line);
+        }
         return;
       }
     }
@@ -5386,7 +5425,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
     if (proc_suspends_early) {
       sm_analysis_data = compiler__analyze_suspensions(
-          args[body_arg_idx], param_names_arr, user_param_count, true);
+          args[body_arg_idx], param_names_arr, user_param_count, true, c->suspension_map);
       /* Always SM-compile suspending procs — even if suspension_count == 0
          (transitively suspending via calling other suspending procs). */
       use_sm_path = true;
@@ -6987,7 +7026,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
     if (spawn_suspends) {
       /* SM spawn body: analyze suspensions, compile as state machine */
-      spawn_sm_analysis = compiler__analyze_suspensions(body_block, NULL, 0, true);
+      spawn_sm_analysis = compiler__analyze_suspensions(body_block, NULL, 0, true, c->suspension_map);
       closure->param_count = 2;
       JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
       pnames[0] = jacl_inline_string("__sm", 4);
@@ -7376,9 +7415,45 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
 
-    /* Emit call */
-    compiler__emit_byte(c, OP_CALL, line);
-    compiler__emit_byte(c, (uint8_t)argc, line);
+    /* Check if callee is a known suspending proc in SM context */
+    bool use_call_suspend = false;
+    if (c->sm_analysis && c->suspension_map && callee_name_str && callee_name_len <= 7) {
+      JaclVal cname = jacl_inline_string(callee_name_str, callee_name_len);
+      if (suspension_map_lookup(c->suspension_map, cname) &&
+          !suspension_map_is_generator(c->suspension_map, cname)) {
+        use_call_suspend = true;
+      }
+    }
+
+    if (use_call_suspend) {
+      /* SM call to suspending proc: emit OP_CALL_SUSPEND + SM await sequence.
+         OP_CALL_SUSPEND spawns inner SM as a task (concurrent) or falls through
+         to synchronous call (single-threaded), pushing a future on stack.
+         Then the SM await pattern handles suspension/inline resolution. */
+      compiler__emit_byte(c, OP_CALL_SUSPEND, line);
+      compiler__emit_byte(c, (uint8_t)argc, line);
+
+      /* SM await sequence: set resume_point, OP_AWAIT_SM, dispatch backpatch */
+      uint32_t sp_idx = c->sm_suspension_idx++;
+      compiler__emit_constant(c, jacl_i32((int32_t)(sp_idx + 1)), line);
+      compiler__emit_byte(c, OP_SET_RESUME_POINT, line);
+      compiler__emit_byte(c, OP_AWAIT_SM, line);
+      /* Inline path: result already on stack; jump past resume value push */
+      uint32_t skip_jump = compiler__emit_jump(c, OP_JUMP, line);
+      /* Resume label: dispatch table backpatch lands here */
+      if (sp_idx < c->sm_dispatch.label_count) {
+        compiler__patch_jump(c, c->sm_dispatch.label_patches[sp_idx]);
+      }
+      /* Push resume value from slot 1 (__rv) onto stack */
+      compiler__emit_byte(c, OP_GET_LOCAL, line);
+      compiler__emit_byte(c, 1, line);
+      /* Common path: result on stack */
+      compiler__patch_jump(c, skip_jump);
+    } else {
+      /* Regular call */
+      compiler__emit_byte(c, OP_CALL, line);
+      compiler__emit_byte(c, (uint8_t)argc, line);
+    }
 
     /* Set result type from callee's return type */
     c->last_expr_type = call_return_type;
@@ -7469,9 +7544,10 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
       if (c->sm_analysis) {
         int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
         if (field_idx >= 0) {
-          compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+          bool is_mut = sm__is_field_mutable(&c->sm_analysis->state_layout, name_val);
+          compiler__emit_byte(c, is_mut ? OP_GET_STATE_FIELD_CELL
+                                        : OP_GET_STATE_FIELD, line);
           compiler__emit_byte(c, (uint8_t)field_idx, line);
-          /* Look up type info from state layout */
           c->last_expr_type = TYPE_DYN;
           break;
         }
@@ -8156,7 +8232,7 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     fake_block.data.block.commands = non_proc_stmts;
 
     SuspensionAnalysis main_sm_analysis = compiler__analyze_suspensions(
-        &fake_block, NULL, 0, true);
+        &fake_block, NULL, 0, true, &suspension_map);
 
     JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
     chunk_init(&main_cl->chunk, arena);
@@ -8566,7 +8642,7 @@ static ProgramResult jacl_compile_program(const char* root_path,
     fake_block2.data.block.commands = non_proc_stmts;
 
     SuspensionAnalysis main_sm_analysis2 = compiler__analyze_suspensions(
-        &fake_block2, NULL, 0, true);
+        &fake_block2, NULL, 0, true, &suspension_map);
 
     JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
     chunk_init(&main_cl->chunk, arena);

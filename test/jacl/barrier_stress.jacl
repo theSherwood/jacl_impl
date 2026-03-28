@@ -31,8 +31,8 @@ proc main {} {
   def f2 [spawn { bump $a2 0 50 }]
   def f3 [spawn { bump $a3 0 50 }]
   def f4 [spawn { bump $a4 0 50 }]
-  def g1 [spawn { trash 0 100 }]
-  def g2 [spawn { trash 0 100 }]
+  def g1 [spawn { trash 0 50 }]
+  def g2 [spawn { trash 0 50 }]
   await $f1
   await $f2
   await $f3
