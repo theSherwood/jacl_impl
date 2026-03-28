@@ -1745,11 +1745,16 @@ static void sm__liveness_walk(AstNode* node, const StateLayout* layout,
         }
       }
 
-      /* Head might be a var ref */
+      /* Head might be a var ref or a bare-word proc call */
       if (head->type == AST_VAR_REF && head->data.var_ref.length <= 7) {
         sm__liveness_mark_read(liveness, layout,
             jacl_inline_string(head->data.var_ref.name,
                                head->data.var_ref.length), *segment);
+      } else if (head->type == AST_LIT_STRING &&
+                 head->data.lit_string.length <= 7) {
+        sm__liveness_mark_read(liveness, layout,
+            jacl_inline_string(head->data.lit_string.value,
+                               head->data.lit_string.length), *segment);
       }
       /* Walk all arguments for any other command */
       for (uint32_t i = 0; i < argc; i++) {
@@ -5613,7 +5618,25 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     /* Bind the name — use user_param_count for arity checks */
-    if (c->scope_depth > 0 && !c->force_global_procs) {
+    if (c->sm_analysis) {
+      /* SM mode: store closure in state object field (survives suspension) */
+      int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
+      if (field_idx >= 0) {
+        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)field_idx, line);
+        /* Push nil (proc definition is a statement) */
+        compiler__emit_byte(c, OP_NIL, line);
+      } else {
+        /* Name not in state layout — shouldn't happen, fall through to local */
+        compiler__add_local(c, name_val, line, col);
+        c->locals[c->local_count - 1].known_arity = is_variadic ? -1 : (int16_t)user_param_count;
+        c->locals[c->local_count - 1].return_type = proc_return_type;
+        c->locals[c->local_count - 1].param_types = stored_param_types;
+        c->locals[c->local_count - 1].suspends    = proc_suspends;
+        c->locals[c->local_count - 1].captures_mutable = proc_captures_mutable;
+        compiler__emit_byte(c, OP_NIL, line);
+      }
+    } else if (c->scope_depth > 0 && !c->force_global_procs) {
       /* Local scope: closure is on stack as local */
       compiler__add_local(c, name_val, line, col);
       c->locals[c->local_count - 1].known_arity = is_variadic ? -1 : (int16_t)user_param_count;
@@ -7292,9 +7315,16 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
         return;
       }
       JaclVal name_val = jacl_inline_string(head->data.lit_string.value, name_len);
-      int local_slot = compiler__resolve_local(c, name_val);
       callee_name_str = head->data.lit_string.value;
       callee_name_len = name_len;
+
+      /* SM mode: resolve callee from state object fields first */
+      int sm_field_idx = -1;
+      if (c->sm_analysis) {
+        sm_field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
+      }
+
+      int local_slot = compiler__resolve_local(c, name_val);
 
       /* Compile-time arity check and param type resolution */
       {
@@ -7324,7 +7354,13 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
         }
       }
 
-      if (local_slot != -1) {
+      if (sm_field_idx >= 0) {
+        /* SM mode: read callee from state object field */
+        bool is_mut = sm__is_field_mutable(&c->sm_analysis->state_layout, name_val);
+        compiler__emit_byte(c, is_mut ? OP_GET_STATE_FIELD_CELL
+                                      : OP_GET_STATE_FIELD, line);
+        compiler__emit_byte(c, (uint8_t)sm_field_idx, line);
+      } else if (local_slot != -1) {
         if (c->locals[local_slot].is_mutable) {
           compiler__emit_byte(c, OP_GET_CELL_LOCAL, line);
         } else {
