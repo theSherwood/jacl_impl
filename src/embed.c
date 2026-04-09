@@ -61,7 +61,7 @@ struct JaclTrampoline_s { int _unused; }; /* stub — never allocated without li
 #endif
 
 /* Forward declaration — defined at end of file in trampoline section */
-static void embed__free_all_trampolines(JaclVM* jvm);
+void embed__free_all_trampolines(JaclVM* jvm);
 
 /* --- Native function signature and registry entry --- */
 
@@ -101,7 +101,7 @@ struct JaclVM_s {
 
 /* --- Native function dispatch callback (called from VM's OP_CALL) --- */
 
-static JaclVal embed__call_native(void* ctx, uint32_t fn_index,
+JaclVal embed__call_native(void* ctx, uint32_t fn_index,
                                    JaclVal* args, int argc) {
   JaclVM* jvm = (JaclVM*)ctx;
   if (fn_index >= jvm->native_fn_count) return jacl_set_error(JACL_NIL);
@@ -113,17 +113,17 @@ static JaclVal embed__call_native(void* ctx, uint32_t fn_index,
 
 /* --- Forward declare jacl_vm_new_ex so jacl_vm_new can call it --- */
 
-JACL_EMBED_FN JaclVM* jacl_vm_new_ex(const JaclConfig* config);
+JaclVM* jacl_vm_new_ex(const JaclConfig* config);
 
 /* --- jacl_vm_new — create VM with default settings --- */
 
-JACL_EMBED_FN JaclVM* jacl_vm_new(void) {
+JaclVM* jacl_vm_new(void) {
   return jacl_vm_new_ex(NULL);
 }
 
 /* --- jacl_vm_new_ex — create VM with custom configuration --- */
 
-JACL_EMBED_FN JaclVM* jacl_vm_new_ex(const JaclConfig* config) {
+JaclVM* jacl_vm_new_ex(const JaclConfig* config) {
   JaclVM* jvm = (JaclVM*)malloc(sizeof(JaclVM));
   if (!jvm) return NULL;
 
@@ -196,7 +196,7 @@ JACL_EMBED_FN JaclVM* jacl_vm_new_ex(const JaclConfig* config) {
 
 /* --- jacl_vm_free — destroy VM and free all memory --- */
 
-JACL_EMBED_FN void jacl_vm_free(JaclVM* vm) {
+void jacl_vm_free(JaclVM* vm) {
   if (!vm) return;
 
   free(vm->handle_slots);
@@ -216,7 +216,7 @@ JACL_EMBED_FN void jacl_vm_free(JaclVM* vm) {
 
 /* --- Error value helpers --- */
 
-static JaclVal embed__make_error(JaclVM* jvm, const char* msg) {
+JaclVal embed__make_error(JaclVM* jvm, const char* msg) {
   /* Copy message into arena so it survives across calls */
   size_t len = strlen(msg);
   char* copy = (char*)arena_alloc(&jvm->arena, (uint32_t)(len + 1));
@@ -228,7 +228,7 @@ static JaclVal embed__make_error(JaclVM* jvm, const char* msg) {
 
 /* --- jacl_eval — parse, compile, execute source string --- */
 
-JACL_EMBED_FN JaclVal jacl_eval(JaclVM* jvm, const char* source) {
+JaclVal jacl_eval(JaclVM* jvm, const char* source) {
   if (!jvm || !source) return jacl_set_error(JACL_NIL);
 
   VM* vm = &jvm->vm;
@@ -389,7 +389,7 @@ JACL_EMBED_FN JaclVal jacl_eval(JaclVM* jvm, const char* source) {
 
 /* --- jacl_eval_file — read file and eval contents --- */
 
-JACL_EMBED_FN JaclVal jacl_eval_file(JaclVM* jvm, const char* path) {
+JaclVal jacl_eval_file(JaclVM* jvm, const char* path) {
   if (!jvm || !path) return jacl_set_error(JACL_NIL);
 
   FILE* f = fopen(path, "rb");
@@ -416,13 +416,13 @@ JACL_EMBED_FN JaclVal jacl_eval_file(JaclVM* jvm, const char* path) {
 
 /* --- jacl_is_error — exported wrapper for the inline in value.c --- */
 
-JACL_EMBED_FN bool jacl_is_error_val(JaclVal v) {
+bool jacl_is_error_val(JaclVal v) {
   return jacl_is_error(v);
 }
 
 /* --- jacl_error_message — extract error message string --- */
 
-JACL_EMBED_FN const char* jacl_error_message_str(JaclVM* jvm, JaclVal err) {
+const char* jacl_error_message_str(JaclVM* jvm, JaclVal err) {
   if (!jvm) return NULL;
   if (!jacl_is_error(err)) return NULL;
   return jvm->last_error;
@@ -432,39 +432,39 @@ JACL_EMBED_FN const char* jacl_error_message_str(JaclVM* jvm, JaclVal err) {
 
 /* --- Value constructors (public API wrappers) --- */
 
-JACL_EMBED_FN JaclVal jacl_nil_val(void) {
+JaclVal jacl_nil_val(void) {
   return JACL_NIL;
 }
 
-JACL_EMBED_FN JaclVal jacl_bool_val(bool b) {
+JaclVal jacl_bool_val(bool b) {
   return jacl_bool(b);
 }
 
-JACL_EMBED_FN JaclVal jacl_i32_val(int32_t n) {
+JaclVal jacl_i32_val(int32_t n) {
   return jacl_i32(n);
 }
 
-JACL_EMBED_FN JaclVal jacl_i64_val(JaclVM* jvm, int64_t n) {
+JaclVal jacl_i64_val(JaclVM* jvm, int64_t n) {
   return jacl_i64(&jvm->vm.heap, n);
 }
 
-JACL_EMBED_FN JaclVal jacl_u32_val(uint32_t n) {
+JaclVal jacl_u32_val(uint32_t n) {
   return jacl_u32(n);
 }
 
-JACL_EMBED_FN JaclVal jacl_u64_val(JaclVM* jvm, uint64_t n) {
+JaclVal jacl_u64_val(JaclVM* jvm, uint64_t n) {
   return jacl_u64(&jvm->vm.heap, n);
 }
 
-JACL_EMBED_FN JaclVal jacl_f32_val(float f) {
+JaclVal jacl_f32_val(float f) {
   return jacl_f32(f);
 }
 
-JACL_EMBED_FN JaclVal jacl_f64_val(JaclVM* jvm, double d) {
+JaclVal jacl_f64_val(JaclVM* jvm, double d) {
   return jacl_f64(&jvm->vm.heap, d);
 }
 
-JACL_EMBED_FN JaclVal jacl_string_val(JaclVM* jvm, const char* s, size_t len) {
+JaclVal jacl_string_val(JaclVM* jvm, const char* s, size_t len) {
   if (!jvm || !s) return jacl_set_error(JACL_NIL);
   if (len <= 7) {
     return jacl_inline_string(s, len);
@@ -472,42 +472,42 @@ JACL_EMBED_FN JaclVal jacl_string_val(JaclVM* jvm, const char* s, size_t len) {
   return jacl_intern(&jvm->vm.heap, &jvm->intern_table, s, (uint32_t)len);
 }
 
-JACL_EMBED_FN JaclVal jacl_string_cstr_val(JaclVM* jvm, const char* s) {
+JaclVal jacl_string_cstr_val(JaclVM* jvm, const char* s) {
   if (!jvm || !s) return jacl_set_error(JACL_NIL);
   return jacl_string_val(jvm, s, strlen(s));
 }
 
 /* --- Value extractors (public API wrappers) --- */
 
-JACL_EMBED_FN int32_t jacl_as_i32_val(JaclVal val) {
+int32_t jacl_as_i32_val(JaclVal val) {
   return jacl_as_i32(val);
 }
 
-JACL_EMBED_FN int64_t jacl_as_i64_val(JaclVal val) {
+int64_t jacl_as_i64_val(JaclVal val) {
   return jacl_as_i64(val);
 }
 
-JACL_EMBED_FN uint32_t jacl_as_u32_val(JaclVal val) {
+uint32_t jacl_as_u32_val(JaclVal val) {
   return jacl_as_u32(val);
 }
 
-JACL_EMBED_FN uint64_t jacl_as_u64_val(JaclVal val) {
+uint64_t jacl_as_u64_val(JaclVal val) {
   return jacl_as_u64(val);
 }
 
-JACL_EMBED_FN float jacl_as_f32_val(JaclVal val) {
+float jacl_as_f32_val(JaclVal val) {
   return jacl_as_f32(val);
 }
 
-JACL_EMBED_FN double jacl_as_f64_val(JaclVal val) {
+double jacl_as_f64_val(JaclVal val) {
   return jacl_as_f64(val);
 }
 
-JACL_EMBED_FN bool jacl_as_bool_val(JaclVal val) {
+bool jacl_as_bool_val(JaclVal val) {
   return jacl_as_bool(val);
 }
 
-JACL_EMBED_FN const char* jacl_as_cstr_val(JaclVM* jvm, JaclVal val, size_t* len_out) {
+const char* jacl_as_cstr_val(JaclVM* jvm, JaclVal val, size_t* len_out) {
   if (!jvm) return NULL;
   if (!jacl_is_string(val)) return NULL;
 
@@ -551,7 +551,7 @@ typedef enum {
   EMBED_TYPE_NATIVE_FN
 } EmbedJaclType;
 
-JACL_EMBED_FN int jacl_typeof_val(JaclVal val) {
+int jacl_typeof_val(JaclVal val) {
   uint64_t tag = val & JACL_TYPE_MASK;
   switch (tag) {
     case JACL_TAG_NIL:           return EMBED_TYPE_NIL;
@@ -575,7 +575,7 @@ JACL_EMBED_FN int jacl_typeof_val(JaclVal val) {
 
 /* ===== US-006: Native function registration (internal) ===== */
 
-static uint32_t embed__register_native(JaclVM* jvm, const char* name,
+uint32_t embed__register_native(JaclVM* jvm, const char* name,
                                         EmbedNativeFn fn, int8_t arity) {
   if (!jvm || !fn) return UINT32_MAX;
 
@@ -637,7 +637,7 @@ static uint32_t embed__register_native(JaclVM* jvm, const char* name,
 
 /* ===== US-007: jacl_register_fn — public API for native function registration ===== */
 
-JACL_EMBED_FN bool jacl_register_fn_val(JaclVM* jvm, const char* name,
+bool jacl_register_fn_val(JaclVM* jvm, const char* name,
                                   EmbedNativeFn fn, int arity) {
   if (!jvm || !name || !fn) return false;
   /* Name must fit inline string (<=7 bytes) */
@@ -653,7 +653,7 @@ JACL_EMBED_FN bool jacl_register_fn_val(JaclVM* jvm, const char* name,
 
 typedef struct { uint32_t index; } EmbedJaclHandle;
 
-JACL_EMBED_FN EmbedJaclHandle jacl_handle_new_val(JaclVM* jvm, JaclVal val) {
+EmbedJaclHandle jacl_handle_new_val(JaclVM* jvm, JaclVal val) {
   EmbedJaclHandle h = { .index = UINT32_MAX };
   if (!jvm) return h;
 
@@ -669,12 +669,12 @@ JACL_EMBED_FN EmbedJaclHandle jacl_handle_new_val(JaclVM* jvm, JaclVal val) {
   return h;
 }
 
-JACL_EMBED_FN JaclVal jacl_handle_get_val(JaclVM* jvm, EmbedJaclHandle h) {
+JaclVal jacl_handle_get_val(JaclVM* jvm, EmbedJaclHandle h) {
   if (!jvm || h.index >= jvm->handle_count) return JACL_NIL;
   return jvm->handle_slots[h.index];
 }
 
-JACL_EMBED_FN void jacl_handle_free_val(JaclVM* jvm, EmbedJaclHandle h) {
+void jacl_handle_free_val(JaclVM* jvm, EmbedJaclHandle h) {
   if (!jvm || h.index >= jvm->handle_count) return;
   /* Mark slot as free and push back to free list */
   jvm->handle_slots[h.index] = JACL_NIL;
@@ -690,7 +690,7 @@ JACL_EMBED_FN void jacl_handle_free_val(JaclVM* jvm, EmbedJaclHandle h) {
  * For closures: saves VM state, sets up a single call frame, runs to completion,
  *               then restores state. Supports re-entrant calls.
  */
-JACL_EMBED_FN JaclVal jacl_call_val(JaclVM* jvm, JaclVal fn, JaclVal* args, int argc) {
+JaclVal jacl_call_val(JaclVM* jvm, JaclVal fn, JaclVal* args, int argc) {
   if (!jvm) return jacl_set_error(JACL_NIL);
 
   VM* vm = &jvm->vm;
@@ -790,7 +790,7 @@ JACL_EMBED_FN JaclVal jacl_call_val(JaclVM* jvm, JaclVal fn, JaclVal* args, int 
  *
  * Supports names ≤7 bytes (inline) and longer names (heap-interned).
  */
-JACL_EMBED_FN JaclVal jacl_call_named_val(JaclVM* jvm, const char* name,
+JaclVal jacl_call_named_val(JaclVM* jvm, const char* name,
                                     JaclVal* args, int argc) {
   if (!jvm || !name) return jacl_set_error(JACL_NIL);
 
@@ -818,7 +818,7 @@ JACL_EMBED_FN JaclVal jacl_call_named_val(JaclVM* jvm, const char* name,
 /* ===== US-009: Struct interop from C ===== */
 
 /* Check whether a JaclVal matches a struct field type */
-static bool embed__val_matches_field_type(JaclVal val, int field_type) {
+bool embed__val_matches_field_type(JaclVal val, int field_type) {
   switch ((JaclType)field_type) {
     case TYPE_BOOL:    return jacl_is_bool(val);
     case TYPE_I32:     return jacl_is_i32(val);
@@ -840,14 +840,14 @@ static bool embed__val_matches_field_type(JaclVal val, int field_type) {
 }
 
 /* Read a field from struct data and return as JaclVal (always boxed) */
-static JaclVal embed__struct_read_field(JaclVM* jvm, JaclStruct* s,
+JaclVal embed__struct_read_field(JaclVM* jvm, JaclStruct* s,
                                          uint32_t offset, int field_type) {
   return vm__struct_read_field(&jvm->vm.heap, s, offset, field_type);
 }
 
 /* Write a JaclVal to a struct field (caller must have already type-checked).
  * Unboxes 64-bit types from boxed embed API values before delegating. */
-static void embed__struct_write_field(JaclStruct* s, uint32_t offset,
+void embed__struct_write_field(JaclStruct* s, uint32_t offset,
                                        int field_type, JaclVal val) {
   /* Embed API always passes boxed JaclVals; unbox 64-bit types for the
    * shared write function which uses the unboxed (raw-bits) VM convention. */
@@ -869,7 +869,7 @@ static void embed__struct_write_field(JaclStruct* s, uint32_t offset,
  *
  * Returns the struct value, or error-flagged value on failure.
  */
-JACL_EMBED_FN JaclVal jacl_struct_new_val(JaclVM* jvm, const char* type_name,
+JaclVal jacl_struct_new_val(JaclVM* jvm, const char* type_name,
                                     JaclVal* fields, int count) {
   if (!jvm || !type_name) return jacl_set_error(JACL_NIL);
 
@@ -908,7 +908,7 @@ JACL_EMBED_FN JaclVal jacl_struct_new_val(JaclVM* jvm, const char* type_name,
  *
  * Returns the field value (boxed), or error-flagged value on failure.
  */
-JACL_EMBED_FN JaclVal jacl_struct_get_val(JaclVM* jvm, JaclVal s_val,
+JaclVal jacl_struct_get_val(JaclVM* jvm, JaclVal s_val,
                                     const char* field_name) {
   if (!jvm || !field_name) return jacl_set_error(JACL_NIL);
   if (!jacl_is_struct(s_val)) {
@@ -941,7 +941,7 @@ JACL_EMBED_FN JaclVal jacl_struct_get_val(JaclVM* jvm, JaclVal s_val,
  * Returns true on success, false if type mismatch or field not found.
  * Triggers GC write barrier for heap-typed fields.
  */
-JACL_EMBED_FN bool jacl_struct_set_val(JaclVM* jvm, JaclVal s_val,
+bool jacl_struct_set_val(JaclVM* jvm, JaclVal s_val,
                                  const char* field_name, JaclVal value) {
   if (!jvm || !field_name) return false;
   if (!jacl_is_struct(s_val)) return false;
@@ -980,7 +980,7 @@ JACL_EMBED_FN bool jacl_struct_set_val(JaclVM* jvm, JaclVal s_val,
 
 /* ===== US-010: jacl_has_trampolines — runtime libffi availability query ===== */
 
-JACL_EMBED_FN bool jacl_has_trampolines(void) {
+bool jacl_has_trampolines(void) {
 #ifdef JACL_HAS_LIBFFI
   return true;
 #else
@@ -993,7 +993,7 @@ JACL_EMBED_FN bool jacl_has_trampolines(void) {
 #ifdef JACL_HAS_LIBFFI
 
 /* Parse a single type token from signature string, advance *p */
-static int tramp__parse_type(const char** p) {
+int tramp__parse_type(const char** p) {
   const char* s = *p;
   if      (strncmp(s, "void", 4) == 0) { *p += 4; return TRAMP_TYPE_VOID; }
   else if (strncmp(s, "i32",  3) == 0) { *p += 3; return TRAMP_TYPE_I32;  }
@@ -1007,7 +1007,7 @@ static int tramp__parse_type(const char** p) {
 }
 
 /* Map type ID to libffi type descriptor */
-static ffi_type* tramp__ffi_type(int type_id) {
+ffi_type* tramp__ffi_type(int type_id) {
   switch (type_id) {
     case TRAMP_TYPE_VOID: return &ffi_type_void;
     case TRAMP_TYPE_I32:  return &ffi_type_sint32;
@@ -1022,7 +1022,7 @@ static ffi_type* tramp__ffi_type(int type_id) {
 }
 
 /* libffi callback invoked when the trampoline's C function pointer is called */
-static void tramp__callback(ffi_cif* cif, void* ret, void** args, void* user_data) {
+void tramp__callback(ffi_cif* cif, void* ret, void** args, void* user_data) {
   (void)cif;
   JaclTrampoline* t = (JaclTrampoline*)user_data;
   JaclVM* jvm = t->jvm;
@@ -1062,7 +1062,7 @@ static void tramp__callback(ffi_cif* cif, void* ret, void** args, void* user_dat
   }
 }
 
-JACL_EMBED_FN JaclTrampoline* jacl_trampoline_new_val(JaclVM* jvm, JaclVal closure,
+JaclTrampoline* jacl_trampoline_new_val(JaclVM* jvm, JaclVal closure,
                                                 const char* sig) {
   if (!jvm || !sig || !jacl_is_closure(closure)) return NULL;
 
@@ -1150,13 +1150,13 @@ fail_handle:
   return NULL;
 }
 
-JACL_EMBED_FN void* jacl_trampoline_ptr_val(JaclTrampoline* t) {
+void* jacl_trampoline_ptr_val(JaclTrampoline* t) {
   if (!t) return NULL;
   return t->code_ptr;
 }
 
 /* Destroy a single trampoline without removing from VM list (for batch cleanup) */
-static void embed__trampoline_destroy(JaclVM* jvm, JaclTrampoline* t) {
+void embed__trampoline_destroy(JaclVM* jvm, JaclTrampoline* t) {
   ffi_closure_free(t->ffi_closure);
   free(t->ffi_arg_types);
   /* Release GC handle */
@@ -1165,7 +1165,7 @@ static void embed__trampoline_destroy(JaclVM* jvm, JaclTrampoline* t) {
   free(t);
 }
 
-JACL_EMBED_FN void jacl_trampoline_free_val(JaclVM* jvm, JaclTrampoline* t) {
+void jacl_trampoline_free_val(JaclVM* jvm, JaclTrampoline* t) {
   if (!jvm || !t) return;
   /* Remove from VM's linked list */
   JaclTrampoline** prev = &jvm->trampoline_list;
@@ -1176,7 +1176,7 @@ JACL_EMBED_FN void jacl_trampoline_free_val(JaclVM* jvm, JaclTrampoline* t) {
   embed__trampoline_destroy(jvm, t);
 }
 
-static void embed__free_all_trampolines(JaclVM* jvm) {
+void embed__free_all_trampolines(JaclVM* jvm) {
   JaclTrampoline* t = jvm->trampoline_list;
   while (t) {
     JaclTrampoline* next = t->vm_next;
@@ -1188,18 +1188,18 @@ static void embed__free_all_trampolines(JaclVM* jvm) {
 
 #else /* !JACL_HAS_LIBFFI */
 
-JACL_EMBED_FN JaclTrampoline* jacl_trampoline_new_val(JaclVM* jvm, JaclVal closure,
+JaclTrampoline* jacl_trampoline_new_val(JaclVM* jvm, JaclVal closure,
                                                 const char* sig) {
   (void)jvm; (void)closure; (void)sig; return NULL;
 }
 
-JACL_EMBED_FN void* jacl_trampoline_ptr_val(JaclTrampoline* t) { (void)t; return NULL; }
+void* jacl_trampoline_ptr_val(JaclTrampoline* t) { (void)t; return NULL; }
 
-JACL_EMBED_FN void jacl_trampoline_free_val(JaclVM* jvm, JaclTrampoline* t) {
+void jacl_trampoline_free_val(JaclVM* jvm, JaclTrampoline* t) {
   (void)jvm; (void)t;
 }
 
-static void embed__free_all_trampolines(JaclVM* jvm) { (void)jvm; }
+void embed__free_all_trampolines(JaclVM* jvm) { (void)jvm; }
 
 #endif /* JACL_HAS_LIBFFI */
 
@@ -1208,7 +1208,7 @@ static void embed__free_all_trampolines(JaclVM* jvm) { (void)jvm; }
  *
  * Returns an arena-allocated null-terminated string, or NULL on failure.
  */
-JACL_EMBED_FN const char* jacl_struct_type_name_val(JaclVM* jvm, JaclVal s_val) {
+const char* jacl_struct_type_name_val(JaclVM* jvm, JaclVal s_val) {
   if (!jvm) return NULL;
   if (!jacl_is_struct(s_val)) return NULL;
 

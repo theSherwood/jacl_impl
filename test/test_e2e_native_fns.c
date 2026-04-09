@@ -1,5 +1,5 @@
 #include "test_helpers.h"
-#include "../src/jacl.c"
+#include "../src/jacl.h"
 
 /* ===== US-014: E2E tests — native functions and jacl_call ===== */
 

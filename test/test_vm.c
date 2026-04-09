@@ -1,5 +1,5 @@
 #include "test_helpers.h"
-#include "../src/jacl.c"
+#include "../src/jacl.h"
 
 /* ===== US-002: VM state and execution loop ===== */
 

@@ -1,5 +1,5 @@
 #include "test_helpers.h"
-#include "../src/jacl.c"
+#include "../src/jacl.h"
 
 /* ===== US-002: VM lifecycle — jacl_vm_new / jacl_vm_free ===== */
 

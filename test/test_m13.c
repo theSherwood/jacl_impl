@@ -6,7 +6,7 @@
  */
 
 #include "test_helpers.h"
-#include "../src/jacl.c"
+#include "../src/jacl.h"
 
 /* --- PrintCapture helper (same as other integration tests) --- */
 

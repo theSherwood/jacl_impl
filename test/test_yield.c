@@ -1,5 +1,5 @@
 #include "test_helpers.h"
-#include "../src/jacl.c"
+#include "../src/jacl.h"
 
 /* ===== US-009: OP_YIELD and stream creation ===== */
 

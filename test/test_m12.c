@@ -7,7 +7,7 @@
  */
 
 #include "test_helpers.h"
-#include "../src/jacl.c"
+#include "../src/jacl.h"
 
 /* --- Helper: check if object is marked --- */
 static int gc__is_marked(void *payload, uint8_t mark) {

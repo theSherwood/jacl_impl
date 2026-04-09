@@ -125,14 +125,14 @@ typedef struct {
   arena_t* arena;
 } TokenArray;
 
-static void lexer__arr_init(TokenArray* arr, arena_t* arena) {
+void lexer__arr_init(TokenArray* arr, arena_t* arena) {
   arr->cap    = LEXER_INITIAL_CAP;
   arr->count  = 0;
   arr->arena  = arena;
   arr->tokens = (Token*)arena_alloc(arena, sizeof(Token) * arr->cap);
 }
 
-static void lexer__arr_push(TokenArray* arr, Token tok) {
+void lexer__arr_push(TokenArray* arr, Token tok) {
   if (arr->count >= arr->cap) {
     uint32_t new_cap = arr->cap * 2;
     Token* new_tokens = (Token*)arena_alloc(arr->arena, sizeof(Token) * new_cap);
@@ -155,7 +155,7 @@ typedef struct {
   arena_t*    arena;
 } Lexer;
 
-static void lexer__init(Lexer* lex, const char* source, arena_t* arena) {
+void lexer__init(Lexer* lex, const char* source, arena_t* arena) {
   lex->source = source;
   lex->pos    = 0;
   lex->line   = 1;
@@ -163,17 +163,17 @@ static void lexer__init(Lexer* lex, const char* source, arena_t* arena) {
   lex->arena  = arena;
 }
 
-static char lexer__peek(Lexer* lex) {
+char lexer__peek(Lexer* lex) {
   return lex->source[lex->pos];
 }
 
-static char lexer__advance(Lexer* lex) {
+char lexer__advance(Lexer* lex) {
   char c = lex->source[lex->pos++];
   lex->col++;
   return c;
 }
 
-static Token lexer__make_token(Lexer* lex, TokenType type,
+Token lexer__make_token(Lexer* lex, TokenType type,
                                uint32_t start_offset, uint32_t start_line,
                                uint32_t start_col) {
   Token tok;
@@ -197,14 +197,14 @@ typedef struct {
   arena_t* arena;
 } StringBuf;
 
-static void strbuf_init(StringBuf* sb, arena_t* arena) {
+void strbuf_init(StringBuf* sb, arena_t* arena) {
   sb->cap   = 64;
   sb->len   = 0;
   sb->arena = arena;
   sb->data  = (char*)arena_alloc(arena, sb->cap);
 }
 
-static void strbuf_push(StringBuf* sb, char c) {
+void strbuf_push(StringBuf* sb, char c) {
   if (sb->len >= sb->cap) {
     uint32_t new_cap = sb->cap * 2;
     char* new_data = (char*)arena_alloc(sb->arena, new_cap);
@@ -220,7 +220,7 @@ static void strbuf_push(StringBuf* sb, char c) {
  * ------------------------------------------------------------------------- */
 
 /* Encode a Unicode codepoint as UTF-8. Returns number of bytes written. */
-static uint32_t lexer__encode_utf8(uint32_t cp, char* out) {
+uint32_t lexer__encode_utf8(uint32_t cp, char* out) {
   if (cp <= 0x7F) {
     out[0] = (char)cp;
     return 1;
@@ -247,7 +247,7 @@ static uint32_t lexer__encode_utf8(uint32_t cp, char* out) {
 }
 
 /* Parse a single hex digit. Returns -1 if not a hex digit. */
-static int lexer__hex_digit(char c) {
+int lexer__hex_digit(char c) {
   if (c >= '0' && c <= '9') return c - '0';
   if (c >= 'a' && c <= 'f') return c - 'a' + 10;
   if (c >= 'A' && c <= 'F') return c - 'A' + 10;
@@ -258,25 +258,25 @@ static int lexer__hex_digit(char c) {
  * Internal: Character classification helpers
  * ------------------------------------------------------------------------- */
 
-static int lexer__is_word_start(char c) {
+int lexer__is_word_start(char c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
          || ((unsigned char)c >= 0x80);
 }
 
-static int lexer__is_word_char(char c) {
+int lexer__is_word_char(char c) {
   return lexer__is_word_start(c) || (c >= '0' && c <= '9') || c == '-'
          || c == '?' || c == '!';
 }
 
 /* Check if current position is a word char, but stop before -> (arrow) */
-static int lexer__is_word_char_no_arrow(Lexer* lex) {
+int lexer__is_word_char_no_arrow(Lexer* lex) {
   char c = lex->source[lex->pos];
   if (!lexer__is_word_char(c)) return 0;
   if (c == '-' && lex->source[lex->pos + 1] == '>') return 0;
   return 1;
 }
 
-static int lexer__is_operator_char(char c) {
+int lexer__is_operator_char(char c) {
   return c == '!' || c == '%' || c == '&' || c == '*' || c == '+' ||
          c == '-' || c == '.' || c == '/' || c == ':' || c == '<' ||
          c == '=' || c == '>' || c == '?' || c == '@' || c == '\\' ||
@@ -287,8 +287,8 @@ static int lexer__is_operator_char(char c) {
  * Internal: Arena-allocated error message for unexpected characters
  * ------------------------------------------------------------------------- */
 
-static const char* lexer__unexpected_char_msg(Lexer* lex, char c) {
-  static const char hex[] = "0123456789ABCDEF";
+const char* lexer__unexpected_char_msg(Lexer* lex, char c) {
+  const char hex[] = "0123456789ABCDEF";
   unsigned char uc = (unsigned char)c;
   /* "unexpected character (0xNN)" = 27 chars + null */
   char* msg = (char*)arena_alloc(lex->arena, 28);
@@ -304,13 +304,13 @@ static const char* lexer__unexpected_char_msg(Lexer* lex, char c) {
  * Internal: Forward declarations for mutually recursive functions
  * ------------------------------------------------------------------------- */
 
-static void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
+void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
                                     uint32_t* error_count,
                                     uint32_t str_start, uint32_t str_line,
                                     uint32_t str_col);
-static void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
+void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
                                     uint32_t* error_count);
-static void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
+void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
                                      uint32_t* error_count);
 
 /* -------------------------------------------------------------------------
@@ -318,7 +318,7 @@ static void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
  * Returns non-NULL error message on failure, NULL on success.
  * ------------------------------------------------------------------------- */
 
-static const char* lexer__handle_escape(Lexer* lex, StringBuf* sb) {
+const char* lexer__handle_escape(Lexer* lex, StringBuf* sb) {
   char esc = lexer__peek(lex);
 
   if (esc == '\0') return "unterminated string";
@@ -389,7 +389,7 @@ static const char* lexer__handle_escape(Lexer* lex, StringBuf* sb) {
  * Handles \" escapes and embedded newlines during skip.
  * ------------------------------------------------------------------------- */
 
-static void lexer__skip_to_string_end(Lexer* lex) {
+void lexer__skip_to_string_end(Lexer* lex) {
   while (lexer__peek(lex) != '\0' && lexer__peek(lex) != '"') {
     char skip = lexer__peek(lex);
     if (skip == '\\') {
@@ -414,7 +414,7 @@ static void lexer__skip_to_string_end(Lexer* lex) {
  * Called when current char is a digit. Pushes one token.
  * ------------------------------------------------------------------------- */
 
-static void lexer__lex_number(Lexer* lex, TokenArray* arr,
+void lexer__lex_number(Lexer* lex, TokenArray* arr,
                                uint32_t* error_count) {
   char c = lexer__peek(lex);
   uint32_t start = lex->pos;
@@ -576,7 +576,7 @@ static void lexer__lex_number(Lexer* lex, TokenArray* arr,
  * On error: emits TOKEN_ERROR.
  * ------------------------------------------------------------------------- */
 
-static void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
+void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
                                     uint32_t* error_count,
                                     uint32_t str_start, uint32_t str_line,
                                     uint32_t str_col) {
@@ -726,7 +726,7 @@ static void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
  * Called after $[ has been consumed and INTERP_EXPR_START emitted.
  * ------------------------------------------------------------------------- */
 
-static void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
+void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
                                     uint32_t* error_count) {
   int depth = 1;
 
@@ -928,7 +928,7 @@ static void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
  * Called after $( has been consumed and TOKEN_DOLLAR_PAREN emitted.
  * ------------------------------------------------------------------------- */
 
-static void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
+void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
                                      uint32_t* error_count) {
   int depth = 1;
 

@@ -23,14 +23,14 @@ typedef struct {
     int    ov_cap;
 } GCMarkStack;
 
-static void gc__ms_init(GCMarkStack *ms) {
+void gc__ms_init(GCMarkStack *ms) {
     ms->top      = 0;
     ms->overflow = NULL;
     ms->ov_count = 0;
     ms->ov_cap   = 0;
 }
 
-static void gc__ms_push(GCMarkStack *ms, void *ptr) {
+void gc__ms_push(GCMarkStack *ms, void *ptr) {
     if (ms->top < GC_MARK_STACK_SIZE) {
         ms->fixed[ms->top++] = ptr;
         return;
@@ -46,7 +46,7 @@ static void gc__ms_push(GCMarkStack *ms, void *ptr) {
     ms->overflow[ms->ov_count++] = ptr;
 }
 
-static bool gc__ms_pop(GCMarkStack *ms, void **out) {
+bool gc__ms_pop(GCMarkStack *ms, void **out) {
     if (ms->top > 0) {
         *out = ms->fixed[--ms->top];
         return true;
@@ -58,7 +58,7 @@ static bool gc__ms_pop(GCMarkStack *ms, void **out) {
     return false;
 }
 
-static void gc__ms_destroy(GCMarkStack *ms) {
+void gc__ms_destroy(GCMarkStack *ms) {
     free(ms->overflow);
     ms->overflow = NULL;
     ms->ov_count = 0;
@@ -66,14 +66,14 @@ static void gc__ms_destroy(GCMarkStack *ms) {
 }
 
 /* Push a JaclVal if it refers to a GC-managed heap object */
-static inline void gc__ms_push_val(GCMarkStack *ms, JaclVal v) {
+void gc__ms_push_val(GCMarkStack *ms, JaclVal v) {
     if (jacl_is_heap_type(v)) {
         gc__ms_push(ms, jacl_as_ptr(v));
     }
 }
 
 /* Push a constant pool entry — skip closures (arena-allocated templates) */
-static inline void gc__ms_push_const(GCMarkStack *ms, JaclVal v) {
+void gc__ms_push_const(GCMarkStack *ms, JaclVal v) {
     if (jacl_is_heap_type(v) && !jacl_is_closure(v)) {
         gc__ms_push(ms, jacl_as_ptr(v));
     }
@@ -83,7 +83,7 @@ static inline void gc__ms_push_const(GCMarkStack *ms, JaclVal v) {
  * Object finalization: release external resources before sweep zeroes memory
  * ====================================================================== */
 
-static inline void gc__finalize_dead(GCHeader *hdr) {
+void gc__finalize_dead(GCHeader *hdr) {
     (void)hdr;
 }
 
@@ -91,7 +91,7 @@ static inline void gc__finalize_dead(GCHeader *hdr) {
  * Object tracing: push an object's children onto the mark stack
  * ====================================================================== */
 
-static void gc__trace_object(void *payload, GCMarkStack *ms) {
+void gc__trace_object(void *payload, GCMarkStack *ms) {
     GCHeader *hdr = gc_header_of(payload);
 
     switch (hdr->obj_type) {
@@ -301,7 +301,7 @@ static void gc__trace_object(void *payload, GCMarkStack *ms) {
  * gc_mark: trace from GC roots through the object graph, marking live objects
  * ====================================================================== */
 
-static void gc_mark(ThreadHeap *heap, VM *vm) {
+void gc_mark(ThreadHeap *heap, VM *vm) {
     GCMarkStack ms;
     gc__ms_init(&ms);
 
@@ -369,7 +369,7 @@ static void gc_mark(ThreadHeap *heap, VM *vm) {
  * 5. All-free blocks returned to global pool
  * ====================================================================== */
 
-static size_t gc_sweep(ThreadHeap *heap) {
+size_t gc_sweep(ThreadHeap *heap) {
     uint8_t  current_mark = heap->current_mark;
     GCBlock *block = heap->blocks;
     GCBlock *prev  = NULL;
@@ -473,7 +473,7 @@ static size_t gc_sweep(ThreadHeap *heap) {
  * ====================================================================== */
 
 /* Check if a pointer falls within any of this heap's blocks. */
-static bool gc__ptr_in_heap(ThreadHeap *heap, void *ptr) {
+bool gc__ptr_in_heap(ThreadHeap *heap, void *ptr) {
     uint8_t *p = (uint8_t *)ptr;
     for (GCBlock *b = heap->blocks; b; b = b->next) {
         if (p >= b->payload && p < b->payload + GC_BLOCK_SIZE)
@@ -482,7 +482,7 @@ static bool gc__ptr_in_heap(ThreadHeap *heap, void *ptr) {
     return false;
 }
 
-static void gc_sweep_intern_table(JaclInternTable *table,
+void gc_sweep_intern_table(JaclInternTable *table,
                                    ThreadHeap *heap) {
     /* Skip sweep if we're inside jacl_intern — the allocation that
      * triggered this GC is about to insert into the table, and
@@ -527,7 +527,7 @@ static void gc_sweep_intern_table(JaclInternTable *table,
  * High survival (>80%) → increase threshold by 50% (too much live data).
  * Low survival (<20%) → decrease threshold by 25% (lots of garbage).
  * Clamped to [GC_THRESHOLD_MIN, GC_THRESHOLD_MAX]. */
-static void gc__adjust_threshold(ThreadHeap *heap, size_t bytes_survived) {
+void gc__adjust_threshold(ThreadHeap *heap, size_t bytes_survived) {
     size_t allocated = heap->bytes_since_gc;
     if (allocated == 0) return;
 
@@ -547,7 +547,7 @@ static void gc__adjust_threshold(ThreadHeap *heap, size_t bytes_survived) {
     if (heap->gc_threshold > GC_THRESHOLD_MAX) heap->gc_threshold = GC_THRESHOLD_MAX;
 }
 
-static void gc_collect(ThreadHeap *heap, VM *vm) {
+void gc_collect(ThreadHeap *heap, VM *vm) {
     gc__struct_registry = vm ? vm->struct_registry : NULL;
     gc_mark(heap, vm);
 
@@ -576,7 +576,7 @@ static void gc_collect(ThreadHeap *heap, VM *vm) {
  * reachable only through old-gen containers.
  * ====================================================================== */
 
-static void gc_mark_minor(ThreadHeap *heap, VM *vm,
+void gc_mark_minor(ThreadHeap *heap, VM *vm,
                            RememberedSet *remembered_set) {
     GCMarkStack ms;
     gc__ms_init(&ms);
@@ -673,7 +673,7 @@ static void gc_mark_minor(ThreadHeap *heap, VM *vm,
  * promoted to old gen.
  * ====================================================================== */
 
-static size_t gc_sweep_minor(ThreadHeap *heap) {
+size_t gc_sweep_minor(ThreadHeap *heap) {
     uint8_t  current_mark = heap->current_mark;
     GCBlock *block = heap->blocks;
     size_t   bytes_survived = 0;
@@ -793,7 +793,7 @@ static size_t gc_sweep_minor(ThreadHeap *heap) {
  * Clears the remembered set after collection.
  * ====================================================================== */
 
-static void gc_collect_minor(ThreadHeap *heap, VM *vm,
+void gc_collect_minor(ThreadHeap *heap, VM *vm,
                               RememberedSet *remembered_set) {
     gc__struct_registry = vm ? vm->struct_registry : NULL;
     gc_mark_minor(heap, vm, remembered_set);
@@ -818,7 +818,7 @@ static void gc_collect_minor(ThreadHeap *heap, VM *vm,
  *   - Old generation has grown >50% since last major GC
  * ====================================================================== */
 
-static bool gc_should_major(ThreadHeap *heap) {
+bool gc_should_major(ThreadHeap *heap) {
     /* First GC cycle is always major */
     if (heap->gc_cycle_count == 0) return true;
 
@@ -846,7 +846,7 @@ static bool gc_should_major(ThreadHeap *heap) {
  * - Does NOT invalidate cursor/limit (owning worker may be allocating)
  * ====================================================================== */
 
-static size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
+size_t gc_sweep_concurrent(ThreadHeap *heap, GCBlock *skip_block,
                                    uint32_t watermark, uint8_t current_mark,
                                    BlockPool *pool) {
     GCBlock **pp = &heap->blocks;

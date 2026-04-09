@@ -82,21 +82,21 @@ struct Runtime {
 };
 
 /* Forward declarations for functions used in the worker loop */
-static void gc__concurrent_task(void *data);
-static void runtime_submit(Runtime *rt, void (*fn)(void *), void *data);
-static void gc_concurrent_collect(Runtime *rt);
+void gc__concurrent_task(void *data);
+void runtime_submit(Runtime *rt, void (*fn)(void *), void *data);
+void gc_concurrent_collect(Runtime *rt);
 
 /* Thread-local worker ID (set in worker loop, -1 for non-worker threads) */
-static JACL_THREAD_LOCAL int rt__worker_id = -1;
+JACL_THREAD_LOCAL int rt__worker_id = -1;
 
 /* Thread-local pointer to current worker (set in worker loop) */
-static JACL_THREAD_LOCAL WorkerThread *rt__current_worker = NULL;
+JACL_THREAD_LOCAL WorkerThread *rt__current_worker = NULL;
 
 /* ======================================================================
  * Worker VM initialization — uses the shared block pool
  * ====================================================================== */
 
-static void runtime__init_worker_vm(WorkerThread *w) {
+void runtime__init_worker_vm(WorkerThread *w) {
     VM *vm        = &w->vm;
     arena_t *arena = &w->arena;
 
@@ -150,7 +150,7 @@ static void runtime__init_worker_vm(WorkerThread *w) {
  * already running, waits for it to complete.
  * ====================================================================== */
 
-static void runtime__emergency_gc(void *ctx) {
+void runtime__emergency_gc(void *ctx) {
     Runtime *rt = (Runtime *)ctx;
     uint32_t expected = 0;
     if (ATOMIC_CAS(&rt->gc_running, &expected, 1,
@@ -175,7 +175,7 @@ static void runtime__emergency_gc(void *ctx) {
  *   4. If not found: mark idle, backoff sleep
  * ====================================================================== */
 
-static THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
+THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
     WorkerThread *self = (WorkerThread *)arg;
     Runtime *rt = self->runtime;
     int backoff = 0;
@@ -285,7 +285,7 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
  * runtime_init: create worker threads and start the pool
  * ====================================================================== */
 
-static void runtime_init(Runtime *rt, int num_workers) {
+void runtime_init(Runtime *rt, int num_workers) {
     int i, j;
 
     rt->num_workers  = num_workers;
@@ -348,7 +348,7 @@ static void runtime_init(Runtime *rt, int num_workers) {
  * runtime_destroy: signal shutdown, join threads, free resources
  * ====================================================================== */
 
-static void runtime_destroy(Runtime *rt) {
+void runtime_destroy(Runtime *rt) {
     int i, j;
 
     /* Signal all workers to stop */
@@ -408,7 +408,7 @@ static void runtime_destroy(Runtime *rt) {
  * Inbox push helper — all task submission funnels through here
  * ====================================================================== */
 
-static void runtime__push_inbox(Runtime *rt, RuntimeTask *task) {
+void runtime__push_inbox(Runtime *rt, RuntimeTask *task) {
     MUTEX_LOCK(rt->inbox_mutex);
     if (rt->inbox_count >= rt->inbox_cap) {
         intptr_t new_cap = rt->inbox_cap * 2;
@@ -428,7 +428,7 @@ static void runtime__push_inbox(Runtime *rt, RuntimeTask *task) {
  * non-local mutable state, ensuring consistency across workers.
  * ====================================================================== */
 
-static void runtime__push_pinned(Runtime *rt, RuntimeTask *task, int worker_id) {
+void runtime__push_pinned(Runtime *rt, RuntimeTask *task, int worker_id) {
     if (worker_id >= 0 && worker_id < rt->num_workers) {
         rt_deque_deque_push(rt->workers[worker_id].private_deque,
                             (uintptr_t)task);
@@ -442,7 +442,7 @@ static void runtime__push_pinned(Runtime *rt, RuntimeTask *task, int worker_id) 
  * Task submission — external callers push to the global inbox
  * ====================================================================== */
 
-static void runtime_submit(Runtime *rt, void (*fn)(void *), void *data) {
+void runtime_submit(Runtime *rt, void (*fn)(void *), void *data) {
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
     task->fn       = fn;
     task->data     = data;
@@ -460,7 +460,7 @@ static void runtime_submit(Runtime *rt, void (*fn)(void *), void *data) {
  * argc is the number of arguments (0 for no-arg calls, 1 for single-arg
  * like continuation/CPS calls). argv points to argument values (NULL if
  * argc==0). */
-static void runtime__setup_call(VM *vm, JaclClosure *cl,
+void runtime__setup_call(VM *vm, JaclClosure *cl,
                                 int argc, JaclVal *argv) {
     vm->stack_top   = 0;
     vm->frame_count = 0;
@@ -483,7 +483,7 @@ static void runtime__setup_call(VM *vm, JaclClosure *cl,
     vm->top_chunk = &cl->chunk;
 }
 
-static void runtime__exec_closure(void *data) {
+void runtime__exec_closure(void *data) {
     JaclClosure *cl = (JaclClosure *)data;
     WorkerThread *self = rt__current_worker;
     VM *vm = &self->vm;
@@ -495,7 +495,7 @@ static void runtime__exec_closure(void *data) {
     vm__run(vm, 0);
 }
 
-static void runtime_submit_task(Runtime *rt, JaclClosure *closure,
+void runtime_submit_task(Runtime *rt, JaclClosure *closure,
                                  bool thread_local) {
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
     task->fn       = runtime__exec_closure;
@@ -521,7 +521,7 @@ static void runtime_submit_task(Runtime *rt, JaclClosure *closure,
 
 /* Snapshot a Chase-Lev deque's contents and push task gc_roots onto mark stack.
  * Conservative: may include already-completed or stolen tasks (harmless). */
-static void gc__scan_deque(rt_deque_deque *dq, GCMarkStack *ms) {
+void gc__scan_deque(rt_deque_deque *dq, GCMarkStack *ms) {
     uint64_t t = ATOMIC_LOAD_EXPLICIT(&dq->top, MEM_ACQUIRE);
     ATOMIC_FENCE(MEM_SEQ_CST);
     uint64_t b = ATOMIC_LOAD_EXPLICIT(&dq->bottom, MEM_ACQUIRE);
@@ -554,7 +554,7 @@ static void gc__scan_deque(rt_deque_deque *dq, GCMarkStack *ms) {
  *   8. Intern table entries (Phase 1: immortal strings)
  *
  * Plus global inbox tasks. */
-static void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
+void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
     for (int w_idx = 0; w_idx < rt->num_workers; w_idx++) {
         WorkerThread *w = &rt->workers[w_idx];
 
@@ -651,7 +651,7 @@ static void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
  *   - The gb->entries pointer itself (which may have changed due to realloc)
  * Therefore reading gb->entries[j] for j < current is safe even if the
  * worker reallocated the buffer between our previous and current drain. */
-static bool gc__drain_grey_bufs(Runtime *rt, GCMarkStack *ms,
+bool gc__drain_grey_bufs(Runtime *rt, GCMarkStack *ms,
                                  uint32_t *drained) {
     bool found_new = false;
     for (int i = 0; i < rt->num_workers; i++) {
@@ -671,7 +671,7 @@ static bool gc__drain_grey_bufs(Runtime *rt, GCMarkStack *ms,
     return found_new;
 }
 
-static void gc_concurrent_collect(Runtime *rt) {
+void gc_concurrent_collect(Runtime *rt) {
     int i;
     GCMarkStack ms;
     gc__ms_init(&ms);
@@ -786,14 +786,14 @@ static void gc_concurrent_collect(Runtime *rt) {
 }
 
 /* Task function for concurrent GC — submitted to the inbox */
-static void gc__concurrent_task(void *data) {
+void gc__concurrent_task(void *data) {
     Runtime *rt = (Runtime *)data;
     gc_concurrent_collect(rt);
 }
 
 /* Trigger concurrent GC from vm.c's safepoint.
  * Attempts to CAS gc_running from 0 to 1; if successful, submits a GC task. */
-static void gc_concurrent_trigger(void *runtime_ptr) {
+void gc_concurrent_trigger(void *runtime_ptr) {
     Runtime *rt = (Runtime *)runtime_ptr;
     uint32_t expected = 0;
     if (ATOMIC_CAS(&rt->gc_running, &expected, 1,
@@ -814,15 +814,15 @@ static void gc_concurrent_trigger(void *runtime_ptr) {
  * ====================================================================== */
 
 /* Static bytecode for resolve_k closures (shared by all instances) */
-static uint8_t resolve_k_code[] = {
+uint8_t resolve_k_code[] = {
     OP_GET_UPVALUE, 0,    /* push future (below) */
     OP_GET_LOCAL, 0,      /* push result param (top) */
     OP_RESOLVE_FUTURE,    /* pop result, pop future, resolve */
     OP_RETURN
 };
-static uint32_t resolve_k_lines[] = { 0, 0, 0, 0, 0, 0 };
+uint32_t resolve_k_lines[] = { 0, 0, 0, 0, 0, 0 };
 
-static JaclVal runtime__create_resolve_closure(ThreadHeap *heap, arena_t *arena,
+JaclVal runtime__create_resolve_closure(ThreadHeap *heap, arena_t *arena,
                                                 JaclVal future_val) {
     /* Allocate closure + 1 upvalue slot */
     size_t cl_size = sizeof(JaclClosure) + sizeof(JaclVal);
@@ -865,16 +865,16 @@ static JaclVal runtime__create_resolve_closure(ThreadHeap *heap, arena_t *arena,
  *   OP_RETURN
  * ====================================================================== */
 
-static uint8_t parallel_k_code[] = {
+uint8_t parallel_k_code[] = {
     OP_GET_UPVALUE, 0,    /* push agg_val */
     OP_GET_UPVALUE, 1,    /* push index */
     OP_GET_LOCAL, 0,      /* push result param */
     OP_COMPLETE_PARALLEL, /* complete parallel slot */
     OP_RETURN
 };
-static uint32_t parallel_k_lines[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+uint32_t parallel_k_lines[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
-static JaclVal runtime__create_parallel_k(ThreadHeap *heap, arena_t *arena,
+JaclVal runtime__create_parallel_k(ThreadHeap *heap, arena_t *arena,
                                            JaclVal agg_val, uint32_t index) {
     /* Allocate closure + 2 upvalue slots */
     size_t cl_size = sizeof(JaclClosure) + 2 * sizeof(JaclVal);
@@ -903,13 +903,13 @@ static JaclVal runtime__create_parallel_k(ThreadHeap *heap, arena_t *arena,
 }
 
 /* Forward declaration for SM resumption (used by parallel slot completion) */
-static void runtime__schedule_sm_resumption(void *runtime_ptr,
+void runtime__schedule_sm_resumption(void *runtime_ptr,
                                              JaclVal state_machine,
                                              JaclVal result);
 
 /* --- Parallel slot completion logic (called from OP_COMPLETE_PARALLEL) --- */
 
-static void runtime__complete_parallel_slot(void *runtime_ptr, VM *vm,
+void runtime__complete_parallel_slot(void *runtime_ptr, VM *vm,
                                              JaclVal agg_val,
                                              uint32_t index,
                                              JaclVal task_result) {
@@ -980,15 +980,15 @@ static void runtime__complete_parallel_slot(void *runtime_ptr, VM *vm,
  *   OP_RETURN
  * ====================================================================== */
 
-static uint8_t race_k_code[] = {
+uint8_t race_k_code[] = {
     OP_GET_UPVALUE, 0,    /* push agg_val */
     OP_GET_LOCAL, 0,      /* push result param */
     OP_COMPLETE_RACE,     /* settle race */
     OP_RETURN
 };
-static uint32_t race_k_lines[] = { 0, 0, 0, 0, 0, 0, 0 };
+uint32_t race_k_lines[] = { 0, 0, 0, 0, 0, 0, 0 };
 
-static JaclVal runtime__create_race_k(ThreadHeap *heap, arena_t *arena,
+JaclVal runtime__create_race_k(ThreadHeap *heap, arena_t *arena,
                                        JaclVal agg_val) {
     /* Allocate closure + 1 upvalue slot */
     size_t cl_size = sizeof(JaclClosure) + sizeof(JaclVal);
@@ -1017,7 +1017,7 @@ static JaclVal runtime__create_race_k(ThreadHeap *heap, arena_t *arena,
 
 /* --- Race slot completion logic (called from OP_COMPLETE_RACE) --- */
 
-static void runtime__complete_race_slot(void *runtime_ptr, VM *vm,
+void runtime__complete_race_slot(void *runtime_ptr, VM *vm,
                                          JaclVal agg_val,
                                          JaclVal task_result) {
     (void)vm;
@@ -1042,7 +1042,7 @@ typedef struct {
     JaclVal      result;
 } ContinuationTaskData;
 
-static void runtime__continuation_task_exec(void *data) {
+void runtime__continuation_task_exec(void *data) {
     ContinuationTaskData *ctd = (ContinuationTaskData *)data;
     WorkerThread *self = rt__current_worker;
     VM *vm = &self->vm;
@@ -1054,7 +1054,7 @@ static void runtime__continuation_task_exec(void *data) {
     free(ctd);
 }
 
-static void runtime__schedule_continuation(void *runtime_ptr,
+void runtime__schedule_continuation(void *runtime_ptr,
                                             JaclClosure *continuation,
                                             JaclVal result) {
     Runtime *rt = (Runtime *)runtime_ptr;
@@ -1086,7 +1086,7 @@ typedef struct {
     JaclVal result;         /* resume value (future result) */
 } SMTaskData;
 
-static void runtime__state_machine_task_exec(void *data) {
+void runtime__state_machine_task_exec(void *data) {
     SMTaskData *smd = (SMTaskData *)data;
     WorkerThread *self = rt__current_worker;
     VM *vm = &self->vm;
@@ -1125,7 +1125,7 @@ static void runtime__state_machine_task_exec(void *data) {
     free(smd);
 }
 
-static void runtime__schedule_sm_resumption(void *runtime_ptr,
+void runtime__schedule_sm_resumption(void *runtime_ptr,
                                              JaclVal state_machine,
                                              JaclVal result) {
     Runtime *rt = (Runtime *)runtime_ptr;
@@ -1150,7 +1150,7 @@ static void runtime__schedule_sm_resumption(void *runtime_ptr,
     }
 }
 
-static void runtime__schedule_waiters(void *runtime_ptr,
+void runtime__schedule_waiters(void *runtime_ptr,
                                        FutureWaiter *waiters,
                                        JaclVal result) {
     while (waiters) {
@@ -1168,7 +1168,7 @@ typedef struct {
     JaclVal      future_val;
 } SpawnTaskData;
 
-static void runtime__spawn_task_exec(void *data) {
+void runtime__spawn_task_exec(void *data) {
     SpawnTaskData *std = (SpawnTaskData *)data;
     WorkerThread *self = rt__current_worker;
     VM *vm = &self->vm;
@@ -1238,7 +1238,7 @@ static void runtime__spawn_task_exec(void *data) {
     free(std);
 }
 
-static void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
+void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
                                         JaclVal future_val) {
     Runtime *rt = (Runtime *)runtime_ptr;
 
@@ -1274,7 +1274,7 @@ typedef struct {
     uint32_t      index;        /* position in results array */
 } ParallelTaskData;
 
-static void runtime__parallel_task_exec(void *data) {
+void runtime__parallel_task_exec(void *data) {
     ParallelTaskData *ptd = (ParallelTaskData *)data;
     WorkerThread *self = rt__current_worker;
     VM *vm = &self->vm;
@@ -1331,7 +1331,7 @@ static void runtime__parallel_task_exec(void *data) {
     free(ptd);
 }
 
-static void runtime__submit_parallel_task(void *runtime_ptr,
+void runtime__submit_parallel_task(void *runtime_ptr,
                                            JaclClosure *closure,
                                            JaclVal agg_val,
                                            uint32_t index) {
@@ -1369,7 +1369,7 @@ typedef struct {
     JaclVal       agg_val;      /* tagged pointer to RaceAgg */
 } RaceTaskData;
 
-static void runtime__race_task_exec(void *data) {
+void runtime__race_task_exec(void *data) {
     RaceTaskData *rtd = (RaceTaskData *)data;
     WorkerThread *self = rt__current_worker;
     VM *vm = &self->vm;
@@ -1423,7 +1423,7 @@ static void runtime__race_task_exec(void *data) {
     free(rtd);
 }
 
-static void runtime__submit_race_task(void *runtime_ptr,
+void runtime__submit_race_task(void *runtime_ptr,
                                        JaclClosure *closure,
                                        JaclVal agg_val) {
     Runtime *rt = (Runtime *)runtime_ptr;
@@ -1451,7 +1451,7 @@ static void runtime__submit_race_task(void *runtime_ptr,
  * its completion future resolves.
  * ====================================================================== */
 
-static VMResult rt_run_to_completion(Runtime *rt, JaclClosure *closure,
+VMResult rt_run_to_completion(Runtime *rt, JaclClosure *closure,
                                       arena_t *arena) {
     /* Create a completion future on worker 0's heap */
     JaclVal completion = jacl_future(&rt->workers[0].vm.heap);

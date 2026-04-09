@@ -108,68 +108,68 @@ typedef struct {
 
 /* --- API --- */
 
-static void     vm_init(VM* vm, arena_t* arena);
-static void     vm_destroy(VM* vm);
-static VMResult vm_exec(VM* vm, BytecodeChunk* chunk);
+void     vm_init(VM* vm, arena_t* arena);
+void     vm_destroy(VM* vm);
+VMResult vm_exec(VM* vm, BytecodeChunk* chunk);
 
 /* --- Pipeline convenience --- */
 
-static VMResult jacl_run(const char* source, VM* vm, arena_t* arena);
-static VMResult jacl_exec_program(ProgramResult* program, VM* vm);
+VMResult jacl_run(const char* source, VM* vm, arena_t* arena);
+VMResult jacl_exec_program(ProgramResult* program, VM* vm);
 
 /* --- GC collect (defined in gc_collect.c, after vm.c in unity build) --- */
 
-static void gc_collect(ThreadHeap *heap, VM *vm);
-static void gc_collect_minor(ThreadHeap *heap, VM *vm,
+void gc_collect(ThreadHeap *heap, VM *vm);
+void gc_collect_minor(ThreadHeap *heap, VM *vm,
                               RememberedSet *remembered_set);
-static bool gc_should_major(ThreadHeap *heap);
+bool gc_should_major(ThreadHeap *heap);
 
 /* --- Emergency GC callback for single-threaded mode --- */
 
-static void vm__emergency_gc_single(void *ctx) {
+void vm__emergency_gc_single(void *ctx) {
     VM *vm = (VM *)ctx;
     gc_collect(&vm->heap, vm);
 }
 
 /* --- Concurrent GC trigger (defined in runtime.c, after gc_collect.c) --- */
 
-static void gc_concurrent_trigger(void *runtime_ptr);
+void gc_concurrent_trigger(void *runtime_ptr);
 
 /* --- Runtime helpers (defined in runtime.c, after gc_collect.c) --- */
 
-static JaclVal runtime__create_resolve_closure(ThreadHeap *heap, arena_t *arena,
+JaclVal runtime__create_resolve_closure(ThreadHeap *heap, arena_t *arena,
                                                 JaclVal future_val);
-static void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
+void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
                                         JaclVal future_val);
-static void runtime__schedule_continuation(void *runtime_ptr,
+void runtime__schedule_continuation(void *runtime_ptr,
                                             JaclClosure *continuation,
                                             JaclVal result);
-static void runtime__schedule_sm_resumption(void *runtime_ptr,
+void runtime__schedule_sm_resumption(void *runtime_ptr,
                                              JaclVal state_machine,
                                              JaclVal result);
-static void runtime__schedule_waiters(void *runtime_ptr,
+void runtime__schedule_waiters(void *runtime_ptr,
                                        FutureWaiter *waiters,
                                        JaclVal result);
-static void runtime__submit_parallel_task(void *runtime_ptr,
+void runtime__submit_parallel_task(void *runtime_ptr,
                                            JaclClosure *closure,
                                            JaclVal agg_val,
                                            uint32_t index);
-static void runtime__submit_race_task(void *runtime_ptr,
+void runtime__submit_race_task(void *runtime_ptr,
                                        JaclClosure *closure,
                                        JaclVal agg_val);
-static void runtime__complete_parallel_slot(void *runtime_ptr,
+void runtime__complete_parallel_slot(void *runtime_ptr,
                                              VM *vm,
                                              JaclVal agg_val,
                                              uint32_t index,
                                              JaclVal result);
-static void runtime__complete_race_slot(void *runtime_ptr,
+void runtime__complete_race_slot(void *runtime_ptr,
                                          VM *vm,
                                          JaclVal agg_val,
                                          JaclVal result);
 
 /* --- Type name helper for error messages --- */
 
-static const char* vm__type_name(JaclVal v) {
+const char* vm__type_name(JaclVal v) {
   if (jacl_is_nil(v))           return "nil";
   if (jacl_is_bool(v))          return "bool";
   if (jacl_is_i32(v))           return "i32";
@@ -190,7 +190,7 @@ static const char* vm__type_name(JaclVal v) {
 
 /* --- Error reporting helper --- */
 
-static void vm__set_error(VM* vm, const char* fmt, ...) {
+void vm__set_error(VM* vm, const char* fmt, ...) {
   va_list ap;
   char buf[256];
   va_start(ap, fmt);
@@ -205,14 +205,14 @@ static void vm__set_error(VM* vm, const char* fmt, ...) {
 
 /* --- Default print function: write to stdout --- */
 
-static void vm__default_print(const char* text, uint32_t len, void* ctx) {
+void vm__default_print(const char* text, uint32_t len, void* ctx) {
   (void)ctx;
   fwrite(text, 1, len, stdout);
 }
 
 /* --- Truthiness helper --- */
 
-static bool vm__is_falsy(JaclVal v) {
+bool vm__is_falsy(JaclVal v) {
   return jacl_is_nil(v) || v == JACL_FALSE;
 }
 
@@ -222,7 +222,7 @@ static bool vm__is_falsy(JaclVal v) {
  * Capture the current call frame chain into the VM's stack trace.
  * Walks frames from innermost to outermost.
  */
-static void vm__capture_trace(VM* vm) {
+void vm__capture_trace(VM* vm) {
   vm->stack_trace.count = 0;
   for (uint32_t i = vm->frame_count; i > 0 && vm->stack_trace.count < VM_STACK_TRACE_MAX; i--) {
     CallFrame* f = &vm->frames[i - 1];
@@ -254,7 +254,7 @@ static void vm__capture_trace(VM* vm) {
  * Initialize the VM to a clean state.
  * Arena is used for environment storage.
  */
-static void vm_init(VM* vm, arena_t* arena) {
+void vm_init(VM* vm, arena_t* arena) {
   memset(vm->stack, 0, sizeof(vm->stack));
   vm->stack_top = 0;
   vm->ip        = NULL;
@@ -315,14 +315,14 @@ static void vm_init(VM* vm, arena_t* arena) {
  * Destroy the VM's GC heap and block pool.
  * Call before arena_destroy().
  */
-static void vm_destroy(VM* vm) {
+void vm_destroy(VM* vm) {
   gc_heap_destroy(&vm->heap);
   gc_block_pool_destroy(&vm->block_pool);
 }
 
 /* --- Stack helpers --- */
 
-static VMResult vm__push(VM* vm, JaclVal value) {
+VMResult vm__push(VM* vm, JaclVal value) {
   if (vm->stack_top >= VM_STACK_MAX) {
     vm->error_message = "stack overflow";
     return VM_STACK_OVERFLOW;
@@ -331,7 +331,7 @@ static VMResult vm__push(VM* vm, JaclVal value) {
   return VM_OK;
 }
 
-static VMResult vm__pop(VM* vm, JaclVal* out) {
+VMResult vm__pop(VM* vm, JaclVal* out) {
   if (vm->stack_top == 0) {
     vm->error_message = "stack underflow";
     return VM_RUNTIME_ERROR;
@@ -342,11 +342,11 @@ static VMResult vm__pop(VM* vm, JaclVal* out) {
 
 /* --- Instruction pointer helpers --- */
 
-static uint8_t vm__read_byte(VM* vm) {
+uint8_t vm__read_byte(VM* vm) {
   return *vm->ip++;
 }
 
-static uint16_t vm__read_u16(VM* vm) {
+uint16_t vm__read_u16(VM* vm) {
   uint8_t hi = vm__read_byte(vm);
   uint8_t lo = vm__read_byte(vm);
   return (uint16_t)((hi << 8) | lo);
@@ -354,7 +354,7 @@ static uint16_t vm__read_u16(VM* vm) {
 
 /* --- Environment helpers --- */
 
-static void vm__env_grow(VM* vm) {
+void vm__env_grow(VM* vm) {
   uint32_t new_cap = vm->env.cap * 2;
   JaclVal* new_names  = (JaclVal*)arena_alloc(vm->arena, new_cap * sizeof(JaclVal));
   JaclVal* new_values = (JaclVal*)arena_alloc(vm->arena, new_cap * sizeof(JaclVal));
@@ -365,7 +365,7 @@ static void vm__env_grow(VM* vm) {
   vm->env.cap    = new_cap;
 }
 
-static void vm__env_set(VM* vm, JaclVal name, JaclVal value) {
+void vm__env_set(VM* vm, JaclVal name, JaclVal value) {
   /* Check if name already exists */
   for (uint32_t i = 0; i < vm->env.count; i++) {
     if (vm->env.names[i] == name) {
@@ -382,7 +382,7 @@ static void vm__env_set(VM* vm, JaclVal name, JaclVal value) {
   vm->env.count++;
 }
 
-static JaclVal vm__env_get(VM* vm, JaclVal name, bool* found) {
+JaclVal vm__env_get(VM* vm, JaclVal name, bool* found) {
   for (uint32_t i = 0; i < vm->env.count; i++) {
     if (vm->env.names[i] == name) {
       *found = true;
@@ -427,14 +427,14 @@ typedef struct {
   arena_t*  arena;
 } VMFormatBuf;
 
-static void vm__fmt_init(VMFormatBuf* buf, arena_t* arena) {
+void vm__fmt_init(VMFormatBuf* buf, arena_t* arena) {
   buf->arena = arena;
   buf->len   = 0;
   buf->cap   = 128;
   buf->data  = (char*)arena_alloc(arena, 128);
 }
 
-static void vm__fmt_ensure(VMFormatBuf* buf, uint32_t extra) {
+void vm__fmt_ensure(VMFormatBuf* buf, uint32_t extra) {
   if (buf->len + extra <= buf->cap) return;
   uint32_t new_cap = buf->cap * 2;
   while (new_cap < buf->len + extra) new_cap *= 2;
@@ -444,13 +444,13 @@ static void vm__fmt_ensure(VMFormatBuf* buf, uint32_t extra) {
   buf->cap  = new_cap;
 }
 
-static void vm__fmt_append(VMFormatBuf* buf, const char* str, uint32_t len) {
+void vm__fmt_append(VMFormatBuf* buf, const char* str, uint32_t len) {
   vm__fmt_ensure(buf, len);
   memcpy(buf->data + buf->len, str, len);
   buf->len += len;
 }
 
-static void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
+void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
   char tmp[64];
   int n;
 
@@ -564,7 +564,7 @@ static void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
 
 /* --- Deep structural equality for collections --- */
 
-static bool vm__deep_eq(JaclVal a, JaclVal b) {
+bool vm__deep_eq(JaclVal a, JaclVal b) {
   return jacl_val_eq(a, b);
 }
 
@@ -573,7 +573,7 @@ static bool vm__deep_eq(JaclVal a, JaclVal b) {
 /* Read a field from struct data and return as JaclVal.
  * Pass heap=NULL for unboxed 64-bit types (raw bits, for typed arithmetic).
  * Pass heap!=NULL for boxed 64-bit types (heap-allocated, for dyn/embed). */
-static JaclVal vm__struct_read_field(ThreadHeap* heap, JaclStruct* s,
+JaclVal vm__struct_read_field(ThreadHeap* heap, JaclStruct* s,
                                       uint32_t offset, int field_type) {
   switch ((JaclType)field_type) {
     case TYPE_BOOL: { uint8_t b = s->data[offset]; return jacl_bool(b); }
@@ -601,7 +601,7 @@ static JaclVal vm__struct_read_field(ThreadHeap* heap, JaclStruct* s,
 
 /* Write a JaclVal to a struct field (caller must have already type-checked).
  * For i64/u64/f64, val must contain raw bits (unboxed VM representation). */
-static void vm__struct_write_field(JaclStruct* s, uint32_t offset,
+void vm__struct_write_field(JaclStruct* s, uint32_t offset,
                                     int field_type, JaclVal val) {
   switch ((JaclType)field_type) {
     case TYPE_BOOL: { uint8_t b = jacl_as_bool(val) ? 1 : 0; s->data[offset] = b; break; }
@@ -616,7 +616,7 @@ static void vm__struct_write_field(JaclStruct* s, uint32_t offset,
 }
 
 /* Forward declaration for recursive call from OP_EACH */
-static VMResult vm__run(VM* vm, uint32_t min_frame);
+VMResult vm__run(VM* vm, uint32_t min_frame);
 
 /**
  * Execute a bytecode chunk.
@@ -624,7 +624,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame);
  * VM_RUNTIME_ERROR on stack underflow or unknown opcode,
  * VM_STACK_OVERFLOW on stack overflow.
  */
-static VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
+VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
   vm->error_message = NULL;
   vm->error_line    = 0;
 
@@ -661,7 +661,7 @@ typedef enum {
  * On STREAM_PULL_VALUE: *out_value = yielded element.
  * On STREAM_PULL_EXHAUSTED: *out_value = JACL_NIL.
  */
-static StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
+StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
                                             JaclVal* out_value) {
     JaclStream* stream = jacl_as_stream(stream_val);
 
@@ -932,7 +932,7 @@ static StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
  * Inner dispatch loop. Runs until OP_HALT or until frame_count drops
  * to min_frame (used by OP_EACH to execute closures inline).
  */
-static VMResult vm__run(VM* vm, uint32_t min_frame) {
+VMResult vm__run(VM* vm, uint32_t min_frame) {
   CallFrame* frame = &vm->frames[vm->frame_count - 1];
 
   for (;;) {
@@ -5041,7 +5041,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
               default: vm__set_error(vm, "unknown fold op"); return VM_RUNTIME_ERROR;
             }
           } else {
-            static const char* op_names[] = { "+", "-", "*", "/" };
+            const char* op_names[] = { "+", "-", "*", "/" };
             vm__set_error(vm,
               "type error in '%s': expected matching numeric types, got %s and %s",
               op_names[op_id < 4 ? op_id : 0], vm__type_name(acc), vm__type_name(val));
@@ -5784,7 +5784,7 @@ static VMResult vm__run(VM* vm, uint32_t min_frame) {
  * then executes the root module (last in the array).
  * For CPS-transformed root modules, handles continuation setup.
  */
-static VMResult jacl_exec_program(ProgramResult* program, VM* vm) {
+VMResult jacl_exec_program(ProgramResult* program, VM* vm) {
   if (!program || program->module_count == 0) {
     vm->error_message = "no modules to execute";
     return VM_RUNTIME_ERROR;
@@ -5916,7 +5916,7 @@ static VMResult jacl_exec_program(ProgramResult* program, VM* vm) {
  * Chains: lexer_lex -> parser_parse -> compiler_compile -> vm_exec.
  * Returns VM_RUNTIME_ERROR on parse or compile errors (message in vm->error_message).
  */
-static VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
+VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   LexResult tokens = lexer_lex(source, arena);
   ParseResult parse = parser_parse(tokens, arena);
   if (parse.error_count > 0) {

@@ -3,7 +3,7 @@
 #include <math.h>
 
 #include "test_helpers.h"
-#include "../src/jacl.c"
+#include "../src/jacl.h"
 
 /* Test: JaclVal is uint64_t (8 bytes) */
 static int test_jaclval_size(void) {

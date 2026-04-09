@@ -69,13 +69,13 @@ typedef struct {
 
 /* --- Header access --- */
 
-static inline GCHeader *gc_header_of(void *payload) {
+GCHeader *gc_header_of(void *payload) {
     return (GCHeader *)payload - 1;
 }
 
 /* --- Heap type predicate --- */
 
-static inline bool jacl_is_heap_type(JaclVal v) {
+bool jacl_is_heap_type(JaclVal v) {
     uint64_t tag = v & JACL_TYPE_MASK;
     return tag == JACL_TAG_STRING
         || tag == JACL_TAG_VECTOR
@@ -130,14 +130,14 @@ typedef struct {
     uint32_t         max_blocks;              /* limit (default GC_MAX_HEAP_BLOCKS) */
 } BlockPool;
 
-static void gc_block_pool_init(BlockPool *pool) {
+void gc_block_pool_init(BlockPool *pool) {
     pool->free_list = NULL;
     MUTEX_INIT(pool->mutex);
     pool->total_blocks_allocated = 0;
     pool->max_blocks = GC_MAX_HEAP_BLOCKS;
 }
 
-static GCBlock *gc_block_pool_get(BlockPool *pool) {
+GCBlock *gc_block_pool_get(BlockPool *pool) {
     GCBlock *block;
     bool need_malloc = false;
 
@@ -173,14 +173,14 @@ static GCBlock *gc_block_pool_get(BlockPool *pool) {
     return block;
 }
 
-static void gc_block_pool_return(BlockPool *pool, GCBlock *block) {
+void gc_block_pool_return(BlockPool *pool, GCBlock *block) {
     MUTEX_LOCK(pool->mutex);
     block->next = pool->free_list;
     pool->free_list = block;
     MUTEX_UNLOCK(pool->mutex);
 }
 
-static void gc_block_pool_destroy(BlockPool *pool) {
+void gc_block_pool_destroy(BlockPool *pool) {
     GCBlock *b = pool->free_list;
     while (b) {
         GCBlock *n = b->next;
@@ -200,7 +200,7 @@ static void gc_block_pool_destroy(BlockPool *pool) {
 /* Thread-local epoch for gc_alloc stamping. Workers set this from their
  * thread_epoch at the start of each task. Main thread leaves it at 0
  * (single-threaded mode doesn't use epoch watermarking). */
-static JACL_THREAD_LOCAL uint32_t gc__thread_epoch = 0;
+JACL_THREAD_LOCAL uint32_t gc__thread_epoch = 0;
 
 /* --- ThreadHeap: per-thread heap state --- */
 
@@ -220,7 +220,7 @@ typedef struct {
     uint32_t   gc_cycle_count;          /* total GC cycles run (first cycle is major) */
 } ThreadHeap;
 
-static void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
+void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
     heap->blocks = NULL;
     heap->current_block = NULL;
     heap->cursor = NULL;
@@ -236,9 +236,9 @@ static void gc_heap_init(ThreadHeap *heap, BlockPool *pool) {
 }
 
 /* Forward-declare thread-local (defined later in this file) */
-static JACL_THREAD_LOCAL ThreadHeap *gc__current_heap;
+JACL_THREAD_LOCAL ThreadHeap *gc__current_heap;
 
-static void gc_heap_destroy(ThreadHeap *heap) {
+void gc_heap_destroy(ThreadHeap *heap) {
     GCBlock *b = heap->blocks;
     while (b) {
         GCBlock *n = b->next;
@@ -261,12 +261,12 @@ static void gc_heap_destroy(ThreadHeap *heap) {
 
 /* --- Emergency GC callback (set by vm.c or runtime.c) --- */
 
-static JACL_THREAD_LOCAL void (*gc__emergency_gc_fn)(void *ctx) = NULL;
-static JACL_THREAD_LOCAL void *gc__emergency_gc_ctx = NULL;
+JACL_THREAD_LOCAL void (*gc__emergency_gc_fn)(void *ctx) = NULL;
+JACL_THREAD_LOCAL void *gc__emergency_gc_ctx = NULL;
 
 /* --- OOM panic handler --- */
 
-static void gc__oom_panic_default(ThreadHeap *heap, size_t request_size) {
+void gc__oom_panic_default(ThreadHeap *heap, size_t request_size) {
     fprintf(stderr, "JACL OOM PANIC:\n");
     fprintf(stderr, "  Heap blocks: %u / %u\n",
             heap->pool->total_blocks_allocated, heap->pool->max_blocks);
@@ -278,12 +278,12 @@ static void gc__oom_panic_default(ThreadHeap *heap, size_t request_size) {
 }
 
 /* Override for testing (set to non-NULL to intercept panic) */
-static void (*gc__oom_handler)(ThreadHeap *, size_t) = gc__oom_panic_default;
+void (*gc__oom_handler)(ThreadHeap *, size_t) = gc__oom_panic_default;
 
 /* --- Internal helpers --- */
 
 /* Mark all lines touched by an allocation at [offset, offset+size) */
-static void gc__mark_lines(GCBlock *block, size_t offset, size_t size) {
+void gc__mark_lines(GCBlock *block, size_t offset, size_t size) {
     int first_line = (int)(offset / GC_LINE_SIZE);
     int last_line  = (int)((offset + size - 1) / GC_LINE_SIZE);
     int i;
@@ -294,7 +294,7 @@ static void gc__mark_lines(GCBlock *block, size_t offset, size_t size) {
 
 /* Find next run of free lines starting from line index `from`.
  * Returns true if found, writing start index and length to out params. */
-static bool gc__find_free_run(GCBlock *block, int from,
+bool gc__find_free_run(GCBlock *block, int from,
                               int *out_start, int *out_len) {
     int i = from;
     while (i < GC_LINES_PER_BLOCK && block->line_map[i] != GC_LINE_FREE)
@@ -310,7 +310,7 @@ static bool gc__find_free_run(GCBlock *block, int from,
 
 /* Search a block (from line `from`) for a free run >= needed_lines.
  * On success, sets heap cursor/limit/current_block and returns true. */
-static bool gc__find_fit_in_block(ThreadHeap *heap, GCBlock *block,
+bool gc__find_fit_in_block(ThreadHeap *heap, GCBlock *block,
                                   int needed_lines, int from) {
     int run_start, run_len;
     int scan = from;
@@ -330,7 +330,7 @@ static bool gc__find_fit_in_block(ThreadHeap *heap, GCBlock *block,
 
 /* Bump-allocate at the current cursor position.
  * Caller must ensure cursor + total <= limit. */
-static void *gc__bump_alloc(ThreadHeap *heap, size_t total, uint8_t obj_type) {
+void *gc__bump_alloc(ThreadHeap *heap, size_t total, uint8_t obj_type) {
     uint8_t  *ptr = heap->cursor;
     GCHeader *hdr;
 
@@ -361,7 +361,7 @@ static void *gc__bump_alloc(ThreadHeap *heap, size_t total, uint8_t obj_type) {
 
 /* --- gc_alloc: bump-allocate with Immix-style line scanning --- */
 
-static void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
+void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size) {
     size_t   total = sizeof(GCHeader) + payload_size;
     int      needed_lines;
     GCBlock *b;
@@ -460,11 +460,11 @@ typedef struct {
     uint8_t  data[];      /* C-ABI laid out field data (total_size bytes) */
 } JaclStruct;
 
-static inline JaclStruct* jacl_as_struct_ptr(JaclVal v) {
+JaclStruct* jacl_as_struct_ptr(JaclVal v) {
     return (JaclStruct*)(uintptr_t)(v & JACL_PAYLOAD_MASK);
 }
 
-static inline JaclVal jacl_struct_val(JaclStruct* s) {
+JaclVal jacl_struct_val(JaclStruct* s) {
     return JACL_TAG_STRUCT | ((uint64_t)(uintptr_t)s & JACL_PAYLOAD_MASK);
 }
 
@@ -472,19 +472,19 @@ static inline JaclVal jacl_struct_val(JaclStruct* s) {
  * Heap-allocating value constructors (moved from value.c — need ThreadHeap)
  * ====================================================================== */
 
-static inline JaclVal jacl_i64(ThreadHeap *heap, int64_t n) {
+JaclVal jacl_i64(ThreadHeap *heap, int64_t n) {
     JaclHeapI64 *h = (JaclHeapI64 *)gc_alloc(heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
     h->value = n;
     return JACL_TAG_I64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
 }
 
-static inline JaclVal jacl_u64(ThreadHeap *heap, uint64_t n) {
+JaclVal jacl_u64(ThreadHeap *heap, uint64_t n) {
     JaclHeapU64 *h = (JaclHeapU64 *)gc_alloc(heap, OBJ_HEAP_U64, sizeof(JaclHeapU64));
     h->value = n;
     return JACL_TAG_U64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
 }
 
-static inline JaclVal jacl_f64(ThreadHeap *heap, double d) {
+JaclVal jacl_f64(ThreadHeap *heap, double d) {
     JaclHeapF64 *h = (JaclHeapF64 *)gc_alloc(heap, OBJ_HEAP_F64, sizeof(JaclHeapF64));
     h->value = d;
     return JACL_TAG_F64 | ((uint64_t)(uintptr_t)h & JACL_PAYLOAD_MASK);
@@ -492,7 +492,7 @@ static inline JaclVal jacl_f64(ThreadHeap *heap, double d) {
 
 /* --- i64 arithmetic --- */
 
-static inline JaclVal jacl_i64_add(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_i64_add(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -500,7 +500,7 @@ static inline JaclVal jacl_i64_add(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_i64_sub(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_i64_sub(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -508,7 +508,7 @@ static inline JaclVal jacl_i64_sub(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_i64_mul(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_i64_mul(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -516,7 +516,7 @@ static inline JaclVal jacl_i64_mul(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_i64_div(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_i64_div(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -531,7 +531,7 @@ static inline JaclVal jacl_i64_div(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_i64_mod(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_i64_mod(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -546,7 +546,7 @@ static inline JaclVal jacl_i64_mod(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_i64_neg(ThreadHeap *heap, JaclVal a) {
+JaclVal jacl_i64_neg(ThreadHeap *heap, JaclVal a) {
     if (jacl_is_error(a)) return a;
     uint64_t flags = a & JACL_FLAGS_MASK;
     JaclVal result = jacl_i64(heap, -jacl_as_i64(a));
@@ -555,7 +555,7 @@ static inline JaclVal jacl_i64_neg(ThreadHeap *heap, JaclVal a) {
 
 /* --- u64 arithmetic --- */
 
-static inline JaclVal jacl_u64_add(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_u64_add(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -563,7 +563,7 @@ static inline JaclVal jacl_u64_add(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_u64_sub(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_u64_sub(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -571,7 +571,7 @@ static inline JaclVal jacl_u64_sub(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_u64_mul(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_u64_mul(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -579,7 +579,7 @@ static inline JaclVal jacl_u64_mul(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_u64_div(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_u64_div(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -591,7 +591,7 @@ static inline JaclVal jacl_u64_div(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_u64_mod(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_u64_mod(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -603,7 +603,7 @@ static inline JaclVal jacl_u64_mod(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_u64_neg(ThreadHeap *heap, JaclVal a) {
+JaclVal jacl_u64_neg(ThreadHeap *heap, JaclVal a) {
     if (jacl_is_error(a)) return a;
     uint64_t flags = a & JACL_FLAGS_MASK;
     return jacl_apply_flags(jacl_set_error(jacl_u64(heap, 0)), flags);
@@ -611,7 +611,7 @@ static inline JaclVal jacl_u64_neg(ThreadHeap *heap, JaclVal a) {
 
 /* --- f64 arithmetic --- */
 
-static inline JaclVal jacl_f64_add(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_f64_add(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -619,7 +619,7 @@ static inline JaclVal jacl_f64_add(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_f64_sub(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_f64_sub(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -627,7 +627,7 @@ static inline JaclVal jacl_f64_sub(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_f64_mul(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_f64_mul(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -635,7 +635,7 @@ static inline JaclVal jacl_f64_mul(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_f64_div(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_f64_div(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -647,7 +647,7 @@ static inline JaclVal jacl_f64_div(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_f64_mod(ThreadHeap *heap, JaclVal a, JaclVal b) {
+JaclVal jacl_f64_mod(ThreadHeap *heap, JaclVal a, JaclVal b) {
     if (jacl_is_error(a)) return a;
     if (jacl_is_error(b)) return b;
     uint64_t flags = jacl_propagate_flags(a, b);
@@ -659,7 +659,7 @@ static inline JaclVal jacl_f64_mod(ThreadHeap *heap, JaclVal a, JaclVal b) {
     return jacl_apply_flags(result, flags);
 }
 
-static inline JaclVal jacl_f64_neg(ThreadHeap *heap, JaclVal a) {
+JaclVal jacl_f64_neg(ThreadHeap *heap, JaclVal a) {
     if (jacl_is_error(a)) return a;
     uint64_t flags = a & JACL_FLAGS_MASK;
     JaclVal result = jacl_f64(heap, -jacl_as_f64(a));
@@ -671,13 +671,13 @@ static inline JaclVal jacl_f64_neg(ThreadHeap *heap, JaclVal a) {
  * so the template allocator can reach the current thread's GC heap.
  * Each worker thread sets its own copy in the task execution loop. */
 
-static JACL_THREAD_LOCAL ThreadHeap *gc__current_heap = NULL;
+JACL_THREAD_LOCAL ThreadHeap *gc__current_heap = NULL;
 
 /* --- Global struct registry pointer for GC tracing ---
  * Type is void* because StructTypeRegistry is defined in compiler.c,
  * which is included after gc.c in the unity build. Cast to
  * StructTypeRegistry* in gc_collect.c (included after compiler.c). */
-static void *gc__struct_registry = NULL;
+void *gc__struct_registry = NULL;
 
 /* ======================================================================
  * GreyBuffer: per-thread append-only buffer for write barrier entries.
@@ -693,7 +693,7 @@ typedef struct {
     uint32_t  cap;
 } GreyBuffer;
 
-static void grey_buf_init(GreyBuffer *gb) {
+void grey_buf_init(GreyBuffer *gb) {
     gb->entries = (JaclVal *)malloc(GREY_BUF_INIT_CAP * sizeof(JaclVal));
     gb->count   = 0;
     gb->cap     = GREY_BUF_INIT_CAP;
@@ -724,7 +724,7 @@ static void grey_buf_init(GreyBuffer *gb) {
  * entries pointer directly through a load — it reads gb->entries once per
  * drain call, and the acquire on count ensures it sees the post-realloc
  * pointer if count reflects post-realloc entries. */
-static void grey_buf_push(GreyBuffer *gb, JaclVal v) {
+void grey_buf_push(GreyBuffer *gb, JaclVal v) {
     uint32_t c = gb->count;
     if (c >= gb->cap) {
         uint32_t new_cap = gb->cap * 2;
@@ -738,7 +738,7 @@ static void grey_buf_push(GreyBuffer *gb, JaclVal v) {
     ATOMIC_STORE_EXPLICIT(&gb->count, c + 1, MEM_RELEASE);
 }
 
-static void grey_buf_destroy(GreyBuffer *gb) {
+void grey_buf_destroy(GreyBuffer *gb) {
     free(gb->entries);
     gb->entries = NULL;
     gb->count   = 0;
@@ -762,13 +762,13 @@ typedef struct {
     uint32_t  cap;
 } RememberedSet;
 
-static void remembered_set_init(RememberedSet *rs) {
+void remembered_set_init(RememberedSet *rs) {
     rs->entries = (JaclVal *)malloc(REMEMBERED_SET_INIT_CAP * sizeof(JaclVal));
     rs->count   = 0;
     rs->cap     = REMEMBERED_SET_INIT_CAP;
 }
 
-static void remembered_set_push(RememberedSet *rs, JaclVal container) {
+void remembered_set_push(RememberedSet *rs, JaclVal container) {
     uint32_t c = rs->count;
     if (c >= rs->cap) {
         uint32_t new_cap = rs->cap * 2;
@@ -783,7 +783,7 @@ static void remembered_set_push(RememberedSet *rs, JaclVal container) {
 /* Drain the remembered set, returning deduplicated entries.
  * Writes unique container values to out_entries (caller-allocated),
  * returns the count of unique entries, and resets the set to empty. */
-static uint32_t remembered_set_drain(RememberedSet *rs,
+uint32_t remembered_set_drain(RememberedSet *rs,
                                       JaclVal *out_entries,
                                       uint32_t out_cap) {
     uint32_t unique = 0;
@@ -802,7 +802,7 @@ static uint32_t remembered_set_drain(RememberedSet *rs,
     return unique;
 }
 
-static void remembered_set_destroy(RememberedSet *rs) {
+void remembered_set_destroy(RememberedSet *rs) {
     free(rs->entries);
     rs->entries = NULL;
     rs->count   = 0;
@@ -821,7 +821,7 @@ static void remembered_set_destroy(RememberedSet *rs) {
  * when GC is not running or when running in single-threaded mode (NULL).
  * ====================================================================== */
 
-static inline void gc_write_barrier(GreyBuffer *gb,
+void gc_write_barrier(GreyBuffer *gb,
                                      volatile uint32_t *gc_active_ptr,
                                      JaclVal old_val, JaclVal new_val) {
     /* Single-threaded mode: no gc_active flag → no barrier needed */
@@ -851,7 +851,7 @@ static inline void gc_write_barrier(GreyBuffer *gb,
  * old-gen containers without scanning the entire old generation.
  * ====================================================================== */
 
-static inline void gc_remembered_set_barrier(RememberedSet *rs,
+void gc_remembered_set_barrier(RememberedSet *rs,
                                               JaclVal container,
                                               JaclVal new_val) {
     /* No remembered set in single-threaded mode */
@@ -898,29 +898,29 @@ typedef struct {
 
 /* --- Pointer tag/untag for futures --- */
 
-static inline JaclVal jacl_future_ptr(JaclFuture *p) {
+JaclVal jacl_future_ptr(JaclFuture *p) {
     return JACL_TAG_FUTURE | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
 }
 
-static inline JaclFuture *jacl_as_future(JaclVal v) {
+JaclFuture *jacl_as_future(JaclVal v) {
     return (JaclFuture *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
 }
 
 /* --- Spinlock for futures: CAS-based, no OS resource to leak on GC --- */
 
-static inline void future_lock(JaclFuture *f) {
+void future_lock(JaclFuture *f) {
     uint32_t expected = 0;
     while (!ATOMIC_CAS(&f->lock, &expected, 1, MEM_ACQUIRE, MEM_RELAXED))
         expected = 0;
 }
 
-static inline void future_unlock(JaclFuture *f) {
+void future_unlock(JaclFuture *f) {
     ATOMIC_STORE_EXPLICIT(&f->lock, 0, MEM_RELEASE);
 }
 
 /* --- Constructor: create a pending future --- */
 
-static JaclVal jacl_future(ThreadHeap *heap) {
+JaclVal jacl_future(ThreadHeap *heap) {
     JaclFuture *f = (JaclFuture *)gc_alloc(heap, OBJ_FUTURE, sizeof(JaclFuture));
     f->state   = FUTURE_PENDING;
     f->result  = (uint64_t)JACL_NIL;
@@ -932,7 +932,7 @@ static JaclVal jacl_future(ThreadHeap *heap) {
 /* --- Resolve: set result + RESOLVED state, return waiter list.
  *     Fires write barrier (old=NIL, new=result) for concurrent GC. --- */
 
-static FutureWaiter *jacl_future_resolve(JaclFuture *f, JaclVal result,
+FutureWaiter *jacl_future_resolve(JaclFuture *f, JaclVal result,
                                           GreyBuffer *gb,
                                           volatile uint32_t *gc_active_ptr) {
     FutureWaiter *waiters;
@@ -949,7 +949,7 @@ static FutureWaiter *jacl_future_resolve(JaclFuture *f, JaclVal result,
 /* --- Error: set error result + ERROR state, return waiter list.
  *     Fires write barrier (old=NIL, new=error) for concurrent GC. --- */
 
-static FutureWaiter *jacl_future_error(JaclFuture *f, JaclVal error,
+FutureWaiter *jacl_future_error(JaclFuture *f, JaclVal error,
                                         GreyBuffer *gb,
                                         volatile uint32_t *gc_active_ptr) {
     FutureWaiter *waiters;
@@ -966,7 +966,7 @@ static FutureWaiter *jacl_future_error(JaclFuture *f, JaclVal error,
 /* --- Add waiter: if pending, prepend waiter and return true.
  *     If already resolved/errored, return false (caller schedules immediately). --- */
 
-static bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
+bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
                                     ThreadHeap *heap) {
     bool added = false;
     future_lock(f);
@@ -1010,11 +1010,11 @@ typedef struct {
     uint8_t   arg_count;
 } JaclStream;
 
-static inline JaclStream *jacl_as_stream(JaclVal v) {
+JaclStream *jacl_as_stream(JaclVal v) {
     return (JaclStream *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
 }
 
-static JaclVal jacl_stream(ThreadHeap *heap) {
+JaclVal jacl_stream(ThreadHeap *heap) {
     JaclStream *s = (JaclStream *)gc_alloc(heap, OBJ_STREAM, sizeof(JaclStream));
     s->state         = STREAM_PENDING;
     s->kind          = STREAM_KIND_GENERATOR;
@@ -1046,16 +1046,16 @@ typedef struct {
  * ParallelAgg is an internal GC object (OBJ_PARALLEL_AGG obj_type in
  * GCHeader ensures correct tracing). Never exposed to user code. */
 
-static inline JaclVal parallel_agg_ptr(ParallelAgg *p) {
+JaclVal parallel_agg_ptr(ParallelAgg *p) {
     return JACL_TAG_FUTURE | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
 }
 
-static inline ParallelAgg *as_parallel_agg(JaclVal v) {
+ParallelAgg *as_parallel_agg(JaclVal v) {
     return (ParallelAgg *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
 }
 
 /* Constructor: allocate a pending parallel aggregate with N result slots */
-static JaclVal jacl_parallel_agg(ThreadHeap *heap, uint32_t count,
+JaclVal jacl_parallel_agg(ThreadHeap *heap, uint32_t count,
                                   JaclVal state_machine) {
     size_t sz = sizeof(ParallelAgg) + count * sizeof(JaclVal);
     ParallelAgg *agg = (ParallelAgg *)gc_alloc(heap, OBJ_PARALLEL_AGG, sz);
@@ -1083,16 +1083,16 @@ typedef struct {
 
 /* Tag/untag helpers — same tagging scheme as ParallelAgg */
 
-static inline JaclVal race_agg_ptr(RaceAgg *r) {
+JaclVal race_agg_ptr(RaceAgg *r) {
     return JACL_TAG_FUTURE | ((uint64_t)(uintptr_t)r & JACL_PAYLOAD_MASK);
 }
 
-static inline RaceAgg *as_race_agg(JaclVal v) {
+RaceAgg *as_race_agg(JaclVal v) {
     return (RaceAgg *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
 }
 
 /* Constructor: allocate a pending race aggregate */
-static JaclVal jacl_race_agg(ThreadHeap *heap, JaclVal state_machine) {
+JaclVal jacl_race_agg(ThreadHeap *heap, JaclVal state_machine) {
     RaceAgg *agg = (RaceAgg *)gc_alloc(heap, OBJ_RACE_AGG, sizeof(RaceAgg));
     agg->settled       = 0;
     agg->state_machine = state_machine;
@@ -1117,13 +1117,13 @@ typedef struct {
 
 /* --- Pointer accessor --- */
 
-static inline JaclStateMachine *jacl_as_state_machine(JaclVal v) {
+JaclStateMachine *jacl_as_state_machine(JaclVal v) {
     return (JaclStateMachine *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
 }
 
 /* --- Constructor: allocate a state machine with field_count trailing slots --- */
 
-static JaclVal gc_alloc_state_machine(ThreadHeap *heap, uint32_t field_count) {
+JaclVal gc_alloc_state_machine(ThreadHeap *heap, uint32_t field_count) {
     size_t sz = sizeof(JaclStateMachine) + field_count * sizeof(JaclVal);
     JaclStateMachine *sm = (JaclStateMachine *)gc_alloc(heap, OBJ_STATE_MACHINE, sz);
     sm->resume_point = 0;

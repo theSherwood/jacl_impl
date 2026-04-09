@@ -10,8 +10,8 @@
 
 /* --- Forward declarations (defined after template instantiation) --- */
 
-static uint32_t jacl_val_hash(JaclVal v);
-static bool jacl_val_eq(JaclVal a, JaclVal b);
+uint32_t jacl_val_hash(JaclVal v);
+bool jacl_val_eq(JaclVal a, JaclVal b);
 
 /* --- Allocator for collection auxiliary allocations (size tables, temp arrays) --- */
 
@@ -43,7 +43,7 @@ static bool jacl_val_eq(JaclVal a, JaclVal b);
 
 /* --- JaclVal hash function (dispatches on type tag) --- */
 
-static uint32_t jacl_val_hash(JaclVal v) {
+uint32_t jacl_val_hash(JaclVal v) {
   uint64_t tag = jacl_type_tag(v);
 
   if (tag == JACL_TAG_NIL) {
@@ -111,7 +111,7 @@ static uint32_t jacl_val_hash(JaclVal v) {
 
 /* --- JaclVal equality function (for HAMT key comparison) --- */
 
-static bool jacl_val_eq(JaclVal a, JaclVal b) {
+bool jacl_val_eq(JaclVal a, JaclVal b) {
   uint64_t tag_a = jacl_type_tag(a);
   uint64_t tag_b = jacl_type_tag(b);
 
@@ -164,7 +164,7 @@ static bool jacl_val_eq(JaclVal a, JaclVal b) {
 
 /* --- Initialization: wire up hash/eq handlers --- */
 
-static void collections__init(void) {
+void collections__init(void) {
   jacl_map_set_key_handlers(jacl_val_hash, jacl_val_eq);
   jacl_vec_set_hash_handler(jacl_val_hash);
   jacl_map_set_hash_handlers(jacl_val_hash, jacl_val_hash);

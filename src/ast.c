@@ -89,11 +89,11 @@ struct AstNode {
  * Arena helper for allocating AST nodes
  * ------------------------------------------------------------------------- */
 
-static AstNode* ast_alloc(arena_t* arena) {
+AstNode* ast_alloc(arena_t* arena) {
   return (AstNode*)arena_alloc(arena, sizeof(AstNode));
 }
 
-static AstNode** ast_alloc_array(arena_t* arena, uint32_t count) {
+AstNode** ast_alloc_array(arena_t* arena, uint32_t count) {
   return (AstNode**)arena_alloc(arena, sizeof(AstNode*) * count);
 }
 
@@ -122,14 +122,14 @@ typedef struct {
   arena_t* arena;
 } AstStrBuf;
 
-static void ast__buf_init(AstStrBuf* b, arena_t* arena) {
+void ast__buf_init(AstStrBuf* b, arena_t* arena) {
   b->cap   = AST__PP_INITIAL_CAP;
   b->len   = 0;
   b->arena = arena;
   b->buf   = (char*)arena_alloc(arena, b->cap);
 }
 
-static void ast__buf_ensure(AstStrBuf* b, uint32_t extra) {
+void ast__buf_ensure(AstStrBuf* b, uint32_t extra) {
   if (b->len + extra >= b->cap) {
     uint32_t new_cap = b->cap;
     while (new_cap <= b->len + extra) {
@@ -142,22 +142,22 @@ static void ast__buf_ensure(AstStrBuf* b, uint32_t extra) {
   }
 }
 
-static void ast__buf_char(AstStrBuf* b, char c) {
+void ast__buf_char(AstStrBuf* b, char c) {
   ast__buf_ensure(b, 1);
   b->buf[b->len++] = c;
 }
 
-static void ast__buf_str(AstStrBuf* b, const char* s, uint32_t len) {
+void ast__buf_str(AstStrBuf* b, const char* s, uint32_t len) {
   ast__buf_ensure(b, len);
   memcpy(b->buf + b->len, s, len);
   b->len += len;
 }
 
-static void ast__buf_cstr(AstStrBuf* b, const char* s) {
+void ast__buf_cstr(AstStrBuf* b, const char* s) {
   ast__buf_str(b, s, (uint32_t)strlen(s));
 }
 
-static const char* ast__buf_finish(AstStrBuf* b) {
+const char* ast__buf_finish(AstStrBuf* b) {
   ast__buf_char(b, '\0');
   return b->buf;
 }
@@ -166,7 +166,7 @@ static const char* ast__buf_finish(AstStrBuf* b) {
  * Internal: Escape a character inside a quoted string
  * ------------------------------------------------------------------------- */
 
-static void ast__buf_escaped_char(AstStrBuf* b, char c) {
+void ast__buf_escaped_char(AstStrBuf* b, char c) {
   switch (c) {
     case '"':  ast__buf_char(b, '\\'); ast__buf_char(b, '"');  break;
     case '\\': ast__buf_char(b, '\\'); ast__buf_char(b, '\\'); break;
@@ -185,7 +185,7 @@ static void ast__buf_escaped_char(AstStrBuf* b, char c) {
  * Bare words and operators can be printed unquoted.
  * ------------------------------------------------------------------------- */
 
-static int ast__needs_quoting(const char* s, uint32_t len) {
+int ast__needs_quoting(const char* s, uint32_t len) {
   if (len == 0) return 1;
   /* Starts with digit → would lex as int/float */
   if (s[0] >= '0' && s[0] <= '9') return 1;
@@ -205,7 +205,7 @@ static int ast__needs_quoting(const char* s, uint32_t len) {
  * Internal: Pretty-print a single AST node into a string buffer
  * ------------------------------------------------------------------------- */
 
-static void ast__pp_node(AstStrBuf* b, AstNode* node) {
+void ast__pp_node(AstStrBuf* b, AstNode* node) {
   switch (node->type) {
     case AST_LIT_INT: {
       char tmp[32];

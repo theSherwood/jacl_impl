@@ -195,15 +195,15 @@ typedef struct {
 
 /* --- API --- */
 
-static void     chunk_init(BytecodeChunk* chunk, arena_t* arena);
-static void     chunk_write(BytecodeChunk* chunk, uint8_t byte, uint32_t line);
-static void     chunk_write_u16(BytecodeChunk* chunk, uint16_t value, uint32_t line);
-static uint16_t chunk_add_constant(BytecodeChunk* chunk, JaclVal value);
+void     chunk_init(BytecodeChunk* chunk, arena_t* arena);
+void     chunk_write(BytecodeChunk* chunk, uint8_t byte, uint32_t line);
+void     chunk_write_u16(BytecodeChunk* chunk, uint16_t value, uint32_t line);
+uint16_t chunk_add_constant(BytecodeChunk* chunk, JaclVal value);
 
 /**
  * Initialize a bytecode chunk. All storage is arena-allocated.
  */
-static void chunk_init(BytecodeChunk* chunk, arena_t* arena) {
+void chunk_init(BytecodeChunk* chunk, arena_t* arena) {
   chunk->arena       = arena;
   chunk->code_count  = 0;
   chunk->code_cap    = BYTECODE_INIT_CODE_CAP;
@@ -219,7 +219,7 @@ static void chunk_init(BytecodeChunk* chunk, arena_t* arena) {
  * Internal: grow an arena-allocated array by doubling capacity.
  * Copies existing data to the new allocation.
  */
-static void bytecode__grow_code(BytecodeChunk* chunk) {
+void bytecode__grow_code(BytecodeChunk* chunk) {
   uint32_t new_cap = chunk->code_cap * 2;
   uint8_t* new_code = (uint8_t*)arena_alloc(chunk->arena, new_cap * sizeof(uint8_t));
   memcpy(new_code, chunk->code, chunk->code_count * sizeof(uint8_t));
@@ -233,7 +233,7 @@ static void bytecode__grow_code(BytecodeChunk* chunk) {
   chunk->lines_cap = new_cap;
 }
 
-static void bytecode__grow_constants(BytecodeChunk* chunk) {
+void bytecode__grow_constants(BytecodeChunk* chunk) {
   uint32_t new_cap = chunk->const_cap * 2;
   JaclVal* new_consts = (JaclVal*)arena_alloc(chunk->arena, new_cap * sizeof(JaclVal));
   memcpy(new_consts, chunk->constants, chunk->const_count * sizeof(JaclVal));
@@ -244,7 +244,7 @@ static void bytecode__grow_constants(BytecodeChunk* chunk) {
 /**
  * Append a single byte to the chunk's bytecode array.
  */
-static void chunk_write(BytecodeChunk* chunk, uint8_t byte, uint32_t line) {
+void chunk_write(BytecodeChunk* chunk, uint8_t byte, uint32_t line) {
   if (chunk->code_count >= chunk->code_cap) {
     bytecode__grow_code(chunk);
   }
@@ -256,7 +256,7 @@ static void chunk_write(BytecodeChunk* chunk, uint8_t byte, uint32_t line) {
 /**
  * Append a 2-byte big-endian value to the chunk's bytecode array.
  */
-static void chunk_write_u16(BytecodeChunk* chunk, uint16_t value, uint32_t line) {
+void chunk_write_u16(BytecodeChunk* chunk, uint16_t value, uint32_t line) {
   chunk_write(chunk, (uint8_t)((value >> 8) & 0xFF), line);
   chunk_write(chunk, (uint8_t)(value & 0xFF), line);
 }
@@ -265,7 +265,7 @@ static void chunk_write_u16(BytecodeChunk* chunk, uint16_t value, uint32_t line)
  * Add a constant to the constant pool.
  * Returns the index of the added constant.
  */
-static uint16_t chunk_add_constant(BytecodeChunk* chunk, JaclVal value) {
+uint16_t chunk_add_constant(BytecodeChunk* chunk, JaclVal value) {
   if (chunk->const_count >= chunk->const_cap) {
     bytecode__grow_constants(chunk);
   }
@@ -294,17 +294,17 @@ typedef struct {
   uint8_t       sm_field_count; /* state machine field count for SM-compiled closures */
 } JaclClosure;
 
-static inline JaclVal jacl_closure(JaclClosure* cl) {
+JaclVal jacl_closure(JaclClosure* cl) {
   return jacl_closure_ptr(cl);
 }
 
-static inline JaclClosure* jacl_as_closure(JaclVal v) {
+JaclClosure* jacl_as_closure(JaclVal v) {
   return (JaclClosure*)jacl_as_ptr(v);
 }
 
 /* --- Opcode name lookup (debug/error messages) --- */
 
-static const char* bytecode__opcode_name(uint8_t op) {
+const char* bytecode__opcode_name(uint8_t op) {
   switch ((OpCode)op) {
     case OP_CONST:           return "OP_CONST";
     case OP_NIL:             return "OP_NIL";

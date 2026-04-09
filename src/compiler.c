@@ -24,7 +24,7 @@ typedef struct {
 
 /* --- API --- */
 
-static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
+CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       JaclInternTable* intern_table,
                                       ThreadHeap* heap,
                                       StructTypeRegistry* seed_registry);
@@ -51,7 +51,7 @@ typedef enum {
   TYPE_STREAM
 } JaclType;
 
-static bool is_type_keyword(const char* word, size_t len) {
+bool is_type_keyword(const char* word, size_t len) {
   if (len == 3) {
     if (memcmp(word, "i32", 3) == 0) return true;
     if (memcmp(word, "i64", 3) == 0) return true;
@@ -69,7 +69,7 @@ static bool is_type_keyword(const char* word, size_t len) {
   return false;
 }
 
-static JaclType type_from_keyword(const char* word, size_t len) {
+JaclType type_from_keyword(const char* word, size_t len) {
   if (len == 3) {
     if (memcmp(word, "i32", 3) == 0) return TYPE_I32;
     if (memcmp(word, "i64", 3) == 0) return TYPE_I64;
@@ -87,7 +87,7 @@ static JaclType type_from_keyword(const char* word, size_t len) {
   return TYPE_DYN;
 }
 
-static const char* type_name(JaclType t) {
+const char* type_name(JaclType t) {
   switch (t) {
     case TYPE_DYN:     return "dyn";
     case TYPE_BOOL:    return "bool";
@@ -108,12 +108,12 @@ static const char* type_name(JaclType t) {
   return "unknown";
 }
 
-static bool is_numeric_type(JaclType t) {
+bool is_numeric_type(JaclType t) {
   return t == TYPE_I32 || t == TYPE_I64 || t == TYPE_U32 ||
          t == TYPE_U64 || t == TYPE_F32 || t == TYPE_F64;
 }
 
-static bool is_unboxed_type(JaclType t) {
+bool is_unboxed_type(JaclType t) {
   return t == TYPE_I64 || t == TYPE_U64 || t == TYPE_F64;
 }
 
@@ -146,7 +146,7 @@ struct StructTypeRegistry {
 /* typedef already forward-declared above */
 
 /* C-ABI size and alignment for a JaclType */
-static uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx) {
+uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx) {
   switch (t) {
     case TYPE_BOOL:    return 1;
     case TYPE_NIL:     return 0;
@@ -171,7 +171,7 @@ static uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t 
   return 8;
 }
 
-static uint32_t struct__type_align(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx) {
+uint32_t struct__type_align(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx) {
   switch (t) {
     case TYPE_BOOL:    return 1;
     case TYPE_NIL:     return 1;
@@ -196,12 +196,12 @@ static uint32_t struct__type_align(JaclType t, StructTypeRegistry* reg, uint32_t
   return 8;
 }
 
-static uint32_t struct__align_up(uint32_t offset, uint32_t align) {
+uint32_t struct__align_up(uint32_t offset, uint32_t align) {
   return (offset + align - 1) & ~(align - 1);
 }
 
 /* Look up a struct type by name in the registry. Returns index or UINT32_MAX if not found. */
-static uint32_t struct_registry__find(StructTypeRegistry* reg, const char* name, uint32_t name_len) {
+uint32_t struct_registry__find(StructTypeRegistry* reg, const char* name, uint32_t name_len) {
   if (!reg) return UINT32_MAX;
   for (uint32_t i = 0; i < reg->count; i++) {
     if (reg->defs[i].name_len == name_len &&
@@ -215,7 +215,7 @@ static uint32_t struct_registry__find(StructTypeRegistry* reg, const char* name,
 /* Register an inline anonymous struct type from a canonical string like "struct{x:i32,y:i32}".
    Returns registry index or UINT32_MAX on error. Uses structural equivalence: if an identical
    canonical string already exists in the registry, returns that index. */
-static uint32_t compiler__register_inline_struct(
+uint32_t compiler__register_inline_struct(
     StructTypeRegistry* reg, const char* spec, uint32_t spec_len) {
   if (!reg) return UINT32_MAX;
 
@@ -354,7 +354,7 @@ typedef struct {
   StructTypeRegistry* struct_registry; /* struct type metadata for VM */
 } ProgramResult;
 
-static ProgramResult jacl_compile_program(const char* root_path,
+ProgramResult jacl_compile_program(const char* root_path,
                                           arena_t* arena,
                                           JaclInternTable* intern_table,
                                           ThreadHeap* heap);
@@ -367,7 +367,7 @@ typedef struct {
   arena_t* arena;
 } ModuleCache;
 
-static void module_cache__init(ModuleCache* cache, arena_t* arena) {
+void module_cache__init(ModuleCache* cache, arena_t* arena) {
   cache->count = 0;
   cache->topo_counter = 0;
   cache->arena = arena;
@@ -377,7 +377,7 @@ static void module_cache__init(ModuleCache* cache, arena_t* arena) {
   }
 }
 
-static Module* module_cache__find(ModuleCache* cache, const char* canonical_path) {
+Module* module_cache__find(ModuleCache* cache, const char* canonical_path) {
   for (uint32_t i = 0; i < cache->count; i++) {
     if (cache->paths[i] && strcmp(cache->paths[i], canonical_path) == 0) {
       return cache->modules[i];
@@ -386,7 +386,7 @@ static Module* module_cache__find(ModuleCache* cache, const char* canonical_path
   return NULL;
 }
 
-static Module* module_cache__add(ModuleCache* cache, const char* canonical_path) {
+Module* module_cache__add(ModuleCache* cache, const char* canonical_path) {
   if (cache->count >= MODULE_CACHE_MAX) return NULL;
   uint32_t idx = cache->count++;
   size_t path_len = strlen(canonical_path);
@@ -415,30 +415,30 @@ typedef struct {
   uint32_t    count;
 } ImportStack;
 
-static void import_stack__init(ImportStack* stack) {
+void import_stack__init(ImportStack* stack) {
   stack->count = 0;
 }
 
-static bool import_stack__contains(ImportStack* stack, const char* canonical_path) {
+bool import_stack__contains(ImportStack* stack, const char* canonical_path) {
   for (uint32_t i = 0; i < stack->count; i++) {
     if (strcmp(stack->paths[i], canonical_path) == 0) return true;
   }
   return false;
 }
 
-static bool import_stack__push(ImportStack* stack, const char* canonical_path) {
+bool import_stack__push(ImportStack* stack, const char* canonical_path) {
   if (stack->count >= MODULE_IMPORT_STACK_MAX) return false;
   stack->paths[stack->count++] = canonical_path;
   return true;
 }
 
-static void import_stack__pop(ImportStack* stack) {
+void import_stack__pop(ImportStack* stack) {
   if (stack->count > 0) stack->count--;
 }
 
 /* Build a circular import chain string: "A -> B -> C -> A"
    The cycle_path is the path that was found again in the stack. */
-static const char* import_stack__chain_str(ImportStack* stack,
+const char* import_stack__chain_str(ImportStack* stack,
                                            const char* cycle_path,
                                            arena_t* arena) {
   /* Find the start of the cycle in the stack */
@@ -493,7 +493,7 @@ static const char* import_stack__chain_str(ImportStack* stack,
    use_path:      the relative path string from the `use` declaration
    arena:         for allocating the result string
    Returns: canonical path on success, NULL on failure (file not found) */
-static const char* module__resolve_path(const char* importer_path,
+const char* module__resolve_path(const char* importer_path,
                                         const char* use_path,
                                         arena_t* arena) {
   /* Find the directory of the importing file */
@@ -530,12 +530,12 @@ static const char* module__resolve_path(const char* importer_path,
 /* Returns true if a top-level name is private (underscore-prefixed).
    Private names are excluded from module export lists and cannot be
    imported by other modules. */
-static bool module__is_private(const char* name, uint32_t name_len) {
+bool module__is_private(const char* name, uint32_t name_len) {
   return name_len > 0 && name[0] == '_';
 }
 
 /* Read a file into arena-allocated memory. Returns NULL on failure. */
-static char* module__read_file(const char* path, arena_t* arena) {
+char* module__read_file(const char* path, arena_t* arena) {
   FILE* f = fopen(path, "rb");
   if (!f) return NULL;
   fseek(f, 0, SEEK_END);
@@ -613,7 +613,7 @@ typedef struct {
   uint32_t count;
 } SuspensionMap;
 
-static bool suspension_map_lookup(SuspensionMap* map, JaclVal name) {
+bool suspension_map_lookup(SuspensionMap* map, JaclVal name) {
   for (uint32_t i = 0; i < map->count; i++) {
     if (map->entries[i].name == name) {
       return map->entries[i].suspends;
@@ -622,7 +622,7 @@ static bool suspension_map_lookup(SuspensionMap* map, JaclVal name) {
   return false;
 }
 
-static bool suspension_map_is_generator(SuspensionMap* map, JaclVal name) {
+bool suspension_map_is_generator(SuspensionMap* map, JaclVal name) {
   for (uint32_t i = 0; i < map->count; i++) {
     if (map->entries[i].name == name) {
       return map->entries[i].is_generator;
@@ -631,7 +631,7 @@ static bool suspension_map_is_generator(SuspensionMap* map, JaclVal name) {
   return false;
 }
 
-static void suspension_map_set(SuspensionMap* map, JaclVal name,
+void suspension_map_set(SuspensionMap* map, JaclVal name,
                                bool suspends, bool is_generator) {
   for (uint32_t i = 0; i < map->count; i++) {
     if (map->entries[i].name == name) {
@@ -667,7 +667,7 @@ typedef struct {
 
 /* Walk an AST subtree within a proc body to find suspension points and callees.
    Does NOT recurse into nested proc definitions (they have their own scope). */
-static void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
+void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
   if (!node) return;
 
   switch (node->type) {
@@ -759,7 +759,7 @@ static void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
 }
 
 /* Recursively collect proc definitions from AST, analyzing each body */
-static void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list) {
+void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list) {
   if (!node) return;
 
   switch (node->type) {
@@ -837,7 +837,7 @@ static void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list) {
 
 /* Pre-compilation suspension analysis: walk AST to determine which procs suspend.
    Returns a SuspensionMap that the compiler consults during code generation. */
-static SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t count) {
+SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t count) {
   SuspensionMap map;
   ProcSuspendInfoList proc_list;
   memset(&map, 0, sizeof(map));
@@ -941,7 +941,7 @@ typedef struct {
    Assigns sequential IDs to each discovered suspension point.
    When map is non-NULL, also treats calls to known suspending procs as
    suspension points (SUSPEND_CALL). */
-static void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
+void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
                                   SuspensionMap* map) {
   if (!node) return;
 
@@ -1093,7 +1093,7 @@ static void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
 /* --- State layout helpers --- */
 
 /* Add a field to the state layout, skipping empty names and duplicates. */
-static void sm__add_state_field(StateLayout* layout, JaclVal name,
+void sm__add_state_field(StateLayout* layout, JaclVal name,
                                 bool is_mutable, bool is_param) {
   if (layout->field_count >= SM_MAX_STATE_FIELDS) return;
   /* Skip empty/wildcard names (compiler uses empty string for _ wildcards) */
@@ -1112,14 +1112,14 @@ static void sm__add_state_field(StateLayout* layout, JaclVal name,
 
 /* Look up a variable name in the StateLayout.
    Returns the field index (0..field_count-1) or -1 if not found. */
-static int sm__find_field(const StateLayout* layout, JaclVal name) {
+int sm__find_field(const StateLayout* layout, JaclVal name) {
   for (uint32_t i = 0; i < layout->field_count; i++) {
     if (layout->fields[i].name == name) return (int)layout->fields[i].field_index;
   }
   return -1;
 }
 
-static bool sm__is_field_mutable(const StateLayout* layout, JaclVal name) {
+bool sm__is_field_mutable(const StateLayout* layout, JaclVal name) {
   for (uint32_t i = 0; i < layout->field_count; i++) {
     if (layout->fields[i].name == name) return layout->fields[i].is_mutable;
   }
@@ -1127,7 +1127,7 @@ static bool sm__is_field_mutable(const StateLayout* layout, JaclVal name) {
 }
 
 /* Collect names from an AST_DESTRUCTURE_VEC node into the state layout. */
-static void sm__collect_destructure_vec_names(AstNode* dv, StateLayout* layout,
+void sm__collect_destructure_vec_names(AstNode* dv, StateLayout* layout,
                                               bool is_mutable) {
   for (uint32_t i = 0; i < dv->data.destructure_vec.count; i++) {
     const char* n = dv->data.destructure_vec.names[i];
@@ -1144,7 +1144,7 @@ static void sm__collect_destructure_vec_names(AstNode* dv, StateLayout* layout,
 }
 
 /* Collect names from an AST_DESTRUCTURE_NAMED node into the state layout. */
-static void sm__collect_destructure_named_names(AstNode* dn, StateLayout* layout,
+void sm__collect_destructure_named_names(AstNode* dn, StateLayout* layout,
                                                 bool is_mutable) {
   for (uint32_t i = 0; i < dn->data.destructure_named.count; i++) {
     const char* n = dn->data.destructure_named.names[i];
@@ -1160,7 +1160,7 @@ static void sm__collect_destructure_named_names(AstNode* dn, StateLayout* layout
 }
 
 /* Collect names from a bracket destructure in AST_COMMAND form [a b c]. */
-static void sm__collect_command_destructure_names(AstNode* pat,
+void sm__collect_command_destructure_names(AstNode* pat,
                                                   StateLayout* layout,
                                                   bool is_mutable) {
   /* Head element */
@@ -1202,7 +1202,7 @@ static void sm__collect_command_destructure_names(AstNode* pat,
 }
 
 /* Collect names from a curly-brace destructure in AST_BLOCK form {a, b, c}. */
-static void sm__collect_block_destructure_names(AstNode* blk,
+void sm__collect_block_destructure_names(AstNode* blk,
                                                 StateLayout* layout,
                                                 bool is_mutable) {
   for (uint32_t i = 0; i < blk->data.block.count; i++) {
@@ -1246,7 +1246,7 @@ static void sm__collect_block_destructure_names(AstNode* blk,
 /* Walk AST to collect all local variable declarations for state layout.
    Conservative strategy: ALL locals are included.
    Does NOT recurse into nested proc/spawn body/params (separate scopes). */
-static void sm__walk_locals(AstNode* node, StateLayout* layout) {
+void sm__walk_locals(AstNode* node, StateLayout* layout) {
   if (!node) return;
 
   switch (node->type) {
@@ -1414,7 +1414,7 @@ typedef struct {
 } FieldLiveness;
 
 /* Update liveness for a variable WRITE (def/mut/set/for-bind). */
-static void sm__liveness_mark_write(FieldLiveness* liveness,
+void sm__liveness_mark_write(FieldLiveness* liveness,
                                      const StateLayout* layout,
                                      JaclVal name, int32_t segment) {
   int idx = sm__find_field(layout, name);
@@ -1425,7 +1425,7 @@ static void sm__liveness_mark_write(FieldLiveness* liveness,
 }
 
 /* Update liveness for a variable READ (var_ref). */
-static void sm__liveness_mark_read(FieldLiveness* liveness,
+void sm__liveness_mark_read(FieldLiveness* liveness,
                                     const StateLayout* layout,
                                     JaclVal name, int32_t segment) {
   int idx = sm__find_field(layout, name);
@@ -1436,17 +1436,17 @@ static void sm__liveness_mark_read(FieldLiveness* liveness,
 }
 
 /* Helper: extract JaclVal name from an AST_LIT_STRING node. */
-static JaclVal sm__lit_string_name(AstNode* node) {
+JaclVal sm__lit_string_name(AstNode* node) {
   return jacl_inline_string(node->data.lit_string.value,
                             node->data.lit_string.length);
 }
 
 /* Forward declaration. */
-static void sm__liveness_walk(AstNode* node, const StateLayout* layout,
+void sm__liveness_walk(AstNode* node, const StateLayout* layout,
                                FieldLiveness* liveness, int32_t* segment);
 
 /* Walk a def/mut binding pattern to mark WRITE on all bound names. */
-static void sm__liveness_mark_binding_names(AstNode* pattern,
+void sm__liveness_mark_binding_names(AstNode* pattern,
                                              const StateLayout* layout,
                                              FieldLiveness* liveness,
                                              int32_t segment) {
@@ -1551,16 +1551,16 @@ static void sm__liveness_mark_binding_names(AstNode* pattern,
 }
 
 /* Forward declaration — defined later in this file. */
-static bool ast__contains_suspension(AstNode* node, SuspensionMap* map);
+bool ast__contains_suspension(AstNode* node, SuspensionMap* map);
 
 /* Check if the body of a loop (while/for) directly contains suspension. */
-static bool sm__loop_body_suspends(AstNode* body) {
+bool sm__loop_body_suspends(AstNode* body) {
   return ast__contains_suspension(body, NULL);
 }
 
 /* Liveness walker: walks AST tracking suspension segments and recording
    variable reads/writes per segment. */
-static void sm__liveness_walk(AstNode* node, const StateLayout* layout,
+void sm__liveness_walk(AstNode* node, const StateLayout* layout,
                                FieldLiveness* liveness, int32_t* segment) {
   if (!node) return;
 
@@ -1812,7 +1812,7 @@ static void sm__liveness_walk(AstNode* node, const StateLayout* layout,
    (first_write < last_read with a suspension between them).
    When suspension_count == 0, skips analysis (no optimisation possible).
    body is the function body AST, needed for the liveness walk. */
-static void sm__optimize_state_layout(SuspensionAnalysis* analysis,
+void sm__optimize_state_layout(SuspensionAnalysis* analysis,
                                        AstNode* body) {
   StateLayout* layout = &analysis->state_layout;
 
@@ -1892,7 +1892,7 @@ static void sm__optimize_state_layout(SuspensionAnalysis* analysis,
    in the layout).  Pass NULL/0 for non-function contexts.
    When optimize_liveness is true, prunes locals that don't cross any
    suspension boundary (they remain as normal stack locals). */
-static SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
+SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
                                                         JaclVal* param_names,
                                                         uint8_t  param_count,
                                                         bool     optimize_liveness,
@@ -1940,7 +1940,7 @@ static SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
 
 /* Check if an AST subtree contains any suspension points.
    When map is non-NULL, also checks if named proc calls are suspending. */
-static bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
+bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
   if (!node) return false;
 
   switch (node->type) {
@@ -2007,7 +2007,7 @@ static bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
  * Skips nested proc/spawn/parallel/race scopes (they are separate bodies).
  */
 #define AST_LOCAL_MUTS_MAX 64
-static void ast__collect_local_muts(AstNode* node, JaclVal* names,
+void ast__collect_local_muts(AstNode* node, JaclVal* names,
                                      uint32_t* count) {
   if (!node || *count >= AST_LOCAL_MUTS_MAX) return;
 
@@ -2071,7 +2071,7 @@ static void ast__collect_local_muts(AstNode* node, JaclVal* names,
  *   - Box references stored in collections then retrieved on another thread
  *   - Dynamic box creation passed indirectly through data structures
  */
-static bool ast__contains_nonlocal_set_impl(AstNode* node,
+bool ast__contains_nonlocal_set_impl(AstNode* node,
                                              JaclVal* local_muts,
                                              uint32_t local_mut_count) {
   if (!node) return false;
@@ -2132,7 +2132,7 @@ static bool ast__contains_nonlocal_set_impl(AstNode* node,
  * Used to decide whether a concurrent body (spawn/parallel/race) needs to be
  * pinned to thread 0. Bodies with only local mutations can run on any worker.
  */
-static bool ast__contains_nonlocal_set(AstNode* block) {
+bool ast__contains_nonlocal_set(AstNode* block) {
   JaclVal local_muts[AST_LOCAL_MUTS_MAX];
   uint32_t local_mut_count = 0;
 
@@ -2210,7 +2210,7 @@ struct Compiler {
   SuspensionAnalysis*  sm_analysis;    /* suspension analysis for current SM function (or NULL) */
 };
 
-static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
+void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
                            JaclInternTable* intern_table, ThreadHeap* heap) {
   c->chunk         = chunk;
   c->arena         = arena;
@@ -2248,12 +2248,12 @@ static void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
-static bool compiler__compile_module(const char* canonical_path,
+bool compiler__compile_module(const char* canonical_path,
                                      Compiler* importer,
                                      uint32_t line, uint32_t col);
 
 /* Build "basename::" prefix string for a module path (arena-allocated). */
-static const char* module__build_prefix(const char* canonical_path, arena_t* arena,
+const char* module__build_prefix(const char* canonical_path, arena_t* arena,
                                          uint32_t* out_len) {
   const char* slash = strrchr(canonical_path, '/');
   const char* basename = slash ? slash + 1 : canonical_path;
@@ -2271,7 +2271,7 @@ static const char* module__build_prefix(const char* canonical_path, arena_t* are
 /* Create a namespace-prefixed global name constant.
    In module context, returns interned "prefix::name".
    Outside module context, returns inline string. */
-static JaclVal compiler__global_name_val(Compiler* c, const char* name,
+JaclVal compiler__global_name_val(Compiler* c, const char* name,
                                           uint32_t name_len) {
   /* Walk to root compiler to find module prefix */
   Compiler* root = c;
@@ -2294,15 +2294,15 @@ static JaclVal compiler__global_name_val(Compiler* c, const char* name,
 
 /* --- Internal: Emit helpers --- */
 
-static void compiler__emit_byte(Compiler* c, uint8_t byte, uint32_t line) {
+void compiler__emit_byte(Compiler* c, uint8_t byte, uint32_t line) {
   chunk_write(c->chunk, byte, line);
 }
 
-static void compiler__emit_u16(Compiler* c, uint16_t value, uint32_t line) {
+void compiler__emit_u16(Compiler* c, uint16_t value, uint32_t line) {
   chunk_write_u16(c->chunk, value, line);
 }
 
-static void compiler__emit_constant(Compiler* c, JaclVal value, uint32_t line) {
+void compiler__emit_constant(Compiler* c, JaclVal value, uint32_t line) {
   uint16_t index = chunk_add_constant(c->chunk, value);
   compiler__emit_byte(c, OP_CONST, line);
   compiler__emit_u16(c, index, line);
@@ -2310,7 +2310,7 @@ static void compiler__emit_constant(Compiler* c, JaclVal value, uint32_t line) {
 
 /* --- Internal: Error reporting --- */
 
-static void compiler__error(Compiler* c, uint32_t line, uint32_t col,
+void compiler__error(Compiler* c, uint32_t line, uint32_t col,
                             const char* message) {
   c->error_count++;
   if (!c->first_error) {
@@ -2325,11 +2325,11 @@ static void compiler__error(Compiler* c, uint32_t line, uint32_t col,
 
 /* --- Internal: Scope and local variable helpers --- */
 
-static void compiler__begin_scope(Compiler* c) {
+void compiler__begin_scope(Compiler* c) {
   c->scope_depth++;
 }
 
-static void compiler__end_scope(Compiler* c, uint32_t line) {
+void compiler__end_scope(Compiler* c, uint32_t line) {
   c->scope_depth--;
   uint32_t pop_count = 0;
   while (c->local_count > 0 &&
@@ -2343,7 +2343,7 @@ static void compiler__end_scope(Compiler* c, uint32_t line) {
   }
 }
 
-static void compiler__add_local(Compiler* c, JaclVal name,
+void compiler__add_local(Compiler* c, JaclVal name,
                                 uint32_t line, uint32_t col) {
   if (c->local_count >= COMPILER_LOCALS_MAX) {
     compiler__error(c, line, col, "too many local variables in function");
@@ -2362,7 +2362,7 @@ static void compiler__add_local(Compiler* c, JaclVal name,
   local->param_types = NULL;
 }
 
-static int compiler__resolve_local(Compiler* c, JaclVal name) {
+int compiler__resolve_local(Compiler* c, JaclVal name) {
   for (int i = (int)c->local_count - 1; i >= 0; i--) {
     if (c->locals[i].name == name) {
       return i;
@@ -2373,7 +2373,7 @@ static int compiler__resolve_local(Compiler* c, JaclVal name) {
 
 /* --- Internal: Global arity helpers --- */
 
-static GlobalArity* compiler__find_global(Compiler* c, JaclVal name) {
+GlobalArity* compiler__find_global(Compiler* c, JaclVal name) {
   Compiler* root = c;
   while (root->enclosing) root = root->enclosing;
   for (uint32_t i = 0; i < root->global_arity_count; i++) {
@@ -2384,7 +2384,7 @@ static GlobalArity* compiler__find_global(Compiler* c, JaclVal name) {
   return NULL;
 }
 
-static void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity) {
+void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity) {
   for (uint32_t i = 0; i < c->global_arity_count; i++) {
     if (c->global_arities[i].name == name) {
       c->global_arities[i].known_arity = arity;
@@ -2407,7 +2407,7 @@ static void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity)
 
 /* --- Internal: Struct type registry access --- */
 
-static StructTypeRegistry* compiler__get_struct_registry(Compiler* c) {
+StructTypeRegistry* compiler__get_struct_registry(Compiler* c) {
   Compiler* root = c;
   while (root->enclosing) root = root->enclosing;
   return root->struct_registry;
@@ -2416,7 +2416,7 @@ static StructTypeRegistry* compiler__get_struct_registry(Compiler* c) {
 /* Resolve a type annotation string to a JaclType.
    Handles built-in types and named struct types.
    Returns true if resolved, false if unknown type. */
-static bool compiler__resolve_type(Compiler* c, const char* word, uint32_t len,
+bool compiler__resolve_type(Compiler* c, const char* word, uint32_t len,
                                     JaclType* out_type) {
   if (is_type_keyword(word, len)) {
     *out_type = type_from_keyword(word, len);
@@ -2437,14 +2437,14 @@ static bool compiler__resolve_type(Compiler* c, const char* word, uint32_t len,
 }
 
 /* Check if a string is a valid type annotation (built-in or struct name) */
-static bool compiler__is_type_annotation(Compiler* c, const char* word, uint32_t len) {
+bool compiler__is_type_annotation(Compiler* c, const char* word, uint32_t len) {
   JaclType dummy;
   return compiler__resolve_type(c, word, len, &dummy);
 }
 
 /* --- Internal: Upvalue resolution --- */
 
-static int compiler__add_upvalue(Compiler* c, uint8_t index, uint8_t is_local,
+int compiler__add_upvalue(Compiler* c, uint8_t index, uint8_t is_local,
                                   JaclVal name) {
   /* Check if this upvalue already exists */
   for (uint32_t i = 0; i < c->upvalue_count; i++) {
@@ -2466,7 +2466,7 @@ static int compiler__add_upvalue(Compiler* c, uint8_t index, uint8_t is_local,
   return (int)c->upvalue_count++;
 }
 
-static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
+int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
   if (!c->enclosing) return -1;
 
   /* Check if the variable is a local in the enclosing scope */
@@ -2528,7 +2528,7 @@ static int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
  * Skips nested proc/spawn/parallel/race scopes (they are separate bodies).
  */
 #define AST_LOCAL_NAMES_MAX 128
-static void ast__collect_local_names(AstNode* node, JaclVal* names,
+void ast__collect_local_names(AstNode* node, JaclVal* names,
                                       uint32_t* count) {
   if (!node || *count >= AST_LOCAL_NAMES_MAX) return;
 
@@ -2589,7 +2589,7 @@ static void ast__collect_local_names(AstNode* node, JaclVal* names,
 
 /* Helper: check if a name resolves to a binding with is_mutable or
    captures_mutable in the enclosing scope chain. */
-static bool compiler__name_touches_mutable(Compiler* enclosing, JaclVal name) {
+bool compiler__name_touches_mutable(Compiler* enclosing, JaclVal name) {
   for (Compiler* cc = enclosing; cc; cc = cc->enclosing) {
     int slot = compiler__resolve_local(cc, name);
     if (slot != -1)
@@ -2605,7 +2605,7 @@ static bool compiler__name_touches_mutable(Compiler* enclosing, JaclVal name) {
   return false;
 }
 
-static bool ast__refs_nonlocal_mutable_impl(AstNode* node,
+bool ast__refs_nonlocal_mutable_impl(AstNode* node,
                                              JaclVal* local_names,
                                              uint32_t local_name_count,
                                              Compiler* enclosing) {
@@ -2680,7 +2680,7 @@ static bool ast__refs_nonlocal_mutable_impl(AstNode* node,
  * Used alongside ast__contains_nonlocal_set() to decide pinning.
  * If either check is true, the body is pinned to thread 0.
  */
-static bool compiler__body_captures_mutable(Compiler* enclosing,
+bool compiler__body_captures_mutable(Compiler* enclosing,
                                              AstNode* body_block) {
   JaclVal local_names[AST_LOCAL_NAMES_MAX];
   uint32_t local_name_count = 0;
@@ -2690,11 +2690,11 @@ static bool compiler__body_captures_mutable(Compiler* enclosing,
 }
 
 /* Forward declaration for compile_block_expr */
-static void compiler__compile_node(Compiler* c, AstNode* node);
+void compiler__compile_node(Compiler* c, AstNode* node);
 
 /* --- Internal: Jump patching helpers --- */
 
-static uint32_t compiler__emit_jump(Compiler* c, uint8_t instruction,
+uint32_t compiler__emit_jump(Compiler* c, uint8_t instruction,
                                      uint32_t line) {
   compiler__emit_byte(c, instruction, line);
   compiler__emit_byte(c, 0xFF, line);  /* placeholder high byte */
@@ -2702,7 +2702,7 @@ static uint32_t compiler__emit_jump(Compiler* c, uint8_t instruction,
   return c->chunk->code_count - 2;
 }
 
-static void compiler__patch_jump(Compiler* c, uint32_t offset) {
+void compiler__patch_jump(Compiler* c, uint32_t offset) {
   uint32_t jump = c->chunk->code_count - offset - 2;
   c->chunk->code[offset]     = (uint8_t)((jump >> 8) & 0xFF);
   c->chunk->code[offset + 1] = (uint8_t)(jump & 0xFF);
@@ -2710,7 +2710,7 @@ static void compiler__patch_jump(Compiler* c, uint32_t offset) {
 
 /* --- Internal: Emit OP_CHECK_ERROR with offset 0 (return from frame) --- */
 
-static void compiler__emit_check_error(Compiler* c, uint32_t line) {
+void compiler__emit_check_error(Compiler* c, uint32_t line) {
   compiler__emit_byte(c, OP_CHECK_ERROR, line);
   if (c->in_try_body) {
     /* Record position for later patching to jump to try handler */
@@ -2741,7 +2741,7 @@ static void compiler__emit_check_error(Compiler* c, uint32_t line) {
  * @param suspension_count Number of suspension points (from SuspensionAnalysis)
  * @param line             Source line for debug info
  */
-static void compiler__emit_sm_dispatch_table(Compiler* c,
+void compiler__emit_sm_dispatch_table(Compiler* c,
                                               uint32_t suspension_count,
                                               uint32_t line) {
   if (suspension_count == 0) return;
@@ -2786,9 +2786,9 @@ static void compiler__emit_sm_dispatch_table(Compiler* c,
 /* --- Internal: State machine body compilation (US-007) --- */
 
 /* Forward declarations needed by SM compilation */
-static void compiler__compile_node(Compiler* c, AstNode* node);
-static void compiler__emit_check_error(Compiler* c, uint32_t line);
-static int  compiler__head_matches(AstNode* head, const char* name, uint32_t len);
+void compiler__compile_node(Compiler* c, AstNode* node);
+void compiler__emit_check_error(Compiler* c, uint32_t line);
+int  compiler__head_matches(AstNode* head, const char* name, uint32_t len);
 
 /**
  * Compile a generator body as a state machine function.
@@ -2811,7 +2811,7 @@ static int  compiler__head_matches(AstNode* head, const char* name, uint32_t len
  * When false, all statement results are consumed by check_error and nil is
  * returned (generator exhaustion pattern).
  */
-static void compiler__compile_sm_stmts(Compiler* c, AstNode** stmts,
+void compiler__compile_sm_stmts(Compiler* c, AstNode** stmts,
                                         uint32_t count, uint32_t line,
                                         bool return_last_value) {
   SuspensionAnalysis* analysis = c->sm_analysis;
@@ -2851,7 +2851,7 @@ static void compiler__compile_sm_stmts(Compiler* c, AstNode** stmts,
   compiler__emit_byte(c, OP_RETURN, line);
 }
 
-static void compiler__compile_sm_body(Compiler* c, AstNode* body_block,
+void compiler__compile_sm_body(Compiler* c, AstNode* body_block,
                                        uint32_t line) {
   uint32_t stmt_count = body_block->data.block.count;
   AstNode** stmts = body_block->data.block.commands;
@@ -2859,11 +2859,11 @@ static void compiler__compile_sm_body(Compiler* c, AstNode* body_block,
 }
 
 /* Forward declarations */
-static void compiler__compile_node(Compiler* c, AstNode* node);
-static int  compiler__head_matches(AstNode* head, const char* name, uint32_t len);
-static void compiler__emit_check_error(Compiler* c, uint32_t line);
-static void compiler__compile_command(Compiler* c, AstNode* node);
-static void compiler__compile_block_expr(Compiler* c, AstNode* block_node);
+void compiler__compile_node(Compiler* c, AstNode* node);
+int  compiler__head_matches(AstNode* head, const char* name, uint32_t len);
+void compiler__emit_check_error(Compiler* c, uint32_t line);
+void compiler__compile_command(Compiler* c, AstNode* node);
+void compiler__compile_block_expr(Compiler* c, AstNode* block_node);
 
 /**
  * Compile a parallel/race body block as a closure.
@@ -2871,7 +2871,7 @@ static void compiler__compile_block_expr(Compiler* c, AstNode* block_node);
  * (suspending, with __sm/__rv params and state machine compilation).
  * Pushes the closure onto the stack.
  */
-static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
+void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
                                              uint32_t line, uint32_t col) {
   if (body_block->type != AST_BLOCK) {
     compiler__error(c, line, col, "parallel body must be a block");
@@ -2979,7 +2979,7 @@ static void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
 
 /* --- Internal: Compile block as expression (last stmt value stays on stack) --- */
 
-static void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
+void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
   uint32_t line  = block_node->start.line;
   uint32_t count = block_node->data.block.count;
   uint32_t scope_start_locals = c->local_count;
@@ -3026,7 +3026,7 @@ static void compiler__compile_block_expr(Compiler* c, AstNode* block_node) {
 
 /* --- Internal: Command head matching --- */
 
-static int compiler__head_matches(AstNode* head, const char* name, uint32_t len) {
+int compiler__head_matches(AstNode* head, const char* name, uint32_t len) {
   return head->type == AST_LIT_STRING &&
          head->data.lit_string.length == len &&
          memcmp(head->data.lit_string.value, name, len) == 0;
@@ -3034,7 +3034,7 @@ static int compiler__head_matches(AstNode* head, const char* name, uint32_t len)
 
 /* --- Internal: Determine known arity of an AST expression --- */
 
-static int16_t compiler__node_known_arity(Compiler* c, AstNode* node) {
+int16_t compiler__node_known_arity(Compiler* c, AstNode* node) {
   if (node->type == AST_VAR_REF) {
     uint32_t name_len = node->data.var_ref.length;
     if (name_len <= 7) {
@@ -3060,7 +3060,7 @@ static int16_t compiler__node_known_arity(Compiler* c, AstNode* node) {
 
 /* --- Internal: Builtin arity error helper --- */
 
-static void compiler__builtin_arity_error(Compiler* c, uint32_t line,
+void compiler__builtin_arity_error(Compiler* c, uint32_t line,
                                            uint32_t col, const char* name,
                                            const char* expected_desc,
                                            uint32_t got) {
@@ -3073,7 +3073,7 @@ static void compiler__builtin_arity_error(Compiler* c, uint32_t line,
 
 /* --- Internal: Auto-box unboxed types (emit OP_TO_DYN if needed) --- */
 
-static void compiler__ensure_boxed(Compiler* c, uint32_t line) {
+void compiler__ensure_boxed(Compiler* c, uint32_t line) {
   if (is_unboxed_type(c->last_expr_type)) {
     compiler__emit_byte(c, OP_TO_DYN, line);
     compiler__emit_byte(c, (uint8_t)c->last_expr_type, line);
@@ -3083,7 +3083,7 @@ static void compiler__ensure_boxed(Compiler* c, uint32_t line) {
 
 /* --- Internal: Map dynamic opcode to typed opcode for a given type --- */
 
-static uint8_t compiler__typed_op(uint8_t dyn_op, JaclType type) {
+uint8_t compiler__typed_op(uint8_t dyn_op, JaclType type) {
   if (type == TYPE_I64) {
     switch (dyn_op) {
       case OP_ADD: return OP_ADD_I64;
@@ -3134,7 +3134,7 @@ static uint8_t compiler__typed_op(uint8_t dyn_op, JaclType type) {
 
 /* --- Internal: Compile a typed binary operation --- */
 
-static void compiler__compile_binary(Compiler* c, AstNode** args,
+void compiler__compile_binary(Compiler* c, AstNode** args,
                                      uint8_t op, const char* op_verb,
                                      uint32_t line, uint32_t col) {
   /* Compile LHS */
@@ -3175,7 +3175,7 @@ static void compiler__compile_binary(Compiler* c, AstNode** args,
 
 /* --- Internal: Shared HOF builtin compilation (transform/each/filter) --- */
 
-static void compiler__compile_hof_builtin(Compiler* c, const char* name,
+void compiler__compile_hof_builtin(Compiler* c, const char* name,
                                            AstNode** args, uint32_t argc,
                                            uint8_t opcode,
                                            uint32_t line, uint32_t col) {
@@ -3231,7 +3231,7 @@ static void compiler__compile_hof_builtin(Compiler* c, const char* name,
  * For globals (scope_depth==0): each element stored with OP_DEF_GLOBAL.
  * rest_name/rest_name_len: if non-NULL, collects remaining elements into a vector.
  */
-static void compiler__compile_destructure_vec(
+void compiler__compile_destructure_vec(
     Compiler* c,
     const char** d_names, uint32_t* d_name_lens,
     const char** d_types, uint32_t* d_type_lens,
@@ -3515,7 +3515,7 @@ static void compiler__compile_destructure_vec(
  * For globals: defines each extracted value as a global.
  * rest_name/rest_name_len: if non-NULL, collects remaining fields into a map.
  */
-static void compiler__compile_destructure_named(
+void compiler__compile_destructure_named(
     Compiler* c,
     const char** d_names, uint32_t* d_name_lens,
     const char** d_types, uint32_t* d_type_lens,
@@ -3892,9 +3892,9 @@ static void compiler__compile_destructure_named(
  *   [| [cmd1 a] val]       →  [val [cmd1 a]]      (wrap as call)
  * ----------------------------------------------------------------------- */
 
-static void compiler__compile_command(Compiler* c, AstNode* node);
+void compiler__compile_command(Compiler* c, AstNode* node);
 
-static void compiler__rewrite_binding_op(Compiler* c, AstNode* node,
+void compiler__rewrite_binding_op(Compiler* c, AstNode* node,
                                           const char* target, uint32_t target_len) {
   AstNode* lhs = node->data.command.args[0];
   AstNode* rhs = node->data.command.args[1];
@@ -3954,7 +3954,7 @@ static void compiler__rewrite_binding_op(Compiler* c, AstNode* node,
   (void)line;
 }
 
-static void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
+void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
   AstNode* lhs = node->data.command.args[0];
   AstNode* rhs = node->data.command.args[1];
 
@@ -3990,7 +3990,7 @@ static void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
 
 /* --- Internal: Compile a command invocation --- */
 
-static void compiler__compile_command(Compiler* c, AstNode* node) {
+void compiler__compile_command(Compiler* c, AstNode* node) {
   AstNode* head = node->data.command.head;
   uint32_t argc = node->data.command.arg_count;
   AstNode** args = node->data.command.args;
@@ -7498,7 +7498,7 @@ static void compiler__compile_command(Compiler* c, AstNode* node) {
 
 /* --- Internal: Compile a single AST node --- */
 
-static void compiler__compile_node(Compiler* c, AstNode* node) {
+void compiler__compile_node(Compiler* c, AstNode* node) {
   uint32_t line = node->start.line;
   c->last_expr_type = TYPE_DYN;  /* default; specific cases override */
 
@@ -8139,7 +8139,7 @@ static void compiler__compile_node(Compiler* c, AstNode* node) {
  * Check if any top-level statement is suspending (uses await/parallel/race
  * or calls a suspending proc). Used to decide if top-level SM wrapping is needed.
  */
-static bool compiler__top_level_suspends(AstNode** stmts, uint32_t count,
+bool compiler__top_level_suspends(AstNode** stmts, uint32_t count,
                                           SuspensionMap* map) {
   for (uint32_t i = 0; i < count; i++) {
     if (ast__contains_suspension(stmts[i], map)) return true;
@@ -8147,7 +8147,7 @@ static bool compiler__top_level_suspends(AstNode** stmts, uint32_t count,
   return false;
 }
 
-static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
+CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       JaclInternTable* intern_table,
                                       ThreadHeap* heap,
                                       StructTypeRegistry* seed_registry) {
@@ -8359,7 +8359,7 @@ static CompileResult compiler_compile(ParseResult parse, arena_t* arena,
 
 /* Populate a Module's export list from the compiler's global_arities,
    excluding underscore-prefixed (private) names. */
-static void module__populate_exports(Module* mod, Compiler* c) {
+void module__populate_exports(Module* mod, Compiler* c) {
   /* Count non-private globals */
   uint32_t count = 0;
   for (uint32_t i = 0; i < c->global_arity_count; i++) {
@@ -8407,7 +8407,7 @@ static void module__populate_exports(Module* mod, Compiler* c) {
 /* Compile a module from a canonical file path.
    Reads the file, lexes, parses, and compiles into a new Module in the cache.
    Returns true on success, false on error (error reported via importer). */
-static bool compiler__compile_module(const char* canonical_path,
+bool compiler__compile_module(const char* canonical_path,
                                      Compiler* importer,
                                      uint32_t line, uint32_t col) {
   arena_t* arena = importer->arena;
@@ -8509,7 +8509,7 @@ static bool compiler__compile_module(const char* canonical_path,
 /* Compile a program starting from a root file.
    Recursively compiles all dependency modules and returns them in
    topological order (dependencies first, root module last). */
-static ProgramResult jacl_compile_program(const char* root_path,
+ProgramResult jacl_compile_program(const char* root_path,
                                           arena_t* arena,
                                           JaclInternTable* intern_table,
                                           ThreadHeap* heap) {

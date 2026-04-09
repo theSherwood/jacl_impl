@@ -45,14 +45,14 @@ typedef struct {
   arena_t*  arena;
 } NodeArray;
 
-static void parser__arr_init(NodeArray* arr, arena_t* arena) {
+void parser__arr_init(NodeArray* arr, arena_t* arena) {
   arr->cap   = PARSER_INITIAL_CAP;
   arr->count = 0;
   arr->arena = arena;
   arr->nodes = (AstNode**)arena_alloc(arena, sizeof(AstNode*) * arr->cap);
 }
 
-static void parser__arr_push(NodeArray* arr, AstNode* node) {
+void parser__arr_push(NodeArray* arr, AstNode* node) {
   if (arr->count >= arr->cap) {
     uint32_t new_cap = arr->cap * 2;
     AstNode** new_nodes = (AstNode**)arena_alloc(arr->arena,
@@ -76,7 +76,7 @@ typedef struct {
   uint32_t error_count;
 } Parser;
 
-static void parser__init(Parser* p, LexResult tokens, arena_t* arena) {
+void parser__init(Parser* p, LexResult tokens, arena_t* arena) {
   p->tokens      = tokens.tokens;
   p->count       = tokens.count;
   p->pos         = 0;
@@ -84,11 +84,11 @@ static void parser__init(Parser* p, LexResult tokens, arena_t* arena) {
   p->error_count = 0;
 }
 
-static Token* parser__peek(Parser* p) {
+Token* parser__peek(Parser* p) {
   return &p->tokens[p->pos];
 }
 
-static Token* parser__advance(Parser* p) {
+Token* parser__advance(Parser* p) {
   Token* tok = &p->tokens[p->pos];
   if (tok->type != TOKEN_EOF) {
     p->pos++;
@@ -96,11 +96,11 @@ static Token* parser__advance(Parser* p) {
   return tok;
 }
 
-static int parser__at_end(Parser* p) {
+int parser__at_end(Parser* p) {
   return p->tokens[p->pos].type == TOKEN_EOF;
 }
 
-static SourcePos parser__token_start(Token* tok) {
+SourcePos parser__token_start(Token* tok) {
   SourcePos pos;
   pos.line   = tok->line;
   pos.column = tok->column;
@@ -108,7 +108,7 @@ static SourcePos parser__token_start(Token* tok) {
   return pos;
 }
 
-static SourcePos parser__token_end(Token* tok) {
+SourcePos parser__token_end(Token* tok) {
   SourcePos pos;
   pos.line   = tok->line;
   pos.column = tok->column + tok->length;
@@ -120,7 +120,7 @@ static SourcePos parser__token_end(Token* tok) {
  * Internal: Error node creation
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__error(Parser* p, const char* message, Token* tok) {
+AstNode* parser__error(Parser* p, const char* message, Token* tok) {
   AstNode* node = ast_alloc(p->arena);
   node->type  = AST_ERROR;
   node->start = parser__token_start(tok);
@@ -134,7 +134,7 @@ static AstNode* parser__error(Parser* p, const char* message, Token* tok) {
  * Internal: Skip newlines
  * ------------------------------------------------------------------------- */
 
-static void parser__skip_newlines(Parser* p) {
+void parser__skip_newlines(Parser* p) {
   while (parser__peek(p)->type == TOKEN_NEWLINE) {
     parser__advance(p);
   }
@@ -148,7 +148,7 @@ static void parser__skip_newlines(Parser* p) {
  * or EOF. Respects brace depth to avoid consuming an enclosing '}'.
  * ------------------------------------------------------------------------- */
 
-static void parser__sync_bracket(Parser* p) {
+void parser__sync_bracket(Parser* p) {
   int bracket_depth = 1;
   int brace_depth = 0;
   while (!parser__at_end(p)) {
@@ -181,7 +181,7 @@ static void parser__sync_bracket(Parser* p) {
  * Returns NULL if the current token is not an atom.
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_atom(Parser* p) {
+AstNode* parser__parse_atom(Parser* p) {
   Token* tok = parser__peek(p);
 
   switch (tok->type) {
@@ -289,10 +289,10 @@ static AstNode* parser__parse_atom(Parser* p) {
  * Internal: Forward declarations for mutual recursion
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_expr(Parser* p);
-static AstNode* parser__parse_block(Parser* p);
-static AstNode* parser__parse_interp_string(Parser* p);
-static AstNode* parser__parse_infix(Parser* p);
+AstNode* parser__parse_expr(Parser* p);
+AstNode* parser__parse_block(Parser* p);
+AstNode* parser__parse_interp_string(Parser* p);
+AstNode* parser__parse_infix(Parser* p);
 
 /* -------------------------------------------------------------------------
  * Internal: Parse bracketed command [cmd arg1 arg2]
@@ -301,7 +301,7 @@ static AstNode* parser__parse_infix(Parser* p);
  * Returns AST_COMMAND on success, AST_ERROR on failure.
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_command(Parser* p) {
+AstNode* parser__parse_command(Parser* p) {
   Token* open = parser__advance(p); /* consume '[' */
   SourcePos cmd_start = parser__token_start(open);
 
@@ -520,7 +520,7 @@ static AstNode* parser__parse_command(Parser* p) {
  * Internal: Sync to matching ')' for error recovery in infix mode
  * ------------------------------------------------------------------------- */
 
-static void parser__sync_paren(Parser* p) {
+void parser__sync_paren(Parser* p) {
   int depth = 1;
   while (!parser__at_end(p)) {
     TokenType t = parser__peek(p)->type;
@@ -549,7 +549,7 @@ static void parser__sync_paren(Parser* p) {
  *   TOKEN_COLON: :  TOKEN_DOUBLE_COLON: ::
  * ------------------------------------------------------------------------- */
 
-static int parser__is_operator(Token* tok) {
+int parser__is_operator(Token* tok) {
   return tok->type == TOKEN_OPERATOR
       || tok->type == TOKEN_AND
       || tok->type == TOKEN_OR
@@ -567,7 +567,7 @@ static int parser__is_operator(Token* tok) {
  * Returns the original expr unchanged if no arrow follows.
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
+AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
   while (!parser__at_end(p) && parser__peek(p)->type == TOKEN_ARROW) {
     Token* arrow = parser__advance(p); /* consume '->' */
 
@@ -618,7 +618,7 @@ static AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
  * before dispatching to primary expression parsing.
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_infix_operand(Parser* p) {
+AstNode* parser__parse_infix_operand(Parser* p) {
   Token* tok = parser__peek(p);
 
   /* Unary prefix: - (negation) */
@@ -770,7 +770,7 @@ static AstNode* parser__parse_infix_operand(Parser* p) {
  * simple grouping like ($x).
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_infix(Parser* p) {
+AstNode* parser__parse_infix(Parser* p) {
   Token* open = parser__advance(p); /* consume '(' */
 
   /* Empty parens → error */
@@ -850,7 +850,7 @@ static AstNode* parser__parse_infix(Parser* p) {
  *   otherwise       → NULL
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_expr(Parser* p) {
+AstNode* parser__parse_expr(Parser* p) {
   Token* tok = parser__peek(p);
   AstNode* result = NULL;
 
@@ -923,14 +923,14 @@ static AstNode* parser__parse_expr(Parser* p) {
  * Internal: Check if current token ends a command
  * ------------------------------------------------------------------------- */
 
-static int parser__is_command_end(Parser* p) {
+int parser__is_command_end(Parser* p) {
   TokenType t = parser__peek(p)->type;
   return t == TOKEN_NEWLINE || t == TOKEN_SEMICOLON || t == TOKEN_COMMA
       || t == TOKEN_EOF || t == TOKEN_RBRACE;
 }
 
 /* Check if current token ends a command operand (command-end OR operator) */
-static int parser__is_operand_end(Parser* p) {
+int parser__is_operand_end(Parser* p) {
   if (parser__is_command_end(p)) return 1;
   return parser__is_operator(parser__peek(p));
 }
@@ -942,7 +942,7 @@ static int parser__is_operand_end(Parser* p) {
  * Returns AST_USE on success, AST_ERROR on failure.
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_use(Parser* p) {
+AstNode* parser__parse_use(Parser* p) {
   Token* use_tok = parser__advance(p); /* consume 'use' */
   SourcePos start = parser__token_start(use_tok);
 
@@ -1027,7 +1027,7 @@ static AstNode* parser__parse_use(Parser* p) {
  * "struct{x:i32,y:i32}" in the arena. Returns NULL on error.
  * ------------------------------------------------------------------------- */
 
-static const char* parser__parse_inline_struct_type(Parser* p, uint32_t* out_len) {
+const char* parser__parse_inline_struct_type(Parser* p, uint32_t* out_len) {
   /* Consume TOKEN_WORD("struct") */
   parser__advance(p);
   /* Consume TOKEN_LBRACE */
@@ -1139,7 +1139,7 @@ static const char* parser__parse_inline_struct_type(Parser* p, uint32_t* out_len
   return result;
 }
 
-static AstNode* parser__parse_defstruct(Parser* p) {
+AstNode* parser__parse_defstruct(Parser* p) {
   Token* kw_tok = parser__advance(p); /* consume 'struct'/'defstruct' */
   SourcePos start = parser__token_start(kw_tok);
 
@@ -1281,7 +1281,7 @@ static AstNode* parser__parse_defstruct(Parser* p) {
  * so the compiler can process them identically.
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_proc_params(Parser* p) {
+AstNode* parser__parse_proc_params(Parser* p) {
   Token* open = parser__advance(p); /* consume '{' */
   SourcePos start = parser__token_start(open);
 
@@ -1362,7 +1362,7 @@ static AstNode* parser__parse_proc_params(Parser* p) {
  * Produces the same AST_COMMAND shape the compiler expects.
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
+AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
   SourcePos start = proc_head->start;
   NodeArray args;
   parser__arr_init(&args, p->arena);
@@ -1436,7 +1436,7 @@ static AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
  * 2 args (no else) or 3 args (with else block).
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
+AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
   SourcePos start = if_head->start;
 
   /* Parse condition expression */
@@ -1574,7 +1574,7 @@ static AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
  * Produces AST_COMMAND with head="while", 2 args (condition + body block).
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_while_form(Parser* p, AstNode* while_head) {
+AstNode* parser__parse_while_form(Parser* p, AstNode* while_head) {
   SourcePos start = while_head->start;
 
   /* Parse condition expression */
@@ -1614,7 +1614,7 @@ static AstNode* parser__parse_while_form(Parser* p, AstNode* while_head) {
  * Does NOT advance the parser position.
  * ------------------------------------------------------------------------- */
 
-static int parser__lookahead_is_destructure_binding(Parser* p) {
+int parser__lookahead_is_destructure_binding(Parser* p) {
   if (parser__peek(p)->type != TOKEN_LBRACKET) return 0;
   uint32_t saved = p->pos;
   int depth = 0;
@@ -1649,7 +1649,7 @@ static int parser__lookahead_is_destructure_binding(Parser* p) {
  * Returns AST_DESTRUCTURE_VEC node.
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_destructure_vec_pattern(Parser* p) {
+AstNode* parser__parse_destructure_vec_pattern(Parser* p) {
   Token* open = parser__advance(p); /* consume '[' */
   SourcePos start = parser__token_start(open);
 
@@ -1786,7 +1786,7 @@ static AstNode* parser__parse_destructure_vec_pattern(Parser* p) {
  * Does NOT advance the parser position.
  * ------------------------------------------------------------------------- */
 
-static int parser__lookahead_is_named_destructure_binding(Parser* p) {
+int parser__lookahead_is_named_destructure_binding(Parser* p) {
   if (parser__peek(p)->type != TOKEN_LBRACE) return 0;
   uint32_t saved = p->pos;
   int depth = 0;
@@ -1831,7 +1831,7 @@ static int parser__lookahead_is_named_destructure_binding(Parser* p) {
  * Returns AST_DESTRUCTURE_NAMED node.
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_destructure_named_pattern(Parser* p) {
+AstNode* parser__parse_destructure_named_pattern(Parser* p) {
   Token* open = parser__advance(p); /* consume '{' */
   SourcePos start = parser__token_start(open);
 
@@ -1969,7 +1969,7 @@ static AstNode* parser__parse_destructure_named_pattern(Parser* p) {
  * Non-word atoms ($var, literals, [], (), {}) are returned bare.
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_cmd_operand(Parser* p) {
+AstNode* parser__parse_cmd_operand(Parser* p) {
   /* break [value] → AST_BREAK */
   Token* peek = parser__peek(p);
   if (peek->type == TOKEN_BREAK ||
@@ -2106,7 +2106,7 @@ static AstNode* parser__parse_cmd_operand(Parser* p) {
  * In {} mode, operands are commands (head + args).
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_cmd_expr(Parser* p) {
+AstNode* parser__parse_cmd_expr(Parser* p) {
   AstNode* left = parser__parse_cmd_operand(p);
   if (left == NULL || left->type == AST_ERROR) return left;
 
@@ -2149,7 +2149,7 @@ static AstNode* parser__parse_cmd_expr(Parser* p) {
  * Returns AST_BLOCK on success, AST_ERROR on failure.
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_block(Parser* p) {
+AstNode* parser__parse_block(Parser* p) {
   Token* open = parser__advance(p); /* consume '{' */
   SourcePos block_start = parser__token_start(open);
 
@@ -2208,7 +2208,7 @@ static AstNode* parser__parse_block(Parser* p) {
  * AST_INTERP_STRING. Empty text segments are skipped.
  * ------------------------------------------------------------------------- */
 
-static AstNode* parser__parse_interp_string(Parser* p) {
+AstNode* parser__parse_interp_string(Parser* p) {
   Token* begin = parser__advance(p); /* consume TOKEN_STRING_BEGIN */
   SourcePos str_start = parser__token_start(begin);
 

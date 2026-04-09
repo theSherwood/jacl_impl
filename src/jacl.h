@@ -1,0 +1,1825 @@
+/*
+ * JACL — Public header for libjacl.a
+ *
+ * Include this file in test and application code that links against libjacl.a.
+ * All types and function declarations mirror the unity build (jacl.c).
+ *
+ * This file is hand-maintained. When adding new types or functions to the
+ * source files, add corresponding declarations here.
+ */
+#ifndef JACL_H
+#define JACL_H
+
+/* ========================================================================
+ * System headers
+ * ======================================================================== */
+
+#include <inttypes.h>
+#include <math.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ========================================================================
+ * Infrastructure (single-header libraries, header-only mode)
+ * ======================================================================== */
+
+#define ARENA_IMPLEMENTATION
+#include "../lib/arena/arena.h"
+#include "../lib/platform/platform.h"
+#include "../lib/unicode/unicode.h"
+
+/* ========================================================================
+ * Types — value.c
+ * ======================================================================== */
+
+typedef uint64_t JaclVal;
+
+#define JACL_TAG_SHIFT      56
+#define JACL_TAG_MASK       ((uint64_t)0xFF << JACL_TAG_SHIFT)
+#define JACL_PAYLOAD_MASK   ((UINT64_C(1) << JACL_TAG_SHIFT) - 1)
+
+#define JACL_FLAG_TAINTED   ((uint64_t)1 << 63)
+#define JACL_FLAG_SECRET    ((uint64_t)1 << 62)
+#define JACL_FLAG_ERROR     ((uint64_t)1 << 61)
+#define JACL_FLAGS_MASK     (JACL_FLAG_TAINTED | JACL_FLAG_SECRET | JACL_FLAG_ERROR)
+
+#define JACL_TYPE_MASK      ((uint64_t)0x1F << JACL_TAG_SHIFT)
+
+#define JACL_TAG_NIL            ((uint64_t)0x00 << JACL_TAG_SHIFT)
+#define JACL_TAG_BOOL           ((uint64_t)0x01 << JACL_TAG_SHIFT)
+#define JACL_TAG_I32            ((uint64_t)0x02 << JACL_TAG_SHIFT)
+#define JACL_TAG_F32            ((uint64_t)0x03 << JACL_TAG_SHIFT)
+#define JACL_TAG_INLINE_STRING  ((uint64_t)0x04 << JACL_TAG_SHIFT)
+#define JACL_TAG_STRING         ((uint64_t)0x05 << JACL_TAG_SHIFT)
+#define JACL_TAG_VECTOR         ((uint64_t)0x06 << JACL_TAG_SHIFT)
+#define JACL_TAG_MAP            ((uint64_t)0x07 << JACL_TAG_SHIFT)
+#define JACL_TAG_CLOSURE        ((uint64_t)0x08 << JACL_TAG_SHIFT)
+#define JACL_TAG_BIGNUM         ((uint64_t)0x09 << JACL_TAG_SHIFT)
+#define JACL_TAG_CELL           ((uint64_t)0x0A << JACL_TAG_SHIFT)
+#define JACL_TAG_BOX            ((uint64_t)0x0B << JACL_TAG_SHIFT)
+#define JACL_TAG_ATOM           ((uint64_t)0x0C << JACL_TAG_SHIFT)
+#define JACL_TAG_U32            ((uint64_t)0x0D << JACL_TAG_SHIFT)
+#define JACL_TAG_I64            ((uint64_t)0x0E << JACL_TAG_SHIFT)
+#define JACL_TAG_U64            ((uint64_t)0x0F << JACL_TAG_SHIFT)
+#define JACL_TAG_F64            ((uint64_t)0x10 << JACL_TAG_SHIFT)
+#define JACL_TAG_FUTURE         ((uint64_t)0x11 << JACL_TAG_SHIFT)
+#define JACL_TAG_STRUCT         ((uint64_t)0x12 << JACL_TAG_SHIFT)
+#define JACL_TAG_NATIVE_FN     ((uint64_t)0x13 << JACL_TAG_SHIFT)
+#define JACL_TAG_ROPE_STRING   ((uint64_t)0x14 << JACL_TAG_SHIFT)
+#define JACL_TAG_STREAM        ((uint64_t)0x15 << JACL_TAG_SHIFT)
+#define JACL_TAG_STATE_MACHINE ((uint64_t)0x16 << JACL_TAG_SHIFT)
+
+typedef struct { int64_t value; } JaclHeapI64;
+typedef struct { uint64_t value; } JaclHeapU64;
+typedef struct { double value; } JaclHeapF64;
+
+#define JACL_NIL    ((JaclVal)JACL_TAG_NIL)
+#define JACL_TRUE   ((JaclVal)(JACL_TAG_BOOL | UINT64_C(1)))
+#define JACL_FALSE  ((JaclVal)(JACL_TAG_BOOL))
+
+typedef struct {
+    JaclVal value;
+} JaclMutableRef;
+
+typedef char jacl_assert_ptr_fits_payload_[(sizeof(void *) <= sizeof(uint64_t)) ? 1 : -1];
+
+/* ========================================================================
+ * Types — gc.c
+ * ======================================================================== */
+
+typedef enum {
+    OBJ_CLOSURE,
+    OBJ_STRING,
+    OBJ_HEAP_I64,
+    OBJ_HEAP_U64,
+    OBJ_HEAP_F64,
+    OBJ_MUTABLE_REF,
+    OBJ_BIGNUM,
+    OBJ_HAMT_INTERNAL,
+    OBJ_HAMT_LEAF,
+    OBJ_HAMT_COLLISION,
+    OBJ_RRB_INTERNAL,
+    OBJ_RRB_LEAF,
+    OBJ_RRB_ROOT,
+    OBJ_FUTURE,
+    OBJ_FUTURE_WAITER,
+    OBJ_PARALLEL_AGG,
+    OBJ_RACE_AGG,
+    OBJ_STRUCT,
+    OBJ_ROPE_STRING,
+    OBJ_ROPE_LEAF,
+    OBJ_ROPE_INTERNAL,
+    OBJ_STREAM,
+    OBJ_STATE_MACHINE
+} GCObjType;
+
+#define GC_BLOCK_SIZE       65536
+#define GC_LINE_SIZE        128
+#define GC_LINES_PER_BLOCK  512
+
+#ifndef GC_MAX_HEAP_BLOCKS
+#define GC_MAX_HEAP_BLOCKS 4096
+#endif
+
+#define GC_LINE_FREE     0
+#define GC_LINE_OCCUPIED 1
+
+#define GC_THRESHOLD     (1024 * 1024)
+#define GC_THRESHOLD_MIN (256 * 1024)
+#define GC_THRESHOLD_MAX (16 * 1024 * 1024)
+
+typedef struct {
+    uint32_t epoch;
+    uint8_t  mark          : 1;
+    uint8_t  gen           : 1;
+    uint8_t  survive_count : 2;
+    uint8_t  _reserved     : 4;
+    uint8_t  obj_type;
+    uint16_t alloc_total;
+} GCHeader;
+
+typedef struct GCBlock {
+    uint8_t         payload[GC_BLOCK_SIZE];
+    uint8_t         line_map[GC_LINES_PER_BLOCK];
+    struct GCBlock *next;
+} GCBlock;
+
+typedef struct {
+    GCBlock         *free_list;
+    platform_mutex_t mutex;
+    uint32_t         total_blocks_allocated;
+    uint32_t         max_blocks;
+} BlockPool;
+
+typedef struct {
+    GCBlock   *blocks;
+    GCBlock   *current_block;
+    uint8_t   *cursor;
+    uint8_t   *limit;
+    size_t     bytes_since_gc;
+    size_t     gc_threshold;
+    BlockPool *pool;
+    uint8_t    current_mark;
+    bool       needs_gc;
+    size_t     old_gen_bytes;
+    size_t     last_major_old_gen_bytes;
+    uint32_t   gc_cycle_count;
+} ThreadHeap;
+
+typedef struct {
+    uint32_t type_idx;
+    uint32_t _pad;
+    uint8_t  data[];
+} JaclStruct;
+
+typedef struct {
+    JaclVal  *entries;
+    uint32_t  count;
+    uint32_t  cap;
+} GreyBuffer;
+
+typedef struct {
+    JaclVal  *entries;
+    uint32_t  count;
+    uint32_t  cap;
+} RememberedSet;
+
+typedef struct FutureWaiter {
+    JaclVal               continuation;
+    struct FutureWaiter  *next;
+} FutureWaiter;
+
+typedef struct {
+    volatile uint32_t   state;
+    volatile uint64_t   result;
+    FutureWaiter       *waiters;
+    volatile uint32_t   lock;
+} JaclFuture;
+
+#define FUTURE_PENDING      0
+#define FUTURE_RESOLVED     1
+#define FUTURE_ERROR        2
+
+#define STREAM_PENDING      0
+#define STREAM_CONSUMED     1
+#define STREAM_EXHAUSTED    2
+#define STREAM_ERROR        3
+#define STREAM_KIND_GENERATOR  0
+#define STREAM_KIND_FILTER     1
+#define STREAM_KIND_TRANSFORM  2
+#define STREAM_KIND_TAKE       3
+#define STREAM_KIND_LINES      4
+#define STREAM_MAX_ARGS     8
+
+typedef struct {
+    uint32_t  state;
+    uint32_t  kind;
+    JaclVal   next_fn;
+    JaclVal   cached_value;
+    JaclVal   state_machine;
+    JaclVal   args[STREAM_MAX_ARGS];
+    uint8_t   arg_count;
+} JaclStream;
+
+typedef struct {
+    volatile uint32_t completed;
+    volatile uint32_t errored;
+    volatile uint64_t error_val;
+    uint32_t          count;
+    JaclVal           state_machine;
+    JaclVal           results[];
+} ParallelAgg;
+
+typedef struct {
+    volatile uint32_t settled;
+    JaclVal           state_machine;
+} RaceAgg;
+
+typedef struct {
+    uint32_t resume_point;
+    uint32_t field_count;
+    JaclVal  error_k;
+    JaclVal  sm_closure;
+    JaclVal  fields[];
+} JaclStateMachine;
+
+#define GREY_BUF_INIT_CAP   256
+#define REMEMBERED_SET_INIT_CAP  256
+
+/* Thread-local variables (defined in gc.c, string.c, runtime.c) */
+extern JACL_THREAD_LOCAL uint32_t gc__thread_epoch;
+extern JACL_THREAD_LOCAL ThreadHeap *gc__current_heap;
+extern JACL_THREAD_LOCAL void (*gc__emergency_gc_fn)(void *ctx);
+extern JACL_THREAD_LOCAL void *gc__emergency_gc_ctx;
+extern JACL_THREAD_LOCAL bool gc__interning;
+
+/* ========================================================================
+ * Rope library (included after gc.c types, before string.c)
+ *
+ * The rope library is a template header that provides the `rope` type and
+ * rope manipulation functions. In the unity build (jacl.c), it's included
+ * with GC-mode macros so rope nodes are GC-allocated. Here we include it
+ * the same way so tests see the same types.
+ * ======================================================================== */
+
+/* Forward-declare gc_alloc so the STREE_GC_ALLOC macro can reference it. */
+extern void *gc_alloc(ThreadHeap *heap, uint8_t obj_type, size_t payload_size);
+
+#define STREE_ALLOCATOR {libc_alloc, libc_realloc, libc_free, NULL}
+#define STREE_GC_MODE
+#define STREE_GC_ALLOC(t, sz)    gc_alloc(gc__current_heap, (t), (sz))
+#define STREE_GC_OBJ_INTERNAL    OBJ_ROPE_INTERNAL
+#define STREE_GC_OBJ_LEAF        OBJ_ROPE_LEAF
+#include "../lib/sum_tree/rope.h"
+
+/* ========================================================================
+ * Types — string.c
+ * ======================================================================== */
+
+#define INTERN_INIT_CAP     16
+#define INTERN_TOMBSTONE    ((JaclHeapString*)1)
+
+typedef struct {
+  uint32_t byte_len;
+  uint32_t grapheme_len;
+  uint32_t hash;
+  char     data[];
+} JaclHeapString;
+
+typedef struct {
+  JaclHeapString** entries;
+  uint32_t         count;
+  uint32_t         tombstone_count;
+  uint32_t         cap;
+  arena_t*         arena;
+  platform_mutex_t lock;
+} JaclInternTable;
+
+typedef struct {
+  uint32_t hash;
+  rope     r;
+} JaclRopeString;
+
+/* ========================================================================
+ * Types — lexer.c
+ * ======================================================================== */
+
+#define LEXER_INITIAL_CAP 256
+
+typedef enum {
+  TOKEN_LBRACKET,
+  TOKEN_RBRACKET,
+  TOKEN_LBRACE,
+  TOKEN_RBRACE,
+  TOKEN_LPAREN,
+  TOKEN_RPAREN,
+  TOKEN_SEMICOLON,
+  TOKEN_COMMA,
+  TOKEN_WORD,
+  TOKEN_OPERATOR,
+  TOKEN_INT,
+  TOKEN_FLOAT,
+  TOKEN_STRING,
+  TOKEN_STRING_BEGIN,
+  TOKEN_STRING_PART,
+  TOKEN_STRING_END,
+  TOKEN_INTERP_VAR,
+  TOKEN_INTERP_EXPR_START,
+  TOKEN_INTERP_EXPR_END,
+  TOKEN_VAR,
+  TOKEN_DOLLAR_BRACKET,
+  TOKEN_DOLLAR_PAREN,
+  TOKEN_USE,
+  TOKEN_STRUCT,
+  TOKEN_PIPE,
+  TOKEN_ARROW,
+  TOKEN_BACKSLASH,
+  TOKEN_BANG,
+  TOKEN_DOTDOT,
+  TOKEN_AMP,
+  TOKEN_AND,
+  TOKEN_OR,
+  TOKEN_NOT,
+  TOKEN_EQUALS,
+  TOKEN_COLON,
+  TOKEN_DOUBLE_COLON,
+  TOKEN_PROC,
+  TOKEN_IF,
+  TOKEN_ELIF,
+  TOKEN_ELSE,
+  TOKEN_WHILE,
+  TOKEN_FOR,
+  TOKEN_DEF,
+  TOKEN_MUT,
+  TOKEN_SET,
+  TOKEN_MATCH,
+  TOKEN_RETURN,
+  TOKEN_BREAK,
+  TOKEN_CONTINUE,
+  TOKEN_TRY,
+  TOKEN_NEWLINE,
+  TOKEN_ERROR,
+  TOKEN_EOF
+} TokenType;
+
+typedef struct {
+  TokenType type;
+  uint32_t  line;
+  uint32_t  column;
+  uint32_t  offset;
+  uint32_t  length;
+  union {
+    const char* text;
+    int32_t     int_val;
+    float       float_val;
+    const char* error_msg;
+  } payload;
+} Token;
+
+typedef struct {
+  Token*   tokens;
+  uint32_t count;
+  uint32_t error_count;
+} LexResult;
+
+typedef struct {
+  Token*   tokens;
+  uint32_t count;
+  uint32_t cap;
+  arena_t* arena;
+} TokenArray;
+
+typedef struct {
+  const char* source;
+  uint32_t    pos;
+  uint32_t    line;
+  uint32_t    col;
+  arena_t*    arena;
+} Lexer;
+
+typedef struct {
+  char*    data;
+  uint32_t len;
+  uint32_t cap;
+  arena_t* arena;
+} StringBuf;
+
+/* ========================================================================
+ * Types — ast.c
+ * ======================================================================== */
+
+#define AST__PP_INITIAL_CAP 256
+
+typedef enum {
+  AST_COMMAND,
+  AST_LIT_INT,
+  AST_LIT_FLOAT,
+  AST_LIT_STRING,
+  AST_VAR_REF,
+  AST_BLOCK,
+  AST_INTERP_STRING,
+  AST_USE,
+  AST_DEFSTRUCT,
+  AST_BREAK,
+  AST_CONTINUE,
+  AST_RETURN,
+  AST_DESTRUCTURE_VEC,
+  AST_DESTRUCTURE_NAMED,
+  AST_SPREAD,
+  AST_ERROR
+} AstNodeType;
+
+typedef struct {
+  uint32_t line;
+  uint32_t column;
+  uint32_t offset;
+} SourcePos;
+
+typedef struct AstNode AstNode;
+
+struct AstNode {
+  AstNodeType type;
+  SourcePos   start;
+  SourcePos   end;
+  union {
+    struct { AstNode*  head; AstNode** args; uint32_t arg_count; } command;
+    struct { int32_t   value; }                                    lit_int;
+    struct { float     value; }                                    lit_float;
+    struct { const char* value;   uint32_t length; }               lit_string;
+    struct { const char* name;    uint32_t length; }               var_ref;
+    struct { AstNode**   commands; uint32_t count; bool trailing_semi; } block;
+    struct { AstNode**   segments; uint32_t count; }               interp_string;
+    struct { const char* path; uint32_t path_len;
+             const char** names; uint32_t* name_lens;
+             uint32_t name_count; }                               use_decl;
+    struct { const char* name; uint32_t name_len;
+             const char** field_names; uint32_t* field_name_lens;
+             const char** field_types; uint32_t* field_type_lens;
+             uint32_t field_count; }                              defstruct;
+    struct { AstNode* value; }              break_stmt;
+    struct { AstNode* value; }              return_stmt;
+    struct { const char** names; uint32_t* name_lens;
+             const char** types; uint32_t* type_lens;
+             uint32_t count;
+             const char* rest_name; uint32_t rest_name_len; } destructure_vec;
+    struct { const char** names; uint32_t* name_lens;
+             const char** types; uint32_t* type_lens;
+             uint32_t count;
+             const char* rest_name; uint32_t rest_name_len;
+             int spread_all; } destructure_named;
+    struct { AstNode* expr; }                                      spread;
+    struct { const char* message; }                                error;
+  } data;
+};
+
+typedef struct {
+  char*    buf;
+  uint32_t len;
+  uint32_t cap;
+  arena_t* arena;
+} AstStrBuf;
+
+/* ========================================================================
+ * Types — parser.c
+ * ======================================================================== */
+
+#define PARSER_INITIAL_CAP 64
+
+typedef struct {
+  AstNode** nodes;
+  uint32_t  count;
+  uint32_t  error_count;
+} ParseResult;
+
+typedef struct {
+  AstNode** nodes;
+  uint32_t  count;
+  uint32_t  cap;
+  arena_t*  arena;
+} NodeArray;
+
+typedef struct {
+  Token*   tokens;
+  uint32_t count;
+  uint32_t pos;
+  arena_t* arena;
+  uint32_t error_count;
+} Parser;
+
+/* ========================================================================
+ * Types — bytecode.c
+ * ======================================================================== */
+
+#define BYTECODE_INIT_CODE_CAP  256
+#define BYTECODE_INIT_CONST_CAP 64
+
+typedef enum {
+  OP_CONST,
+  OP_NIL,
+  OP_TRUE,
+  OP_FALSE,
+  OP_POP,
+  OP_ADD,
+  OP_SUB,
+  OP_MUL,
+  OP_DIV,
+  OP_MOD,
+  OP_NEG,
+  OP_EQ,
+  OP_LT,
+  OP_GT,
+  OP_LE,
+  OP_GE,
+  OP_PRINT,
+  OP_DEF_GLOBAL,
+  OP_GET_GLOBAL,
+  OP_GET_LOCAL,
+  OP_SET_LOCAL,
+  OP_GET_UPVALUE,
+  OP_JUMP,
+  OP_JUMP_IF_FALSE,
+  OP_LOOP,
+  OP_CALL,
+  OP_TAIL_CALL,
+  OP_RETURN,
+  OP_CLOSURE,
+  OP_POP_N,
+  OP_CONCAT,
+  OP_STR_LEN,
+  OP_STR_BYTE_LEN,
+  OP_STR_INDEX,
+  OP_STR_SLICE,
+  OP_TO_STRING,
+  OP_VEC,
+  OP_VEC_GET,
+  OP_VEC_LEN,
+  OP_VEC_PUSH,
+  OP_VEC_SET,
+  OP_VEC_CONCAT,
+  OP_VEC_SLICE,
+  OP_VEC_SPREAD,
+  OP_MAP,
+  OP_MAP_GET,
+  OP_MAP_HAS,
+  OP_MAP_LEN,
+  OP_MAP_SET,
+  OP_MAP_REMOVE,
+  OP_MAP_KEYS,
+  OP_MAP_VALS,
+  OP_EACH,
+  OP_TRANSFORM,
+  OP_FILTER,
+  OP_ERROR,
+  OP_IS_ERROR,
+  OP_ERROR_VAL,
+  OP_CHECK_ERROR,
+  OP_JUMP_IF_ERROR,
+  OP_STACK_TRACE,
+  OP_MAKE_CELL,
+  OP_GET_CELL_LOCAL,
+  OP_SET_CELL_LOCAL,
+  OP_GET_CELL_UPVALUE,
+  OP_SET_CELL_UPVALUE,
+  OP_SET_GLOBAL,
+  OP_BOX,
+  OP_ATOM,
+  OP_DEREF,
+  OP_RESET,
+  OP_SWAP,
+  OP_IS_BOX,
+  OP_IS_ATOM,
+  OP_IS_FUTURE,
+  OP_AWAIT,
+  OP_SPAWN,
+  OP_RESOLVE_FUTURE,
+  OP_PARALLEL,
+  OP_RACE,
+  OP_COMPLETE_PARALLEL,
+  OP_COMPLETE_RACE,
+  OP_ADD_I64,
+  OP_SUB_I64,
+  OP_MUL_I64,
+  OP_DIV_I64,
+  OP_MOD_I64,
+  OP_NEG_I64,
+  OP_LT_I64,
+  OP_GT_I64,
+  OP_LE_I64,
+  OP_GE_I64,
+  OP_EQ_I64,
+  OP_DIV_U64,
+  OP_MOD_U64,
+  OP_LT_U64,
+  OP_GT_U64,
+  OP_LE_U64,
+  OP_GE_U64,
+  OP_ADD_F64,
+  OP_SUB_F64,
+  OP_MUL_F64,
+  OP_DIV_F64,
+  OP_MOD_F64,
+  OP_NEG_F64,
+  OP_LT_F64,
+  OP_GT_F64,
+  OP_LE_F64,
+  OP_GE_F64,
+  OP_EQ_F64,
+  OP_TO_I32,
+  OP_TO_I64,
+  OP_TO_U32,
+  OP_TO_U64,
+  OP_TO_F32,
+  OP_TO_F64,
+  OP_TO_DYN,
+  OP_CONST_I64,
+  OP_CONST_U64,
+  OP_CONST_F64,
+  OP_STRUCT_NEW,
+  OP_STRUCT_GET,
+  OP_STRUCT_SET,
+  OP_STRUCT_GET_DYN,
+  OP_STRUCT_SET_DYN,
+  OP_CLOSE_LOOP,
+  OP_DESTRUCTURE_VEC,
+  OP_DESTRUCTURE_NAMED,
+  OP_DESTRUCTURE_VEC_REST,
+  OP_DESTRUCTURE_NAMED_REST,
+  OP_SPREAD,
+  OP_CALL_SPREAD,
+  OP_FOLD_SPREAD,
+  OP_COLLECT_VARIADIC,
+  OP_YIELD,
+  OP_STREAM_NEXT,
+  OP_COLLECT,
+  OP_IS_STREAM_EXHAUSTED,
+  OP_COUNT,
+  OP_TAKE,
+  OP_FIRST,
+  OP_LINES,
+  OP_GET_STATE_FIELD,
+  OP_SET_STATE_FIELD,
+  OP_GET_RESUME_POINT,
+  OP_SET_RESUME_POINT,
+  OP_YIELD_SM,
+  OP_AWAIT_SM,
+  OP_CALL_SUSPEND,
+  OP_GET_STATE_FIELD_CELL,
+  OP_SET_STATE_FIELD_CELL,
+  OP_HALT
+} OpCode;
+
+typedef struct {
+  uint8_t*  code;
+  uint32_t  code_count;
+  uint32_t  code_cap;
+  JaclVal*  constants;
+  uint32_t  const_count;
+  uint32_t  const_cap;
+  uint32_t* lines;
+  uint32_t  lines_cap;
+  arena_t*  arena;
+} BytecodeChunk;
+
+typedef struct {
+  BytecodeChunk chunk;
+  uint8_t       param_count;
+  JaclVal*      param_names;
+  JaclVal*      upvalues;
+  uint8_t       upvalue_count;
+  const char*   name;
+  uint8_t       min_args;
+  bool          variadic;
+  bool          pinned;
+  int8_t        pin_worker_id;
+  bool          is_generator;
+  bool          is_sm_compiled;
+  uint8_t       sm_field_count;
+} JaclClosure;
+
+/* ========================================================================
+ * Collection templates — collections.c
+ *
+ * The RRB vector and HAMT templates are instantiated with JaclVal types.
+ * We include them here so the generated struct types (jacl_vec_root,
+ * jacl_map_node, etc.) are visible to test code.
+ * ======================================================================== */
+
+#define JACL_COLL_ALLOCATOR { .alloc = libc_alloc, .free = libc_free, .ctx = NULL }
+
+#define RRB_VEC_T                JaclVal
+#define RRB_VEC_NAME             jacl_vec
+#define RRB_VEC_ALLOCATOR        JACL_COLL_ALLOCATOR
+#define RRB_VEC_GC_MODE
+#define RRB_VEC_GC_ALLOC(t, sz)  gc_alloc(gc__current_heap, (t), (sz))
+#define RRB_VEC_GC_OBJ_INTERNAL  OBJ_RRB_INTERNAL
+#define RRB_VEC_GC_OBJ_LEAF      OBJ_RRB_LEAF
+#define RRB_VEC_GC_OBJ_ROOT      OBJ_RRB_ROOT
+#include "../lib/rrb_vec/rrb_vec.h"
+
+#define HAMT_KEY_T             JaclVal
+#define HAMT_VAL_T             JaclVal
+#define HAMT_NAME              jacl_map
+#define HAMT_GC_MODE
+#define HAMT_GC_ALLOC(t, sz)   gc_alloc(gc__current_heap, (t), (sz))
+#define HAMT_GC_OBJ_INTERNAL   OBJ_HAMT_INTERNAL
+#define HAMT_GC_OBJ_LEAF       OBJ_HAMT_LEAF
+#define HAMT_GC_OBJ_COLLISION  OBJ_HAMT_COLLISION
+#include "../lib/hamt/hamt.h"
+
+/* ========================================================================
+ * Types — compiler.c
+ * ======================================================================== */
+
+#define STRUCT_REGISTRY_MAX 32
+#define STRUCT_MAX_FIELDS   64
+#define COMPILER_MAX_PROC_PARAMS 16
+#define MODULE_CACHE_MAX 64
+#define MODULE_EXPORTS_MAX 64
+#define COMPILER_LOCALS_MAX 256
+#define COMPILER_UPVALUES_MAX 256
+#define COMPILER_TRY_PATCHES_MAX 128
+#define COMPILER_GLOBAL_ARITIES_MAX 64
+#define MODULE_IMPORT_STACK_MAX 32
+#define SUSPENSION_MAP_MAX 256
+#define SUSPENSION_CALLEES_MAX 64
+#define SM_MAX_SUSPENSION_POINTS 256
+#define SM_MAX_STATE_FIELDS     256
+#define MAX_PROC_INFOS 256
+#define COMPILER_LOOP_DEPTH_MAX 16
+#define COMPILER_BREAK_PATCHES_MAX 32
+#define COMPILER_CONTINUE_PATCHES_MAX 32
+
+typedef struct StructTypeRegistry StructTypeRegistry;
+
+typedef struct {
+  BytecodeChunk chunk;
+  uint32_t      error_count;
+  const char*   error_message;
+  bool          suspending;
+  StructTypeRegistry* struct_registry;
+} CompileResult;
+
+typedef enum {
+  TYPE_DYN = 0,
+  TYPE_BOOL,
+  TYPE_NIL,
+  TYPE_I32,
+  TYPE_I64,
+  TYPE_U32,
+  TYPE_U64,
+  TYPE_F32,
+  TYPE_F64,
+  TYPE_STR,
+  TYPE_VEC,
+  TYPE_MAP,
+  TYPE_CLOSURE,
+  TYPE_STRUCT,
+  TYPE_STREAM
+} JaclType;
+
+typedef struct {
+  const char* name;
+  uint32_t    name_len;
+  JaclVal     name_val;
+  struct {
+    const char* name;
+    uint32_t    name_len;
+    JaclType    type;
+    uint32_t    struct_type_idx;
+    uint32_t    offset;
+    uint32_t    size;
+  } fields[STRUCT_MAX_FIELDS];
+  uint32_t field_count;
+  uint32_t total_size;
+  uint32_t alignment;
+} StructTypeDef;
+
+struct StructTypeRegistry {
+  StructTypeDef defs[STRUCT_REGISTRY_MAX];
+  uint32_t count;
+};
+
+typedef struct {
+  const char* name;
+  uint32_t    name_len;
+  int16_t     arity;
+  bool        is_mutable;
+  bool        suspends;
+  JaclType    type;
+  JaclType    return_type;
+  JaclType    param_types[COMPILER_MAX_PROC_PARAMS];
+  uint32_t    param_count;
+} ExportEntry;
+
+typedef struct {
+  BytecodeChunk* chunk;
+  const char*    path;
+  const char*    source;
+  ExportEntry*   exports;
+  uint32_t       export_count;
+  uint32_t       topo_order;
+  bool           compiled;
+} Module;
+
+typedef struct {
+  Module**    modules;
+  uint32_t    module_count;
+  uint32_t    error_count;
+  const char* error_message;
+  bool        suspending;
+  StructTypeRegistry* struct_registry;
+} ProgramResult;
+
+typedef struct {
+  Module*  modules[MODULE_CACHE_MAX];
+  char*    paths[MODULE_CACHE_MAX];
+  uint32_t count;
+  uint32_t topo_counter;
+  arena_t* arena;
+} ModuleCache;
+
+typedef struct {
+  const char* paths[MODULE_IMPORT_STACK_MAX];
+  uint32_t    count;
+} ImportStack;
+
+typedef struct {
+  JaclVal   name;
+  int       depth;
+  int16_t   known_arity;
+  bool      is_mutable;
+  bool      is_param;
+  bool      suspends;
+  bool      captures_mutable;
+  JaclType  type;
+  uint32_t  struct_type_idx;
+  JaclType  return_type;
+  JaclType* param_types;
+} Local;
+
+typedef struct {
+  JaclVal   name;
+  int16_t   known_arity;
+  bool      is_mutable;
+  bool      suspends;
+  bool      captures_mutable;
+  JaclType  type;
+  uint32_t  struct_type_idx;
+  JaclType  return_type;
+  JaclType  param_types[COMPILER_MAX_PROC_PARAMS];
+} GlobalArity;
+
+typedef struct {
+  uint8_t   index;
+  uint8_t   is_local;
+  JaclVal   name;
+  bool      is_mutable;
+  bool      suspends;
+  bool      captures_mutable;
+  JaclType  type;
+  uint32_t  struct_type_idx;
+} Upvalue;
+
+typedef struct {
+  JaclVal name;
+  bool    suspends;
+  bool    is_generator;
+} SuspensionEntry;
+
+typedef struct {
+  SuspensionEntry entries[SUSPENSION_MAP_MAX];
+  uint32_t count;
+} SuspensionMap;
+
+typedef struct {
+  JaclVal  name;
+  bool     direct_suspends;
+  bool     has_yield;
+  bool     has_indirect_call;
+  JaclVal  callees[SUSPENSION_CALLEES_MAX];
+  uint32_t callee_count;
+} ProcSuspendInfo;
+
+typedef struct {
+  ProcSuspendInfo procs[MAX_PROC_INFOS];
+  uint32_t count;
+} ProcSuspendInfoList;
+
+typedef enum {
+  SUSPEND_YIELD,
+  SUSPEND_AWAIT,
+  SUSPEND_PARALLEL,
+  SUSPEND_RACE,
+  SUSPEND_CALL
+} SuspensionPointType;
+
+typedef struct {
+  uint32_t            id;
+  SuspensionPointType type;
+  AstNode*            node;
+  uint32_t            line;
+  uint32_t            column;
+} SuspensionPoint;
+
+typedef struct {
+  JaclVal  name;
+  uint32_t field_index;
+  bool     is_mutable;
+  bool     is_param;
+} StateField;
+
+typedef struct {
+  uint32_t   field_count;
+  StateField fields[SM_MAX_STATE_FIELDS];
+} StateLayout;
+
+typedef struct {
+  uint32_t        suspension_count;
+  SuspensionPoint suspension_points[SM_MAX_SUSPENSION_POINTS];
+  StateLayout     state_layout;
+} SuspensionAnalysis;
+
+typedef struct {
+  int32_t first_write;
+  int32_t last_read;
+} FieldLiveness;
+
+typedef struct {
+  uint32_t loop_start;
+  uint32_t break_patches[COMPILER_BREAK_PATCHES_MAX];
+  uint32_t break_patch_count;
+  uint32_t continue_patches[COMPILER_CONTINUE_PATCHES_MAX];
+  uint32_t continue_patch_count;
+  uint32_t local_count_at_loop;
+  bool     is_for_loop;
+} LoopContext;
+
+typedef struct {
+  uint32_t label_patches[SM_MAX_SUSPENSION_POINTS];
+  uint32_t label_count;
+} SMDispatchContext;
+
+typedef struct Compiler Compiler;
+struct Compiler {
+  BytecodeChunk*   chunk;
+  arena_t*         arena;
+  ThreadHeap*      heap;
+  JaclInternTable* intern_table;
+  uint32_t         error_count;
+  const char*      first_error;
+  Local            locals[COMPILER_LOCALS_MAX];
+  uint32_t         local_count;
+  int              scope_depth;
+  Upvalue          upvalues[COMPILER_UPVALUES_MAX];
+  uint32_t         upvalue_count;
+  Compiler*        enclosing;
+  GlobalArity      global_arities[COMPILER_GLOBAL_ARITIES_MAX];
+  uint32_t         global_arity_count;
+  uint32_t         try_patches[COMPILER_TRY_PATCHES_MAX];
+  uint32_t         try_patch_count;
+  bool             in_try_body;
+  bool             in_non_suspending_callback;
+  SuspensionMap*   suspension_map;
+  bool             in_concurrent_body;
+  bool             pin_all_closures;
+  bool             force_global_procs;
+  JaclType         expected_type;
+  JaclType         last_expr_type;
+  uint32_t         last_struct_idx;
+  JaclType         return_type;
+  ModuleCache*     module_cache;
+  Module*          current_module;
+  ImportStack*     import_stack;
+  const char*      module_prefix;
+  uint32_t         module_prefix_len;
+  StructTypeRegistry* struct_registry;
+  LoopContext          loop_stack[COMPILER_LOOP_DEPTH_MAX];
+  uint32_t             loop_depth;
+  bool                 has_yield;
+  uint32_t             sm_suspension_idx;
+  SMDispatchContext     sm_dispatch;
+  SuspensionAnalysis*  sm_analysis;
+};
+
+/* ========================================================================
+ * Types — vm.c
+ * ======================================================================== */
+
+#define VM_STACK_MAX        256
+#define VM_FRAMES_MAX       64
+#define VM_ENV_INIT_CAP     16
+#define VM_STACK_TRACE_MAX  32
+
+typedef enum {
+  VM_OK,
+  VM_RUNTIME_ERROR,
+  VM_STACK_OVERFLOW,
+  VM_YIELD
+} VMResult;
+
+typedef void (*VMPrintFn)(const char* text, uint32_t len, void* ctx);
+
+typedef struct {
+  JaclVal*  names;
+  JaclVal*  values;
+  uint32_t  count;
+  uint32_t  cap;
+} Environment;
+
+typedef struct {
+  JaclClosure*   closure;
+  uint8_t*       return_ip;
+  uint32_t       stack_base;
+  BytecodeChunk* chunk;
+} CallFrame;
+
+typedef struct {
+  const char* function_name;
+  uint32_t    line_number;
+} StackTraceEntry;
+
+typedef struct {
+  StackTraceEntry entries[VM_STACK_TRACE_MAX];
+  uint32_t        count;
+} StackTrace;
+
+typedef struct {
+  JaclVal        stack[VM_STACK_MAX];
+  uint32_t       stack_top;
+  CallFrame      frames[VM_FRAMES_MAX];
+  uint32_t       frame_count;
+  uint8_t*       ip;
+  BytecodeChunk* chunk;
+  VMPrintFn      print_fn;
+  void*          print_ctx;
+  Environment    env;
+  arena_t*       arena;
+  BlockPool      block_pool;
+  ThreadHeap     heap;
+  JaclInternTable* intern_table;
+  BytecodeChunk* top_chunk;
+  GreyBuffer*    grey_buf;
+  RememberedSet* remembered_set;
+  volatile uint32_t *gc_active_ptr;
+  void*          runtime;
+  int            worker_id;
+  const char*    error_message;
+  uint32_t       error_line;
+  StackTrace     stack_trace;
+  StructTypeRegistry* struct_registry;
+  JaclVal*   gc_handle_slots;
+  uint32_t   gc_handle_count;
+  JaclVal    (*call_native)(void* ctx, uint32_t fn_index, JaclVal* args, int argc);
+  void*      native_fn_ctx;
+  int8_t*    native_fn_arities;
+  uint32_t   native_fn_count;
+  uint32_t   spread_counts[32];
+  uint32_t   spread_count_top;
+  JaclVal    yield_value;
+} VM;
+
+typedef struct {
+  char*     data;
+  uint32_t  len;
+  uint32_t  cap;
+  arena_t*  arena;
+} VMFormatBuf;
+
+typedef enum {
+    STREAM_PULL_VALUE,
+    STREAM_PULL_EXHAUSTED,
+    STREAM_PULL_ERROR
+} StreamPullResult;
+
+/* ========================================================================
+ * Types — gc_collect.c
+ * ======================================================================== */
+
+#define GC_MARK_STACK_SIZE 4096
+
+typedef struct {
+    void  *fixed[GC_MARK_STACK_SIZE];
+    int    top;
+    void **overflow;
+    int    ov_count;
+    int    ov_cap;
+} GCMarkStack;
+
+/* ========================================================================
+ * Chase-Lev deque template (instantiated before runtime.c types)
+ * ======================================================================== */
+
+#define CHASE_LEV_T    uintptr_t
+#define CHASE_LEV_NAME rt_deque
+#include "../lib/chase_lev/chase_lev.h"
+
+/* ========================================================================
+ * Types — runtime.c
+ * ======================================================================== */
+
+#define WORKER_IDLE ((uintptr_t)0)
+#define WORKER_BUSY ((uintptr_t)1)
+
+typedef struct {
+    void (*fn)(void *data);
+    void *data;
+    JaclVal gc_root;
+    JaclVal gc_root2;
+} RuntimeTask;
+
+typedef struct Runtime Runtime;
+
+typedef struct WorkerThread {
+    rt_deque_deque    *public_deque;
+    rt_deque_deque    *private_deque;
+    GreyBuffer         grey_buf;
+    RememberedSet      remembered_set;
+    volatile uintptr_t currently_executing;
+    volatile uint64_t  thread_epoch;
+    VM                 vm;
+    Runtime           *runtime;
+    int                id;
+    thread_t           thread;
+    arena_t            arena;
+    int               *steal_ids;
+} WorkerThread;
+
+struct Runtime {
+    WorkerThread       *workers;
+    int                 num_workers;
+    volatile uint64_t   global_epoch;
+    volatile uint32_t   gc_running;
+    volatile uint32_t   gc_active;
+    BlockPool           block_pool;
+    volatile int        shutdown;
+    uintptr_t          *inbox;
+    volatile intptr_t   inbox_count;
+    intptr_t            inbox_cap;
+    platform_mutex_t    inbox_mutex;
+};
+
+extern JACL_THREAD_LOCAL int rt__worker_id;
+extern JACL_THREAD_LOCAL WorkerThread *rt__current_worker;
+
+/* ========================================================================
+ * Types — embed.c
+ * ======================================================================== */
+
+typedef struct JaclVM_s JaclVM;
+typedef struct JaclTrampoline_s JaclTrampoline;
+
+typedef struct {
+  size_t   initial_heap_size;
+  size_t   max_heap_size;
+  uint32_t max_handles;
+} JaclConfig;
+
+#define TRAMP_TYPE_VOID    0
+#define TRAMP_TYPE_I32     1
+#define TRAMP_TYPE_I64     2
+#define TRAMP_TYPE_U32     3
+#define TRAMP_TYPE_U64     4
+#define TRAMP_TYPE_F32     5
+#define TRAMP_TYPE_F64     6
+#define TRAMP_TYPE_PTR     7
+#define TRAMP_TYPE_UNKNOWN 255
+
+#ifdef JACL_HAS_LIBFFI
+#include <ffi.h>
+struct JaclTrampoline_s {
+  JaclVM*         jvm;
+  JaclVal         closure;
+  uint32_t        handle_idx;
+  void*           ffi_closure;
+  void*           code_ptr;
+  ffi_cif         cif;
+  ffi_type**      ffi_arg_types;
+  int             arg_types_id[16];
+  int             arg_count;
+  int             ret_type_id;
+  JaclTrampoline* vm_next;
+};
+#else
+struct JaclTrampoline_s { int _unused; };
+#endif
+
+typedef JaclVal (*EmbedNativeFn)(JaclVM* vm, JaclVal* args, int argc);
+
+typedef struct {
+  EmbedNativeFn fn;
+  JaclVal       name;
+  int8_t        arity;
+} NativeFnEntry;
+
+#define NATIVE_FN_INIT_CAP 32
+
+struct JaclVM_s {
+  VM              vm;
+  arena_t         arena;
+  JaclInternTable intern_table;
+  uint32_t        max_handles;
+  const char*     last_error;
+  JaclVal*        handle_slots;
+  uint32_t*       handle_free_list;
+  uint32_t        handle_count;
+  uint32_t        handle_free_top;
+  NativeFnEntry*  native_fns;
+  int8_t*         native_fn_arities;
+  uint32_t        native_fn_count;
+  uint32_t        native_fn_cap;
+  StructTypeRegistry persistent_struct_registry;
+  JaclTrampoline* trampoline_list;
+};
+
+typedef enum {
+  EMBED_TYPE_DYN = 0,
+  EMBED_TYPE_BOOL,
+  EMBED_TYPE_NIL,
+  EMBED_TYPE_I32,
+  EMBED_TYPE_I64,
+  EMBED_TYPE_U32,
+  EMBED_TYPE_U64,
+  EMBED_TYPE_F32,
+  EMBED_TYPE_F64,
+  EMBED_TYPE_STR,
+  EMBED_TYPE_VEC,
+  EMBED_TYPE_MAP,
+  EMBED_TYPE_CLOSURE,
+  EMBED_TYPE_STRUCT,
+  EMBED_TYPE_NATIVE_FN
+} EmbedJaclType;
+
+typedef struct { uint32_t index; } EmbedJaclHandle;
+
+/* ========================================================================
+ * Function declarations
+ *
+ * Generated from: gcc -aux-info on src/jacl.c
+ * Grouped by source file in unity build order.
+ * ======================================================================== */
+
+/* --- value.c --- */
+extern JaclVal jacl_bool (bool b);
+extern JaclVal jacl_i32 (int32_t n);
+extern JaclVal jacl_f32 (float f);
+extern JaclVal jacl_u32 (uint32_t n);
+extern uint64_t jacl_type_tag (JaclVal v);
+extern bool jacl_is_nil (JaclVal v);
+extern bool jacl_is_bool (JaclVal v);
+extern bool jacl_is_i32 (JaclVal v);
+extern bool jacl_is_f32 (JaclVal v);
+extern bool jacl_is_u32 (JaclVal v);
+extern bool jacl_is_i64 (JaclVal v);
+extern bool jacl_is_u64 (JaclVal v);
+extern bool jacl_is_f64 (JaclVal v);
+extern JaclVal jacl_string_ptr (void *p);
+extern JaclVal jacl_vector_ptr (void *p);
+extern JaclVal jacl_map_ptr (void *p);
+extern JaclVal jacl_closure_ptr (void *p);
+extern JaclVal jacl_bignum_ptr (void *p);
+extern void *jacl_as_ptr (JaclVal v);
+extern bool jacl_is_string (JaclVal v);
+extern bool jacl_is_vector (JaclVal v);
+extern bool jacl_is_map (JaclVal v);
+extern bool jacl_is_closure (JaclVal v);
+extern bool jacl_is_bignum (JaclVal v);
+extern JaclVal jacl_cell_ptr (JaclMutableRef *p);
+extern JaclMutableRef *jacl_as_cell (JaclVal v);
+extern bool jacl_is_cell (JaclVal v);
+extern JaclVal jacl_box_ptr (JaclMutableRef *p);
+extern JaclMutableRef *jacl_as_box (JaclVal v);
+extern bool jacl_is_box (JaclVal v);
+extern JaclVal jacl_atom_ptr (JaclMutableRef *p);
+extern JaclMutableRef *jacl_as_atom (JaclVal v);
+extern bool jacl_is_atom (JaclVal v);
+extern bool jacl_is_future (JaclVal v);
+extern bool jacl_is_struct (JaclVal v);
+extern bool jacl_is_native_fn (JaclVal v);
+extern JaclVal jacl_native_fn (uint32_t index);
+extern uint32_t jacl_as_native_fn_index (JaclVal v);
+extern bool jacl_is_stream (JaclVal v);
+extern JaclVal jacl_stream_ptr (void *p);
+extern bool jacl_is_state_machine (JaclVal v);
+extern JaclVal jacl_state_machine_ptr (void *p);
+extern JaclVal jacl_inline_string (const char *s, size_t len);
+extern bool jacl_is_inline_string (JaclVal v);
+extern size_t jacl_inline_string_len (JaclVal v);
+extern void jacl_inline_string_get (JaclVal v, char *buf, size_t buflen);
+extern bool jacl_is_tainted (JaclVal v);
+extern JaclVal jacl_set_tainted (JaclVal v);
+extern JaclVal jacl_clear_tainted (JaclVal v);
+extern bool jacl_is_secret (JaclVal v);
+extern JaclVal jacl_set_secret (JaclVal v);
+extern JaclVal jacl_clear_secret (JaclVal v);
+extern bool jacl_is_error (JaclVal v);
+extern JaclVal jacl_set_error (JaclVal v);
+extern JaclVal jacl_clear_error (JaclVal v);
+extern uint64_t jacl_propagate_flags (JaclVal a, JaclVal b);
+extern JaclVal jacl_apply_flags (JaclVal result, uint64_t flags);
+extern bool jacl_as_bool (JaclVal v);
+extern int32_t jacl_as_i32 (JaclVal v);
+extern float jacl_as_f32 (JaclVal v);
+extern uint32_t jacl_as_u32 (JaclVal v);
+extern int64_t jacl_as_i64 (JaclVal v);
+extern uint64_t jacl_as_u64 (JaclVal v);
+extern double jacl_as_f64 (JaclVal v);
+extern JaclVal jacl_add_i32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_sub_i32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_mul_i32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_div_i32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_mod_i32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_neg_i32 (JaclVal a);
+extern JaclVal jacl_add_f32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_sub_f32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_mul_f32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_div_f32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_neg_f32 (JaclVal a);
+extern JaclVal jacl_eq (JaclVal a, JaclVal b);
+extern JaclVal jacl_lt_i32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_gt_i32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_le_i32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_ge_i32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_lt_f32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_gt_f32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_le_f32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_ge_f32 (JaclVal a, JaclVal b);
+extern JaclVal jacl_u32_add (JaclVal a, JaclVal b);
+extern JaclVal jacl_u32_sub (JaclVal a, JaclVal b);
+extern JaclVal jacl_u32_mul (JaclVal a, JaclVal b);
+extern JaclVal jacl_u32_div (JaclVal a, JaclVal b);
+extern JaclVal jacl_u32_mod (JaclVal a, JaclVal b);
+extern JaclVal jacl_u32_neg (JaclVal a);
+extern JaclVal jacl_u32_lt (JaclVal a, JaclVal b);
+extern JaclVal jacl_u32_gt (JaclVal a, JaclVal b);
+extern JaclVal jacl_u32_le (JaclVal a, JaclVal b);
+extern JaclVal jacl_u32_ge (JaclVal a, JaclVal b);
+extern JaclVal jacl_u32_eq (JaclVal a, JaclVal b);
+extern JaclVal jacl_i64_lt (JaclVal a, JaclVal b);
+extern JaclVal jacl_i64_gt (JaclVal a, JaclVal b);
+extern JaclVal jacl_i64_le (JaclVal a, JaclVal b);
+extern JaclVal jacl_i64_ge (JaclVal a, JaclVal b);
+extern JaclVal jacl_i64_eq (JaclVal a, JaclVal b);
+extern JaclVal jacl_u64_lt (JaclVal a, JaclVal b);
+extern JaclVal jacl_u64_gt (JaclVal a, JaclVal b);
+extern JaclVal jacl_u64_le (JaclVal a, JaclVal b);
+extern JaclVal jacl_u64_ge (JaclVal a, JaclVal b);
+extern JaclVal jacl_u64_eq (JaclVal a, JaclVal b);
+extern JaclVal jacl_f64_lt (JaclVal a, JaclVal b);
+extern JaclVal jacl_f64_gt (JaclVal a, JaclVal b);
+extern JaclVal jacl_f64_le (JaclVal a, JaclVal b);
+extern JaclVal jacl_f64_ge (JaclVal a, JaclVal b);
+extern JaclVal jacl_f64_eq (JaclVal a, JaclVal b);
+
+/* --- gc.c --- */
+extern GCHeader *gc_header_of (void *payload);
+extern bool jacl_is_heap_type (JaclVal v);
+extern void gc_block_pool_init (BlockPool *pool);
+extern GCBlock *gc_block_pool_get (BlockPool *pool);
+extern void gc_block_pool_return (BlockPool *pool, GCBlock *block);
+extern void gc_block_pool_destroy (BlockPool *pool);
+extern void gc_heap_init (ThreadHeap *heap, BlockPool *pool);
+extern void gc_heap_destroy (ThreadHeap *heap);
+extern void gc__oom_panic_default (ThreadHeap *heap, size_t request_size);
+extern void (*gc__oom_handler)(ThreadHeap *, size_t);
+extern void gc__mark_lines (GCBlock *block, size_t offset, size_t size);
+extern bool gc__find_free_run (GCBlock *block, int from, int *out_start, int *out_len);
+extern bool gc__find_fit_in_block (ThreadHeap *heap, GCBlock *block, int needed_lines, int from);
+extern void *gc__bump_alloc (ThreadHeap *heap, size_t total, uint8_t obj_type);
+extern void *gc_alloc (ThreadHeap *heap, uint8_t obj_type, size_t payload_size);
+extern JaclStruct *jacl_as_struct_ptr (JaclVal v);
+extern JaclVal jacl_struct_val (JaclStruct *s);
+extern JaclVal jacl_i64 (ThreadHeap *heap, int64_t n);
+extern JaclVal jacl_u64 (ThreadHeap *heap, uint64_t n);
+extern JaclVal jacl_f64 (ThreadHeap *heap, double d);
+extern JaclVal jacl_i64_add (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_i64_sub (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_i64_mul (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_i64_div (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_i64_mod (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_i64_neg (ThreadHeap *heap, JaclVal a);
+extern JaclVal jacl_u64_add (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_u64_sub (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_u64_mul (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_u64_div (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_u64_mod (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_u64_neg (ThreadHeap *heap, JaclVal a);
+extern JaclVal jacl_f64_add (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_f64_sub (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_f64_mul (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_f64_div (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_f64_mod (ThreadHeap *heap, JaclVal a, JaclVal b);
+extern JaclVal jacl_f64_neg (ThreadHeap *heap, JaclVal a);
+extern void grey_buf_init (GreyBuffer *gb);
+extern void grey_buf_push (GreyBuffer *gb, JaclVal v);
+extern void grey_buf_destroy (GreyBuffer *gb);
+extern void remembered_set_init (RememberedSet *rs);
+extern void remembered_set_push (RememberedSet *rs, JaclVal container);
+extern uint32_t remembered_set_drain (RememberedSet *rs, JaclVal *out_entries, uint32_t out_cap);
+extern void remembered_set_destroy (RememberedSet *rs);
+extern void gc_write_barrier (GreyBuffer *gb, volatile uint32_t *gc_active_ptr, JaclVal old_val, JaclVal new_val);
+extern void gc_remembered_set_barrier (RememberedSet *rs, JaclVal container, JaclVal new_val);
+extern JaclVal jacl_future_ptr (JaclFuture *p);
+extern JaclFuture *jacl_as_future (JaclVal v);
+extern void future_lock (JaclFuture *f);
+extern void future_unlock (JaclFuture *f);
+extern JaclVal jacl_future (ThreadHeap *heap);
+extern FutureWaiter *jacl_future_resolve (JaclFuture *f, JaclVal result, GreyBuffer *gb, volatile uint32_t *gc_active_ptr);
+extern FutureWaiter *jacl_future_error (JaclFuture *f, JaclVal error, GreyBuffer *gb, volatile uint32_t *gc_active_ptr);
+extern bool jacl_future_add_waiter (JaclFuture *f, JaclVal continuation, ThreadHeap *heap);
+extern JaclStream *jacl_as_stream (JaclVal v);
+extern JaclVal jacl_stream (ThreadHeap *heap);
+extern JaclVal parallel_agg_ptr (ParallelAgg *p);
+extern ParallelAgg *as_parallel_agg (JaclVal v);
+extern JaclVal jacl_parallel_agg (ThreadHeap *heap, uint32_t count, JaclVal state_machine);
+extern JaclVal race_agg_ptr (RaceAgg *r);
+extern RaceAgg *as_race_agg (JaclVal v);
+extern JaclVal jacl_race_agg (ThreadHeap *heap, JaclVal state_machine);
+extern JaclStateMachine *jacl_as_state_machine (JaclVal v);
+extern JaclVal gc_alloc_state_machine (ThreadHeap *heap, uint32_t field_count);
+
+/* --- string.c --- */
+extern uint32_t string__fnv1a (const char *data, uint32_t length);
+extern void intern_table_init (JaclInternTable *table, arena_t *arena);
+extern void intern_table_destroy (JaclInternTable *table);
+extern JaclHeapString **intern__find_slot (JaclHeapString **entries, uint32_t cap, const char *data, uint32_t length, uint32_t hash);
+extern void intern__rehash (JaclInternTable *table, uint32_t new_cap);
+extern void intern__resize (JaclInternTable *table);
+extern void intern__compact (JaclInternTable *table);
+extern JaclVal jacl_intern (ThreadHeap *heap, JaclInternTable *table, const char *data, uint32_t length);
+extern bool jacl_is_heap_string (JaclVal v);
+extern JaclHeapString *jacl_as_heap_string (JaclVal v);
+extern bool jacl_is_rope_string (JaclVal v);
+extern JaclRopeString *jacl_as_rope_string (JaclVal v);
+extern JaclVal jacl_rope_string_ptr (JaclRopeString *p);
+extern uint32_t jacl_string_len (JaclVal v);
+extern uint32_t jacl_string_byte_len (JaclVal v);
+extern uint32_t jacl_string_data (JaclVal v, char *buf, size_t buflen);
+extern uint32_t jacl_string_hash (JaclVal v);
+extern bool jacl_string_eq (JaclVal a, JaclVal b);
+extern const char *jacl_string_flat_ptr (JaclVal v, char *buf, size_t buflen);
+extern int jacl_string_cmp (JaclVal a, JaclVal b);
+extern uint32_t rope_string__compute_hash (rope r);
+extern JaclVal jacl_rope_string_create (ThreadHeap *heap, const uint8_t *data, size_t len);
+extern bool jacl_utf8_validate (const char *data, size_t len);
+extern bool jacl_nfd_normalize (const char *data, size_t len, uint8_t *stack_buf, size_t stack_cap, uint8_t **out, size_t *out_len);
+extern bool jacl_grapheme_nth (const uint8_t *data, size_t len, size_t n, size_t *out_start, size_t *out_end);
+extern JaclVal jacl_string_new (ThreadHeap *heap, JaclInternTable *table, const char *data, size_t length);
+
+/* --- lexer.c --- */
+extern void lexer__arr_init (TokenArray *arr, arena_t *arena);
+extern void lexer__arr_push (TokenArray *arr, Token tok);
+extern void lexer__init (Lexer *lex, const char *source, arena_t *arena);
+extern char lexer__peek (Lexer *lex);
+extern char lexer__advance (Lexer *lex);
+extern Token lexer__make_token (Lexer *lex, TokenType type, uint32_t start_offset, uint32_t start_line, uint32_t start_col);
+extern void strbuf_init (StringBuf *sb, arena_t *arena);
+extern void strbuf_push (StringBuf *sb, char c);
+extern uint32_t lexer__encode_utf8 (uint32_t cp, char *out);
+extern int lexer__hex_digit (char c);
+extern int lexer__is_word_start (char c);
+extern int lexer__is_word_char (char c);
+extern int lexer__is_word_char_no_arrow (Lexer *lex);
+extern int lexer__is_operator_char (char c);
+extern const char *lexer__unexpected_char_msg (Lexer *lex, char c);
+extern const char *lexer__handle_escape (Lexer *lex, StringBuf *sb);
+extern void lexer__skip_to_string_end (Lexer *lex);
+extern void lexer__lex_number (Lexer *lex, TokenArray *arr, uint32_t *error_count);
+extern void lexer__lex_string_body (Lexer *lex, TokenArray *arr, uint32_t *error_count, uint32_t str_start, uint32_t str_line, uint32_t str_col);
+extern void lexer__lex_interp_expr (Lexer *lex, TokenArray *arr, uint32_t *error_count);
+extern void lexer__lex_interp_infix (Lexer *lex, TokenArray *arr, uint32_t *error_count);
+extern LexResult lexer_lex (const char *source, arena_t *arena);
+
+/* --- ast.c --- */
+extern AstNode *ast_alloc (arena_t *arena);
+extern AstNode **ast_alloc_array (arena_t *arena, uint32_t count);
+extern void ast__buf_init (AstStrBuf *b, arena_t *arena);
+extern void ast__buf_ensure (AstStrBuf *b, uint32_t extra);
+extern void ast__buf_char (AstStrBuf *b, char c);
+extern void ast__buf_str (AstStrBuf *b, const char *s, uint32_t len);
+extern void ast__buf_cstr (AstStrBuf *b, const char *s);
+extern const char *ast__buf_finish (AstStrBuf *b);
+extern void ast__buf_escaped_char (AstStrBuf *b, char c);
+extern int ast__needs_quoting (const char *s, uint32_t len);
+extern void ast__pp_node (AstStrBuf *b, AstNode *node);
+extern const char *ast_pretty_print (AstNode *node, arena_t *arena);
+extern const char *ast_pretty_print_program (AstNode **nodes, uint32_t count, arena_t *arena);
+
+/* --- parser.c --- */
+extern void parser__arr_init (NodeArray *arr, arena_t *arena);
+extern void parser__arr_push (NodeArray *arr, AstNode *node);
+extern void parser__init (Parser *p, LexResult tokens, arena_t *arena);
+extern Token *parser__peek (Parser *p);
+extern Token *parser__advance (Parser *p);
+extern int parser__at_end (Parser *p);
+extern SourcePos parser__token_start (Token *tok);
+extern SourcePos parser__token_end (Token *tok);
+extern AstNode *parser__error (Parser *p, const char *message, Token *tok);
+extern void parser__skip_newlines (Parser *p);
+extern void parser__sync_bracket (Parser *p);
+extern AstNode *parser__parse_atom (Parser *p);
+extern AstNode *parser__parse_command (Parser *p);
+extern void parser__sync_paren (Parser *p);
+extern int parser__is_operator (Token *tok);
+extern AstNode *parser__maybe_arrow_access (Parser *p, AstNode *expr);
+extern AstNode *parser__parse_infix_operand (Parser *p);
+extern AstNode *parser__parse_infix (Parser *p);
+extern AstNode *parser__parse_expr (Parser *p);
+extern int parser__is_command_end (Parser *p);
+extern int parser__is_operand_end (Parser *p);
+extern AstNode *parser__parse_use (Parser *p);
+extern const char *parser__parse_inline_struct_type (Parser *p, uint32_t *out_len);
+extern AstNode *parser__parse_defstruct (Parser *p);
+extern AstNode *parser__parse_proc_params (Parser *p);
+extern AstNode *parser__parse_proc_form (Parser *p, AstNode *proc_head);
+extern AstNode *parser__parse_if_form (Parser *p, AstNode *if_head);
+extern AstNode *parser__parse_while_form (Parser *p, AstNode *while_head);
+extern int parser__lookahead_is_destructure_binding (Parser *p);
+extern AstNode *parser__parse_destructure_vec_pattern (Parser *p);
+extern int parser__lookahead_is_named_destructure_binding (Parser *p);
+extern AstNode *parser__parse_destructure_named_pattern (Parser *p);
+extern AstNode *parser__parse_cmd_operand (Parser *p);
+extern AstNode *parser__parse_cmd_expr (Parser *p);
+extern AstNode *parser__parse_block (Parser *p);
+extern AstNode *parser__parse_interp_string (Parser *p);
+extern ParseResult parser_parse (LexResult tokens, arena_t *arena);
+
+/* --- bytecode.c --- */
+extern void chunk_init (BytecodeChunk *chunk, arena_t *arena);
+extern void bytecode__grow_code (BytecodeChunk *chunk);
+extern void bytecode__grow_constants (BytecodeChunk *chunk);
+extern void chunk_write (BytecodeChunk *chunk, uint8_t byte, uint32_t line);
+extern void chunk_write_u16 (BytecodeChunk *chunk, uint16_t value, uint32_t line);
+extern uint16_t chunk_add_constant (BytecodeChunk *chunk, JaclVal value);
+extern JaclVal jacl_closure (JaclClosure *cl);
+extern JaclClosure *jacl_as_closure (JaclVal v);
+extern const char *bytecode__opcode_name (uint8_t op);
+
+/* --- collections.c --- */
+extern uint32_t jacl_val_hash (JaclVal v);
+extern bool jacl_val_eq (JaclVal a, JaclVal b);
+extern void collections__init (void);
+
+/* --- compiler.c --- */
+extern bool is_type_keyword (const char *word, size_t len);
+extern JaclType type_from_keyword (const char *word, size_t len);
+extern const char *type_name (JaclType t);
+extern bool is_numeric_type (JaclType t);
+extern bool is_unboxed_type (JaclType t);
+extern uint32_t struct__type_size (JaclType t, StructTypeRegistry *reg, uint32_t struct_idx);
+extern uint32_t struct__type_align (JaclType t, StructTypeRegistry *reg, uint32_t struct_idx);
+extern uint32_t struct__align_up (uint32_t offset, uint32_t align);
+extern uint32_t struct_registry__find (StructTypeRegistry *reg, const char *name, uint32_t name_len);
+extern uint32_t compiler__register_inline_struct (StructTypeRegistry *reg, const char *spec, uint32_t spec_len);
+extern void module_cache__init (ModuleCache *cache, arena_t *arena);
+extern Module *module_cache__find (ModuleCache *cache, const char *canonical_path);
+extern Module *module_cache__add (ModuleCache *cache, const char *canonical_path);
+extern void import_stack__init (ImportStack *stack);
+extern bool import_stack__contains (ImportStack *stack, const char *canonical_path);
+extern bool import_stack__push (ImportStack *stack, const char *canonical_path);
+extern void import_stack__pop (ImportStack *stack);
+extern const char *import_stack__chain_str (ImportStack *stack, const char *cycle_path, arena_t *arena);
+extern const char *module__resolve_path (const char *importer_path, const char *use_path, arena_t *arena);
+extern bool module__is_private (const char *name, uint32_t name_len);
+extern char *module__read_file (const char *path, arena_t *arena);
+extern bool suspension_map_lookup (SuspensionMap *map, JaclVal name);
+extern bool suspension_map_is_generator (SuspensionMap *map, JaclVal name);
+extern void suspension_map_set (SuspensionMap *map, JaclVal name, bool suspends, bool is_generator);
+extern void analyze__walk_body (AstNode *node, ProcSuspendInfo *info);
+extern void analyze__collect_procs (AstNode *node, ProcSuspendInfoList *list);
+extern SuspensionMap compiler__analyze_suspension (AstNode **nodes, uint32_t count);
+extern void sm__walk_suspensions (AstNode *node, SuspensionAnalysis *analysis, SuspensionMap *map);
+extern void sm__add_state_field (StateLayout *layout, JaclVal name, bool is_mutable, bool is_param);
+extern int sm__find_field (const StateLayout *layout, JaclVal name);
+extern bool sm__is_field_mutable (const StateLayout *layout, JaclVal name);
+extern void sm__collect_destructure_vec_names (AstNode *dv, StateLayout *layout, bool is_mutable);
+extern void sm__collect_destructure_named_names (AstNode *dn, StateLayout *layout, bool is_mutable);
+extern void sm__collect_command_destructure_names (AstNode *pat, StateLayout *layout, bool is_mutable);
+extern void sm__collect_block_destructure_names (AstNode *blk, StateLayout *layout, bool is_mutable);
+extern void sm__walk_locals (AstNode *node, StateLayout *layout);
+extern void sm__liveness_mark_write (FieldLiveness *liveness, const StateLayout *layout, JaclVal name, int32_t segment);
+extern void sm__liveness_mark_read (FieldLiveness *liveness, const StateLayout *layout, JaclVal name, int32_t segment);
+extern JaclVal sm__lit_string_name (AstNode *node);
+extern void sm__liveness_mark_binding_names (AstNode *pattern, const StateLayout *layout, FieldLiveness *liveness, int32_t segment);
+extern bool sm__loop_body_suspends (AstNode *body);
+extern void sm__liveness_walk (AstNode *node, const StateLayout *layout, FieldLiveness *liveness, int32_t *segment);
+extern void sm__optimize_state_layout (SuspensionAnalysis *analysis, AstNode *body);
+extern SuspensionAnalysis compiler__analyze_suspensions (AstNode *body, JaclVal *param_names, uint8_t param_count, bool optimize_liveness, SuspensionMap *map);
+extern bool ast__contains_suspension (AstNode *node, SuspensionMap *map);
+extern void ast__collect_local_muts (AstNode *node, JaclVal *names, uint32_t *count);
+extern bool ast__contains_nonlocal_set_impl (AstNode *node, JaclVal *local_muts, uint32_t local_mut_count);
+extern bool ast__contains_nonlocal_set (AstNode *block);
+extern void compiler__init (Compiler *c, BytecodeChunk *chunk, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap);
+extern const char *module__build_prefix (const char *canonical_path, arena_t *arena, uint32_t *out_len);
+extern JaclVal compiler__global_name_val (Compiler *c, const char *name, uint32_t name_len);
+extern void compiler__emit_byte (Compiler *c, uint8_t byte, uint32_t line);
+extern void compiler__emit_u16 (Compiler *c, uint16_t value, uint32_t line);
+extern void compiler__emit_constant (Compiler *c, JaclVal value, uint32_t line);
+extern void compiler__error (Compiler *c, uint32_t line, uint32_t col, const char *message);
+extern void compiler__begin_scope (Compiler *c);
+extern void compiler__end_scope (Compiler *c, uint32_t line);
+extern void compiler__add_local (Compiler *c, JaclVal name, uint32_t line, uint32_t col);
+extern int compiler__resolve_local (Compiler *c, JaclVal name);
+extern GlobalArity *compiler__find_global (Compiler *c, JaclVal name);
+extern void compiler__set_global_arity (Compiler *c, JaclVal name, int16_t arity);
+extern StructTypeRegistry *compiler__get_struct_registry (Compiler *c);
+extern bool compiler__resolve_type (Compiler *c, const char *word, uint32_t len, JaclType *out_type);
+extern bool compiler__is_type_annotation (Compiler *c, const char *word, uint32_t len);
+extern int compiler__add_upvalue (Compiler *c, uint8_t index, uint8_t is_local, JaclVal name);
+extern int compiler__resolve_upvalue (Compiler *c, JaclVal name);
+extern void ast__collect_local_names (AstNode *node, JaclVal *names, uint32_t *count);
+extern bool compiler__name_touches_mutable (Compiler *enclosing, JaclVal name);
+extern bool ast__refs_nonlocal_mutable_impl (AstNode *node, JaclVal *local_names, uint32_t local_name_count, Compiler *enclosing);
+extern bool compiler__body_captures_mutable (Compiler *enclosing, AstNode *body_block);
+extern uint32_t compiler__emit_jump (Compiler *c, uint8_t instruction, uint32_t line);
+extern void compiler__patch_jump (Compiler *c, uint32_t offset);
+extern void compiler__emit_check_error (Compiler *c, uint32_t line);
+extern void compiler__emit_sm_dispatch_table (Compiler *c, uint32_t suspension_count, uint32_t line);
+extern void compiler__compile_sm_stmts (Compiler *c, AstNode **stmts, uint32_t count, uint32_t line, bool return_last_value);
+extern void compiler__compile_sm_body (Compiler *c, AstNode *body_block, uint32_t line);
+extern void compiler__compile_parallel_body (Compiler *c, AstNode *body_block, uint32_t line, uint32_t col);
+extern void compiler__compile_block_expr (Compiler *c, AstNode *block_node);
+extern int compiler__head_matches (AstNode *head, const char *name, uint32_t len);
+extern int16_t compiler__node_known_arity (Compiler *c, AstNode *node);
+extern void compiler__builtin_arity_error (Compiler *c, uint32_t line, uint32_t col, const char *name, const char *expected_desc, uint32_t got);
+extern void compiler__ensure_boxed (Compiler *c, uint32_t line);
+extern uint8_t compiler__typed_op (uint8_t dyn_op, JaclType type);
+extern void compiler__compile_binary (Compiler *c, AstNode **args, uint8_t op, const char *op_verb, uint32_t line, uint32_t col);
+extern void compiler__compile_hof_builtin (Compiler *c, const char *name, AstNode **args, uint32_t argc, uint8_t opcode, uint32_t line, uint32_t col);
+extern void compiler__compile_destructure_vec (Compiler *c, const char **d_names, uint32_t *d_name_lens, const char **d_types, uint32_t *d_type_lens, uint32_t d_count, const char *rest_name, uint32_t rest_name_len, AstNode *value_expr, bool is_mutable, uint32_t line, uint32_t col);
+extern void compiler__compile_destructure_named (Compiler *c, const char **d_names, uint32_t *d_name_lens, const char **d_types, uint32_t *d_type_lens, uint32_t d_count, const char *rest_name, uint32_t rest_name_len, int spread_all, AstNode *value_expr, bool is_mutable, uint32_t line, uint32_t col);
+extern void compiler__rewrite_binding_op (Compiler *c, AstNode *node, const char *target, uint32_t target_len);
+extern void compiler__compile_pipe_op (Compiler *c, AstNode *node);
+extern void compiler__compile_command (Compiler *c, AstNode *node);
+extern void compiler__compile_node (Compiler *c, AstNode *node);
+extern bool compiler__top_level_suspends (AstNode **stmts, uint32_t count, SuspensionMap *map);
+extern CompileResult compiler_compile (ParseResult parse, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap, StructTypeRegistry *seed_registry);
+extern void module__populate_exports (Module *mod, Compiler *c);
+extern bool compiler__compile_module (const char *canonical_path, Compiler *importer, uint32_t line, uint32_t col);
+extern ProgramResult jacl_compile_program (const char *root_path, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap);
+
+/* --- vm.c --- */
+extern void vm__emergency_gc_single (void *ctx);
+extern const char *vm__type_name (JaclVal v);
+extern void vm__set_error (VM *vm, const char *fmt, ...);
+extern void vm__default_print (const char *text, uint32_t len, void *ctx);
+extern bool vm__is_falsy (JaclVal v);
+extern void vm__capture_trace (VM *vm);
+extern void vm_init (VM *vm, arena_t *arena);
+extern void vm_destroy (VM *vm);
+extern VMResult vm__push (VM *vm, JaclVal value);
+extern VMResult vm__pop (VM *vm, JaclVal *out);
+extern uint8_t vm__read_byte (VM *vm);
+extern uint16_t vm__read_u16 (VM *vm);
+extern void vm__env_grow (VM *vm);
+extern void vm__env_set (VM *vm, JaclVal name, JaclVal value);
+extern JaclVal vm__env_get (VM *vm, JaclVal name, bool *found);
+extern void vm__fmt_init (VMFormatBuf *buf, arena_t *arena);
+extern void vm__fmt_ensure (VMFormatBuf *buf, uint32_t extra);
+extern void vm__fmt_append (VMFormatBuf *buf, const char *str, uint32_t len);
+extern void vm__fmt_value (VMFormatBuf *buf, JaclVal val);
+extern bool vm__deep_eq (JaclVal a, JaclVal b);
+extern JaclVal vm__struct_read_field (ThreadHeap *heap, JaclStruct *s, uint32_t offset, int field_type);
+extern void vm__struct_write_field (JaclStruct *s, uint32_t offset, int field_type, JaclVal val);
+extern VMResult vm_exec (VM *vm, BytecodeChunk *chunk);
+extern StreamPullResult vm__pull_stream_one (VM *vm, JaclVal stream_val, JaclVal *out_value);
+extern VMResult vm__run (VM *vm, uint32_t min_frame);
+extern VMResult jacl_exec_program (ProgramResult *program, VM *vm);
+extern VMResult jacl_run (const char *source, VM *vm, arena_t *arena);
+
+/* --- gc_collect.c --- */
+extern void gc__ms_init (GCMarkStack *ms);
+extern void gc__ms_push (GCMarkStack *ms, void *ptr);
+extern bool gc__ms_pop (GCMarkStack *ms, void **out);
+extern void gc__ms_destroy (GCMarkStack *ms);
+extern void gc__ms_push_val (GCMarkStack *ms, JaclVal v);
+extern void gc__ms_push_const (GCMarkStack *ms, JaclVal v);
+extern void gc__finalize_dead (GCHeader *hdr);
+extern void gc__trace_object (void *payload, GCMarkStack *ms);
+extern void gc_mark (ThreadHeap *heap, VM *vm);
+extern size_t gc_sweep (ThreadHeap *heap);
+extern bool gc__ptr_in_heap (ThreadHeap *heap, void *ptr);
+extern void gc_sweep_intern_table (JaclInternTable *table, ThreadHeap *heap);
+extern void gc__adjust_threshold (ThreadHeap *heap, size_t bytes_survived);
+extern void gc_collect (ThreadHeap *heap, VM *vm);
+extern void gc_mark_minor (ThreadHeap *heap, VM *vm, RememberedSet *remembered_set);
+extern size_t gc_sweep_minor (ThreadHeap *heap);
+extern void gc_collect_minor (ThreadHeap *heap, VM *vm, RememberedSet *remembered_set);
+extern bool gc_should_major (ThreadHeap *heap);
+extern size_t gc_sweep_concurrent (ThreadHeap *heap, GCBlock *skip_block, uint32_t watermark, uint8_t current_mark, BlockPool *pool);
+
+/* --- runtime.c --- */
+extern void runtime__init_worker_vm (WorkerThread *w);
+extern void runtime__emergency_gc (void *ctx);
+extern void *runtime__worker_loop (void *arg);
+extern void runtime_init (Runtime *rt, int num_workers);
+extern void runtime_destroy (Runtime *rt);
+extern void runtime__push_inbox (Runtime *rt, RuntimeTask *task);
+extern void runtime__push_pinned (Runtime *rt, RuntimeTask *task, int worker_id);
+extern void runtime_submit (Runtime *rt, void (*fn)(void *), void *data);
+extern void runtime__setup_call (VM *vm, JaclClosure *cl, int argc, JaclVal *argv);
+extern void runtime__exec_closure (void *data);
+extern void runtime_submit_task (Runtime *rt, JaclClosure *closure, bool thread_local);
+extern void gc__scan_deque (rt_deque_deque *dq, GCMarkStack *ms);
+extern void gc_enumerate_roots (Runtime *rt, GCMarkStack *ms);
+extern bool gc__drain_grey_bufs (Runtime *rt, GCMarkStack *ms, uint32_t *drained);
+extern void gc_concurrent_collect (Runtime *rt);
+extern void gc__concurrent_task (void *data);
+extern void gc_concurrent_trigger (void *runtime_ptr);
+extern JaclVal runtime__create_resolve_closure (ThreadHeap *heap, arena_t *arena, JaclVal future_val);
+extern JaclVal runtime__create_parallel_k (ThreadHeap *heap, arena_t *arena, JaclVal agg_val, uint32_t index);
+extern void runtime__complete_parallel_slot (void *runtime_ptr, VM *vm, JaclVal agg_val, uint32_t index, JaclVal task_result);
+extern JaclVal runtime__create_race_k (ThreadHeap *heap, arena_t *arena, JaclVal agg_val);
+extern void runtime__complete_race_slot (void *runtime_ptr, VM *vm, JaclVal agg_val, JaclVal task_result);
+extern void runtime__continuation_task_exec (void *data);
+extern void runtime__schedule_continuation (void *runtime_ptr, JaclClosure *continuation, JaclVal result);
+extern void runtime__state_machine_task_exec (void *data);
+extern void runtime__schedule_sm_resumption (void *runtime_ptr, JaclVal state_machine, JaclVal result);
+extern void runtime__schedule_waiters (void *runtime_ptr, FutureWaiter *waiters, JaclVal result);
+extern void runtime__spawn_task_exec (void *data);
+extern void runtime__submit_spawn_task (void *runtime_ptr, JaclClosure *closure, JaclVal future_val);
+extern void runtime__parallel_task_exec (void *data);
+extern void runtime__submit_parallel_task (void *runtime_ptr, JaclClosure *closure, JaclVal agg_val, uint32_t index);
+extern void runtime__race_task_exec (void *data);
+extern void runtime__submit_race_task (void *runtime_ptr, JaclClosure *closure, JaclVal agg_val);
+extern VMResult rt_run_to_completion (Runtime *rt, JaclClosure *closure, arena_t *arena);
+
+/* --- embed.c --- */
+extern JaclVal embed__call_native (void *ctx, uint32_t fn_index, JaclVal *args, int argc);
+extern JaclVM *jacl_vm_new (void);
+extern JaclVM *jacl_vm_new_ex (const JaclConfig *config);
+extern void jacl_vm_free (JaclVM *vm);
+extern JaclVal embed__make_error (JaclVM *jvm, const char *msg);
+extern JaclVal jacl_eval (JaclVM *jvm, const char *source);
+extern JaclVal jacl_eval_file (JaclVM *jvm, const char *path);
+extern bool jacl_is_error_val (JaclVal v);
+extern const char *jacl_error_message_str (JaclVM *jvm, JaclVal err);
+extern JaclVal jacl_nil_val (void);
+extern JaclVal jacl_bool_val (bool b);
+extern JaclVal jacl_i32_val (int32_t n);
+extern JaclVal jacl_i64_val (JaclVM *jvm, int64_t n);
+extern JaclVal jacl_u32_val (uint32_t n);
+extern JaclVal jacl_u64_val (JaclVM *jvm, uint64_t n);
+extern JaclVal jacl_f32_val (float f);
+extern JaclVal jacl_f64_val (JaclVM *jvm, double d);
+extern JaclVal jacl_string_val (JaclVM *jvm, const char *s, size_t len);
+extern JaclVal jacl_string_cstr_val (JaclVM *jvm, const char *s);
+extern int32_t jacl_as_i32_val (JaclVal val);
+extern int64_t jacl_as_i64_val (JaclVal val);
+extern uint32_t jacl_as_u32_val (JaclVal val);
+extern uint64_t jacl_as_u64_val (JaclVal val);
+extern float jacl_as_f32_val (JaclVal val);
+extern double jacl_as_f64_val (JaclVal val);
+extern bool jacl_as_bool_val (JaclVal val);
+extern const char *jacl_as_cstr_val (JaclVM *jvm, JaclVal val, size_t *len_out);
+extern int jacl_typeof_val (JaclVal val);
+extern uint32_t embed__register_native (JaclVM *jvm, const char *name, EmbedNativeFn fn, int8_t arity);
+extern bool jacl_register_fn_val (JaclVM *jvm, const char *name, EmbedNativeFn fn, int arity);
+extern EmbedJaclHandle jacl_handle_new_val (JaclVM *jvm, JaclVal val);
+extern JaclVal jacl_handle_get_val (JaclVM *jvm, EmbedJaclHandle h);
+extern void jacl_handle_free_val (JaclVM *jvm, EmbedJaclHandle h);
+extern JaclVal jacl_call_val (JaclVM *jvm, JaclVal fn, JaclVal *args, int argc);
+extern JaclVal jacl_call_named_val (JaclVM *jvm, const char *name, JaclVal *args, int argc);
+extern bool embed__val_matches_field_type (JaclVal val, int field_type);
+extern JaclVal embed__struct_read_field (JaclVM *jvm, JaclStruct *s, uint32_t offset, int field_type);
+extern void embed__struct_write_field (JaclStruct *s, uint32_t offset, int field_type, JaclVal val);
+extern JaclVal jacl_struct_new_val (JaclVM *jvm, const char *type_name, JaclVal *fields, int count);
+extern JaclVal jacl_struct_get_val (JaclVM *jvm, JaclVal s_val, const char *field_name);
+extern bool jacl_struct_set_val (JaclVM *jvm, JaclVal s_val, const char *field_name, JaclVal value);
+extern bool jacl_has_trampolines (void);
+extern JaclTrampoline *jacl_trampoline_new_val (JaclVM *jvm, JaclVal closure, const char *sig);
+extern void *jacl_trampoline_ptr_val (JaclTrampoline *t);
+extern void jacl_trampoline_free_val (JaclVM *jvm, JaclTrampoline *t);
+extern void embed__free_all_trampolines (JaclVM *jvm);
+extern const char *jacl_struct_type_name_val (JaclVM *jvm, JaclVal s_val);
+
+/* ========================================================================
+ * Auto-initialization constructor
+ *
+ * Template libraries (HAMT, RRB-vec, rope sum_tree) use per-compilation-unit
+ * static function pointers for hash/eq/summarize handlers. When tests are
+ * compiled as a separate compilation unit from libjacl.a, the test's copy
+ * of these function pointers starts as NULL. This constructor runs at
+ * program startup to wire them up.
+ * ======================================================================== */
+
+__attribute__((constructor))
+static void jacl__init_template_handlers(void) {
+    /* HAMT key handlers */
+    jacl_map_set_key_handlers(jacl_val_hash, jacl_val_eq);
+    /* RRB-vec hash handler */
+    jacl_vec_set_hash_handler(jacl_val_hash);
+    /* HAMT hash handlers (for map-of-maps) */
+    jacl_map_set_hash_handlers(jacl_val_hash, jacl_val_hash);
+    /* Rope sum_tree handlers */
+    rope_st_set_handlers((rope_st_handlers){
+        .identity  = rope_summary_identity,
+        .combine   = rope_summary_combine,
+        .summarize = rope_summary_summarize
+    });
+}
+
+#endif /* JACL_H */

@@ -163,6 +163,30 @@ echo ""
 # Find newest source file for cache invalidation
 NEWEST_SRC=$(find src/ lib/ -name '*.c' -o -name '*.h' 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
 
+# Phase 0: Build shared libjacl.a (compile the unity build once)
+LIBJACL="$BUILD_DIR/libjacl.a"
+JACL_OBJ="$BUILD_DIR/jacl.o"
+NEED_LIB=0
+if [ ! -f "$LIBJACL" ]; then
+    NEED_LIB=1
+elif [ -n "$NEWEST_SRC" ] && [ "$LIBJACL" -ot "$NEWEST_SRC" ]; then
+    NEED_LIB=1
+fi
+if [ "$NEED_LIB" -eq 1 ]; then
+    echo -n "Building libjacl.a... "
+    if $CC $CFLAGS -c src/jacl.c -o "$JACL_OBJ" -lm 2>"$BUILD_DIR/jacl.err"; then
+        ar rcs "$LIBJACL" "$JACL_OBJ"
+        echo "ok"
+    else
+        echo "FAIL"
+        cat "$BUILD_DIR/jacl.err" >&2
+        exit 1
+    fi
+else
+    echo "libjacl.a is up-to-date"
+fi
+echo ""
+
 # Phase 1: compile all tests in parallel
 PIDS=()
 NEED_COMPILE=()
@@ -180,10 +204,10 @@ for entry in "${TESTS[@]}"; do
         if [ "$BUILD_DIR/$name" -ot "$src" ]; then
             skip=0
         fi
-        # For test/ files that include jacl.c, also check against newest source
+        # For test/ files that link against libjacl.a, check against the library
         case "$src" in
             test/*)
-                if [ -n "$NEWEST_SRC" ] && [ "$BUILD_DIR/$name" -ot "$NEWEST_SRC" ]; then
+                if [ "$BUILD_DIR/$name" -ot "$LIBJACL" ]; then
                     skip=0
                 fi
                 ;;
@@ -195,7 +219,15 @@ for entry in "${TESTS[@]}"; do
         fi
     fi
 
-    $CC $flags "$src" -o "$BUILD_DIR/$name" -lm 2>"$BUILD_DIR/${name}.err" &
+    # test/ files link against libjacl.a; lib/ files compile standalone
+    case "$src" in
+        test/*)
+            $CC $flags "$src" -o "$BUILD_DIR/$name" "$LIBJACL" -lm 2>"$BUILD_DIR/${name}.err" &
+            ;;
+        *)
+            $CC $flags "$src" -o "$BUILD_DIR/$name" -lm 2>"$BUILD_DIR/${name}.err" &
+            ;;
+    esac
     PIDS+=($!)
     NEED_COMPILE+=("1")
 done
