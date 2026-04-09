@@ -24,11 +24,14 @@ fi
 LIB_ONLY=0
 FILTER=""
 CLEAN=0
+PARALLEL=0
 for arg in "$@"; do
   case "$arg" in
     --lib) LIB_ONLY=1 ;;
     --clean) CLEAN=1 ;;
     --test=*) FILTER="${arg#--test=}" ;;
+    --parallel|-j) PARALLEL=$(nproc) ;;
+    --parallel=*|-j=*) PARALLEL="${arg#*=}" ;;
   esac
 done
 
@@ -256,22 +259,57 @@ else
 fi
 echo ""
 
-# Phase 2: run all compiled tests sequentially
-for entry in "${TESTS[@]}"; do
-    IFS='|' read -r src name extra_cflags <<< "$entry"
-    if [ ! -x "$BUILD_DIR/$name" ]; then
-        continue  # compilation failed, already counted
-    fi
-    printf "%-30s" "$name"
-    if "$BUILD_DIR/$name"; then
-        echo "PASS"
-        PASS=$((PASS + 1))
-    else
-        echo "FAIL"
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS="$FAILED_TESTS $name"
-    fi
-done
+# Phase 2: run tests
+if [ "$PARALLEL" -gt 1 ]; then
+    # Parallel execution: run up to $PARALLEL tests at once
+    RESULTS_DIR=$(mktemp -d)
+    TEST_NAMES=()
+    for entry in "${TESTS[@]}"; do
+        IFS='|' read -r src name extra_cflags <<< "$entry"
+        if [ ! -x "$BUILD_DIR/$name" ]; then
+            continue
+        fi
+        TEST_NAMES+=("$name")
+    done
+    printf '%s\n' "${TEST_NAMES[@]}" | xargs -P "$PARALLEL" -I{} sh -c \
+        '"$1/$2" > "$3/$2.out" 2>&1; echo $? > "$3/$2.rc"' _ "$BUILD_DIR" {} "$RESULTS_DIR"
+
+    # Collect results in order
+    for entry in "${TESTS[@]}"; do
+        IFS='|' read -r src name extra_cflags <<< "$entry"
+        if [ ! -x "$BUILD_DIR/$name" ]; then
+            continue
+        fi
+        rc=$(cat "$RESULTS_DIR/${name}.rc" 2>/dev/null || echo "1")
+        if [ "$rc" = "0" ]; then
+            printf "%-30s PASS\n" "$name"
+            PASS=$((PASS + 1))
+        else
+            printf "%-30s FAIL\n" "$name"
+            cat "$RESULTS_DIR/${name}.out" >&2
+            FAIL=$((FAIL + 1))
+            FAILED_TESTS="$FAILED_TESTS $name"
+        fi
+    done
+    rm -rf "$RESULTS_DIR"
+else
+    # Sequential execution
+    for entry in "${TESTS[@]}"; do
+        IFS='|' read -r src name extra_cflags <<< "$entry"
+        if [ ! -x "$BUILD_DIR/$name" ]; then
+            continue  # compilation failed, already counted
+        fi
+        printf "%-30s" "$name"
+        if "$BUILD_DIR/$name"; then
+            echo "PASS"
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL"
+            FAIL=$((FAIL + 1))
+            FAILED_TESTS="$FAILED_TESTS $name"
+        fi
+    done
+fi
 
 # WIP modules (skipped)
 echo ""
