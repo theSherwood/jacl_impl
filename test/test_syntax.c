@@ -2575,6 +2575,413 @@ static int test_compile_quote_inside_macro_body(void) {
     TEST_PASS();
 }
 
+/* ===== US-010: Compiler handling of syntax-quote — template expansion ===== */
+
+/* Helper: allocate a SYNTAX_LIT_INT value */
+static JaclVal us010_make_lit_int(ThreadHeap* heap, int32_t v) {
+    JaclVal s = gc_alloc_syntax(heap);
+    JaclSyntax* sy = jacl_as_syntax(s);
+    sy->kind = SYNTAX_LIT_INT;
+    sy->data.lit_int.value = v;
+    return s;
+}
+
+/* Helper: allocate a SYNTAX_VAR_REF value with a given name */
+static JaclVal us010_make_var_ref(ThreadHeap* heap, const char* name) {
+    JaclVal s = gc_alloc_syntax(heap);
+    JaclSyntax* sy = jacl_as_syntax(s);
+    sy->kind = SYNTAX_VAR_REF;
+    sy->data.var_ref.name = jacl_inline_string(name, (uint32_t)strlen(name));
+    return s;
+}
+
+/* Helper: allocate a SYNTAX_COMMAND with a head and args vec */
+static JaclVal us010_make_command(ThreadHeap* heap, JaclVal head,
+                                   JaclVal* args, uint32_t argc) {
+    jacl_vec_root* v = jacl_vec_empty();
+    for (uint32_t i = 0; i < argc; i++) {
+        v = jacl_vec_push_back(v, args[i]);
+    }
+    JaclVal s = gc_alloc_syntax(heap);
+    JaclSyntax* sy = jacl_as_syntax(s);
+    sy->kind = SYNTAX_COMMAND;
+    sy->data.command.head = head;
+    sy->data.command.args = jacl_vector_ptr(v);
+    return s;
+}
+
+/* Helper: build a vec of values */
+static JaclVal us010_make_vec(JaclVal* elems, uint32_t n) {
+    jacl_vec_root* v = jacl_vec_empty();
+    for (uint32_t i = 0; i < n; i++) {
+        v = jacl_vec_push_back(v, elems[i]);
+    }
+    return jacl_vector_ptr(v);
+}
+
+/* Helper: invoke a compiled macro closure with the given syntax object
+ * arguments, returning the result in *out. Mimics jacl_call_val's setup
+ * without requiring a JaclVM wrapper. */
+static VMResult us010_run_closure(VM* vm, JaclClosure* cl,
+                                   JaclVal* args, uint32_t argc,
+                                   JaclVal* out) {
+    vm->error_message = NULL;
+    vm->error_line = 0;
+
+    vm->stack[0] = jacl_closure(cl);
+    for (uint32_t i = 0; i < argc; i++) vm->stack[1 + i] = args[i];
+    vm->stack_top = 1 + argc;
+
+    vm->frames[0].closure    = cl;
+    vm->frames[0].return_ip  = NULL;
+    vm->frames[0].stack_base = 1;
+    vm->frames[0].chunk      = &cl->chunk;
+    vm->frame_count = 1;
+
+    vm->chunk     = &cl->chunk;
+    vm->top_chunk = &cl->chunk;
+    vm->ip        = cl->chunk.code;
+
+    VMResult r = vm__run(vm, 0);
+    if (out) {
+        *out = (vm->stack_top > 0) ? vm->stack[0] : JACL_NIL;
+    }
+    return r;
+}
+
+/* Helper: extract a short string from a SYNTAX_LIT_STRING/VAR_REF name field */
+static void us010_syn_name(JaclSyntax* s, char* buf, size_t buf_len) {
+    JaclVal nm = (s->kind == SYNTAX_VAR_REF) ? s->data.var_ref.name
+                                              : s->data.lit_string.value;
+    uint32_t n = jacl_string_data(nm, buf, (uint32_t)buf_len - 1);
+    buf[n] = '\0';
+}
+
+/* Test: syntax-quote [if [not ~cond] ~body] runs through the compiled
+ * bytecode and builds an SYNTAX_COMMAND with head "if" and 2 args. */
+static int test_us010_syntax_quote_unquotes(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char* src =
+        "defmacro wrap {cond, body} {\n"
+        "  syntax-quote [if [not ~cond] ~body]\n"
+        "}";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT_INT_EQ(cr.error_count, 0);
+    MacroEntry* entry = macro_table_lookup(cr.macro_table, "wrap", 4);
+    ASSERT(entry != NULL);
+    ASSERT(entry->closure != NULL);
+
+    /* Build syntax object args: cond = lit-int 0, body = lit-int 42 */
+    JaclVal cond_arg = us010_make_lit_int(&vm.heap, 0);
+    JaclVal body_arg = us010_make_lit_int(&vm.heap, 42);
+    JaclVal args[2] = { cond_arg, body_arg };
+
+    JaclVal result;
+    VMResult r = us010_run_closure(&vm, entry->closure, args, 2, &result);
+    ASSERT_INT_EQ(r, VM_OK);
+    ASSERT(jacl_is_syntax(result));
+
+    JaclSyntax* top = jacl_as_syntax(result);
+    ASSERT_INT_EQ(top->kind, SYNTAX_COMMAND);
+
+    /* Head should be "if" */
+    JaclSyntax* top_head = jacl_as_syntax(top->data.command.head);
+    ASSERT_INT_EQ(top_head->kind, SYNTAX_LIT_STRING);
+    {
+        char buf[16];
+        us010_syn_name(top_head, buf, sizeof(buf));
+        ASSERT_STR_EQ(buf, "if");
+    }
+
+    /* Args: [not cond] and body_arg (the filled-in one) */
+    jacl_vec_root* top_args = (jacl_vec_root*)jacl_as_ptr(top->data.command.args);
+    ASSERT_U32_EQ(jacl_vec_count(top_args), 2);
+
+    /* First arg: [not ~cond] → command with head "not" and 1 arg (cond_arg) */
+    JaclSyntax* a0 = jacl_as_syntax(jacl_vec_get(top_args, 0).value);
+    ASSERT_INT_EQ(a0->kind, SYNTAX_COMMAND);
+    JaclSyntax* a0_head = jacl_as_syntax(a0->data.command.head);
+    ASSERT_INT_EQ(a0_head->kind, SYNTAX_LIT_STRING);
+    {
+        char buf[16];
+        us010_syn_name(a0_head, buf, sizeof(buf));
+        ASSERT_STR_EQ(buf, "not");
+    }
+    jacl_vec_root* a0_args = (jacl_vec_root*)jacl_as_ptr(a0->data.command.args);
+    ASSERT_U32_EQ(jacl_vec_count(a0_args), 1);
+    JaclSyntax* cond_filled = jacl_as_syntax(jacl_vec_get(a0_args, 0).value);
+    ASSERT_INT_EQ(cond_filled->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(cond_filled->data.lit_int.value, 0);
+
+    /* Second arg: body_arg as-is (lit-int 42) */
+    JaclSyntax* a1 = jacl_as_syntax(jacl_vec_get(top_args, 1).value);
+    ASSERT_INT_EQ(a1->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(a1->data.lit_int.value, 42);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax-quote [foo ~@args] flattens a 2-element vec into the
+ * command's arg list, producing a 2-arg command. */
+static int test_us010_unquote_splicing_in_args(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char* src =
+        "defmacro wrap {args} {\n"
+        "  syntax-quote [foo ~@args]\n"
+        "}";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT_INT_EQ(cr.error_count, 0);
+    MacroEntry* entry = macro_table_lookup(cr.macro_table, "wrap", 4);
+    ASSERT(entry != NULL);
+
+    /* Build a vec of 2 lit-int syntax objects */
+    JaclVal e0 = us010_make_lit_int(&vm.heap, 10);
+    JaclVal e1 = us010_make_lit_int(&vm.heap, 20);
+    JaclVal elems[2] = { e0, e1 };
+    JaclVal args_vec = us010_make_vec(elems, 2);
+    JaclVal call_args[1] = { args_vec };
+
+    JaclVal result;
+    VMResult r = us010_run_closure(&vm, entry->closure, call_args, 1, &result);
+    ASSERT_INT_EQ(r, VM_OK);
+    ASSERT(jacl_is_syntax(result));
+
+    JaclSyntax* cmd = jacl_as_syntax(result);
+    ASSERT_INT_EQ(cmd->kind, SYNTAX_COMMAND);
+
+    JaclSyntax* head = jacl_as_syntax(cmd->data.command.head);
+    ASSERT_INT_EQ(head->kind, SYNTAX_LIT_STRING);
+    {
+        char buf[16];
+        us010_syn_name(head, buf, sizeof(buf));
+        ASSERT_STR_EQ(buf, "foo");
+    }
+
+    /* Args: 2 elements flattened from the vec */
+    jacl_vec_root* rargs = (jacl_vec_root*)jacl_as_ptr(cmd->data.command.args);
+    ASSERT_U32_EQ(jacl_vec_count(rargs), 2);
+    JaclSyntax* a0 = jacl_as_syntax(jacl_vec_get(rargs, 0).value);
+    ASSERT_INT_EQ(a0->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(a0->data.lit_int.value, 10);
+    JaclSyntax* a1 = jacl_as_syntax(jacl_vec_get(rargs, 1).value);
+    ASSERT_INT_EQ(a1->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(a1->data.lit_int.value, 20);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax-quote { ~@stmts } flattens a vec of syntax commands into
+ * a block. */
+static int test_us010_unquote_splicing_in_block(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char* src =
+        "defmacro wrap {stmts} {\n"
+        "  syntax-quote { ~@stmts }\n"
+        "}";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT_INT_EQ(cr.error_count, 0);
+    MacroEntry* entry = macro_table_lookup(cr.macro_table, "wrap", 4);
+    ASSERT(entry != NULL);
+
+    /* Build 2 command syntax objects: [print 1] and [print 2] */
+    JaclVal head1 = us010_make_var_ref(&vm.heap, "print");
+    JaclVal arg1  = us010_make_lit_int(&vm.heap, 1);
+    JaclVal cmd1_args[1] = { arg1 };
+    JaclVal cmd1 = us010_make_command(&vm.heap, head1, cmd1_args, 1);
+
+    JaclVal head2 = us010_make_var_ref(&vm.heap, "print");
+    JaclVal arg2  = us010_make_lit_int(&vm.heap, 2);
+    JaclVal cmd2_args[1] = { arg2 };
+    JaclVal cmd2 = us010_make_command(&vm.heap, head2, cmd2_args, 1);
+
+    JaclVal stmts_elems[2] = { cmd1, cmd2 };
+    JaclVal stmts_vec = us010_make_vec(stmts_elems, 2);
+    JaclVal call_args[1] = { stmts_vec };
+
+    JaclVal result;
+    VMResult r = us010_run_closure(&vm, entry->closure, call_args, 1, &result);
+    ASSERT_INT_EQ(r, VM_OK);
+    ASSERT(jacl_is_syntax(result));
+
+    JaclSyntax* blk = jacl_as_syntax(result);
+    ASSERT_INT_EQ(blk->kind, SYNTAX_BLOCK);
+
+    jacl_vec_root* cmds = (jacl_vec_root*)jacl_as_ptr(blk->data.block.commands);
+    ASSERT_U32_EQ(jacl_vec_count(cmds), 2);
+    JaclSyntax* b0 = jacl_as_syntax(jacl_vec_get(cmds, 0).value);
+    ASSERT_INT_EQ(b0->kind, SYNTAX_COMMAND);
+    JaclSyntax* b1 = jacl_as_syntax(jacl_vec_get(cmds, 1).value);
+    ASSERT_INT_EQ(b1->kind, SYNTAX_COMMAND);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: runtime error when ~ result is not a syntax object. */
+static int test_us010_unquote_type_error(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char* src =
+        "defmacro wrap {x} {\n"
+        "  syntax-quote [foo ~x]\n"
+        "}";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT_INT_EQ(cr.error_count, 0);
+    MacroEntry* entry = macro_table_lookup(cr.macro_table, "wrap", 4);
+    ASSERT(entry != NULL);
+
+    /* Pass a raw i32 instead of a syntax object */
+    JaclVal args[1] = { jacl_i32(42) };
+
+    JaclVal result;
+    VMResult r = us010_run_closure(&vm, entry->closure, args, 1, &result);
+    ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
+    ASSERT(vm.error_message != NULL);
+    ASSERT(strstr(vm.error_message, "syntax object") != NULL);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: runtime error when ~@ result is not a vec of syntax objects. */
+static int test_us010_unquote_splicing_type_error(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char* src =
+        "defmacro wrap {args} {\n"
+        "  syntax-quote [foo ~@args]\n"
+        "}";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT_INT_EQ(cr.error_count, 0);
+    MacroEntry* entry = macro_table_lookup(cr.macro_table, "wrap", 4);
+    ASSERT(entry != NULL);
+
+    /* Pass a raw i32 (not a vec) */
+    JaclVal call_args[1] = { jacl_i32(42) };
+
+    JaclVal result;
+    VMResult r = us010_run_closure(&vm, entry->closure, call_args, 1, &result);
+    ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
+    ASSERT(vm.error_message != NULL);
+    ASSERT(strstr(vm.error_message, "vec of syntax objects") != NULL);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: runtime error when ~@ receives a vec containing non-syntax elements. */
+static int test_us010_unquote_splicing_vec_nonsyntax(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char* src =
+        "defmacro wrap {args} {\n"
+        "  syntax-quote [foo ~@args]\n"
+        "}";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT_INT_EQ(cr.error_count, 0);
+    MacroEntry* entry = macro_table_lookup(cr.macro_table, "wrap", 4);
+    ASSERT(entry != NULL);
+
+    /* Build a vec where elements are i32 instead of syntax */
+    JaclVal elems[2] = { jacl_i32(1), jacl_i32(2) };
+    JaclVal bad_vec = us010_make_vec(elems, 2);
+    JaclVal call_args[1] = { bad_vec };
+
+    JaclVal result;
+    VMResult r = us010_run_closure(&vm, entry->closure, call_args, 1, &result);
+    ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
+    ASSERT(vm.error_message != NULL);
+    ASSERT(strstr(vm.error_message, "vec of syntax objects") != NULL);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: nested syntax-quote is treated as literal (outer ~ does not
+ * recurse into inner template). */
+static int test_us010_nested_syntax_quote_literal(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    /* Outer macro with no unquotes — the inner syntax-quote is a literal
+     * part of the template. With zero unquotes, the template constant is
+     * emitted directly (OP_SYNTAX_SPLICE is not used). */
+    const char* src =
+        "defmacro mk {} {\n"
+        "  syntax-quote [foo 1]\n"
+        "}";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT_INT_EQ(cr.error_count, 0);
+    MacroEntry* entry = macro_table_lookup(cr.macro_table, "mk", 2);
+    ASSERT(entry != NULL);
+
+    JaclVal result;
+    VMResult r = us010_run_closure(&vm, entry->closure, NULL, 0, &result);
+    ASSERT_INT_EQ(r, VM_OK);
+    ASSERT(jacl_is_syntax(result));
+
+    JaclSyntax* cmd = jacl_as_syntax(result);
+    ASSERT_INT_EQ(cmd->kind, SYNTAX_COMMAND);
+    jacl_vec_root* rargs = (jacl_vec_root*)jacl_as_ptr(cmd->data.command.args);
+    ASSERT_U32_EQ(jacl_vec_count(rargs), 1);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -2706,6 +3113,16 @@ int main(void) {
     RUN(test_compile_quote_lit_int);
     RUN(test_compile_quote_nested);
     RUN(test_compile_quote_inside_macro_body);
+
+    printf("\n=== Compile Syntax-Quote Tests (US-010) ===\n");
+
+    RUN(test_us010_syntax_quote_unquotes);
+    RUN(test_us010_unquote_splicing_in_args);
+    RUN(test_us010_unquote_splicing_in_block);
+    RUN(test_us010_unquote_type_error);
+    RUN(test_us010_unquote_splicing_type_error);
+    RUN(test_us010_unquote_splicing_vec_nonsyntax);
+    RUN(test_us010_nested_syntax_quote_literal);
 
 #undef RUN
 

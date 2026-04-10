@@ -128,7 +128,8 @@ bool gc_should_major(ThreadHeap *heap);
 
 static JaclVal syntax__splice_template(JaclVal tmpl, JaclVal *values,
                                        uint32_t n_values, uint32_t *idx,
-                                       ThreadHeap *heap);
+                                       ThreadHeap *heap,
+                                       const char **err);
 
 /* --- Emergency GC callback for single-threaded mode --- */
 
@@ -5867,9 +5868,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal *values = &vm->stack[vm->stack_top - n_unquotes];
         JaclVal tmpl = vm->stack[vm->stack_top - n_unquotes - 1];
         uint32_t idx = 0;
+        const char *splice_err = NULL;
         JaclVal spliced = syntax__splice_template(tmpl, values, n_unquotes,
-                                                   &idx, &vm->heap);
+                                                   &idx, &vm->heap,
+                                                   &splice_err);
         vm->stack_top -= (n_unquotes + 1);  /* pop template + values */
+        if (splice_err) {
+          vm__set_error(vm, "%s", splice_err);
+          return VM_RUNTIME_ERROR;
+        }
         result = vm__push(vm, spliced);
         if (result != VM_OK) return result;
         break;

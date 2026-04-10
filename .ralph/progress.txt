@@ -26,6 +26,8 @@ Started: Thu Apr 10 2026
 - Inside syntax-quote, `~cond` (bare word) parses as AST_UNQUOTE(AST_LIT_STRING("cond")), not AST_VAR_REF. Template expansion must handle both SYNTAX_LIT_STRING and SYNTAX_VAR_REF children of unquotes for parameter matching.
 - Expansion pass and compiler pass share the same MacroTable. The expansion pass registers entries with closure=NULL (body AST only), and the compiler pass fills in the closure. The compiler must NOT treat a closure==NULL entry as a duplicate error.
 - String comparison from JaclVal: `jacl_string_data(v, buf, sizeof(buf))` returns the byte length and copies into buf (NOT a pointer accessor). Null-terminate with `buf[n] = '\0'` before ASSERT_STR_EQ. This is the pattern used everywhere in test/test_syntax.c.
+- Directly invoking a compiled closure from a C test without a JaclVM wrapper: put closure at stack[0], args at stack[1..N], set stack_top, configure frames[0] with stack_base=1 and chunk=&cl->chunk, point vm->chunk/top_chunk/ip at the closure's chunk, call vm__run(vm, 0). Result lands at vm->stack[0] after OP_RETURN drops frame_count to 0. See us010_run_closure in test/test_syntax.c.
+- Inside syntax-quote, `~bareword` parses as AST_UNQUOTE(AST_LIT_STRING). The compiler must synthesize an AST_VAR_REF from the lit-string before compiling (via syntax__compile_unquote_child in compiler.c) so the closure does a parameter lookup, not a string literal push.
 
 ## 2026-04-10 - US-001 — Add JACL_TAG_SYNTAX value tag and OBJ_SYNTAX GC object
 - Most of US-001 was already staged as uncommitted edits (tag constant, obj enum, JaclSyntax struct, GC tracing, printing, test file). I wired up the final missing pieces and fixed one blocker.
@@ -177,6 +179,34 @@ Thread: (inline)
   - Chunk constants are GC-traced via `gc__ms_push_const` — invoked both through call-frame chunk traversal (for the top-level chunk when executing) and via `OBJ_CLOSURE` tracing (for macro body closures). Syntax objects created at compile time and stored in constants are safe from GC as long as the chunk is reachable.
   - `jacl_string_data` is a copy-into-buffer API: `uint32_t n = jacl_string_data(v, buf, sizeof(buf)); buf[n] = '\0';`. It is NOT a pointer accessor; older test code that uses `memcmp(node->data.lit_string.value, "x", 1)` is comparing against the raw `const char*` stored directly on AstNode (not on a JaclVal).
   - The existing AST_QUOTE → JaclSyntax conversion in `syntax_from_ast` wraps nested quotes in SYNTAX_QUOTE (not unwrapped), so `quote [foo quote [bar]]` round-trips through the compile-time conversion as a command arg of kind SYNTAX_QUOTE.
+---
+
+## 2026-04-10 - US-010 — Compiler handling of syntax-quote — template expansion
+Thread: (inline)
+- The compiler emission for AST_SYNTAX_QUOTE was already scaffolded as part of US-008: it converts the full template (with SYNTAX_UNQUOTE markers) to a constant, compiles each unquote expression in depth-first order, then emits OP_SYNTAX_SPLICE n. For US-010 I tightened the semantics and proved the bytecode path end-to-end.
+- Added runtime type validation in `syntax__splice_template` (src/syntax.c): threaded an `err` out-parameter through all recursive calls. On type error, sets *err to a static string and returns JACL_NIL. Errors:
+  - `~` (unquote) value must be nil or a syntax object
+  - `~@` (unquote-splicing) value must be a vec, AND every element in the vec must be a syntax object
+  - `~@` at a non-spliceable position (not inside a command arg list or block body) errors instead of silently passing through
+- The OP_SYNTAX_SPLICE handler in src/vm.c now surfaces splice errors via `vm__set_error` and returns VM_RUNTIME_ERROR.
+- Fixed `syntax__compile_unquotes` in src/compiler.c so that `~bareword` compiles as a variable lookup of `bareword` (the parser emits AST_UNQUOTE wrapping AST_LIT_STRING for bare words inside syntax-quote). Added `syntax__compile_unquote_child` helper that synthesizes an AST_VAR_REF when the unquote child is AST_LIT_STRING, and compiles other expressions normally. Without this fix, the closure would just push the bare string literal instead of looking up the parameter.
+- 7 new tests in test/test_syntax.c, all exercising the OP_SYNTAX_SPLICE bytecode by compiling a defmacro and then directly invoking the compiled closure via a new `us010_run_closure` helper (mimics jacl_call_val but takes VM* directly — sets frame 0 with stack_base=1, closure at slot 0, args at 1..N, runs vm__run):
+  - `test_us010_syntax_quote_unquotes`: `syntax-quote [if [not ~cond] ~body]` with lit-int args produces nested SYNTAX_COMMAND tree
+  - `test_us010_unquote_splicing_in_args`: `syntax-quote [foo ~@args]` with vec of 2 flattens to 2 command args
+  - `test_us010_unquote_splicing_in_block`: `syntax-quote { ~@stmts }` flattens vec into SYNTAX_BLOCK commands
+  - `test_us010_unquote_type_error`: passing i32 as the unquote value errors with "syntax object"
+  - `test_us010_unquote_splicing_type_error`: passing i32 for ~@ errors with "vec of syntax objects"
+  - `test_us010_unquote_splicing_vec_nonsyntax`: vec of i32 elements errors
+  - `test_us010_nested_syntax_quote_literal`: zero-unquote template compiles to a bare constant (no OP_SYNTAX_SPLICE)
+- Also added helper constructors in test_syntax.c: `us010_make_lit_int`, `us010_make_var_ref`, `us010_make_command`, `us010_make_vec`, `us010_syn_name`.
+- Files changed: src/syntax.c, src/vm.c, src/compiler.c, test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 binaries pass (103 syntax subtests), no warnings with -Wall -Wextra.
+- **Learnings for future iterations:**
+  - To directly invoke a compiled closure from a C test without a JaclVM wrapper, use the `jacl_call_val` pattern: put closure at stack[0], args at stack[1..N], set stack_top, configure frames[0] with `stack_base=1`, point `vm->chunk/top_chunk/ip` at the closure's chunk, then call `vm__run(vm, 0)`. Result lands at `vm->stack[0]` after OP_RETURN drops frame_count to 0.
+  - `syntax__compile_unquotes` needs to special-case AST_LIT_STRING children of AST_UNQUOTE — bare words like `~cond` parse as unquote-of-lit-string, but the compiler must compile them as AST_VAR_REF to look up the parameter binding. Synthesizing a temporary AST_VAR_REF on the stack (same layout as AST_LIT_STRING) works cleanly.
+  - When a syntax-quote has zero unquotes, the compiler just emits the template as a constant (no OP_SYNTAX_SPLICE). The OP_SYNTAX_SPLICE path is only exercised when there is at least one ~ or ~@ in the template.
+  - `syntax__splice_template` threads a `const char **err` out-parameter for type errors. Callers check `*err != NULL` after each recursive call to short-circuit. Error messages are static C strings so no arena allocation is needed.
+  - Sibling expansion pass (`expand__subst_template` in src/syntax.c) still uses template substitution by parameter name and does NOT go through the compiled closure. Both paths need to stay behaviorally consistent — but the expansion pass currently does not validate types in the same way (acceptable since macros today go through the expansion pass, not the compiled closure path).
 ---
 
 ## 2026-04-10 - US-008 — Macro expansion pass — basic expansion

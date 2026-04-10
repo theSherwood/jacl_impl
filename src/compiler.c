@@ -7610,14 +7610,36 @@ static uint32_t syntax__count_unquotes_ast(AstNode *node) {
     }
 }
 
+/* Compile an unquote child expression. Inside a syntax-quote context, a
+ * bare word like `~cond` parses as AST_UNQUOTE(AST_LIT_STRING "cond") —
+ * in that case we emit a variable reference to `cond` so the compiled
+ * closure can look up the parameter/local by that name. For any other
+ * expression kind, compile it normally. */
+static void syntax__compile_unquote_child(Compiler *c, AstNode *child) {
+    if (!child) return;
+    if (child->type == AST_LIT_STRING) {
+        /* Build a synthetic AST_VAR_REF and compile it. */
+        AstNode vref;
+        memset(&vref, 0, sizeof(vref));
+        vref.type = AST_VAR_REF;
+        vref.start = child->start;
+        vref.end = child->end;
+        vref.data.var_ref.name = child->data.lit_string.value;
+        vref.data.var_ref.length = child->data.lit_string.length;
+        compiler__compile_node(c, &vref);
+        return;
+    }
+    compiler__compile_node(c, child);
+}
+
 static void syntax__compile_unquotes(Compiler *c, AstNode *node) {
     if (!node) return;
     switch (node->type) {
     case AST_UNQUOTE:
-        compiler__compile_node(c, node->data.unquote.child);
+        syntax__compile_unquote_child(c, node->data.unquote.child);
         return;
     case AST_UNQUOTE_SPLICING:
-        compiler__compile_node(c, node->data.unquote_splicing.child);
+        syntax__compile_unquote_child(c, node->data.unquote_splicing.child);
         return;
     case AST_COMMAND:
         syntax__compile_unquotes(c, node->data.command.head);

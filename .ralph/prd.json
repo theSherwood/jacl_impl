@@ -217,7 +217,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "syntax-quote compiles to a sequence of bytecode instructions that allocate and assemble syntax objects. This is more complex than quote — it's a mix of constants and evaluated expressions."
     },
     {

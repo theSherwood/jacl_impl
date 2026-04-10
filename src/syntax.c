@@ -649,37 +649,49 @@ AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena) {
  * values[0..n-1] are consumed in the order unquotes appear (left-to-right,
  * depth-first traversal). *idx tracks the next value to consume.
  * Returns a new syntax object tree (the template is not mutated).
+ *
+ * Type validation: ~ (unquote) result must be a syntax object (or nil).
+ * ~@ (unquote-splicing) result must be a vec of syntax objects. On type
+ * error, sets *err to a static error message and returns JACL_NIL.
  * ------------------------------------------------------------------------- */
 
 static JaclVal syntax__splice_template(JaclVal tmpl, JaclVal *values,
                                        uint32_t n_values, uint32_t *idx,
-                                       ThreadHeap *heap) {
+                                       ThreadHeap *heap,
+                                       const char **err) {
+    if (*err) return JACL_NIL;
     if (jacl_is_nil(tmpl)) return JACL_NIL;
     if (!jacl_is_syntax(tmpl)) return tmpl;
 
     JaclSyntax *syn = jacl_as_syntax(tmpl);
 
-    /* Unquote: replace with the next value */
+    /* Unquote: replace with the next value. The value must be a syntax
+     * object (or nil). */
     if (syn->kind == SYNTAX_UNQUOTE) {
         if (*idx < n_values) {
-            return values[(*idx)++];
+            JaclVal v = values[(*idx)++];
+            if (!jacl_is_nil(v) && !jacl_is_syntax(v)) {
+                *err = "~ (unquote) requires a syntax object";
+                return JACL_NIL;
+            }
+            return v;
         }
         return JACL_NIL;  /* shouldn't happen if counts match */
     }
 
-    /* Unquote-splicing: handled by the parent (command/block).
-     * If we reach here, it means ~@ at a non-spliceable position. */
+    /* Unquote-splicing at a non-spliceable position is an error — ~@ only
+     * makes sense inside command args or block command lists. */
     if (syn->kind == SYNTAX_UNQUOTE_SPLICING) {
-        if (*idx < n_values) {
-            return values[(*idx)++];
-        }
+        *err = "~@ (unquote-splicing) is only valid in command args or block bodies";
         return JACL_NIL;
     }
 
     /* Command: splice head and args, flatten ~@ in args */
     if (syn->kind == SYNTAX_COMMAND) {
         JaclVal new_head = syntax__splice_template(syn->data.command.head,
-                                                    values, n_values, idx, heap);
+                                                    values, n_values, idx,
+                                                    heap, err);
+        if (*err) return JACL_NIL;
         jacl_vec_root *old_args =
             (jacl_vec_root *)jacl_as_ptr(syn->data.command.args);
         uint32_t argc = jacl_vec_count(old_args);
@@ -689,27 +701,30 @@ static JaclVal syntax__splice_template(JaclVal tmpl, JaclVal *values,
             if (jacl_is_syntax(arg)) {
                 JaclSyntax *arg_syn = jacl_as_syntax(arg);
                 if (arg_syn->kind == SYNTAX_UNQUOTE_SPLICING) {
-                    /* Flatten: the value should be a vec of syntax objects */
-                    if (*idx < n_values) {
-                        JaclVal splice_val = values[(*idx)++];
-                        if (jacl_is_vector(splice_val)) {
-                            jacl_vec_root *splice_vec =
-                                (jacl_vec_root *)jacl_as_ptr(splice_val);
-                            uint32_t sc = jacl_vec_count(splice_vec);
-                            for (uint32_t j = 0; j < sc; j++) {
-                                new_args = jacl_vec_push_back(new_args,
-                                    jacl_vec_get(splice_vec, j).value);
-                            }
-                        } else {
-                            /* If not a vec, just insert as-is */
-                            new_args = jacl_vec_push_back(new_args, splice_val);
+                    /* Flatten: the value must be a vec of syntax objects */
+                    if (*idx >= n_values) continue;
+                    JaclVal splice_val = values[(*idx)++];
+                    if (!jacl_is_vector(splice_val)) {
+                        *err = "~@ (unquote-splicing) requires a vec of syntax objects";
+                        return JACL_NIL;
+                    }
+                    jacl_vec_root *splice_vec =
+                        (jacl_vec_root *)jacl_as_ptr(splice_val);
+                    uint32_t sc = jacl_vec_count(splice_vec);
+                    for (uint32_t j = 0; j < sc; j++) {
+                        JaclVal elem = jacl_vec_get(splice_vec, j).value;
+                        if (!jacl_is_syntax(elem)) {
+                            *err = "~@ (unquote-splicing) requires a vec of syntax objects";
+                            return JACL_NIL;
                         }
+                        new_args = jacl_vec_push_back(new_args, elem);
                     }
                     continue;
                 }
             }
             JaclVal spliced = syntax__splice_template(arg, values, n_values,
-                                                       idx, heap);
+                                                       idx, heap, err);
+            if (*err) return JACL_NIL;
             new_args = jacl_vec_push_back(new_args, spliced);
         }
         JaclVal result = gc_alloc_syntax(heap);
@@ -735,25 +750,29 @@ static JaclVal syntax__splice_template(JaclVal tmpl, JaclVal *values,
             if (jacl_is_syntax(cmd)) {
                 JaclSyntax *cmd_syn = jacl_as_syntax(cmd);
                 if (cmd_syn->kind == SYNTAX_UNQUOTE_SPLICING) {
-                    if (*idx < n_values) {
-                        JaclVal splice_val = values[(*idx)++];
-                        if (jacl_is_vector(splice_val)) {
-                            jacl_vec_root *splice_vec =
-                                (jacl_vec_root *)jacl_as_ptr(splice_val);
-                            uint32_t sc = jacl_vec_count(splice_vec);
-                            for (uint32_t j = 0; j < sc; j++) {
-                                new_cmds = jacl_vec_push_back(new_cmds,
-                                    jacl_vec_get(splice_vec, j).value);
-                            }
-                        } else {
-                            new_cmds = jacl_vec_push_back(new_cmds, splice_val);
+                    if (*idx >= n_values) continue;
+                    JaclVal splice_val = values[(*idx)++];
+                    if (!jacl_is_vector(splice_val)) {
+                        *err = "~@ (unquote-splicing) requires a vec of syntax objects";
+                        return JACL_NIL;
+                    }
+                    jacl_vec_root *splice_vec =
+                        (jacl_vec_root *)jacl_as_ptr(splice_val);
+                    uint32_t sc = jacl_vec_count(splice_vec);
+                    for (uint32_t j = 0; j < sc; j++) {
+                        JaclVal elem = jacl_vec_get(splice_vec, j).value;
+                        if (!jacl_is_syntax(elem)) {
+                            *err = "~@ (unquote-splicing) requires a vec of syntax objects";
+                            return JACL_NIL;
                         }
+                        new_cmds = jacl_vec_push_back(new_cmds, elem);
                     }
                     continue;
                 }
             }
             JaclVal spliced = syntax__splice_template(cmd, values, n_values,
-                                                       idx, heap);
+                                                       idx, heap, err);
+            if (*err) return JACL_NIL;
             new_cmds = jacl_vec_push_back(new_cmds, spliced);
         }
         JaclVal result = gc_alloc_syntax(heap);
@@ -776,7 +795,8 @@ static JaclVal syntax__splice_template(JaclVal tmpl, JaclVal *values,
         for (uint32_t i = 0; i < cnt; i++) {
             JaclVal seg = jacl_vec_get(old_segs, i).value;
             JaclVal spliced = syntax__splice_template(seg, values, n_values,
-                                                       idx, heap);
+                                                       idx, heap, err);
+            if (*err) return JACL_NIL;
             new_segs = jacl_vec_push_back(new_segs, spliced);
         }
         JaclVal result = gc_alloc_syntax(heap);
@@ -793,7 +813,9 @@ static JaclVal syntax__splice_template(JaclVal tmpl, JaclVal *values,
     /* Spread: recurse into child */
     if (syn->kind == SYNTAX_SPREAD) {
         JaclVal new_child = syntax__splice_template(syn->data.spread.child,
-                                                     values, n_values, idx, heap);
+                                                     values, n_values, idx,
+                                                     heap, err);
+        if (*err) return JACL_NIL;
         JaclVal result = gc_alloc_syntax(heap);
         JaclSyntax *rsyn = jacl_as_syntax(result);
         rsyn->kind = SYNTAX_SPREAD;
@@ -808,7 +830,9 @@ static JaclVal syntax__splice_template(JaclVal tmpl, JaclVal *values,
     /* Quote/syntax-quote: recurse into child */
     if (syn->kind == SYNTAX_QUOTE) {
         JaclVal new_child = syntax__splice_template(syn->data.quote.child,
-                                                     values, n_values, idx, heap);
+                                                     values, n_values, idx,
+                                                     heap, err);
+        if (*err) return JACL_NIL;
         JaclVal result = gc_alloc_syntax(heap);
         JaclSyntax *rsyn = jacl_as_syntax(result);
         rsyn->kind = SYNTAX_QUOTE;
