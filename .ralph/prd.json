@@ -177,7 +177,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "The expansion pass needs a VM instance to execute macro bodies. Reuse the compiler's embed VM or create a dedicated expansion VM."
     },
     {

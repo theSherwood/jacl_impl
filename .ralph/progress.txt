@@ -23,6 +23,8 @@ Started: Thu Apr 10 2026
 - When forward-declaring a typedef'd struct in compiler.c, use `typedef struct Foo Foo;` before CompileResult, then `struct Foo { ... };` at the definition site.
 - MacroTable is allocated in compiler_compile and stored in both Compiler.macro_table and CompileResult.macro_table.
 - Special forms that are lexer keywords (if, proc, def, mut, set, while, for, match, break, continue, return, try, quote, defmacro, syntax-quote) are caught at parse time if used as defmacro name. Non-keyword special forms (spawn, yield, await, parallel, defstruct, to) are caught at compile time by macro__is_special_form.
+- Inside syntax-quote, `~cond` (bare word) parses as AST_UNQUOTE(AST_LIT_STRING("cond")), not AST_VAR_REF. Template expansion must handle both SYNTAX_LIT_STRING and SYNTAX_VAR_REF children of unquotes for parameter matching.
+- Expansion pass and compiler pass share the same MacroTable. The expansion pass registers entries with closure=NULL (body AST only), and the compiler pass fills in the closure. The compiler must NOT treat a closure==NULL entry as a duplicate error.
 
 ## 2026-04-10 - US-001 — Add JACL_TAG_SYNTAX value tag and OBJ_SYNTAX GC object
 - Most of US-001 was already staged as uncommitted edits (tag constant, obj enum, JaclSyntax struct, GC tracing, printing, test file). I wired up the final missing pieces and fixed one blocker.
@@ -156,4 +158,22 @@ Thread: (inline)
   - Special form names that are lexer keywords (if, proc, etc.) get caught by the parser as "expected macro name" before reaching the compiler. Non-keyword special forms (spawn, yield, await, parallel, defstruct, to) are caught by macro__is_special_form at compile time.
   - The macro body closure is compiled like a proc body: create a body Compiler with scope_depth=1, add params as locals, compile_block_expr, emit OP_RETURN.
   - concurrent_intern test is flaky — can fail sporadically in full builds.
+---
+
+## 2026-04-10 - US-008 — Macro expansion pass — basic expansion
+Thread: (inline)
+- Implemented template-based macro expansion in src/syntax.c that replaces SYNTAX_UNQUOTE nodes by matching their child names against macro parameter names.
+- Key new functions: expand__match_param (name lookup), expand__subst_template (recursive template walk with unquote substitution, ~@ flattening in commands/blocks), expand__find_syntax_quote_child (extract template from body).
+- Expansion pass (ast_expand_macros) now registers macros with body AST (no VM needed) and expands calls via template substitution.
+- Fixed compiler duplicate defmacro bug: expansion pass registers macros in the shared MacroTable, then compiler pass sees AST_DEFMACRO again. Now compiler detects expansion-pass-registered entries (closure==NULL) and compiles the closure without re-registration.
+- Fixed pre-existing bytecode test: OP_SYNTAX_SPLICE shifted OP_HALT from 151 to 152.
+- Added MacroEntry.body field to both compiler.c and jacl.h to store the original body AST.
+- 8 new tests: unless expansion, double (same param used twice), two-level (macro expanding to macro), depth limit (self-referencing), use-before-define, wrong arg count, non-macro passthrough, expansion inside nested blocks.
+- Files changed: src/syntax.c, src/compiler.c, src/jacl.h, src/bytecode.c, src/vm.c, test/test_bytecode.c, test/test_syntax.c
+- Verification: ./build.sh → 84/84 pass (91 syntax subtests), no warnings.
+- **Learnings for future iterations:**
+  - Inside syntax-quote, `~cond` (bare word) parses as AST_UNQUOTE(AST_LIT_STRING("cond")), NOT AST_VAR_REF. Template substitution must match both SYNTAX_LIT_STRING and SYNTAX_VAR_REF as unquote children.
+  - The expansion pass runs before the compiler pass. Both share the same MacroTable. The expansion pass sets closure=NULL (template-only), and the compiler pass fills in the closure later for the entry already in the table.
+  - Expansion is iterative: after replacing a macro call, the result is re-expanded (depth+1) to handle macros that expand to other macro calls.
+  - When adding a new opcode between existing ones (like OP_SYNTAX_SPLICE before OP_HALT), update the hardcoded enum values in test_bytecode.c.
 ---
