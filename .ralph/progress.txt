@@ -10,7 +10,7 @@ Started: Thu Apr 10 2026
 - VMFormatBuf usage: init with `VMFormatBuf buf = {0}; buf.arena = &arena;` — vm__fmt_ensure handles cap==0 by seeding to 128.
 - build.sh takes --test=NAME for single-test filter; --clean clears .build.
 - syntax_from_ast signature: JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap, JaclInternTable *intern). Returns JACL_NIL for NULL nodes or AST_ERROR.
-- All lib/ tests fail in this environment (build/link issues); test/ tests are the ones to watch. Pre-existing parser/embed/e2e_struct_tramp failures may be resolved now.
+- build.sh now auto-detects platform changes (macOS ↔ Linux) via .build/.platform stamp. All 84 tests (lib/ + test/) should pass on a clean build.
 - syntax_to_ast signature: AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena). Returns NULL for JACL_NIL or non-syntax values.
 - For string round-trip: use jacl_string_byte_len() + jacl_string_data() to copy JaclVal strings into arena memory.
 - Pretty-printer does NOT always re-emit quotes: "hello" parses as AST_LIT_STRING but prints as bare `hello`. Compare against ast_pretty_print of the original, not the source text.
