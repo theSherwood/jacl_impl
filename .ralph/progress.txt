@@ -9,6 +9,11 @@ Started: Thu Apr 10 2026
 - Pre-existing broken tests (on HEAD f8d63e3): parser, e2e_struct_tramp, embed. Not related to macro work.
 - VMFormatBuf usage: init with `VMFormatBuf buf = {0}; buf.arena = &arena;` — vm__fmt_ensure handles cap==0 by seeding to 128.
 - build.sh takes --test=NAME for single-test filter; --clean clears .build.
+- syntax_from_ast signature: JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap, JaclInternTable *intern). Returns JACL_NIL for NULL nodes or AST_ERROR.
+- All lib/ tests fail in this environment (build/link issues); test/ tests are the ones to watch. Pre-existing parser/embed/e2e_struct_tramp failures may be resolved now.
+- syntax_to_ast signature: AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena). Returns NULL for JACL_NIL or non-syntax values.
+- For string round-trip: use jacl_string_byte_len() + jacl_string_data() to copy JaclVal strings into arena memory.
+- Pretty-printer does NOT always re-emit quotes: "hello" parses as AST_LIT_STRING but prints as bare `hello`. Compare against ast_pretty_print of the original, not the source text.
 
 ## 2026-04-10 - US-001 — Add JACL_TAG_SYNTAX value tag and OBJ_SYNTAX GC object
 - Most of US-001 was already staged as uncommitted edits (tag constant, obj enum, JaclSyntax struct, GC tracing, printing, test file). I wired up the final missing pieces and fixed one blocker.
@@ -23,4 +28,41 @@ Started: Thu Apr 10 2026
   - No sweep changes are needed unless the object owns external resources — gc__finalize_dead is a no-op for all types so far.
   - test/test_helpers.h provides ASSERT_U64_EQ, ASSERT_U32_EQ, ASSERT_STR_EQ, TEST_PASS macros.
   - The test uses VMFormatBuf for printing: zero-init the struct, set arena, call vm__fmt_value, then read buf.data/buf.len.
+---
+
+## 2026-04-10 - US-002 — AstNode to syntax object conversion
+- Created src/syntax.c with syntax_from_ast() that recursively converts all 16 AstNodeType variants to corresponding JaclSyntax objects.
+- Added syntax.c to the unity build (src/jacl.c) after compiler.c.
+- Added extern declaration to src/jacl.h.
+- Added 17 new tests to test/test_syntax.c covering: lit-int, lit-float, lit-string, var-ref, command, block, source positions, scope marks, spread, break, continue, return, nested commands, interp-string, error→nil, null→nil, GC survival.
+- Files changed:
+  - src/syntax.c (new) — syntax_from_ast implementation
+  - src/jacl.c — added #include "syntax.c"
+  - src/jacl.h — added extern for syntax_from_ast
+  - test/test_syntax.c — 17 new US-002 tests
+- Verification: ./build.sh --test=syntax → 39/39 pass. Compiles with -Wall -Wextra clean.
+- **Learnings for future iterations:**
+  - syntax_from_ast takes ThreadHeap* and JaclInternTable* (not GCHeap*) — matches how gc_alloc_syntax and jacl_intern are called.
+  - AST_USE and AST_DEFSTRUCT use a simplified vec-of-strings representation in syntax objects (stored in child field).
+  - AST_DESTRUCTURE_VEC/NAMED store names as vec of strings; rest names prefixed with ".." for disambiguation.
+  - To parse source in tests: LexResult tokens = lexer_lex(src, &arena); ParseResult pr = parser_parse(tokens, &arena);
+  - The parser produces AST_LIT_STRING for bare words used as command heads (e.g., "+" in [+ 1 2] is AST_LIT_STRING, not AST_VAR_REF).
+---
+
+## 2026-04-10 - US-003 — Syntax object to AstNode conversion
+- Implemented syntax_to_ast() in src/syntax.c that recursively converts all 15 SyntaxKind variants back to corresponding AstNode types.
+- Added two helper functions: syntax__string_to_arena (copies JaclVal string data into arena memory) and syntax__set_ast_pos (copies source position from syntax to AstNode).
+- Added extern declaration in src/jacl.h.
+- Added 13 round-trip tests to test/test_syntax.c: lit-int, lit-float, lit-string, var-ref, command, nested command, block with multiple commands, source positions, nil→null, break, continue, return, spread.
+- Files changed:
+  - src/syntax.c — syntax_to_ast implementation + two helpers
+  - src/jacl.h — added extern for syntax_to_ast
+  - test/test_syntax.c — 13 new US-003 tests
+- Verification: ./build.sh --test=syntax → 52/52 pass. Full build → all test/ tests pass, only lib/ failures (pre-existing).
+- **Learnings for future iterations:**
+  - syntax_to_ast takes only arena_t* (no heap/intern needed) — strings are copied from JaclVal into arena memory.
+  - Use jacl_string_byte_len() to get the byte length, then jacl_string_data() to copy. Don't confuse with jacl_string_len() which returns grapheme count.
+  - AST pretty-printer doesn't always re-emit source quotes: "hello" → prints as bare `hello`. Round-trip tests must compare ast_pretty_print outputs, not source text.
+  - The end position of AstNode is approximated (set equal to start) since syntax objects only store the start position.
+  - Destructure rest names are prefixed with ".." in syntax objects — syntax_to_ast strips the prefix and sets rest_name/rest_name_len.
 ---

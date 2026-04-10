@@ -44,7 +44,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "AST_USE and AST_DEFSTRUCT conversion can use a simplified representation (store field names/types as vecs of strings). AST_DESTRUCTURE_VEC and AST_DESTRUCTURE_NAMED similarly store names/types as vecs."
     },
     {
@@ -66,7 +66,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Scope marks on syntax objects are not preserved in AstNode — they are used during expansion for hygiene, then discarded. The compiler's name resolution uses scope marks from the syntax objects during expansion, before converting back."
     },
     {
