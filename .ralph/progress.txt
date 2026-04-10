@@ -90,3 +90,20 @@ Started: Thu Apr 10 2026
   - Defmacro parser follows the defstruct pattern: consume keyword, get name, parse brace-enclosed params, parse block body.
   - Adding a new enum member between existing ones shifts all subsequent values — tests with hardcoded enum values (test_syntax_kind_enum) must be updated.
 ---
+
+## 2026-04-10 - US-005 — Lexer and parser support for quote
+- Added TOKEN_QUOTE to lexer keyword table (length-5 switch case).
+- Added AST_QUOTE to AstNodeType with data: child (AstNode*).
+- Handled TOKEN_QUOTE as a prefix form in parser__parse_expr and parser__parse_infix_operand — NOT added to keyword-as-atom lists since quote always takes a child expression.
+- Added AST_QUOTE pretty-printer: prints as "quote <child>".
+- Added SYNTAX_QUOTE to SyntaxKind with GC tracing and printing in vm.c.
+- Added syntax_from_ast/syntax_to_ast handling for AST_QUOTE.
+- Added compiler.c stub (emits nil, real implementation in US-009).
+- Added 7 tests: quote wrapping command, var-ref, block; pretty-print; round-trip; inside command.
+- Files changed: src/lexer.c, src/ast.c, src/parser.c, src/syntax.c, src/compiler.c, src/gc.c, src/gc_collect.c, src/vm.c, src/jacl.h, test/test_syntax.c
+- Verification: ./build.sh --test=syntax → 66/66 pass. Full build → all test/ tests pass, no warnings.
+- **Learnings for future iterations:**
+  - Prefix keyword forms (like quote) should be handled as their own case in parser__parse_expr (and parser__parse_infix_operand), NOT added to keyword-as-atom lists. This is different from regular keywords which are in all 3 keyword-as-atom lists.
+  - In parser__parse_cmd_operand, AST_QUOTE returned from parser__parse_expr naturally avoids arg collection because head_token_type != TOKEN_WORD and args.count == 0 → returns head directly.
+  - "quote" is length 5, same switch case as "while", "match", "break" in the lexer keyword table.
+---
