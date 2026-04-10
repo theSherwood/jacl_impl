@@ -729,6 +729,20 @@ AstNode* parser__parse_infix_operand(Parser* p) {
     case TOKEN_STRING_BEGIN:
       result = parser__parse_interp_string(p);
       break;
+    case TOKEN_QUOTE: {
+      Token* kw = parser__advance(p);
+      AstNode* child = parser__parse_infix_operand(p);
+      if (child == NULL) {
+        return parser__error(p, "expected expression after 'quote'", kw);
+      }
+      AstNode* node = ast_alloc(p->arena);
+      node->type  = AST_QUOTE;
+      node->start = parser__token_start(kw);
+      node->end   = child->end;
+      node->data.quote.child = child;
+      result = node;
+      break;
+    }
     case TOKEN_INT:
     case TOKEN_FLOAT:
     case TOKEN_WORD:
@@ -872,6 +886,21 @@ AstNode* parser__parse_expr(Parser* p) {
     case TOKEN_STRING_BEGIN:
       result = parser__parse_interp_string(p);
       break;
+
+    case TOKEN_QUOTE: {
+      Token* kw = parser__advance(p);
+      AstNode* child = parser__parse_expr(p);
+      if (child == NULL) {
+        return parser__error(p, "expected expression after 'quote'", kw);
+      }
+      AstNode* node = ast_alloc(p->arena);
+      node->type  = AST_QUOTE;
+      node->start = parser__token_start(kw);
+      node->end   = child->end;
+      node->data.quote.child = child;
+      result = node;
+      break;
+    }
 
     case TOKEN_INT:
     case TOKEN_FLOAT:

@@ -22,11 +22,12 @@ static int test_syntax_kind_enum(void) {
     ASSERT_INT_EQ(SYNTAX_USE, 8);
     ASSERT_INT_EQ(SYNTAX_DEFSTRUCT, 9);
     ASSERT_INT_EQ(SYNTAX_DEFMACRO, 10);
-    ASSERT_INT_EQ(SYNTAX_BREAK, 11);
-    ASSERT_INT_EQ(SYNTAX_CONTINUE, 12);
-    ASSERT_INT_EQ(SYNTAX_RETURN, 13);
-    ASSERT_INT_EQ(SYNTAX_DESTRUCTURE_VEC, 14);
-    ASSERT_INT_EQ(SYNTAX_DESTRUCTURE_NAMED, 15);
+    ASSERT_INT_EQ(SYNTAX_QUOTE, 11);
+    ASSERT_INT_EQ(SYNTAX_BREAK, 12);
+    ASSERT_INT_EQ(SYNTAX_CONTINUE, 13);
+    ASSERT_INT_EQ(SYNTAX_RETURN, 14);
+    ASSERT_INT_EQ(SYNTAX_DESTRUCTURE_VEC, 15);
+    ASSERT_INT_EQ(SYNTAX_DESTRUCTURE_NAMED, 16);
     TEST_PASS();
 }
 
@@ -1560,6 +1561,124 @@ static int test_parse_defmacro_no_body(void) {
     TEST_PASS();
 }
 
+/* ===== US-005: Quote parsing tests ===== */
+
+/* Test: parse quote [+ 1 2] produces AST_QUOTE wrapping AST_COMMAND */
+static int test_parse_quote_command(void) {
+    arena_t arena = {0};
+    const char *src = "quote [+ 1 2]";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.count >= 1);
+    AstNode *node = pr.nodes[0];
+    ASSERT_INT_EQ(node->type, AST_QUOTE);
+    ASSERT(node->data.quote.child != NULL);
+    ASSERT_INT_EQ(node->data.quote.child->type, AST_COMMAND);
+    /* Check the command is [+ 1 2] */
+    AstNode *cmd = node->data.quote.child;
+    ASSERT_INT_EQ(cmd->data.command.head->type, AST_LIT_STRING);
+    ASSERT(memcmp(cmd->data.command.head->data.lit_string.value, "+", 1) == 0);
+    ASSERT_U32_EQ(cmd->data.command.arg_count, 2);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parse quote $x produces AST_QUOTE wrapping AST_VAR_REF */
+static int test_parse_quote_var_ref(void) {
+    arena_t arena = {0};
+    const char *src = "quote $x";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.count >= 1);
+    AstNode *node = pr.nodes[0];
+    ASSERT_INT_EQ(node->type, AST_QUOTE);
+    ASSERT(node->data.quote.child != NULL);
+    ASSERT_INT_EQ(node->data.quote.child->type, AST_VAR_REF);
+    ASSERT(memcmp(node->data.quote.child->data.var_ref.name, "x", 1) == 0);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parse quote { print 1; print 2 } produces AST_QUOTE wrapping AST_BLOCK */
+static int test_parse_quote_block(void) {
+    arena_t arena = {0};
+    const char *src = "quote { print 1; print 2 }";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.count >= 1);
+    AstNode *node = pr.nodes[0];
+    ASSERT_INT_EQ(node->type, AST_QUOTE);
+    ASSERT(node->data.quote.child != NULL);
+    ASSERT_INT_EQ(node->data.quote.child->type, AST_BLOCK);
+    ASSERT_U32_EQ(node->data.quote.child->data.block.count, 2);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: quote pretty-prints as "quote <child>" */
+static int test_parse_quote_pretty_print(void) {
+    arena_t arena = {0};
+    const char *src = "quote [+ 1 2]";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.count >= 1);
+    const char *pp = ast_pretty_print(pr.nodes[0], &arena);
+    ASSERT(pp != NULL);
+    ASSERT_STR_EQ(pp, "quote [+ 1 2]");
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: quote $x pretty-prints correctly */
+static int test_parse_quote_var_pretty_print(void) {
+    arena_t arena = {0};
+    const char *src = "quote $x";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.count >= 1);
+    const char *pp = ast_pretty_print(pr.nodes[0], &arena);
+    ASSERT(pp != NULL);
+    ASSERT_STR_EQ(pp, "quote $x");
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: quote round-trips through syntax objects */
+static int test_quote_roundtrip(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char *src = "quote [+ 1 2]";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.count >= 1);
+    const char *orig = ast_pretty_print(pr.nodes[0], &arena);
+
+    const char *rt = roundtrip_pp(src, &arena, &vm, &intern);
+    ASSERT(rt != NULL);
+    ASSERT_STR_EQ(rt, orig);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: quote inside a command is valid */
+static int test_parse_quote_inside_command(void) {
+    arena_t arena = {0};
+    const char *src = "[foo quote [+ 1 2]]";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.count >= 1);
+    AstNode *node = pr.nodes[0];
+    ASSERT_INT_EQ(node->type, AST_COMMAND);
+    /* The argument should be a quote node */
+    ASSERT_U32_EQ(node->data.command.arg_count, 1);
+    AstNode *arg = node->data.command.args[0];
+    ASSERT_INT_EQ(arg->type, AST_QUOTE);
+    ASSERT_INT_EQ(arg->data.quote.child->type, AST_COMMAND);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -1639,6 +1758,16 @@ int main(void) {
     RUN(test_parse_defmacro_no_name);
     RUN(test_parse_defmacro_no_params);
     RUN(test_parse_defmacro_no_body);
+
+    printf("\n=== Quote Parsing Tests (US-005) ===\n");
+
+    RUN(test_parse_quote_command);
+    RUN(test_parse_quote_var_ref);
+    RUN(test_parse_quote_block);
+    RUN(test_parse_quote_pretty_print);
+    RUN(test_parse_quote_var_pretty_print);
+    RUN(test_quote_roundtrip);
+    RUN(test_parse_quote_inside_command);
 
 #undef RUN
 

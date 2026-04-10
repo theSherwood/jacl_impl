@@ -1158,6 +1158,7 @@ typedef enum {
     SYNTAX_USE,
     SYNTAX_DEFSTRUCT,
     SYNTAX_DEFMACRO,
+    SYNTAX_QUOTE,
     SYNTAX_BREAK,
     SYNTAX_CONTINUE,
     SYNTAX_RETURN,
@@ -1183,6 +1184,7 @@ typedef struct {
         struct { JaclVal child; }               use_decl;      /* syntax (simplified) */
         struct { JaclVal child; }               defstruct;     /* syntax (simplified) */
         struct { JaclVal child; }               defmacro;      /* syntax (simplified) */
+        struct { JaclVal child; }               quote;         /* syntax (quoted child) */
         struct { JaclVal value; }               break_stmt;    /* syntax or nil */
         struct { JaclVal value; }               return_stmt;   /* syntax or nil */
         struct { JaclVal names; }               destructure_vec;   /* vec of strings */

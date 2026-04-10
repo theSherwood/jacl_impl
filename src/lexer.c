@@ -55,6 +55,7 @@ typedef enum {
   /* --- new keyword tokens --- */
   TOKEN_PROC,             /* proc */
   TOKEN_DEFMACRO,         /* defmacro */
+  TOKEN_QUOTE,            /* quote */
   TOKEN_IF,               /* if */
   TOKEN_ELIF,             /* elif */
   TOKEN_ELSE,             /* else */
@@ -1301,6 +1302,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
           if      (memcmp(wstart, "while", 5) == 0) wtype = TOKEN_WHILE;
           else if (memcmp(wstart, "match", 5) == 0) wtype = TOKEN_MATCH;
           else if (memcmp(wstart, "break", 5) == 0) wtype = TOKEN_BREAK;
+          else if (memcmp(wstart, "quote", 5) == 0) wtype = TOKEN_QUOTE;
           break;
         case 6:
           if      (memcmp(wstart, "return", 6) == 0) wtype = TOKEN_RETURN;

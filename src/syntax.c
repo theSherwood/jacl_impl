@@ -141,6 +141,12 @@ JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap,
         break;
     }
 
+    case AST_QUOTE:
+        syn->kind = SYNTAX_QUOTE;
+        syn->data.quote.child = syntax_from_ast(node->data.quote.child,
+                                                 heap, intern);
+        break;
+
     case AST_DEFMACRO: {
         syn->kind = SYNTAX_DEFMACRO;
         /* Simplified: store [name, param1, param2, ..., body_syntax] */
@@ -418,6 +424,11 @@ AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena) {
         }
         break;
     }
+
+    case SYNTAX_QUOTE:
+        node->type = AST_QUOTE;
+        node->data.quote.child = syntax_to_ast(syn->data.quote.child, arena);
+        break;
 
     case SYNTAX_DEFMACRO: {
         node->type = AST_DEFMACRO;

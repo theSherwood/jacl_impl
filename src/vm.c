@@ -617,6 +617,12 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
       vm__fmt_append(buf, "<syntax:defmacro>", 17);
       break;
     }
+    case SYNTAX_QUOTE: {
+      vm__fmt_append(buf, "<syntax:quote ", 14);
+      vm__fmt_value(buf, syn->data.quote.child);
+      vm__fmt_append(buf, ">", 1);
+      break;
+    }
     default:
       n = snprintf(tmp, sizeof(tmp), "<syntax:%d>", syn->kind);
       vm__fmt_append(buf, tmp, (uint32_t)n);

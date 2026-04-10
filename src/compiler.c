@@ -8046,6 +8046,13 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       break;
     }
 
+    case AST_QUOTE: {
+      /* Quote compilation will be implemented in US-009.
+       * For now, emit nil as a placeholder. */
+      compiler__emit_byte(c, OP_NIL, line);
+      break;
+    }
+
     case AST_BREAK: {
       if (c->loop_depth == 0) {
         compiler__error(c, line, node->start.column,

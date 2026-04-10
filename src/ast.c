@@ -26,6 +26,7 @@ typedef enum {
   AST_USE,           /* use "path" [name1 name2 ...] */
   AST_DEFSTRUCT,     /* defstruct Name [field :type] ... */
   AST_DEFMACRO,      /* defmacro name {params} {body} */
+  AST_QUOTE,         /* quote <expr> — unevaluated syntax */
   AST_BREAK,         /* break or break $value */
   AST_CONTINUE,      /* continue */
   AST_RETURN,        /* return or return $value */
@@ -74,6 +75,7 @@ struct AstNode {
              const char** param_names; uint32_t* param_name_lens;
              uint32_t param_count;
              AstNode* body; }                                     defmacro;
+    struct { AstNode* child; }                                     quote;
     struct { AstNode* value; /* NULL if no value */ }              break_stmt;
     struct { AstNode* value; /* NULL if no value */ }              return_stmt;
     struct { const char** names; uint32_t* name_lens;
@@ -421,6 +423,11 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
       }
       ast__buf_cstr(b, "} ");
       ast__pp_node(b, node->data.defmacro.body);
+      break;
+    }
+    case AST_QUOTE: {
+      ast__buf_cstr(b, "quote ");
+      ast__pp_node(b, node->data.quote.child);
       break;
     }
     case AST_BREAK: {
