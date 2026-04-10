@@ -134,7 +134,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "~ only works in structural positions (command args, block commands), NOT inside strings. ~@ only valid in command arg lists or block command lists."
     },
     {
