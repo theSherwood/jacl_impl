@@ -740,6 +740,7 @@ typedef enum {
   OP_CALL_SUSPEND,
   OP_GET_STATE_FIELD_CELL,
   OP_SET_STATE_FIELD_CELL,
+  OP_SYNTAX_SPLICE,
   OP_HALT
 } OpCode;
 
@@ -837,6 +838,7 @@ typedef struct {
   const char**  param_names;
   uint32_t*     param_name_lens;
   JaclClosure*  closure;
+  AstNode*      body;        /* original body AST for template-based expansion */
 } MacroEntry;
 
 typedef struct MacroTable MacroTable;
@@ -1540,6 +1542,11 @@ extern JaclVal gc_alloc_syntax (ThreadHeap *heap);
 /* --- syntax.c --- */
 extern JaclVal syntax_from_ast (AstNode *node, ThreadHeap *heap, JaclInternTable *intern);
 extern AstNode *syntax_to_ast (JaclVal syn_val, arena_t *arena);
+extern const char *ast_expand_macros(AstNode **program, uint32_t count,
+                                     MacroTable *macros, ThreadHeap *heap,
+                                     JaclInternTable *intern, arena_t *arena,
+                                     uint32_t *out_error_line,
+                                     uint32_t *out_error_col);
 
 /* --- string.c --- */
 extern uint32_t string__fnv1a (const char *data, uint32_t length);

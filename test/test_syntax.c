@@ -2079,6 +2079,298 @@ static int test_is_special_form(void) {
     TEST_PASS();
 }
 
+/* ===== US-008: Macro expansion pass — basic expansion ===== */
+
+/* Helper: parse source and run expansion pass, return expanded program.
+ * Sets *out_err to a non-NULL error message on failure. */
+static ParseResult expand_source(const char* src, arena_t* arena, VM* vm,
+                                 MacroTable* mt, const char** out_err) {
+    LexResult tokens = lexer_lex(src, arena);
+    ParseResult parse = parser_parse(tokens, arena);
+    if (parse.error_count > 0) {
+        *out_err = "parse error";
+        return parse;
+    }
+    JaclInternTable intern_table;
+    intern_table_init(&intern_table, arena);
+    macro_table_init(mt);
+    uint32_t err_line = 0, err_col = 0;
+    *out_err = ast_expand_macros(parse.nodes, parse.count, mt,
+                                  &vm->heap, &intern_table, arena,
+                                  &err_line, &err_col);
+    return parse;
+}
+
+/* Test: defmacro unless expands correctly */
+static int test_expand_unless(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro unless {cond, body} {\n"
+                      "  syntax-quote [if [not ~cond] ~body]\n"
+                      "}\n"
+                      "unless [eq 1 2] { print ok }";
+    MacroTable mt;
+    const char* err = NULL;
+    ParseResult pr = expand_source(src, &arena, &vm, &mt, &err);
+    ASSERT(err == NULL);
+
+    /* After expansion, node[0] is defmacro (unchanged),
+     * node[1] should be the expanded [if [not [eq 1 2]] { print ok }] */
+    ASSERT(pr.count >= 2);
+    AstNode* expanded = pr.nodes[1];
+    ASSERT(expanded != NULL);
+    ASSERT(expanded->type == AST_COMMAND);
+
+    const char* pp = ast_pretty_print(expanded, &arena);
+    /* The expanded form should be: [if [not [eq 1 2]] { print ok }] */
+    ASSERT(pp != NULL);
+    /* Check that 'if' is the head */
+    ASSERT(expanded->data.command.head != NULL);
+    ASSERT(expanded->data.command.head->type == AST_LIT_STRING);
+    ASSERT(expanded->data.command.head->data.lit_string.length == 2);
+    ASSERT(memcmp(expanded->data.command.head->data.lit_string.value, "if", 2) == 0);
+    /* Check 2 args: [not [eq 1 2]] and { print ok } */
+    ASSERT(expanded->data.command.arg_count == 2);
+    /* First arg: [not [eq 1 2]] */
+    AstNode* not_cmd = expanded->data.command.args[0];
+    ASSERT(not_cmd != NULL);
+    ASSERT(not_cmd->type == AST_COMMAND);
+    ASSERT(not_cmd->data.command.head->type == AST_LIT_STRING);
+    ASSERT(memcmp(not_cmd->data.command.head->data.lit_string.value, "not", 3) == 0);
+    ASSERT(not_cmd->data.command.arg_count == 1);
+    /* The arg to not should be [eq 1 2] */
+    AstNode* eq_cmd = not_cmd->data.command.args[0];
+    ASSERT(eq_cmd != NULL);
+    ASSERT(eq_cmd->type == AST_COMMAND);
+    ASSERT(eq_cmd->data.command.head->type == AST_LIT_STRING);
+    ASSERT(memcmp(eq_cmd->data.command.head->data.lit_string.value, "eq", 2) == 0);
+    ASSERT(eq_cmd->data.command.arg_count == 2);
+    /* Second arg: { print ok } — should be a block */
+    AstNode* body = expanded->data.command.args[1];
+    ASSERT(body != NULL);
+    ASSERT(body->type == AST_BLOCK);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: defmacro double {x} expansion with ~x used twice */
+static int test_expand_double(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro double {x} {\n"
+                      "  syntax-quote [+ ~x ~x]\n"
+                      "}\n"
+                      "double 21";
+    MacroTable mt;
+    const char* err = NULL;
+    ParseResult pr = expand_source(src, &arena, &vm, &mt, &err);
+    ASSERT(err == NULL);
+
+    ASSERT(pr.count >= 2);
+    AstNode* expanded = pr.nodes[1];
+    ASSERT(expanded != NULL);
+    ASSERT(expanded->type == AST_COMMAND);
+    /* Head should be + */
+    ASSERT(expanded->data.command.head->type == AST_LIT_STRING);
+    ASSERT(memcmp(expanded->data.command.head->data.lit_string.value, "+", 1) == 0);
+    /* Two args, both should be 21 */
+    ASSERT(expanded->data.command.arg_count == 2);
+    ASSERT(expanded->data.command.args[0]->type == AST_LIT_INT);
+    ASSERT(expanded->data.command.args[0]->data.lit_int.value == 21);
+    ASSERT(expanded->data.command.args[1]->type == AST_LIT_INT);
+    ASSERT(expanded->data.command.args[1]->data.lit_int.value == 21);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: macro that expands to another macro call (two-level expansion) */
+static int test_expand_two_level(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro double {x} {\n"
+                      "  syntax-quote [+ ~x ~x]\n"
+                      "}\n"
+                      "defmacro quadruple {x} {\n"
+                      "  syntax-quote [double [double ~x]]\n"
+                      "}\n"
+                      "quadruple 5";
+    MacroTable mt;
+    const char* err = NULL;
+    ParseResult pr = expand_source(src, &arena, &vm, &mt, &err);
+    ASSERT(err == NULL);
+
+    ASSERT(pr.count >= 3);
+    AstNode* expanded = pr.nodes[2];
+    ASSERT(expanded != NULL);
+    ASSERT(expanded->type == AST_COMMAND);
+    /* Should expand to [+ [+ 5 5] [+ 5 5]] */
+    ASSERT(expanded->data.command.head->type == AST_LIT_STRING);
+    ASSERT(memcmp(expanded->data.command.head->data.lit_string.value, "+", 1) == 0);
+    ASSERT(expanded->data.command.arg_count == 2);
+    /* Each arg should be [+ 5 5] */
+    for (int a = 0; a < 2; a++) {
+        AstNode* inner = expanded->data.command.args[a];
+        ASSERT(inner->type == AST_COMMAND);
+        ASSERT(inner->data.command.head->type == AST_LIT_STRING);
+        ASSERT(memcmp(inner->data.command.head->data.lit_string.value, "+", 1) == 0);
+        ASSERT(inner->data.command.arg_count == 2);
+        ASSERT(inner->data.command.args[0]->type == AST_LIT_INT);
+        ASSERT(inner->data.command.args[0]->data.lit_int.value == 5);
+        ASSERT(inner->data.command.args[1]->type == AST_LIT_INT);
+        ASSERT(inner->data.command.args[1]->data.lit_int.value == 5);
+    }
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: depth limit hit by self-referencing macro */
+static int test_expand_depth_limit(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro loop {x} {\n"
+                      "  syntax-quote [loop ~x]\n"
+                      "}\n"
+                      "loop 1";
+    MacroTable mt;
+    const char* err = NULL;
+    expand_source(src, &arena, &vm, &mt, &err);
+    ASSERT(err != NULL);
+    /* Error should mention depth limit */
+    ASSERT(strstr(err, "depth limit") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: macro used before its defmacro is not expanded (treated as normal command) */
+static int test_expand_use_before_defmacro(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "unless [eq 1 2] { print ok }\n"
+                      "defmacro unless {cond, body} {\n"
+                      "  syntax-quote [if [not ~cond] ~body]\n"
+                      "}";
+    MacroTable mt;
+    const char* err = NULL;
+    ParseResult pr = expand_source(src, &arena, &vm, &mt, &err);
+    ASSERT(err == NULL);
+
+    /* The first statement should NOT be expanded (macro defined after use).
+     * It should remain as AST_COMMAND with head "unless". */
+    ASSERT(pr.count >= 2);
+    AstNode* first = pr.nodes[0];
+    ASSERT(first != NULL);
+    ASSERT(first->type == AST_COMMAND);
+    ASSERT(first->data.command.head->type == AST_LIT_STRING);
+    ASSERT(first->data.command.head->data.lit_string.length == 6);
+    ASSERT(memcmp(first->data.command.head->data.lit_string.value, "unless", 6) == 0);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: macro with wrong argument count produces expansion error */
+static int test_expand_wrong_arg_count(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro unless {cond, body} {\n"
+                      "  syntax-quote [if [not ~cond] ~body]\n"
+                      "}\n"
+                      "unless [eq 1 2]";
+    MacroTable mt;
+    const char* err = NULL;
+    expand_source(src, &arena, &vm, &mt, &err);
+    ASSERT(err != NULL);
+    /* Error should mention argument count */
+    ASSERT(strstr(err, "expects 2 arguments but got 1") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: non-macro commands pass through unchanged */
+static int test_expand_non_macro_passthrough(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro unless {cond, body} {\n"
+                      "  syntax-quote [if [not ~cond] ~body]\n"
+                      "}\n"
+                      "print hello";
+    MacroTable mt;
+    const char* err = NULL;
+    ParseResult pr = expand_source(src, &arena, &vm, &mt, &err);
+    ASSERT(err == NULL);
+
+    ASSERT(pr.count >= 2);
+    AstNode* print_cmd = pr.nodes[1];
+    ASSERT(print_cmd != NULL);
+    ASSERT(print_cmd->type == AST_COMMAND);
+    ASSERT(print_cmd->data.command.head->type == AST_LIT_STRING);
+    ASSERT(memcmp(print_cmd->data.command.head->data.lit_string.value, "print", 5) == 0);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: macro expansion inside nested blocks */
+static int test_expand_inside_block(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro double {x} {\n"
+                      "  syntax-quote [+ ~x ~x]\n"
+                      "}\n"
+                      "if 1 { double 3 }";
+    MacroTable mt;
+    const char* err = NULL;
+    ParseResult pr = expand_source(src, &arena, &vm, &mt, &err);
+    ASSERT(err == NULL);
+
+    ASSERT(pr.count >= 2);
+    AstNode* if_cmd = pr.nodes[1];
+    ASSERT(if_cmd != NULL);
+    ASSERT(if_cmd->type == AST_COMMAND);
+    /* The block body should contain expanded [+ 3 3] */
+    AstNode* block = if_cmd->data.command.args[1];
+    ASSERT(block != NULL);
+    ASSERT(block->type == AST_BLOCK);
+    ASSERT(block->data.block.count == 1);
+    AstNode* plus_cmd = block->data.block.commands[0];
+    ASSERT(plus_cmd != NULL);
+    ASSERT(plus_cmd->type == AST_COMMAND);
+    ASSERT(memcmp(plus_cmd->data.command.head->data.lit_string.value, "+", 1) == 0);
+    ASSERT(plus_cmd->data.command.arg_count == 2);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -2191,6 +2483,17 @@ int main(void) {
     RUN(test_defmacro_duplicate_error);
     RUN(test_macro_table_lookup_api);
     RUN(test_is_special_form);
+
+    printf("\n=== Macro Expansion Tests (US-008) ===\n");
+
+    RUN(test_expand_unless);
+    RUN(test_expand_double);
+    RUN(test_expand_two_level);
+    RUN(test_expand_depth_limit);
+    RUN(test_expand_use_before_defmacro);
+    RUN(test_expand_wrong_arg_count);
+    RUN(test_expand_non_macro_passthrough);
+    RUN(test_expand_inside_block);
 
 #undef RUN
 

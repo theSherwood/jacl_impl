@@ -33,6 +33,14 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
 
 /* jacl_compile_program forward-declared after ProgramResult (below) */
 
+/* Forward declarations for syntax.c functions used by the compiler
+ * (syntax.c is included after compiler.c in the unity build) */
+JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap, JaclInternTable *intern);
+const char *ast_expand_macros(AstNode **program, uint32_t count,
+                              MacroTable *macros, ThreadHeap *heap,
+                              JaclInternTable *intern, arena_t *arena,
+                              uint32_t *out_error_line, uint32_t *out_error_col);
+
 /* --- Type system --- */
 
 typedef enum {
@@ -2179,6 +2187,7 @@ typedef struct {
   const char**  param_names; /* arena-allocated array of param name strings */
   uint32_t*     param_name_lens; /* lengths of each param name */
   JaclClosure*  closure;     /* compiled macro body closure */
+  AstNode*      body;        /* original body AST for template-based expansion */
 } MacroEntry;
 
 struct MacroTable {
@@ -7562,6 +7571,80 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 }
 
+/* -------------------------------------------------------------------------
+ * Syntax-quote helpers: count unquote holes and compile unquote expressions
+ * ------------------------------------------------------------------------- */
+
+static uint32_t syntax__count_unquotes_ast(AstNode *node) {
+    if (!node) return 0;
+    switch (node->type) {
+    case AST_UNQUOTE:
+    case AST_UNQUOTE_SPLICING:
+        return 1;
+    case AST_COMMAND: {
+        uint32_t count = syntax__count_unquotes_ast(node->data.command.head);
+        for (uint32_t i = 0; i < node->data.command.arg_count; i++)
+            count += syntax__count_unquotes_ast(node->data.command.args[i]);
+        return count;
+    }
+    case AST_BLOCK: {
+        uint32_t count = 0;
+        for (uint32_t i = 0; i < node->data.block.count; i++)
+            count += syntax__count_unquotes_ast(node->data.block.commands[i]);
+        return count;
+    }
+    case AST_INTERP_STRING: {
+        uint32_t count = 0;
+        for (uint32_t i = 0; i < node->data.interp_string.count; i++)
+            count += syntax__count_unquotes_ast(node->data.interp_string.segments[i]);
+        return count;
+    }
+    case AST_SPREAD:
+        return syntax__count_unquotes_ast(node->data.spread.expr);
+    case AST_QUOTE:
+        return syntax__count_unquotes_ast(node->data.quote.child);
+    case AST_SYNTAX_QUOTE:
+        return 0;  /* nested syntax-quote: don't recurse */
+    default:
+        return 0;
+    }
+}
+
+static void syntax__compile_unquotes(Compiler *c, AstNode *node) {
+    if (!node) return;
+    switch (node->type) {
+    case AST_UNQUOTE:
+        compiler__compile_node(c, node->data.unquote.child);
+        return;
+    case AST_UNQUOTE_SPLICING:
+        compiler__compile_node(c, node->data.unquote_splicing.child);
+        return;
+    case AST_COMMAND:
+        syntax__compile_unquotes(c, node->data.command.head);
+        for (uint32_t i = 0; i < node->data.command.arg_count; i++)
+            syntax__compile_unquotes(c, node->data.command.args[i]);
+        return;
+    case AST_BLOCK:
+        for (uint32_t i = 0; i < node->data.block.count; i++)
+            syntax__compile_unquotes(c, node->data.block.commands[i]);
+        return;
+    case AST_INTERP_STRING:
+        for (uint32_t i = 0; i < node->data.interp_string.count; i++)
+            syntax__compile_unquotes(c, node->data.interp_string.segments[i]);
+        return;
+    case AST_SPREAD:
+        syntax__compile_unquotes(c, node->data.spread.expr);
+        return;
+    case AST_QUOTE:
+        syntax__compile_unquotes(c, node->data.quote.child);
+        return;
+    case AST_SYNTAX_QUOTE:
+        return;  /* nested syntax-quote: don't recurse */
+    default:
+        return;
+    }
+}
+
 /* --- Internal: Compile a single AST node --- */
 
 void compiler__compile_node(Compiler* c, AstNode* node) {
@@ -8130,14 +8213,84 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       }
 
       if (mt) {
-        /* Error: duplicate defmacro */
-        if (macro_table_lookup(mt, mname, mname_len)) {
-          char err[128];
-          snprintf(err, sizeof(err),
-                   "defmacro: '%.*s' is already defined",
-                   (int)mname_len, mname);
-          compiler__error(c, line, col, err);
-          break;
+        /* Check if already registered by expansion pass */
+        {
+          MacroEntry* existing = macro_table_lookup(mt, mname, mname_len);
+          if (existing) {
+            if (existing->closure != NULL) {
+              /* Truly duplicate defmacro — expansion pass didn't register
+                 this, so it must be a second defmacro with the same name
+                 (shouldn't happen since expansion pass catches it). */
+              char err[128];
+              snprintf(err, sizeof(err),
+                       "defmacro: '%.*s' is already defined",
+                       (int)mname_len, mname);
+              compiler__error(c, line, col, err);
+              break;
+            }
+            /* Registered by expansion pass (closure is NULL).
+               Compile the body to fill in the closure. */
+            uint32_t param_count = node->data.defmacro.param_count;
+
+            JaclClosure* closure = (JaclClosure*)arena_alloc(c->arena,
+                                      sizeof(JaclClosure));
+            chunk_init(&closure->chunk, c->arena);
+            closure->upvalue_count  = 0;
+            closure->upvalues       = NULL;
+            closure->param_count    = (uint8_t)param_count;
+            closure->min_args       = (uint8_t)param_count;
+            closure->variadic       = false;
+            closure->pinned         = false;
+            closure->pin_worker_id  = -1;
+            closure->is_generator   = false;
+            closure->is_sm_compiled = false;
+            closure->sm_field_count = 0;
+
+            char* name_copy2 = (char*)arena_alloc(c->arena, mname_len + 1);
+            memcpy(name_copy2, mname, mname_len);
+            name_copy2[mname_len] = '\0';
+            closure->name = name_copy2;
+
+            if (param_count > 0) {
+              closure->param_names = (JaclVal*)arena_alloc(c->arena,
+                                      sizeof(JaclVal) * param_count);
+              for (uint32_t pi = 0; pi < param_count; pi++) {
+                closure->param_names[pi] = jacl_inline_string(
+                    node->data.defmacro.param_names[pi],
+                    node->data.defmacro.param_name_lens[pi]);
+              }
+            } else {
+              closure->param_names = NULL;
+            }
+
+            Compiler body_compiler;
+            compiler__init(&body_compiler, &closure->chunk, c->arena,
+                           c->intern_table, c->heap);
+            body_compiler.scope_depth = 1;
+            body_compiler.enclosing   = c;
+            body_compiler.macro_table = mt;
+
+            for (uint32_t pi = 0; pi < param_count; pi++) {
+              compiler__add_local(&body_compiler, closure->param_names[pi],
+                                  line, col);
+              body_compiler.locals[body_compiler.local_count - 1].is_param = true;
+            }
+
+            compiler__compile_block_expr(&body_compiler,
+                                          node->data.defmacro.body);
+            compiler__emit_byte(&body_compiler, OP_RETURN, line);
+
+            c->error_count += body_compiler.error_count;
+            if (!c->first_error && body_compiler.first_error) {
+              c->first_error = body_compiler.first_error;
+            }
+
+            closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
+            existing->closure = closure;
+
+            compiler__emit_byte(c, OP_NIL, line);
+            break;
+          }
         }
 
         if (mt->count >= MACRO_TABLE_MAX) {
@@ -8222,16 +8375,42 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_QUOTE: {
-      /* Quote compilation will be implemented in US-009.
-       * For now, emit nil as a placeholder. */
-      compiler__emit_byte(c, OP_NIL, line);
+      /* Convert the child AstNode to a syntax object at compile time,
+       * then emit it as a constant. At runtime the quote pushes the
+       * pre-built syntax object onto the stack. */
+      JaclVal syn_val = syntax_from_ast(node->data.quote.child,
+                                         c->heap, c->intern_table);
+      compiler__emit_constant(c, syn_val, line);
       break;
     }
 
     case AST_SYNTAX_QUOTE: {
-      /* Syntax-quote compilation will be implemented in US-010.
-       * For now, emit nil as a placeholder. */
-      compiler__emit_byte(c, OP_NIL, line);
+      /* Compile syntax-quote template:
+       * 1. Convert full template (with unquotes) to a syntax object constant
+       * 2. Compile each unquote/unquote-splicing inner expression
+       * 3. Emit OP_SYNTAX_SPLICE to walk the template and replace unquotes
+       *
+       * The template syntax object contains SYNTAX_UNQUOTE markers which
+       * OP_SYNTAX_SPLICE replaces with the values on the stack. */
+
+      AstNode *child = node->data.syntax_quote.child;
+
+      /* Count unquote holes */
+      uint32_t n_unquotes = syntax__count_unquotes_ast(child);
+
+      /* Convert the full template to a syntax object (including unquote markers) */
+      JaclVal tmpl = syntax_from_ast(child, c->heap, c->intern_table);
+      compiler__emit_constant(c, tmpl, line);
+
+      if (n_unquotes > 0) {
+        /* Compile each unquote expression (pushes values onto stack) */
+        syntax__compile_unquotes(c, child);
+
+        /* Emit splice opcode */
+        compiler__emit_byte(c, OP_SYNTAX_SPLICE, line);
+        compiler__emit_byte(c, (uint8_t)n_unquotes, line);
+      }
+      /* If no unquotes, the template constant is already on the stack */
       break;
     }
 
@@ -8392,6 +8571,18 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     MacroTable* mt = (MacroTable*)arena_alloc(arena, sizeof(MacroTable));
     macro_table_init(mt);
     c.macro_table = mt;
+  }
+
+  /* Macro expansion pass: compile defmacro bodies, expand macro calls.
+   * Runs after parsing, before the main compilation pass. */
+  if (parse.error_count == 0) {
+    uint32_t err_line = 0, err_col = 0;
+    const char *expand_err = ast_expand_macros(
+        parse.nodes, parse.count, c.macro_table, heap,
+        intern_table, arena, &err_line, &err_col);
+    if (expand_err) {
+      compiler__error(&c, err_line, err_col, expand_err);
+    }
   }
 
   /* Check if top-level code is suspending */

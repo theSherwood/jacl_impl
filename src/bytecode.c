@@ -171,6 +171,7 @@ typedef enum {
   OP_CALL_SUSPEND,   /* uint8_t arg_count; like OP_CALL but spawns SM callee as task + await; for calls to suspending procs in SM context */
   OP_GET_STATE_FIELD_CELL, /* uint8_t field_idx; read cell from SM field, deref, push value */
   OP_SET_STATE_FIELD_CELL, /* uint8_t field_idx; read cell from SM field, pop value, write through cell w/ barrier, push NIL */
+  OP_SYNTAX_SPLICE, /* uint8_t n_unquotes; pop n values + template, splice unquotes into template, push result */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -457,6 +458,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_CALL_SUSPEND:        return "OP_CALL_SUSPEND";
     case OP_GET_STATE_FIELD_CELL: return "OP_GET_STATE_FIELD_CELL";
     case OP_SET_STATE_FIELD_CELL: return "OP_SET_STATE_FIELD_CELL";
+    case OP_SYNTAX_SPLICE:       return "OP_SYNTAX_SPLICE";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";

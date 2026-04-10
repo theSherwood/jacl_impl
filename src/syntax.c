@@ -641,4 +641,624 @@ AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena) {
     return node;
 }
 
+/* -------------------------------------------------------------------------
+ * syntax__splice_template: walk a syntax template, replacing SYNTAX_UNQUOTE
+ * with values from the splice array. SYNTAX_UNQUOTE_SPLICING flattens into
+ * parent arg lists / block command lists.
+ *
+ * values[0..n-1] are consumed in the order unquotes appear (left-to-right,
+ * depth-first traversal). *idx tracks the next value to consume.
+ * Returns a new syntax object tree (the template is not mutated).
+ * ------------------------------------------------------------------------- */
+
+static JaclVal syntax__splice_template(JaclVal tmpl, JaclVal *values,
+                                       uint32_t n_values, uint32_t *idx,
+                                       ThreadHeap *heap) {
+    if (jacl_is_nil(tmpl)) return JACL_NIL;
+    if (!jacl_is_syntax(tmpl)) return tmpl;
+
+    JaclSyntax *syn = jacl_as_syntax(tmpl);
+
+    /* Unquote: replace with the next value */
+    if (syn->kind == SYNTAX_UNQUOTE) {
+        if (*idx < n_values) {
+            return values[(*idx)++];
+        }
+        return JACL_NIL;  /* shouldn't happen if counts match */
+    }
+
+    /* Unquote-splicing: handled by the parent (command/block).
+     * If we reach here, it means ~@ at a non-spliceable position. */
+    if (syn->kind == SYNTAX_UNQUOTE_SPLICING) {
+        if (*idx < n_values) {
+            return values[(*idx)++];
+        }
+        return JACL_NIL;
+    }
+
+    /* Command: splice head and args, flatten ~@ in args */
+    if (syn->kind == SYNTAX_COMMAND) {
+        JaclVal new_head = syntax__splice_template(syn->data.command.head,
+                                                    values, n_values, idx, heap);
+        jacl_vec_root *old_args =
+            (jacl_vec_root *)jacl_as_ptr(syn->data.command.args);
+        uint32_t argc = jacl_vec_count(old_args);
+        jacl_vec_root *new_args = jacl_vec_empty();
+        for (uint32_t i = 0; i < argc; i++) {
+            JaclVal arg = jacl_vec_get(old_args, i).value;
+            if (jacl_is_syntax(arg)) {
+                JaclSyntax *arg_syn = jacl_as_syntax(arg);
+                if (arg_syn->kind == SYNTAX_UNQUOTE_SPLICING) {
+                    /* Flatten: the value should be a vec of syntax objects */
+                    if (*idx < n_values) {
+                        JaclVal splice_val = values[(*idx)++];
+                        if (jacl_is_vector(splice_val)) {
+                            jacl_vec_root *splice_vec =
+                                (jacl_vec_root *)jacl_as_ptr(splice_val);
+                            uint32_t sc = jacl_vec_count(splice_vec);
+                            for (uint32_t j = 0; j < sc; j++) {
+                                new_args = jacl_vec_push_back(new_args,
+                                    jacl_vec_get(splice_vec, j).value);
+                            }
+                        } else {
+                            /* If not a vec, just insert as-is */
+                            new_args = jacl_vec_push_back(new_args, splice_val);
+                        }
+                    }
+                    continue;
+                }
+            }
+            JaclVal spliced = syntax__splice_template(arg, values, n_values,
+                                                       idx, heap);
+            new_args = jacl_vec_push_back(new_args, spliced);
+        }
+        JaclVal result = gc_alloc_syntax(heap);
+        JaclSyntax *rsyn = jacl_as_syntax(result);
+        rsyn->kind = SYNTAX_COMMAND;
+        rsyn->pos_line = syn->pos_line;
+        rsyn->pos_col = syn->pos_col;
+        rsyn->pos_offset = syn->pos_offset;
+        rsyn->scope_mark = syn->scope_mark;
+        rsyn->data.command.head = new_head;
+        rsyn->data.command.args = jacl_vector_ptr(new_args);
+        return result;
+    }
+
+    /* Block: splice commands, flatten ~@ in command list */
+    if (syn->kind == SYNTAX_BLOCK) {
+        jacl_vec_root *old_cmds =
+            (jacl_vec_root *)jacl_as_ptr(syn->data.block.commands);
+        uint32_t cnt = jacl_vec_count(old_cmds);
+        jacl_vec_root *new_cmds = jacl_vec_empty();
+        for (uint32_t i = 0; i < cnt; i++) {
+            JaclVal cmd = jacl_vec_get(old_cmds, i).value;
+            if (jacl_is_syntax(cmd)) {
+                JaclSyntax *cmd_syn = jacl_as_syntax(cmd);
+                if (cmd_syn->kind == SYNTAX_UNQUOTE_SPLICING) {
+                    if (*idx < n_values) {
+                        JaclVal splice_val = values[(*idx)++];
+                        if (jacl_is_vector(splice_val)) {
+                            jacl_vec_root *splice_vec =
+                                (jacl_vec_root *)jacl_as_ptr(splice_val);
+                            uint32_t sc = jacl_vec_count(splice_vec);
+                            for (uint32_t j = 0; j < sc; j++) {
+                                new_cmds = jacl_vec_push_back(new_cmds,
+                                    jacl_vec_get(splice_vec, j).value);
+                            }
+                        } else {
+                            new_cmds = jacl_vec_push_back(new_cmds, splice_val);
+                        }
+                    }
+                    continue;
+                }
+            }
+            JaclVal spliced = syntax__splice_template(cmd, values, n_values,
+                                                       idx, heap);
+            new_cmds = jacl_vec_push_back(new_cmds, spliced);
+        }
+        JaclVal result = gc_alloc_syntax(heap);
+        JaclSyntax *rsyn = jacl_as_syntax(result);
+        rsyn->kind = SYNTAX_BLOCK;
+        rsyn->pos_line = syn->pos_line;
+        rsyn->pos_col = syn->pos_col;
+        rsyn->pos_offset = syn->pos_offset;
+        rsyn->scope_mark = syn->scope_mark;
+        rsyn->data.block.commands = jacl_vector_ptr(new_cmds);
+        return result;
+    }
+
+    /* Interp-string: splice segments, flatten ~@ */
+    if (syn->kind == SYNTAX_INTERP_STRING) {
+        jacl_vec_root *old_segs =
+            (jacl_vec_root *)jacl_as_ptr(syn->data.interp_string.segments);
+        uint32_t cnt = jacl_vec_count(old_segs);
+        jacl_vec_root *new_segs = jacl_vec_empty();
+        for (uint32_t i = 0; i < cnt; i++) {
+            JaclVal seg = jacl_vec_get(old_segs, i).value;
+            JaclVal spliced = syntax__splice_template(seg, values, n_values,
+                                                       idx, heap);
+            new_segs = jacl_vec_push_back(new_segs, spliced);
+        }
+        JaclVal result = gc_alloc_syntax(heap);
+        JaclSyntax *rsyn = jacl_as_syntax(result);
+        rsyn->kind = SYNTAX_INTERP_STRING;
+        rsyn->pos_line = syn->pos_line;
+        rsyn->pos_col = syn->pos_col;
+        rsyn->pos_offset = syn->pos_offset;
+        rsyn->scope_mark = syn->scope_mark;
+        rsyn->data.interp_string.segments = jacl_vector_ptr(new_segs);
+        return result;
+    }
+
+    /* Spread: recurse into child */
+    if (syn->kind == SYNTAX_SPREAD) {
+        JaclVal new_child = syntax__splice_template(syn->data.spread.child,
+                                                     values, n_values, idx, heap);
+        JaclVal result = gc_alloc_syntax(heap);
+        JaclSyntax *rsyn = jacl_as_syntax(result);
+        rsyn->kind = SYNTAX_SPREAD;
+        rsyn->pos_line = syn->pos_line;
+        rsyn->pos_col = syn->pos_col;
+        rsyn->pos_offset = syn->pos_offset;
+        rsyn->scope_mark = syn->scope_mark;
+        rsyn->data.spread.child = new_child;
+        return result;
+    }
+
+    /* Quote/syntax-quote: recurse into child */
+    if (syn->kind == SYNTAX_QUOTE) {
+        JaclVal new_child = syntax__splice_template(syn->data.quote.child,
+                                                     values, n_values, idx, heap);
+        JaclVal result = gc_alloc_syntax(heap);
+        JaclSyntax *rsyn = jacl_as_syntax(result);
+        rsyn->kind = SYNTAX_QUOTE;
+        rsyn->pos_line = syn->pos_line;
+        rsyn->pos_col = syn->pos_col;
+        rsyn->pos_offset = syn->pos_offset;
+        rsyn->scope_mark = syn->scope_mark;
+        rsyn->data.quote.child = new_child;
+        return result;
+    }
+
+    /* Nested syntax-quote: treat as literal (don't recurse into unquotes) */
+    if (syn->kind == SYNTAX_SYNTAX_QUOTE) {
+        return tmpl;  /* nested syntax-quote is literal */
+    }
+
+    /* All other kinds (lit-int, lit-float, lit-string, var-ref, break, etc.)
+     * are leaves — return as-is */
+    return tmpl;
+}
+
+/* -------------------------------------------------------------------------
+ * ast_expand_macros: macro expansion pass
+ *
+ * Walks the AST top-to-bottom. When a defmacro node is found, compiles it
+ * and registers in the macro table. When a macro call is found, expands it
+ * by executing the macro closure with syntax object arguments.
+ *
+ * Returns NULL on success, or an error message string on failure.
+ * ------------------------------------------------------------------------- */
+
+static const char *expand__error_msg;
+static uint32_t    expand__error_line;
+static uint32_t    expand__error_col;
+
+/* Helper: check if an AstNode command head is a bare word matching a name */
+static bool expand__head_is_name(AstNode *node, const char **out_name,
+                                 uint32_t *out_len) {
+    if (node->type != AST_COMMAND) return false;
+    AstNode *head = node->data.command.head;
+    if (!head || head->type != AST_LIT_STRING) return false;
+    *out_name = head->data.lit_string.value;
+    *out_len  = head->data.lit_string.length;
+    return true;
+}
+
+/* -------------------------------------------------------------------------
+ * expand__match_param: extract the name string from an unquote child
+ * (either SYNTAX_LIT_STRING or SYNTAX_VAR_REF) and look up which
+ * parameter index it matches. Returns -1 if no match.
+ * ------------------------------------------------------------------------- */
+
+static int expand__match_param(JaclVal unquote_child,
+                               const char **param_names,
+                               uint32_t *param_name_lens,
+                               uint32_t param_count) {
+    if (jacl_is_nil(unquote_child) || !jacl_is_syntax(unquote_child))
+        return -1;
+    JaclSyntax *csyn = jacl_as_syntax(unquote_child);
+    JaclVal name_val;
+    if (csyn->kind == SYNTAX_LIT_STRING)
+        name_val = csyn->data.lit_string.value;
+    else if (csyn->kind == SYNTAX_VAR_REF)
+        name_val = csyn->data.var_ref.name;
+    else
+        return -1;
+
+    uint32_t nlen = jacl_string_byte_len(name_val);
+    char nbuf[256];
+    if (nlen >= sizeof(nbuf)) return -1;
+    jacl_string_data(name_val, nbuf, nlen);
+    for (uint32_t i = 0; i < param_count; i++) {
+        if (nlen == param_name_lens[i] &&
+            memcmp(nbuf, param_names[i], nlen) == 0)
+            return (int)i;
+    }
+    return -1;
+}
+
+/* -------------------------------------------------------------------------
+ * expand__subst_template: walk a syntax object template from a syntax-quote,
+ * replacing SYNTAX_UNQUOTE nodes by matching their child name against macro
+ * parameter names. SYNTAX_UNQUOTE_SPLICING flattens into arg/cmd lists.
+ *
+ * This is the template-based expansion approach: no VM execution needed.
+ * Works because macro bodies are syntax-quote templates with ~name holes.
+ * ------------------------------------------------------------------------- */
+
+static JaclVal expand__subst_template(JaclVal tmpl,
+                                       const char **param_names,
+                                       uint32_t *param_name_lens,
+                                       JaclVal *arg_vals,
+                                       uint32_t param_count,
+                                       ThreadHeap *heap) {
+    if (jacl_is_nil(tmpl)) return JACL_NIL;
+    if (!jacl_is_syntax(tmpl)) return tmpl;
+
+    JaclSyntax *syn = jacl_as_syntax(tmpl);
+
+    /* Unquote: look up the child name and substitute with arg value */
+    if (syn->kind == SYNTAX_UNQUOTE) {
+        int idx = expand__match_param(syn->data.unquote.child,
+                                       param_names, param_name_lens,
+                                       param_count);
+        if (idx >= 0) return arg_vals[idx];
+        return JACL_NIL;
+    }
+
+    /* Unquote-splicing: handled by parent (command/block).
+     * If we reach here, it means ~@ at a non-spliceable position. */
+    if (syn->kind == SYNTAX_UNQUOTE_SPLICING) {
+        int idx = expand__match_param(syn->data.unquote_splicing.child,
+                                       param_names, param_name_lens,
+                                       param_count);
+        if (idx >= 0) return arg_vals[idx];
+        return JACL_NIL;
+    }
+
+    /* Command: recurse into head and args, flatten ~@ in args */
+    if (syn->kind == SYNTAX_COMMAND) {
+        JaclVal new_head = expand__subst_template(
+            syn->data.command.head, param_names, param_name_lens,
+            arg_vals, param_count, heap);
+        jacl_vec_root *old_args =
+            (jacl_vec_root *)jacl_as_ptr(syn->data.command.args);
+        uint32_t argc = jacl_vec_count(old_args);
+        jacl_vec_root *new_args = jacl_vec_empty();
+        for (uint32_t i = 0; i < argc; i++) {
+            JaclVal arg = jacl_vec_get(old_args, i).value;
+            if (jacl_is_syntax(arg)) {
+                JaclSyntax *asyn = jacl_as_syntax(arg);
+                if (asyn->kind == SYNTAX_UNQUOTE_SPLICING) {
+                    /* Flatten: look up the splice value (should be a vec) */
+                    int idx = expand__match_param(
+                        asyn->data.unquote_splicing.child,
+                        param_names, param_name_lens, param_count);
+                    if (idx >= 0) {
+                        JaclVal splice_val = arg_vals[idx];
+                        if (jacl_is_vector(splice_val)) {
+                            jacl_vec_root *sv =
+                                (jacl_vec_root *)jacl_as_ptr(splice_val);
+                            uint32_t sc = jacl_vec_count(sv);
+                            for (uint32_t j = 0; j < sc; j++)
+                                new_args = jacl_vec_push_back(new_args,
+                                    jacl_vec_get(sv, j).value);
+                        } else {
+                            new_args = jacl_vec_push_back(new_args, splice_val);
+                        }
+                    }
+                    continue;
+                }
+            }
+            new_args = jacl_vec_push_back(new_args,
+                expand__subst_template(arg, param_names, param_name_lens,
+                                        arg_vals, param_count, heap));
+        }
+        JaclVal result = gc_alloc_syntax(heap);
+        JaclSyntax *rsyn = jacl_as_syntax(result);
+        rsyn->kind = SYNTAX_COMMAND;
+        rsyn->pos_line = syn->pos_line;
+        rsyn->pos_col = syn->pos_col;
+        rsyn->pos_offset = syn->pos_offset;
+        rsyn->scope_mark = syn->scope_mark;
+        rsyn->data.command.head = new_head;
+        rsyn->data.command.args = jacl_vector_ptr(new_args);
+        return result;
+    }
+
+    /* Block: recurse, flatten ~@ in command list */
+    if (syn->kind == SYNTAX_BLOCK) {
+        jacl_vec_root *old_cmds =
+            (jacl_vec_root *)jacl_as_ptr(syn->data.block.commands);
+        uint32_t cnt = jacl_vec_count(old_cmds);
+        jacl_vec_root *new_cmds = jacl_vec_empty();
+        for (uint32_t i = 0; i < cnt; i++) {
+            JaclVal cmd = jacl_vec_get(old_cmds, i).value;
+            if (jacl_is_syntax(cmd)) {
+                JaclSyntax *csyn = jacl_as_syntax(cmd);
+                if (csyn->kind == SYNTAX_UNQUOTE_SPLICING) {
+                    int idx = expand__match_param(
+                        csyn->data.unquote_splicing.child,
+                        param_names, param_name_lens, param_count);
+                    if (idx >= 0) {
+                        JaclVal splice_val = arg_vals[idx];
+                        if (jacl_is_vector(splice_val)) {
+                            jacl_vec_root *sv =
+                                (jacl_vec_root *)jacl_as_ptr(splice_val);
+                            uint32_t sc = jacl_vec_count(sv);
+                            for (uint32_t j = 0; j < sc; j++)
+                                new_cmds = jacl_vec_push_back(new_cmds,
+                                    jacl_vec_get(sv, j).value);
+                        } else {
+                            new_cmds = jacl_vec_push_back(new_cmds, splice_val);
+                        }
+                    }
+                    continue;
+                }
+            }
+            new_cmds = jacl_vec_push_back(new_cmds,
+                expand__subst_template(cmd, param_names, param_name_lens,
+                                        arg_vals, param_count, heap));
+        }
+        JaclVal result = gc_alloc_syntax(heap);
+        JaclSyntax *rsyn = jacl_as_syntax(result);
+        rsyn->kind = SYNTAX_BLOCK;
+        rsyn->pos_line = syn->pos_line;
+        rsyn->pos_col = syn->pos_col;
+        rsyn->pos_offset = syn->pos_offset;
+        rsyn->scope_mark = syn->scope_mark;
+        rsyn->data.block.commands = jacl_vector_ptr(new_cmds);
+        return result;
+    }
+
+    /* Nested syntax-quote: treat as literal */
+    if (syn->kind == SYNTAX_SYNTAX_QUOTE) return tmpl;
+
+    /* All other kinds (literals, var-ref, etc.) — return as-is */
+    return tmpl;
+}
+
+/* -------------------------------------------------------------------------
+ * expand__find_syntax_quote_child: extract the syntax-quote template from
+ * a defmacro body AST. The body is a block containing a syntax-quote expr.
+ * Returns the syntax-quote child, or NULL if not a simple template.
+ * ------------------------------------------------------------------------- */
+
+static AstNode *expand__find_syntax_quote_child(AstNode *body) {
+    if (!body) return NULL;
+    if (body->type == AST_SYNTAX_QUOTE)
+        return body->data.syntax_quote.child;
+    if (body->type == AST_BLOCK) {
+        /* Block with one statement that is syntax-quote */
+        if (body->data.block.count == 1) {
+            AstNode *stmt = body->data.block.commands[0];
+            if (stmt && stmt->type == AST_SYNTAX_QUOTE)
+                return stmt->data.syntax_quote.child;
+        }
+    }
+    return NULL;
+}
+
+/* Forward declare the recursive expansion helper */
+static bool expand__node(AstNode **node_ptr, MacroTable *macros,
+                         ThreadHeap *heap, JaclInternTable *intern,
+                         arena_t *arena, uint32_t depth);
+
+static bool expand__block(AstNode *block, MacroTable *macros,
+                          ThreadHeap *heap, JaclInternTable *intern,
+                          arena_t *arena, uint32_t depth) {
+    if (!block || block->type != AST_BLOCK) return true;
+    for (uint32_t i = 0; i < block->data.block.count; i++) {
+        if (!expand__node(&block->data.block.commands[i], macros, heap,
+                          intern, arena, depth))
+            return false;
+    }
+    return true;
+}
+
+static bool expand__node(AstNode **node_ptr, MacroTable *macros,
+                         ThreadHeap *heap, JaclInternTable *intern,
+                         arena_t *arena, uint32_t depth) {
+    AstNode *node = *node_ptr;
+    if (!node) return true;
+
+    if (depth > 256) {
+        expand__error_msg  = "macro expansion depth limit exceeded";
+        expand__error_line = node->start.line;
+        expand__error_col  = node->start.column;
+        return false;
+    }
+
+    switch (node->type) {
+    case AST_COMMAND: {
+        const char *name;
+        uint32_t name_len;
+        if (expand__head_is_name(node, &name, &name_len)) {
+            MacroEntry *entry = macro_table_lookup(macros, name, name_len);
+            if (entry) {
+                /* Macro call found — expand it */
+                uint32_t argc = node->data.command.arg_count;
+                if (argc != entry->param_count) {
+                    char err[256];
+                    snprintf(err, sizeof(err),
+                             "macro '%.*s' expects %u arguments but got %u",
+                             (int)name_len, name,
+                             entry->param_count, argc);
+                    char *msg = (char *)arena_alloc(arena, strlen(err) + 1);
+                    memcpy(msg, err, strlen(err) + 1);
+                    expand__error_msg  = msg;
+                    expand__error_line = node->start.line;
+                    expand__error_col  = node->start.column;
+                    return false;
+                }
+
+                /* Find the syntax-quote template in the body */
+                AstNode *tmpl_ast = expand__find_syntax_quote_child(
+                    entry->body);
+                if (!tmpl_ast) {
+                    char err[256];
+                    snprintf(err, sizeof(err),
+                             "macro '%.*s' body must be a syntax-quote template",
+                             (int)name_len, name);
+                    char *msg = (char *)arena_alloc(arena, strlen(err) + 1);
+                    memcpy(msg, err, strlen(err) + 1);
+                    expand__error_msg  = msg;
+                    expand__error_line = node->start.line;
+                    expand__error_col  = node->start.column;
+                    return false;
+                }
+
+                /* Convert template and arguments to syntax objects */
+                JaclVal tmpl_syn = syntax_from_ast(tmpl_ast, heap, intern);
+
+                JaclVal arg_vals[64];
+                for (uint32_t i = 0; i < argc; i++) {
+                    arg_vals[i] = syntax_from_ast(
+                        node->data.command.args[i], heap, intern);
+                }
+
+                /* Template substitution: replace unquotes by name */
+                JaclVal result_syn = expand__subst_template(
+                    tmpl_syn,
+                    entry->param_names, entry->param_name_lens,
+                    arg_vals, entry->param_count, heap);
+
+                /* Convert result back to AstNode */
+                AstNode *expanded = syntax_to_ast(result_syn, arena);
+                if (!expanded) {
+                    expand__error_msg  = "macro expansion produced invalid syntax";
+                    expand__error_line = node->start.line;
+                    expand__error_col  = node->start.column;
+                    return false;
+                }
+
+                /* Replace the node and re-expand (iterative expansion) */
+                *node_ptr = expanded;
+                return expand__node(node_ptr, macros, heap, intern, arena,
+                                    depth + 1);
+            }
+        }
+
+        /* Not a macro — recurse into head and args */
+        if (!expand__node(&node->data.command.head, macros, heap, intern,
+                          arena, depth))
+            return false;
+        for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            if (!expand__node(&node->data.command.args[i], macros, heap,
+                              intern, arena, depth))
+                return false;
+        }
+        return true;
+    }
+
+    case AST_BLOCK:
+        return expand__block(node, macros, heap, intern, arena, depth);
+
+    case AST_QUOTE:
+        /* Don't expand inside quote */
+        return true;
+
+    case AST_SYNTAX_QUOTE:
+        /* Don't expand inside syntax-quote */
+        return true;
+
+    default:
+        return true;
+    }
+}
+
+/* Main expansion pass: walk program top-to-bottom.
+ * defmacro nodes are registered in the macro table; macro calls are expanded
+ * via template-based substitution (walking the syntax-quote template and
+ * replacing unquote holes by matching parameter names).
+ * Returns NULL on success, or an error message string on failure.
+ * Sets *out_line and *out_col to the error location on failure. */
+const char *ast_expand_macros(AstNode **program, uint32_t count,
+                              MacroTable *macros, ThreadHeap *heap,
+                              JaclInternTable *intern, arena_t *arena,
+                              uint32_t *out_error_line, uint32_t *out_error_col) {
+    expand__error_msg  = NULL;
+    expand__error_line = 0;
+    expand__error_col  = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        AstNode *node = program[i];
+        if (!node) continue;
+
+        /* Check for defmacro — register in macro table */
+        if (node->type == AST_DEFMACRO) {
+            const char *mname     = node->data.defmacro.name;
+            uint32_t    mname_len = node->data.defmacro.name_len;
+
+            if (macro__is_special_form(mname, mname_len)) {
+                char err[128];
+                snprintf(err, sizeof(err),
+                         "defmacro: '%.*s' shadows a special form",
+                         (int)mname_len, mname);
+                char *msg = (char *)arena_alloc(arena, strlen(err) + 1);
+                memcpy(msg, err, strlen(err) + 1);
+                *out_error_line = node->start.line;
+                *out_error_col  = node->start.column;
+                return msg;
+            }
+
+            if (macro_table_lookup(macros, mname, mname_len)) {
+                char err[128];
+                snprintf(err, sizeof(err),
+                         "defmacro: '%.*s' is already defined",
+                         (int)mname_len, mname);
+                char *msg = (char *)arena_alloc(arena, strlen(err) + 1);
+                memcpy(msg, err, strlen(err) + 1);
+                *out_error_line = node->start.line;
+                *out_error_col  = node->start.column;
+                return msg;
+            }
+
+            if (macros->count >= MACRO_TABLE_MAX) {
+                *out_error_line = node->start.line;
+                *out_error_col  = node->start.column;
+                return "too many macro definitions";
+            }
+
+            uint32_t param_count = node->data.defmacro.param_count;
+
+            char *name_copy = (char *)arena_alloc(arena, mname_len + 1);
+            memcpy(name_copy, mname, mname_len);
+            name_copy[mname_len] = '\0';
+
+            /* Register in macro table with body AST for template expansion */
+            MacroEntry *entry = &macros->entries[macros->count++];
+            entry->name           = name_copy;
+            entry->name_len       = mname_len;
+            entry->param_count    = param_count;
+            entry->param_names    = node->data.defmacro.param_names;
+            entry->param_name_lens = node->data.defmacro.param_name_lens;
+            entry->closure        = NULL;  /* compiled later by the compiler pass */
+            entry->body           = node->data.defmacro.body;
+
+            continue;
+        }
+
+        /* Expand macro calls in this statement */
+        if (!expand__node(&program[i], macros, heap, intern, arena, 0)) {
+            *out_error_line = expand__error_line;
+            *out_error_col  = expand__error_col;
+            return expand__error_msg;
+        }
+    }
+
+    return NULL;  /* success */
+}
+
 #endif /* SYNTAX_C */

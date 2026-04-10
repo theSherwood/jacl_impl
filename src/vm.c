@@ -124,6 +124,12 @@ void gc_collect_minor(ThreadHeap *heap, VM *vm,
                               RememberedSet *remembered_set);
 bool gc_should_major(ThreadHeap *heap);
 
+/* --- Syntax splice (defined in syntax.c, after vm.c in unity build) --- */
+
+static JaclVal syntax__splice_template(JaclVal tmpl, JaclVal *values,
+                                       uint32_t n_values, uint32_t *idx,
+                                       ThreadHeap *heap);
+
 /* --- Emergency GC callback for single-threaded mode --- */
 
 void vm__emergency_gc_single(void *ctx) {
@@ -5848,6 +5854,24 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, f);
           if (result != VM_OK) return result;
         }
+        break;
+      }
+
+      case OP_SYNTAX_SPLICE: {
+        uint8_t n_unquotes = vm__read_byte(vm);
+        /* Stack layout: [... template, val0, val1, ..., valN-1] */
+        if (vm->stack_top < (uint32_t)(n_unquotes + 1)) {
+          vm__set_error(vm, "stack underflow in OP_SYNTAX_SPLICE");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclVal *values = &vm->stack[vm->stack_top - n_unquotes];
+        JaclVal tmpl = vm->stack[vm->stack_top - n_unquotes - 1];
+        uint32_t idx = 0;
+        JaclVal spliced = syntax__splice_template(tmpl, values, n_unquotes,
+                                                   &idx, &vm->heap);
+        vm->stack_top -= (n_unquotes + 1);  /* pop template + values */
+        result = vm__push(vm, spliced);
+        if (result != VM_OK) return result;
         break;
       }
 
