@@ -436,10 +436,10 @@ void vm__fmt_init(VMFormatBuf* buf, arena_t* arena) {
 
 void vm__fmt_ensure(VMFormatBuf* buf, uint32_t extra) {
   if (buf->len + extra <= buf->cap) return;
-  uint32_t new_cap = buf->cap * 2;
+  uint32_t new_cap = buf->cap ? buf->cap * 2 : 128;
   while (new_cap < buf->len + extra) new_cap *= 2;
   char* new_data = (char*)arena_alloc(buf->arena, new_cap);
-  memcpy(new_data, buf->data, buf->len);
+  if (buf->len) memcpy(new_data, buf->data, buf->len);
   buf->data = new_data;
   buf->cap  = new_cap;
 }
@@ -557,6 +557,67 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
     n = snprintf(tmp, sizeof(tmp), "<native-fn #%u>",
                  jacl_as_native_fn_index(val));
     vm__fmt_append(buf, tmp, (uint32_t)n);
+  } else if (jacl_is_syntax(val)) {
+    JaclSyntax *syn = jacl_as_syntax(val);
+    switch (syn->kind) {
+    case SYNTAX_COMMAND: {
+      vm__fmt_append(buf, "<syntax:command [", 17);
+      vm__fmt_value(buf, syn->data.command.head);
+      jacl_vec_root *args = (jacl_vec_root *)jacl_as_ptr(syn->data.command.args);
+      uint32_t argc = jacl_vec_count(args);
+      for (uint32_t i = 0; i < argc; i++) {
+        vm__fmt_append(buf, " ", 1);
+        vm__fmt_value(buf, jacl_vec_get(args, i).value);
+      }
+      vm__fmt_append(buf, "]>", 2);
+      break;
+    }
+    case SYNTAX_LIT_INT:
+      n = snprintf(tmp, sizeof(tmp), "<syntax:lit-int %d>", syn->data.lit_int.value);
+      vm__fmt_append(buf, tmp, (uint32_t)n);
+      break;
+    case SYNTAX_LIT_FLOAT:
+      n = snprintf(tmp, sizeof(tmp), "<syntax:lit-float %g>", (double)syn->data.lit_float.value);
+      vm__fmt_append(buf, tmp, (uint32_t)n);
+      break;
+    case SYNTAX_LIT_STRING: {
+      vm__fmt_append(buf, "<syntax:lit-string ", 19);
+      vm__fmt_value(buf, syn->data.lit_string.value);
+      vm__fmt_append(buf, ">", 1);
+      break;
+    }
+    case SYNTAX_VAR_REF: {
+      vm__fmt_append(buf, "<syntax:var-ref $", 17);
+      JaclVal name = syn->data.var_ref.name;
+      uint32_t slen = jacl_string_byte_len(name);
+      if (jacl_is_heap_string(name)) {
+        JaclHeapString *hs = jacl_as_heap_string(name);
+        vm__fmt_append(buf, hs->data, hs->byte_len);
+      } else {
+        char sbuf[8];
+        jacl_string_data(name, sbuf, slen);
+        vm__fmt_append(buf, sbuf, slen);
+      }
+      vm__fmt_append(buf, ">", 1);
+      break;
+    }
+    case SYNTAX_BLOCK: {
+      vm__fmt_append(buf, "<syntax:block {", 15);
+      jacl_vec_root *cmds = (jacl_vec_root *)jacl_as_ptr(syn->data.block.commands);
+      uint32_t cnt = jacl_vec_count(cmds);
+      for (uint32_t i = 0; i < cnt; i++) {
+        if (i > 0) vm__fmt_append(buf, "; ", 2);
+        vm__fmt_append(buf, " ", 1);
+        vm__fmt_value(buf, jacl_vec_get(cmds, i).value);
+      }
+      vm__fmt_append(buf, " }>", 3);
+      break;
+    }
+    default:
+      n = snprintf(tmp, sizeof(tmp), "<syntax:%d>", syn->kind);
+      vm__fmt_append(buf, tmp, (uint32_t)n);
+      break;
+    }
   } else {
     vm__fmt_append(buf, "<unknown>", 9);
   }

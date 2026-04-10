@@ -1,0 +1,695 @@
+#include "test_helpers.h"
+#include "../src/jacl.h"
+
+/* ===== US-001: JACL_TAG_SYNTAX value tag and OBJ_SYNTAX GC object ===== */
+
+/* Test: JACL_TAG_SYNTAX occupies the expected tag slot */
+static int test_syntax_tag_slot(void) {
+    ASSERT_U64_EQ(JACL_TAG_SYNTAX, (uint64_t)0x17 << JACL_TAG_SHIFT);
+    TEST_PASS();
+}
+
+/* Test: all SyntaxKind enum values are distinct */
+static int test_syntax_kind_enum(void) {
+    ASSERT_INT_EQ(SYNTAX_COMMAND, 0);
+    ASSERT_INT_EQ(SYNTAX_LIT_INT, 1);
+    ASSERT_INT_EQ(SYNTAX_LIT_FLOAT, 2);
+    ASSERT_INT_EQ(SYNTAX_LIT_STRING, 3);
+    ASSERT_INT_EQ(SYNTAX_VAR_REF, 4);
+    ASSERT_INT_EQ(SYNTAX_BLOCK, 5);
+    ASSERT_INT_EQ(SYNTAX_INTERP_STRING, 6);
+    ASSERT_INT_EQ(SYNTAX_SPREAD, 7);
+    ASSERT_INT_EQ(SYNTAX_USE, 8);
+    ASSERT_INT_EQ(SYNTAX_DEFSTRUCT, 9);
+    ASSERT_INT_EQ(SYNTAX_BREAK, 10);
+    ASSERT_INT_EQ(SYNTAX_CONTINUE, 11);
+    ASSERT_INT_EQ(SYNTAX_RETURN, 12);
+    ASSERT_INT_EQ(SYNTAX_DESTRUCTURE_VEC, 13);
+    ASSERT_INT_EQ(SYNTAX_DESTRUCTURE_NAMED, 14);
+    TEST_PASS();
+}
+
+/* Test: jacl_is_syntax predicate */
+static int test_syntax_is_predicate(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal syn = gc_alloc_syntax(&vm.heap);
+    ASSERT(jacl_is_syntax(syn));
+    ASSERT(!jacl_is_nil(syn));
+    ASSERT(!jacl_is_i32(syn));
+    ASSERT(!jacl_is_string(syn));
+    ASSERT(!jacl_is_closure(syn));
+
+    /* Non-syntax values should not pass */
+    ASSERT(!jacl_is_syntax(JACL_NIL));
+    ASSERT(!jacl_is_syntax(jacl_i32(42)));
+    ASSERT(!jacl_is_syntax(JACL_TRUE));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: jacl_is_heap_type includes syntax */
+static int test_syntax_is_heap_type(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal syn = gc_alloc_syntax(&vm.heap);
+    ASSERT(jacl_is_heap_type(syn));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: gc_alloc_syntax returns valid object with correct GC header */
+static int test_syntax_alloc_gc_header(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT(s != NULL);
+
+    GCHeader *hdr = gc_header_of(s);
+    ASSERT_INT_EQ(hdr->obj_type, OBJ_SYNTAX);
+    ASSERT(hdr->alloc_total >= sizeof(GCHeader) + sizeof(JaclSyntax));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax object fields are zeroed on allocation */
+static int test_syntax_alloc_zeroed(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *s = jacl_as_syntax(syn);
+
+    ASSERT_INT_EQ(s->kind, 0);
+    ASSERT_U32_EQ(s->pos_line, 0);
+    ASSERT_U32_EQ(s->pos_col, 0);
+    ASSERT_U32_EQ(s->pos_offset, 0);
+    ASSERT_U32_EQ(s->scope_mark, 0);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax object round-trip: alloc, set fields, read back */
+static int test_syntax_lit_int(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *s = jacl_as_syntax(syn);
+    s->kind = SYNTAX_LIT_INT;
+    s->data.lit_int.value = 42;
+    s->pos_line = 10;
+    s->pos_col = 5;
+
+    /* Read back */
+    JaclSyntax *r = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(r->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(r->data.lit_int.value, 42);
+    ASSERT_U32_EQ(r->pos_line, 10);
+    ASSERT_U32_EQ(r->pos_col, 5);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax object with float literal */
+static int test_syntax_lit_float(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *s = jacl_as_syntax(syn);
+    s->kind = SYNTAX_LIT_FLOAT;
+    s->data.lit_float.value = 3.14f;
+
+    ASSERT_INT_EQ(s->kind, SYNTAX_LIT_FLOAT);
+    float diff = s->data.lit_float.value - 3.14f;
+    ASSERT(diff < 0.001f && diff > -0.001f);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax var-ref stores a string JaclVal */
+static int test_syntax_var_ref(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    JaclVal name = jacl_intern(&vm.heap, &intern, "x", 1);
+    JaclVal syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *s = jacl_as_syntax(syn);
+    s->kind = SYNTAX_VAR_REF;
+    s->data.var_ref.name = name;
+
+    ASSERT_INT_EQ(s->kind, SYNTAX_VAR_REF);
+    ASSERT(jacl_is_string(s->data.var_ref.name));
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax command with head and args vec */
+static int test_syntax_command(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    /* Create head: var-ref for "+" */
+    JaclVal head_syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *head = jacl_as_syntax(head_syn);
+    head->kind = SYNTAX_VAR_REF;
+    head->data.var_ref.name = jacl_intern(&vm.heap, &intern, "+", 1);
+
+    /* Create arg1: lit-int 1 */
+    JaclVal arg1_syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *arg1 = jacl_as_syntax(arg1_syn);
+    arg1->kind = SYNTAX_LIT_INT;
+    arg1->data.lit_int.value = 1;
+
+    /* Create arg2: lit-int 2 */
+    JaclVal arg2_syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *arg2 = jacl_as_syntax(arg2_syn);
+    arg2->kind = SYNTAX_LIT_INT;
+    arg2->data.lit_int.value = 2;
+
+    /* Build args vec */
+    jacl_vec_root *vec = jacl_vec_empty();
+    vec = jacl_vec_push_back(vec, arg1_syn);
+    vec = jacl_vec_push_back(vec, arg2_syn);
+    JaclVal args_val = JACL_TAG_VECTOR | ((uint64_t)(uintptr_t)vec & JACL_PAYLOAD_MASK);
+
+    /* Create command syntax */
+    JaclVal cmd_syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *cmd = jacl_as_syntax(cmd_syn);
+    cmd->kind = SYNTAX_COMMAND;
+    cmd->data.command.head = head_syn;
+    cmd->data.command.args = args_val;
+
+    ASSERT_INT_EQ(cmd->kind, SYNTAX_COMMAND);
+    ASSERT(jacl_is_syntax(cmd->data.command.head));
+    ASSERT(jacl_is_vector(cmd->data.command.args));
+
+    jacl_vec_root *rargs = (jacl_vec_root *)jacl_as_ptr(cmd->data.command.args);
+    ASSERT_U32_EQ(jacl_vec_count(rargs), 2);
+
+    JaclSyntax *a1 = jacl_as_syntax(jacl_vec_get(rargs, 0).value);
+    ASSERT_INT_EQ(a1->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(a1->data.lit_int.value, 1);
+
+    JaclSyntax *a2 = jacl_as_syntax(jacl_vec_get(rargs, 1).value);
+    ASSERT_INT_EQ(a2->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(a2->data.lit_int.value, 2);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax block with a vec of commands */
+static int test_syntax_block(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal s1 = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(s1)->kind = SYNTAX_LIT_INT;
+    jacl_as_syntax(s1)->data.lit_int.value = 10;
+
+    JaclVal s2 = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(s2)->kind = SYNTAX_LIT_INT;
+    jacl_as_syntax(s2)->data.lit_int.value = 20;
+
+    jacl_vec_root *cmds = jacl_vec_empty();
+    cmds = jacl_vec_push_back(cmds, s1);
+    cmds = jacl_vec_push_back(cmds, s2);
+    JaclVal cmds_val = JACL_TAG_VECTOR | ((uint64_t)(uintptr_t)cmds & JACL_PAYLOAD_MASK);
+
+    JaclVal blk = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *b = jacl_as_syntax(blk);
+    b->kind = SYNTAX_BLOCK;
+    b->data.block.commands = cmds_val;
+
+    ASSERT_INT_EQ(b->kind, SYNTAX_BLOCK);
+    jacl_vec_root *rc = (jacl_vec_root *)jacl_as_ptr(b->data.block.commands);
+    ASSERT_U32_EQ(jacl_vec_count(rc), 2);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax spread wraps a child */
+static int test_syntax_spread(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal child = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(child)->kind = SYNTAX_LIT_INT;
+    jacl_as_syntax(child)->data.lit_int.value = 99;
+
+    JaclVal spr = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *sp = jacl_as_syntax(spr);
+    sp->kind = SYNTAX_SPREAD;
+    sp->data.spread.child = child;
+
+    ASSERT_INT_EQ(sp->kind, SYNTAX_SPREAD);
+    ASSERT(jacl_is_syntax(sp->data.spread.child));
+    ASSERT_INT_EQ(jacl_as_syntax(sp->data.spread.child)->data.lit_int.value, 99);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: scope_mark field is writable and readable */
+static int test_syntax_scope_mark(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_U32_EQ(s->scope_mark, 0);
+
+    s->scope_mark = 42;
+    ASSERT_U32_EQ(s->scope_mark, 42);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax printing — lit-int */
+static int test_syntax_print_lit_int(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *s = jacl_as_syntax(syn);
+    s->kind = SYNTAX_LIT_INT;
+    s->data.lit_int.value = 42;
+
+    VMFormatBuf buf = {0};
+    buf.arena = &arena;
+    vm__fmt_value(&buf, syn);
+
+    char result[64];
+    uint32_t len = buf.len < 63 ? buf.len : 63;
+    memcpy(result, buf.data, len);
+    result[len] = '\0';
+
+    ASSERT_STR_EQ(result, "<syntax:lit-int 42>");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax printing — lit-float */
+static int test_syntax_print_lit_float(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    JaclVal syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *s = jacl_as_syntax(syn);
+    s->kind = SYNTAX_LIT_FLOAT;
+    s->data.lit_float.value = 3.14f;
+
+    VMFormatBuf buf = {0};
+    buf.arena = &arena;
+    vm__fmt_value(&buf, syn);
+
+    char result[64];
+    uint32_t len = buf.len < 63 ? buf.len : 63;
+    memcpy(result, buf.data, len);
+    result[len] = '\0';
+
+    ASSERT_STR_EQ(result, "<syntax:lit-float 3.14>");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax printing — var-ref */
+static int test_syntax_print_var_ref(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    JaclVal name = jacl_intern(&vm.heap, &intern, "foo", 3);
+    JaclVal syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *s = jacl_as_syntax(syn);
+    s->kind = SYNTAX_VAR_REF;
+    s->data.var_ref.name = name;
+
+    VMFormatBuf buf = {0};
+    buf.arena = &arena;
+    vm__fmt_value(&buf, syn);
+
+    char result[64];
+    uint32_t len = buf.len < 63 ? buf.len : 63;
+    memcpy(result, buf.data, len);
+    result[len] = '\0';
+
+    ASSERT_STR_EQ(result, "<syntax:var-ref $foo>");
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax printing — command [+ 1 2] */
+static int test_syntax_print_command(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    /* head: var-ref "+" */
+    JaclVal head_syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *h = jacl_as_syntax(head_syn);
+    h->kind = SYNTAX_VAR_REF;
+    h->data.var_ref.name = jacl_intern(&vm.heap, &intern, "+", 1);
+
+    /* arg1: lit-int 1 */
+    JaclVal arg1 = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(arg1)->kind = SYNTAX_LIT_INT;
+    jacl_as_syntax(arg1)->data.lit_int.value = 1;
+
+    /* arg2: lit-int 2 */
+    JaclVal arg2 = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(arg2)->kind = SYNTAX_LIT_INT;
+    jacl_as_syntax(arg2)->data.lit_int.value = 2;
+
+    /* args vec */
+    jacl_vec_root *vec = jacl_vec_empty();
+    vec = jacl_vec_push_back(vec, arg1);
+    vec = jacl_vec_push_back(vec, arg2);
+    JaclVal args_val = JACL_TAG_VECTOR | ((uint64_t)(uintptr_t)vec & JACL_PAYLOAD_MASK);
+
+    /* command */
+    JaclVal cmd = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *c = jacl_as_syntax(cmd);
+    c->kind = SYNTAX_COMMAND;
+    c->data.command.head = head_syn;
+    c->data.command.args = args_val;
+
+    VMFormatBuf buf = {0};
+    buf.arena = &arena;
+    vm__fmt_value(&buf, cmd);
+
+    char result[128];
+    uint32_t len = buf.len < 127 ? buf.len : 127;
+    memcpy(result, buf.data, len);
+    result[len] = '\0';
+
+    ASSERT_STR_EQ(result,
+      "<syntax:command [<syntax:var-ref $+> <syntax:lit-int 1> <syntax:lit-int 2>]>");
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax lit-string */
+static int test_syntax_lit_string(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    JaclVal str = jacl_intern(&vm.heap, &intern, "hello", 5);
+    JaclVal syn = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *s = jacl_as_syntax(syn);
+    s->kind = SYNTAX_LIT_STRING;
+    s->data.lit_string.value = str;
+
+    ASSERT_INT_EQ(s->kind, SYNTAX_LIT_STRING);
+    ASSERT(jacl_is_string(s->data.lit_string.value));
+
+    VMFormatBuf buf = {0};
+    buf.arena = &arena;
+    vm__fmt_value(&buf, syn);
+
+    char result[64];
+    uint32_t len = buf.len < 63 ? buf.len : 63;
+    memcpy(result, buf.data, len);
+    result[len] = '\0';
+
+    ASSERT_STR_EQ(result, "<syntax:lit-string \"hello\">");
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax break and return with value */
+static int test_syntax_break_return(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* break with a value */
+    JaclVal val_syn = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(val_syn)->kind = SYNTAX_LIT_INT;
+    jacl_as_syntax(val_syn)->data.lit_int.value = 7;
+
+    JaclVal brk = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *b = jacl_as_syntax(brk);
+    b->kind = SYNTAX_BREAK;
+    b->data.break_stmt.value = val_syn;
+    ASSERT(jacl_is_syntax(b->data.break_stmt.value));
+
+    /* break without value */
+    JaclVal brk2 = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *b2 = jacl_as_syntax(brk2);
+    b2->kind = SYNTAX_BREAK;
+    b2->data.break_stmt.value = JACL_NIL;
+    ASSERT(jacl_is_nil(b2->data.break_stmt.value));
+
+    /* continue has no value field */
+    JaclVal cont = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(cont)->kind = SYNTAX_CONTINUE;
+
+    /* return with value */
+    JaclVal ret = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *r = jacl_as_syntax(ret);
+    r->kind = SYNTAX_RETURN;
+    r->data.return_stmt.value = val_syn;
+    ASSERT(jacl_is_syntax(r->data.return_stmt.value));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax interp-string with segments vec */
+static int test_syntax_interp_string(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    /* Segments: lit-string "hello " + var-ref "name" */
+    JaclVal seg1 = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(seg1)->kind = SYNTAX_LIT_STRING;
+    jacl_as_syntax(seg1)->data.lit_string.value = jacl_intern(&vm.heap, &intern, "hello ", 6);
+
+    JaclVal seg2 = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(seg2)->kind = SYNTAX_VAR_REF;
+    jacl_as_syntax(seg2)->data.var_ref.name = jacl_intern(&vm.heap, &intern, "name", 4);
+
+    jacl_vec_root *segs = jacl_vec_empty();
+    segs = jacl_vec_push_back(segs, seg1);
+    segs = jacl_vec_push_back(segs, seg2);
+    JaclVal segs_val = JACL_TAG_VECTOR | ((uint64_t)(uintptr_t)segs & JACL_PAYLOAD_MASK);
+
+    JaclVal is = gc_alloc_syntax(&vm.heap);
+    JaclSyntax *s = jacl_as_syntax(is);
+    s->kind = SYNTAX_INTERP_STRING;
+    s->data.interp_string.segments = segs_val;
+
+    ASSERT_INT_EQ(s->kind, SYNTAX_INTERP_STRING);
+    jacl_vec_root *rs = (jacl_vec_root *)jacl_as_ptr(s->data.interp_string.segments);
+    ASSERT_U32_EQ(jacl_vec_count(rs), 2);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: multiple syntax objects survive GC */
+static int test_syntax_gc_survives(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Allocate syntax objects and push to VM stack as roots */
+    JaclVal s1 = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(s1)->kind = SYNTAX_LIT_INT;
+    jacl_as_syntax(s1)->data.lit_int.value = 100;
+    vm.stack[vm.stack_top++] = s1;
+
+    JaclVal s2 = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(s2)->kind = SYNTAX_LIT_INT;
+    jacl_as_syntax(s2)->data.lit_int.value = 200;
+    vm.stack[vm.stack_top++] = s2;
+
+    /* Force a GC cycle */
+    gc_collect(&vm.heap, &vm);
+
+    /* Objects should survive (they're on the stack) */
+    ASSERT(jacl_is_syntax(s1));
+    JaclSyntax *r1 = jacl_as_syntax(s1);
+    ASSERT_INT_EQ(r1->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(r1->data.lit_int.value, 100);
+
+    JaclSyntax *r2 = jacl_as_syntax(s2);
+    ASSERT_INT_EQ(r2->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(r2->data.lit_int.value, 200);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax object with command and inner refs survives GC */
+static int test_syntax_command_gc_survives(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    /* Build [+ 1 2] as syntax */
+    JaclVal head_syn = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(head_syn)->kind = SYNTAX_VAR_REF;
+    jacl_as_syntax(head_syn)->data.var_ref.name = jacl_intern(&vm.heap, &intern, "+", 1);
+
+    JaclVal a1 = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(a1)->kind = SYNTAX_LIT_INT;
+    jacl_as_syntax(a1)->data.lit_int.value = 1;
+
+    JaclVal a2 = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(a2)->kind = SYNTAX_LIT_INT;
+    jacl_as_syntax(a2)->data.lit_int.value = 2;
+
+    jacl_vec_root *args = jacl_vec_empty();
+    args = jacl_vec_push_back(args, a1);
+    args = jacl_vec_push_back(args, a2);
+    JaclVal args_val = JACL_TAG_VECTOR | ((uint64_t)(uintptr_t)args & JACL_PAYLOAD_MASK);
+
+    JaclVal cmd = gc_alloc_syntax(&vm.heap);
+    jacl_as_syntax(cmd)->kind = SYNTAX_COMMAND;
+    jacl_as_syntax(cmd)->data.command.head = head_syn;
+    jacl_as_syntax(cmd)->data.command.args = args_val;
+
+    /* Root only the command — inner syntax should survive via tracing */
+    vm.stack[vm.stack_top++] = cmd;
+
+    gc_collect(&vm.heap, &vm);
+
+    /* Verify the entire tree survived */
+    JaclSyntax *c = jacl_as_syntax(cmd);
+    ASSERT_INT_EQ(c->kind, SYNTAX_COMMAND);
+    ASSERT(jacl_is_syntax(c->data.command.head));
+    ASSERT(jacl_is_vector(c->data.command.args));
+
+    jacl_vec_root *rargs = (jacl_vec_root *)jacl_as_ptr(c->data.command.args);
+    ASSERT_U32_EQ(jacl_vec_count(rargs), 2);
+    ASSERT_INT_EQ(jacl_as_syntax(jacl_vec_get(rargs, 0).value)->data.lit_int.value, 1);
+    ASSERT_INT_EQ(jacl_as_syntax(jacl_vec_get(rargs, 1).value)->data.lit_int.value, 2);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+int main(void) {
+    int pass = 0, fail = 0;
+
+    printf("=== Syntax Object Tests (US-001) ===\n");
+
+#define RUN(fn) do { \
+        printf("  %-45s ", #fn); \
+        if (fn()) { printf("PASS\n"); pass++; } \
+        else { printf("FAIL\n"); fail++; } \
+    } while (0)
+
+    RUN(test_syntax_tag_slot);
+    RUN(test_syntax_kind_enum);
+    RUN(test_syntax_is_predicate);
+    RUN(test_syntax_is_heap_type);
+    RUN(test_syntax_alloc_gc_header);
+    RUN(test_syntax_alloc_zeroed);
+    RUN(test_syntax_lit_int);
+    RUN(test_syntax_lit_float);
+    RUN(test_syntax_var_ref);
+    RUN(test_syntax_command);
+    RUN(test_syntax_block);
+    RUN(test_syntax_spread);
+    RUN(test_syntax_scope_mark);
+    RUN(test_syntax_print_lit_int);
+    RUN(test_syntax_print_lit_float);
+    RUN(test_syntax_print_var_ref);
+    RUN(test_syntax_print_command);
+    RUN(test_syntax_lit_string);
+    RUN(test_syntax_break_return);
+    RUN(test_syntax_interp_string);
+    RUN(test_syntax_gc_survives);
+    RUN(test_syntax_command_gc_survives);
+
+#undef RUN
+
+    printf("\n%d passed, %d failed\n", pass, fail);
+    return fail > 0 ? 1 : 0;
+}

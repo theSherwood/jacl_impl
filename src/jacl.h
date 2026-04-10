@@ -72,6 +72,7 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_ROPE_STRING   ((uint64_t)0x14 << JACL_TAG_SHIFT)
 #define JACL_TAG_STREAM        ((uint64_t)0x15 << JACL_TAG_SHIFT)
 #define JACL_TAG_STATE_MACHINE ((uint64_t)0x16 << JACL_TAG_SHIFT)
+#define JACL_TAG_SYNTAX        ((uint64_t)0x17 << JACL_TAG_SHIFT)
 
 typedef struct { int64_t value; } JaclHeapI64;
 typedef struct { uint64_t value; } JaclHeapU64;
@@ -114,7 +115,8 @@ typedef enum {
     OBJ_ROPE_LEAF,
     OBJ_ROPE_INTERNAL,
     OBJ_STREAM,
-    OBJ_STATE_MACHINE
+    OBJ_STATE_MACHINE,
+    OBJ_SYNTAX
 } GCObjType;
 
 #define GC_BLOCK_SIZE       65536
@@ -246,6 +248,48 @@ typedef struct {
     JaclVal  sm_closure;
     JaclVal  fields[];
 } JaclStateMachine;
+
+typedef enum {
+    SYNTAX_COMMAND,
+    SYNTAX_LIT_INT,
+    SYNTAX_LIT_FLOAT,
+    SYNTAX_LIT_STRING,
+    SYNTAX_VAR_REF,
+    SYNTAX_BLOCK,
+    SYNTAX_INTERP_STRING,
+    SYNTAX_SPREAD,
+    SYNTAX_USE,
+    SYNTAX_DEFSTRUCT,
+    SYNTAX_BREAK,
+    SYNTAX_CONTINUE,
+    SYNTAX_RETURN,
+    SYNTAX_DESTRUCTURE_VEC,
+    SYNTAX_DESTRUCTURE_NAMED
+} SyntaxKind;
+
+typedef struct {
+    uint8_t   kind;        /* SyntaxKind */
+    uint32_t  pos_line;    /* source line */
+    uint32_t  pos_col;     /* source column */
+    uint32_t  pos_offset;  /* source offset */
+    uint32_t  scope_mark;  /* hygiene: 0 = no macro context */
+    union {
+        struct { JaclVal head; JaclVal args; }  command;
+        struct { int32_t value; }               lit_int;
+        struct { float   value; }               lit_float;
+        struct { JaclVal value; }               lit_string;
+        struct { JaclVal name; }                var_ref;
+        struct { JaclVal commands; }            block;
+        struct { JaclVal segments; }            interp_string;
+        struct { JaclVal child; }               spread;
+        struct { JaclVal child; }               use_decl;
+        struct { JaclVal child; }               defstruct;
+        struct { JaclVal value; }               break_stmt;
+        struct { JaclVal value; }               return_stmt;
+        struct { JaclVal names; }               destructure_vec;
+        struct { JaclVal names; }               destructure_named;
+    } data;
+} JaclSyntax;
 
 #define GREY_BUF_INIT_CAP   256
 #define REMEMBERED_SET_INIT_CAP  256
@@ -1305,6 +1349,8 @@ extern bool jacl_is_stream (JaclVal v);
 extern JaclVal jacl_stream_ptr (void *p);
 extern bool jacl_is_state_machine (JaclVal v);
 extern JaclVal jacl_state_machine_ptr (void *p);
+extern bool jacl_is_syntax (JaclVal v);
+extern JaclVal jacl_syntax_ptr (void *p);
 extern JaclVal jacl_inline_string (const char *s, size_t len);
 extern bool jacl_is_inline_string (JaclVal v);
 extern size_t jacl_inline_string_len (JaclVal v);
@@ -1440,6 +1486,8 @@ extern RaceAgg *as_race_agg (JaclVal v);
 extern JaclVal jacl_race_agg (ThreadHeap *heap, JaclVal state_machine);
 extern JaclStateMachine *jacl_as_state_machine (JaclVal v);
 extern JaclVal gc_alloc_state_machine (ThreadHeap *heap, uint32_t field_count);
+extern JaclSyntax *jacl_as_syntax (JaclVal v);
+extern JaclVal gc_alloc_syntax (ThreadHeap *heap);
 
 /* --- string.c --- */
 extern uint32_t string__fnv1a (const char *data, uint32_t length);

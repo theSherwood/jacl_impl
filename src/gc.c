@@ -34,7 +34,8 @@ typedef enum {
     OBJ_ROPE_LEAF,
     OBJ_ROPE_INTERNAL,
     OBJ_STREAM,
-    OBJ_STATE_MACHINE
+    OBJ_STATE_MACHINE,
+    OBJ_SYNTAX
 } GCObjType;
 
 /* --- GC object header (8 bytes, prepended before payload) ---
@@ -91,7 +92,8 @@ bool jacl_is_heap_type(JaclVal v) {
         || tag == JACL_TAG_FUTURE
         || tag == JACL_TAG_STRUCT
         || tag == JACL_TAG_ROPE_STRING
-        || tag == JACL_TAG_STATE_MACHINE;
+        || tag == JACL_TAG_STATE_MACHINE
+        || tag == JACL_TAG_SYNTAX;
 }
 
 /* ======================================================================
@@ -1134,6 +1136,70 @@ JaclVal gc_alloc_state_machine(ThreadHeap *heap, uint32_t field_count) {
         sm->fields[i] = JACL_NIL;
     }
     return jacl_state_machine_ptr(sm);
+}
+
+/* ======================================================================
+ * JaclSyntax: GC-allocated syntax objects for macro expansion
+ *
+ * Represents AST nodes as manipulable values during compile-time macro
+ * expansion. Each syntax object carries its node kind, source position,
+ * a scope mark for hygienic naming, and per-kind data in a tagged union.
+ * ====================================================================== */
+
+typedef enum {
+    SYNTAX_COMMAND,
+    SYNTAX_LIT_INT,
+    SYNTAX_LIT_FLOAT,
+    SYNTAX_LIT_STRING,
+    SYNTAX_VAR_REF,
+    SYNTAX_BLOCK,
+    SYNTAX_INTERP_STRING,
+    SYNTAX_SPREAD,
+    SYNTAX_USE,
+    SYNTAX_DEFSTRUCT,
+    SYNTAX_BREAK,
+    SYNTAX_CONTINUE,
+    SYNTAX_RETURN,
+    SYNTAX_DESTRUCTURE_VEC,
+    SYNTAX_DESTRUCTURE_NAMED
+} SyntaxKind;
+
+typedef struct {
+    uint8_t   kind;        /* SyntaxKind */
+    uint32_t  pos_line;    /* source line */
+    uint32_t  pos_col;     /* source column */
+    uint32_t  pos_offset;  /* source offset */
+    uint32_t  scope_mark;  /* hygiene: 0 = no macro context */
+    union {
+        struct { JaclVal head; JaclVal args; }  command;       /* head: syntax, args: vec of syntax */
+        struct { int32_t value; }               lit_int;
+        struct { float   value; }               lit_float;
+        struct { JaclVal value; }               lit_string;    /* JaclVal string */
+        struct { JaclVal name; }                var_ref;       /* JaclVal string */
+        struct { JaclVal commands; }            block;         /* vec of syntax */
+        struct { JaclVal segments; }            interp_string; /* vec of syntax */
+        struct { JaclVal child; }               spread;        /* syntax */
+        struct { JaclVal child; }               use_decl;      /* syntax (simplified) */
+        struct { JaclVal child; }               defstruct;     /* syntax (simplified) */
+        struct { JaclVal value; }               break_stmt;    /* syntax or nil */
+        struct { JaclVal value; }               return_stmt;   /* syntax or nil */
+        struct { JaclVal names; }               destructure_vec;   /* vec of strings */
+        struct { JaclVal names; }               destructure_named; /* vec of strings */
+    } data;
+} JaclSyntax;
+
+/* --- Pointer accessor --- */
+
+JaclSyntax *jacl_as_syntax(JaclVal v) {
+    return (JaclSyntax *)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+}
+
+/* --- Constructor: allocate a zeroed syntax object --- */
+
+JaclVal gc_alloc_syntax(ThreadHeap *heap) {
+    JaclSyntax *syn = (JaclSyntax *)gc_alloc(heap, OBJ_SYNTAX, sizeof(JaclSyntax));
+    memset(syn, 0, sizeof(JaclSyntax));
+    return jacl_syntax_ptr(syn);
 }
 
 #endif /* GC_C */

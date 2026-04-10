@@ -2,3 +2,25 @@
 Started: Thu Apr 10 2026
 
 ## Codebase Patterns
+- Unity build: src/jacl.c is the unity build entrypoint; it includes value.c, gc.c, gc_collect.c, vm.c, etc. in a specific order. jacl.c does NOT include jacl.h.
+- Type duplication convention: jacl.h declares public types (GCHeader, JaclSyntax, SyntaxKind, etc.) for external consumers (tests). Unity build source files (gc.c) have their own parallel definitions. The two must stay byte-identical. This is the established pattern — don't try to "deduplicate" it.
+- Test builds: test/ files include src/jacl.h and link against .build/libjacl.a. lib/ tests compile standalone.
+- Running tests on macOS: stdout is fully buffered when not a TTY. Use `stdbuf -o0 -e0 timeout N .build/<test>` to see output when killed.
+- Pre-existing broken tests (on HEAD f8d63e3): parser, e2e_struct_tramp, embed. Not related to macro work.
+- VMFormatBuf usage: init with `VMFormatBuf buf = {0}; buf.arena = &arena;` — vm__fmt_ensure handles cap==0 by seeding to 128.
+- build.sh takes --test=NAME for single-test filter; --clean clears .build.
+
+## 2026-04-10 - US-001 — Add JACL_TAG_SYNTAX value tag and OBJ_SYNTAX GC object
+- Most of US-001 was already staged as uncommitted edits (tag constant, obj enum, JaclSyntax struct, GC tracing, printing, test file). I wired up the final missing pieces and fixed one blocker.
+- Fixed an infinite loop in src/vm.c vm__fmt_ensure: when VMFormatBuf.cap == 0, doubling yielded 0 → loop. Seeded new_cap to 128 in that case, and skipped the memcpy when len == 0. This unblocked test/test_syntax.c (all 22 subtests rely on VMFormatBuf initialized via `{0}`).
+- Files changed:
+  - src/vm.c — vm__fmt_ensure cap==0 fix.
+  - (Pre-existing uncommitted) src/jacl.h, src/value.c, src/gc.c, src/gc_collect.c, src/vm.c, build.sh, test/test_syntax.c.
+- Verification: ./build.sh --test=syntax → 22/22 pass. Full ./build.sh → 81 pass, 3 fail (parser, e2e_struct_tramp, embed — pre-existing on HEAD, not regressed).
+- **Learnings for future iterations:**
+  - When adding a new JaclVal tag, four places must be updated: JACL_TAG_X in src/value.c AND src/jacl.h, the is/as helpers in src/value.c, and jacl_is_heap_type in src/gc.c if the payload points to GC memory.
+  - When adding a new GC object kind, update: GCObjType enum in src/gc.c AND src/jacl.h, the gc__trace_object switch in src/gc_collect.c (only if it holds references), and any printing in src/vm.c::vm__fmt_value.
+  - No sweep changes are needed unless the object owns external resources — gc__finalize_dead is a no-op for all types so far.
+  - test/test_helpers.h provides ASSERT_U64_EQ, ASSERT_U32_EQ, ASSERT_STR_EQ, TEST_PASS macros.
+  - The test uses VMFormatBuf for printing: zero-init the struct, set arena, call vm__fmt_value, then read buf.data/buf.len.
+---

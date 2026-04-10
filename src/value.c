@@ -62,6 +62,7 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_ROPE_STRING   ((uint64_t)0x14 << JACL_TAG_SHIFT)
 #define JACL_TAG_STREAM        ((uint64_t)0x15 << JACL_TAG_SHIFT)
 #define JACL_TAG_STATE_MACHINE ((uint64_t)0x16 << JACL_TAG_SHIFT)
+#define JACL_TAG_SYNTAX        ((uint64_t)0x17 << JACL_TAG_SHIFT)
 
 /* --- Heap structs for 64-bit numeric types --- */
 
@@ -276,6 +277,15 @@ bool jacl_is_state_machine(JaclVal v) {
 
 JaclVal jacl_state_machine_ptr(void *p) {
     return JACL_TAG_STATE_MACHINE | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+/* Syntax object */
+bool jacl_is_syntax(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_SYNTAX;
+}
+
+JaclVal jacl_syntax_ptr(void *p) {
+    return JACL_TAG_SYNTAX | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
 }
 
 /* --- Inline string constructor --- */

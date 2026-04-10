@@ -20,7 +20,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "Kind enum values: SYNTAX_COMMAND, SYNTAX_LIT_INT, SYNTAX_LIT_FLOAT, SYNTAX_LIT_STRING, SYNTAX_VAR_REF, SYNTAX_BLOCK, SYNTAX_INTERP_STRING, SYNTAX_SPREAD, SYNTAX_USE, SYNTAX_DEFSTRUCT, SYNTAX_BREAK, SYNTAX_CONTINUE, SYNTAX_RETURN, SYNTAX_DESTRUCTURE_VEC, SYNTAX_DESTRUCTURE_NAMED"
     },
     {

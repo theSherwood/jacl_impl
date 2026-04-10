@@ -265,6 +265,53 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
+    /* --- Syntax object: trace JaclVal fields based on kind --- */
+    case OBJ_SYNTAX: {
+        JaclSyntax *syn = (JaclSyntax *)payload;
+        switch (syn->kind) {
+        case SYNTAX_COMMAND:
+            gc__ms_push_val(ms, syn->data.command.head);
+            gc__ms_push_val(ms, syn->data.command.args);
+            break;
+        case SYNTAX_LIT_STRING:
+            gc__ms_push_val(ms, syn->data.lit_string.value);
+            break;
+        case SYNTAX_VAR_REF:
+            gc__ms_push_val(ms, syn->data.var_ref.name);
+            break;
+        case SYNTAX_BLOCK:
+            gc__ms_push_val(ms, syn->data.block.commands);
+            break;
+        case SYNTAX_INTERP_STRING:
+            gc__ms_push_val(ms, syn->data.interp_string.segments);
+            break;
+        case SYNTAX_SPREAD:
+            gc__ms_push_val(ms, syn->data.spread.child);
+            break;
+        case SYNTAX_USE:
+            gc__ms_push_val(ms, syn->data.use_decl.child);
+            break;
+        case SYNTAX_DEFSTRUCT:
+            gc__ms_push_val(ms, syn->data.defstruct.child);
+            break;
+        case SYNTAX_BREAK:
+            gc__ms_push_val(ms, syn->data.break_stmt.value);
+            break;
+        case SYNTAX_RETURN:
+            gc__ms_push_val(ms, syn->data.return_stmt.value);
+            break;
+        case SYNTAX_DESTRUCTURE_VEC:
+            gc__ms_push_val(ms, syn->data.destructure_vec.names);
+            break;
+        case SYNTAX_DESTRUCTURE_NAMED:
+            gc__ms_push_val(ms, syn->data.destructure_named.names);
+            break;
+        default:
+            break; /* SYNTAX_LIT_INT, SYNTAX_LIT_FLOAT, SYNTAX_CONTINUE — no refs */
+        }
+        break;
+    }
+
     /* --- Struct: trace reference-type fields --- */
     case OBJ_STRUCT: {
         JaclStruct *s = (JaclStruct *)payload;
