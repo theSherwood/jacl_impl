@@ -46,6 +46,7 @@
 #include "collections.c"
 #include "compiler.c"
 #include "vm.c"
+#include "syntax.c"
 #include "gc_collect.c"
 #include "runtime.c"
 #include "embed.c"

@@ -654,6 +654,505 @@ static int test_syntax_command_gc_survives(void) {
     TEST_PASS();
 }
 
+/* ===== US-002: AstNode to syntax object conversion ===== */
+
+/* Helper: parse source code into AST nodes */
+static ParseResult parse_source(const char *src, arena_t *arena) {
+    LexResult tokens = lexer_lex(src, arena);
+    return parser_parse(tokens, arena);
+}
+
+/* Test: convert AST_LIT_INT to syntax */
+static int test_from_ast_lit_int(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("42", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    ASSERT(jacl_is_syntax(syn));
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(s->data.lit_int.value, 42);
+    ASSERT_U32_EQ(s->scope_mark, 0);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: convert AST_LIT_FLOAT to syntax */
+static int test_from_ast_lit_float(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("3.14", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    ASSERT(jacl_is_syntax(syn));
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_LIT_FLOAT);
+    float diff = s->data.lit_float.value - 3.14f;
+    ASSERT(diff < 0.01f && diff > -0.01f);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: convert AST_LIT_STRING to syntax */
+static int test_from_ast_lit_string(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("\"hello\"", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    ASSERT(jacl_is_syntax(syn));
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_LIT_STRING);
+    ASSERT(jacl_is_string(s->data.lit_string.value));
+
+    char buf[32];
+    uint32_t len = jacl_string_data(s->data.lit_string.value, buf, sizeof(buf));
+    buf[len] = '\0';
+    ASSERT_STR_EQ(buf, "hello");
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: convert AST_VAR_REF to syntax */
+static int test_from_ast_var_ref(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("$x", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    ASSERT(jacl_is_syntax(syn));
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_VAR_REF);
+    ASSERT(jacl_is_string(s->data.var_ref.name));
+
+    char buf[32];
+    uint32_t len = jacl_string_data(s->data.var_ref.name, buf, sizeof(buf));
+    buf[len] = '\0';
+    ASSERT_STR_EQ(buf, "x");
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: convert AST_COMMAND [+ 1 2] to syntax */
+static int test_from_ast_command(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("[+ 1 2]", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    ASSERT(jacl_is_syntax(syn));
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_COMMAND);
+
+    /* head should be lit-string "+" */
+    ASSERT(jacl_is_syntax(s->data.command.head));
+    JaclSyntax *head = jacl_as_syntax(s->data.command.head);
+    ASSERT_INT_EQ(head->kind, SYNTAX_LIT_STRING);
+
+    /* args should be vec of 2 lit-ints */
+    ASSERT(jacl_is_vector(s->data.command.args));
+    jacl_vec_root *args = (jacl_vec_root *)jacl_as_ptr(s->data.command.args);
+    ASSERT_U32_EQ(jacl_vec_count(args), 2);
+
+    JaclSyntax *a1 = jacl_as_syntax(jacl_vec_get(args, 0).value);
+    ASSERT_INT_EQ(a1->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(a1->data.lit_int.value, 1);
+
+    JaclSyntax *a2 = jacl_as_syntax(jacl_vec_get(args, 1).value);
+    ASSERT_INT_EQ(a2->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(a2->data.lit_int.value, 2);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: convert AST_BLOCK { print 1; print 2 } to syntax */
+static int test_from_ast_block(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("{ print 1; print 2 }", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    ASSERT(jacl_is_syntax(syn));
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_BLOCK);
+
+    jacl_vec_root *cmds = (jacl_vec_root *)jacl_as_ptr(s->data.block.commands);
+    ASSERT_U32_EQ(jacl_vec_count(cmds), 2);
+
+    /* Each command should be a SYNTAX_COMMAND */
+    JaclSyntax *c1 = jacl_as_syntax(jacl_vec_get(cmds, 0).value);
+    ASSERT_INT_EQ(c1->kind, SYNTAX_COMMAND);
+    JaclSyntax *c2 = jacl_as_syntax(jacl_vec_get(cmds, 1).value);
+    ASSERT_INT_EQ(c2->kind, SYNTAX_COMMAND);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: source positions copied from AstNode */
+static int test_from_ast_source_positions(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("42", &arena);
+    ASSERT(pr.count >= 1);
+
+    /* Check the AstNode has source position set */
+    AstNode *node = pr.nodes[0];
+    ASSERT_U32_EQ(node->start.line, 1);
+    ASSERT(node->start.column >= 1);
+
+    JaclVal syn = syntax_from_ast(node, &vm.heap, &intern);
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_U32_EQ(s->pos_line, node->start.line);
+    ASSERT_U32_EQ(s->pos_col, node->start.column);
+    ASSERT_U32_EQ(s->pos_offset, node->start.offset);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: scope marks initialized to 0 */
+static int test_from_ast_scope_marks_zero(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("[+ $x 1]", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_U32_EQ(s->scope_mark, 0);
+
+    /* Check children too */
+    JaclSyntax *head = jacl_as_syntax(s->data.command.head);
+    ASSERT_U32_EQ(head->scope_mark, 0);
+
+    jacl_vec_root *args = (jacl_vec_root *)jacl_as_ptr(s->data.command.args);
+    JaclSyntax *a1 = jacl_as_syntax(jacl_vec_get(args, 0).value);
+    ASSERT_U32_EQ(a1->scope_mark, 0);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: AST_SPREAD conversion */
+static int test_from_ast_spread(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("[foo ..$xs]", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_COMMAND);
+
+    /* The spread arg */
+    jacl_vec_root *args = (jacl_vec_root *)jacl_as_ptr(s->data.command.args);
+    ASSERT(jacl_vec_count(args) >= 1);
+    JaclSyntax *spread = jacl_as_syntax(jacl_vec_get(args, 0).value);
+    ASSERT_INT_EQ(spread->kind, SYNTAX_SPREAD);
+    ASSERT(jacl_is_syntax(spread->data.spread.child));
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: AST_BREAK with value */
+static int test_from_ast_break(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("break 42", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    ASSERT(jacl_is_syntax(syn));
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_BREAK);
+    ASSERT(!jacl_is_nil(s->data.break_stmt.value));
+    ASSERT(jacl_is_syntax(s->data.break_stmt.value));
+
+    JaclSyntax *val = jacl_as_syntax(s->data.break_stmt.value);
+    ASSERT_INT_EQ(val->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(val->data.lit_int.value, 42);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: AST_CONTINUE conversion */
+static int test_from_ast_continue(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("continue", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    ASSERT(jacl_is_syntax(syn));
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_CONTINUE);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: AST_RETURN with value */
+static int test_from_ast_return(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("return 99", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    ASSERT(jacl_is_syntax(syn));
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_RETURN);
+    ASSERT(jacl_is_syntax(s->data.return_stmt.value));
+
+    JaclSyntax *val = jacl_as_syntax(s->data.return_stmt.value);
+    ASSERT_INT_EQ(val->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(val->data.lit_int.value, 99);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: nested command [if [> $x 3] { print $x }] */
+static int test_from_ast_nested_command(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("[if [> $x 3] { print $x }]", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    ASSERT(jacl_is_syntax(syn));
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_COMMAND);
+
+    /* args[0] should be the nested [> $x 3] command */
+    jacl_vec_root *args = (jacl_vec_root *)jacl_as_ptr(s->data.command.args);
+    ASSERT(jacl_vec_count(args) >= 2);
+
+    JaclSyntax *cond = jacl_as_syntax(jacl_vec_get(args, 0).value);
+    ASSERT_INT_EQ(cond->kind, SYNTAX_COMMAND);
+
+    /* args[1] should be a block */
+    JaclSyntax *body = jacl_as_syntax(jacl_vec_get(args, 1).value);
+    ASSERT_INT_EQ(body->kind, SYNTAX_BLOCK);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: interp-string "hello $name" */
+static int test_from_ast_interp_string(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("\"hello $name\"", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    ASSERT(jacl_is_syntax(syn));
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_INTERP_STRING);
+
+    jacl_vec_root *segs = (jacl_vec_root *)jacl_as_ptr(s->data.interp_string.segments);
+    ASSERT_U32_EQ(jacl_vec_count(segs), 2);
+
+    /* First segment: lit-string "hello " */
+    JaclSyntax *seg1 = jacl_as_syntax(jacl_vec_get(segs, 0).value);
+    ASSERT_INT_EQ(seg1->kind, SYNTAX_LIT_STRING);
+
+    /* Second segment: var-ref "name" */
+    JaclSyntax *seg2 = jacl_as_syntax(jacl_vec_get(segs, 1).value);
+    ASSERT_INT_EQ(seg2->kind, SYNTAX_VAR_REF);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: AST_ERROR returns nil */
+static int test_from_ast_error_returns_nil(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    /* Manually create an error node */
+    AstNode *err = ast_alloc(&arena);
+    memset(err, 0, sizeof(AstNode));
+    err->type = AST_ERROR;
+    err->data.error.message = "test error";
+
+    JaclVal syn = syntax_from_ast(err, &vm.heap, &intern);
+    ASSERT(jacl_is_nil(syn));
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: NULL node returns nil */
+static int test_from_ast_null_returns_nil(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    JaclVal syn = syntax_from_ast(NULL, &vm.heap, &intern);
+    ASSERT(jacl_is_nil(syn));
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: syntax objects from AST survive GC */
+static int test_from_ast_gc_survives(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("[+ 1 2]", &arena);
+    ASSERT(pr.count >= 1);
+
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    vm.stack[vm.stack_top++] = syn;
+
+    gc_collect(&vm.heap, &vm);
+
+    /* Verify the tree survived */
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_COMMAND);
+    ASSERT(jacl_is_syntax(s->data.command.head));
+    ASSERT(jacl_is_vector(s->data.command.args));
+
+    jacl_vec_root *args = (jacl_vec_root *)jacl_as_ptr(s->data.command.args);
+    ASSERT_U32_EQ(jacl_vec_count(args), 2);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -687,6 +1186,26 @@ int main(void) {
     RUN(test_syntax_interp_string);
     RUN(test_syntax_gc_survives);
     RUN(test_syntax_command_gc_survives);
+
+    printf("\n=== AST-to-Syntax Conversion Tests (US-002) ===\n");
+
+    RUN(test_from_ast_lit_int);
+    RUN(test_from_ast_lit_float);
+    RUN(test_from_ast_lit_string);
+    RUN(test_from_ast_var_ref);
+    RUN(test_from_ast_command);
+    RUN(test_from_ast_block);
+    RUN(test_from_ast_source_positions);
+    RUN(test_from_ast_scope_marks_zero);
+    RUN(test_from_ast_spread);
+    RUN(test_from_ast_break);
+    RUN(test_from_ast_continue);
+    RUN(test_from_ast_return);
+    RUN(test_from_ast_nested_command);
+    RUN(test_from_ast_interp_string);
+    RUN(test_from_ast_error_returns_nil);
+    RUN(test_from_ast_null_returns_nil);
+    RUN(test_from_ast_gc_survives);
 
 #undef RUN
 

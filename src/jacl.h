@@ -1489,6 +1489,9 @@ extern JaclVal gc_alloc_state_machine (ThreadHeap *heap, uint32_t field_count);
 extern JaclSyntax *jacl_as_syntax (JaclVal v);
 extern JaclVal gc_alloc_syntax (ThreadHeap *heap);
 
+/* --- syntax.c --- */
+extern JaclVal syntax_from_ast (AstNode *node, ThreadHeap *heap, JaclInternTable *intern);
+
 /* --- string.c --- */
 extern uint32_t string__fnv1a (const char *data, uint32_t length);
 extern void intern_table_init (JaclInternTable *table, arena_t *arena);
