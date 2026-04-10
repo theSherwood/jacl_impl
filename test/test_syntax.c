@@ -2371,6 +2371,210 @@ static int test_expand_inside_block(void) {
     TEST_PASS();
 }
 
+/* ===== US-009: Compiler handling of quote — emit syntax object literal ===== */
+
+/* Helper: find the first syntax object constant in a chunk. */
+static JaclVal find_first_syntax_const(BytecodeChunk* chunk) {
+    for (uint32_t i = 0; i < chunk->const_count; i++) {
+        if (jacl_is_syntax(chunk->constants[i])) {
+            return chunk->constants[i];
+        }
+    }
+    return JACL_NIL;
+}
+
+/* Test: quote [+ 1 2] compiles to a syntax object command constant. */
+static int test_compile_quote_command(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "quote [+ 1 2]";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT(cr.error_count == 0);
+
+    /* The constant pool should contain a syntax object. */
+    JaclVal syn_val = find_first_syntax_const(&cr.chunk);
+    ASSERT(jacl_is_syntax(syn_val));
+    JaclSyntax* s = jacl_as_syntax(syn_val);
+    ASSERT_INT_EQ(s->kind, SYNTAX_COMMAND);
+
+    /* Head should be a lit-string syntax with value "+". */
+    ASSERT(jacl_is_syntax(s->data.command.head));
+    JaclSyntax* head = jacl_as_syntax(s->data.command.head);
+    ASSERT_INT_EQ(head->kind, SYNTAX_LIT_STRING);
+    ASSERT(jacl_is_string(head->data.lit_string.value));
+    {
+        char buf[16];
+        uint32_t n = jacl_string_data(head->data.lit_string.value, buf, sizeof(buf));
+        buf[n] = '\0';
+        ASSERT_STR_EQ(buf, "+");
+    }
+
+    /* Args should be a vec of 2 lit-int syntax objects. */
+    ASSERT(jacl_is_vector(s->data.command.args));
+    jacl_vec_root* args = (jacl_vec_root*)jacl_as_ptr(s->data.command.args);
+    ASSERT_U32_EQ(jacl_vec_count(args), 2);
+
+    JaclSyntax* a1 = jacl_as_syntax(jacl_vec_get(args, 0).value);
+    ASSERT_INT_EQ(a1->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(a1->data.lit_int.value, 1);
+
+    JaclSyntax* a2 = jacl_as_syntax(jacl_vec_get(args, 1).value);
+    ASSERT_INT_EQ(a2->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(a2->data.lit_int.value, 2);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: quote $x compiles to a var-ref syntax (not a variable lookup). */
+static int test_compile_quote_var_ref(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "quote $x";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT(cr.error_count == 0);
+
+    JaclVal syn_val = find_first_syntax_const(&cr.chunk);
+    ASSERT(jacl_is_syntax(syn_val));
+    JaclSyntax* s = jacl_as_syntax(syn_val);
+    ASSERT_INT_EQ(s->kind, SYNTAX_VAR_REF);
+    ASSERT(jacl_is_string(s->data.var_ref.name));
+    {
+        char buf[16];
+        uint32_t n = jacl_string_data(s->data.var_ref.name, buf, sizeof(buf));
+        buf[n] = '\0';
+        ASSERT_STR_EQ(buf, "x");
+    }
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: quote 42 compiles to a lit-int syntax. */
+static int test_compile_quote_lit_int(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "quote 42";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT(cr.error_count == 0);
+
+    JaclVal syn_val = find_first_syntax_const(&cr.chunk);
+    ASSERT(jacl_is_syntax(syn_val));
+    JaclSyntax* s = jacl_as_syntax(syn_val);
+    ASSERT_INT_EQ(s->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(s->data.lit_int.value, 42);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: nested quote — quote [foo quote [bar]] produces a command syntax
+ * whose second element is a SYNTAX_QUOTE wrapping another command. */
+static int test_compile_quote_nested(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "quote [foo quote [bar]]";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT(cr.error_count == 0);
+
+    JaclVal syn_val = find_first_syntax_const(&cr.chunk);
+    ASSERT(jacl_is_syntax(syn_val));
+    JaclSyntax* outer = jacl_as_syntax(syn_val);
+    ASSERT_INT_EQ(outer->kind, SYNTAX_COMMAND);
+
+    /* Head: lit-string "foo" */
+    JaclSyntax* head = jacl_as_syntax(outer->data.command.head);
+    ASSERT_INT_EQ(head->kind, SYNTAX_LIT_STRING);
+    {
+        char buf[16];
+        uint32_t n = jacl_string_data(head->data.lit_string.value, buf, sizeof(buf));
+        buf[n] = '\0';
+        ASSERT_STR_EQ(buf, "foo");
+    }
+
+    /* Args: one element, a SYNTAX_QUOTE wrapping [bar] */
+    jacl_vec_root* args = (jacl_vec_root*)jacl_as_ptr(outer->data.command.args);
+    ASSERT_U32_EQ(jacl_vec_count(args), 1);
+
+    JaclSyntax* inner_quote = jacl_as_syntax(jacl_vec_get(args, 0).value);
+    ASSERT_INT_EQ(inner_quote->kind, SYNTAX_QUOTE);
+
+    JaclSyntax* inner_cmd = jacl_as_syntax(inner_quote->data.quote.child);
+    ASSERT_INT_EQ(inner_cmd->kind, SYNTAX_COMMAND);
+    JaclSyntax* inner_head = jacl_as_syntax(inner_cmd->data.command.head);
+    ASSERT_INT_EQ(inner_head->kind, SYNTAX_LIT_STRING);
+    {
+        char buf[16];
+        uint32_t n = jacl_string_data(inner_head->data.lit_string.value, buf, sizeof(buf));
+        buf[n] = '\0';
+        ASSERT_STR_EQ(buf, "bar");
+    }
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: quote inside a macro body — the macro's compiled closure chunk
+ * must contain the syntax object as a constant, and the macro must
+ * return that syntax object when called. */
+static int test_compile_quote_inside_macro_body(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Macro body uses quote [+ 1 2] directly (not syntax-quote). */
+    const char* src = "defmacro q {} { quote [+ 1 2] }";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT(cr.error_count == 0);
+    ASSERT(cr.macro_table != NULL);
+
+    MacroEntry* entry = macro_table_lookup(cr.macro_table, "q", 1);
+    ASSERT(entry != NULL);
+    ASSERT(entry->closure != NULL);
+
+    /* Find the syntax object constant inside the closure's chunk. */
+    JaclVal syn_val = find_first_syntax_const(&entry->closure->chunk);
+    ASSERT(jacl_is_syntax(syn_val));
+    JaclSyntax* s = jacl_as_syntax(syn_val);
+    ASSERT_INT_EQ(s->kind, SYNTAX_COMMAND);
+
+    /* Verify the head is the literal "+" */
+    JaclSyntax* head = jacl_as_syntax(s->data.command.head);
+    ASSERT_INT_EQ(head->kind, SYNTAX_LIT_STRING);
+    {
+        char buf[16];
+        uint32_t n = jacl_string_data(head->data.lit_string.value, buf, sizeof(buf));
+        buf[n] = '\0';
+        ASSERT_STR_EQ(buf, "+");
+    }
+
+    /* And the args are lit-ints 1 and 2 */
+    jacl_vec_root* args = (jacl_vec_root*)jacl_as_ptr(s->data.command.args);
+    ASSERT_U32_EQ(jacl_vec_count(args), 2);
+    JaclSyntax* a1 = jacl_as_syntax(jacl_vec_get(args, 0).value);
+    ASSERT_INT_EQ(a1->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(a1->data.lit_int.value, 1);
+    JaclSyntax* a2 = jacl_as_syntax(jacl_vec_get(args, 1).value);
+    ASSERT_INT_EQ(a2->kind, SYNTAX_LIT_INT);
+    ASSERT_INT_EQ(a2->data.lit_int.value, 2);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -2494,6 +2698,14 @@ int main(void) {
     RUN(test_expand_wrong_arg_count);
     RUN(test_expand_non_macro_passthrough);
     RUN(test_expand_inside_block);
+
+    printf("\n=== Compile Quote Tests (US-009) ===\n");
+
+    RUN(test_compile_quote_command);
+    RUN(test_compile_quote_var_ref);
+    RUN(test_compile_quote_lit_int);
+    RUN(test_compile_quote_nested);
+    RUN(test_compile_quote_inside_macro_body);
 
 #undef RUN
 

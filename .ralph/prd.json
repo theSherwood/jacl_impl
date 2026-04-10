@@ -195,7 +195,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "quote is only meaningful inside macro bodies (compile-time code). Outside macros it could be allowed as a general-purpose form, but for now it only needs to work during expansion."
     },
     {

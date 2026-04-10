@@ -25,6 +25,7 @@ Started: Thu Apr 10 2026
 - Special forms that are lexer keywords (if, proc, def, mut, set, while, for, match, break, continue, return, try, quote, defmacro, syntax-quote) are caught at parse time if used as defmacro name. Non-keyword special forms (spawn, yield, await, parallel, defstruct, to) are caught at compile time by macro__is_special_form.
 - Inside syntax-quote, `~cond` (bare word) parses as AST_UNQUOTE(AST_LIT_STRING("cond")), not AST_VAR_REF. Template expansion must handle both SYNTAX_LIT_STRING and SYNTAX_VAR_REF children of unquotes for parameter matching.
 - Expansion pass and compiler pass share the same MacroTable. The expansion pass registers entries with closure=NULL (body AST only), and the compiler pass fills in the closure. The compiler must NOT treat a closure==NULL entry as a duplicate error.
+- String comparison from JaclVal: `jacl_string_data(v, buf, sizeof(buf))` returns the byte length and copies into buf (NOT a pointer accessor). Null-terminate with `buf[n] = '\0'` before ASSERT_STR_EQ. This is the pattern used everywhere in test/test_syntax.c.
 
 ## 2026-04-10 - US-001 — Add JACL_TAG_SYNTAX value tag and OBJ_SYNTAX GC object
 - Most of US-001 was already staged as uncommitted edits (tag constant, obj enum, JaclSyntax struct, GC tracing, printing, test file). I wired up the final missing pieces and fixed one blocker.
@@ -158,6 +159,24 @@ Thread: (inline)
   - Special form names that are lexer keywords (if, proc, etc.) get caught by the parser as "expected macro name" before reaching the compiler. Non-keyword special forms (spawn, yield, await, parallel, defstruct, to) are caught by macro__is_special_form at compile time.
   - The macro body closure is compiled like a proc body: create a body Compiler with scope_depth=1, add params as locals, compile_block_expr, emit OP_RETURN.
   - concurrent_intern test is flaky — can fail sporadically in full builds.
+---
+
+## 2026-04-10 - US-009 — Compiler handling of quote — emit syntax object literal
+Thread: (inline)
+- The compiler AST_QUOTE case was already implemented in place as part of US-008's expansion pass work — it calls `syntax_from_ast` on the child AstNode and emits the resulting syntax object as a constant via `compiler__emit_constant`. This lands the syntax object in the chunk's constant pool, so at runtime OP_CONST pushes the pre-built syntax object onto the stack. No compiler changes were needed.
+- Added 5 tests in test/test_syntax.c to verify US-009's acceptance criteria:
+  - `test_compile_quote_command`: `quote [+ 1 2]` → chunk constant is a SYNTAX_COMMAND with head "+" and two SYNTAX_LIT_INT args.
+  - `test_compile_quote_var_ref`: `quote $x` → SYNTAX_VAR_REF with name "x" (not a variable lookup).
+  - `test_compile_quote_lit_int`: `quote 42` → SYNTAX_LIT_INT with value 42.
+  - `test_compile_quote_nested`: `quote [foo quote [bar]]` → outer SYNTAX_COMMAND whose arg is a SYNTAX_QUOTE wrapping an inner SYNTAX_COMMAND.
+  - `test_compile_quote_inside_macro_body`: `defmacro q {} { quote [+ 1 2] }` → macro closure's chunk contains the expected syntax object constant.
+- Helper `find_first_syntax_const(chunk)` added — walks `chunk->constants` looking for the first value where `jacl_is_syntax(...)` holds.
+- Files changed: test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 test binaries pass (96 syntax subtests), no warnings.
+- **Learnings for future iterations:**
+  - Chunk constants are GC-traced via `gc__ms_push_const` — invoked both through call-frame chunk traversal (for the top-level chunk when executing) and via `OBJ_CLOSURE` tracing (for macro body closures). Syntax objects created at compile time and stored in constants are safe from GC as long as the chunk is reachable.
+  - `jacl_string_data` is a copy-into-buffer API: `uint32_t n = jacl_string_data(v, buf, sizeof(buf)); buf[n] = '\0';`. It is NOT a pointer accessor; older test code that uses `memcmp(node->data.lit_string.value, "x", 1)` is comparing against the raw `const char*` stored directly on AstNode (not on a JaclVal).
+  - The existing AST_QUOTE → JaclSyntax conversion in `syntax_from_ast` wraps nested quotes in SYNTAX_QUOTE (not unwrapped), so `quote [foo quote [bar]]` round-trips through the compile-time conversion as a command arg of kind SYNTAX_QUOTE.
 ---
 
 ## 2026-04-10 - US-008 — Macro expansion pass — basic expansion
