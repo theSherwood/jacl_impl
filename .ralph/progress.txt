@@ -28,6 +28,9 @@ Started: Thu Apr 10 2026
 - String comparison from JaclVal: `jacl_string_data(v, buf, sizeof(buf))` returns the byte length and copies into buf (NOT a pointer accessor). Null-terminate with `buf[n] = '\0'` before ASSERT_STR_EQ. This is the pattern used everywhere in test/test_syntax.c.
 - Directly invoking a compiled closure from a C test without a JaclVM wrapper: put closure at stack[0], args at stack[1..N], set stack_top, configure frames[0] with stack_base=1 and chunk=&cl->chunk, point vm->chunk/top_chunk/ip at the closure's chunk, call vm__run(vm, 0). Result lands at vm->stack[0] after OP_RETURN drops frame_count to 0. See us010_run_closure in test/test_syntax.c.
 - Inside syntax-quote, `~bareword` parses as AST_UNQUOTE(AST_LIT_STRING). The compiler must synthesize an AST_VAR_REF from the lit-string before compiling (via syntax__compile_unquote_child in compiler.c) so the closure does a parameter lookup, not a string literal push.
+- Jacl has no `not` or `eq` builtins — use `==` for equality, and `if cond {} else-body` (3-arg if with empty then-branch) to invert a condition. The PRD example `syntax-quote [if [not ~cond] ~body]` is aspirational; `syntax-quote [if ~cond {} ~body]` is equivalent and works today.
+- `def` creates an immutable binding — `set` on a def'd variable errors with "cannot mutate immutable binding". Use `mut` for mutable globals.
+- jacl_eval runs the full pipeline (lex → parse → compiler_compile → vm_exec) and compiler_compile invokes ast_expand_macros internally, so macros Just Work from embed code without any extra wiring.
 
 ## 2026-04-10 - US-001 — Add JACL_TAG_SYNTAX value tag and OBJ_SYNTAX GC object
 - Most of US-001 was already staged as uncommitted edits (tag constant, obj enum, JaclSyntax struct, GC tracing, printing, test file). I wired up the final missing pieces and fixed one blocker.
@@ -225,4 +228,23 @@ Thread: (inline)
   - The expansion pass runs before the compiler pass. Both share the same MacroTable. The expansion pass sets closure=NULL (template-only), and the compiler pass fills in the closure later for the entry already in the table.
   - Expansion is iterative: after replacing a macro call, the result is re-expanded (depth+1) to handle macros that expand to other macro calls.
   - When adding a new opcode between existing ones (like OP_SYNTAX_SPLICE before OP_HALT), update the hardcoded enum values in test_bytecode.c.
+---
+
+## 2026-04-10 - US-011 — End-to-end basic macro test
+Thread: (inline)
+- Added 6 end-to-end macro tests in test/test_syntax.c that drive the full pipeline via `jacl_vm_new` + `jacl_eval` (no direct VM/compiler plumbing). Because `compiler_compile` already invokes `ast_expand_macros` internally, macros work from the embed API for free — no source changes were needed for US-011.
+- Tests added:
+  - `test_us011_double_macro`: `defmacro double {x} { syntax-quote [+ ~x ~x] }` then `double 21` returns 42.
+  - `test_us011_unless_macro`: `defmacro unless {cond, body} { syntax-quote [if ~cond {} ~body] }` — confirms body executes when cond is false. Uses a mutable global (`mut x 0`) as a side-effect observable through a trailing `$x` expression.
+  - `test_us011_unless_macro_true_cond`: same macro, confirms body does NOT run when cond is true.
+  - `test_us011_two_level_macro`: `quadruple 5` → `[double [double 5]]` → `[+ [+ 5 5] [+ 5 5]]` → 20. Exercises a macro that expands into another macro call.
+  - `test_us011_use_before_defmacro_error`: calling `unless` before the `defmacro` produces a compile error (the unexpanded command is treated as a call to an undefined proc).
+  - `test_us011_wrong_arg_count_error`: calling `unless` with 1 arg when it expects 2 surfaces `ast_expand_macros`'s "expects 2 arguments but got 1" message as a compile error.
+- Files changed: test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 binaries pass, 109 syntax subtests pass, no warnings with -Wall -Wextra.
+- **Learnings for future iterations:**
+  - The PRD's example `syntax-quote [if [not ~cond] ~body]` uses `not`, which is not implemented as a builtin in jacl. Use the 3-arg form `[if ~cond {} ~body]` to get the same semantics with existing builtins.
+  - `def` is immutable-binding (like `let` in other languages). Attempting `set` on a `def`'d variable errors with "cannot mutate immutable binding 'name'". For mutable test globals, use `mut` instead.
+  - `jacl_eval` is the cleanest way to write e2e tests: `JaclVM* vm = jacl_vm_new(); JaclVal r = jacl_eval(vm, src); ...; jacl_vm_free(vm);`. It returns the top-of-stack value after the whole program runs, or an error-flagged JaclVal on any failure (use `jacl_is_error` and `jacl_error_message_str`).
+  - Multi-statement sources are fine — jacl_eval parses, compiles and runs the whole chunk. The last expression's value is returned, so a trailing `$x` reads the global.
 ---

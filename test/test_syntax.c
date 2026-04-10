@@ -2982,6 +2982,146 @@ static int test_us010_nested_syntax_quote_literal(void) {
     TEST_PASS();
 }
 
+/* ===== US-011: End-to-end basic macro tests ===== */
+
+/* Test: defmacro double {x} { syntax-quote [+ ~x ~x] } ; double 21 → 42 */
+static int test_us011_double_macro(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src =
+        "defmacro double {x} {\n"
+        "  syntax-quote [+ ~x ~x]\n"
+        "}\n"
+        "double 21";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_i32(result));
+    ASSERT_INT_EQ(jacl_as_i32(result), 42);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: defmacro unless expands and executes body when condition is false.
+ * Note: the PRD example uses `[not ~cond]` but jacl's current builtins don't
+ * include `not` — we express the same semantics with `if ~cond {} ~body`
+ * (3-arg if with empty then-branch). */
+static int test_us011_unless_macro(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    /* Use a mutable global side-effect to verify the body was executed:
+     * unless [== 1 2] { set x 42 } — cond is false, so body runs, x becomes 42. */
+    const char* src =
+        "mut x 0\n"
+        "defmacro unless {cond, body} {\n"
+        "  syntax-quote [if ~cond {} ~body]\n"
+        "}\n"
+        "unless [== 1 2] { set x 42 }\n"
+        "$x";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_i32(result));
+    ASSERT_INT_EQ(jacl_as_i32(result), 42);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: unless macro does NOT execute body when condition is true */
+static int test_us011_unless_macro_true_cond(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    /* unless [== 1 1] { set x 42 } — cond is true, so body is NOT run,
+     * x remains 7. */
+    const char* src =
+        "mut x 7\n"
+        "defmacro unless {cond, body} {\n"
+        "  syntax-quote [if ~cond {} ~body]\n"
+        "}\n"
+        "unless [== 1 1] { set x 42 }\n"
+        "$x";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_i32(result));
+    ASSERT_INT_EQ(jacl_as_i32(result), 7);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: macro that expands to another macro call (two-level expansion) */
+static int test_us011_two_level_macro(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    /* quadruple 5 → [double [double 5]] → [+ [+ 5 5] [+ 5 5]] → 20 */
+    const char* src =
+        "defmacro double {x} {\n"
+        "  syntax-quote [+ ~x ~x]\n"
+        "}\n"
+        "defmacro quadruple {x} {\n"
+        "  syntax-quote [double [double ~x]]\n"
+        "}\n"
+        "quadruple 5";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_i32(result));
+    ASSERT_INT_EQ(jacl_as_i32(result), 20);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: macro used before its defmacro produces an error.
+ * The expansion pass walks top-to-bottom and leaves the pre-defmacro call as
+ * a plain AST_COMMAND — the compiler then tries to resolve 'unless' as a
+ * normal proc/builtin and fails. */
+static int test_us011_use_before_defmacro_error(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src =
+        "unless [eq 1 2] { set x 42 }\n"
+        "defmacro unless {cond, body} {\n"
+        "  syntax-quote [if [not ~cond] ~body]\n"
+        "}";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(jacl_is_error(result));
+
+    const char* msg = jacl_error_message_str(vm, result);
+    ASSERT(msg != NULL);
+    ASSERT(strlen(msg) > 0);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: macro with wrong argument count produces a compile error. */
+static int test_us011_wrong_arg_count_error(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    /* unless expects 2 args but only 1 given. */
+    const char* src =
+        "defmacro unless {cond, body} {\n"
+        "  syntax-quote [if [not ~cond] ~body]\n"
+        "}\n"
+        "unless [eq 1 2]";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(jacl_is_error(result));
+
+    const char* msg = jacl_error_message_str(vm, result);
+    ASSERT(msg != NULL);
+    /* The error from ast_expand_macros mentions argument count. */
+    ASSERT(strstr(msg, "argument") != NULL || strstr(msg, "expects") != NULL);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -3123,6 +3263,15 @@ int main(void) {
     RUN(test_us010_unquote_splicing_type_error);
     RUN(test_us010_unquote_splicing_vec_nonsyntax);
     RUN(test_us010_nested_syntax_quote_literal);
+
+    printf("\n=== End-to-End Macro Tests (US-011) ===\n");
+
+    RUN(test_us011_double_macro);
+    RUN(test_us011_unless_macro);
+    RUN(test_us011_unless_macro_true_cond);
+    RUN(test_us011_two_level_macro);
+    RUN(test_us011_use_before_defmacro_error);
+    RUN(test_us011_wrong_arg_count_error);
 
 #undef RUN
 

@@ -234,7 +234,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "This is the integration test story that validates US-001 through US-010 working together. If earlier stories were tested in isolation, this validates the full pipeline."
     },
     {
