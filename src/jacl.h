@@ -260,6 +260,7 @@ typedef enum {
     SYNTAX_SPREAD,
     SYNTAX_USE,
     SYNTAX_DEFSTRUCT,
+    SYNTAX_DEFMACRO,
     SYNTAX_BREAK,
     SYNTAX_CONTINUE,
     SYNTAX_RETURN,
@@ -284,6 +285,7 @@ typedef struct {
         struct { JaclVal child; }               spread;
         struct { JaclVal child; }               use_decl;
         struct { JaclVal child; }               defstruct;
+        struct { JaclVal child; }               defmacro;
         struct { JaclVal value; }               break_stmt;
         struct { JaclVal value; }               return_stmt;
         struct { JaclVal names; }               destructure_vec;
@@ -392,6 +394,7 @@ typedef enum {
   TOKEN_COLON,
   TOKEN_DOUBLE_COLON,
   TOKEN_PROC,
+  TOKEN_DEFMACRO,
   TOKEN_IF,
   TOKEN_ELIF,
   TOKEN_ELSE,
@@ -468,6 +471,7 @@ typedef enum {
   AST_INTERP_STRING,
   AST_USE,
   AST_DEFSTRUCT,
+  AST_DEFMACRO,
   AST_BREAK,
   AST_CONTINUE,
   AST_RETURN,
@@ -504,6 +508,10 @@ struct AstNode {
              const char** field_names; uint32_t* field_name_lens;
              const char** field_types; uint32_t* field_type_lens;
              uint32_t field_count; }                              defstruct;
+    struct { const char* name; uint32_t name_len;
+             const char** param_names; uint32_t* param_name_lens;
+             uint32_t param_count;
+             AstNode* body; }                                     defmacro;
     struct { AstNode* value; }              break_stmt;
     struct { AstNode* value; }              return_stmt;
     struct { const char** names; uint32_t* name_lens;

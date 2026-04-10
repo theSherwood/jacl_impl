@@ -248,6 +248,7 @@ AstNode* parser__parse_atom(Parser* p) {
     /* Keyword tokens — usable as command names */
     case TOKEN_STRUCT:
     case TOKEN_PROC:
+    case TOKEN_DEFMACRO:
     case TOKEN_IF:
     case TOKEN_ELIF:
     case TOKEN_ELSE:
@@ -735,6 +736,7 @@ AstNode* parser__parse_infix_operand(Parser* p) {
     case TOKEN_VAR:
     case TOKEN_STRUCT:
     case TOKEN_PROC:
+    case TOKEN_DEFMACRO:
     case TOKEN_IF:
     case TOKEN_ELIF:
     case TOKEN_ELSE:
@@ -892,6 +894,7 @@ AstNode* parser__parse_expr(Parser* p) {
     /* New keyword tokens */
     case TOKEN_STRUCT:
     case TOKEN_PROC:
+    case TOKEN_DEFMACRO:
     case TOKEN_IF:
     case TOKEN_ELIF:
     case TOKEN_ELSE:
@@ -1270,6 +1273,114 @@ AstNode* parser__parse_defstruct(Parser* p) {
   node->data.defstruct.field_types = field_types;
   node->data.defstruct.field_type_lens = field_type_lens;
   node->data.defstruct.field_count = field_count;
+  return node;
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Parse defmacro declaration
+ *
+ * Syntax: defmacro name {param1, param2, ...} { body }
+ * Called when the current token is TOKEN_DEFMACRO.
+ * ------------------------------------------------------------------------- */
+
+AstNode* parser__parse_defmacro(Parser* p) {
+  Token* kw_tok = parser__advance(p); /* consume 'defmacro' */
+  SourcePos start = parser__token_start(kw_tok);
+
+  /* Expect macro name (a word) */
+  Token* name_tok = parser__peek(p);
+  if (name_tok->type != TOKEN_WORD) {
+    return parser__error(p, "expected macro name after 'defmacro'", name_tok);
+  }
+  parser__advance(p);
+  const char* macro_name = name_tok->payload.text;
+  uint32_t macro_name_len = name_tok->length;
+
+  /* Expect parameter list in braces {param1, param2, ...} */
+  if (parser__at_end(p) || parser__peek(p)->type != TOKEN_LBRACE) {
+    return parser__error(p, "expected '{' for macro parameters", parser__peek(p));
+  }
+  Token* open_params = parser__advance(p); /* consume '{' */
+
+  #define DEFMACRO_MAX_PARAMS 32
+  const char* tmp_names[DEFMACRO_MAX_PARAMS];
+  uint32_t tmp_name_lens[DEFMACRO_MAX_PARAMS];
+  uint32_t param_count = 0;
+
+  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
+    /* Skip commas and newlines between params */
+    while (!parser__at_end(p) &&
+           (parser__peek(p)->type == TOKEN_COMMA ||
+            parser__peek(p)->type == TOKEN_NEWLINE ||
+            parser__peek(p)->type == TOKEN_SEMICOLON)) {
+      parser__advance(p);
+    }
+    if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
+
+    /* Param name — must be a word */
+    Token* param_tok = parser__peek(p);
+    if (param_tok->type != TOKEN_WORD) {
+      return parser__error(p, "expected parameter name in macro parameter list", param_tok);
+    }
+    parser__advance(p);
+
+    if (param_count >= DEFMACRO_MAX_PARAMS) {
+      return parser__error(p, "too many parameters in defmacro (max 32)", kw_tok);
+    }
+
+    /* Check for duplicate parameter names */
+    for (uint32_t i = 0; i < param_count; i++) {
+      if (tmp_name_lens[i] == param_tok->length &&
+          memcmp(tmp_names[i], param_tok->payload.text, param_tok->length) == 0) {
+        return parser__error(p, "duplicate parameter name in defmacro", param_tok);
+      }
+    }
+
+    tmp_names[param_count] = param_tok->payload.text;
+    tmp_name_lens[param_count] = param_tok->length;
+    param_count++;
+  }
+
+  /* Expect closing brace for params */
+  if (parser__at_end(p) || parser__peek(p)->type != TOKEN_RBRACE) {
+    return parser__error(p, "expected '}' to close macro parameters", open_params);
+  }
+  parser__advance(p); /* consume '}' */
+
+  /* Skip optional whitespace/newlines between param list and body */
+  while (!parser__at_end(p) && parser__peek(p)->type == TOKEN_NEWLINE) {
+    parser__advance(p);
+  }
+
+  /* Expect body block { ... } */
+  if (parser__at_end(p) || parser__peek(p)->type != TOKEN_LBRACE) {
+    return parser__error(p, "expected '{' for macro body", parser__peek(p));
+  }
+  AstNode* body = parser__parse_block(p);
+  if (body->type == AST_ERROR) return body;
+
+  /* Copy param names to arena-allocated arrays */
+  const char** param_names = NULL;
+  uint32_t* param_name_lens = NULL;
+  if (param_count > 0) {
+    param_names = (const char**)arena_alloc(p->arena, sizeof(const char*) * param_count);
+    param_name_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * param_count);
+    for (uint32_t i = 0; i < param_count; i++) {
+      param_names[i] = tmp_names[i];
+      param_name_lens[i] = tmp_name_lens[i];
+    }
+  }
+
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_DEFMACRO;
+  node->start = start;
+  node->end   = body->end;
+  node->data.defmacro.name = macro_name;
+  node->data.defmacro.name_len = macro_name_len;
+  node->data.defmacro.param_names = param_names;
+  node->data.defmacro.param_name_lens = param_name_lens;
+  node->data.defmacro.param_count = param_count;
+  node->data.defmacro.body = body;
   return node;
 }
 
@@ -2421,6 +2532,8 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
       cmd = parser__parse_use(&p);
     } else if (parser__peek(&p)->type == TOKEN_STRUCT) {
       cmd = parser__parse_defstruct(&p);
+    } else if (parser__peek(&p)->type == TOKEN_DEFMACRO) {
+      cmd = parser__parse_defmacro(&p);
     } else {
       cmd = parser__parse_cmd_expr(&p);
     }

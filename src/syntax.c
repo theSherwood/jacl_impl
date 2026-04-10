@@ -141,6 +141,25 @@ JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap,
         break;
     }
 
+    case AST_DEFMACRO: {
+        syn->kind = SYNTAX_DEFMACRO;
+        /* Simplified: store [name, param1, param2, ..., body_syntax] */
+        jacl_vec_root *items = jacl_vec_empty();
+        items = jacl_vec_push_back(items,
+            jacl_intern(heap, intern, node->data.defmacro.name,
+                        node->data.defmacro.name_len));
+        for (uint32_t i = 0; i < node->data.defmacro.param_count; i++) {
+            items = jacl_vec_push_back(items,
+                jacl_intern(heap, intern, node->data.defmacro.param_names[i],
+                            node->data.defmacro.param_name_lens[i]));
+        }
+        /* Convert body block to syntax and append */
+        JaclVal body_syn = syntax_from_ast(node->data.defmacro.body, heap, intern);
+        items = jacl_vec_push_back(items, body_syn);
+        syn->data.defmacro.child = jacl_vector_ptr(items);
+        break;
+    }
+
     case AST_BREAK:
         syn->kind = SYNTAX_BREAK;
         syn->data.break_stmt.value = node->data.break_stmt.value
@@ -396,6 +415,45 @@ AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena) {
                     syntax__string_to_arena(name_val, arena,
                         &node->data.defstruct.field_name_lens[i]);
             }
+        }
+        break;
+    }
+
+    case SYNTAX_DEFMACRO: {
+        node->type = AST_DEFMACRO;
+        jacl_vec_root *items =
+            (jacl_vec_root *)jacl_as_ptr(syn->data.defmacro.child);
+        uint32_t item_count = jacl_vec_count(items);
+        /* First element is name, last is body, middle are param names */
+        if (item_count > 0) {
+            JaclVal name_val = jacl_vec_get(items, 0).value;
+            node->data.defmacro.name =
+                syntax__string_to_arena(name_val, arena,
+                                        &node->data.defmacro.name_len);
+        }
+        uint32_t param_count = item_count > 2 ? item_count - 2 : 0;
+        node->data.defmacro.param_count = param_count;
+        if (param_count > 0) {
+            node->data.defmacro.param_names =
+                (const char **)arena_alloc(arena, sizeof(char *) * param_count);
+            node->data.defmacro.param_name_lens =
+                (uint32_t *)arena_alloc(arena, sizeof(uint32_t) * param_count);
+            for (uint32_t i = 0; i < param_count; i++) {
+                JaclVal pval = jacl_vec_get(items, 1 + i).value;
+                node->data.defmacro.param_names[i] =
+                    syntax__string_to_arena(pval, arena,
+                        &node->data.defmacro.param_name_lens[i]);
+            }
+        } else {
+            node->data.defmacro.param_names = NULL;
+            node->data.defmacro.param_name_lens = NULL;
+        }
+        /* Last element is the body */
+        if (item_count > 1) {
+            JaclVal body_val = jacl_vec_get(items, item_count - 1).value;
+            node->data.defmacro.body = syntax_to_ast(body_val, arena);
+        } else {
+            node->data.defmacro.body = NULL;
         }
         break;
     }

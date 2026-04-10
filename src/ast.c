@@ -25,6 +25,7 @@ typedef enum {
   AST_INTERP_STRING, /* interpolated string: "hello $name" */
   AST_USE,           /* use "path" [name1 name2 ...] */
   AST_DEFSTRUCT,     /* defstruct Name [field :type] ... */
+  AST_DEFMACRO,      /* defmacro name {params} {body} */
   AST_BREAK,         /* break or break $value */
   AST_CONTINUE,      /* continue */
   AST_RETURN,        /* return or return $value */
@@ -69,6 +70,10 @@ struct AstNode {
              const char** field_names; uint32_t* field_name_lens;
              const char** field_types; uint32_t* field_type_lens;
              uint32_t field_count; }                              defstruct;
+    struct { const char* name; uint32_t name_len;
+             const char** param_names; uint32_t* param_name_lens;
+             uint32_t param_count;
+             AstNode* body; }                                     defmacro;
     struct { AstNode* value; /* NULL if no value */ }              break_stmt;
     struct { AstNode* value; /* NULL if no value */ }              return_stmt;
     struct { const char** names; uint32_t* name_lens;
@@ -402,6 +407,20 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
                      node->data.defstruct.field_name_lens[i]);
       }
       ast__buf_char(b, '}');
+      break;
+    }
+    case AST_DEFMACRO: {
+      ast__buf_cstr(b, "defmacro ");
+      ast__buf_str(b, node->data.defmacro.name, node->data.defmacro.name_len);
+      ast__buf_cstr(b, " {");
+      for (uint32_t i = 0; i < node->data.defmacro.param_count; i++) {
+        if (i > 0) ast__buf_char(b, ',');
+        ast__buf_char(b, ' ');
+        ast__buf_str(b, node->data.defmacro.param_names[i],
+                     node->data.defmacro.param_name_lens[i]);
+      }
+      ast__buf_cstr(b, "} ");
+      ast__pp_node(b, node->data.defmacro.body);
       break;
     }
     case AST_BREAK: {

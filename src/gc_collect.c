@@ -294,6 +294,9 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         case SYNTAX_DEFSTRUCT:
             gc__ms_push_val(ms, syn->data.defstruct.child);
             break;
+        case SYNTAX_DEFMACRO:
+            gc__ms_push_val(ms, syn->data.defmacro.child);
+            break;
         case SYNTAX_BREAK:
             gc__ms_push_val(ms, syn->data.break_stmt.value);
             break;

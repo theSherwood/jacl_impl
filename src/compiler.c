@@ -8034,6 +8034,18 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       break;
     }
 
+    case AST_DEFMACRO: {
+      /* Macro registration will be implemented in US-007.
+       * For now, treat as a declaration that produces nil. */
+      if (c->scope_depth > 0) {
+        compiler__error(c, line, node->start.column,
+                        "defmacro must appear at top level");
+        break;
+      }
+      compiler__emit_byte(c, OP_NIL, line);
+      break;
+    }
+
     case AST_BREAK: {
       if (c->loop_depth == 0) {
         compiler__error(c, line, node->start.column,

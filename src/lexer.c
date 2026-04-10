@@ -54,6 +54,7 @@ typedef enum {
   TOKEN_DOUBLE_COLON,     /* :: */
   /* --- new keyword tokens --- */
   TOKEN_PROC,             /* proc */
+  TOKEN_DEFMACRO,         /* defmacro */
   TOKEN_IF,               /* if */
   TOKEN_ELIF,             /* elif */
   TOKEN_ELSE,             /* else */
@@ -1307,6 +1308,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
           break;
         case 8:
           if (memcmp(wstart, "continue", 8) == 0) wtype = TOKEN_CONTINUE;
+          else if (memcmp(wstart, "defmacro", 8) == 0) wtype = TOKEN_DEFMACRO;
           break;
         /* defstruct keyword removed — use struct instead */
         default:
