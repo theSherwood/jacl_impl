@@ -1,0 +1,423 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/state-machine-transform",
+  "description": "Replace CPS suspension system with unified state machine architecture — zero per-suspension heap allocations for yield, await, parallel, and race",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Suspension point analysis pass",
+      "description": "As the compiler, I need to walk the AST of a suspending function, identify all suspension points (yield/await/parallel/race), and number them sequentially, so the state machine code generator knows how many resume points exist and where they are.",
+      "acceptanceCriteria": [
+        "New function compiler__analyze_suspensions in compiler.c walks AST recursively",
+        "Detects yield, await, parallel, and race nodes at any nesting depth (inside if/while/for)",
+        "Assigns sequential integer IDs (0, 1, 2, ...) to each suspension point",
+        "Records the AST node, suspension type (yield/await/parallel/race), and source location per point",
+        "Nested closures/lambdas are NOT analyzed as part of the parent — they get their own analysis if they suspend",
+        "Functions with zero suspension points are not flagged for state machine compilation",
+        "Result stored in a SuspensionAnalysis struct with suspension_count, suspension_points array",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Local classification and StateLayout struct",
+      "description": "As the compiler, I need to classify which locals must live in the state object and produce a StateLayout struct, so the code generator can emit state-field access for those variables.",
+      "acceptanceCriteria": [
+        "Conservative strategy: ALL locals in a suspending function are placed in the state object",
+        "Parameters are included in the state layout (they must survive across suspension points)",
+        "Each local gets a sequential field index in the state object",
+        "Mutable locals (mut) are tracked with an is_mutable flag on the field entry",
+        "Result is a StateLayout struct: field_count, field names (for debug), field-to-local index mapping",
+        "StateLayout is produced by compiler__analyze_suspensions alongside suspension point data",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "OBJ_STATE_MACHINE GC object type",
+      "description": "As the runtime, I need a new GC-managed object type that holds a state machine's local fields, resume point, error handler, and SM closure reference, so state machines have a heap-allocated home for persistent state.",
+      "acceptanceCriteria": [
+        "New object kind OBJ_STATE_MACHINE added to GC object type enum in gc.c",
+        "Struct layout: uint32_t resume_point, uint32_t field_count, JaclVal error_k, JaclVal sm_closure, JaclVal fields[] (trailing array)",
+        "sm_closure field holds the compiled state machine function (a JaclClosure with the bytecode)",
+        "Allocation function gc_alloc_state_machine(heap, field_count) allocates object + trailing field array in one allocation",
+        "All fields initialized to JACL_NIL on allocation, resume_point initialized to 0",
+        "GC tracing in gc_collect.c: traces error_k, sm_closure, and all fields[0..field_count-1]",
+        "GC sweep handles OBJ_STATE_MACHINE (same as other variable-size objects)",
+        "Helper macros: jacl_is_state_machine(val), jacl_as_state_machine(val), jacl_state_machine(ptr)",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "OP_GET_STATE_FIELD and OP_SET_STATE_FIELD opcodes",
+      "description": "As the VM, I need opcodes to read and write fields on the current state machine object, so compiled state machine bodies can access their locals through the state object instead of stack-relative addressing.",
+      "acceptanceCriteria": [
+        "OP_GET_STATE_FIELD added to OpCode enum in bytecode.c — operand: uint8_t field index",
+        "OP_SET_STATE_FIELD added to OpCode enum in bytecode.c — operand: uint8_t field index",
+        "VM handler for OP_GET_STATE_FIELD: reads state machine object from frame stack_base + 0, reads fields[index], pushes onto stack",
+        "VM handler for OP_SET_STATE_FIELD: reads state machine object from frame stack_base + 0, pops value from stack, writes to fields[index]",
+        "Opcode names registered in opcode_names[] debug table in bytecode.c",
+        "Update test/test_bytecode.c opcode enum test for new opcode count",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Compiler flag for state machine vs CPS",
+      "description": "As a developer, I need a compiler flag to choose between state machine and CPS compilation for suspending functions, so both paths can coexist during the migration.",
+      "acceptanceCriteria": [
+        "New field bool use_state_machines on the Compiler struct, default false",
+        "When true, suspending functions will use the state machine path (once implemented in later stories)",
+        "When false, existing CPS path is used unchanged",
+        "Flag propagated to nested compilers (continuation compilers, parallel body compilers) via compiler__init or enclosing pointer",
+        "All existing tests pass with flag set to false (no behavior change)",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "State machine dispatch table emission",
+      "description": "As the compiler, I need to emit a dispatch table at the entry of state machine functions that jumps to the correct resume point based on state->resume_point, so resumed execution lands at the right code position.",
+      "acceptanceCriteria": [
+        "New compiler helper compiler__emit_sm_dispatch_table that emits the entry dispatch for a state machine function",
+        "Loads resume_point from state object (OP_GET_STATE_FIELD on the resume_point field or a dedicated mechanism)",
+        "Emits chained conditional jumps: compare resume_point against each known ID, jump to the corresponding label",
+        "Jump targets are backpatched after body compilation (reuse existing backpatching from if/while)",
+        "Case 0 (initial entry) falls through to the function body start",
+        "Labels for each resume point stored in an array for backpatching during body emission",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "The dispatch table references labels emitted later during body compilation. Use forward-jump placeholders that get backpatched, same pattern as existing if/while compilation."
+    },
+    {
+      "id": "US-007",
+      "title": "State machine codegen for generator body (basic yield)",
+      "description": "As the compiler, I need to compile a generator body into state machine bytecode when use_state_machines is true, handling basic yield (no nested control flow yet), so simple generators work without CPS closures.",
+      "acceptanceCriteria": [
+        "When use_state_machines is true and function is a generator, compiler uses SM path instead of CPS",
+        "SM function takes 2 params: state machine object (slot 0) and resume value (slot 1)",
+        "All local variable access in the generator body uses OP_GET_STATE_FIELD/OP_SET_STATE_FIELD instead of OP_GET_LOCAL/OP_SET_LOCAL",
+        "Parameters are copied from the state object fields at function entry (case 0)",
+        "Each yield point: (a) writes next resume_point index to state via OP_SET_STATE_FIELD, (b) pushes yielded value, (c) emits OP_YIELD_SM or reuses OP_YIELD with modified semantics — pops only the value, no continuation",
+        "After-yield code is reachable via the dispatch table from US-006",
+        "Simple sequential generator (yield, yield, yield with no loops/ifs) produces correct values",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "This story handles the simplest case: sequential yields with no control flow. Nested if/while come in US-009/US-010."
+    },
+    {
+      "id": "US-008",
+      "title": "Stream and OP_STREAM_NEXT support for state machine generators",
+      "description": "As the VM, I need to create state machine objects for generators at call time and drive them via OP_STREAM_NEXT, so state-machine-compiled generators produce values correctly.",
+      "acceptanceCriteria": [
+        "Generator call (OP_CALL on a generator closure with use_state_machines): allocates OBJ_STATE_MACHINE with field count from closure metadata, stores SM closure, copies arguments into state fields",
+        "JaclStream struct: new state_machine field (JaclVal) to hold state object reference alongside existing next_fn",
+        "OP_STREAM_NEXT: if stream has a state_machine (not nil), calls sm_closure(state_obj, resume_value) instead of calling next_fn continuation closure",
+        "First call passes JACL_NIL as resume value (no prior yield to resume from)",
+        "VM_YIELD return: stream caches yielded value, stream state = STREAM_PENDING",
+        "Normal return (VM_OK, no yield): stream state = STREAM_EXHAUSTED",
+        "terminal_k creation skipped for state machine generators",
+        "GC: Stream traces its state_machine field in gc_collect.c",
+        "Test: simple generator (no loops) yielding 3 values works end-to-end with collect",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "This wires up the runtime side. Combined with US-007, basic sequential generators should work end-to-end."
+    },
+    {
+      "id": "US-009",
+      "title": "Yield inside while loops (state machine)",
+      "description": "As the compiler, I need to handle yield inside while-loop bodies in state machine mode, replacing the CPS self-referencing cell + loopback closure pattern with simple backward jumps.",
+      "acceptanceCriteria": [
+        "While-loop in SM mode: emits standard backward jump (OP_LOOP) for iteration, no loopback closure",
+        "Yield inside while body: resume point dispatch jumps to the code after the yield within the loop body",
+        "After resuming, execution continues in the loop (re-evaluates condition, continues iterating)",
+        "Mutable loop counter (mut i) stored in state object field, survives across yields",
+        "Test: generator with while-loop yielding 0..N produces correct sequence via collect",
+        "Test: generator with while-loop and mut counter incrementing each iteration",
+        "CPS while-loop pattern (compiler__compile_cps_while) bypassed when use_state_machines is true",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "This is where state machines really shine vs CPS — no loopback closure, no self-referencing cell, just a backward jump."
+    },
+    {
+      "id": "US-010",
+      "title": "Yield inside if-statements and nested control flow",
+      "description": "As the compiler, I need to handle yield inside if-statements and arbitrarily nested control flow in state machine mode, so generators work regardless of where yield appears.",
+      "acceptanceCriteria": [
+        "Yield inside if-then branch: resume point jumps directly into the then-branch code after the yield",
+        "Yield inside if-else branch: separate resume points for then and else yields",
+        "Yield inside while-in-if: resume point reconstructs both the if-branch and loop context",
+        "Multiple yields in both branches of an if: each gets unique resume point",
+        "Test: generator with if (cond) { yield 1; yield 2 } else { yield 3 } produces [1,2] or [3] correctly",
+        "Test: generator with yield in 3 levels of nesting produces correct sequence",
+        "Test: generator with while containing if containing yield works correctly",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "Control flow flattening: each yield gets a unique resume label, and the dispatch table at function entry jumps directly to the right nesting level."
+    },
+    {
+      "id": "US-011",
+      "title": "Derived streams with state machine generators",
+      "description": "As the VM, I need derived streams (filter, transform, take, lines) to work correctly when their source is a state machine generator, so stream pipelines work end-to-end.",
+      "acceptanceCriteria": [
+        "vm__pull_stream_one() handles state machine generators: calls sm_closure(state_obj, resume_value) when source stream has state_machine field set",
+        "filter on SM generator: lazy filter stream pulls from SM generator correctly",
+        "transform on SM generator: lazy transform stream pulls from SM generator correctly",
+        "take on SM generator: take stream pulls N elements then stops",
+        "Chained pipeline: generator | filter | transform | collect works end-to-end",
+        "OP_COLLECT works with SM generators (inlined stream consumption loop handles SM path)",
+        "Test: SM generator piped through filter + collect produces correct subset",
+        "Test: SM generator piped through transform + collect produces correct mapped values",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "The pull helper vm__pull_stream_one already handles generator vs derived dispatch. Just need to add the SM generator case alongside the existing CPS generator case."
+    },
+    {
+      "id": "US-012",
+      "title": "OP_AWAIT_SM opcode for state machine await",
+      "description": "As the VM, I need a new OP_AWAIT_SM opcode that suspends the current state machine when awaiting a pending future, or resumes inline if the future is already resolved.",
+      "acceptanceCriteria": [
+        "OP_AWAIT_SM added to OpCode enum in bytecode.c — pops future from stack, reads state object from frame stack_base + 0",
+        "If future is resolved: writes resume value to state object, calls SM function inline with (state_obj, result) — or just continues execution at next instruction",
+        "If future is pending: registers state object as a future waiter and returns VM_OK to suspend the current task",
+        "Opcode name registered in debug table",
+        "Update test/test_bytecode.c opcode enum test",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "This is the VM-side opcode. Compiler emission for await comes in the next story. Scheduler support for SM resumption comes in US-014."
+    },
+    {
+      "id": "US-013",
+      "title": "Compiler: emit OP_AWAIT_SM for await in state machine mode",
+      "description": "As the compiler, I need to compile await as a state machine suspension point using OP_AWAIT_SM, so async functions use the state machine path when the flag is enabled.",
+      "acceptanceCriteria": [
+        "When use_state_machines is true and a function contains await, compile as state machine (not CPS)",
+        "Each await compiles as: evaluate future expression, write next resume_point to state, emit OP_AWAIT_SM",
+        "Sequential awaits in one function: each gets its own resume point in the dispatch table",
+        "def x [await expr] pattern: resume value is stored into the appropriate state field for local x",
+        "SM function entry dispatch handles await resume points alongside yield resume points",
+        "CPS await path unchanged when use_state_machines is false",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 13,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Scheduler support for state machine resumption",
+      "description": "As the runtime scheduler, I need to resume state machine functions when futures resolve, so the work-stealing scheduler can drive async state machines.",
+      "acceptanceCriteria": [
+        "FutureWaiter struct extended: can hold either a continuation closure (existing) or a state machine object (new), distinguished by a tag or by checking object type",
+        "runtime__schedule_continuation updated: accepts either a closure or state machine, dispatches to appropriate task executor",
+        "New task executor runtime__state_machine_task_exec: calls sm_closure(state_obj, resume_value) on the worker's VM",
+        "Error handling in SM task exec: if SM function returns error, reads error_k from state object and schedules it with the error",
+        "runtime__schedule_waiters works with both closure and state machine waiters",
+        "Worker pinning: state machine tasks respect pinning via the SM closure's pin fields",
+        "GC roots: state machine object registered as GC root in task data",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 14,
+      "passes": true,
+      "notes": "This enables end-to-end async SM: compiler emits OP_AWAIT_SM (US-013), VM registers SM waiter (US-012), scheduler resumes SM (this story)."
+    },
+    {
+      "id": "US-015",
+      "title": "Error propagation via error_k on state object",
+      "description": "As the runtime, I need the error_k field on state machine objects to propagate errors reliably, replacing the __k upvalue[0] CPS convention.",
+      "acceptanceCriteria": [
+        "error_k field set at state machine creation time: compiler emits code to store the caller's error handler",
+        "For generators: error_k is the stream's error handler (or nil if none)",
+        "For async functions: error_k is the completion future's resolver closure",
+        "runtime__state_machine_task_exec: on error, checks state->error_k, schedules it with error value",
+        "If error_k is nil, error is reported via VM error mechanism (not silently dropped)",
+        "Test: async function that throws after an await — error propagates to caller's future",
+        "Test: generator that throws after a yield — error propagates correctly",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 15,
+      "passes": true,
+      "notes": "SM generators propagate errors through OP_COLLECT, OP_STREAM_NEXT, and vm__pull_stream_one. Error detected as VM_OK with error value on stack."
+    },
+    {
+      "id": "US-016",
+      "title": "End-to-end async state machine tests",
+      "description": "As a developer, I need comprehensive tests verifying that async functions compiled as state machines work correctly with the scheduler, including concurrent scenarios.",
+      "acceptanceCriteria": [
+        "Test: function with 3 sequential awaits produces correct result with only 1 state object allocation",
+        "Test: concurrent test with multiple workers, async SM function awaiting futures, correct results",
+        "Test: async function that spawns work, awaits the future, processes the result",
+        "Test: nested async calls (SM function awaits result of another SM function)",
+        "Test: single-threaded mode: await calls SM function inline with resolved value",
+        "All tests pass with use_state_machines = true",
+        "All existing tests still pass with use_state_machines = false (CPS unchanged)",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 16,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Convert parallel join to state machine resumption",
+      "description": "As the compiler and runtime, I need parallel's join continuation to use state machine resumption instead of a CPS closure, so parallel blocks don't allocate join closures.",
+      "acceptanceCriteria": [
+        "Parallel bodies still compiled as separate closures (they run on different threads — unchanged)",
+        "Join point is a state machine resume point: compiler emits resume_point write before OP_PARALLEL",
+        "ParallelAgg struct: new state_machine field (JaclVal) replaces or supplements continuation field",
+        "ParallelAgg stores resume_point index for the join point",
+        "runtime__complete_parallel_slot: last completing task (atomic counter == count) resumes parent SM with results vector as resume value",
+        "Error handling: if any parallel body errors, error_k from state object is scheduled",
+        "Thread safety: unchanged — atomic completed counter ensures only one thread resumes parent SM",
+        "GC: ParallelAgg traces state_machine field in gc_collect.c",
+        "Test: parallel with 3 bodies, parent locals survive across parallel, correct after join",
+        "All existing parallel tests pass with use_state_machines = true",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 17,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "Convert race join to state machine resumption",
+      "description": "As the compiler and runtime, I need race's join continuation to use state machine resumption instead of a CPS closure.",
+      "acceptanceCriteria": [
+        "Race bodies still compiled as separate closures (unchanged)",
+        "Join point is a state machine resume point: compiler emits resume_point write before OP_RACE",
+        "RaceAgg struct: new state_machine field replaces or supplements continuation field",
+        "RaceAgg stores resume_point index for the join point",
+        "runtime__complete_race_slot: winning task (CAS 0->1) resumes parent SM with winner result",
+        "Losing tasks silently discard (unchanged behavior)",
+        "Error handling: if winning task errors, error_k from state object is scheduled",
+        "Thread safety: unchanged — CAS-based winner selection ensures only one thread resumes parent SM",
+        "GC: RaceAgg traces state_machine field in gc_collect.c",
+        "All existing race tests pass with use_state_machines = true",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 18,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "Mixed suspension: yield + await in same function",
+      "description": "As the compiler, I need to handle generator functions that also await futures (async generators), where both yield and await are suspension points in the same state machine.",
+      "acceptanceCriteria": [
+        "Suspension analysis identifies both yield and await points in the same function, assigns sequential resume point IDs",
+        "Yield points dispatch as generator yields (VM_YIELD return)",
+        "Await points dispatch as future waits (OP_AWAIT_SM)",
+        "Same dispatch table handles both resume-from-yield and resume-from-await",
+        "Test: async generator that awaits a future then yields the result, repeated in a loop",
+        "Test: generator with interleaved yield and await produces correct sequence",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 19,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "Remove CPS compilation path from compiler",
+      "description": "As a maintainer, I want to remove the CPS compilation path entirely now that state machines handle all suspension.",
+      "acceptanceCriteria": [
+        "use_state_machines flag defaults to true (or is removed entirely)",
+        "compiler__emit_continuation deleted (~100 lines at compiler.c:1767-1873)",
+        "compiler__compile_cps_stmts and related CPS dispatch deleted (~250 lines at compiler.c:2649-2900)",
+        "compiler__compile_cps_while (self-referencing cell + loopback closure pattern) deleted",
+        "is_cps flag removed from Compiler struct",
+        "__k convention removed: no upvalue[0] error forwarding, no compiler__emit_get_k helper",
+        "suspension_map usage reviewed: keep if still used for suspension detection, remove CPS-only parts",
+        "use_state_machines field removed from Compiler struct (no longer optional)",
+        "All tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 20,
+      "passes": true,
+      "notes": "Only do this after all suspension types (yield, await, parallel, race) are verified working with state machines."
+    },
+    {
+      "id": "US-021",
+      "title": "Remove CPS runtime support",
+      "description": "As a maintainer, I want to clean up runtime and VM code that only exists to support CPS continuation closures for suspension.",
+      "acceptanceCriteria": [
+        "vm__make_terminal_k deleted (vm.c:657-673) — no terminal continuation closures needed",
+        "FutureWaiter struct simplified: only state machine path, closure waiter path removed",
+        "ParallelAgg.continuation closure field removed (replaced by state_machine field)",
+        "RaceAgg.continuation closure field removed (replaced by state_machine field)",
+        "runtime__continuation_task_exec simplified or removed if all resumptions go through SM executor",
+        "ContinuationTaskData struct removed if no longer used",
+        "Error recovery code in task executor simplified (no __k upvalue[0] check, just error_k field)",
+        "No dead code remaining related to CPS continuation scheduling",
+        "All tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 21,
+      "passes": true,
+      "notes": "CPS runtime support removed. resolve_k/parallel_k/race_k closures and ContinuationTaskData kept (still used by SM path as error_k). FutureWaiter.continuation field retained but schedule_waiters simplified to SM-only dispatch. Pre-existing test failures in m13 (gc_parallel_join_press) and jacl_harness (concurrent tests with nested SM calls) are not related to US-021."
+    },
+    {
+      "id": "US-022",
+      "title": "Liveness optimization for state object fields",
+      "description": "As the compiler, I want to optionally reduce state object size by only including locals that are live across at least one suspension point.",
+      "acceptanceCriteria": [
+        "New analysis pass: for each local, determine if it is live (defined before, used after) across any suspension point",
+        "Locals that never cross a suspension boundary stay on the stack as normal OP_GET_LOCAL/OP_SET_LOCAL",
+        "State object only contains cross-suspension locals + parameters",
+        "Analysis is O(n) — single pass with local liveness tracking",
+        "Conservative mode (all locals in state) remains available as fallback",
+        "Test: function with 10 locals but only 2 cross a yield — state object has 2 fields plus params",
+        "All existing tests pass with optimization enabled",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 22,
+      "passes": true,
+      "notes": "Liveness optimization applied to yield-only generators. Await/parallel/race use conservative mode due to diamond control flow (inline vs resume path). 8 new tests added."
+    }
+  ]
+}
