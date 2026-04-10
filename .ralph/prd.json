@@ -155,7 +155,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "The macro body is compiled eagerly when defmacro is encountered (top-to-bottom order). This means it can only reference macros/procs defined above it."
     },
     {

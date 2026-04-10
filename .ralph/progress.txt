@@ -18,6 +18,11 @@ Started: Thu Apr 10 2026
 - When adding a new keyword token: update (1) TokenType enum in lexer.c AND jacl.h, (2) keyword switch table in lexer.c, (3) keyword-as-atom case lists in parser.c (3 places: parser__parse_atom, parser__parse_cmd_operand, parser__parse_cmd_operand default switch), (4) top-level dispatch in parser_parse.
 - When adding a new AST node type: update (1) AstNodeType enum in ast.c AND jacl.h, (2) AstNode union in ast.c AND jacl.h, (3) pretty-printer in ast.c, (4) syntax_from_ast and syntax_to_ast in syntax.c if convertible, (5) SyntaxKind enum in gc.c AND jacl.h if adding a syntax kind, (6) GC tracing in gc_collect.c, (7) compiler.c main switch.
 - When producing a parser error for an unexpected token, always advance past the offending token first to avoid infinite loops in the top-level parse loop.
+- Compiler struct also duplicated: the Compiler struct in compiler.c AND jacl.h must have identical fields. When adding a field to the Compiler struct, update both files.
+- CompileResult struct also duplicated in compiler.c AND jacl.h. Same rule: keep them byte-identical.
+- When forward-declaring a typedef'd struct in compiler.c, use `typedef struct Foo Foo;` before CompileResult, then `struct Foo { ... };` at the definition site.
+- MacroTable is allocated in compiler_compile and stored in both Compiler.macro_table and CompileResult.macro_table.
+- Special forms that are lexer keywords (if, proc, def, mut, set, while, for, match, break, continue, return, try, quote, defmacro, syntax-quote) are caught at parse time if used as defmacro name. Non-keyword special forms (spawn, yield, await, parallel, defstruct, to) are caught at compile time by macro__is_special_form.
 
 ## 2026-04-10 - US-001 — Add JACL_TAG_SYNTAX value tag and OBJ_SYNTAX GC object
 - Most of US-001 was already staged as uncommitted edits (tag constant, obj enum, JaclSyntax struct, GC tracing, printing, test file). I wired up the final missing pieces and fixed one blocker.
@@ -129,4 +134,26 @@ Thread: (inline)
   - TOKEN_TILDE_AT needs to be in the operator-as-atom list in parser__parse_atom so it can be treated as a literal at depth > 1.
   - TOKEN_SYNTAX_QUOTE goes in the keyword-as-atom list in parser__parse_atom (unlike TOKEN_QUOTE which is NOT in atom lists).
   - Adding 3 new SyntaxKind values between SYNTAX_QUOTE and SYNTAX_BREAK shifts all subsequent enum values — the test_syntax_kind_enum test with hardcoded values must be updated.
+---
+
+## 2026-04-10 - US-007 — Compile-time macro table and defmacro registration
+Thread: (inline)
+- Added MacroTable and MacroEntry types in compiler.c (and jacl.h) for compile-time macro definitions.
+- MacroEntry stores: name, param_count, param_names, param_name_lens, and compiled JaclClosure*.
+- MacroTable: fixed-size array of up to 64 entries with count, plus macro_table_init and macro_table_lookup functions.
+- Added macro__is_special_form function that blocks shadowing of core control-flow/binding keywords.
+- Added macro_table field to Compiler struct (root compiler owns it, body compilers inherit via macro_table pointer).
+- Added macro_table field to CompileResult so tests and the expansion pass can access it.
+- In compiler_compile: allocate MacroTable and set c.macro_table, propagate to CompileResult.
+- AST_DEFMACRO compiler case: checks top-level, checks special form shadowing, checks duplicate, compiles body block to JaclClosure, registers in MacroTable.
+- 10 new tests in test/test_syntax.c: register/lookup, missing lookup, zero params, multiple macros, shadow-if (parser error), shadow-spawn (compiler error), shadow special forms, duplicate error, lookup API, is_special_form.
+- Files changed: src/compiler.c, src/jacl.h, test/test_syntax.c
+- Verification: ./build.sh → 84/84 pass (83 test/ + 1 lib/), no warnings.
+- **Learnings for future iterations:**
+  - Compiler struct is duplicated in compiler.c AND jacl.h — must update both when adding fields.
+  - CompileResult struct is also duplicated in compiler.c AND jacl.h — same rule.
+  - When forward-declaring a struct used in CompileResult (like MacroTable), add `typedef struct MacroTable MacroTable;` before the CompileResult definition in compiler.c.
+  - Special form names that are lexer keywords (if, proc, etc.) get caught by the parser as "expected macro name" before reaching the compiler. Non-keyword special forms (spawn, yield, await, parallel, defstruct, to) are caught by macro__is_special_form at compile time.
+  - The macro body closure is compiled like a proc body: create a body Compiler with scope_depth=1, add params as locals, compile_block_expr, emit OP_RETURN.
+  - concurrent_intern test is flaky — can fail sporadically in full builds.
 ---
