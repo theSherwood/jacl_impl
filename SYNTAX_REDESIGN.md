@@ -1037,11 +1037,11 @@ In `()`, operators work between values/expressions. The same symbol can have dif
 
 ### User-definable operators
 
-Operators are a kind of macro. Users can define new operators using the same mechanism the built-in operators use. Design details TBD:
+Operators are a kind of macro. Users can define new operators using the same mechanism the built-in operators use.
 
-- **AST representation**: macros need to receive and return syntax as data. Format TBD.
-- **Mode-specific overloading**: same symbol can have different definitions for `{}` and `()` modes.
-- **Leaking**: macros can intentionally introduce bindings into the caller's scope (needed for `=`, `:`, etc.). Full hygiene design TBD.
+- **AST representation**: macros receive and return **syntax objects** — a compile-time value type wrapping kind + datum + source position + scope marks. Quasiquoting (`syntax-quote`, `~`, `~@`) is the primary interface; introspection/construction APIs are available for advanced macros. See DESIGN.md M15 for full details.
+- **Mode-specific overloading** (tentative): same symbol can have different definitions for `{}` and `()` modes via mode annotation on `defmacro` (e.g. `defmacro | :cmd ...` vs `defmacro | :infix ...`). Whether this is the right mechanism is an open question.
+- **Hygiene**: hygienic by default — scope marks prevent macro-introduced names from colliding with caller names. Binding operators (`=`, `:`, `::`) need no special treatment because the bound name comes from the caller's code (spliced via `~`, retains caller's scope). Anaphoric macros use `^` prefix to intentionally introduce names into the caller's scope. `gensym` available for guaranteed-unique temporaries.
 
 ### Prelude
 

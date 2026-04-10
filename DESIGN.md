@@ -56,6 +56,89 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 - AST quasiquoting, hygienic expansion
 - Rewrite builtins (`proc`, `if`, etc.) as macros where possible
 
+#### Syntax Objects
+
+Macros operate on **syntax objects** — a dedicated compile-time value type (`JACL_TAG_SYNTAX`) that wraps:
+- **Kind**: AST node type (`"command"`, `"var-ref"`, `"lit-int"`, `"block"`, etc.)
+- **Datum**: payload (children for commands/blocks, raw value for literals, name for var-refs)
+- **Source position**: line/col/file for error messages pointing back to the original call site
+- **Scope marks**: set of marks for hygiene tracking (see below)
+
+Syntax objects exist only during compilation — macro bodies are Jacl code evaluated by the compiler, and syntax objects are the values they manipulate. They never appear in the running program.
+
+**Primary interface — quasiquoting:**
+```
+defmacro unless {cond, body} {
+  syntax-quote [if [not ~cond] ~body]      # ~ splices, ~@ splices and flattens
+}
+```
+
+**Introspection (advanced macros):**
+```
+syntax-kind $s          # → "command", "lit-int", "var-ref", "block", ...
+syntax-datum $s         # → raw value (for literals)
+syntax-head $s          # → head syntax object (for commands)
+syntax-args $s          # → vec of child syntax objects (for commands)
+syntax-commands $s      # → vec of child syntax objects (for blocks)
+syntax-pos $s           # → map {line: N, col: M}
+syntax->string $s       # → pretty-printed source text
+```
+
+**Construction (computed AST):**
+```
+make-syntax "command" $head $args
+make-syntax "lit-int" 42
+make-syntax "var-ref" "x"
+```
+
+#### Hygiene
+
+Hygienic by default. Each macro expansion gets a fresh scope mark. Identifiers in a `syntax-quote` template get the macro's scope mark; identifiers spliced via `~` retain their original (caller's) scope mark.
+
+```
+defmacro swap {a, b} {
+  syntax-quote {
+    tmp = ~a        # 'tmp' gets macro's scope — invisible to caller
+    ~a :: ~b
+    ~b :: $tmp
+  }
+}
+```
+
+**Binding operators need no special treatment.** In `x = 3`, `x` comes from the user's code, is passed as an argument to the `=` macro, and spliced back via `~` — it retains the caller's scope naturally.
+
+**`^` prefix for intentional introduction (anaphoric macros):**
+```
+defmacro aif {cond, body} {
+  syntax-quote {
+    ^it = ~cond       # ^it → "it" in the caller's scope
+    if $^it ~body      # body can reference $it
+  }
+}
+```
+
+**`gensym` for guaranteed-unique temporaries:**
+```
+defmacro or-else {a, b} {
+  tmp = [gensym "or_tmp"]
+  syntax-quote {
+    ~tmp = ~a
+    if (~tmp != nil) { $~tmp } { ~b }
+  }
+}
+```
+
+#### Mode-Specific Operator Overloading (tentative)
+
+Same symbol may need different macro definitions per parsing mode (e.g. `|` = pipe in `{}`, bitwise OR in `()`). One possible approach — mode annotation on `defmacro`:
+
+```
+defmacro | :cmd {left, right} { syntax-quote [pipe ~left ~right] }
+defmacro | :infix {left, right} { syntax-quote [bit-or ~left ~right] }
+```
+
+Whether this is the right mechanism or whether mode dispatch should be handled differently is an open question.
+
 ### M16: Phase 2 Syntax
 
 - Assignment: `foo = 3` → `[def foo 3]`, `bar : 4` → `[mut bar 4]`, `bar :: 5` → `[set! bar 5]`
