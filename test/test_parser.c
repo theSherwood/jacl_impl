@@ -2415,11 +2415,12 @@ static int test_infix_in_block(void) {
 
 /* ---- Syntax Redesign US-003: New proc syntax ---- */
 
-/* Helper: verify AST_COMMAND shape for proc */
-static void assert_proc_head(AstNode* n) {
+/* Helper: verify AST_COMMAND shape for proc. Returns 1 on success, 0 on failure. */
+static int assert_proc_head(AstNode* n) {
   ASSERT(n->type == AST_COMMAND);
   ASSERT(n->data.command.head->type == AST_LIT_STRING);
   ASSERT(memcmp(n->data.command.head->data.lit_string.value, "proc", 4) == 0);
+  return 1;
 }
 
 static int test_proc_basic_new_syntax(void) {
@@ -2429,7 +2430,7 @@ static int test_proc_basic_new_syntax(void) {
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
-  assert_proc_head(n);
+  ASSERT(assert_proc_head(n));
   ASSERT_U32_EQ(n->data.command.arg_count, 3); /* name, params, body */
   /* arg[0]: name "add" */
   ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
@@ -2455,7 +2456,7 @@ static int test_proc_typed_params(void) {
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
-  assert_proc_head(n);
+  ASSERT(assert_proc_head(n));
   ASSERT_U32_EQ(n->data.command.arg_count, 4); /* type, name, params, body */
   /* arg[0]: return type "i64" */
   ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "i64", 3) == 0);
@@ -2484,7 +2485,7 @@ static int test_proc_zero_params_new(void) {
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
-  assert_proc_head(n);
+  ASSERT(assert_proc_head(n));
   ASSERT_U32_EQ(n->data.command.arg_count, 3);
   /* params: empty AST_COMMAND */
   AstNode* params = n->data.command.args[1];
@@ -2553,7 +2554,7 @@ static int test_proc_multiline(void) {
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
-  assert_proc_head(n);
+  ASSERT(assert_proc_head(n));
   ASSERT_U32_EQ(n->data.command.arg_count, 3);
   teardown();
   ASSERT(check_no_leaks());

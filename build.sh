@@ -6,15 +6,24 @@ PASS=0
 FAIL=0
 FAILED_TESTS=""
 
-# Detect libffi for trampoline support
+# Detect libffi for trampoline support.
+# LIBFFI_COMPILE_FLAGS: -D and -I flags needed when compiling libjacl.a.
+# LIBFFI_LINK_FLAGS: -l flag(s) needed when linking any binary against libjacl.a.
+# LIBFFI_FLAGS: compile + link flags for final test executables (back-compat).
+LIBFFI_COMPILE_FLAGS=""
+LIBFFI_LINK_FLAGS=""
 LIBFFI_FLAGS=""
 if pkg-config --exists libffi 2>/dev/null; then
   LIBFFI_CFLAGS="$(pkg-config --cflags libffi 2>/dev/null)"
   LIBFFI_LIBS="$(pkg-config --libs libffi 2>/dev/null)"
+  LIBFFI_COMPILE_FLAGS="-DJACL_HAS_LIBFFI=1 ${LIBFFI_CFLAGS}"
+  LIBFFI_LINK_FLAGS="${LIBFFI_LIBS}"
   LIBFFI_FLAGS="-DJACL_HAS_LIBFFI=1 ${LIBFFI_CFLAGS} ${LIBFFI_LIBS}"
   echo "libffi: found via pkg-config"
 elif [ -f "/usr/include/ffi.h" ] || [ -f "/usr/local/include/ffi.h" ] || \
      [ -f "/usr/include/x86_64-linux-gnu/ffi.h" ]; then
+  LIBFFI_COMPILE_FLAGS="-DJACL_HAS_LIBFFI=1"
+  LIBFFI_LINK_FLAGS="-lffi"
   LIBFFI_FLAGS="-DJACL_HAS_LIBFFI=1 -lffi"
   echo "libffi: found in standard paths"
 else
@@ -178,7 +187,7 @@ elif [ -n "$NEWEST_SRC" ] && [ "$LIBJACL" -ot "$NEWEST_SRC" ]; then
 fi
 if [ "$NEED_LIB" -eq 1 ]; then
     echo -n "Building libjacl.a... "
-    if $CC $CFLAGS -c src/jacl.c -o "$JACL_OBJ" -lm 2>"$BUILD_DIR/jacl.err"; then
+    if $CC $CFLAGS $LIBFFI_COMPILE_FLAGS -c src/jacl.c -o "$JACL_OBJ" 2>"$BUILD_DIR/jacl.err"; then
         ar rcs "$LIBJACL" "$JACL_OBJ"
         echo "ok"
     else
@@ -223,10 +232,12 @@ for entry in "${TESTS[@]}"; do
         fi
     fi
 
-    # test/ files link against libjacl.a; lib/ files compile standalone
+    # test/ files link against libjacl.a; lib/ files compile standalone.
+    # libjacl.a references ffi symbols when JACL_HAS_LIBFFI is defined, so
+    # every test that links against it must also link -lffi.
     case "$src" in
         test/*)
-            $CC $flags "$src" -o "$BUILD_DIR/$name" "$LIBJACL" -lm 2>"$BUILD_DIR/${name}.err" &
+            $CC $flags "$src" -o "$BUILD_DIR/$name" "$LIBJACL" $LIBFFI_LINK_FLAGS -lm 2>"$BUILD_DIR/${name}.err" &
             ;;
         *)
             $CC $flags "$src" -o "$BUILD_DIR/$name" -lm 2>"$BUILD_DIR/${name}.err" &

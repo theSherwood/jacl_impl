@@ -293,8 +293,9 @@ static int test_e2e_tramp_free_releases_closure(void) {
 
 /* Native: dereference a u64 address as i32 */
 static JaclVal e2e_dref(JaclVM* vm, JaclVal* args, int argc) {
+  (void)vm;
   (void)argc;
-  uint64_t addr = jacl_as_u64_val(vm, args[0]);
+  uint64_t addr = jacl_as_u64_val(args[0]);
   int32_t val;
   memcpy(&val, (void*)(uintptr_t)addr, sizeof(val));
   return jacl_i32(val);
