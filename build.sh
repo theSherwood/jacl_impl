@@ -176,6 +176,28 @@ echo ""
 # Find newest source file for cache invalidation
 NEWEST_SRC=$(find src/ lib/ -name '*.c' -o -name '*.h' 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
 
+# Platform stamp: detect when switching between macOS and Linux so stale
+# cross-platform binaries are automatically purged from the build cache.
+PLATFORM_STAMP="$BUILD_DIR/.platform"
+CURRENT_PLATFORM="$(uname -s)-$(uname -m)"
+if [ -f "$PLATFORM_STAMP" ]; then
+    CACHED_PLATFORM=$(cat "$PLATFORM_STAMP")
+    if [ "$CACHED_PLATFORM" != "$CURRENT_PLATFORM" ]; then
+        echo "Platform changed ($CACHED_PLATFORM -> $CURRENT_PLATFORM), clearing build cache..."
+        rm -rf "$BUILD_DIR"
+        mkdir -p "$BUILD_DIR"
+    fi
+else
+    # No platform stamp — if there are cached binaries they may be from another
+    # platform (e.g. macOS binaries in a Linux container).  Clear to be safe.
+    if ls "$BUILD_DIR"/* >/dev/null 2>&1; then
+        echo "No platform stamp found, clearing build cache for clean $CURRENT_PLATFORM build..."
+        rm -rf "$BUILD_DIR"
+        mkdir -p "$BUILD_DIR"
+    fi
+fi
+echo "$CURRENT_PLATFORM" > "$PLATFORM_STAMP"
+
 # Phase 0: Build shared libjacl.a (compile the unity build once)
 LIBJACL="$BUILD_DIR/libjacl.a"
 JACL_OBJ="$BUILD_DIR/jacl.o"
