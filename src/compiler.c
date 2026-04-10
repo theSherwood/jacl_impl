@@ -578,6 +578,7 @@ typedef struct {
   uint32_t  struct_type_idx; /* struct registry index when type==TYPE_STRUCT */
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
   JaclType* param_types;  /* proc param types (NULL for non-procs, arena-allocated) */
+  uint32_t  scope_mark;   /* hygiene: 0 = user code, >0 = macro-introduced */
 } Local;
 
 /* --- Internal: Global arity tracking --- */
@@ -605,6 +606,7 @@ typedef struct {
   bool      captures_mutable; /* true if capturing a closure that captures mutable state */
   JaclType  type;     /* compile-time type (default TYPE_DYN) */
   uint32_t  struct_type_idx; /* struct registry index when type==TYPE_STRUCT */
+  uint32_t  scope_mark; /* hygiene: mark of the captured binding */
 } Upvalue;
 
 /* --- Internal: Suspension analysis --- */
@@ -2282,6 +2284,7 @@ struct Compiler {
   SMDispatchContext     sm_dispatch;    /* dispatch table jump patches for SM compilation */
   SuspensionAnalysis*  sm_analysis;    /* suspension analysis for current SM function (or NULL) */
   MacroTable*          macro_table;    /* compile-time macro definitions (root compiler owns) */
+  uint32_t             current_scope_mark; /* hygiene: mark for newly introduced bindings */
 };
 
 void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -2320,6 +2323,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   memset(&c->sm_dispatch, 0, sizeof(SMDispatchContext));
   c->sm_analysis       = NULL;
   c->macro_table       = NULL;
+  c->current_scope_mark = 0;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -2435,12 +2439,25 @@ void compiler__add_local(Compiler* c, JaclVal name,
   local->type        = TYPE_DYN;
   local->return_type = TYPE_DYN;
   local->param_types = NULL;
+  local->scope_mark  = c->current_scope_mark;
 }
 
 int compiler__resolve_local(Compiler* c, JaclVal name) {
+  uint32_t mark = c->current_scope_mark;
+  /* First pass: match at current scope mark (hygiene) */
   for (int i = (int)c->local_count - 1; i >= 0; i--) {
-    if (c->locals[i].name == name) {
+    if (c->locals[i].name == name && c->locals[i].scope_mark == mark) {
       return i;
+    }
+  }
+  /* Fallback: if inside macro expansion, also try mark 0 (user-visible bindings
+     like globals captured as locals or caller-scope bindings visible through
+     hygienic macros). */
+  if (mark != 0) {
+    for (int i = (int)c->local_count - 1; i >= 0; i--) {
+      if (c->locals[i].name == name && c->locals[i].scope_mark == 0) {
+        return i;
+      }
     }
   }
   return -1;
@@ -2538,15 +2555,23 @@ int compiler__add_upvalue(Compiler* c, uint8_t index, uint8_t is_local,
   c->upvalues[c->upvalue_count].suspends   = false;
   c->upvalues[c->upvalue_count].captures_mutable = false;
   c->upvalues[c->upvalue_count].type       = TYPE_DYN;
+  c->upvalues[c->upvalue_count].scope_mark = c->current_scope_mark;
   return (int)c->upvalue_count++;
 }
 
 int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
   if (!c->enclosing) return -1;
 
+  /* Propagate our current scope mark into the enclosing lookup so that
+     hygienic identifier matching uses the reference site's mark rather
+     than whatever the enclosing compiler happens to be processing. */
+  uint32_t enc_saved_mark = c->enclosing->current_scope_mark;
+  c->enclosing->current_scope_mark = c->current_scope_mark;
+
   /* Check if the variable is a local in the enclosing scope */
   int local = compiler__resolve_local(c->enclosing, name);
   if (local != -1) {
+    c->enclosing->current_scope_mark = enc_saved_mark;
     int uv = compiler__add_upvalue(c, (uint8_t)local, 1, name);
     if (uv != -1) {
       if (c->enclosing->locals[local].is_mutable)
@@ -2555,6 +2580,7 @@ int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
       c->upvalues[uv].suspends = c->enclosing->locals[local].suspends;
       c->upvalues[uv].type = c->enclosing->locals[local].type;
       c->upvalues[uv].struct_type_idx = c->enclosing->locals[local].struct_type_idx;
+      c->upvalues[uv].scope_mark = c->enclosing->locals[local].scope_mark;
     }
     return uv;
   }
@@ -2565,6 +2591,7 @@ int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
   if (c->enclosing->sm_analysis) {
     int field_idx = sm__find_field(&c->enclosing->sm_analysis->state_layout, name);
     if (field_idx >= 0) {
+      c->enclosing->current_scope_mark = enc_saved_mark;
       /* is_local=2: copy SM field value into closure upvalue at creation
          time.  For mutable fields the SM field holds a cell, so the
          closure gets the shared cell pointer (FR-5 semantics). */
@@ -2582,6 +2609,7 @@ int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
   /* Check if it's an upvalue in the enclosing scope (transitive capture) */
   int upvalue = compiler__resolve_upvalue(c->enclosing, name);
   if (upvalue != -1) {
+    c->enclosing->current_scope_mark = enc_saved_mark;
     int uv = compiler__add_upvalue(c, (uint8_t)upvalue, 0, name);
     if (uv != -1) {
       if (c->enclosing->upvalues[upvalue].is_mutable)
@@ -2590,10 +2618,12 @@ int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
       c->upvalues[uv].suspends = c->enclosing->upvalues[upvalue].suspends;
       c->upvalues[uv].type = c->enclosing->upvalues[upvalue].type;
       c->upvalues[uv].struct_type_idx = c->enclosing->upvalues[upvalue].struct_type_idx;
+      c->upvalues[uv].scope_mark = c->enclosing->upvalues[upvalue].scope_mark;
     }
     return uv;
   }
 
+  c->enclosing->current_scope_mark = enc_saved_mark;
   return -1;
 }
 
@@ -3001,6 +3031,7 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   body_compiler.enclosing      = c;
   body_compiler.suspension_map = c->suspension_map;
   body_compiler.pin_all_closures = needs_pinning;
+  body_compiler.current_scope_mark = c->current_scope_mark;
 
   /* Copy global arities for suspension lookups */
   {
@@ -5558,6 +5589,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     body_compiler.enclosing      = c;
     body_compiler.return_type    = proc_return_type;
     body_compiler.suspension_map = c->suspension_map;
+    body_compiler.current_scope_mark = c->current_scope_mark;
 
     /* Copy global arities to body compiler for suspension lookups */
     {
@@ -7143,6 +7175,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     body_compiler.enclosing      = c;
     body_compiler.suspension_map = c->suspension_map;
     body_compiler.pin_all_closures = needs_pinning;
+    body_compiler.current_scope_mark = c->current_scope_mark;
 
     /* Copy global arities for suspension lookups */
     {
@@ -7672,6 +7705,16 @@ static void syntax__compile_unquotes(Compiler *c, AstNode *node) {
 void compiler__compile_node(Compiler* c, AstNode* node) {
   uint32_t line = node->start.line;
   c->last_expr_type = TYPE_DYN;  /* default; specific cases override */
+
+  /* Hygiene: every AST node carries its own scope mark (0 for hand-written
+     code, non-zero for nodes stamped during macro expansion).  Switch to
+     the node's mark while compiling this node so that name resolution
+     (locals, upvalues) uses the binding context of the code that created
+     this node — crucially, unquoted sub-nodes with mark 0 must look up
+     names in the caller's scope even when nested inside a stamped
+     template. */
+  uint32_t prev_scope_mark = c->current_scope_mark;
+  c->current_scope_mark = node->scope_mark;
 
   switch (node->type) {
 
@@ -8291,6 +8334,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             body_compiler.scope_depth = 1;
             body_compiler.enclosing   = c;
             body_compiler.macro_table = mt;
+            body_compiler.current_scope_mark = c->current_scope_mark;
 
             for (uint32_t pi = 0; pi < param_count; pi++) {
               compiler__add_local(&body_compiler, closure->param_names[pi],
@@ -8362,6 +8406,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         body_compiler.scope_depth = 1;
         body_compiler.enclosing   = c;
         body_compiler.macro_table = mt;
+        body_compiler.current_scope_mark = c->current_scope_mark;
 
         /* Add params as locals */
         for (uint32_t i = 0; i < param_count; i++) {
@@ -8545,6 +8590,8 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       break;
     }
   }
+
+  c->current_scope_mark = prev_scope_mark;
 }
 
 /* --- Public API --- */

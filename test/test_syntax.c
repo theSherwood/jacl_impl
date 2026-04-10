@@ -3099,6 +3099,103 @@ static int test_us011_use_before_defmacro_error(void) {
     TEST_PASS();
 }
 
+/* ===== US-012: Scope marks on syntax objects for hygiene ===== */
+
+/* Test: a macro-introduced local does not shadow the caller's variable
+ * when the caller's variable is referenced through an unquote.
+ *
+ * Without hygiene, the template's `mut tmp 1` would shadow the caller's
+ * `tmp` and the unquoted `~x` (which is syntactically `$tmp` from the
+ * caller) would bind to the inner `1`, giving `+ 1 1 = 2`.
+ *
+ * With scope marks: the template's `tmp` carries the macro's fresh
+ * mark, while `~x` retains the caller's mark (0). Name resolution
+ * finds the caller's `tmp = 99` for `~x` and the template's `tmp = 1`
+ * for the template-introduced `$tmp`. Result: 99 + 1 = 100. */
+static int test_us012_hygiene_local_shadow(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src =
+        "defmacro m {x} {\n"
+        "  syntax-quote {\n"
+        "    mut tmp 1\n"
+        "    [+ ~x $tmp]\n"
+        "  }\n"
+        "}\n"
+        "proc run {} {\n"
+        "  mut tmp 99\n"
+        "  m $tmp\n"
+        "}\n"
+        "run";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_i32(result));
+    ASSERT_INT_EQ(jacl_as_i32(result), 100);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: two nested macro expansions that each introduce the same name
+ * do not collide — each expansion gets a distinct scope mark.
+ *
+ * `add_ten` binds `t = 10`, `add_hundred` binds `t = 100`, caller has
+ * `t = 0`. Result: 0 + 100 + 10 = 110. Every `~x` reference retains
+ * its original scope mark so the chain of additions is correct. */
+static int test_us012_hygiene_nested_macros(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src =
+        "defmacro add_ten {x} {\n"
+        "  syntax-quote {\n"
+        "    mut t 10\n"
+        "    [+ ~x $t]\n"
+        "  }\n"
+        "}\n"
+        "defmacro add_hundred {x} {\n"
+        "  syntax-quote {\n"
+        "    mut t 100\n"
+        "    [add_ten [+ ~x $t]]\n"
+        "  }\n"
+        "}\n"
+        "proc run {} {\n"
+        "  mut t 0\n"
+        "  add_hundred $t\n"
+        "}\n"
+        "run";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_i32(result));
+    ASSERT_INT_EQ(jacl_as_i32(result), 110);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: macros can still reference globals/builtins from the template
+ * (e.g. `+`) — these resolve via the mark-0 fallback because globals
+ * carry no scope mark. The double macro from US-011 still works after
+ * introducing scope marks. */
+static int test_us012_global_fallback_still_works(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src =
+        "defmacro double {x} {\n"
+        "  syntax-quote [+ ~x ~x]\n"
+        "}\n"
+        "double 21";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_i32(result));
+    ASSERT_INT_EQ(jacl_as_i32(result), 42);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
 /* Test: macro with wrong argument count produces a compile error. */
 static int test_us011_wrong_arg_count_error(void) {
     JaclVM* vm = jacl_vm_new();
@@ -3272,6 +3369,12 @@ int main(void) {
     RUN(test_us011_two_level_macro);
     RUN(test_us011_use_before_defmacro_error);
     RUN(test_us011_wrong_arg_count_error);
+
+    printf("\n=== Hygiene Tests (US-012) ===\n");
+
+    RUN(test_us012_hygiene_local_shadow);
+    RUN(test_us012_hygiene_nested_macros);
+    RUN(test_us012_global_fallback_still_works);
 
 #undef RUN
 

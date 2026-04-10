@@ -248,3 +248,28 @@ Thread: (inline)
   - `jacl_eval` is the cleanest way to write e2e tests: `JaclVM* vm = jacl_vm_new(); JaclVal r = jacl_eval(vm, src); ...; jacl_vm_free(vm);`. It returns the top-of-stack value after the whole program runs, or an error-flagged JaclVal on any failure (use `jacl_is_error` and `jacl_error_message_str`).
   - Multi-statement sources are fine — jacl_eval parses, compiles and runs the whole chunk. The last expression's value is returned, so a trailing `$x` reads the global.
 ---
+
+## 2026-04-10 - US-012 — Scope marks on syntax objects for hygiene
+Thread: (inline)
+- Implemented hygienic macro expansion via scope marks, so macro-introduced locals do not shadow caller-referenced identifiers passed through `~`.
+- Core idea: every AstNode carries a `uint32_t scope_mark` (0 = hand-written code, >0 = macro expansion mark). A new local (or upvalue) is tagged with the compiler's current mark, and resolve_local matches on (name, mark) with a fallback to mark 0 for inside-macro references to user globals/builtins.
+- src/ast.c + src/jacl.h: added `scope_mark` field to AstNode, Local, Upvalue, and Compiler structs (all four structs are duplicated across compiler.c and jacl.h — updated both copies).
+- src/syntax.c: added a per-process counter `expand__scope_counter` (starts at 0, incremented for each macro expansion). New helpers `expand__stamp_syntax` / `expand__stamp_vec` walk a freshly-cloned template and stamp every node with the fresh mark. Substitution (`expand__subst_template`) propagates the mark on copied commands/blocks; unquoted argument values are returned as-is so they keep their original (caller's) marks.
+- src/syntax.c: `syntax_from_ast` now **preserves** `node->scope_mark` instead of resetting to 0. This is crucial for iterative expansion — when the expander re-reads an argument that was already substituted from a previous expansion, the existing marks must survive the AST↔syntax round-trip.
+- src/syntax.c: `syntax_to_ast` (`syntax__set_ast_pos`) copies `syn->scope_mark` back onto the new AstNode.
+- src/compiler.c: `compiler__compile_node` saves/restores `current_scope_mark` around every node compilation and always sets it to `node->scope_mark` (no guard — a child node with mark 0 must switch BACK to mark 0 even when nested inside a mark-M parent, because unquoted arguments inside a stamped template carry mark 0).
+- src/compiler.c: `compiler__add_local` stamps new locals with `c->current_scope_mark`; `compiler__resolve_local` does two passes: match at current mark, then (if current mark ≠ 0) fall back to mark 0. `compiler__add_upvalue` / `compiler__resolve_upvalue` propagate scope_mark through closure captures. Upvalue resolution temporarily writes the child compiler's mark into the enclosing compiler's `current_scope_mark` so that `resolve_local` on the enclosing uses the **reference site's** mark, not whatever the enclosing happens to be compiling.
+- src/compiler.c: each of the 5 sub-compiler init sites (`compile_node` closure bodies, proc bodies, defmacro body compilation) copies `body_compiler.current_scope_mark = c->current_scope_mark` after `compiler__init` — so params added before `compile_node` descends into the body get the correct mark.
+- test/test_syntax.c: added 3 US-012 tests:
+  - `test_us012_hygiene_local_shadow`: the PRD example — `defmacro m {x} { syntax-quote { mut tmp 1; [+ ~x $tmp] } }` then inside a proc `mut tmp 99; m $tmp` returns 100 (not 2).
+  - `test_us012_hygiene_nested_macros`: `add_ten` and `add_hundred` both introduce a local `t`; nested call `add_hundred $t` starting from caller's `t = 0` returns 110.
+  - `test_us012_global_fallback_still_works`: regression check that macros can still reference globals/builtins like `+` — `double 21` still returns 42.
+- Files changed: src/ast.c, src/syntax.c, src/compiler.c, src/jacl.h, test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 binaries pass, 112 syntax subtests pass, no warnings with -Wall -Wextra.
+- **Learnings for future iterations:**
+  - Hygiene needs scope_mark to survive EVERY AST→syntax→AST round trip. Iterative expansion (where a macro expands to code containing another macro call) re-feeds previously-substituted ASTs through `syntax_from_ast`, and if that path resets the mark to 0, you lose hygiene silently — the test fails non-obviously with a "mostly right" number (e.g. 10 instead of 110).
+  - When adding a `current_scope_mark` to the compiler, the temptation is to guard `if (node->scope_mark != 0) c->current_scope_mark = node->scope_mark;` — DON'T. Unquoted sub-nodes with mark 0 are nested inside mark-M templates, and they must restore mark 0 to look up the caller's bindings. Always assign unconditionally, save/restore around the call.
+  - For upvalue resolution across a closure boundary, propagate the child's `current_scope_mark` into the enclosing compiler during the call, then restore. Otherwise the enclosing's own unrelated mark leaks into the lookup.
+  - `jacl_inline_string` caps at 7 bytes, so you cannot mangle names by appending a mark suffix. Adding a sidecar `scope_mark` field on Local/Upvalue is the right call.
+  - Sub-compilers (proc/closure body compilers) must inherit `current_scope_mark` from the parent in their init site — parameters added before `compile_node` runs on the body will otherwise be stamped with 0 and the macro-introduced references won't resolve through them.
+---

@@ -508,6 +508,7 @@ struct AstNode {
   AstNodeType type;
   SourcePos   start;
   SourcePos   end;
+  uint32_t    scope_mark;  /* hygiene: 0 = no macro context, >0 = macro expansion */
   union {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count; } command;
     struct { int32_t   value; }                                    lit_int;
@@ -952,6 +953,7 @@ typedef struct {
   uint32_t  struct_type_idx;
   JaclType  return_type;
   JaclType* param_types;
+  uint32_t  scope_mark;
 } Local;
 
 typedef struct {
@@ -975,6 +977,7 @@ typedef struct {
   bool      captures_mutable;
   JaclType  type;
   uint32_t  struct_type_idx;
+  uint32_t  scope_mark;
 } Upvalue;
 
 typedef struct {
@@ -1097,6 +1100,7 @@ struct Compiler {
   SMDispatchContext     sm_dispatch;
   SuspensionAnalysis*  sm_analysis;
   MacroTable*          macro_table;
+  uint32_t             current_scope_mark;
 };
 
 /* ========================================================================

@@ -31,7 +31,7 @@ JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap,
     JaclVal syn_val = gc_alloc_syntax(heap);
     JaclSyntax *syn = jacl_as_syntax(syn_val);
     syntax__set_pos(syn, node);
-    syn->scope_mark = 0;
+    syn->scope_mark = node->scope_mark;  /* hygiene: preserve macro mark */
 
     switch (node->type) {
 
@@ -285,6 +285,7 @@ static void syntax__set_ast_pos(AstNode *node, JaclSyntax *syn) {
     node->start.column = syn->pos_col;
     node->start.offset = syn->pos_offset;
     node->end = node->start;  /* approximate — original end not stored */
+    node->scope_mark   = syn->scope_mark;  /* hygiene: preserve macro mark */
 }
 
 /* -------------------------------------------------------------------------
@@ -868,6 +869,92 @@ static const char *expand__error_msg;
 static uint32_t    expand__error_line;
 static uint32_t    expand__error_col;
 
+/* Global scope mark counter — incremented each time a macro expansion
+ * begins. Each expansion gets a fresh mark so template-introduced
+ * identifiers don't collide with caller identifiers or with other
+ * expansions of the same (or different) macros. Mark 0 means "no macro
+ * context" and is reserved for user-written code. */
+static uint32_t    expand__scope_counter = 0;
+
+/* -------------------------------------------------------------------------
+ * expand__stamp_syntax: recursively stamp a freshly-allocated template
+ * syntax tree with the given scope mark. Used before substitution so that
+ * every template-originated node carries the macro's scope mark. Nodes
+ * that the substitution replaces (unquoted arguments from the caller)
+ * retain their own marks because the substitution returns arg values
+ * directly without copying.
+ *
+ * Safe to mutate: the template syntax tree was produced by syntax_from_ast
+ * at expansion time and is not aliased by any user-visible value.
+ * ------------------------------------------------------------------------- */
+
+static void expand__stamp_syntax(JaclVal val, uint32_t mark);
+
+static void expand__stamp_vec(JaclVal vec_val, uint32_t mark) {
+    if (!jacl_is_vector(vec_val)) return;
+    jacl_vec_root *vec = (jacl_vec_root *)jacl_as_ptr(vec_val);
+    uint32_t n = jacl_vec_count(vec);
+    for (uint32_t i = 0; i < n; i++) {
+        expand__stamp_syntax(jacl_vec_get(vec, i).value, mark);
+    }
+}
+
+static void expand__stamp_syntax(JaclVal val, uint32_t mark) {
+    if (!jacl_is_syntax(val)) return;
+    JaclSyntax *syn = jacl_as_syntax(val);
+    syn->scope_mark = mark;
+    switch ((SyntaxKind)syn->kind) {
+    case SYNTAX_COMMAND:
+        expand__stamp_syntax(syn->data.command.head, mark);
+        expand__stamp_vec(syn->data.command.args, mark);
+        break;
+    case SYNTAX_BLOCK:
+        expand__stamp_vec(syn->data.block.commands, mark);
+        break;
+    case SYNTAX_INTERP_STRING:
+        expand__stamp_vec(syn->data.interp_string.segments, mark);
+        break;
+    case SYNTAX_SPREAD:
+        expand__stamp_syntax(syn->data.spread.child, mark);
+        break;
+    case SYNTAX_QUOTE:
+        expand__stamp_syntax(syn->data.quote.child, mark);
+        break;
+    case SYNTAX_SYNTAX_QUOTE:
+        expand__stamp_syntax(syn->data.syntax_quote.child, mark);
+        break;
+    case SYNTAX_UNQUOTE:
+        /* Stamp the unquote placeholder too — it will be replaced by an
+         * arg value during substitution, but in case the placeholder
+         * leaks through (e.g. ~@ at a non-spliceable position) we still
+         * want its mark set. */
+        expand__stamp_syntax(syn->data.unquote.child, mark);
+        break;
+    case SYNTAX_UNQUOTE_SPLICING:
+        expand__stamp_syntax(syn->data.unquote_splicing.child, mark);
+        break;
+    case SYNTAX_BREAK:
+        expand__stamp_syntax(syn->data.break_stmt.value, mark);
+        break;
+    case SYNTAX_RETURN:
+        expand__stamp_syntax(syn->data.return_stmt.value, mark);
+        break;
+    case SYNTAX_LIT_INT:
+    case SYNTAX_LIT_FLOAT:
+    case SYNTAX_LIT_STRING:
+    case SYNTAX_VAR_REF:
+    case SYNTAX_CONTINUE:
+    case SYNTAX_USE:
+    case SYNTAX_DEFSTRUCT:
+    case SYNTAX_DEFMACRO:
+    case SYNTAX_DESTRUCTURE_VEC:
+    case SYNTAX_DESTRUCTURE_NAMED:
+        /* Leaves or simplified representations — nothing more to recurse
+         * into for the hygiene walk. */
+        break;
+    }
+}
+
 /* Helper: check if an AstNode command head is a bare word matching a name */
 static bool expand__head_is_name(AstNode *node, const char **out_name,
                                  uint32_t *out_len) {
@@ -1146,13 +1233,22 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                 /* Convert template and arguments to syntax objects */
                 JaclVal tmpl_syn = syntax_from_ast(tmpl_ast, heap, intern);
 
+                /* Fresh scope mark for this expansion — stamp the template
+                 * so identifiers introduced by the template are unique
+                 * and don't collide with the caller's identifiers. */
+                uint32_t macro_mark = ++expand__scope_counter;
+                expand__stamp_syntax(tmpl_syn, macro_mark);
+
                 JaclVal arg_vals[64];
                 for (uint32_t i = 0; i < argc; i++) {
                     arg_vals[i] = syntax_from_ast(
                         node->data.command.args[i], heap, intern);
                 }
 
-                /* Template substitution: replace unquotes by name */
+                /* Template substitution: replace unquotes by name.
+                 * Arg values retain their own (caller's) scope marks —
+                 * the substitution returns them directly without copying,
+                 * so unquoted references stay bound to the caller's scope. */
                 JaclVal result_syn = expand__subst_template(
                     tmpl_syn,
                     entry->param_names, entry->param_name_lens,

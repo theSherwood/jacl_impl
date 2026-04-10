@@ -254,7 +254,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "Scope mark 0 means 'no macro context' — all existing non-macro code has scope mark 0, so existing name resolution is unchanged. The scope mark field on AstNode is only populated for macro-expanded code."
     },
     {

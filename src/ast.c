@@ -59,6 +59,7 @@ struct AstNode {
   AstNodeType type;
   SourcePos   start;
   SourcePos   end;
+  uint32_t    scope_mark;  /* hygiene: 0 = no macro context, >0 = macro expansion */
   union {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count; } command;
     struct { int32_t   value; }                                    lit_int;
