@@ -88,7 +88,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "At parse time, the body is parsed as a normal block — quote, syntax-quote, ~, ~@ are handled later by the compiler. The parser just needs to recognize defmacro as a top-level form."
     },
     {

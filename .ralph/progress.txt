@@ -14,6 +14,9 @@ Started: Thu Apr 10 2026
 - syntax_to_ast signature: AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena). Returns NULL for JACL_NIL or non-syntax values.
 - For string round-trip: use jacl_string_byte_len() + jacl_string_data() to copy JaclVal strings into arena memory.
 - Pretty-printer does NOT always re-emit quotes: "hello" parses as AST_LIT_STRING but prints as bare `hello`. Compare against ast_pretty_print of the original, not the source text.
+- TokenType and AstNodeType enums are ALSO duplicated in jacl.h (like SyntaxKind). When adding a new token or AST node type, update BOTH the source .c file AND jacl.h, keeping them byte-identical.
+- When adding a new keyword token: update (1) TokenType enum in lexer.c AND jacl.h, (2) keyword switch table in lexer.c, (3) keyword-as-atom case lists in parser.c (3 places: parser__parse_atom, parser__parse_cmd_operand, parser__parse_cmd_operand default switch), (4) top-level dispatch in parser_parse.
+- When adding a new AST node type: update (1) AstNodeType enum in ast.c AND jacl.h, (2) AstNode union in ast.c AND jacl.h, (3) pretty-printer in ast.c, (4) syntax_from_ast and syntax_to_ast in syntax.c if convertible, (5) SyntaxKind enum in gc.c AND jacl.h if adding a syntax kind, (6) GC tracing in gc_collect.c, (7) compiler.c main switch.
 
 ## 2026-04-10 - US-001 — Add JACL_TAG_SYNTAX value tag and OBJ_SYNTAX GC object
 - Most of US-001 was already staged as uncommitted edits (tag constant, obj enum, JaclSyntax struct, GC tracing, printing, test file). I wired up the final missing pieces and fixed one blocker.
@@ -65,4 +68,25 @@ Started: Thu Apr 10 2026
   - AST pretty-printer doesn't always re-emit source quotes: "hello" → prints as bare `hello`. Round-trip tests must compare ast_pretty_print outputs, not source text.
   - The end position of AstNode is approximated (set equal to start) since syntax objects only store the start position.
   - Destructure rest names are prefixed with ".." in syntax objects — syntax_to_ast strips the prefix and sets rest_name/rest_name_len.
+---
+
+## 2026-04-10 - US-004 — Lexer and parser support for defmacro
+- Added TOKEN_DEFMACRO to lexer keyword table (length-8 switch case).
+- Added AST_DEFMACRO to AstNodeType with data: name, param_names, param_name_lens, param_count, body.
+- Implemented parser__parse_defmacro() in parser.c: parses `defmacro name {params} { body }`.
+- Added TOKEN_DEFMACRO to all 3 keyword-as-atom case lists in parser.c plus top-level dispatch.
+- Added AST_DEFMACRO pretty-printer case in ast.c.
+- Added SYNTAX_DEFMACRO to SyntaxKind enum (gc.c + jacl.h) with GC tracing.
+- Added syntax_from_ast and syntax_to_ast handling for AST_DEFMACRO (stores [name, param1, ..., body_syntax]).
+- Added compiler.c stub for AST_DEFMACRO (top-level check, emits nil — real macro registration is US-007).
+- Added 7 tests: basic parse, zero params, pretty-print, not-top-level, no-name error, no-params error, no-body error.
+- Files changed: src/lexer.c, src/ast.c, src/parser.c, src/syntax.c, src/compiler.c, src/gc.c, src/gc_collect.c, src/vm.c, src/jacl.h, test/test_syntax.c
+- Verification: ./build.sh --test=syntax → 59/59 pass. Full build → all test/ tests pass, no warnings.
+- **Learnings for future iterations:**
+  - TokenType enum is duplicated in lexer.c AND jacl.h — must update both when adding a new token.
+  - AstNodeType enum is duplicated in ast.c AND jacl.h — must update both, including the AstNode union.
+  - Parser has 3 separate keyword-as-atom case lists (parser__parse_atom ~line 249, parser__parse_cmd_operand ~line 737, and a third ~line 895). All 3 must include any new keyword token.
+  - The lexer keyword table uses a length-based switch; "defmacro" has 8 chars, same as "continue".
+  - Defmacro parser follows the defstruct pattern: consume keyword, get name, parse brace-enclosed params, parse block body.
+  - Adding a new enum member between existing ones shifts all subsequent values — tests with hardcoded enum values (test_syntax_kind_enum) must be updated.
 ---
