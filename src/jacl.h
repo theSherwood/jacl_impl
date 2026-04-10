@@ -826,12 +826,32 @@ typedef struct {
 
 typedef struct StructTypeRegistry StructTypeRegistry;
 
+/* --- Macro table --- */
+
+#define MACRO_TABLE_MAX 64
+
+typedef struct {
+  const char*   name;
+  uint32_t      name_len;
+  uint32_t      param_count;
+  const char**  param_names;
+  uint32_t*     param_name_lens;
+  JaclClosure*  closure;
+} MacroEntry;
+
+typedef struct MacroTable MacroTable;
+struct MacroTable {
+  MacroEntry entries[MACRO_TABLE_MAX];
+  uint32_t   count;
+};
+
 typedef struct {
   BytecodeChunk chunk;
   uint32_t      error_count;
   const char*   error_message;
   bool          suspending;
   StructTypeRegistry* struct_registry;
+  MacroTable*   macro_table;
 } CompileResult;
 
 typedef enum {
@@ -1074,6 +1094,7 @@ struct Compiler {
   uint32_t             sm_suspension_idx;
   SMDispatchContext     sm_dispatch;
   SuspensionAnalysis*  sm_analysis;
+  MacroTable*          macro_table;
 };
 
 /* ========================================================================
@@ -1736,6 +1757,9 @@ extern void compiler__compile_command (Compiler *c, AstNode *node);
 extern void compiler__compile_node (Compiler *c, AstNode *node);
 extern bool compiler__top_level_suspends (AstNode **stmts, uint32_t count, SuspensionMap *map);
 extern CompileResult compiler_compile (ParseResult parse, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap, StructTypeRegistry *seed_registry);
+extern void macro_table_init (MacroTable *t);
+extern MacroEntry *macro_table_lookup (MacroTable *t, const char *name, uint32_t name_len);
+extern bool macro__is_special_form (const char *name, uint32_t len);
 extern void module__populate_exports (Module *mod, Compiler *c);
 extern bool compiler__compile_module (const char *canonical_path, Compiler *importer, uint32_t line, uint32_t col);
 extern ProgramResult jacl_compile_program (const char *root_path, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap);

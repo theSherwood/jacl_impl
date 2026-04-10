@@ -1833,6 +1833,252 @@ static int test_tilde_at_outside_syntax_quote_error(void) {
     TEST_PASS();
 }
 
+/* ===== US-007: Compile-time macro table and defmacro registration ===== */
+
+/* Helper: compile source and return CompileResult (caller must destroy arena) */
+static CompileResult compile_source(const char* src, arena_t* arena, VM* vm) {
+    LexResult tokens = lexer_lex(src, arena);
+    ParseResult parse = parser_parse(tokens, arena);
+    JaclInternTable intern_table;
+    intern_table_init(&intern_table, arena);
+    CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL);
+    cr.error_count += parse.error_count;
+    return cr;
+}
+
+/* Test: defmacro registers in macro table, lookup by name succeeds */
+static int test_defmacro_registers_in_table(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro unless {cond, body} {\n"
+                      "  syntax-quote [if [not ~cond] ~body]\n"
+                      "}";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT(cr.error_count == 0);
+    ASSERT(cr.macro_table != NULL);
+    ASSERT(cr.macro_table->count == 1);
+
+    MacroEntry* entry = macro_table_lookup(cr.macro_table, "unless", 6);
+    ASSERT(entry != NULL);
+    ASSERT(entry->name_len == 6);
+    ASSERT(memcmp(entry->name, "unless", 6) == 0);
+    ASSERT(entry->param_count == 2);
+    ASSERT(entry->closure != NULL);
+    ASSERT(entry->closure->param_count == 2);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: defmacro lookup for non-existent name returns NULL */
+static int test_defmacro_lookup_missing(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro unless {cond, body} {\n"
+                      "  syntax-quote [if [not ~cond] ~body]\n"
+                      "}";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT(cr.error_count == 0);
+    ASSERT(cr.macro_table != NULL);
+
+    MacroEntry* entry = macro_table_lookup(cr.macro_table, "when", 4);
+    ASSERT(entry == NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: defmacro with zero params registers correctly */
+static int test_defmacro_zero_params_registers(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro now {} { syntax-quote [+ 1 2] }";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT(cr.error_count == 0);
+    ASSERT(cr.macro_table != NULL);
+    ASSERT(cr.macro_table->count == 1);
+
+    MacroEntry* entry = macro_table_lookup(cr.macro_table, "now", 3);
+    ASSERT(entry != NULL);
+    ASSERT(entry->param_count == 0);
+    ASSERT(entry->closure != NULL);
+    ASSERT(entry->closure->param_count == 0);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: multiple defmacros register correctly */
+static int test_defmacro_multiple_register(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro unless {cond, body} {\n"
+                      "  syntax-quote [if [not ~cond] ~body]\n"
+                      "}\n"
+                      "defmacro double {x} {\n"
+                      "  syntax-quote [+ ~x ~x]\n"
+                      "}";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT(cr.error_count == 0);
+    ASSERT(cr.macro_table != NULL);
+    ASSERT(cr.macro_table->count == 2);
+
+    MacroEntry* e1 = macro_table_lookup(cr.macro_table, "unless", 6);
+    ASSERT(e1 != NULL);
+    ASSERT(e1->param_count == 2);
+
+    MacroEntry* e2 = macro_table_lookup(cr.macro_table, "double", 6);
+    ASSERT(e2 != NULL);
+    ASSERT(e2->param_count == 1);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: defmacro shadowing 'if' produces error (parser rejects keyword as name) */
+static int test_defmacro_shadow_if_error(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro if {cond, body} {\n"
+                      "  syntax-quote [+ ~cond ~body]\n"
+                      "}";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    /* 'if' is a keyword token, so the parser rejects it before the compiler */
+    ASSERT(cr.error_count > 0);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: defmacro shadowing a non-keyword special form (spawn) produces compile error */
+static int test_defmacro_shadow_spawn_error(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro spawn {x} {\n"
+                      "  syntax-quote [+ ~x 1]\n"
+                      "}";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT(cr.error_count > 0);
+    ASSERT(cr.error_message != NULL);
+    ASSERT(strstr(cr.error_message, "shadows a special form") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: defmacro shadowing other special forms */
+static int test_defmacro_shadow_special_forms(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Test several special forms */
+    const char* forms[] = {"proc", "def", "mut", "set", "while", "for",
+                           "match", "break", "return", "defmacro"};
+    int nforms = (int)(sizeof(forms) / sizeof(forms[0]));
+    for (int i = 0; i < nforms; i++) {
+        arena_t a2 = {0};
+        VM vm2;
+        vm_init(&vm2, &a2);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "defmacro %s {x} { syntax-quote [+ ~x 1] }", forms[i]);
+        CompileResult cr = compile_source(buf, &a2, &vm2);
+        ASSERT(cr.error_count > 0);
+        vm_destroy(&vm2);
+        arena_destroy(&a2);
+    }
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: duplicate defmacro produces compile error */
+static int test_defmacro_duplicate_error(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src = "defmacro unless {cond, body} {\n"
+                      "  syntax-quote [if [not ~cond] ~body]\n"
+                      "}\n"
+                      "defmacro unless {x} {\n"
+                      "  syntax-quote [+ ~x 1]\n"
+                      "}";
+    CompileResult cr = compile_source(src, &arena, &vm);
+    ASSERT(cr.error_count > 0);
+    ASSERT(cr.error_message != NULL);
+    ASSERT(strstr(cr.error_message, "already defined") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: macro table consulted during command head check */
+static int test_macro_table_lookup_api(void) {
+    MacroTable mt;
+    macro_table_init(&mt);
+    ASSERT(mt.count == 0);
+    ASSERT(macro_table_lookup(&mt, "foo", 3) == NULL);
+
+    /* Manually add an entry */
+    mt.entries[0].name = "foo";
+    mt.entries[0].name_len = 3;
+    mt.entries[0].param_count = 1;
+    mt.entries[0].closure = NULL;
+    mt.count = 1;
+
+    ASSERT(macro_table_lookup(&mt, "foo", 3) != NULL);
+    ASSERT(macro_table_lookup(&mt, "bar", 3) == NULL);
+    ASSERT(macro_table_lookup(&mt, "fo", 2) == NULL);
+    ASSERT(macro_table_lookup(&mt, "fooo", 4) == NULL);
+
+    TEST_PASS();
+}
+
+/* Test: macro__is_special_form recognizes all special forms */
+static int test_is_special_form(void) {
+    ASSERT(macro__is_special_form("if", 2));
+    ASSERT(macro__is_special_form("proc", 4));
+    ASSERT(macro__is_special_form("def", 3));
+    ASSERT(macro__is_special_form("mut", 3));
+    ASSERT(macro__is_special_form("set", 3));
+    ASSERT(macro__is_special_form("while", 5));
+    ASSERT(macro__is_special_form("for", 3));
+    ASSERT(macro__is_special_form("match", 5));
+    ASSERT(macro__is_special_form("break", 5));
+    ASSERT(macro__is_special_form("continue", 8));
+    ASSERT(macro__is_special_form("return", 6));
+    ASSERT(macro__is_special_form("defmacro", 8));
+    ASSERT(macro__is_special_form("defstruct", 9));
+    ASSERT(macro__is_special_form("syntax-quote", 12));
+    /* These should NOT be special forms */
+    ASSERT(!macro__is_special_form("unless", 6));
+    ASSERT(!macro__is_special_form("print", 5));
+    ASSERT(!macro__is_special_form("length", 6));
+    ASSERT(!macro__is_special_form("foo", 3));
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -1932,6 +2178,19 @@ int main(void) {
     RUN(test_parse_syntax_quote_roundtrip);
     RUN(test_syntax_quote_nested_depth);
     RUN(test_tilde_at_outside_syntax_quote_error);
+
+    printf("\n=== Macro Table Tests (US-007) ===\n");
+
+    RUN(test_defmacro_registers_in_table);
+    RUN(test_defmacro_lookup_missing);
+    RUN(test_defmacro_zero_params_registers);
+    RUN(test_defmacro_multiple_register);
+    RUN(test_defmacro_shadow_if_error);
+    RUN(test_defmacro_shadow_spawn_error);
+    RUN(test_defmacro_shadow_special_forms);
+    RUN(test_defmacro_duplicate_error);
+    RUN(test_macro_table_lookup_api);
+    RUN(test_is_special_form);
 
 #undef RUN
 

@@ -11,6 +11,7 @@
 
 /* --- Forward declarations for struct types --- */
 typedef struct StructTypeRegistry StructTypeRegistry;
+typedef struct MacroTable MacroTable;
 
 /* --- Compile Result --- */
 
@@ -20,6 +21,7 @@ typedef struct {
   const char*   error_message;  /* first error message, or NULL */
   bool          suspending;     /* true if top-level code is state-machine transformed */
   StructTypeRegistry* struct_registry; /* struct type metadata for VM */
+  MacroTable*   macro_table;    /* compile-time macro definitions (NULL if none) */
 } CompileResult;
 
 /* --- API --- */
@@ -2166,6 +2168,68 @@ typedef struct {
   uint32_t label_count;                             /* number of resume points (= suspension_count) */
 } SMDispatchContext;
 
+/* --- Macro table --- */
+
+#define MACRO_TABLE_MAX 64
+
+typedef struct {
+  const char*   name;        /* macro name (arena-allocated, NUL-terminated) */
+  uint32_t      name_len;    /* length of name */
+  uint32_t      param_count; /* number of macro parameters */
+  const char**  param_names; /* arena-allocated array of param name strings */
+  uint32_t*     param_name_lens; /* lengths of each param name */
+  JaclClosure*  closure;     /* compiled macro body closure */
+} MacroEntry;
+
+struct MacroTable {
+  MacroEntry entries[MACRO_TABLE_MAX];
+  uint32_t   count;
+};
+
+void macro_table_init(MacroTable* t) {
+  t->count = 0;
+}
+
+MacroEntry* macro_table_lookup(MacroTable* t, const char* name, uint32_t name_len) {
+  for (uint32_t i = 0; i < t->count; i++) {
+    if (t->entries[i].name_len == name_len &&
+        memcmp(t->entries[i].name, name, name_len) == 0) {
+      return &t->entries[i];
+    }
+  }
+  return NULL;
+}
+
+/* Check if a name matches a compiler special form / builtin that macros
+   must not shadow.  Only the core control-flow / binding keywords are
+   blocked — library builtins (print, length, …) are fine to shadow. */
+bool macro__is_special_form(const char* name, uint32_t len) {
+  switch (len) {
+    case 2: return memcmp(name, "if", 2) == 0 ||
+                   memcmp(name, "to", 2) == 0;
+    case 3: return memcmp(name, "def", 3) == 0 ||
+                   memcmp(name, "mut", 3) == 0 ||
+                   memcmp(name, "set", 3) == 0 ||
+                   memcmp(name, "for", 3) == 0 ||
+                   memcmp(name, "try", 3) == 0;
+    case 4: return memcmp(name, "proc", 4) == 0;
+    case 5: return memcmp(name, "while", 5) == 0 ||
+                   memcmp(name, "break", 5) == 0 ||
+                   memcmp(name, "match", 5) == 0 ||
+                   memcmp(name, "quote", 5) == 0 ||
+                   memcmp(name, "spawn", 5) == 0 ||
+                   memcmp(name, "yield", 5) == 0 ||
+                   memcmp(name, "await", 5) == 0;
+    case 6: return memcmp(name, "return", 6) == 0;
+    case 8: return memcmp(name, "defmacro", 8) == 0 ||
+                   memcmp(name, "continue", 8) == 0 ||
+                   memcmp(name, "parallel", 8) == 0;
+    case 9: return memcmp(name, "defstruct", 9) == 0;
+    case 12: return memcmp(name, "syntax-quote", 12) == 0;
+    default: return false;
+  }
+}
+
 /* --- Internal: Compiler state --- */
 
 typedef struct Compiler Compiler;
@@ -2208,6 +2272,7 @@ struct Compiler {
   uint32_t             sm_suspension_idx; /* next suspension point index for SM yield emission */
   SMDispatchContext     sm_dispatch;    /* dispatch table jump patches for SM compilation */
   SuspensionAnalysis*  sm_analysis;    /* suspension analysis for current SM function (or NULL) */
+  MacroTable*          macro_table;    /* compile-time macro definitions (root compiler owns) */
 };
 
 void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -2245,6 +2310,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->sm_suspension_idx = 0;
   memset(&c->sm_dispatch, 0, sizeof(SMDispatchContext));
   c->sm_analysis       = NULL;
+  c->macro_table       = NULL;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -8035,13 +8101,122 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_DEFMACRO: {
-      /* Macro registration will be implemented in US-007.
-       * For now, treat as a declaration that produces nil. */
+      uint32_t col = node->start.column;
+
       if (c->scope_depth > 0) {
-        compiler__error(c, line, node->start.column,
-                        "defmacro must appear at top level");
+        compiler__error(c, line, col, "defmacro must appear at top level");
         break;
       }
+
+      const char* mname     = node->data.defmacro.name;
+      uint32_t    mname_len = node->data.defmacro.name_len;
+
+      /* Error: shadowing a special form */
+      if (macro__is_special_form(mname, mname_len)) {
+        char err[128];
+        snprintf(err, sizeof(err),
+                 "defmacro: '%.*s' shadows a special form",
+                 (int)mname_len, mname);
+        compiler__error(c, line, col, err);
+        break;
+      }
+
+      /* Find the root compiler's macro table */
+      MacroTable* mt = c->macro_table;
+      if (!mt) {
+        Compiler* root = c;
+        while (root->enclosing) root = root->enclosing;
+        mt = root->macro_table;
+      }
+
+      if (mt) {
+        /* Error: duplicate defmacro */
+        if (macro_table_lookup(mt, mname, mname_len)) {
+          char err[128];
+          snprintf(err, sizeof(err),
+                   "defmacro: '%.*s' is already defined",
+                   (int)mname_len, mname);
+          compiler__error(c, line, col, err);
+          break;
+        }
+
+        if (mt->count >= MACRO_TABLE_MAX) {
+          compiler__error(c, line, col, "too many macro definitions");
+          break;
+        }
+
+        /* Compile macro body block to a closure */
+        uint32_t param_count = node->data.defmacro.param_count;
+
+        JaclClosure* closure = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
+        chunk_init(&closure->chunk, c->arena);
+        closure->upvalue_count  = 0;
+        closure->upvalues       = NULL;
+        closure->param_count    = (uint8_t)param_count;
+        closure->min_args       = (uint8_t)param_count;
+        closure->variadic       = false;
+        closure->pinned         = false;
+        closure->pin_worker_id  = -1;
+        closure->is_generator   = false;
+        closure->is_sm_compiled = false;
+        closure->sm_field_count = 0;
+
+        /* Copy macro name to arena */
+        char* name_copy = (char*)arena_alloc(c->arena, mname_len + 1);
+        memcpy(name_copy, mname, mname_len);
+        name_copy[mname_len] = '\0';
+        closure->name = name_copy;
+
+        /* Set up param_names as inline strings */
+        if (param_count > 0) {
+          closure->param_names = (JaclVal*)arena_alloc(c->arena,
+                                    sizeof(JaclVal) * param_count);
+          for (uint32_t i = 0; i < param_count; i++) {
+            closure->param_names[i] = jacl_inline_string(
+                node->data.defmacro.param_names[i],
+                node->data.defmacro.param_name_lens[i]);
+          }
+        } else {
+          closure->param_names = NULL;
+        }
+
+        /* Create body compiler */
+        Compiler body_compiler;
+        compiler__init(&body_compiler, &closure->chunk, c->arena,
+                       c->intern_table, c->heap);
+        body_compiler.scope_depth = 1;
+        body_compiler.enclosing   = c;
+        body_compiler.macro_table = mt;
+
+        /* Add params as locals */
+        for (uint32_t i = 0; i < param_count; i++) {
+          compiler__add_local(&body_compiler, closure->param_names[i], line, col);
+          body_compiler.locals[body_compiler.local_count - 1].is_param = true;
+        }
+
+        /* Compile body block */
+        compiler__compile_block_expr(&body_compiler, node->data.defmacro.body);
+        compiler__emit_byte(&body_compiler, OP_RETURN, line);
+
+        /* Propagate errors */
+        c->error_count += body_compiler.error_count;
+        if (!c->first_error && body_compiler.first_error) {
+          c->first_error = body_compiler.first_error;
+        }
+
+        closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
+
+        /* Register in macro table */
+        MacroEntry* entry = &mt->entries[mt->count++];
+        entry->name           = name_copy;
+        entry->name_len       = mname_len;
+        entry->param_count    = param_count;
+        entry->param_names    = node->data.defmacro.param_names;
+        entry->param_name_lens = node->data.defmacro.param_name_lens;
+        entry->closure        = closure;
+      }
+
+      /* defmacro is a declaration, produces nil */
       compiler__emit_byte(c, OP_NIL, line);
       break;
     }
@@ -8193,6 +8368,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   chunk_init(&result.chunk, arena);
   result.error_count = parse.error_count;
   result.suspending  = false;
+  result.macro_table = NULL;
 
   /* Pre-compilation suspension analysis */
   SuspensionMap suspension_map = compiler__analyze_suspension(
@@ -8209,6 +8385,13 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
       reg->count = 0;
     }
     c.struct_registry = reg;
+  }
+
+  /* Allocate macro table for compile-time macro definitions */
+  {
+    MacroTable* mt = (MacroTable*)arena_alloc(arena, sizeof(MacroTable));
+    macro_table_init(mt);
+    c.macro_table = mt;
   }
 
   /* Check if top-level code is suspending */
@@ -8390,6 +8573,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   result.error_count  += c.error_count;
   result.error_message = c.first_error;
   result.struct_registry = c.struct_registry;
+  result.macro_table     = c.macro_table;
   return result;
 }
 
