@@ -1153,6 +1153,303 @@ static int test_from_ast_gc_survives(void) {
     TEST_PASS();
 }
 
+/* ===== US-003: Syntax object to AstNode conversion ===== */
+
+/* Helper: round-trip a source string through AST → syntax → AST → pretty-print */
+static const char *roundtrip_pp(const char *src, arena_t *arena, VM *vm,
+                                JaclInternTable *intern) {
+    ParseResult pr = parse_source(src, arena);
+    if (pr.count == 0) return NULL;
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm->heap, intern);
+    AstNode *back = syntax_to_ast(syn, arena);
+    if (!back) return NULL;
+    return ast_pretty_print(back, arena);
+}
+
+/* Test: round-trip lit-int */
+static int test_to_ast_lit_int(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("42", &arena);
+    ASSERT(pr.count >= 1);
+    const char *orig = ast_pretty_print(pr.nodes[0], &arena);
+
+    const char *rt = roundtrip_pp("42", &arena, &vm, &intern);
+    ASSERT(rt != NULL);
+    ASSERT_STR_EQ(rt, orig);
+    ASSERT_STR_EQ(rt, "42");
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: round-trip lit-float */
+static int test_to_ast_lit_float(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char *rt = roundtrip_pp("3.14", &arena, &vm, &intern);
+    ASSERT(rt != NULL);
+    ASSERT_STR_EQ(rt, "3.14");
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: round-trip lit-string */
+static int test_to_ast_lit_string(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("\"hello\"", &arena);
+    ASSERT(pr.count >= 1);
+    const char *orig = ast_pretty_print(pr.nodes[0], &arena);
+
+    const char *rt = roundtrip_pp("\"hello\"", &arena, &vm, &intern);
+    ASSERT(rt != NULL);
+    ASSERT_STR_EQ(rt, orig);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: round-trip var-ref */
+static int test_to_ast_var_ref(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char *rt = roundtrip_pp("$x", &arena, &vm, &intern);
+    ASSERT(rt != NULL);
+    ASSERT_STR_EQ(rt, "$x");
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: round-trip simple command [+ 1 2] */
+static int test_to_ast_command(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("[+ 1 2]", &arena);
+    ASSERT(pr.count >= 1);
+    const char *orig = ast_pretty_print(pr.nodes[0], &arena);
+
+    const char *rt = roundtrip_pp("[+ 1 2]", &arena, &vm, &intern);
+    ASSERT(rt != NULL);
+    ASSERT_STR_EQ(rt, orig);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: round-trip with nested commands [if [> $x 3] { print $x }] */
+static int test_to_ast_nested_command(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char *src = "[if [> $x 3] { print $x }]";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.count >= 1);
+    const char *orig = ast_pretty_print(pr.nodes[0], &arena);
+
+    const char *rt = roundtrip_pp(src, &arena, &vm, &intern);
+    ASSERT(rt != NULL);
+    ASSERT_STR_EQ(rt, orig);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: round-trip block with multiple commands */
+static int test_to_ast_block_multi(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char *src = "{ print 1; print 2 }";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.count >= 1);
+    const char *orig = ast_pretty_print(pr.nodes[0], &arena);
+
+    const char *rt = roundtrip_pp(src, &arena, &vm, &intern);
+    ASSERT(rt != NULL);
+    ASSERT_STR_EQ(rt, orig);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: source positions round-trip */
+static int test_to_ast_source_positions(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    ParseResult pr = parse_source("42", &arena);
+    ASSERT(pr.count >= 1);
+    AstNode *orig_node = pr.nodes[0];
+
+    JaclVal syn = syntax_from_ast(orig_node, &vm.heap, &intern);
+    AstNode *back = syntax_to_ast(syn, &arena);
+    ASSERT(back != NULL);
+
+    /* Source positions should be preserved */
+    ASSERT_U32_EQ(back->start.line, orig_node->start.line);
+    ASSERT_U32_EQ(back->start.column, orig_node->start.column);
+    ASSERT_U32_EQ(back->start.offset, orig_node->start.offset);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: nil syntax returns NULL */
+static int test_to_ast_nil_returns_null(void) {
+    arena_t arena = {0};
+    AstNode *result = syntax_to_ast(JACL_NIL, &arena);
+    ASSERT(result == NULL);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: break round-trip */
+static int test_to_ast_break(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char *src = "break 42";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.count >= 1);
+    const char *orig = ast_pretty_print(pr.nodes[0], &arena);
+
+    const char *rt = roundtrip_pp(src, &arena, &vm, &intern);
+    ASSERT(rt != NULL);
+    ASSERT_STR_EQ(rt, orig);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: continue round-trip */
+static int test_to_ast_continue(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char *rt = roundtrip_pp("continue", &arena, &vm, &intern);
+    ASSERT(rt != NULL);
+    ASSERT_STR_EQ(rt, "continue");
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: return round-trip */
+static int test_to_ast_return(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char *src = "return 99";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.count >= 1);
+    const char *orig = ast_pretty_print(pr.nodes[0], &arena);
+
+    const char *rt = roundtrip_pp(src, &arena, &vm, &intern);
+    ASSERT(rt != NULL);
+    ASSERT_STR_EQ(rt, orig);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: spread round-trip */
+static int test_to_ast_spread(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+
+    const char *src = "[foo ..$xs]";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.count >= 1);
+    const char *orig = ast_pretty_print(pr.nodes[0], &arena);
+
+    const char *rt = roundtrip_pp(src, &arena, &vm, &intern);
+    ASSERT(rt != NULL);
+    ASSERT_STR_EQ(rt, orig);
+
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -1206,6 +1503,22 @@ int main(void) {
     RUN(test_from_ast_error_returns_nil);
     RUN(test_from_ast_null_returns_nil);
     RUN(test_from_ast_gc_survives);
+
+    printf("\n=== Syntax-to-AST Conversion Tests (US-003) ===\n");
+
+    RUN(test_to_ast_lit_int);
+    RUN(test_to_ast_lit_float);
+    RUN(test_to_ast_lit_string);
+    RUN(test_to_ast_var_ref);
+    RUN(test_to_ast_command);
+    RUN(test_to_ast_nested_command);
+    RUN(test_to_ast_block_multi);
+    RUN(test_to_ast_source_positions);
+    RUN(test_to_ast_nil_returns_null);
+    RUN(test_to_ast_break);
+    RUN(test_to_ast_continue);
+    RUN(test_to_ast_return);
+    RUN(test_to_ast_spread);
 
 #undef RUN
 

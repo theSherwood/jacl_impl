@@ -1491,6 +1491,7 @@ extern JaclVal gc_alloc_syntax (ThreadHeap *heap);
 
 /* --- syntax.c --- */
 extern JaclVal syntax_from_ast (AstNode *node, ThreadHeap *heap, JaclInternTable *intern);
+extern AstNode *syntax_to_ast (JaclVal syn_val, arena_t *arena);
 
 /* --- string.c --- */
 extern uint32_t string__fnv1a (const char *data, uint32_t length);

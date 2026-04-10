@@ -218,4 +218,322 @@ JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap,
     return syn_val;
 }
 
+/* -------------------------------------------------------------------------
+ * Helper: copy string data from a JaclVal string into arena memory
+ * Returns the arena-allocated C string and sets *out_len to its byte length.
+ * ------------------------------------------------------------------------- */
+
+static const char *syntax__string_to_arena(JaclVal str_val, arena_t *arena,
+                                           uint32_t *out_len) {
+    uint32_t byte_len = jacl_string_byte_len(str_val);
+    char *buf = (char *)arena_alloc(arena, byte_len + 1);
+    jacl_string_data(str_val, buf, byte_len + 1);
+    buf[byte_len] = '\0';
+    *out_len = byte_len;
+    return buf;
+}
+
+/* -------------------------------------------------------------------------
+ * Helper: set source position on an AstNode from a syntax object
+ * ------------------------------------------------------------------------- */
+
+static void syntax__set_ast_pos(AstNode *node, JaclSyntax *syn) {
+    node->start.line   = syn->pos_line;
+    node->start.column = syn->pos_col;
+    node->start.offset = syn->pos_offset;
+    node->end = node->start;  /* approximate — original end not stored */
+}
+
+/* -------------------------------------------------------------------------
+ * syntax_to_ast: recursively convert JaclVal syntax object → AstNode*
+ * ------------------------------------------------------------------------- */
+
+AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena) {
+    if (jacl_is_nil(syn_val)) return NULL;
+    if (!jacl_is_syntax(syn_val)) return NULL;
+
+    JaclSyntax *syn = jacl_as_syntax(syn_val);
+    AstNode *node = ast_alloc(arena);
+    memset(node, 0, sizeof(AstNode));
+    syntax__set_ast_pos(node, syn);
+
+    switch ((SyntaxKind)syn->kind) {
+
+    case SYNTAX_COMMAND: {
+        node->type = AST_COMMAND;
+        node->data.command.head = syntax_to_ast(syn->data.command.head, arena);
+        /* Convert args vec */
+        jacl_vec_root *args = (jacl_vec_root *)jacl_as_ptr(syn->data.command.args);
+        uint32_t argc = jacl_vec_count(args);
+        node->data.command.args = ast_alloc_array(arena, argc);
+        node->data.command.arg_count = argc;
+        for (uint32_t i = 0; i < argc; i++) {
+            node->data.command.args[i] =
+                syntax_to_ast(jacl_vec_get(args, i).value, arena);
+        }
+        break;
+    }
+
+    case SYNTAX_LIT_INT:
+        node->type = AST_LIT_INT;
+        node->data.lit_int.value = syn->data.lit_int.value;
+        break;
+
+    case SYNTAX_LIT_FLOAT:
+        node->type = AST_LIT_FLOAT;
+        node->data.lit_float.value = syn->data.lit_float.value;
+        break;
+
+    case SYNTAX_LIT_STRING: {
+        node->type = AST_LIT_STRING;
+        node->data.lit_string.value =
+            syntax__string_to_arena(syn->data.lit_string.value, arena,
+                                    &node->data.lit_string.length);
+        break;
+    }
+
+    case SYNTAX_VAR_REF: {
+        node->type = AST_VAR_REF;
+        node->data.var_ref.name =
+            syntax__string_to_arena(syn->data.var_ref.name, arena,
+                                    &node->data.var_ref.length);
+        break;
+    }
+
+    case SYNTAX_BLOCK: {
+        node->type = AST_BLOCK;
+        jacl_vec_root *cmds =
+            (jacl_vec_root *)jacl_as_ptr(syn->data.block.commands);
+        uint32_t cnt = jacl_vec_count(cmds);
+        node->data.block.commands = ast_alloc_array(arena, cnt);
+        node->data.block.count = cnt;
+        node->data.block.trailing_semi = false;
+        for (uint32_t i = 0; i < cnt; i++) {
+            node->data.block.commands[i] =
+                syntax_to_ast(jacl_vec_get(cmds, i).value, arena);
+        }
+        break;
+    }
+
+    case SYNTAX_INTERP_STRING: {
+        node->type = AST_INTERP_STRING;
+        jacl_vec_root *segs =
+            (jacl_vec_root *)jacl_as_ptr(syn->data.interp_string.segments);
+        uint32_t cnt = jacl_vec_count(segs);
+        node->data.interp_string.segments = ast_alloc_array(arena, cnt);
+        node->data.interp_string.count = cnt;
+        for (uint32_t i = 0; i < cnt; i++) {
+            node->data.interp_string.segments[i] =
+                syntax_to_ast(jacl_vec_get(segs, i).value, arena);
+        }
+        break;
+    }
+
+    case SYNTAX_SPREAD:
+        node->type = AST_SPREAD;
+        node->data.spread.expr = syntax_to_ast(syn->data.spread.child, arena);
+        break;
+
+    case SYNTAX_USE: {
+        node->type = AST_USE;
+        jacl_vec_root *items =
+            (jacl_vec_root *)jacl_as_ptr(syn->data.use_decl.child);
+        uint32_t item_count = jacl_vec_count(items);
+        /* First element is the path, rest are names */
+        if (item_count > 0) {
+            JaclVal path_val = jacl_vec_get(items, 0).value;
+            node->data.use_decl.path =
+                syntax__string_to_arena(path_val, arena,
+                                        &node->data.use_decl.path_len);
+        }
+        uint32_t name_count = item_count > 0 ? item_count - 1 : 0;
+        node->data.use_decl.name_count = name_count;
+        if (name_count > 0) {
+            node->data.use_decl.names =
+                (const char **)arena_alloc(arena, sizeof(char *) * name_count);
+            node->data.use_decl.name_lens =
+                (uint32_t *)arena_alloc(arena, sizeof(uint32_t) * name_count);
+            for (uint32_t i = 0; i < name_count; i++) {
+                JaclVal name_val = jacl_vec_get(items, i + 1).value;
+                node->data.use_decl.names[i] =
+                    syntax__string_to_arena(name_val, arena,
+                                            &node->data.use_decl.name_lens[i]);
+            }
+        }
+        break;
+    }
+
+    case SYNTAX_DEFSTRUCT: {
+        node->type = AST_DEFSTRUCT;
+        jacl_vec_root *items =
+            (jacl_vec_root *)jacl_as_ptr(syn->data.defstruct.child);
+        uint32_t item_count = jacl_vec_count(items);
+        /* First element is name, rest are type/field pairs */
+        if (item_count > 0) {
+            JaclVal name_val = jacl_vec_get(items, 0).value;
+            node->data.defstruct.name =
+                syntax__string_to_arena(name_val, arena,
+                                        &node->data.defstruct.name_len);
+        }
+        uint32_t field_count = item_count > 1 ? (item_count - 1) / 2 : 0;
+        node->data.defstruct.field_count = field_count;
+        if (field_count > 0) {
+            node->data.defstruct.field_types =
+                (const char **)arena_alloc(arena, sizeof(char *) * field_count);
+            node->data.defstruct.field_type_lens =
+                (uint32_t *)arena_alloc(arena, sizeof(uint32_t) * field_count);
+            node->data.defstruct.field_names =
+                (const char **)arena_alloc(arena, sizeof(char *) * field_count);
+            node->data.defstruct.field_name_lens =
+                (uint32_t *)arena_alloc(arena, sizeof(uint32_t) * field_count);
+            for (uint32_t i = 0; i < field_count; i++) {
+                JaclVal type_val = jacl_vec_get(items, 1 + i * 2).value;
+                JaclVal name_val = jacl_vec_get(items, 2 + i * 2).value;
+                node->data.defstruct.field_types[i] =
+                    syntax__string_to_arena(type_val, arena,
+                        &node->data.defstruct.field_type_lens[i]);
+                node->data.defstruct.field_names[i] =
+                    syntax__string_to_arena(name_val, arena,
+                        &node->data.defstruct.field_name_lens[i]);
+            }
+        }
+        break;
+    }
+
+    case SYNTAX_BREAK:
+        node->type = AST_BREAK;
+        node->data.break_stmt.value =
+            jacl_is_nil(syn->data.break_stmt.value)
+                ? NULL
+                : syntax_to_ast(syn->data.break_stmt.value, arena);
+        break;
+
+    case SYNTAX_CONTINUE:
+        node->type = AST_CONTINUE;
+        break;
+
+    case SYNTAX_RETURN:
+        node->type = AST_RETURN;
+        node->data.return_stmt.value =
+            jacl_is_nil(syn->data.return_stmt.value)
+                ? NULL
+                : syntax_to_ast(syn->data.return_stmt.value, arena);
+        break;
+
+    case SYNTAX_DESTRUCTURE_VEC: {
+        node->type = AST_DESTRUCTURE_VEC;
+        jacl_vec_root *names =
+            (jacl_vec_root *)jacl_as_ptr(syn->data.destructure_vec.names);
+        uint32_t total = jacl_vec_count(names);
+        /* Count regular names (not ".." prefixed) and find rest name */
+        uint32_t regular_count = 0;
+        for (uint32_t i = 0; i < total; i++) {
+            JaclVal nv = jacl_vec_get(names, i).value;
+            uint32_t blen = jacl_string_byte_len(nv);
+            char tmp[4];
+            jacl_string_data(nv, tmp, 2);
+            if (blen >= 2 && tmp[0] == '.' && tmp[1] == '.') {
+                /* rest name */
+            } else {
+                regular_count++;
+            }
+        }
+        node->data.destructure_vec.count = regular_count;
+        node->data.destructure_vec.names =
+            (const char **)arena_alloc(arena, sizeof(char *) * regular_count);
+        node->data.destructure_vec.name_lens =
+            (uint32_t *)arena_alloc(arena, sizeof(uint32_t) * regular_count);
+        node->data.destructure_vec.types = NULL;
+        node->data.destructure_vec.type_lens = NULL;
+        node->data.destructure_vec.rest_name = NULL;
+        node->data.destructure_vec.rest_name_len = 0;
+        uint32_t ri = 0;
+        for (uint32_t i = 0; i < total; i++) {
+            JaclVal nv = jacl_vec_get(names, i).value;
+            uint32_t blen = jacl_string_byte_len(nv);
+            char prefix[4];
+            uint32_t plen = blen < 2 ? blen : 2;
+            jacl_string_data(nv, prefix, plen);
+            if (blen >= 2 && prefix[0] == '.' && prefix[1] == '.') {
+                /* rest name: skip ".." prefix */
+                uint32_t rlen = blen - 2;
+                char *rbuf = (char *)arena_alloc(arena, rlen + 1);
+                char full[256];
+                jacl_string_data(nv, full, blen);
+                memcpy(rbuf, full + 2, rlen);
+                rbuf[rlen] = '\0';
+                node->data.destructure_vec.rest_name = rbuf;
+                node->data.destructure_vec.rest_name_len = rlen;
+            } else {
+                node->data.destructure_vec.names[ri] =
+                    syntax__string_to_arena(nv, arena,
+                        &node->data.destructure_vec.name_lens[ri]);
+                ri++;
+            }
+        }
+        break;
+    }
+
+    case SYNTAX_DESTRUCTURE_NAMED: {
+        node->type = AST_DESTRUCTURE_NAMED;
+        jacl_vec_root *names =
+            (jacl_vec_root *)jacl_as_ptr(syn->data.destructure_named.names);
+        uint32_t total = jacl_vec_count(names);
+        uint32_t regular_count = 0;
+        for (uint32_t i = 0; i < total; i++) {
+            JaclVal nv = jacl_vec_get(names, i).value;
+            uint32_t blen = jacl_string_byte_len(nv);
+            char tmp[4];
+            jacl_string_data(nv, tmp, 2);
+            if (blen >= 2 && tmp[0] == '.' && tmp[1] == '.') {
+                /* rest name */
+            } else {
+                regular_count++;
+            }
+        }
+        node->data.destructure_named.count = regular_count;
+        node->data.destructure_named.names =
+            (const char **)arena_alloc(arena, sizeof(char *) * regular_count);
+        node->data.destructure_named.name_lens =
+            (uint32_t *)arena_alloc(arena, sizeof(uint32_t) * regular_count);
+        node->data.destructure_named.types = NULL;
+        node->data.destructure_named.type_lens = NULL;
+        node->data.destructure_named.rest_name = NULL;
+        node->data.destructure_named.rest_name_len = 0;
+        node->data.destructure_named.spread_all = 0;
+        uint32_t ri = 0;
+        for (uint32_t i = 0; i < total; i++) {
+            JaclVal nv = jacl_vec_get(names, i).value;
+            uint32_t blen = jacl_string_byte_len(nv);
+            char prefix[4];
+            uint32_t plen = blen < 2 ? blen : 2;
+            jacl_string_data(nv, prefix, plen);
+            if (blen >= 2 && prefix[0] == '.' && prefix[1] == '.') {
+                uint32_t rlen = blen - 2;
+                if (rlen > 0) {
+                    char *rbuf = (char *)arena_alloc(arena, rlen + 1);
+                    char full[256];
+                    jacl_string_data(nv, full, blen);
+                    memcpy(rbuf, full + 2, rlen);
+                    rbuf[rlen] = '\0';
+                    node->data.destructure_named.rest_name = rbuf;
+                    node->data.destructure_named.rest_name_len = rlen;
+                } else {
+                    node->data.destructure_named.spread_all = 1;
+                }
+            } else {
+                node->data.destructure_named.names[ri] =
+                    syntax__string_to_arena(nv, arena,
+                        &node->data.destructure_named.name_lens[ri]);
+                ri++;
+            }
+        }
+        break;
+    }
+
+    }
+
+    return node;
+}
+
 #endif /* SYNTAX_C */
