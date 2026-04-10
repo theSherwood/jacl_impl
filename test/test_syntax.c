@@ -23,11 +23,14 @@ static int test_syntax_kind_enum(void) {
     ASSERT_INT_EQ(SYNTAX_DEFSTRUCT, 9);
     ASSERT_INT_EQ(SYNTAX_DEFMACRO, 10);
     ASSERT_INT_EQ(SYNTAX_QUOTE, 11);
-    ASSERT_INT_EQ(SYNTAX_BREAK, 12);
-    ASSERT_INT_EQ(SYNTAX_CONTINUE, 13);
-    ASSERT_INT_EQ(SYNTAX_RETURN, 14);
-    ASSERT_INT_EQ(SYNTAX_DESTRUCTURE_VEC, 15);
-    ASSERT_INT_EQ(SYNTAX_DESTRUCTURE_NAMED, 16);
+    ASSERT_INT_EQ(SYNTAX_SYNTAX_QUOTE, 12);
+    ASSERT_INT_EQ(SYNTAX_UNQUOTE, 13);
+    ASSERT_INT_EQ(SYNTAX_UNQUOTE_SPLICING, 14);
+    ASSERT_INT_EQ(SYNTAX_BREAK, 15);
+    ASSERT_INT_EQ(SYNTAX_CONTINUE, 16);
+    ASSERT_INT_EQ(SYNTAX_RETURN, 17);
+    ASSERT_INT_EQ(SYNTAX_DESTRUCTURE_VEC, 18);
+    ASSERT_INT_EQ(SYNTAX_DESTRUCTURE_NAMED, 19);
     TEST_PASS();
 }
 
@@ -1679,6 +1682,157 @@ static int test_parse_quote_inside_command(void) {
     TEST_PASS();
 }
 
+/* ===== US-006: syntax-quote, ~, ~@ parsing tests ===== */
+
+/* Test: parse syntax-quote [if [not ~cond] ~body] — AST_SYNTAX_QUOTE with unquotes */
+static int test_parse_syntax_quote_with_unquotes(void) {
+    arena_t arena = {0};
+    const char *src = "syntax-quote [if [not ~$cond] ~$body]";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.error_count == 0);
+    ASSERT(pr.count >= 1);
+    AstNode *node = pr.nodes[0];
+    ASSERT_INT_EQ(node->type, AST_SYNTAX_QUOTE);
+    /* Child should be a command [if ...] */
+    AstNode *child = node->data.syntax_quote.child;
+    ASSERT_INT_EQ(child->type, AST_COMMAND);
+    /* Second arg [not ~$cond] is a command */
+    AstNode *not_cmd = child->data.command.args[0];
+    ASSERT_INT_EQ(not_cmd->type, AST_COMMAND);
+    /* The arg to not should be an unquote wrapping $cond */
+    ASSERT_U32_EQ(not_cmd->data.command.arg_count, 1);
+    AstNode *unq = not_cmd->data.command.args[0];
+    ASSERT_INT_EQ(unq->type, AST_UNQUOTE);
+    ASSERT_INT_EQ(unq->data.unquote.child->type, AST_VAR_REF);
+    /* Third arg ~$body is also an unquote */
+    AstNode *body_unq = child->data.command.args[1];
+    ASSERT_INT_EQ(body_unq->type, AST_UNQUOTE);
+    ASSERT_INT_EQ(body_unq->data.unquote.child->type, AST_VAR_REF);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: parse syntax-quote [foo ~@$args] — AST_UNQUOTE_SPLICING */
+static int test_parse_syntax_quote_unquote_splicing(void) {
+    arena_t arena = {0};
+    const char *src = "syntax-quote [foo ~@$args]";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.error_count == 0);
+    ASSERT(pr.count >= 1);
+    AstNode *node = pr.nodes[0];
+    ASSERT_INT_EQ(node->type, AST_SYNTAX_QUOTE);
+    AstNode *child = node->data.syntax_quote.child;
+    ASSERT_INT_EQ(child->type, AST_COMMAND);
+    /* Second arg should be unquote-splicing */
+    AstNode *splice = child->data.command.args[0];
+    ASSERT_INT_EQ(splice->type, AST_UNQUOTE_SPLICING);
+    ASSERT_INT_EQ(splice->data.unquote_splicing.child->type, AST_VAR_REF);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: ~ outside syntax-quote still works as logical NOT (not an error) */
+static int test_tilde_outside_syntax_quote_error(void) {
+    arena_t arena = {0};
+    /* ~ outside syntax-quote is the logical NOT operator in infix context */
+    const char *src = "(~$x)";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.error_count == 0);
+    ASSERT(pr.count >= 1);
+    /* Should parse as [~ $x] command */
+    AstNode *node = pr.nodes[0];
+    ASSERT_INT_EQ(node->type, AST_COMMAND);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: pretty-print syntax-quote, ~, ~@ */
+static int test_parse_syntax_quote_pretty_print(void) {
+    arena_t arena = {0};
+    const char *src = "syntax-quote [if [not ~$cond] ~$body]";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.error_count == 0);
+    ASSERT(pr.count >= 1);
+    const char *pp = ast_pretty_print(pr.nodes[0], &arena);
+    /* Should contain "syntax-quote" */
+    ASSERT(strstr(pp, "syntax-quote") != NULL);
+    /* Should contain unquote markers */
+    ASSERT(strstr(pp, "~$cond") != NULL);
+    ASSERT(strstr(pp, "~$body") != NULL);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: round-trip syntax-quote through syntax objects */
+static int test_parse_syntax_quote_roundtrip(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern;
+    intern_table_init(&intern, &arena);
+    vm.intern_table = &intern;
+    const char *src = "syntax-quote [foo ~$bar]";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.error_count == 0);
+    ASSERT(pr.count >= 1);
+    /* Convert to syntax object */
+    JaclVal syn = syntax_from_ast(pr.nodes[0], &vm.heap, &intern);
+    ASSERT(jacl_is_syntax(syn));
+    JaclSyntax *s = jacl_as_syntax(syn);
+    ASSERT_INT_EQ(s->kind, SYNTAX_SYNTAX_QUOTE);
+    /* Convert back to AST */
+    AstNode *rt = syntax_to_ast(syn, &arena);
+    ASSERT(rt != NULL);
+    ASSERT_INT_EQ(rt->type, AST_SYNTAX_QUOTE);
+    /* Pretty-print both should match */
+    const char *pp_orig = ast_pretty_print(pr.nodes[0], &arena);
+    const char *pp_rt = ast_pretty_print(rt, &arena);
+    ASSERT_STR_EQ(pp_orig, pp_rt);
+    intern_table_destroy(&intern);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: nested syntax-quote — inner ~ stays literal at depth > 1 */
+static int test_syntax_quote_nested_depth(void) {
+    arena_t arena = {0};
+    /* At depth 2, ~ should NOT produce AST_UNQUOTE */
+    const char *src = "syntax-quote [foo syntax-quote [bar ~$baz]]";
+    ParseResult pr = parse_source(src, &arena);
+    ASSERT(pr.error_count == 0);
+    ASSERT(pr.count >= 1);
+    AstNode *outer = pr.nodes[0];
+    ASSERT_INT_EQ(outer->type, AST_SYNTAX_QUOTE);
+    /* The child command [foo syntax-quote [...]] */
+    AstNode *outer_cmd = outer->data.syntax_quote.child;
+    ASSERT_INT_EQ(outer_cmd->type, AST_COMMAND);
+    /* The second arg should be a syntax-quote node */
+    AstNode *inner_sq = outer_cmd->data.command.args[0];
+    ASSERT_INT_EQ(inner_sq->type, AST_SYNTAX_QUOTE);
+    /* Inside the inner syntax-quote, ~ should NOT be AST_UNQUOTE
+       (it's at depth 2, so it's treated as a literal) */
+    AstNode *inner_cmd = inner_sq->data.syntax_quote.child;
+    ASSERT_INT_EQ(inner_cmd->type, AST_COMMAND);
+    /* The ~ at depth 2 falls through to atom parsing — becomes [~ $baz] command */
+    AstNode *inner_arg = inner_cmd->data.command.args[0];
+    /* At depth 2, ~ is literal, so this is NOT AST_UNQUOTE */
+    ASSERT(inner_arg->type != AST_UNQUOTE);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: ~@ outside syntax-quote produces error */
+static int test_tilde_at_outside_syntax_quote_error(void) {
+    arena_t arena = {0};
+    const char *src = "~@$x";
+    ParseResult pr = parse_source(src, &arena);
+    /* Should have an error */
+    ASSERT(pr.error_count > 0);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -1768,6 +1922,16 @@ int main(void) {
     RUN(test_parse_quote_var_pretty_print);
     RUN(test_quote_roundtrip);
     RUN(test_parse_quote_inside_command);
+
+    printf("\n=== Syntax-Quote Parsing Tests (US-006) ===\n");
+
+    RUN(test_parse_syntax_quote_with_unquotes);
+    RUN(test_parse_syntax_quote_unquote_splicing);
+    RUN(test_tilde_outside_syntax_quote_error);
+    RUN(test_parse_syntax_quote_pretty_print);
+    RUN(test_parse_syntax_quote_roundtrip);
+    RUN(test_syntax_quote_nested_depth);
+    RUN(test_tilde_at_outside_syntax_quote_error);
 
 #undef RUN
 

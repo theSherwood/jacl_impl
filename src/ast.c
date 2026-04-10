@@ -27,6 +27,9 @@ typedef enum {
   AST_DEFSTRUCT,     /* defstruct Name [field :type] ... */
   AST_DEFMACRO,      /* defmacro name {params} {body} */
   AST_QUOTE,         /* quote <expr> — unevaluated syntax */
+  AST_SYNTAX_QUOTE,  /* syntax-quote <expr> — template with unquote holes */
+  AST_UNQUOTE,       /* ~<expr> inside syntax-quote */
+  AST_UNQUOTE_SPLICING, /* ~@<expr> inside syntax-quote */
   AST_BREAK,         /* break or break $value */
   AST_CONTINUE,      /* continue */
   AST_RETURN,        /* return or return $value */
@@ -76,6 +79,9 @@ struct AstNode {
              uint32_t param_count;
              AstNode* body; }                                     defmacro;
     struct { AstNode* child; }                                     quote;
+    struct { AstNode* child; }                                     syntax_quote;
+    struct { AstNode* child; }                                     unquote;
+    struct { AstNode* child; }                                     unquote_splicing;
     struct { AstNode* value; /* NULL if no value */ }              break_stmt;
     struct { AstNode* value; /* NULL if no value */ }              return_stmt;
     struct { const char** names; uint32_t* name_lens;
@@ -428,6 +434,21 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
     case AST_QUOTE: {
       ast__buf_cstr(b, "quote ");
       ast__pp_node(b, node->data.quote.child);
+      break;
+    }
+    case AST_SYNTAX_QUOTE: {
+      ast__buf_cstr(b, "syntax-quote ");
+      ast__pp_node(b, node->data.syntax_quote.child);
+      break;
+    }
+    case AST_UNQUOTE: {
+      ast__buf_char(b, '~');
+      ast__pp_node(b, node->data.unquote.child);
+      break;
+    }
+    case AST_UNQUOTE_SPLICING: {
+      ast__buf_cstr(b, "~@");
+      ast__pp_node(b, node->data.unquote_splicing.child);
       break;
     }
     case AST_BREAK: {

@@ -147,6 +147,24 @@ JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap,
                                                  heap, intern);
         break;
 
+    case AST_SYNTAX_QUOTE:
+        syn->kind = SYNTAX_SYNTAX_QUOTE;
+        syn->data.syntax_quote.child = syntax_from_ast(
+            node->data.syntax_quote.child, heap, intern);
+        break;
+
+    case AST_UNQUOTE:
+        syn->kind = SYNTAX_UNQUOTE;
+        syn->data.unquote.child = syntax_from_ast(
+            node->data.unquote.child, heap, intern);
+        break;
+
+    case AST_UNQUOTE_SPLICING:
+        syn->kind = SYNTAX_UNQUOTE_SPLICING;
+        syn->data.unquote_splicing.child = syntax_from_ast(
+            node->data.unquote_splicing.child, heap, intern);
+        break;
+
     case AST_DEFMACRO: {
         syn->kind = SYNTAX_DEFMACRO;
         /* Simplified: store [name, param1, param2, ..., body_syntax] */
@@ -428,6 +446,24 @@ AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena) {
     case SYNTAX_QUOTE:
         node->type = AST_QUOTE;
         node->data.quote.child = syntax_to_ast(syn->data.quote.child, arena);
+        break;
+
+    case SYNTAX_SYNTAX_QUOTE:
+        node->type = AST_SYNTAX_QUOTE;
+        node->data.syntax_quote.child = syntax_to_ast(
+            syn->data.syntax_quote.child, arena);
+        break;
+
+    case SYNTAX_UNQUOTE:
+        node->type = AST_UNQUOTE;
+        node->data.unquote.child = syntax_to_ast(
+            syn->data.unquote.child, arena);
+        break;
+
+    case SYNTAX_UNQUOTE_SPLICING:
+        node->type = AST_UNQUOTE_SPLICING;
+        node->data.unquote_splicing.child = syntax_to_ast(
+            syn->data.unquote_splicing.child, arena);
         break;
 
     case SYNTAX_DEFMACRO: {

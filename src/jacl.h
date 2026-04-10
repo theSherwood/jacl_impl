@@ -262,6 +262,9 @@ typedef enum {
     SYNTAX_DEFSTRUCT,
     SYNTAX_DEFMACRO,
     SYNTAX_QUOTE,
+    SYNTAX_SYNTAX_QUOTE,
+    SYNTAX_UNQUOTE,
+    SYNTAX_UNQUOTE_SPLICING,
     SYNTAX_BREAK,
     SYNTAX_CONTINUE,
     SYNTAX_RETURN,
@@ -288,6 +291,9 @@ typedef struct {
         struct { JaclVal child; }               defstruct;
         struct { JaclVal child; }               defmacro;
         struct { JaclVal child; }               quote;
+        struct { JaclVal child; }               syntax_quote;
+        struct { JaclVal child; }               unquote;
+        struct { JaclVal child; }               unquote_splicing;
         struct { JaclVal value; }               break_stmt;
         struct { JaclVal value; }               return_stmt;
         struct { JaclVal names; }               destructure_vec;
@@ -392,12 +398,14 @@ typedef enum {
   TOKEN_AND,
   TOKEN_OR,
   TOKEN_NOT,
+  TOKEN_TILDE_AT,
   TOKEN_EQUALS,
   TOKEN_COLON,
   TOKEN_DOUBLE_COLON,
   TOKEN_PROC,
   TOKEN_DEFMACRO,
   TOKEN_QUOTE,
+  TOKEN_SYNTAX_QUOTE,
   TOKEN_IF,
   TOKEN_ELIF,
   TOKEN_ELSE,
@@ -476,6 +484,9 @@ typedef enum {
   AST_DEFSTRUCT,
   AST_DEFMACRO,
   AST_QUOTE,
+  AST_SYNTAX_QUOTE,
+  AST_UNQUOTE,
+  AST_UNQUOTE_SPLICING,
   AST_BREAK,
   AST_CONTINUE,
   AST_RETURN,
@@ -517,6 +528,9 @@ struct AstNode {
              uint32_t param_count;
              AstNode* body; }                                     defmacro;
     struct { AstNode* child; }                                     quote;
+    struct { AstNode* child; }                                     syntax_quote;
+    struct { AstNode* child; }                                     unquote;
+    struct { AstNode* child; }                                     unquote_splicing;
     struct { AstNode* value; }              break_stmt;
     struct { AstNode* value; }              return_stmt;
     struct { const char** names; uint32_t* name_lens;

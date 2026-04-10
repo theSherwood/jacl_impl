@@ -49,6 +49,7 @@ typedef enum {
   TOKEN_AND,              /* && */
   TOKEN_OR,               /* || */
   TOKEN_NOT,              /* ~ */
+  TOKEN_TILDE_AT,         /* ~@ */
   TOKEN_EQUALS,           /* = (single) */
   TOKEN_COLON,            /* : (single) */
   TOKEN_DOUBLE_COLON,     /* :: */
@@ -56,6 +57,7 @@ typedef enum {
   TOKEN_PROC,             /* proc */
   TOKEN_DEFMACRO,         /* defmacro */
   TOKEN_QUOTE,            /* quote */
+  TOKEN_SYNTAX_QUOTE,     /* syntax-quote */
   TOKEN_IF,               /* if */
   TOKEN_ELIF,             /* elif */
   TOKEN_ELSE,             /* else */
@@ -1081,7 +1083,12 @@ void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
           break;
         case '~':
           lexer__advance(lex);
-          otype = TOKEN_NOT;
+          if (lexer__peek(lex) == '@') {
+            lexer__advance(lex);
+            otype = TOKEN_TILDE_AT;
+          } else {
+            otype = TOKEN_NOT;
+          }
           break;
         case '=':
           lexer__advance(lex);
@@ -1312,6 +1319,9 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
           if (memcmp(wstart, "continue", 8) == 0) wtype = TOKEN_CONTINUE;
           else if (memcmp(wstart, "defmacro", 8) == 0) wtype = TOKEN_DEFMACRO;
           break;
+        case 12:
+          if (memcmp(wstart, "syntax-quote", 12) == 0) wtype = TOKEN_SYNTAX_QUOTE;
+          break;
         /* defstruct keyword removed — use struct instead */
         default:
           break;
@@ -1382,7 +1392,12 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
           break;
         case '~':
           lexer__advance(&lex);
-          otype = TOKEN_NOT;
+          if (lexer__peek(&lex) == '@') {
+            lexer__advance(&lex);
+            otype = TOKEN_TILDE_AT;
+          } else {
+            otype = TOKEN_NOT;
+          }
           break;
         case '=':
           lexer__advance(&lex);

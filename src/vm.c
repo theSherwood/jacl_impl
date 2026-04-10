@@ -623,6 +623,24 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
       vm__fmt_append(buf, ">", 1);
       break;
     }
+    case SYNTAX_SYNTAX_QUOTE: {
+      vm__fmt_append(buf, "<syntax:syntax-quote ", 21);
+      vm__fmt_value(buf, syn->data.syntax_quote.child);
+      vm__fmt_append(buf, ">", 1);
+      break;
+    }
+    case SYNTAX_UNQUOTE: {
+      vm__fmt_append(buf, "<syntax:unquote ", 16);
+      vm__fmt_value(buf, syn->data.unquote.child);
+      vm__fmt_append(buf, ">", 1);
+      break;
+    }
+    case SYNTAX_UNQUOTE_SPLICING: {
+      vm__fmt_append(buf, "<syntax:unquote-splicing ", 24);
+      vm__fmt_value(buf, syn->data.unquote_splicing.child);
+      vm__fmt_append(buf, ">", 1);
+      break;
+    }
     default:
       n = snprintf(tmp, sizeof(tmp), "<syntax:%d>", syn->kind);
       vm__fmt_append(buf, tmp, (uint32_t)n);

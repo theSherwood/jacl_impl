@@ -74,6 +74,7 @@ typedef struct {
   uint32_t pos;
   arena_t* arena;
   uint32_t error_count;
+  uint32_t syntax_quote_depth;  /* nesting depth for syntax-quote */
 } Parser;
 
 void parser__init(Parser* p, LexResult tokens, arena_t* arena) {
@@ -82,6 +83,7 @@ void parser__init(Parser* p, LexResult tokens, arena_t* arena) {
   p->pos         = 0;
   p->arena       = arena;
   p->error_count = 0;
+  p->syntax_quote_depth = 0;
 }
 
 Token* parser__peek(Parser* p) {
@@ -233,6 +235,7 @@ AstNode* parser__parse_atom(Parser* p) {
     case TOKEN_AND:
     case TOKEN_OR:
     case TOKEN_NOT:
+    case TOKEN_TILDE_AT:
     case TOKEN_EQUALS:
     case TOKEN_COLON:
     case TOKEN_DOUBLE_COLON: {
@@ -249,6 +252,7 @@ AstNode* parser__parse_atom(Parser* p) {
     case TOKEN_STRUCT:
     case TOKEN_PROC:
     case TOKEN_DEFMACRO:
+    case TOKEN_SYNTAX_QUOTE:
     case TOKEN_IF:
     case TOKEN_ELIF:
     case TOKEN_ELSE:
@@ -651,8 +655,24 @@ AstNode* parser__parse_infix_operand(Parser* p) {
     return node;
   }
 
-  /* Unary prefix: ~ (logical not) */
+  /* Unary prefix: ~ (logical not) — or unquote inside syntax-quote */
   if (tok->type == TOKEN_NOT) {
+    if (p->syntax_quote_depth == 1) {
+      Token* op = parser__advance(p);
+      p->syntax_quote_depth--;
+      AstNode* child = parser__parse_infix_operand(p);
+      p->syntax_quote_depth++;
+      if (child == NULL) {
+        return parser__error(p, "expected expression after '~'", op);
+      }
+      AstNode* node = ast_alloc(p->arena);
+      node->type  = AST_UNQUOTE;
+      node->start = parser__token_start(op);
+      node->end   = child->end;
+      node->data.unquote.child = child;
+      return node;
+    }
+    /* depth 0 or > 1: normal logical not */
     Token* op = parser__advance(p);
     AstNode* operand = parser__parse_infix_operand(p);
     if (operand == NULL) {
@@ -677,6 +697,30 @@ AstNode* parser__parse_infix_operand(Parser* p) {
     node->data.command.args      = args;
     node->data.command.arg_count = 1;
     return node;
+  }
+
+  /* ~@ (unquote-splicing) inside syntax-quote */
+  if (tok->type == TOKEN_TILDE_AT) {
+    if (p->syntax_quote_depth == 1) {
+      Token* op = parser__advance(p);
+      p->syntax_quote_depth--;
+      AstNode* child = parser__parse_infix_operand(p);
+      p->syntax_quote_depth++;
+      if (child == NULL) {
+        return parser__error(p, "expected expression after '~@'", op);
+      }
+      AstNode* node = ast_alloc(p->arena);
+      node->type  = AST_UNQUOTE_SPLICING;
+      node->start = parser__token_start(op);
+      node->end   = child->end;
+      node->data.unquote_splicing.child = child;
+      return node;
+    }
+    if (p->syntax_quote_depth == 0) {
+      parser__advance(p);
+      return parser__error(p, "'~@' can only be used inside syntax-quote", tok);
+    }
+    /* depth > 1: treat as literal — fall through */
   }
 
   /* Primary expressions */
@@ -740,6 +784,22 @@ AstNode* parser__parse_infix_operand(Parser* p) {
       node->start = parser__token_start(kw);
       node->end   = child->end;
       node->data.quote.child = child;
+      result = node;
+      break;
+    }
+    case TOKEN_SYNTAX_QUOTE: {
+      Token* kw = parser__advance(p);
+      p->syntax_quote_depth++;
+      AstNode* child = parser__parse_infix_operand(p);
+      p->syntax_quote_depth--;
+      if (child == NULL) {
+        return parser__error(p, "expected expression after 'syntax-quote'", kw);
+      }
+      AstNode* node = ast_alloc(p->arena);
+      node->type  = AST_SYNTAX_QUOTE;
+      node->start = parser__token_start(kw);
+      node->end   = child->end;
+      node->data.syntax_quote.child = child;
       result = node;
       break;
     }
@@ -902,6 +962,71 @@ AstNode* parser__parse_expr(Parser* p) {
       break;
     }
 
+    case TOKEN_SYNTAX_QUOTE: {
+      Token* kw = parser__advance(p);
+      p->syntax_quote_depth++;
+      AstNode* child = parser__parse_expr(p);
+      p->syntax_quote_depth--;
+      if (child == NULL) {
+        return parser__error(p, "expected expression after 'syntax-quote'", kw);
+      }
+      AstNode* node = ast_alloc(p->arena);
+      node->type  = AST_SYNTAX_QUOTE;
+      node->start = parser__token_start(kw);
+      node->end   = child->end;
+      node->data.syntax_quote.child = child;
+      result = node;
+      break;
+    }
+
+    case TOKEN_NOT: {
+      if (p->syntax_quote_depth == 1) {
+        Token* op = parser__advance(p);
+        p->syntax_quote_depth--;
+        AstNode* child = parser__parse_expr(p);
+        p->syntax_quote_depth++;
+        if (child == NULL) {
+          return parser__error(p, "expected expression after '~'", op);
+        }
+        AstNode* node = ast_alloc(p->arena);
+        node->type  = AST_UNQUOTE;
+        node->start = parser__token_start(op);
+        node->end   = child->end;
+        node->data.unquote.child = child;
+        result = node;
+        break;
+      }
+      /* depth 0 or > 1: fall through to atom (operator literal) */
+      result = parser__parse_atom(p);
+      break;
+    }
+
+    case TOKEN_TILDE_AT: {
+      if (p->syntax_quote_depth == 1) {
+        Token* op = parser__advance(p);
+        p->syntax_quote_depth--;
+        AstNode* child = parser__parse_expr(p);
+        p->syntax_quote_depth++;
+        if (child == NULL) {
+          return parser__error(p, "expected expression after '~@'", op);
+        }
+        AstNode* node = ast_alloc(p->arena);
+        node->type  = AST_UNQUOTE_SPLICING;
+        node->start = parser__token_start(op);
+        node->end   = child->end;
+        node->data.unquote_splicing.child = child;
+        result = node;
+        break;
+      }
+      if (p->syntax_quote_depth == 0) {
+        parser__advance(p);
+        return parser__error(p, "'~@' can only be used inside syntax-quote", tok);
+      }
+      /* depth > 1: treat as literal */
+      result = parser__parse_atom(p);
+      break;
+    }
+
     case TOKEN_INT:
     case TOKEN_FLOAT:
     case TOKEN_WORD:
@@ -916,7 +1041,6 @@ AstNode* parser__parse_expr(Parser* p) {
     case TOKEN_AMP:
     case TOKEN_AND:
     case TOKEN_OR:
-    case TOKEN_NOT:
     case TOKEN_EQUALS:
     case TOKEN_COLON:
     case TOKEN_DOUBLE_COLON:

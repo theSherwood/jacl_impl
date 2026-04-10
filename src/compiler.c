@@ -8053,6 +8053,25 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       break;
     }
 
+    case AST_SYNTAX_QUOTE: {
+      /* Syntax-quote compilation will be implemented in US-010.
+       * For now, emit nil as a placeholder. */
+      compiler__emit_byte(c, OP_NIL, line);
+      break;
+    }
+
+    case AST_UNQUOTE: {
+      compiler__error(c, line, node->start.column,
+                      "'~' (unquote) can only appear inside syntax-quote");
+      break;
+    }
+
+    case AST_UNQUOTE_SPLICING: {
+      compiler__error(c, line, node->start.column,
+                      "'~@' (unquote-splicing) can only appear inside syntax-quote");
+      break;
+    }
+
     case AST_BREAK: {
       if (c->loop_depth == 0) {
         compiler__error(c, line, node->start.column,
