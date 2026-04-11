@@ -747,6 +747,7 @@ typedef enum {
   OP_GET_STATE_FIELD_CELL,
   OP_SET_STATE_FIELD_CELL,
   OP_SYNTAX_SPLICE,
+  OP_SYNTAX_OP,    /* uint8_t subop; pops syntax object(s), pushes introspection result */
   OP_HALT
 } OpCode;
 
@@ -1559,6 +1560,7 @@ extern const char *ast_expand_macros(AstNode **program, uint32_t count,
 extern JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
                                 ThreadHeap *heap, uint32_t scope_mark,
                                 const char **err);
+extern const char *syntax_kind_name(uint8_t kind);
 
 /* --- string.c --- */
 extern uint32_t string__fnv1a (const char *data, uint32_t length);

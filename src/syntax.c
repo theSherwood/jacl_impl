@@ -1506,4 +1506,35 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
     return NULL;  /* success */
 }
 
+/* -------------------------------------------------------------------------
+ * US-015: Syntax introspection helpers
+ * ------------------------------------------------------------------------- */
+
+/* Return a short human-readable name for a SyntaxKind (used by syntax-kind). */
+const char *syntax_kind_name(uint8_t kind) {
+    switch ((SyntaxKind)kind) {
+    case SYNTAX_COMMAND:           return "command";
+    case SYNTAX_LIT_INT:           return "lit-int";
+    case SYNTAX_LIT_FLOAT:         return "lit-float";
+    case SYNTAX_LIT_STRING:        return "lit-string";
+    case SYNTAX_VAR_REF:           return "var-ref";
+    case SYNTAX_BLOCK:             return "block";
+    case SYNTAX_INTERP_STRING:     return "interp-string";
+    case SYNTAX_SPREAD:            return "spread";
+    case SYNTAX_USE:               return "use";
+    case SYNTAX_DEFSTRUCT:         return "defstruct";
+    case SYNTAX_DEFMACRO:          return "defmacro";
+    case SYNTAX_QUOTE:             return "quote";
+    case SYNTAX_SYNTAX_QUOTE:      return "syntax-quote";
+    case SYNTAX_UNQUOTE:           return "unquote";
+    case SYNTAX_UNQUOTE_SPLICING:  return "unquote-splicing";
+    case SYNTAX_BREAK:             return "break";
+    case SYNTAX_CONTINUE:          return "continue";
+    case SYNTAX_RETURN:            return "return";
+    case SYNTAX_DESTRUCTURE_VEC:   return "destructure-vec";
+    case SYNTAX_DESTRUCTURE_NAMED: return "destructure-named";
+    }
+    return "unknown";
+}
+
 #endif /* SYNTAX_C */

@@ -6759,6 +6759,88 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* US-015: syntax object introspection builtins. Each compiles the single
+   * argument to a syntax object value, then emits OP_SYNTAX_OP with a subop
+   * byte indicating which introspection operation to perform. */
+  if (compiler__head_matches(head, "syntax-kind", 11)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "syntax-kind", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_SYNTAX_OP, line);
+    compiler__emit_byte(c, 0 /* SYNTAX_OP_KIND */, line);
+    c->last_expr_type = TYPE_STR;
+    return;
+  }
+  if (compiler__head_matches(head, "syntax-datum", 12)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "syntax-datum", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_SYNTAX_OP, line);
+    compiler__emit_byte(c, 1 /* SYNTAX_OP_DATUM */, line);
+    return;
+  }
+  if (compiler__head_matches(head, "syntax-head", 11)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "syntax-head", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_SYNTAX_OP, line);
+    compiler__emit_byte(c, 2 /* SYNTAX_OP_HEAD */, line);
+    return;
+  }
+  if (compiler__head_matches(head, "syntax-args", 11)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "syntax-args", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_SYNTAX_OP, line);
+    compiler__emit_byte(c, 3 /* SYNTAX_OP_ARGS */, line);
+    c->last_expr_type = TYPE_VEC;
+    return;
+  }
+  if (compiler__head_matches(head, "syntax-commands", 15)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "syntax-commands", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_SYNTAX_OP, line);
+    compiler__emit_byte(c, 4 /* SYNTAX_OP_COMMANDS */, line);
+    c->last_expr_type = TYPE_VEC;
+    return;
+  }
+  if (compiler__head_matches(head, "syntax-pos", 10)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "syntax-pos", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_SYNTAX_OP, line);
+    compiler__emit_byte(c, 5 /* SYNTAX_OP_POS */, line);
+    c->last_expr_type = TYPE_MAP;
+    return;
+  }
+  /* NOTE: PRD calls this syntax->string but the lexer tokenizes -> as a
+   * separator (arrow), so the hyphenated form 'syntax-str' is used instead,
+   * consistent with existing builtins like to-string and byte-length. */
+  if (compiler__head_matches(head, "syntax-str", 10)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "syntax-str", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_SYNTAX_OP, line);
+    compiler__emit_byte(c, 6 /* SYNTAX_OP_STRING */, line);
+    c->last_expr_type = TYPE_STR;
+    return;
+  }
+
   /* box builtin (exactly 1 arg) */
   if (compiler__head_matches(head, "box", 3)) {
     if (argc != 1) {

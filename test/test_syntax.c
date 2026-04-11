@@ -3444,6 +3444,251 @@ static int test_us014_gensym_no_collision_with_caller(void) {
     TEST_PASS();
 }
 
+/* ===== US-015: Introspection builtins ===== */
+
+/* Helper: extract a null-terminated C string from a JaclVal string into buf. */
+static void us015__string_to_cstr(JaclVal v, char *buf, size_t buf_sz) {
+    uint32_t n = jacl_string_byte_len(v);
+    if (n >= buf_sz) n = (uint32_t)(buf_sz - 1);
+    jacl_string_data(v, buf, (uint32_t)buf_sz);
+    buf[n] = '\0';
+}
+
+/* Test: syntax-kind on a command returns "command". */
+static int test_us015_syntax_kind_command(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal result = jacl_eval(vm, "syntax-kind quote [+ 1 2]");
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_string(result));
+    char buf[32];
+    us015__string_to_cstr(result, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "command");
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-kind on various literal/var-ref forms. */
+static int test_us015_syntax_kind_literals(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+    char buf[32];
+
+    JaclVal r1 = jacl_eval(vm, "syntax-kind quote 42");
+    ASSERT(!jacl_is_error(r1));
+    us015__string_to_cstr(r1, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "lit-int");
+
+    JaclVal r2 = jacl_eval(vm, "syntax-kind quote 3.14");
+    ASSERT(!jacl_is_error(r2));
+    us015__string_to_cstr(r2, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "lit-float");
+
+    JaclVal r3 = jacl_eval(vm, "syntax-kind quote \"hi\"");
+    ASSERT(!jacl_is_error(r3));
+    us015__string_to_cstr(r3, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "lit-string");
+
+    JaclVal r4 = jacl_eval(vm, "syntax-kind quote $foo");
+    ASSERT(!jacl_is_error(r4));
+    us015__string_to_cstr(r4, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "var-ref");
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-datum on literal kinds returns the raw value. */
+static int test_us015_syntax_datum_literals(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal r1 = jacl_eval(vm, "syntax-datum quote 42");
+    ASSERT(!jacl_is_error(r1));
+    ASSERT(jacl_is_i32(r1));
+    ASSERT_INT_EQ(jacl_as_i32(r1), 42);
+
+    JaclVal r2 = jacl_eval(vm, "syntax-datum quote \"hi\"");
+    ASSERT(!jacl_is_error(r2));
+    ASSERT(jacl_is_string(r2));
+    char buf[32];
+    us015__string_to_cstr(r2, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "hi");
+
+    JaclVal r3 = jacl_eval(vm, "syntax-datum quote $foo");
+    ASSERT(!jacl_is_error(r3));
+    ASSERT(jacl_is_string(r3));
+    us015__string_to_cstr(r3, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "foo");
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-datum on a non-datum kind (command) is a runtime error. */
+static int test_us015_syntax_datum_command_error(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal result = jacl_eval(vm, "syntax-datum quote [+ 1 2]");
+    ASSERT(jacl_is_error(result));
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-head returns the head syntax; chained with syntax-datum it
+ * yields the head name as a string. */
+static int test_us015_syntax_head(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    /* Kind of the head of [+ 1 2] is lit-string. */
+    JaclVal r1 = jacl_eval(vm, "syntax-kind [syntax-head quote [+ 1 2]]");
+    ASSERT(!jacl_is_error(r1));
+    char buf[32];
+    us015__string_to_cstr(r1, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "lit-string");
+
+    /* The datum of that head is the string "+". */
+    JaclVal r2 = jacl_eval(vm, "syntax-datum [syntax-head quote [+ 1 2]]");
+    ASSERT(!jacl_is_error(r2));
+    ASSERT(jacl_is_string(r2));
+    us015__string_to_cstr(r2, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "+");
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-head on a non-command is a runtime error. */
+static int test_us015_syntax_head_type_error(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal result = jacl_eval(vm, "syntax-head quote 42");
+    ASSERT(jacl_is_error(result));
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-args returns a vec of syntax objects for a command. */
+static int test_us015_syntax_args(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    /* Length of args for [+ 1 2] is 2. */
+    JaclVal r1 = jacl_eval(vm, "vec-len [syntax-args quote [+ 1 2]]");
+    ASSERT(!jacl_is_error(r1));
+    ASSERT(jacl_is_i32(r1));
+    ASSERT_INT_EQ(jacl_as_i32(r1), 2);
+
+    /* The datum of the first arg is the integer 1. */
+    JaclVal r2 = jacl_eval(vm,
+        "syntax-datum [vec-get [syntax-args quote [+ 1 2]] 0]");
+    ASSERT(!jacl_is_error(r2));
+    ASSERT(jacl_is_i32(r2));
+    ASSERT_INT_EQ(jacl_as_i32(r2), 1);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-commands returns a vec of command syntax objects for a block. */
+static int test_us015_syntax_commands(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    /* syntax-quote of a block with 2 commands. */
+    JaclVal r = jacl_eval(vm,
+        "vec-len [syntax-commands syntax-quote { print 1; print 2 }]");
+    ASSERT(!jacl_is_error(r));
+    ASSERT(jacl_is_i32(r));
+    ASSERT_INT_EQ(jacl_as_i32(r), 2);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-commands on a non-block is a runtime error. */
+static int test_us015_syntax_commands_type_error(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal result = jacl_eval(vm, "syntax-commands quote [+ 1 2]");
+    ASSERT(jacl_is_error(result));
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-pos returns a map with "line" and "col" keys. */
+static int test_us015_syntax_pos(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    /* Any syntax object parsed from source code has a line >= 1. */
+    JaclVal r1 = jacl_eval(vm, "map-get [syntax-pos quote [+ 1 2]] \"line\"");
+    ASSERT(!jacl_is_error(r1));
+    ASSERT(jacl_is_i32(r1));
+    ASSERT(jacl_as_i32(r1) >= 1);
+
+    JaclVal r2 = jacl_eval(vm, "map-get [syntax-pos quote [+ 1 2]] \"col\"");
+    ASSERT(!jacl_is_error(r2));
+    ASSERT(jacl_is_i32(r2));
+    ASSERT(jacl_as_i32(r2) >= 1);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-str returns a pretty-printed string of the syntax object. */
+static int test_us015_syntax_str(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal r = jacl_eval(vm, "syntax-str quote 42");
+    ASSERT(!jacl_is_error(r));
+    ASSERT(jacl_is_string(r));
+    /* The formatted output contains "42" — exact prefix depends on the
+     * VM formatter but must include the literal value. */
+    char buf[64];
+    us015__string_to_cstr(r, buf, sizeof(buf));
+    ASSERT(strstr(buf, "42") != NULL);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: all introspection builtins raise a type error when given a
+ * non-syntax value. */
+static int test_us015_non_syntax_type_error(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    /* A plain integer is not a syntax object. */
+    JaclVal r = jacl_eval(vm, "syntax-kind 42");
+    ASSERT(jacl_is_error(r));
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: wrong arg count is a compile error. */
+static int test_us015_arity_error(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal r = jacl_eval(vm, "syntax-kind quote 1 quote 2");
+    ASSERT(jacl_is_error(r));
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -3615,6 +3860,22 @@ int main(void) {
     RUN(test_us014_gensym_prefix_too_long);
     RUN(test_us014_gensym_in_macro_mut);
     RUN(test_us014_gensym_no_collision_with_caller);
+
+    printf("\n=== Introspection Builtin Tests (US-015) ===\n");
+
+    RUN(test_us015_syntax_kind_command);
+    RUN(test_us015_syntax_kind_literals);
+    RUN(test_us015_syntax_datum_literals);
+    RUN(test_us015_syntax_datum_command_error);
+    RUN(test_us015_syntax_head);
+    RUN(test_us015_syntax_head_type_error);
+    RUN(test_us015_syntax_args);
+    RUN(test_us015_syntax_commands);
+    RUN(test_us015_syntax_commands_type_error);
+    RUN(test_us015_syntax_pos);
+    RUN(test_us015_syntax_str);
+    RUN(test_us015_non_syntax_type_error);
+    RUN(test_us015_arity_error);
 
 #undef RUN
 

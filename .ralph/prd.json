@@ -317,8 +317,8 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented as compile-time builtins (head_matches) dispatched to a single OP_SYNTAX_OP bytecode op with a uint8_t subop. Native-function registration cannot be used — embed__register_native caps names at 7 bytes (inline string), and all 7 builtin names exceed that. Same pattern as byte-length and stack-trace. Deviation from spec: syntax->string is implemented as syntax-str because the lexer tokenizes -> as a separator (arrow operator), so syntax->string would parse as three tokens. The hyphenated form matches to-string/byte-length convention. Tests call introspection via jacl_eval on top-level 'syntax-kind [quote ...]' expressions — remember that nested invocations must be bracketed because top-level command operands are space-separated (e.g. 'syntax-kind [syntax-head quote [+ 1 2]]' not 'syntax-kind syntax-head quote [+ 1 2]')."
     },
     {
       "id": "US-016",

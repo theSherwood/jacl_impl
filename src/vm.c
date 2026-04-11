@@ -131,6 +131,9 @@ static JaclVal syntax__splice_template(JaclVal tmpl, JaclVal *values,
                                        ThreadHeap *heap,
                                        const char **err);
 
+/* US-015: introspection kind-name helper (defined in syntax.c) */
+const char *syntax_kind_name(uint8_t kind);
+
 /* --- Emergency GC callback for single-threaded mode --- */
 
 void vm__emergency_gc_single(void *ctx) {
@@ -5879,6 +5882,130 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         result = vm__push(vm, spliced);
         if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_SYNTAX_OP: {
+        /* US-015: syntax introspection. Subops:
+         *   0 = syntax-kind      (syntax → string)
+         *   1 = syntax-datum     (literal/var-ref → raw datum)
+         *   2 = syntax-head      (command → syntax)
+         *   3 = syntax-args      (command → vec of syntax)
+         *   4 = syntax-commands  (block → vec of syntax)
+         *   5 = syntax-pos       (syntax → map {line, col})
+         *   6 = syntax->string   (syntax → pretty-printed string) */
+        uint8_t subop = vm__read_byte(vm);
+        JaclVal val;
+        result = vm__pop(vm, &val); if (result != VM_OK) return result;
+        if (jacl_is_error(val)) {
+          result = vm__push(vm, val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_syntax(val)) {
+          static const char *names[] = {
+            "syntax-kind", "syntax-datum", "syntax-head", "syntax-args",
+            "syntax-commands", "syntax-pos", "syntax-str"
+          };
+          const char *nm = (subop < 7) ? names[subop] : "syntax-op";
+          vm__set_error(vm, "type error in '%s': expected syntax object, got %s",
+                       nm, vm__type_name(val));
+          return VM_RUNTIME_ERROR;
+        }
+        JaclSyntax *syn = jacl_as_syntax(val);
+        gc__current_heap = &vm->heap;
+
+        switch (subop) {
+        case 0: {  /* syntax-kind */
+          const char *kn = syntax_kind_name(syn->kind);
+          JaclVal s = jacl_string_new(&vm->heap, vm->intern_table,
+                                      kn, strlen(kn));
+          result = vm__push(vm, s);
+          if (result != VM_OK) return result;
+          break;
+        }
+        case 1: {  /* syntax-datum */
+          JaclVal out;
+          switch ((SyntaxKind)syn->kind) {
+          case SYNTAX_LIT_INT:
+            out = jacl_i32(syn->data.lit_int.value);
+            break;
+          case SYNTAX_LIT_FLOAT:
+            out = jacl_f32(syn->data.lit_float.value);
+            break;
+          case SYNTAX_LIT_STRING:
+            out = syn->data.lit_string.value;
+            break;
+          case SYNTAX_VAR_REF:
+            out = syn->data.var_ref.name;
+            break;
+          default:
+            vm__set_error(vm,
+              "type error in 'syntax-datum': syntax object of kind '%s' has no datum",
+              syntax_kind_name(syn->kind));
+            return VM_RUNTIME_ERROR;
+          }
+          result = vm__push(vm, out);
+          if (result != VM_OK) return result;
+          break;
+        }
+        case 2: {  /* syntax-head */
+          if (syn->kind != SYNTAX_COMMAND) {
+            vm__set_error(vm,
+              "type error in 'syntax-head': expected command syntax, got '%s'",
+              syntax_kind_name(syn->kind));
+            return VM_RUNTIME_ERROR;
+          }
+          result = vm__push(vm, syn->data.command.head);
+          if (result != VM_OK) return result;
+          break;
+        }
+        case 3: {  /* syntax-args */
+          if (syn->kind != SYNTAX_COMMAND) {
+            vm__set_error(vm,
+              "type error in 'syntax-args': expected command syntax, got '%s'",
+              syntax_kind_name(syn->kind));
+            return VM_RUNTIME_ERROR;
+          }
+          result = vm__push(vm, syn->data.command.args);
+          if (result != VM_OK) return result;
+          break;
+        }
+        case 4: {  /* syntax-commands */
+          if (syn->kind != SYNTAX_BLOCK) {
+            vm__set_error(vm,
+              "type error in 'syntax-commands': expected block syntax, got '%s'",
+              syntax_kind_name(syn->kind));
+            return VM_RUNTIME_ERROR;
+          }
+          result = vm__push(vm, syn->data.block.commands);
+          if (result != VM_OK) return result;
+          break;
+        }
+        case 5: {  /* syntax-pos — map {line, col} */
+          jacl_map_node *m = NULL;
+          JaclVal k_line = jacl_inline_string("line", 4);
+          JaclVal k_col  = jacl_inline_string("col", 3);
+          m = jacl_map_set(m, k_line, jacl_i32((int32_t)syn->pos_line));
+          m = jacl_map_set(m, k_col,  jacl_i32((int32_t)syn->pos_col));
+          result = vm__push(vm, jacl_map_ptr(m));
+          if (result != VM_OK) return result;
+          break;
+        }
+        case 6: {  /* syntax->string — pretty-printed */
+          VMFormatBuf fmt;
+          vm__fmt_init(&fmt, vm->arena);
+          vm__fmt_value(&fmt, val);
+          JaclVal s = jacl_string_new(&vm->heap, vm->intern_table,
+                                       fmt.data, fmt.len);
+          result = vm__push(vm, s);
+          if (result != VM_OK) return result;
+          break;
+        }
+        default:
+          vm__set_error(vm, "unknown OP_SYNTAX_OP subop %u", subop);
+          return VM_RUNTIME_ERROR;
+        }
         break;
       }
 
