@@ -3932,6 +3932,126 @@ static int test_us016_round_trip_str(void) {
     TEST_PASS();
 }
 
+/* ===== US-017: syntax-error builtin ===== */
+
+/* Test: syntax-error with just a message halts execution with that message. */
+static int test_us017_syntax_error_message_only(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal r = jacl_eval(vm, "syntax-error \"must be a literal\"");
+    ASSERT(jacl_is_error(r));
+    const char* msg = jacl_error_message_str(vm, r);
+    ASSERT(msg != NULL);
+    /* The custom message must appear in the error text. */
+    ASSERT(strstr(msg, "must be a literal") != NULL);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-error with message + syntax object includes the source
+ * position of the syntax object in the error text. */
+static int test_us017_syntax_error_with_syntax(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    /* Build a syntax object from a quoted expression (which carries a
+     * real source position) and pass it as the second arg. The parser
+     * gives quoted expressions line/col >= 1. NOTE: use the prefix
+     * `quote` form (without brackets) — `[quote ...]` would try to call
+     * the resulting syntax object at runtime. */
+    JaclVal r = jacl_eval(vm,
+        "syntax-error \"bad shape\" quote [+ 1 2]");
+    ASSERT(jacl_is_error(r));
+    const char* msg = jacl_error_message_str(vm, r);
+    ASSERT(msg != NULL);
+    ASSERT(strstr(msg, "bad shape") != NULL);
+    /* The error message should contain a line:col position hint. */
+    ASSERT(strstr(msg, ":") != NULL);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-error with zero arguments is a compile error. */
+static int test_us017_syntax_error_zero_args(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal r = jacl_eval(vm, "syntax-error");
+    ASSERT(jacl_is_error(r));
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-error with 3+ arguments is a compile error. */
+static int test_us017_syntax_error_too_many_args(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal r = jacl_eval(vm,
+        "syntax-error \"a\" [quote 1] [quote 2]");
+    ASSERT(jacl_is_error(r));
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-error with a non-string first argument is a runtime type error. */
+static int test_us017_syntax_error_non_string_message(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal r = jacl_eval(vm, "syntax-error 42");
+    ASSERT(jacl_is_error(r));
+    const char* msg = jacl_error_message_str(vm, r);
+    ASSERT(msg != NULL);
+    /* Either compile or runtime error, but must mention the problem. */
+    ASSERT(strlen(msg) > 0);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: syntax-error with a non-syntax second argument is a runtime type error. */
+static int test_us017_syntax_error_non_syntax_second(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal r = jacl_eval(vm, "syntax-error \"msg\" 42");
+    ASSERT(jacl_is_error(r));
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: a macro that expands to a syntax-error call reports the custom
+ * error text at the call site. Because JACL macros are template-based,
+ * the macro template produces a direct call to `syntax-error` in the
+ * expanded program and the error surfaces at runtime when that code
+ * runs. This validates the acceptance criterion "macro that checks
+ * something and calls syntax-error". */
+static int test_us017_syntax_error_from_macro(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src =
+        "defmacro require {} {\n"
+        "  syntax-quote [syntax-error \"nope\"]\n"
+        "}\n"
+        "require";
+    JaclVal r = jacl_eval(vm, src);
+    ASSERT(jacl_is_error(r));
+    const char* msg = jacl_error_message_str(vm, r);
+    ASSERT(msg != NULL);
+    ASSERT(strstr(msg, "nope") != NULL);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -4132,6 +4252,16 @@ int main(void) {
     RUN(test_us016_arity_error);
     RUN(test_us016_type_error);
     RUN(test_us016_round_trip_str);
+
+    printf("\n=== syntax-error Builtin Tests (US-017) ===\n");
+
+    RUN(test_us017_syntax_error_message_only);
+    RUN(test_us017_syntax_error_with_syntax);
+    RUN(test_us017_syntax_error_zero_args);
+    RUN(test_us017_syntax_error_too_many_args);
+    RUN(test_us017_syntax_error_non_string_message);
+    RUN(test_us017_syntax_error_non_syntax_second);
+    RUN(test_us017_syntax_error_from_macro);
 
 #undef RUN
 

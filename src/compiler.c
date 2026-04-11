@@ -6906,6 +6906,31 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* US-017: syntax-error — signal a custom error with an optional syntax
+   * object for source-location reporting. Two forms:
+   *   syntax-error $message                 → subop 13 (message only)
+   *   syntax-error $message $syntax-obj     → subop 14 (message + pos)
+   * Implementation is a runtime error — macros in JACL are template-based,
+   * so "compile-time" in the PRD sense means "at macro-expanded-code
+   * execution time", which is the program's normal runtime. */
+  if (compiler__head_matches(head, "syntax-error", 12)) {
+    if (argc != 1 && argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "syntax-error",
+                                    "1 or 2 arguments (message, optional syntax)", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    if (argc == 2) {
+      compiler__compile_node(c, args[1]);
+      compiler__emit_byte(c, OP_SYNTAX_OP, line);
+      compiler__emit_byte(c, 14 /* SYNTAX_OP_ERROR_POS */, line);
+    } else {
+      compiler__emit_byte(c, OP_SYNTAX_OP, line);
+      compiler__emit_byte(c, 13 /* SYNTAX_OP_ERROR */, line);
+    }
+    return;
+  }
+
   /* box builtin (exactly 1 arg) */
   if (compiler__head_matches(head, "box", 3)) {
     if (argc != 1) {

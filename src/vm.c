@@ -5886,7 +5886,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_SYNTAX_OP: {
-        /* US-015: syntax introspection. US-016: syntax construction. Subops:
+        /* US-015: syntax introspection. US-016: syntax construction.
+         * US-017: user-raised syntax errors. Subops:
          *   0  = syntax-kind      (syntax → string)
          *   1  = syntax-datum     (literal/var-ref → raw datum)
          *   2  = syntax-head      (command → syntax)
@@ -5899,9 +5900,68 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
          *   9  = make-syntax lit-string (string → syntax)
          *   10 = make-syntax var-ref    (string → syntax)
          *   11 = make-syntax command    (head, args-vec → syntax)
-         *   12 = make-syntax block      (commands-vec → syntax) */
+         *   12 = make-syntax block      (commands-vec → syntax)
+         *   13 = syntax-error message       (string → halt)
+         *   14 = syntax-error message+syn   (string, syntax → halt) */
         uint8_t subop = vm__read_byte(vm);
         gc__current_heap = &vm->heap;
+
+        /* US-017: syntax-error — halt execution with a custom message and
+         * (optionally) a source position from the provided syntax object.
+         * Dispatched before both construction and introspection because
+         * its operand types are string (or string+syntax), not a bare
+         * syntax object on top of the stack. */
+        if (subop == 13) {  /* syntax-error message */
+          JaclVal msg;
+          result = vm__pop(vm, &msg); if (result != VM_OK) return result;
+          if (jacl_is_error(msg)) {
+            result = vm__push(vm, msg);
+            if (result != VM_OK) return result;
+            break;
+          }
+          if (!jacl_is_string(msg)) {
+            vm__set_error(vm, "type error in 'syntax-error': expected string message, got %s",
+                         vm__type_name(msg));
+            return VM_RUNTIME_ERROR;
+          }
+          char mbuf[192];
+          uint32_t mlen = jacl_string_data(msg, mbuf, sizeof(mbuf) - 1);
+          mbuf[mlen] = '\0';
+          vm__set_error(vm, "syntax-error: %s", mbuf);
+          return VM_RUNTIME_ERROR;
+        }
+        if (subop == 14) {  /* syntax-error message + syntax */
+          JaclVal syn_val, msg;
+          result = vm__pop(vm, &syn_val); if (result != VM_OK) return result;
+          result = vm__pop(vm, &msg);     if (result != VM_OK) return result;
+          if (jacl_is_error(syn_val)) {
+            result = vm__push(vm, syn_val);
+            if (result != VM_OK) return result;
+            break;
+          }
+          if (jacl_is_error(msg)) {
+            result = vm__push(vm, msg);
+            if (result != VM_OK) return result;
+            break;
+          }
+          if (!jacl_is_string(msg)) {
+            vm__set_error(vm, "type error in 'syntax-error': expected string message, got %s",
+                         vm__type_name(msg));
+            return VM_RUNTIME_ERROR;
+          }
+          if (!jacl_is_syntax(syn_val)) {
+            vm__set_error(vm, "type error in 'syntax-error': expected syntax object as second argument, got %s",
+                         vm__type_name(syn_val));
+            return VM_RUNTIME_ERROR;
+          }
+          JaclSyntax *syn = jacl_as_syntax(syn_val);
+          char mbuf[192];
+          uint32_t mlen = jacl_string_data(msg, mbuf, sizeof(mbuf) - 1);
+          mbuf[mlen] = '\0';
+          vm__set_error(vm, "syntax-error at %u:%u: %s",
+                       syn->pos_line, syn->pos_col, mbuf);
+          return VM_RUNTIME_ERROR;
+        }
 
         /* US-016: construction subops — each kind pops its own operands,
          * allocates a fresh JaclSyntax, and pushes it. Dispatched before

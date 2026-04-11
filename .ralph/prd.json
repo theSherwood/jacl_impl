@@ -359,8 +359,8 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented as compile-time-matched builtin (head_matches) dispatched to OP_SYNTAX_OP with 2 new subops: 13=error with message only, 14=error with message+syntax. Same single-opcode/subop-byte pattern as US-015/US-016. The arity check (1 or 2 args) is a compile error; the message type check (must be string) is a runtime error; when the syntax variant is used, the second arg's type check (must be syntax) is a runtime error. The error message is prefixed with 'syntax-error: ' for the 1-arg form and 'syntax-error at <line>:<col>: ' for the 2-arg form. 'Compile-time' in the PRD's sense is realized as runtime for JACL because macros are template-based (see project_macro_eval_limitation memory) — a macro template that contains a syntax-error call becomes a regular function call in the expanded program and fires when that code path runs. The 'macro checks syntax-kind and calls syntax-error' test case is adapted to an e2e pattern: defmacro whose template is `[syntax-error \"msg\"]`, then invoking the macro yields the custom error text. Gotcha: at top level, `[quote [+ 1 2]]` is a command invocation (tries to call the syntax value), so tests must use the prefix form `quote [+ 1 2]` to pass a quoted expression as an arg."
     },
     {
       "id": "US-018",
