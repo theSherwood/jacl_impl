@@ -33,6 +33,7 @@ JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap,
     syntax__set_pos(syn, node);
     syn->scope_mark = node->scope_mark;  /* hygiene: preserve macro mark */
     syn->is_caret   = node->is_caret;    /* US-013: preserve ^ flag */
+    syn->is_gensym  = node->is_gensym;   /* US-014: preserve gensym flag */
 
     switch (node->type) {
 
@@ -288,6 +289,7 @@ static void syntax__set_ast_pos(AstNode *node, JaclSyntax *syn) {
     node->end = node->start;  /* approximate — original end not stored */
     node->scope_mark   = syn->scope_mark;  /* hygiene: preserve macro mark */
     node->is_caret     = syn->is_caret;    /* US-013: preserve ^ flag */
+    node->is_gensym    = syn->is_gensym;   /* US-014: preserve gensym flag */
 }
 
 /* -------------------------------------------------------------------------
@@ -1008,6 +1010,107 @@ static int expand__match_param(JaclVal unquote_child,
 }
 
 /* -------------------------------------------------------------------------
+ * US-014: gensym — generate unique var-ref syntax objects for macro
+ * temporaries. A global counter is incremented for each call so names are
+ * unique across all macro expansions in a program. Names are formatted as
+ * <prefix>__<counter> and capped at 7 bytes to fit the compiler's inline
+ * identifier limit. The resulting var-ref is flagged is_gensym=1 so that
+ * mut/set/def accept it as a binding name (analogous to is_caret).
+ * ------------------------------------------------------------------------- */
+
+static uint32_t syntax__gensym_counter = 0;
+
+/* Build a fresh gensym var-ref syntax object. Writes the generated name
+ * into the returned SYNTAX_VAR_REF via jacl_inline_string (≤7 bytes).
+ * scope_mark is set to the supplied mark; is_gensym is set to 1.
+ * If prefix_len > 3, returns JACL_NIL and sets *err to a static message. */
+JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
+                         ThreadHeap *heap, uint32_t scope_mark,
+                         const char **err) {
+    if (err) *err = NULL;
+    if (prefix_len == 0) { prefix = "g"; prefix_len = 1; }
+    if (prefix_len > 3) {
+        if (err) *err = "gensym prefix too long (max 3 chars)";
+        return JACL_NIL;
+    }
+
+    uint32_t counter = syntax__gensym_counter++;
+    char name_buf[8];
+    uint32_t name_len = 0;
+    for (uint32_t i = 0; i < prefix_len && name_len < 7; i++)
+        name_buf[name_len++] = prefix[i];
+    if (name_len < 7) name_buf[name_len++] = '_';
+    if (name_len < 7) name_buf[name_len++] = '_';
+
+    /* Emit decimal digits of counter, reversed into name_buf. */
+    char digit_buf[16];
+    int digit_count = 0;
+    uint32_t tmp = counter;
+    if (tmp == 0) { digit_buf[digit_count++] = '0'; }
+    while (tmp > 0) {
+        digit_buf[digit_count++] = '0' + (tmp % 10);
+        tmp /= 10;
+    }
+    for (int i = digit_count - 1; i >= 0 && name_len < 7; i--)
+        name_buf[name_len++] = digit_buf[i];
+    name_buf[name_len] = '\0';
+
+    JaclVal name_val = jacl_inline_string(name_buf, name_len);
+    JaclVal result = gc_alloc_syntax(heap);
+    JaclSyntax *rsyn = jacl_as_syntax(result);
+    rsyn->kind = SYNTAX_VAR_REF;
+    rsyn->is_caret = 0;
+    rsyn->is_gensym = 1;
+    rsyn->scope_mark = scope_mark;
+    rsyn->data.var_ref.name = name_val;
+    return result;
+}
+
+/* Returns true if tmpl is a [gensym] or [gensym "prefix"] call, and fills
+ * prefix_out/prefix_len_out with the prefix string (default "g"). */
+static bool expand__is_gensym_call(JaclVal tmpl,
+                                   char prefix_out[4],
+                                   uint32_t *prefix_len_out) {
+    if (!jacl_is_syntax(tmpl)) return false;
+    JaclSyntax *syn = jacl_as_syntax(tmpl);
+    if (syn->kind != SYNTAX_COMMAND) return false;
+
+    JaclVal head = syn->data.command.head;
+    if (!jacl_is_syntax(head)) return false;
+    JaclSyntax *hsyn = jacl_as_syntax(head);
+    if (hsyn->kind != SYNTAX_LIT_STRING) return false;
+    JaclVal head_name = hsyn->data.lit_string.value;
+    uint32_t hlen = jacl_string_byte_len(head_name);
+    if (hlen != 6) return false;
+    char hbuf[16];
+    jacl_string_data(head_name, hbuf, sizeof(hbuf));
+    if (memcmp(hbuf, "gensym", 6) != 0) return false;
+
+    jacl_vec_root *args =
+        (jacl_vec_root *)jacl_as_ptr(syn->data.command.args);
+    uint32_t argc = jacl_vec_count(args);
+    if (argc == 0) {
+        prefix_out[0] = 'g';
+        prefix_out[1] = '\0';
+        *prefix_len_out = 1;
+        return true;
+    }
+    if (argc != 1) return false;
+
+    JaclVal arg = jacl_vec_get(args, 0).value;
+    if (!jacl_is_syntax(arg)) return false;
+    JaclSyntax *asyn = jacl_as_syntax(arg);
+    if (asyn->kind != SYNTAX_LIT_STRING) return false;
+    JaclVal prefix_val = asyn->data.lit_string.value;
+    uint32_t plen = jacl_string_byte_len(prefix_val);
+    if (plen == 0 || plen > 3) return false;
+    jacl_string_data(prefix_val, prefix_out, 4);
+    prefix_out[plen] = '\0';
+    *prefix_len_out = plen;
+    return true;
+}
+
+/* -------------------------------------------------------------------------
  * expand__subst_template: walk a syntax object template from a syntax-quote,
  * replacing SYNTAX_UNQUOTE nodes by matching their child name against macro
  * parameter names. SYNTAX_UNQUOTE_SPLICING flattens into arg/cmd lists.
@@ -1026,6 +1129,20 @@ static JaclVal expand__subst_template(JaclVal tmpl,
     if (!jacl_is_syntax(tmpl)) return tmpl;
 
     JaclSyntax *syn = jacl_as_syntax(tmpl);
+
+    /* US-014: detect [gensym] / [gensym "prefix"] calls in the template
+     * and replace them with a fresh gensym var-ref. The var-ref inherits
+     * the current template mark (set by expand__stamp_syntax) so the
+     * binding is hygienic within the macro's own scope. */
+    {
+        char prefix[4];
+        uint32_t prefix_len;
+        if (expand__is_gensym_call(tmpl, prefix, &prefix_len)) {
+            const char *err = NULL;
+            return jacl_gensym_next(prefix, prefix_len, heap,
+                                    syn->scope_mark, &err);
+        }
+    }
 
     /* Unquote: look up the child name and substitute with arg value */
     if (syn->kind == SYNTAX_UNQUOTE) {

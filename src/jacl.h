@@ -275,6 +275,7 @@ typedef enum {
 typedef struct {
     uint8_t   kind;        /* SyntaxKind */
     uint8_t   is_caret;    /* US-013: ^name — skip scope-mark stamping */
+    uint8_t   is_gensym;   /* US-014: var-ref produced by gensym */
     uint32_t  pos_line;    /* source line */
     uint32_t  pos_col;     /* source column */
     uint32_t  pos_offset;  /* source offset */
@@ -512,6 +513,7 @@ struct AstNode {
   SourcePos   end;
   uint32_t    scope_mark;  /* hygiene: 0 = no macro context, >0 = macro expansion */
   uint8_t     is_caret;    /* US-013: ^name in syntax-quote — force scope mark 0 */
+  uint8_t     is_gensym;   /* US-014: var-ref produced by gensym — accepted as binding name */
   union {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count; } command;
     struct { int32_t   value; }                                    lit_int;
@@ -1554,6 +1556,9 @@ extern const char *ast_expand_macros(AstNode **program, uint32_t count,
                                      JaclInternTable *intern, arena_t *arena,
                                      uint32_t *out_error_line,
                                      uint32_t *out_error_col);
+extern JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
+                                ThreadHeap *heap, uint32_t scope_mark,
+                                const char **err);
 
 /* --- string.c --- */
 extern uint32_t string__fnv1a (const char *data, uint32_t length);

@@ -1172,6 +1172,7 @@ typedef enum {
 typedef struct {
     uint8_t   kind;        /* SyntaxKind */
     uint8_t   is_caret;    /* US-013: ^name — skip scope-mark stamping */
+    uint8_t   is_gensym;   /* US-014: var-ref produced by gensym */
     uint32_t  pos_line;    /* source line */
     uint32_t  pos_col;     /* source column */
     uint32_t  pos_offset;  /* source offset */

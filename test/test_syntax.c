@@ -3293,6 +3293,157 @@ static int test_us011_wrong_arg_count_error(void) {
     TEST_PASS();
 }
 
+/* ===== US-014: gensym builtin ===== */
+
+/* Test: jacl_gensym_next returns a SYNTAX_VAR_REF with is_gensym=1. */
+static int test_us014_gensym_returns_var_ref(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char *err = NULL;
+    JaclVal v = jacl_gensym_next("g", 1, &vm.heap, 0, &err);
+    ASSERT(err == NULL);
+    ASSERT(jacl_is_syntax(v));
+    JaclSyntax *s = jacl_as_syntax(v);
+    ASSERT_U32_EQ(s->kind, SYNTAX_VAR_REF);
+    ASSERT_U32_EQ(s->is_gensym, 1);
+    ASSERT_U32_EQ(s->is_caret, 0);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: two gensym calls produce two distinct syntax objects with
+ * distinct name strings. */
+static int test_us014_gensym_produces_distinct_names(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char *err = NULL;
+    JaclVal a = jacl_gensym_next("t", 1, &vm.heap, 0, &err);
+    ASSERT(err == NULL);
+    JaclVal b = jacl_gensym_next("t", 1, &vm.heap, 0, &err);
+    ASSERT(err == NULL);
+
+    /* Different heap pointers (distinct allocations). */
+    ASSERT(a != b);
+
+    JaclSyntax *sa = jacl_as_syntax(a);
+    JaclSyntax *sb = jacl_as_syntax(b);
+    char nbuf_a[16];
+    char nbuf_b[16];
+    uint32_t la = jacl_string_byte_len(sa->data.var_ref.name);
+    uint32_t lb = jacl_string_byte_len(sb->data.var_ref.name);
+    jacl_string_data(sa->data.var_ref.name, nbuf_a, sizeof(nbuf_a));
+    jacl_string_data(sb->data.var_ref.name, nbuf_b, sizeof(nbuf_b));
+    nbuf_a[la] = '\0';
+    nbuf_b[lb] = '\0';
+
+    /* Distinct name strings. */
+    ASSERT(la != lb || memcmp(nbuf_a, nbuf_b, la) != 0);
+
+    /* Both start with "t__" (prefix + separator). */
+    ASSERT(la >= 3 && nbuf_a[0] == 't' && nbuf_a[1] == '_' && nbuf_a[2] == '_');
+    ASSERT(lb >= 3 && nbuf_b[0] == 't' && nbuf_b[1] == '_' && nbuf_b[2] == '_');
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: jacl_gensym_next with zero-length prefix uses the default "g". */
+static int test_us014_gensym_default_prefix(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char *err = NULL;
+    JaclVal v = jacl_gensym_next(NULL, 0, &vm.heap, 0, &err);
+    ASSERT(err == NULL);
+    JaclSyntax *s = jacl_as_syntax(v);
+    char nbuf[16];
+    uint32_t n = jacl_string_byte_len(s->data.var_ref.name);
+    jacl_string_data(s->data.var_ref.name, nbuf, sizeof(nbuf));
+    nbuf[n] = '\0';
+    /* Name starts with "g__" (default prefix). */
+    ASSERT(n >= 3 && nbuf[0] == 'g' && nbuf[1] == '_' && nbuf[2] == '_');
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: prefix longer than 3 chars is rejected. */
+static int test_us014_gensym_prefix_too_long(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char *err = NULL;
+    JaclVal v = jacl_gensym_next("toolong", 7, &vm.heap, 0, &err);
+    ASSERT(err != NULL);
+    ASSERT(jacl_is_nil(v));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: a macro using [gensym] as a mut binding name compiles and runs.
+ * The generated unique name is a fresh local that does not exist before the
+ * macro call. */
+static int test_us014_gensym_in_macro_mut(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src =
+        "defmacro m {v} {\n"
+        "  syntax-quote [mut [gensym] ~v]\n"
+        "}\n"
+        "proc run {} {\n"
+        "  m 42\n"
+        "  99\n"
+        "}\n"
+        "run";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_i32(result));
+    ASSERT_INT_EQ(jacl_as_i32(result), 99);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: macro using [gensym "t"] for a temporary does not collide with a
+ * caller variable named "t". The caller's t keeps its original value after
+ * the macro call. */
+static int test_us014_gensym_no_collision_with_caller(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src =
+        "defmacro bindit {v} {\n"
+        "  syntax-quote [mut [gensym t] ~v]\n"
+        "}\n"
+        "proc run {} {\n"
+        "  mut t 99\n"
+        "  bindit 7\n"
+        "  $t\n"
+        "}\n"
+        "run";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_i32(result));
+    /* Caller's t is unchanged — gensym'd name is distinct from "t". */
+    ASSERT_INT_EQ(jacl_as_i32(result), 99);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -3455,6 +3606,15 @@ int main(void) {
     RUN(test_us013_caret_binds_in_caller_scope);
     RUN(test_us013_caret_outside_syntax_quote_error);
     RUN(test_us013_caret_does_not_collide_with_internal);
+
+    printf("\n=== Gensym Tests (US-014) ===\n");
+
+    RUN(test_us014_gensym_returns_var_ref);
+    RUN(test_us014_gensym_produces_distinct_names);
+    RUN(test_us014_gensym_default_prefix);
+    RUN(test_us014_gensym_prefix_too_long);
+    RUN(test_us014_gensym_in_macro_mut);
+    RUN(test_us014_gensym_no_collision_with_caller);
 
 #undef RUN
 

@@ -292,7 +292,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": "gensym is simpler than scope marks for the common case of macro-internal temporaries. Both mechanisms coexist — scope marks handle hygiene automatically, gensym is explicit."
     },
     {

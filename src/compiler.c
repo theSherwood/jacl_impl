@@ -4694,7 +4694,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* US-013: accept either AST_LIT_STRING (normal mut name) or
        AST_VAR_REF with is_caret set (^name inside syntax-quote, which
-       introduces a binding in the caller's scope for anaphoric macros). */
+       introduces a binding in the caller's scope for anaphoric macros).
+       US-014: also accept AST_VAR_REF with is_gensym set (gensym-produced
+       unique names). Gensym bindings stay at the var-ref's scope mark. */
     const char* bind_name_ptr;
     uint32_t    name_len;
     uint32_t    bind_scope_mark;
@@ -4707,6 +4709,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       bind_name_ptr   = args[name_arg_idx]->data.var_ref.name;
       name_len        = args[name_arg_idx]->data.var_ref.length;
       bind_scope_mark = 0;  /* ^name → caller's scope */
+    } else if (args[name_arg_idx]->type == AST_VAR_REF &&
+               args[name_arg_idx]->is_gensym) {
+      bind_name_ptr   = args[name_arg_idx]->data.var_ref.name;
+      name_len        = args[name_arg_idx]->data.var_ref.length;
+      bind_scope_mark = args[name_arg_idx]->scope_mark;
     } else {
       compiler__error(c, line, col, "mut name must be a string");
       return;
@@ -4833,13 +4840,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (compiler__head_matches(head, "set", 3)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "set", "2 arguments", argc); return; }
     /* US-013: accept AST_LIT_STRING (normal set) or AST_VAR_REF with
-       is_caret set (^name inside syntax-quote). */
+       is_caret set (^name inside syntax-quote).
+       US-014: also accept AST_VAR_REF with is_gensym set. */
     const char* set_name_ptr;
     uint32_t    name_len;
     if (args[0]->type == AST_LIT_STRING) {
       set_name_ptr = args[0]->data.lit_string.value;
       name_len     = args[0]->data.lit_string.length;
-    } else if (args[0]->type == AST_VAR_REF && args[0]->is_caret) {
+    } else if (args[0]->type == AST_VAR_REF &&
+               (args[0]->is_caret || args[0]->is_gensym)) {
       set_name_ptr = args[0]->data.var_ref.name;
       name_len     = args[0]->data.var_ref.length;
     } else {
@@ -5299,7 +5308,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     /* US-013: accept AST_LIT_STRING (normal def) or AST_VAR_REF with
-       is_caret set (^name inside syntax-quote). */
+       is_caret set (^name inside syntax-quote).
+       US-014: also accept AST_VAR_REF with is_gensym set. */
     const char* bind_name_ptr;
     uint32_t    name_len;
     uint32_t    bind_scope_mark;
@@ -5312,6 +5322,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       bind_name_ptr   = args[name_arg_idx]->data.var_ref.name;
       name_len        = args[name_arg_idx]->data.var_ref.length;
       bind_scope_mark = 0;  /* ^name → caller's scope */
+    } else if (args[name_arg_idx]->type == AST_VAR_REF &&
+               args[name_arg_idx]->is_gensym) {
+      bind_name_ptr   = args[name_arg_idx]->data.var_ref.name;
+      name_len        = args[name_arg_idx]->data.var_ref.length;
+      bind_scope_mark = args[name_arg_idx]->scope_mark;
     } else {
       compiler__error(c, line, col, "def name must be a string");
       return;
