@@ -880,6 +880,116 @@ static uint32_t    expand__error_col;
  * context" and is reserved for user-written code. */
 static uint32_t    expand__scope_counter = 0;
 
+/* US-018: expansion call stack for dual-location error reporting. Each
+ * frame records the name and original call-site of a macro whose
+ * template is currently being recursively re-expanded. When an error
+ * occurs inside a nested expansion, the chain is rendered into the
+ * error message so the user sees both the inner failure location and
+ * every outer macro expansion that led to it. */
+typedef struct ExpandFrame {
+    const char *name;
+    uint32_t    name_len;
+    uint32_t    line;
+    uint32_t    col;
+} ExpandFrame;
+
+#define EXPAND_FRAME_MAX 256
+static ExpandFrame expand__frames[EXPAND_FRAME_MAX];
+static uint32_t    expand__frame_top = 0;
+
+static bool expand__push_frame(const char *name, uint32_t name_len,
+                                uint32_t line, uint32_t col) {
+    if (expand__frame_top >= EXPAND_FRAME_MAX) return false;
+    expand__frames[expand__frame_top].name     = name;
+    expand__frames[expand__frame_top].name_len = name_len;
+    expand__frames[expand__frame_top].line     = line;
+    expand__frames[expand__frame_top].col      = col;
+    expand__frame_top++;
+    return true;
+}
+
+static void expand__pop_frame(void) {
+    if (expand__frame_top > 0) expand__frame_top--;
+}
+
+/* Build an arena-allocated error message combining base_msg with the
+ * current expansion call stack. Frames are rendered outermost-first
+ * (index 0 → frame_top - 1) so the reader sees the chain top-down. When
+ * the stack is deeper than 8 frames we show the outermost 4, an "... N
+ * more ..." marker, and the innermost 4, so that a self-recursing macro
+ * hitting the depth limit doesn't produce a 200-line error. When the
+ * stack is empty (no active expansion) we simply copy base_msg into the
+ * arena so the returned pointer has the same lifetime as the arena. */
+static const char *expand__build_error_with_chain(const char *base_msg,
+                                                   arena_t *arena) {
+    size_t base_len = strlen(base_msg);
+    if (expand__frame_top == 0) {
+        char *buf = (char *)arena_alloc(arena, (uint32_t)(base_len + 1));
+        memcpy(buf, base_msg, base_len);
+        buf[base_len] = '\0';
+        return buf;
+    }
+
+    const uint32_t DISPLAY_MAX = 8;
+    bool truncated = expand__frame_top > DISPLAY_MAX;
+
+    size_t cap = base_len + 64;
+    for (uint32_t i = 0; i < expand__frame_top; i++)
+        cap += expand__frames[i].name_len + 80;
+    cap += 96;  /* truncation marker headroom */
+
+    char *buf = (char *)arena_alloc(arena, (uint32_t)cap);
+    size_t n = 0;
+    memcpy(buf + n, base_msg, base_len);
+    n += base_len;
+
+    if (!truncated) {
+        for (uint32_t i = 0; i < expand__frame_top; i++) {
+            int w = snprintf(buf + n, cap - n,
+                "\n  in expansion of macro `%.*s` at line %u, col %u",
+                (int)expand__frames[i].name_len,
+                expand__frames[i].name,
+                expand__frames[i].line,
+                expand__frames[i].col);
+            if (w > 0) n += (size_t)w;
+        }
+    } else {
+        for (uint32_t i = 0; i < 4; i++) {
+            int w = snprintf(buf + n, cap - n,
+                "\n  in expansion of macro `%.*s` at line %u, col %u",
+                (int)expand__frames[i].name_len,
+                expand__frames[i].name,
+                expand__frames[i].line,
+                expand__frames[i].col);
+            if (w > 0) n += (size_t)w;
+        }
+        {
+            int w = snprintf(buf + n, cap - n,
+                "\n  ... %u more expansion frames ...",
+                expand__frame_top - DISPLAY_MAX);
+            if (w > 0) n += (size_t)w;
+        }
+        for (uint32_t i = expand__frame_top - 4; i < expand__frame_top; i++) {
+            int w = snprintf(buf + n, cap - n,
+                "\n  in expansion of macro `%.*s` at line %u, col %u",
+                (int)expand__frames[i].name_len,
+                expand__frames[i].name,
+                expand__frames[i].line,
+                expand__frames[i].col);
+            if (w > 0) n += (size_t)w;
+        }
+    }
+    buf[n] = '\0';
+    return buf;
+}
+
+static void expand__set_error(const char *msg, uint32_t line, uint32_t col,
+                               arena_t *arena) {
+    expand__error_msg  = expand__build_error_with_chain(msg, arena);
+    expand__error_line = line;
+    expand__error_col  = col;
+}
+
 /* -------------------------------------------------------------------------
  * expand__stamp_syntax: recursively stamp a freshly-allocated template
  * syntax tree with the given scope mark. Used before substitution so that
@@ -1310,9 +1420,8 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
     if (!node) return true;
 
     if (depth > 256) {
-        expand__error_msg  = "macro expansion depth limit exceeded";
-        expand__error_line = node->start.line;
-        expand__error_col  = node->start.column;
+        expand__set_error("macro expansion depth limit exceeded",
+                          node->start.line, node->start.column, arena);
         return false;
     }
 
@@ -1331,11 +1440,8 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                              "macro '%.*s' expects %u arguments but got %u",
                              (int)name_len, name,
                              entry->param_count, argc);
-                    char *msg = (char *)arena_alloc(arena, strlen(err) + 1);
-                    memcpy(msg, err, strlen(err) + 1);
-                    expand__error_msg  = msg;
-                    expand__error_line = node->start.line;
-                    expand__error_col  = node->start.column;
+                    expand__set_error(err, node->start.line,
+                                      node->start.column, arena);
                     return false;
                 }
 
@@ -1347,11 +1453,8 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                     snprintf(err, sizeof(err),
                              "macro '%.*s' body must be a syntax-quote template",
                              (int)name_len, name);
-                    char *msg = (char *)arena_alloc(arena, strlen(err) + 1);
-                    memcpy(msg, err, strlen(err) + 1);
-                    expand__error_msg  = msg;
-                    expand__error_line = node->start.line;
-                    expand__error_col  = node->start.column;
+                    expand__set_error(err, node->start.line,
+                                      node->start.column, arena);
                     return false;
                 }
 
@@ -1382,16 +1485,26 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                 /* Convert result back to AstNode */
                 AstNode *expanded = syntax_to_ast(result_syn, arena);
                 if (!expanded) {
-                    expand__error_msg  = "macro expansion produced invalid syntax";
-                    expand__error_line = node->start.line;
-                    expand__error_col  = node->start.column;
+                    expand__set_error("macro expansion produced invalid syntax",
+                                      node->start.line,
+                                      node->start.column, arena);
                     return false;
                 }
 
+                /* US-018: capture the ORIGINAL call site BEFORE replacement
+                 * so we can push a frame for this expansion. The node is
+                 * about to be replaced by the expanded AST, which carries
+                 * positions from the template, not the call site. */
+                uint32_t orig_line = node->start.line;
+                uint32_t orig_col  = node->start.column;
+
                 /* Replace the node and re-expand (iterative expansion) */
                 *node_ptr = expanded;
-                return expand__node(node_ptr, macros, heap, intern, arena,
-                                    depth + 1);
+                expand__push_frame(name, name_len, orig_line, orig_col);
+                bool ok = expand__node(node_ptr, macros, heap, intern, arena,
+                                       depth + 1);
+                expand__pop_frame();
+                return ok;
             }
         }
 
@@ -1436,6 +1549,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
     expand__error_msg  = NULL;
     expand__error_line = 0;
     expand__error_col  = 0;
+    expand__frame_top  = 0;
 
     for (uint32_t i = 0; i < count; i++) {
         AstNode *node = program[i];

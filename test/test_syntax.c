@@ -4052,6 +4052,156 @@ static int test_us017_syntax_error_from_macro(void) {
     TEST_PASS();
 }
 
+/* ===== US-018: Dual-location error reporting ===== */
+
+/* Top-level arity error: macro call directly fails.
+ * Chain should be empty (no outer expansions involved). */
+static int test_us018_top_level_no_chain(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src =
+        "defmacro take2 {a, b} { syntax-quote [+ ~a ~b] }\n"
+        "take2 1";
+    MacroTable mt;
+    const char* err = NULL;
+    expand_source(src, &arena, &vm, &mt, &err);
+    ASSERT(err != NULL);
+    ASSERT(strstr(err, "expects 2 arguments but got 1") != NULL);
+    /* No chain entries because the failing call is at the top level. */
+    ASSERT(strstr(err, "in expansion of macro") == NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Nested macro failure: outer's template calls inner with wrong arity.
+ * The error should reference inner's arity mismatch AND include an
+ * "in expansion of macro `outer`" chain entry pointing at the user's
+ * original call site for outer. */
+static int test_us018_nested_arity_chain(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src =
+        "defmacro inner {} { syntax-quote [+ 1 2] }\n"
+        "defmacro outer {} { syntax-quote [inner 1 2] }\n"
+        "outer";
+    MacroTable mt;
+    const char* err = NULL;
+    expand_source(src, &arena, &vm, &mt, &err);
+    ASSERT(err != NULL);
+    ASSERT(strstr(err, "inner") != NULL);
+    ASSERT(strstr(err, "expects 0 arguments but got 2") != NULL);
+    ASSERT(strstr(err, "in expansion of macro `outer`") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Triply-nested macro failure: a -> b -> c, where c has wrong arity.
+ * The error chain should include both a and b, from outer-most to
+ * inner-most. */
+static int test_us018_triply_nested_chain(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src =
+        "defmacro c {} { syntax-quote [+ 1 2] }\n"
+        "defmacro b {} { syntax-quote [c 99] }\n"
+        "defmacro a {} { syntax-quote [b] }\n"
+        "a";
+    MacroTable mt;
+    const char* err = NULL;
+    expand_source(src, &arena, &vm, &mt, &err);
+    ASSERT(err != NULL);
+    ASSERT(strstr(err, "expects 0 arguments but got 1") != NULL);
+    ASSERT(strstr(err, "in expansion of macro `a`") != NULL);
+    ASSERT(strstr(err, "in expansion of macro `b`") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* The call-site line number should be captured and reported in the chain
+ * entry — if outer is called on line 4, the chain entry for outer should
+ * carry "line 4". */
+static int test_us018_call_site_line_captured(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* outer is called on line 4 of the source below. */
+    const char* src =
+        "defmacro inner {} { syntax-quote [+ 1 2] }\n"
+        "defmacro outer {} { syntax-quote [inner 7] }\n"
+        "\n"
+        "outer";
+    MacroTable mt;
+    const char* err = NULL;
+    expand_source(src, &arena, &vm, &mt, &err);
+    ASSERT(err != NULL);
+    ASSERT(strstr(err, "in expansion of macro `outer`") != NULL);
+    /* The outer frame should record line 4 (the line of the `outer` call). */
+    ASSERT(strstr(err, "line 4") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Depth-limit failure from a self-referencing macro should produce an
+ * error with a truncated chain ("... N more expansion frames ..."). The
+ * chain must not dump all 256 frames. */
+static int test_us018_depth_limit_truncated(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    const char* src =
+        "defmacro loop {x} { syntax-quote [loop ~x] }\n"
+        "loop 1";
+    MacroTable mt;
+    const char* err = NULL;
+    expand_source(src, &arena, &vm, &mt, &err);
+    ASSERT(err != NULL);
+    ASSERT(strstr(err, "depth limit") != NULL);
+    ASSERT(strstr(err, "in expansion of macro `loop`") != NULL);
+    /* Deep chain must be truncated, not dumped in full. */
+    ASSERT(strstr(err, "more expansion frames") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Full end-to-end: a nested macro failure surfaces through jacl_eval
+ * with the chain embedded in the error message reported to user code. */
+static int test_us018_e2e_via_jacl_eval(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src =
+        "defmacro inner {} { syntax-quote [+ 1 2] }\n"
+        "defmacro outer {} { syntax-quote [inner 1 2] }\n"
+        "outer";
+    JaclVal r = jacl_eval(vm, src);
+    ASSERT(jacl_is_error(r));
+    const char* msg = jacl_error_message_str(vm, r);
+    ASSERT(msg != NULL);
+    ASSERT(strstr(msg, "expects 0 arguments but got 2") != NULL);
+    ASSERT(strstr(msg, "in expansion of macro `outer`") != NULL);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -4262,6 +4412,15 @@ int main(void) {
     RUN(test_us017_syntax_error_non_string_message);
     RUN(test_us017_syntax_error_non_syntax_second);
     RUN(test_us017_syntax_error_from_macro);
+
+    printf("\n=== Dual-Location Error Reporting Tests (US-018) ===\n");
+
+    RUN(test_us018_top_level_no_chain);
+    RUN(test_us018_nested_arity_chain);
+    RUN(test_us018_triply_nested_chain);
+    RUN(test_us018_call_site_line_captured);
+    RUN(test_us018_depth_limit_truncated);
+    RUN(test_us018_e2e_via_jacl_eval);
 
 #undef RUN
 

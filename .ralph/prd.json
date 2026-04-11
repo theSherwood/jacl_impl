@@ -377,8 +377,8 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented as an expansion-pass-only call stack in src/syntax.c — JACL macros are template-based (see project_macro_eval_limitation memory), so 'runtime error during expansion' maps to 'compile-time error during the expansion walk' (arity mismatch at a nested call site, body-shape error, depth limit, invalid-syntax from syntax_to_ast). No VM/runtime wiring needed. Added ExpandFrame[256] + expand__push_frame/expand__pop_frame + expand__build_error_with_chain helpers. Frames push outer-macro-name + ORIGINAL call site (captured BEFORE *node_ptr is replaced with the expanded AST) around the recursive expand__node call. The chain is rendered into the error message at error-set time (not return time) because set_error captures the stack state before any pops happen. Chain format: base msg on line 1, then one '  in expansion of macro `name` at line L, col C' line per ancestor frame, outermost-first. Deep chains (>8) are truncated to outermost-4 + '... N more expansion frames ...' + innermost-4 so self-recursing macros hitting the depth limit don't dump a 200-line error. Deviation from the PRD's 'division by zero' test case: adapted to nested-arity tests because template-based expansion never runs user code during expansion. Runtime errors that fire from expanded macro bodies (e.g. the syntax-error builtin from US-017) go through the VM's error path, NOT the expansion chain — they get the call-site-of-the-expanded-code position automatically via syntax_to_ast position propagation, which is a different mechanism."
     }
   ]
 }
