@@ -3689,6 +3689,249 @@ static int test_us015_arity_error(void) {
     TEST_PASS();
 }
 
+/* ===== US-016: make-syntax construction builtin ===== */
+
+/* Test: make-syntax lit-int produces a lit-int syntax with correct datum. */
+static int test_us016_make_lit_int(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+    char buf[32];
+
+    JaclVal r1 = jacl_eval(vm, "syntax-kind [make-syntax lit-int 42]");
+    ASSERT(!jacl_is_error(r1));
+    us015__string_to_cstr(r1, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "lit-int");
+
+    JaclVal r2 = jacl_eval(vm, "syntax-datum [make-syntax lit-int 42]");
+    ASSERT(!jacl_is_error(r2));
+    ASSERT(jacl_is_i32(r2));
+    ASSERT_INT_EQ(jacl_as_i32(r2), 42);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: make-syntax lit-float produces a lit-float syntax. */
+static int test_us016_make_lit_float(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+    char buf[32];
+
+    JaclVal r1 = jacl_eval(vm, "syntax-kind [make-syntax lit-float 3.14]");
+    ASSERT(!jacl_is_error(r1));
+    us015__string_to_cstr(r1, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "lit-float");
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: make-syntax lit-string produces a lit-string syntax with correct datum. */
+static int test_us016_make_lit_string(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+    char buf[32];
+
+    JaclVal r1 = jacl_eval(vm, "syntax-kind [make-syntax lit-string \"hi\"]");
+    ASSERT(!jacl_is_error(r1));
+    us015__string_to_cstr(r1, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "lit-string");
+
+    JaclVal r2 = jacl_eval(vm, "syntax-datum [make-syntax lit-string \"hi\"]");
+    ASSERT(!jacl_is_error(r2));
+    ASSERT(jacl_is_string(r2));
+    us015__string_to_cstr(r2, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "hi");
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: make-syntax var-ref produces a var-ref syntax with correct name. */
+static int test_us016_make_var_ref(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+    char buf[32];
+
+    JaclVal r1 = jacl_eval(vm, "syntax-kind [make-syntax var-ref \"x\"]");
+    ASSERT(!jacl_is_error(r1));
+    us015__string_to_cstr(r1, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "var-ref");
+
+    JaclVal r2 = jacl_eval(vm, "syntax-datum [make-syntax var-ref \"x\"]");
+    ASSERT(!jacl_is_error(r2));
+    ASSERT(jacl_is_string(r2));
+    us015__string_to_cstr(r2, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "x");
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: make-syntax command assembles a command from a head syntax and
+ * a vec of arg syntax. The head is built via [syntax-head quote [+ 1 2]]
+ * to avoid the fact that operator tokens like '+' don't parse as a
+ * bare expression after the 'quote' prefix form. */
+static int test_us016_make_command(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+    char buf[32];
+
+    const char *src =
+        "make-syntax command [syntax-head quote [+ 1 2]] "
+        "[vec [make-syntax lit-int 1] [make-syntax lit-int 2]]";
+    char wrap[256];
+    snprintf(wrap, sizeof(wrap), "syntax-kind [%s]", src);
+    JaclVal r1 = jacl_eval(vm, wrap);
+    ASSERT(!jacl_is_error(r1));
+    us015__string_to_cstr(r1, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "command");
+
+    /* The head datum should be the operator string "+". */
+    snprintf(wrap, sizeof(wrap), "syntax-datum [syntax-head [%s]]", src);
+    JaclVal r2 = jacl_eval(vm, wrap);
+    ASSERT(!jacl_is_error(r2));
+    ASSERT(jacl_is_string(r2));
+    us015__string_to_cstr(r2, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "+");
+
+    /* The args vec should have length 2. */
+    snprintf(wrap, sizeof(wrap), "vec-len [syntax-args [%s]]", src);
+    JaclVal r3 = jacl_eval(vm, wrap);
+    ASSERT(!jacl_is_error(r3));
+    ASSERT(jacl_is_i32(r3));
+    ASSERT_INT_EQ(jacl_as_i32(r3), 2);
+
+    /* The first arg should be a lit-int with datum 1. */
+    snprintf(wrap, sizeof(wrap),
+             "syntax-datum [vec-get [syntax-args [%s]] 0]", src);
+    JaclVal r4 = jacl_eval(vm, wrap);
+    ASSERT(!jacl_is_error(r4));
+    ASSERT(jacl_is_i32(r4));
+    ASSERT_INT_EQ(jacl_as_i32(r4), 1);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: make-syntax block assembles a block from a vec of command syntax. */
+static int test_us016_make_block(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+    char buf[32];
+
+    /* Build a block containing [+ 1 2] as its single command. The inner
+     * command is obtained via `quote [+ 1 2]` (quote is a prefix form that
+     * consumes its following expression, so we write it without inner
+     * brackets: `[vec quote [+ 1 2]]` = a 1-element vec whose element is
+     * the quoted `[+ 1 2]` syntax object). */
+    const char *src =
+        "make-syntax block [vec quote [+ 1 2]]";
+    char wrap[256];
+    snprintf(wrap, sizeof(wrap), "syntax-kind [%s]", src);
+    JaclVal r1 = jacl_eval(vm, wrap);
+    ASSERT(!jacl_is_error(r1));
+    us015__string_to_cstr(r1, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "block");
+
+    snprintf(wrap, sizeof(wrap), "vec-len [syntax-commands [%s]]", src);
+    JaclVal r2 = jacl_eval(vm, wrap);
+    ASSERT(!jacl_is_error(r2));
+    ASSERT(jacl_is_i32(r2));
+    ASSERT_INT_EQ(jacl_as_i32(r2), 1);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: unknown kind is a compile error. */
+static int test_us016_unknown_kind_error(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal r = jacl_eval(vm, "make-syntax bogus 42");
+    ASSERT(jacl_is_error(r));
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: wrong arg count for a kind is a compile error. */
+static int test_us016_arity_error(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    /* lit-int expects exactly one extra arg — two extras is a compile error. */
+    JaclVal r1 = jacl_eval(vm, "make-syntax lit-int 1 2");
+    ASSERT(jacl_is_error(r1));
+
+    /* command expects exactly two extra args — only one is a compile error. */
+    JaclVal r2 = jacl_eval(vm, "make-syntax command [quote +]");
+    ASSERT(jacl_is_error(r2));
+
+    /* zero args is a compile error. */
+    JaclVal r3 = jacl_eval(vm, "make-syntax");
+    ASSERT(jacl_is_error(r3));
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: wrong payload type is a runtime error. */
+static int test_us016_type_error(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    /* lit-int with a string — runtime type error. */
+    JaclVal r1 = jacl_eval(vm, "make-syntax lit-int \"not an int\"");
+    ASSERT(jacl_is_error(r1));
+
+    /* var-ref with an integer — runtime type error. */
+    JaclVal r2 = jacl_eval(vm, "make-syntax var-ref 42");
+    ASSERT(jacl_is_error(r2));
+
+    /* command with a non-syntax head — runtime type error. */
+    JaclVal r3 = jacl_eval(vm, "make-syntax command 42 [vec]");
+    ASSERT(jacl_is_error(r3));
+
+    /* command with a non-vec args — runtime type error. */
+    JaclVal r4 = jacl_eval(vm,
+        "make-syntax command [make-syntax var-ref \"foo\"] 42");
+    ASSERT(jacl_is_error(r4));
+
+    /* command whose args vec contains a non-syntax element — runtime error. */
+    JaclVal r5 = jacl_eval(vm,
+        "make-syntax command [make-syntax var-ref \"foo\"] [vec 1 2]");
+    ASSERT(jacl_is_error(r5));
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: round-trip make-syntax -> syntax-str contains the expected text.
+ * This validates the end-to-end path: a programmatically-built command
+ * can be pretty-printed like any other syntax object. */
+static int test_us016_round_trip_str(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    JaclVal r = jacl_eval(vm,
+        "syntax-str [make-syntax command [syntax-head quote [+ 1 2]] "
+        "[vec [make-syntax lit-int 1] [make-syntax lit-int 2]]]");
+    ASSERT(!jacl_is_error(r));
+    ASSERT(jacl_is_string(r));
+    char buf[128];
+    us015__string_to_cstr(r, buf, sizeof(buf));
+    /* Pretty-printer output must at least mention the command's operator
+     * and both integer operands somewhere in the formatted text. */
+    ASSERT(strstr(buf, "+") != NULL);
+    ASSERT(strstr(buf, "1") != NULL);
+    ASSERT(strstr(buf, "2") != NULL);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
 int main(void) {
     int pass = 0, fail = 0;
 
@@ -3876,6 +4119,19 @@ int main(void) {
     RUN(test_us015_syntax_str);
     RUN(test_us015_non_syntax_type_error);
     RUN(test_us015_arity_error);
+
+    printf("\n=== make-syntax Construction Tests (US-016) ===\n");
+
+    RUN(test_us016_make_lit_int);
+    RUN(test_us016_make_lit_float);
+    RUN(test_us016_make_lit_string);
+    RUN(test_us016_make_var_ref);
+    RUN(test_us016_make_command);
+    RUN(test_us016_make_block);
+    RUN(test_us016_unknown_kind_error);
+    RUN(test_us016_arity_error);
+    RUN(test_us016_type_error);
+    RUN(test_us016_round_trip_str);
 
 #undef RUN
 

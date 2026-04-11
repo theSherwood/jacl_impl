@@ -6841,6 +6841,71 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* US-016: make-syntax — programmatic construction of syntax objects.
+   * First arg is a bare word naming the kind; remaining args are the
+   * payload. Kind dispatch happens at compile time, so the opcode only
+   * needs the kind-specific subop. Subops 7..12 share OP_SYNTAX_OP. */
+  if (compiler__head_matches(head, "make-syntax", 11)) {
+    if (argc < 1) {
+      compiler__builtin_arity_error(c, line, col, "make-syntax",
+                                    "at least 1 argument (kind)", argc);
+      return;
+    }
+    AstNode* kind_node = args[0];
+    if (kind_node->type != AST_LIT_STRING) {
+      compiler__error(c, line, col,
+        "make-syntax: first argument must be a kind name "
+        "(one of: lit-int, lit-float, lit-string, var-ref, command, block)");
+      return;
+    }
+    const char* kn = kind_node->data.lit_string.value;
+    uint32_t    kl = kind_node->data.lit_string.length;
+
+    uint8_t subop   = 0xFF;
+    const char* nm  = NULL;
+    uint32_t expect_args = 0;       /* excluding the kind arg */
+    const char* expect_desc = NULL;
+
+    if (kl == 7 && memcmp(kn, "lit-int", 7) == 0) {
+      subop = 7; nm = "make-syntax lit-int"; expect_args = 1; expect_desc = "kind and i32 value";
+    } else if (kl == 9 && memcmp(kn, "lit-float", 9) == 0) {
+      subop = 8; nm = "make-syntax lit-float"; expect_args = 1; expect_desc = "kind and f32 value";
+    } else if (kl == 10 && memcmp(kn, "lit-string", 10) == 0) {
+      subop = 9; nm = "make-syntax lit-string"; expect_args = 1; expect_desc = "kind and string value";
+    } else if (kl == 7 && memcmp(kn, "var-ref", 7) == 0) {
+      subop = 10; nm = "make-syntax var-ref"; expect_args = 1; expect_desc = "kind and string name";
+    } else if (kl == 7 && memcmp(kn, "command", 7) == 0) {
+      subop = 11; nm = "make-syntax command"; expect_args = 2; expect_desc = "kind, head, args-vec";
+    } else if (kl == 5 && memcmp(kn, "block", 5) == 0) {
+      subop = 12; nm = "make-syntax block"; expect_args = 1; expect_desc = "kind and commands-vec";
+    } else {
+      char err[128];
+      snprintf(err, sizeof(err),
+               "make-syntax: unknown kind '%.*s' (expected one of: "
+               "lit-int, lit-float, lit-string, var-ref, command, block)",
+               (int)kl, kn);
+      compiler__error(c, line, col, err);
+      return;
+    }
+
+    uint32_t got_extra = argc - 1;
+    if (got_extra != expect_args) {
+      compiler__builtin_arity_error(c, line, col, nm, expect_desc, argc);
+      return;
+    }
+
+    /* Compile the payload args (skip the kind) in left-to-right order. */
+    for (uint32_t i = 1; i < argc; i++) {
+      compiler__compile_node(c, args[i]);
+      /* lit-int and lit-float keep unboxed types — the VM subop reads
+       * them as i32/f32 directly. For the other kinds (string/vec/syntax),
+       * the default boxing is already in place. */
+    }
+    compiler__emit_byte(c, OP_SYNTAX_OP, line);
+    compiler__emit_byte(c, subop, line);
+    return;
+  }
+
   /* box builtin (exactly 1 arg) */
   if (compiler__head_matches(head, "box", 3)) {
     if (argc != 1) {

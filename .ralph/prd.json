@@ -340,8 +340,8 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented as a compile-time builtin (head_matches) dispatched to OP_SYNTAX_OP with 6 new subops (7=lit-int, 8=lit-float, 9=lit-string, 10=var-ref, 11=command, 12=block) — same single-opcode/subop-byte pattern as US-015 introspection. Kind dispatch is done at compile time so the opcode doesn't need to read a kind byte. First argument must be a bare-word kind name (AST_LIT_STRING) known at compile time; unknown kinds are a compile error, wrong arity is a compile error, wrong payload types are a runtime error. Constructed syntax objects have scope_mark = 0 because JACL's macro expansion is template-based (see project_macro_eval_limitation memory) — there is no 'current expansion scope mark' accessible at runtime, which is a simplification from the PRD's ideal semantics but has no user-observable impact since make-syntax values are only useful outside of an active expansion anyway. Gotcha: quote is a prefix form so `[quote +]` doesn't parse — use `[syntax-head quote [+ 1 2]]` or `[make-syntax var-ref \"foo\"]` to build head values for make-syntax command."
     },
     {
       "id": "US-017",

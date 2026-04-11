@@ -5886,15 +5886,171 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_SYNTAX_OP: {
-        /* US-015: syntax introspection. Subops:
-         *   0 = syntax-kind      (syntax → string)
-         *   1 = syntax-datum     (literal/var-ref → raw datum)
-         *   2 = syntax-head      (command → syntax)
-         *   3 = syntax-args      (command → vec of syntax)
-         *   4 = syntax-commands  (block → vec of syntax)
-         *   5 = syntax-pos       (syntax → map {line, col})
-         *   6 = syntax->string   (syntax → pretty-printed string) */
+        /* US-015: syntax introspection. US-016: syntax construction. Subops:
+         *   0  = syntax-kind      (syntax → string)
+         *   1  = syntax-datum     (literal/var-ref → raw datum)
+         *   2  = syntax-head      (command → syntax)
+         *   3  = syntax-args      (command → vec of syntax)
+         *   4  = syntax-commands  (block → vec of syntax)
+         *   5  = syntax-pos       (syntax → map {line, col})
+         *   6  = syntax->string   (syntax → pretty-printed string)
+         *   7  = make-syntax lit-int    (i32 → syntax)
+         *   8  = make-syntax lit-float  (f32 → syntax)
+         *   9  = make-syntax lit-string (string → syntax)
+         *   10 = make-syntax var-ref    (string → syntax)
+         *   11 = make-syntax command    (head, args-vec → syntax)
+         *   12 = make-syntax block      (commands-vec → syntax) */
         uint8_t subop = vm__read_byte(vm);
+        gc__current_heap = &vm->heap;
+
+        /* US-016: construction subops — each kind pops its own operands,
+         * allocates a fresh JaclSyntax, and pushes it. Dispatched before
+         * the introspection path because construction ops don't expect
+         * a syntax object as the operand on top of the stack. */
+        if (subop >= 7 && subop <= 12) {
+          static const char *mk_names[] = {
+            "make-syntax lit-int",    "make-syntax lit-float",
+            "make-syntax lit-string", "make-syntax var-ref",
+            "make-syntax command",    "make-syntax block"
+          };
+          const char *mk_name = mk_names[subop - 7];
+
+          switch (subop) {
+          case 7: {  /* make-syntax lit-int */
+            JaclVal v;
+            result = vm__pop(vm, &v); if (result != VM_OK) return result;
+            if (jacl_is_error(v)) { result = vm__push(vm, v); if (result != VM_OK) return result; break; }
+            if (!jacl_is_i32(v)) {
+              vm__set_error(vm, "type error in '%s': expected i32, got %s",
+                            mk_name, vm__type_name(v));
+              return VM_RUNTIME_ERROR;
+            }
+            JaclVal out = gc_alloc_syntax(&vm->heap);
+            JaclSyntax *rsyn = jacl_as_syntax(out);
+            rsyn->kind = SYNTAX_LIT_INT;
+            rsyn->data.lit_int.value = jacl_as_i32(v);
+            result = vm__push(vm, out);
+            if (result != VM_OK) return result;
+            break;
+          }
+          case 8: {  /* make-syntax lit-float */
+            JaclVal v;
+            result = vm__pop(vm, &v); if (result != VM_OK) return result;
+            if (jacl_is_error(v)) { result = vm__push(vm, v); if (result != VM_OK) return result; break; }
+            if (!jacl_is_f32(v)) {
+              vm__set_error(vm, "type error in '%s': expected f32, got %s",
+                            mk_name, vm__type_name(v));
+              return VM_RUNTIME_ERROR;
+            }
+            JaclVal out = gc_alloc_syntax(&vm->heap);
+            JaclSyntax *rsyn = jacl_as_syntax(out);
+            rsyn->kind = SYNTAX_LIT_FLOAT;
+            rsyn->data.lit_float.value = jacl_as_f32(v);
+            result = vm__push(vm, out);
+            if (result != VM_OK) return result;
+            break;
+          }
+          case 9: {  /* make-syntax lit-string */
+            JaclVal v;
+            result = vm__pop(vm, &v); if (result != VM_OK) return result;
+            if (jacl_is_error(v)) { result = vm__push(vm, v); if (result != VM_OK) return result; break; }
+            if (!jacl_is_string(v)) {
+              vm__set_error(vm, "type error in '%s': expected string, got %s",
+                            mk_name, vm__type_name(v));
+              return VM_RUNTIME_ERROR;
+            }
+            JaclVal out = gc_alloc_syntax(&vm->heap);
+            JaclSyntax *rsyn = jacl_as_syntax(out);
+            rsyn->kind = SYNTAX_LIT_STRING;
+            rsyn->data.lit_string.value = v;
+            result = vm__push(vm, out);
+            if (result != VM_OK) return result;
+            break;
+          }
+          case 10: {  /* make-syntax var-ref */
+            JaclVal v;
+            result = vm__pop(vm, &v); if (result != VM_OK) return result;
+            if (jacl_is_error(v)) { result = vm__push(vm, v); if (result != VM_OK) return result; break; }
+            if (!jacl_is_string(v)) {
+              vm__set_error(vm, "type error in '%s': expected string, got %s",
+                            mk_name, vm__type_name(v));
+              return VM_RUNTIME_ERROR;
+            }
+            JaclVal out = gc_alloc_syntax(&vm->heap);
+            JaclSyntax *rsyn = jacl_as_syntax(out);
+            rsyn->kind = SYNTAX_VAR_REF;
+            rsyn->data.var_ref.name = v;
+            result = vm__push(vm, out);
+            if (result != VM_OK) return result;
+            break;
+          }
+          case 11: {  /* make-syntax command (head, args-vec) */
+            JaclVal args_vec, head_val;
+            result = vm__pop(vm, &args_vec); if (result != VM_OK) return result;
+            result = vm__pop(vm, &head_val); if (result != VM_OK) return result;
+            if (jacl_is_error(args_vec)) { result = vm__push(vm, args_vec); if (result != VM_OK) return result; break; }
+            if (jacl_is_error(head_val)) { result = vm__push(vm, head_val); if (result != VM_OK) return result; break; }
+            if (!jacl_is_syntax(head_val)) {
+              vm__set_error(vm, "type error in '%s': head must be a syntax object, got %s",
+                            mk_name, vm__type_name(head_val));
+              return VM_RUNTIME_ERROR;
+            }
+            if (!jacl_is_vector(args_vec)) {
+              vm__set_error(vm, "type error in '%s': args must be a vec of syntax, got %s",
+                            mk_name, vm__type_name(args_vec));
+              return VM_RUNTIME_ERROR;
+            }
+            jacl_vec_root *vroot = (jacl_vec_root *)jacl_as_ptr(args_vec);
+            uint32_t vcount = jacl_vec_count(vroot);
+            for (uint32_t i = 0; i < vcount; i++) {
+              JaclVal elem = jacl_vec_get(vroot, i).value;
+              if (!jacl_is_syntax(elem)) {
+                vm__set_error(vm, "type error in '%s': args must be a vec of syntax, element %u is %s",
+                              mk_name, i, vm__type_name(elem));
+                return VM_RUNTIME_ERROR;
+              }
+            }
+            JaclVal out = gc_alloc_syntax(&vm->heap);
+            JaclSyntax *rsyn = jacl_as_syntax(out);
+            rsyn->kind = SYNTAX_COMMAND;
+            rsyn->data.command.head = head_val;
+            rsyn->data.command.args = args_vec;
+            result = vm__push(vm, out);
+            if (result != VM_OK) return result;
+            break;
+          }
+          case 12: {  /* make-syntax block (commands-vec) */
+            JaclVal cmds_vec;
+            result = vm__pop(vm, &cmds_vec); if (result != VM_OK) return result;
+            if (jacl_is_error(cmds_vec)) { result = vm__push(vm, cmds_vec); if (result != VM_OK) return result; break; }
+            if (!jacl_is_vector(cmds_vec)) {
+              vm__set_error(vm, "type error in '%s': commands must be a vec of syntax, got %s",
+                            mk_name, vm__type_name(cmds_vec));
+              return VM_RUNTIME_ERROR;
+            }
+            jacl_vec_root *vroot = (jacl_vec_root *)jacl_as_ptr(cmds_vec);
+            uint32_t vcount = jacl_vec_count(vroot);
+            for (uint32_t i = 0; i < vcount; i++) {
+              JaclVal elem = jacl_vec_get(vroot, i).value;
+              if (!jacl_is_syntax(elem)) {
+                vm__set_error(vm, "type error in '%s': commands must be a vec of syntax, element %u is %s",
+                              mk_name, i, vm__type_name(elem));
+                return VM_RUNTIME_ERROR;
+              }
+            }
+            JaclVal out = gc_alloc_syntax(&vm->heap);
+            JaclSyntax *rsyn = jacl_as_syntax(out);
+            rsyn->kind = SYNTAX_BLOCK;
+            rsyn->data.block.commands = cmds_vec;
+            result = vm__push(vm, out);
+            if (result != VM_OK) return result;
+            break;
+          }
+          }
+          break;
+        }
+
+        /* Introspection path (subops 0-6): pop one syntax value, dispatch. */
         JaclVal val;
         result = vm__pop(vm, &val); if (result != VM_OK) return result;
         if (jacl_is_error(val)) {
@@ -5913,7 +6069,6 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         JaclSyntax *syn = jacl_as_syntax(val);
-        gc__current_heap = &vm->heap;
 
         switch (subop) {
         case 0: {  /* syntax-kind */
