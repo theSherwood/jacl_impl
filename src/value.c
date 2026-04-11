@@ -292,7 +292,12 @@ JaclVal jacl_syntax_ptr(void *p) {
 
 JaclVal jacl_inline_string(const char *s, size_t len) {
     uint64_t payload = 0;
-    if (len > 7) len = 7;
+    if (len > 7) {
+        fprintf(stderr,
+                "JACL ASSERT: jacl_inline_string called with len=%zu (max 7)\n",
+                len);
+        abort();
+    }
     for (size_t i = 0; i < len; i++) {
         if (s[i] == '\0') break;
         payload |= ((uint64_t)(unsigned char)s[i]) << (i * 8);

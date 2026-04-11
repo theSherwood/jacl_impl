@@ -605,14 +605,21 @@ uint32_t embed__register_native(JaclVM* jvm, const char* name,
 
   uint32_t idx = jvm->native_fn_count++;
   jvm->native_fns[idx].fn    = fn;
-  jvm->native_fns[idx].name  = jacl_inline_string(name, strlen(name));
+  size_t nlen = strlen(name);
+  JaclVal name_val;
+  if (nlen <= 7) {
+    name_val = jacl_inline_string(name, nlen);
+  } else {
+    name_val = jacl_intern(&jvm->vm.heap, &jvm->intern_table,
+                           name, (uint32_t)nlen);
+  }
+  jvm->native_fns[idx].name  = name_val;
   jvm->native_fns[idx].arity = arity;
   jvm->native_fn_arities[idx] = arity;
   jvm->vm.native_fn_count     = jvm->native_fn_count;
 
   /* Register the native function value as a global in the VM's environment */
   JaclVal fn_val = jacl_native_fn(idx);
-  JaclVal name_val = jacl_inline_string(name, strlen(name));
   Environment* env = &jvm->vm.env;
 
   /* Check if name already exists */
