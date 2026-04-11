@@ -274,6 +274,7 @@ typedef enum {
 
 typedef struct {
     uint8_t   kind;        /* SyntaxKind */
+    uint8_t   is_caret;    /* US-013: ^name — skip scope-mark stamping */
     uint32_t  pos_line;    /* source line */
     uint32_t  pos_col;     /* source column */
     uint32_t  pos_offset;  /* source offset */
@@ -419,6 +420,7 @@ typedef enum {
   TOKEN_BREAK,
   TOKEN_CONTINUE,
   TOKEN_TRY,
+  TOKEN_CARET_WORD,
   TOKEN_NEWLINE,
   TOKEN_ERROR,
   TOKEN_EOF
@@ -509,6 +511,7 @@ struct AstNode {
   SourcePos   start;
   SourcePos   end;
   uint32_t    scope_mark;  /* hygiene: 0 = no macro context, >0 = macro expansion */
+  uint8_t     is_caret;    /* US-013: ^name in syntax-quote — force scope mark 0 */
   union {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count; } command;
     struct { int32_t   value; }                                    lit_int;

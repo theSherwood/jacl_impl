@@ -273,7 +273,7 @@
         "Compiles cleanly with -Wall -Wextra"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "Scope mark 0 means caller's scope. This works because the caller's code has scope mark 0 (or whatever the enclosing context's mark is). For nested macros, ^ should use the immediate caller's scope mark, not necessarily 0 — this may need refinement."
     },
     {

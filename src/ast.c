@@ -60,6 +60,7 @@ struct AstNode {
   SourcePos   start;
   SourcePos   end;
   uint32_t    scope_mark;  /* hygiene: 0 = no macro context, >0 = macro expansion */
+  uint8_t     is_caret;    /* US-013: ^name in syntax-quote — force scope mark 0 */
   union {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count; } command;
     struct { int32_t   value; }                                    lit_int;
@@ -260,7 +261,13 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
       break;
     }
     case AST_VAR_REF: {
-      ast__buf_char(b, '$');
+      /* US-013: print caret-prefixed references as ^name (they appear only
+         inside syntax-quote bodies, never in regular code). */
+      if (node->is_caret) {
+        ast__buf_char(b, '^');
+      } else {
+        ast__buf_char(b, '$');
+      }
       ast__buf_str(b, node->data.var_ref.name, node->data.var_ref.length);
       break;
     }

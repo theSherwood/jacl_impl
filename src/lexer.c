@@ -71,6 +71,7 @@ typedef enum {
   TOKEN_BREAK,            /* break */
   TOKEN_CONTINUE,         /* continue */
   TOKEN_TRY,              /* try */
+  TOKEN_CARET_WORD,       /* ^identifier (caller-scope inside syntax-quote) */
   TOKEN_NEWLINE,          /* newline (\n or \r\n) */
   TOKEN_ERROR,            /* lexer error with descriptive message */
   TOKEN_EOF               /* end of input */
@@ -1055,6 +1056,28 @@ void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
       continue;
     }
 
+    /* Caret-prefixed identifier: ^name (only valid inside syntax-quote;
+       parser enforces context). Falls through to operator tokenization
+       if '^' is not followed by a word-start character (e.g., '^=' or
+       bare '^'). */
+    if (c == '^' && lexer__is_word_start(lex->source[lex->pos + 1])) {
+      uint32_t s  = lex->pos;
+      uint32_t sl = lex->line;
+      uint32_t sc = lex->col;
+      lexer__advance(lex);  /* consume '^' */
+      uint32_t word_start = lex->pos;
+      while (lexer__is_word_char_no_arrow(lex))
+        lexer__advance(lex);
+      Token tok = lexer__make_token(lex, TOKEN_CARET_WORD, s, sl, sc);
+      tok.payload.text = lex->source + word_start;
+      /* Override length to be the word portion (excluding '^') so that
+         parser consumers can read the bare name directly from the
+         payload pointer. The token's own length field describes the
+         full span including the '^'. */
+      lexer__arr_push(arr, tok);
+      continue;
+    }
+
     /* Operators */
     if (lexer__is_operator_char(c)) {
       uint32_t s  = lex->pos;
@@ -1328,6 +1351,24 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       }
       Token tok = lexer__make_token(&lex, wtype, start, sline, scol);
       tok.payload.text = lex.source + start;
+      lexer__arr_push(&arr, tok);
+      continue;
+    }
+
+    /* Caret-prefixed identifier: ^name (only valid inside syntax-quote;
+       parser enforces context). Falls through to operator tokenization
+       if '^' is not followed by a word-start character. */
+    if (c == '^' && lexer__is_word_start(lex.source[lex.pos + 1])) {
+      uint32_t start = lex.pos;
+      uint32_t sline = lex.line;
+      uint32_t scol  = lex.col;
+      lexer__advance(&lex);  /* consume '^' */
+      uint32_t word_start = lex.pos;
+      while (lexer__is_word_char_no_arrow(&lex)) {
+        lexer__advance(&lex);
+      }
+      Token tok = lexer__make_token(&lex, TOKEN_CARET_WORD, start, sline, scol);
+      tok.payload.text = lex.source + word_start;
       lexer__arr_push(&arr, tok);
       continue;
     }

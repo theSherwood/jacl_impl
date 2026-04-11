@@ -4692,11 +4692,25 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    if (args[name_arg_idx]->type != AST_LIT_STRING) {
+    /* US-013: accept either AST_LIT_STRING (normal mut name) or
+       AST_VAR_REF with is_caret set (^name inside syntax-quote, which
+       introduces a binding in the caller's scope for anaphoric macros). */
+    const char* bind_name_ptr;
+    uint32_t    name_len;
+    uint32_t    bind_scope_mark;
+    if (args[name_arg_idx]->type == AST_LIT_STRING) {
+      bind_name_ptr   = args[name_arg_idx]->data.lit_string.value;
+      name_len        = args[name_arg_idx]->data.lit_string.length;
+      bind_scope_mark = args[name_arg_idx]->scope_mark;
+    } else if (args[name_arg_idx]->type == AST_VAR_REF &&
+               args[name_arg_idx]->is_caret) {
+      bind_name_ptr   = args[name_arg_idx]->data.var_ref.name;
+      name_len        = args[name_arg_idx]->data.var_ref.length;
+      bind_scope_mark = 0;  /* ^name → caller's scope */
+    } else {
       compiler__error(c, line, col, "mut name must be a string");
       return;
     }
-    uint32_t name_len = args[name_arg_idx]->data.lit_string.length;
     if (name_len > 7) {
       compiler__error(c, line, col, "variable name exceeds 7-byte inline limit");
       return;
@@ -4728,7 +4742,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       effective_type = TYPE_DYN;
     }
 
-    JaclVal name_val = jacl_inline_string(args[name_arg_idx]->data.lit_string.value, name_len);
+    JaclVal name_val = jacl_inline_string(bind_name_ptr, name_len);
 
     if (c->sm_analysis) {
       /* SM mode: wrap value in a cell and store in state field.
@@ -4748,7 +4762,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, (uint8_t)effective_type, line);
         }
         compiler__emit_byte(c, OP_MAKE_CELL, line);
-        compiler__add_local(c, name_val, line, col);
+        {
+          uint32_t prev_mark = c->current_scope_mark;
+          c->current_scope_mark = bind_scope_mark;
+          compiler__add_local(c, name_val, line, col);
+          c->current_scope_mark = prev_mark;
+        }
         c->locals[c->local_count - 1].is_mutable = true;
         compiler__emit_byte(c, OP_NIL, line);
       }
@@ -4759,7 +4778,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, (uint8_t)effective_type, line);
       }
       compiler__emit_byte(c, OP_MAKE_CELL, line);
-      compiler__add_local(c, name_val, line, col);
+      {
+        /* US-013: use the name arg's scope mark (0 for ^caret, else the
+           mut command's stamped mark) so caret bindings land in the
+           caller's scope while normal macro bindings stay hygienic. */
+        uint32_t prev_mark = c->current_scope_mark;
+        c->current_scope_mark = bind_scope_mark;
+        compiler__add_local(c, name_val, line, col);
+        c->current_scope_mark = prev_mark;
+      }
       c->locals[c->local_count - 1].is_mutable = true;
       c->locals[c->local_count - 1].type = effective_type;
       if (effective_type == TYPE_STRUCT)
@@ -4777,8 +4804,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (c->current_module) {
         compiler__emit_byte(c, OP_BOX, line);
       }
-      JaclVal global_key = compiler__global_name_val(c,
-          args[name_arg_idx]->data.lit_string.value, name_len);
+      JaclVal global_key = compiler__global_name_val(c, bind_name_ptr, name_len);
       uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);
@@ -4806,16 +4832,25 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   /* set — reassign mutable binding */
   if (compiler__head_matches(head, "set", 3)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "set", "2 arguments", argc); return; }
-    if (args[0]->type != AST_LIT_STRING) {
+    /* US-013: accept AST_LIT_STRING (normal set) or AST_VAR_REF with
+       is_caret set (^name inside syntax-quote). */
+    const char* set_name_ptr;
+    uint32_t    name_len;
+    if (args[0]->type == AST_LIT_STRING) {
+      set_name_ptr = args[0]->data.lit_string.value;
+      name_len     = args[0]->data.lit_string.length;
+    } else if (args[0]->type == AST_VAR_REF && args[0]->is_caret) {
+      set_name_ptr = args[0]->data.var_ref.name;
+      name_len     = args[0]->data.var_ref.length;
+    } else {
       compiler__error(c, line, col, "set first argument must be a name");
       return;
     }
-    uint32_t name_len = args[0]->data.lit_string.length;
     if (name_len > 7) {
       compiler__error(c, line, col, "variable name exceeds 7-byte inline limit");
       return;
     }
-    JaclVal name_val = jacl_inline_string(args[0]->data.lit_string.value, name_len);
+    JaclVal name_val = jacl_inline_string(set_name_ptr, name_len);
     char err_msg[128];
 
     /* SM mode: write to state field (through cell if mutable) */
@@ -4851,7 +4886,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           snprintf(err_msg, sizeof(err_msg),
                    "type error: cannot assign %s to %s binding '%.*s'",
                    type_name(rhs_type), type_name(target_type),
-                   (int)name_len, args[0]->data.lit_string.value);
+                   (int)name_len, set_name_ptr);
           compiler__error(c, line, col, err_msg);
           return;
         }
@@ -4859,7 +4894,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           snprintf(err_msg, sizeof(err_msg),
                    "type error: cannot assign dyn to %s binding '%.*s'",
                    type_name(target_type),
-                   (int)name_len, args[0]->data.lit_string.value);
+                   (int)name_len, set_name_ptr);
           compiler__error(c, line, col, err_msg);
           return;
         }
@@ -4874,10 +4909,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       if (c->locals[local_slot].is_param) {
         snprintf(err_msg, sizeof(err_msg), "cannot mutate parameter '%.*s'",
-                 (int)name_len, args[0]->data.lit_string.value);
+                 (int)name_len, set_name_ptr);
       } else {
         snprintf(err_msg, sizeof(err_msg), "cannot mutate immutable binding '%.*s'",
-                 (int)name_len, args[0]->data.lit_string.value);
+                 (int)name_len, set_name_ptr);
       }
       compiler__error(c, line, col, err_msg);
       return;
@@ -4897,7 +4932,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           snprintf(err_msg, sizeof(err_msg),
                    "type error: cannot assign %s to %s binding '%.*s'",
                    type_name(rhs_type), type_name(target_type),
-                   (int)name_len, args[0]->data.lit_string.value);
+                   (int)name_len, set_name_ptr);
           compiler__error(c, line, col, err_msg);
           return;
         }
@@ -4905,7 +4940,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           snprintf(err_msg, sizeof(err_msg),
                    "type error: cannot assign dyn to %s binding '%.*s'",
                    type_name(target_type),
-                   (int)name_len, args[0]->data.lit_string.value);
+                   (int)name_len, set_name_ptr);
           compiler__error(c, line, col, err_msg);
           return;
         }
@@ -4919,7 +4954,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         return;
       }
       snprintf(err_msg, sizeof(err_msg), "cannot mutate immutable binding '%.*s'",
-               (int)name_len, args[0]->data.lit_string.value);
+               (int)name_len, set_name_ptr);
       compiler__error(c, line, col, err_msg);
       return;
     }
@@ -4934,8 +4969,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           /* In module context, mutable globals are boxes — use reset!
              semantics to update the box in place (shared reference).
              Emit: GET_GLOBAL (push box), compile RHS, OP_RESET */
-          JaclVal set_key = compiler__global_name_val(c,
-              args[0]->data.lit_string.value, name_len);
+          JaclVal set_key = compiler__global_name_val(c, set_name_ptr, name_len);
           uint16_t name_idx = chunk_add_constant(c->chunk, set_key);
           compiler__emit_byte(c, OP_GET_GLOBAL, line);
           compiler__emit_u16(c, name_idx, line);
@@ -4947,7 +4981,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             snprintf(err_msg, sizeof(err_msg),
                      "type error: cannot assign %s to %s binding '%.*s'",
                      type_name(rhs_type), type_name(target_type),
-                     (int)name_len, args[0]->data.lit_string.value);
+                     (int)name_len, set_name_ptr);
             compiler__error(c, line, col, err_msg);
             return;
           }
@@ -4955,7 +4989,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             snprintf(err_msg, sizeof(err_msg),
                      "type error: cannot assign dyn to %s binding '%.*s'",
                      type_name(target_type),
-                     (int)name_len, args[0]->data.lit_string.value);
+                     (int)name_len, set_name_ptr);
             compiler__error(c, line, col, err_msg);
             return;
           }
@@ -4974,7 +5008,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             snprintf(err_msg, sizeof(err_msg),
                      "type error: cannot assign %s to %s binding '%.*s'",
                      type_name(rhs_type), type_name(target_type),
-                     (int)name_len, args[0]->data.lit_string.value);
+                     (int)name_len, set_name_ptr);
             compiler__error(c, line, col, err_msg);
             return;
           }
@@ -4982,7 +5016,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             snprintf(err_msg, sizeof(err_msg),
                      "type error: cannot assign dyn to %s binding '%.*s'",
                      type_name(target_type),
-                     (int)name_len, args[0]->data.lit_string.value);
+                     (int)name_len, set_name_ptr);
             compiler__error(c, line, col, err_msg);
             return;
           }
@@ -4998,14 +5032,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         return;
       }
       snprintf(err_msg, sizeof(err_msg), "cannot mutate immutable binding '%.*s'",
-               (int)name_len, args[0]->data.lit_string.value);
+               (int)name_len, set_name_ptr);
       compiler__error(c, line, col, err_msg);
       return;
     }
 
     /* Not found anywhere */
     snprintf(err_msg, sizeof(err_msg), "undefined variable '%.*s'",
-             (int)name_len, args[0]->data.lit_string.value);
+             (int)name_len, set_name_ptr);
     compiler__error(c, line, col, err_msg);
     return;
   }
@@ -5264,11 +5298,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    if (args[name_arg_idx]->type != AST_LIT_STRING) {
+    /* US-013: accept AST_LIT_STRING (normal def) or AST_VAR_REF with
+       is_caret set (^name inside syntax-quote). */
+    const char* bind_name_ptr;
+    uint32_t    name_len;
+    uint32_t    bind_scope_mark;
+    if (args[name_arg_idx]->type == AST_LIT_STRING) {
+      bind_name_ptr   = args[name_arg_idx]->data.lit_string.value;
+      name_len        = args[name_arg_idx]->data.lit_string.length;
+      bind_scope_mark = args[name_arg_idx]->scope_mark;
+    } else if (args[name_arg_idx]->type == AST_VAR_REF &&
+               args[name_arg_idx]->is_caret) {
+      bind_name_ptr   = args[name_arg_idx]->data.var_ref.name;
+      name_len        = args[name_arg_idx]->data.var_ref.length;
+      bind_scope_mark = 0;  /* ^name → caller's scope */
+    } else {
       compiler__error(c, line, col, "def name must be a string");
       return;
     }
-    uint32_t name_len = args[name_arg_idx]->data.lit_string.length;
     if (name_len > 7) {
       compiler__error(c, line, col, "variable name exceeds 7-byte inline limit");
       return;
@@ -5289,7 +5336,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    JaclVal name_val = jacl_inline_string(args[name_arg_idx]->data.lit_string.value, name_len);
+    JaclVal name_val = jacl_inline_string(bind_name_ptr, name_len);
 
     /* Determine effective type: declared type wins, else infer unboxed/struct from RHS */
     JaclType effective_type;
@@ -5315,12 +5362,25 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, OP_NIL, line);
       } else {
         /* Name not in state layout — shouldn't happen, but fall through */
-        compiler__add_local(c, name_val, line, col);
+        {
+          uint32_t prev_mark = c->current_scope_mark;
+          c->current_scope_mark = bind_scope_mark;
+          compiler__add_local(c, name_val, line, col);
+          c->current_scope_mark = prev_mark;
+        }
         compiler__emit_byte(c, OP_NIL, line);
       }
     } else if (c->scope_depth > 0) {
-      /* Local variable: value is on stack as the local slot */
-      compiler__add_local(c, name_val, line, col);
+      /* Local variable: value is on stack as the local slot.
+         US-013: use the name arg's scope mark (0 for ^caret, else the
+         def command's stamped mark) so caret bindings land in the
+         caller's scope while normal macro bindings stay hygienic. */
+      {
+        uint32_t prev_mark = c->current_scope_mark;
+        c->current_scope_mark = bind_scope_mark;
+        compiler__add_local(c, name_val, line, col);
+        c->current_scope_mark = prev_mark;
+      }
       c->locals[c->local_count - 1].known_arity = rhs_arity;
       c->locals[c->local_count - 1].type = effective_type;
       if (effective_type == TYPE_STRUCT)
@@ -5333,8 +5393,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, OP_TO_DYN, line);
         compiler__emit_byte(c, (uint8_t)effective_type, line);
       }
-      JaclVal def_key = compiler__global_name_val(c,
-          args[name_arg_idx]->data.lit_string.value, name_len);
+      JaclVal def_key = compiler__global_name_val(c, bind_name_ptr, name_len);
       uint16_t name_idx = chunk_add_constant(c->chunk, def_key);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, name_idx, line);

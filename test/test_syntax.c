@@ -3196,6 +3196,80 @@ static int test_us012_global_fallback_still_works(void) {
     TEST_PASS();
 }
 
+/* ===== US-013: ^ prefix for intentional binding introduction ===== */
+
+/* Core caret behavior: a macro body using [mut ^it ~v] creates an `it`
+ * binding in the caller's scope (scope mark 0), so the caller's $it
+ * reference resolves to it.
+ *
+ * Without the caret: stamping would mark `it` with a fresh macro mark,
+ * making it invisible to the caller's mark-0 $it reference. */
+static int test_us013_caret_binds_in_caller_scope(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src =
+        "defmacro bindit {v} {\n"
+        "  syntax-quote [mut ^it ~v]\n"
+        "}\n"
+        "proc run {} {\n"
+        "  bindit 42\n"
+        "  $it\n"
+        "}\n"
+        "run";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_i32(result));
+    ASSERT_INT_EQ(jacl_as_i32(result), 42);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: using ^name outside of syntax-quote is a parse error whose
+ * message mentions syntax-quote. */
+static int test_us013_caret_outside_syntax_quote_error(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src = "^foo";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(jacl_is_error(result));
+    const char* msg = jacl_error_message_str(vm, result);
+    ASSERT(msg != NULL);
+    ASSERT(strstr(msg, "syntax-quote") != NULL);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: ^it in a macro body overrides a caller's pre-existing `it`.
+ * This verifies the caret path does not accidentally create a separate
+ * binding with a different scope mark — it ends up at mark 0, same as
+ * the caller's own `mut it`, so the most recent binding wins. */
+static int test_us013_caret_does_not_collide_with_internal(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src =
+        "defmacro collide {x} {\n"
+        "  syntax-quote [mut ^it ~x]\n"
+        "}\n"
+        "proc run {} {\n"
+        "  mut it 999\n"
+        "  collide 7\n"
+        "  $it\n"
+        "}\n"
+        "run";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_i32(result));
+    ASSERT_INT_EQ(jacl_as_i32(result), 7);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
 /* Test: macro with wrong argument count produces a compile error. */
 static int test_us011_wrong_arg_count_error(void) {
     JaclVM* vm = jacl_vm_new();
@@ -3375,6 +3449,12 @@ int main(void) {
     RUN(test_us012_hygiene_local_shadow);
     RUN(test_us012_hygiene_nested_macros);
     RUN(test_us012_global_fallback_still_works);
+
+    printf("\n=== Caret Anaphoric Binding Tests (US-013) ===\n");
+
+    RUN(test_us013_caret_binds_in_caller_scope);
+    RUN(test_us013_caret_outside_syntax_quote_error);
+    RUN(test_us013_caret_does_not_collide_with_internal);
 
 #undef RUN
 

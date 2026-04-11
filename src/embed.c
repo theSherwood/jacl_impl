@@ -239,7 +239,16 @@ JaclVal jacl_eval(JaclVM* jvm, const char* source) {
   /* Parse */
   ParseResult parse = parser_parse(tokens, &jvm->arena);
   if (parse.error_count > 0) {
-    return embed__make_error(jvm, "parse error");
+    /* Surface the first AST_ERROR message so callers (and tests) can
+       see what actually went wrong instead of an opaque "parse error". */
+    const char* first_err = NULL;
+    for (uint32_t i = 0; i < parse.count; i++) {
+      if (parse.nodes[i] && parse.nodes[i]->type == AST_ERROR) {
+        first_err = parse.nodes[i]->data.error.message;
+        break;
+      }
+    }
+    return embed__make_error(jvm, first_err ? first_err : "parse error");
   }
 
   /* Compile — use persistent intern table and seeded struct registry */

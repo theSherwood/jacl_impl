@@ -285,6 +285,25 @@ AstNode* parser__parse_atom(Parser* p) {
       node->data.var_ref.length = tok->length - 1; /* exclude '$' */
       return node;
     }
+    case TOKEN_CARET_WORD: {
+      /* ^identifier — only valid inside syntax-quote. Produces a
+         var-ref AST node flagged as caret so hygiene stamping skips
+         it and the identifier resolves in the caller's scope (mark 0)
+         rather than the macro's freshly-minted scope mark. */
+      if (p->syntax_quote_depth == 0) {
+        parser__advance(p);
+        return parser__error(p, "'^' identifier can only be used inside syntax-quote", tok);
+      }
+      parser__advance(p);
+      AstNode* node = ast_alloc(p->arena);
+      node->type = AST_VAR_REF;
+      node->start = parser__token_start(tok);
+      node->end   = parser__token_end(tok);
+      node->data.var_ref.name   = tok->payload.text;
+      node->data.var_ref.length = tok->length - 1; /* exclude '^' */
+      node->is_caret = 1;
+      return node;
+    }
     default:
       return NULL;
   }
@@ -808,6 +827,7 @@ AstNode* parser__parse_infix_operand(Parser* p) {
     case TOKEN_WORD:
     case TOKEN_STRING:
     case TOKEN_VAR:
+    case TOKEN_CARET_WORD:
     case TOKEN_STRUCT:
     case TOKEN_PROC:
     case TOKEN_DEFMACRO:
@@ -1033,6 +1053,7 @@ AstNode* parser__parse_expr(Parser* p) {
     case TOKEN_STRING:
     case TOKEN_OPERATOR:
     case TOKEN_VAR:
+    case TOKEN_CARET_WORD:
     /* New operator tokens */
     case TOKEN_PIPE:
     case TOKEN_BACKSLASH:

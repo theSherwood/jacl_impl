@@ -32,6 +32,7 @@ JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap,
     JaclSyntax *syn = jacl_as_syntax(syn_val);
     syntax__set_pos(syn, node);
     syn->scope_mark = node->scope_mark;  /* hygiene: preserve macro mark */
+    syn->is_caret   = node->is_caret;    /* US-013: preserve ^ flag */
 
     switch (node->type) {
 
@@ -286,6 +287,7 @@ static void syntax__set_ast_pos(AstNode *node, JaclSyntax *syn) {
     node->start.offset = syn->pos_offset;
     node->end = node->start;  /* approximate — original end not stored */
     node->scope_mark   = syn->scope_mark;  /* hygiene: preserve macro mark */
+    node->is_caret     = syn->is_caret;    /* US-013: preserve ^ flag */
 }
 
 /* -------------------------------------------------------------------------
@@ -902,7 +904,13 @@ static void expand__stamp_vec(JaclVal vec_val, uint32_t mark) {
 static void expand__stamp_syntax(JaclVal val, uint32_t mark) {
     if (!jacl_is_syntax(val)) return;
     JaclSyntax *syn = jacl_as_syntax(val);
-    syn->scope_mark = mark;
+    /* US-013: caret-flagged var refs stay at scope mark 0 so the
+       identifier resolves in the caller's scope instead of the
+       freshly-minted macro mark.  We leave the mark alone but still
+       recurse below — a SYNTAX_VAR_REF has no children anyway. */
+    if (!syn->is_caret) {
+        syn->scope_mark = mark;
+    }
     switch ((SyntaxKind)syn->kind) {
     case SYNTAX_COMMAND:
         expand__stamp_syntax(syn->data.command.head, mark);
