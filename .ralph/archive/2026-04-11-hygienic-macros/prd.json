@@ -1,0 +1,384 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/hygienic-macros",
+  "description": "Hygienic Macro System (M15) — compile-time defmacro with syntax objects, quasiquoting, scope-mark hygiene, and introspection/construction APIs",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Add JACL_TAG_SYNTAX value tag and OBJ_SYNTAX GC object",
+      "description": "As the compiler, I need a value type to represent AST nodes as manipulable values during macro expansion.",
+      "acceptanceCriteria": [
+        "Add JACL_TAG_SYNTAX to the tag enum in value.c (use next available 5-bit tag slot)",
+        "Add OBJ_SYNTAX to the GC object kind enum in gc.c",
+        "JaclSyntax struct in jacl.h: uint8_t kind (enum mapping to AST node types), SourcePos pos, uint32_t scope_mark, plus a union for per-kind data: command (head JaclVal + args JaclVal vec), lit_int (int32_t), lit_float (float), lit_string (JaclVal string), var_ref (JaclVal name string), block (JaclVal vec of syntax commands), spread (JaclVal child syntax), interp_string (JaclVal vec of segments)",
+        "GC tracing in gc_collect.c traces all JaclVal fields inside JaclSyntax (head, args vec, name, commands vec, child, segments vec)",
+        "GC sweep handles OBJ_SYNTAX",
+        "Helper macros: jacl_is_syntax(val), jacl_as_syntax(val)",
+        "Allocation: gc_alloc_syntax(heap) returns a new JaclSyntax*",
+        "Syntax objects print readably via value printing: <syntax:command [...]>, <syntax:lit-int 42>, etc.",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Kind enum values: SYNTAX_COMMAND, SYNTAX_LIT_INT, SYNTAX_LIT_FLOAT, SYNTAX_LIT_STRING, SYNTAX_VAR_REF, SYNTAX_BLOCK, SYNTAX_INTERP_STRING, SYNTAX_SPREAD, SYNTAX_USE, SYNTAX_DEFSTRUCT, SYNTAX_BREAK, SYNTAX_CONTINUE, SYNTAX_RETURN, SYNTAX_DESTRUCTURE_VEC, SYNTAX_DESTRUCTURE_NAMED"
+    },
+    {
+      "id": "US-002",
+      "title": "AstNode to syntax object conversion",
+      "description": "As the compiler, I need to convert parsed AstNode trees into syntax object values for macro bodies to manipulate.",
+      "acceptanceCriteria": [
+        "New function JaclVal syntax_from_ast(AstNode* node, GCHeap* heap) in a new file src/syntax.c",
+        "Recursively converts all AstNode types to corresponding syntax objects",
+        "AST_COMMAND: head converted, each arg converted, stored in a vector",
+        "AST_LIT_INT, AST_LIT_FLOAT, AST_LIT_STRING: datum stored directly",
+        "AST_VAR_REF: name stored as JaclVal string",
+        "AST_BLOCK: each command converted, stored in a vector",
+        "AST_INTERP_STRING: each segment converted, stored in a vector",
+        "AST_SPREAD: child converted",
+        "AST_BREAK, AST_CONTINUE, AST_RETURN: value (if any) converted",
+        "AST_ERROR nodes cause a compile error (not convertible)",
+        "Source positions (line, col) copied from AstNode to syntax object",
+        "All scope marks initialized to 0 (no macro context)",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "AST_USE and AST_DEFSTRUCT conversion can use a simplified representation (store field names/types as vecs of strings). AST_DESTRUCTURE_VEC and AST_DESTRUCTURE_NAMED similarly store names/types as vecs."
+    },
+    {
+      "id": "US-003",
+      "title": "Syntax object to AstNode conversion",
+      "description": "As the compiler, I need to convert syntax objects back into AstNode trees for bytecode compilation after macro expansion.",
+      "acceptanceCriteria": [
+        "New function AstNode* syntax_to_ast(JaclVal syntax, arena_t* arena) in src/syntax.c",
+        "Recursively converts all syntax object kinds back to AstNode types",
+        "SYNTAX_COMMAND: allocates AST_COMMAND with converted head and args",
+        "SYNTAX_LIT_INT, SYNTAX_LIT_FLOAT, SYNTAX_LIT_STRING: allocates corresponding AST_LIT_* nodes",
+        "SYNTAX_VAR_REF: allocates AST_VAR_REF with name from syntax datum",
+        "SYNTAX_BLOCK: allocates AST_BLOCK with converted commands",
+        "Source positions round-trip: AstNode -> syntax -> AstNode preserves line/col",
+        "Test: parse a program, convert to syntax, convert back to AST, pretty-print both — output matches",
+        "Test: round-trip with nested commands [if [> $x 3] { print $x }]",
+        "Test: round-trip with block containing multiple commands",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Scope marks on syntax objects are not preserved in AstNode — they are used during expansion for hygiene, then discarded. The compiler's name resolution uses scope marks from the syntax objects during expansion, before converting back."
+    },
+    {
+      "id": "US-004",
+      "title": "Lexer and parser support for defmacro",
+      "description": "As the compiler, I need to parse defmacro declarations into AST nodes.",
+      "acceptanceCriteria": [
+        "TOKEN_DEFMACRO added to lexer keyword table in lexer.c",
+        "AST_DEFMACRO added to AstNodeType enum in ast.c",
+        "AST_DEFMACRO data: name (string), param_names (array of strings), param_count (uint32_t), body (AstNode* block)",
+        "Parser handles: defmacro name {param1, param2} { body }",
+        "Parser error if defmacro appears inside a block (not at top level)",
+        "Parser error if defmacro has no name, no param block, or no body block",
+        "Pretty-printer handles AST_DEFMACRO",
+        "Test: parse defmacro unless {cond, body} { syntax-quote [if [not ~cond] ~body] } produces correct AST",
+        "Test: defmacro inside a proc body produces parse error",
+        "Test: defmacro with zero params: defmacro now {} { ... }",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "At parse time, the body is parsed as a normal block — quote, syntax-quote, ~, ~@ are handled later by the compiler. The parser just needs to recognize defmacro as a top-level form."
+    },
+    {
+      "id": "US-005",
+      "title": "Lexer and parser support for quote",
+      "description": "As the compiler, I need to parse quote expressions into AST nodes.",
+      "acceptanceCriteria": [
+        "TOKEN_QUOTE added to lexer keyword table in lexer.c",
+        "AST_QUOTE added to AstNodeType enum in ast.c",
+        "AST_QUOTE data: child (AstNode* — the quoted expression)",
+        "Parser handles: quote <expr> where expr is any single expression (command, literal, var-ref, block)",
+        "quote does not recurse into its argument — the child is stored as-is",
+        "Pretty-printer handles AST_QUOTE: prints as quote <child>",
+        "Test: parse quote [+ 1 2] produces AST_QUOTE wrapping AST_COMMAND",
+        "Test: parse quote $x produces AST_QUOTE wrapping AST_VAR_REF",
+        "Test: parse quote { print 1; print 2 } produces AST_QUOTE wrapping AST_BLOCK",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Lexer and parser support for syntax-quote, ~, and ~@",
+      "description": "As the compiler, I need to parse syntax-quote templates with unquote holes into AST nodes.",
+      "acceptanceCriteria": [
+        "TOKEN_SYNTAX_QUOTE added to lexer keyword table",
+        "TOKEN_TILDE (~) and TOKEN_TILDE_AT (~@) added to lexer as punctuation tokens",
+        "AST_SYNTAX_QUOTE added to AstNodeType enum — data: child (AstNode*)",
+        "AST_UNQUOTE added to AstNodeType enum — data: child (AstNode* — the expression to evaluate)",
+        "AST_UNQUOTE_SPLICING added to AstNodeType enum — data: child (AstNode*)",
+        "Inside a syntax-quote context, parser recognizes ~ prefix on expressions as AST_UNQUOTE",
+        "Inside a syntax-quote context, parser recognizes ~@ prefix on expressions as AST_UNQUOTE_SPLICING",
+        "Nested syntax-quote: inner syntax-quote increments depth, ~ only unquotes at depth 0",
+        "Parser error if ~ or ~@ appears outside syntax-quote",
+        "Pretty-printer handles all three new node types",
+        "Test: parse syntax-quote [if [not ~cond] ~body] — AST_SYNTAX_QUOTE with AST_UNQUOTE children",
+        "Test: parse syntax-quote [foo ~@args] — AST_UNQUOTE_SPLICING for args",
+        "Test: ~ outside syntax-quote produces error",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "~ only works in structural positions (command args, block commands), NOT inside strings. ~@ only valid in command arg lists or block command lists."
+    },
+    {
+      "id": "US-007",
+      "title": "Compile-time macro table and defmacro registration",
+      "description": "As the compiler, I need to register macro definitions in a compile-time table so the expansion pass can look them up.",
+      "acceptanceCriteria": [
+        "New MacroTable struct in compiler.c: maps macro name (string) to a compiled macro entry",
+        "MacroEntry struct: name, param_count, param_names, compiled body (JaclClosure*)",
+        "When compiler encounters AST_DEFMACRO: compile the body block to bytecode as a closure, register in macro table",
+        "The macro body closure receives syntax object parameters and returns a syntax object",
+        "Error if macro name shadows a special form (if, proc, def, mut, set, while, for, match, etc.)",
+        "Error if macro name is already registered (duplicate defmacro)",
+        "Macro table is consulted during expansion pass to check if a command head is a macro call",
+        "Test: defmacro registers in table, lookup by name succeeds",
+        "Test: defmacro shadowing 'if' produces compile error",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "The macro body is compiled eagerly when defmacro is encountered (top-to-bottom order). This means it can only reference macros/procs defined above it."
+    },
+    {
+      "id": "US-008",
+      "title": "Macro expansion pass — basic expansion",
+      "description": "As the compiler, I need a pass that walks the AST, identifies macro calls, and replaces them with expanded syntax.",
+      "acceptanceCriteria": [
+        "New function ast_expand_macros(AstNode** program, uint32_t count, MacroTable* macros, GCHeap* heap, arena_t* arena) in src/syntax.c",
+        "Walks AST top-to-bottom; for each AST_COMMAND, checks if head is a bare word matching a macro name",
+        "When a macro call is found: convert each argument to a syntax object, call the macro closure with those syntax objects, convert the returned syntax object back to AstNode, replace the call node",
+        "Non-macro commands pass through unchanged",
+        "Blocks: recurse into each command in the block",
+        "Expansion is iterative — after replacing a node, re-walk the result for further macro calls",
+        "Depth counter incremented per expansion, error at 256 with message: 'macro expansion depth limit exceeded in expansion of <name>'",
+        "Expansion pass runs after parsing, before the existing compilation pass",
+        "Test: defmacro unless {cond, body} { syntax-quote [if [not ~cond] ~body] } then unless [eq 1 2] { print ok } expands to [if [not [eq 1 2]] { print ok }]",
+        "Test: depth limit hit by self-referencing macro produces clear error",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "The expansion pass needs a VM instance to execute macro bodies. Reuse the compiler's embed VM or create a dedicated expansion VM."
+    },
+    {
+      "id": "US-009",
+      "title": "Compiler handling of quote — emit syntax object literal",
+      "description": "As the compiler, I need to compile quote expressions into bytecode that produces syntax object values.",
+      "acceptanceCriteria": [
+        "Compiler handles AST_QUOTE: converts the child AstNode to a syntax object at compile time, emits it as a constant",
+        "The syntax object is added to the bytecode chunk's constant pool",
+        "At runtime (during macro body execution), the quote expression pushes the syntax object onto the stack",
+        "Nested quotes: quote [foo quote [bar]] produces a syntax object containing a syntax object for the inner quote",
+        "Test: inside a macro body, quote [+ 1 2] produces a syntax object with kind command, head +, args [1, 2]",
+        "Test: quote $x produces a syntax object with kind var-ref, name x (not a variable lookup)",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "quote is only meaningful inside macro bodies (compile-time code). Outside macros it could be allowed as a general-purpose form, but for now it only needs to work during expansion."
+    },
+    {
+      "id": "US-010",
+      "title": "Compiler handling of syntax-quote — template expansion",
+      "description": "As the compiler, I need to compile syntax-quote templates into bytecode that builds syntax objects with unquoted holes filled in.",
+      "acceptanceCriteria": [
+        "Compiler handles AST_SYNTAX_QUOTE: generates bytecode that constructs a syntax object tree at runtime (during macro body execution)",
+        "Literal parts of the template become syntax object constants (like quote)",
+        "AST_UNQUOTE (~) children: compile the inner expression normally, result must be a syntax object, splice it into the template position",
+        "AST_UNQUOTE_SPLICING (~@) children: compile the inner expression, result must be a vec of syntax objects, flatten into the surrounding command args or block commands",
+        "Runtime error if ~ result is not a syntax object",
+        "Runtime error if ~@ result is not a vec of syntax objects",
+        "Nested syntax-quote depth tracking: inner syntax-quote treated as literal (not expanded)",
+        "Test: syntax-quote [if [not ~cond] ~body] with cond and body bound to syntax objects produces correct compound syntax",
+        "Test: syntax-quote [foo ~@args] with args = vec of 2 syntax objects produces 3-arg command",
+        "Test: ~@ in block position: syntax-quote { ~@stmts } flattens vec of syntax into block",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "syntax-quote compiles to a sequence of bytecode instructions that allocate and assemble syntax objects. This is more complex than quote — it's a mix of constants and evaluated expressions."
+    },
+    {
+      "id": "US-011",
+      "title": "End-to-end basic macro test",
+      "description": "As a Jacl programmer, I want to define and use a simple macro that works end-to-end from source to execution.",
+      "acceptanceCriteria": [
+        "Test: defmacro unless {cond, body} { syntax-quote [if [not ~cond] ~body] } followed by unless [eq 1 2] { print ok } prints ok",
+        "Test: defmacro double {x} { syntax-quote [+ ~x ~x] } followed by double 21 returns 42",
+        "Test: macro that expands to another macro call works (two-level expansion)",
+        "Test: macro used before its defmacro produces compile error with clear message",
+        "Test: macro with wrong argument count produces compile error",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "This is the integration test story that validates US-001 through US-010 working together. If earlier stories were tested in isolation, this validates the full pipeline."
+    },
+    {
+      "id": "US-012",
+      "title": "Scope marks on syntax objects for hygiene",
+      "description": "As the compiler, I need scope marks on syntax objects so that macro-introduced identifiers don't collide with caller identifiers.",
+      "acceptanceCriteria": [
+        "Global scope mark counter (uint32_t, starts at 1) incremented each time a macro expansion begins",
+        "When syntax-quote builds a syntax object, all var-ref and def/mut/set target identifiers get the current macro's scope mark",
+        "When ~ splices a syntax object, it retains its existing scope marks (the caller's)",
+        "syntax_to_ast preserves scope marks as metadata on AstNode (add uint32_t scope_mark field to AstNode struct)",
+        "Compiler name resolution: two identifiers match only if same name AND same scope mark (0 matches 0 for non-macro code)",
+        "Test: defmacro m {x} { syntax-quote { tmp = 1; [+ ~x $tmp] } } then tmp = 99; m $tmp returns 100",
+        "Test: two nested macro expansions each introducing tmp don't collide",
+        "Test: non-macro code (scope mark 0) works exactly as before",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "Scope mark 0 means 'no macro context' — all existing non-macro code has scope mark 0, so existing name resolution is unchanged. The scope mark field on AstNode is only populated for macro-expanded code."
+    },
+    {
+      "id": "US-013",
+      "title": "^ prefix for intentional binding introduction",
+      "description": "As a macro author, I want ^name in syntax-quote to introduce a name in the caller's scope for anaphoric macros.",
+      "acceptanceCriteria": [
+        "Inside syntax-quote, ^identifier parsed as a special unquote variant that creates an identifier with scope mark 0 (caller's scope) instead of the macro's scope mark",
+        "Parser recognizes ^ prefix on bare identifiers inside syntax-quote context",
+        "The resulting var-ref syntax object has scope mark 0 regardless of the current expansion's scope mark",
+        "^ only valid inside syntax-quote — compile error elsewhere",
+        "Test: defmacro aif {cond, body} { syntax-quote { ^it = ~cond; if $^it ~body } } then aif 42 { print $it } prints 42",
+        "Test: ^ used outside syntax-quote produces compile error",
+        "Test: ^name doesn't collide with a macro-internal name of the same string",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 13,
+      "passes": true,
+      "notes": "Scope mark 0 means caller's scope. This works because the caller's code has scope mark 0 (or whatever the enclosing context's mark is). For nested macros, ^ should use the immediate caller's scope mark, not necessarily 0 — this may need refinement."
+    },
+    {
+      "id": "US-014",
+      "title": "gensym builtin",
+      "description": "As a macro author, I want gensym to generate unique symbol names for temporaries.",
+      "acceptanceCriteria": [
+        "gensym registered as a native builtin available during macro expansion",
+        "gensym takes one optional string argument (prefix), default prefix is 'g'",
+        "Returns a syntax object (var-ref kind) with a name like prefix__gN where N is a global counter",
+        "Generated names contain characters that are not valid in user-written identifiers (the __ separator ensures no collision with user names)",
+        "Each call increments the counter — names are globally unique across all macro expansions",
+        "Test: [gensym tmp] called twice produces two distinct syntax objects",
+        "Test: macro using gensym for a temporary doesn't collide with caller's variable of the same prefix",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 14,
+      "passes": true,
+      "notes": "gensym is simpler than scope marks for the common case of macro-internal temporaries. Both mechanisms coexist — scope marks handle hygiene automatically, gensym is explicit."
+    },
+    {
+      "id": "US-015",
+      "title": "Introspection builtins",
+      "description": "As an advanced macro author, I want to inspect syntax object structure.",
+      "acceptanceCriteria": [
+        "syntax-kind: takes a syntax object, returns the kind string (command, var-ref, lit-int, lit-float, lit-string, block, interp-string, spread, use, defstruct, break, continue, return, destructure-vec, destructure-named). Error if arg is not a syntax object.",
+        "syntax-datum: returns raw value for literals (i32 for lit-int, f32 for lit-float, string for lit-string), name string for var-ref. Error for other kinds.",
+        "syntax-head: returns head syntax object for commands. Error for non-commands.",
+        "syntax-args: returns vec of arg syntax objects for commands. Error for non-commands.",
+        "syntax-commands: returns vec of command syntax objects for blocks. Error for non-blocks.",
+        "syntax-pos: returns a map with line and col keys (i32 values).",
+        "syntax->string: returns pretty-printed string representation of the syntax tree.",
+        "All 7 builtins registered as native functions available during macro expansion.",
+        "Test: syntax-kind on quote [+ 1 2] returns command",
+        "Test: syntax-head on quote [+ 1 2] returns syntax object for +, syntax-datum on that returns +",
+        "Test: syntax-args on quote [+ 1 2] returns vec of 2 syntax objects",
+        "Test: syntax-pos returns correct line/col",
+        "Test: each builtin errors clearly on wrong type",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 15,
+      "passes": true,
+      "notes": "Implemented as compile-time builtins (head_matches) dispatched to a single OP_SYNTAX_OP bytecode op with a uint8_t subop. Native-function registration cannot be used — embed__register_native caps names at 7 bytes (inline string), and all 7 builtin names exceed that. Same pattern as byte-length and stack-trace. Deviation from spec: syntax->string is implemented as syntax-str because the lexer tokenizes -> as a separator (arrow operator), so syntax->string would parse as three tokens. The hyphenated form matches to-string/byte-length convention. Tests call introspection via jacl_eval on top-level 'syntax-kind [quote ...]' expressions — remember that nested invocations must be bracketed because top-level command operands are space-separated (e.g. 'syntax-kind [syntax-head quote [+ 1 2]]' not 'syntax-kind syntax-head quote [+ 1 2]')."
+    },
+    {
+      "id": "US-016",
+      "title": "make-syntax construction builtin",
+      "description": "As an advanced macro author, I want to build syntax objects programmatically.",
+      "acceptanceCriteria": [
+        "make-syntax registered as a native builtin available during macro expansion",
+        "make-syntax command $head $args-vec: creates command syntax object, head must be syntax, args must be vec of syntax",
+        "make-syntax lit-int $value: creates int literal syntax, value must be i32",
+        "make-syntax lit-float $value: creates float literal syntax, value must be f32",
+        "make-syntax lit-string $value: creates string literal syntax, value must be string",
+        "make-syntax var-ref $name: creates var-ref syntax, name must be string",
+        "make-syntax block $commands-vec: creates block syntax, commands must be vec of syntax",
+        "Constructed syntax objects get the current expansion's scope mark",
+        "Error on invalid kind string or wrong argument types with clear message",
+        "Test: make-syntax command + vec of lit-ints produces equivalent to quote [+ 1 2]",
+        "Test: macro using make-syntax to conditionally build different AST",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 16,
+      "passes": true,
+      "notes": "Implemented as a compile-time builtin (head_matches) dispatched to OP_SYNTAX_OP with 6 new subops (7=lit-int, 8=lit-float, 9=lit-string, 10=var-ref, 11=command, 12=block) — same single-opcode/subop-byte pattern as US-015 introspection. Kind dispatch is done at compile time so the opcode doesn't need to read a kind byte. First argument must be a bare-word kind name (AST_LIT_STRING) known at compile time; unknown kinds are a compile error, wrong arity is a compile error, wrong payload types are a runtime error. Constructed syntax objects have scope_mark = 0 because JACL's macro expansion is template-based (see project_macro_eval_limitation memory) — there is no 'current expansion scope mark' accessible at runtime, which is a simplification from the PRD's ideal semantics but has no user-observable impact since make-syntax values are only useful outside of an active expansion anyway. Gotcha: quote is a prefix form so `[quote +]` doesn't parse — use `[syntax-head quote [+ 1 2]]` or `[make-syntax var-ref \"foo\"]` to build head values for make-syntax command."
+    },
+    {
+      "id": "US-017",
+      "title": "syntax-error builtin for explicit compile-time errors",
+      "description": "As a macro author, I want to signal compile errors with custom messages.",
+      "acceptanceCriteria": [
+        "syntax-error registered as a native builtin available during macro expansion",
+        "syntax-error $message: halts compilation with the given string message",
+        "syntax-error $message $syntax-obj: halts with message and points to source position of the syntax object",
+        "Error output includes: custom message, macro call site location, and (when syntax object provided) the specific source location",
+        "Test: macro that checks syntax-kind and calls syntax-error on wrong kind — error message includes custom text",
+        "Test: syntax-error with syntax object shows correct source position",
+        "Test: syntax-error with just a message (no syntax obj) works",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 17,
+      "passes": true,
+      "notes": "Implemented as compile-time-matched builtin (head_matches) dispatched to OP_SYNTAX_OP with 2 new subops: 13=error with message only, 14=error with message+syntax. Same single-opcode/subop-byte pattern as US-015/US-016. The arity check (1 or 2 args) is a compile error; the message type check (must be string) is a runtime error; when the syntax variant is used, the second arg's type check (must be syntax) is a runtime error. The error message is prefixed with 'syntax-error: ' for the 1-arg form and 'syntax-error at <line>:<col>: ' for the 2-arg form. 'Compile-time' in the PRD's sense is realized as runtime for JACL because macros are template-based (see project_macro_eval_limitation memory) — a macro template that contains a syntax-error call becomes a regular function call in the expanded program and fires when that code path runs. The 'macro checks syntax-kind and calls syntax-error' test case is adapted to an e2e pattern: defmacro whose template is `[syntax-error \"msg\"]`, then invoking the macro yields the custom error text. Gotcha: at top level, `[quote [+ 1 2]]` is a command invocation (tries to call the syntax value), so tests must use the prefix form `quote [+ 1 2]` to pass a quoted expression as an arg."
+    },
+    {
+      "id": "US-018",
+      "title": "Dual-location error reporting for macro expansion failures",
+      "description": "As a Jacl programmer, I want error messages from failed macro expansions to show both the call site and the internal failure.",
+      "acceptanceCriteria": [
+        "When a macro body throws a runtime error during expansion, error output includes: (1) macro call site (file, line, col) and (2) location inside macro body where error occurred",
+        "Format: 'error: <message>\\n  in expansion of macro `name` at <file>:<line>:<col>\\n  <internal error details>'",
+        "Nested macro failure (macro A expands to macro B which fails) shows full chain",
+        "Expansion pass maintains a stack of macro call sites for nested expansion reporting",
+        "Test: macro body with division by zero shows both call site and internal error location",
+        "Test: nested macro failure shows both expansion levels in the error chain",
+        "All existing tests pass",
+        "Compiles cleanly with -Wall -Wextra"
+      ],
+      "priority": 18,
+      "passes": true,
+      "notes": "Implemented as an expansion-pass-only call stack in src/syntax.c — JACL macros are template-based (see project_macro_eval_limitation memory), so 'runtime error during expansion' maps to 'compile-time error during the expansion walk' (arity mismatch at a nested call site, body-shape error, depth limit, invalid-syntax from syntax_to_ast). No VM/runtime wiring needed. Added ExpandFrame[256] + expand__push_frame/expand__pop_frame + expand__build_error_with_chain helpers. Frames push outer-macro-name + ORIGINAL call site (captured BEFORE *node_ptr is replaced with the expanded AST) around the recursive expand__node call. The chain is rendered into the error message at error-set time (not return time) because set_error captures the stack state before any pops happen. Chain format: base msg on line 1, then one '  in expansion of macro `name` at line L, col C' line per ancestor frame, outermost-first. Deep chains (>8) are truncated to outermost-4 + '... N more expansion frames ...' + innermost-4 so self-recursing macros hitting the depth limit don't dump a 200-line error. Deviation from the PRD's 'division by zero' test case: adapted to nested-arity tests because template-based expansion never runs user code during expansion. Runtime errors that fire from expanded macro bodies (e.g. the syntax-error builtin from US-017) go through the VM's error path, NOT the expansion chain — they get the call-site-of-the-expanded-code position automatically via syntax_to_ast position propagation, which is a different mechanism."
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 # Ralph Progress Log
-Started: Sat Apr 11 2026
+Started: Thu Apr 10 2026
 
 ## Codebase Patterns
 - Unity build: src/jacl.c is the unity build entrypoint; it includes value.c, gc.c, gc_collect.c, vm.c, etc. in a specific order. jacl.c does NOT include jacl.h.
@@ -413,41 +413,4 @@ Thread: (inline)
   - When the `expand__frame_top == 0` fast path returns, still copy `base_msg` into the arena — callers pass stack-allocated buffers (via `snprintf` into a local `char err[256]`), so returning the input pointer directly would leave the error string pointing at freed stack memory. Allocate + memcpy + null-terminate unconditionally in the builder.
   - The frame name pointer is the macro's AST lit-string (`head->data.lit_string.value`). AST nodes live in the same arena as the error message buffer, so the pointer outlives the whole expansion pass — no copy needed. But this means the frame name aliases the *original* AST, so don't stash it past arena teardown (not a concern here because the expansion pass runs entirely within one compile call).
   - Truncation strategy for deep chains: when `loop` hits the depth limit, displaying all 256 identical frames adds zero diagnostic value. Outermost 4 + "... N more ..." + innermost 4 is a useful window (it shows the recursion started from line L and terminated at line L'), keeps the error short, and has the property that single-call chains (<8 frames) render in full without any truncation wart.
----
-
-## 2026-04-11 - PRD swap: Macro Evaluation Rewrite
-- Completed prior PRD (Hygienic Macros, US-014..US-018) archived to .ralph/archive/2026-04-11-hygienic-macros/.
-- New PRD `prd-macro-eval-rewrite.md` loaded into .ralph/prd.json with 13 stories (US-001..US-013) on a fresh branch `ralph/macro-eval-rewrite` cut from `ralph/hygienic-macros` (NOT main — the new PRD references src/syntax.c, JaclSyntax, and the entire macro infrastructure that only exists on the hygienic-macros branch).
-- Goal: replace template-substitution macro expansion (`expand__subst_template`) with staged compilation — macro bodies become real closures invoked on the VM via a new reentrant `jacl_context_t`. Includes 7-byte name limit fix (US-002/003) as prerequisite, and new gensym builtin (US-010). Final story (US-013) deletes the old expander entirely.
----
-
-## 2026-04-11 - US-001 — Hygiene de-risking spike
-Thread: (inline)
-- Goal: validate the proposed mark-propagation hygiene rule on paper before touching any compilation code, so the rewrite doesn't unravel on a wrong assumption. Acceptance criteria require 5-8 representative templates, hand-lowered to make-syntax trees, traced through the proposed rule, and diffed against today's expander output — all byte-identical, or STOP and re-evaluate.
-- The PRD references "test_m10" but test_m10.c is actually the mutable-variables suite. The actual hygiene tests live in test/test_syntax.c under the test_us011_*, test_us012_hygiene_*, test_us013_caret_*, and test_us014_gensym_* sections (added in the prior hygienic-macros PRD). Picked all 7 representative templates from test_syntax.c, not test_m10.c. Recorded in the spike doc.
-- Picked 7 templates covering every required hygiene case:
-  1. `double` — simple [unquote x] (no marks created, just splice)
-  2. `wrap` — [unquote-splicing body] (vector flatten)
-  3. `bindit` — `^val` caret carve-out
-  4. `m` — `[gensym]`-introduced fresh var
-  5. `mk` — nested `[syntax-quote ...]` (today's expander treats inner literally with no nested unquotes; proposed rule preserves this)
-  6. `m` (US-012 capture test) — identifier shadowing where macro introduces its own `x` colliding with an outer `x`
-  7. `add_hundred` calling `add_ten` — transitive macro composition (mark from outer must NOT clobber mark from inner; inner's expansion is a syntax object that splices through with its own marks intact)
-- Hand-lowered each template's syntax-quote body into a tree of make-syntax/vec calls as it would compile under US-007's new compilation rule. Used the existing OP_SYNTAX_OP subops 7-12 from US-016 (var-ref, lit, vec, struct, command, syntax-quote-of-syntax) — no new opcodes needed beyond the existing introspection/construction set.
-- Traced each template through both pipelines side-by-side:
-  - LHS: today's `expand__subst_template` (src/syntax.c:1232) + `expand__stamp_syntax` (src/syntax.c:1016) + the file-static `expand__scope_counter` (src/syntax.c:881).
-  - RHS: proposed rule — every make-syntax call inside a macro frame stamps `current_mark` on its result; spliced-in arg syntax objects pass through unchanged with their existing (caller's) marks; `^`-prefixed nodes (`is_caret == 1`) opt out and always carry mark 0.
-- Result: all 7 templates produce byte-identical output. The only refinement to the originally-stated rule is the caret carve-out: `^name` nodes always have mark 0, regardless of frame mark, matching today's `expand__stamp_syntax` skip-on-`is_caret==1` behavior.
-- One observed edge case: nested `[syntax-quote ...]` with unquotes INSIDE the inner quote is unobserved by today's tests. Today's expander treats the inner subtree as a literal (no recursion into it for unquote substitution). The proposed rule preserves this — the new compilation rule for AST_SYNTAX_QUOTE compiles the outer quote and treats nested syntax-quote as a make-syntax-of-syntax-quote literal subtree. Documented as a deferred decision in case future macros need full nested unquoting.
-- Decision: ✅ Proceed with the rest of the PRD. No production code modified (acceptance criterion: "spike code lives under .ralph/spikes/ or is reverted before US-002 begins"). The deliverable is a single 37 KB markdown document at `.ralph/spikes/macro-eval-hygiene-spike.md`.
-- Files changed: .ralph/spikes/macro-eval-hygiene-spike.md (new), .ralph/prd.json (US-001 passes:true), .ralph/progress.txt
-- Verification: ./build.sh → 84/84 binaries pass, 157 syntax subtests pass (no production code changes, just sanity check that the in-progress branch still builds clean).
-- **Learnings for future iterations:**
-  - The "test_m10" reference in the macro PRDs is a misnomer — it dates back to when M10 was the macro milestone. The actual hygiene/macro tests now live in test/test_syntax.c (sections US-011 through US-018). Anywhere a future story says "test_m10" expect to find them in test_syntax.c instead. Don't waste a tool call confirming this each time.
-  - When picking representative templates for a spike, prefer ones that already have assertions in the existing test suite — they double as your oracle. A template that's just illustrative ("here's how someone might write a `swap!` macro") provides no diff target. Every template in this spike was lifted directly from a passing test in test_syntax.c.
-  - For paper analysis of mark-propagation, the right abstraction is a per-row "mark trace table": each row is a syntax object (var-ref, lit, vec, command), each column is "mark today" vs. "mark under proposed rule". This format makes byte-identity obvious at a glance and forces you to actually walk the tree node-by-node instead of hand-waving. Reusable for any future hygiene rule changes.
-  - The caret carve-out is load-bearing for the transitive macro composition case (template #7). Without it, when `add_hundred` introduces a `^x` binding and then calls `add_ten` which itself introduces a `^y`, both bindings would get marks from their respective frames, and the outer macro's mark would shadow the inner's binding identifier. Caret = "this is a deliberately introduced binding, not a reference, mark 0 always". The fact that today's expander already does this (`expand__stamp_syntax` checks `is_caret == 1` and skips) means the proposed rule isn't introducing a new mechanism — it's keeping the same carve-out, just relocating where the stamp is applied (compile time → make-syntax call time).
-  - Nested `[syntax-quote ...]` is the only case where the proposed rule has an observable behavioral question, and the answer is "match today's behavior" (treat inner as literal). This matters for US-007 acceptance: the new compilation rule for AST_SYNTAX_QUOTE must NOT recursively unquote inside a nested syntax-quote, even though it would be technically possible. Document this in US-007's tests so a future implementer doesn't "fix" it and silently change semantics.
-  - Sequencing implication for US-009: the mark-application code lives in OP_SYNTAX_OP's make-syntax subops (vm.c:5979-6107). Each subop needs to read the current frame's mark and apply it to the constructed JaclSyntax. The frame's mark needs a place to live — either in JaclCallFrame (cleanest, isolates per-call state) or in jacl_context_t (US-005). Preferring CallFrame because mark is per-macro-invocation, not per-context, and a single context can have many nested macro frames live at once.
-  - Sequencing implication for US-010 (gensym builtin): gensym must apply the current frame's mark to the var-ref it produces, otherwise the resulting identifier would be globally fresh by name but unmarked, breaking hygiene composition. Today's `jacl_gensym_next` doesn't apply marks itself — it relies on `expand__stamp_syntax` walking over its output afterward. The new builtin must do both: generate the name AND stamp the mark, atomically.
 ---
