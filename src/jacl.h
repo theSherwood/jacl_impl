@@ -846,6 +846,7 @@ typedef struct {
   uint32_t*     param_name_lens;
   JaclClosure*  closure;
   AstNode*      body;        /* original body AST for template-based expansion */
+  bool          use_staged_eval; /* US-008: use staged evaluation instead of template subst */
 } MacroEntry;
 
 typedef struct MacroTable MacroTable;
@@ -862,6 +863,9 @@ typedef struct {
   StructTypeRegistry* struct_registry;
   MacroTable*   macro_table;
 } CompileResult;
+
+/* Forward declaration (full definition below) */
+typedef struct jacl_context_s jacl_context_t;
 
 /* --- ExpandFrame: tracks nested macro expansion for error reporting --- */
 
@@ -885,11 +889,10 @@ typedef struct {
     uint32_t     scope_counter;
     uint32_t     gensym_counter;
     bool         staged_syntax_quote; /* US-007: compile syntax-quote via make-syntax */
+    jacl_context_t *ctx;              /* US-008: context for staged macro eval (NULL if N/A) */
 } ExpandState;
 
 /* --- jacl_context_t: reentrant execution context --- */
-
-typedef struct jacl_context_s jacl_context_t;
 
 typedef enum {
   TYPE_DYN = 0,

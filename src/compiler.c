@@ -24,6 +24,12 @@ typedef struct {
   MacroTable*   macro_table;    /* compile-time macro definitions (NULL if none) */
 } CompileResult;
 
+/* Forward-declare jacl_context_t for ExpandState (defined later in vm.c) */
+#ifndef JACL_CONTEXT_FWD
+#define JACL_CONTEXT_FWD
+typedef struct jacl_context_s jacl_context_t;
+#endif
+
 /* --- ExpandState: per-compilation macro expansion state (reentrancy-safe) ---
  * These types are also declared in jacl.h for external consumers. In the
  * unity build they are defined here (compiler.c comes before syntax.c). */
@@ -47,6 +53,7 @@ typedef struct {
     uint32_t     scope_counter;
     uint32_t     gensym_counter;
     bool         staged_syntax_quote; /* US-007: compile syntax-quote via make-syntax */
+    jacl_context_t *ctx;              /* US-008: context for staged macro eval (NULL if N/A) */
 } ExpandState;
 
 #endif /* EXPAND_FRAME_MAX */
@@ -2287,6 +2294,7 @@ typedef struct {
   uint32_t*     param_name_lens; /* lengths of each param name */
   JaclClosure*  closure;     /* compiled macro body closure */
   AstNode*      body;        /* original body AST for template-based expansion */
+  bool          use_staged_eval; /* US-008: use staged evaluation instead of template subst */
 } MacroEntry;
 
 struct MacroTable {
@@ -8786,9 +8794,13 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           MacroEntry* existing = macro_table_lookup(mt, mname, mname_len);
           if (existing) {
             if (existing->closure != NULL) {
-              /* Truly duplicate defmacro — expansion pass didn't register
-                 this, so it must be a second defmacro with the same name
-                 (shouldn't happen since expansion pass catches it). */
+              if (existing->use_staged_eval) {
+                /* US-008: staged macro body already compiled during expansion —
+                   skip recompilation, just emit OP_NIL. */
+                compiler__emit_byte(c, OP_NIL, line);
+                break;
+              }
+              /* Truly duplicate defmacro */
               char err[128];
               snprintf(err, sizeof(err),
                        "defmacro: '%.*s' is already defined",

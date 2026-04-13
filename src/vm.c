@@ -6514,6 +6514,7 @@ JaclVal jacl_ctx_run_source(jacl_context_t *ctx, const char *src, size_t len,
     JaclInternTable *itab = ctx->owns_intern_table ? &ctx->intern_table
                                                    : ctx->vm.intern_table;
     ctx->expand.staged_syntax_quote = ctx->use_staged_syntax_quote;
+    ctx->expand.ctx = ctx->use_staged_syntax_quote ? ctx : NULL;
     CompileResult cr = compiler_compile(parse, &ctx->arena, itab,
                                         &ctx->vm.heap, NULL, &ctx->expand);
     if (cr.error_count > 0) {

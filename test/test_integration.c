@@ -685,6 +685,100 @@ static int test_staged_sq_nested(void) {
     TEST_PASS();
 }
 
+/* ===== US-008 (macro-eval): Staged macro expansion ===== */
+
+/* Test: staged macro end-to-end — same output as legacy path */
+static int test_staged_macro_e2e(void) {
+    /* Legacy path */
+    jacl_context_t *ctx_old = jacl_ctx_new(NULL);
+    PrintCapture cap_old = { .len = 0 };
+    ctx_old->vm.print_fn = capture_print;
+    ctx_old->vm.print_ctx = &cap_old;
+
+    const char *src =
+        "defmacro double {x} { syntax-quote [+ ~x ~x] }\n"
+        "[print [double 21]]";
+
+    JaclError err_old;
+    jacl_ctx_run_source(ctx_old, src, strlen(src), UINT64_MAX, &err_old);
+    ASSERT(err_old.kind == JACL_ERROR_NONE);
+
+    /* Staged path */
+    jacl_context_t *ctx_new = jacl_ctx_new(NULL);
+    ctx_new->use_staged_syntax_quote = true;
+    PrintCapture cap_new = { .len = 0 };
+    ctx_new->vm.print_fn = capture_print;
+    ctx_new->vm.print_ctx = &cap_new;
+
+    JaclError err_new;
+    jacl_ctx_run_source(ctx_new, src, strlen(src), UINT64_MAX, &err_new);
+    if (err_new.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged_macro_e2e: %s\n", err_new.message ? err_new.message : "(null)");
+    }
+    ASSERT(err_new.kind == JACL_ERROR_NONE);
+
+    /* Outputs must match */
+    ASSERT_STR_EQ(cap_old.buf, "42\n");
+    ASSERT_STR_EQ(cap_new.buf, cap_old.buf);
+
+    jacl_ctx_destroy(ctx_new);
+    jacl_ctx_destroy(ctx_old);
+    TEST_PASS();
+}
+
+/* Test: staged macro with block body — multiple expressions */
+static int test_staged_macro_block(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ctx->use_staged_syntax_quote = true;
+    PrintCapture cap = { .len = 0 };
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    const char *src =
+        "defmacro triple {x} { syntax-quote [* ~x 3] }\n"
+        "[print [triple 7]]";
+
+    JaclError err;
+    jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged_macro_block: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "21\n");
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: forward-referenced staged macros (A calls B defined later) */
+static int test_staged_macro_forward_ref(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ctx->use_staged_syntax_quote = true;
+    PrintCapture cap = { .len = 0 };
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    /* macro inc calls +, macro add-two calls inc (defined earlier, but
+     * both are registered before expansion so forward ref within the
+     * expansion pass works). */
+    const char *src =
+        "defmacro inc {x} { syntax-quote [+ ~x 1] }\n"
+        "defmacro add-two {x} { syntax-quote [+ ~x 2] }\n"
+        "[print [inc 10]]\n"
+        "[print [add-two 10]]";
+
+    JaclError err;
+    jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged_macro_fwd: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "11\n12\n");
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -720,6 +814,10 @@ int main(void) {
     { "staged_sq_unquote",       test_staged_sq_unquote },
     { "staged_sq_splice",        test_staged_sq_splice },
     { "staged_sq_nested",        test_staged_sq_nested },
+    /* US-008 (macro-eval): staged macro expansion */
+    { "staged_macro_e2e",        test_staged_macro_e2e },
+    { "staged_macro_block",      test_staged_macro_block },
+    { "staged_macro_fwd_ref",    test_staged_macro_forward_ref },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

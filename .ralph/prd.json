@@ -157,8 +157,8 @@
         "Tests pass (none use the staged path yet except the new test macros)"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added use_staged_eval field to MacroEntry. Added jacl_context_t *ctx to ExpandState. Three-phase expansion in staged mode: register all defmacros, compile staged bodies via expand__compile_staged_body, expand calls. Non-staged mode preserves original single-pass semantics. expand__node checks entry->use_staged_eval to route between template substitution and jacl_ctx_run_closure. AST_DEFMACRO compilation skips staged macros whose closures are already compiled. 3 tests: e2e comparison, block body, forward references."
     },
     {
       "id": "US-009",

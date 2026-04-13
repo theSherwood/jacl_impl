@@ -1438,42 +1438,76 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                     return false;
                 }
 
-                /* Find the syntax-quote template in the body */
-                AstNode *tmpl_ast = expand__find_syntax_quote_child(
-                    entry->body);
-                if (!tmpl_ast) {
-                    char err[256];
-                    snprintf(err, sizeof(err),
-                             "macro '%.*s' body must be a syntax-quote template",
-                             (int)name_len, name);
-                    expand__set_error(es, err, node->start.line,
-                                      node->start.column, arena);
-                    return false;
+                JaclVal result_syn;
+
+                if (entry->use_staged_eval && entry->closure && es->ctx) {
+                    /* ---- US-008 staged path ---- */
+                    /* Convert args to syntax objects */
+                    JaclVal arg_vals[64];
+                    for (uint32_t i = 0; i < argc; i++) {
+                        arg_vals[i] = syntax_from_ast(
+                            node->data.command.args[i], heap, intern);
+                    }
+
+                    /* Invoke the compiled macro closure */
+                    JaclError merr;
+                    result_syn = jacl_ctx_run_closure(
+                        es->ctx, entry->closure, arg_vals, argc, &merr);
+
+                    if (merr.kind != JACL_ERROR_NONE) {
+                        char err[256];
+                        snprintf(err, sizeof(err),
+                                 "staged macro '%.*s': %s",
+                                 (int)name_len, name,
+                                 merr.message ? merr.message : "runtime error");
+                        expand__set_error(es, err, node->start.line,
+                                          node->start.column, arena);
+                        return false;
+                    }
+
+                    if (!jacl_is_syntax(result_syn)) {
+                        char err[256];
+                        snprintf(err, sizeof(err),
+                                 "staged macro '%.*s' must return a syntax object",
+                                 (int)name_len, name);
+                        expand__set_error(es, err, node->start.line,
+                                          node->start.column, arena);
+                        return false;
+                    }
+                } else {
+                    /* ---- Legacy template substitution path ---- */
+
+                    /* Find the syntax-quote template in the body */
+                    AstNode *tmpl_ast = expand__find_syntax_quote_child(
+                        entry->body);
+                    if (!tmpl_ast) {
+                        char err[256];
+                        snprintf(err, sizeof(err),
+                                 "macro '%.*s' body must be a syntax-quote template",
+                                 (int)name_len, name);
+                        expand__set_error(es, err, node->start.line,
+                                          node->start.column, arena);
+                        return false;
+                    }
+
+                    /* Convert template and arguments to syntax objects */
+                    JaclVal tmpl_syn = syntax_from_ast(tmpl_ast, heap, intern);
+
+                    /* Fresh scope mark for this expansion */
+                    uint32_t macro_mark = ++es->scope_counter;
+                    expand__stamp_syntax(tmpl_syn, macro_mark);
+
+                    JaclVal arg_vals[64];
+                    for (uint32_t i = 0; i < argc; i++) {
+                        arg_vals[i] = syntax_from_ast(
+                            node->data.command.args[i], heap, intern);
+                    }
+
+                    result_syn = expand__subst_template(
+                        tmpl_syn,
+                        entry->param_names, entry->param_name_lens,
+                        arg_vals, entry->param_count, heap, intern, es);
                 }
-
-                /* Convert template and arguments to syntax objects */
-                JaclVal tmpl_syn = syntax_from_ast(tmpl_ast, heap, intern);
-
-                /* Fresh scope mark for this expansion — stamp the template
-                 * so identifiers introduced by the template are unique
-                 * and don't collide with the caller's identifiers. */
-                uint32_t macro_mark = ++es->scope_counter;
-                expand__stamp_syntax(tmpl_syn, macro_mark);
-
-                JaclVal arg_vals[64];
-                for (uint32_t i = 0; i < argc; i++) {
-                    arg_vals[i] = syntax_from_ast(
-                        node->data.command.args[i], heap, intern);
-                }
-
-                /* Template substitution: replace unquotes by name.
-                 * Arg values retain their own (caller's) scope marks —
-                 * the substitution returns them directly without copying,
-                 * so unquoted references stay bound to the caller's scope. */
-                JaclVal result_syn = expand__subst_template(
-                    tmpl_syn,
-                    entry->param_names, entry->param_name_lens,
-                    arg_vals, entry->param_count, heap, intern, es);
 
                 /* Convert result back to AstNode */
                 AstNode *expanded = syntax_to_ast(result_syn, arena);
@@ -1484,10 +1518,7 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                     return false;
                 }
 
-                /* US-018: capture the ORIGINAL call site BEFORE replacement
-                 * so we can push a frame for this expansion. The node is
-                 * about to be replaced by the expanded AST, which carries
-                 * positions from the template, not the call site. */
+                /* US-018: capture the ORIGINAL call site BEFORE replacement */
                 uint32_t orig_line = node->start.line;
                 uint32_t orig_col  = node->start.column;
 
@@ -1535,6 +1566,60 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
  * replacing unquote holes by matching parameter names).
  * Returns NULL on success, or an error message string on failure.
  * Sets *out_line and *out_col to the error location on failure. */
+/* US-008: Compile a staged macro body into a closure.
+ * Called during expansion (before the main compilation pass) so the closure
+ * is available for jacl_ctx_run_closure when a staged macro is invoked. */
+static const char *expand__compile_staged_body(MacroEntry *entry,
+                                               ThreadHeap *heap,
+                                               JaclInternTable *intern,
+                                               arena_t *arena) {
+    uint32_t param_count = entry->param_count;
+
+    JaclClosure *closure = (JaclClosure *)arena_alloc(arena, sizeof(JaclClosure));
+    memset(closure, 0, sizeof(JaclClosure));
+    chunk_init(&closure->chunk, arena);
+    closure->param_count = (uint8_t)param_count;
+    closure->min_args    = (uint8_t)param_count;
+    closure->variadic    = false;
+
+    char *name_copy = (char *)arena_alloc(arena, entry->name_len + 1);
+    memcpy(name_copy, entry->name, entry->name_len);
+    name_copy[entry->name_len] = '\0';
+    closure->name = name_copy;
+
+    if (param_count > 0) {
+        closure->param_names = (JaclVal *)arena_alloc(arena,
+                                   sizeof(JaclVal) * param_count);
+        for (uint32_t pi = 0; pi < param_count; pi++) {
+            closure->param_names[pi] = compiler__name_val(heap, intern,
+                entry->param_names[pi], entry->param_name_lens[pi]);
+        }
+    }
+
+    Compiler body_compiler;
+    compiler__init(&body_compiler, &closure->chunk, arena, intern, heap);
+    body_compiler.scope_depth = 1;
+    body_compiler.use_staged_syntax_quote = true;
+
+    for (uint32_t pi = 0; pi < param_count; pi++) {
+        compiler__add_local(&body_compiler, closure->param_names[pi],
+                            0 /*line*/, 0 /*col*/);
+        body_compiler.locals[body_compiler.local_count - 1].is_param = true;
+    }
+
+    compiler__compile_block_expr(&body_compiler, entry->body);
+    compiler__emit_byte(&body_compiler, OP_RETURN, 0);
+
+    if (body_compiler.error_count > 0) {
+        return body_compiler.first_error ? body_compiler.first_error
+                                          : "staged macro body compilation failed";
+    }
+
+    closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
+    entry->closure = closure;
+    return NULL;
+}
+
 const char *ast_expand_macros(AstNode **program, uint32_t count,
                               MacroTable *macros, ThreadHeap *heap,
                               JaclInternTable *intern, arena_t *arena,
@@ -1552,12 +1637,19 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
         es->frame_top  = 0;
     }
 
-    for (uint32_t i = 0; i < count; i++) {
-        AstNode *node = program[i];
-        if (!node) continue;
+    bool staged_mode = es->staged_syntax_quote;
 
-        /* Check for defmacro — register in macro table */
-        if (node->type == AST_DEFMACRO) {
+    if (staged_mode) {
+        /* --- US-008 three-phase staged approach ---
+         * Phase 1: Register ALL defmacros first (enables forward references).
+         * Phase 2: Compile staged macro bodies.
+         * Phase 3: Expand macro calls in non-defmacro statements. */
+
+        /* Phase 1: Register all defmacros */
+        for (uint32_t i = 0; i < count; i++) {
+            AstNode *node = program[i];
+            if (!node || node->type != AST_DEFMACRO) continue;
+
             const char *mname     = node->data.defmacro.name;
             uint32_t    mname_len = node->data.defmacro.name_len;
 
@@ -1592,29 +1684,108 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
             }
 
             uint32_t param_count = node->data.defmacro.param_count;
-
             char *name_copy = (char *)arena_alloc(arena, mname_len + 1);
             memcpy(name_copy, mname, mname_len);
             name_copy[mname_len] = '\0';
 
-            /* Register in macro table with body AST for template expansion */
             MacroEntry *entry = &macros->entries[macros->count++];
             entry->name           = name_copy;
             entry->name_len       = mname_len;
             entry->param_count    = param_count;
             entry->param_names    = node->data.defmacro.param_names;
             entry->param_name_lens = node->data.defmacro.param_name_lens;
-            entry->closure        = NULL;  /* compiled later by the compiler pass */
+            entry->closure        = NULL;
             entry->body           = node->data.defmacro.body;
-
-            continue;
+            entry->use_staged_eval = true;
         }
 
-        /* Expand macro calls in this statement */
-        if (!expand__node(&program[i], macros, heap, intern, arena, es, 0)) {
-            *out_error_line = es->error_line;
-            *out_error_col  = es->error_col;
-            return es->error_msg;
+        /* Phase 2: Compile staged macro bodies */
+        for (uint32_t i = 0; i < macros->count; i++) {
+            MacroEntry *entry = &macros->entries[i];
+            if (!entry->use_staged_eval || entry->closure) continue;
+            const char *err = expand__compile_staged_body(entry, heap,
+                                                           intern, arena);
+            if (err) {
+                *out_error_line = 0;
+                *out_error_col  = 0;
+                return err;
+            }
+        }
+
+        /* Phase 3: Expand macro calls */
+        for (uint32_t i = 0; i < count; i++) {
+            AstNode *node = program[i];
+            if (!node || node->type == AST_DEFMACRO) continue;
+            if (!expand__node(&program[i], macros, heap, intern, arena, es, 0)) {
+                *out_error_line = es->error_line;
+                *out_error_col  = es->error_col;
+                return es->error_msg;
+            }
+        }
+    } else {
+        /* --- Original single-pass approach (non-staged) ---
+         * Registration and expansion are interleaved: a macro must be
+         * defined before it is used. */
+        for (uint32_t i = 0; i < count; i++) {
+            AstNode *node = program[i];
+            if (!node) continue;
+
+            if (node->type == AST_DEFMACRO) {
+                const char *mname     = node->data.defmacro.name;
+                uint32_t    mname_len = node->data.defmacro.name_len;
+
+                if (macro__is_special_form(mname, mname_len)) {
+                    char err[128];
+                    snprintf(err, sizeof(err),
+                             "defmacro: '%.*s' shadows a special form",
+                             (int)mname_len, mname);
+                    char *msg = (char *)arena_alloc(arena, strlen(err) + 1);
+                    memcpy(msg, err, strlen(err) + 1);
+                    *out_error_line = node->start.line;
+                    *out_error_col  = node->start.column;
+                    return msg;
+                }
+
+                if (macro_table_lookup(macros, mname, mname_len)) {
+                    char err[128];
+                    snprintf(err, sizeof(err),
+                             "defmacro: '%.*s' is already defined",
+                             (int)mname_len, mname);
+                    char *msg = (char *)arena_alloc(arena, strlen(err) + 1);
+                    memcpy(msg, err, strlen(err) + 1);
+                    *out_error_line = node->start.line;
+                    *out_error_col  = node->start.column;
+                    return msg;
+                }
+
+                if (macros->count >= MACRO_TABLE_MAX) {
+                    *out_error_line = node->start.line;
+                    *out_error_col  = node->start.column;
+                    return "too many macro definitions";
+                }
+
+                uint32_t param_count = node->data.defmacro.param_count;
+                char *name_copy = (char *)arena_alloc(arena, mname_len + 1);
+                memcpy(name_copy, mname, mname_len);
+                name_copy[mname_len] = '\0';
+
+                MacroEntry *entry = &macros->entries[macros->count++];
+                entry->name           = name_copy;
+                entry->name_len       = mname_len;
+                entry->param_count    = param_count;
+                entry->param_names    = node->data.defmacro.param_names;
+                entry->param_name_lens = node->data.defmacro.param_name_lens;
+                entry->closure        = NULL;
+                entry->body           = node->data.defmacro.body;
+                entry->use_staged_eval = false;
+                continue;
+            }
+
+            if (!expand__node(&program[i], macros, heap, intern, arena, es, 0)) {
+                *out_error_line = es->error_line;
+                *out_error_col  = es->error_col;
+                return es->error_msg;
+            }
         }
     }
 

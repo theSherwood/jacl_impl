@@ -118,3 +118,24 @@ Thread: (inline)
   - `OP_VEC_CONCAT` stack order: [a, b] → pops b first, then a → pushes a++b
   - The staged path and legacy path produce structurally identical syntax objects — the difference is only in how the bytecode constructs them
 ---
+
+## 2026-04-13 - US-008
+Thread: (inline)
+- Added `use_staged_eval` bool to MacroEntry in both compiler.c and jacl.h
+- Added `jacl_context_t *ctx` to ExpandState (forward-declared in compiler.c since it's defined later in vm.c)
+- Forward-declared `jacl_context_t` in jacl.h before ExpandState, removed duplicate typedef
+- Implemented `expand__compile_staged_body` in syntax.c: creates JaclClosure, Compiler with `use_staged_syntax_quote=true`, compiles body, returns closure
+- Modified `ast_expand_macros` with two modes:
+  - Staged mode (three-phase): register ALL defmacros, compile staged bodies, expand calls — enables forward references
+  - Non-staged mode (original single-pass): interleaved registration + expansion — preserves "must define before use" semantics
+- Modified `expand__node` to check `entry->use_staged_eval`: if true, invokes `jacl_ctx_run_closure` with syntax-object args; if false, uses existing template substitution
+- Modified AST_DEFMACRO compilation: if `use_staged_eval && closure != NULL`, skip recompilation (body already compiled during expansion)
+- Plumbed `ctx->expand.ctx` from `jacl_ctx_run_source` when staged mode is active
+- Added 3 integration tests: `test_staged_macro_e2e`, `test_staged_macro_block`, `test_staged_macro_forward_ref`
+- Files changed: src/compiler.c, src/syntax.c, src/vm.c, src/jacl.h, test/test_integration.c
+- **Learnings for future iterations:**
+  - The three-phase approach for forward references MUST be gated on staged mode — applying it to all macros breaks `test_expand_use_before_defmacro` which expects macros used before definition to NOT be expanded
+  - `jacl_context_t` is defined in vm.c but ExpandState is in compiler.c (earlier in unity build) — needs forward declaration
+  - Staged macro closures compiled during expansion are found by the compiler pass with `closure != NULL` — must detect `use_staged_eval` to avoid "already defined" error
+  - `expand__compile_staged_body` compiles the body block using `compiler__compile_block_expr` (not static, visible from syntax.c via unity build)
+---
