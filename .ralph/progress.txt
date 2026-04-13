@@ -159,3 +159,33 @@ Thread: (inline)
   - Existing staged tests (US-008) only checked print output, never return values — the stack corruption bug was latent until hygiene tests checked `jacl_is_i32(result)`
   - `m13` test crashes with pthread assertion — pre-existing, unrelated to macro-eval work
 ---
+
+## 2026-04-13 - US-010
+Thread: (inline)
+- Added `gensym_counter_ptr` (uint32_t*) field to VM struct in both vm.c and src/jacl.h
+- Added OP_SYNTAX_OP subop 16 (gensym) in vm.c: pops prefix string, calls `jacl_gensym_next` with `vm->gensym_counter_ptr` and `vm->macro_scope_mark`, pushes syntax var-ref with `is_gensym=1`
+- Forward-declared `jacl_gensym_next` in vm.c (defined in syntax.c, later in unity build order)
+- Updated `syntax__compile_sq_node` in compiler.c: detects `[gensym]` / `[gensym "prefix"]` in AST_COMMAND case and emits prefix constant + OP_SYNTAX_OP subop 16 instead of normal make-syntax command compilation
+- Updated `expand__node` in syntax.c: sets `vm->gensym_counter_ptr = &es->gensym_counter` before `jacl_ctx_run_closure`, resets to NULL after
+- Old `expand__is_gensym_call` and template-level gensym detection preserved for legacy path (deleted in US-013)
+- Added 3 integration tests: `test_staged_gensym_basic`, `test_staged_gensym_long_prefix_no_collision`, `test_staged_gensym_binding_usable`
+- Files changed: src/vm.c, src/compiler.c, src/jacl.h, src/syntax.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - Unity build order (compiler.c → vm.c → syntax.c) means `jacl_gensym_next` (defined in syntax.c) needs a forward declaration in vm.c to be callable from the OP_SYNTAX_OP handler
+  - The gensym subop (16) follows the same pattern as make-syntax var-ref (subop 10) but sets `is_gensym=1` and uses `jacl_gensym_next` for name generation instead of taking the name directly
+  - `gensym_counter_ptr` is a pointer (not a value) because the counter is owned by ExpandState and must be shared between the VM and the expander — incrementing it in the VM during closure execution must be visible to subsequent macro calls
+  - The compiler-level gensym detection in `syntax__compile_sq_node` matches the same pattern as `expand__is_gensym_call` (head == "gensym", 0 or 1 lit-string args) but operates on AST nodes instead of syntax objects
+---
+
+## 2026-04-13 - US-011
+Thread: (inline)
+- Verified test_m10.c contains zero defmacros — it tests mutable state (mut, set!, box, atom, deref, reset!, swap!), not macros or hygiene
+- AC "every defmacro annotated with use_staged_eval=true" is vacuously satisfied
+- All 53 test_m10 tests pass; full test suite passes (m13 pthread failure is pre-existing)
+- Both expansion paths coexist; test_m11/m12/m13/test_syntax.c still use the old path
+- No code changes needed — PRD's reference to test_m10 as "the hygiene suite" was a misnomer
+- Files changed: .ralph/prd.json (notes update only)
+- **Learnings for future iterations:**
+  - test_m10.c = milestone 10 (mutable state), not macro hygiene; actual macro/hygiene tests live in test_syntax.c and test_integration.c
+  - test_m11.c, test_m12.c, test_m13.c also have zero defmacros — US-012's real work is migrating test_syntax.c
+---
