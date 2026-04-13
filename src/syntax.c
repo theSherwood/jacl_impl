@@ -1449,10 +1449,18 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                             node->data.command.args[i], heap, intern);
                     }
 
+                    /* US-009: allocate fresh scope mark for hygiene.
+                     * Set it on the VM so make-syntax ops can apply it. */
+                    uint32_t macro_mark = ++es->scope_counter;
+                    es->ctx->vm.macro_scope_mark = macro_mark;
+
                     /* Invoke the compiled macro closure */
                     JaclError merr;
                     result_syn = jacl_ctx_run_closure(
                         es->ctx, entry->closure, arg_vals, argc, &merr);
+
+                    /* Reset scope mark after invocation */
+                    es->ctx->vm.macro_scope_mark = 0;
 
                     if (merr.kind != JACL_ERROR_NONE) {
                         char err[256];

@@ -6,6 +6,9 @@ Started: Sat Apr 11 15:40:27 UTC 2026
 - Build/test: `bash build.sh --parallel` runs all tests; `--test=NAME` filters to a single test
 - Inline strings are 7-byte max (NaN-boxed payload); longer strings must use `jacl_intern` (heap-interned, pointer-stable) or `jacl_rope_string_create`
 - The `concurrent_intern` test is flaky (race condition, off-by-one in counts) — not a real failure
+- The `m13` test crashes with a pthread assertion (`__pthread_tpp_change_priority`) — pre-existing, not related to macro-eval work
+- `vm_exec` must reset `vm->stack_top = 0` — staged macro expansion calls `jacl_ctx_run_closure` on the same VM during compilation, leaving stale stack values
+- `jacl.h` VM struct must mirror `vm.c` VM struct exactly — mismatched fields cause struct layout offset bugs in test binaries (e.g., missing `macro_scope_mark`)
 - Compiler uses `compiler__name_val` helper for all name construction: <=7 inline, 8-128 interned, >128 rejected
 - Analysis functions (suspension analysis, capture analysis, etc.) now accept heap/intern_table params for name construction
 - `abort()` is available via `lib/platform/platform.h` which includes `<stdlib.h>`
@@ -138,4 +141,21 @@ Thread: (inline)
   - `jacl_context_t` is defined in vm.c but ExpandState is in compiler.c (earlier in unity build) — needs forward declaration
   - Staged macro closures compiled during expansion are found by the compiler pass with `closure != NULL` — must detect `use_staged_eval` to avoid "already defined" error
   - `expand__compile_staged_body` compiles the body block using `compiler__compile_block_expr` (not static, visible from syntax.c via unity build)
+---
+
+## 2026-04-13 - US-009
+Thread: (inline)
+- Updated all OP_SYNTAX_OP make-syntax subops (7-12) to apply `vm->macro_scope_mark` to constructed syntax objects
+- Added subop 15 (`make-syntax var-ref-caret`): scope_mark=0, is_caret=1 — for ^-prefixed identifiers that bypass mark application
+- Updated `syntax__compile_sq_node` in compiler.c: VAR_REF with `is_caret` emits subop 15 instead of subop 10
+- Fixed `vm_exec` to reset `vm->stack_top = 0` before execution — staged macro expansion calls `jacl_ctx_run_closure` on the same VM during compilation, leaving stale syntax objects on the stack
+- Synced `macro_scope_mark` field to VM struct in `jacl.h` (was missing, causing struct layout mismatch between unity build and test binaries)
+- Added 7 integration tests comparing staged vs legacy path output: local shadow, nested macros, global fallback, caret binding, caret override, unless macro, transitive composition
+- Files changed: src/vm.c, src/compiler.c, src/jacl.h, test/test_integration.c
+- **Learnings for future iterations:**
+  - `vm_exec` never reset `stack_top` — harmless before staged macros because expansion never touched the VM, but now critical because `jacl_ctx_run_closure` modifies the VM during the compile pass
+  - `jacl.h` and `vm.c` both define the VM struct; they MUST stay in sync or test binaries silently read wrong field offsets (no compiler error because they're in separate translation units via the unity build)
+  - The spike's "caret always mark 0" rule maps cleanly to a separate subop (15) rather than a flag byte — simpler in both compiler and VM
+  - Existing staged tests (US-008) only checked print output, never return values — the stack corruption bug was latent until hygiene tests checked `jacl_is_i32(result)`
+  - `m13` test crashes with pthread assertion — pre-existing, unrelated to macro-eval work
 ---

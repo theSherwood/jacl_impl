@@ -177,8 +177,8 @@
         "Tests pass"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "All OP_SYNTAX_OP make-syntax subops (7-12) now apply vm->macro_scope_mark to constructed syntax objects. Added subop 15 for caret var-refs (scope_mark=0, is_caret=1). syntax__compile_sq_node emits subop 15 for ^-prefixed var-refs. Fixed vm_exec to reset stack_top before execution (staged macro closure runs during expansion left stale values). Fixed VM struct in jacl.h missing macro_scope_mark field (struct layout mismatch). 7 integration tests verify staged-path hygiene matches legacy path: local shadow, nested macros, global fallback, caret, caret override, unless, transitive composition."
     },
     {
       "id": "US-010",
