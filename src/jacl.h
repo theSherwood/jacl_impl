@@ -1863,9 +1863,25 @@ extern VMResult vm__run (VM *vm, uint32_t min_frame);
 extern VMResult jacl_exec_program (ProgramResult *program, VM *vm);
 extern VMResult jacl_run (const char *source, VM *vm, arena_t *arena);
 
-/* --- context lifecycle --- */
+/* --- context lifecycle and internal run API --- */
+
+typedef enum {
+    JACL_ERROR_NONE = 0,
+    JACL_ERROR_COMPILE,
+    JACL_ERROR_RUNTIME
+} JaclErrorKind;
+
+typedef struct {
+    JaclErrorKind kind;
+    const char   *message;
+    uint32_t      line;
+    uint32_t      col;
+} JaclError;
+
 extern jacl_context_t *jacl_ctx_new (jacl_context_t *parent);
 extern void            jacl_ctx_destroy (jacl_context_t *ctx);
+extern JaclVal         jacl_ctx_run_source (jacl_context_t *ctx, const char *src, size_t len, uint64_t restriction_set, JaclError *err_out);
+extern JaclVal         jacl_ctx_run_closure (jacl_context_t *ctx, JaclClosure *closure, JaclVal *args, uint32_t arg_count, JaclError *err_out);
 
 /* --- gc_collect.c --- */
 extern void gc__ms_init (GCMarkStack *ms);

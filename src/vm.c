@@ -150,6 +150,23 @@ struct jacl_context_s {
     bool             owns_intern_table;   /* false when sharing parent's */
 };
 
+/* --- JaclError: error out-param for internal run API --- */
+#ifndef JACL_ERROR_DEFINED
+#define JACL_ERROR_DEFINED
+typedef enum {
+    JACL_ERROR_NONE = 0,
+    JACL_ERROR_COMPILE,
+    JACL_ERROR_RUNTIME
+} JaclErrorKind;
+
+typedef struct {
+    JaclErrorKind kind;
+    const char   *message;
+    uint32_t      line;
+    uint32_t      col;
+} JaclError;
+#endif
+
 /* --- API --- */
 
 void     vm_init(VM* vm, arena_t* arena);
@@ -6456,6 +6473,110 @@ void jacl_ctx_destroy(jacl_context_t *ctx) {
         intern_table_destroy(&ctx->intern_table);
     arena_destroy(&ctx->arena);
     free(ctx);
+}
+
+/* --- jacl_ctx_run_source / jacl_ctx_run_closure (US-006) --- */
+
+JaclVal jacl_ctx_run_source(jacl_context_t *ctx, const char *src, size_t len,
+                            uint64_t restriction_set, JaclError *err_out) {
+    if (err_out) { err_out->kind = JACL_ERROR_NONE; err_out->message = NULL; err_out->line = 0; err_out->col = 0; }
+    if (!ctx || !src) return JACL_NIL;
+
+    ctx->restriction_set = restriction_set;
+
+    /* Copy source to arena so it's NUL-terminated for the lexer */
+    char *buf = (char *)arena_alloc(&ctx->arena, (uint32_t)(len + 1));
+    memcpy(buf, src, len);
+    buf[len] = '\0';
+
+    /* Lex */
+    LexResult tokens = lexer_lex(buf, &ctx->arena);
+
+    /* Parse */
+    ParseResult parse = parser_parse(tokens, &ctx->arena);
+    if (parse.error_count > 0) {
+        const char *first_err = "parse error";
+        for (uint32_t i = 0; i < parse.count; i++) {
+            if (parse.nodes[i] && parse.nodes[i]->type == AST_ERROR) {
+                first_err = parse.nodes[i]->data.error.message;
+                break;
+            }
+        }
+        if (err_out) {
+            err_out->kind = JACL_ERROR_COMPILE;
+            err_out->message = first_err;
+        }
+        return JACL_NIL;
+    }
+
+    /* Compile */
+    JaclInternTable *itab = ctx->owns_intern_table ? &ctx->intern_table
+                                                   : ctx->vm.intern_table;
+    CompileResult cr = compiler_compile(parse, &ctx->arena, itab,
+                                        &ctx->vm.heap, NULL, &ctx->expand);
+    if (cr.error_count > 0) {
+        if (err_out) {
+            err_out->kind = JACL_ERROR_COMPILE;
+            err_out->message = cr.error_message ? cr.error_message : "compile error";
+        }
+        return JACL_NIL;
+    }
+
+    /* Execute */
+    ctx->vm.intern_table   = itab;
+    ctx->vm.struct_registry = cr.struct_registry;
+
+    VMResult r = vm_exec(&ctx->vm, &cr.chunk);
+    if (r != VM_OK) {
+        if (err_out) {
+            err_out->kind    = JACL_ERROR_RUNTIME;
+            err_out->message = ctx->vm.error_message ? ctx->vm.error_message : "runtime error";
+            err_out->line    = ctx->vm.error_line;
+        }
+        return JACL_NIL;
+    }
+
+    return (ctx->vm.stack_top > 0) ? ctx->vm.stack[0] : JACL_NIL;
+}
+
+JaclVal jacl_ctx_run_closure(jacl_context_t *ctx, JaclClosure *closure,
+                             JaclVal *args, uint32_t arg_count,
+                             JaclError *err_out) {
+    if (err_out) { err_out->kind = JACL_ERROR_NONE; err_out->message = NULL; err_out->line = 0; err_out->col = 0; }
+    if (!ctx || !closure) return JACL_NIL;
+
+    VM *vm = &ctx->vm;
+
+    /* Set up stack: [closure_val, args...] */
+    JaclVal closure_val = jacl_closure_ptr(closure);
+    vm->stack[0] = closure_val;
+    for (uint32_t i = 0; i < arg_count; i++)
+        vm->stack[1 + i] = args[i];
+    vm->stack_top = 1 + arg_count;
+
+    /* Set up call frame */
+    vm->frames[0].closure    = closure;
+    vm->frames[0].return_ip  = NULL;
+    vm->frames[0].stack_base = 1;
+    vm->frames[0].chunk      = &closure->chunk;
+    vm->frame_count = 1;
+
+    vm->ip        = closure->chunk.code;
+    vm->chunk     = &closure->chunk;
+    vm->top_chunk = &closure->chunk;
+
+    VMResult r = vm__run(vm, 0);
+
+    if (r != VM_OK) {
+        if (err_out) {
+            err_out->kind    = JACL_ERROR_RUNTIME;
+            err_out->message = vm->error_message ? vm->error_message : "runtime error";
+            err_out->line    = vm->error_line;
+        }
+        return JACL_NIL;
+    }
+
+    return (vm->stack_top > 0) ? vm->stack[0] : JACL_NIL;
 }
 
 /* --- Pipeline convenience: jacl_run --- */

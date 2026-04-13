@@ -437,6 +437,105 @@ static int test_recursive_vm_exec(void) {
   TEST_PASS();
 }
 
+/* ===== US-006 (macro-eval): jacl_ctx_run API ===== */
+
+/* Test: jacl_ctx_run_source with valid source returns correct value */
+static int test_ctx_run_source_valid(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    PrintCapture cap = { .len = 0 };
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    const char *src = "[print 42]\n[+ 1 2]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "42\n");
+    ASSERT(jacl_is_i32(result));
+    ASSERT(jacl_as_i32(result) == 3);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: jacl_ctx_run_source with parse error populates err_out */
+static int test_ctx_run_source_parse_error(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[+ 1";  /* unclosed bracket */
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+
+    ASSERT(err.kind == JACL_ERROR_COMPILE);
+    ASSERT(err.message != NULL);
+    ASSERT(jacl_is_nil(result));
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: jacl_ctx_run_source with runtime error populates err_out */
+static int test_ctx_run_source_runtime_error(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[undefined_fn 1]";  /* undefined variable -> runtime error */
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+
+    ASSERT(err.kind == JACL_ERROR_RUNTIME);
+    ASSERT(err.message != NULL);
+    ASSERT(jacl_is_nil(result));
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: nested jacl_ctx_run_source calls (reentrancy) */
+static int test_ctx_run_source_nested(void) {
+    /* Outer context runs code with a macro */
+    jacl_context_t *outer = jacl_ctx_new(NULL);
+    ASSERT(outer != NULL);
+
+    PrintCapture cap_outer = { .len = 0 };
+    outer->vm.print_fn = capture_print;
+    outer->vm.print_ctx = &cap_outer;
+
+    const char *src_outer = "defmacro double {x} { syntax-quote [+ ~x ~x] }\n"
+                            "[print [double 10]]";
+    JaclError err_outer;
+    JaclVal r_outer = jacl_ctx_run_source(outer, src_outer, strlen(src_outer),
+                                           UINT64_MAX, &err_outer);
+    ASSERT(err_outer.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap_outer.buf, "20\n");
+
+    /* Inner context runs independent code — no cross-contamination */
+    jacl_context_t *inner = jacl_ctx_new(NULL);
+    ASSERT(inner != NULL);
+
+    PrintCapture cap_inner = { .len = 0 };
+    inner->vm.print_fn = capture_print;
+    inner->vm.print_ctx = &cap_inner;
+
+    const char *src_inner = "[print [* 5 7]]";
+    JaclError err_inner;
+    JaclVal r_inner = jacl_ctx_run_source(inner, src_inner, strlen(src_inner),
+                                           UINT64_MAX, &err_inner);
+    ASSERT(err_inner.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap_inner.buf, "35\n");
+
+    /* Verify outer's output unchanged */
+    ASSERT_STR_EQ(cap_outer.buf, "20\n");
+
+    jacl_ctx_destroy(inner);
+    jacl_ctx_destroy(outer);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -462,6 +561,11 @@ int main(void) {
     /* US-005 (macro-eval): context lifecycle and reentrancy */
     { "context_lifecycle",       test_context_lifecycle },
     { "recursive_vm_exec",       test_recursive_vm_exec },
+    /* US-006 (macro-eval): jacl_ctx_run API */
+    { "ctx_run_source_valid",    test_ctx_run_source_valid },
+    { "ctx_run_source_parse_err",test_ctx_run_source_parse_error },
+    { "ctx_run_source_rt_err",   test_ctx_run_source_runtime_error },
+    { "ctx_run_source_nested",   test_ctx_run_source_nested },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
