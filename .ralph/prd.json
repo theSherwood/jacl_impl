@@ -135,8 +135,8 @@
         "Tests pass"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added use_staged_syntax_quote flag on ExpandState + jacl_context_t. New syntax__compile_sq_node recursive function emits OP_SYNTAX_OP subops 7-12 (make-syntax) for AST_LIT_INT/FLOAT/STRING/VAR_REF/COMMAND/BLOCK, compiles ~expr as normal expressions, handles ~@expr with OP_VEC_PUSH/OP_VEC_CONCAT, and emits nested syntax-quote as constants. Gate in AST_SYNTAX_QUOTE case checks c->use_staged_syntax_quote. 4 tests: literal, unquote, unquote-splicing, nested."
     },
     {
       "id": "US-008",

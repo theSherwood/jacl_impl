@@ -148,6 +148,7 @@ struct jacl_context_s {
     /* Parent context (NULL for root) */
     jacl_context_t  *parent;
     bool             owns_intern_table;   /* false when sharing parent's */
+    bool             use_staged_syntax_quote; /* US-007: emit make-syntax ops */
 };
 
 /* --- JaclError: error out-param for internal run API --- */
@@ -6512,6 +6513,7 @@ JaclVal jacl_ctx_run_source(jacl_context_t *ctx, const char *src, size_t len,
     /* Compile */
     JaclInternTable *itab = ctx->owns_intern_table ? &ctx->intern_table
                                                    : ctx->vm.intern_table;
+    ctx->expand.staged_syntax_quote = ctx->use_staged_syntax_quote;
     CompileResult cr = compiler_compile(parse, &ctx->arena, itab,
                                         &ctx->vm.heap, NULL, &ctx->expand);
     if (cr.error_count > 0) {

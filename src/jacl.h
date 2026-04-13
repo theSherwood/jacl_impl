@@ -884,6 +884,7 @@ typedef struct {
     uint32_t     frame_top;
     uint32_t     scope_counter;
     uint32_t     gensym_counter;
+    bool         staged_syntax_quote; /* US-007: compile syntax-quote via make-syntax */
 } ExpandState;
 
 /* --- jacl_context_t: reentrant execution context --- */
@@ -1231,6 +1232,7 @@ struct jacl_context_s {
     /* Parent context (NULL for root) */
     jacl_context_t  *parent;
     bool             owns_intern_table;   /* false when sharing parent's */
+    bool             use_staged_syntax_quote; /* US-007: emit make-syntax ops */
 };
 
 typedef struct {

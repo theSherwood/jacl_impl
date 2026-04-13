@@ -94,3 +94,27 @@ Thread: (inline)
   - `jacl_closure_ptr` (not `jacl_closure_val`) is the correct function to convert JaclClosure* to JaclVal
   - `vm_exec` wraps the chunk in an implicit top_closure; the result lands in `vm->stack[0]` after `vm__run`
 ---
+
+## 2026-04-13 - US-007
+Thread: (inline)
+- Added `use_staged_syntax_quote` flag to `ExpandState` and `jacl_context_t`; plumbed through `compiler_compile` → `Compiler.use_staged_syntax_quote`
+- Implemented `syntax__compile_sq_node` recursive function in compiler.c that emits `OP_SYNTAX_OP` make-syntax bytecode:
+  - AST_LIT_INT → push i32 → subop 7 (make-syntax lit-int)
+  - AST_LIT_FLOAT → push f32 → subop 8 (make-syntax lit-float)
+  - AST_LIT_STRING → push string → subop 9 (make-syntax lit-string)
+  - AST_VAR_REF → push name → subop 10 (make-syntax var-ref)
+  - AST_COMMAND → recurse head, recurse args, OP_VEC, subop 11 (make-syntax command)
+  - AST_BLOCK → recurse commands, OP_VEC, subop 12 (make-syntax block)
+  - AST_UNQUOTE → compile inner expression normally (must produce syntax JaclVal)
+  - AST_UNQUOTE_SPLICING → handled at parent level with OP_VEC_PUSH/OP_VEC_CONCAT
+  - AST_SYNTAX_QUOTE (nested) → emit as constant via syntax_from_ast
+  - Other nodes → fallback to constant via syntax_from_ast
+- Gated new path in `AST_SYNTAX_QUOTE` case: checks `c->use_staged_syntax_quote`
+- Added 4 integration tests: `test_staged_sq_literal`, `test_staged_sq_unquote`, `test_staged_sq_splice`, `test_staged_sq_nested`
+- Files changed: src/compiler.c, src/jacl.h, src/vm.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - Command heads (like `+`) parse as `AST_LIT_STRING`, not `AST_VAR_REF` — the head in a syntax-quote produces `SYNTAX_LIT_STRING`
+  - `OP_VEC_PUSH` stack order: [vec, elem] → pops elem first, then vec → pushes new_vec
+  - `OP_VEC_CONCAT` stack order: [a, b] → pops b first, then a → pushes a++b
+  - The staged path and legacy path produce structurally identical syntax objects — the difference is only in how the bytecode constructs them
+---

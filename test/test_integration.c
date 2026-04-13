@@ -536,6 +536,155 @@ static int test_ctx_run_source_nested(void) {
     TEST_PASS();
 }
 
+/* ===== US-007 (macro-eval): Staged syntax-quote compilation ===== */
+
+/* Helper: run source in a staged-syntax-quote context, return the result */
+static JaclVal staged_run(const char *src, JaclError *err) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ctx->use_staged_syntax_quote = true;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, err);
+    /* NOTE: result is on the context's heap; we return it but the caller
+       must inspect it before destroying the context.  For these tests we
+       leak the context intentionally — acceptable in test code. */
+    (void)ctx;  /* intentional leak for test simplicity */
+    return result;
+}
+
+/* Test: syntax-quote with literal substitution (no unquotes) */
+static int test_staged_sq_literal(void) {
+    JaclError err;
+    JaclVal result = staged_run("syntax-quote [+ 1 2]", &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_syntax(result));
+
+    JaclSyntax *syn = jacl_as_syntax(result);
+    ASSERT(syn->kind == SYNTAX_COMMAND);
+
+    /* Head should be a lit-string for "+" (bare words in commands parse as strings) */
+    JaclSyntax *head = jacl_as_syntax(syn->data.command.head);
+    ASSERT(head->kind == SYNTAX_LIT_STRING);
+
+    /* Args should be [lit-int(1), lit-int(2)] */
+    JaclVal args = syn->data.command.args;
+    ASSERT(jacl_is_vector(args));
+    ASSERT(jacl_vec_count((jacl_vec_root*)jacl_as_ptr(args)) == 2);
+
+    jacl_vec_get_result g0 = jacl_vec_get((jacl_vec_root*)jacl_as_ptr(args), 0);
+    ASSERT(g0.found);
+    JaclSyntax *a0 = jacl_as_syntax(g0.value);
+    ASSERT(a0->kind == SYNTAX_LIT_INT);
+    ASSERT(a0->data.lit_int.value == 1);
+
+    jacl_vec_get_result g1 = jacl_vec_get((jacl_vec_root*)jacl_as_ptr(args), 1);
+    ASSERT(g1.found);
+    JaclSyntax *a1 = jacl_as_syntax(g1.value);
+    ASSERT(a1->kind == SYNTAX_LIT_INT);
+    ASSERT(a1->data.lit_int.value == 2);
+
+    TEST_PASS();
+}
+
+/* Test: syntax-quote with unquote (~) substitution */
+static int test_staged_sq_unquote(void) {
+    /* Wrap in a proc so 'x' is a local binding */
+    const char *src =
+        "proc make-it {x} { syntax-quote [+ ~x 10] }\n"
+        "[make-it [make-syntax \"lit-int\" 42]]";
+    JaclError err;
+    JaclVal result = staged_run(src, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged_sq_unquote err: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_syntax(result));
+
+    JaclSyntax *syn = jacl_as_syntax(result);
+    ASSERT(syn->kind == SYNTAX_COMMAND);
+
+    /* First arg should be the unquoted value: lit-int(42) */
+    JaclVal args = syn->data.command.args;
+    jacl_vec_get_result g0 = jacl_vec_get((jacl_vec_root*)jacl_as_ptr(args), 0);
+    ASSERT(g0.found);
+    JaclSyntax *a0 = jacl_as_syntax(g0.value);
+    ASSERT(a0->kind == SYNTAX_LIT_INT);
+    ASSERT(a0->data.lit_int.value == 42);
+
+    /* Second arg should be literal 10 */
+    jacl_vec_get_result g1 = jacl_vec_get((jacl_vec_root*)jacl_as_ptr(args), 1);
+    ASSERT(g1.found);
+    JaclSyntax *a1 = jacl_as_syntax(g1.value);
+    ASSERT(a1->kind == SYNTAX_LIT_INT);
+    ASSERT(a1->data.lit_int.value == 10);
+
+    TEST_PASS();
+}
+
+/* Test: syntax-quote with unquote-splicing (~@) */
+static int test_staged_sq_splice(void) {
+    /* Create a vec of syntax objects and splice them into a command */
+    const char *src =
+        "proc make-it {items} { syntax-quote [+ ~@items] }\n"
+        "xs = [vec [make-syntax \"lit-int\" 1] [make-syntax \"lit-int\" 2] [make-syntax \"lit-int\" 3]]\n"
+        "[make-it $xs]";
+    JaclError err;
+    JaclVal result = staged_run(src, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged_sq_splice err: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_syntax(result));
+
+    JaclSyntax *syn = jacl_as_syntax(result);
+    ASSERT(syn->kind == SYNTAX_COMMAND);
+
+    /* Args should be [1, 2, 3] after splicing */
+    JaclVal args = syn->data.command.args;
+    uint32_t count = jacl_vec_count((jacl_vec_root*)jacl_as_ptr(args));
+    ASSERT(count == 3);
+
+    for (uint32_t i = 0; i < 3; i++) {
+        jacl_vec_get_result g = jacl_vec_get((jacl_vec_root*)jacl_as_ptr(args), i);
+        ASSERT(g.found);
+        JaclSyntax *a = jacl_as_syntax(g.value);
+        ASSERT(a->kind == SYNTAX_LIT_INT);
+        ASSERT(a->data.lit_int.value == (int32_t)(i + 1));
+    }
+
+    TEST_PASS();
+}
+
+/* Test: nested syntax-quote is treated as literal */
+static int test_staged_sq_nested(void) {
+    const char *src = "syntax-quote { syntax-quote [+ ~x 1] }";
+    JaclError err;
+    JaclVal result = staged_run(src, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged_sq_nested err: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_syntax(result));
+
+    /* The outer syntax-quote wraps a block containing an inner syntax-quote.
+     * The result should be a block (or the inner expression) containing
+     * a SYNTAX_SYNTAX_QUOTE node. */
+    JaclSyntax *syn = jacl_as_syntax(result);
+    /* The block { ... } compiles as a SYNTAX_BLOCK */
+    ASSERT(syn->kind == SYNTAX_BLOCK);
+
+    /* The single command inside is the nested syntax-quote */
+    JaclVal cmds = syn->data.block.commands;
+    uint32_t cnt = jacl_vec_count((jacl_vec_root*)jacl_as_ptr(cmds));
+    ASSERT(cnt == 1);
+
+    jacl_vec_get_result g0 = jacl_vec_get((jacl_vec_root*)jacl_as_ptr(cmds), 0);
+    ASSERT(g0.found);
+    JaclSyntax *inner = jacl_as_syntax(g0.value);
+    /* Nested syntax-quote is emitted as a constant, so it should be SYNTAX_SYNTAX_QUOTE */
+    ASSERT(inner->kind == SYNTAX_SYNTAX_QUOTE);
+
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -566,6 +715,11 @@ int main(void) {
     { "ctx_run_source_parse_err",test_ctx_run_source_parse_error },
     { "ctx_run_source_rt_err",   test_ctx_run_source_runtime_error },
     { "ctx_run_source_nested",   test_ctx_run_source_nested },
+    /* US-007 (macro-eval): staged syntax-quote compilation */
+    { "staged_sq_literal",       test_staged_sq_literal },
+    { "staged_sq_unquote",       test_staged_sq_unquote },
+    { "staged_sq_splice",        test_staged_sq_splice },
+    { "staged_sq_nested",        test_staged_sq_nested },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

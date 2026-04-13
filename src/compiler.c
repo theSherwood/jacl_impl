@@ -46,6 +46,7 @@ typedef struct {
     uint32_t     frame_top;
     uint32_t     scope_counter;
     uint32_t     gensym_counter;
+    bool         staged_syntax_quote; /* US-007: compile syntax-quote via make-syntax */
 } ExpandState;
 
 #endif /* EXPAND_FRAME_MAX */
@@ -2381,6 +2382,7 @@ struct Compiler {
   SuspensionAnalysis*  sm_analysis;    /* suspension analysis for current SM function (or NULL) */
   MacroTable*          macro_table;    /* compile-time macro definitions (root compiler owns) */
   uint32_t             current_scope_mark; /* hygiene: mark for newly introduced bindings */
+  bool                 use_staged_syntax_quote; /* US-007: emit make-syntax ops instead of OP_SYNTAX_SPLICE */
 };
 
 void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -2420,6 +2422,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->sm_analysis       = NULL;
   c->macro_table       = NULL;
   c->current_scope_mark = 0;
+  c->use_staged_syntax_quote = false;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -8053,6 +8056,153 @@ static void syntax__compile_unquotes(Compiler *c, AstNode *node) {
     }
 }
 
+/* --- US-007: Staged syntax-quote compilation via make-syntax --- */
+
+/* Emit bytecode that constructs a JaclVal syntax object for the given AST
+ * node using OP_SYNTAX_OP make-syntax subops (7-12).  Each call leaves
+ * exactly one syntax JaclVal on the stack.
+ *
+ * Unquote (~expr): compiles inner expression normally — the result must
+ * be a syntax object at runtime.
+ *
+ * Unquote-splicing (~@expr) is handled at the parent (command/block) level:
+ * the parent builds the args/commands vec incrementally with vec-push and
+ * vec-concat instead of a single OP_VEC instruction.
+ *
+ * Nested syntax-quote: emitted as a constant (no recursion into inner
+ * unquotes — those belong to the inner quasiquotation level). */
+
+static void syntax__compile_sq_node(Compiler *c, AstNode *node) {
+    uint32_t line = node->start.line;
+
+    switch (node->type) {
+    case AST_LIT_INT:
+        compiler__emit_constant(c, jacl_i32(node->data.lit_int.value), line);
+        compiler__emit_byte(c, OP_SYNTAX_OP, line);
+        compiler__emit_byte(c, 7, line);  /* make-syntax lit-int */
+        break;
+
+    case AST_LIT_FLOAT:
+        compiler__emit_constant(c, jacl_f32(node->data.lit_float.value), line);
+        compiler__emit_byte(c, OP_SYNTAX_OP, line);
+        compiler__emit_byte(c, 8, line);  /* make-syntax lit-float */
+        break;
+
+    case AST_LIT_STRING: {
+        JaclVal str = jacl_string_new(c->heap, c->intern_table,
+                                       node->data.lit_string.value,
+                                       (size_t)node->data.lit_string.length);
+        compiler__emit_constant(c, str, line);
+        compiler__emit_byte(c, OP_SYNTAX_OP, line);
+        compiler__emit_byte(c, 9, line);  /* make-syntax lit-string */
+        break;
+    }
+
+    case AST_VAR_REF: {
+        JaclVal name = jacl_string_new(c->heap, c->intern_table,
+                                        node->data.var_ref.name,
+                                        (size_t)node->data.var_ref.length);
+        compiler__emit_constant(c, name, line);
+        compiler__emit_byte(c, OP_SYNTAX_OP, line);
+        compiler__emit_byte(c, 10, line); /* make-syntax var-ref */
+        break;
+    }
+
+    case AST_COMMAND: {
+        /* Head → syntax */
+        syntax__compile_sq_node(c, node->data.command.head);
+
+        /* Check for unquote-splicing in args */
+        bool has_splice = false;
+        for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+            if (node->data.command.args[i]->type == AST_UNQUOTE_SPLICING)
+                has_splice = true;
+        }
+
+        if (has_splice) {
+            /* Build args vec incrementally: start with empty vec, push/concat */
+            compiler__emit_byte(c, OP_VEC, line);
+            compiler__emit_byte(c, 0, line);
+            for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+                AstNode *arg = node->data.command.args[i];
+                if (arg->type == AST_UNQUOTE_SPLICING) {
+                    syntax__compile_unquote_child(c, arg->data.unquote_splicing.child);
+                    compiler__emit_byte(c, OP_VEC_CONCAT, line);
+                } else {
+                    syntax__compile_sq_node(c, arg);
+                    compiler__emit_byte(c, OP_VEC_PUSH, line);
+                }
+            }
+        } else {
+            /* Simple: compile all args, collect with OP_VEC */
+            for (uint32_t i = 0; i < node->data.command.arg_count; i++)
+                syntax__compile_sq_node(c, node->data.command.args[i]);
+            compiler__emit_byte(c, OP_VEC, line);
+            compiler__emit_byte(c, (uint8_t)node->data.command.arg_count, line);
+        }
+
+        /* make-syntax command (head, args-vec → syntax) */
+        compiler__emit_byte(c, OP_SYNTAX_OP, line);
+        compiler__emit_byte(c, 11, line);
+        break;
+    }
+
+    case AST_BLOCK: {
+        bool has_splice = false;
+        for (uint32_t i = 0; i < node->data.block.count; i++) {
+            if (node->data.block.commands[i]->type == AST_UNQUOTE_SPLICING)
+                has_splice = true;
+        }
+
+        if (has_splice) {
+            compiler__emit_byte(c, OP_VEC, line);
+            compiler__emit_byte(c, 0, line);
+            for (uint32_t i = 0; i < node->data.block.count; i++) {
+                AstNode *cmd = node->data.block.commands[i];
+                if (cmd->type == AST_UNQUOTE_SPLICING) {
+                    syntax__compile_unquote_child(c, cmd->data.unquote_splicing.child);
+                    compiler__emit_byte(c, OP_VEC_CONCAT, line);
+                } else {
+                    syntax__compile_sq_node(c, cmd);
+                    compiler__emit_byte(c, OP_VEC_PUSH, line);
+                }
+            }
+        } else {
+            for (uint32_t i = 0; i < node->data.block.count; i++)
+                syntax__compile_sq_node(c, node->data.block.commands[i]);
+            compiler__emit_byte(c, OP_VEC, line);
+            compiler__emit_byte(c, (uint8_t)node->data.block.count, line);
+        }
+
+        /* make-syntax block (commands-vec → syntax) */
+        compiler__emit_byte(c, OP_SYNTAX_OP, line);
+        compiler__emit_byte(c, 12, line);
+        break;
+    }
+
+    case AST_UNQUOTE:
+        /* Compile inner expression — must produce a syntax JaclVal at runtime */
+        syntax__compile_unquote_child(c, node->data.unquote.child);
+        break;
+
+    case AST_SYNTAX_QUOTE:
+        /* Nested syntax-quote: emit entire subtree as a constant */
+        {
+            JaclVal tmpl = syntax_from_ast(node, c->heap, c->intern_table);
+            compiler__emit_constant(c, tmpl, line);
+        }
+        break;
+
+    default:
+        /* Other node types (spread, interp-string, etc.): fall back to constant */
+        {
+            JaclVal tmpl = syntax_from_ast(node, c->heap, c->intern_table);
+            compiler__emit_constant(c, tmpl, line);
+        }
+        break;
+    }
+}
+
 /* --- Internal: Compile a single AST node --- */
 
 void compiler__compile_node(Compiler* c, AstNode* node) {
@@ -8805,32 +8955,26 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_SYNTAX_QUOTE: {
-      /* Compile syntax-quote template:
-       * 1. Convert full template (with unquotes) to a syntax object constant
-       * 2. Compile each unquote/unquote-splicing inner expression
-       * 3. Emit OP_SYNTAX_SPLICE to walk the template and replace unquotes
-       *
-       * The template syntax object contains SYNTAX_UNQUOTE markers which
-       * OP_SYNTAX_SPLICE replaces with the values on the stack. */
-
       AstNode *child = node->data.syntax_quote.child;
 
-      /* Count unquote holes */
-      uint32_t n_unquotes = syntax__count_unquotes_ast(child);
+      if (c->use_staged_syntax_quote) {
+        /* US-007 staged path: emit make-syntax ops to build the syntax tree
+         * bottom-up at runtime.  Each subtree is constructed via OP_SYNTAX_OP
+         * subops 7-12; unquotes compile their inner expressions normally. */
+        syntax__compile_sq_node(c, child);
+      } else {
+        /* Legacy template path: convert template to a constant, compile
+         * unquote expressions, and splice at runtime via OP_SYNTAX_SPLICE. */
+        uint32_t n_unquotes = syntax__count_unquotes_ast(child);
+        JaclVal tmpl = syntax_from_ast(child, c->heap, c->intern_table);
+        compiler__emit_constant(c, tmpl, line);
 
-      /* Convert the full template to a syntax object (including unquote markers) */
-      JaclVal tmpl = syntax_from_ast(child, c->heap, c->intern_table);
-      compiler__emit_constant(c, tmpl, line);
-
-      if (n_unquotes > 0) {
-        /* Compile each unquote expression (pushes values onto stack) */
-        syntax__compile_unquotes(c, child);
-
-        /* Emit splice opcode */
-        compiler__emit_byte(c, OP_SYNTAX_SPLICE, line);
-        compiler__emit_byte(c, (uint8_t)n_unquotes, line);
+        if (n_unquotes > 0) {
+          syntax__compile_unquotes(c, child);
+          compiler__emit_byte(c, OP_SYNTAX_SPLICE, line);
+          compiler__emit_byte(c, (uint8_t)n_unquotes, line);
+        }
       }
-      /* If no unquotes, the template constant is already on the stack */
       break;
     }
 
@@ -8981,6 +9125,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   Compiler c;
   compiler__init(&c, &result.chunk, arena, intern_table, heap);
   c.suspension_map = &suspension_map;
+  if (es) c.use_staged_syntax_quote = es->staged_syntax_quote;
   {
     StructTypeRegistry* reg = (StructTypeRegistry*)arena_alloc(arena, sizeof(StructTypeRegistry));
     if (seed_registry) {
