@@ -1123,36 +1123,41 @@ static int expand__match_param(JaclVal unquote_child,
  * US-014: gensym — generate unique var-ref syntax objects for macro
  * temporaries. A global counter is incremented for each call so names are
  * unique across all macro expansions in a program. Names are formatted as
- * <prefix>__<counter> and capped at 7 bytes to fit the compiler's inline
- * identifier limit. The resulting var-ref is flagged is_gensym=1 so that
- * mut/set/def accept it as a binding name (analogous to is_caret).
+ * <prefix>__<counter>. For results ≤7 bytes, inline strings are used;
+ * longer results use interned strings (pointer-stable, == comparison).
+ * Prefixes up to 64 bytes are allowed. The resulting var-ref is flagged
+ * is_gensym=1 so that mut/set/def accept it as a binding name (analogous
+ * to is_caret).
  * ------------------------------------------------------------------------- */
 
 static uint32_t syntax__gensym_counter = 0;
 
-/* Build a fresh gensym var-ref syntax object. Writes the generated name
- * into the returned SYNTAX_VAR_REF via jacl_inline_string (≤7 bytes).
- * scope_mark is set to the supplied mark; is_gensym is set to 1.
- * If prefix_len > 3, returns JACL_NIL and sets *err to a static message. */
+/* Build a fresh gensym var-ref syntax object. Names are formatted as
+ * prefix__counter. For names ≤7 bytes, uses jacl_inline_string; for
+ * longer names, uses jacl_intern. scope_mark is set to the supplied mark;
+ * is_gensym is set to 1. If prefix_len > 64, returns JACL_NIL and sets
+ * *err to a static message. */
 JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
-                         ThreadHeap *heap, uint32_t scope_mark,
-                         const char **err) {
+                         ThreadHeap *heap, JaclInternTable *intern,
+                         uint32_t scope_mark, const char **err) {
     if (err) *err = NULL;
     if (prefix_len == 0) { prefix = "g"; prefix_len = 1; }
-    if (prefix_len > 3) {
-        if (err) *err = "gensym prefix too long (max 3 chars)";
+    if (prefix_len > 64) {
+        if (err) *err = "gensym prefix too long (max 64 bytes)";
         return JACL_NIL;
     }
 
     uint32_t counter = syntax__gensym_counter++;
-    char name_buf[8];
-    uint32_t name_len = 0;
-    for (uint32_t i = 0; i < prefix_len && name_len < 7; i++)
-        name_buf[name_len++] = prefix[i];
-    if (name_len < 7) name_buf[name_len++] = '_';
-    if (name_len < 7) name_buf[name_len++] = '_';
 
-    /* Emit decimal digits of counter, reversed into name_buf. */
+    /* Format: prefix__counter — max 64 + 2 + 10 = 76 bytes */
+    char name_buf[80];
+    uint32_t name_len = 0;
+    memcpy(name_buf, prefix, prefix_len);
+    name_len = prefix_len;
+    name_buf[name_len++] = '_';
+    name_buf[name_len++] = '_';
+
+    /* Emit decimal digits of counter. */
     char digit_buf[16];
     int digit_count = 0;
     uint32_t tmp = counter;
@@ -1161,11 +1166,15 @@ JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
         digit_buf[digit_count++] = '0' + (tmp % 10);
         tmp /= 10;
     }
-    for (int i = digit_count - 1; i >= 0 && name_len < 7; i--)
+    for (int i = digit_count - 1; i >= 0; i--)
         name_buf[name_len++] = digit_buf[i];
     name_buf[name_len] = '\0';
 
-    JaclVal name_val = jacl_inline_string(name_buf, name_len);
+    JaclVal name_val;
+    if (name_len <= 7)
+        name_val = jacl_inline_string(name_buf, name_len);
+    else
+        name_val = jacl_intern(heap, intern, name_buf, name_len);
     JaclVal result = gc_alloc_syntax(heap);
     JaclSyntax *rsyn = jacl_as_syntax(result);
     rsyn->kind = SYNTAX_VAR_REF;
@@ -1177,9 +1186,10 @@ JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
 }
 
 /* Returns true if tmpl is a [gensym] or [gensym "prefix"] call, and fills
- * prefix_out/prefix_len_out with the prefix string (default "g"). */
+ * prefix_out/prefix_len_out with the prefix string (default "g").
+ * prefix_out must be at least 65 bytes. Prefixes up to 64 bytes accepted. */
 static bool expand__is_gensym_call(JaclVal tmpl,
-                                   char prefix_out[4],
+                                   char prefix_out[65],
                                    uint32_t *prefix_len_out) {
     if (!jacl_is_syntax(tmpl)) return false;
     JaclSyntax *syn = jacl_as_syntax(tmpl);
@@ -1213,8 +1223,8 @@ static bool expand__is_gensym_call(JaclVal tmpl,
     if (asyn->kind != SYNTAX_LIT_STRING) return false;
     JaclVal prefix_val = asyn->data.lit_string.value;
     uint32_t plen = jacl_string_byte_len(prefix_val);
-    if (plen == 0 || plen > 3) return false;
-    jacl_string_data(prefix_val, prefix_out, 4);
+    if (plen == 0 || plen > 64) return false;
+    jacl_string_data(prefix_val, prefix_out, 65);
     prefix_out[plen] = '\0';
     *prefix_len_out = plen;
     return true;
@@ -1234,7 +1244,8 @@ static JaclVal expand__subst_template(JaclVal tmpl,
                                        uint32_t *param_name_lens,
                                        JaclVal *arg_vals,
                                        uint32_t param_count,
-                                       ThreadHeap *heap) {
+                                       ThreadHeap *heap,
+                                       JaclInternTable *intern) {
     if (jacl_is_nil(tmpl)) return JACL_NIL;
     if (!jacl_is_syntax(tmpl)) return tmpl;
 
@@ -1245,11 +1256,11 @@ static JaclVal expand__subst_template(JaclVal tmpl,
      * the current template mark (set by expand__stamp_syntax) so the
      * binding is hygienic within the macro's own scope. */
     {
-        char prefix[4];
+        char prefix[65];
         uint32_t prefix_len;
         if (expand__is_gensym_call(tmpl, prefix, &prefix_len)) {
             const char *err = NULL;
-            return jacl_gensym_next(prefix, prefix_len, heap,
+            return jacl_gensym_next(prefix, prefix_len, heap, intern,
                                     syn->scope_mark, &err);
         }
     }
@@ -1277,7 +1288,7 @@ static JaclVal expand__subst_template(JaclVal tmpl,
     if (syn->kind == SYNTAX_COMMAND) {
         JaclVal new_head = expand__subst_template(
             syn->data.command.head, param_names, param_name_lens,
-            arg_vals, param_count, heap);
+            arg_vals, param_count, heap, intern);
         jacl_vec_root *old_args =
             (jacl_vec_root *)jacl_as_ptr(syn->data.command.args);
         uint32_t argc = jacl_vec_count(old_args);
@@ -1309,7 +1320,7 @@ static JaclVal expand__subst_template(JaclVal tmpl,
             }
             new_args = jacl_vec_push_back(new_args,
                 expand__subst_template(arg, param_names, param_name_lens,
-                                        arg_vals, param_count, heap));
+                                        arg_vals, param_count, heap, intern));
         }
         JaclVal result = gc_alloc_syntax(heap);
         JaclSyntax *rsyn = jacl_as_syntax(result);
@@ -1355,7 +1366,7 @@ static JaclVal expand__subst_template(JaclVal tmpl,
             }
             new_cmds = jacl_vec_push_back(new_cmds,
                 expand__subst_template(cmd, param_names, param_name_lens,
-                                        arg_vals, param_count, heap));
+                                        arg_vals, param_count, heap, intern));
         }
         JaclVal result = gc_alloc_syntax(heap);
         JaclSyntax *rsyn = jacl_as_syntax(result);
@@ -1480,7 +1491,7 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                 JaclVal result_syn = expand__subst_template(
                     tmpl_syn,
                     entry->param_names, entry->param_name_lens,
-                    arg_vals, entry->param_count, heap);
+                    arg_vals, entry->param_count, heap, intern);
 
                 /* Convert result back to AstNode */
                 AstNode *expanded = syntax_to_ast(result_syn, arena);

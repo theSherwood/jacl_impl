@@ -1558,8 +1558,8 @@ extern const char *ast_expand_macros(AstNode **program, uint32_t count,
                                      uint32_t *out_error_line,
                                      uint32_t *out_error_col);
 extern JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
-                                ThreadHeap *heap, uint32_t scope_mark,
-                                const char **err);
+                                ThreadHeap *heap, JaclInternTable *intern,
+                                uint32_t scope_mark, const char **err);
 extern const char *syntax_kind_name(uint8_t kind);
 
 /* --- string.c --- */

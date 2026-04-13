@@ -3302,7 +3302,7 @@ static int test_us014_gensym_returns_var_ref(void) {
     vm_init(&vm, &arena);
 
     const char *err = NULL;
-    JaclVal v = jacl_gensym_next("g", 1, &vm.heap, 0, &err);
+    JaclVal v = jacl_gensym_next("g", 1, &vm.heap, vm.intern_table, 0, &err);
     ASSERT(err == NULL);
     ASSERT(jacl_is_syntax(v));
     JaclSyntax *s = jacl_as_syntax(v);
@@ -3323,9 +3323,9 @@ static int test_us014_gensym_produces_distinct_names(void) {
     vm_init(&vm, &arena);
 
     const char *err = NULL;
-    JaclVal a = jacl_gensym_next("t", 1, &vm.heap, 0, &err);
+    JaclVal a = jacl_gensym_next("t", 1, &vm.heap, vm.intern_table, 0, &err);
     ASSERT(err == NULL);
-    JaclVal b = jacl_gensym_next("t", 1, &vm.heap, 0, &err);
+    JaclVal b = jacl_gensym_next("t", 1, &vm.heap, vm.intern_table, 0, &err);
     ASSERT(err == NULL);
 
     /* Different heap pointers (distinct allocations). */
@@ -3361,7 +3361,7 @@ static int test_us014_gensym_default_prefix(void) {
     vm_init(&vm, &arena);
 
     const char *err = NULL;
-    JaclVal v = jacl_gensym_next(NULL, 0, &vm.heap, 0, &err);
+    JaclVal v = jacl_gensym_next(NULL, 0, &vm.heap, vm.intern_table, 0, &err);
     ASSERT(err == NULL);
     JaclSyntax *s = jacl_as_syntax(v);
     char nbuf[16];
@@ -3376,14 +3376,17 @@ static int test_us014_gensym_default_prefix(void) {
     TEST_PASS();
 }
 
-/* Test: prefix longer than 3 chars is rejected. */
+/* Test: prefix longer than 64 bytes is rejected. */
 static int test_us014_gensym_prefix_too_long(void) {
     arena_t arena = {0};
     VM vm;
     vm_init(&vm, &arena);
 
+    /* 65-byte prefix should be rejected */
+    const char *long_prefix =
+        "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeeffffffffff12345";
     const char *err = NULL;
-    JaclVal v = jacl_gensym_next("toolong", 7, &vm.heap, 0, &err);
+    JaclVal v = jacl_gensym_next(long_prefix, 65, &vm.heap, vm.intern_table, 0, &err);
     ASSERT(err != NULL);
     ASSERT(jacl_is_nil(v));
 
@@ -3439,6 +3442,59 @@ static int test_us014_gensym_no_collision_with_caller(void) {
     ASSERT(jacl_is_i32(result));
     /* Caller's t is unchanged — gensym'd name is distinct from "t". */
     ASSERT_INT_EQ(jacl_as_i32(result), 99);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: macro using [gensym "loop_idx"] — a long prefix (> 3 bytes) that
+ * overflows the old 7-byte inline limit. The generated name loop_idx__N
+ * should be correctly bound via interned strings. */
+static int test_us014_gensym_long_prefix_in_macro(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src =
+        "defmacro with_temp {body} {\n"
+        "  syntax-quote {\n"
+        "    mut [gensym \"loop_idx\"] 42\n"
+        "    ~body\n"
+        "  }\n"
+        "}\n"
+        "proc run {} {\n"
+        "  with_temp { 99 }\n"
+        "}\n"
+        "run";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_i32(result));
+    ASSERT_INT_EQ(jacl_as_i32(result), 99);
+
+    jacl_vm_free(vm);
+    TEST_PASS();
+}
+
+/* Test: macro using [gensym "loop_idx"] where the generated variable is
+ * actually read back — verifies the binding is usable, not just created. */
+static int test_us014_gensym_long_prefix_binding_works(void) {
+    JaclVM* vm = jacl_vm_new();
+    ASSERT(vm != NULL);
+
+    const char* src =
+        "defmacro inc_tmp {v} {\n"
+        "  syntax-quote {\n"
+        "    mut [gensym \"counter\"] ~v\n"
+        "  }\n"
+        "}\n"
+        "proc run {} {\n"
+        "  inc_tmp 55\n"
+        "  77\n"
+        "}\n"
+        "run";
+    JaclVal result = jacl_eval(vm, src);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_i32(result));
+    ASSERT_INT_EQ(jacl_as_i32(result), 77);
 
     jacl_vm_free(vm);
     TEST_PASS();
@@ -4373,6 +4429,8 @@ int main(void) {
     RUN(test_us014_gensym_prefix_too_long);
     RUN(test_us014_gensym_in_macro_mut);
     RUN(test_us014_gensym_no_collision_with_caller);
+    RUN(test_us014_gensym_long_prefix_in_macro);
+    RUN(test_us014_gensym_long_prefix_binding_works);
 
     printf("\n=== Introspection Builtin Tests (US-015) ===\n");
 
