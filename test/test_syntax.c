@@ -1835,8 +1835,7 @@ static int test_tilde_at_outside_syntax_quote_error(void) {
 
 /* ===== US-007: Compile-time macro table and defmacro registration ===== */
 
-/* Helper: compile source and return CompileResult (caller must destroy arena).
- * US-012: Uses staged expansion path so all defmacros get use_staged_eval=true. */
+/* Helper: compile source and return CompileResult (caller must destroy arena). */
 static CompileResult compile_source(const char* src, arena_t* arena, VM* vm) {
     LexResult tokens = lexer_lex(src, arena);
     ParseResult parse = parser_parse(tokens, arena);
@@ -1844,7 +1843,6 @@ static CompileResult compile_source(const char* src, arena_t* arena, VM* vm) {
     intern_table_init(&intern_table, arena);
     ExpandState es;
     memset(&es, 0, sizeof(es));
-    es.staged_syntax_quote = true;
     jacl_context_t *ctx = jacl_ctx_new(NULL);
     es.ctx = ctx;
     CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, &es);
@@ -2089,8 +2087,7 @@ static int test_is_special_form(void) {
 /* ===== US-008: Macro expansion pass — basic expansion ===== */
 
 /* Helper: parse source and run expansion pass, return expanded program.
- * Sets *out_err to a non-NULL error message on failure.
- * US-012: Uses staged expansion path so all defmacros get use_staged_eval=true. */
+ * Sets *out_err to a non-NULL error message on failure. */
 static ParseResult expand_source(const char* src, arena_t* arena, VM* vm,
                                  MacroTable* mt, const char** out_err) {
     LexResult tokens = lexer_lex(src, arena);
@@ -2104,7 +2101,6 @@ static ParseResult expand_source(const char* src, arena_t* arena, VM* vm,
     macro_table_init(mt);
     ExpandState es;
     memset(&es, 0, sizeof(es));
-    es.staged_syntax_quote = true;
     jacl_context_t *ctx = jacl_ctx_new(NULL);
     es.ctx = ctx;
     uint32_t err_line = 0, err_col = 0;
@@ -2979,9 +2975,8 @@ static int test_us010_nested_syntax_quote_literal(void) {
     intern_table_init(&intern, &arena);
     vm.intern_table = &intern;
 
-    /* Outer macro with no unquotes — the inner syntax-quote is a literal
-     * part of the template. With zero unquotes, the template constant is
-     * emitted directly (OP_SYNTAX_SPLICE is not used). */
+    /* Outer macro with no unquotes — the syntax-quote compiles via
+     * make-syntax ops, producing the syntax tree at runtime. */
     const char* src =
         "defmacro mk {} {\n"
         "  syntax-quote [foo 1]\n"

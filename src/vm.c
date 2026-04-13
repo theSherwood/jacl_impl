@@ -158,7 +158,6 @@ struct jacl_context_s {
     /* Parent context (NULL for root) */
     jacl_context_t  *parent;
     bool             owns_intern_table;   /* false when sharing parent's */
-    bool             use_staged_syntax_quote; /* US-007: emit make-syntax ops */
 };
 
 /* --- JaclError: error out-param for internal run API --- */
@@ -195,13 +194,6 @@ void gc_collect(ThreadHeap *heap, VM *vm);
 void gc_collect_minor(ThreadHeap *heap, VM *vm,
                               RememberedSet *remembered_set);
 bool gc_should_major(ThreadHeap *heap);
-
-/* --- Syntax splice (defined in syntax.c, after vm.c in unity build) --- */
-
-static JaclVal syntax__splice_template(JaclVal tmpl, JaclVal *values,
-                                       uint32_t n_values, uint32_t *idx,
-                                       ThreadHeap *heap,
-                                       const char **err);
 
 /* US-015: introspection kind-name helper (defined in syntax.c) */
 const char *syntax_kind_name(uint8_t kind);
@@ -5937,27 +5929,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_SYNTAX_SPLICE: {
-        uint8_t n_unquotes = vm__read_byte(vm);
-        /* Stack layout: [... template, val0, val1, ..., valN-1] */
-        if (vm->stack_top < (uint32_t)(n_unquotes + 1)) {
-          vm__set_error(vm, "stack underflow in OP_SYNTAX_SPLICE");
-          return VM_RUNTIME_ERROR;
-        }
-        JaclVal *values = &vm->stack[vm->stack_top - n_unquotes];
-        JaclVal tmpl = vm->stack[vm->stack_top - n_unquotes - 1];
-        uint32_t idx = 0;
-        const char *splice_err = NULL;
-        JaclVal spliced = syntax__splice_template(tmpl, values, n_unquotes,
-                                                   &idx, &vm->heap,
-                                                   &splice_err);
-        vm->stack_top -= (n_unquotes + 1);  /* pop template + values */
-        if (splice_err) {
-          vm__set_error(vm, "%s", splice_err);
-          return VM_RUNTIME_ERROR;
-        }
-        result = vm__push(vm, spliced);
-        if (result != VM_OK) return result;
-        break;
+        vm__set_error(vm, "OP_SYNTAX_SPLICE is no longer supported");
+        return VM_RUNTIME_ERROR;
       }
 
       case OP_SYNTAX_OP: {
@@ -6618,8 +6591,7 @@ JaclVal jacl_ctx_run_source(jacl_context_t *ctx, const char *src, size_t len,
     /* Compile */
     JaclInternTable *itab = ctx->owns_intern_table ? &ctx->intern_table
                                                    : ctx->vm.intern_table;
-    ctx->expand.staged_syntax_quote = ctx->use_staged_syntax_quote;
-    ctx->expand.ctx = ctx->use_staged_syntax_quote ? ctx : NULL;
+    ctx->expand.ctx = ctx;
     CompileResult cr = compiler_compile(parse, &ctx->arena, itab,
                                         &ctx->vm.heap, NULL, &ctx->expand);
     if (cr.error_count > 0) {
@@ -6709,9 +6681,7 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   ExpandState es;
   memset(&es, 0, sizeof(es));
 
-  /* US-012: Enable staged macro expansion by default.
-   * Create a temporary context for macro closure execution. */
-  es.staged_syntax_quote = true;
+  /* Create a temporary context for macro closure execution. */
   jacl_context_t *macro_ctx = jacl_ctx_new(NULL);
   es.ctx = macro_ctx;
 

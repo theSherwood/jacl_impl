@@ -538,10 +538,9 @@ static int test_ctx_run_source_nested(void) {
 
 /* ===== US-007 (macro-eval): Staged syntax-quote compilation ===== */
 
-/* Helper: run source in a staged-syntax-quote context, return the result */
+/* Helper: run source in a context, return the result */
 static JaclVal staged_run(const char *src, JaclError *err) {
     jacl_context_t *ctx = jacl_ctx_new(NULL);
-    ctx->use_staged_syntax_quote = true;
     JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, err);
     /* NOTE: result is on the context's heap; we return it but the caller
        must inspect it before destroying the context.  For these tests we
@@ -705,7 +704,6 @@ static int test_staged_macro_e2e(void) {
 
     /* Staged path */
     jacl_context_t *ctx_new = jacl_ctx_new(NULL);
-    ctx_new->use_staged_syntax_quote = true;
     PrintCapture cap_new = { .len = 0 };
     ctx_new->vm.print_fn = capture_print;
     ctx_new->vm.print_ctx = &cap_new;
@@ -729,7 +727,6 @@ static int test_staged_macro_e2e(void) {
 /* Test: staged macro with block body — multiple expressions */
 static int test_staged_macro_block(void) {
     jacl_context_t *ctx = jacl_ctx_new(NULL);
-    ctx->use_staged_syntax_quote = true;
     PrintCapture cap = { .len = 0 };
     ctx->vm.print_fn = capture_print;
     ctx->vm.print_ctx = &cap;
@@ -753,7 +750,6 @@ static int test_staged_macro_block(void) {
 /* Test: forward-referenced staged macros (A calls B defined later) */
 static int test_staged_macro_forward_ref(void) {
     jacl_context_t *ctx = jacl_ctx_new(NULL);
-    ctx->use_staged_syntax_quote = true;
     PrintCapture cap = { .len = 0 };
     ctx->vm.print_fn = capture_print;
     ctx->vm.print_ctx = &cap;

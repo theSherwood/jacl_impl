@@ -251,11 +251,9 @@ JaclVal jacl_eval(JaclVM* jvm, const char* source) {
     return embed__make_error(jvm, first_err ? first_err : "parse error");
   }
 
-  /* Compile — use persistent intern table and seeded struct registry.
-   * US-012: Enable staged macro expansion by default. */
+  /* Compile — use persistent intern table and seeded struct registry. */
   ExpandState es;
   memset(&es, 0, sizeof(es));
-  es.staged_syntax_quote = true;
   jacl_context_t *macro_ctx = jacl_ctx_new(NULL);
   es.ctx = macro_ctx;
 

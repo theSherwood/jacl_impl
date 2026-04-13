@@ -52,8 +52,7 @@ typedef struct {
     uint32_t     frame_top;
     uint32_t     scope_counter;
     uint32_t     gensym_counter;
-    bool         staged_syntax_quote; /* US-007: compile syntax-quote via make-syntax */
-    jacl_context_t *ctx;              /* US-008: context for staged macro eval (NULL if N/A) */
+    jacl_context_t *ctx;              /* context for macro eval (NULL if N/A) */
 } ExpandState;
 
 #endif /* EXPAND_FRAME_MAX */
@@ -2293,8 +2292,7 @@ typedef struct {
   const char**  param_names; /* arena-allocated array of param name strings */
   uint32_t*     param_name_lens; /* lengths of each param name */
   JaclClosure*  closure;     /* compiled macro body closure */
-  AstNode*      body;        /* original body AST for template-based expansion */
-  bool          use_staged_eval; /* US-008: use staged evaluation instead of template subst */
+  AstNode*      body;        /* original body AST for macro body compilation */
 } MacroEntry;
 
 struct MacroTable {
@@ -2390,7 +2388,6 @@ struct Compiler {
   SuspensionAnalysis*  sm_analysis;    /* suspension analysis for current SM function (or NULL) */
   MacroTable*          macro_table;    /* compile-time macro definitions (root compiler owns) */
   uint32_t             current_scope_mark; /* hygiene: mark for newly introduced bindings */
-  bool                 use_staged_syntax_quote; /* US-007: emit make-syntax ops instead of OP_SYNTAX_SPLICE */
 };
 
 void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -2430,7 +2427,6 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->sm_analysis       = NULL;
   c->macro_table       = NULL;
   c->current_scope_mark = 0;
-  c->use_staged_syntax_quote = false;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -7969,43 +7965,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 }
 
 /* -------------------------------------------------------------------------
- * Syntax-quote helpers: count unquote holes and compile unquote expressions
+ * Syntax-quote helpers
  * ------------------------------------------------------------------------- */
 
-static uint32_t syntax__count_unquotes_ast(AstNode *node) {
-    if (!node) return 0;
-    switch (node->type) {
-    case AST_UNQUOTE:
-    case AST_UNQUOTE_SPLICING:
-        return 1;
-    case AST_COMMAND: {
-        uint32_t count = syntax__count_unquotes_ast(node->data.command.head);
-        for (uint32_t i = 0; i < node->data.command.arg_count; i++)
-            count += syntax__count_unquotes_ast(node->data.command.args[i]);
-        return count;
-    }
-    case AST_BLOCK: {
-        uint32_t count = 0;
-        for (uint32_t i = 0; i < node->data.block.count; i++)
-            count += syntax__count_unquotes_ast(node->data.block.commands[i]);
-        return count;
-    }
-    case AST_INTERP_STRING: {
-        uint32_t count = 0;
-        for (uint32_t i = 0; i < node->data.interp_string.count; i++)
-            count += syntax__count_unquotes_ast(node->data.interp_string.segments[i]);
-        return count;
-    }
-    case AST_SPREAD:
-        return syntax__count_unquotes_ast(node->data.spread.expr);
-    case AST_QUOTE:
-        return syntax__count_unquotes_ast(node->data.quote.child);
-    case AST_SYNTAX_QUOTE:
-        return 0;  /* nested syntax-quote: don't recurse */
-    default:
-        return 0;
-    }
-}
+/* --- Syntax-quote compilation via make-syntax --- */
 
 /* Compile an unquote child expression. Inside a syntax-quote context, a
  * bare word like `~cond` parses as AST_UNQUOTE(AST_LIT_STRING "cond") —
@@ -8028,43 +7991,6 @@ static void syntax__compile_unquote_child(Compiler *c, AstNode *child) {
     }
     compiler__compile_node(c, child);
 }
-
-static void syntax__compile_unquotes(Compiler *c, AstNode *node) {
-    if (!node) return;
-    switch (node->type) {
-    case AST_UNQUOTE:
-        syntax__compile_unquote_child(c, node->data.unquote.child);
-        return;
-    case AST_UNQUOTE_SPLICING:
-        syntax__compile_unquote_child(c, node->data.unquote_splicing.child);
-        return;
-    case AST_COMMAND:
-        syntax__compile_unquotes(c, node->data.command.head);
-        for (uint32_t i = 0; i < node->data.command.arg_count; i++)
-            syntax__compile_unquotes(c, node->data.command.args[i]);
-        return;
-    case AST_BLOCK:
-        for (uint32_t i = 0; i < node->data.block.count; i++)
-            syntax__compile_unquotes(c, node->data.block.commands[i]);
-        return;
-    case AST_INTERP_STRING:
-        for (uint32_t i = 0; i < node->data.interp_string.count; i++)
-            syntax__compile_unquotes(c, node->data.interp_string.segments[i]);
-        return;
-    case AST_SPREAD:
-        syntax__compile_unquotes(c, node->data.spread.expr);
-        return;
-    case AST_QUOTE:
-        syntax__compile_unquotes(c, node->data.quote.child);
-        return;
-    case AST_SYNTAX_QUOTE:
-        return;  /* nested syntax-quote: don't recurse */
-    default:
-        return;
-    }
-}
-
-/* --- US-007: Staged syntax-quote compilation via make-syntax --- */
 
 /* Emit bytecode that constructs a JaclVal syntax object for the given AST
  * node using OP_SYNTAX_OP make-syntax subops (7-12).  Each call leaves
@@ -8833,18 +8759,9 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           MacroEntry* existing = macro_table_lookup(mt, mname, mname_len);
           if (existing) {
             if (existing->closure != NULL) {
-              if (existing->use_staged_eval) {
-                /* US-008: staged macro body already compiled during expansion —
-                   skip recompilation, just emit OP_NIL. */
-                compiler__emit_byte(c, OP_NIL, line);
-                break;
-              }
-              /* Truly duplicate defmacro */
-              char err[128];
-              snprintf(err, sizeof(err),
-                       "defmacro: '%.*s' is already defined",
-                       (int)mname_len, mname);
-              compiler__error(c, line, col, err);
+              /* Macro body already compiled during expansion —
+                 skip recompilation, just emit OP_NIL. */
+              compiler__emit_byte(c, OP_NIL, line);
               break;
             }
             /* Registered by expansion pass (closure is NULL).
@@ -9007,25 +8924,10 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
 
     case AST_SYNTAX_QUOTE: {
       AstNode *child = node->data.syntax_quote.child;
-
-      if (c->use_staged_syntax_quote) {
-        /* US-007 staged path: emit make-syntax ops to build the syntax tree
-         * bottom-up at runtime.  Each subtree is constructed via OP_SYNTAX_OP
-         * subops 7-12; unquotes compile their inner expressions normally. */
-        syntax__compile_sq_node(c, child);
-      } else {
-        /* Legacy template path: convert template to a constant, compile
-         * unquote expressions, and splice at runtime via OP_SYNTAX_SPLICE. */
-        uint32_t n_unquotes = syntax__count_unquotes_ast(child);
-        JaclVal tmpl = syntax_from_ast(child, c->heap, c->intern_table);
-        compiler__emit_constant(c, tmpl, line);
-
-        if (n_unquotes > 0) {
-          syntax__compile_unquotes(c, child);
-          compiler__emit_byte(c, OP_SYNTAX_SPLICE, line);
-          compiler__emit_byte(c, (uint8_t)n_unquotes, line);
-        }
-      }
+      /* Emit make-syntax ops to build the syntax tree bottom-up at runtime.
+       * Each subtree is constructed via OP_SYNTAX_OP subops 7-12;
+       * unquotes compile their inner expressions normally. */
+      syntax__compile_sq_node(c, child);
       break;
     }
 
@@ -9176,7 +9078,6 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   Compiler c;
   compiler__init(&c, &result.chunk, arena, intern_table, heap);
   c.suspension_map = &suspension_map;
-  if (es) c.use_staged_syntax_quote = es->staged_syntax_quote;
   {
     StructTypeRegistry* reg = (StructTypeRegistry*)arena_alloc(arena, sizeof(StructTypeRegistry));
     if (seed_registry) {
