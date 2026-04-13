@@ -106,6 +106,50 @@ typedef struct {
   JaclVal    yield_value;        /* yielded value (set by OP_YIELD_SM) */
 } VM;
 
+/* --- jacl_context_t: reentrant execution context ---
+ *
+ * Owns arena, VM (which contains ThreadHeap), intern table, macro table.
+ * Child contexts share parent's intern table but have their own arena/heap.
+ * Macro expansion state (ExpandState) is per-context, eliminating the
+ * file-static reentrancy hazards that previously lived in syntax.c.
+ *
+ * VM REENTRANCY AUDIT (US-005):
+ * Audited vm_exec and all transitively called functions for state that
+ * assumes a single in-flight execution. Findings:
+ *
+ * 1. vm.c: NO file-static mutable state. All VM state (stack, frames, ip,
+ *    heap, environment) lives in the VM struct. vm_exec is reentrant as
+ *    long as each invocation uses a separate VM instance.
+ *
+ * 2. compiler.c: NO file-static mutable state.
+ *
+ * 3. syntax.c: HAD 7 file-static variables (reentrancy hazards):
+ *    - expand__error_msg/line/col: macro expansion error state
+ *    - expand__frames[256]/frame_top: macro call stack for error reporting
+ *    - expand__scope_counter: scope mark for hygiene
+ *    - syntax__gensym_counter: unique symbol counter
+ *    FIX: All moved into ExpandState struct, passed through expansion
+ *    functions. jacl_gensym_next takes uint32_t* counter parameter.
+ *
+ * 4. runtime.c, string.c, value.c, embed.c: NO file-static mutable state.
+ *
+ * 5. No signal handlers or global instruction-pointer registers found.
+ */
+
+typedef struct jacl_context_s jacl_context_t;
+struct jacl_context_s {
+    arena_t          arena;
+    VM               vm;
+    JaclInternTable  intern_table;
+    MacroTable       macro_table;
+    uint64_t         restriction_set;     /* all-permissive = UINT64_MAX */
+    ExpandState      expand;
+
+    /* Parent context (NULL for root) */
+    jacl_context_t  *parent;
+    bool             owns_intern_table;   /* false when sharing parent's */
+};
+
 /* --- API --- */
 
 void     vm_init(VM* vm, arena_t* arena);
@@ -6373,11 +6417,53 @@ VMResult jacl_exec_program(ProgramResult* program, VM* vm) {
   return vm_exec(vm, root->chunk);
 }
 
+/* --- Context lifecycle --- */
+
+jacl_context_t *jacl_ctx_new(jacl_context_t *parent) {
+    jacl_context_t *ctx = (jacl_context_t *)calloc(1, sizeof(jacl_context_t));
+    if (!ctx) return NULL;
+
+    ctx->parent = parent;
+    ctx->restriction_set = UINT64_MAX;  /* all-permissive */
+
+    /* Arena: zero-initialized by calloc (uses default allocator) */
+
+    /* VM */
+    vm_init(&ctx->vm, &ctx->arena);
+
+    if (parent) {
+        /* Child: share parent's intern table */
+        ctx->owns_intern_table = false;
+        ctx->vm.intern_table = &parent->intern_table;
+    } else {
+        /* Root: own intern table */
+        ctx->owns_intern_table = true;
+        intern_table_init(&ctx->intern_table, &ctx->arena);
+        ctx->vm.intern_table = &ctx->intern_table;
+    }
+
+    macro_table_init(&ctx->macro_table);
+
+    /* Expansion state is zero-initialized by calloc */
+
+    return ctx;
+}
+
+void jacl_ctx_destroy(jacl_context_t *ctx) {
+    if (!ctx) return;
+    vm_destroy(&ctx->vm);
+    if (ctx->owns_intern_table)
+        intern_table_destroy(&ctx->intern_table);
+    arena_destroy(&ctx->arena);
+    free(ctx);
+}
+
 /* --- Pipeline convenience: jacl_run --- */
 
 /**
  * Source-to-execution pipeline.
  * Chains: lexer_lex -> parser_parse -> compiler_compile -> vm_exec.
+ * Uses a stack-local ExpandState for reentrancy-safe macro expansion.
  * Returns VM_RUNTIME_ERROR on parse or compile errors (message in vm->error_message).
  */
 VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
@@ -6391,7 +6477,10 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   JaclInternTable intern_table;
   intern_table_init(&intern_table, arena);
 
-  CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL);
+  ExpandState es;
+  memset(&es, 0, sizeof(es));
+
+  CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, &es);
   if (cr.error_count > 0) {
     vm->error_message = cr.error_message ? cr.error_message : "compile error";
     intern_table_destroy(&intern_table);

@@ -869,47 +869,24 @@ static JaclVal syntax__splice_template(JaclVal tmpl, JaclVal *values,
  * Returns NULL on success, or an error message string on failure.
  * ------------------------------------------------------------------------- */
 
-static const char *expand__error_msg;
-static uint32_t    expand__error_line;
-static uint32_t    expand__error_col;
+/* Macro expansion state is now per-compilation via ExpandState (defined in
+ * jacl.h), eliminating the file-static reentrancy hazards that previously
+ * prevented nested or concurrent compile+run cycles. */
 
-/* Global scope mark counter — incremented each time a macro expansion
- * begins. Each expansion gets a fresh mark so template-introduced
- * identifiers don't collide with caller identifiers or with other
- * expansions of the same (or different) macros. Mark 0 means "no macro
- * context" and is reserved for user-written code. */
-static uint32_t    expand__scope_counter = 0;
-
-/* US-018: expansion call stack for dual-location error reporting. Each
- * frame records the name and original call-site of a macro whose
- * template is currently being recursively re-expanded. When an error
- * occurs inside a nested expansion, the chain is rendered into the
- * error message so the user sees both the inner failure location and
- * every outer macro expansion that led to it. */
-typedef struct ExpandFrame {
-    const char *name;
-    uint32_t    name_len;
-    uint32_t    line;
-    uint32_t    col;
-} ExpandFrame;
-
-#define EXPAND_FRAME_MAX 256
-static ExpandFrame expand__frames[EXPAND_FRAME_MAX];
-static uint32_t    expand__frame_top = 0;
-
-static bool expand__push_frame(const char *name, uint32_t name_len,
+static bool expand__push_frame(ExpandState *es, const char *name,
+                                uint32_t name_len,
                                 uint32_t line, uint32_t col) {
-    if (expand__frame_top >= EXPAND_FRAME_MAX) return false;
-    expand__frames[expand__frame_top].name     = name;
-    expand__frames[expand__frame_top].name_len = name_len;
-    expand__frames[expand__frame_top].line     = line;
-    expand__frames[expand__frame_top].col      = col;
-    expand__frame_top++;
+    if (es->frame_top >= EXPAND_FRAME_MAX) return false;
+    es->frames[es->frame_top].name     = name;
+    es->frames[es->frame_top].name_len = name_len;
+    es->frames[es->frame_top].line     = line;
+    es->frames[es->frame_top].col      = col;
+    es->frame_top++;
     return true;
 }
 
-static void expand__pop_frame(void) {
-    if (expand__frame_top > 0) expand__frame_top--;
+static void expand__pop_frame(ExpandState *es) {
+    if (es->frame_top > 0) es->frame_top--;
 }
 
 /* Build an arena-allocated error message combining base_msg with the
@@ -920,10 +897,11 @@ static void expand__pop_frame(void) {
  * hitting the depth limit doesn't produce a 200-line error. When the
  * stack is empty (no active expansion) we simply copy base_msg into the
  * arena so the returned pointer has the same lifetime as the arena. */
-static const char *expand__build_error_with_chain(const char *base_msg,
+static const char *expand__build_error_with_chain(ExpandState *es,
+                                                   const char *base_msg,
                                                    arena_t *arena) {
     size_t base_len = strlen(base_msg);
-    if (expand__frame_top == 0) {
+    if (es->frame_top == 0) {
         char *buf = (char *)arena_alloc(arena, (uint32_t)(base_len + 1));
         memcpy(buf, base_msg, base_len);
         buf[base_len] = '\0';
@@ -931,11 +909,11 @@ static const char *expand__build_error_with_chain(const char *base_msg,
     }
 
     const uint32_t DISPLAY_MAX = 8;
-    bool truncated = expand__frame_top > DISPLAY_MAX;
+    bool truncated = es->frame_top > DISPLAY_MAX;
 
     size_t cap = base_len + 64;
-    for (uint32_t i = 0; i < expand__frame_top; i++)
-        cap += expand__frames[i].name_len + 80;
+    for (uint32_t i = 0; i < es->frame_top; i++)
+        cap += es->frames[i].name_len + 80;
     cap += 96;  /* truncation marker headroom */
 
     char *buf = (char *)arena_alloc(arena, (uint32_t)cap);
@@ -944,38 +922,38 @@ static const char *expand__build_error_with_chain(const char *base_msg,
     n += base_len;
 
     if (!truncated) {
-        for (uint32_t i = 0; i < expand__frame_top; i++) {
+        for (uint32_t i = 0; i < es->frame_top; i++) {
             int w = snprintf(buf + n, cap - n,
                 "\n  in expansion of macro `%.*s` at line %u, col %u",
-                (int)expand__frames[i].name_len,
-                expand__frames[i].name,
-                expand__frames[i].line,
-                expand__frames[i].col);
+                (int)es->frames[i].name_len,
+                es->frames[i].name,
+                es->frames[i].line,
+                es->frames[i].col);
             if (w > 0) n += (size_t)w;
         }
     } else {
         for (uint32_t i = 0; i < 4; i++) {
             int w = snprintf(buf + n, cap - n,
                 "\n  in expansion of macro `%.*s` at line %u, col %u",
-                (int)expand__frames[i].name_len,
-                expand__frames[i].name,
-                expand__frames[i].line,
-                expand__frames[i].col);
+                (int)es->frames[i].name_len,
+                es->frames[i].name,
+                es->frames[i].line,
+                es->frames[i].col);
             if (w > 0) n += (size_t)w;
         }
         {
             int w = snprintf(buf + n, cap - n,
                 "\n  ... %u more expansion frames ...",
-                expand__frame_top - DISPLAY_MAX);
+                es->frame_top - DISPLAY_MAX);
             if (w > 0) n += (size_t)w;
         }
-        for (uint32_t i = expand__frame_top - 4; i < expand__frame_top; i++) {
+        for (uint32_t i = es->frame_top - 4; i < es->frame_top; i++) {
             int w = snprintf(buf + n, cap - n,
                 "\n  in expansion of macro `%.*s` at line %u, col %u",
-                (int)expand__frames[i].name_len,
-                expand__frames[i].name,
-                expand__frames[i].line,
-                expand__frames[i].col);
+                (int)es->frames[i].name_len,
+                es->frames[i].name,
+                es->frames[i].line,
+                es->frames[i].col);
             if (w > 0) n += (size_t)w;
         }
     }
@@ -983,11 +961,12 @@ static const char *expand__build_error_with_chain(const char *base_msg,
     return buf;
 }
 
-static void expand__set_error(const char *msg, uint32_t line, uint32_t col,
+static void expand__set_error(ExpandState *es, const char *msg,
+                               uint32_t line, uint32_t col,
                                arena_t *arena) {
-    expand__error_msg  = expand__build_error_with_chain(msg, arena);
-    expand__error_line = line;
-    expand__error_col  = col;
+    es->error_msg  = expand__build_error_with_chain(es, msg, arena);
+    es->error_line = line;
+    es->error_col  = col;
 }
 
 /* -------------------------------------------------------------------------
@@ -1130,15 +1109,16 @@ static int expand__match_param(JaclVal unquote_child,
  * to is_caret).
  * ------------------------------------------------------------------------- */
 
-static uint32_t syntax__gensym_counter = 0;
-
 /* Build a fresh gensym var-ref syntax object. Names are formatted as
  * prefix__counter. For names ≤7 bytes, uses jacl_inline_string; for
  * longer names, uses jacl_intern. scope_mark is set to the supplied mark;
  * is_gensym is set to 1. If prefix_len > 64, returns JACL_NIL and sets
- * *err to a static message. */
+ * *err to a static message. The gensym_counter pointer is incremented
+ * atomically per call (caller owns the counter — typically in ExpandState
+ * or a local variable for tests). */
 JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
                          ThreadHeap *heap, JaclInternTable *intern,
+                         uint32_t *gensym_counter,
                          uint32_t scope_mark, const char **err) {
     if (err) *err = NULL;
     if (prefix_len == 0) { prefix = "g"; prefix_len = 1; }
@@ -1147,7 +1127,7 @@ JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
         return JACL_NIL;
     }
 
-    uint32_t counter = syntax__gensym_counter++;
+    uint32_t counter = (*gensym_counter)++;
 
     /* Format: prefix__counter — max 64 + 2 + 10 = 76 bytes */
     char name_buf[80];
@@ -1245,7 +1225,8 @@ static JaclVal expand__subst_template(JaclVal tmpl,
                                        JaclVal *arg_vals,
                                        uint32_t param_count,
                                        ThreadHeap *heap,
-                                       JaclInternTable *intern) {
+                                       JaclInternTable *intern,
+                                       ExpandState *es) {
     if (jacl_is_nil(tmpl)) return JACL_NIL;
     if (!jacl_is_syntax(tmpl)) return tmpl;
 
@@ -1261,6 +1242,7 @@ static JaclVal expand__subst_template(JaclVal tmpl,
         if (expand__is_gensym_call(tmpl, prefix, &prefix_len)) {
             const char *err = NULL;
             return jacl_gensym_next(prefix, prefix_len, heap, intern,
+                                    &es->gensym_counter,
                                     syn->scope_mark, &err);
         }
     }
@@ -1288,7 +1270,7 @@ static JaclVal expand__subst_template(JaclVal tmpl,
     if (syn->kind == SYNTAX_COMMAND) {
         JaclVal new_head = expand__subst_template(
             syn->data.command.head, param_names, param_name_lens,
-            arg_vals, param_count, heap, intern);
+            arg_vals, param_count, heap, intern, es);
         jacl_vec_root *old_args =
             (jacl_vec_root *)jacl_as_ptr(syn->data.command.args);
         uint32_t argc = jacl_vec_count(old_args);
@@ -1320,7 +1302,7 @@ static JaclVal expand__subst_template(JaclVal tmpl,
             }
             new_args = jacl_vec_push_back(new_args,
                 expand__subst_template(arg, param_names, param_name_lens,
-                                        arg_vals, param_count, heap, intern));
+                                        arg_vals, param_count, heap, intern, es));
         }
         JaclVal result = gc_alloc_syntax(heap);
         JaclSyntax *rsyn = jacl_as_syntax(result);
@@ -1366,7 +1348,7 @@ static JaclVal expand__subst_template(JaclVal tmpl,
             }
             new_cmds = jacl_vec_push_back(new_cmds,
                 expand__subst_template(cmd, param_names, param_name_lens,
-                                        arg_vals, param_count, heap, intern));
+                                        arg_vals, param_count, heap, intern, es));
         }
         JaclVal result = gc_alloc_syntax(heap);
         JaclSyntax *rsyn = jacl_as_syntax(result);
@@ -1410,15 +1392,15 @@ static AstNode *expand__find_syntax_quote_child(AstNode *body) {
 /* Forward declare the recursive expansion helper */
 static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                          ThreadHeap *heap, JaclInternTable *intern,
-                         arena_t *arena, uint32_t depth);
+                         arena_t *arena, ExpandState *es, uint32_t depth);
 
 static bool expand__block(AstNode *block, MacroTable *macros,
                           ThreadHeap *heap, JaclInternTable *intern,
-                          arena_t *arena, uint32_t depth) {
+                          arena_t *arena, ExpandState *es, uint32_t depth) {
     if (!block || block->type != AST_BLOCK) return true;
     for (uint32_t i = 0; i < block->data.block.count; i++) {
         if (!expand__node(&block->data.block.commands[i], macros, heap,
-                          intern, arena, depth))
+                          intern, arena, es, depth))
             return false;
     }
     return true;
@@ -1426,12 +1408,12 @@ static bool expand__block(AstNode *block, MacroTable *macros,
 
 static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                          ThreadHeap *heap, JaclInternTable *intern,
-                         arena_t *arena, uint32_t depth) {
+                         arena_t *arena, ExpandState *es, uint32_t depth) {
     AstNode *node = *node_ptr;
     if (!node) return true;
 
     if (depth > 256) {
-        expand__set_error("macro expansion depth limit exceeded",
+        expand__set_error(es, "macro expansion depth limit exceeded",
                           node->start.line, node->start.column, arena);
         return false;
     }
@@ -1451,7 +1433,7 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                              "macro '%.*s' expects %u arguments but got %u",
                              (int)name_len, name,
                              entry->param_count, argc);
-                    expand__set_error(err, node->start.line,
+                    expand__set_error(es, err, node->start.line,
                                       node->start.column, arena);
                     return false;
                 }
@@ -1464,7 +1446,7 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                     snprintf(err, sizeof(err),
                              "macro '%.*s' body must be a syntax-quote template",
                              (int)name_len, name);
-                    expand__set_error(err, node->start.line,
+                    expand__set_error(es, err, node->start.line,
                                       node->start.column, arena);
                     return false;
                 }
@@ -1475,7 +1457,7 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                 /* Fresh scope mark for this expansion — stamp the template
                  * so identifiers introduced by the template are unique
                  * and don't collide with the caller's identifiers. */
-                uint32_t macro_mark = ++expand__scope_counter;
+                uint32_t macro_mark = ++es->scope_counter;
                 expand__stamp_syntax(tmpl_syn, macro_mark);
 
                 JaclVal arg_vals[64];
@@ -1491,12 +1473,12 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                 JaclVal result_syn = expand__subst_template(
                     tmpl_syn,
                     entry->param_names, entry->param_name_lens,
-                    arg_vals, entry->param_count, heap, intern);
+                    arg_vals, entry->param_count, heap, intern, es);
 
                 /* Convert result back to AstNode */
                 AstNode *expanded = syntax_to_ast(result_syn, arena);
                 if (!expanded) {
-                    expand__set_error("macro expansion produced invalid syntax",
+                    expand__set_error(es, "macro expansion produced invalid syntax",
                                       node->start.line,
                                       node->start.column, arena);
                     return false;
@@ -1511,28 +1493,28 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
 
                 /* Replace the node and re-expand (iterative expansion) */
                 *node_ptr = expanded;
-                expand__push_frame(name, name_len, orig_line, orig_col);
+                expand__push_frame(es, name, name_len, orig_line, orig_col);
                 bool ok = expand__node(node_ptr, macros, heap, intern, arena,
-                                       depth + 1);
-                expand__pop_frame();
+                                       es, depth + 1);
+                expand__pop_frame(es);
                 return ok;
             }
         }
 
         /* Not a macro — recurse into head and args */
         if (!expand__node(&node->data.command.head, macros, heap, intern,
-                          arena, depth))
+                          arena, es, depth))
             return false;
         for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
             if (!expand__node(&node->data.command.args[i], macros, heap,
-                              intern, arena, depth))
+                              intern, arena, es, depth))
                 return false;
         }
         return true;
     }
 
     case AST_BLOCK:
-        return expand__block(node, macros, heap, intern, arena, depth);
+        return expand__block(node, macros, heap, intern, arena, es, depth);
 
     case AST_QUOTE:
         /* Don't expand inside quote */
@@ -1556,11 +1538,19 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
 const char *ast_expand_macros(AstNode **program, uint32_t count,
                               MacroTable *macros, ThreadHeap *heap,
                               JaclInternTable *intern, arena_t *arena,
+                              ExpandState *es,
                               uint32_t *out_error_line, uint32_t *out_error_col) {
-    expand__error_msg  = NULL;
-    expand__error_line = 0;
-    expand__error_col  = 0;
-    expand__frame_top  = 0;
+    /* Initialize expansion state for this compilation pass */
+    ExpandState local_es;
+    if (!es) {
+        memset(&local_es, 0, sizeof(local_es));
+        es = &local_es;
+    } else {
+        es->error_msg  = NULL;
+        es->error_line = 0;
+        es->error_col  = 0;
+        es->frame_top  = 0;
+    }
 
     for (uint32_t i = 0; i < count; i++) {
         AstNode *node = program[i];
@@ -1621,10 +1611,10 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
         }
 
         /* Expand macro calls in this statement */
-        if (!expand__node(&program[i], macros, heap, intern, arena, 0)) {
-            *out_error_line = expand__error_line;
-            *out_error_col  = expand__error_col;
-            return expand__error_msg;
+        if (!expand__node(&program[i], macros, heap, intern, arena, es, 0)) {
+            *out_error_line = es->error_line;
+            *out_error_col  = es->error_col;
+            return es->error_msg;
         }
     }
 

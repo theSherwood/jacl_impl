@@ -24,12 +24,39 @@ typedef struct {
   MacroTable*   macro_table;    /* compile-time macro definitions (NULL if none) */
 } CompileResult;
 
+/* --- ExpandState: per-compilation macro expansion state (reentrancy-safe) ---
+ * These types are also declared in jacl.h for external consumers. In the
+ * unity build they are defined here (compiler.c comes before syntax.c). */
+#ifndef EXPAND_FRAME_MAX
+
+typedef struct {
+    const char *name;
+    uint32_t    name_len;
+    uint32_t    line;
+    uint32_t    col;
+} ExpandFrame;
+
+#define EXPAND_FRAME_MAX 256
+
+typedef struct {
+    const char  *error_msg;
+    uint32_t     error_line;
+    uint32_t     error_col;
+    ExpandFrame  frames[EXPAND_FRAME_MAX];
+    uint32_t     frame_top;
+    uint32_t     scope_counter;
+    uint32_t     gensym_counter;
+} ExpandState;
+
+#endif /* EXPAND_FRAME_MAX */
+
 /* --- API --- */
 
 CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       JaclInternTable* intern_table,
                                       ThreadHeap* heap,
-                                      StructTypeRegistry* seed_registry);
+                                      StructTypeRegistry* seed_registry,
+                                      ExpandState* es);
 
 /* jacl_compile_program forward-declared after ProgramResult (below) */
 
@@ -39,6 +66,7 @@ JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap, JaclInternTable *intern
 const char *ast_expand_macros(AstNode **program, uint32_t count,
                               MacroTable *macros, ThreadHeap *heap,
                               JaclInternTable *intern, arena_t *arena,
+                              ExpandState *es,
                               uint32_t *out_error_line, uint32_t *out_error_col);
 
 /* --- Type system --- */
@@ -8938,7 +8966,8 @@ bool compiler__top_level_suspends(AstNode** stmts, uint32_t count,
 CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       JaclInternTable* intern_table,
                                       ThreadHeap* heap,
-                                      StructTypeRegistry* seed_registry) {
+                                      StructTypeRegistry* seed_registry,
+                                      ExpandState* es) {
   CompileResult result;
   chunk_init(&result.chunk, arena);
   result.error_count = parse.error_count;
@@ -8975,7 +9004,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     uint32_t err_line = 0, err_col = 0;
     const char *expand_err = ast_expand_macros(
         parse.nodes, parse.count, c.macro_table, heap,
-        intern_table, arena, &err_line, &err_col);
+        intern_table, arena, es, &err_line, &err_col);
     if (expand_err) {
       compiler__error(&c, err_line, err_col, expand_err);
     }

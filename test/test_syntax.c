@@ -1841,7 +1841,7 @@ static CompileResult compile_source(const char* src, arena_t* arena, VM* vm) {
     ParseResult parse = parser_parse(tokens, arena);
     JaclInternTable intern_table;
     intern_table_init(&intern_table, arena);
-    CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL);
+    CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, NULL);
     cr.error_count += parse.error_count;
     return cr;
 }
@@ -2097,7 +2097,7 @@ static ParseResult expand_source(const char* src, arena_t* arena, VM* vm,
     uint32_t err_line = 0, err_col = 0;
     *out_err = ast_expand_macros(parse.nodes, parse.count, mt,
                                   &vm->heap, &intern_table, arena,
-                                  &err_line, &err_col);
+                                  NULL, &err_line, &err_col);
     return parse;
 }
 
@@ -3301,8 +3301,9 @@ static int test_us014_gensym_returns_var_ref(void) {
     VM vm;
     vm_init(&vm, &arena);
 
+    uint32_t gctr = 0;
     const char *err = NULL;
-    JaclVal v = jacl_gensym_next("g", 1, &vm.heap, vm.intern_table, 0, &err);
+    JaclVal v = jacl_gensym_next("g", 1, &vm.heap, vm.intern_table, &gctr, 0, &err);
     ASSERT(err == NULL);
     ASSERT(jacl_is_syntax(v));
     JaclSyntax *s = jacl_as_syntax(v);
@@ -3322,10 +3323,11 @@ static int test_us014_gensym_produces_distinct_names(void) {
     VM vm;
     vm_init(&vm, &arena);
 
+    uint32_t gctr = 0;
     const char *err = NULL;
-    JaclVal a = jacl_gensym_next("t", 1, &vm.heap, vm.intern_table, 0, &err);
+    JaclVal a = jacl_gensym_next("t", 1, &vm.heap, vm.intern_table, &gctr, 0, &err);
     ASSERT(err == NULL);
-    JaclVal b = jacl_gensym_next("t", 1, &vm.heap, vm.intern_table, 0, &err);
+    JaclVal b = jacl_gensym_next("t", 1, &vm.heap, vm.intern_table, &gctr, 0, &err);
     ASSERT(err == NULL);
 
     /* Different heap pointers (distinct allocations). */
@@ -3360,8 +3362,9 @@ static int test_us014_gensym_default_prefix(void) {
     VM vm;
     vm_init(&vm, &arena);
 
+    uint32_t gctr = 0;
     const char *err = NULL;
-    JaclVal v = jacl_gensym_next(NULL, 0, &vm.heap, vm.intern_table, 0, &err);
+    JaclVal v = jacl_gensym_next(NULL, 0, &vm.heap, vm.intern_table, &gctr, 0, &err);
     ASSERT(err == NULL);
     JaclSyntax *s = jacl_as_syntax(v);
     char nbuf[16];
@@ -3386,7 +3389,8 @@ static int test_us014_gensym_prefix_too_long(void) {
     const char *long_prefix =
         "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeeffffffffff12345";
     const char *err = NULL;
-    JaclVal v = jacl_gensym_next(long_prefix, 65, &vm.heap, vm.intern_table, 0, &err);
+    uint32_t gctr = 0;
+    JaclVal v = jacl_gensym_next(long_prefix, 65, &vm.heap, vm.intern_table, &gctr, 0, &err);
     ASSERT(err != NULL);
     ASSERT(jacl_is_nil(v));
 

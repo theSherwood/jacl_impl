@@ -254,7 +254,7 @@ JaclVal jacl_eval(JaclVM* jvm, const char* source) {
   /* Compile — use persistent intern table and seeded struct registry */
   CompileResult cr = compiler_compile(parse, &jvm->arena,
                                       &jvm->intern_table, &vm->heap,
-                                      &jvm->persistent_struct_registry);
+                                      &jvm->persistent_struct_registry, NULL);
   if (cr.error_count > 0) {
     return embed__make_error(jvm, cr.error_message ? cr.error_message
                                                    : "compile error");

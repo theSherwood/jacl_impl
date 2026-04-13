@@ -92,12 +92,15 @@ static int test_compile_error_reported(void) {
   VM vm;
   vm_init(&vm, &arena);
 
-  /* Long variable name > 7 bytes is a compile error */
-  VMResult result = jacl_run("def abcdefgh 42", &vm, &arena);
+  /* Long variable name > 128 bytes is a compile error */
+  VMResult result = jacl_run(
+      "def aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffffgggggggghhhhhhhh"
+      "iiiiiiiijjjjjjjjkkkkkkkkllllllllmmmmmmmmnnnnnnnnooooooooppppppppq 42",
+      &vm, &arena);
 
   ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
   ASSERT(vm.error_message != NULL);
-  ASSERT(strstr(vm.error_message, "7-byte") != NULL);
+  ASSERT(strstr(vm.error_message, "128-byte") != NULL);
 
   vm_destroy(&vm);
   arena_destroy(&arena);
@@ -343,6 +346,97 @@ static int test_var_ref_command_call(void) {
   TEST_PASS();
 }
 
+/* --- US-005: Context lifecycle and recursive vm_exec --- */
+
+/* Test: jacl_ctx_new creates a working root context, child context shares
+ * parent intern table but has independent VM state. */
+static int test_context_lifecycle(void) {
+  jacl_context_t *root = jacl_ctx_new(NULL);
+  ASSERT(root != NULL);
+  ASSERT(root->parent == NULL);
+  ASSERT(root->owns_intern_table == true);
+  ASSERT(root->restriction_set == UINT64_MAX);
+
+  jacl_context_t *child = jacl_ctx_new(root);
+  ASSERT(child != NULL);
+  ASSERT(child->parent == root);
+  ASSERT(child->owns_intern_table == false);
+  /* Child shares parent's intern table */
+  ASSERT(child->vm.intern_table == &root->intern_table);
+
+  jacl_ctx_destroy(child);
+  jacl_ctx_destroy(root);
+  TEST_PASS();
+}
+
+/* Test: two independent vm_exec invocations via contexts complete without
+ * state corruption. This proves the macro expansion state (previously
+ * file-static) is safely per-context. */
+static int test_recursive_vm_exec(void) {
+  /* First invocation: run code with a macro in context A */
+  jacl_context_t *ctx_a = jacl_ctx_new(NULL);
+  ASSERT(ctx_a != NULL);
+
+  PrintCapture cap_a = { .len = 0 };
+  ctx_a->vm.print_fn = capture_print;
+  ctx_a->vm.print_ctx = &cap_a;
+
+  ExpandState es_a;
+  memset(&es_a, 0, sizeof(es_a));
+
+  LexResult tok_a = lexer_lex(
+      "defmacro double {x} { syntax-quote [+ ~x ~x] }\n"
+      "[print [double 21]]",
+      &ctx_a->arena);
+  ParseResult parse_a = parser_parse(tok_a, &ctx_a->arena);
+  ASSERT(parse_a.error_count == 0);
+
+  CompileResult cr_a = compiler_compile(parse_a, &ctx_a->arena,
+      &ctx_a->intern_table, &ctx_a->vm.heap, NULL, &es_a);
+  ASSERT(cr_a.error_count == 0);
+
+  ctx_a->vm.struct_registry = cr_a.struct_registry;
+  VMResult r_a = vm_exec(&ctx_a->vm, &cr_a.chunk);
+  ASSERT(r_a == VM_OK);
+  ASSERT_STR_EQ(cap_a.buf, "42\n");
+
+  /* Second invocation: independently run code with a different macro in
+   * context B. If the old file-statics leaked, expansion state from A
+   * would corrupt B. */
+  jacl_context_t *ctx_b = jacl_ctx_new(NULL);
+  ASSERT(ctx_b != NULL);
+
+  PrintCapture cap_b = { .len = 0 };
+  ctx_b->vm.print_fn = capture_print;
+  ctx_b->vm.print_ctx = &cap_b;
+
+  ExpandState es_b;
+  memset(&es_b, 0, sizeof(es_b));
+
+  LexResult tok_b = lexer_lex(
+      "defmacro triple {x} { syntax-quote [* ~x 3] }\n"
+      "[print [triple 10]]",
+      &ctx_b->arena);
+  ParseResult parse_b = parser_parse(tok_b, &ctx_b->arena);
+  ASSERT(parse_b.error_count == 0);
+
+  CompileResult cr_b = compiler_compile(parse_b, &ctx_b->arena,
+      &ctx_b->intern_table, &ctx_b->vm.heap, NULL, &es_b);
+  ASSERT(cr_b.error_count == 0);
+
+  ctx_b->vm.struct_registry = cr_b.struct_registry;
+  VMResult r_b = vm_exec(&ctx_b->vm, &cr_b.chunk);
+  ASSERT(r_b == VM_OK);
+  ASSERT_STR_EQ(cap_b.buf, "30\n");
+
+  /* Verify A's output is unchanged — no cross-contamination */
+  ASSERT_STR_EQ(cap_a.buf, "42\n");
+
+  jacl_ctx_destroy(ctx_b);
+  jacl_ctx_destroy(ctx_a);
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -365,6 +459,9 @@ int main(void) {
     { "comma_sep_block",         test_comma_separator_block },
     /* US-005 (M6): $var lines as command calls */
     { "var_ref_cmd_call",        test_var_ref_command_call },
+    /* US-005 (macro-eval): context lifecycle and reentrancy */
+    { "context_lifecycle",       test_context_lifecycle },
+    { "recursive_vm_exec",       test_recursive_vm_exec },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

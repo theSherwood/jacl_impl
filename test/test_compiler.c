@@ -11,7 +11,7 @@ static CompileResult compile_source(const char* source, arena_t* arena, ThreadHe
   ParseResult parse = parser_parse(tokens, arena);
   JaclInternTable intern_table;
   intern_table_init(&intern_table, arena);
-  return compiler_compile(parse, arena, &intern_table, heap, NULL);
+  return compiler_compile(parse, arena, &intern_table, heap, NULL, NULL);
 }
 
 /* ===== US-003: Compiler skeleton and literal compilation ===== */

@@ -863,6 +863,33 @@ typedef struct {
   MacroTable*   macro_table;
 } CompileResult;
 
+/* --- ExpandFrame: tracks nested macro expansion for error reporting --- */
+
+typedef struct {
+    const char *name;
+    uint32_t    name_len;
+    uint32_t    line;
+    uint32_t    col;
+} ExpandFrame;
+
+#define EXPAND_FRAME_MAX 256
+
+/* --- ExpandState: per-compilation macro expansion state --- */
+
+typedef struct {
+    const char  *error_msg;
+    uint32_t     error_line;
+    uint32_t     error_col;
+    ExpandFrame  frames[EXPAND_FRAME_MAX];
+    uint32_t     frame_top;
+    uint32_t     scope_counter;
+    uint32_t     gensym_counter;
+} ExpandState;
+
+/* --- jacl_context_t: reentrant execution context --- */
+
+typedef struct jacl_context_s jacl_context_t;
+
 typedef enum {
   TYPE_DYN = 0,
   TYPE_BOOL,
@@ -1185,6 +1212,26 @@ typedef struct {
   uint32_t   spread_count_top;
   JaclVal    yield_value;
 } VM;
+
+/* --- jacl_context_t: reentrant execution context (full definition) ---
+ *
+ * Owns arena, VM (which contains ThreadHeap), intern table, macro table.
+ * Child contexts share parent's intern table but have their own arena/heap.
+ * Macro expansion state (error, frames, scope counter, gensym counter) is
+ * per-context, eliminating the file-static reentrancy hazards.
+ */
+struct jacl_context_s {
+    arena_t          arena;
+    VM               vm;
+    JaclInternTable  intern_table;
+    MacroTable       macro_table;
+    uint64_t         restriction_set;     /* all-permissive = UINT64_MAX */
+    ExpandState      expand;
+
+    /* Parent context (NULL for root) */
+    jacl_context_t  *parent;
+    bool             owns_intern_table;   /* false when sharing parent's */
+};
 
 typedef struct {
   char*     data;
@@ -1555,10 +1602,12 @@ extern AstNode *syntax_to_ast (JaclVal syn_val, arena_t *arena);
 extern const char *ast_expand_macros(AstNode **program, uint32_t count,
                                      MacroTable *macros, ThreadHeap *heap,
                                      JaclInternTable *intern, arena_t *arena,
+                                     ExpandState *es,
                                      uint32_t *out_error_line,
                                      uint32_t *out_error_col);
 extern JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
                                 ThreadHeap *heap, JaclInternTable *intern,
+                                uint32_t *gensym_counter,
                                 uint32_t scope_mark, const char **err);
 extern const char *syntax_kind_name(uint8_t kind);
 
@@ -1777,7 +1826,7 @@ extern void compiler__compile_pipe_op (Compiler *c, AstNode *node);
 extern void compiler__compile_command (Compiler *c, AstNode *node);
 extern void compiler__compile_node (Compiler *c, AstNode *node);
 extern bool compiler__top_level_suspends (AstNode **stmts, uint32_t count, SuspensionMap *map);
-extern CompileResult compiler_compile (ParseResult parse, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap, StructTypeRegistry *seed_registry);
+extern CompileResult compiler_compile (ParseResult parse, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap, StructTypeRegistry *seed_registry, ExpandState *es);
 extern void macro_table_init (MacroTable *t);
 extern MacroEntry *macro_table_lookup (MacroTable *t, const char *name, uint32_t name_len);
 extern bool macro__is_special_form (const char *name, uint32_t len);
@@ -1813,6 +1862,10 @@ extern StreamPullResult vm__pull_stream_one (VM *vm, JaclVal stream_val, JaclVal
 extern VMResult vm__run (VM *vm, uint32_t min_frame);
 extern VMResult jacl_exec_program (ProgramResult *program, VM *vm);
 extern VMResult jacl_run (const char *source, VM *vm, arena_t *arena);
+
+/* --- context lifecycle --- */
+extern jacl_context_t *jacl_ctx_new (jacl_context_t *parent);
+extern void            jacl_ctx_destroy (jacl_context_t *ctx);
 
 /* --- gc_collect.c --- */
 extern void gc__ms_init (GCMarkStack *ms);
