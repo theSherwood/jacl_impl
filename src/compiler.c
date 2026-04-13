@@ -8165,6 +8165,9 @@ static void syntax__compile_sq_node(Compiler *c, AstNode *node) {
                 AstNode *arg = node->data.command.args[i];
                 if (arg->type == AST_UNQUOTE_SPLICING) {
                     syntax__compile_unquote_child(c, arg->data.unquote_splicing.child);
+                    /* US-012: validate splice operand before concat */
+                    compiler__emit_byte(c, OP_SYNTAX_OP, line);
+                    compiler__emit_byte(c, 18, line);  /* validate-unquote-splice */
                     compiler__emit_byte(c, OP_VEC_CONCAT, line);
                 } else {
                     syntax__compile_sq_node(c, arg);
@@ -8199,6 +8202,9 @@ static void syntax__compile_sq_node(Compiler *c, AstNode *node) {
                 AstNode *cmd = node->data.block.commands[i];
                 if (cmd->type == AST_UNQUOTE_SPLICING) {
                     syntax__compile_unquote_child(c, cmd->data.unquote_splicing.child);
+                    /* US-012: validate splice operand before concat */
+                    compiler__emit_byte(c, OP_SYNTAX_OP, line);
+                    compiler__emit_byte(c, 18, line);  /* validate-unquote-splice */
                     compiler__emit_byte(c, OP_VEC_CONCAT, line);
                 } else {
                     syntax__compile_sq_node(c, cmd);
@@ -8221,6 +8227,9 @@ static void syntax__compile_sq_node(Compiler *c, AstNode *node) {
     case AST_UNQUOTE:
         /* Compile inner expression — must produce a syntax JaclVal at runtime */
         syntax__compile_unquote_child(c, node->data.unquote.child);
+        /* US-012: validate that unquote result is a syntax object */
+        compiler__emit_byte(c, OP_SYNTAX_OP, node->start.line);
+        compiler__emit_byte(c, 17, node->start.line);  /* validate-unquote */
         break;
 
     case AST_SYNTAX_QUOTE:

@@ -3,6 +3,8 @@ Started: Sat Apr 11 15:40:27 UTC 2026
 
 ## Codebase Patterns
 - Unity build: all .c files are `#include`d into `src/jacl.c`; system headers (stdio, stdlib via platform.h) are available everywhere
+- To enable staged mode in a new code path: create `jacl_context_t *ctx = jacl_ctx_new(NULL)`, set `es.staged_syntax_quote = true` and `es.ctx = ctx` on an ExpandState, pass to `compiler_compile` or `ast_expand_macros`
+- OP_SYNTAX_OP subop dispatch guard (`if (subop >= 7 ...)`) must be updated when adding new construction/validation subops — missing subops fall through to the introspection path and produce "unknown subop" errors
 - Build/test: `bash build.sh --parallel` runs all tests; `--test=NAME` filters to a single test
 - Inline strings are 7-byte max (NaN-boxed payload); longer strings must use `jacl_intern` (heap-interned, pointer-stable) or `jacl_rope_string_create`
 - The `concurrent_intern` test is flaky (race condition, off-by-one in counts) — not a real failure
@@ -188,4 +190,23 @@ Thread: (inline)
 - **Learnings for future iterations:**
   - test_m10.c = milestone 10 (mutable state), not macro hygiene; actual macro/hygiene tests live in test_syntax.c and test_integration.c
   - test_m11.c, test_m12.c, test_m13.c also have zero defmacros — US-012's real work is migrating test_syntax.c
+---
+
+## 2026-04-13 - US-012
+Thread: (inline)
+- Enabled staged macro expansion by default in `jacl_run` (vm.c) and `jacl_eval` (embed.c): both now create a temporary `jacl_context_t` with `staged_syntax_quote=true` for macro closure execution during compilation
+- Updated test_syntax.c `compile_source` and `expand_source` helpers to pass staged ExpandState with jacl_context_t
+- Updated `test_expand_use_before_defmacro` to verify forward references work (staged three-phase pre-registers all defmacros)
+- Added OP_SYNTAX_OP subop 17 (validate-unquote): peeks TOS, errors if not syntax with message matching old splice path
+- Added OP_SYNTAX_OP subop 18 (validate-unquote-splice): peeks TOS, errors if not vec-of-syntax with message matching old splice path
+- Updated staged compiler (`syntax__compile_sq_node`) to emit subop 17 after unquote and subop 18 before VEC_CONCAT for splice
+- Updated OP_SYNTAX_OP dispatch guard to include subops 17 and 18
+- Verified test_m11.c, test_m12.c, test_m13.c have zero defmacros (vacuously satisfied)
+- Files changed: src/vm.c, src/embed.c, src/compiler.c, test/test_syntax.c
+- **Learnings for future iterations:**
+  - The OP_SYNTAX_OP handler has a dispatch guard `if ((subop >= 7 && subop <= 12) || subop == 15 || subop == 16 || ...)` that MUST be updated for any new construction/validation subop — otherwise the subop falls through to the introspection path (which pops+checks for syntax) and produces a confusing "unknown subop" error
+  - `jacl_run` and `jacl_eval` create temporary `jacl_context_t` for macro expansion; the context is destroyed after compilation but before execution, which is safe because all syntax objects are converted to AST before destroy
+  - The old OP_SYNTAX_SPLICE path and `syntax__splice_template` produce specific error messages ("~ (unquote) requires a syntax object"); staged path needed explicit validation subops (17, 18) to match these messages since make-syntax subop 11 uses different wording
+  - Forward references are an intentional behavioral difference in staged mode — `test_expand_use_before_defmacro` was the only test affected
+  - heap_strings, variadic, long_names, jacl_harness, compiler_vm_integration segfaults are all pre-existing failures unrelated to this work
 ---

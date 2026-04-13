@@ -229,8 +229,8 @@
         "Tests pass"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Enabled staged macro expansion by default in jacl_run (vm.c), jacl_eval (embed.c), and both test helpers (compile_source, expand_source in test_syntax.c). All paths now create a temporary jacl_context_t with staged_syntax_quote=true for macro closure execution. test_m11.c, test_m12.c, test_m13.c have zero defmacros (vacuously satisfied). test_syntax.c: updated expand_source and compile_source helpers to use staged ExpandState; updated test_expand_use_before_defmacro to verify forward references work (staged three-phase approach pre-registers all defmacros). Added OP_SYNTAX_OP subops 17 (validate-unquote) and 18 (validate-unquote-splice) so staged closures produce the same error messages as the old splice path. Zero macros route through expand__subst_template. Full test suite passes (pre-existing failures: m13 pthread, concurrent_intern flaky, heap_strings/variadic/long_names/jacl_harness/compiler_vm_integration segfaults are all pre-existing)."
     },
     {
       "id": "US-013",

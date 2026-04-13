@@ -5979,7 +5979,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
          *   13 = syntax-error message       (string → halt)
          *   14 = syntax-error message+syn   (string, syntax → halt)
          *   15 = make-syntax var-ref-caret  (string → syntax, scope_mark=0, is_caret=1)
-         *   16 = gensym                     (prefix-string → syntax var-ref, is_gensym=1) */
+         *   16 = gensym                     (prefix-string → syntax var-ref, is_gensym=1)
+         *   17 = validate-unquote           (peek TOS: must be syntax object)
+         *   18 = validate-unquote-splice    (peek TOS: must be vec of syntax objects) */
         uint8_t subop = vm__read_byte(vm);
         gc__current_heap = &vm->heap;
 
@@ -6044,7 +6046,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
          * allocates a fresh JaclSyntax, and pushes it. Dispatched before
          * the introspection path because construction ops don't expect
          * a syntax object as the operand on top of the stack. */
-        if ((subop >= 7 && subop <= 12) || subop == 15 || subop == 16) {
+        if ((subop >= 7 && subop <= 12) || subop == 15 || subop == 16 ||
+            subop == 17 || subop == 18) {
           static const char *mk_names[] = {
             "make-syntax lit-int",    "make-syntax lit-float",
             "make-syntax lit-string", "make-syntax var-ref",
@@ -6178,6 +6181,34 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             }
             result = vm__push(vm, out);
             if (result != VM_OK) return result;
+            break;
+          }
+          case 17: {  /* US-012: validate-unquote (top-of-stack must be syntax) */
+            JaclVal v = vm->stack[vm->stack_top - 1];
+            if (!jacl_is_nil(v) && !jacl_is_syntax(v)) {
+              vm__set_error(vm, "~ (unquote) requires a syntax object, got %s",
+                            vm__type_name(v));
+              return VM_RUNTIME_ERROR;
+            }
+            break;
+          }
+          case 18: {  /* US-012: validate-unquote-splice (top-of-stack must be vec of syntax) */
+            JaclVal v = vm->stack[vm->stack_top - 1];
+            if (!jacl_is_vector(v)) {
+              vm__set_error(vm, "~@ (unquote-splicing) requires a vec of syntax objects, got %s",
+                            vm__type_name(v));
+              return VM_RUNTIME_ERROR;
+            }
+            jacl_vec_root *vr = (jacl_vec_root *)jacl_as_ptr(v);
+            uint32_t vc = jacl_vec_count(vr);
+            for (uint32_t i = 0; i < vc; i++) {
+              JaclVal elem = jacl_vec_get(vr, i).value;
+              if (!jacl_is_syntax(elem)) {
+                vm__set_error(vm, "~@ (unquote-splicing) requires a vec of syntax objects, element %u is %s",
+                              i, vm__type_name(elem));
+                return VM_RUNTIME_ERROR;
+              }
+            }
             break;
           }
           case 11: {  /* make-syntax command (head, args-vec) */
@@ -6678,7 +6709,17 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   ExpandState es;
   memset(&es, 0, sizeof(es));
 
+  /* US-012: Enable staged macro expansion by default.
+   * Create a temporary context for macro closure execution. */
+  es.staged_syntax_quote = true;
+  jacl_context_t *macro_ctx = jacl_ctx_new(NULL);
+  es.ctx = macro_ctx;
+
   CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, &es);
+
+  jacl_ctx_destroy(macro_ctx);
+  es.ctx = NULL;
+
   if (cr.error_count > 0) {
     vm->error_message = cr.error_message ? cr.error_message : "compile error";
     intern_table_destroy(&intern_table);

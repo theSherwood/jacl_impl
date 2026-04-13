@@ -1835,14 +1835,21 @@ static int test_tilde_at_outside_syntax_quote_error(void) {
 
 /* ===== US-007: Compile-time macro table and defmacro registration ===== */
 
-/* Helper: compile source and return CompileResult (caller must destroy arena) */
+/* Helper: compile source and return CompileResult (caller must destroy arena).
+ * US-012: Uses staged expansion path so all defmacros get use_staged_eval=true. */
 static CompileResult compile_source(const char* src, arena_t* arena, VM* vm) {
     LexResult tokens = lexer_lex(src, arena);
     ParseResult parse = parser_parse(tokens, arena);
     JaclInternTable intern_table;
     intern_table_init(&intern_table, arena);
-    CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, NULL);
+    ExpandState es;
+    memset(&es, 0, sizeof(es));
+    es.staged_syntax_quote = true;
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    es.ctx = ctx;
+    CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, &es);
     cr.error_count += parse.error_count;
+    /* ctx intentionally leaked for test simplicity */
     return cr;
 }
 
@@ -2082,7 +2089,8 @@ static int test_is_special_form(void) {
 /* ===== US-008: Macro expansion pass — basic expansion ===== */
 
 /* Helper: parse source and run expansion pass, return expanded program.
- * Sets *out_err to a non-NULL error message on failure. */
+ * Sets *out_err to a non-NULL error message on failure.
+ * US-012: Uses staged expansion path so all defmacros get use_staged_eval=true. */
 static ParseResult expand_source(const char* src, arena_t* arena, VM* vm,
                                  MacroTable* mt, const char** out_err) {
     LexResult tokens = lexer_lex(src, arena);
@@ -2094,10 +2102,16 @@ static ParseResult expand_source(const char* src, arena_t* arena, VM* vm,
     JaclInternTable intern_table;
     intern_table_init(&intern_table, arena);
     macro_table_init(mt);
+    ExpandState es;
+    memset(&es, 0, sizeof(es));
+    es.staged_syntax_quote = true;
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    es.ctx = ctx;
     uint32_t err_line = 0, err_col = 0;
     *out_err = ast_expand_macros(parse.nodes, parse.count, mt,
                                   &vm->heap, &intern_table, arena,
-                                  NULL, &err_line, &err_col);
+                                  &es, &err_line, &err_col);
+    /* ctx intentionally leaked for test simplicity */
     return parse;
 }
 
@@ -2257,7 +2271,9 @@ static int test_expand_depth_limit(void) {
     TEST_PASS();
 }
 
-/* Test: macro used before its defmacro is not expanded (treated as normal command) */
+/* Test: macro used before its defmacro IS expanded (staged mode supports forward refs).
+ * US-012: Staged three-phase approach pre-registers all defmacros before expansion,
+ * so forward references are resolved. */
 static int test_expand_use_before_defmacro(void) {
     arena_t arena = {0};
     VM vm;
@@ -2272,15 +2288,24 @@ static int test_expand_use_before_defmacro(void) {
     ParseResult pr = expand_source(src, &arena, &vm, &mt, &err);
     ASSERT(err == NULL);
 
-    /* The first statement should NOT be expanded (macro defined after use).
-     * It should remain as AST_COMMAND with head "unless". */
+    /* In staged mode, the three-phase approach registers defmacros first,
+     * so forward references work. The first statement IS expanded to
+     * [if [not [eq 1 2]] { print ok }]. */
     ASSERT(pr.count >= 2);
     AstNode* first = pr.nodes[0];
     ASSERT(first != NULL);
     ASSERT(first->type == AST_COMMAND);
     ASSERT(first->data.command.head->type == AST_LIT_STRING);
-    ASSERT(first->data.command.head->data.lit_string.length == 6);
-    ASSERT(memcmp(first->data.command.head->data.lit_string.value, "unless", 6) == 0);
+    ASSERT(first->data.command.head->data.lit_string.length == 2);
+    ASSERT(memcmp(first->data.command.head->data.lit_string.value, "if", 2) == 0);
+    /* Verify expansion structure: [if [not [eq 1 2]] { print ok }] */
+    ASSERT(first->data.command.arg_count == 2);
+    AstNode* not_cmd = first->data.command.args[0];
+    ASSERT(not_cmd->type == AST_COMMAND);
+    ASSERT(not_cmd->data.command.head->type == AST_LIT_STRING);
+    ASSERT(memcmp(not_cmd->data.command.head->data.lit_string.value, "not", 3) == 0);
+    AstNode* body = first->data.command.args[1];
+    ASSERT(body->type == AST_BLOCK);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
