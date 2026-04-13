@@ -779,6 +779,243 @@ static int test_staged_macro_forward_ref(void) {
     TEST_PASS();
 }
 
+/* ===== US-009: Mark-propagation hygiene on staged path ===== */
+
+/* Test: macro-introduced local does not shadow caller's variable (hygiene).
+ * Template's `mut tmp 1` carries macro mark; caller's `$tmp` via ~x has mark 0.
+ * Result: 99 + 1 = 100 (not 1 + 1 = 2). */
+static int test_staged_hygiene_local_shadow(void) {
+    const char *src =
+        "defmacro m {x} {\n"
+        "  syntax-quote {\n"
+        "    mut tmp 1\n"
+        "    [+ ~x $tmp]\n"
+        "  }\n"
+        "}\n"
+        "proc run {} {\n"
+        "  mut tmp 99\n"
+        "  m $tmp\n"
+        "}\n"
+        "run";
+
+    /* Legacy path */
+    JaclVM* vm_old = jacl_vm_new();
+    JaclVal r_old = jacl_eval(vm_old, src);
+    ASSERT(!jacl_is_error(r_old));
+    ASSERT_INT_EQ(jacl_as_i32(r_old), 100);
+    jacl_vm_free(vm_old);
+
+    /* Staged path */
+    JaclError err;
+    JaclVal r_new = staged_run(src, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "  staged hygiene shadow: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(r_new));
+    ASSERT_INT_EQ(jacl_as_i32(r_new), 100);
+
+    TEST_PASS();
+}
+
+/* Test: two nested macro expansions with same name don't collide.
+ * add_ten binds t=10, add_hundred binds t=100, caller has t=0.
+ * Result: 0 + 100 + 10 = 110. */
+static int test_staged_hygiene_nested_macros(void) {
+    const char *src =
+        "defmacro add_ten {x} {\n"
+        "  syntax-quote {\n"
+        "    mut t 10\n"
+        "    [+ ~x $t]\n"
+        "  }\n"
+        "}\n"
+        "defmacro add_hundred {x} {\n"
+        "  syntax-quote {\n"
+        "    mut t 100\n"
+        "    [add_ten [+ ~x $t]]\n"
+        "  }\n"
+        "}\n"
+        "proc run {} {\n"
+        "  mut t 0\n"
+        "  add_hundred $t\n"
+        "}\n"
+        "run";
+
+    /* Legacy path */
+    JaclVM* vm_old = jacl_vm_new();
+    JaclVal r_old = jacl_eval(vm_old, src);
+    ASSERT(!jacl_is_error(r_old));
+    ASSERT_INT_EQ(jacl_as_i32(r_old), 110);
+    jacl_vm_free(vm_old);
+
+    /* Staged path */
+    JaclError err;
+    JaclVal r_new = staged_run(src, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged hygiene nested: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(r_new));
+    ASSERT_INT_EQ(jacl_as_i32(r_new), 110);
+
+    TEST_PASS();
+}
+
+/* Test: global builtins (like +) still resolve through macro marks. */
+static int test_staged_hygiene_global_fallback(void) {
+    const char *src =
+        "defmacro double {x} {\n"
+        "  syntax-quote [+ ~x ~x]\n"
+        "}\n"
+        "double 21";
+
+    /* Legacy path */
+    JaclVM* vm_old = jacl_vm_new();
+    JaclVal r_old = jacl_eval(vm_old, src);
+    ASSERT(!jacl_is_error(r_old));
+    ASSERT_INT_EQ(jacl_as_i32(r_old), 42);
+    jacl_vm_free(vm_old);
+
+    /* Staged path */
+    JaclError err;
+    JaclVal r_new = staged_run(src, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged global fallback: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(r_new));
+    ASSERT_INT_EQ(jacl_as_i32(r_new), 42);
+
+    TEST_PASS();
+}
+
+/* Test: ^name in macro body creates binding in caller's scope (caret hygiene).
+ * [mut ^it ~v] puts `it` at scope mark 0 so caller's $it sees it. */
+static int test_staged_hygiene_caret(void) {
+    const char *src =
+        "defmacro bindit {v} {\n"
+        "  syntax-quote [mut ^it ~v]\n"
+        "}\n"
+        "proc run {} {\n"
+        "  bindit 42\n"
+        "  $it\n"
+        "}\n"
+        "run";
+
+    /* Legacy path */
+    JaclVM* vm_old = jacl_vm_new();
+    JaclVal r_old = jacl_eval(vm_old, src);
+    ASSERT(!jacl_is_error(r_old));
+    ASSERT_INT_EQ(jacl_as_i32(r_old), 42);
+    jacl_vm_free(vm_old);
+
+    /* Staged path */
+    JaclError err;
+    JaclVal r_new = staged_run(src, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged caret: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(r_new));
+    ASSERT_INT_EQ(jacl_as_i32(r_new), 42);
+
+    TEST_PASS();
+}
+
+/* Test: ^it overrides a pre-existing `it` in caller's scope. */
+static int test_staged_hygiene_caret_override(void) {
+    const char *src =
+        "defmacro collide {x} {\n"
+        "  syntax-quote [mut ^it ~x]\n"
+        "}\n"
+        "proc run {} {\n"
+        "  mut it 999\n"
+        "  collide 7\n"
+        "  $it\n"
+        "}\n"
+        "run";
+
+    /* Legacy path */
+    JaclVM* vm_old = jacl_vm_new();
+    JaclVal r_old = jacl_eval(vm_old, src);
+    ASSERT(!jacl_is_error(r_old));
+    ASSERT_INT_EQ(jacl_as_i32(r_old), 7);
+    jacl_vm_free(vm_old);
+
+    /* Staged path */
+    JaclError err;
+    JaclVal r_new = staged_run(src, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged caret override: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(r_new));
+    ASSERT_INT_EQ(jacl_as_i32(r_new), 7);
+
+    TEST_PASS();
+}
+
+/* Test: unless macro on staged path (two-level expansion) */
+static int test_staged_hygiene_unless(void) {
+    const char *src =
+        "mut x 0\n"
+        "defmacro unless {cond, body} {\n"
+        "  syntax-quote [if ~cond {} ~body]\n"
+        "}\n"
+        "unless [== 1 2] { set x 42 }\n"
+        "$x";
+
+    /* Legacy path */
+    JaclVM* vm_old = jacl_vm_new();
+    JaclVal r_old = jacl_eval(vm_old, src);
+    ASSERT(!jacl_is_error(r_old));
+    ASSERT_INT_EQ(jacl_as_i32(r_old), 42);
+    jacl_vm_free(vm_old);
+
+    /* Staged path */
+    JaclError err;
+    JaclVal r_new = staged_run(src, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged unless: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(r_new));
+    ASSERT_INT_EQ(jacl_as_i32(r_new), 42);
+
+    TEST_PASS();
+}
+
+/* Test: quadruple macro (transitive composition) on staged path */
+static int test_staged_hygiene_transitive(void) {
+    const char *src =
+        "defmacro double {x} {\n"
+        "  syntax-quote [+ ~x ~x]\n"
+        "}\n"
+        "defmacro quadruple {x} {\n"
+        "  syntax-quote [double [double ~x]]\n"
+        "}\n"
+        "quadruple 5";
+
+    /* Legacy path */
+    JaclVM* vm_old = jacl_vm_new();
+    JaclVal r_old = jacl_eval(vm_old, src);
+    ASSERT(!jacl_is_error(r_old));
+    ASSERT_INT_EQ(jacl_as_i32(r_old), 20);
+    jacl_vm_free(vm_old);
+
+    /* Staged path */
+    JaclError err;
+    JaclVal r_new = staged_run(src, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged transitive: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(r_new));
+    ASSERT_INT_EQ(jacl_as_i32(r_new), 20);
+
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -818,6 +1055,14 @@ int main(void) {
     { "staged_macro_e2e",        test_staged_macro_e2e },
     { "staged_macro_block",      test_staged_macro_block },
     { "staged_macro_fwd_ref",    test_staged_macro_forward_ref },
+    /* US-009 (macro-eval): mark-propagation hygiene on staged path */
+    { "staged_hygiene_shadow",   test_staged_hygiene_local_shadow },
+    { "staged_hygiene_nested",   test_staged_hygiene_nested_macros },
+    { "staged_hygiene_global",   test_staged_hygiene_global_fallback },
+    { "staged_hygiene_caret",    test_staged_hygiene_caret },
+    { "staged_hygiene_caret_ovr",test_staged_hygiene_caret_override },
+    { "staged_hygiene_unless",   test_staged_hygiene_unless },
+    { "staged_hygiene_trans",    test_staged_hygiene_transitive },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

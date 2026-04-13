@@ -104,6 +104,8 @@ typedef struct {
   uint32_t   spread_count_top;  /* top index in spread_counts */
   /* Generator/yield support */
   JaclVal    yield_value;        /* yielded value (set by OP_YIELD_SM) */
+  /* US-009: scope mark for hygiene in staged macro expansion */
+  uint32_t   macro_scope_mark;   /* >0 during staged macro eval; make-syntax applies this */
 } VM;
 
 /* --- jacl_context_t: reentrant execution context ---
@@ -795,6 +797,7 @@ VMResult vm_exec(VM* vm, BytecodeChunk* chunk) {
   top_closure.chunk    = *chunk;
   top_closure.variadic = false;
 
+  vm->stack_top = 0;  /* US-009: reset stack after staged macro expansion may have left values */
   vm->frames[0].closure    = &top_closure;
   vm->frames[0].return_ip  = NULL;
   vm->frames[0].stack_base = 0;
@@ -6031,13 +6034,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
          * allocates a fresh JaclSyntax, and pushes it. Dispatched before
          * the introspection path because construction ops don't expect
          * a syntax object as the operand on top of the stack. */
-        if (subop >= 7 && subop <= 12) {
+        if ((subop >= 7 && subop <= 12) || subop == 15) {
           static const char *mk_names[] = {
             "make-syntax lit-int",    "make-syntax lit-float",
             "make-syntax lit-string", "make-syntax var-ref",
             "make-syntax command",    "make-syntax block"
           };
-          const char *mk_name = mk_names[subop - 7];
+          const char *mk_name = (subop <= 12) ? mk_names[subop - 7]
+                                              : "make-syntax var-ref-caret";
 
           switch (subop) {
           case 7: {  /* make-syntax lit-int */
@@ -6053,6 +6057,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             JaclSyntax *rsyn = jacl_as_syntax(out);
             rsyn->kind = SYNTAX_LIT_INT;
             rsyn->data.lit_int.value = jacl_as_i32(v);
+            rsyn->scope_mark = vm->macro_scope_mark;
             result = vm__push(vm, out);
             if (result != VM_OK) return result;
             break;
@@ -6070,6 +6075,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             JaclSyntax *rsyn = jacl_as_syntax(out);
             rsyn->kind = SYNTAX_LIT_FLOAT;
             rsyn->data.lit_float.value = jacl_as_f32(v);
+            rsyn->scope_mark = vm->macro_scope_mark;
             result = vm__push(vm, out);
             if (result != VM_OK) return result;
             break;
@@ -6087,6 +6093,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             JaclSyntax *rsyn = jacl_as_syntax(out);
             rsyn->kind = SYNTAX_LIT_STRING;
             rsyn->data.lit_string.value = v;
+            rsyn->scope_mark = vm->macro_scope_mark;
             result = vm__push(vm, out);
             if (result != VM_OK) return result;
             break;
@@ -6104,6 +6111,26 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             JaclSyntax *rsyn = jacl_as_syntax(out);
             rsyn->kind = SYNTAX_VAR_REF;
             rsyn->data.var_ref.name = v;
+            rsyn->scope_mark = vm->macro_scope_mark;
+            result = vm__push(vm, out);
+            if (result != VM_OK) return result;
+            break;
+          }
+          case 15: {  /* make-syntax var-ref-caret (^name: scope_mark=0, is_caret=1) */
+            JaclVal v;
+            result = vm__pop(vm, &v); if (result != VM_OK) return result;
+            if (jacl_is_error(v)) { result = vm__push(vm, v); if (result != VM_OK) return result; break; }
+            if (!jacl_is_string(v)) {
+              vm__set_error(vm, "type error in '%s': expected string, got %s",
+                            mk_name, vm__type_name(v));
+              return VM_RUNTIME_ERROR;
+            }
+            JaclVal out = gc_alloc_syntax(&vm->heap);
+            JaclSyntax *rsyn = jacl_as_syntax(out);
+            rsyn->kind = SYNTAX_VAR_REF;
+            rsyn->data.var_ref.name = v;
+            rsyn->scope_mark = 0;  /* caret: bypass macro mark */
+            rsyn->is_caret = 1;
             result = vm__push(vm, out);
             if (result != VM_OK) return result;
             break;
@@ -6139,6 +6166,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             rsyn->kind = SYNTAX_COMMAND;
             rsyn->data.command.head = head_val;
             rsyn->data.command.args = args_vec;
+            rsyn->scope_mark = vm->macro_scope_mark;
             result = vm__push(vm, out);
             if (result != VM_OK) return result;
             break;
@@ -6166,6 +6194,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             JaclSyntax *rsyn = jacl_as_syntax(out);
             rsyn->kind = SYNTAX_BLOCK;
             rsyn->data.block.commands = cmds_vec;
+            rsyn->scope_mark = vm->macro_scope_mark;
             result = vm__push(vm, out);
             if (result != VM_OK) return result;
             break;

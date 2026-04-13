@@ -1215,6 +1215,7 @@ typedef struct {
   uint32_t   spread_counts[32];
   uint32_t   spread_count_top;
   JaclVal    yield_value;
+  uint32_t   macro_scope_mark;   /* >0 during staged macro eval; make-syntax applies this */
 } VM;
 
 /* --- jacl_context_t: reentrant execution context (full definition) ---

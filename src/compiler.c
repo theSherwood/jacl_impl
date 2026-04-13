@@ -8112,7 +8112,11 @@ static void syntax__compile_sq_node(Compiler *c, AstNode *node) {
                                         (size_t)node->data.var_ref.length);
         compiler__emit_constant(c, name, line);
         compiler__emit_byte(c, OP_SYNTAX_OP, line);
-        compiler__emit_byte(c, 10, line); /* make-syntax var-ref */
+        if (node->is_caret) {
+            compiler__emit_byte(c, 15, line); /* make-syntax var-ref-caret (scope_mark=0) */
+        } else {
+            compiler__emit_byte(c, 10, line); /* make-syntax var-ref */
+        }
         break;
     }
 
