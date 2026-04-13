@@ -1454,13 +1454,18 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                     uint32_t macro_mark = ++es->scope_counter;
                     es->ctx->vm.macro_scope_mark = macro_mark;
 
+                    /* US-010: expose gensym counter to the VM so the
+                     * gensym builtin (subop 16) can allocate fresh names. */
+                    es->ctx->vm.gensym_counter_ptr = &es->gensym_counter;
+
                     /* Invoke the compiled macro closure */
                     JaclError merr;
                     result_syn = jacl_ctx_run_closure(
                         es->ctx, entry->closure, arg_vals, argc, &merr);
 
-                    /* Reset scope mark after invocation */
+                    /* Reset scope mark and gensym counter pointer after invocation */
                     es->ctx->vm.macro_scope_mark = 0;
+                    es->ctx->vm.gensym_counter_ptr = NULL;
 
                     if (merr.kind != JACL_ERROR_NONE) {
                         char err[256];

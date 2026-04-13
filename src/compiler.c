@@ -8121,6 +8121,32 @@ static void syntax__compile_sq_node(Compiler *c, AstNode *node) {
     }
 
     case AST_COMMAND: {
+        /* US-010: detect [gensym] / [gensym "prefix"] inside syntax-quote
+         * and emit OP_SYNTAX_OP subop 16 (gensym builtin) instead of
+         * compiling it as a normal make-syntax command. */
+        {
+            AstNode *head = node->data.command.head;
+            uint32_t argc = node->data.command.arg_count;
+            if (head->type == AST_LIT_STRING &&
+                head->data.lit_string.length == 6 &&
+                memcmp(head->data.lit_string.value, "gensym", 6) == 0 &&
+                argc <= 1) {
+                /* Emit prefix string constant */
+                const char *prefix = "g";
+                size_t prefix_len = 1;
+                if (argc == 1 && node->data.command.args[0]->type == AST_LIT_STRING) {
+                    prefix = node->data.command.args[0]->data.lit_string.value;
+                    prefix_len = (size_t)node->data.command.args[0]->data.lit_string.length;
+                }
+                JaclVal pstr = jacl_string_new(c->heap, c->intern_table,
+                                               prefix, prefix_len);
+                compiler__emit_constant(c, pstr, line);
+                compiler__emit_byte(c, OP_SYNTAX_OP, line);
+                compiler__emit_byte(c, 16, line);  /* gensym */
+                break;
+            }
+        }
+
         /* Head → syntax */
         syntax__compile_sq_node(c, node->data.command.head);
 

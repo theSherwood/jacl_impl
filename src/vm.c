@@ -66,6 +66,12 @@ typedef struct {
   uint32_t        count;
 } StackTrace;
 
+/* Forward declaration: defined in syntax.c (later in unity build) */
+JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
+                         ThreadHeap *heap, JaclInternTable *intern,
+                         uint32_t *gensym_counter,
+                         uint32_t scope_mark, const char **err);
+
 /* --- VM state --- */
 
 typedef struct {
@@ -106,6 +112,8 @@ typedef struct {
   JaclVal    yield_value;        /* yielded value (set by OP_YIELD_SM) */
   /* US-009: scope mark for hygiene in staged macro expansion */
   uint32_t   macro_scope_mark;   /* >0 during staged macro eval; make-syntax applies this */
+  /* US-010: gensym counter pointer — set by expand__node before staged closure invocation */
+  uint32_t  *gensym_counter_ptr; /* points into ExpandState.gensym_counter; NULL outside staged eval */
 } VM;
 
 /* --- jacl_context_t: reentrant execution context ---
@@ -5969,7 +5977,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
          *   11 = make-syntax command    (head, args-vec → syntax)
          *   12 = make-syntax block      (commands-vec → syntax)
          *   13 = syntax-error message       (string → halt)
-         *   14 = syntax-error message+syn   (string, syntax → halt) */
+         *   14 = syntax-error message+syn   (string, syntax → halt)
+         *   15 = make-syntax var-ref-caret  (string → syntax, scope_mark=0, is_caret=1)
+         *   16 = gensym                     (prefix-string → syntax var-ref, is_gensym=1) */
         uint8_t subop = vm__read_byte(vm);
         gc__current_heap = &vm->heap;
 
@@ -6034,13 +6044,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
          * allocates a fresh JaclSyntax, and pushes it. Dispatched before
          * the introspection path because construction ops don't expect
          * a syntax object as the operand on top of the stack. */
-        if ((subop >= 7 && subop <= 12) || subop == 15) {
+        if ((subop >= 7 && subop <= 12) || subop == 15 || subop == 16) {
           static const char *mk_names[] = {
             "make-syntax lit-int",    "make-syntax lit-float",
             "make-syntax lit-string", "make-syntax var-ref",
             "make-syntax command",    "make-syntax block"
           };
           const char *mk_name = (subop <= 12) ? mk_names[subop - 7]
+                               : (subop == 16) ? "gensym"
                                               : "make-syntax var-ref-caret";
 
           switch (subop) {
@@ -6131,6 +6142,40 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             rsyn->data.var_ref.name = v;
             rsyn->scope_mark = 0;  /* caret: bypass macro mark */
             rsyn->is_caret = 1;
+            result = vm__push(vm, out);
+            if (result != VM_OK) return result;
+            break;
+          }
+          case 16: {  /* US-010: gensym (prefix-string → syntax var-ref) */
+            JaclVal v;
+            result = vm__pop(vm, &v); if (result != VM_OK) return result;
+            if (jacl_is_error(v)) { result = vm__push(vm, v); if (result != VM_OK) return result; break; }
+            if (!jacl_is_string(v)) {
+              vm__set_error(vm, "type error in '%s': expected string, got %s",
+                            mk_name, vm__type_name(v));
+              return VM_RUNTIME_ERROR;
+            }
+            if (!vm->gensym_counter_ptr) {
+              vm__set_error(vm, "gensym: no gensym counter available (not in macro expansion)");
+              return VM_RUNTIME_ERROR;
+            }
+            char prefix_buf[65];
+            uint32_t plen = jacl_string_byte_len(v);
+            if (plen > 64) {
+              vm__set_error(vm, "gensym: prefix too long (max 64 bytes)");
+              return VM_RUNTIME_ERROR;
+            }
+            jacl_string_data(v, prefix_buf, sizeof(prefix_buf));
+            prefix_buf[plen] = '\0';
+            const char *gerr = NULL;
+            JaclVal out = jacl_gensym_next(prefix_buf, plen,
+                                           &vm->heap, vm->intern_table,
+                                           vm->gensym_counter_ptr,
+                                           vm->macro_scope_mark, &gerr);
+            if (gerr) {
+              vm__set_error(vm, "gensym: %s", gerr);
+              return VM_RUNTIME_ERROR;
+            }
             result = vm__push(vm, out);
             if (result != VM_OK) return result;
             break;

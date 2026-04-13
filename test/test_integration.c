@@ -1016,6 +1016,105 @@ static int test_staged_hygiene_transitive(void) {
     TEST_PASS();
 }
 
+/* ===== US-010 (macro-eval): gensym as a VM builtin on the staged path ===== */
+
+/* Test: staged macro using [gensym] produces a working binding */
+static int test_staged_gensym_basic(void) {
+    const char *src =
+        "defmacro with_tmp {body} {\n"
+        "  syntax-quote {\n"
+        "    mut [gensym] 42\n"
+        "    ~body\n"
+        "  }\n"
+        "}\n"
+        "proc run {} {\n"
+        "  with_tmp { 99 }\n"
+        "}\n"
+        "run";
+
+    /* Legacy path */
+    JaclVM* vm_old = jacl_vm_new();
+    JaclVal r_old = jacl_eval(vm_old, src);
+    ASSERT(!jacl_is_error(r_old));
+    ASSERT(jacl_is_i32(r_old));
+    ASSERT_INT_EQ(jacl_as_i32(r_old), 99);
+    jacl_vm_free(vm_old);
+
+    /* Staged path */
+    JaclError err;
+    JaclVal r_new = staged_run(src, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged_gensym_basic: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(r_new));
+    ASSERT_INT_EQ(jacl_as_i32(r_new), 99);
+
+    TEST_PASS();
+}
+
+/* Test: staged macro using [gensym "prefix"] with a long prefix;
+ * generated binding does not collide with caller variable of same prefix. */
+static int test_staged_gensym_long_prefix_no_collision(void) {
+    const char *src =
+        "defmacro bindit {v} {\n"
+        "  syntax-quote [mut [gensym \"tmp_var\"] ~v]\n"
+        "}\n"
+        "proc run {} {\n"
+        "  mut tmp_var 99\n"
+        "  bindit 7\n"
+        "  $tmp_var\n"
+        "}\n"
+        "run";
+
+    /* Legacy path */
+    JaclVM* vm_old = jacl_vm_new();
+    JaclVal r_old = jacl_eval(vm_old, src);
+    ASSERT(!jacl_is_error(r_old));
+    ASSERT(jacl_is_i32(r_old));
+    ASSERT_INT_EQ(jacl_as_i32(r_old), 99);
+    jacl_vm_free(vm_old);
+
+    /* Staged path */
+    JaclError err;
+    JaclVal r_new = staged_run(src, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged_gensym_long_prefix: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(r_new));
+    ASSERT_INT_EQ(jacl_as_i32(r_new), 99);
+
+    TEST_PASS();
+}
+
+/* Test: staged macro using [gensym "idx"] where generated var is read back */
+static int test_staged_gensym_binding_usable(void) {
+    const char *src =
+        "defmacro wrap {v} {\n"
+        "  syntax-quote {\n"
+        "    def [gensym \"idx\"] ~v\n"
+        "    100\n"
+        "  }\n"
+        "}\n"
+        "proc run {} {\n"
+        "  wrap 42\n"
+        "}\n"
+        "run";
+
+    /* Staged path */
+    JaclError err;
+    JaclVal r = staged_run(src, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "staged_gensym_binding_usable: %s\n", err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(r));
+    ASSERT_INT_EQ(jacl_as_i32(r), 100);
+
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1063,6 +1162,10 @@ int main(void) {
     { "staged_hygiene_caret_ovr",test_staged_hygiene_caret_override },
     { "staged_hygiene_unless",   test_staged_hygiene_unless },
     { "staged_hygiene_trans",    test_staged_hygiene_transitive },
+    /* US-010 (macro-eval): gensym as VM builtin on staged path */
+    { "staged_gensym_basic",     test_staged_gensym_basic },
+    { "staged_gensym_long_pfx",  test_staged_gensym_long_prefix_no_collision },
+    { "staged_gensym_bind_use",  test_staged_gensym_binding_usable },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

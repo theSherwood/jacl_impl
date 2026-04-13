@@ -1216,6 +1216,8 @@ typedef struct {
   uint32_t   spread_count_top;
   JaclVal    yield_value;
   uint32_t   macro_scope_mark;   /* >0 during staged macro eval; make-syntax applies this */
+  /* US-010: gensym counter pointer — set by expand__node before staged closure invocation */
+  uint32_t  *gensym_counter_ptr; /* points into ExpandState.gensym_counter; NULL outside staged eval */
 } VM;
 
 /* --- jacl_context_t: reentrant execution context (full definition) ---
