@@ -677,9 +677,14 @@ typedef struct {
   uint32_t count;
 } ProcSuspendInfoList;
 
+/* Forward declaration — defined later in this file. */
+static JaclVal compiler__name_val(ThreadHeap* heap, JaclInternTable* table,
+                                  const char* name, uint32_t len);
+
 /* Walk an AST subtree within a proc body to find suspension points and callees.
    Does NOT recurse into nested proc definitions (they have their own scope). */
-void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
+void analyze__walk_body(AstNode* node, ProcSuspendInfo* info,
+                        ThreadHeap* heap, JaclInternTable* intern_table) {
   if (!node) return;
 
   switch (node->type) {
@@ -696,7 +701,7 @@ void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
           info->direct_suspends = true;
           /* Still recurse into args (they might contain calls) */
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            analyze__walk_body(node->data.command.args[i], info);
+            analyze__walk_body(node->data.command.args[i], info, heap, intern_table);
           }
           return;
         }
@@ -707,7 +712,7 @@ void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
           info->has_yield = true;
           /* Still recurse into args (they might contain calls) */
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            analyze__walk_body(node->data.command.args[i], info);
+            analyze__walk_body(node->data.command.args[i], info, heap, intern_table);
           }
           return;
         }
@@ -724,11 +729,9 @@ void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
         }
 
         /* Record callee name for named calls (for transitive propagation) */
-        if (len <= 7) {
-          JaclVal callee_name = jacl_inline_string(name, len);
-          if (info->callee_count < SUSPENSION_CALLEES_MAX) {
-            info->callees[info->callee_count++] = callee_name;
-          }
+        if (info->callee_count < SUSPENSION_CALLEES_MAX) {
+          info->callees[info->callee_count++] =
+              compiler__name_val(heap, intern_table, name, len);
         }
       } else if (head->type == AST_VAR_REF) {
         /* Indirect call through variable ($f ...) */
@@ -737,31 +740,31 @@ void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
 
       /* Recurse into arguments */
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        analyze__walk_body(node->data.command.args[i], info);
+        analyze__walk_body(node->data.command.args[i], info, heap, intern_table);
       }
       break;
     }
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
-        analyze__walk_body(node->data.block.commands[i], info);
+        analyze__walk_body(node->data.block.commands[i], info, heap, intern_table);
       }
       break;
     }
     case AST_INTERP_STRING: {
       for (uint32_t i = 0; i < node->data.interp_string.count; i++) {
-        analyze__walk_body(node->data.interp_string.segments[i], info);
+        analyze__walk_body(node->data.interp_string.segments[i], info, heap, intern_table);
       }
       break;
     }
     case AST_BREAK: {
       if (node->data.break_stmt.value) {
-        analyze__walk_body(node->data.break_stmt.value, info);
+        analyze__walk_body(node->data.break_stmt.value, info, heap, intern_table);
       }
       break;
     }
     case AST_RETURN: {
       if (node->data.return_stmt.value) {
-        analyze__walk_body(node->data.return_stmt.value, info);
+        analyze__walk_body(node->data.return_stmt.value, info, heap, intern_table);
       }
       break;
     }
@@ -771,7 +774,8 @@ void analyze__walk_body(AstNode* node, ProcSuspendInfo* info) {
 }
 
 /* Recursively collect proc definitions from AST, analyzing each body */
-void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list) {
+void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list,
+                             ThreadHeap* heap, JaclInternTable* intern_table) {
   if (!node) return;
 
   switch (node->type) {
@@ -792,9 +796,10 @@ void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list) {
 
         if (args[name_idx]->type != AST_LIT_STRING) goto recurse_args;
         uint32_t name_len = args[name_idx]->data.lit_string.length;
-        if (name_len > 7) goto recurse_args;
+        if (name_len > 128) goto recurse_args;
 
-        JaclVal proc_name = jacl_inline_string(
+        JaclVal proc_name = compiler__name_val(
+            heap, intern_table,
             args[name_idx]->data.lit_string.value, name_len);
 
         if (list->count < MAX_PROC_INFOS) {
@@ -807,38 +812,38 @@ void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list) {
 
           /* Walk the body to find suspension points and callees */
           if (args[body_idx]->type == AST_BLOCK) {
-            analyze__walk_body(args[body_idx], info);
+            analyze__walk_body(args[body_idx], info, heap, intern_table);
           }
         }
 
         /* Recurse into body to find nested procs */
         if (args[body_idx]->type == AST_BLOCK) {
-          analyze__collect_procs(args[body_idx], list);
+          analyze__collect_procs(args[body_idx], list, heap, intern_table);
         }
         return;
       }
 
       recurse_args:
       for (uint32_t i = 0; i < argc; i++) {
-        analyze__collect_procs(args[i], list);
+        analyze__collect_procs(args[i], list, heap, intern_table);
       }
       break;
     }
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
-        analyze__collect_procs(node->data.block.commands[i], list);
+        analyze__collect_procs(node->data.block.commands[i], list, heap, intern_table);
       }
       break;
     }
     case AST_BREAK: {
       if (node->data.break_stmt.value) {
-        analyze__collect_procs(node->data.break_stmt.value, list);
+        analyze__collect_procs(node->data.break_stmt.value, list, heap, intern_table);
       }
       break;
     }
     case AST_RETURN: {
       if (node->data.return_stmt.value) {
-        analyze__collect_procs(node->data.return_stmt.value, list);
+        analyze__collect_procs(node->data.return_stmt.value, list, heap, intern_table);
       }
       break;
     }
@@ -849,7 +854,9 @@ void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list) {
 
 /* Pre-compilation suspension analysis: walk AST to determine which procs suspend.
    Returns a SuspensionMap that the compiler consults during code generation. */
-SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t count) {
+SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t count,
+                                           ThreadHeap* heap,
+                                           JaclInternTable* intern_table) {
   SuspensionMap map;
   ProcSuspendInfoList proc_list;
   memset(&map, 0, sizeof(map));
@@ -857,7 +864,7 @@ SuspensionMap compiler__analyze_suspension(AstNode** nodes, uint32_t count) {
 
   /* Step 1: Collect all proc definitions and analyze bodies */
   for (uint32_t i = 0; i < count; i++) {
-    analyze__collect_procs(nodes[i], &proc_list);
+    analyze__collect_procs(nodes[i], &proc_list, heap, intern_table);
   }
 
   /* Step 2: Initialize suspension map from direct suspension */
@@ -938,8 +945,10 @@ typedef struct {
 } StateField;
 
 typedef struct {
-  uint32_t   field_count;
-  StateField fields[SM_MAX_STATE_FIELDS];
+  uint32_t         field_count;
+  StateField       fields[SM_MAX_STATE_FIELDS];
+  ThreadHeap*      heap;          /* for interning names > 7 bytes */
+  JaclInternTable* intern_table;  /* for interning names > 7 bytes */
 } StateLayout;
 
 typedef struct {
@@ -948,13 +957,23 @@ typedef struct {
   StateLayout     state_layout;
 } SuspensionAnalysis;
 
+/* Create a JaclVal from a name string, routing by length:
+   <= 7 bytes: inline string.  8-128 bytes: interned (pointer-stable).
+   Caller must ensure len <= 128 (enforced at validation sites). */
+static JaclVal compiler__name_val(ThreadHeap* heap, JaclInternTable* table,
+                                  const char* name, uint32_t len) {
+  if (len <= 7) return jacl_inline_string(name, len);
+  return jacl_intern(heap, table, name, len);
+}
+
 /* Walk an AST subtree to find suspension points for state machine compilation.
    Does NOT recurse into nested proc/spawn definitions (separate closure scopes).
    Assigns sequential IDs to each discovered suspension point.
    When map is non-NULL, also treats calls to known suspending procs as
    suspension points (SUSPEND_CALL). */
 void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
-                                  SuspensionMap* map) {
+                                  SuspensionMap* map,
+                                  ThreadHeap* heap, JaclInternTable* intern_table) {
   if (!node) return;
 
   switch (node->type) {
@@ -978,7 +997,8 @@ void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
           }
           /* Still recurse into args (they might contain nested suspension) */
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            sm__walk_suspensions(node->data.command.args[i], analysis, map);
+            sm__walk_suspensions(node->data.command.args[i], analysis, map,
+                                 heap, intern_table);
           }
           return;
         }
@@ -996,7 +1016,8 @@ void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
             analysis->suspension_count++;
           }
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            sm__walk_suspensions(node->data.command.args[i], analysis, map);
+            sm__walk_suspensions(node->data.command.args[i], analysis, map,
+                                 heap, intern_table);
           }
           return;
         }
@@ -1014,7 +1035,8 @@ void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
             analysis->suspension_count++;
           }
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            sm__walk_suspensions(node->data.command.args[i], analysis, map);
+            sm__walk_suspensions(node->data.command.args[i], analysis, map,
+                                 heap, intern_table);
           }
           return;
         }
@@ -1032,7 +1054,8 @@ void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
             analysis->suspension_count++;
           }
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            sm__walk_suspensions(node->data.command.args[i], analysis, map);
+            sm__walk_suspensions(node->data.command.args[i], analysis, map,
+                                 heap, intern_table);
           }
           return;
         }
@@ -1045,8 +1068,8 @@ void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
         }
 
         /* Call to a known suspending proc is a suspension point */
-        if (map && len <= 7) {
-          JaclVal name_val = jacl_inline_string(name, len);
+        if (map) {
+          JaclVal name_val = compiler__name_val(heap, intern_table, name, len);
           if (suspension_map_lookup(map, name_val) &&
               !suspension_map_is_generator(map, name_val)) {
             if (analysis->suspension_count < SM_MAX_SUSPENSION_POINTS) {
@@ -1060,7 +1083,8 @@ void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
               analysis->suspension_count++;
             }
             for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-              sm__walk_suspensions(node->data.command.args[i], analysis, map);
+              sm__walk_suspensions(node->data.command.args[i], analysis, map,
+                                   heap, intern_table);
             }
             return;
           }
@@ -1069,31 +1093,36 @@ void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
 
       /* Recurse into arguments for all other commands */
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        sm__walk_suspensions(node->data.command.args[i], analysis, map);
+        sm__walk_suspensions(node->data.command.args[i], analysis, map,
+                             heap, intern_table);
       }
       break;
     }
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
-        sm__walk_suspensions(node->data.block.commands[i], analysis, map);
+        sm__walk_suspensions(node->data.block.commands[i], analysis, map,
+                             heap, intern_table);
       }
       break;
     }
     case AST_INTERP_STRING: {
       for (uint32_t i = 0; i < node->data.interp_string.count; i++) {
-        sm__walk_suspensions(node->data.interp_string.segments[i], analysis, map);
+        sm__walk_suspensions(node->data.interp_string.segments[i], analysis, map,
+                             heap, intern_table);
       }
       break;
     }
     case AST_BREAK: {
       if (node->data.break_stmt.value) {
-        sm__walk_suspensions(node->data.break_stmt.value, analysis, map);
+        sm__walk_suspensions(node->data.break_stmt.value, analysis, map,
+                             heap, intern_table);
       }
       break;
     }
     case AST_RETURN: {
       if (node->data.return_stmt.value) {
-        sm__walk_suspensions(node->data.return_stmt.value, analysis, map);
+        sm__walk_suspensions(node->data.return_stmt.value, analysis, map,
+                             heap, intern_table);
       }
       break;
     }
@@ -1145,11 +1174,12 @@ void sm__collect_destructure_vec_names(AstNode* dv, StateLayout* layout,
     const char* n = dv->data.destructure_vec.names[i];
     uint32_t nl = dv->data.destructure_vec.name_lens[i];
     if (nl == 1 && n[0] == '_') continue;  /* skip wildcard */
-    sm__add_state_field(layout, jacl_inline_string(n, nl), is_mutable, false);
+    sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, n, nl), is_mutable, false);
   }
   if (dv->data.destructure_vec.rest_name) {
     sm__add_state_field(layout,
-        jacl_inline_string(dv->data.destructure_vec.rest_name,
+        compiler__name_val(layout->heap, layout->intern_table,
+                           dv->data.destructure_vec.rest_name,
                            dv->data.destructure_vec.rest_name_len),
         is_mutable, false);
   }
@@ -1161,11 +1191,12 @@ void sm__collect_destructure_named_names(AstNode* dn, StateLayout* layout,
   for (uint32_t i = 0; i < dn->data.destructure_named.count; i++) {
     const char* n = dn->data.destructure_named.names[i];
     uint32_t nl = dn->data.destructure_named.name_lens[i];
-    sm__add_state_field(layout, jacl_inline_string(n, nl), is_mutable, false);
+    sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, n, nl), is_mutable, false);
   }
   if (dn->data.destructure_named.rest_name) {
     sm__add_state_field(layout,
-        jacl_inline_string(dn->data.destructure_named.rest_name,
+        compiler__name_val(layout->heap, layout->intern_table,
+                           dn->data.destructure_named.rest_name,
                            dn->data.destructure_named.rest_name_len),
         is_mutable, false);
   }
@@ -1181,13 +1212,14 @@ void sm__collect_command_destructure_names(AstNode* pat,
     uint32_t sl = pat->data.command.head->data.lit_string.length;
     if (!(sl == 2 && s[0] == '.' && s[1] == '.') &&
         !(sl == 1 && s[0] == '_')) {
-      sm__add_state_field(layout, jacl_inline_string(s, sl), is_mutable, false);
+      sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, s, sl), is_mutable, false);
     }
   } else if (pat->data.command.head->type == AST_SPREAD) {
     AstNode* inner = pat->data.command.head->data.spread.expr;
     if (inner && inner->type == AST_LIT_STRING) {
       sm__add_state_field(layout,
-          jacl_inline_string(inner->data.lit_string.value,
+          compiler__name_val(layout->heap, layout->intern_table,
+                             inner->data.lit_string.value,
                              inner->data.lit_string.length),
           is_mutable, false);
     }
@@ -1200,12 +1232,13 @@ void sm__collect_command_destructure_names(AstNode* pat,
       uint32_t sl = elem->data.lit_string.length;
       if (sl == 2 && s[0] == '.' && s[1] == '.') continue;
       if (sl == 1 && s[0] == '_') continue;
-      sm__add_state_field(layout, jacl_inline_string(s, sl), is_mutable, false);
+      sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, s, sl), is_mutable, false);
     } else if (elem->type == AST_SPREAD) {
       AstNode* inner = elem->data.spread.expr;
       if (inner && inner->type == AST_LIT_STRING) {
         sm__add_state_field(layout,
-            jacl_inline_string(inner->data.lit_string.value,
+            compiler__name_val(layout->heap, layout->intern_table,
+                               inner->data.lit_string.value,
                                inner->data.lit_string.length),
             is_mutable, false);
       }
@@ -1234,7 +1267,8 @@ void sm__collect_block_destructure_names(AstNode* blk,
       if (cmd->data.command.arg_count == 1 &&
           cmd->data.command.args[0]->type == AST_LIT_STRING) {
         sm__add_state_field(layout,
-            jacl_inline_string(cmd->data.command.args[0]->data.lit_string.value,
+            compiler__name_val(layout->heap, layout->intern_table,
+                               cmd->data.command.args[0]->data.lit_string.value,
                                cmd->data.command.args[0]->data.lit_string.length),
             is_mutable, false);
       }
@@ -1244,12 +1278,13 @@ void sm__collect_block_destructure_names(AstNode* blk,
     if (cmd->data.command.arg_count == 1 &&
         cmd->data.command.args[0]->type == AST_LIT_STRING) {
       sm__add_state_field(layout,
-          jacl_inline_string(cmd->data.command.args[0]->data.lit_string.value,
+          compiler__name_val(layout->heap, layout->intern_table,
+                             cmd->data.command.args[0]->data.lit_string.value,
                              cmd->data.command.args[0]->data.lit_string.length),
           is_mutable, false);
     } else if (cmd->data.command.arg_count == 0) {
       /* simple name: head only */
-      sm__add_state_field(layout, jacl_inline_string(hstr, hlen),
+      sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, hstr, hlen),
                           is_mutable, false);
     }
   }
@@ -1291,7 +1326,8 @@ void sm__walk_locals(AstNode* node, StateLayout* layout) {
             if (argc == 3) name_idx = 1;
             if (args[name_idx]->type == AST_LIT_STRING) {
               sm__add_state_field(layout,
-                  jacl_inline_string(args[name_idx]->data.lit_string.value,
+                  compiler__name_val(layout->heap, layout->intern_table,
+                                     args[name_idx]->data.lit_string.value,
                                      args[name_idx]->data.lit_string.length),
                   is_mut, false);
             }
@@ -1313,13 +1349,14 @@ void sm__walk_locals(AstNode* node, StateLayout* layout) {
               args[2]->type == AST_BLOCK) {
             /* [for coll name { body }] */
             sm__add_state_field(layout,
-                jacl_inline_string(args[1]->data.lit_string.value,
+                compiler__name_val(layout->heap, layout->intern_table,
+                                   args[1]->data.lit_string.value,
                                    args[1]->data.lit_string.length),
                 false, false);
           } else if (argc == 2 && args[1]->type == AST_BLOCK &&
                      !(args[0]->type == AST_BLOCK)) {
             /* [for coll { body }] — implicit "it" */
-            sm__add_state_field(layout, jacl_inline_string("it", 2),
+            sm__add_state_field(layout, jacl_inline_string("it", 2),  /* "it" is always <= 7 */
                                 false, false);
           }
           /* Recurse into all sub-expressions */
@@ -1351,7 +1388,7 @@ void sm__walk_locals(AstNode* node, StateLayout* layout) {
             const char* pn = args[name_idx]->data.lit_string.value;
             uint32_t pnl = args[name_idx]->data.lit_string.length;
             if (pnl > 0) {
-              sm__add_state_field(layout, jacl_inline_string(pn, pnl),
+              sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, pn, pnl),
                                   false, false);
             }
           }
@@ -1448,8 +1485,9 @@ void sm__liveness_mark_read(FieldLiveness* liveness,
 }
 
 /* Helper: extract JaclVal name from an AST_LIT_STRING node. */
-JaclVal sm__lit_string_name(AstNode* node) {
-  return jacl_inline_string(node->data.lit_string.value,
+JaclVal sm__lit_string_name(const StateLayout* layout, AstNode* node) {
+  return compiler__name_val(layout->heap, layout->intern_table,
+                            node->data.lit_string.value,
                             node->data.lit_string.length);
 }
 
@@ -1466,7 +1504,7 @@ void sm__liveness_mark_binding_names(AstNode* pattern,
   switch (pattern->type) {
     case AST_LIT_STRING:
       sm__liveness_mark_write(liveness, layout,
-          sm__lit_string_name(pattern), segment);
+          sm__lit_string_name(layout, pattern), segment);
       break;
     case AST_DESTRUCTURE_VEC:
       for (uint32_t i = 0; i < pattern->data.destructure_vec.count; i++) {
@@ -1474,11 +1512,12 @@ void sm__liveness_mark_binding_names(AstNode* pattern,
         uint32_t nl = pattern->data.destructure_vec.name_lens[i];
         if (nl == 1 && n[0] == '_') continue;
         sm__liveness_mark_write(liveness, layout,
-            jacl_inline_string(n, nl), segment);
+            compiler__name_val(layout->heap, layout->intern_table, n, nl), segment);
       }
       if (pattern->data.destructure_vec.rest_name) {
         sm__liveness_mark_write(liveness, layout,
-            jacl_inline_string(pattern->data.destructure_vec.rest_name,
+            compiler__name_val(layout->heap, layout->intern_table,
+                               pattern->data.destructure_vec.rest_name,
                                pattern->data.destructure_vec.rest_name_len),
             segment);
       }
@@ -1488,11 +1527,12 @@ void sm__liveness_mark_binding_names(AstNode* pattern,
         const char* n = pattern->data.destructure_named.names[i];
         uint32_t nl = pattern->data.destructure_named.name_lens[i];
         sm__liveness_mark_write(liveness, layout,
-            jacl_inline_string(n, nl), segment);
+            compiler__name_val(layout->heap, layout->intern_table, n, nl), segment);
       }
       if (pattern->data.destructure_named.rest_name) {
         sm__liveness_mark_write(liveness, layout,
-            jacl_inline_string(pattern->data.destructure_named.rest_name,
+            compiler__name_val(layout->heap, layout->intern_table,
+                               pattern->data.destructure_named.rest_name,
                                pattern->data.destructure_named.rest_name_len),
             segment);
       }
@@ -1506,12 +1546,12 @@ void sm__liveness_mark_binding_names(AstNode* pattern,
         if (!(sl == 2 && s[0] == '.' && s[1] == '.') &&
             !(sl == 1 && s[0] == '_')) {
           sm__liveness_mark_write(liveness, layout,
-              jacl_inline_string(s, sl), segment);
+              compiler__name_val(layout->heap, layout->intern_table, s, sl), segment);
         }
       } else if (hd->type == AST_SPREAD && hd->data.spread.expr &&
                  hd->data.spread.expr->type == AST_LIT_STRING) {
         sm__liveness_mark_write(liveness, layout,
-            sm__lit_string_name(hd->data.spread.expr), segment);
+            sm__lit_string_name(layout, hd->data.spread.expr), segment);
       }
       for (uint32_t i = 0; i < pattern->data.command.arg_count; i++) {
         AstNode* elem = pattern->data.command.args[i];
@@ -1521,11 +1561,11 @@ void sm__liveness_mark_binding_names(AstNode* pattern,
           if (sl == 2 && s[0] == '.' && s[1] == '.') continue;
           if (sl == 1 && s[0] == '_') continue;
           sm__liveness_mark_write(liveness, layout,
-              jacl_inline_string(s, sl), segment);
+              compiler__name_val(layout->heap, layout->intern_table, s, sl), segment);
         } else if (elem->type == AST_SPREAD && elem->data.spread.expr &&
                    elem->data.spread.expr->type == AST_LIT_STRING) {
           sm__liveness_mark_write(liveness, layout,
-              sm__lit_string_name(elem->data.spread.expr), segment);
+              sm__lit_string_name(layout, elem->data.spread.expr), segment);
         }
       }
       break;
@@ -1544,15 +1584,15 @@ void sm__liveness_mark_binding_names(AstNode* pattern,
           if (cmd->data.command.arg_count == 1 &&
               cmd->data.command.args[0]->type == AST_LIT_STRING) {
             sm__liveness_mark_write(liveness, layout,
-                sm__lit_string_name(cmd->data.command.args[0]), segment);
+                sm__lit_string_name(layout, cmd->data.command.args[0]), segment);
           }
         } else if (cmd->data.command.arg_count == 1 &&
                    cmd->data.command.args[0]->type == AST_LIT_STRING) {
           sm__liveness_mark_write(liveness, layout,
-              sm__lit_string_name(cmd->data.command.args[0]), segment);
+              sm__lit_string_name(layout, cmd->data.command.args[0]), segment);
         } else if (cmd->data.command.arg_count == 0) {
           sm__liveness_mark_write(liveness, layout,
-              jacl_inline_string(hstr, hlen), segment);
+              compiler__name_val(layout->heap, layout->intern_table, hstr, hlen), segment);
         }
       }
       break;
@@ -1563,11 +1603,12 @@ void sm__liveness_mark_binding_names(AstNode* pattern,
 }
 
 /* Forward declaration — defined later in this file. */
-bool ast__contains_suspension(AstNode* node, SuspensionMap* map);
+bool ast__contains_suspension(AstNode* node, SuspensionMap* map,
+                               ThreadHeap* heap, JaclInternTable* intern_table);
 
 /* Check if the body of a loop (while/for) directly contains suspension. */
 bool sm__loop_body_suspends(AstNode* body) {
-  return ast__contains_suspension(body, NULL);
+  return ast__contains_suspension(body, NULL, NULL, NULL);
 }
 
 /* Liveness walker: walks AST tracking suspension segments and recording
@@ -1578,8 +1619,9 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
 
   switch (node->type) {
     case AST_VAR_REF: {
-      if (node->data.var_ref.length <= 7) {
-        JaclVal name = jacl_inline_string(node->data.var_ref.name,
+      if (node->data.var_ref.length <= 128) {
+        JaclVal name = compiler__name_val(layout->heap, layout->intern_table,
+                                          node->data.var_ref.name,
                                           node->data.var_ref.length);
         sm__liveness_mark_read(liveness, layout, name, *segment);
       }
@@ -1637,7 +1679,7 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
             /* Mark target as write */
             if (args[0]->type == AST_LIT_STRING) {
               sm__liveness_mark_write(liveness, layout,
-                  sm__lit_string_name(args[0]), *segment);
+                  sm__lit_string_name(layout, args[0]), *segment);
             }
           }
           return;
@@ -1696,7 +1738,7 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
             /* Mark for-loop binding variable */
             if (argc == 3 && args[1]->type == AST_LIT_STRING) {
               sm__liveness_mark_write(liveness, layout,
-                  sm__lit_string_name(args[1]), *segment);
+                  sm__lit_string_name(layout, args[1]), *segment);
             } else if (argc == 2 && body->type == AST_BLOCK &&
                        !(args[0]->type == AST_BLOCK)) {
               sm__liveness_mark_write(liveness, layout,
@@ -1746,7 +1788,7 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
           else return;
           if (args[name_idx]->type == AST_LIT_STRING) {
             sm__liveness_mark_write(liveness, layout,
-                sm__lit_string_name(args[name_idx]), *segment);
+                sm__lit_string_name(layout, args[name_idx]), *segment);
           }
           return;
         }
@@ -1758,14 +1800,16 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
       }
 
       /* Head might be a var ref or a bare-word proc call */
-      if (head->type == AST_VAR_REF && head->data.var_ref.length <= 7) {
+      if (head->type == AST_VAR_REF && head->data.var_ref.length <= 128) {
         sm__liveness_mark_read(liveness, layout,
-            jacl_inline_string(head->data.var_ref.name,
+            compiler__name_val(layout->heap, layout->intern_table,
+                               head->data.var_ref.name,
                                head->data.var_ref.length), *segment);
       } else if (head->type == AST_LIT_STRING &&
-                 head->data.lit_string.length <= 7) {
+                 head->data.lit_string.length <= 128) {
         sm__liveness_mark_read(liveness, layout,
-            jacl_inline_string(head->data.lit_string.value,
+            compiler__name_val(layout->heap, layout->intern_table,
+                               head->data.lit_string.value,
                                head->data.lit_string.length), *segment);
       }
       /* Walk all arguments for any other command */
@@ -1908,19 +1952,24 @@ SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
                                                         JaclVal* param_names,
                                                         uint8_t  param_count,
                                                         bool     optimize_liveness,
-                                                        SuspensionMap* map) {
+                                                        SuspensionMap* map,
+                                                        ThreadHeap* heap,
+                                                        JaclInternTable* intern_table) {
   SuspensionAnalysis analysis;
   memset(&analysis, 0, sizeof(analysis));
+  analysis.state_layout.heap = heap;
+  analysis.state_layout.intern_table = intern_table;
 
   if (!body) return analysis;
 
   /* Pass 1: find suspension points */
   if (body->type == AST_BLOCK) {
     for (uint32_t i = 0; i < body->data.block.count; i++) {
-      sm__walk_suspensions(body->data.block.commands[i], &analysis, map);
+      sm__walk_suspensions(body->data.block.commands[i], &analysis, map,
+                           heap, intern_table);
     }
   } else {
-    sm__walk_suspensions(body, &analysis, map);
+    sm__walk_suspensions(body, &analysis, map, heap, intern_table);
   }
 
   /* Pass 2: build state layout.  Always build it so that transitively
@@ -1952,7 +2001,8 @@ SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
 
 /* Check if an AST subtree contains any suspension points.
    When map is non-NULL, also checks if named proc calls are suspending. */
-bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
+bool ast__contains_suspension(AstNode* node, SuspensionMap* map,
+                               ThreadHeap* heap, JaclInternTable* intern_table) {
   if (!node) return false;
 
   switch (node->type) {
@@ -1975,34 +2025,38 @@ bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
         }
         /* Check if this is a call to a known suspending proc.
            Generator calls return a stream immediately — they don't suspend. */
-        if (map && len <= 7) {
-          JaclVal name_val = jacl_inline_string(name, len);
+        if (map) {
+          JaclVal name_val = compiler__name_val(heap, intern_table, name, len);
           if (suspension_map_lookup(map, name_val) &&
               !suspension_map_is_generator(map, name_val)) return true;
         }
       }
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        if (ast__contains_suspension(node->data.command.args[i], map))
+        if (ast__contains_suspension(node->data.command.args[i], map,
+                                     heap, intern_table))
           return true;
       }
       return false;
     }
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
-        if (ast__contains_suspension(node->data.block.commands[i], map))
+        if (ast__contains_suspension(node->data.block.commands[i], map,
+                                     heap, intern_table))
           return true;
       }
       return false;
     }
     case AST_BREAK: {
       if (node->data.break_stmt.value) {
-        return ast__contains_suspension(node->data.break_stmt.value, map);
+        return ast__contains_suspension(node->data.break_stmt.value, map,
+                                        heap, intern_table);
       }
       return false;
     }
     case AST_RETURN: {
       if (node->data.return_stmt.value) {
-        return ast__contains_suspension(node->data.return_stmt.value, map);
+        return ast__contains_suspension(node->data.return_stmt.value, map,
+                                        heap, intern_table);
       }
       return false;
     }
@@ -2020,7 +2074,9 @@ bool ast__contains_suspension(AstNode* node, SuspensionMap* map) {
  */
 #define AST_LOCAL_MUTS_MAX 64
 void ast__collect_local_muts(AstNode* node, JaclVal* names,
-                                     uint32_t* count) {
+                                     uint32_t* count,
+                                     ThreadHeap* heap,
+                                     JaclInternTable* intern_table) {
   if (!node || *count >= AST_LOCAL_MUTS_MAX) return;
 
   switch (node->type) {
@@ -2034,7 +2090,8 @@ void ast__collect_local_muts(AstNode* node, JaclVal* names,
           uint32_t argc = node->data.command.arg_count;
           if (argc >= 2 && node->data.command.args[0]->type == AST_LIT_STRING) {
             AstNode* name_node = node->data.command.args[0];
-            names[*count] = jacl_inline_string(
+            names[*count] = compiler__name_val(
+                heap, intern_table,
                 name_node->data.lit_string.value,
                 name_node->data.lit_string.length);
             (*count)++;
@@ -2050,13 +2107,15 @@ void ast__collect_local_muts(AstNode* node, JaclVal* names,
         }
       }
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        ast__collect_local_muts(node->data.command.args[i], names, count);
+        ast__collect_local_muts(node->data.command.args[i], names, count,
+                                heap, intern_table);
       }
       break;
     }
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
-        ast__collect_local_muts(node->data.block.commands[i], names, count);
+        ast__collect_local_muts(node->data.block.commands[i], names, count,
+                                heap, intern_table);
       }
       break;
     }
@@ -2085,7 +2144,9 @@ void ast__collect_local_muts(AstNode* node, JaclVal* names,
  */
 bool ast__contains_nonlocal_set_impl(AstNode* node,
                                              JaclVal* local_muts,
-                                             uint32_t local_mut_count) {
+                                             uint32_t local_mut_count,
+                                             ThreadHeap* heap,
+                                             JaclInternTable* intern_table) {
   if (!node) return false;
 
   switch (node->type) {
@@ -2099,7 +2160,8 @@ bool ast__contains_nonlocal_set_impl(AstNode* node,
           uint32_t argc = node->data.command.arg_count;
           if (argc >= 1 && node->data.command.args[0]->type == AST_LIT_STRING) {
             AstNode* target = node->data.command.args[0];
-            JaclVal target_name = jacl_inline_string(
+            JaclVal target_name = compiler__name_val(
+                heap, intern_table,
                 target->data.lit_string.value,
                 target->data.lit_string.length);
             for (uint32_t i = 0; i < local_mut_count; i++) {
@@ -2118,7 +2180,8 @@ bool ast__contains_nonlocal_set_impl(AstNode* node,
       }
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
         if (ast__contains_nonlocal_set_impl(node->data.command.args[i],
-                                             local_muts, local_mut_count))
+                                             local_muts, local_mut_count,
+                                             heap, intern_table))
           return true;
       }
       return false;
@@ -2126,7 +2189,8 @@ bool ast__contains_nonlocal_set_impl(AstNode* node,
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
         if (ast__contains_nonlocal_set_impl(node->data.block.commands[i],
-                                             local_muts, local_mut_count))
+                                             local_muts, local_mut_count,
+                                             heap, intern_table))
           return true;
       }
       return false;
@@ -2144,15 +2208,19 @@ bool ast__contains_nonlocal_set_impl(AstNode* node,
  * Used to decide whether a concurrent body (spawn/parallel/race) needs to be
  * pinned to thread 0. Bodies with only local mutations can run on any worker.
  */
-bool ast__contains_nonlocal_set(AstNode* block) {
+bool ast__contains_nonlocal_set(AstNode* block,
+                                 ThreadHeap* heap,
+                                 JaclInternTable* intern_table) {
   JaclVal local_muts[AST_LOCAL_MUTS_MAX];
   uint32_t local_mut_count = 0;
 
   /* First pass: collect all mut names declared in this body */
-  ast__collect_local_muts(block, local_muts, &local_mut_count);
+  ast__collect_local_muts(block, local_muts, &local_mut_count,
+                          heap, intern_table);
 
   /* Second pass: check if any set! targets a non-local name */
-  return ast__contains_nonlocal_set_impl(block, local_muts, local_mut_count);
+  return ast__contains_nonlocal_set_impl(block, local_muts, local_mut_count,
+                                          heap, intern_table);
 }
 
 /* --- Internal: Loop context for break/continue --- */
@@ -2368,7 +2436,7 @@ JaclVal compiler__global_name_val(Compiler* c, const char* name,
     return jacl_intern(c->heap, c->intern_table, buf, total);
   }
 
-  return jacl_inline_string(name, name_len);
+  return compiler__name_val(c->heap, c->intern_table, name, name_len);
 }
 
 /* --- Internal: Emit helpers --- */
@@ -2634,7 +2702,9 @@ int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
  */
 #define AST_LOCAL_NAMES_MAX 128
 void ast__collect_local_names(AstNode* node, JaclVal* names,
-                                      uint32_t* count) {
+                                      uint32_t* count,
+                                      ThreadHeap* heap,
+                                      JaclInternTable* intern_table) {
   if (!node || *count >= AST_LOCAL_NAMES_MAX) return;
 
   switch (node->type) {
@@ -2649,12 +2719,11 @@ void ast__collect_local_names(AstNode* node, JaclVal* names,
           uint32_t argc = node->data.command.arg_count;
           if (argc >= 2 && node->data.command.args[0]->type == AST_LIT_STRING) {
             AstNode* name_node = node->data.command.args[0];
-            uint32_t nlen = name_node->data.lit_string.length;
-            if (nlen <= 7) {
-              names[*count] = jacl_inline_string(
-                  name_node->data.lit_string.value, nlen);
-              (*count)++;
-            }
+            names[*count] = compiler__name_val(
+                heap, intern_table,
+                name_node->data.lit_string.value,
+                name_node->data.lit_string.length);
+            (*count)++;
           }
           return;
         }
@@ -2667,13 +2736,15 @@ void ast__collect_local_names(AstNode* node, JaclVal* names,
         }
       }
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        ast__collect_local_names(node->data.command.args[i], names, count);
+        ast__collect_local_names(node->data.command.args[i], names, count,
+                                 heap, intern_table);
       }
       break;
     }
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
-        ast__collect_local_names(node->data.block.commands[i], names, count);
+        ast__collect_local_names(node->data.block.commands[i], names, count,
+                                 heap, intern_table);
       }
       break;
     }
@@ -2719,8 +2790,8 @@ bool ast__refs_nonlocal_mutable_impl(AstNode* node,
   switch (node->type) {
     case AST_VAR_REF: {
       uint32_t len = node->data.var_ref.length;
-      if (len > 7) return false;
-      JaclVal name = jacl_inline_string(node->data.var_ref.name, len);
+      if (len > 128) return false;
+      JaclVal name = compiler__name_val(enclosing->heap, enclosing->intern_table, node->data.var_ref.name, len);
       /* Check if locally declared in the body */
       for (uint32_t i = 0; i < local_name_count; i++) {
         if (local_names[i] == name) return false;
@@ -2741,8 +2812,8 @@ bool ast__refs_nonlocal_mutable_impl(AstNode* node,
         }
         /* Check if function call target is a non-local closure that
            transitively captures mutable state (US-003). */
-        if (hlen <= 7) {
-          JaclVal fname = jacl_inline_string(hname, hlen);
+        if (hlen <= 128) {
+          JaclVal fname = compiler__name_val(enclosing->heap, enclosing->intern_table, hname, hlen);
           bool is_local_name = false;
           for (uint32_t i = 0; i < local_name_count; i++) {
             if (local_names[i] == fname) { is_local_name = true; break; }
@@ -2789,7 +2860,8 @@ bool compiler__body_captures_mutable(Compiler* enclosing,
                                              AstNode* body_block) {
   JaclVal local_names[AST_LOCAL_NAMES_MAX];
   uint32_t local_name_count = 0;
-  ast__collect_local_names(body_block, local_names, &local_name_count);
+  ast__collect_local_names(body_block, local_names, &local_name_count,
+                           enclosing->heap, enclosing->intern_table);
   return ast__refs_nonlocal_mutable_impl(body_block, local_names,
                                           local_name_count, enclosing);
 }
@@ -2987,7 +3059,8 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   AstNode** stmts = body_block->data.block.commands;
 
   /* Check if the body contains suspension points */
-  bool body_suspends = ast__contains_suspension(body_block, c->suspension_map);
+  bool body_suspends = ast__contains_suspension(body_block, c->suspension_map,
+                                                c->heap, c->intern_table);
 
   /* Allocate anonymous closure for the parallel body */
   JaclClosure* closure = (JaclClosure*)arena_alloc(c->arena, sizeof(JaclClosure));
@@ -3002,7 +3075,8 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
 
   /* Pin this body to thread 0 if it mutates non-local variables
      OR captures a mutable (mut/box) binding from an enclosing scope. */
-  bool needs_pinning = ast__contains_nonlocal_set(body_block)
+  bool needs_pinning = ast__contains_nonlocal_set(body_block,
+                                                   c->heap, c->intern_table)
                     || compiler__body_captures_mutable(c, body_block);
   closure->pinned = needs_pinning;
 
@@ -3012,7 +3086,7 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   if (body_suspends) {
     /* SM parallel body: analyze suspensions, compile as state machine */
     sm_analysis_data = compiler__analyze_suspensions(
-        body_block, NULL, 0, true, c->suspension_map);
+        body_block, NULL, 0, true, c->suspension_map, c->heap, c->intern_table);
     closure->param_count = 2;
     JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
     pnames[0] = jacl_inline_string("__sm", 4);
@@ -3143,8 +3217,8 @@ int compiler__head_matches(AstNode* head, const char* name, uint32_t len) {
 int16_t compiler__node_known_arity(Compiler* c, AstNode* node) {
   if (node->type == AST_VAR_REF) {
     uint32_t name_len = node->data.var_ref.length;
-    if (name_len <= 7) {
-      JaclVal name_val = jacl_inline_string(node->data.var_ref.name, name_len);
+    if (name_len <= 128) {
+      JaclVal name_val = compiler__name_val(c->heap, c->intern_table, node->data.var_ref.name, name_len);
       int slot = compiler__resolve_local(c, name_val);
       if (slot != -1) {
         return c->locals[slot].known_arity;
@@ -3155,8 +3229,8 @@ int16_t compiler__node_known_arity(Compiler* c, AstNode* node) {
   }
   if (node->type == AST_LIT_STRING) {
     uint32_t name_len = node->data.lit_string.length;
-    if (name_len <= 7) {
-      JaclVal name_val = jacl_inline_string(node->data.lit_string.value, name_len);
+    if (name_len <= 128) {
+      JaclVal name_val = compiler__name_val(c->heap, c->intern_table, node->data.lit_string.value, name_len);
       GlobalArity* ga = compiler__find_global(c, name_val);
       return ga ? ga->known_arity : -1;
     }
@@ -3290,8 +3364,8 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
     return;
   }
   /* Check if callback is a known suspending proc ($var reference) */
-  if (args[1]->type == AST_VAR_REF && args[1]->data.var_ref.length <= 7) {
-    JaclVal cb_name = jacl_inline_string(args[1]->data.var_ref.name,
+  if (args[1]->type == AST_VAR_REF && args[1]->data.var_ref.length <= 128) {
+    JaclVal cb_name = compiler__name_val(c->heap, c->intern_table, args[1]->data.var_ref.name,
                                           args[1]->data.var_ref.length);
     char err_msg[128];
     snprintf(err_msg, sizeof(err_msg),
@@ -3309,7 +3383,8 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
     }
   }
   /* Check if callback block contains suspension points */
-  if (ast__contains_suspension(args[1], c->suspension_map)) {
+  if (ast__contains_suspension(args[1], c->suspension_map,
+                                c->heap, c->intern_table)) {
     compiler__error(c, line, col,
         "cannot suspend inside non-suspending callback");
     return;
@@ -3350,9 +3425,9 @@ void compiler__compile_destructure_vec(
   int has_rest = (rest_name != NULL && rest_name_len > 0);
 
   /* Validate rest name length */
-  if (has_rest && rest_name_len > 7) {
+  if (has_rest && rest_name_len > 128) {
     compiler__error(c, line, col,
-                    "variable name exceeds 7-byte inline limit");
+                    "variable name exceeds 128-byte limit");
     return;
   }
 
@@ -3361,9 +3436,9 @@ void compiler__compile_destructure_vec(
   for (uint32_t i = 0; i < d_count; i++) {
     if (d_name_lens[i] == 1 && d_names[i][0] == '_') {
       skip_mask |= (uint8_t)(1u << i);
-    } else if (d_name_lens[i] > 7) {
+    } else if (d_name_lens[i] > 128) {
       compiler__error(c, line, col,
-                      "variable name exceeds 7-byte inline limit");
+                      "variable name exceeds 128-byte limit");
       return;
     }
   }
@@ -3390,7 +3465,7 @@ void compiler__compile_destructure_vec(
             JaclVal wc_name = jacl_inline_string("", 0);
             compiler__add_local(c, wc_name, line, col);
           } else {
-            JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+            JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
             compiler__add_local(c, name_val, line, col);
             if (d_types && d_types[i]) {
               JaclType t;
@@ -3401,7 +3476,7 @@ void compiler__compile_destructure_vec(
           }
         }
         /* Register local for rest vector */
-        JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+        JaclVal rest_val = compiler__name_val(c->heap, c->intern_table, rest_name, rest_name_len);
         compiler__add_local(c, rest_val, line, col);
         c->locals[c->local_count - 1].type = TYPE_VEC;
       } else {
@@ -3419,7 +3494,7 @@ void compiler__compile_destructure_vec(
           compiler__emit_u16(c, idx, line);
           compiler__emit_byte(c, OP_VEC_GET, line);
           compiler__emit_byte(c, OP_MAKE_CELL, line);
-          JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
           compiler__add_local(c, name_val, line, col);
           c->locals[c->local_count - 1].is_mutable = true;
           if (d_types && d_types[i]) {
@@ -3446,7 +3521,7 @@ void compiler__compile_destructure_vec(
         /* Emit OP_VEC_SLICE */
         compiler__emit_byte(c, OP_VEC_SLICE, line);
         compiler__emit_byte(c, OP_MAKE_CELL, line);
-        JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+        JaclVal rest_val = compiler__name_val(c->heap, c->intern_table, rest_name, rest_name_len);
         compiler__add_local(c, rest_val, line, col);
         c->locals[c->local_count - 1].is_mutable = true;
         c->locals[c->local_count - 1].type = TYPE_VEC;
@@ -3462,7 +3537,7 @@ void compiler__compile_destructure_vec(
       if (is_mutable && c->current_module) {
         compiler__emit_byte(c, OP_BOX, line);
       }
-      JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+      JaclVal rest_val = compiler__name_val(c->heap, c->intern_table, rest_name, rest_name_len);
       JaclVal rest_gkey = compiler__global_name_val(c, rest_name, rest_name_len);
       uint16_t rest_idx = chunk_add_constant(c->chunk, rest_gkey);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
@@ -3490,7 +3565,7 @@ void compiler__compile_destructure_vec(
         if (is_mutable && c->current_module) {
           compiler__emit_byte(c, OP_BOX, line);
         }
-        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
         JaclVal global_key = compiler__global_name_val(c, d_names[i],
                                                         d_name_lens[i]);
         uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
@@ -3521,7 +3596,7 @@ void compiler__compile_destructure_vec(
         compiler__emit_byte(c, skip_mask, line);
         for (uint32_t i = 0; i < d_count; i++) {
           if (skip_mask & (1u << i)) continue; /* wildcard: no local */
-          JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
           compiler__add_local(c, name_val, line, col);
           if (d_types && d_types[i]) {
             JaclType t;
@@ -3551,7 +3626,7 @@ void compiler__compile_destructure_vec(
           /* Wrap in cell for mutable binding */
           compiler__emit_byte(c, OP_MAKE_CELL, line);
           /* Register local */
-          JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
           compiler__add_local(c, name_val, line, col);
           c->locals[c->local_count - 1].is_mutable = true;
           if (d_types && d_types[i]) {
@@ -3583,7 +3658,7 @@ void compiler__compile_destructure_vec(
         if (is_mutable && c->current_module) {
           compiler__emit_byte(c, OP_BOX, line);
         }
-        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
         JaclVal global_key = compiler__global_name_val(c, d_names[i],
                                                         d_name_lens[i]);
         uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
@@ -3635,9 +3710,9 @@ void compiler__compile_destructure_named(
   int has_rest = (rest_name != NULL && rest_name_len > 0);
 
   /* Validate rest name length */
-  if (has_rest && rest_name_len > 7) {
+  if (has_rest && rest_name_len > 128) {
     compiler__error(c, line, col,
-                    "variable name exceeds 7-byte inline limit");
+                    "variable name exceeds 128-byte limit");
     return;
   }
 
@@ -3648,9 +3723,9 @@ void compiler__compile_destructure_named(
                       "'_' is meaningless in named destructuring; just omit the field");
       return;
     }
-    if (d_name_lens[i] > 7) {
+    if (d_name_lens[i] > 128) {
       compiler__error(c, line, col,
-                      "variable name exceeds 7-byte inline limit");
+                      "variable name exceeds 128-byte limit");
       return;
     }
   }
@@ -3725,9 +3800,9 @@ void compiler__compile_destructure_named(
         }
       }
       if (!already_listed) {
-        if (sdef->fields[fi].name_len > 7) {
+        if (sdef->fields[fi].name_len > 128) {
           compiler__error(c, line, col,
-                          "variable name exceeds 7-byte inline limit");
+                          "variable name exceeds 128-byte limit");
           return;
         }
         exp_names[exp_count]     = sdef->fields[fi].name;
@@ -3741,7 +3816,7 @@ void compiler__compile_destructure_named(
     /* Check for same-scope shadowing */
     if (c->scope_depth > 0) {
       for (uint32_t i = 0; i < exp_count; i++) {
-        JaclVal check_name = jacl_inline_string(exp_names[i], exp_name_lens[i]);
+        JaclVal check_name = compiler__name_val(c->heap, c->intern_table, exp_names[i], exp_name_lens[i]);
         for (int j = (int)c->local_count - 1; j >= 0; j--) {
           if (c->locals[j].depth < c->scope_depth) break;
           if (c->locals[j].name == check_name) {
@@ -3795,7 +3870,7 @@ void compiler__compile_destructure_named(
           compiler__emit_byte(c, OP_MAKE_CELL, line);
         }
 
-        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
         compiler__add_local(c, name_val, line, col);
         if (is_mutable)
           c->locals[c->local_count - 1].is_mutable = true;
@@ -3819,14 +3894,14 @@ void compiler__compile_destructure_named(
         compiler__emit_byte(c, OP_DESTRUCTURE_NAMED_REST, line);
         compiler__emit_byte(c, (uint8_t)d_count, line);
         for (uint32_t i = 0; i < d_count; i++) {
-          JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          JaclVal key_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
           uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
           compiler__emit_u16(c, key_idx, line);
         }
         if (is_mutable) {
           compiler__emit_byte(c, OP_MAKE_CELL, line);
         }
-        JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+        JaclVal rest_val = compiler__name_val(c->heap, c->intern_table, rest_name, rest_name_len);
         compiler__add_local(c, rest_val, line, col);
         if (is_mutable)
           c->locals[c->local_count - 1].is_mutable = true;
@@ -3842,7 +3917,7 @@ void compiler__compile_destructure_named(
 
         compiler__emit_byte(c, OP_DESTRUCTURE_NAMED, line);
         compiler__emit_byte(c, 1, line);
-        JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal key_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
         uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
         compiler__emit_u16(c, key_idx, line);
 
@@ -3850,7 +3925,7 @@ void compiler__compile_destructure_named(
           compiler__emit_byte(c, OP_MAKE_CELL, line);
         }
 
-        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
         compiler__add_local(c, name_val, line, col);
         if (is_mutable)
           c->locals[c->local_count - 1].is_mutable = true;
@@ -3870,14 +3945,14 @@ void compiler__compile_destructure_named(
         compiler__emit_byte(c, OP_DESTRUCTURE_NAMED_REST, line);
         compiler__emit_byte(c, (uint8_t)d_count, line);
         for (uint32_t i = 0; i < d_count; i++) {
-          JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+          JaclVal key_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
           uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
           compiler__emit_u16(c, key_idx, line);
         }
         if (is_mutable) {
           compiler__emit_byte(c, OP_MAKE_CELL, line);
         }
-        JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+        JaclVal rest_val = compiler__name_val(c->heap, c->intern_table, rest_name, rest_name_len);
         compiler__add_local(c, rest_val, line, col);
         if (is_mutable)
           c->locals[c->local_count - 1].is_mutable = true;
@@ -3894,7 +3969,7 @@ void compiler__compile_destructure_named(
       compiler__emit_byte(c, OP_DESTRUCTURE_NAMED, line);
       compiler__emit_byte(c, (uint8_t)d_count, line);
       for (uint32_t i = 0; i < d_count; i++) {
-        JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal key_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
         uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
         compiler__emit_u16(c, key_idx, line);
       }
@@ -3904,7 +3979,7 @@ void compiler__compile_destructure_named(
         if (is_mutable && c->current_module) {
           compiler__emit_byte(c, OP_BOX, line);
         }
-        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
         JaclVal global_key = compiler__global_name_val(c, d_names[i],
                                                         d_name_lens[i]);
         uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
@@ -3930,7 +4005,7 @@ void compiler__compile_destructure_named(
       compiler__emit_byte(c, OP_DESTRUCTURE_NAMED_REST, line);
       compiler__emit_byte(c, (uint8_t)d_count, line);
       for (uint32_t i = 0; i < d_count; i++) {
-        JaclVal key_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal key_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
         uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
         compiler__emit_u16(c, key_idx, line);
       }
@@ -3940,7 +4015,7 @@ void compiler__compile_destructure_named(
       if (is_mutable && c->current_module) {
         compiler__emit_byte(c, OP_BOX, line);
       }
-      JaclVal rest_val = jacl_inline_string(rest_name, rest_name_len);
+      JaclVal rest_val = compiler__name_val(c->heap, c->intern_table, rest_name, rest_name_len);
       JaclVal rest_gkey = compiler__global_name_val(c, rest_name, rest_name_len);
       uint16_t rest_idx = chunk_add_constant(c->chunk, rest_gkey);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
@@ -3962,7 +4037,7 @@ void compiler__compile_destructure_named(
         if (is_mutable && c->current_module) {
           compiler__emit_byte(c, OP_BOX, line);
         }
-        JaclVal name_val = jacl_inline_string(d_names[i], d_name_lens[i]);
+        JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
         JaclVal global_key = compiler__global_name_val(c, d_names[i],
                                                         d_name_lens[i]);
         uint16_t name_idx = chunk_add_constant(c->chunk, global_key);
@@ -4168,11 +4243,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Generic spread call: resolve head as callable, args, then OP_CALL_SPREAD */
     if (head->type == AST_LIT_STRING) {
       uint32_t name_len = head->data.lit_string.length;
-      if (name_len > 7) {
-        compiler__error(c, line, col, "command name exceeds 7-byte inline limit");
+      if (name_len > 128) {
+        compiler__error(c, line, col, "command name exceeds 128-byte limit");
         return;
       }
-      JaclVal name_val = jacl_inline_string(head->data.lit_string.value, name_len);
+      JaclVal name_val = compiler__name_val(c->heap, c->intern_table, head->data.lit_string.value, name_len);
       int local_slot = compiler__resolve_local(c, name_val);
       if (local_slot != -1) {
         if (c->locals[local_slot].is_mutable) {
@@ -4718,8 +4793,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__error(c, line, col, "mut name must be a string");
       return;
     }
-    if (name_len > 7) {
-      compiler__error(c, line, col, "variable name exceeds 7-byte inline limit");
+    if (name_len > 128) {
+      compiler__error(c, line, col, "variable name exceeds 128-byte limit");
       return;
     }
 
@@ -4749,7 +4824,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       effective_type = TYPE_DYN;
     }
 
-    JaclVal name_val = jacl_inline_string(bind_name_ptr, name_len);
+    JaclVal name_val = compiler__name_val(c->heap, c->intern_table, bind_name_ptr, name_len);
 
     if (c->sm_analysis) {
       /* SM mode: wrap value in a cell and store in state field.
@@ -4855,11 +4930,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__error(c, line, col, "set first argument must be a name");
       return;
     }
-    if (name_len > 7) {
-      compiler__error(c, line, col, "variable name exceeds 7-byte inline limit");
+    if (name_len > 128) {
+      compiler__error(c, line, col, "variable name exceeds 128-byte limit");
       return;
     }
-    JaclVal name_val = jacl_inline_string(set_name_ptr, name_len);
+    JaclVal name_val = compiler__name_val(c->heap, c->intern_table, set_name_ptr, name_len);
     char err_msg[128];
 
     /* SM mode: write to state field (through cell if mutable) */
@@ -5331,8 +5406,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__error(c, line, col, "def name must be a string");
       return;
     }
-    if (name_len > 7) {
-      compiler__error(c, line, col, "variable name exceeds 7-byte inline limit");
+    if (name_len > 128) {
+      compiler__error(c, line, col, "variable name exceeds 128-byte limit");
       return;
     }
 
@@ -5351,7 +5426,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    JaclVal name_val = jacl_inline_string(bind_name_ptr, name_len);
+    JaclVal name_val = compiler__name_val(c->heap, c->intern_table, bind_name_ptr, name_len);
 
     /* Determine effective type: declared type wins, else infer unboxed/struct from RHS */
     JaclType effective_type;
@@ -5476,8 +5551,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Get proc name */
     const char* proc_name = args[name_arg_idx]->data.lit_string.value;
     uint32_t proc_name_len = args[name_arg_idx]->data.lit_string.length;
-    if (proc_name_len > 7) {
-      compiler__error(c, line, col, "proc name exceeds 7-byte inline limit");
+    if (proc_name_len > 128) {
+      compiler__error(c, line, col, "proc name exceeds 128-byte limit");
       return;
     }
 
@@ -5539,7 +5614,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             elem = flat_elems[fi];
           }
         }
-        if (elem->type != AST_LIT_STRING || elem->data.lit_string.length > 7) {
+        if (elem->type != AST_LIT_STRING || elem->data.lit_string.length > 128) {
           compiler__error(c, line, col, "proc parameter name invalid");
           return;
         }
@@ -5552,7 +5627,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, "too many proc parameters");
           return;
         }
-        param_names_arr[param_count] = jacl_inline_string(
+        param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table,
             elem->data.lit_string.value, elem->data.lit_string.length);
         param_types_arr[param_count] = rest_type;
         param_count++;
@@ -5565,7 +5640,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         /* Type annotation followed by param name → typed param */
         fi++;
         elem = flat_elems[fi];
-        if (elem->type != AST_LIT_STRING || elem->data.lit_string.length > 7) {
+        if (elem->type != AST_LIT_STRING || elem->data.lit_string.length > 128) {
           compiler__error(c, line, col, "proc parameter name invalid");
           return;
         }
@@ -5573,13 +5648,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, "too many proc parameters");
           return;
         }
-        param_names_arr[param_count] = jacl_inline_string(
+        param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table,
             elem->data.lit_string.value, elem->data.lit_string.length);
         param_types_arr[param_count] = ptype;
         param_count++;
       } else {
         /* Untyped param name */
-        if (wlen > 7) {
+        if (wlen > 128) {
           compiler__error(c, line, col, "proc parameter name invalid");
           return;
         }
@@ -5587,7 +5662,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, "too many proc parameters");
           return;
         }
-        param_names_arr[param_count] = jacl_inline_string(word, wlen);
+        param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table, word, wlen);
         param_types_arr[param_count] = TYPE_DYN;
         param_count++;
       }
@@ -5596,7 +5671,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     uint8_t min_args = is_variadic ? (uint8_t)(param_count - 1) : param_count;
 
     /* Check if this proc suspends (yield/await/parallel/race) */
-    JaclVal name_val_check = jacl_inline_string(proc_name, proc_name_len);
+    JaclVal name_val_check = compiler__name_val(c->heap, c->intern_table, proc_name, proc_name_len);
     bool proc_suspends_early = false;
     if (c->suspension_map) {
       proc_suspends_early = suspension_map_lookup(c->suspension_map, name_val_check);
@@ -5610,7 +5685,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     if (proc_suspends_early) {
       sm_analysis_data = compiler__analyze_suspensions(
-          args[body_arg_idx], param_names_arr, user_param_count, true, c->suspension_map);
+          args[body_arg_idx], param_names_arr, user_param_count, true, c->suspension_map,
+          c->heap, c->intern_table);
       /* Always SM-compile suspending procs — even if suspension_count == 0
          (transitively suspending via calling other suspending procs). */
       use_sm_path = true;
@@ -5780,7 +5856,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     /* Look up suspension status from analysis map */
-    JaclVal name_val = jacl_inline_string(proc_name, proc_name_len);
+    JaclVal name_val = compiler__name_val(c->heap, c->intern_table, proc_name, proc_name_len);
     bool proc_suspends = false;
     if (c->suspension_map) {
       proc_suspends = suspension_map_lookup(c->suspension_map, name_val);
@@ -6095,13 +6171,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    if (bind_name_len > 7) {
-      compiler__error(c, line, col, "for binding name exceeds 7-byte inline limit");
+    if (bind_name_len > 128) {
+      compiler__error(c, line, col, "for binding name exceeds 128-byte limit");
       return;
     }
 
     /* Check for suspension in block body (inlined for still can't suspend) */
-    if (ast__contains_suspension(body_block, c->suspension_map)) {
+    if (ast__contains_suspension(body_block, c->suspension_map,
+                                  c->heap, c->intern_table)) {
       compiler__error(c, line, col,
           "cannot suspend inside non-suspending callback");
       return;
@@ -6131,7 +6208,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
       /* Element placeholder → local $it/name (starts as nil) */
       compiler__emit_byte(c, OP_NIL, line);
-      JaclVal bind_val = jacl_inline_string(bind_name, bind_name_len);
+      JaclVal bind_val = compiler__name_val(c->heap, c->intern_table, bind_name, bind_name_len);
       compiler__add_local(c, bind_val, line, col);
       uint8_t elem_slot = (uint8_t)(saved_local_count + 1);
 
@@ -6229,7 +6306,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Element placeholder → local $it/name (starts as nil) */
     compiler__emit_byte(c, OP_NIL, line);
-    JaclVal bind_val = jacl_inline_string(bind_name, bind_name_len);
+    JaclVal bind_val = compiler__name_val(c->heap, c->intern_table, bind_name, bind_name_len);
     compiler__add_local(c, bind_val, line, col);
 
     uint8_t len_slot = (uint8_t)(saved_local_count + 1);
@@ -6424,11 +6501,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Get binding name */
     uint32_t bind_len = args[1]->data.lit_string.length;
-    if (bind_len > 7) {
-      compiler__error(c, line, col, "try binding name exceeds 7-byte inline limit");
+    if (bind_len > 128) {
+      compiler__error(c, line, col, "try binding name exceeds 128-byte limit");
       return;
     }
-    JaclVal bind_name = jacl_inline_string(args[1]->data.lit_string.value, bind_len);
+    JaclVal bind_name = compiler__name_val(c->heap, c->intern_table, args[1]->data.lit_string.value, bind_len);
 
     /* Save try context */
     bool saved_in_try = c->in_try_body;
@@ -7378,7 +7455,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     AstNode** stmts = body_block->data.block.commands;
 
     /* Check if the spawn body contains suspension points */
-    bool spawn_suspends = ast__contains_suspension(body_block, c->suspension_map);
+    bool spawn_suspends = ast__contains_suspension(body_block, c->suspension_map,
+                                                    c->heap, c->intern_table);
 
     SuspensionAnalysis spawn_sm_analysis;
     memset(&spawn_sm_analysis, 0, sizeof(spawn_sm_analysis));
@@ -7396,13 +7474,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Pin spawn body to thread 0 if it mutates non-local variables
        OR captures a mutable (mut/box) binding from an enclosing scope. */
-    bool needs_pinning = ast__contains_nonlocal_set(body_block)
+    bool needs_pinning = ast__contains_nonlocal_set(body_block,
+                                                     c->heap, c->intern_table)
                       || compiler__body_captures_mutable(c, body_block);
     closure->pinned = needs_pinning;
 
     if (spawn_suspends) {
       /* SM spawn body: analyze suspensions, compile as state machine */
-      spawn_sm_analysis = compiler__analyze_suspensions(body_block, NULL, 0, true, c->suspension_map);
+      spawn_sm_analysis = compiler__analyze_suspensions(body_block, NULL, 0, true, c->suspension_map, c->heap, c->intern_table);
       closure->param_count = 2;
       JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
       pnames[0] = jacl_inline_string("__sm", 4);
@@ -7567,7 +7646,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Struct type unknown at compile time — emit runtime field resolution */
     {
       /* Store field name as a constant */
-      JaclVal name_val = jacl_inline_string(field_name, field_name_len);
+      JaclVal name_val = compiler__name_val(c->heap, c->intern_table, field_name, field_name_len);
       uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
 
       if (is_set) {
@@ -7664,11 +7743,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (head->type == AST_LIT_STRING) {
       /* Look up bare word as a variable */
       uint32_t name_len = head->data.lit_string.length;
-      if (name_len > 7) {
-        compiler__error(c, line, col, "command name exceeds 7-byte inline limit");
+      if (name_len > 128) {
+        compiler__error(c, line, col, "command name exceeds 128-byte limit");
         return;
       }
-      JaclVal name_val = jacl_inline_string(head->data.lit_string.value, name_len);
+      JaclVal name_val = compiler__name_val(c->heap, c->intern_table, head->data.lit_string.value, name_len);
       callee_name_str = head->data.lit_string.value;
       callee_name_len = name_len;
 
@@ -7746,8 +7825,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         /* Resolve param types for $var call-site checking */
         callee_name_str = head->data.var_ref.name;
         callee_name_len = head->data.var_ref.length;
-        if (head->data.var_ref.length <= 7) {
-          JaclVal vname = jacl_inline_string(head->data.var_ref.name,
+        if (head->data.var_ref.length <= 128) {
+          JaclVal vname = compiler__name_val(c->heap, c->intern_table, head->data.var_ref.name,
                                               head->data.var_ref.length);
           int slot = compiler__resolve_local(c, vname);
           if (slot != -1) {
@@ -7807,8 +7886,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Check if callee is a known suspending proc in SM context */
     bool use_call_suspend = false;
-    if (c->sm_analysis && c->suspension_map && callee_name_str && callee_name_len <= 7) {
-      JaclVal cname = jacl_inline_string(callee_name_str, callee_name_len);
+    if (c->sm_analysis && c->suspension_map && callee_name_str && callee_name_len <= 128) {
+      JaclVal cname = compiler__name_val(c->heap, c->intern_table, callee_name_str, callee_name_len);
       if (suspension_map_lookup(c->suspension_map, cname) &&
           !suspension_map_is_generator(c->suspension_map, cname)) {
         use_call_suspend = true;
@@ -8029,12 +8108,12 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
 
     case AST_VAR_REF: {
       uint32_t name_len = node->data.var_ref.length;
-      if (name_len > 7) {
+      if (name_len > 128) {
         compiler__error(c, line, node->start.column,
-                        "variable name exceeds 7-byte inline limit");
+                        "variable name exceeds 128-byte limit");
         break;
       }
-      JaclVal name_val = jacl_inline_string(node->data.var_ref.name, name_len);
+      JaclVal name_val = compiler__name_val(c->heap, c->intern_table, node->data.var_ref.name, name_len);
 
       /* SM mode: resolve variables from state object fields first */
       if (c->sm_analysis) {
@@ -8265,8 +8344,8 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         }
 
         /* Check for conflict with existing local or global definition */
-        if (imp_len <= 7) {
-          JaclVal name_val = jacl_inline_string(imp_name, imp_len);
+        if (imp_len <= 128) {
+          JaclVal name_val = compiler__name_val(c->heap, c->intern_table, imp_name, imp_len);
 
           /* Check conflict with existing global */
           GlobalArity* existing = compiler__find_global(c, name_val);
@@ -8379,8 +8458,8 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       StructTypeDef* sdef = &reg->defs[this_idx];
       sdef->name     = struct_name;
       sdef->name_len = struct_name_len;
-      if (struct_name_len <= 7) {
-        sdef->name_val = jacl_inline_string(struct_name, struct_name_len);
+      if (struct_name_len <= 128) {
+        sdef->name_val = compiler__name_val(c->heap, c->intern_table, struct_name, struct_name_len);
       } else {
         sdef->name_val = JACL_NIL;
       }
@@ -8479,7 +8558,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
 
       /* Register struct name as a global with arity = field_count (constructor)
          and type = TYPE_STRUCT */
-      if (struct_name_len <= 7) {
+      if (struct_name_len <= 128) {
         JaclVal name_val = sdef->name_val;
         compiler__set_global_arity(root, name_val, (int16_t)field_count);
         GlobalArity* ga = compiler__find_global(root, name_val);
@@ -8566,7 +8645,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
               closure->param_names = (JaclVal*)arena_alloc(c->arena,
                                       sizeof(JaclVal) * param_count);
               for (uint32_t pi = 0; pi < param_count; pi++) {
-                closure->param_names[pi] = jacl_inline_string(
+                closure->param_names[pi] = compiler__name_val(c->heap, c->intern_table,
                     node->data.defmacro.param_names[pi],
                     node->data.defmacro.param_name_lens[pi]);
               }
@@ -8637,7 +8716,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           closure->param_names = (JaclVal*)arena_alloc(c->arena,
                                     sizeof(JaclVal) * param_count);
           for (uint32_t i = 0; i < param_count; i++) {
-            closure->param_names[i] = jacl_inline_string(
+            closure->param_names[i] = compiler__name_val(c->heap, c->intern_table,
                 node->data.defmacro.param_names[i],
                 node->data.defmacro.param_name_lens[i]);
           }
@@ -8847,9 +8926,11 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
  * or calls a suspending proc). Used to decide if top-level SM wrapping is needed.
  */
 bool compiler__top_level_suspends(AstNode** stmts, uint32_t count,
-                                          SuspensionMap* map) {
+                                          SuspensionMap* map,
+                                          ThreadHeap* heap,
+                                          JaclInternTable* intern_table) {
   for (uint32_t i = 0; i < count; i++) {
-    if (ast__contains_suspension(stmts[i], map)) return true;
+    if (ast__contains_suspension(stmts[i], map, heap, intern_table)) return true;
   }
   return false;
 }
@@ -8866,7 +8947,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
 
   /* Pre-compilation suspension analysis */
   SuspensionMap suspension_map = compiler__analyze_suspension(
-      parse.nodes, parse.count);
+      parse.nodes, parse.count, heap, intern_table);
 
   Compiler c;
   compiler__init(&c, &result.chunk, arena, intern_table, heap);
@@ -8902,7 +8983,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
 
   /* Check if top-level code is suspending */
   bool top_suspends = compiler__top_level_suspends(
-      parse.nodes, parse.count, &suspension_map);
+      parse.nodes, parse.count, &suspension_map, heap, intern_table);
 
   if (top_suspends) {
     /* Wrap top-level suspending code into a __main SM closure.
@@ -8918,8 +8999,8 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
         uint32_t pargc = node->data.command.arg_count;
         if (pargc >= 3) {
           AstNode* name_node = pargs[0];
-          if (name_node->type == AST_LIT_STRING && name_node->data.lit_string.length <= 7) {
-            JaclVal pname = jacl_inline_string(
+          if (name_node->type == AST_LIT_STRING && name_node->data.lit_string.length <= 128) {
+            JaclVal pname = compiler__name_val(c.heap, c.intern_table,
                 name_node->data.lit_string.value, name_node->data.lit_string.length);
             /* Count user params from the param list (head + args) */
             AstNode* param_list = pargs[1];
@@ -8953,8 +9034,8 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
           /* mut [type] name value — name is last-but-one arg */
           AstNode* name_node = node->data.command.args[margc >= 3 ? 1 : 0];
           if (name_node->type == AST_LIT_STRING &&
-              name_node->data.lit_string.length <= 7) {
-            JaclVal mname = jacl_inline_string(
+              name_node->data.lit_string.length <= 128) {
+            JaclVal mname = compiler__name_val(c.heap, c.intern_table,
                 name_node->data.lit_string.value,
                 name_node->data.lit_string.length);
             compiler__set_global_arity(&c, mname, -1);
@@ -8995,7 +9076,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     fake_block.data.block.commands = non_proc_stmts;
 
     SuspensionAnalysis main_sm_analysis = compiler__analyze_suspensions(
-        &fake_block, NULL, 0, true, &suspension_map);
+        &fake_block, NULL, 0, true, &suspension_map, heap, intern_table);
 
     JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
     chunk_init(&main_cl->chunk, arena);
@@ -9177,7 +9258,7 @@ bool compiler__compile_module(const char* canonical_path,
 
   /* Suspension analysis */
   SuspensionMap suspension_map = compiler__analyze_suspension(
-      parse.nodes, parse.count);
+      parse.nodes, parse.count, importer->heap, importer->intern_table);
 
   /* Compile into a new chunk */
   BytecodeChunk* chunk = (BytecodeChunk*)arena_alloc(arena, sizeof(BytecodeChunk));
@@ -9300,9 +9381,9 @@ ProgramResult jacl_compile_program(const char* root_path,
 
   /* Suspension analysis */
   SuspensionMap suspension_map = compiler__analyze_suspension(
-      parse.nodes, parse.count);
+      parse.nodes, parse.count, heap, intern_table);
   bool top_suspends = compiler__top_level_suspends(
-      parse.nodes, parse.count, &suspension_map);
+      parse.nodes, parse.count, &suspension_map, heap, intern_table);
 
   /* Create root module chunk */
   BytecodeChunk* root_chunk = (BytecodeChunk*)arena_alloc(
@@ -9336,8 +9417,8 @@ ProgramResult jacl_compile_program(const char* root_path,
         if (pargc >= 3) {
           AstNode* name_node = pargs[0];
           if (name_node->type == AST_LIT_STRING &&
-              name_node->data.lit_string.length <= 7) {
-            JaclVal pname = jacl_inline_string(
+              name_node->data.lit_string.length <= 128) {
+            JaclVal pname = compiler__name_val(c.heap, c.intern_table,
                 name_node->data.lit_string.value,
                 name_node->data.lit_string.length);
             AstNode* param_list = pargs[1];
@@ -9368,8 +9449,8 @@ ProgramResult jacl_compile_program(const char* root_path,
         if (margc >= 2) {
           AstNode* name_node = node->data.command.args[margc >= 3 ? 1 : 0];
           if (name_node->type == AST_LIT_STRING &&
-              name_node->data.lit_string.length <= 7) {
-            JaclVal mname = jacl_inline_string(
+              name_node->data.lit_string.length <= 128) {
+            JaclVal mname = compiler__name_val(c.heap, c.intern_table,
                 name_node->data.lit_string.value,
                 name_node->data.lit_string.length);
             compiler__set_global_arity(&c, mname, -1);
@@ -9406,7 +9487,7 @@ ProgramResult jacl_compile_program(const char* root_path,
     fake_block2.data.block.commands = non_proc_stmts;
 
     SuspensionAnalysis main_sm_analysis2 = compiler__analyze_suspensions(
-        &fake_block2, NULL, 0, true, &suspension_map);
+        &fake_block2, NULL, 0, true, &suspension_map, heap, intern_table);
 
     JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
     chunk_init(&main_cl->chunk, arena);

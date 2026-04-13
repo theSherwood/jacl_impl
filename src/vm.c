@@ -1468,8 +1468,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         bool found;
         JaclVal value = vm__env_get(vm, name, &found);
         if (!found) {
-          char name_buf[8];
-          jacl_inline_string_get(name, name_buf, sizeof(name_buf));
+          char name_buf[130];
+          uint32_t nlen = jacl_string_data(name, name_buf, sizeof(name_buf) - 1);
+          if (nlen >= sizeof(name_buf)) nlen = sizeof(name_buf) - 1;
+          name_buf[nlen] = '\0';
           vm__set_error(vm, "undefined variable '$%s'", name_buf);
           return VM_RUNTIME_ERROR;
         }
