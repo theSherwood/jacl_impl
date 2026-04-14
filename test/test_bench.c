@@ -24,7 +24,7 @@
 
 /* ── Timing helpers ─────────────────────────────────────────────── */
 
-static inline uint64_t now_ns(void) {
+static uint64_t __attribute__((noinline)) now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
@@ -92,7 +92,7 @@ typedef struct {
  */
 static StageTimings bench_one(const char *src) {
     StageTimings t = {0};
-    uint64_t t0, t1;
+    volatile uint64_t t0, t1;
 
     arena_t arena = {0};
     VM vm;

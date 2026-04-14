@@ -1108,14 +1108,19 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
     }
 
     /* Phase 0: Register built-in macros (e.g., \ for lambda).
-     * The prelude is parsed once and the compiled closure is cached across
-     * invocations so we pay the lex/parse/compile cost only on first use. */
-    static arena_t      expand__prelude_arena   = {0};
-    static AstNode     *expand__prelude_node    = NULL;
-    static bool         expand__prelude_parsed  = false;
+     * The prelude is parsed and compiled once into persistent static storage
+     * (arena, heap, intern table) so we pay the full cost only on first use.
+     * The cached closure is reused directly on every subsequent call. */
+    static arena_t          expand__prelude_arena   = {0};
+    static BlockPool        expand__prelude_pool;
+    static ThreadHeap       expand__prelude_heap;
+    static JaclInternTable  expand__prelude_intern;
+    static AstNode         *expand__prelude_node    = NULL;
+    static JaclClosure     *expand__prelude_closure = NULL;
+    static bool             expand__prelude_ready   = false;
 
     {
-        if (!expand__prelude_parsed) {
+        if (!expand__prelude_ready) {
             static const char *lambda_prelude =
                 "defmacro \\ {head ..rest} {\n"
                 "  def body [make-syntax \"command\" $head $rest]\n"
@@ -1126,6 +1131,8 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
                 "  [make-syntax \"command\" [make-syntax \"lit-string\" \"proc\"] "
                 "[vec $nm $params $blk]]\n"
                 "}\n";
+
+            /* Parse the prelude */
             LexResult ltoks = lexer_lex(lambda_prelude, &expand__prelude_arena);
             ParseResult ppre = parser_parse(ltoks, &expand__prelude_arena);
             for (uint32_t pi = 0; pi < ppre.count; pi++) {
@@ -1134,10 +1141,40 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
                     break;
                 }
             }
-            expand__prelude_parsed = true;
+
+            /* Compile the closure into persistent static heap/intern so the
+             * bytecode constants (interned strings) survive across calls. */
+            if (expand__prelude_node) {
+                gc_block_pool_init(&expand__prelude_pool);
+                gc_heap_init(&expand__prelude_heap, &expand__prelude_pool);
+                intern_table_init(&expand__prelude_intern, &expand__prelude_arena);
+
+                ThreadHeap *prev_heap = gc__current_heap;
+                gc__current_heap = &expand__prelude_heap;
+
+                MacroEntry tmp_entry;
+                tmp_entry.name           = "\\";
+                tmp_entry.name_len       = 1;
+                tmp_entry.param_count    = expand__prelude_node->data.defmacro.param_count;
+                tmp_entry.variadic       = expand__prelude_node->data.defmacro.variadic;
+                tmp_entry.param_names    = expand__prelude_node->data.defmacro.param_names;
+                tmp_entry.param_name_lens = expand__prelude_node->data.defmacro.param_name_lens;
+                tmp_entry.body           = expand__prelude_node->data.defmacro.body;
+                tmp_entry.closure        = NULL;
+                tmp_entry.is_builtin     = true;
+
+                expand__compile_staged_body(&tmp_entry,
+                    &expand__prelude_heap, &expand__prelude_intern,
+                    &expand__prelude_arena);
+                expand__prelude_closure = tmp_entry.closure;
+
+                gc__current_heap = prev_heap;
+            }
+
+            expand__prelude_ready = true;
         }
 
-        if (expand__prelude_node && macros->count < MACRO_TABLE_MAX) {
+        if (expand__prelude_closure && macros->count < MACRO_TABLE_MAX) {
             MacroEntry *pe = &macros->entries[macros->count++];
             pe->name           = "\\";
             pe->name_len       = 1;
@@ -1147,7 +1184,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
             pe->param_name_lens = expand__prelude_node->data.defmacro.param_name_lens;
             pe->body           = expand__prelude_node->data.defmacro.body;
             pe->is_builtin     = true;
-            pe->closure        = NULL;  /* compiled fresh in Phase 2 each call */
+            pe->closure        = expand__prelude_closure;
         }
     }
 
