@@ -875,12 +875,21 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
             if (entry) {
                 /* Macro call found — expand it */
                 uint32_t argc = node->data.command.arg_count;
-                if (argc != entry->param_count) {
+                uint32_t min_args = entry->variadic
+                    ? (entry->param_count > 0 ? entry->param_count - 1 : 0)
+                    : entry->param_count;
+                if (entry->variadic ? (argc < min_args) : (argc != entry->param_count)) {
                     char err[256];
-                    snprintf(err, sizeof(err),
-                             "macro '%.*s' expects %u arguments but got %u",
-                             (int)name_len, name,
-                             entry->param_count, argc);
+                    if (entry->variadic) {
+                        snprintf(err, sizeof(err),
+                                 "macro '%.*s' expects at least %u arguments but got %u",
+                                 (int)name_len, name, min_args, argc);
+                    } else {
+                        snprintf(err, sizeof(err),
+                                 "macro '%.*s' expects %u arguments but got %u",
+                                 (int)name_len, name,
+                                 entry->param_count, argc);
+                    }
                     expand__set_error(es, err, node->start.line,
                                       node->start.column, arena);
                     return false;
@@ -896,11 +905,31 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                     return false;
                 }
 
-                /* Convert args to syntax objects */
+                /* Convert args to syntax objects.
+                 * For variadic macros, collect extra args into a vec. */
                 JaclVal arg_vals[64];
-                for (uint32_t i = 0; i < argc; i++) {
-                    arg_vals[i] = syntax_from_ast(
-                        node->data.command.args[i], heap, intern);
+                uint32_t call_argc;
+                if (entry->variadic) {
+                    /* Fixed params: 0..min_args-1, rest collected into vec */
+                    for (uint32_t i = 0; i < min_args; i++) {
+                        arg_vals[i] = syntax_from_ast(
+                            node->data.command.args[i], heap, intern);
+                    }
+                    /* Build vec from remaining args */
+                    jacl_vec_root *rest_root = jacl_vec_empty();
+                    for (uint32_t i = min_args; i < argc; i++) {
+                        JaclVal syn_arg = syntax_from_ast(
+                            node->data.command.args[i], heap, intern);
+                        rest_root = jacl_vec_push_back(rest_root, syn_arg);
+                    }
+                    arg_vals[min_args] = jacl_vector_ptr(rest_root);
+                    call_argc = entry->param_count;
+                } else {
+                    for (uint32_t i = 0; i < argc; i++) {
+                        arg_vals[i] = syntax_from_ast(
+                            node->data.command.args[i], heap, intern);
+                    }
+                    call_argc = argc;
                 }
 
                 /* Allocate fresh scope mark for hygiene.
@@ -915,7 +944,7 @@ static bool expand__node(AstNode **node_ptr, MacroTable *macros,
                 /* Invoke the compiled macro closure */
                 JaclError merr;
                 JaclVal result_syn = jacl_ctx_run_closure(
-                    es->ctx, entry->closure, arg_vals, argc, &merr);
+                    es->ctx, entry->closure, arg_vals, call_argc, &merr);
 
                 /* Reset scope mark and gensym counter pointer after invocation */
                 es->ctx->vm.macro_scope_mark = 0;
@@ -1006,8 +1035,10 @@ static const char *expand__compile_staged_body(MacroEntry *entry,
     memset(closure, 0, sizeof(JaclClosure));
     chunk_init(&closure->chunk, arena);
     closure->param_count = (uint8_t)param_count;
-    closure->min_args    = (uint8_t)param_count;
-    closure->variadic    = false;
+    closure->min_args    = entry->variadic
+                             ? (uint8_t)(param_count > 0 ? param_count - 1 : 0)
+                             : (uint8_t)param_count;
+    closure->variadic    = entry->variadic;
 
     char *name_copy = (char *)arena_alloc(arena, entry->name_len + 1);
     memcpy(name_copy, entry->name, entry->name_len);
@@ -1070,9 +1101,50 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
 
     /* Create a temporary context for macro expansion if none provided */
     jacl_context_t *tmp_ctx = NULL;
+    ThreadHeap *saved_heap = gc__current_heap;
     if (!es->ctx) {
         tmp_ctx = jacl_ctx_new(NULL);
         es->ctx = tmp_ctx;
+    }
+
+    /* Phase 0: Register built-in macros (e.g., \ for lambda).
+     * These are parsed from a prelude string and registered before
+     * user defmacros so they can be overridden. */
+    {
+        static const char *lambda_prelude =
+            "defmacro \\ {head ..rest} {\n"
+            "  def body [make-syntax \"command\" $head $rest]\n"
+            "  def blk [make-syntax \"block\" [vec $body]]\n"
+            "  def pn [make-syntax \"lit-string-caret\" \"it\"]\n"
+            "  def params [make-syntax \"command\" $pn [vec]]\n"
+            "  def nm [make-syntax \"lit-string\" \"\"]\n"
+            "  [make-syntax \"command\" [make-syntax \"lit-string\" \"proc\"] "
+            "[vec $nm $params $blk]]\n"
+            "}\n";
+        LexResult ltoks = lexer_lex(lambda_prelude, arena);
+        ParseResult ppre = parser_parse(ltoks, arena);
+        for (uint32_t pi = 0; pi < ppre.count; pi++) {
+            AstNode *pnode = ppre.nodes[pi];
+            if (!pnode || pnode->type != AST_DEFMACRO) continue;
+            if (macros->count >= MACRO_TABLE_MAX) break;
+
+            const char *pname = pnode->data.defmacro.name;
+            uint32_t    pname_len = pnode->data.defmacro.name_len;
+            char *pcopy = (char *)arena_alloc(arena, pname_len + 1);
+            memcpy(pcopy, pname, pname_len);
+            pcopy[pname_len] = '\0';
+
+            MacroEntry *pe = &macros->entries[macros->count++];
+            pe->name           = pcopy;
+            pe->name_len       = pname_len;
+            pe->param_count    = pnode->data.defmacro.param_count;
+            pe->variadic       = pnode->data.defmacro.variadic;
+            pe->param_names    = pnode->data.defmacro.param_names;
+            pe->param_name_lens = pnode->data.defmacro.param_name_lens;
+            pe->closure        = NULL;
+            pe->body           = pnode->data.defmacro.body;
+            pe->is_builtin     = true;
+        }
     }
 
     /* Phase 1: Register all defmacros */
@@ -1092,27 +1164,42 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
             memcpy(msg, err, strlen(err) + 1);
             *out_error_line = node->start.line;
             *out_error_col  = node->start.column;
-            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; }
+            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; gc__current_heap = saved_heap; }
             return msg;
         }
 
-        if (macro_table_lookup(macros, mname, mname_len)) {
-            char err[128];
-            snprintf(err, sizeof(err),
-                     "defmacro: '%.*s' is already defined",
-                     (int)mname_len, mname);
-            char *msg = (char *)arena_alloc(arena, strlen(err) + 1);
-            memcpy(msg, err, strlen(err) + 1);
-            *out_error_line = node->start.line;
-            *out_error_col  = node->start.column;
-            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; }
-            return msg;
+        {
+            MacroEntry *existing = macro_table_lookup(macros, mname, mname_len);
+            if (existing) {
+                if (existing->is_builtin) {
+                    /* Allow user to override built-in macros (like \).
+                     * Replace the entry in-place. */
+                    existing->param_count    = node->data.defmacro.param_count;
+                    existing->variadic       = node->data.defmacro.variadic;
+                    existing->param_names    = node->data.defmacro.param_names;
+                    existing->param_name_lens = node->data.defmacro.param_name_lens;
+                    existing->closure        = NULL;
+                    existing->body           = node->data.defmacro.body;
+                    existing->is_builtin     = false;
+                    continue;
+                }
+                char err[128];
+                snprintf(err, sizeof(err),
+                         "defmacro: '%.*s' already defined",
+                         (int)mname_len, mname);
+                char *msg = (char *)arena_alloc(arena, strlen(err) + 1);
+                memcpy(msg, err, strlen(err) + 1);
+                *out_error_line = node->start.line;
+                *out_error_col  = node->start.column;
+                if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; gc__current_heap = saved_heap; }
+                return msg;
+            }
         }
 
         if (macros->count >= MACRO_TABLE_MAX) {
             *out_error_line = node->start.line;
             *out_error_col  = node->start.column;
-            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; }
+            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; gc__current_heap = saved_heap; }
             return "too many macro definitions";
         }
 
@@ -1125,6 +1212,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
         entry->name           = name_copy;
         entry->name_len       = mname_len;
         entry->param_count    = param_count;
+        entry->variadic       = node->data.defmacro.variadic;
         entry->param_names    = node->data.defmacro.param_names;
         entry->param_name_lens = node->data.defmacro.param_name_lens;
         entry->closure        = NULL;
@@ -1140,7 +1228,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
         if (err) {
             *out_error_line = 0;
             *out_error_col  = 0;
-            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; }
+            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; gc__current_heap = saved_heap; }
             return err;
         }
     }
@@ -1152,7 +1240,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
         if (!expand__node(&program[i], macros, heap, intern, arena, es, 0)) {
             *out_error_line = es->error_line;
             *out_error_col  = es->error_col;
-            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; }
+            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; gc__current_heap = saved_heap; }
             return es->error_msg;
         }
     }
@@ -1160,6 +1248,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
     if (tmp_ctx) {
         jacl_ctx_destroy(tmp_ctx);
         es->ctx = NULL;
+        gc__current_heap = saved_heap;
     }
 
     return NULL;  /* success */

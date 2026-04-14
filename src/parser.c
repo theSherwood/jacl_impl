@@ -329,108 +329,6 @@ AstNode* parser__parse_command(Parser* p) {
   Token* open = parser__advance(p); /* consume '[' */
   SourcePos cmd_start = parser__token_start(open);
 
-  /* Lambda shorthand: [\ body...] → [proc "" [it] { body }] */
-  if (parser__peek(p)->type == TOKEN_BACKSLASH) {
-    parser__advance(p); /* consume '\' */
-
-    /* Parse body head */
-    AstNode* body_head = parser__parse_expr(p);
-    if (body_head == NULL) {
-      AstNode* err = parser__error(p, "expected lambda body after '\\'", open);
-      parser__sync_bracket(p);
-      return err;
-    }
-
-    /* Collect body args until ] */
-    NodeArray body_args;
-    parser__arr_init(&body_args, p->arena);
-    while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACKET) {
-      if (parser__peek(p)->type == TOKEN_NEWLINE) {
-        uint32_t saved_pos = p->pos;
-        while (parser__peek(p)->type == TOKEN_NEWLINE) parser__advance(p);
-        if (parser__peek(p)->type == TOKEN_RBRACKET) break;
-        p->pos = saved_pos;
-        break;
-      }
-      AstNode* arg = parser__parse_expr(p);
-      if (arg == NULL) break;
-      parser__arr_push(&body_args, arg);
-    }
-
-    /* Expect closing ] */
-    if (parser__peek(p)->type != TOKEN_RBRACKET) {
-      AstNode* err = parser__error(p, "expected ']' to close lambda", open);
-      parser__sync_bracket(p);
-      return err;
-    }
-    Token* close = parser__advance(p); /* consume ']' */
-
-    /* Build body command: [head args...] */
-    AstNode* body_cmd = ast_alloc(p->arena);
-    body_cmd->type = AST_COMMAND;
-    body_cmd->start = body_head->start;
-    body_cmd->end   = parser__token_end(close);
-    body_cmd->data.command.head      = body_head;
-    body_cmd->data.command.args      = body_args.nodes;
-    body_cmd->data.command.arg_count = body_args.count;
-
-    /* Wrap body in AST_BLOCK */
-    AstNode** block_stmts = ast_alloc_array(p->arena, 1);
-    block_stmts[0] = body_cmd;
-    AstNode* body_block = ast_alloc(p->arena);
-    body_block->type  = AST_BLOCK;
-    body_block->start = body_cmd->start;
-    body_block->end   = body_cmd->end;
-    body_block->data.block.commands = block_stmts;
-    body_block->data.block.count    = 1;
-
-    /* Build params: AST_COMMAND with head="it" */
-    AstNode* it_name = ast_alloc(p->arena);
-    it_name->type = AST_LIT_STRING;
-    it_name->start = cmd_start;
-    it_name->end   = cmd_start;
-    it_name->data.lit_string.value  = "it";
-    it_name->data.lit_string.length = 2;
-
-    AstNode* params = ast_alloc(p->arena);
-    params->type  = AST_COMMAND;
-    params->start = it_name->start;
-    params->end   = it_name->end;
-    params->data.command.head      = it_name;
-    params->data.command.args      = NULL;
-    params->data.command.arg_count = 0;
-
-    /* Build empty name for anonymous lambda */
-    AstNode* empty_name = ast_alloc(p->arena);
-    empty_name->type = AST_LIT_STRING;
-    empty_name->start = cmd_start;
-    empty_name->end   = cmd_start;
-    empty_name->data.lit_string.value  = "";
-    empty_name->data.lit_string.length = 0;
-
-    /* Build [proc "" [it] {body}] */
-    AstNode* proc_head = ast_alloc(p->arena);
-    proc_head->type = AST_LIT_STRING;
-    proc_head->start = cmd_start;
-    proc_head->end   = cmd_start;
-    proc_head->data.lit_string.value  = "proc";
-    proc_head->data.lit_string.length = 4;
-
-    AstNode** proc_args = ast_alloc_array(p->arena, 3);
-    proc_args[0] = empty_name;  /* name (empty = anonymous) */
-    proc_args[1] = params;      /* param list */
-    proc_args[2] = body_block;  /* body */
-
-    AstNode* node = ast_alloc(p->arena);
-    node->type  = AST_COMMAND;
-    node->start = cmd_start;
-    node->end   = parser__token_end(close);
-    node->data.command.head      = proc_head;
-    node->data.command.args      = proc_args;
-    node->data.command.arg_count = 3;
-    return node;
-  }
-
   /* Empty brackets [] → empty command node (used for proc param lists) */
   if (parser__peek(p)->type == TOKEN_RBRACKET) {
     Token* close = parser__advance(p);
@@ -1461,9 +1359,21 @@ AstNode* parser__parse_defmacro(Parser* p) {
   Token* kw_tok = parser__advance(p); /* consume 'defmacro' */
   SourcePos start = parser__token_start(kw_tok);
 
-  /* Expect macro name (a word) */
+  /* Expect macro name (a word or operator token) */
   Token* name_tok = parser__peek(p);
-  if (name_tok->type != TOKEN_WORD) {
+  if (name_tok->type != TOKEN_WORD &&
+      name_tok->type != TOKEN_OPERATOR &&
+      name_tok->type != TOKEN_BACKSLASH &&
+      name_tok->type != TOKEN_PIPE &&
+      name_tok->type != TOKEN_BANG &&
+      name_tok->type != TOKEN_AMP &&
+      name_tok->type != TOKEN_DOTDOT &&
+      name_tok->type != TOKEN_EQUALS &&
+      name_tok->type != TOKEN_COLON &&
+      name_tok->type != TOKEN_DOUBLE_COLON &&
+      name_tok->type != TOKEN_AND &&
+      name_tok->type != TOKEN_OR &&
+      name_tok->type != TOKEN_NOT) {
     return parser__error(p, "expected macro name after 'defmacro'", name_tok);
   }
   parser__advance(p);
@@ -1480,6 +1390,7 @@ AstNode* parser__parse_defmacro(Parser* p) {
   const char* tmp_names[DEFMACRO_MAX_PARAMS];
   uint32_t tmp_name_lens[DEFMACRO_MAX_PARAMS];
   uint32_t param_count = 0;
+  bool is_variadic = false;
 
   while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
     /* Skip commas and newlines between params */
@@ -1490,6 +1401,38 @@ AstNode* parser__parse_defmacro(Parser* p) {
       parser__advance(p);
     }
     if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
+
+    /* Check for rest marker '..' */
+    if (parser__peek(p)->type == TOKEN_DOTDOT) {
+      parser__advance(p); /* consume '..' */
+      if (is_variadic) {
+        return parser__error(p, "multiple rest parameters not allowed in defmacro", kw_tok);
+      }
+      is_variadic = true;
+      /* Next token must be the rest param name */
+      Token* rest_tok = parser__peek(p);
+      if (rest_tok->type != TOKEN_WORD) {
+        return parser__error(p, "expected parameter name after '..' in defmacro", rest_tok);
+      }
+      parser__advance(p);
+      if (param_count >= DEFMACRO_MAX_PARAMS) {
+        return parser__error(p, "too many parameters in defmacro (max 32)", kw_tok);
+      }
+      tmp_names[param_count] = rest_tok->payload.text;
+      tmp_name_lens[param_count] = rest_tok->length;
+      param_count++;
+      /* Rest param must be last — skip trailing commas/newlines and expect } */
+      while (!parser__at_end(p) &&
+             (parser__peek(p)->type == TOKEN_COMMA ||
+              parser__peek(p)->type == TOKEN_NEWLINE ||
+              parser__peek(p)->type == TOKEN_SEMICOLON)) {
+        parser__advance(p);
+      }
+      if (parser__at_end(p) || parser__peek(p)->type != TOKEN_RBRACE) {
+        return parser__error(p, "rest parameter must be last in defmacro", kw_tok);
+      }
+      break;
+    }
 
     /* Param name — must be a word */
     Token* param_tok = parser__peek(p);
@@ -1554,6 +1497,7 @@ AstNode* parser__parse_defmacro(Parser* p) {
   node->data.defmacro.param_names = param_names;
   node->data.defmacro.param_name_lens = param_name_lens;
   node->data.defmacro.param_count = param_count;
+  node->data.defmacro.variadic = is_variadic;
   node->data.defmacro.body = body;
   return node;
 }

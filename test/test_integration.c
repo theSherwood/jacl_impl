@@ -1111,6 +1111,228 @@ static int test_staged_gensym_binding_usable(void) {
     TEST_PASS();
 }
 
+/* ===== Procedural macros: syntax introspection in macro bodies ===== */
+
+/* Test: macro that branches on syntax-kind of its argument.
+ * If the argument is a literal integer, wrap it in [+ x 1].
+ * Otherwise, return the argument unchanged. */
+static int test_procedural_macro_syntax_kind(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    PrintCapture cap = { .len = 0 };
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    /* Macro that branches on syntax-kind using multi-line if...else.
+     * If arg is a lit-int, double it via make-syntax.
+     * Otherwise, pass through unchanged. */
+    const char *src =
+        "defmacro maybe-double {x} {\n"
+        "  if [== [syntax-kind $x] \"lit-int\"] {\n"
+        "    [make-syntax \"lit-int\" [* [syntax-datum $x] 2]]\n"
+        "  } else {\n"
+        "    $x\n"
+        "  }\n"
+        "}\n"
+        "[print [maybe-double 21]]\n"       /* lit-int 21 → lit-int 42 */
+        "[print [maybe-double [+ 10 5]]]";  /* command → pass-through → 15 */
+
+    JaclError err;
+    jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "procedural_syntax_kind: %s\n",
+                err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "42\n15\n");
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: macro that uses syntax-datum to extract a literal value. */
+static int test_procedural_macro_syntax_datum(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    PrintCapture cap = { .len = 0 };
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    const char *src =
+        "defmacro double-lit {x} {\n"
+        "  def val [syntax-datum $x]\n"
+        "  make-syntax \"lit-int\" [* $val 2]\n"
+        "}\n"
+        "[print [double-lit 21]]";  /* extract 21, make lit-int 42 */
+
+    JaclError err;
+    jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "procedural_syntax_datum: %s\n",
+                err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "42\n");
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: macro that uses syntax-head and syntax-args for command decomposition. */
+static int test_procedural_macro_syntax_decompose(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    PrintCapture cap = { .len = 0 };
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    /* Macro that reverses the arguments of a 2-arg command.
+     * [flip [+ 10 3]] → [+ 3 10] → 13 */
+    const char *src =
+        "defmacro flip {x} {\n"
+        "  def h [syntax-head $x]\n"
+        "  def a [syntax-args $x]\n"
+        "  make-syntax \"command\" $h [vec [vec-get $a 1] [vec-get $a 0]]\n"
+        "}\n"
+        "[print [flip [- 10 3]]]";  /* [- 3 10] → -7 */
+
+    JaclError err;
+    jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "procedural_syntax_decompose: %s\n",
+                err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "-7\n");
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: lambda macro — takes a body expression and wraps it in
+ * [proc "" [it] { body }], replicating the [\ ...] parser shorthand. */
+static int test_procedural_macro_lambda(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    PrintCapture cap = { .len = 0 };
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    /* Build [proc _ {it} { body }] using make-syntax.
+     * proc inside [...] is rejected by the parser, so we construct
+     * the syntax object manually. */
+    /* Test 1: verify proc with 'it' param works directly */
+    const char *src1 =
+        "proc add10 {it} { [+ $it 10] }\n"
+        "[print [add10 32]]";
+
+    JaclError err1;
+    jacl_ctx_run_source(ctx, src1, strlen(src1), UINT64_MAX, &err1);
+    if (err1.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "proc_direct: %s\n", err1.message ? err1.message : "(null)");
+    }
+    ASSERT(err1.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "42\n");
+
+    /* Test 2: lam macro generating the same proc.
+     * The param name comes from the caller so it shares scope_mark=0
+     * with the body's var-refs — this is what makes hygiene work correctly. */
+    jacl_ctx_destroy(ctx);
+    ctx = jacl_ctx_new(NULL);
+    cap.len = 0;
+    cap.buf[0] = '\0';
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    const char *src =
+        "defmacro lam {param body} {\n"
+        "  def params [make-syntax \"command\" $param [vec]]\n"
+        "  def blk [make-syntax \"block\" [vec $body]]\n"
+        "  def name [make-syntax \"lit-string\" \"\"]\n"
+        "  [make-syntax \"command\" [make-syntax \"lit-string\" \"proc\"] [vec $name $params $blk]]\n"
+        "}\n"
+        "[print [[lam x [+ $x 10]] 32]]";
+
+    JaclError err;
+    jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "procedural_macro_lambda: %s\n",
+                err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "42\n");
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: built-in \ macro (lambda shorthand, no explicit defmacro needed) */
+static int test_builtin_lambda_macro(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    PrintCapture cap = { .len = 0 };
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    /* [\ + $it 10] should expand to [proc "" (it) { [+ $it 10] }] via macro */
+    const char *src = "[print [[\\  + $it 10] 32]]";
+
+    JaclError err;
+    jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "builtin_lambda: %s\n",
+                err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "42\n");
+
+    /* Test 2: lambda with map-style usage */
+    jacl_ctx_destroy(ctx);
+    ctx = jacl_ctx_new(NULL);
+    cap.len = 0;
+    cap.buf[0] = '\0';
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    const char *src2 =
+        "def f [\\ * $it $it]\n"
+        "[print [f 7]]";
+
+    JaclError err2;
+    jacl_ctx_run_source(ctx, src2, strlen(src2), UINT64_MAX, &err2);
+    if (err2.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "builtin_lambda2: %s\n",
+                err2.message ? err2.message : "(null)");
+    }
+    ASSERT(err2.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "49\n");
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: variadic defmacro */
+static int test_variadic_defmacro(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    PrintCapture cap = { .len = 0 };
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    /* Variadic macro that collects all args into a vec and counts them */
+    const char *src =
+        "defmacro count-args {..args} {\n"
+        "  [make-syntax \"lit-int\" [vec-len $args]]\n"
+        "}\n"
+        "[print [count-args a b c d]]";
+
+    JaclError err;
+    jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    if (err.kind != JACL_ERROR_NONE) {
+        fprintf(stderr, "variadic_macro: %s\n",
+                err.message ? err.message : "(null)");
+    }
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "4\n");
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1162,6 +1384,14 @@ int main(void) {
     { "staged_gensym_basic",     test_staged_gensym_basic },
     { "staged_gensym_long_pfx",  test_staged_gensym_long_prefix_no_collision },
     { "staged_gensym_bind_use",  test_staged_gensym_binding_usable },
+    /* Procedural macros: syntax introspection in macro bodies */
+    { "proc_macro_kind",         test_procedural_macro_syntax_kind },
+    { "proc_macro_datum",        test_procedural_macro_syntax_datum },
+    { "proc_macro_decompose",    test_procedural_macro_syntax_decompose },
+    { "proc_macro_lambda",       test_procedural_macro_lambda },
+    /* Built-in \ macro and variadic macros */
+    { "builtin_lambda",          test_builtin_lambda_macro },
+    { "variadic_defmacro",       test_variadic_defmacro },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -265,6 +265,23 @@ static CompileResult compile_with_sm(const char* src, arena_t* arena,
   cr.error_count = parse.error_count;
   cr.suspending = false;
 
+  /* Expand macros (needed for \ lambda shorthand) */
+  MacroTable macro_table;
+  macro_table_init(&macro_table);
+  ExpandState es;
+  memset(&es, 0, sizeof(es));
+  if (parse.error_count == 0) {
+    uint32_t err_line = 0, err_col = 0;
+    const char *expand_err = ast_expand_macros(
+        parse.nodes, parse.count, &macro_table, heap,
+        intern_table, arena, &es, &err_line, &err_col);
+    if (expand_err) {
+      cr.error_count = 1;
+      cr.error_message = expand_err;
+      return cr;
+    }
+  }
+
   SuspensionMap suspension_map = compiler__analyze_suspension(
       parse.nodes, parse.count);
 

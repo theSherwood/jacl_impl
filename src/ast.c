@@ -79,7 +79,7 @@ struct AstNode {
              uint32_t field_count; }                              defstruct;
     struct { const char* name; uint32_t name_len;
              const char** param_names; uint32_t* param_name_lens;
-             uint32_t param_count;
+             uint32_t param_count; bool variadic;
              AstNode* body; }                                     defmacro;
     struct { AstNode* child; }                                     quote;
     struct { AstNode* child; }                                     syntax_quote;

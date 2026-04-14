@@ -1812,10 +1812,10 @@ static int test_nesting_pipe_with_lambda(void) {
   AstNode* right = n->data.command.args[1];
   ASSERT(right->type == AST_COMMAND);
   ASSERT(memcmp(right->data.command.head->data.lit_string.value, "map", 3) == 0);
-  /* the lambda is an arg to map */
+  /* the lambda is an arg to map (now a regular command with head=\) */
   AstNode* lambda = right->data.command.args[0];
   ASSERT(lambda->type == AST_COMMAND);
-  ASSERT(memcmp(lambda->data.command.head->data.lit_string.value, "proc", 4) == 0);
+  ASSERT(lambda->data.command.head->data.lit_string.value[0] == '\\');
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -3554,31 +3554,21 @@ static int test_pipe_literal_in_brackets(void) {
 /* ---- US-011: Lambda shorthand (\\) ---- */
 
 static int test_lambda_basic(void) {
-  /* [\\ + $it 2] → [proc "" [it] { [+ $it 2] }] */
+  /* [\\ + $it 2] → [\ + $it 2] (macro handles desugaring now) */
   setup();
   AstNode* n = parse_expr("[\\ + $it 2]");
   ASSERT(n != NULL);
   ASSERT(n->type == AST_COMMAND);
-  /* head = "proc" */
+  /* head = "\\" */
   ASSERT(n->data.command.head->type == AST_LIT_STRING);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "proc", 4) == 0);
+  ASSERT(n->data.command.head->data.lit_string.length == 1);
+  ASSERT(n->data.command.head->data.lit_string.value[0] == '\\');
+  /* 3 args: +, $it, 2 */
   ASSERT_U32_EQ(n->data.command.arg_count, 3);
-  /* arg0 = name "" (anonymous) */
   ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
-  ASSERT_U32_EQ(n->data.command.args[0]->data.lit_string.length, 0);
-  /* arg1 = params [it] */
-  ASSERT(n->data.command.args[1]->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.args[1]->data.command.head->data.lit_string.value, "it", 2) == 0);
-  ASSERT_U32_EQ(n->data.command.args[1]->data.command.arg_count, 0);
-  /* arg2 = body block containing [+ $it 2] */
-  ASSERT(n->data.command.args[2]->type == AST_BLOCK);
-  ASSERT_U32_EQ(n->data.command.args[2]->data.block.count, 1);
-  AstNode* body = n->data.command.args[2]->data.block.commands[0];
-  ASSERT(body->type == AST_COMMAND);
-  ASSERT(memcmp(body->data.command.head->data.lit_string.value, "+", 1) == 0);
-  ASSERT_U32_EQ(body->data.command.arg_count, 2);
-  ASSERT(body->data.command.args[0]->type == AST_VAR_REF);
-  ASSERT(body->data.command.args[1]->type == AST_LIT_INT);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "+", 1) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[2]->type == AST_LIT_INT);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -3594,46 +3584,46 @@ static int test_lambda_as_callback(void) {
   ASSERT(n->type == AST_COMMAND);
   ASSERT(memcmp(n->data.command.head->data.lit_string.value, "for", 3) == 0);
   ASSERT_U32_EQ(n->data.command.arg_count, 2);
-  /* second arg is lambda */
+  /* second arg is lambda command [\ print $it] */
   AstNode* lambda = n->data.command.args[1];
   ASSERT(lambda->type == AST_COMMAND);
-  ASSERT(memcmp(lambda->data.command.head->data.lit_string.value, "proc", 4) == 0);
-  ASSERT_U32_EQ(lambda->data.command.arg_count, 3);
+  ASSERT(lambda->data.command.head->data.lit_string.value[0] == '\\');
+  ASSERT_U32_EQ(lambda->data.command.arg_count, 2); /* print, $it */
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
 static int test_lambda_single_arg(void) {
-  /* [\\ print $it] — single-arg body */
+  /* [\\ print $it] — single-arg body (now just a regular command) */
   setup();
   AstNode* n = parse_expr("[\\ print $it]");
   ASSERT(n != NULL);
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "proc", 4) == 0);
-  AstNode* body = n->data.command.args[2]->data.block.commands[0];
-  ASSERT(body->type == AST_COMMAND);
-  ASSERT(memcmp(body->data.command.head->data.lit_string.value, "print", 5) == 0);
-  ASSERT_U32_EQ(body->data.command.arg_count, 1);
+  ASSERT(n->data.command.head->data.lit_string.value[0] == '\\');
+  /* 2 args: print, $it */
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.command.args[0]->data.lit_string.value, "print", 5) == 0);
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
 static int test_lambda_nested_bracket(void) {
-  /* [\\ + $it [vec-len $v]] — nested [] inside lambda */
+  /* [\\ + $it [len $v]] — nested [] inside lambda (now regular command) */
   setup();
   AstNode* n = parse_expr("[\\ + $it [len $v]]");
   ASSERT(n != NULL);
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "proc", 4) == 0);
-  AstNode* body = n->data.command.args[2]->data.block.commands[0];
-  ASSERT(body->type == AST_COMMAND);
-  ASSERT(memcmp(body->data.command.head->data.lit_string.value, "+", 1) == 0);
-  ASSERT_U32_EQ(body->data.command.arg_count, 2);
-  /* second arg is nested command [len $v] */
-  ASSERT(body->data.command.args[1]->type == AST_COMMAND);
-  ASSERT(memcmp(body->data.command.args[1]->data.command.head->data.lit_string.value, "len", 3) == 0);
+  ASSERT(n->data.command.head->data.lit_string.value[0] == '\\');
+  /* 3 args: +, $it, [len $v] */
+  ASSERT_U32_EQ(n->data.command.arg_count, 3);
+  ASSERT(n->data.command.args[0]->type == AST_LIT_STRING);
+  ASSERT(n->data.command.args[1]->type == AST_VAR_REF);
+  ASSERT(n->data.command.args[2]->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.args[2]->data.command.head->data.lit_string.value, "len", 3) == 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -3654,27 +3644,25 @@ static int test_lambda_in_pipe(void) {
   AstNode* right = n->data.command.args[1];
   ASSERT(right->type == AST_COMMAND);
   ASSERT(memcmp(right->data.command.head->data.lit_string.value, "filter", 6) == 0);
-  /* filter's arg is lambda */
+  /* filter's arg is lambda (now regular command with head=\) */
   AstNode* lambda = right->data.command.args[0];
   ASSERT(lambda->type == AST_COMMAND);
-  ASSERT(memcmp(lambda->data.command.head->data.lit_string.value, "proc", 4) == 0);
+  ASSERT(lambda->data.command.head->data.lit_string.value[0] == '\\');
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
 static int test_lambda_no_args(void) {
-  /* [\\ $it] — lambda with just a variable ref (no extra args) */
+  /* [\\ $it] — lambda with just a variable ref (now regular command) */
   setup();
   AstNode* n = parse_expr("[\\ $it]");
   ASSERT(n != NULL);
   ASSERT(n->type == AST_COMMAND);
-  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "proc", 4) == 0);
-  AstNode* body = n->data.command.args[2]->data.block.commands[0];
-  ASSERT(body->type == AST_COMMAND);
-  /* head is $it (var ref), no args */
-  ASSERT(body->data.command.head->type == AST_VAR_REF);
-  ASSERT_U32_EQ(body->data.command.arg_count, 0);
+  ASSERT(n->data.command.head->data.lit_string.value[0] == '\\');
+  /* 1 arg: $it */
+  ASSERT_U32_EQ(n->data.command.arg_count, 1);
+  ASSERT(n->data.command.args[0]->type == AST_VAR_REF);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();

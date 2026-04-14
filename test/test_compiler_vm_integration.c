@@ -303,6 +303,7 @@ int main(void) {
     { "literal_nfd_normalization",      test_literal_nfd_normalization },
   };
 
+
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;
   int failed = 0;

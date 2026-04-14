@@ -2289,6 +2289,8 @@ typedef struct {
   const char*   name;        /* macro name (arena-allocated, NUL-terminated) */
   uint32_t      name_len;    /* length of name */
   uint32_t      param_count; /* number of macro parameters */
+  bool          variadic;    /* last param is rest-param (receives vec of remaining args) */
+  bool          is_builtin;  /* true if registered in Phase 0 (can be overridden by user) */
   const char**  param_names; /* arena-allocated array of param name strings */
   uint32_t*     param_name_lens; /* lengths of each param name */
   JaclClosure*  closure;     /* compiled macro body closure */
@@ -5612,6 +5614,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Walk flat list to extract (type, name) pairs */
     JaclVal param_names_arr[COMPILER_MAX_PROC_PARAMS];
     JaclType param_types_arr[COMPILER_MAX_PROC_PARAMS];
+    uint32_t param_scope_marks[COMPILER_MAX_PROC_PARAMS]; /* hygiene: per-param scope mark */
     uint8_t param_count = 0;
     bool is_variadic = false;
 
@@ -5665,6 +5668,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table,
             elem->data.lit_string.value, elem->data.lit_string.length);
         param_types_arr[param_count] = rest_type;
+        param_scope_marks[param_count] = elem->scope_mark;
         param_count++;
         continue;
       }
@@ -5686,6 +5690,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table,
             elem->data.lit_string.value, elem->data.lit_string.length);
         param_types_arr[param_count] = ptype;
+        param_scope_marks[param_count] = elem->scope_mark;
         param_count++;
       } else {
         /* Untyped param name */
@@ -5699,6 +5704,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
         param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table, word, wlen);
         param_types_arr[param_count] = TYPE_DYN;
+        param_scope_marks[param_count] = elem->scope_mark;
         param_count++;
       }
     }
@@ -5792,9 +5798,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__add_local(&body_compiler, jacl_inline_string("__rv", 4), line, col);
       body_compiler.locals[body_compiler.local_count - 1].is_param = true;
     } else {
-      /* Normal: add params as locals in body compiler (slots 0..N-1) with types */
+      /* Normal: add params as locals in body compiler (slots 0..N-1) with types.
+         Use each param's own scope mark (from its AST node) so that macro-generated
+         procs correctly match param names to body var-refs at the same scope. */
       for (uint8_t i = 0; i < param_count; i++) {
+        uint32_t prev_mark = body_compiler.current_scope_mark;
+        body_compiler.current_scope_mark = param_scope_marks[i];
         compiler__add_local(&body_compiler, closure->param_names[i], line, col);
+        body_compiler.current_scope_mark = prev_mark;
         body_compiler.locals[body_compiler.local_count - 1].is_param = true;
         body_compiler.locals[body_compiler.local_count - 1].type = param_types_arr[i];
       }
@@ -6990,11 +7001,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       subop = 11; nm = "make-syntax command"; expect_args = 2; expect_desc = "kind, head, args-vec";
     } else if (kl == 5 && memcmp(kn, "block", 5) == 0) {
       subop = 12; nm = "make-syntax block"; expect_args = 1; expect_desc = "kind and commands-vec";
+    } else if (kl == 16 && memcmp(kn, "lit-string-caret", 16) == 0) {
+      subop = 19; nm = "make-syntax lit-string-caret"; expect_args = 1; expect_desc = "kind and string value";
     } else {
       char err[128];
       snprintf(err, sizeof(err),
                "make-syntax: unknown kind '%.*s' (expected one of: "
-               "lit-int, lit-float, lit-string, var-ref, command, block)",
+               "lit-int, lit-float, lit-string, var-ref, command, block, lit-string-caret)",
                (int)kl, kn);
       compiler__error(c, line, col, err);
       return;
@@ -8774,8 +8787,10 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             closure->upvalue_count  = 0;
             closure->upvalues       = NULL;
             closure->param_count    = (uint8_t)param_count;
-            closure->min_args       = (uint8_t)param_count;
-            closure->variadic       = false;
+            closure->min_args       = node->data.defmacro.variadic
+                                        ? (uint8_t)(param_count > 0 ? param_count - 1 : 0)
+                                        : (uint8_t)param_count;
+            closure->variadic       = node->data.defmacro.variadic;
             closure->pinned         = false;
             closure->pin_worker_id  = -1;
             closure->is_generator   = false;
@@ -8843,8 +8858,10 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         closure->upvalue_count  = 0;
         closure->upvalues       = NULL;
         closure->param_count    = (uint8_t)param_count;
-        closure->min_args       = (uint8_t)param_count;
-        closure->variadic       = false;
+        closure->min_args       = node->data.defmacro.variadic
+                                    ? (uint8_t)(param_count > 0 ? param_count - 1 : 0)
+                                    : (uint8_t)param_count;
+        closure->variadic       = node->data.defmacro.variadic;
         closure->pinned         = false;
         closure->pin_worker_id  = -1;
         closure->is_generator   = false;
@@ -8902,6 +8919,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         entry->name           = name_copy;
         entry->name_len       = mname_len;
         entry->param_count    = param_count;
+        entry->variadic       = node->data.defmacro.variadic;
         entry->param_names    = node->data.defmacro.param_names;
         entry->param_name_lens = node->data.defmacro.param_name_lens;
         entry->closure        = closure;

@@ -1400,6 +1400,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
         uint32_t scol  = lex.col;
         lexer__advance(&lex);
         Token tok = lexer__make_token(&lex, TOKEN_BACKSLASH, start, sline, scol);
+        tok.payload.text = lex.source + start;
         lexer__arr_push(&arr, tok);
         continue;
       }

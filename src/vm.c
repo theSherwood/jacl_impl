@@ -6020,7 +6020,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
          * the introspection path because construction ops don't expect
          * a syntax object as the operand on top of the stack. */
         if ((subop >= 7 && subop <= 12) || subop == 15 || subop == 16 ||
-            subop == 17 || subop == 18) {
+            subop == 17 || subop == 18 || subop == 19) {
           static const char *mk_names[] = {
             "make-syntax lit-int",    "make-syntax lit-float",
             "make-syntax lit-string", "make-syntax var-ref",
@@ -6182,6 +6182,25 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                 return VM_RUNTIME_ERROR;
               }
             }
+            break;
+          }
+          case 19: {  /* make-syntax lit-string-caret (scope_mark=0 for anaphoric introduction) */
+            JaclVal v;
+            result = vm__pop(vm, &v); if (result != VM_OK) return result;
+            if (jacl_is_error(v)) { result = vm__push(vm, v); if (result != VM_OK) return result; break; }
+            if (!jacl_is_string(v)) {
+              vm__set_error(vm, "type error in 'make-syntax lit-string-caret': expected string, got %s",
+                            vm__type_name(v));
+              return VM_RUNTIME_ERROR;
+            }
+            JaclVal out = gc_alloc_syntax(&vm->heap);
+            JaclSyntax *rsyn = jacl_as_syntax(out);
+            rsyn->kind = SYNTAX_LIT_STRING;
+            rsyn->data.lit_string.value = v;
+            rsyn->scope_mark = 0;  /* caret: bypass macro mark */
+            rsyn->is_caret = 1;
+            result = vm__push(vm, out);
+            if (result != VM_OK) return result;
             break;
           }
           case 11: {  /* make-syntax command (head, args-vec) */
@@ -6689,6 +6708,7 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
 
   jacl_ctx_destroy(macro_ctx);
   es.ctx = NULL;
+  gc__current_heap = &vm->heap;  /* restore after temp context destroyed it */
 
   if (cr.error_count > 0) {
     vm->error_message = cr.error_message ? cr.error_message : "compile error";
