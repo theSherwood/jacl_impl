@@ -254,6 +254,8 @@ JaclVal jacl_eval(JaclVM* jvm, const char* source) {
   /* Compile — use persistent intern table and seeded struct registry. */
   ExpandState es;
   memset(&es, 0, sizeof(es));
+  jacl_ctx_saved_t macro_saved;
+  jacl_ctx_save(&macro_saved);
   jacl_context_t *macro_ctx = jacl_ctx_new(NULL);
   es.ctx = macro_ctx;
 
@@ -263,6 +265,7 @@ JaclVal jacl_eval(JaclVM* jvm, const char* source) {
 
   jacl_ctx_destroy(macro_ctx);
   es.ctx = NULL;
+  jacl_ctx_restore(macro_saved);
   if (cr.error_count > 0) {
     return embed__make_error(jvm, cr.error_message ? cr.error_message
                                                    : "compile error");

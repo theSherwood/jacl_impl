@@ -1333,6 +1333,230 @@ static int test_variadic_defmacro(void) {
     TEST_PASS();
 }
 
+/* ===== Context save/enter/restore API ===== */
+
+/* Test: jacl_ctx_save + jacl_ctx_restore round-trips gc__current_heap */
+static int test_ctx_save_restore_basic(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    /* gc__current_heap is now &vm.heap */
+
+    ThreadHeap *original_heap = gc__current_heap;
+    ASSERT(original_heap == &vm.heap);
+
+    jacl_ctx_saved_t saved;
+    jacl_ctx_save(&saved);
+    ASSERT(saved.heap == original_heap);
+
+    /* Create a context — this overwrites gc__current_heap */
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(gc__current_heap == &ctx->vm.heap);
+    ASSERT(gc__current_heap != original_heap);
+
+    /* Destroy the context — this NULLs gc__current_heap */
+    jacl_ctx_destroy(ctx);
+
+    /* Restore — this brings back the original heap */
+    jacl_ctx_restore(saved);
+    ASSERT(gc__current_heap == original_heap);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: jacl_ctx_enter switches gc__current_heap to the context's heap */
+static int test_ctx_enter_switches_heap(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    ThreadHeap *original_heap = gc__current_heap;
+
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    /* gc__current_heap is now ctx's heap (from vm_init inside ctx_new) */
+
+    /* Restore to original first */
+    gc__current_heap = original_heap;
+    ASSERT(gc__current_heap == original_heap);
+
+    /* Now enter the context */
+    jacl_ctx_saved_t saved;
+    jacl_ctx_enter(ctx, &saved);
+    ASSERT(saved.heap == original_heap);
+    ASSERT(gc__current_heap == &ctx->vm.heap);
+
+    /* Restore */
+    jacl_ctx_restore(saved);
+    ASSERT(gc__current_heap == original_heap);
+
+    jacl_ctx_destroy(ctx);
+    gc__current_heap = original_heap;  /* clean up after destroy */
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: nested save/restore correctly stacks */
+static int test_ctx_nested_save_restore(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    ThreadHeap *original_heap = gc__current_heap;
+
+    /* Save outer state before creating first context */
+    jacl_ctx_saved_t saved_outer;
+    jacl_ctx_save(&saved_outer);
+
+    jacl_context_t *outer = jacl_ctx_new(NULL);
+    ThreadHeap *outer_heap = &outer->vm.heap;
+    ASSERT(gc__current_heap == outer_heap);
+
+    /* Save outer context state before creating inner context */
+    jacl_ctx_saved_t saved_inner;
+    jacl_ctx_save(&saved_inner);
+
+    jacl_context_t *inner = jacl_ctx_new(NULL);
+    ThreadHeap *inner_heap = &inner->vm.heap;
+    ASSERT(gc__current_heap == inner_heap);
+
+    /* Destroy inner, restore to outer */
+    jacl_ctx_destroy(inner);
+    jacl_ctx_restore(saved_inner);
+    ASSERT(gc__current_heap == outer_heap);
+
+    /* Destroy outer, restore to original */
+    jacl_ctx_destroy(outer);
+    jacl_ctx_restore(saved_outer);
+    ASSERT(gc__current_heap == original_heap);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: error path in ast_expand_macros restores gc__current_heap */
+static int test_ctx_error_path_restores_heap(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable it;
+    intern_table_init(&it, &arena);
+    ThreadHeap *original_heap = gc__current_heap;
+
+    /* Source with duplicate macro definitions → expansion error. */
+    const char *src =
+        "defmacro foo {x} { $x }\n"
+        "defmacro foo {x} { $x }\n";
+    LexResult tokens = lexer_lex(src, &arena);
+    ParseResult parse = parser_parse(tokens, &arena);
+    ASSERT(parse.error_count == 0);
+
+    MacroTable mt;
+    macro_table_init(&mt);
+    ExpandState es;
+    memset(&es, 0, sizeof(es));
+
+    uint32_t err_line = 0, err_col = 0;
+    const char *err = ast_expand_macros(parse.nodes, parse.count, &mt,
+        &vm.heap, &it, &arena, &es, &err_line, &err_col);
+
+    /* Should have an error about shadowing */
+    ASSERT(err != NULL);
+
+    /* Critical: gc__current_heap must be restored after error */
+    ASSERT(gc__current_heap == original_heap);
+
+    intern_table_destroy(&it);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: jacl_run correctly restores gc__current_heap */
+static int test_jacl_run_restores_heap(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    ThreadHeap *original_heap = gc__current_heap;
+
+    VMResult r = jacl_run("[+ 1 2]", &vm, &arena);
+    ASSERT(r == VM_OK);
+    ASSERT(jacl_as_i32(vm.stack[0]) == 3);
+
+    /* gc__current_heap must be restored to the caller's heap */
+    ASSERT(gc__current_heap == original_heap);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: macro expansion through jacl_ctx_run_source restores heap */
+static int test_ctx_run_with_macros_restores_heap(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    ThreadHeap *caller_heap = gc__current_heap;
+
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+
+    PrintCapture cap = { .len = 0 };
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    const char *src =
+        "def f [\\ + $it 10]\n"
+        "[print [f 5]]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "15\n");
+    (void)result;
+
+    jacl_ctx_destroy(ctx);
+
+    /* Caller's heap must be restorable */
+    gc__current_heap = caller_heap;
+    ASSERT(gc__current_heap == caller_heap);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+/* Test: multiple sequential context runs don't corrupt heap state */
+static int test_ctx_sequential_runs(void) {
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    ThreadHeap *original_heap = gc__current_heap;
+
+    /* Run 1: simple arithmetic */
+    VMResult r1 = jacl_run("[+ 10 20]", &vm, &arena);
+    ASSERT(r1 == VM_OK);
+    ASSERT(jacl_as_i32(vm.stack[0]) == 30);
+    ASSERT(gc__current_heap == original_heap);
+
+    /* Run 2: with lambda macro */
+    VMResult r2 = jacl_run("def f [\\ * $it 3]\n[f 7]", &vm, &arena);
+    ASSERT(r2 == VM_OK);
+    ASSERT(jacl_as_i32(vm.stack[0]) == 21);
+    ASSERT(gc__current_heap == original_heap);
+
+    /* Run 3: with user defmacro */
+    VMResult r3 = jacl_run(
+        "defmacro double {x} { syntax-quote [+ ~x ~x] }\n[double 5]",
+        &vm, &arena);
+    ASSERT(r3 == VM_OK);
+    ASSERT(jacl_as_i32(vm.stack[0]) == 10);
+    ASSERT(gc__current_heap == original_heap);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1392,6 +1616,14 @@ int main(void) {
     /* Built-in \ macro and variadic macros */
     { "builtin_lambda",          test_builtin_lambda_macro },
     { "variadic_defmacro",       test_variadic_defmacro },
+    /* Context save/enter/restore API */
+    { "ctx_save_restore_basic",  test_ctx_save_restore_basic },
+    { "ctx_enter_switches_heap", test_ctx_enter_switches_heap },
+    { "ctx_nested_save_restore", test_ctx_nested_save_restore },
+    { "ctx_error_restores_heap", test_ctx_error_path_restores_heap },
+    { "jacl_run_restores_heap",  test_jacl_run_restores_heap },
+    { "ctx_run_macros_heap",     test_ctx_run_with_macros_restores_heap },
+    { "ctx_sequential_runs",     test_ctx_sequential_runs },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

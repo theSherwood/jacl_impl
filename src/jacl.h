@@ -1890,6 +1890,22 @@ extern void            jacl_ctx_destroy (jacl_context_t *ctx);
 extern JaclVal         jacl_ctx_run_source (jacl_context_t *ctx, const char *src, size_t len, uint64_t restriction_set, JaclError *err_out);
 extern JaclVal         jacl_ctx_run_closure (jacl_context_t *ctx, JaclClosure *closure, JaclVal *args, uint32_t arg_count, JaclError *err_out);
 
+/* Scoped context switching: saves/restores gc__current_heap and the emergency
+ * GC callback so that nested context operations are reentrant.
+ *
+ * jacl_ctx_save:    snapshot current thread-local GC state (call BEFORE ctx_new)
+ * jacl_ctx_enter:   save + switch gc__current_heap to a context's heap
+ * jacl_ctx_restore: restore a previously saved snapshot */
+typedef struct {
+    ThreadHeap *heap;
+    void       (*gc_fn)(void *);
+    void        *gc_ctx;
+} jacl_ctx_saved_t;
+
+extern void jacl_ctx_save    (jacl_ctx_saved_t *saved);
+extern void jacl_ctx_enter   (jacl_context_t *ctx, jacl_ctx_saved_t *saved);
+extern void jacl_ctx_restore (jacl_ctx_saved_t saved);
+
 /* --- gc_collect.c --- */
 extern void gc__ms_init (GCMarkStack *ms);
 extern void gc__ms_push (GCMarkStack *ms, void *ptr);

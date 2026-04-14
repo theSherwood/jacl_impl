@@ -1101,8 +1101,11 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
 
     /* Create a temporary context for macro expansion if none provided */
     jacl_context_t *tmp_ctx = NULL;
-    ThreadHeap *saved_heap = gc__current_heap;
+    jacl_ctx_saved_t saved_ctx = {0};
+    bool have_saved_ctx = false;
     if (!es->ctx) {
+        jacl_ctx_save(&saved_ctx);
+        have_saved_ctx = true;
         tmp_ctx = jacl_ctx_new(NULL);
         es->ctx = tmp_ctx;
     }
@@ -1205,7 +1208,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
             memcpy(msg, err, strlen(err) + 1);
             *out_error_line = node->start.line;
             *out_error_col  = node->start.column;
-            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; gc__current_heap = saved_heap; }
+            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; jacl_ctx_restore(saved_ctx); }
             return msg;
         }
 
@@ -1232,7 +1235,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
                 memcpy(msg, err, strlen(err) + 1);
                 *out_error_line = node->start.line;
                 *out_error_col  = node->start.column;
-                if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; gc__current_heap = saved_heap; }
+                if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; jacl_ctx_restore(saved_ctx); }
                 return msg;
             }
         }
@@ -1240,7 +1243,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
         if (macros->count >= MACRO_TABLE_MAX) {
             *out_error_line = node->start.line;
             *out_error_col  = node->start.column;
-            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; gc__current_heap = saved_heap; }
+            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; jacl_ctx_restore(saved_ctx); }
             return "too many macro definitions";
         }
 
@@ -1269,7 +1272,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
         if (err) {
             *out_error_line = 0;
             *out_error_col  = 0;
-            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; gc__current_heap = saved_heap; }
+            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; jacl_ctx_restore(saved_ctx); }
             return err;
         }
     }
@@ -1282,7 +1285,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
         if (!expand__node(&program[i], macros, heap, intern, arena, es, 0)) {
             *out_error_line = es->error_line;
             *out_error_col  = es->error_col;
-            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; gc__current_heap = saved_heap; }
+            if (tmp_ctx) { jacl_ctx_destroy(tmp_ctx); es->ctx = NULL; jacl_ctx_restore(saved_ctx); }
             return es->error_msg;
         }
     }
@@ -1290,7 +1293,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
     if (tmp_ctx) {
         jacl_ctx_destroy(tmp_ctx);
         es->ctx = NULL;
-        gc__current_heap = saved_heap;
+        jacl_ctx_restore(saved_ctx);
     }
 
     return NULL;  /* success */

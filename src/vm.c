@@ -160,6 +160,22 @@ struct jacl_context_s {
     bool             owns_intern_table;   /* false when sharing parent's */
 };
 
+/* Scoped context switching: saves/restores gc__current_heap and the emergency
+ * GC callback so that nested context operations are reentrant.
+ *
+ * jacl_ctx_save:  snapshot current thread-local GC state (call BEFORE ctx_new)
+ * jacl_ctx_enter: save + switch gc__current_heap to a context's heap
+ * jacl_ctx_restore: restore a previously saved snapshot */
+typedef struct {
+    ThreadHeap *heap;
+    void       (*gc_fn)(void *);
+    void        *gc_ctx;
+} jacl_ctx_saved_t;
+
+void jacl_ctx_save    (jacl_ctx_saved_t *saved);
+void jacl_ctx_enter   (jacl_context_t *ctx, jacl_ctx_saved_t *saved);
+void jacl_ctx_restore (jacl_ctx_saved_t saved);
+
 /* --- JaclError: error out-param for internal run API --- */
 #ifndef JACL_ERROR_DEFINED
 #define JACL_ERROR_DEFINED
@@ -6573,6 +6589,27 @@ void jacl_ctx_destroy(jacl_context_t *ctx) {
     free(ctx);
 }
 
+/* --- Scoped context switching --- */
+
+void jacl_ctx_save(jacl_ctx_saved_t *saved) {
+    saved->heap   = gc__current_heap;
+    saved->gc_fn  = gc__emergency_gc_fn;
+    saved->gc_ctx = gc__emergency_gc_ctx;
+}
+
+void jacl_ctx_enter(jacl_context_t *ctx, jacl_ctx_saved_t *saved) {
+    jacl_ctx_save(saved);
+    gc__current_heap     = &ctx->vm.heap;
+    gc__emergency_gc_fn  = vm__emergency_gc_single;
+    gc__emergency_gc_ctx = &ctx->vm;
+}
+
+void jacl_ctx_restore(jacl_ctx_saved_t saved) {
+    gc__current_heap     = saved.heap;
+    gc__emergency_gc_fn  = saved.gc_fn;
+    gc__emergency_gc_ctx = saved.gc_ctx;
+}
+
 /* --- jacl_ctx_run_source / jacl_ctx_run_closure (US-006) --- */
 
 JaclVal jacl_ctx_run_source(jacl_context_t *ctx, const char *src, size_t len,
@@ -6701,6 +6738,8 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   memset(&es, 0, sizeof(es));
 
   /* Create a temporary context for macro closure execution. */
+  jacl_ctx_saved_t macro_saved;
+  jacl_ctx_save(&macro_saved);
   jacl_context_t *macro_ctx = jacl_ctx_new(NULL);
   es.ctx = macro_ctx;
 
@@ -6708,7 +6747,7 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
 
   jacl_ctx_destroy(macro_ctx);
   es.ctx = NULL;
-  gc__current_heap = &vm->heap;  /* restore after temp context destroyed it */
+  jacl_ctx_restore(macro_saved);
 
   if (cr.error_count > 0) {
     vm->error_message = cr.error_message ? cr.error_message : "compile error";
