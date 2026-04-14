@@ -9078,6 +9078,39 @@ bool compiler__top_level_suspends(AstNode** stmts, uint32_t count,
   return false;
 }
 
+/* Check if any AST node requires macro expansion (defmacro or \ command). */
+static bool compiler__node_needs_expansion(AstNode *node) {
+  if (!node) return false;
+  if (node->type == AST_DEFMACRO) return true;
+  if (node->type == AST_COMMAND) {
+    AstNode *head = node->data.command.head;
+    if (head && head->type == AST_LIT_STRING
+        && head->data.lit_string.length == 1
+        && head->data.lit_string.value[0] == '\\')
+      return true;
+    /* Recurse into head and args */
+    if (compiler__node_needs_expansion(head)) return true;
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+      if (compiler__node_needs_expansion(node->data.command.args[i]))
+        return true;
+    }
+  }
+  if (node->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < node->data.block.count; i++) {
+      if (compiler__node_needs_expansion(node->data.block.commands[i]))
+        return true;
+    }
+  }
+  return false;
+}
+
+static bool compiler__needs_expansion(AstNode **nodes, uint32_t count) {
+  for (uint32_t i = 0; i < count; i++) {
+    if (compiler__node_needs_expansion(nodes[i])) return true;
+  }
+  return false;
+}
+
 CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       JaclInternTable* intern_table,
                                       ThreadHeap* heap,
@@ -9114,8 +9147,10 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   }
 
   /* Macro expansion pass: compile defmacro bodies, expand macro calls.
-   * Runs after parsing, before the main compilation pass. */
-  if (parse.error_count == 0) {
+   * Runs after parsing, before the main compilation pass.
+   * Fast-path: skip entirely if the AST has no defmacros and no command
+   * heads that match a built-in macro name (currently just \). */
+  if (parse.error_count == 0 && compiler__needs_expansion(parse.nodes, parse.count)) {
     uint32_t err_line = 0, err_col = 0;
     const char *expand_err = ast_expand_macros(
         parse.nodes, parse.count, c.macro_table, heap,

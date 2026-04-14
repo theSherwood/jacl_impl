@@ -1108,42 +1108,46 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
     }
 
     /* Phase 0: Register built-in macros (e.g., \ for lambda).
-     * These are parsed from a prelude string and registered before
-     * user defmacros so they can be overridden. */
+     * The prelude is parsed once and the compiled closure is cached across
+     * invocations so we pay the lex/parse/compile cost only on first use. */
+    static arena_t      expand__prelude_arena   = {0};
+    static AstNode     *expand__prelude_node    = NULL;
+    static bool         expand__prelude_parsed  = false;
+
     {
-        static const char *lambda_prelude =
-            "defmacro \\ {head ..rest} {\n"
-            "  def body [make-syntax \"command\" $head $rest]\n"
-            "  def blk [make-syntax \"block\" [vec $body]]\n"
-            "  def pn [make-syntax \"lit-string-caret\" \"it\"]\n"
-            "  def params [make-syntax \"command\" $pn [vec]]\n"
-            "  def nm [make-syntax \"lit-string\" \"\"]\n"
-            "  [make-syntax \"command\" [make-syntax \"lit-string\" \"proc\"] "
-            "[vec $nm $params $blk]]\n"
-            "}\n";
-        LexResult ltoks = lexer_lex(lambda_prelude, arena);
-        ParseResult ppre = parser_parse(ltoks, arena);
-        for (uint32_t pi = 0; pi < ppre.count; pi++) {
-            AstNode *pnode = ppre.nodes[pi];
-            if (!pnode || pnode->type != AST_DEFMACRO) continue;
-            if (macros->count >= MACRO_TABLE_MAX) break;
+        if (!expand__prelude_parsed) {
+            static const char *lambda_prelude =
+                "defmacro \\ {head ..rest} {\n"
+                "  def body [make-syntax \"command\" $head $rest]\n"
+                "  def blk [make-syntax \"block\" [vec $body]]\n"
+                "  def pn [make-syntax \"lit-string-caret\" \"it\"]\n"
+                "  def params [make-syntax \"command\" $pn [vec]]\n"
+                "  def nm [make-syntax \"lit-string\" \"\"]\n"
+                "  [make-syntax \"command\" [make-syntax \"lit-string\" \"proc\"] "
+                "[vec $nm $params $blk]]\n"
+                "}\n";
+            LexResult ltoks = lexer_lex(lambda_prelude, &expand__prelude_arena);
+            ParseResult ppre = parser_parse(ltoks, &expand__prelude_arena);
+            for (uint32_t pi = 0; pi < ppre.count; pi++) {
+                if (ppre.nodes[pi] && ppre.nodes[pi]->type == AST_DEFMACRO) {
+                    expand__prelude_node = ppre.nodes[pi];
+                    break;
+                }
+            }
+            expand__prelude_parsed = true;
+        }
 
-            const char *pname = pnode->data.defmacro.name;
-            uint32_t    pname_len = pnode->data.defmacro.name_len;
-            char *pcopy = (char *)arena_alloc(arena, pname_len + 1);
-            memcpy(pcopy, pname, pname_len);
-            pcopy[pname_len] = '\0';
-
+        if (expand__prelude_node && macros->count < MACRO_TABLE_MAX) {
             MacroEntry *pe = &macros->entries[macros->count++];
-            pe->name           = pcopy;
-            pe->name_len       = pname_len;
-            pe->param_count    = pnode->data.defmacro.param_count;
-            pe->variadic       = pnode->data.defmacro.variadic;
-            pe->param_names    = pnode->data.defmacro.param_names;
-            pe->param_name_lens = pnode->data.defmacro.param_name_lens;
-            pe->closure        = NULL;
-            pe->body           = pnode->data.defmacro.body;
+            pe->name           = "\\";
+            pe->name_len       = 1;
+            pe->param_count    = expand__prelude_node->data.defmacro.param_count;
+            pe->variadic       = expand__prelude_node->data.defmacro.variadic;
+            pe->param_names    = expand__prelude_node->data.defmacro.param_names;
+            pe->param_name_lens = expand__prelude_node->data.defmacro.param_name_lens;
+            pe->body           = expand__prelude_node->data.defmacro.body;
             pe->is_builtin     = true;
+            pe->closure        = NULL;  /* compiled fresh in Phase 2 each call */
         }
     }
 
@@ -1232,6 +1236,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
             return err;
         }
     }
+
 
     /* Phase 3: Expand macro calls */
     for (uint32_t i = 0; i < count; i++) {
