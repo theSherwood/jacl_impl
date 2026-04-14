@@ -143,6 +143,7 @@ TESTS=(
     "test/test_stream_type_enforce.c|stream_type_enforce|"
     "test/test_syntax.c|syntax|"
     "test/test_long_names.c|long_names|"
+    "test/test_bench.c|bench|"
 )
 
 # Filter tests if --lib flag is set
