@@ -748,6 +748,7 @@ typedef enum {
   OP_SET_STATE_FIELD_CELL,
   OP_SYNTAX_SPLICE,
   OP_SYNTAX_OP,    /* uint8_t subop; pops syntax object(s), pushes introspection result */
+  OP_INTERPRET,    /* pop string, interpret as JACL source, push result */
   OP_HALT
 } OpCode;
 

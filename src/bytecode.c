@@ -173,6 +173,7 @@ typedef enum {
   OP_SET_STATE_FIELD_CELL, /* uint8_t field_idx; read cell from SM field, pop value, write through cell w/ barrier, push NIL */
   OP_SYNTAX_SPLICE, /* uint8_t n_unquotes; pop n values + template, splice unquotes into template, push result */
   OP_SYNTAX_OP,     /* uint8_t subop; introspect syntax object (kind/datum/head/args/commands/pos/to-string) */
+  OP_INTERPRET,     /* pop string, interpret as source, push result */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -461,6 +462,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_SET_STATE_FIELD_CELL: return "OP_SET_STATE_FIELD_CELL";
     case OP_SYNTAX_SPLICE:       return "OP_SYNTAX_SPLICE";
     case OP_SYNTAX_OP:           return "OP_SYNTAX_OP";
+    case OP_INTERPRET:           return "OP_INTERPRET";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";

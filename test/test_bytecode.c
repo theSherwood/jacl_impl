@@ -166,7 +166,8 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_SET_STATE_FIELD_CELL, 150);
   ASSERT_INT_EQ(OP_SYNTAX_SPLICE,   151);
   ASSERT_INT_EQ(OP_SYNTAX_OP,       152);
-  ASSERT_INT_EQ(OP_HALT,             153);
+  ASSERT_INT_EQ(OP_INTERPRET,       153);
+  ASSERT_INT_EQ(OP_HALT,             154);
   TEST_PASS();
 }
 

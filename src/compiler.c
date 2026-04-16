@@ -6882,6 +6882,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  if (compiler__head_matches(head, "interpret", 9)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "interpret", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
+    compiler__emit_byte(c, OP_INTERPRET, line);
+    return;
+  }
+
   /* US-015: syntax object introspection builtins. Each compiles the single
    * argument to a syntax object value, then emits OP_SYNTAX_OP with a subop
    * byte indicating which introspection operation to perform. */

@@ -193,6 +193,13 @@ typedef struct {
 } JaclError;
 #endif
 
+/* Forward declarations for context lifecycle functions, used by OP_INTERPRET
+ * and other opcodes before their definitions later in this file. */
+jacl_context_t *jacl_ctx_new(jacl_context_t *parent);
+void jacl_ctx_destroy(jacl_context_t *ctx);
+JaclVal jacl_ctx_run_source(jacl_context_t *ctx, const char *src, size_t len,
+                            uint64_t restriction_set, JaclError *err_out);
+
 /* --- API --- */
 
 void     vm_init(VM* vm, arena_t* arena);
@@ -6398,6 +6405,99 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm__set_error(vm, "unknown OP_SYNTAX_OP subop %u", subop);
           return VM_RUNTIME_ERROR;
         }
+        break;
+      }
+
+      case OP_INTERPRET: {
+        /* Pop source string argument. */
+        JaclVal src_val;
+        result = vm__pop(vm, &src_val);
+        if (result != VM_OK) return result;
+
+        /* Error passthrough */
+        if (jacl_is_error(src_val)) {
+          result = vm__push(vm, src_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        if (!jacl_is_string(src_val)) {
+          vm__set_error(vm, "interpret: expected string, got %s",
+                        vm__type_name(src_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Copy source bytes out of the parent heap before switching contexts.
+           Use arena so the buffer survives the child run. */
+        uint32_t slen = jacl_string_byte_len(src_val);
+        char *src_buf = (char *)arena_alloc(vm->arena, slen + 1);
+        jacl_string_data(src_val, src_buf, slen + 1);
+        src_buf[slen] = '\0';
+
+        /* Save parent's GC state; jacl_ctx_new will switch gc__current_heap. */
+        jacl_ctx_saved_t saved;
+        jacl_ctx_save(&saved);
+
+        jacl_context_t *child = jacl_ctx_new(NULL);
+        if (!child) {
+          jacl_ctx_restore(saved);
+          vm__set_error(vm, "interpret: failed to allocate child context");
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Inherit parent's print function so [print ...] in interpreted
+           code routes to the same destination. */
+        child->vm.print_fn  = vm->print_fn;
+        child->vm.print_ctx = vm->print_ctx;
+
+        JaclError ierr;
+        JaclVal child_result = jacl_ctx_run_source(child, src_buf, slen,
+                                                   UINT64_MAX, &ierr);
+
+        /* Switch gc__current_heap back to parent before allocating the
+           materialized result. */
+        jacl_ctx_restore(saved);
+
+        JaclVal out;
+        if (ierr.kind != JACL_ERROR_NONE) {
+          /* Copy error message into parent's arena so it survives destroy. */
+          const char *msg = ierr.message ? ierr.message : "interpret error";
+          size_t mlen = strlen(msg);
+          char *mcopy = (char *)arena_alloc(vm->arena, (uint32_t)(mlen + 1));
+          memcpy(mcopy, msg, mlen + 1);
+          vm->error_message = mcopy;
+          out = jacl_set_error(JACL_NIL);
+        } else {
+          /* Materialize child_result onto parent heap. Phase 1: only scalars
+             and strings; complex values (vec/map/closure) return an error. */
+          if (jacl_is_nil(child_result) || jacl_is_bool(child_result) ||
+              jacl_is_i32(child_result) || jacl_is_f32(child_result) ||
+              jacl_is_u32(child_result) || jacl_is_inline_string(child_result) ||
+              jacl_is_native_fn(child_result)) {
+            out = child_result;
+          } else if (jacl_is_i64(child_result)) {
+            out = jacl_i64(&vm->heap, jacl_as_i64(child_result));
+          } else if (jacl_is_u64(child_result)) {
+            out = jacl_u64(&vm->heap, jacl_as_u64(child_result));
+          } else if (jacl_is_f64(child_result)) {
+            out = jacl_f64(&vm->heap, jacl_as_f64(child_result));
+          } else if (jacl_is_string(child_result)) {
+            uint32_t blen = jacl_string_byte_len(child_result);
+            char *sbuf = (char *)arena_alloc(vm->arena, blen > 0 ? blen : 1);
+            jacl_string_data(child_result, sbuf, blen);
+            out = jacl_string_new(&vm->heap, vm->intern_table, sbuf, blen);
+          } else {
+            vm->error_message =
+              "interpret: cannot return complex value across contexts "
+              "(Phase 1 supports only scalars and strings)";
+            out = jacl_set_error(JACL_NIL);
+          }
+        }
+
+        jacl_ctx_destroy(child);
+
+        result = vm__push(vm, out);
+        if (result != VM_OK) return result;
         break;
       }
 

@@ -536,6 +536,140 @@ static int test_ctx_run_source_nested(void) {
     TEST_PASS();
 }
 
+/* ===== M14 (interpret): [interpret $src] builtin — Phase 1 ===== */
+
+/* Test: [interpret "..."] returns scalar result on parent heap */
+static int test_interpret_basic(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret \"[+ 1 2]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(result));
+    ASSERT(jacl_as_i32(result) == 3);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret] returning a string copies it onto parent heap */
+static int test_interpret_string_result(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* [concat "hello " "world!"] → "hello world!" (long enough to exceed
+       the 7-byte inline-string path, exercising heap-string materialization) */
+    const char *src =
+        "[interpret \"[concat \\\"hello \\\" \\\"world!\\\"]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_string(result));
+
+    char buf[64] = {0};
+    uint32_t n = jacl_string_data(result, buf, sizeof(buf));
+    ASSERT(n == strlen("hello world!"));
+    ASSERT_STR_EQ(buf, "hello world!");
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret] on source with a parse error returns an error value */
+static int test_interpret_parse_error(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret \"[+ 1\"]";  /* unclosed bracket */
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+
+    ASSERT(err.kind == JACL_ERROR_NONE);  /* outer run succeeds */
+    ASSERT(jacl_is_error(result));         /* inner parse error → error value */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret] on source with a runtime error returns an error value */
+static int test_interpret_runtime_error(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret \"[undefined_fn 1]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_error(result));
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret] inherits parent's print function */
+static int test_interpret_with_print(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    PrintCapture cap = { .len = 0 };
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    const char *src = "[interpret \"[print 99]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "99\n");
+    (void)result;  /* return value of [print ...] is nil */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret 42] on non-string argument is a runtime error */
+static int test_interpret_type_error(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret 42]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+
+    ASSERT(err.kind == JACL_ERROR_RUNTIME);
+    ASSERT(err.message != NULL);
+    ASSERT(jacl_is_nil(result));
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: result from [interpret] is usable in subsequent parent operations */
+static int test_interpret_shared_heap(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    PrintCapture cap = { .len = 0 };
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    const char *src = "[print [+ [interpret \"[* 3 4]\"] 1]]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT_STR_EQ(cap.buf, "13\n");
+    (void)result;
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
 /* ===== US-007 (macro-eval): Staged syntax-quote compilation ===== */
 
 /* Helper: run source in a context, return the result */
@@ -1587,6 +1721,14 @@ int main(void) {
     { "ctx_run_source_parse_err",test_ctx_run_source_parse_error },
     { "ctx_run_source_rt_err",   test_ctx_run_source_runtime_error },
     { "ctx_run_source_nested",   test_ctx_run_source_nested },
+    /* M14 (interpret): [interpret $src] builtin — Phase 1 */
+    { "interpret_basic",         test_interpret_basic },
+    { "interpret_string_result", test_interpret_string_result },
+    { "interpret_parse_error",   test_interpret_parse_error },
+    { "interpret_runtime_error", test_interpret_runtime_error },
+    { "interpret_with_print",    test_interpret_with_print },
+    { "interpret_type_error",    test_interpret_type_error },
+    { "interpret_shared_heap",   test_interpret_shared_heap },
     /* US-007 (macro-eval): staged syntax-quote compilation */
     { "staged_sq_literal",       test_staged_sq_literal },
     { "staged_sq_unquote",       test_staged_sq_unquote },
