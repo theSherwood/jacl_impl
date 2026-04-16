@@ -22,6 +22,7 @@ static int              allocation_count      = 0;
 static size_t           total_allocated_bytes = 0;
 static size_t           allocation_seq        = 0;
 static platform_mutex_t tracker_mutex;
+static bool             tracker_mutex_initialized = false;
 
 // Resets the tracker state and (re-)initializes the mutex.
 // Frees any still-active (orphaned) allocations with a warning.
@@ -36,8 +37,12 @@ void tracker_reset() {
       tracking_pool[i].active = false;
     }
   }
-  // Reset counters and (re-)initialize the mutex
+  // Destroy before re-init to avoid UB (glibc asserts on re-init of live mutex)
+  if (tracker_mutex_initialized) {
+    MUTEX_DESTROY(tracker_mutex);
+  }
   MUTEX_INIT(tracker_mutex);
+  tracker_mutex_initialized = true;
   allocation_count      = 0;
   total_allocated_bytes = 0;
   allocation_seq        = 0;

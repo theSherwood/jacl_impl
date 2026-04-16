@@ -283,7 +283,7 @@ static CompileResult compile_with_sm(const char* src, arena_t* arena,
   }
 
   SuspensionMap suspension_map = compiler__analyze_suspension(
-      parse.nodes, parse.count);
+      parse.nodes, parse.count, heap, intern_table);
 
   Compiler c;
   compiler__init(&c, &cr.chunk, arena, intern_table, heap);

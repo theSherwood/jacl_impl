@@ -332,9 +332,15 @@ static int test_future_print_format(void) {
 /* Helper: run suspension analysis on source, return the map */
 static SuspensionMap test__analyze(const char* source) {
     arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+    JaclInternTable intern_table;
+    intern_table_init(&intern_table, &arena);
     LexResult tokens = lexer_lex(source, &arena);
     ParseResult parse = parser_parse(tokens, &arena);
-    SuspensionMap map = compiler__analyze_suspension(parse.nodes, parse.count);
+    SuspensionMap map = compiler__analyze_suspension(parse.nodes, parse.count,
+                                                     &vm.heap, &intern_table);
+    vm_destroy(&vm);
     arena_destroy(&arena);
     return map;
 }
@@ -550,7 +556,10 @@ static CompileResult test__compile(const char *source, arena_t *arena, VM *vm) {
     JaclInternTable intern_table;
     intern_table_init(&intern_table, arena);
     vm->intern_table = &intern_table;
-    return compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, NULL);
+    CompileResult result = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, NULL);
+    intern_table_destroy(&intern_table);
+    vm->intern_table = NULL;
+    return result;
 }
 
 /* Helper: find a closure constant by name in a chunk */

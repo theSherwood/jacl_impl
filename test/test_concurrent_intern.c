@@ -17,17 +17,19 @@ typedef struct {
 
 static THREAD_PROC_RETURN THREAD_PROC_TYPE intern_unique_fn(void *arg) {
     InternArgs *a = (InternArgs *)arg;
-    ThreadHeap heap;
-    gc_heap_init(&heap, a->pool);
-    gc__current_heap = &heap;
+    gc_heap_init(&a->heap, a->pool);
+    gc__current_heap = &a->heap;
 
     for (int i = 0; i < a->n_strings; i++) {
         char buf[64];
         int len = snprintf(buf, sizeof(buf), "t%d_u_%04d", a->thread_id, i);
-        jacl_intern(&heap, a->table, buf, (uint32_t)len);
+        jacl_intern(&a->heap, a->table, buf, (uint32_t)len);
     }
 
-    gc_heap_destroy(&heap);
+    /* Heap stays alive — caller destroys after verification.
+     * Destroying here would return GC blocks to the pool; another thread's
+     * gc_alloc could reuse the block, overwriting interned string data and
+     * causing false "already exists" matches via dangling intern table pointers. */
     return 0;
 }
 
@@ -53,20 +55,19 @@ static THREAD_PROC_RETURN THREAD_PROC_TYPE intern_shared_fn(void *arg) {
 
 static THREAD_PROC_RETURN THREAD_PROC_TYPE reader_fn(void *arg) {
     InternArgs *a = (InternArgs *)arg;
-    ThreadHeap heap;
-    gc_heap_init(&heap, a->pool);
-    gc__current_heap = &heap;
+    gc_heap_init(&a->heap, a->pool);
+    gc__current_heap = &a->heap;
 
     for (int round = 0; round < 50; round++) {
         for (int i = 0; i < a->n_strings; i++) {
             char buf[64];
             int len = snprintf(buf, sizeof(buf), "pre_%04d", i);
-            JaclVal v = jacl_intern(&heap, a->table, buf, (uint32_t)len);
+            JaclVal v = jacl_intern(&a->heap, a->table, buf, (uint32_t)len);
             (void)v;
         }
     }
 
-    gc_heap_destroy(&heap);
+    /* Heap stays alive — caller destroys after verification. */
     return 0;
 }
 
@@ -96,6 +97,12 @@ static int test_concurrent_unique_8000(void) {
     }
 
     ASSERT_U32_EQ(table.count, 8000);
+
+    /* Destroy thread heaps after verification — blocks must stay valid
+     * while intern table entries reference them. */
+    for (int i = 0; i < 8; i++) {
+        gc_heap_destroy(&args[i].heap);
+    }
 
     intern_table_destroy(&table);
     gc_block_pool_destroy(&pool);
@@ -199,6 +206,12 @@ static int test_concurrent_readers_writers(void) {
         ASSERT(v != JACL_NIL);
     }
 
+    /* Destroy thread heaps after all verification — blocks must stay valid
+     * while intern table entries reference them. */
+    for (int i = 0; i < 4; i++) {
+        gc_heap_destroy(&rargs[i].heap);
+        gc_heap_destroy(&wargs[i].heap);
+    }
     gc_heap_destroy(&setup_heap);
     intern_table_destroy(&table);
     gc_block_pool_destroy(&pool);

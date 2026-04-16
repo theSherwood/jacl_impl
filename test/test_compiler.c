@@ -3152,7 +3152,7 @@ static int test_module_populate_exports(void) {
   intern_table_init(&intern_table, &arena);
 
   SuspensionMap suspension_map = compiler__analyze_suspension(
-      parse.nodes, parse.count);
+      parse.nodes, parse.count, &heap, &intern_table);
 
   BytecodeChunk chunk;
   chunk_init(&chunk, &arena);
