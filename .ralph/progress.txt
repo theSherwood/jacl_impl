@@ -17,6 +17,11 @@ Started: Thu Apr 16 21:22:15 UTC 2026
 - When compiling with a prelude map, the compiler registers keys as globals via `compiler__set_global_arity` and enforces closed-world name resolution (unresolved names → compile error)
 - HAMT map iteration pattern: `jacl_map_iter_init(node)` → loop `jacl_map_next_leaf(&it)` → `jacl_map_key_from_leaf(ir.item)` / `jacl_map_value_from_leaf(ir.item)`
 - Reserved prelude keys start with ':' (e.g. `:core`) and are skipped during global registration
+- OpCode enum is duplicated in src/bytecode.c AND src/jacl.h — BOTH must be updated when adding new opcodes
+- No `jacl_is_true()` function exists — compare with `JACL_TRUE` constant directly
+- JACL strings have `$var` interpolation — `"[+ $x 1]"` tries to resolve `$x` in the enclosing scope. To embed literal `$var` in a string, use `[concat "prefix" "$" "var suffix"]`
+- OP_INTERPRET uses an arity byte (1 or 2) after the opcode — existing 1-arg form and new 2-arg form share one opcode
+- For 2-arg interpret, env entries must be set BEFORE inner compilation/execution and cleaned up by restoring env.count after
 
 ## 2026-04-17 - US-003
 Thread: (no thread URL available)
@@ -60,4 +65,34 @@ Thread: (no thread URL available)
   - Top-level compiled code uses `stack_base=0`, so you must use `vm_exec(&cl->chunk)` to run it, NOT `jacl_ctx_run_closure` which uses `stack_base=1`
   - `[undefined_fn 1]` does NOT produce a compile error — the compiler treats unknown heads as proc/global calls. Use `[def]` (bad arity) to test compile errors.
   - The full pipeline is: `lexer_lex` → `parser_parse` → `compiler_compile` (handles macro expansion internally) → closure wrapping
+---
+
+## 2026-04-17 - US-004
+Thread: (no thread URL available)
+- Added `OP_INTERPRET_PRELUDE` opcode (position 154, OP_HALT shifted to 155)
+- Added `[interpret-prelude]` compiler builtin (0 args) in src/compiler.c
+- Added VM handler that builds a HAMT map of 17 non-core builtin names with `JACL_TRUE` sentinel values
+- Non-core builtins: print, interpret, interpret-prelude, spawn, await, parallel, race, yield, make-syntax, syntax-error, box, atom, deref, reset, swap, lines, stream_next
+- Added 3 integration tests: iprelude_has_interpret, iprelude_no_core, iprelude_has_print
+- Files changed: src/jacl.h, src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - OpCode enum exists in TWO places: src/bytecode.c AND src/jacl.h — BOTH must be updated when adding opcodes
+  - `jacl_inline_string` is limited to 7 bytes max — use `jacl_intern` for longer names (9+ bytes like "interpret")
+  - There is no `jacl_is_true()` function — compare directly with `JACL_TRUE` constant
+  - HAMT map keys use value-based comparison (`jacl_val_eq`), not identity, so `jacl_intern` and `jacl_inline_string` representations are NOT interchangeable as keys — use the same representation for insertion and lookup
+---
+
+## 2026-04-17 - US-005
+Thread: (no thread URL available)
+- Added 2-arg form for `[interpret $prelude $src]` with arity byte after OP_INTERPRET
+- Compiler: accepts 1 or 2 args, emits arity byte (1 or 2) after OP_INTERPRET
+- Compiler: sandbox check — when `has_prelude` is true, non-core builtins not in prelude globals produce compile errors
+- VM: OP_INTERPRET reads arity byte; 2-arg form pops prelude map, type-checks, populates env, compiles with prelude, executes, restores env.count
+- Added 6 integration tests: prelude_var, empty_core, blocked_print, blocked_nested, custom_closure, shared_state
+- Files changed: src/compiler.c, src/vm.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - JACL strings have `$var` interpolation — `"[+ $x 1]"` in source code tries to resolve `$x` in the enclosing scope. Use `[concat "prefix" "$" "var suffix"]` to build strings with literal `$` signs.
+  - OP_INTERPRET arity byte (1 or 2) after the opcode allows sharing one opcode between 1-arg and 2-arg forms
+  - For 2-arg interpret, env entries populated from prelude map must use the same key representation as the compiler (inline_string for ≤7 bytes, intern for >7 bytes) or OP_GET_GLOBAL will fail with "undefined variable"
+  - Save/restore `vm->env.count` around interpret execution to clean up prelude entries from the env
 ---
