@@ -1,0 +1,143 @@
+# Ralph Progress Log
+Started: Thu Apr 16 21:22:15 UTC 2026
+
+## Codebase Patterns
+- `compiler_compile` returns a `CompileResult` with a `BytecodeChunk`; to execute top-level code, wrap in a JaclClosure and call `vm_exec`, NOT `jacl_ctx_run_closure` (which expects stack_base=1 for lambda closures)
+- `jacl_ctx_run_closure` is for calling proper closures (lambdas), not top-level compiled chunks
+- Parse errors are detected by `parse.error_count > 0` and the first error message is found by walking `parse.nodes` looking for `AST_ERROR`
+- Compile errors are detected by `cr.error_count > 0` and message is in `cr.error_message`
+- Unknown command heads are NOT compile errors — they compile to proc/global calls and fail at runtime
+- For compile-error tests use bad builtin arity (e.g. `[def]`) not unknown names
+- `ExpandState.ctx` must be set to a valid context for macro expansion to work; if NULL, `ast_expand_macros` creates a temp context automatically
+- Tests use `jacl_context_t` pattern: `jacl_ctx_new(NULL)` → use ctx→arena/heap/intern_table → `jacl_ctx_destroy`
+- To run a compiled closure from within `vm__run`: save (stack_top, frame_count, ip, chunk, top_chunk), push dummy callee, set up CallFrame with stack_base above dummy, call `vm__run(vm, saved_frame_count)`, get result from stack_top-1, restore state
+- `MacroEntry.is_builtin` MUST be set to false for user-defined macros; macro_table_init only zeros count, not entries
+- HAMT map type is `jacl_map_node*` (from `jacl_as_ptr()`), NOT `jacl_map_root*`
+- `vm__env_get`/`vm__env_set` use identity comparison (`==`) for name keys — short names (≤7 bytes) must use `jacl_inline_string`, NOT `jacl_intern`
+- When compiling with a prelude map, the compiler registers keys as globals via `compiler__set_global_arity` and enforces closed-world name resolution (unresolved names → compile error)
+- HAMT map iteration pattern: `jacl_map_iter_init(node)` → loop `jacl_map_next_leaf(&it)` → `jacl_map_key_from_leaf(ir.item)` / `jacl_map_value_from_leaf(ir.item)`
+- Reserved prelude keys start with ':' (e.g. `:core`) and are skipped during global registration
+- OpCode enum is duplicated in src/bytecode.c AND src/jacl.h — BOTH must be updated when adding new opcodes
+- No `jacl_is_true()` function exists — compare with `JACL_TRUE` constant directly
+- JACL strings have `$var` interpolation — `"[+ $x 1]"` tries to resolve `$x` in the enclosing scope. To embed literal `$var` in a string, use `[concat "prefix" "$" "var suffix"]`
+- OP_INTERPRET uses an arity byte (1 or 2) after the opcode — existing 1-arg form and new 2-arg form share one opcode
+- For 2-arg interpret, env entries must be set BEFORE inner compilation/execution and cleaned up by restoring env.count after
+- In sandbox mode (has_prelude), non-core builtins emit OP_GET_GLOBAL + OP_CALL instead of direct opcodes — `compiler__is_core_builtin()` is the single source of truth for core/non-core classification
+
+## Known Issues (interpret)
+
+1. **Prelude values are useless sentinels** — `[interpret-prelude]` returns `{"print": true, ...}` where values are `JACL_TRUE`, not callable functions. The map only works for `map-remove` derivation; to actually call non-core builtins in sandbox mode, you must inject your own closures. Confusing API.
+
+## 2026-04-17 - US-003
+Thread: (no thread URL available)
+- Added `JaclVal prelude_map` parameter to `compiler_compile` and `source_to_closure_in_place`
+- Added `has_prelude` flag to Compiler struct — when true, unresolved names produce compile errors
+- In `compiler_compile`: iterates prelude map keys, registers each as a global via `compiler__set_global_arity`
+- Reserved keys (starting with ':') are skipped during registration
+- Compile-time name checks added in generic call path (command heads) and AST_VAR_REF handler
+- Updated all call sites (vm.c, embed.c, 7 test files) to pass `JACL_NIL` for new parameter
+- Added 3 integration tests: prelude_compile_ok, prelude_compile_unresol, prelude_entries_reach
+- Files changed: src/compiler.c, src/jacl.h, src/vm.c, src/embed.c, test/test_integration.c, test/test_bench.c, test/test_compiler.c, test/test_jacl_harness.c, test/test_m13.c, test/test_string.c, test/test_syntax.c
+- **Learnings for future iterations:**
+  - `vm__env_get`/`vm__env_set` use identity comparison for keys. For names ≤7 bytes, the compiler uses `jacl_inline_string`, so env keys must match. Using `jacl_intern` for short names creates a different JaclVal that won't match.
+  - HAMT map keys can be extracted via `jacl_map_key_from_leaf` and converted to raw bytes via `jacl_string_flat_ptr`. The bytes can then be fed to `compiler__name_val` to get the correct JaclVal representation.
+  - When adding a parameter to `compiler_compile`, there are 13+ call sites across source and test files. The unity build (`jacl.c`) includes all source files, so the forward declaration in compiler.c and the extern in jacl.h must both be updated.
+---
+
+## 2026-04-17 - US-002
+Thread: (no thread URL available)
+- Rewrote OP_INTERPRET handler to use `source_to_closure_in_place` + direct execution on parent VM
+- Deleted Phase 1 isolated-context code (jacl_ctx_save/new/run_source/restore/destroy)
+- Deleted result-materialization block (i64/u64/f64/string + complex-value error ladder)
+- Added dummy callee slot + manual frame setup for safe in-place closure execution
+- Added tests for vector and map return values (previously rejected by Phase 1)
+- Fixed latent bug: `is_builtin` not initialized in `ast_expand_macros` Phase 1 macro registration
+- Files changed: src/vm.c, src/syntax.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - To run top-level compiled code from within `vm__run`, you CANNOT use `vm_exec` (it resets the stack). Instead, save state, push dummy callee, set up a CallFrame at the current stack_top, and call `vm__run(vm, saved_frame_count)`. OP_HALT returns cleanly, and the result is at `stack_top - 1`.
+  - OP_RETURN and OP_CHECK_ERROR write the return value to `stack[callee_base - 1]`, so you must push a dummy callee slot before the frame. Otherwise they clobber parent stack data.
+  - `MacroEntry.is_builtin` is uninitialized when `macro_table_init` only zeros `count`. Stack garbage can make `is_builtin == true`, causing duplicate defmacros to silently override instead of erroring. Always set `is_builtin = false` for user-defined entries.
+  - The HAMT map type for test assertions is `jacl_map_node*` (via `jacl_as_ptr()`), not `jacl_map_root*`.
+---
+
+## 2026-04-17 - US-001
+Thread: (no thread URL available)
+- Implemented `source_to_closure_in_place()` in src/vm.c
+- Function lex/parse/macro-expand/compiles source into a JaclClosure on caller-supplied heap
+- Added forward declaration in vm.c and extern declaration in jacl.h
+- Files changed: src/vm.c, src/jacl.h, test/test_integration.c
+- **Learnings for future iterations:**
+  - Top-level compiled code uses `stack_base=0`, so you must use `vm_exec(&cl->chunk)` to run it, NOT `jacl_ctx_run_closure` which uses `stack_base=1`
+  - `[undefined_fn 1]` does NOT produce a compile error — the compiler treats unknown heads as proc/global calls. Use `[def]` (bad arity) to test compile errors.
+  - The full pipeline is: `lexer_lex` → `parser_parse` → `compiler_compile` (handles macro expansion internally) → closure wrapping
+---
+
+## 2026-04-17 - US-004
+Thread: (no thread URL available)
+- Added `OP_INTERPRET_PRELUDE` opcode (position 154, OP_HALT shifted to 155)
+- Added `[interpret-prelude]` compiler builtin (0 args) in src/compiler.c
+- Added VM handler that builds a HAMT map of 17 non-core builtin names with `JACL_TRUE` sentinel values
+- Non-core builtins: print, interpret, interpret-prelude, spawn, await, parallel, race, yield, make-syntax, syntax-error, box, atom, deref, reset, swap, lines, stream_next
+- Added 3 integration tests: iprelude_has_interpret, iprelude_no_core, iprelude_has_print
+- Files changed: src/jacl.h, src/bytecode.c, src/compiler.c, src/vm.c, test/test_bytecode.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - OpCode enum exists in TWO places: src/bytecode.c AND src/jacl.h — BOTH must be updated when adding opcodes
+  - `jacl_inline_string` is limited to 7 bytes max — use `jacl_intern` for longer names (9+ bytes like "interpret")
+  - There is no `jacl_is_true()` function — compare directly with `JACL_TRUE` constant
+  - HAMT map keys use value-based comparison (`jacl_val_eq`), not identity, so `jacl_intern` and `jacl_inline_string` representations are NOT interchangeable as keys — use the same representation for insertion and lookup
+---
+
+## 2026-04-17 - US-005
+Thread: (no thread URL available)
+- Added 2-arg form for `[interpret $prelude $src]` with arity byte after OP_INTERPRET
+- Compiler: accepts 1 or 2 args, emits arity byte (1 or 2) after OP_INTERPRET
+- Compiler: sandbox check — when `has_prelude` is true, non-core builtins not in prelude globals produce compile errors
+- VM: OP_INTERPRET reads arity byte; 2-arg form pops prelude map, type-checks, populates env, compiles with prelude, executes, restores env.count
+- Added 6 integration tests: prelude_var, empty_core, blocked_print, blocked_nested, custom_closure, shared_state
+- Files changed: src/compiler.c, src/vm.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - JACL strings have `$var` interpolation — `"[+ $x 1]"` in source code tries to resolve `$x` in the enclosing scope. Use `[concat "prefix" "$" "var suffix"]` to build strings with literal `$` signs.
+  - OP_INTERPRET arity byte (1 or 2) after the opcode allows sharing one opcode between 1-arg and 2-arg forms
+  - For 2-arg interpret, env entries populated from prelude map must use the same key representation as the compiler (inline_string for ≤7 bytes, intern for >7 bytes) or OP_GET_GLOBAL will fail with "undefined variable"
+  - Save/restore `vm->env.count` around interpret execution to clean up prelude entries from the env
+---
+
+## 2026-04-17 - US-006
+Thread: (no thread URL available)
+- Added `compiler__is_core_builtin()` helper in src/compiler.c — single source of truth for 17 non-core builtin names
+- Modified sandbox check in `compiler__compile_command`: when has_prelude is true and head is a non-core builtin present in the prelude, emit OP_GET_GLOBAL + compile args + OP_CALL instead of the direct opcode
+- Non-core builtins absent from prelude still produce compile errors (unchanged)
+- Core builtins emit their opcodes regardless of prelude (unchanged)
+- Added declaration in src/jacl.h
+- Added 4 integration tests: sandbox_print_downgrade, sandbox_spawn_blocked, sandbox_core_arith, sandbox_macro_noncore
+- Files changed: src/compiler.c, src/jacl.h, test/test_integration.c
+- **Learnings for future iterations:**
+  - The sandbox downgrade is purely a compiler change — zero VM modifications needed. OP_GET_GLOBAL + OP_CALL reuses the existing generic call path.
+  - The downgrade block must come BEFORE all the individual builtin handlers (print, spawn, etc.) in compiler__compile_command so it intercepts and returns before the opcode handlers fire.
+  - Macros that expand to non-core builtins correctly get sandbox treatment because macro expansion happens before compilation, and the expanded AST goes through the same compiler__compile_command code path.
+---
+
+## 2026-04-17 - US-007
+Thread: (no thread URL available)
+- Created new test file `test/test_interpret_sandbox.c` with 6 end-to-end scenarios
+- Registered in build.sh as `interpret_sandbox` test target
+- Scenarios: untrusted expression evaluator, audit-logged I/O, nested interpret with restriction, prelude derivation via map-remove, parent closure captures over mutable state, defmacro inside interpreted sandbox code
+- All 6 scenarios pass; full 87-test suite green
+- Files changed: test/test_interpret_sandbox.c, build.sh
+- **Learnings for future iterations:**
+  - `[interpret-prelude]` returns sentinel `JACL_TRUE` values, not actual callable functions. The map controls compile-time name resolution only. To actually call non-core builtins in sandbox mode, you must provide real closures as map values.
+  - For nested interpret tests, 1-arg outer form (full access, no sandbox) is the cleanest way to test transitivity — the outer code has real access to `interpret` as a builtin opcode.
+  - `defmacro`, `syntax-quote`, and `~` (unquote) are all core builtins — they work inside sandbox mode with an empty prelude.
+  - Parent closures compiled in non-sandbox scope retain direct opcode access to builtins like `print`, `reset`, `deref` — sandbox restrictions only apply to the interpreted code's compilation context.
+---
+
+## 2026-04-17 - US-008
+Thread: (no thread URL available)
+- No code changes needed: Phase 1 isolated-context code was already removed in US-002
+- Verified: OP_INTERPRET handler uses source_to_closure_in_place + manual frame setup, zero jacl_ctx_* calls
+- Verified: jacl_context_t APIs remain available for macro-eval and public API (jacl_ctx_run_source, etc.)
+- Verified: all 87 tests pass, no dead code warnings from compiler
+- Files changed: none (already complete from US-002)
+- **Learnings for future iterations:**
+  - When a cleanup story's work was already done in a prior story, verify the acceptance criteria are met and mark it complete — no need for a separate code change.
+---
