@@ -1261,6 +1261,7 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
         entry->param_name_lens = node->data.defmacro.param_name_lens;
         entry->closure        = NULL;
         entry->body           = node->data.defmacro.body;
+        entry->is_builtin     = false;
     }
 
     /* Phase 2: Compile macro bodies */

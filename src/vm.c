@@ -6432,74 +6432,86 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
 
-        /* Copy source bytes out of the parent heap before switching contexts.
-           Use arena so the buffer survives the child run. */
+        /* Extract source bytes into arena. */
         uint32_t slen = jacl_string_byte_len(src_val);
         char *src_buf = (char *)arena_alloc(vm->arena, slen + 1);
         jacl_string_data(src_val, src_buf, slen + 1);
         src_buf[slen] = '\0';
 
-        /* Save parent's GC state; jacl_ctx_new will switch gc__current_heap. */
-        jacl_ctx_saved_t saved;
-        jacl_ctx_save(&saved);
+        /* Compile source into a closure on the parent VM's heap (in-place). */
+        ExpandState iexpand;
+        memset(&iexpand, 0, sizeof(iexpand));
+        JaclError ierr;
+        JaclVal closure_val = source_to_closure_in_place(
+            src_buf, slen, vm->arena, &vm->heap,
+            vm->intern_table, &iexpand, &ierr);
 
-        jacl_context_t *child = jacl_ctx_new(NULL);
-        if (!child) {
-          jacl_ctx_restore(saved);
-          vm__set_error(vm, "interpret: failed to allocate child context");
+        if (ierr.kind != JACL_ERROR_NONE) {
+          /* Compile/parse error → push error value with message. */
+          vm->error_message = ierr.message ? ierr.message
+                                           : "interpret error";
+          result = vm__push(vm, jacl_set_error(JACL_NIL));
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        /* Execute the compiled closure on the parent VM. */
+        JaclClosure *icl = jacl_as_closure(closure_val);
+
+        /* Save caller state. */
+        uint32_t saved_stack_top   = vm->stack_top;
+        uint32_t saved_frame_count = vm->frame_count;
+        uint8_t *saved_ip          = vm->ip;
+        BytecodeChunk *saved_chunk = vm->chunk;
+        BytecodeChunk *saved_top   = vm->top_chunk;
+
+        /* Push dummy callee slot so OP_RETURN / OP_CHECK_ERROR
+           frame-unwinding writes into a safe position. */
+        result = vm__push(vm, closure_val);
+        if (result != VM_OK) return result;
+
+        if (vm->frame_count >= VM_FRAMES_MAX) {
+          vm->stack_top = saved_stack_top;
+          vm__set_error(vm, "stack overflow");
           return VM_RUNTIME_ERROR;
         }
 
-        /* Inherit parent's print function so [print ...] in interpreted
-           code routes to the same destination. */
-        child->vm.print_fn  = vm->print_fn;
-        child->vm.print_ctx = vm->print_ctx;
+        JaclClosure interpret_wrapper;
+        memset(&interpret_wrapper, 0, sizeof(interpret_wrapper));
+        interpret_wrapper.chunk = icl->chunk;
 
-        JaclError ierr;
-        JaclVal child_result = jacl_ctx_run_source(child, src_buf, slen,
-                                                   UINT64_MAX, &ierr);
+        CallFrame *ifrm = &vm->frames[vm->frame_count++];
+        ifrm->closure    = &interpret_wrapper;
+        ifrm->return_ip  = NULL;
+        ifrm->stack_base = vm->stack_top;
+        ifrm->chunk      = &icl->chunk;
 
-        /* Switch gc__current_heap back to parent before allocating the
-           materialized result. */
-        jacl_ctx_restore(saved);
+        vm->ip        = icl->chunk.code;
+        vm->chunk     = &icl->chunk;
+        vm->top_chunk = &icl->chunk;
+        vm->error_message = NULL;
+
+        VMResult inner = vm__run(vm, saved_frame_count);
 
         JaclVal out;
-        if (ierr.kind != JACL_ERROR_NONE) {
-          /* Copy error message into parent's arena so it survives destroy. */
-          const char *msg = ierr.message ? ierr.message : "interpret error";
-          size_t mlen = strlen(msg);
-          char *mcopy = (char *)arena_alloc(vm->arena, (uint32_t)(mlen + 1));
-          memcpy(mcopy, msg, mlen + 1);
-          vm->error_message = mcopy;
+        if (inner != VM_OK) {
+          /* Runtime error during interpreted execution. */
           out = jacl_set_error(JACL_NIL);
+          /* vm->error_message already set by vm__run */
         } else {
-          /* Materialize child_result onto parent heap. Phase 1: only scalars
-             and strings; complex values (vec/map/closure) return an error. */
-          if (jacl_is_nil(child_result) || jacl_is_bool(child_result) ||
-              jacl_is_i32(child_result) || jacl_is_f32(child_result) ||
-              jacl_is_u32(child_result) || jacl_is_inline_string(child_result) ||
-              jacl_is_native_fn(child_result)) {
-            out = child_result;
-          } else if (jacl_is_i64(child_result)) {
-            out = jacl_i64(&vm->heap, jacl_as_i64(child_result));
-          } else if (jacl_is_u64(child_result)) {
-            out = jacl_u64(&vm->heap, jacl_as_u64(child_result));
-          } else if (jacl_is_f64(child_result)) {
-            out = jacl_f64(&vm->heap, jacl_as_f64(child_result));
-          } else if (jacl_is_string(child_result)) {
-            uint32_t blen = jacl_string_byte_len(child_result);
-            char *sbuf = (char *)arena_alloc(vm->arena, blen > 0 ? blen : 1);
-            jacl_string_data(child_result, sbuf, blen);
-            out = jacl_string_new(&vm->heap, vm->intern_table, sbuf, blen);
-          } else {
-            vm->error_message =
-              "interpret: cannot return complex value across contexts "
-              "(Phase 1 supports only scalars and strings)";
-            out = jacl_set_error(JACL_NIL);
-          }
+          /* Success — result is on top of stack. */
+          out = (vm->stack_top > saved_stack_top)
+              ? vm->stack[vm->stack_top - 1]
+              : JACL_NIL;
         }
 
-        jacl_ctx_destroy(child);
+        /* Restore caller state. */
+        vm->stack_top   = saved_stack_top;
+        vm->frame_count = saved_frame_count;
+        vm->ip          = saved_ip;
+        vm->chunk       = saved_chunk;
+        vm->top_chunk   = saved_top;
+        frame = &vm->frames[vm->frame_count - 1];
 
         result = vm__push(vm, out);
         if (result != VM_OK) return result;

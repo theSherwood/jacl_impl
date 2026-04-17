@@ -670,6 +670,40 @@ static int test_interpret_shared_heap(void) {
     TEST_PASS();
 }
 
+/* Test: [interpret] returning a vector works (no more Phase 1 complex-value error) */
+static int test_interpret_vector_result(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret \"[vec 1 2 3]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_vector(result));
+    ASSERT(jacl_vec_count((jacl_vec_root*)jacl_as_ptr(result)) == 3);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret] returning a map works (no more Phase 1 complex-value error) */
+static int test_interpret_map_result(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret \"[map \\\"a\\\" 1 \\\"b\\\" 2]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_map(result));
+    ASSERT(jacl_map_count((jacl_map_node*)jacl_as_ptr(result)) == 2);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
 /* ===== source_to_closure_in_place tests ===== */
 
 /* Test: valid source compiles to a closure, calling it produces expected value */
@@ -1816,6 +1850,8 @@ int main(void) {
     { "interpret_with_print",    test_interpret_with_print },
     { "interpret_type_error",    test_interpret_type_error },
     { "interpret_shared_heap",   test_interpret_shared_heap },
+    { "interpret_vector_result", test_interpret_vector_result },
+    { "interpret_map_result",    test_interpret_map_result },
     /* source_to_closure_in_place */
     { "stc_valid",               test_source_to_closure_valid },
     { "stc_parse_error",         test_source_to_closure_parse_error },
