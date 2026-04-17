@@ -1004,6 +1004,75 @@ static int test_interpret_prelude_has_print(void) {
     TEST_PASS();
 }
 
+/* Test: [interpret-prelude] values are native-fn refs (not just $true sentinels) */
+static int test_interpret_prelude_native_fn_values(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret-prelude]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_map(result));
+
+    jacl_map_node *m = (jacl_map_node *)jacl_as_ptr(result);
+
+    /* Check that "print" value is a native-fn (not $true) */
+    JaclVal key_print = jacl_inline_string("print", 5);
+    JaclVal val_print = jacl_map_get(m, key_print);
+    ASSERT(!jacl_is_nil(val_print));
+    ASSERT(jacl_is_native_fn(val_print));  /* NEW: values are native fn refs */
+
+    /* Check that "interpret" value is also a native-fn */
+    JaclVal key_interpret = jacl_intern(&ctx->vm.heap, &ctx->intern_table,
+                                         "interpret", 9);
+    JaclVal val_interpret = jacl_map_get(m, key_interpret);
+    ASSERT(!jacl_is_nil(val_interpret));
+    ASSERT(jacl_is_native_fn(val_interpret));
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret [interpret-prelude] "[print 42]"] works with direct opcode emission.
+ * The native fn ref for "print" triggers direct OP_PRINT, not env lookup. */
+static int test_interpret_prelude_direct_opcode(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* Using default prelude with native fn refs — print compiles to OP_PRINT */
+    const char *src = "[interpret [interpret-prelude] \"[print 42]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    /* print returns nil */
+    ASSERT(jacl_is_nil(result));
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [map-set [interpret-prelude] "print" $closure] overrides the native fn ref.
+ * When a closure replaces a native fn ref, the closure is called (env lookup path). */
+static int test_interpret_prelude_override_builtin(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* Override print with a closure that returns x + 1000 instead of printing */
+    const char *src =
+        "proc my-print {x} { + $x 1000 };"
+        "[interpret [map-set [interpret-prelude] \"print\" $my-print] \"[print 42]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    /* Custom closure returns 42 + 1000 = 1042 */
+    ASSERT(jacl_is_i32(result));
+    ASSERT(jacl_as_i32(result) == 1042);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
 /* ===== US-005 (sandboxed eval): [interpret $prelude $src] two-arg form ===== */
 
 /* Test: [interpret {"x": 42} "[+ $x 1]"] returns 43
@@ -2273,6 +2342,9 @@ int main(void) {
     { "iprelude_has_interpret",  test_interpret_prelude_has_interpret },
     { "iprelude_no_core",        test_interpret_prelude_no_core },
     { "iprelude_has_print",      test_interpret_prelude_has_print },
+    { "iprelude_native_fn_vals", test_interpret_prelude_native_fn_values },
+    { "iprelude_direct_opcode",  test_interpret_prelude_direct_opcode },
+    { "iprelude_override",       test_interpret_prelude_override_builtin },
     /* US-005 (sandboxed eval): [interpret $prelude $src] two-arg form */
     { "interp2_prelude_var",     test_interpret_two_arg_prelude_var },
     { "interp2_empty_core",      test_interpret_two_arg_empty_prelude_core },

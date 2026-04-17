@@ -6613,7 +6613,9 @@ interpret_done:
         gc__current_heap = &vm->heap;
         jacl_map_node *m = NULL;
 
-        /* Use shared non-core list from compiler.c */
+        /* Use shared non-core list from compiler.c.
+         * Values are native fn refs — callable first-class function references
+         * that the compiler can recognize for direct opcode emission. */
         for (int i = 0; jacl_non_core_builtins[i]; i++) {
           const char *name = jacl_non_core_builtins[i];
           uint32_t len = (uint32_t)strlen(name);
@@ -6623,7 +6625,8 @@ interpret_done:
           } else {
             key = jacl_intern(&vm->heap, vm->intern_table, name, len);
           }
-          m = jacl_map_set(m, key, JACL_TRUE);
+          /* Native fn ref with index i — enables compile-time opcode emission */
+          m = jacl_map_set(m, key, jacl_native_fn((uint32_t)i));
         }
 
         result = vm__push(vm, jacl_map_ptr(m));

@@ -627,6 +627,7 @@ typedef struct {
   bool      is_mutable;   /* true if declared with mut */
   bool      suspends;     /* true if this is a suspending proc */
   bool      captures_mutable; /* true if bound to a closure that captures mutable state */
+  bool      prelude_is_native_fn; /* true if prelude value is a native fn ref (emit direct opcode) */
   JaclType  type;         /* compile-time type (default TYPE_DYN) */
   uint32_t  struct_type_idx; /* struct registry index when type==TYPE_STRUCT */
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
@@ -2598,10 +2599,19 @@ void compiler__set_global_arity(Compiler* c, JaclVal name, int16_t arity) {
     ga->is_mutable = false;
     ga->suspends = false;
     ga->captures_mutable = false;
+    ga->prelude_is_native_fn = false;
     ga->type = TYPE_DYN;
     ga->return_type = TYPE_DYN;
     memset(ga->param_types, 0, sizeof(ga->param_types));
     c->global_arity_count++;
+  }
+}
+
+/* Mark a global as having a native fn ref prelude value (for compile-time resolution) */
+void compiler__set_global_prelude_native_fn(Compiler* c, JaclVal name, bool is_native_fn) {
+  GlobalArity* ga = compiler__find_global(c, name);
+  if (ga) {
+    ga->prelude_is_native_fn = is_native_fn;
   }
 }
 
@@ -4362,10 +4372,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* --- Sandbox mode: non-core builtins downgraded to env lookup + OP_CALL ---
+  /* --- Sandbox mode: prelude controls name resolution ---
    * When compiling under a prelude (has_prelude), non-core builtins are
-   * NOT compiled to their direct opcodes.  Instead they emit OP_GET_GLOBAL
-   * + args + OP_CALL so the prelude map actually controls what gets called.
+   * resolved via the prelude map.  If the prelude value is a native fn ref,
+   * we emit the direct opcode (fast path).  If it's a closure or other value,
+   * we emit OP_GET_GLOBAL + args + OP_CALL (runtime dispatch).
    * Non-core builtins absent from the prelude produce a compile error. */
   if (c->has_prelude && head->type == AST_LIT_STRING) {
     const char *hname = head->data.lit_string.value;
@@ -4373,27 +4384,33 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (!compiler__is_core_builtin(hname, hlen)) {
       /* Non-core builtin: must be in prelude globals to be callable */
       JaclVal nv = compiler__name_val(c->heap, c->intern_table, hname, hlen);
-      if (!compiler__find_global(c, nv)) {
+      GlobalArity* ga = compiler__find_global(c, nv);
+      if (!ga) {
         char err_msg[160];
         snprintf(err_msg, sizeof(err_msg),
                  "undefined name '%.*s'", (int)hlen, hname);
         compiler__error(c, line, col, err_msg);
         return;
       }
-      /* Downgrade: emit OP_GET_GLOBAL + args + OP_CALL instead of direct
-       * opcode.  The prelude map entry's value (env-set by the VM before
-       * compilation) is looked up at runtime, giving the caller control. */
-      JaclVal gkey = compiler__global_name_val(c, hname, hlen);
-      uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
-      compiler__emit_byte(c, OP_GET_GLOBAL, line);
-      compiler__emit_u16(c, name_idx, line);
-      for (uint32_t i = 0; i < argc; i++) {
-        compiler__compile_node(c, args[i]);
+      /* Check if prelude value is a native fn ref — if so, emit direct opcode */
+      if (ga->prelude_is_native_fn) {
+        /* Native fn ref: fall through to normal builtin opcode emission below.
+         * The name matches the builtin, so direct opcode is correct. */
+      } else {
+        /* Closure or other value: emit OP_GET_GLOBAL + args + OP_CALL.
+         * Runtime looks up the prelude-seeded env value and calls it. */
+        JaclVal gkey = compiler__global_name_val(c, hname, hlen);
+        uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
+        compiler__emit_byte(c, OP_GET_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
+        for (uint32_t i = 0; i < argc; i++) {
+          compiler__compile_node(c, args[i]);
+        }
+        compiler__emit_byte(c, OP_CALL, line);
+        compiler__emit_byte(c, (uint8_t)argc, line);
+        c->last_expr_type = TYPE_DYN;
+        return;
       }
-      compiler__emit_byte(c, OP_CALL, line);
-      compiler__emit_byte(c, (uint8_t)argc, line);
-      c->last_expr_type = TYPE_DYN;
-      return;
     }
   }
 
@@ -9289,7 +9306,9 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
       const char *kptr = jacl_string_flat_ptr(key, kbuf, sizeof(kbuf));
       if (kptr[0] == ':') continue;
       JaclVal name_val = compiler__name_val(heap, intern_table, kptr, klen);
+      JaclVal value = jacl_map_value_from_leaf(pir.item);
       compiler__set_global_arity(&c, name_val, -1);
+      compiler__set_global_prelude_native_fn(&c, name_val, jacl_is_native_fn(value));
     }
   }
   {
