@@ -1837,6 +1837,7 @@ extern void compiler__compile_command (Compiler *c, AstNode *node);
 extern void compiler__compile_node (Compiler *c, AstNode *node);
 extern bool compiler__top_level_suspends (AstNode **stmts, uint32_t count, SuspensionMap *map);
 extern bool compiler__is_core_builtin (const char *name, uint32_t len);
+extern const char *jacl_non_core_builtins[];  /* NULL-terminated list */
 extern CompileResult compiler_compile (ParseResult parse, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap, StructTypeRegistry *seed_registry, ExpandState *es, JaclVal prelude_map);
 extern void macro_table_init (MacroTable *t);
 extern MacroEntry *macro_table_lookup (MacroTable *t, const char *name, uint32_t name_len);

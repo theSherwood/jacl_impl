@@ -6593,17 +6593,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         gc__current_heap = &vm->heap;
         jacl_map_node *m = NULL;
 
-        static const char *non_core[] = {
-          "print", "interpret", "interpret-prelude",
-          "spawn", "await", "parallel", "race", "yield",
-          "make-syntax", "syntax-error",
-          "box", "atom", "deref", "reset", "swap",
-          "lines", "stream_next",
-          NULL
-        };
-
-        for (int i = 0; non_core[i]; i++) {
-          const char *name = non_core[i];
+        /* Use shared non-core list from compiler.c */
+        for (int i = 0; jacl_non_core_builtins[i]; i++) {
+          const char *name = jacl_non_core_builtins[i];
           uint32_t len = (uint32_t)strlen(name);
           JaclVal key;
           if (len <= 7) {

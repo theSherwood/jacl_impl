@@ -4224,18 +4224,22 @@ void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
  * destructuring, immutable data ops, vec/map/set ops, string ops,
  * syntax-quote/unquote, type predicates) is core.
  */
+/* Single source of truth for non-core builtins.  These are capability-
+ * sensitive and subject to sandbox prelude gating.  Core builtins (arithmetic,
+ * comparison, control flow, binding, data ops, etc.) are always available. */
+const char *jacl_non_core_builtins[] = {
+  "print", "interpret", "interpret-prelude",
+  "spawn", "await", "parallel", "race", "yield",
+  "make-syntax", "syntax-error",
+  "box", "atom", "deref", "reset", "swap",
+  "lines", "stream_next",
+  NULL
+};
+
 bool compiler__is_core_builtin(const char *name, uint32_t len) {
-  static const char *non_core[] = {
-    "print", "interpret", "interpret-prelude",
-    "spawn", "await", "parallel", "race", "yield",
-    "make-syntax", "syntax-error",
-    "box", "atom", "deref", "reset", "swap",
-    "lines", "stream_next",
-    NULL
-  };
-  for (int i = 0; non_core[i]; i++) {
-    uint32_t nclen = (uint32_t)strlen(non_core[i]);
-    if (len == nclen && memcmp(name, non_core[i], len) == 0) {
+  for (int i = 0; jacl_non_core_builtins[i]; i++) {
+    uint32_t nclen = (uint32_t)strlen(jacl_non_core_builtins[i]);
+    if (len == nclen && memcmp(name, jacl_non_core_builtins[i], len) == 0) {
       return false;
     }
   }
