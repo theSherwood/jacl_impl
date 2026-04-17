@@ -126,3 +126,14 @@ Thread: (no thread URL available)
   - `defmacro`, `syntax-quote`, and `~` (unquote) are all core builtins — they work inside sandbox mode with an empty prelude.
   - Parent closures compiled in non-sandbox scope retain direct opcode access to builtins like `print`, `reset`, `deref` — sandbox restrictions only apply to the interpreted code's compilation context.
 ---
+
+## 2026-04-17 - US-008
+Thread: (no thread URL available)
+- No code changes needed: Phase 1 isolated-context code was already removed in US-002
+- Verified: OP_INTERPRET handler uses source_to_closure_in_place + manual frame setup, zero jacl_ctx_* calls
+- Verified: jacl_context_t APIs remain available for macro-eval and public API (jacl_ctx_run_source, etc.)
+- Verified: all 87 tests pass, no dead code warnings from compiler
+- Files changed: none (already complete from US-002)
+- **Learnings for future iterations:**
+  - When a cleanup story's work was already done in a prior story, verify the acceptance criteria are met and mark it complete — no need for a separate code change.
+---
