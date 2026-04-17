@@ -24,6 +24,16 @@ Started: Thu Apr 16 21:22:15 UTC 2026
 - For 2-arg interpret, env entries must be set BEFORE inner compilation/execution and cleaned up by restoring env.count after
 - In sandbox mode (has_prelude), non-core builtins emit OP_GET_GLOBAL + OP_CALL instead of direct opcodes — `compiler__is_core_builtin()` is the single source of truth for core/non-core classification
 
+## Known Issues (interpret)
+
+1. **Prelude values are useless sentinels** — `[interpret-prelude]` returns `{"print": true, ...}` where values are `JACL_TRUE`, not callable functions. The map only works for `map-remove` derivation; to actually call non-core builtins in sandbox mode, you must inject your own closures. Confusing API.
+
+2. **Inconsistent error semantics** — `[interpret 42]` (type error) raises a VM exception that propagates up and halts the caller. `[interpret "[bad"]` (parse error) returns an error *value* and the caller continues. Type errors are caught before compilation; compile/runtime errors are wrapped as values.
+
+3. **Silent prelude key rejection** — Prelude map keys >128 bytes or non-strings are silently ignored during compiler registration. No warning; compilation just fails with "undefined name" and you have to debug why.
+
+4. **Error messages lack location** — Parse/compile errors from interpreted code return only a message string. No line/column info from the inner source, making debugging difficult.
+
 ## 2026-04-17 - US-003
 Thread: (no thread URL available)
 - Added `JaclVal prelude_map` parameter to `compiler_compile` and `source_to_closure_in_place`
