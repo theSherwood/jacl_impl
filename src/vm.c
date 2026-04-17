@@ -6415,10 +6415,20 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_INTERPRET: {
-        /* Pop source string argument. */
+        /* Read arity byte: 1 = [interpret $src], 2 = [interpret $prelude $src] */
+        uint8_t interp_arity = *vm->ip++;
+
+        /* Pop source string (always top of stack). */
         JaclVal src_val;
         result = vm__pop(vm, &src_val);
         if (result != VM_OK) return result;
+
+        /* Pop prelude map for 2-arg form. */
+        JaclVal prelude_val = JACL_NIL;
+        if (interp_arity == 2) {
+          result = vm__pop(vm, &prelude_val);
+          if (result != VM_OK) return result;
+        }
 
         /* Error passthrough */
         if (jacl_is_error(src_val)) {
@@ -6426,10 +6436,23 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (result != VM_OK) return result;
           break;
         }
+        if (interp_arity == 2 && jacl_is_error(prelude_val)) {
+          result = vm__push(vm, prelude_val);
+          if (result != VM_OK) return result;
+          break;
+        }
 
+        /* Type-check: source must be string */
         if (!jacl_is_string(src_val)) {
           vm__set_error(vm, "interpret: expected string, got %s",
                         vm__type_name(src_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Type-check: prelude must be map or nil */
+        if (interp_arity == 2 && !jacl_is_nil(prelude_val) && !jacl_is_map(prelude_val)) {
+          vm__set_error(vm, "interpret: expected map for prelude, got %s",
+                        vm__type_name(prelude_val));
           return VM_RUNTIME_ERROR;
         }
 
@@ -6439,16 +6462,48 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         jacl_string_data(src_val, src_buf, slen + 1);
         src_buf[slen] = '\0';
 
-        /* Compile source into a closure on the parent VM's heap (in-place). */
+        /* For 2-arg form: populate VM env with prelude entries so
+         * OP_GET_GLOBAL resolves them at runtime. Save env.count for
+         * cleanup after execution. */
+        uint32_t saved_env_count = vm->env.count;
+        if (interp_arity == 2 && jacl_is_map(prelude_val)) {
+          gc__current_heap = &vm->heap;
+          jacl_map_node *pmap = (jacl_map_node *)jacl_as_ptr(prelude_val);
+          jacl_map_iter pit = jacl_map_iter_init(pmap);
+          jacl_map_iter_result pir;
+          for (;;) {
+            pir = jacl_map_next_leaf(&pit);
+            if (!pir.item) break;
+            JaclVal mkey = jacl_map_key_from_leaf(pir.item);
+            JaclVal mval = jacl_map_value_from_leaf(pir.item);
+            /* Derive env key matching compiler's representation:
+             * ≤7 bytes → jacl_inline_string, >7 → jacl_intern */
+            uint32_t klen = jacl_string_byte_len(mkey);
+            char kbuf[128];
+            jacl_string_data(mkey, kbuf, sizeof(kbuf));
+            JaclVal env_key;
+            if (klen <= 7) {
+              env_key = jacl_inline_string(kbuf, klen);
+            } else {
+              env_key = jacl_intern(&vm->heap, vm->intern_table, kbuf, klen);
+            }
+            vm__env_set(vm, env_key, mval);
+          }
+        }
+
+        /* Compile source into a closure on the parent VM's heap (in-place).
+         * Pass prelude_val so the compiler enforces closed-world names. */
         ExpandState iexpand;
         memset(&iexpand, 0, sizeof(iexpand));
         JaclError ierr;
+        JaclVal compile_prelude = (interp_arity == 2) ? prelude_val : JACL_NIL;
         JaclVal closure_val = source_to_closure_in_place(
             src_buf, slen, vm->arena, &vm->heap,
-            vm->intern_table, &iexpand, &ierr, JACL_NIL);
+            vm->intern_table, &iexpand, &ierr, compile_prelude);
 
         if (ierr.kind != JACL_ERROR_NONE) {
-          /* Compile/parse error → push error value with message. */
+          /* Compile/parse error → restore env and push error value. */
+          vm->env.count = saved_env_count;
           vm->error_message = ierr.message ? ierr.message
                                            : "interpret error";
           result = vm__push(vm, jacl_set_error(JACL_NIL));
@@ -6473,6 +6528,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         if (vm->frame_count >= VM_FRAMES_MAX) {
           vm->stack_top = saved_stack_top;
+          vm->env.count = saved_env_count;
           vm__set_error(vm, "stack overflow");
           return VM_RUNTIME_ERROR;
         }
@@ -6506,12 +6562,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               : JACL_NIL;
         }
 
-        /* Restore caller state. */
+        /* Restore caller state (including env for sandbox cleanup). */
         vm->stack_top   = saved_stack_top;
         vm->frame_count = saved_frame_count;
         vm->ip          = saved_ip;
         vm->chunk       = saved_chunk;
         vm->top_chunk   = saved_top;
+        vm->env.count   = saved_env_count;
         frame = &vm->frames[vm->frame_count - 1];
 
         result = vm__push(vm, out);

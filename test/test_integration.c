@@ -989,6 +989,119 @@ static int test_interpret_prelude_has_print(void) {
     TEST_PASS();
 }
 
+/* ===== US-005 (sandboxed eval): [interpret $prelude $src] two-arg form ===== */
+
+/* Test: [interpret {"x": 42} "[+ $x 1]"] returns 43
+ * Note: $x inside a JACL string triggers interpolation, so we build the
+ * inner source via concat to avoid outer-scope resolution. */
+static int test_interpret_two_arg_prelude_var(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* Build inner source "[+ $x 1]" without triggering $x interpolation */
+    const char *src =
+        "def inner-src [concat \"[+ \" \"$\" \"x 1]\"];"
+        "[interpret [map \"x\" 42] $inner-src]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(result));
+    ASSERT(jacl_as_i32(result) == 43);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret {} "[+ 1 2]"] returns 3 (core always available) */
+static int test_interpret_two_arg_empty_prelude_core(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret [map] \"[+ 1 2]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(result));
+    ASSERT(jacl_as_i32(result) == 3);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret {} "[print \"hi\"]"] returns compile-error (print not in prelude) */
+static int test_interpret_two_arg_blocked_print(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret [map] \"[print \\\"hi\\\"]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);  /* outer succeeds */
+    ASSERT(jacl_is_error(result));          /* inner compile error */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret [map-remove [interpret-prelude] "interpret"] "[interpret \"[+ 1 2]\"]"]
+ * returns compile-error (nested interpret blocked) */
+static int test_interpret_two_arg_blocked_nested(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src =
+        "[interpret [map-remove [interpret-prelude] \"interpret\"]"
+        " \"[interpret \\\"[+ 1 2]\\\"]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);  /* outer succeeds */
+    ASSERT(jacl_is_error(result));          /* inner compile error */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret [map-set [map] "log" $my-closure] "[log 42]"] calls the closure */
+static int test_interpret_two_arg_custom_closure(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* Define a closure that adds 100, then pass it via prelude as "log" */
+    const char *src =
+        "proc adder {x} { + $x 100 };"
+        "[interpret [map-set [map] \"log\" $adder] \"[log 42]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(result));
+    ASSERT(jacl_as_i32(result) == 142);  /* 42 + 100 */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: closure in prelude sees parent's mutable state (shared heap/VM) */
+static int test_interpret_two_arg_shared_state(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* Create a box (mutable cell) in the parent, pass a reader closure
+     * via prelude that reads the box, and verify the interpreted code
+     * can observe the parent's state. */
+    const char *src =
+        "def b [box 10];"
+        "proc read-b {} { deref $b };"
+        "[interpret [map-set [map] \"read-b\" $read-b] \"[read-b]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(result));
+    ASSERT(jacl_as_i32(result) == 10);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
 /* ===== US-007 (macro-eval): Staged syntax-quote compilation ===== */
 
 /* Helper: run source in a context, return the result */
@@ -2062,6 +2175,13 @@ int main(void) {
     { "iprelude_has_interpret",  test_interpret_prelude_has_interpret },
     { "iprelude_no_core",        test_interpret_prelude_no_core },
     { "iprelude_has_print",      test_interpret_prelude_has_print },
+    /* US-005 (sandboxed eval): [interpret $prelude $src] two-arg form */
+    { "interp2_prelude_var",     test_interpret_two_arg_prelude_var },
+    { "interp2_empty_core",      test_interpret_two_arg_empty_prelude_core },
+    { "interp2_blocked_print",   test_interpret_two_arg_blocked_print },
+    { "interp2_blocked_nested",  test_interpret_two_arg_blocked_nested },
+    { "interp2_custom_closure",  test_interpret_two_arg_custom_closure },
+    { "interp2_shared_state",    test_interpret_two_arg_shared_state },
     /* US-007 (macro-eval): staged syntax-quote compilation */
     { "staged_sq_literal",       test_staged_sq_literal },
     { "staged_sq_unquote",       test_staged_sq_unquote },

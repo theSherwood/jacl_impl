@@ -4325,6 +4325,39 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* --- Sandbox mode: non-core builtins gated by prelude --- */
+  /* When compiling under a prelude (has_prelude), non-core builtins that
+   * are NOT in the prelude globals produce a compile error.  Non-core
+   * builtins that ARE in the prelude still emit their normal opcodes for
+   * now; US-006 will downgrade them to OP_GET_GLOBAL+OP_CALL. */
+  if (c->has_prelude && head->type == AST_LIT_STRING) {
+    static const char *non_core_names[] = {
+      "print", "interpret", "interpret-prelude",
+      "spawn", "await", "parallel", "race", "yield",
+      "make-syntax", "syntax-error",
+      "box", "atom", "deref", "reset", "swap",
+      "lines", "stream_next",
+      NULL
+    };
+    const char *hname = head->data.lit_string.value;
+    uint32_t hlen = head->data.lit_string.length;
+    for (int nci = 0; non_core_names[nci]; nci++) {
+      uint32_t nclen = (uint32_t)strlen(non_core_names[nci]);
+      if (hlen == nclen && memcmp(hname, non_core_names[nci], hlen) == 0) {
+        /* This is a non-core builtin — check if it's in the prelude */
+        JaclVal nv = compiler__name_val(c->heap, c->intern_table, hname, hlen);
+        if (!compiler__find_global(c, nv)) {
+          char err_msg[160];
+          snprintf(err_msg, sizeof(err_msg),
+                   "undefined name '%.*s'", (int)hlen, hname);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        break;
+      }
+    }
+  }
+
   /* --- Operator forms from uniform parsing --- */
 
   /* = → def (immutable binding) */
@@ -6886,13 +6919,23 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   if (compiler__head_matches(head, "interpret", 9)) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "interpret", "1 argument", argc);
+    if (argc != 1 && argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "interpret", "1 or 2 arguments", argc);
       return;
     }
-    compiler__compile_node(c, args[0]);
-    compiler__ensure_boxed(c, line);
+    if (argc == 2) {
+      /* 2-arg form: [interpret $prelude $src] */
+      compiler__compile_node(c, args[0]);  /* prelude map */
+      compiler__ensure_boxed(c, line);
+      compiler__compile_node(c, args[1]);  /* source string */
+      compiler__ensure_boxed(c, line);
+    } else {
+      /* 1-arg form: [interpret $src] */
+      compiler__compile_node(c, args[0]);
+      compiler__ensure_boxed(c, line);
+    }
     compiler__emit_byte(c, OP_INTERPRET, line);
+    compiler__emit_byte(c, (uint8_t)argc, line);  /* arity byte */
     return;
   }
 
