@@ -6442,18 +6442,22 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           break;
         }
 
-        /* Type-check: source must be string */
+        /* Type-check: source must be string — return error value, not exception */
         if (!jacl_is_string(src_val)) {
           vm__set_error(vm, "interpret: expected string, got %s",
                         vm__type_name(src_val));
-          return VM_RUNTIME_ERROR;
+          result = vm__push(vm, jacl_set_error(JACL_NIL));
+          if (result != VM_OK) return result;
+          break;
         }
 
-        /* Type-check: prelude must be map or nil */
+        /* Type-check: prelude must be map or nil — return error value, not exception */
         if (interp_arity == 2 && !jacl_is_nil(prelude_val) && !jacl_is_map(prelude_val)) {
           vm__set_error(vm, "interpret: expected map for prelude, got %s",
                         vm__type_name(prelude_val));
-          return VM_RUNTIME_ERROR;
+          result = vm__push(vm, jacl_set_error(JACL_NIL));
+          if (result != VM_OK) return result;
+          break;
         }
 
         /* Extract source bytes into arena. */

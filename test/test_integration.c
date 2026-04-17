@@ -632,7 +632,7 @@ static int test_interpret_with_print(void) {
     TEST_PASS();
 }
 
-/* Test: [interpret 42] on non-string argument is a runtime error */
+/* Test: [interpret 42] on non-string argument returns error value (not exception) */
 static int test_interpret_type_error(void) {
     jacl_context_t *ctx = jacl_ctx_new(NULL);
     ASSERT(ctx != NULL);
@@ -641,9 +641,24 @@ static int test_interpret_type_error(void) {
     JaclError err;
     JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
 
-    ASSERT(err.kind == JACL_ERROR_RUNTIME);
-    ASSERT(err.message != NULL);
-    ASSERT(jacl_is_nil(result));
+    ASSERT(err.kind == JACL_ERROR_NONE);  /* outer call succeeds */
+    ASSERT(jacl_is_error(result));         /* result is error value */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret 42 "src"] with non-map prelude returns error value */
+static int test_interpret_prelude_type_error(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret 42 \"[+ 1 2]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+
+    ASSERT(err.kind == JACL_ERROR_NONE);  /* outer call succeeds */
+    ASSERT(jacl_is_error(result));         /* result is error value */
 
     jacl_ctx_destroy(ctx);
     TEST_PASS();
@@ -2242,6 +2257,7 @@ int main(void) {
     { "interpret_runtime_error", test_interpret_runtime_error },
     { "interpret_with_print",    test_interpret_with_print },
     { "interpret_type_error",    test_interpret_type_error },
+    { "interpret_prelude_type",  test_interpret_prelude_type_error },
     { "interpret_shared_heap",   test_interpret_shared_heap },
     { "interpret_vector_result", test_interpret_vector_result },
     { "interpret_map_result",    test_interpret_map_result },
