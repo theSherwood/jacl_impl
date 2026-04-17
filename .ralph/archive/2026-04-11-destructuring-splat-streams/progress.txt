@@ -1,0 +1,453 @@
+# Ralph Progress Log
+Started: Sat Apr 11 2026
+
+## Codebase Patterns
+- Unity build: src/jacl.c is the unity build entrypoint; it includes value.c, gc.c, gc_collect.c, vm.c, etc. in a specific order. jacl.c does NOT include jacl.h.
+- Type duplication convention: jacl.h declares public types (GCHeader, JaclSyntax, SyntaxKind, etc.) for external consumers (tests). Unity build source files (gc.c) have their own parallel definitions. The two must stay byte-identical. This is the established pattern — don't try to "deduplicate" it.
+- Test builds: test/ files include src/jacl.h and link against .build/libjacl.a. lib/ tests compile standalone.
+- Running tests on macOS: stdout is fully buffered when not a TTY. Use `stdbuf -o0 -e0 timeout N .build/<test>` to see output when killed.
+- Pre-existing broken tests (on HEAD f8d63e3): parser, e2e_struct_tramp, embed. Not related to macro work.
+- VMFormatBuf usage: init with `VMFormatBuf buf = {0}; buf.arena = &arena;` — vm__fmt_ensure handles cap==0 by seeding to 128.
+- build.sh takes --test=NAME for single-test filter; --clean clears .build.
+- syntax_from_ast signature: JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap, JaclInternTable *intern). Returns JACL_NIL for NULL nodes or AST_ERROR.
+- build.sh now auto-detects platform changes (macOS ↔ Linux) via .build/.platform stamp. All 84 tests (lib/ + test/) should pass on a clean build.
+- syntax_to_ast signature: AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena). Returns NULL for JACL_NIL or non-syntax values.
+- For string round-trip: use jacl_string_byte_len() + jacl_string_data() to copy JaclVal strings into arena memory.
+- Pretty-printer does NOT always re-emit quotes: "hello" parses as AST_LIT_STRING but prints as bare `hello`. Compare against ast_pretty_print of the original, not the source text.
+- TokenType and AstNodeType enums are ALSO duplicated in jacl.h (like SyntaxKind). When adding a new token or AST node type, update BOTH the source .c file AND jacl.h, keeping them byte-identical.
+- When adding a new keyword token: update (1) TokenType enum in lexer.c AND jacl.h, (2) keyword switch table in lexer.c, (3) keyword-as-atom case lists in parser.c (3 places: parser__parse_atom, parser__parse_cmd_operand, parser__parse_cmd_operand default switch), (4) top-level dispatch in parser_parse.
+- When adding a new AST node type: update (1) AstNodeType enum in ast.c AND jacl.h, (2) AstNode union in ast.c AND jacl.h, (3) pretty-printer in ast.c, (4) syntax_from_ast and syntax_to_ast in syntax.c if convertible, (5) SyntaxKind enum in gc.c AND jacl.h if adding a syntax kind, (6) GC tracing in gc_collect.c, (7) compiler.c main switch.
+- When producing a parser error for an unexpected token, always advance past the offending token first to avoid infinite loops in the top-level parse loop.
+- Compiler struct also duplicated: the Compiler struct in compiler.c AND jacl.h must have identical fields. When adding a field to the Compiler struct, update both files.
+- CompileResult struct also duplicated in compiler.c AND jacl.h. Same rule: keep them byte-identical.
+- When forward-declaring a typedef'd struct in compiler.c, use `typedef struct Foo Foo;` before CompileResult, then `struct Foo { ... };` at the definition site.
+- MacroTable is allocated in compiler_compile and stored in both Compiler.macro_table and CompileResult.macro_table.
+- Special forms that are lexer keywords (if, proc, def, mut, set, while, for, match, break, continue, return, try, quote, defmacro, syntax-quote) are caught at parse time if used as defmacro name. Non-keyword special forms (spawn, yield, await, parallel, defstruct, to) are caught at compile time by macro__is_special_form.
+- Inside syntax-quote, `~cond` (bare word) parses as AST_UNQUOTE(AST_LIT_STRING("cond")), not AST_VAR_REF. Template expansion must handle both SYNTAX_LIT_STRING and SYNTAX_VAR_REF children of unquotes for parameter matching.
+- Expansion pass and compiler pass share the same MacroTable. The expansion pass registers entries with closure=NULL (body AST only), and the compiler pass fills in the closure. The compiler must NOT treat a closure==NULL entry as a duplicate error.
+- String comparison from JaclVal: `jacl_string_data(v, buf, sizeof(buf))` returns the byte length and copies into buf (NOT a pointer accessor). Null-terminate with `buf[n] = '\0'` before ASSERT_STR_EQ. This is the pattern used everywhere in test/test_syntax.c.
+- Directly invoking a compiled closure from a C test without a JaclVM wrapper: put closure at stack[0], args at stack[1..N], set stack_top, configure frames[0] with stack_base=1 and chunk=&cl->chunk, point vm->chunk/top_chunk/ip at the closure's chunk, call vm__run(vm, 0). Result lands at vm->stack[0] after OP_RETURN drops frame_count to 0. See us010_run_closure in test/test_syntax.c.
+- Inside syntax-quote, `~bareword` parses as AST_UNQUOTE(AST_LIT_STRING). The compiler must synthesize an AST_VAR_REF from the lit-string before compiling (via syntax__compile_unquote_child in compiler.c) so the closure does a parameter lookup, not a string literal push.
+- Jacl has no `not` or `eq` builtins — use `==` for equality, and `if cond {} else-body` (3-arg if with empty then-branch) to invert a condition. The PRD example `syntax-quote [if [not ~cond] ~body]` is aspirational; `syntax-quote [if ~cond {} ~body]` is equivalent and works today.
+- `def` creates an immutable binding — `set` on a def'd variable errors with "cannot mutate immutable binding". Use `mut` for mutable globals.
+- jacl_eval runs the full pipeline (lex → parse → compiler_compile → vm_exec) and compiler_compile invokes ast_expand_macros internally, so macros Just Work from embed code without any extra wiring.
+- Binding handlers (mut/set/def) now accept AST_VAR_REF in three forms: (1) plain lit-string name, (2) is_caret=1 (^name, scope mark 0), (3) is_gensym=1 (gensym output, scope mark = var-ref's own). Adding a new "name-introduction" form means extending all 3 handlers (~lines 4700 for mut, ~4840 for set, ~5310 for def).
+- `quote` / `syntax-quote` are prefix forms that consume their following expression via parse_expr — so `quote +` does NOT parse (operator tokens aren't primary expressions), and `[quote [expr]]` makes a command with AST_QUOTE head + 0 args (not a 1-element arg list). To quote an operator symbol, use `syntax-head quote [+ 1 2]` or `make-syntax lit-string "+"`. To put a quoted value inside a vec, write `[vec quote [...]]` (NOT `[vec [quote [...]]]`).
+- OP_SYNTAX_OP subop assignments: 0=kind, 1=datum, 2=head, 3=args, 4=commands, 5=pos, 6=string, 7=make lit-int, 8=make lit-float, 9=make lit-string, 10=make var-ref, 11=make command, 12=make block, 13=error msg-only, 14=error msg+syntax. Subops 0-6 pop a single syntax operand (introspection); subops 7-12 pop kind-specific operands (construction) and are branched before the shared introspection pop in vm.c; subops 13-14 (syntax-error) branch earlier still and `return VM_RUNTIME_ERROR` directly after `vm__set_error`.
+- Expansion pass error reporting: `ast_expand_macros` maintains a static call stack (`expand__frames`/`expand__frame_top`) that pushes a frame around each recursive re-expand. Error sites call `expand__set_error(msg, line, col, arena)` which renders the stack into the message at error-set time (before pops unwind). When adding a new error site in `expand__node`, use this helper — don't set `expand__error_msg` directly, or you'll lose the chain.
+
+## 2026-04-10 - US-001 — Add JACL_TAG_SYNTAX value tag and OBJ_SYNTAX GC object
+- Most of US-001 was already staged as uncommitted edits (tag constant, obj enum, JaclSyntax struct, GC tracing, printing, test file). I wired up the final missing pieces and fixed one blocker.
+- Fixed an infinite loop in src/vm.c vm__fmt_ensure: when VMFormatBuf.cap == 0, doubling yielded 0 → loop. Seeded new_cap to 128 in that case, and skipped the memcpy when len == 0. This unblocked test/test_syntax.c (all 22 subtests rely on VMFormatBuf initialized via `{0}`).
+- Files changed:
+  - src/vm.c — vm__fmt_ensure cap==0 fix.
+  - (Pre-existing uncommitted) src/jacl.h, src/value.c, src/gc.c, src/gc_collect.c, src/vm.c, build.sh, test/test_syntax.c.
+- Verification: ./build.sh --test=syntax → 22/22 pass. Full ./build.sh → 81 pass, 3 fail (parser, e2e_struct_tramp, embed — pre-existing on HEAD, not regressed).
+- **Learnings for future iterations:**
+  - When adding a new JaclVal tag, four places must be updated: JACL_TAG_X in src/value.c AND src/jacl.h, the is/as helpers in src/value.c, and jacl_is_heap_type in src/gc.c if the payload points to GC memory.
+  - When adding a new GC object kind, update: GCObjType enum in src/gc.c AND src/jacl.h, the gc__trace_object switch in src/gc_collect.c (only if it holds references), and any printing in src/vm.c::vm__fmt_value.
+  - No sweep changes are needed unless the object owns external resources — gc__finalize_dead is a no-op for all types so far.
+  - test/test_helpers.h provides ASSERT_U64_EQ, ASSERT_U32_EQ, ASSERT_STR_EQ, TEST_PASS macros.
+  - The test uses VMFormatBuf for printing: zero-init the struct, set arena, call vm__fmt_value, then read buf.data/buf.len.
+---
+
+## 2026-04-10 - US-002 — AstNode to syntax object conversion
+- Created src/syntax.c with syntax_from_ast() that recursively converts all 16 AstNodeType variants to corresponding JaclSyntax objects.
+- Added syntax.c to the unity build (src/jacl.c) after compiler.c.
+- Added extern declaration to src/jacl.h.
+- Added 17 new tests to test/test_syntax.c covering: lit-int, lit-float, lit-string, var-ref, command, block, source positions, scope marks, spread, break, continue, return, nested commands, interp-string, error→nil, null→nil, GC survival.
+- Files changed:
+  - src/syntax.c (new) — syntax_from_ast implementation
+  - src/jacl.c — added #include "syntax.c"
+  - src/jacl.h — added extern for syntax_from_ast
+  - test/test_syntax.c — 17 new US-002 tests
+- Verification: ./build.sh --test=syntax → 39/39 pass. Compiles with -Wall -Wextra clean.
+- **Learnings for future iterations:**
+  - syntax_from_ast takes ThreadHeap* and JaclInternTable* (not GCHeap*) — matches how gc_alloc_syntax and jacl_intern are called.
+  - AST_USE and AST_DEFSTRUCT use a simplified vec-of-strings representation in syntax objects (stored in child field).
+  - AST_DESTRUCTURE_VEC/NAMED store names as vec of strings; rest names prefixed with ".." for disambiguation.
+  - To parse source in tests: LexResult tokens = lexer_lex(src, &arena); ParseResult pr = parser_parse(tokens, &arena);
+  - The parser produces AST_LIT_STRING for bare words used as command heads (e.g., "+" in [+ 1 2] is AST_LIT_STRING, not AST_VAR_REF).
+---
+
+## 2026-04-10 - US-003 — Syntax object to AstNode conversion
+- Implemented syntax_to_ast() in src/syntax.c that recursively converts all 15 SyntaxKind variants back to corresponding AstNode types.
+- Added two helper functions: syntax__string_to_arena (copies JaclVal string data into arena memory) and syntax__set_ast_pos (copies source position from syntax to AstNode).
+- Added extern declaration in src/jacl.h.
+- Added 13 round-trip tests to test/test_syntax.c: lit-int, lit-float, lit-string, var-ref, command, nested command, block with multiple commands, source positions, nil→null, break, continue, return, spread.
+- Files changed:
+  - src/syntax.c — syntax_to_ast implementation + two helpers
+  - src/jacl.h — added extern for syntax_to_ast
+  - test/test_syntax.c — 13 new US-003 tests
+- Verification: ./build.sh --test=syntax → 52/52 pass. Full build → all test/ tests pass, only lib/ failures (pre-existing).
+- **Learnings for future iterations:**
+  - syntax_to_ast takes only arena_t* (no heap/intern needed) — strings are copied from JaclVal into arena memory.
+  - Use jacl_string_byte_len() to get the byte length, then jacl_string_data() to copy. Don't confuse with jacl_string_len() which returns grapheme count.
+  - AST pretty-printer doesn't always re-emit source quotes: "hello" → prints as bare `hello`. Round-trip tests must compare ast_pretty_print outputs, not source text.
+  - The end position of AstNode is approximated (set equal to start) since syntax objects only store the start position.
+  - Destructure rest names are prefixed with ".." in syntax objects — syntax_to_ast strips the prefix and sets rest_name/rest_name_len.
+---
+
+## 2026-04-10 - US-004 — Lexer and parser support for defmacro
+- Added TOKEN_DEFMACRO to lexer keyword table (length-8 switch case).
+- Added AST_DEFMACRO to AstNodeType with data: name, param_names, param_name_lens, param_count, body.
+- Implemented parser__parse_defmacro() in parser.c: parses `defmacro name {params} { body }`.
+- Added TOKEN_DEFMACRO to all 3 keyword-as-atom case lists in parser.c plus top-level dispatch.
+- Added AST_DEFMACRO pretty-printer case in ast.c.
+- Added SYNTAX_DEFMACRO to SyntaxKind enum (gc.c + jacl.h) with GC tracing.
+- Added syntax_from_ast and syntax_to_ast handling for AST_DEFMACRO (stores [name, param1, ..., body_syntax]).
+- Added compiler.c stub for AST_DEFMACRO (top-level check, emits nil — real macro registration is US-007).
+- Added 7 tests: basic parse, zero params, pretty-print, not-top-level, no-name error, no-params error, no-body error.
+- Files changed: src/lexer.c, src/ast.c, src/parser.c, src/syntax.c, src/compiler.c, src/gc.c, src/gc_collect.c, src/vm.c, src/jacl.h, test/test_syntax.c
+- Verification: ./build.sh --test=syntax → 59/59 pass. Full build → all test/ tests pass, no warnings.
+- **Learnings for future iterations:**
+  - TokenType enum is duplicated in lexer.c AND jacl.h — must update both when adding a new token.
+  - AstNodeType enum is duplicated in ast.c AND jacl.h — must update both, including the AstNode union.
+  - Parser has 3 separate keyword-as-atom case lists (parser__parse_atom ~line 249, parser__parse_cmd_operand ~line 737, and a third ~line 895). All 3 must include any new keyword token.
+  - The lexer keyword table uses a length-based switch; "defmacro" has 8 chars, same as "continue".
+  - Defmacro parser follows the defstruct pattern: consume keyword, get name, parse brace-enclosed params, parse block body.
+  - Adding a new enum member between existing ones shifts all subsequent values — tests with hardcoded enum values (test_syntax_kind_enum) must be updated.
+---
+
+## 2026-04-10 - US-005 — Lexer and parser support for quote
+- Added TOKEN_QUOTE to lexer keyword table (length-5 switch case).
+- Added AST_QUOTE to AstNodeType with data: child (AstNode*).
+- Handled TOKEN_QUOTE as a prefix form in parser__parse_expr and parser__parse_infix_operand — NOT added to keyword-as-atom lists since quote always takes a child expression.
+- Added AST_QUOTE pretty-printer: prints as "quote <child>".
+- Added SYNTAX_QUOTE to SyntaxKind with GC tracing and printing in vm.c.
+- Added syntax_from_ast/syntax_to_ast handling for AST_QUOTE.
+- Added compiler.c stub (emits nil, real implementation in US-009).
+- Added 7 tests: quote wrapping command, var-ref, block; pretty-print; round-trip; inside command.
+- Files changed: src/lexer.c, src/ast.c, src/parser.c, src/syntax.c, src/compiler.c, src/gc.c, src/gc_collect.c, src/vm.c, src/jacl.h, test/test_syntax.c
+- Verification: ./build.sh --test=syntax → 66/66 pass. Full build → all test/ tests pass, no warnings.
+- **Learnings for future iterations:**
+  - Prefix keyword forms (like quote) should be handled as their own case in parser__parse_expr (and parser__parse_infix_operand), NOT added to keyword-as-atom lists. This is different from regular keywords which are in all 3 keyword-as-atom lists.
+  - In parser__parse_cmd_operand, AST_QUOTE returned from parser__parse_expr naturally avoids arg collection because head_token_type != TOKEN_WORD and args.count == 0 → returns head directly.
+  - "quote" is length 5, same switch case as "while", "match", "break" in the lexer keyword table.
+---
+
+## 2026-04-10 - US-006 — Lexer and parser support for syntax-quote, ~, and ~@
+Thread: (inline)
+- Added TOKEN_SYNTAX_QUOTE (keyword, 12 chars) and TOKEN_TILDE_AT (~@) to lexer.
+- Modified ~ lexer handling in both lexer locations to check for trailing @ → TOKEN_TILDE_AT.
+- Added AST_SYNTAX_QUOTE, AST_UNQUOTE, AST_UNQUOTE_SPLICING to AstNodeType enum.
+- Added syntax_quote_depth field to Parser struct for tracking nested syntax-quote context.
+- In parser__parse_expr and parser__parse_infix_operand: ~ at depth 1 produces AST_UNQUOTE; ~@ at depth 1 produces AST_UNQUOTE_SPLICING; ~@ at depth 0 produces error; depth > 1 treats ~ and ~@ as literals.
+- Added SYNTAX_SYNTAX_QUOTE, SYNTAX_UNQUOTE, SYNTAX_UNQUOTE_SPLICING to SyntaxKind enum with GC tracing, printing, and syntax_from_ast/syntax_to_ast conversion.
+- Added pretty-printer cases: syntax-quote prints as "syntax-quote <child>", unquote as "~<child>", unquote-splicing as "~@<child>".
+- Added compiler.c stubs (AST_SYNTAX_QUOTE → nil placeholder, AST_UNQUOTE/AST_UNQUOTE_SPLICING → compile error).
+- 7 new tests: syntax-quote with unquotes, unquote-splicing, tilde-as-NOT outside syntax-quote, pretty-print, round-trip, nested depth, ~@-outside-error.
+- Files changed: src/lexer.c, src/ast.c, src/parser.c, src/syntax.c, src/compiler.c, src/gc.c, src/gc_collect.c, src/vm.c, src/jacl.h, test/test_syntax.c
+- Verification: ./build.sh → 84/84 pass, no warnings.
+- **Learnings for future iterations:**
+  - syntax-quote is a 12-char keyword containing a hyphen. Hyphens are valid word characters in JACL, so "syntax-quote" is a single token.
+  - The parser tracks syntax_quote_depth. ~ and ~@ only become unquote/splice at depth == 1 (not depth 0 or > 1).
+  - When producing a parser error for an unexpected token (like ~@ outside syntax-quote), MUST advance past the token first, otherwise the top-level parse loop will hang in an infinite loop re-encountering the same token.
+  - TOKEN_TILDE_AT needs to be in the operator-as-atom list in parser__parse_atom so it can be treated as a literal at depth > 1.
+  - TOKEN_SYNTAX_QUOTE goes in the keyword-as-atom list in parser__parse_atom (unlike TOKEN_QUOTE which is NOT in atom lists).
+  - Adding 3 new SyntaxKind values between SYNTAX_QUOTE and SYNTAX_BREAK shifts all subsequent enum values — the test_syntax_kind_enum test with hardcoded values must be updated.
+---
+
+## 2026-04-10 - US-007 — Compile-time macro table and defmacro registration
+Thread: (inline)
+- Added MacroTable and MacroEntry types in compiler.c (and jacl.h) for compile-time macro definitions.
+- MacroEntry stores: name, param_count, param_names, param_name_lens, and compiled JaclClosure*.
+- MacroTable: fixed-size array of up to 64 entries with count, plus macro_table_init and macro_table_lookup functions.
+- Added macro__is_special_form function that blocks shadowing of core control-flow/binding keywords.
+- Added macro_table field to Compiler struct (root compiler owns it, body compilers inherit via macro_table pointer).
+- Added macro_table field to CompileResult so tests and the expansion pass can access it.
+- In compiler_compile: allocate MacroTable and set c.macro_table, propagate to CompileResult.
+- AST_DEFMACRO compiler case: checks top-level, checks special form shadowing, checks duplicate, compiles body block to JaclClosure, registers in MacroTable.
+- 10 new tests in test/test_syntax.c: register/lookup, missing lookup, zero params, multiple macros, shadow-if (parser error), shadow-spawn (compiler error), shadow special forms, duplicate error, lookup API, is_special_form.
+- Files changed: src/compiler.c, src/jacl.h, test/test_syntax.c
+- Verification: ./build.sh → 84/84 pass (83 test/ + 1 lib/), no warnings.
+- **Learnings for future iterations:**
+  - Compiler struct is duplicated in compiler.c AND jacl.h — must update both when adding fields.
+  - CompileResult struct is also duplicated in compiler.c AND jacl.h — same rule.
+  - When forward-declaring a struct used in CompileResult (like MacroTable), add `typedef struct MacroTable MacroTable;` before the CompileResult definition in compiler.c.
+  - Special form names that are lexer keywords (if, proc, etc.) get caught by the parser as "expected macro name" before reaching the compiler. Non-keyword special forms (spawn, yield, await, parallel, defstruct, to) are caught by macro__is_special_form at compile time.
+  - The macro body closure is compiled like a proc body: create a body Compiler with scope_depth=1, add params as locals, compile_block_expr, emit OP_RETURN.
+  - concurrent_intern test is flaky — can fail sporadically in full builds.
+---
+
+## 2026-04-10 - US-009 — Compiler handling of quote — emit syntax object literal
+Thread: (inline)
+- The compiler AST_QUOTE case was already implemented in place as part of US-008's expansion pass work — it calls `syntax_from_ast` on the child AstNode and emits the resulting syntax object as a constant via `compiler__emit_constant`. This lands the syntax object in the chunk's constant pool, so at runtime OP_CONST pushes the pre-built syntax object onto the stack. No compiler changes were needed.
+- Added 5 tests in test/test_syntax.c to verify US-009's acceptance criteria:
+  - `test_compile_quote_command`: `quote [+ 1 2]` → chunk constant is a SYNTAX_COMMAND with head "+" and two SYNTAX_LIT_INT args.
+  - `test_compile_quote_var_ref`: `quote $x` → SYNTAX_VAR_REF with name "x" (not a variable lookup).
+  - `test_compile_quote_lit_int`: `quote 42` → SYNTAX_LIT_INT with value 42.
+  - `test_compile_quote_nested`: `quote [foo quote [bar]]` → outer SYNTAX_COMMAND whose arg is a SYNTAX_QUOTE wrapping an inner SYNTAX_COMMAND.
+  - `test_compile_quote_inside_macro_body`: `defmacro q {} { quote [+ 1 2] }` → macro closure's chunk contains the expected syntax object constant.
+- Helper `find_first_syntax_const(chunk)` added — walks `chunk->constants` looking for the first value where `jacl_is_syntax(...)` holds.
+- Files changed: test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 test binaries pass (96 syntax subtests), no warnings.
+- **Learnings for future iterations:**
+  - Chunk constants are GC-traced via `gc__ms_push_const` — invoked both through call-frame chunk traversal (for the top-level chunk when executing) and via `OBJ_CLOSURE` tracing (for macro body closures). Syntax objects created at compile time and stored in constants are safe from GC as long as the chunk is reachable.
+  - `jacl_string_data` is a copy-into-buffer API: `uint32_t n = jacl_string_data(v, buf, sizeof(buf)); buf[n] = '\0';`. It is NOT a pointer accessor; older test code that uses `memcmp(node->data.lit_string.value, "x", 1)` is comparing against the raw `const char*` stored directly on AstNode (not on a JaclVal).
+  - The existing AST_QUOTE → JaclSyntax conversion in `syntax_from_ast` wraps nested quotes in SYNTAX_QUOTE (not unwrapped), so `quote [foo quote [bar]]` round-trips through the compile-time conversion as a command arg of kind SYNTAX_QUOTE.
+---
+
+## 2026-04-10 - US-010 — Compiler handling of syntax-quote — template expansion
+Thread: (inline)
+- The compiler emission for AST_SYNTAX_QUOTE was already scaffolded as part of US-008: it converts the full template (with SYNTAX_UNQUOTE markers) to a constant, compiles each unquote expression in depth-first order, then emits OP_SYNTAX_SPLICE n. For US-010 I tightened the semantics and proved the bytecode path end-to-end.
+- Added runtime type validation in `syntax__splice_template` (src/syntax.c): threaded an `err` out-parameter through all recursive calls. On type error, sets *err to a static string and returns JACL_NIL. Errors:
+  - `~` (unquote) value must be nil or a syntax object
+  - `~@` (unquote-splicing) value must be a vec, AND every element in the vec must be a syntax object
+  - `~@` at a non-spliceable position (not inside a command arg list or block body) errors instead of silently passing through
+- The OP_SYNTAX_SPLICE handler in src/vm.c now surfaces splice errors via `vm__set_error` and returns VM_RUNTIME_ERROR.
+- Fixed `syntax__compile_unquotes` in src/compiler.c so that `~bareword` compiles as a variable lookup of `bareword` (the parser emits AST_UNQUOTE wrapping AST_LIT_STRING for bare words inside syntax-quote). Added `syntax__compile_unquote_child` helper that synthesizes an AST_VAR_REF when the unquote child is AST_LIT_STRING, and compiles other expressions normally. Without this fix, the closure would just push the bare string literal instead of looking up the parameter.
+- 7 new tests in test/test_syntax.c, all exercising the OP_SYNTAX_SPLICE bytecode by compiling a defmacro and then directly invoking the compiled closure via a new `us010_run_closure` helper (mimics jacl_call_val but takes VM* directly — sets frame 0 with stack_base=1, closure at slot 0, args at 1..N, runs vm__run):
+  - `test_us010_syntax_quote_unquotes`: `syntax-quote [if [not ~cond] ~body]` with lit-int args produces nested SYNTAX_COMMAND tree
+  - `test_us010_unquote_splicing_in_args`: `syntax-quote [foo ~@args]` with vec of 2 flattens to 2 command args
+  - `test_us010_unquote_splicing_in_block`: `syntax-quote { ~@stmts }` flattens vec into SYNTAX_BLOCK commands
+  - `test_us010_unquote_type_error`: passing i32 as the unquote value errors with "syntax object"
+  - `test_us010_unquote_splicing_type_error`: passing i32 for ~@ errors with "vec of syntax objects"
+  - `test_us010_unquote_splicing_vec_nonsyntax`: vec of i32 elements errors
+  - `test_us010_nested_syntax_quote_literal`: zero-unquote template compiles to a bare constant (no OP_SYNTAX_SPLICE)
+- Also added helper constructors in test_syntax.c: `us010_make_lit_int`, `us010_make_var_ref`, `us010_make_command`, `us010_make_vec`, `us010_syn_name`.
+- Files changed: src/syntax.c, src/vm.c, src/compiler.c, test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 binaries pass (103 syntax subtests), no warnings with -Wall -Wextra.
+- **Learnings for future iterations:**
+  - To directly invoke a compiled closure from a C test without a JaclVM wrapper, use the `jacl_call_val` pattern: put closure at stack[0], args at stack[1..N], set stack_top, configure frames[0] with `stack_base=1`, point `vm->chunk/top_chunk/ip` at the closure's chunk, then call `vm__run(vm, 0)`. Result lands at `vm->stack[0]` after OP_RETURN drops frame_count to 0.
+  - `syntax__compile_unquotes` needs to special-case AST_LIT_STRING children of AST_UNQUOTE — bare words like `~cond` parse as unquote-of-lit-string, but the compiler must compile them as AST_VAR_REF to look up the parameter binding. Synthesizing a temporary AST_VAR_REF on the stack (same layout as AST_LIT_STRING) works cleanly.
+  - When a syntax-quote has zero unquotes, the compiler just emits the template as a constant (no OP_SYNTAX_SPLICE). The OP_SYNTAX_SPLICE path is only exercised when there is at least one ~ or ~@ in the template.
+  - `syntax__splice_template` threads a `const char **err` out-parameter for type errors. Callers check `*err != NULL` after each recursive call to short-circuit. Error messages are static C strings so no arena allocation is needed.
+  - Sibling expansion pass (`expand__subst_template` in src/syntax.c) still uses template substitution by parameter name and does NOT go through the compiled closure. Both paths need to stay behaviorally consistent — but the expansion pass currently does not validate types in the same way (acceptable since macros today go through the expansion pass, not the compiled closure path).
+---
+
+## 2026-04-10 - US-008 — Macro expansion pass — basic expansion
+Thread: (inline)
+- Implemented template-based macro expansion in src/syntax.c that replaces SYNTAX_UNQUOTE nodes by matching their child names against macro parameter names.
+- Key new functions: expand__match_param (name lookup), expand__subst_template (recursive template walk with unquote substitution, ~@ flattening in commands/blocks), expand__find_syntax_quote_child (extract template from body).
+- Expansion pass (ast_expand_macros) now registers macros with body AST (no VM needed) and expands calls via template substitution.
+- Fixed compiler duplicate defmacro bug: expansion pass registers macros in the shared MacroTable, then compiler pass sees AST_DEFMACRO again. Now compiler detects expansion-pass-registered entries (closure==NULL) and compiles the closure without re-registration.
+- Fixed pre-existing bytecode test: OP_SYNTAX_SPLICE shifted OP_HALT from 151 to 152.
+- Added MacroEntry.body field to both compiler.c and jacl.h to store the original body AST.
+- 8 new tests: unless expansion, double (same param used twice), two-level (macro expanding to macro), depth limit (self-referencing), use-before-define, wrong arg count, non-macro passthrough, expansion inside nested blocks.
+- Files changed: src/syntax.c, src/compiler.c, src/jacl.h, src/bytecode.c, src/vm.c, test/test_bytecode.c, test/test_syntax.c
+- Verification: ./build.sh → 84/84 pass (91 syntax subtests), no warnings.
+- **Learnings for future iterations:**
+  - Inside syntax-quote, `~cond` (bare word) parses as AST_UNQUOTE(AST_LIT_STRING("cond")), NOT AST_VAR_REF. Template substitution must match both SYNTAX_LIT_STRING and SYNTAX_VAR_REF as unquote children.
+  - The expansion pass runs before the compiler pass. Both share the same MacroTable. The expansion pass sets closure=NULL (template-only), and the compiler pass fills in the closure later for the entry already in the table.
+  - Expansion is iterative: after replacing a macro call, the result is re-expanded (depth+1) to handle macros that expand to other macro calls.
+  - When adding a new opcode between existing ones (like OP_SYNTAX_SPLICE before OP_HALT), update the hardcoded enum values in test_bytecode.c.
+---
+
+## 2026-04-10 - US-011 — End-to-end basic macro test
+Thread: (inline)
+- Added 6 end-to-end macro tests in test/test_syntax.c that drive the full pipeline via `jacl_vm_new` + `jacl_eval` (no direct VM/compiler plumbing). Because `compiler_compile` already invokes `ast_expand_macros` internally, macros work from the embed API for free — no source changes were needed for US-011.
+- Tests added:
+  - `test_us011_double_macro`: `defmacro double {x} { syntax-quote [+ ~x ~x] }` then `double 21` returns 42.
+  - `test_us011_unless_macro`: `defmacro unless {cond, body} { syntax-quote [if ~cond {} ~body] }` — confirms body executes when cond is false. Uses a mutable global (`mut x 0`) as a side-effect observable through a trailing `$x` expression.
+  - `test_us011_unless_macro_true_cond`: same macro, confirms body does NOT run when cond is true.
+  - `test_us011_two_level_macro`: `quadruple 5` → `[double [double 5]]` → `[+ [+ 5 5] [+ 5 5]]` → 20. Exercises a macro that expands into another macro call.
+  - `test_us011_use_before_defmacro_error`: calling `unless` before the `defmacro` produces a compile error (the unexpanded command is treated as a call to an undefined proc).
+  - `test_us011_wrong_arg_count_error`: calling `unless` with 1 arg when it expects 2 surfaces `ast_expand_macros`'s "expects 2 arguments but got 1" message as a compile error.
+- Files changed: test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 binaries pass, 109 syntax subtests pass, no warnings with -Wall -Wextra.
+- **Learnings for future iterations:**
+  - The PRD's example `syntax-quote [if [not ~cond] ~body]` uses `not`, which is not implemented as a builtin in jacl. Use the 3-arg form `[if ~cond {} ~body]` to get the same semantics with existing builtins.
+  - `def` is immutable-binding (like `let` in other languages). Attempting `set` on a `def`'d variable errors with "cannot mutate immutable binding 'name'". For mutable test globals, use `mut` instead.
+  - `jacl_eval` is the cleanest way to write e2e tests: `JaclVM* vm = jacl_vm_new(); JaclVal r = jacl_eval(vm, src); ...; jacl_vm_free(vm);`. It returns the top-of-stack value after the whole program runs, or an error-flagged JaclVal on any failure (use `jacl_is_error` and `jacl_error_message_str`).
+  - Multi-statement sources are fine — jacl_eval parses, compiles and runs the whole chunk. The last expression's value is returned, so a trailing `$x` reads the global.
+---
+
+## 2026-04-10 - US-012 — Scope marks on syntax objects for hygiene
+Thread: (inline)
+- Implemented hygienic macro expansion via scope marks, so macro-introduced locals do not shadow caller-referenced identifiers passed through `~`.
+- Core idea: every AstNode carries a `uint32_t scope_mark` (0 = hand-written code, >0 = macro expansion mark). A new local (or upvalue) is tagged with the compiler's current mark, and resolve_local matches on (name, mark) with a fallback to mark 0 for inside-macro references to user globals/builtins.
+- src/ast.c + src/jacl.h: added `scope_mark` field to AstNode, Local, Upvalue, and Compiler structs (all four structs are duplicated across compiler.c and jacl.h — updated both copies).
+- src/syntax.c: added a per-process counter `expand__scope_counter` (starts at 0, incremented for each macro expansion). New helpers `expand__stamp_syntax` / `expand__stamp_vec` walk a freshly-cloned template and stamp every node with the fresh mark. Substitution (`expand__subst_template`) propagates the mark on copied commands/blocks; unquoted argument values are returned as-is so they keep their original (caller's) marks.
+- src/syntax.c: `syntax_from_ast` now **preserves** `node->scope_mark` instead of resetting to 0. This is crucial for iterative expansion — when the expander re-reads an argument that was already substituted from a previous expansion, the existing marks must survive the AST↔syntax round-trip.
+- src/syntax.c: `syntax_to_ast` (`syntax__set_ast_pos`) copies `syn->scope_mark` back onto the new AstNode.
+- src/compiler.c: `compiler__compile_node` saves/restores `current_scope_mark` around every node compilation and always sets it to `node->scope_mark` (no guard — a child node with mark 0 must switch BACK to mark 0 even when nested inside a mark-M parent, because unquoted arguments inside a stamped template carry mark 0).
+- src/compiler.c: `compiler__add_local` stamps new locals with `c->current_scope_mark`; `compiler__resolve_local` does two passes: match at current mark, then (if current mark ≠ 0) fall back to mark 0. `compiler__add_upvalue` / `compiler__resolve_upvalue` propagate scope_mark through closure captures. Upvalue resolution temporarily writes the child compiler's mark into the enclosing compiler's `current_scope_mark` so that `resolve_local` on the enclosing uses the **reference site's** mark, not whatever the enclosing happens to be compiling.
+- src/compiler.c: each of the 5 sub-compiler init sites (`compile_node` closure bodies, proc bodies, defmacro body compilation) copies `body_compiler.current_scope_mark = c->current_scope_mark` after `compiler__init` — so params added before `compile_node` descends into the body get the correct mark.
+- test/test_syntax.c: added 3 US-012 tests:
+  - `test_us012_hygiene_local_shadow`: the PRD example — `defmacro m {x} { syntax-quote { mut tmp 1; [+ ~x $tmp] } }` then inside a proc `mut tmp 99; m $tmp` returns 100 (not 2).
+  - `test_us012_hygiene_nested_macros`: `add_ten` and `add_hundred` both introduce a local `t`; nested call `add_hundred $t` starting from caller's `t = 0` returns 110.
+  - `test_us012_global_fallback_still_works`: regression check that macros can still reference globals/builtins like `+` — `double 21` still returns 42.
+- Files changed: src/ast.c, src/syntax.c, src/compiler.c, src/jacl.h, test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 binaries pass, 112 syntax subtests pass, no warnings with -Wall -Wextra.
+- **Learnings for future iterations:**
+  - Hygiene needs scope_mark to survive EVERY AST→syntax→AST round trip. Iterative expansion (where a macro expands to code containing another macro call) re-feeds previously-substituted ASTs through `syntax_from_ast`, and if that path resets the mark to 0, you lose hygiene silently — the test fails non-obviously with a "mostly right" number (e.g. 10 instead of 110).
+  - When adding a `current_scope_mark` to the compiler, the temptation is to guard `if (node->scope_mark != 0) c->current_scope_mark = node->scope_mark;` — DON'T. Unquoted sub-nodes with mark 0 are nested inside mark-M templates, and they must restore mark 0 to look up the caller's bindings. Always assign unconditionally, save/restore around the call.
+  - For upvalue resolution across a closure boundary, propagate the child's `current_scope_mark` into the enclosing compiler during the call, then restore. Otherwise the enclosing's own unrelated mark leaks into the lookup.
+  - `jacl_inline_string` caps at 7 bytes, so you cannot mangle names by appending a mark suffix. Adding a sidecar `scope_mark` field on Local/Upvalue is the right call.
+  - Sub-compilers (proc/closure body compilers) must inherit `current_scope_mark` from the parent in their init site — parameters added before `compile_node` runs on the body will otherwise be stamped with 0 and the macro-introduced references won't resolve through them.
+---
+
+## 2026-04-11 - US-013 — ^ prefix for intentional binding introduction
+Thread: (inline)
+- Implemented caret-prefixed identifiers `^name` inside syntax-quote templates. These produce a var-ref AST node flagged `is_caret = 1`; hygiene stamping skips them, so they land at scope mark 0 (caller's scope). A macro template like `syntax-quote [mut ^it ~v]` now creates a caller-visible `it` binding, enabling anaphoric macros.
+- src/jacl.h: added `TOKEN_CARET_WORD` to the TokenType enum; added `uint8_t is_caret` to AstNode and JaclSyntax structs.
+- src/lexer.c: added `TOKEN_CARET_WORD` enum value; added `^identifier` recognition in both `lexer_lex` (top-level) AND `lexer__lex_interp_infix` ($-paren interpolation). **Critical:** the top-level path is `lexer_lex`, not `lexer__lex_interp_infix` — initially added it only to the interp lexer, which is why `^foo` at the top level was silently falling through to operator tokenization and surfacing as `undefined variable '$^'` at runtime.
+- src/parser.c: added `TOKEN_CARET_WORD` case to `parser__parse_atom`, rejecting use outside syntax-quote (`p->syntax_quote_depth == 0`) with a message that contains the substring "syntax-quote". Also added the token to the dispatch lists in `parser__parse_expr` and `parser__parse_infix_operand` so it routes back into `parse_atom`.
+- src/ast.c: added `uint8_t is_caret` field mirror on AstNode (the struct is duplicated between jacl.h and ast.c — keep byte-identical); pretty-printer emits `^name` instead of `$name` when `is_caret` is set.
+- src/gc.c: added `uint8_t is_caret` mirror on JaclSyntax. `gc_alloc_syntax` already zeros the struct, so no explicit init needed.
+- src/syntax.c: `syntax_from_ast` copies `node->is_caret` → `syn->is_caret`; `syntax_to_ast` (`syntax__set_ast_pos`) copies it back. `expand__stamp_syntax` skips assigning `scope_mark` when `syn->is_caret` is set — the caret node retains its original mark 0.
+- src/compiler.c: extended the `mut`, `set`, and `def` handlers to accept either AST_LIT_STRING (normal path) OR AST_VAR_REF with `is_caret` set. For the caret path, `bind_scope_mark` is forced to 0; the handler saves/restores `c->current_scope_mark` around `compiler__add_local` so the local is stamped at mark 0 instead of the current expansion mark.
+- src/embed.c: `jacl_eval` now extracts the first `AST_ERROR` node's message from the parse result instead of returning an opaque "parse error". This unblocks tests that look for specific parse-error substrings (the previous behavior had made the caret-outside-syntax-quote test impossible to assert).
+- test/test_syntax.c: added 3 US-013 tests:
+  - `test_us013_caret_binds_in_caller_scope`: `defmacro bindit {v} { syntax-quote [mut ^it ~v] }`, then inside a proc, `bindit 42` followed by `$it` returns 42.
+  - `test_us013_caret_outside_syntax_quote_error`: bare `^foo` at top level produces a parse error whose message contains "syntax-quote".
+  - `test_us013_caret_does_not_collide_with_internal`: caller's `mut it 999` followed by a macro call to `collide 7` (which expands to `[mut ^it 7]`) followed by `$it` returns 7 — the caret binding properly re-shadows at mark 0.
+- Files changed: src/jacl.h, src/lexer.c, src/parser.c, src/ast.c, src/gc.c, src/syntax.c, src/compiler.c, src/embed.c, test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 binaries pass, 115 syntax subtests pass, no warnings with -Wall -Wextra.
+- **Learnings for future iterations:**
+  - lexer.c has multiple lexer entry functions: `lexer_lex` (top-level, used for program source), `lexer__lex_interp_expr` (command-mode inside interpolated strings), and `lexer__lex_interp_infix` (infix $() interpolation). New token recognizers need to be added to whichever lexer sees the text — for identifiers at command head positions, that's `lexer_lex`. If you add a handler to only one and not the others, symptoms are silent fall-through and bizarre downstream errors (e.g. "undefined variable '$^'"), not a clean "unknown token".
+  - Template substitution of a block-valued unquote (`~body` in a block context, where body is itself a block) produces a nested AST_BLOCK child inside a parent AST_BLOCK. The compiler handles that via `compile_block_expr` recursion, but the inner block is a fresh scope — any `mut` in the parent block is visible to inner references, but any `mut` in the inner block is NOT visible to the parent after the inner ends. For anaphoric macros that want to expose a caller-visible binding, the macro template MUST use a single top-level command (bracket-form `[mut ^it ~v]`), not a curly block. Curly-form templates create a nested block around the bindings and the caret local dies with the block before the caller can see it.
+  - `embed.c`'s `jacl_eval` was masking all parse errors with the hardcoded string "parse error" — surfacing the first `AST_ERROR` node's message is a one-off fix that makes parse-error tests much more useful, with no downside.
+  - The acceptance-criteria example in the PRD (`syntax-quote { ^it = ~cond; if $^it ~body }`) is pseudocode — `^it = ~cond` and `$^it` aren't JACL syntax. The real implementation uses `[mut ^it ~cond]` and `$it` (no caret on the read side; caret is a binding-introduction marker, not a reference marker). Don't try to match the PRD example literally.
+  - The "7-byte inline limit" on variable names is a hard compile-time check in `compiler.c` (at least 9 sites: mut/set/def, destructure paths, etc.). Any test using a name longer than 7 characters (`captured`, `collide`, etc.) will fail with "variable name exceeds 7-byte inline limit" — easy to confuse with other errors. Keep test names short (`cap`, `it`, `out`, `x`).
+---
+
+## 2026-04-11 - US-014 — gensym builtin
+Thread: (inline)
+- Implemented `gensym` as a template-level form inside `syntax-quote` bodies. `[gensym]` and `[gensym "prefix"]` inside a template produce fresh unique var-ref syntax objects (kind=VAR_REF, `is_gensym=1`) with a monotonic global counter. Names follow the format `<prefix>__<N>` where `<prefix>` defaults to `"g"`. A gensym'd var-ref is accepted as a binding name by `mut`/`set`/`def`, so macros can introduce internal helper variables that cannot collide with anything in the caller's scope or with other macros' gensyms.
+- src/ast.c + src/jacl.h + src/gc.c: added `uint8_t is_gensym` mirror field to AstNode and JaclSyntax (same three-file struct-duplication dance as `is_caret`). Zero-initialized by default via `gc_alloc_syntax` / parser node alloc.
+- src/syntax.c: added static counter `syntax__gensym_counter`, added `jacl_gensym_next(prefix, prefix_len, heap, scope_mark, err)` which allocates a JaclSyntax of kind VAR_REF with a fresh `<prefix>__<N>` name, `is_gensym=1`, and the macro's current scope mark. Prefix is hard-capped at 3 bytes (so `prefix + "__" + digits` fits the 7-byte inline limit); longer prefixes are rejected with an explicit "gensym prefix too long" error.
+- src/syntax.c: added `expand__is_gensym_call(syn)` helper: detects a SYNTAX_COMMAND whose head is a var-ref named "gensym" (length 6, exact match) with either 0 args or 1 arg that is a string literal. Integrated into `expand__subst_template`: before falling through to generic child recursion, if the current node is a gensym call, call `jacl_gensym_next` with the expansion's current scope mark and return the fresh var-ref syntax object.
+- src/syntax.c: `syntax_from_ast` and `syntax_to_ast` (`syntax__set_ast_pos`) copy `is_gensym` through the roundtrip, same pattern as `is_caret`.
+- src/compiler.c: extended the `mut`, `set`, and `def` handlers to also accept `AST_VAR_REF` with `is_gensym=1` as a binding name form. For gensym inputs, `bind_scope_mark` is taken from `args[name_arg_idx]->scope_mark` (the var-ref's own mark, set at gensym time to the expansion's current mark), NOT forced to 0 like caret. This is the semantic distinction: caret binds in caller scope, gensym binds in the macro's own scope — uniqueness is guaranteed by the name, not the scope mark.
+- test/test_syntax.c: added 6 US-014 tests:
+  - `test_us014_gensym_returns_var_ref`: template `[gensym]` expands to a VAR_REF whose name starts with `g__`.
+  - `test_us014_gensym_produces_distinct_names`: two consecutive `[gensym]` calls (inside the same template, so same expansion) produce different names.
+  - `test_us014_gensym_default_prefix`: no-arg form uses default prefix `"g"`.
+  - `test_us014_gensym_prefix_too_long`: `[gensym "abcd"]` → parse/expansion error.
+  - `test_us014_gensym_in_macro_mut`: a macro template `syntax-quote [mut [gensym] ~v]` (the gensym'd name used as the mut target) successfully defines a fresh local and binds the value.
+  - `test_us014_gensym_no_collision_with_caller`: caller has `mut g 99` in scope; macro uses `[mut [gensym] 42]` with default prefix `g`. The macro's gensym'd binding (`g__<counter>`) does not collide with the caller's `g`, and after expansion the caller's `g` still reads 99.
+- Files changed: src/ast.c, src/gc.c, src/jacl.h, src/syntax.c, src/compiler.c, test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 binaries pass, 121 syntax subtests pass (up from 115), no warnings with -Wall -Wextra.
+- **Learnings for future iterations:**
+  - JACL macros are template-based substitution, not runtime evaluation. This means builtins that are "supposed to be called during macro expansion" (like gensym in traditional Lisps) cannot be registered as regular native functions and called via opcodes — there is no interpreter running during `expand__subst_template`. The only path is to recognize the call *as a syntactic form* inside the template walker and synthesize its result directly. If the PRD says a feature needs to run during expansion, think "template form", not "builtin function".
+  - The 7-byte inline-string limit strongly constrains name-generation strategies. With 2 bytes reserved for the `__` separator and at least 1-2 for a decimal counter, you get roughly 3 bytes for the prefix. A simple base-10 counter cap the prefix accordingly; if you needed a larger namespace you'd want a base-36 or hex counter, or use gc-allocated (non-inline) strings. For gensym, 3-byte prefix is fine because macro authors shouldn't be picking long gensym prefixes anyway — `g`, `tmp`, `it` all fit.
+  - Adding a new "binding introduction" flag (gensym, caret, etc.) means *three* edits in compiler.c — the `mut`, `set`, and `def` handlers are separate and each has its own name-extraction code. All three must accept the new form or you get "expected literal string" errors at surprising sites (e.g., user writes a macro with `[mut [gensym] ...]` and it works, then tries `[def [gensym] ...]` inside a proc and it fails). Grep for `bind_name_ptr` to find the three sites (currently ~lines 4700, 4840, 5310).
+  - The gensym counter is a static file-scope global in syntax.c. This is fine for single-threaded use but would need to be per-heap or atomic in a multi-interpreter setup. Keep this in mind when US-018 or later introduces multi-VM isolation.
+  - Semantic distinction that took a moment to clarify: `^name` (caret) forces mark 0 so the binding lives in *caller scope* — uniqueness via mark. `[gensym]` keeps the current expansion mark AND uses a unique name — uniqueness via name. Both solve "avoid accidental capture", but they solve opposite ends: caret is for *intentional* capture (anaphoric macros); gensym is for *unintentional* capture (macro-private helpers). Don't collapse them into a single flag.
+---
+
+## 2026-04-11 - US-015 — Introspection builtins
+Thread: (inline)
+- Implemented 7 introspection builtins for JaclSyntax objects: `syntax-kind`, `syntax-datum`, `syntax-head`, `syntax-args`, `syntax-commands`, `syntax-pos`, `syntax-str`. Each takes a syntax object and returns a kind-string, the raw datum, the head syntax, arg/command vecs, a `{line,col}` map, or a pretty-printed string. Error on wrong kind.
+- Design decision: these are compile-time *builtins* (matched via `compiler__head_matches` in the command-head handler), NOT native functions. Reason: `embed__register_native` stores the native name as an inline string, which is hard-capped at 7 bytes. All 7 builtin names exceed that (shortest is `syntax-pos` at 10 bytes). This is the same pattern already used by `byte-length`, `stack-trace`, and `to-string` — matched at compile time, dispatched to a dedicated opcode. If you need any future name >7 bytes, this is the path. Do not waste time trying `embed__register_native` with a long name.
+- Single opcode for all 7: added `OP_SYNTAX_OP` (opcode 152) with a uint8_t subop byte (0=kind, 1=datum, 2=head, 3=args, 4=commands, 5=pos, 6=string). Cleaner than 7 separate opcodes and avoids shifting the opcode table more than necessary — still had to update the hardcoded `OP_HALT == 152` assertion in `test/test_bytecode.c` (now 153). When adding opcodes near the end of the enum, always grep `test/test_bytecode.c` for opcode-value constants.
+- src/jacl.h: added `OP_SYNTAX_OP` between `OP_SYNTAX_SPLICE` and `OP_HALT`; added extern declaration for `syntax_kind_name`.
+- src/bytecode.c: added `OP_SYNTAX_OP` to the disassembler name table.
+- src/compiler.c: 7 new head-matches handlers in `compiler__compile_command` (around line 6765). Each compiles the single argument as an expression, emits `OP_SYNTAX_OP` + subop byte, and sets `c->last_expr_type` for the ones with a known static type (string for kind/str, vec for args/commands, map for pos).
+- src/vm.c: new `case OP_SYNTAX_OP` in the dispatch loop that pops the operand, type-checks it as a syntax object (with a named error using a small `names[]` array indexed by subop), sets `gc__current_heap`, and dispatches on the subop. For `syntax-pos` it builds a 2-entry HAMT map via `jacl_map_set`; for `syntax-str` it uses the existing `vm__fmt_value` formatter and interns the result via `jacl_string_new`.
+- src/syntax.c: new `syntax_kind_name(uint8_t kind)` helper at the bottom of the file that maps a `SyntaxKind` to its hyphenated lowercase name ("command", "lit-int", "var-ref", etc.). Called from both the kind subop and the error messages. Exported via the extern in `jacl.h`.
+- **Lexer arrow gotcha**: the PRD spec calls the last builtin `syntax->string`, but the JACL lexer (`lexer__is_word_char_no_arrow`) explicitly stops at `->` to preserve the arrow operator. `syntax->string` would tokenize as three tokens (`syntax`, `->`, `string`) and never reach the compiler as a single head. Deviated from the spec and implemented it as `syntax-str`, matching the existing `to-string` / `byte-length` naming convention. Documented the deviation in a comment at the compiler call site and in the PRD notes. Future features that want an arrow in an identifier will hit the same wall — either rename, or change the lexer (don't recommend the latter, the arrow is load-bearing).
+- test/test_syntax.c: added 13 US-015 end-to-end tests via `jacl_eval` (all through the public `JaclVM` API, not internal unit-level probing — matches the end-to-end testing strategy in memory). Covered: kind on command/literals/var-ref, datum on all 4 datum-bearing kinds, datum error on command, head + datum chained, head type error, args length + first-arg datum via `vec-get`, commands length on block, commands type error, pos map with line/col, syntax-str contains the literal value, non-syntax type error, arity error.
+- test/test_bytecode.c: updated `ASSERT_INT_EQ(OP_HALT, 152)` → `153` and added `ASSERT_INT_EQ(OP_SYNTAX_OP, 152)`.
+- Files changed: src/jacl.h, src/bytecode.c, src/compiler.c, src/vm.c, src/syntax.c, test/test_bytecode.c, test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 binaries pass, 134 syntax subtests pass (up from 121), no warnings with -Wall -Wextra.
+- **Learnings for future iterations:**
+  - JACL top-level commands are *space-separated*, so calls like `syntax-kind syntax-head quote [+ 1 2]` parse as `syntax-kind` with three args (`syntax-head`, the quote form, and nothing else — the quote keyword consumes one expression). Nested invocations MUST be bracketed: `syntax-kind [syntax-head quote [+ 1 2]]`. The `quote` / `syntax-quote` keywords are "prefix" forms that consume exactly one following expression, so they nest naturally *inside* a bracketed command but do NOT nest at the top level. First-pass tests all failed this way; easy debugging heuristic is "if the builtin claims wrong-arity or wrong-type, check if the subcommand needs brackets".
+  - The existing `byte-length`, `stack-trace`, `to-string`, `box`, `atom`, etc. builtins are all compile-time-matched via `compiler__head_matches` and emit dedicated opcodes. This is the correct pattern for any builtin whose name exceeds 7 bytes OR whose argument evaluation needs to be controlled (e.g., you want to emit type-specialized bytecode). Native-function registration is only for 7-byte-or-less names that take their args normally. When in doubt, grep `compiler__head_matches` to see prior art.
+  - A single dispatch opcode with a subop byte is a clean way to add a *family* of related builtins without bloating the opcode table. Three rules: (1) the subop byte is a `uint8_t` read via `vm__read_byte`, so you get 256 slots per family; (2) put a comment block at the top of the case listing the subop meanings; (3) keep a parallel `static const char *names[]` array for error messages so the dispatcher can print the user-level builtin name on type errors without duplicating it in each case. This pattern would also work well for future "syntax manipulation" opcodes (US-016 `make-syntax`, US-017 etc.).
+  - `vm__fmt_init` / `vm__fmt_value` / `vm__fmt_*` are the internal formatter used by `stack-trace` and error messages. They write into an arena-allocated buffer (`VMFormatBuf`) and are cheap to use from any opcode handler. Handy for any builtin that needs to stringify a value; don't reinvent it.
+  - The command head for `[+ 1 2]` is a `SYNTAX_LIT_STRING` (not `SYNTAX_VAR_REF`) whose datum is the operator string `"+"`. I initially expected var-ref. Reason: the parser treats operators and bare head words as lit-strings so that operator dispatch and normal command dispatch can share the same lookup path. `syntax-datum syntax-head` on an operator call gives you the operator's spelling as a plain string, which is probably what you want for most macro introspection.
+---
+
+## 2026-04-11 - US-016 — make-syntax construction builtin
+Thread: (inline)
+- Implemented `make-syntax` as a compile-time-matched builtin in `compiler__compile_command` that dispatches on the first-arg kind name (a bare word) and emits `OP_SYNTAX_OP` with one of 6 new subops (7..12). Same single-opcode/subop-byte family pattern established by US-015 introspection. Construction kinds: `lit-int`, `lit-float`, `lit-string`, `var-ref`, `command` (head + args-vec), `block` (commands-vec).
+- src/compiler.c: new `compiler__head_matches(head, "make-syntax", 11)` branch that (1) requires at least 1 arg, (2) requires the first arg to be `AST_LIT_STRING`, (3) dispatches on the kind string to select a subop and required argc, (4) compiles the remaining args and emits `OP_SYNTAX_OP` + subop. Unknown kinds and wrong arities are compile errors with clear messages listing the valid kinds.
+- src/vm.c: `OP_SYNTAX_OP` dispatcher now branches on `subop >= 7` BEFORE the introspection pop, because construction ops don't expect a syntax operand on top of the stack (they take strings, numbers, syntax, or vecs). Each construction subop pops its operand(s), type-checks via `jacl_is_i32` / `jacl_is_f32` / `jacl_is_string` / `jacl_is_vector` / `jacl_is_syntax`, allocates via `gc_alloc_syntax(&vm->heap)`, fills in the kind-specific union field, and pushes. The command subop also walks the args vec to verify every element is a syntax object before assembly (same invariant `gc_alloc_syntax` callers elsewhere assume).
+- Scope mark: constructed syntax objects get `scope_mark = 0` (the default from `gc_alloc_syntax`). The PRD says "Constructed syntax objects get the current expansion's scope mark" but JACL's macro expansion is template-based (see the `project_macro_eval_limitation` memory), so there is no "current expansion scope mark" accessible at runtime — there's no interpreter running during `expand__subst_template`. Runtime-constructed syntax values are only useful outside of an active expansion anyway, so 0 is the correct default. Documented as a known simplification in the PRD notes.
+- test/test_syntax.c: added 10 US-016 tests via `jacl_eval` — matching the end-to-end testing strategy used throughout test_syntax.c. Covered: lit-int/lit-float/lit-string/var-ref construction (+ datum round-trip), command construction (with head datum, args length, first-arg datum chain), block construction (with commands length), unknown-kind compile error, three arity compile errors (too many, too few, zero), five type errors at runtime (lit-int with string, var-ref with int, command with non-syntax head, command with non-vec args, command with non-syntax element in args vec), and a pretty-print round-trip.
+- Files changed: src/compiler.c, src/vm.c, test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 binaries pass, 144 syntax subtests pass (up from 134), no warnings with -Wall -Wextra.
+- **Learnings for future iterations:**
+  - The `quote` prefix form consumes its single following expression via `parser__parse_expr` (not a special bare-word reader), so `quote +` does NOT parse — `+` is `TOKEN_OPERATOR` which is not handled as a primary expression in `parser__parse_expr`. You cannot write `[quote +]` to get a 1-arg command whose arg is the `+` symbol. Workarounds: (a) quote a full bracket form and extract with syntax-head, e.g. `[syntax-head quote [+ 1 2]]`, or (b) construct the head programmatically via `[make-syntax var-ref "foo"]` or `[make-syntax lit-string "+"]`. This is exactly the path test_us015_syntax_head already uses. Any test that wants "a syntax for an operator symbol" should use approach (a) or (b).
+  - Writing `[quote [+ 1 2]]` inside another bracketed command does NOT produce a vec/arg-list element containing the quoted command. It produces a *command whose head is an AST_QUOTE* and which has zero args, because `parser__parse_command` calls `parse_expr` for the head, which sees `TOKEN_QUOTE` as a prefix form and consumes `[+ 1 2]` as the quote child. The resulting form is compiled as "call the value of the quoted expression as a function" → runtime error. To put a quoted value inside a vec, write `[vec quote [+ 1 2]]` (quote is NOT bracketed separately) — the vec head consumes its own `vec` token, then parse_expr sees TOKEN_QUOTE and reads `quote [+ 1 2]` as a single arg via the prefix form. Mental model: `quote` / `syntax-quote` are word-prefix operators in any expression position, not head-position commands.
+  - When adding construction ops that don't take a syntax object on top of the stack, branch on the subop BEFORE the shared introspection pop. The existing introspection path fetches the top-of-stack as a syntax object and errors otherwise, which is wrong for constructors that pop a string/number/vec. The cleanest refactor is a simple `if (subop >= construction_base) { ... break; }` guard before the introspection code.
+  - For the make-syntax command subop, type-check every element of the args vec upfront (walking it once) before allocating the syntax object. Skipping per-element checks at allocation time would let bogus values slip into the AST where later introspection or expansion would misbehave far from the origin.
+  - For floats, `3.14` at the literal level is an `f32` by default (see `compiler__compile_node` AST_LIT_FLOAT path). `jacl_is_f32(v)` / `jacl_as_f32(v)` pair is the runtime check; don't reach for `f64` unless the user explicitly annotated the context.
+---
+
+## 2026-04-11 - US-017 — syntax-error builtin for explicit compile-time errors
+Thread: (inline)
+- Implemented `syntax-error` as a compile-time-matched builtin in `compiler__compile_command` that dispatches to two new OP_SYNTAX_OP subops: 13 (message only) and 14 (message + syntax object). The arity check (must be 1 or 2 args) is enforced at compile time via `compiler__builtin_arity_error`; the message must be a string (runtime type check); when a second arg is present it must be a syntax object (runtime type check).
+- src/compiler.c: added a `compiler__head_matches(head, "syntax-error", 12)` branch right after the make-syntax branch (~line 6907). Compiles the message arg unconditionally; if `argc == 2` also compiles the syntax arg, then emits `OP_SYNTAX_OP` + subop 14, otherwise subop 13.
+- src/vm.c: added subop 13 and 14 dispatch in the `OP_SYNTAX_OP` case. Both pop their operands, type-check them, extract the message via `jacl_string_data(msg, mbuf, sizeof(mbuf)-1)` into a 192-byte stack buffer, and call `vm__set_error`. Subop 13 formats as `syntax-error: <msg>`; subop 14 as `syntax-error at <line>:<col>: <msg>` using `syn->pos_line` and `syn->pos_col`. Both branches are inserted BEFORE the existing construction (subop 7-12) check and introspection (subop 0-6) path, so they don't interact with the shared syntax-on-top-of-stack fetch. Both return `VM_RUNTIME_ERROR` to halt the VM.
+- Semantic note: The PRD framed this as "halts compilation" but JACL macros are template-based (see `project_macro_eval_limitation` memory) — there is no expansion-time interpreter. The practical equivalent is "halts the program at the point the expanded `syntax-error` call runs". A macro template like `syntax-quote [syntax-error "nope"]` substitutes into the caller's AST as a regular command; when that code is reached at runtime, the error fires with the custom message. The e2e test `test_us017_syntax_error_from_macro` validates this path.
+- test/test_syntax.c: added 7 US-017 tests via `jacl_eval`:
+  - `test_us017_syntax_error_message_only`: `syntax-error "must be a literal"` → error whose message contains "must be a literal".
+  - `test_us017_syntax_error_with_syntax`: `syntax-error "bad shape" quote [+ 1 2]` → error whose message contains "bad shape" and a `:` (line:col). Uses the prefix `quote` form, NOT bracketed `[quote ...]` — brackets would invoke `quote` as a command and try to call the resulting syntax value.
+  - `test_us017_syntax_error_zero_args`: `syntax-error` → compile error.
+  - `test_us017_syntax_error_too_many_args`: `syntax-error "a" quote 1 quote 2` → compile error (the parser treats it as 3 args, which violates the 1-or-2 arity).
+  - `test_us017_syntax_error_non_string_message`: `syntax-error 42` → error (runtime type check).
+  - `test_us017_syntax_error_non_syntax_second`: `syntax-error "msg" 42` → error (runtime type check).
+  - `test_us017_syntax_error_from_macro`: `defmacro require {} { syntax-quote [syntax-error "nope"] }; require` → error whose message contains "nope". Demonstrates the template-substitution path end-to-end.
+- Files changed: src/compiler.c, src/vm.c, test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 binaries pass, 151 syntax subtests pass (up from 144), no warnings with -Wall -Wextra.
+- **Learnings for future iterations:**
+  - The top-level parser treats bracketed forms `[quote [+ 1 2]]` as a command invocation — at runtime this tries to call the resulting syntax-object value, which fails with "cannot call unknown value". For tests that need a quoted expression as a command argument, use the PREFIX form `quote [+ 1 2]` (no outer brackets). `quote` is a word-prefix operator and consumes the next expression as its child. This is the same gotcha documented in US-016 learnings and keeps biting — any test that starts seeing "cannot call unknown value" should check for stray brackets around a `quote`/`syntax-quote` form.
+  - When adding a new OP_SYNTAX_OP subop whose operand types are NOT a single syntax object on top of stack, insert the handler BEFORE both the construction (subop 7-12) and introspection (0-6) branches, and `return VM_RUNTIME_ERROR` from the error path directly. The pattern established in US-016 (branch early, `break` out of the switch) is the right shape — just add another `if (subop == N)` guard before the existing two.
+  - `jacl_string_data(v, buf, buflen)` returns the byte count copied and null-terminates nothing (the test helper `us015__string_to_cstr` explicitly writes `buf[n] = '\0'` after). When using it for a VM error message, leave 1 byte of headroom in the buffer (`sizeof(mbuf) - 1`) and null-terminate manually — `vm__set_error` takes a `%s` format and will read until null.
+  - A halting builtin like syntax-error should set the error via `vm__set_error` AND `return VM_RUNTIME_ERROR` immediately from the switch case — do NOT fall through to the shared `break` at the bottom of the OP_SYNTAX_OP case, otherwise the dispatch loop will continue executing with a popped stack but no error propagation.
+---
+
+## 2026-04-11 - US-018 — Dual-location error reporting for macro expansion failures
+Thread: (inline)
+- Implemented an expansion call stack + chain-aware error rendering in src/syntax.c. When a nested macro expansion fails (arity mismatch, body shape error, invalid syntax, depth limit), the error message now includes one `  in expansion of macro `name` at line L, col C` line per ancestor expansion frame, outermost-first, so the user sees both the inner failure point AND the chain of outer macro call sites that led there.
+- src/syntax.c — added `ExpandFrame[256]`, `expand__frame_top`, `expand__push_frame`, `expand__pop_frame`, `expand__build_error_with_chain`, and `expand__set_error`. The builder renders frames outermost-first, with a truncation path (outermost 4 + `... N more expansion frames ...` + innermost 4) when the chain is >8 deep so depth-limit errors don't dump 200 lines.
+- src/syntax.c — converted all four `expand__node` error sites (depth limit, arity mismatch, body-not-syntax-quote, syntax_to_ast-returned-null) from inline `expand__error_msg = msg` stanzas to `expand__set_error(...)` calls so they pick up the current chain. Stack frames are pushed/popped around the recursive `expand__node` call that re-expands after substitution; the push captures the ORIGINAL `node->start.line/col` BEFORE `*node_ptr` is replaced (the expanded AST carries template positions, not the call-site position).
+- src/syntax.c — `ast_expand_macros` now resets `expand__frame_top = 0` alongside the other error-state resets. The top-level sites (shadowing, duplicate, too-many-macros) still write directly to the return value because they happen outside any expansion and don't need a chain.
+- test/test_syntax.c — added 6 US-018 tests covering the full matrix:
+  - `test_us018_top_level_no_chain`: direct arity error at user's call → error contains "expects N but got M" and NO "in expansion of macro" chain entry.
+  - `test_us018_nested_arity_chain`: `outer` → `[inner 1 2]` where `inner` has 0 params → error contains the inner arity msg AND "in expansion of macro `outer`".
+  - `test_us018_triply_nested_chain`: `a → b → c` with c arity error → chain contains both "in expansion of macro `a`" AND "in expansion of macro `b`".
+  - `test_us018_call_site_line_captured`: outer called on line 4 → chain entry contains literal "line 4".
+  - `test_us018_depth_limit_truncated`: self-referencing `loop` → error contains "depth limit" AND "in expansion of macro `loop`" AND "more expansion frames" (truncation marker).
+  - `test_us018_e2e_via_jacl_eval`: full pipeline via `jacl_eval` → error message reported to user code contains both the inner arity text and the outer chain entry.
+- Files changed: src/syntax.c, test/test_syntax.c, .ralph/prd.json, .ralph/progress.txt
+- Verification: ./build.sh → 84/84 binaries pass, 157 syntax subtests pass (up from 151), no warnings with -Wall -Wextra.
+- **Learnings for future iterations:**
+  - "Runtime errors during macro expansion" (the PRD's phrasing) do not literally apply to JACL because macros are template-based — no user code runs during `expand__subst_template`. Practical interpretation: it means "errors detected by the expansion walk itself" (arity, body shape, depth limit, invalid conversion). Don't chase the "division by zero during expansion" test case — it would require an expansion-time evaluator, which is a different project. Adapt the test to exercise nested arity or depth limit instead, which are the real failure modes.
+  - The frame push MUST happen after saving `node->start.line/col` into locals because the very next line replaces `*node_ptr` with the expanded AST, whose `start` fields carry positions from the template (i.e., from inside the macro's defmacro body), NOT the call site. Capture first, then replace, then push: `uint32_t orig_line = node->start.line; uint32_t orig_col = node->start.column; *node_ptr = expanded; expand__push_frame(name, name_len, orig_line, orig_col);`.
+  - The chain must be rendered at error-set time, not at return time. By the time `ast_expand_macros` returns, every frame has already been popped by the unwinding recursion, so the chain is empty. Format the message in `expand__set_error` and store the fully-rendered string in `expand__error_msg`; the return path just hands it back.
+  - When the `expand__frame_top == 0` fast path returns, still copy `base_msg` into the arena — callers pass stack-allocated buffers (via `snprintf` into a local `char err[256]`), so returning the input pointer directly would leave the error string pointing at freed stack memory. Allocate + memcpy + null-terminate unconditionally in the builder.
+  - The frame name pointer is the macro's AST lit-string (`head->data.lit_string.value`). AST nodes live in the same arena as the error message buffer, so the pointer outlives the whole expansion pass — no copy needed. But this means the frame name aliases the *original* AST, so don't stash it past arena teardown (not a concern here because the expansion pass runs entirely within one compile call).
+  - Truncation strategy for deep chains: when `loop` hits the depth limit, displaying all 256 identical frames adds zero diagnostic value. Outermost 4 + "... N more ..." + innermost 4 is a useful window (it shows the recursion started from line L and terminated at line L'), keeps the error short, and has the property that single-call chains (<8 frames) render in full without any truncation wart.
+---
+
+## 2026-04-11 - PRD swap: Macro Evaluation Rewrite
+- Completed prior PRD (Hygienic Macros, US-014..US-018) archived to .ralph/archive/2026-04-11-hygienic-macros/.
+- New PRD `prd-macro-eval-rewrite.md` loaded into .ralph/prd.json with 13 stories (US-001..US-013) on a fresh branch `ralph/macro-eval-rewrite` cut from `ralph/hygienic-macros` (NOT main — the new PRD references src/syntax.c, JaclSyntax, and the entire macro infrastructure that only exists on the hygienic-macros branch).
+- Goal: replace template-substitution macro expansion (`expand__subst_template`) with staged compilation — macro bodies become real closures invoked on the VM via a new reentrant `jacl_context_t`. Includes 7-byte name limit fix (US-002/003) as prerequisite, and new gensym builtin (US-010). Final story (US-013) deletes the old expander entirely.
+---
+
+## 2026-04-11 - US-001 — Hygiene de-risking spike
+Thread: (inline)
+- Goal: validate the proposed mark-propagation hygiene rule on paper before touching any compilation code, so the rewrite doesn't unravel on a wrong assumption. Acceptance criteria require 5-8 representative templates, hand-lowered to make-syntax trees, traced through the proposed rule, and diffed against today's expander output — all byte-identical, or STOP and re-evaluate.
+- The PRD references "test_m10" but test_m10.c is actually the mutable-variables suite. The actual hygiene tests live in test/test_syntax.c under the test_us011_*, test_us012_hygiene_*, test_us013_caret_*, and test_us014_gensym_* sections (added in the prior hygienic-macros PRD). Picked all 7 representative templates from test_syntax.c, not test_m10.c. Recorded in the spike doc.
+- Picked 7 templates covering every required hygiene case:
+  1. `double` — simple [unquote x] (no marks created, just splice)
+  2. `wrap` — [unquote-splicing body] (vector flatten)
+  3. `bindit` — `^val` caret carve-out
+  4. `m` — `[gensym]`-introduced fresh var
+  5. `mk` — nested `[syntax-quote ...]` (today's expander treats inner literally with no nested unquotes; proposed rule preserves this)
+  6. `m` (US-012 capture test) — identifier shadowing where macro introduces its own `x` colliding with an outer `x`
+  7. `add_hundred` calling `add_ten` — transitive macro composition (mark from outer must NOT clobber mark from inner; inner's expansion is a syntax object that splices through with its own marks intact)
+- Hand-lowered each template's syntax-quote body into a tree of make-syntax/vec calls as it would compile under US-007's new compilation rule. Used the existing OP_SYNTAX_OP subops 7-12 from US-016 (var-ref, lit, vec, struct, command, syntax-quote-of-syntax) — no new opcodes needed beyond the existing introspection/construction set.
+- Traced each template through both pipelines side-by-side:
+  - LHS: today's `expand__subst_template` (src/syntax.c:1232) + `expand__stamp_syntax` (src/syntax.c:1016) + the file-static `expand__scope_counter` (src/syntax.c:881).
+  - RHS: proposed rule — every make-syntax call inside a macro frame stamps `current_mark` on its result; spliced-in arg syntax objects pass through unchanged with their existing (caller's) marks; `^`-prefixed nodes (`is_caret == 1`) opt out and always carry mark 0.
+- Result: all 7 templates produce byte-identical output. The only refinement to the originally-stated rule is the caret carve-out: `^name` nodes always have mark 0, regardless of frame mark, matching today's `expand__stamp_syntax` skip-on-`is_caret==1` behavior.
+- One observed edge case: nested `[syntax-quote ...]` with unquotes INSIDE the inner quote is unobserved by today's tests. Today's expander treats the inner subtree as a literal (no recursion into it for unquote substitution). The proposed rule preserves this — the new compilation rule for AST_SYNTAX_QUOTE compiles the outer quote and treats nested syntax-quote as a make-syntax-of-syntax-quote literal subtree. Documented as a deferred decision in case future macros need full nested unquoting.
+- Decision: ✅ Proceed with the rest of the PRD. No production code modified (acceptance criterion: "spike code lives under .ralph/spikes/ or is reverted before US-002 begins"). The deliverable is a single 37 KB markdown document at `.ralph/spikes/macro-eval-hygiene-spike.md`.
+- Files changed: .ralph/spikes/macro-eval-hygiene-spike.md (new), .ralph/prd.json (US-001 passes:true), .ralph/progress.txt
+- Verification: ./build.sh → 84/84 binaries pass, 157 syntax subtests pass (no production code changes, just sanity check that the in-progress branch still builds clean).
+- **Learnings for future iterations:**
+  - The "test_m10" reference in the macro PRDs is a misnomer — it dates back to when M10 was the macro milestone. The actual hygiene/macro tests now live in test/test_syntax.c (sections US-011 through US-018). Anywhere a future story says "test_m10" expect to find them in test_syntax.c instead. Don't waste a tool call confirming this each time.
+  - When picking representative templates for a spike, prefer ones that already have assertions in the existing test suite — they double as your oracle. A template that's just illustrative ("here's how someone might write a `swap!` macro") provides no diff target. Every template in this spike was lifted directly from a passing test in test_syntax.c.
+  - For paper analysis of mark-propagation, the right abstraction is a per-row "mark trace table": each row is a syntax object (var-ref, lit, vec, command), each column is "mark today" vs. "mark under proposed rule". This format makes byte-identity obvious at a glance and forces you to actually walk the tree node-by-node instead of hand-waving. Reusable for any future hygiene rule changes.
+  - The caret carve-out is load-bearing for the transitive macro composition case (template #7). Without it, when `add_hundred` introduces a `^x` binding and then calls `add_ten` which itself introduces a `^y`, both bindings would get marks from their respective frames, and the outer macro's mark would shadow the inner's binding identifier. Caret = "this is a deliberately introduced binding, not a reference, mark 0 always". The fact that today's expander already does this (`expand__stamp_syntax` checks `is_caret == 1` and skips) means the proposed rule isn't introducing a new mechanism — it's keeping the same carve-out, just relocating where the stamp is applied (compile time → make-syntax call time).
+  - Nested `[syntax-quote ...]` is the only case where the proposed rule has an observable behavioral question, and the answer is "match today's behavior" (treat inner as literal). This matters for US-007 acceptance: the new compilation rule for AST_SYNTAX_QUOTE must NOT recursively unquote inside a nested syntax-quote, even though it would be technically possible. Document this in US-007's tests so a future implementer doesn't "fix" it and silently change semantics.
+  - Sequencing implication for US-009: the mark-application code lives in OP_SYNTAX_OP's make-syntax subops (vm.c:5979-6107). Each subop needs to read the current frame's mark and apply it to the constructed JaclSyntax. The frame's mark needs a place to live — either in JaclCallFrame (cleanest, isolates per-call state) or in jacl_context_t (US-005). Preferring CallFrame because mark is per-macro-invocation, not per-context, and a single context can have many nested macro frames live at once.
+  - Sequencing implication for US-010 (gensym builtin): gensym must apply the current frame's mark to the var-ref it produces, otherwise the resulting identifier would be globally fresh by name but unmarked, breaking hygiene composition. Today's `jacl_gensym_next` doesn't apply marks itself — it relies on `expand__stamp_syntax` walking over its output afterward. The new builtin must do both: generate the name AND stamp the mark, atomically.
+---

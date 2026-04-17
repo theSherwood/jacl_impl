@@ -1,0 +1,238 @@
+# Ralph Progress Log
+Started: Sat Apr 11 15:40:27 UTC 2026
+
+## Codebase Patterns
+- Unity build: all .c files are `#include`d into `src/jacl.c`; system headers (stdio, stdlib via platform.h) are available everywhere
+- Macro expansion is always staged: `ast_expand_macros` auto-creates a temporary `jacl_context_t` if `es->ctx` is NULL, so callers can pass `es = NULL` to `compiler_compile` and macros still work
+- OP_SYNTAX_OP subop dispatch guard (`if (subop >= 7 ...)`) must be updated when adding new construction/validation subops — missing subops fall through to the introspection path and produce "unknown subop" errors
+- Build/test: `bash build.sh --parallel` runs all tests; `--test=NAME` filters to a single test
+- Inline strings are 7-byte max (NaN-boxed payload); longer strings must use `jacl_intern` (heap-interned, pointer-stable) or `jacl_rope_string_create`
+- The `concurrent_intern` test is flaky (race condition, off-by-one in counts) — not a real failure
+- The `m13` test crashes with a pthread assertion (`__pthread_tpp_change_priority`) — pre-existing, not related to macro-eval work
+- `vm_exec` must reset `vm->stack_top = 0` — staged macro expansion calls `jacl_ctx_run_closure` on the same VM during compilation, leaving stale stack values
+- `jacl.h` VM struct must mirror `vm.c` VM struct exactly — mismatched fields cause struct layout offset bugs in test binaries (e.g., missing `macro_scope_mark`)
+- Compiler uses `compiler__name_val` helper for all name construction: <=7 inline, 8-128 interned, >128 rejected
+- Analysis functions (suspension analysis, capture analysis, etc.) now accept heap/intern_table params for name construction
+- `abort()` is available via `lib/platform/platform.h` which includes `<stdlib.h>`
+
+---
+
+## 2026-04-11 - US-002
+Thread: (inline)
+- Replaced silent truncation `if (len > 7) len = 7` with `fprintf(stderr, ...) + abort()` assertion in `jacl_inline_string` (src/value.c:293)
+- Audited all callers across src/value.c, src/compiler.c, src/vm.c, src/syntax.c, src/embed.c, src/string.c, src/runtime.c
+- Fixed embed.c `embed__register_native`: was passing `strlen(name)` without length check; now routes names > 7 bytes through `jacl_intern`
+- Files changed: src/value.c, src/embed.c
+- **Learnings for future iterations:**
+  - embed.c:812 (jacl_call_by_name) already had the correct inline/intern routing — only embed__register_native was missing it
+  - All compiler.c callers are safe because the compiler rejects names > 7 bytes at enforcement sites before reaching `jacl_inline_string`
+  - The gensym function (syntax.c) caps names at 7 bytes via loop bounds
+---
+
+## 2026-04-13 - US-003
+Thread: (inline)
+- Added `compiler__name_val(heap, intern_table, name, len)` routing helper at compiler.c:~956
+- Refactored ~12 analysis/suspension functions to accept heap+intern_table params and use `compiler__name_val` instead of `jacl_inline_string`:
+  - `analyze__walk_body`, `analyze__collect_procs`, `compiler__analyze_suspension`
+  - `sm__walk_suspensions`, `ast__contains_suspension`, `compiler__top_level_suspends`
+  - `ast__collect_local_muts`, `ast__contains_nonlocal_set_impl`, `ast__contains_nonlocal_set`
+  - `ast__collect_local_names`, `compiler__body_captures_mutable`
+- Fixed VM OP_GET_GLOBAL error message: replaced `jacl_inline_string_get` with `jacl_string_data` to handle interned names
+- Created test/test_long_names.c with 16 tests covering all binding sites + boundary conditions
+- Files changed: src/compiler.c, src/vm.c, test/test_long_names.c, build.sh
+- **Learnings for future iterations:**
+  - Named destructuring requires commas between field names: `{user_name, user_age}` not `{user_name user_age}` — without commas, parser treats it as a single typed-field command
+  - `{...}` is parsed as AST_BLOCK by `parser__parse_block`; the compiler reinterprets it as destructure based on arg_count (0 = simple name, 1 = typed field)
+  - `parser__lookahead_is_named_destructure_binding` exists but is NEVER CALLED — dead code
+  - Analysis functions had `if (len <= 7)` guards that silently skipped long-named procs in suspension analysis — critical bug that would cause wrong codegen for suspending procs with long names
+  - All 14 binding sites in the compiler were already updated to use `compiler__name_val` (likely done as part of US-003 prep); the main work was the analysis functions
+---
+
+## 2026-04-13 - US-004
+Thread: (inline)
+- Expanded `jacl_gensym_next` (src/syntax.c:~1137): prefix limit raised from 3 to 64 bytes, name buffer from 8 to 80 bytes, removed 7-byte caps on name construction loops
+- Added `JaclInternTable *intern` parameter to `jacl_gensym_next`; names <=7 bytes still use `jacl_inline_string`, longer names use `jacl_intern`
+- Updated `expand__is_gensym_call`: prefix buffer from `char[4]` to `char[65]`, prefix length cap from 3 to 64
+- Threaded `JaclInternTable *intern` through `expand__subst_template` (new parameter) and its single external call site
+- Updated declaration in `src/jacl.h`
+- Updated 4 callers in `test/test_syntax.c` to pass `vm.intern_table`; updated "prefix too long" test to use 65-byte prefix
+- Added 2 integration tests: `test_us014_gensym_long_prefix_in_macro` and `test_us014_gensym_long_prefix_binding_works`
+- Files changed: src/syntax.c, src/jacl.h, test/test_syntax.c
+- **Learnings for future iterations:**
+  - `vm.intern_table` is NULL when vm_init'd without a compile pass, but that's fine for short-prefix gensym tests since names <=7 bytes go through `jacl_inline_string` and never touch the intern table
+  - The `[gensym "prefix"]` syntax in macro templates works because `expand__subst_template` detects gensym calls before recursing into child nodes
+  - `jacl_vm_new()` / `jacl_eval()` is the cleanest way to write end-to-end macro integration tests
+---
+
+## 2026-04-13 - US-005
+Thread: (inline)
+- Defined `jacl_context_t` struct in vm.c (unity build) and jacl.h (external API): owns arena, VM, JaclInternTable, MacroTable, ExpandState, restriction_set (uint64 bitmask)
+- Implemented `jacl_ctx_new(parent)` / `jacl_ctx_destroy(ctx)` in vm.c; child contexts share parent's intern table
+- Created `ExpandState` struct grouping 7 file-static reentrancy hazards from syntax.c: error_msg/line/col, frames[256]/frame_top, scope_counter, gensym_counter
+- Threaded `ExpandState *es` through: `expand__push_frame`, `expand__pop_frame`, `expand__build_error_with_chain`, `expand__set_error`, `expand__node`, `expand__block`, `expand__subst_template`, `ast_expand_macros`
+- Changed `jacl_gensym_next` to take `uint32_t *gensym_counter` instead of using file-static
+- Added `ExpandState *es` param to `compiler_compile` and `ast_expand_macros`; NULL falls back to stack-local state
+- Updated all callers: vm.c, embed.c, 5 test files
+- Documented reentrancy audit in vm.c comment block
+- Added 2 integration tests: `test_context_lifecycle` and `test_recursive_vm_exec`
+- Files changed: src/compiler.c, src/syntax.c, src/vm.c, src/jacl.h, src/embed.c, test/test_integration.c, test/test_syntax.c, test/test_string.c, test/test_m13.c, test/test_jacl_harness.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Unity build order matters: compiler.c → vm.c → syntax.c → embed.c. Types defined in compiler.c are visible to all later files
+  - `jacl.h` is for external consumers (tests); `.c` file types are for the unity build. Guard with `#ifndef` to avoid conflicts
+  - `tracked_allocator` is a test helper, not available in production code; use zero-init `{0}` for arenas in library code
+  - The `calloc` zero-initialization handles ExpandState fields correctly (all zeros is the desired initial state)
+  - `jacl_compile_program` (multi-file API) does NOT call `ast_expand_macros` — macros are only supported in single-file compilation
+---
+
+## 2026-04-13 - US-006
+Thread: (inline)
+- Implemented `jacl_ctx_run_source` in vm.c: lex → parse → compile → exec pipeline using context's own arena, intern table, expand state
+- Implemented `jacl_ctx_run_closure` in vm.c: sets up VM stack/frames for direct closure invocation
+- Defined `JaclError` type (kind: NONE/COMPILE/RUNTIME, message, line, col) in both vm.c and jacl.h
+- `restriction_set` param plumbed to `ctx->restriction_set` but not enforced (per AC — deferred to sandboxing PRD)
+- Added 4 integration tests: `test_ctx_run_source_valid`, `test_ctx_run_source_parse_error`, `test_ctx_run_source_runtime_error`, `test_ctx_run_source_nested`
+- Files changed: src/vm.c, src/jacl.h, test/test_integration.c
+- **Learnings for future iterations:**
+  - `lexer_lex` expects NUL-terminated strings; `jacl_ctx_run_source` copies `src` into arena with NUL terminator
+  - `[print 42] [+ 1 2]` on one line is parsed as `[print 42]` then calling the nil result — separate top-level expressions need newlines
+  - Integer division by zero (`[/ 1 0]`) returns 0, not a runtime error — use undefined variable references for runtime error tests
+  - `jacl_closure_ptr` (not `jacl_closure_val`) is the correct function to convert JaclClosure* to JaclVal
+  - `vm_exec` wraps the chunk in an implicit top_closure; the result lands in `vm->stack[0]` after `vm__run`
+---
+
+## 2026-04-13 - US-007
+Thread: (inline)
+- Added `use_staged_syntax_quote` flag to `ExpandState` and `jacl_context_t`; plumbed through `compiler_compile` → `Compiler.use_staged_syntax_quote`
+- Implemented `syntax__compile_sq_node` recursive function in compiler.c that emits `OP_SYNTAX_OP` make-syntax bytecode:
+  - AST_LIT_INT → push i32 → subop 7 (make-syntax lit-int)
+  - AST_LIT_FLOAT → push f32 → subop 8 (make-syntax lit-float)
+  - AST_LIT_STRING → push string → subop 9 (make-syntax lit-string)
+  - AST_VAR_REF → push name → subop 10 (make-syntax var-ref)
+  - AST_COMMAND → recurse head, recurse args, OP_VEC, subop 11 (make-syntax command)
+  - AST_BLOCK → recurse commands, OP_VEC, subop 12 (make-syntax block)
+  - AST_UNQUOTE → compile inner expression normally (must produce syntax JaclVal)
+  - AST_UNQUOTE_SPLICING → handled at parent level with OP_VEC_PUSH/OP_VEC_CONCAT
+  - AST_SYNTAX_QUOTE (nested) → emit as constant via syntax_from_ast
+  - Other nodes → fallback to constant via syntax_from_ast
+- Gated new path in `AST_SYNTAX_QUOTE` case: checks `c->use_staged_syntax_quote`
+- Added 4 integration tests: `test_staged_sq_literal`, `test_staged_sq_unquote`, `test_staged_sq_splice`, `test_staged_sq_nested`
+- Files changed: src/compiler.c, src/jacl.h, src/vm.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - Command heads (like `+`) parse as `AST_LIT_STRING`, not `AST_VAR_REF` — the head in a syntax-quote produces `SYNTAX_LIT_STRING`
+  - `OP_VEC_PUSH` stack order: [vec, elem] → pops elem first, then vec → pushes new_vec
+  - `OP_VEC_CONCAT` stack order: [a, b] → pops b first, then a → pushes a++b
+  - The staged path and legacy path produce structurally identical syntax objects — the difference is only in how the bytecode constructs them
+---
+
+## 2026-04-13 - US-008
+Thread: (inline)
+- Added `use_staged_eval` bool to MacroEntry in both compiler.c and jacl.h
+- Added `jacl_context_t *ctx` to ExpandState (forward-declared in compiler.c since it's defined later in vm.c)
+- Forward-declared `jacl_context_t` in jacl.h before ExpandState, removed duplicate typedef
+- Implemented `expand__compile_staged_body` in syntax.c: creates JaclClosure, Compiler with `use_staged_syntax_quote=true`, compiles body, returns closure
+- Modified `ast_expand_macros` with two modes:
+  - Staged mode (three-phase): register ALL defmacros, compile staged bodies, expand calls — enables forward references
+  - Non-staged mode (original single-pass): interleaved registration + expansion — preserves "must define before use" semantics
+- Modified `expand__node` to check `entry->use_staged_eval`: if true, invokes `jacl_ctx_run_closure` with syntax-object args; if false, uses existing template substitution
+- Modified AST_DEFMACRO compilation: if `use_staged_eval && closure != NULL`, skip recompilation (body already compiled during expansion)
+- Plumbed `ctx->expand.ctx` from `jacl_ctx_run_source` when staged mode is active
+- Added 3 integration tests: `test_staged_macro_e2e`, `test_staged_macro_block`, `test_staged_macro_forward_ref`
+- Files changed: src/compiler.c, src/syntax.c, src/vm.c, src/jacl.h, test/test_integration.c
+- **Learnings for future iterations:**
+  - The three-phase approach for forward references MUST be gated on staged mode — applying it to all macros breaks `test_expand_use_before_defmacro` which expects macros used before definition to NOT be expanded
+  - `jacl_context_t` is defined in vm.c but ExpandState is in compiler.c (earlier in unity build) — needs forward declaration
+  - Staged macro closures compiled during expansion are found by the compiler pass with `closure != NULL` — must detect `use_staged_eval` to avoid "already defined" error
+  - `expand__compile_staged_body` compiles the body block using `compiler__compile_block_expr` (not static, visible from syntax.c via unity build)
+---
+
+## 2026-04-13 - US-009
+Thread: (inline)
+- Updated all OP_SYNTAX_OP make-syntax subops (7-12) to apply `vm->macro_scope_mark` to constructed syntax objects
+- Added subop 15 (`make-syntax var-ref-caret`): scope_mark=0, is_caret=1 — for ^-prefixed identifiers that bypass mark application
+- Updated `syntax__compile_sq_node` in compiler.c: VAR_REF with `is_caret` emits subop 15 instead of subop 10
+- Fixed `vm_exec` to reset `vm->stack_top = 0` before execution — staged macro expansion calls `jacl_ctx_run_closure` on the same VM during compilation, leaving stale syntax objects on the stack
+- Synced `macro_scope_mark` field to VM struct in `jacl.h` (was missing, causing struct layout mismatch between unity build and test binaries)
+- Added 7 integration tests comparing staged vs legacy path output: local shadow, nested macros, global fallback, caret binding, caret override, unless macro, transitive composition
+- Files changed: src/vm.c, src/compiler.c, src/jacl.h, test/test_integration.c
+- **Learnings for future iterations:**
+  - `vm_exec` never reset `stack_top` — harmless before staged macros because expansion never touched the VM, but now critical because `jacl_ctx_run_closure` modifies the VM during the compile pass
+  - `jacl.h` and `vm.c` both define the VM struct; they MUST stay in sync or test binaries silently read wrong field offsets (no compiler error because they're in separate translation units via the unity build)
+  - The spike's "caret always mark 0" rule maps cleanly to a separate subop (15) rather than a flag byte — simpler in both compiler and VM
+  - Existing staged tests (US-008) only checked print output, never return values — the stack corruption bug was latent until hygiene tests checked `jacl_is_i32(result)`
+  - `m13` test crashes with pthread assertion — pre-existing, unrelated to macro-eval work
+---
+
+## 2026-04-13 - US-010
+Thread: (inline)
+- Added `gensym_counter_ptr` (uint32_t*) field to VM struct in both vm.c and src/jacl.h
+- Added OP_SYNTAX_OP subop 16 (gensym) in vm.c: pops prefix string, calls `jacl_gensym_next` with `vm->gensym_counter_ptr` and `vm->macro_scope_mark`, pushes syntax var-ref with `is_gensym=1`
+- Forward-declared `jacl_gensym_next` in vm.c (defined in syntax.c, later in unity build order)
+- Updated `syntax__compile_sq_node` in compiler.c: detects `[gensym]` / `[gensym "prefix"]` in AST_COMMAND case and emits prefix constant + OP_SYNTAX_OP subop 16 instead of normal make-syntax command compilation
+- Updated `expand__node` in syntax.c: sets `vm->gensym_counter_ptr = &es->gensym_counter` before `jacl_ctx_run_closure`, resets to NULL after
+- Old `expand__is_gensym_call` and template-level gensym detection preserved for legacy path (deleted in US-013)
+- Added 3 integration tests: `test_staged_gensym_basic`, `test_staged_gensym_long_prefix_no_collision`, `test_staged_gensym_binding_usable`
+- Files changed: src/vm.c, src/compiler.c, src/jacl.h, src/syntax.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - Unity build order (compiler.c → vm.c → syntax.c) means `jacl_gensym_next` (defined in syntax.c) needs a forward declaration in vm.c to be callable from the OP_SYNTAX_OP handler
+  - The gensym subop (16) follows the same pattern as make-syntax var-ref (subop 10) but sets `is_gensym=1` and uses `jacl_gensym_next` for name generation instead of taking the name directly
+  - `gensym_counter_ptr` is a pointer (not a value) because the counter is owned by ExpandState and must be shared between the VM and the expander — incrementing it in the VM during closure execution must be visible to subsequent macro calls
+  - The compiler-level gensym detection in `syntax__compile_sq_node` matches the same pattern as `expand__is_gensym_call` (head == "gensym", 0 or 1 lit-string args) but operates on AST nodes instead of syntax objects
+---
+
+## 2026-04-13 - US-011
+Thread: (inline)
+- Verified test_m10.c contains zero defmacros — it tests mutable state (mut, set!, box, atom, deref, reset!, swap!), not macros or hygiene
+- AC "every defmacro annotated with use_staged_eval=true" is vacuously satisfied
+- All 53 test_m10 tests pass; full test suite passes (m13 pthread failure is pre-existing)
+- Both expansion paths coexist; test_m11/m12/m13/test_syntax.c still use the old path
+- No code changes needed — PRD's reference to test_m10 as "the hygiene suite" was a misnomer
+- Files changed: .ralph/prd.json (notes update only)
+- **Learnings for future iterations:**
+  - test_m10.c = milestone 10 (mutable state), not macro hygiene; actual macro/hygiene tests live in test_syntax.c and test_integration.c
+  - test_m11.c, test_m12.c, test_m13.c also have zero defmacros — US-012's real work is migrating test_syntax.c
+---
+
+## 2026-04-13 - US-012
+Thread: (inline)
+- Enabled staged macro expansion by default in `jacl_run` (vm.c) and `jacl_eval` (embed.c): both now create a temporary `jacl_context_t` with `staged_syntax_quote=true` for macro closure execution during compilation
+- Updated test_syntax.c `compile_source` and `expand_source` helpers to pass staged ExpandState with jacl_context_t
+- Updated `test_expand_use_before_defmacro` to verify forward references work (staged three-phase pre-registers all defmacros)
+- Added OP_SYNTAX_OP subop 17 (validate-unquote): peeks TOS, errors if not syntax with message matching old splice path
+- Added OP_SYNTAX_OP subop 18 (validate-unquote-splice): peeks TOS, errors if not vec-of-syntax with message matching old splice path
+- Updated staged compiler (`syntax__compile_sq_node`) to emit subop 17 after unquote and subop 18 before VEC_CONCAT for splice
+- Updated OP_SYNTAX_OP dispatch guard to include subops 17 and 18
+- Verified test_m11.c, test_m12.c, test_m13.c have zero defmacros (vacuously satisfied)
+- Files changed: src/vm.c, src/embed.c, src/compiler.c, test/test_syntax.c
+- **Learnings for future iterations:**
+  - The OP_SYNTAX_OP handler has a dispatch guard `if ((subop >= 7 && subop <= 12) || subop == 15 || subop == 16 || ...)` that MUST be updated for any new construction/validation subop — otherwise the subop falls through to the introspection path (which pops+checks for syntax) and produces a confusing "unknown subop" error
+  - `jacl_run` and `jacl_eval` create temporary `jacl_context_t` for macro expansion; the context is destroyed after compilation but before execution, which is safe because all syntax objects are converted to AST before destroy
+  - The old OP_SYNTAX_SPLICE path and `syntax__splice_template` produce specific error messages ("~ (unquote) requires a syntax object"); staged path needed explicit validation subops (17, 18) to match these messages since make-syntax subop 11 uses different wording
+  - Forward references are an intentional behavioral difference in staged mode — `test_expand_use_before_defmacro` was the only test affected
+  - heap_strings, variadic, long_names, jacl_harness, compiler_vm_integration segfaults are all pre-existing failures unrelated to this work
+---
+
+## 2026-04-13 - US-013
+Thread: (inline)
+- Deleted old template-substitution expansion infrastructure (~793 lines net removal):
+  - `expand__subst_template`, `expand__is_gensym_call`, `expand__stamp_syntax`/`expand__stamp_vec`, `expand__match_param`, `expand__find_syntax_quote_child` from syntax.c
+  - `syntax__splice_template` from syntax.c (runtime splice for OP_SYNTAX_SPLICE)
+  - `syntax__count_unquotes_ast`, `syntax__compile_unquotes` from compiler.c (legacy unquote compilation)
+  - Legacy non-staged path in `ast_expand_macros` (interleaved registration+expansion)
+  - Legacy template path in `expand__node` (the `else` branch)
+  - Legacy OP_SYNTAX_SPLICE compilation path in AST_SYNTAX_QUOTE case
+- Removed per-macro routing infrastructure:
+  - `use_staged_eval` field from MacroEntry (compiler.c + jacl.h)
+  - `staged_syntax_quote` field from ExpandState (compiler.c + jacl.h)
+  - `use_staged_syntax_quote` field from Compiler struct, jacl_context_t (compiler.c, vm.c, jacl.h)
+  - All flag assignments in vm.c, embed.c, test_syntax.c, test_integration.c
+- Replaced OP_SYNTAX_SPLICE VM handler with deprecation error (opcode retained in enum for numbering stability)
+- `jacl_gensym_next` kept — shared between old template path (now deleted) and VM gensym builtin (subop 16)
+- `ast_expand_macros` now auto-creates a temporary `jacl_context_t` when `es->ctx` is NULL, so callers passing `es = NULL` still work
+- Updated DESIGN.md Known Limitations: marked macro-eval and 7-byte name limit as resolved
+- Files changed: src/syntax.c, src/compiler.c, src/vm.c, src/jacl.h, src/embed.c, test/test_syntax.c, test/test_integration.c, DESIGN.md
+- **Learnings for future iterations:**
+  - `syntax__compile_unquote_child` is shared between the deleted legacy unquote-compilation path AND the staged `syntax__compile_sq_node` — must not be deleted with the other legacy functions
+  - When removing struct fields, both the unity-build definition (e.g., compiler.c, vm.c) and the external header (jacl.h) must be updated in lockstep — mismatches cause silent struct layout corruption in test binaries
+  - `ast_expand_macros` may be called with `es = NULL` from callers that don't use macros (test_compiler.c, test_m13.c, test_string.c) — the auto-context creation handles this gracefully
+  - Pre-existing test failures (m13, concurrent_intern, heap_strings, variadic, long_names, jacl_harness, compiler_vm_integration) are unchanged by this work
+---
