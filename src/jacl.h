@@ -749,6 +749,7 @@ typedef enum {
   OP_SYNTAX_SPLICE,
   OP_SYNTAX_OP,    /* uint8_t subop; pops syntax object(s), pushes introspection result */
   OP_INTERPRET,    /* pop string, interpret as JACL source, push result */
+  OP_INTERPRET_PRELUDE, /* push default permissive prelude map for [interpret] */
   OP_HALT
 } OpCode;
 

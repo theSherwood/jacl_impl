@@ -6519,6 +6519,49 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      /* US-004: [interpret-prelude] — returns the default permissive prelude
+       * map containing an entry for every non-core builtin.  Core language
+       * forms (arithmetic, comparison, control flow, binding, destructuring,
+       * immutable data ops, vec/map/set ops, string ops, error handling,
+       * type checks, syntax-quote introspection) are NOT included.
+       *
+       * Non-core / capability-sensitive builtins (the default key list):
+       *   print, interpret, interpret-prelude,
+       *   spawn, await, parallel, race, yield,
+       *   make-syntax, syntax-error,
+       *   box, atom, deref, reset, swap,
+       *   lines, stream_next
+       */
+      case OP_INTERPRET_PRELUDE: {
+        gc__current_heap = &vm->heap;
+        jacl_map_node *m = NULL;
+
+        static const char *non_core[] = {
+          "print", "interpret", "interpret-prelude",
+          "spawn", "await", "parallel", "race", "yield",
+          "make-syntax", "syntax-error",
+          "box", "atom", "deref", "reset", "swap",
+          "lines", "stream_next",
+          NULL
+        };
+
+        for (int i = 0; non_core[i]; i++) {
+          const char *name = non_core[i];
+          uint32_t len = (uint32_t)strlen(name);
+          JaclVal key;
+          if (len <= 7) {
+            key = jacl_inline_string(name, len);
+          } else {
+            key = jacl_intern(&vm->heap, vm->intern_table, name, len);
+          }
+          m = jacl_map_set(m, key, JACL_TRUE);
+        }
+
+        result = vm__push(vm, jacl_map_ptr(m));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HALT: {
         return VM_OK;
       }

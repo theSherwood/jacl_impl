@@ -6896,6 +6896,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  if (compiler__head_matches(head, "interpret-prelude", 17)) {
+    if (argc != 0) {
+      compiler__builtin_arity_error(c, line, col, "interpret-prelude", "0 arguments", argc);
+      return;
+    }
+    compiler__emit_byte(c, OP_INTERPRET_PRELUDE, line);
+    return;
+  }
+
   /* US-015: syntax object introspection builtins. Each compiles the single
    * argument to a syntax object value, then emits OP_SYNTAX_OP with a subop
    * byte indicating which introspection operation to perform. */

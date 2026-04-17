@@ -916,6 +916,79 @@ static int test_prelude_entries_reachable(void) {
     TEST_PASS();
 }
 
+/* ===== US-004: [interpret-prelude] returns default permissive prelude ===== */
+
+/* Test: [interpret-prelude] returns a map with interpret as a key */
+static int test_interpret_prelude_has_interpret(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret-prelude]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_map(result));
+
+    /* Check that "interpret" is a key in the map.
+       "interpret" is 9 bytes (>7) so use jacl_intern to match VM handler. */
+    jacl_map_node *m = (jacl_map_node *)jacl_as_ptr(result);
+    JaclVal key_interpret = jacl_intern(&ctx->vm.heap, &ctx->intern_table,
+                                         "interpret", 9);
+    JaclVal val = jacl_map_get(m, key_interpret);
+    ASSERT(!jacl_is_nil(val));
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: returned map does NOT contain core names like +, if, def */
+static int test_interpret_prelude_no_core(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret-prelude]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_map(result));
+
+    jacl_map_node *m = (jacl_map_node *)jacl_as_ptr(result);
+
+    /* Core builtins must NOT be in the map */
+    JaclVal key_plus = jacl_inline_string("+", 1);
+    ASSERT(jacl_is_nil(jacl_map_get(m, key_plus)));
+
+    JaclVal key_if = jacl_inline_string("if", 2);
+    ASSERT(jacl_is_nil(jacl_map_get(m, key_if)));
+
+    JaclVal key_def = jacl_inline_string("def", 3);
+    ASSERT(jacl_is_nil(jacl_map_get(m, key_def)));
+
+    JaclVal key_vec = jacl_inline_string("vec", 3);
+    ASSERT(jacl_is_nil(jacl_map_get(m, key_vec)));
+
+    JaclVal key_map = jacl_inline_string("map", 3);
+    ASSERT(jacl_is_nil(jacl_map_get(m, key_map)));
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [map-has [interpret-prelude] "print"] is true (via source execution) */
+static int test_interpret_prelude_has_print(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[map-has [interpret-prelude] \"print\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(result == JACL_TRUE);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
 /* ===== US-007 (macro-eval): Staged syntax-quote compilation ===== */
 
 /* Helper: run source in a context, return the result */
@@ -1985,6 +2058,10 @@ int main(void) {
     { "prelude_compile_ok",      test_prelude_compile_success },
     { "prelude_compile_unresol", test_prelude_compile_error_unresolved },
     { "prelude_entries_reach",   test_prelude_entries_reachable },
+    /* US-004: [interpret-prelude] builtin */
+    { "iprelude_has_interpret",  test_interpret_prelude_has_interpret },
+    { "iprelude_no_core",        test_interpret_prelude_no_core },
+    { "iprelude_has_print",      test_interpret_prelude_has_print },
     /* US-007 (macro-eval): staged syntax-quote compilation */
     { "staged_sq_literal",       test_staged_sq_literal },
     { "staged_sq_unquote",       test_staged_sq_unquote },
