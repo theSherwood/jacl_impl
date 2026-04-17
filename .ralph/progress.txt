@@ -1,2 +1,24 @@
 # Ralph Progress Log
 Started: Thu Apr 16 21:22:15 UTC 2026
+
+## Codebase Patterns
+- `compiler_compile` returns a `CompileResult` with a `BytecodeChunk`; to execute top-level code, wrap in a JaclClosure and call `vm_exec`, NOT `jacl_ctx_run_closure` (which expects stack_base=1 for lambda closures)
+- `jacl_ctx_run_closure` is for calling proper closures (lambdas), not top-level compiled chunks
+- Parse errors are detected by `parse.error_count > 0` and the first error message is found by walking `parse.nodes` looking for `AST_ERROR`
+- Compile errors are detected by `cr.error_count > 0` and message is in `cr.error_message`
+- Unknown command heads are NOT compile errors — they compile to proc/global calls and fail at runtime
+- For compile-error tests use bad builtin arity (e.g. `[def]`) not unknown names
+- `ExpandState.ctx` must be set to a valid context for macro expansion to work
+- Tests use `jacl_context_t` pattern: `jacl_ctx_new(NULL)` → use ctx→arena/heap/intern_table → `jacl_ctx_destroy`
+
+## 2026-04-17 - US-001
+Thread: (no thread URL available)
+- Implemented `source_to_closure_in_place()` in src/vm.c
+- Function lex/parse/macro-expand/compiles source into a JaclClosure on caller-supplied heap
+- Added forward declaration in vm.c and extern declaration in jacl.h
+- Files changed: src/vm.c, src/jacl.h, test/test_integration.c
+- **Learnings for future iterations:**
+  - Top-level compiled code uses `stack_base=0`, so you must use `vm_exec(&cl->chunk)` to run it, NOT `jacl_ctx_run_closure` which uses `stack_base=1`
+  - `[undefined_fn 1]` does NOT produce a compile error — the compiler treats unknown heads as proc/global calls. Use `[def]` (bad arity) to test compile errors.
+  - The full pipeline is: `lexer_lex` → `parser_parse` → `compiler_compile` (handles macro expansion internally) → closure wrapping
+---
