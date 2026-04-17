@@ -141,6 +141,7 @@ TESTS=(
     "test/test_stream_seq_ops.c|stream_seq_ops|"
     "test/test_lines.c|lines|"
     "test/test_stream_type_enforce.c|stream_type_enforce|"
+    "test/test_interpret_sandbox.c|interpret_sandbox|"
     "test/test_syntax.c|syntax|"
     "test/test_long_names.c|long_names|"
     "test/test_bench.c|bench|"
