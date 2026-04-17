@@ -28,8 +28,6 @@ Started: Thu Apr 16 21:22:15 UTC 2026
 
 1. **Prelude values are useless sentinels** — `[interpret-prelude]` returns `{"print": true, ...}` where values are `JACL_TRUE`, not callable functions. The map only works for `map-remove` derivation; to actually call non-core builtins in sandbox mode, you must inject your own closures. Confusing API.
 
-2. **Error messages lack location** — Parse/compile errors from interpreted code return only a message string. No line/column info from the inner source, making debugging difficult.
-
 ## 2026-04-17 - US-003
 Thread: (no thread URL available)
 - Added `JaclVal prelude_map` parameter to `compiler_compile` and `source_to_closure_in_place`
