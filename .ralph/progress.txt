@@ -112,3 +112,17 @@ Thread: (no thread URL available)
   - The downgrade block must come BEFORE all the individual builtin handlers (print, spawn, etc.) in compiler__compile_command so it intercepts and returns before the opcode handlers fire.
   - Macros that expand to non-core builtins correctly get sandbox treatment because macro expansion happens before compilation, and the expanded AST goes through the same compiler__compile_command code path.
 ---
+
+## 2026-04-17 - US-007
+Thread: (no thread URL available)
+- Created new test file `test/test_interpret_sandbox.c` with 6 end-to-end scenarios
+- Registered in build.sh as `interpret_sandbox` test target
+- Scenarios: untrusted expression evaluator, audit-logged I/O, nested interpret with restriction, prelude derivation via map-remove, parent closure captures over mutable state, defmacro inside interpreted sandbox code
+- All 6 scenarios pass; full 87-test suite green
+- Files changed: test/test_interpret_sandbox.c, build.sh
+- **Learnings for future iterations:**
+  - `[interpret-prelude]` returns sentinel `JACL_TRUE` values, not actual callable functions. The map controls compile-time name resolution only. To actually call non-core builtins in sandbox mode, you must provide real closures as map values.
+  - For nested interpret tests, 1-arg outer form (full access, no sandbox) is the cleanest way to test transitivity — the outer code has real access to `interpret` as a builtin opcode.
+  - `defmacro`, `syntax-quote`, and `~` (unquote) are all core builtins — they work inside sandbox mode with an empty prelude.
+  - Parent closures compiled in non-sandbox scope retain direct opcode access to builtins like `print`, `reset`, `deref` — sandbox restrictions only apply to the interpreted code's compilation context.
+---
