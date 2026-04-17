@@ -1891,6 +1891,15 @@ extern void            jacl_ctx_destroy (jacl_context_t *ctx);
 extern JaclVal         jacl_ctx_run_source (jacl_context_t *ctx, const char *src, size_t len, uint64_t restriction_set, JaclError *err_out);
 extern JaclVal         jacl_ctx_run_closure (jacl_context_t *ctx, JaclClosure *closure, JaclVal *args, uint32_t arg_count, JaclError *err_out);
 
+/* Compile source into a closure on the caller's heap without creating a
+ * jacl_context_t.  Returns a closure JaclVal on success, or JACL_NIL with
+ * err_out populated on lex/parse/compile error. */
+extern JaclVal source_to_closure_in_place(const char *src, size_t len,
+                                          arena_t *arena, ThreadHeap *heap,
+                                          JaclInternTable *intern_table,
+                                          ExpandState *expand,
+                                          JaclError *err_out);
+
 /* Scoped context switching: saves/restores gc__current_heap and the emergency
  * GC callback so that nested context operations are reentrant.
  *

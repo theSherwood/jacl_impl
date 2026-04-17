@@ -199,6 +199,11 @@ jacl_context_t *jacl_ctx_new(jacl_context_t *parent);
 void jacl_ctx_destroy(jacl_context_t *ctx);
 JaclVal jacl_ctx_run_source(jacl_context_t *ctx, const char *src, size_t len,
                             uint64_t restriction_set, JaclError *err_out);
+JaclVal source_to_closure_in_place(const char *src, size_t len,
+                                   arena_t *arena, ThreadHeap *heap,
+                                   JaclInternTable *intern_table,
+                                   ExpandState *expand,
+                                   JaclError *err_out);
 
 /* --- API --- */
 
@@ -6708,6 +6713,75 @@ void jacl_ctx_restore(jacl_ctx_saved_t saved) {
     gc__current_heap     = saved.heap;
     gc__emergency_gc_fn  = saved.gc_fn;
     gc__emergency_gc_ctx = saved.gc_ctx;
+}
+
+/* --- source_to_closure_in_place: compile source into a closure on caller's heap --- */
+
+JaclVal source_to_closure_in_place(const char *src, size_t len,
+                                   arena_t *arena, ThreadHeap *heap,
+                                   JaclInternTable *intern_table,
+                                   ExpandState *expand,
+                                   JaclError *err_out) {
+    if (err_out) {
+        err_out->kind = JACL_ERROR_NONE;
+        err_out->message = NULL;
+        err_out->line = 0;
+        err_out->col = 0;
+    }
+    if (!src || len == 0) {
+        if (err_out) {
+            err_out->kind = JACL_ERROR_COMPILE;
+            err_out->message = "empty source";
+        }
+        return JACL_NIL;
+    }
+
+    /* Copy source to arena so it's NUL-terminated for the lexer */
+    char *buf = (char *)arena_alloc(arena, (uint32_t)(len + 1));
+    memcpy(buf, src, len);
+    buf[len] = '\0';
+
+    /* Lex */
+    LexResult tokens = lexer_lex(buf, arena);
+
+    /* Parse */
+    ParseResult parse = parser_parse(tokens, arena);
+    if (parse.error_count > 0) {
+        const char *first_err = "parse error";
+        for (uint32_t i = 0; i < parse.count; i++) {
+            if (parse.nodes[i] && parse.nodes[i]->type == AST_ERROR) {
+                first_err = parse.nodes[i]->data.error.message;
+                break;
+            }
+        }
+        if (err_out) {
+            err_out->kind = JACL_ERROR_COMPILE;
+            err_out->message = first_err;
+        }
+        return JACL_NIL;
+    }
+
+    /* Compile (macro expansion happens inside compiler_compile) */
+    CompileResult cr = compiler_compile(parse, arena, intern_table,
+                                        heap, NULL, expand);
+    if (cr.error_count > 0) {
+        if (err_out) {
+            err_out->kind = JACL_ERROR_COMPILE;
+            err_out->message = cr.error_message ? cr.error_message : "compile error";
+        }
+        return JACL_NIL;
+    }
+
+    /* Wrap the compiled bytecode into a 0-arg closure on the arena */
+    JaclClosure *closure = (JaclClosure *)arena_alloc(arena, sizeof(JaclClosure));
+    memset(closure, 0, sizeof(JaclClosure));
+    closure->chunk       = cr.chunk;
+    closure->param_count = 0;
+    closure->min_args    = 0;
+    closure->variadic    = false;
+    closure->name        = "<interpret>";
+
+    return jacl_closure(closure);
 }
 
 /* --- jacl_ctx_run_source / jacl_ctx_run_closure (US-006) --- */

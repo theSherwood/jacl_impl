@@ -670,6 +670,93 @@ static int test_interpret_shared_heap(void) {
     TEST_PASS();
 }
 
+/* ===== source_to_closure_in_place tests ===== */
+
+/* Test: valid source compiles to a closure, calling it produces expected value */
+static int test_source_to_closure_valid(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    PrintCapture cap = { .len = 0 };
+    ctx->vm.print_fn = capture_print;
+    ctx->vm.print_ctx = &cap;
+
+    const char *src = "[+ 1 2]";
+    JaclError err;
+    ExpandState es;
+    memset(&es, 0, sizeof(es));
+    es.ctx = ctx;
+
+    JaclInternTable *itab = &ctx->intern_table;
+
+    JaclVal closure_val = source_to_closure_in_place(
+        src, strlen(src), &ctx->arena, &ctx->vm.heap,
+        itab, &es, &err);
+
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_closure(closure_val));
+
+    /* Execute the closure's chunk via vm_exec (top-level compiled code) */
+    JaclClosure *cl = jacl_as_closure(closure_val);
+    ctx->vm.intern_table = itab;
+    VMResult r = vm_exec(&ctx->vm, &cl->chunk);
+
+    ASSERT(r == VM_OK);
+    ASSERT(ctx->vm.stack_top > 0);
+    JaclVal result = ctx->vm.stack[0];
+    ASSERT(jacl_is_i32(result));
+    ASSERT(jacl_as_i32(result) == 3);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: parse error returns JACL_ERROR_COMPILE with message */
+static int test_source_to_closure_parse_error(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[+ 1";  /* unclosed bracket */
+    JaclError err;
+    ExpandState es;
+    memset(&es, 0, sizeof(es));
+    es.ctx = ctx;
+
+    JaclVal closure_val = source_to_closure_in_place(
+        src, strlen(src), &ctx->arena, &ctx->vm.heap,
+        &ctx->intern_table, &es, &err);
+
+    ASSERT(jacl_is_nil(closure_val));
+    ASSERT(err.kind == JACL_ERROR_COMPILE);
+    ASSERT(err.message != NULL);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: compile error (bad builtin arity) returns JACL_ERROR_COMPILE with message */
+static int test_source_to_closure_compile_error(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[def]";  /* def with no args = compile error */
+    JaclError err;
+    ExpandState es;
+    memset(&es, 0, sizeof(es));
+    es.ctx = ctx;
+
+    JaclVal closure_val = source_to_closure_in_place(
+        src, strlen(src), &ctx->arena, &ctx->vm.heap,
+        &ctx->intern_table, &es, &err);
+
+    ASSERT(jacl_is_nil(closure_val));
+    ASSERT(err.kind == JACL_ERROR_COMPILE);
+    ASSERT(err.message != NULL);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
 /* ===== US-007 (macro-eval): Staged syntax-quote compilation ===== */
 
 /* Helper: run source in a context, return the result */
@@ -1729,6 +1816,10 @@ int main(void) {
     { "interpret_with_print",    test_interpret_with_print },
     { "interpret_type_error",    test_interpret_type_error },
     { "interpret_shared_heap",   test_interpret_shared_heap },
+    /* source_to_closure_in_place */
+    { "stc_valid",               test_source_to_closure_valid },
+    { "stc_parse_error",         test_source_to_closure_parse_error },
+    { "stc_compile_error",       test_source_to_closure_compile_error },
     /* US-007 (macro-eval): staged syntax-quote compilation */
     { "staged_sq_literal",       test_staged_sq_literal },
     { "staged_sq_unquote",       test_staged_sq_unquote },
