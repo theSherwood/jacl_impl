@@ -6852,6 +6852,13 @@ JaclVal source_to_closure_in_place(const char *src, size_t len,
 
     /* Copy source to arena so it's NUL-terminated for the lexer */
     char *buf = (char *)arena_alloc(arena, (uint32_t)(len + 1));
+    if (!buf) {
+        if (err_out) {
+            err_out->kind = JACL_ERROR_COMPILE;
+            err_out->message = "out of memory";
+        }
+        return JACL_NIL;
+    }
     memcpy(buf, src, len);
     buf[len] = '\0';
 
@@ -6888,6 +6895,13 @@ JaclVal source_to_closure_in_place(const char *src, size_t len,
 
     /* Wrap the compiled bytecode into a 0-arg closure on the arena */
     JaclClosure *closure = (JaclClosure *)arena_alloc(arena, sizeof(JaclClosure));
+    if (!closure) {
+        if (err_out) {
+            err_out->kind = JACL_ERROR_COMPILE;
+            err_out->message = "out of memory";
+        }
+        return JACL_NIL;
+    }
     memset(closure, 0, sizeof(JaclClosure));
     closure->chunk       = cr.chunk;
     closure->param_count = 0;
