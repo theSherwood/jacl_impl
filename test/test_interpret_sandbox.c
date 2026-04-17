@@ -211,6 +211,26 @@ static int test_e2e_macro_in_interpreted(void) {
     TEST_PASS();
 }
 
+/* ===== Scenario 7: Invalid prelude key rejection =====
+ * Prelude map with invalid keys (non-string, empty, >128 bytes) should
+ * produce error values, not crash. */
+static int test_e2e_invalid_prelude_key(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* Prelude with non-string key (integer 42) should error.
+     * [map 42 "value"] creates a map with integer key. */
+    const char *src = "[interpret [map 42 \"value\"] \"[+ 1 2]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src),
+                                         UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);  /* outer succeeds */
+    ASSERT(jacl_is_error(result));         /* inner: prelude key error */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -223,6 +243,7 @@ int main(void) {
     { "e2e_prelude_derivation",      test_e2e_prelude_derivation },
     { "e2e_parent_closure_captures", test_e2e_parent_closure_captures },
     { "e2e_macro_in_interpreted",    test_e2e_macro_in_interpreted },
+    { "e2e_invalid_prelude_key",     test_e2e_invalid_prelude_key },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

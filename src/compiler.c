@@ -9242,9 +9242,10 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       JaclVal prelude_map) {
   CompileResult result;
   chunk_init(&result.chunk, arena);
-  result.error_count = parse.error_count;
-  result.suspending  = false;
-  result.macro_table = NULL;
+  result.error_count   = parse.error_count;
+  result.error_message = NULL;
+  result.suspending    = false;
+  result.macro_table   = NULL;
 
   /* Pre-compilation suspension analysis */
   SuspensionMap suspension_map = compiler__analyze_suspension(
@@ -9266,9 +9267,22 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
       pir = jacl_map_next_leaf(&pit);
       if (pir.done) break;
       JaclVal key = jacl_map_key_from_leaf(pir.item);
-      if (!jacl_is_string(key)) continue;
+      if (!jacl_is_string(key)) {
+        result.error_count++;
+        result.error_message = "prelude map key must be a string";
+        continue;
+      }
       uint32_t klen = jacl_string_byte_len(key);
-      if (klen == 0 || klen > 128) continue;
+      if (klen == 0) {
+        result.error_count++;
+        result.error_message = "prelude map key cannot be empty";
+        continue;
+      }
+      if (klen > 128) {
+        result.error_count++;
+        result.error_message = "prelude map key exceeds 128-byte limit";
+        continue;
+      }
       /* Reserved keys (starting with ':') are NOT registered as names —
        * reserved for future config flags (e.g. :core). */
       char kbuf[129];

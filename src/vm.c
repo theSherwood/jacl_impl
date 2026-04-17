@@ -6480,9 +6480,24 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (!pir.item) break;
             JaclVal mkey = jacl_map_key_from_leaf(pir.item);
             JaclVal mval = jacl_map_value_from_leaf(pir.item);
+            /* Prelude keys must be strings */
+            if (!jacl_is_string(mkey)) {
+              vm->error_message = "interpret: prelude map key must be a string";
+              result = vm__push(vm, jacl_set_error(JACL_NIL));
+              if (result != VM_OK) return result;
+              goto interpret_done;
+            }
             /* Derive env key matching compiler's representation:
              * ≤7 bytes → jacl_inline_string, >7 → jacl_intern */
             uint32_t klen = jacl_string_byte_len(mkey);
+            if (klen == 0 || klen > 128) {
+              vm->error_message = klen == 0
+                ? "interpret: prelude map key cannot be empty"
+                : "interpret: prelude map key exceeds 128-byte limit";
+              result = vm__push(vm, jacl_set_error(JACL_NIL));
+              if (result != VM_OK) return result;
+              goto interpret_done;
+            }
             char kbuf[128];
             jacl_string_data(mkey, kbuf, sizeof(kbuf));
             JaclVal env_key;
@@ -6577,6 +6592,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         result = vm__push(vm, out);
         if (result != VM_OK) return result;
+interpret_done:
         break;
       }
 
