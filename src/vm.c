@@ -6880,16 +6880,32 @@ JaclVal source_to_closure_in_place(const char *src, size_t len,
     /* Parse */
     ParseResult parse = parser_parse(tokens, arena);
     if (parse.error_count > 0) {
-        const char *first_err = "parse error";
+        const char *first_msg = "parse error";
+        uint32_t err_line = 1, err_col = 1;
         for (uint32_t i = 0; i < parse.count; i++) {
             if (parse.nodes[i] && parse.nodes[i]->type == AST_ERROR) {
-                first_err = parse.nodes[i]->data.error.message;
+                first_msg = parse.nodes[i]->data.error.message;
+                err_line = parse.nodes[i]->start.line;
+                err_col = parse.nodes[i]->start.column;
                 break;
             }
         }
         if (err_out) {
+            /* Format with location like compile errors */
+            char buf[256];
+            int n = snprintf(buf, sizeof(buf), "line %u, col %u: %s",
+                             err_line, err_col, first_msg);
+            if (n < 0) n = 0;
+            char *msg = (char *)arena_alloc(arena, (uint32_t)n + 1);
+            if (msg) {
+                memcpy(msg, buf, (uint32_t)n + 1);
+                err_out->message = msg;
+            } else {
+                err_out->message = first_msg;
+            }
             err_out->kind = JACL_ERROR_COMPILE;
-            err_out->message = first_err;
+            err_out->line = err_line;
+            err_out->col = err_col;
         }
         return JACL_NIL;
     }
