@@ -203,7 +203,8 @@ JaclVal source_to_closure_in_place(const char *src, size_t len,
                                    arena_t *arena, ThreadHeap *heap,
                                    JaclInternTable *intern_table,
                                    ExpandState *expand,
-                                   JaclError *err_out);
+                                   JaclError *err_out,
+                                   JaclVal prelude_map);
 
 /* --- API --- */
 
@@ -6444,7 +6445,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclError ierr;
         JaclVal closure_val = source_to_closure_in_place(
             src_buf, slen, vm->arena, &vm->heap,
-            vm->intern_table, &iexpand, &ierr);
+            vm->intern_table, &iexpand, &ierr, JACL_NIL);
 
         if (ierr.kind != JACL_ERROR_NONE) {
           /* Compile/parse error → push error value with message. */
@@ -6733,7 +6734,8 @@ JaclVal source_to_closure_in_place(const char *src, size_t len,
                                    arena_t *arena, ThreadHeap *heap,
                                    JaclInternTable *intern_table,
                                    ExpandState *expand,
-                                   JaclError *err_out) {
+                                   JaclError *err_out,
+                                   JaclVal prelude_map) {
     if (err_out) {
         err_out->kind = JACL_ERROR_NONE;
         err_out->message = NULL;
@@ -6775,7 +6777,7 @@ JaclVal source_to_closure_in_place(const char *src, size_t len,
 
     /* Compile (macro expansion happens inside compiler_compile) */
     CompileResult cr = compiler_compile(parse, arena, intern_table,
-                                        heap, NULL, expand);
+                                        heap, NULL, expand, prelude_map);
     if (cr.error_count > 0) {
         if (err_out) {
             err_out->kind = JACL_ERROR_COMPILE;
@@ -6835,7 +6837,8 @@ JaclVal jacl_ctx_run_source(jacl_context_t *ctx, const char *src, size_t len,
                                                    : ctx->vm.intern_table;
     ctx->expand.ctx = ctx;
     CompileResult cr = compiler_compile(parse, &ctx->arena, itab,
-                                        &ctx->vm.heap, NULL, &ctx->expand);
+                                        &ctx->vm.heap, NULL, &ctx->expand,
+                                        JACL_NIL);
     if (cr.error_count > 0) {
         if (err_out) {
             err_out->kind = JACL_ERROR_COMPILE;
@@ -6929,7 +6932,7 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   jacl_context_t *macro_ctx = jacl_ctx_new(NULL);
   es.ctx = macro_ctx;
 
-  CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, &es);
+  CompileResult cr = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, &es, JACL_NIL);
 
   jacl_ctx_destroy(macro_ctx);
   es.ctx = NULL;

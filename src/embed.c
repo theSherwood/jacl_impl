@@ -261,7 +261,8 @@ JaclVal jacl_eval(JaclVM* jvm, const char* source) {
 
   CompileResult cr = compiler_compile(parse, &jvm->arena,
                                       &jvm->intern_table, &vm->heap,
-                                      &jvm->persistent_struct_registry, &es);
+                                      &jvm->persistent_struct_registry, &es,
+                                      JACL_NIL);
 
   jacl_ctx_destroy(macro_ctx);
   es.ctx = NULL;

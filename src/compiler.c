@@ -63,7 +63,8 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       JaclInternTable* intern_table,
                                       ThreadHeap* heap,
                                       StructTypeRegistry* seed_registry,
-                                      ExpandState* es);
+                                      ExpandState* es,
+                                      JaclVal prelude_map);
 
 /* jacl_compile_program forward-declared after ProgramResult (below) */
 
@@ -2390,6 +2391,7 @@ struct Compiler {
   SuspensionAnalysis*  sm_analysis;    /* suspension analysis for current SM function (or NULL) */
   MacroTable*          macro_table;    /* compile-time macro definitions (root compiler owns) */
   uint32_t             current_scope_mark; /* hygiene: mark for newly introduced bindings */
+  bool                 has_prelude;    /* true when compiling under a caller-supplied prelude map */
 };
 
 void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -2429,6 +2431,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->sm_analysis       = NULL;
   c->macro_table       = NULL;
   c->current_scope_mark = 0;
+  c->has_prelude       = false;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -7860,6 +7863,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
         compiler__emit_byte(c, (uint8_t)local_slot, line);
       } else {
+        /* Prelude mode: reject names not in the prelude or source-defined globals */
+        if (c->has_prelude && !compiler__find_global(c, name_val)) {
+          char err_msg[160];
+          snprintf(err_msg, sizeof(err_msg),
+                   "undefined name '%.*s'", (int)name_len,
+                   head->data.lit_string.value);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
         JaclVal gkey = compiler__global_name_val(c,
             head->data.lit_string.value, name_len);
         uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
@@ -8360,6 +8372,15 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             c->last_struct_idx = c->upvalues[upvalue_idx].struct_type_idx;
         } else {
           GlobalArity* ga = compiler__find_global(c, name_val);
+          /* Prelude mode: reject names not in the prelude or source-defined globals */
+          if (c->has_prelude && !ga) {
+            char err_msg[160];
+            snprintf(err_msg, sizeof(err_msg),
+                     "undefined name '%.*s'", (int)name_len,
+                     node->data.var_ref.name);
+            compiler__error(c, line, node->start.column, err_msg);
+            break;
+          }
           JaclType global_type = ga ? ga->type : TYPE_DYN;
           JaclVal gkey = compiler__global_name_val(c,
               node->data.var_ref.name, name_len);
@@ -9126,7 +9147,8 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                                       JaclInternTable* intern_table,
                                       ThreadHeap* heap,
                                       StructTypeRegistry* seed_registry,
-                                      ExpandState* es) {
+                                      ExpandState* es,
+                                      JaclVal prelude_map) {
   CompileResult result;
   chunk_init(&result.chunk, arena);
   result.error_count = parse.error_count;
@@ -9140,6 +9162,31 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   Compiler c;
   compiler__init(&c, &result.chunk, arena, intern_table, heap);
   c.suspension_map = &suspension_map;
+
+  /* Prelude map: seed compile-time globals from caller-supplied map keys.
+   * When a prelude is active, unresolved names produce compile errors
+   * (closed-world assumption — only prelude + source-defined names are valid). */
+  if (prelude_map != JACL_NIL && jacl_is_map(prelude_map)) {
+    c.has_prelude = true;
+    jacl_map_node* pmap = (jacl_map_node*)jacl_as_ptr(prelude_map);
+    jacl_map_iter pit = jacl_map_iter_init(pmap);
+    jacl_map_iter_result pir;
+    for (;;) {
+      pir = jacl_map_next_leaf(&pit);
+      if (pir.done) break;
+      JaclVal key = jacl_map_key_from_leaf(pir.item);
+      if (!jacl_is_string(key)) continue;
+      uint32_t klen = jacl_string_byte_len(key);
+      if (klen == 0 || klen > 128) continue;
+      /* Reserved keys (starting with ':') are NOT registered as names —
+       * reserved for future config flags (e.g. :core). */
+      char kbuf[129];
+      const char *kptr = jacl_string_flat_ptr(key, kbuf, sizeof(kbuf));
+      if (kptr[0] == ':') continue;
+      JaclVal name_val = compiler__name_val(heap, intern_table, kptr, klen);
+      compiler__set_global_arity(&c, name_val, -1);
+    }
+  }
   {
     StructTypeRegistry* reg = (StructTypeRegistry*)arena_alloc(arena, sizeof(StructTypeRegistry));
     if (seed_registry) {

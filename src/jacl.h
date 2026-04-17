@@ -1139,6 +1139,7 @@ struct Compiler {
   SuspensionAnalysis*  sm_analysis;
   MacroTable*          macro_table;
   uint32_t             current_scope_mark;
+  bool                 has_prelude;
 };
 
 /* ========================================================================
@@ -1834,7 +1835,7 @@ extern void compiler__compile_pipe_op (Compiler *c, AstNode *node);
 extern void compiler__compile_command (Compiler *c, AstNode *node);
 extern void compiler__compile_node (Compiler *c, AstNode *node);
 extern bool compiler__top_level_suspends (AstNode **stmts, uint32_t count, SuspensionMap *map);
-extern CompileResult compiler_compile (ParseResult parse, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap, StructTypeRegistry *seed_registry, ExpandState *es);
+extern CompileResult compiler_compile (ParseResult parse, arena_t *arena, JaclInternTable *intern_table, ThreadHeap *heap, StructTypeRegistry *seed_registry, ExpandState *es, JaclVal prelude_map);
 extern void macro_table_init (MacroTable *t);
 extern MacroEntry *macro_table_lookup (MacroTable *t, const char *name, uint32_t name_len);
 extern bool macro__is_special_form (const char *name, uint32_t len);
@@ -1898,7 +1899,8 @@ extern JaclVal source_to_closure_in_place(const char *src, size_t len,
                                           arena_t *arena, ThreadHeap *heap,
                                           JaclInternTable *intern_table,
                                           ExpandState *expand,
-                                          JaclError *err_out);
+                                          JaclError *err_out,
+                                          JaclVal prelude_map);
 
 /* Scoped context switching: saves/restores gc__current_heap and the emergency
  * GC callback so that nested context operations are reentrant.

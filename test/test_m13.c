@@ -355,7 +355,7 @@ static bool test__compile_has_error(const char* source, const char* expected_sub
     ParseResult parse = parser_parse(tokens, &arena);
     JaclInternTable intern_table;
     intern_table_init(&intern_table, &arena);
-    CompileResult cr = compiler_compile(parse, &arena, &intern_table, &vm.heap, NULL, NULL);
+    CompileResult cr = compiler_compile(parse, &arena, &intern_table, &vm.heap, NULL, NULL, JACL_NIL);
 
     bool has_error = (cr.error_count > 0);
     bool has_substr = false;
@@ -556,7 +556,7 @@ static CompileResult test__compile(const char *source, arena_t *arena, VM *vm) {
     JaclInternTable intern_table;
     intern_table_init(&intern_table, arena);
     vm->intern_table = &intern_table;
-    CompileResult result = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, NULL);
+    CompileResult result = compiler_compile(parse, arena, &intern_table, &vm->heap, NULL, NULL, JACL_NIL);
     intern_table_destroy(&intern_table);
     vm->intern_table = NULL;
     return result;
@@ -1355,7 +1355,7 @@ static int test_top_level_cps(void) {
     ParseResult parse = parser_parse(tokens, &arena);
     JaclInternTable intern_table;
     intern_table_init(&intern_table, &arena);
-    CompileResult cr = compiler_compile(parse, &arena, &intern_table, &vm.heap, NULL, NULL);
+    CompileResult cr = compiler_compile(parse, &arena, &intern_table, &vm.heap, NULL, NULL, JACL_NIL);
 
     ASSERT_U32_EQ(cr.error_count, 0);
     ASSERT(cr.suspending); /* top-level should be detected as suspending */

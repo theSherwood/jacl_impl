@@ -8,8 +8,47 @@ Started: Thu Apr 16 21:22:15 UTC 2026
 - Compile errors are detected by `cr.error_count > 0` and message is in `cr.error_message`
 - Unknown command heads are NOT compile errors — they compile to proc/global calls and fail at runtime
 - For compile-error tests use bad builtin arity (e.g. `[def]`) not unknown names
-- `ExpandState.ctx` must be set to a valid context for macro expansion to work
+- `ExpandState.ctx` must be set to a valid context for macro expansion to work; if NULL, `ast_expand_macros` creates a temp context automatically
 - Tests use `jacl_context_t` pattern: `jacl_ctx_new(NULL)` → use ctx→arena/heap/intern_table → `jacl_ctx_destroy`
+- To run a compiled closure from within `vm__run`: save (stack_top, frame_count, ip, chunk, top_chunk), push dummy callee, set up CallFrame with stack_base above dummy, call `vm__run(vm, saved_frame_count)`, get result from stack_top-1, restore state
+- `MacroEntry.is_builtin` MUST be set to false for user-defined macros; macro_table_init only zeros count, not entries
+- HAMT map type is `jacl_map_node*` (from `jacl_as_ptr()`), NOT `jacl_map_root*`
+- `vm__env_get`/`vm__env_set` use identity comparison (`==`) for name keys — short names (≤7 bytes) must use `jacl_inline_string`, NOT `jacl_intern`
+- When compiling with a prelude map, the compiler registers keys as globals via `compiler__set_global_arity` and enforces closed-world name resolution (unresolved names → compile error)
+- HAMT map iteration pattern: `jacl_map_iter_init(node)` → loop `jacl_map_next_leaf(&it)` → `jacl_map_key_from_leaf(ir.item)` / `jacl_map_value_from_leaf(ir.item)`
+- Reserved prelude keys start with ':' (e.g. `:core`) and are skipped during global registration
+
+## 2026-04-17 - US-003
+Thread: (no thread URL available)
+- Added `JaclVal prelude_map` parameter to `compiler_compile` and `source_to_closure_in_place`
+- Added `has_prelude` flag to Compiler struct — when true, unresolved names produce compile errors
+- In `compiler_compile`: iterates prelude map keys, registers each as a global via `compiler__set_global_arity`
+- Reserved keys (starting with ':') are skipped during registration
+- Compile-time name checks added in generic call path (command heads) and AST_VAR_REF handler
+- Updated all call sites (vm.c, embed.c, 7 test files) to pass `JACL_NIL` for new parameter
+- Added 3 integration tests: prelude_compile_ok, prelude_compile_unresol, prelude_entries_reach
+- Files changed: src/compiler.c, src/jacl.h, src/vm.c, src/embed.c, test/test_integration.c, test/test_bench.c, test/test_compiler.c, test/test_jacl_harness.c, test/test_m13.c, test/test_string.c, test/test_syntax.c
+- **Learnings for future iterations:**
+  - `vm__env_get`/`vm__env_set` use identity comparison for keys. For names ≤7 bytes, the compiler uses `jacl_inline_string`, so env keys must match. Using `jacl_intern` for short names creates a different JaclVal that won't match.
+  - HAMT map keys can be extracted via `jacl_map_key_from_leaf` and converted to raw bytes via `jacl_string_flat_ptr`. The bytes can then be fed to `compiler__name_val` to get the correct JaclVal representation.
+  - When adding a parameter to `compiler_compile`, there are 13+ call sites across source and test files. The unity build (`jacl.c`) includes all source files, so the forward declaration in compiler.c and the extern in jacl.h must both be updated.
+---
+
+## 2026-04-17 - US-002
+Thread: (no thread URL available)
+- Rewrote OP_INTERPRET handler to use `source_to_closure_in_place` + direct execution on parent VM
+- Deleted Phase 1 isolated-context code (jacl_ctx_save/new/run_source/restore/destroy)
+- Deleted result-materialization block (i64/u64/f64/string + complex-value error ladder)
+- Added dummy callee slot + manual frame setup for safe in-place closure execution
+- Added tests for vector and map return values (previously rejected by Phase 1)
+- Fixed latent bug: `is_builtin` not initialized in `ast_expand_macros` Phase 1 macro registration
+- Files changed: src/vm.c, src/syntax.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - To run top-level compiled code from within `vm__run`, you CANNOT use `vm_exec` (it resets the stack). Instead, save state, push dummy callee, set up a CallFrame at the current stack_top, and call `vm__run(vm, saved_frame_count)`. OP_HALT returns cleanly, and the result is at `stack_top - 1`.
+  - OP_RETURN and OP_CHECK_ERROR write the return value to `stack[callee_base - 1]`, so you must push a dummy callee slot before the frame. Otherwise they clobber parent stack data.
+  - `MacroEntry.is_builtin` is uninitialized when `macro_table_init` only zeros `count`. Stack garbage can make `is_builtin == true`, causing duplicate defmacros to silently override instead of erroring. Always set `is_builtin = false` for user-defined entries.
+  - The HAMT map type for test assertions is `jacl_map_node*` (via `jacl_as_ptr()`), not `jacl_map_root*`.
+---
 
 ## 2026-04-17 - US-001
 Thread: (no thread URL available)

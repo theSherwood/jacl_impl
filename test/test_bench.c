@@ -135,7 +135,7 @@ static StageTimings bench_one(const char *src) {
 
     t0 = now_ns();
     CompileResult cr = compiler_compile(parse, &arena, &intern_table,
-                                        &vm.heap, NULL, &es2);
+                                        &vm.heap, NULL, &es2, JACL_NIL);
     t1 = now_ns();
     t.compile_ns = t1 - t0;
 

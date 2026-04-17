@@ -392,7 +392,7 @@ static int test_recursive_vm_exec(void) {
   ASSERT(parse_a.error_count == 0);
 
   CompileResult cr_a = compiler_compile(parse_a, &ctx_a->arena,
-      &ctx_a->intern_table, &ctx_a->vm.heap, NULL, &es_a);
+      &ctx_a->intern_table, &ctx_a->vm.heap, NULL, &es_a, JACL_NIL);
   ASSERT(cr_a.error_count == 0);
 
   ctx_a->vm.struct_registry = cr_a.struct_registry;
@@ -421,7 +421,7 @@ static int test_recursive_vm_exec(void) {
   ASSERT(parse_b.error_count == 0);
 
   CompileResult cr_b = compiler_compile(parse_b, &ctx_b->arena,
-      &ctx_b->intern_table, &ctx_b->vm.heap, NULL, &es_b);
+      &ctx_b->intern_table, &ctx_b->vm.heap, NULL, &es_b, JACL_NIL);
   ASSERT(cr_b.error_count == 0);
 
   ctx_b->vm.struct_registry = cr_b.struct_registry;
@@ -725,7 +725,7 @@ static int test_source_to_closure_valid(void) {
 
     JaclVal closure_val = source_to_closure_in_place(
         src, strlen(src), &ctx->arena, &ctx->vm.heap,
-        itab, &es, &err);
+        itab, &es, &err, JACL_NIL);
 
     ASSERT(err.kind == JACL_ERROR_NONE);
     ASSERT(jacl_is_closure(closure_val));
@@ -758,7 +758,7 @@ static int test_source_to_closure_parse_error(void) {
 
     JaclVal closure_val = source_to_closure_in_place(
         src, strlen(src), &ctx->arena, &ctx->vm.heap,
-        &ctx->intern_table, &es, &err);
+        &ctx->intern_table, &es, &err, JACL_NIL);
 
     ASSERT(jacl_is_nil(closure_val));
     ASSERT(err.kind == JACL_ERROR_COMPILE);
@@ -781,11 +781,136 @@ static int test_source_to_closure_compile_error(void) {
 
     JaclVal closure_val = source_to_closure_in_place(
         src, strlen(src), &ctx->arena, &ctx->vm.heap,
-        &ctx->intern_table, &es, &err);
+        &ctx->intern_table, &es, &err, JACL_NIL);
 
     ASSERT(jacl_is_nil(closure_val));
     ASSERT(err.kind == JACL_ERROR_COMPILE);
     ASSERT(err.message != NULL);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* ===== US-003: Compiler prelude map as compile-time env seed ===== */
+
+/* Test: compiling [log 42] with prelude map {"log": $my-log} succeeds;
+ * closure's log reference resolves to $my-log */
+static int test_prelude_compile_success(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* Build a prelude map: {"log": <a closure that returns its arg + 100>} */
+    /* First, compile a closure for the "log" function */
+    const char *log_src = "proc my-log {x} { + $x 100 }; $my-log";
+    JaclError log_err;
+    JaclVal log_result = jacl_ctx_run_source(ctx, log_src, strlen(log_src),
+                                              UINT64_MAX, &log_err);
+    ASSERT(log_err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_closure(log_result));
+
+    /* Build the prelude map: {"log": $my-log} */
+    gc__current_heap = &ctx->vm.heap;
+    JaclVal key_log = jacl_intern(&ctx->vm.heap, &ctx->intern_table, "log", 3);
+    jacl_map_node *pmap = jacl_map_set(NULL, key_log, log_result);
+    JaclVal prelude = jacl_map_ptr(pmap);
+
+    /* Compile "[log 42]" with the prelude map */
+    const char *src = "[log 42]";
+    JaclError err;
+    ExpandState es;
+    memset(&es, 0, sizeof(es));
+    es.ctx = ctx;
+
+    JaclVal closure_val = source_to_closure_in_place(
+        src, strlen(src), &ctx->arena, &ctx->vm.heap,
+        &ctx->intern_table, &es, &err, prelude);
+
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_closure(closure_val));
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: compiling [log 42] with empty prelude map {} returns compile error
+ * for unresolved log */
+static int test_prelude_compile_error_unresolved(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* Empty prelude map (no entries) → log should be unresolved */
+    JaclVal prelude = jacl_map_ptr(NULL);  /* empty map */
+
+    const char *src = "[log 42]";
+    JaclError err;
+    ExpandState es;
+    memset(&es, 0, sizeof(es));
+    es.ctx = ctx;
+
+    JaclVal closure_val = source_to_closure_in_place(
+        src, strlen(src), &ctx->arena, &ctx->vm.heap,
+        &ctx->intern_table, &es, &err, prelude);
+
+    ASSERT(jacl_is_nil(closure_val));
+    ASSERT(err.kind == JACL_ERROR_COMPILE);
+    ASSERT(err.message != NULL);
+    /* Error message should mention 'log' */
+    ASSERT(strstr(err.message, "log") != NULL);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: prelude map entries are reachable via normal env lookup during
+ * interpreted execution — compile with prelude, populate VM env, execute */
+static int test_prelude_entries_reachable(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* Build a closure that returns its arg + 100 */
+    const char *log_src = "proc my-log {x} { + $x 100 }; $my-log";
+    JaclError log_err;
+    JaclVal log_result = jacl_ctx_run_source(ctx, log_src, strlen(log_src),
+                                              UINT64_MAX, &log_err);
+    ASSERT(log_err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_closure(log_result));
+
+    /* Build the prelude map: {"log": $my-log} */
+    gc__current_heap = &ctx->vm.heap;
+    JaclVal key_log = jacl_intern(&ctx->vm.heap, &ctx->intern_table, "log", 3);
+    jacl_map_node *pmap = jacl_map_set(NULL, key_log, log_result);
+    JaclVal prelude = jacl_map_ptr(pmap);
+
+    /* Compile "[log 42]" with the prelude map */
+    const char *src = "[log 42]";
+    JaclError err;
+    ExpandState es;
+    memset(&es, 0, sizeof(es));
+    es.ctx = ctx;
+
+    JaclVal closure_val = source_to_closure_in_place(
+        src, strlen(src), &ctx->arena, &ctx->vm.heap,
+        &ctx->intern_table, &es, &err, prelude);
+
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_closure(closure_val));
+
+    /* Populate the VM env with prelude entries so OP_GET_GLOBAL finds them.
+     * The compiler emits inline strings for names ≤7 bytes, so the env key
+     * must match (vm__env_get uses identity comparison). */
+    JaclVal env_key_log = jacl_inline_string("log", 3);
+    vm__env_set(&ctx->vm, env_key_log, log_result);
+
+    /* Execute the compiled closure */
+    JaclClosure *cl = jacl_as_closure(closure_val);
+    ctx->vm.intern_table = &ctx->intern_table;
+    VMResult r = vm_exec(&ctx->vm, &cl->chunk);
+
+    ASSERT(r == VM_OK);
+    ASSERT(ctx->vm.stack_top > 0);
+    JaclVal result = ctx->vm.stack[0];
+    ASSERT(jacl_is_i32(result));
+    ASSERT(jacl_as_i32(result) == 142);  /* 42 + 100 */
 
     jacl_ctx_destroy(ctx);
     TEST_PASS();
@@ -1856,6 +1981,10 @@ int main(void) {
     { "stc_valid",               test_source_to_closure_valid },
     { "stc_parse_error",         test_source_to_closure_parse_error },
     { "stc_compile_error",       test_source_to_closure_compile_error },
+    /* US-003: Compiler prelude map as compile-time env seed */
+    { "prelude_compile_ok",      test_prelude_compile_success },
+    { "prelude_compile_unresol", test_prelude_compile_error_unresolved },
+    { "prelude_entries_reach",   test_prelude_entries_reachable },
     /* US-007 (macro-eval): staged syntax-quote compilation */
     { "staged_sq_literal",       test_staged_sq_literal },
     { "staged_sq_unquote",       test_staged_sq_unquote },
