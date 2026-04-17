@@ -1102,6 +1102,88 @@ static int test_interpret_two_arg_shared_state(void) {
     TEST_PASS();
 }
 
+/* ===== US-006 (sandboxed eval): Non-core builtin opcode-vs-env downgrade ===== */
+
+/* Test: [interpret {"print": $my-print} "[print \"hi\"]"] calls $my-print
+ * instead of the built-in OP_PRINT opcode.  Proves the opcode downgrade works. */
+static int test_sandbox_print_downgrade(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* Define a closure that returns its arg + 100, pass it as "print" in prelude.
+     * If opcode downgrade works, [print 42] calls our closure → returns 142.
+     * If NOT downgraded, OP_PRINT would print "42" and return nil. */
+    const char *src =
+        "proc my-print {x} { + $x 100 };"
+        "[interpret [map-set [map] \"print\" $my-print] \"[print 42]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(result));
+    ASSERT(jacl_as_i32(result) == 142);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret {} "[spawn { 42 }]"] is a compile error (spawn not in prelude) */
+static int test_sandbox_spawn_blocked(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret [map] \"[spawn { 42 }]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);  /* outer succeeds */
+    ASSERT(jacl_is_error(result));          /* inner compile error: spawn not in prelude */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret {} "[+ 1 [* 2 3]]"] returns 7 (core arithmetic always works) */
+static int test_sandbox_core_arithmetic(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret [map] \"[+ 1 [* 2 3]]\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(result));
+    ASSERT(jacl_as_i32(result) == 7);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: macro defined inside interpreted code that references a non-core
+ * builtin gets the sandbox treatment (macro-expanded output goes through
+ * sandbox compile, so print routes through the prelude closure). */
+static int test_sandbox_macro_noncore(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* Inner source defines a macro that wraps [print ~x], then calls it.
+     * Because "print" in the prelude maps to our custom closure ($my-fn),
+     * the macro-expanded [print 42] should be downgraded to env lookup and
+     * call $my-fn(42) → 42 + 200 = 242. */
+    const char *src =
+        "proc my-fn {x} { + $x 200 };"
+        "def inner-src [concat"
+        "  \"defmacro do-print {x} { syntax-quote [print ~x] };\""
+        "  \" [do-print 42]\"];"
+        "[interpret [map-set [interpret-prelude] \"print\" $my-fn] $inner-src]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_i32(result));
+    ASSERT(jacl_as_i32(result) == 242);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
 /* ===== US-007 (macro-eval): Staged syntax-quote compilation ===== */
 
 /* Helper: run source in a context, return the result */
@@ -2182,6 +2264,11 @@ int main(void) {
     { "interp2_blocked_nested",  test_interpret_two_arg_blocked_nested },
     { "interp2_custom_closure",  test_interpret_two_arg_custom_closure },
     { "interp2_shared_state",    test_interpret_two_arg_shared_state },
+    /* US-006 (sandboxed eval): non-core builtin opcode-vs-env downgrade */
+    { "sandbox_print_downgrade", test_sandbox_print_downgrade },
+    { "sandbox_spawn_blocked",   test_sandbox_spawn_blocked },
+    { "sandbox_core_arith",      test_sandbox_core_arithmetic },
+    { "sandbox_macro_noncore",   test_sandbox_macro_noncore },
     /* US-007 (macro-eval): staged syntax-quote compilation */
     { "staged_sq_literal",       test_staged_sq_literal },
     { "staged_sq_unquote",       test_staged_sq_unquote },

@@ -4209,6 +4209,39 @@ void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
   compiler__compile_command(c, synth);
 }
 
+/* --- Core vs non-core builtin classification for sandbox mode ---
+ *
+ * Returns true if `name` is a core builtin that always emits direct opcodes
+ * regardless of prelude contents.  Returns false for non-core (capability-
+ * sensitive) builtins that must go through env lookup in sandbox mode.
+ *
+ * Non-core builtins (downgraded to env lookup when prelude is active):
+ *   print, interpret, interpret-prelude, spawn, await, parallel, race,
+ *   yield, make-syntax, syntax-error, box, atom, deref, reset, swap,
+ *   lines, stream_next
+ *
+ * Everything else (arithmetic, comparison, control flow, binding,
+ * destructuring, immutable data ops, vec/map/set ops, string ops,
+ * syntax-quote/unquote, type predicates) is core.
+ */
+bool compiler__is_core_builtin(const char *name, uint32_t len) {
+  static const char *non_core[] = {
+    "print", "interpret", "interpret-prelude",
+    "spawn", "await", "parallel", "race", "yield",
+    "make-syntax", "syntax-error",
+    "box", "atom", "deref", "reset", "swap",
+    "lines", "stream_next",
+    NULL
+  };
+  for (int i = 0; non_core[i]; i++) {
+    uint32_t nclen = (uint32_t)strlen(non_core[i]);
+    if (len == nclen && memcmp(name, non_core[i], len) == 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /* --- Internal: Compile a command invocation --- */
 
 void compiler__compile_command(Compiler* c, AstNode* node) {
@@ -4325,36 +4358,38 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* --- Sandbox mode: non-core builtins gated by prelude --- */
-  /* When compiling under a prelude (has_prelude), non-core builtins that
-   * are NOT in the prelude globals produce a compile error.  Non-core
-   * builtins that ARE in the prelude still emit their normal opcodes for
-   * now; US-006 will downgrade them to OP_GET_GLOBAL+OP_CALL. */
+  /* --- Sandbox mode: non-core builtins downgraded to env lookup + OP_CALL ---
+   * When compiling under a prelude (has_prelude), non-core builtins are
+   * NOT compiled to their direct opcodes.  Instead they emit OP_GET_GLOBAL
+   * + args + OP_CALL so the prelude map actually controls what gets called.
+   * Non-core builtins absent from the prelude produce a compile error. */
   if (c->has_prelude && head->type == AST_LIT_STRING) {
-    static const char *non_core_names[] = {
-      "print", "interpret", "interpret-prelude",
-      "spawn", "await", "parallel", "race", "yield",
-      "make-syntax", "syntax-error",
-      "box", "atom", "deref", "reset", "swap",
-      "lines", "stream_next",
-      NULL
-    };
     const char *hname = head->data.lit_string.value;
     uint32_t hlen = head->data.lit_string.length;
-    for (int nci = 0; non_core_names[nci]; nci++) {
-      uint32_t nclen = (uint32_t)strlen(non_core_names[nci]);
-      if (hlen == nclen && memcmp(hname, non_core_names[nci], hlen) == 0) {
-        /* This is a non-core builtin — check if it's in the prelude */
-        JaclVal nv = compiler__name_val(c->heap, c->intern_table, hname, hlen);
-        if (!compiler__find_global(c, nv)) {
-          char err_msg[160];
-          snprintf(err_msg, sizeof(err_msg),
-                   "undefined name '%.*s'", (int)hlen, hname);
-          compiler__error(c, line, col, err_msg);
-          return;
-        }
-        break;
+    if (!compiler__is_core_builtin(hname, hlen)) {
+      /* Non-core builtin: must be in prelude globals to be callable */
+      JaclVal nv = compiler__name_val(c->heap, c->intern_table, hname, hlen);
+      if (!compiler__find_global(c, nv)) {
+        char err_msg[160];
+        snprintf(err_msg, sizeof(err_msg),
+                 "undefined name '%.*s'", (int)hlen, hname);
+        compiler__error(c, line, col, err_msg);
+        return;
       }
+      /* Downgrade: emit OP_GET_GLOBAL + args + OP_CALL instead of direct
+       * opcode.  The prelude map entry's value (env-set by the VM before
+       * compilation) is looked up at runtime, giving the caller control. */
+      JaclVal gkey = compiler__global_name_val(c, hname, hlen);
+      uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
+      compiler__emit_byte(c, OP_GET_GLOBAL, line);
+      compiler__emit_u16(c, name_idx, line);
+      for (uint32_t i = 0; i < argc; i++) {
+        compiler__compile_node(c, args[i]);
+      }
+      compiler__emit_byte(c, OP_CALL, line);
+      compiler__emit_byte(c, (uint8_t)argc, line);
+      c->last_expr_type = TYPE_DYN;
+      return;
     }
   }
 
