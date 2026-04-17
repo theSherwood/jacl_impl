@@ -22,6 +22,7 @@ Started: Thu Apr 16 21:22:15 UTC 2026
 - JACL strings have `$var` interpolation — `"[+ $x 1]"` tries to resolve `$x` in the enclosing scope. To embed literal `$var` in a string, use `[concat "prefix" "$" "var suffix"]`
 - OP_INTERPRET uses an arity byte (1 or 2) after the opcode — existing 1-arg form and new 2-arg form share one opcode
 - For 2-arg interpret, env entries must be set BEFORE inner compilation/execution and cleaned up by restoring env.count after
+- In sandbox mode (has_prelude), non-core builtins emit OP_GET_GLOBAL + OP_CALL instead of direct opcodes — `compiler__is_core_builtin()` is the single source of truth for core/non-core classification
 
 ## 2026-04-17 - US-003
 Thread: (no thread URL available)
@@ -95,4 +96,19 @@ Thread: (no thread URL available)
   - OP_INTERPRET arity byte (1 or 2) after the opcode allows sharing one opcode between 1-arg and 2-arg forms
   - For 2-arg interpret, env entries populated from prelude map must use the same key representation as the compiler (inline_string for ≤7 bytes, intern for >7 bytes) or OP_GET_GLOBAL will fail with "undefined variable"
   - Save/restore `vm->env.count` around interpret execution to clean up prelude entries from the env
+---
+
+## 2026-04-17 - US-006
+Thread: (no thread URL available)
+- Added `compiler__is_core_builtin()` helper in src/compiler.c — single source of truth for 17 non-core builtin names
+- Modified sandbox check in `compiler__compile_command`: when has_prelude is true and head is a non-core builtin present in the prelude, emit OP_GET_GLOBAL + compile args + OP_CALL instead of the direct opcode
+- Non-core builtins absent from prelude still produce compile errors (unchanged)
+- Core builtins emit their opcodes regardless of prelude (unchanged)
+- Added declaration in src/jacl.h
+- Added 4 integration tests: sandbox_print_downgrade, sandbox_spawn_blocked, sandbox_core_arith, sandbox_macro_noncore
+- Files changed: src/compiler.c, src/jacl.h, test/test_integration.c
+- **Learnings for future iterations:**
+  - The sandbox downgrade is purely a compiler change — zero VM modifications needed. OP_GET_GLOBAL + OP_CALL reuses the existing generic call path.
+  - The downgrade block must come BEFORE all the individual builtin handlers (print, spawn, etc.) in compiler__compile_command so it intercepts and returns before the opcode handlers fire.
+  - Macros that expand to non-core builtins correctly get sandbox treatment because macro expansion happens before compilation, and the expanded AST goes through the same compiler__compile_command code path.
 ---
