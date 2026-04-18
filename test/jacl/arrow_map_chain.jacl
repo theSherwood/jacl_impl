@@ -1,0 +1,4 @@
+# expect: deep
+def inner [map "y" "deep"]
+def outer [map "x" $inner]
+print $outer->x->y

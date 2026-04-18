@@ -4835,8 +4835,20 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (result != VM_OK) return result;
           break;
         }
+        /* Handle maps: field access becomes map lookup */
+        if (jacl_is_map(struct_val)) {
+          JaclVal name_val = frame->chunk->constants[name_idx];
+          jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(struct_val);
+          if (jacl_map_has(map, name_val)) {
+            result = vm__push(vm, jacl_map_get(map, name_val));
+          } else {
+            result = vm__push(vm, JACL_NIL);
+          }
+          if (result != VM_OK) return result;
+          break;
+        }
         if (!jacl_is_struct(struct_val)) {
-          vm__set_error(vm, "field access on non-struct value");
+          vm__set_error(vm, "field access requires struct or map");
           return VM_RUNTIME_ERROR;
         }
         JaclStruct* s = jacl_as_struct_ptr(struct_val);
@@ -4880,8 +4892,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (result != VM_OK) return result;
           break;
         }
+        /* Handle maps: field set becomes map-set (returns new map) */
+        if (jacl_is_map(struct_val)) {
+          JaclVal name_val = frame->chunk->constants[name_idx];
+          jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(struct_val);
+          gc__current_heap = &vm->heap;
+          jacl_map_node* new_map = jacl_map_set(map, name_val, new_val);
+          result = vm__push(vm, jacl_map_ptr(new_map));
+          if (result != VM_OK) return result;
+          break;
+        }
         if (!jacl_is_struct(struct_val)) {
-          vm__set_error(vm, "field mutation on non-struct value");
+          vm__set_error(vm, "field mutation requires struct or map");
           return VM_RUNTIME_ERROR;
         }
         JaclStruct* sd = jacl_as_struct_ptr(struct_val);

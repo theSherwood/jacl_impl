@@ -1,0 +1,4 @@
+# expect: 100
+def m [map "x" 42]
+def m2 [map-set $m "x" 100]
+print $m2->x

@@ -1,0 +1,3 @@
+# expect: 42
+def m [map "x" 42]
+print $m->x
