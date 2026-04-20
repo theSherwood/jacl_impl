@@ -2678,6 +2678,155 @@ static int test_word_with_bang_suffix_still_word(void) {
   TEST_PASS();
 }
 
+/* ---- US-001: Shell Interop - ! prefix for external commands ---- */
+
+static int test_bang_ls(void) {
+  setup();
+  /* "!ls" → TOKEN_BANG + TOKEN_WORD */
+  LexResult r = lexer_lex("!ls", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* BANG WORD EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_U32_EQ(r.tokens[0].line, 1);
+  ASSERT_U32_EQ(r.tokens[0].column, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "ls"));
+  ASSERT_U32_EQ(r.tokens[1].column, 2);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bang_git_status(void) {
+  setup();
+  /* "!git status" → TOKEN_BANG + TOKEN_WORD + TOKEN_WORD */
+  LexResult r = lexer_lex("!git status", &test_arena);
+  ASSERT_U32_EQ(r.count, 4); /* BANG WORD WORD EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "git"));
+  ASSERT_U32_EQ(r.tokens[1].column, 2);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[2], "status"));
+  ASSERT_U32_EQ(r.tokens[2].column, 6);
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bang_ls_la(void) {
+  setup();
+  /* "!ls -la" → TOKEN_BANG + TOKEN_WORD + TOKEN_OPERATOR (-) + TOKEN_WORD (la) */
+  LexResult r = lexer_lex("!ls -la", &test_arena);
+  ASSERT_U32_EQ(r.count, 5); /* BANG WORD OPERATOR WORD EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "ls"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_OPERATOR);
+  ASSERT(token_text_eq(r.tokens[2], "-"));
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[3], "la"));
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bang_with_var(void) {
+  setup();
+  /* "!$cmd" → TOKEN_BANG + TOKEN_VAR */
+  LexResult r = lexer_lex("!$cmd", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* BANG VAR EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_VAR);
+  ASSERT(var_text_eq(r.tokens[1], "cmd"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bang_with_string(void) {
+  setup();
+  /* '!"my script.sh"' → TOKEN_BANG + TOKEN_STRING */
+  LexResult r = lexer_lex("!\"my script.sh\"", &test_arena);
+  ASSERT_U32_EQ(r.count, 3); /* BANG STRING EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
+  ASSERT_U32_EQ(r.tokens[0].length, 1);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_STRING);
+  ASSERT_STR_EQ(r.tokens[1].payload.text, "my script.sh");
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bang_with_splat(void) {
+  setup();
+  /* "!cmd ..$args" → TOKEN_BANG + TOKEN_WORD + TOKEN_DOTDOT + TOKEN_VAR */
+  LexResult r = lexer_lex("!cmd ..$args", &test_arena);
+  ASSERT_U32_EQ(r.count, 5); /* BANG WORD DOTDOT VAR EOF */
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "cmd"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_DOTDOT);
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_VAR);
+  ASSERT(var_text_eq(r.tokens[3], "args"));
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bang_in_pipeline(void) {
+  setup();
+  /* "!ls | !grep foo" → BANG WORD PIPE BANG WORD WORD EOF */
+  LexResult r = lexer_lex("!ls | !grep foo", &test_arena);
+  ASSERT_U32_EQ(r.count, 7);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[1], "ls"));
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_PIPE);
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_BANG);
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[4], "grep"));
+  ASSERT_INT_EQ(r.tokens[5].type, TOKEN_WORD);
+  ASSERT(token_text_eq(r.tokens[5], "foo"));
+  ASSERT_INT_EQ(r.tokens[6].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_bang_neq_distinction(void) {
+  setup();
+  /* Verify ! and != are distinguished properly */
+  /* "!ls != foo" → BANG WORD OPERATOR WORD EOF */
+  LexResult r = lexer_lex("!ls != foo", &test_arena);
+  ASSERT_U32_EQ(r.count, 5);
+  ASSERT_INT_EQ(r.tokens[0].type, TOKEN_BANG);
+  ASSERT_INT_EQ(r.tokens[1].type, TOKEN_WORD);
+  ASSERT_INT_EQ(r.tokens[2].type, TOKEN_OPERATOR);
+  ASSERT(token_text_eq(r.tokens[2], "!="));
+  ASSERT_INT_EQ(r.tokens[3].type, TOKEN_WORD);
+  ASSERT_INT_EQ(r.tokens[4].type, TOKEN_EOF);
+  ASSERT_U32_EQ(r.error_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -2853,6 +3002,15 @@ int main(void) {
     {"dotdot_vs_dot",                test_dotdot_vs_dot},
     {"arithmetic_operators_unchanged", test_old_arithmetic_operators_unchanged},
     {"word_bang_suffix_word",        test_word_with_bang_suffix_still_word},
+    /* US-001: Shell Interop - ! prefix */
+    {"bang_ls",                      test_bang_ls},
+    {"bang_git_status",              test_bang_git_status},
+    {"bang_ls_la",                   test_bang_ls_la},
+    {"bang_with_var",                test_bang_with_var},
+    {"bang_with_string",             test_bang_with_string},
+    {"bang_with_splat",              test_bang_with_splat},
+    {"bang_in_pipeline",             test_bang_in_pipeline},
+    {"bang_neq_distinction",         test_bang_neq_distinction},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;
