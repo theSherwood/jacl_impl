@@ -1,6 +1,6 @@
 # expect: 10
 # expect: hi bob
-use "math.jacl" [add]
-use "str.jacl" [greet]
+use "./math.jacl" {add}
+use "./str.jacl" {greet}
 print [add 3 7]
 print [greet "bob"]

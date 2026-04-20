@@ -1840,13 +1840,14 @@ static int test_nesting_arrow_in_infix_in_block(void) {
 
 static int test_use_basic(void) {
   setup();
-  ParseResult r = parse("use \"math.jacl\" [add sub mul]");
+  ParseResult r = parse("use \"./math.jacl\" {add, sub, mul}");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_USE);
-  ASSERT_U32_EQ(n->data.use_decl.path_len, 9);
-  ASSERT(memcmp(n->data.use_decl.path, "math.jacl", 9) == 0);
+  ASSERT_U32_EQ(n->data.use_decl.path_len, 11);
+  ASSERT(memcmp(n->data.use_decl.path, "./math.jacl", 11) == 0);
+  ASSERT_U32_EQ(n->data.use_decl.is_module_binding, 0);
   ASSERT_U32_EQ(n->data.use_decl.name_count, 3);
   ASSERT(memcmp(n->data.use_decl.names[0], "add", 3) == 0);
   ASSERT(memcmp(n->data.use_decl.names[1], "sub", 3) == 0);
@@ -1858,11 +1859,12 @@ static int test_use_basic(void) {
 
 static int test_use_single_name(void) {
   setup();
-  ParseResult r = parse("use \"lib.jacl\" [foo]");
+  ParseResult r = parse("use \"./lib.jacl\" {foo}");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 1);
   AstNode* n = r.nodes[0];
   ASSERT(n->type == AST_USE);
+  ASSERT_U32_EQ(n->data.use_decl.is_module_binding, 0);
   ASSERT_U32_EQ(n->data.use_decl.name_count, 1);
   ASSERT(memcmp(n->data.use_decl.names[0], "foo", 3) == 0);
   teardown();
@@ -1872,7 +1874,7 @@ static int test_use_single_name(void) {
 
 static int test_use_before_statements(void) {
   setup();
-  ParseResult r = parse("use \"lib.jacl\" [add]\n[add 1 2]");
+  ParseResult r = parse("use \"./lib.jacl\" {add}\n[add 1 2]");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 2);
   ASSERT(r.nodes[0]->type == AST_USE);
@@ -1884,7 +1886,7 @@ static int test_use_before_statements(void) {
 
 static int test_use_after_statement_error(void) {
   setup();
-  ParseResult r = parse("[add 1 2]\nuse \"lib.jacl\" [add]");
+  ParseResult r = parse("[add 1 2]\nuse \"./lib.jacl\" {add}");
   ASSERT(r.error_count > 0);
   /* First node is a command, second should be error */
   ASSERT(r.nodes[0]->type == AST_COMMAND);
@@ -1896,7 +1898,7 @@ static int test_use_after_statement_error(void) {
 
 static int test_use_empty_list_error(void) {
   setup();
-  ParseResult r = parse("use \"lib.jacl\" []");
+  ParseResult r = parse("use \"./lib.jacl\" {}");
   ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
@@ -1905,7 +1907,7 @@ static int test_use_empty_list_error(void) {
 
 static int test_use_non_string_path_error(void) {
   setup();
-  ParseResult r = parse("use lib [add]");
+  ParseResult r = parse("use lib {add}");
   ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
@@ -1914,7 +1916,7 @@ static int test_use_non_string_path_error(void) {
 
 static int test_use_duplicate_path_error(void) {
   setup();
-  ParseResult r = parse("use \"lib.jacl\" [add]\nuse \"lib.jacl\" [sub]");
+  ParseResult r = parse("use \"./lib.jacl\" {add}\nuse \"./lib.jacl\" {sub}");
   ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
@@ -1923,7 +1925,7 @@ static int test_use_duplicate_path_error(void) {
 
 static int test_use_duplicate_name_error(void) {
   setup();
-  ParseResult r = parse("use \"a.jacl\" [add]\nuse \"b.jacl\" [add]");
+  ParseResult r = parse("use \"./a.jacl\" {add}\nuse \"./b.jacl\" {add}");
   ASSERT(r.error_count > 0);
   teardown();
   ASSERT(check_no_leaks());
@@ -1932,13 +1934,13 @@ static int test_use_duplicate_name_error(void) {
 
 static int test_use_multiple_modules(void) {
   setup();
-  ParseResult r = parse("use \"math.jacl\" [add]\nuse \"str.jacl\" [concat]");
+  ParseResult r = parse("use \"./math.jacl\" {add}\nuse \"./str.jacl\" {concat}");
   ASSERT_U32_EQ(r.error_count, 0);
   ASSERT_U32_EQ(r.count, 2);
   ASSERT(r.nodes[0]->type == AST_USE);
   ASSERT(r.nodes[1]->type == AST_USE);
-  ASSERT(memcmp(r.nodes[0]->data.use_decl.path, "math.jacl", 9) == 0);
-  ASSERT(memcmp(r.nodes[1]->data.use_decl.path, "str.jacl", 8) == 0);
+  ASSERT(memcmp(r.nodes[0]->data.use_decl.path, "./math.jacl", 11) == 0);
+  ASSERT(memcmp(r.nodes[1]->data.use_decl.path, "./str.jacl", 10) == 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1946,10 +1948,10 @@ static int test_use_multiple_modules(void) {
 
 static int test_use_pretty_print(void) {
   setup();
-  ParseResult r = parse("use \"math.jacl\" [add sub]");
+  ParseResult r = parse("use \"./math.jacl\" {add, sub}");
   ASSERT_U32_EQ(r.error_count, 0);
   const char* pp = ast_pretty_print(r.nodes[0], &test_arena);
-  ASSERT(strcmp(pp, "use \"math.jacl\" [add sub]") == 0);
+  ASSERT(strcmp(pp, "use \"./math.jacl\" {add, sub}") == 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1959,8 +1961,10 @@ static int test_use_pretty_print(void) {
 
 static int test_use_private_name_error(void) {
   setup();
-  ParseResult r = parse("use \"mod.jacl\" [_helper]");
-  ASSERT(r.error_count > 0);
+  /* Private name error is now caught at compile time, not parse time.
+     Parser should accept this and compiler rejects it. */
+  ParseResult r = parse("use \"./mod.jacl\" {_helper}");
+  ASSERT_U32_EQ(r.error_count, 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1968,9 +1972,9 @@ static int test_use_private_name_error(void) {
 
 static int test_use_private_name_mixed(void) {
   setup();
-  /* One private name among public ones — should error */
-  ParseResult r = parse("use \"mod.jacl\" [add _internal sub]");
-  ASSERT(r.error_count > 0);
+  /* Private names mixed with public — parser accepts, compiler rejects */
+  ParseResult r = parse("use \"./mod.jacl\" {add, _internal, sub}");
+  ASSERT_U32_EQ(r.error_count, 0);
   teardown();
   ASSERT(check_no_leaks());
   TEST_PASS();
@@ -1979,7 +1983,7 @@ static int test_use_private_name_mixed(void) {
 static int test_use_non_private_ok(void) {
   setup();
   /* Names not starting with _ should be fine */
-  ParseResult r = parse("use \"mod.jacl\" [add sub_thing mul]");
+  ParseResult r = parse("use \"./mod.jacl\" {add, sub_thing, mul}");
   ASSERT_U32_EQ(r.error_count, 0);
   teardown();
   ASSERT(check_no_leaks());

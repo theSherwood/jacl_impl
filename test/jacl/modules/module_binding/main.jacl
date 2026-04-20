@@ -1,0 +1,7 @@
+# expect: 8
+# expect: 15
+# expect: 42
+use "./lib.jacl" lib
+print [$lib->add 3 5]
+print [$lib->mul 3 5]
+print $lib->x

@@ -3110,7 +3110,7 @@ static int test_use_private_compile_error(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   /* Importing a private name should produce a parse error propagated to compile */
-  CompileResult cr = compile_source("use \"mod.jacl\" [_helper]", &arena, &heap);
+  CompileResult cr = compile_source("use \"mod.jacl\" {_helper}", &arena, &heap);
   ASSERT(cr.error_count > 0);
 
   gc_heap_destroy(&heap);
@@ -3606,7 +3606,7 @@ static void setup_module_ctx(const char* dir, const char* lib_name,
   importer->current_module = importer_mod;
 }
 
-/* Test: use "lib.jacl" [add x] registers GlobalArity entries for imported names */
+/* Test: use "./lib.jacl" {add x} registers GlobalArity entries for imported names */
 static int test_import_registers_globals(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -3621,8 +3621,8 @@ static int test_import_registers_globals(void) {
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
-  /* Compile: use "lib.jacl" [add x] */
-  const char* src = "use \"lib.jacl\" [add x]\n";
+  /* Compile: use "./lib.jacl" {add x} */
+  const char* src = "use \"lib.jacl\" {add x}\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -3671,7 +3671,7 @@ static int test_import_unknown_export_error(void) {
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
   /* Try to import 'foo' which doesn't exist */
-  const char* src = "use \"lib.jacl\" [foo]\n";
+  const char* src = "use \"lib.jacl\" {foo}\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -3712,7 +3712,7 @@ static int test_import_conflict_error(void) {
   compiler__set_global_arity(&importer, x_name, -1);
 
   /* Try to import 'x' — should conflict */
-  const char* src = "use \"lib.jacl\" [x]\n";
+  const char* src = "use \"lib.jacl\" {x}\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -3748,7 +3748,7 @@ static int test_import_typed_propagation(void) {
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
-  const char* src = "use \"math.jacl\" [add]\n";
+  const char* src = "use \"math.jacl\" {add}\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -3793,7 +3793,7 @@ static int test_import_arity_check(void) {
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
   /* Import add then call with wrong arity */
-  const char* src = "use \"lib.jacl\" [add]\n[add 1]\n";
+  const char* src = "use \"lib.jacl\" {add}\n[add 1]\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -3830,7 +3830,7 @@ static int test_import_type_check(void) {
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
   /* Import add then call with wrong type (string instead of i64) */
-  const char* src = "use \"math.jacl\" [add]\n[add \"hi\" 1]\n";
+  const char* src = "use \"math.jacl\" {add}\n[add \"hi\" 1]\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -3866,7 +3866,7 @@ static int test_import_mutable_flag(void) {
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
-  const char* src = "use \"state.jacl\" [count]\n";
+  const char* src = "use \"state.jacl\" {count}\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -3993,7 +3993,7 @@ static int test_module_mutable_import_is_box(void) {
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
-  const char* src = "use \"state.jacl\" [count name]\n";
+  const char* src = "use \"state.jacl\" {count name}\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -4040,7 +4040,7 @@ static int test_module_set_emits_reset(void) {
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
   /* Compile use + set! */
-  const char* src = "use \"state.jacl\" [count]\ncount :: 5\n";
+  const char* src = "use \"state.jacl\" {count}\ncount :: 5\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -4089,7 +4089,7 @@ static int test_module_set_immutable_errors(void) {
                    &arena, &pool, &heap, &cache, &istack, &chunk, &intern,
                    &importer, &importer_mod, real_importer, sizeof(real_importer));
 
-  const char* src = "use \"lib.jacl\" [x]\nx :: 99\n";
+  const char* src = "use \"lib.jacl\" {x}\nx :: 99\n";
   LexResult tokens = lexer_lex(src, &arena);
   ParseResult parse = parser_parse(tokens, &arena);
   ASSERT_U32_EQ(parse.error_count, 0);
@@ -4166,7 +4166,7 @@ static int test_compile_program_with_dep(void) {
   const char* dir = "/tmp/jacl_us009b";
   mkdir(dir, 0755);
   write_temp_jacl(dir, "lib.jacl", "def x 42\nproc add {a, b} { + $a $b }\n");
-  write_temp_jacl(dir, "main.jacl", "use \"lib.jacl\" [add x]\n[add $x 1]\n");
+  write_temp_jacl(dir, "main.jacl", "use \"lib.jacl\" {add x}\n[add $x 1]\n");
 
   ProgramResult pr = jacl_compile_program(
       "/tmp/jacl_us009b/main.jacl", &arena, &intern, &heap);
@@ -4201,8 +4201,8 @@ static int test_compile_program_topo_order(void) {
   const char* dir = "/tmp/jacl_us009c";
   mkdir(dir, 0755);
   write_temp_jacl(dir, "a.jacl", "def val_a 1\n");
-  write_temp_jacl(dir, "b.jacl", "use \"a.jacl\" [val_a]\ndef val_b 2\n");
-  write_temp_jacl(dir, "main.jacl", "use \"b.jacl\" [val_b]\n[+ $val_b 10]\n");
+  write_temp_jacl(dir, "b.jacl", "use \"a.jacl\" {val_a}\ndef val_b 2\n");
+  write_temp_jacl(dir, "main.jacl", "use \"b.jacl\" {val_b}\n[+ $val_b 10]\n");
 
   ProgramResult pr = jacl_compile_program(
       "/tmp/jacl_us009c/main.jacl", &arena, &intern, &heap);
@@ -4321,7 +4321,7 @@ static int test_exec_program_basic(void) {
   write_temp_jacl(dir, "lib.jacl",
     "proc add {a, b} { + $a $b }\n");
   write_temp_jacl(dir, "main.jacl",
-    "use \"lib.jacl\" [add]\n[print [add 1 2]]\n");
+    "use \"lib.jacl\" {add}\n[print [add 1 2]]\n");
 
   ProgramResult pr = jacl_compile_program(
       "/tmp/jacl_us010a/main.jacl", &arena, &intern, &heap);
@@ -4361,7 +4361,7 @@ static int test_exec_program_namespace(void) {
   write_temp_jacl(dir, "a.jacl", "def x 10\n");
   write_temp_jacl(dir, "b.jacl", "def x 20\n");
   write_temp_jacl(dir, "main.jacl",
-    "use \"a.jacl\" [x]\n[print $x]\n");
+    "use \"a.jacl\" {x}\n[print $x]\n");
 
   ProgramResult pr = jacl_compile_program(
       "/tmp/jacl_us010b/main.jacl", &arena, &intern, &heap);
@@ -4401,7 +4401,7 @@ static int test_exec_program_side_effects_once(void) {
   write_temp_jacl(dir, "lib.jacl",
     "[print \"loaded\"]\ndef x 42\n");
   write_temp_jacl(dir, "main.jacl",
-    "use \"lib.jacl\" [x]\n[print $x]\n");
+    "use \"lib.jacl\" {x}\n[print $x]\n");
 
   ProgramResult pr = jacl_compile_program(
       "/tmp/jacl_us010c/main.jacl", &arena, &intern, &heap);
@@ -4442,7 +4442,7 @@ static int test_exec_program_dep_error(void) {
   write_temp_jacl(dir, "lib.jacl",
     "def x [+ $undef 1]\n");
   write_temp_jacl(dir, "main.jacl",
-    "use \"lib.jacl\" [x]\n[print $x]\n");
+    "use \"lib.jacl\" {x}\n[print $x]\n");
 
   ProgramResult pr = jacl_compile_program(
       "/tmp/jacl_us010d/main.jacl", &arena, &intern, &heap);
@@ -4481,7 +4481,7 @@ static int test_exec_program_mutable_import(void) {
   write_temp_jacl(dir, "state.jacl",
     "mut cnt 0\n");
   write_temp_jacl(dir, "main.jacl",
-    "use \"state.jacl\" [cnt]\n"
+    "use \"state.jacl\" {cnt}\n"
     "[print [deref $cnt]]\n"
     "[reset $cnt 5]\n"
     "[print [deref $cnt]]\n");
@@ -5128,7 +5128,7 @@ static int test_struct_module_import(void) {
   write_temp_jacl(dir, "shapes.jacl",
     "struct Point {i32 x, i32 y}\n");
   write_temp_jacl(dir, "main.jacl",
-    "use \"shapes.jacl\" [Point]\n"
+    "use \"shapes.jacl\" {Point}\n"
     "def p [Point 42 10]\n"
     "print $p->x\n");
 

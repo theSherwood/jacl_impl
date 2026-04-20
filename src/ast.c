@@ -23,7 +23,7 @@ typedef enum {
   AST_VAR_REF,       /* variable reference: $name */
   AST_BLOCK,         /* code block: { cmd1; cmd2 } */
   AST_INTERP_STRING, /* interpolated string: "hello $name" */
-  AST_USE,           /* use "path" [name1 name2 ...] */
+  AST_USE,           /* use "path" binding OR use "path" {name1, name2} */
   AST_DEFSTRUCT,     /* defstruct Name [field :type] ... */
   AST_DEFMACRO,      /* defmacro name {params} {body} */
   AST_QUOTE,         /* quote <expr> — unevaluated syntax */
@@ -71,8 +71,10 @@ struct AstNode {
     struct { AstNode**   commands; uint32_t count; bool trailing_semi; } block;
     struct { AstNode**   segments; uint32_t count; }               interp_string;
     struct { const char* path; uint32_t path_len;
+             const char* binding_name; uint32_t binding_name_len; /* module binding form */
              const char** names; uint32_t* name_lens;
-             uint32_t name_count; }                               use_decl;
+             uint32_t name_count;
+             uint8_t is_module_binding; }                         use_decl;
     struct { const char* name; uint32_t name_len;
              const char** field_names; uint32_t* field_name_lens;
              const char** field_types; uint32_t* field_type_lens;
@@ -401,13 +403,21 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
     case AST_USE: {
       ast__buf_cstr(b, "use \"");
       ast__buf_str(b, node->data.use_decl.path, node->data.use_decl.path_len);
-      ast__buf_cstr(b, "\" [");
-      for (uint32_t i = 0; i < node->data.use_decl.name_count; i++) {
-        if (i > 0) ast__buf_char(b, ' ');
-        ast__buf_str(b, node->data.use_decl.names[i],
-                     node->data.use_decl.name_lens[i]);
+      ast__buf_cstr(b, "\" ");
+      if (node->data.use_decl.is_module_binding) {
+        /* Module binding form: use "path" name */
+        ast__buf_str(b, node->data.use_decl.binding_name,
+                     node->data.use_decl.binding_name_len);
+      } else {
+        /* Destructuring form: use "path" {name1, name2} */
+        ast__buf_char(b, '{');
+        for (uint32_t i = 0; i < node->data.use_decl.name_count; i++) {
+          if (i > 0) ast__buf_cstr(b, ", ");
+          ast__buf_str(b, node->data.use_decl.names[i],
+                       node->data.use_decl.name_lens[i]);
+        }
+        ast__buf_char(b, '}');
       }
-      ast__buf_char(b, ']');
       break;
     }
     case AST_DEFSTRUCT: {

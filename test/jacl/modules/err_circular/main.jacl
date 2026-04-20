@@ -1,3 +1,3 @@
 # expect-error: circular import detected
-use "a.jacl" [aval]
+use "./a.jacl" {aval}
 print $aval

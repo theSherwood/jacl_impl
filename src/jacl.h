@@ -523,8 +523,10 @@ struct AstNode {
     struct { AstNode**   commands; uint32_t count; bool trailing_semi; } block;
     struct { AstNode**   segments; uint32_t count; }               interp_string;
     struct { const char* path; uint32_t path_len;
+             const char* binding_name; uint32_t binding_name_len;
              const char** names; uint32_t* name_lens;
-             uint32_t name_count; }                               use_decl;
+             uint32_t name_count;
+             uint8_t is_module_binding; }                         use_decl;
     struct { const char* name; uint32_t name_len;
              const char** field_names; uint32_t* field_name_lens;
              const char** field_types; uint32_t* field_type_lens;

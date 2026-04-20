@@ -1,2 +1,2 @@
-use "b.jacl" [bval]
+use "./b.jacl" {bval}
 def aval 1

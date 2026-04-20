@@ -1011,7 +1011,11 @@ int parser__is_operand_end(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
- * Internal: Parse use declaration: use "path" [name1 name2 ...]
+ * Internal: Parse use declaration
+ *
+ * Two forms:
+ *   use "./path.jacl" name        — module binding (bind module to name)
+ *   use "./path.jacl" {a, b, c}   — destructuring (import specific names)
  *
  * Called when the current token is TOKEN_USE.
  * Returns AST_USE on success, AST_ERROR on failure.
@@ -1030,61 +1034,94 @@ AstNode* parser__parse_use(Parser* p) {
   const char* path = path_tok->payload.text;
   uint32_t path_len = (uint32_t)strlen(path);
 
-  /* Expect '[' for name list */
-  Token* bracket_tok = parser__peek(p);
-  if (bracket_tok->type != TOKEN_LBRACKET) {
-    return parser__error(p, "expected '[' after use path", bracket_tok);
-  }
-  parser__advance(p); /* consume '[' */
+  /* Check what follows the path */
+  Token* next_tok = parser__peek(p);
 
-  /* Check for empty name list */
-  if (parser__peek(p)->type == TOKEN_RBRACKET) {
-    Token* close = parser__advance(p);
-    AstNode* err = parser__error(p, "use name list must not be empty", close);
-    err->start = start;
-    return err;
-  }
-
-  /* Parse names until ']' */
-  NodeArray names;
-  parser__arr_init(&names, p->arena);
-
-  while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACKET) {
-    Token* name_tok = parser__peek(p);
-    if (name_tok->type != TOKEN_WORD) {
-      return parser__error(p, "expected name in use list", name_tok);
-    }
+  if (next_tok->type == TOKEN_WORD) {
+    /* Module binding form: use "path" name */
     parser__advance(p);
-    parser__arr_push(&names, (AstNode*)(void*)name_tok); /* temp: store Token* */
+    const char* binding_name = next_tok->payload.text;
+    uint32_t binding_name_len = next_tok->length;
+
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_USE;
+    node->start = start;
+    node->end   = parser__token_end(next_tok);
+    node->data.use_decl.path             = path;
+    node->data.use_decl.path_len         = path_len;
+    node->data.use_decl.binding_name     = binding_name;
+    node->data.use_decl.binding_name_len = binding_name_len;
+    node->data.use_decl.names            = NULL;
+    node->data.use_decl.name_lens        = NULL;
+    node->data.use_decl.name_count       = 0;
+    node->data.use_decl.is_module_binding = 1;
+    return node;
   }
 
-  /* Expect closing ']' */
-  if (parser__peek(p)->type != TOKEN_RBRACKET) {
-    return parser__error(p, "expected ']' to close use name list", bracket_tok);
-  }
-  Token* close = parser__advance(p);
+  if (next_tok->type == TOKEN_LBRACE) {
+    /* Destructuring form: use "path" {name1, name2, ...} */
+    Token* brace_tok = parser__advance(p); /* consume '{' */
 
-  /* Build name arrays */
-  const char** name_strs = (const char**)arena_alloc(
-      p->arena, sizeof(const char*) * names.count);
-  uint32_t* name_lens = (uint32_t*)arena_alloc(
-      p->arena, sizeof(uint32_t) * names.count);
-  for (uint32_t i = 0; i < names.count; i++) {
-    Token* t = (Token*)(void*)names.nodes[i];
-    name_strs[i] = t->payload.text;
-    name_lens[i] = t->length;
+    /* Check for empty name list */
+    if (parser__peek(p)->type == TOKEN_RBRACE) {
+      Token* close = parser__advance(p);
+      AstNode* err = parser__error(p, "use destructuring must not be empty", close);
+      err->start = start;
+      return err;
+    }
+
+    /* Parse names until '}' */
+    NodeArray names;
+    parser__arr_init(&names, p->arena);
+
+    while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
+      Token* name_tok = parser__peek(p);
+      if (name_tok->type != TOKEN_WORD) {
+        return parser__error(p, "expected name in use destructuring", name_tok);
+      }
+      parser__advance(p);
+      parser__arr_push(&names, (AstNode*)(void*)name_tok); /* temp: store Token* */
+
+      /* Optional comma between names */
+      if (parser__peek(p)->type == TOKEN_COMMA) {
+        parser__advance(p);
+      }
+    }
+
+    /* Expect closing '}' */
+    if (parser__peek(p)->type != TOKEN_RBRACE) {
+      return parser__error(p, "expected '}' to close use destructuring", brace_tok);
+    }
+    Token* close = parser__advance(p);
+
+    /* Build name arrays */
+    const char** name_strs = (const char**)arena_alloc(
+        p->arena, sizeof(const char*) * names.count);
+    uint32_t* name_lens = (uint32_t*)arena_alloc(
+        p->arena, sizeof(uint32_t) * names.count);
+    for (uint32_t i = 0; i < names.count; i++) {
+      Token* t = (Token*)(void*)names.nodes[i];
+      name_strs[i] = t->payload.text;
+      name_lens[i] = t->length;
+    }
+
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_USE;
+    node->start = start;
+    node->end   = parser__token_end(close);
+    node->data.use_decl.path             = path;
+    node->data.use_decl.path_len         = path_len;
+    node->data.use_decl.binding_name     = NULL;
+    node->data.use_decl.binding_name_len = 0;
+    node->data.use_decl.names            = name_strs;
+    node->data.use_decl.name_lens        = name_lens;
+    node->data.use_decl.name_count       = names.count;
+    node->data.use_decl.is_module_binding = 0;
+    return node;
   }
 
-  AstNode* node = ast_alloc(p->arena);
-  node->type  = AST_USE;
-  node->start = start;
-  node->end   = parser__token_end(close);
-  node->data.use_decl.path       = path;
-  node->data.use_decl.path_len   = path_len;
-  node->data.use_decl.names      = name_strs;
-  node->data.use_decl.name_lens  = name_lens;
-  node->data.use_decl.name_count = names.count;
-  return node;
+  /* Neither word nor brace — error */
+  return parser__error(p, "expected binding name or {names} after use path", next_tok);
 }
 
 /* -------------------------------------------------------------------------
@@ -2710,32 +2747,19 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
     }
   }
 
-  /* Check: private names (underscore-prefixed) in use declarations */
-  for (uint32_t i = 0; i < top_level.count; i++) {
-    if (top_level.nodes[i]->type != AST_USE) continue;
-    AstNode* use_node = top_level.nodes[i];
-    for (uint32_t ni = 0; ni < use_node->data.use_decl.name_count; ni++) {
-      if (use_node->data.use_decl.names[ni][0] == '_') {
-        AstNode* err = ast_alloc(arena);
-        err->type  = AST_ERROR;
-        err->start = use_node->start;
-        err->end   = use_node->end;
-        err->data.error.message = "cannot import private name (underscore-prefixed)";
-        p.error_count++;
-        top_level.nodes[i] = err;
-        break; /* already replaced this node */
-      }
-    }
-  }
+  /* Private names (underscore-prefixed) are now checked at compile time,
+     not parse time, since we need module exports to validate. */
 
-  /* Check: duplicate imported names across use declarations */
+  /* Check: duplicate imported names across use declarations (destructuring form only) */
   for (uint32_t i = 0; i < top_level.count; i++) {
     if (top_level.nodes[i]->type != AST_USE) continue;
     AstNode* use_i = top_level.nodes[i];
+    if (use_i->data.use_decl.is_module_binding) continue; /* skip module binding form */
     for (uint32_t ni = 0; ni < use_i->data.use_decl.name_count; ni++) {
       for (uint32_t j = i + 1; j < top_level.count; j++) {
         if (top_level.nodes[j]->type != AST_USE) continue;
         AstNode* use_j = top_level.nodes[j];
+        if (use_j->data.use_decl.is_module_binding) continue; /* skip module binding form */
         for (uint32_t nj = 0; nj < use_j->data.use_decl.name_count; nj++) {
           if (use_i->data.use_decl.name_lens[ni] ==
                   use_j->data.use_decl.name_lens[nj] &&

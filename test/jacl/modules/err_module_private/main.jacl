@@ -1,0 +1,3 @@
+# expect-error: cannot access private member '_private' of module
+use "./lib.jacl" lib
+print $lib->_private

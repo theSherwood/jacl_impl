@@ -379,7 +379,7 @@ typedef struct {
   uint32_t    param_count;
 } ExportEntry;
 
-typedef struct {
+typedef struct Module {
   BytecodeChunk* chunk;        /* compiled bytecode for this module */
   const char*    path;         /* canonical (absolute) path */
   const char*    source;       /* original source text */
@@ -616,6 +616,16 @@ typedef struct {
   JaclType* param_types;  /* proc param types (NULL for non-procs, arena-allocated) */
   uint32_t  scope_mark;   /* hygiene: 0 = user code, >0 = macro-introduced */
 } Local;
+
+/* --- Internal: Module binding tracking --- */
+
+#define COMPILER_MODULE_BINDINGS_MAX 64
+
+typedef struct {
+  JaclVal name;       /* local variable name (interned) */
+  int     local_slot; /* slot in the locals array */
+  Module* module;     /* the module it binds to */
+} ModuleBinding;
 
 /* --- Internal: Global arity tracking --- */
 
@@ -2393,6 +2403,8 @@ struct Compiler {
   MacroTable*          macro_table;    /* compile-time macro definitions (root compiler owns) */
   uint32_t             current_scope_mark; /* hygiene: mark for newly introduced bindings */
   bool                 has_prelude;    /* true when compiling under a caller-supplied prelude map */
+  ModuleBinding        module_bindings[COMPILER_MODULE_BINDINGS_MAX];
+  uint32_t             module_binding_count;
 };
 
 void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -2433,6 +2445,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->macro_table       = NULL;
   c->current_scope_mark = 0;
   c->has_prelude       = false;
+  c->module_binding_count = 0;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -2549,6 +2562,16 @@ void compiler__add_local(Compiler* c, JaclVal name,
   local->return_type = TYPE_DYN;
   local->param_types = NULL;
   local->scope_mark  = c->current_scope_mark;
+}
+
+/* Find module binding by local slot index */
+Module* compiler__find_module_binding(Compiler* c, int local_slot) {
+  for (uint32_t i = 0; i < c->module_binding_count; i++) {
+    if (c->module_bindings[i].local_slot == local_slot) {
+      return c->module_bindings[i].module;
+    }
+  }
+  return NULL;
 }
 
 int compiler__resolve_local(Compiler* c, JaclVal name) {
@@ -7723,7 +7746,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* Struct field access/mutation: [. $s field] or [. $s field value] */
+  /* Struct/map/module field access/mutation: [. $s field] or [. $s field value] */
   if (compiler__head_matches(head, ".", 1)) {
     bool is_set = (argc == 3);
     if (argc != 2 && argc != 3) {
@@ -7731,13 +7754,90 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    /* Compile struct expression */
+    /* Check for module binding: $modname->field with literal field name
+       This is resolved at compile time to a direct global access. */
+    if (args[0]->type == AST_VAR_REF && args[1]->type == AST_LIT_STRING) {
+      const char* var_name = args[0]->data.var_ref.name;
+      uint32_t var_len = args[0]->data.var_ref.length;
+      JaclVal name_val = compiler__name_val(c->heap, c->intern_table, var_name, var_len);
+      int local_idx = compiler__resolve_local(c, name_val);
+
+      if (local_idx != -1) {
+        Module* mod = compiler__find_module_binding(c, local_idx);
+        if (mod != NULL) {
+          /* This is a module binding — resolve field at compile time */
+          const char* field_name = args[1]->data.lit_string.value;
+          uint32_t field_len = args[1]->data.lit_string.length;
+
+          /* Mutation not supported on module bindings */
+          if (is_set) {
+            compiler__error(c, line, col,
+                            "cannot set field on module binding");
+            return;
+          }
+
+          /* Check for private field access */
+          if (field_len > 0 && field_name[0] == '_') {
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                     "cannot access private member '%.*s' of module",
+                     (int)field_len, field_name);
+            char* msg = (char*)arena_alloc(c->arena, (uint32_t)(strlen(buf) + 1));
+            memcpy(msg, buf, strlen(buf) + 1);
+            compiler__error(c, line, col, msg);
+            return;
+          }
+
+          /* Find the export in the module */
+          ExportEntry* found_export = NULL;
+          for (uint32_t ei = 0; ei < mod->export_count; ei++) {
+            if (mod->exports[ei].name_len == field_len &&
+                memcmp(mod->exports[ei].name, field_name, field_len) == 0) {
+              found_export = &mod->exports[ei];
+              break;
+            }
+          }
+
+          if (!found_export) {
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                     "'%.*s' is not exported by module",
+                     (int)field_len, field_name);
+            char* msg = (char*)arena_alloc(c->arena, (uint32_t)(strlen(buf) + 1));
+            memcpy(msg, buf, strlen(buf) + 1);
+            compiler__error(c, line, col, msg);
+            return;
+          }
+
+          /* Emit direct global access to the module's export */
+          uint32_t dep_prefix_len;
+          const char* dep_prefix = module__build_prefix(mod->path, c->arena, &dep_prefix_len);
+          char dep_buf[256];
+          uint32_t dep_total = dep_prefix_len + field_len;
+          if (dep_total >= sizeof(dep_buf)) dep_total = sizeof(dep_buf) - 1;
+          memcpy(dep_buf, dep_prefix, dep_prefix_len);
+          memcpy(dep_buf + dep_prefix_len, field_name, dep_total - dep_prefix_len);
+          dep_buf[dep_total] = '\0';
+          JaclVal dep_key = jacl_intern(c->heap, c->intern_table, dep_buf, dep_total);
+          uint16_t get_idx = chunk_add_constant(c->chunk, dep_key);
+          compiler__emit_byte(c, OP_GET_GLOBAL, line);
+          compiler__emit_u16(c, get_idx, line);
+
+          /* Set type info from export */
+          c->last_expr_type = found_export->type;
+          c->last_struct_idx = UINT32_MAX;
+          return;
+        }
+      }
+    }
+
+    /* Compile struct/map expression */
     compiler__compile_node(c, args[0]);
     JaclType struct_type = c->last_expr_type;
     uint32_t struct_idx = c->last_struct_idx;
 
-    if (struct_type != TYPE_STRUCT && struct_type != TYPE_DYN) {
-      compiler__error(c, line, col, "type error: '.' requires a struct value");
+    if (struct_type != TYPE_STRUCT && struct_type != TYPE_MAP && struct_type != TYPE_DYN) {
+      compiler__error(c, line, col, "type error: '.' requires a struct or map value");
       return;
     }
 
@@ -7811,6 +7911,30 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
         return;
       }
+    }
+
+    /* Known map type — use map operations */
+    if (struct_type == TYPE_MAP) {
+      JaclVal name_val = compiler__name_val(c->heap, c->intern_table, field_name, field_name_len);
+      uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+
+      if (is_set) {
+        /* Push key then value, then emit OP_MAP_SET */
+        compiler__emit_byte(c, OP_CONST, line);
+        compiler__emit_u16(c, name_idx, line);
+        compiler__compile_node(c, args[2]);
+        compiler__emit_byte(c, OP_MAP_SET, line);
+        c->last_expr_type = TYPE_MAP;
+        c->last_struct_idx = UINT32_MAX;
+      } else {
+        /* Push key, then emit OP_MAP_GET */
+        compiler__emit_byte(c, OP_CONST, line);
+        compiler__emit_u16(c, name_idx, line);
+        compiler__emit_byte(c, OP_MAP_GET, line);
+        c->last_expr_type = TYPE_DYN;
+        c->last_struct_idx = UINT32_MAX;
+      }
+      return;
     }
 
     /* Struct type unknown at compile time — emit runtime field resolution */
@@ -8620,6 +8744,95 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         }
       }
 
+      if (node->data.use_decl.is_module_binding) {
+        /* Module binding form: use "path" name
+           Build a map of all exports at runtime and bind to a local variable.
+           Track the module binding for compile-time -> resolution. */
+        const char* binding_name = node->data.use_decl.binding_name;
+        uint32_t binding_len = node->data.use_decl.binding_name_len;
+
+        /* Check for conflict with existing local */
+        JaclVal name_val = compiler__name_val(c->heap, c->intern_table,
+                                               binding_name, binding_len);
+        if (compiler__resolve_local(c, name_val) != -1) {
+          char buf[256];
+          snprintf(buf, sizeof(buf), "'%.*s' is already defined",
+                   (int)binding_len, binding_name);
+          char* msg = (char*)arena_alloc(c->arena, (uint32_t)(strlen(buf) + 1));
+          memcpy(msg, buf, strlen(buf) + 1);
+          compiler__error(c, line, node->start.column, msg);
+          break;
+        }
+
+        /* Build dependency module prefix for looking up exports */
+        uint32_t dep_prefix_len;
+        const char* dep_prefix = module__build_prefix(
+            dep_mod->path, c->arena, &dep_prefix_len);
+
+        /* Count non-struct exports for map construction */
+        uint32_t export_count = 0;
+        for (uint32_t ei = 0; ei < dep_mod->export_count; ei++) {
+          ExportEntry* exp = &dep_mod->exports[ei];
+          /* Skip struct type exports (compile-time only) */
+          if (!(exp->type == TYPE_STRUCT && exp->return_type == TYPE_STRUCT)) {
+            export_count++;
+          }
+        }
+
+        /* Push key-value pairs for each export, then emit OP_MAP */
+        for (uint32_t ei = 0; ei < dep_mod->export_count; ei++) {
+          ExportEntry* exp = &dep_mod->exports[ei];
+
+          /* Skip struct type exports (compile-time only) */
+          if (exp->type == TYPE_STRUCT && exp->return_type == TYPE_STRUCT) {
+            continue;
+          }
+
+          /* Push key (export name as string) */
+          JaclVal key_val = compiler__name_val(c->heap, c->intern_table,
+                                                exp->name, exp->name_len);
+          uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
+          compiler__emit_byte(c, OP_CONST, line);
+          compiler__emit_u16(c, key_idx, line);
+
+          /* Push value (get from dependency module's global) */
+          char dep_buf[256];
+          uint32_t dep_total = dep_prefix_len + exp->name_len;
+          if (dep_total >= sizeof(dep_buf)) dep_total = sizeof(dep_buf) - 1;
+          memcpy(dep_buf, dep_prefix, dep_prefix_len);
+          memcpy(dep_buf + dep_prefix_len, exp->name,
+                 dep_total - dep_prefix_len);
+          dep_buf[dep_total] = '\0';
+          JaclVal dep_key = jacl_intern(c->heap, c->intern_table,
+                                         dep_buf, dep_total);
+          uint16_t get_idx = chunk_add_constant(c->chunk, dep_key);
+          compiler__emit_byte(c, OP_GET_GLOBAL, line);
+          compiler__emit_u16(c, get_idx, line);
+        }
+
+        /* Emit OP_MAP with the pair count */
+        compiler__emit_byte(c, OP_MAP, line);
+        compiler__emit_byte(c, (uint8_t)export_count, line);
+
+        /* The map is now on the stack. Create a local binding for it. */
+        compiler__add_local(c, name_val, line, node->start.column);
+        c->locals[c->local_count - 1].type = TYPE_MAP;
+
+        /* Track this as a module binding for compile-time resolution */
+        if (c->module_binding_count < COMPILER_MODULE_BINDINGS_MAX) {
+          ModuleBinding* mb = &c->module_bindings[c->module_binding_count++];
+          mb->name = name_val;
+          mb->local_slot = (int)(c->local_count - 1);
+          mb->module = dep_mod;
+        }
+
+        /* use statement produces nil as its result value */
+        compiler__emit_byte(c, OP_NIL, line);
+        break;
+      }
+
+      /* Destructuring form: use "path" {name1, name2, ...}
+         Import specific names into scope. */
       /* Register each imported name as a GlobalArity in this compiler */
       for (uint32_t ni = 0; ni < node->data.use_decl.name_count; ni++) {
         const char* imp_name  = node->data.use_decl.names[ni];
@@ -8636,14 +8849,22 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         }
 
         if (!found_export) {
-          /* Check if it's a private name (parser should catch this,
-             but double-check for robustness) */
-          char buf[256];
-          snprintf(buf, sizeof(buf), "'%.*s' is not exported by '%s'",
-                   (int)imp_len, imp_name, use_path);
-          char* msg = (char*)arena_alloc(c->arena, (uint32_t)(strlen(buf) + 1));
-          memcpy(msg, buf, strlen(buf) + 1);
-          compiler__error(c, line, node->start.column, msg);
+          /* Check if it's a private name (underscore-prefixed) */
+          if (imp_len > 0 && imp_name[0] == '_') {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "cannot import private name '%.*s'",
+                     (int)imp_len, imp_name);
+            char* msg = (char*)arena_alloc(c->arena, (uint32_t)(strlen(buf) + 1));
+            memcpy(msg, buf, strlen(buf) + 1);
+            compiler__error(c, line, node->start.column, msg);
+          } else {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "'%.*s' is not exported by '%s'",
+                     (int)imp_len, imp_name, use_path);
+            char* msg = (char*)arena_alloc(c->arena, (uint32_t)(strlen(buf) + 1));
+            memcpy(msg, buf, strlen(buf) + 1);
+            compiler__error(c, line, node->start.column, msg);
+          }
           continue;
         }
 
@@ -9734,6 +9955,7 @@ ProgramResult jacl_compile_program(const char* root_path,
     for (uint32_t i = 0; i < parse.count && !parse_err; i++) {
       if (parse.nodes[i]->type == AST_ERROR) {
         parse_err = parse.nodes[i]->data.error.message;
+        fprintf(stderr, "[DEBUG] AST_ERROR[%u]: %s\n", i, parse_err ? parse_err : "(null)");
       }
     }
     result.error_message = parse_err ? parse_err : "parse error in root module";

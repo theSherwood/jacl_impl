@@ -1,0 +1,3 @@
+# expect-error: 'bar' is not exported by module
+use "./lib.jacl" lib
+print $lib->bar

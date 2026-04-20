@@ -1,0 +1,10 @@
+# expect: 1
+# Test: module binding can be passed as a value (it's a map at runtime)
+use "./lib.jacl" lib
+
+# Pass module binding to a proc that accesses it dynamically
+proc get_version {m} {
+  $m->version
+}
+
+print [get_version $lib]

@@ -1,4 +1,4 @@
 # expect: 42
-use "shapes.jacl" [Point]
+use "./shapes.jacl" {Point}
 def p [Point 42 10]
 print $p->x
