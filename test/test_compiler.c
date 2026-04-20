@@ -7910,6 +7910,140 @@ static int test_blank_lines_compile(void) {
   TEST_PASS();
 }
 
+/* --- Shell Interop US-003: Compiler emits code for !cmd --- */
+
+/* Helper: compile with prelude map */
+static CompileResult compile_with_prelude(const char* source, arena_t* arena,
+                                          ThreadHeap* heap, JaclVal prelude) {
+  LexResult tokens = lexer_lex(source, arena);
+  ParseResult parse = parser_parse(tokens, arena);
+  JaclInternTable intern_table;
+  intern_table_init(&intern_table, arena);
+  return compiler_compile(parse, arena, &intern_table, heap, NULL, NULL, prelude);
+}
+
+/* Test: !ls -la compiles without error (no prelude mode) */
+static int test_shell_cmd_compile_simple(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  CompileResult cr = compile_source("!ls -la", &arena, &heap);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+  /* Bytecode should contain: OP_GET_GLOBAL (exec), OP_CONST (head), OP_CONST (args), OP_CALL */
+  ASSERT(cr.chunk.code_count > 4);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: !$cmd $arg1 compiles with variable references */
+static int test_shell_cmd_compile_vars(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  CompileResult cr = compile_source("cmd = \"ls\"; arg1 = \"-la\"; !$cmd $arg1", &arena, &heap);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: !cmd ..$args compiles with splat */
+static int test_shell_cmd_compile_splat(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  CompileResult cr = compile_source("args = [vec \"-l\" \"-a\"]; !ls ..$args", &arena, &heap);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: !cmd with empty prelude (no exec) produces compile error */
+static int test_shell_cmd_no_exec_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  /* Create empty map for prelude */
+  JaclVal empty_prelude = jacl_map_ptr(NULL);  /* empty map */
+
+  CompileResult cr = compile_with_prelude("!ls", &arena, &heap, empty_prelude);
+
+  ASSERT(cr.error_count > 0);
+  /* Error message should be "exec not available" */
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: !cmd with exec in prelude compiles successfully */
+static int test_shell_cmd_with_exec_prelude(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  /* Create prelude map with exec key */
+  JaclInternTable intern;
+  intern_table_init(&intern, &arena);
+  JaclVal exec_key = jacl_string_new(&heap, &intern, "exec", 4);
+  jacl_map_node* map_root = jacl_map_set(NULL, exec_key, JACL_TRUE);
+  JaclVal prelude = jacl_map_ptr(map_root);
+
+  CompileResult cr = compile_with_prelude("!ls -la", &arena, &heap, prelude);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  jacl_map_unref(map_root);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: !cmd quoted command name */
+static int test_shell_cmd_quoted_name(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  CompileResult cr = compile_source("!\"my script.sh\"", &arena, &heap);
+
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -8230,6 +8364,13 @@ int main(void) {
     { "dollar_paren_existing",         test_dollar_paren_compile_existing },
     { "line_continuation",             test_line_continuation_compile },
     { "blank_lines",                   test_blank_lines_compile },
+    /* Shell Interop US-003: Compiler emits code for !cmd */
+    { "shell_cmd_compile_simple",      test_shell_cmd_compile_simple },
+    { "shell_cmd_compile_vars",        test_shell_cmd_compile_vars },
+    { "shell_cmd_compile_splat",       test_shell_cmd_compile_splat },
+    { "shell_cmd_no_exec_error",       test_shell_cmd_no_exec_error },
+    { "shell_cmd_with_exec_prelude",   test_shell_cmd_with_exec_prelude },
+    { "shell_cmd_quoted_name",         test_shell_cmd_quoted_name },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

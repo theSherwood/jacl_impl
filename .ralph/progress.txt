@@ -11,6 +11,9 @@ Feature: Shell Interop (!cmd)
 - AST node types defined in both src/ast.c AND src/jacl.h - update both when adding new types
 - Parser tests in test/test_parser.c use parse() helper and ASSERT macros
 - parser__is_operand_end() stops at operators - shell commands need custom check
+- Compiler has ~12 switch statements for AST node traversal - add new node types to ALL of them
+- To create empty HAMT map: jacl_map_ptr(NULL), NOT jacl_map_empty()
+- Prelude maps use c.has_prelude flag and compiler__find_global() for name checking
 
 ---
 
@@ -59,5 +62,38 @@ Thread: (current)
   - Shell commands should not stop at TOKEN_OPERATOR (e.g., `-`) since flags like `-la` are valid
   - Shell commands should stop at TOKEN_PIPE, TOKEN_AND, TOKEN_OR, TOKEN_AMP for proper pipeline support
   - parser__parse_expr handles atoms and can parse TOKEN_OPERATOR as string literals in atom position
+---
+
+## 2026-04-20 - US-003
+Thread: (current)
+- Added AST_SHELL_CMD case to compiler__compile_node:
+  - Checks exec availability in prelude mode (compile error if not available)
+  - Transforms !cmd args... into [exec head arg1 arg2...] call
+  - Handles spread (..$args) via OP_CALL_SPREAD path
+  - Emits OP_GET_GLOBAL for exec, compiles head/args, then OP_CALL
+- Added AST_SHELL_CMD handling to ALL 12 analysis/traversal functions:
+  - analyze__walk_body (records exec as callee)
+  - analyze__collect_procs (recurses into head/args)
+  - sm__walk_suspensions (recurses)
+  - sm__walk_locals (recurses)
+  - sm__liveness_walk (recurses)
+  - ast__contains_suspension (recurses)
+  - ast__collect_local_muts (recurses)
+  - ast__contains_nonlocal_set_impl (recurses)
+  - ast__collect_local_names (recurses)
+  - ast__refs_nonlocal_mutable_impl (recurses)
+  - syntax__compile_sq_node already has default fallback
+- Added 6 compiler tests:
+  - test_shell_cmd_compile_simple: basic !ls -la compiles
+  - test_shell_cmd_compile_vars: !$cmd $arg1 with variable refs
+  - test_shell_cmd_compile_splat: !cmd ..$args with spread
+  - test_shell_cmd_no_exec_error: empty prelude produces "exec not available"
+  - test_shell_cmd_with_exec_prelude: prelude with exec compiles successfully
+  - test_shell_cmd_quoted_name: !"my script.sh" compiles
+- Files changed: src/compiler.c, test/test_compiler.c
+- **Learnings for future iterations:**
+  - Compiler has many switch statements on node->type; must add cases to ALL of them
+  - For prelude tests: use jacl_map_ptr(NULL) for empty map, jacl_map_set(NULL, k, v) to add entries
+  - Shell commands transform to calls to exec (prelude function), not a new opcode
 ---
 

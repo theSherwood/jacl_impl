@@ -815,6 +815,19 @@ void analyze__walk_body(AstNode* node, ProcSuspendInfo* info,
       }
       break;
     }
+    case AST_SHELL_CMD: {
+      /* Shell commands call exec - record as a callee */
+      if (info->callee_count < SUSPENSION_CALLEES_MAX) {
+        info->callees[info->callee_count++] =
+            compiler__name_val(heap, intern_table, "exec", 4);
+      }
+      /* Recurse into head and args */
+      analyze__walk_body(node->data.shell_cmd.head, info, heap, intern_table);
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
+        analyze__walk_body(node->data.shell_cmd.args[i], info, heap, intern_table);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -891,6 +904,14 @@ void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list,
     case AST_RETURN: {
       if (node->data.return_stmt.value) {
         analyze__collect_procs(node->data.return_stmt.value, list, heap, intern_table);
+      }
+      break;
+    }
+    case AST_SHELL_CMD: {
+      /* Recurse into head and args to find nested procs */
+      analyze__collect_procs(node->data.shell_cmd.head, list, heap, intern_table);
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
+        analyze__collect_procs(node->data.shell_cmd.args[i], list, heap, intern_table);
       }
       break;
     }
@@ -1169,6 +1190,16 @@ void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
     case AST_RETURN: {
       if (node->data.return_stmt.value) {
         sm__walk_suspensions(node->data.return_stmt.value, analysis, map,
+                             heap, intern_table);
+      }
+      break;
+    }
+    case AST_SHELL_CMD: {
+      /* Recurse into head and args to find suspension points */
+      sm__walk_suspensions(node->data.shell_cmd.head, analysis, map,
+                           heap, intern_table);
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
+        sm__walk_suspensions(node->data.shell_cmd.args[i], analysis, map,
                              heap, intern_table);
       }
       break;
@@ -1475,6 +1506,14 @@ void sm__walk_locals(AstNode* node, StateLayout* layout) {
     case AST_RETURN: {
       if (node->data.return_stmt.value) {
         sm__walk_locals(node->data.return_stmt.value, layout);
+      }
+      break;
+    }
+    case AST_SHELL_CMD: {
+      /* Recurse into head and args to find nested locals */
+      sm__walk_locals(node->data.shell_cmd.head, layout);
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
+        sm__walk_locals(node->data.shell_cmd.args[i], layout);
       }
       break;
     }
@@ -1898,6 +1937,16 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
       break;
     }
 
+    case AST_SHELL_CMD: {
+      /* Recurse into head and args */
+      sm__liveness_walk(node->data.shell_cmd.head, layout, liveness, segment);
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
+        sm__liveness_walk(node->data.shell_cmd.args[i], layout, liveness,
+                          segment);
+      }
+      break;
+    }
+
     case AST_SPREAD: {
       if (node->data.spread.expr) {
         sm__liveness_walk(node->data.spread.expr, layout, liveness, segment);
@@ -2107,6 +2156,18 @@ bool ast__contains_suspension(AstNode* node, SuspensionMap* map,
       }
       return false;
     }
+    case AST_SHELL_CMD: {
+      /* Check head and args for suspension */
+      if (ast__contains_suspension(node->data.shell_cmd.head, map,
+                                   heap, intern_table))
+        return true;
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
+        if (ast__contains_suspension(node->data.shell_cmd.args[i], map,
+                                     heap, intern_table))
+          return true;
+      }
+      return false;
+    }
     default:
       return false;
   }
@@ -2162,6 +2223,16 @@ void ast__collect_local_muts(AstNode* node, JaclVal* names,
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
         ast__collect_local_muts(node->data.block.commands[i], names, count,
+                                heap, intern_table);
+      }
+      break;
+    }
+    case AST_SHELL_CMD: {
+      /* Recurse into head and args */
+      ast__collect_local_muts(node->data.shell_cmd.head, names, count,
+                              heap, intern_table);
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
+        ast__collect_local_muts(node->data.shell_cmd.args[i], names, count,
                                 heap, intern_table);
       }
       break;
@@ -2236,6 +2307,20 @@ bool ast__contains_nonlocal_set_impl(AstNode* node,
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
         if (ast__contains_nonlocal_set_impl(node->data.block.commands[i],
+                                             local_muts, local_mut_count,
+                                             heap, intern_table))
+          return true;
+      }
+      return false;
+    }
+    case AST_SHELL_CMD: {
+      /* Check head and args */
+      if (ast__contains_nonlocal_set_impl(node->data.shell_cmd.head,
+                                           local_muts, local_mut_count,
+                                           heap, intern_table))
+        return true;
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
+        if (ast__contains_nonlocal_set_impl(node->data.shell_cmd.args[i],
                                              local_muts, local_mut_count,
                                              heap, intern_table))
           return true;
@@ -2821,6 +2906,16 @@ void ast__collect_local_names(AstNode* node, JaclVal* names,
       }
       break;
     }
+    case AST_SHELL_CMD: {
+      /* Recurse into head and args */
+      ast__collect_local_names(node->data.shell_cmd.head, names, count,
+                               heap, intern_table);
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
+        ast__collect_local_names(node->data.shell_cmd.args[i], names, count,
+                                 heap, intern_table);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -2911,6 +3006,20 @@ bool ast__refs_nonlocal_mutable_impl(AstNode* node,
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
         if (ast__refs_nonlocal_mutable_impl(node->data.block.commands[i],
+                                             local_names, local_name_count,
+                                             enclosing))
+          return true;
+      }
+      return false;
+    }
+    case AST_SHELL_CMD: {
+      /* Check head and args */
+      if (ast__refs_nonlocal_mutable_impl(node->data.shell_cmd.head,
+                                           local_names, local_name_count,
+                                           enclosing))
+        return true;
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
+        if (ast__refs_nonlocal_mutable_impl(node->data.shell_cmd.args[i],
                                              local_names, local_name_count,
                                              enclosing))
           return true;
@@ -9405,6 +9514,76 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
     case AST_DESTRUCTURE_NAMED: {
       compiler__error(c, line, node->start.column,
                       "destructuring pattern can only appear in def or mut");
+      break;
+    }
+
+    case AST_SHELL_CMD: {
+      /* Shell command: !cmd args... → [exec head arg1 arg2 ...]
+       * Transforms shell command syntax into a call to the `exec` function.
+       * When in prelude/sandbox mode, `exec` must be available. */
+      AstNode* head = node->data.shell_cmd.head;
+      uint32_t argc = node->data.shell_cmd.arg_count;
+      AstNode** args = node->data.shell_cmd.args;
+      uint32_t col  = node->start.column;
+
+      /* Check if any arg is a spread expression */
+      int has_spread = 0;
+      for (uint32_t i = 0; i < argc; i++) {
+        if (args[i]->type == AST_SPREAD) { has_spread = 1; break; }
+      }
+
+      /* In prelude mode, check that `exec` is available */
+      JaclVal exec_name = compiler__name_val(c->heap, c->intern_table, "exec", 4);
+      if (c->has_prelude) {
+        GlobalArity* ga = compiler__find_global(c, exec_name);
+        if (!ga) {
+          compiler__error(c, line, col, "exec not available");
+          break;
+        }
+      }
+
+      /* Load `exec` from globals */
+      JaclVal exec_gkey = compiler__global_name_val(c, "exec", 4);
+      uint16_t exec_idx = chunk_add_constant(c->chunk, exec_gkey);
+      compiler__emit_byte(c, OP_GET_GLOBAL, line);
+      compiler__emit_u16(c, exec_idx, line);
+
+      /* Compile head (command name) as first argument */
+      compiler__compile_node(c, head);
+
+      /* Compile remaining arguments */
+      if (has_spread) {
+        /* Spread path: track fixed args and spreads separately */
+        uint8_t fixed_args = 1; /* head is always a fixed arg */
+        uint8_t num_spreads = 0;
+        for (uint32_t i = 0; i < argc; i++) {
+          if (args[i]->type == AST_SPREAD) {
+            compiler__compile_node(c, args[i]->data.spread.expr);
+            compiler__emit_byte(c, OP_SPREAD, line);
+            num_spreads++;
+          } else {
+            compiler__compile_node(c, args[i]);
+            fixed_args++;
+          }
+        }
+        compiler__emit_byte(c, OP_CALL_SPREAD, line);
+        compiler__emit_byte(c, fixed_args, line);
+        compiler__emit_byte(c, num_spreads, line);
+      } else {
+        /* Simple path: compile each arg and emit OP_CALL */
+        for (uint32_t i = 0; i < argc; i++) {
+          compiler__compile_node(c, args[i]);
+        }
+        /* Total args = 1 (head) + argc */
+        uint32_t total_args = 1 + argc;
+        if (total_args > 255) {
+          compiler__error(c, line, col, "too many arguments to shell command");
+          break;
+        }
+        compiler__emit_byte(c, OP_CALL, line);
+        compiler__emit_byte(c, (uint8_t)total_args, line);
+      }
+      c->last_expr_type = TYPE_DYN;
       break;
     }
 

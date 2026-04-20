@@ -52,8 +52,8 @@
         "build.sh passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added AST_SHELL_CMD handling to compiler__compile_node and all analysis functions. Shell commands transform to [exec head args...] calls. 6 compiler tests added."
     },
     {
       "id": "US-004",
