@@ -496,6 +496,7 @@ typedef enum {
   AST_DESTRUCTURE_VEC,
   AST_DESTRUCTURE_NAMED,
   AST_SPREAD,
+  AST_SHELL_CMD,
   AST_ERROR
 } AstNodeType;
 
@@ -551,6 +552,7 @@ struct AstNode {
              const char* rest_name; uint32_t rest_name_len;
              int spread_all; } destructure_named;
     struct { AstNode* expr; }                                      spread;
+    struct { AstNode* head; AstNode** args; uint32_t arg_count; }  shell_cmd;
     struct { const char* message; }                                error;
   } data;
 };

@@ -3782,6 +3782,175 @@ static int test_blank_lines_no_empty(void) {
   TEST_PASS();
 }
 
+/* ---- Shell Interop US-002: Parser handles !cmd syntax ---- */
+
+/* !ls → AST_SHELL_CMD with head="ls", args=[] */
+static int test_shell_cmd_simple(void) {
+  setup();
+  ParseResult r = parse("!ls");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_SHELL_CMD);
+  ASSERT(n->data.shell_cmd.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.shell_cmd.head->data.lit_string.value, "ls", 2) == 0);
+  ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* !git status → AST_SHELL_CMD with head="git", args=["status"] */
+static int test_shell_cmd_with_arg(void) {
+  setup();
+  ParseResult r = parse("!git status");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_SHELL_CMD);
+  ASSERT(memcmp(n->data.shell_cmd.head->data.lit_string.value, "git", 3) == 0);
+  ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 1);
+  ASSERT(n->data.shell_cmd.args[0]->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.shell_cmd.args[0]->data.lit_string.value, "status", 6) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* !git status --short → multiple args */
+static int test_shell_cmd_multiple_args(void) {
+  setup();
+  ParseResult r = parse("!git status --short");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_SHELL_CMD);
+  ASSERT(memcmp(n->data.shell_cmd.head->data.lit_string.value, "git", 3) == 0);
+  /* --short lexes as OPERATOR(--) + WORD(short), so 3 args */
+  ASSERT(n->data.shell_cmd.arg_count >= 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* !ls -la → handles flag-style args (-la is OPERATOR + WORD) */
+static int test_shell_cmd_flag_args(void) {
+  setup();
+  ParseResult r = parse("!ls -la");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_SHELL_CMD);
+  ASSERT(memcmp(n->data.shell_cmd.head->data.lit_string.value, "ls", 2) == 0);
+  /* -la lexes as OPERATOR(-) + WORD(la), so 2 args */
+  ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 2);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* !"my script.sh" → quoted command name */
+static int test_shell_cmd_quoted_name(void) {
+  setup();
+  ParseResult r = parse("!\"my script.sh\"");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_SHELL_CMD);
+  ASSERT(n->data.shell_cmd.head->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.shell_cmd.head->data.lit_string.value, "my script.sh", 12) == 0);
+  ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* !$cmd → variable as command name */
+static int test_shell_cmd_var_name(void) {
+  setup();
+  ParseResult r = parse("!$cmd");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_SHELL_CMD);
+  ASSERT(n->data.shell_cmd.head->type == AST_VAR_REF);
+  ASSERT(memcmp(n->data.shell_cmd.head->data.var_ref.name, "cmd", 3) == 0);
+  ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* !cmd ..$args → splat for args */
+static int test_shell_cmd_splat_args(void) {
+  setup();
+  ParseResult r = parse("!cmd ..$args");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_SHELL_CMD);
+  ASSERT(memcmp(n->data.shell_cmd.head->data.lit_string.value, "cmd", 3) == 0);
+  ASSERT_U32_EQ(n->data.shell_cmd.arg_count, 1);
+  ASSERT(n->data.shell_cmd.args[0]->type == AST_SPREAD);
+  AstNode* spread = n->data.shell_cmd.args[0];
+  ASSERT(spread->data.spread.expr->type == AST_VAR_REF);
+  ASSERT(memcmp(spread->data.spread.expr->data.var_ref.name, "args", 4) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* !ls | !grep foo → shell commands in pipeline */
+static int test_shell_cmd_in_pipeline(void) {
+  setup();
+  ParseResult r = parse("!ls | !grep foo");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  /* This is a pipe: [| [!ls] [!grep foo]] */
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "|", 1) == 0);
+  ASSERT_U32_EQ(n->data.command.arg_count, 2);
+  /* left: !ls */
+  AstNode* left = n->data.command.args[0];
+  ASSERT(left->type == AST_SHELL_CMD);
+  ASSERT(memcmp(left->data.shell_cmd.head->data.lit_string.value, "ls", 2) == 0);
+  /* right: !grep foo */
+  AstNode* right = n->data.command.args[1];
+  ASSERT(right->type == AST_SHELL_CMD);
+  ASSERT(memcmp(right->data.shell_cmd.head->data.lit_string.value, "grep", 4) == 0);
+  ASSERT_U32_EQ(right->data.shell_cmd.arg_count, 1);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* ! followed by nothing → error */
+static int test_shell_cmd_error_no_name(void) {
+  setup();
+  ParseResult r = parse("!");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* != stays as operator, not shell command */
+static int test_shell_cmd_neq_not_shell(void) {
+  setup();
+  /* In command context, != parses as operator between two operands */
+  ParseResult r = parse("1 != 2");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  /* Should be [!= 1 2] command, not shell command */
+  ASSERT(n->type == AST_COMMAND);
+  ASSERT(memcmp(n->data.command.head->data.lit_string.value, "!=", 2) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -4020,6 +4189,17 @@ int main(void) {
     {"dollar_paren_existing",   test_dollar_paren_existing_interp},
     {"line_continuation",       test_line_continuation},
     {"blank_lines_no_empty",    test_blank_lines_no_empty},
+    /* Shell Interop US-002: Parser handles !cmd syntax */
+    {"shell_cmd_simple",        test_shell_cmd_simple},
+    {"shell_cmd_with_arg",      test_shell_cmd_with_arg},
+    {"shell_cmd_multiple_args", test_shell_cmd_multiple_args},
+    {"shell_cmd_flag_args",     test_shell_cmd_flag_args},
+    {"shell_cmd_quoted_name",   test_shell_cmd_quoted_name},
+    {"shell_cmd_var_name",      test_shell_cmd_var_name},
+    {"shell_cmd_splat_args",    test_shell_cmd_splat_args},
+    {"shell_cmd_in_pipeline",   test_shell_cmd_in_pipeline},
+    {"shell_cmd_error_no_name", test_shell_cmd_error_no_name},
+    {"shell_cmd_neq_not_shell", test_shell_cmd_neq_not_shell},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;

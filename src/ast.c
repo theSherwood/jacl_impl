@@ -36,6 +36,7 @@ typedef enum {
   AST_DESTRUCTURE_VEC, /* [a b c] positional destructuring pattern */
   AST_DESTRUCTURE_NAMED, /* {x, y} named struct/map destructuring pattern */
   AST_SPREAD,        /* ..expr spread in command args */
+  AST_SHELL_CMD,     /* !cmd args... external shell command */
   AST_ERROR          /* parse error with recovery */
 } AstNodeType;
 
@@ -99,6 +100,7 @@ struct AstNode {
              const char* rest_name; uint32_t rest_name_len;
              int spread_all; } destructure_named;
     struct { AstNode* expr; }                                      spread;
+    struct { AstNode* head; AstNode** args; uint32_t arg_count; }  shell_cmd;
     struct { const char* message; }                                error;
   } data;
 };
@@ -540,6 +542,15 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
     case AST_SPREAD: {
       ast__buf_cstr(b, "..");
       ast__pp_node(b, node->data.spread.expr);
+      break;
+    }
+    case AST_SHELL_CMD: {
+      ast__buf_char(b, '!');
+      ast__pp_node(b, node->data.shell_cmd.head);
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
+        ast__buf_char(b, ' ');
+        ast__pp_node(b, node->data.shell_cmd.args[i]);
+      }
       break;
     }
     case AST_ERROR: {

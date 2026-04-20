@@ -1010,6 +1010,14 @@ int parser__is_operand_end(Parser* p) {
   return parser__is_operator(parser__peek(p));
 }
 
+/* Check if current token ends a shell command operand.
+ * Shell commands stop at pipe/and/or/amp but NOT at general operators like - */
+int parser__is_shell_cmd_end(Parser* p) {
+  if (parser__is_command_end(p)) return 1;
+  TokenType t = parser__peek(p)->type;
+  return t == TOKEN_PIPE || t == TOKEN_AND || t == TOKEN_OR || t == TOKEN_AMP;
+}
+
 /* -------------------------------------------------------------------------
  * Internal: Parse use declaration
  *
@@ -2288,6 +2296,61 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
         node->end = val->end;
       }
     }
+    return node;
+  }
+
+  /* !cmd args... → AST_SHELL_CMD (external shell command) */
+  if (peek->type == TOKEN_BANG) {
+    Token* bang = parser__advance(p); /* consume '!' */
+    SourcePos start = parser__token_start(bang);
+
+    /* Parse command name: word, string, or variable */
+    Token* cmd_tok = parser__peek(p);
+    if (cmd_tok->type != TOKEN_WORD && cmd_tok->type != TOKEN_STRING &&
+        cmd_tok->type != TOKEN_VAR) {
+      return parser__error(p, "expected command name after '!'", cmd_tok);
+    }
+
+    AstNode* head = parser__parse_expr(p);
+    if (head == NULL) {
+      return parser__error(p, "expected command name after '!'", bang);
+    }
+
+    /* Collect arguments until pipe/and/or/amp or command-end.
+     * Unlike regular commands, shell commands don't stop at operators like -
+     * since "-la" is a valid shell argument. */
+    NodeArray args;
+    parser__arr_init(&args, p->arena);
+
+    while (!parser__is_shell_cmd_end(p)) {
+      /* Spread expression: ..expr */
+      if (parser__peek(p)->type == TOKEN_DOTDOT) {
+        Token* dotdot = parser__advance(p); /* consume '..' */
+        AstNode* inner = parser__parse_expr(p);
+        if (inner == NULL) {
+          return parser__error(p, "expected expression after '..' in shell command", dotdot);
+        }
+        AstNode* spread = ast_alloc(p->arena);
+        spread->type  = AST_SPREAD;
+        spread->start = parser__token_start(dotdot);
+        spread->end   = inner->end;
+        spread->data.spread.expr = inner;
+        parser__arr_push(&args, spread);
+        continue;
+      }
+
+      AstNode* arg = parser__parse_expr(p);
+      if (arg == NULL) break;
+      parser__arr_push(&args, arg);
+    }
+
+    AstNode* node = ast_alloc(p->arena);
+    node->type  = AST_SHELL_CMD;
+    node->start = start;
+    node->end   = args.count > 0 ? args.nodes[args.count - 1]->end : head->end;
+    node->data.shell_cmd.head      = head;
+    node->data.shell_cmd.args      = args.nodes;
+    node->data.shell_cmd.arg_count = args.count;
     return node;
   }
 
