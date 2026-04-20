@@ -8,6 +8,9 @@ Feature: Shell Interop (!cmd)
 - Tests follow pattern: setup(), lexer_lex(), assertions, teardown(), check_no_leaks()
 - `-flag` syntax lexes as TOKEN_OPERATOR (`-`) + TOKEN_WORD (`flag`), not a single token
 - build.sh runs all tests and reports pass/fail counts
+- AST node types defined in both src/ast.c AND src/jacl.h - update both when adding new types
+- Parser tests in test/test_parser.c use parse() helper and ASSERT macros
+- parser__is_operand_end() stops at operators - shell commands need custom check
 
 ---
 
@@ -30,5 +33,31 @@ Thread: (current)
   - `-` followed by letters is not a single operator; it splits into OPERATOR + WORD
   - Test helper `token_text_eq` compares token length with text length
   - Test helper `var_text_eq` skips the `$` prefix (token.length - 1)
+---
+
+## 2026-04-20 - US-002
+Thread: (current)
+- Added AST_SHELL_CMD node type to ast.c and jacl.h
+- Added shell_cmd data struct with head, args, arg_count fields
+- Added parser__parse_shell_cmd logic in parser__parse_cmd_operand
+- Created parser__is_shell_cmd_end() to stop at pipe/and/or/amp but not at - operators
+- Added pretty-print support for AST_SHELL_CMD (outputs !cmd arg1 arg2)
+- Added 10 parser tests:
+  - test_shell_cmd_simple: `!ls`
+  - test_shell_cmd_with_arg: `!git status`
+  - test_shell_cmd_multiple_args: `!git status --short`
+  - test_shell_cmd_flag_args: `!ls -la`
+  - test_shell_cmd_quoted_name: `!"my script.sh"`
+  - test_shell_cmd_var_name: `!$cmd`
+  - test_shell_cmd_splat_args: `!cmd ..$args`
+  - test_shell_cmd_in_pipeline: `!ls | !grep foo`
+  - test_shell_cmd_error_no_name: `!` alone is error
+  - test_shell_cmd_neq_not_shell: `1 != 2` stays as operator
+- Files changed: src/ast.c, src/jacl.h, src/parser.c, test/test_parser.c
+- **Learnings for future iterations:**
+  - AST node types must be added to both ast.c and jacl.h (duplicate definitions)
+  - Shell commands should not stop at TOKEN_OPERATOR (e.g., `-`) since flags like `-la` are valid
+  - Shell commands should stop at TOKEN_PIPE, TOKEN_AND, TOKEN_OR, TOKEN_AMP for proper pipeline support
+  - parser__parse_expr handles atoms and can parse TOKEN_OPERATOR as string literals in atom position
 ---
 

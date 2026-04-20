@@ -35,8 +35,8 @@
         "build.sh passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added AST_SHELL_CMD node type with head/args structure. Shell commands stop at pipe/and/or/amp but not general operators like -. 10 parser tests added."
     },
     {
       "id": "US-003",
