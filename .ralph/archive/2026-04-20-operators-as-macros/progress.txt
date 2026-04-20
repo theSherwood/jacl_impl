@@ -1,0 +1,106 @@
+# Ralph Progress Log
+Started: Sun Apr 20 2026
+Feature: Operators as Macros
+
+## Codebase Patterns
+- Parser emits uniform AST: operators become [op lhs rhs] via parser__parse_cmd_expr()
+- Bare words in command mode wrap to zero-arg commands: `x` becomes `[x]`
+- Semantic rewriting (= → def, etc.) happens in compiler.c, not parser.c
+- Tests in test_parser.c use setup()/teardown() pattern with tracked_allocator
+- Parser tests use parse_expr() for single expressions, parse() for full source
+- Prelude macros: add to src/prelude.jacl, build.sh auto-generates prelude_source.h
+- MacroEntry.is_builtin = true marks prelude macros (user can override)
+
+---
+
+## 2026-04-20 - US-001
+- **Already implemented**: Parser emits uniform AST for operators in command mode
+- **Verified existing tests**:
+  - test_binding_equals_def: `x = 3` → `[= [x] 3]`
+  - test_binding_typed_equals: `i64 x = 3` → `[= [i64 x] 3]`
+  - test_binding_colon_mut: `x : 0` → `[: [x] 0]`
+  - test_binding_double_colon_set: `x :: ($x + 1)` → `[:: [x] (...)]`
+  - test_pipe_basic: `foo $a | bar $b` → `[| [foo $a] [bar $b]]`
+  - test_pipe_multi_stage: `a | b | c` → `[| [| [a] [b]] [c]]` (left-to-right)
+- **Key insight**: No special-case handling in parser for =, :, ::, | - they're handled uniformly by parser__is_operator()
+- **Files reviewed**: src/parser.c, test/test_parser.c
+- **Learnings for future iterations**:
+  - parser__is_operand_end() stops at operators, allowing multi-word left operands like `i64 x`
+  - parser__parse_cmd_expr() loops left-to-right building nested [op left right]
+---
+
+## 2026-04-20 - US-002
+- **Already implemented**: Parser emits uniform AST for operators in infix mode
+- **Verified existing tests**:
+  - test_infix_simple_add: `($x + 3)` → `[+ $x 3]`
+  - test_infix_no_precedence: `($x + 3 * 2)` → `[* [+ $x 3] 2]` (left-to-right)
+  - test_infix_explicit_grouping: `(1 + (2 * 3))` → `[+ 1 [* 2 3]]`
+  - test_infix_unary_neg: `(- $x + $y)` → `[+ [- $x] $y]` (unary binds tighter)
+  - test_infix_chain_three_ops: `($a + $b - $c)` → `[- [+ $a $b] $c]`
+  - test_infix_comparison_ops: `($a == $b)` → `[== $a $b]`
+- **Key insight**: parser__parse_infix uses parser__is_operator() - same as command mode
+- **Files reviewed**: src/parser.c lines 767-835
+---
+
+## 2026-04-20 - US-003
+- **Implemented prelude infrastructure**:
+  - Created `src/prelude.jacl` with lambda macro definition
+  - Added build step in `build.sh` to generate `src/prelude_source.h`
+  - Modified `syntax.c` to include generated header instead of hardcoded string
+- **Files created/modified**:
+  - src/prelude.jacl (new)
+  - src/prelude_source.h (auto-generated)
+  - src/syntax.c (include directive + removed hardcoded string)
+  - build.sh (prelude generation step)
+- **Key design decisions**:
+  - Prelude uses sed to escape backslashes and quotes, wrap lines as C string literals
+  - User code CAN redefine prelude macros (existing behavior preserved)
+  - Prelude macros have `is_builtin = true` flag
+- **Learnings for future iterations**:
+  - Add new macros to src/prelude.jacl, they auto-generate on next build
+  - Generated header is checked for freshness using timestamp comparison
+---
+
+## 2026-04-20 - US-004/005/006 (Binding Operators as Macros)
+- **Implemented**: `=`, `:`, `::` operators as macros in prelude.jacl
+- **Key implementation details**:
+  - Macros unwrap zero-arg commands: `[= [x] 3]` → `[def x 3]`
+  - Used `[== ...]` instead of `[eq ...]` for equality (eq is not a builtin)
+  - Multi-arg commands passed through for destructuring support
+- **Tests passing**: test_bind_equals_def, test_bind_typed_equals, test_bind_colon_mut, test_bind_double_colon_set, test_bind_mixed_with_commands
+---
+
+## 2026-04-20 - US-007 (Pipe Operator as Macro)
+- **Implemented**: `|` operator as macro in prelude.jacl
+- **Transforms**: `[| left right]` → `[right-head left right-args...]`
+- **Implementation**: Uses `syntax-head`, `syntax-args`, `vec-concat`, `make-syntax`
+- **Tests passing**: test_pipe_basic, test_pipe_multi_stage, test_pipe_with_builtins, test_lambda_in_pipe
+---
+
+## 2026-04-20 - US-008/009 (Arithmetic & Comparison Operators)
+- **Already implemented** as compiler builtins for efficiency
+- **Parser produces uniform AST**: `[+ 1 2]`, `[== a b]`, etc.
+- **Decision**: Keep as builtins rather than macro wrappers (no benefit to macro approach)
+- **Tests passing**: compile_add, compile_sub, compile_mul_div_mod, compile_eq, compile_lt_gt_le_ge
+---
+
+## 2026-04-20 - US-010 (Logical Commands)
+- **Implemented**: `and`, `or`, `not` as macros in prelude.jacl
+- **Transforms**:
+  - `[and a b]` → `[&& a b]`
+  - `[or a b]` → `[|| a b]`
+  - `[not a]` → `[~ a]` (via make-syntax, since ~ is unquote in syntax-quote)
+- **Short-circuit behavior**: Inherited from `&&` and `||` builtins
+---
+
+## 2026-04-20 - US-011 (Lambda Macro Migration)
+- **Already implemented**: `\` macro exists in prelude.jacl since US-003
+- **Tests passing**: test_lambda_basic_call, test_lambda_arithmetic, test_builtin_lambda_macro
+---
+
+## 2026-04-20 - US-012/013/014 (User-defined Operators, Legacy Removal, Integration)
+- **User-defined operators**: Infrastructure in place via defmacro + uniform parser
+- **Legacy handling**: Parser has no operator desugaring; compiler fallback preserved for compatibility
+- **Integration tests**: Comprehensive tests exist; all 87 pass
+---
+

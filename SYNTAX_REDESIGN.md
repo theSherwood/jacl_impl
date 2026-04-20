@@ -1221,7 +1221,7 @@ The syntax is the same for both phases. Full parametric generics (type variables
 
 ## Implementation status
 
-Features from this document compared against the current codebase (M0-M13 complete, syntax redesign merged, for-loop control flow merged).
+Features from this document compared against the current codebase. Last updated: 2026-04-20.
 
 ### Implemented
 
@@ -1230,7 +1230,7 @@ Features from this document compared against the current codebase (M0-M13 comple
 | Three-mode delimiter system (`[]`, `{}`, `()`) | Full lexer/parser/compiler support |
 | Infix mode — no precedence, left-to-right | Smalltalk-style, unary prefix binds tighter |
 | Pipe threading (`\|` first-arg in command mode) | Multi-stage, composes with error short-circuit |
-| Binding operators (`=`, `:`, `::`) | Sugar for `def`, `mut`, `set` |
+| Binding operators (`=`, `:`, `::`) | Sugar for `def`, `mut`, `set` — implemented as macros in prelude.jacl |
 | Arrow field access (`->`) | `$point->x`, chained, dynamic |
 | `proc` syntax (`{params} {body}`, type-before-name) | Closures, tail calls, recursion |
 | `struct` syntax (`struct Name {type field, ...}`) | C-ABI layout, typed fields |
@@ -1238,7 +1238,7 @@ Features from this document compared against the current codebase (M0-M13 comple
 | `while` loops | With `break`/`continue` |
 | `for` — all 4 forms | C-style, collection+implicit, collection+explicit, HOF callback |
 | `break`, `continue`, `return` | Block bodies inlined, lambda bodies separate |
-| Lambda shorthand (`[\  ]` with `$it`) | Works in pipes and callbacks |
+| Lambda shorthand (`[\  ]` with `$it`) | Works in pipes and callbacks — implemented as macro in prelude.jacl |
 | String interpolation (`$var`, `$[...]`, `$(...)`) | All three modes, nesting |
 | Line continuation (`\` at end of line) | Plus delimiter-based multi-line |
 | Comments (`#` single-line) | `##` doc comments by convention |
@@ -1249,20 +1249,24 @@ Features from this document compared against the current codebase (M0-M13 comple
 | Static type system (gradual typing) | Typed/unboxed values, compile-time checks |
 | GC | Epoch-based tracing, generational, non-moving |
 | `filter`, `transform` (HOF) | Eager on vectors |
+| **Destructuring** (`def [a b] $v`, `def {x, y} $p`, `{..}`, `..rest`, `_`) | Vec, named, wildcard, rest, spread-all patterns |
+| **Splat/spread** (`..`) | In destructuring patterns and variadic macro params |
+| **Streams** (lazy sequences) | `lines`, `stream_next`, `collect`; lazy iteration |
+| **Macro system** (`defmacro`) | AST quasiquoting (`syntax-quote`, `~`), hygiene, `gensym` |
+| **Operators as macros** | `=`, `:`, `::`, `\|`, `\`, `and`, `or`, `not` in prelude.jacl |
+| **Variadic macros** | `defmacro foo {a ..rest}` works |
+| **Module system** (basic `use`) | `use "path" name` and `use "path" {bindings}` work |
+| **`interpret`** (sandboxed eval) | `[interpret $src]`, `[interpret $prelude $src]`, capability-based sandboxing |
 
 ### Not yet implemented
 
 | Feature | Complexity | Dependencies | Notes |
 |---------|-----------|--------------|-------|
-| **Destructuring** (`def [a b] $v`, `def {x, y} $p`, `{..}`, `..rest`, `_`) | Large | None | Core language feature, used everywhere in spec |
-| **Match/case** (`match $val { pattern { body } ... }`) | Large | Benefits from destructuring | Literals, bindings, type patterns, guards, pipe composition |
-| **Splat/spread** (`..`) | Medium | Destructuring uses `..rest` | Tokens lexed (`TOKEN_DOTDOT`) but not compiled |
-| **Variadic procs** (`proc log {level, ..msgs}`) | Medium | Splat | `..` in param lists |
-| **Ranges** (`(1 ..< 10)`, `(1 ..= 10)`) | Medium | Streams (produce streams) | Infix operators in `()` mode |
-| **Streams** (lazy sequences) | Large | None | New value type, `collect`, lazy `for`/`filter`/`transform` |
+| **Match/case** (`match $val { pattern { body } ... }`) | Large | None | Literals, bindings, type patterns, guards, pipe composition |
+| **Variadic procs** (`proc log {level, ..msgs}`) | Medium | None | Only macros support `..rest`, not regular procs |
+| **Ranges** (`(1 ..< 10)`, `(1 ..= 10)`) | Medium | None | Infix operators in `()` mode, produce streams |
 | **Shell interop** (`!cmd`, `exec`) | Large | Streams | `!` prefix, OS pipes, stdin/stdout, error mapping |
 | **Implicit context** (`$ctx`) | Large | Shell interop uses it | Dynamic scoping, `with-ctx`, user-extensible fields |
-| **Module system** (full) | Large | Partially started | `use` recognized; needs cache, circular detection, visibility enforcement |
 | **Module visibility** (underscore = private) | Small | Module system | Compiler enforcement at import boundaries |
 | **Callable values** (maps/atoms in `[]` head position) | Medium | None | `[$colors red]`, `[$config port]` |
 | **Atom listeners** (`watch`) | Medium | None | General-purpose watcher mechanism |
@@ -1277,7 +1281,5 @@ Features from this document compared against the current codebase (M0-M13 comple
 | **Jobs** (future + OS process) | Medium | Shell interop, concurrency | `pid`, `signal`, `cancel`, `&` sugar |
 | **`par-each`** | Medium | Streams, concurrency | Concurrent stream processing |
 | **`timeout`** | Small | Concurrency | Sugar for `race` + sleep |
-| **Macro system** (`defmacro`) | Large | Module system | AST quasiquoting, hygiene |
-| **Operators as macros** / user-definable operators | Large | Macro system | Mode-specific overloading |
 | **Regular expressions** | Medium | None | Literal syntax TBD |
 | **Scoping: same-scope shadowing error** | Small | None | Compile-time check |
