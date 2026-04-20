@@ -2413,6 +2413,163 @@ static int test_shell_exec_inherits_env(void) {
     TEST_PASS();
 }
 
+/* ===== US-005: Shell Interop - error handling (exit codes) ===== */
+
+/* Test: !false returns error value (exit 1) */
+static int test_shell_exec_error_false(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult result = jacl_run(
+        "[print [error? {!false | collect}]]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT_STR_EQ(cap.buf, "true\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: error message contains stderr content */
+static int test_shell_exec_error_stderr(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Run a command that outputs to stderr and exits non-zero
+     * Note: JACL uses double quotes, not single quotes */
+    VMResult result = jacl_run(
+        "def e {!sh \"-c\" \"echo err >&2; exit 1\" | collect}\n"
+        "[print [error-val $e]]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* Error message should contain "err" from stderr */
+    ASSERT(strstr(cap.buf, "err") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: successful commands return string, not error */
+static int test_shell_exec_success_no_error(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult result = jacl_run(
+        "[print [error? {!true | collect}]]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT_STR_EQ(cap.buf, "false\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: error composes with pipes - for loop doesn't run on error */
+static int test_shell_exec_error_pipe_compose(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* If for runs on error stream, it would print "ran"
+     * Since the stream returns an error value, the for should not iterate */
+    VMResult result = jacl_run(
+        "def result {!false | for x { [print ran] }}\n"
+        "[print [error? $result]]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* "ran" should NOT appear, but error? should be true */
+    ASSERT(strstr(cap.buf, "ran") == NULL);
+    ASSERT(strstr(cap.buf, "true") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: error works with try/catch */
+static int test_shell_exec_error_try_catch(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult result = jacl_run(
+        "def result [try { {!false | collect} } e { \"fallback\" }]\n"
+        "[print $result]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT_STR_EQ(cap.buf, "fallback\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: exit code 0 returns stdout content */
+static int test_shell_exec_success_returns_stdout(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult result = jacl_run(
+        "[print {!echo hello | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* Should have "hello\n\n" (echo output + print's newline) */
+    ASSERT(strstr(cap.buf, "hello") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -2524,6 +2681,13 @@ int main(void) {
     { "shell_exec_direct_call",  test_shell_exec_direct_call },
     { "shell_exec_stream_lazy",  test_shell_exec_stream_lazy },
     { "shell_exec_inherits_env", test_shell_exec_inherits_env },
+    /* US-005 (Shell Interop): error handling - exit codes */
+    { "shell_exec_err_false",    test_shell_exec_error_false },
+    { "shell_exec_err_stderr",   test_shell_exec_error_stderr },
+    { "shell_exec_success_ok",   test_shell_exec_success_no_error },
+    { "shell_exec_err_pipe",     test_shell_exec_error_pipe_compose },
+    { "shell_exec_err_try",      test_shell_exec_error_try_catch },
+    { "shell_exec_success_out",  test_shell_exec_success_returns_stdout },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

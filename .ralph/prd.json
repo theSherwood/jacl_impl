@@ -90,8 +90,8 @@
         "build.sh passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Exit code 0 returns stdout stream. Non-zero exit returns JACL error value with stderr content. Error propagates through stream for loops via OP_JUMP_IF_ERROR. Error works with try/catch. 6 integration tests added."
     },
     {
       "id": "US-006",

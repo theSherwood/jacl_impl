@@ -11,6 +11,9 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <time.h>
+#include <sys/wait.h>
 
 /* --- Stack size --- */
 
@@ -1053,10 +1056,16 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         return STREAM_PULL_VALUE;
     }
 
-    /* --- Exec stream (US-004): read stdout from spawned process --- */
+    /* --- Exec stream (US-004/US-005): read stdout from spawned process --- */
     if (stream->kind == STREAM_KIND_EXEC) {
         FILE* fp = (FILE*)(uintptr_t)stream->args[0];
         if (!fp) {
+            /* Already exhausted - check if we stored an error value */
+            if (stream->state == STREAM_ERROR && stream->cached_value != JACL_NIL) {
+                *out_value = stream->cached_value;
+                stream->cached_value = JACL_NIL;
+                return STREAM_PULL_VALUE;  /* Return the error value */
+            }
             stream->state = STREAM_EXHAUSTED;
             *out_value = JACL_NIL;
             return STREAM_PULL_EXHAUSTED;
@@ -1065,9 +1074,67 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         /* Read a line from the process output */
         char line_buf[4096];
         if (fgets(line_buf, sizeof(line_buf), fp) == NULL) {
-            /* EOF or error - close the pipe */
-            pclose(fp);
+            /* EOF or error - close the pipe and check exit status */
+            int pclose_status = pclose(fp);
             stream->args[0] = (JaclVal)0;  /* clear FILE* */
+
+            /* US-005: Check exit code and handle errors */
+            int exit_code = WIFEXITED(pclose_status) ? WEXITSTATUS(pclose_status) : 1;
+
+            /* Read and clean up stderr temp file */
+            char stderr_path[64];
+            if (stream->arg_count >= 3 && jacl_is_string(stream->args[2])) {
+                uint32_t path_len = jacl_string_byte_len(stream->args[2]);
+                jacl_string_data(stream->args[2], stderr_path, sizeof(stderr_path));
+                stderr_path[path_len < sizeof(stderr_path) - 1 ? path_len : sizeof(stderr_path) - 1] = '\0';
+            } else {
+                stderr_path[0] = '\0';
+            }
+
+            if (exit_code != 0) {
+                /* Read stderr content */
+                char stderr_buf[4096] = "";
+                if (stderr_path[0] != '\0') {
+                    FILE* stderr_fp = fopen(stderr_path, "r");
+                    if (stderr_fp) {
+                        size_t nread = fread(stderr_buf, 1, sizeof(stderr_buf) - 1, stderr_fp);
+                        stderr_buf[nread] = '\0';
+                        fclose(stderr_fp);
+                    }
+                    unlink(stderr_path);  /* clean up temp file */
+                }
+
+                /* Create error value with stderr as message */
+                gc__current_heap = &vm->heap;
+                JaclVal err_msg;
+                if (stderr_buf[0] != '\0') {
+                    /* Trim trailing newline */
+                    size_t len = strlen(stderr_buf);
+                    while (len > 0 && (stderr_buf[len-1] == '\n' || stderr_buf[len-1] == '\r')) {
+                        stderr_buf[--len] = '\0';
+                    }
+                    err_msg = jacl_string_new(&vm->heap, vm->intern_table,
+                                              stderr_buf, (uint32_t)len);
+                } else {
+                    /* Default message if no stderr */
+                    char default_msg[64];
+                    snprintf(default_msg, sizeof(default_msg), "command exited with code %d", exit_code);
+                    err_msg = jacl_string_new(&vm->heap, vm->intern_table,
+                                              default_msg, (uint32_t)strlen(default_msg));
+                }
+
+                /* Return error value */
+                stream->state = STREAM_ERROR;
+                stream->cached_value = JACL_NIL;
+                *out_value = jacl_set_error(err_msg);
+                return STREAM_PULL_VALUE;  /* Return error as the final value */
+            }
+
+            /* Success - clean up stderr temp file */
+            if (stderr_path[0] != '\0') {
+                unlink(stderr_path);
+            }
+
             stream->state = STREAM_EXHAUSTED;
             *out_value = JACL_NIL;
             return STREAM_PULL_EXHAUSTED;
@@ -2951,6 +3018,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
       case OP_EACH: {
         JaclVal closure_val, coll_val;
+        JaclVal error_val = JACL_NIL;  /* US-005: track error from stream */
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
         if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; break; }
@@ -3091,6 +3159,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
             if (pr == STREAM_PULL_EXHAUSTED) break;
 
+            /* US-005: If stream yields error value, stop iteration and propagate */
+            if (jacl_is_error(elem)) {
+              error_val = elem;
+              break;
+            }
+
             /* Call callback with elem */
             result = vm__push(vm, closure_val);
             if (result != VM_OK) return result;
@@ -3131,8 +3205,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
 
-        /* each returns nil */
-        result = vm__push(vm, JACL_NIL);
+        /* US-005: each returns error if stream yielded one, otherwise nil */
+        if (jacl_is_error(error_val)) {
+          result = vm__push(vm, error_val);
+        } else {
+          result = vm__push(vm, JACL_NIL);
+        }
         if (result != VM_OK) return result;
         break;
       }
@@ -5443,11 +5521,18 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         JaclStream* stream = jacl_as_stream(coll_val);
 
-        /* US-004: Exec streams collect to a single string (concatenated stdout) */
+        /* US-004/US-005: Exec streams collect to a single string (concatenated stdout)
+         * or return an error value if the command fails */
         if (stream->kind == STREAM_KIND_EXEC) {
           FILE* fp = (FILE*)(uintptr_t)stream->args[0];
           if (!fp) {
-            /* Already exhausted */
+            /* Already exhausted - check for cached error */
+            if (stream->state == STREAM_ERROR && stream->cached_value != JACL_NIL) {
+              result = vm__push(vm, stream->cached_value);
+              stream->cached_value = JACL_NIL;
+              if (result != VM_OK) return result;
+              break;
+            }
             result = vm__push(vm, jacl_inline_string("", 0));
             if (result != VM_OK) return result;
             break;
@@ -5475,9 +5560,67 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           }
           buffer[length] = '\0';
 
-          /* Close the pipe */
-          pclose(fp);
+          /* Close the pipe and check exit status */
+          int pclose_status = pclose(fp);
           stream->args[0] = (JaclVal)0;
+
+          /* US-005: Check exit code and handle errors */
+          int exit_code = WIFEXITED(pclose_status) ? WEXITSTATUS(pclose_status) : 1;
+
+          /* Read and clean up stderr temp file */
+          char stderr_path[64];
+          if (stream->arg_count >= 3 && jacl_is_string(stream->args[2])) {
+            uint32_t path_len = jacl_string_byte_len(stream->args[2]);
+            jacl_string_data(stream->args[2], stderr_path, sizeof(stderr_path));
+            stderr_path[path_len < sizeof(stderr_path) - 1 ? path_len : sizeof(stderr_path) - 1] = '\0';
+          } else {
+            stderr_path[0] = '\0';
+          }
+
+          if (exit_code != 0) {
+            /* Read stderr content */
+            char stderr_buf[4096] = "";
+            if (stderr_path[0] != '\0') {
+              FILE* stderr_fp = fopen(stderr_path, "r");
+              if (stderr_fp) {
+                size_t nread = fread(stderr_buf, 1, sizeof(stderr_buf) - 1, stderr_fp);
+                stderr_buf[nread] = '\0';
+                fclose(stderr_fp);
+              }
+              unlink(stderr_path);  /* clean up temp file */
+            }
+
+            /* Create error value with stderr as message */
+            gc__current_heap = &vm->heap;
+            JaclVal err_msg;
+            if (stderr_buf[0] != '\0') {
+              /* Trim trailing newline */
+              size_t len = strlen(stderr_buf);
+              while (len > 0 && (stderr_buf[len-1] == '\n' || stderr_buf[len-1] == '\r')) {
+                stderr_buf[--len] = '\0';
+              }
+              err_msg = jacl_string_new(&vm->heap, vm->intern_table,
+                                        stderr_buf, (uint32_t)len);
+            } else {
+              /* Default message if no stderr */
+              char default_msg[64];
+              snprintf(default_msg, sizeof(default_msg), "command exited with code %d", exit_code);
+              err_msg = jacl_string_new(&vm->heap, vm->intern_table,
+                                        default_msg, (uint32_t)strlen(default_msg));
+            }
+
+            stream->state = STREAM_ERROR;
+            frame = &vm->frames[vm->frame_count - 1];
+            result = vm__push(vm, jacl_set_error(err_msg));
+            if (result != VM_OK) return result;
+            break;
+          }
+
+          /* Success - clean up stderr temp file */
+          if (stderr_path[0] != '\0') {
+            unlink(stderr_path);
+          }
+
           stream->state = STREAM_EXHAUSTED;
 
           /* Create the result string */
@@ -6822,9 +6965,19 @@ interpret_done:
         }
         *p = '\0';
 
+        /* US-005: Create temp file for stderr capture */
+        char stderr_path[64];
+        snprintf(stderr_path, sizeof(stderr_path), "/tmp/jacl_stderr_%d_%lu",
+                 (int)getpid(), (unsigned long)time(NULL) ^ (unsigned long)cmd_buf);
+
+        /* Append stderr redirection to command */
+        char full_cmd[4160];
+        snprintf(full_cmd, sizeof(full_cmd), "%s 2>%s", cmd_buf, stderr_path);
+
         /* Spawn the process with popen */
-        FILE* fp = popen(cmd_buf, "r");
+        FILE* fp = popen(full_cmd, "r");
         if (!fp) {
+          unlink(stderr_path);  /* clean up temp file if spawn failed */
           vm__set_error(vm, "exec: failed to spawn process '%s'", cmd_buf);
           return VM_RUNTIME_ERROR;
         }
@@ -6840,7 +6993,10 @@ interpret_done:
         gc__current_heap = &vm->heap;
         stream->args[1] = jacl_intern(&vm->heap, vm->intern_table,
                                        cmd_buf, (uint32_t)strlen(cmd_buf));
-        stream->arg_count = 2;
+        /* US-005: Store stderr temp file path in args[2] */
+        stream->args[2] = jacl_intern(&vm->heap, vm->intern_table,
+                                       stderr_path, (uint32_t)strlen(stderr_path));
+        stream->arg_count = 3;
 
         result = vm__push(vm, stream_val);
         if (result != VM_OK) return result;

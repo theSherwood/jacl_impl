@@ -131,3 +131,34 @@ Thread: (current)
   - OP_VEC expects fixed element count, doesn't support spread - spread in shell commands deferred
 ---
 
+## 2026-04-20 - US-005
+Thread: (current)
+- Implemented error handling for shell commands based on exit codes:
+  - Exit code 0: returns stdout stream (unchanged from US-004)
+  - Exit code non-zero: returns JACL error value with stderr content
+- Modified OP_EXEC to redirect stderr to temp file (/tmp/jacl_stderr_PID_HASH)
+- Modified vm__pull_stream_one STREAM_KIND_EXEC section:
+  - On EOF, pclose() and check exit status via WEXITSTATUS()
+  - If exit code != 0, read stderr temp file and create error value
+  - Error message is stderr content, or "command exited with code N" if empty
+- Modified OP_COLLECT STREAM_KIND_EXEC section with same error handling
+- Added error propagation for stream for loops:
+  - After OP_STREAM_NEXT, emit OP_JUMP_IF_ERROR to detect errors
+  - Error exit path uses OP_CLOSE_LOOP to preserve error value while popping locals
+- Added 6 integration tests:
+  - test_shell_exec_error_false: !false returns error (exit 1)
+  - test_shell_exec_error_stderr: stderr content captured in error message
+  - test_shell_exec_success_no_error: exit 0 returns non-error value
+  - test_shell_exec_error_pipe_compose: error propagates through for loop
+  - test_shell_exec_error_try_catch: error works with try/catch
+  - test_shell_exec_success_returns_stdout: success returns stdout content
+- Files changed: src/compiler.c, src/vm.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - OP_CLOSE_LOOP pops N values under TOS while preserving TOS - use for cleanup with result
+  - OP_POP_N pops from top - wrong when result value needs to be preserved
+  - In JACL, barewords in blocks are variable/command lookups, not string literals - use quotes
+  - try/catch handler blocks require proper string literals or defined procs, not undefined barewords
+  - pclose() returns exit status that must be decoded with WEXITSTATUS() macro
+  - Temp files for stderr need unique names (PID + hash) to avoid collisions
+---
+

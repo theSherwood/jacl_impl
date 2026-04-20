@@ -6514,6 +6514,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* --- Body start (not exhausted) --- */
       compiler__patch_jump(c, not_done_jump);
 
+      /* US-005: Check if pulled value is an error — if so, exit loop with error */
+      uint32_t error_exit_jump = compiler__emit_jump(c, OP_JUMP_IF_ERROR, line);
+
       /* Bind element: SET_LOCAL + POP */
       compiler__emit_byte(c, OP_SET_LOCAL, line);
       compiler__emit_byte(c, elem_slot, line);
@@ -6546,8 +6549,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* Normal exit: push nil */
       compiler__emit_byte(c, OP_NIL, line);
 
-      /* Jump over break landing zone */
-      uint32_t skip_break = compiler__emit_jump(c, OP_JUMP, line);
+      /* Jump over break/error landing zone */
+      uint32_t skip_landing = compiler__emit_jump(c, OP_JUMP, line);
+
+      /* US-005: Error exit path — error value is on stack */
+      compiler__patch_jump(c, error_exit_jump);
+      /* Pop hidden locals under top, preserving error value */
+      compiler__emit_byte(c, OP_CLOSE_LOOP, line);
+      compiler__emit_byte(c, 2, line);  /* __col and elem */
+      /* Jump to convergence (error value remains on stack) */
+      uint32_t error_done_jump = compiler__emit_jump(c, OP_JUMP, line);
 
       /* Break landing zone */
       for (uint32_t i = 0; i < lctx->break_patch_count; i++) {
@@ -6555,7 +6566,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
 
       /* Convergence */
-      compiler__patch_jump(c, skip_break);
+      compiler__patch_jump(c, skip_landing);
+      compiler__patch_jump(c, error_done_jump);
 
       /* Pop loop context */
       c->loop_depth--;
