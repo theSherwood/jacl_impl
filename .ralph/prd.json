@@ -22,8 +22,8 @@
         "build.sh passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Already implemented. Parser emits uniform [op lhs rhs] AST for all operators. Tests exist in test_parser.c: test_binding_equals_def, test_binding_typed_equals, test_binding_colon_mut, test_binding_double_colon_set, test_pipe_basic, test_pipe_multi_stage. No special-case handling exists in parser - compiler does semantic rewriting."
     },
     {
       "id": "US-002",
@@ -46,8 +46,8 @@
         "build.sh passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Already implemented. parser__parse_infix uses uniform operator handling via parser__is_operator(). Tests exist in test_parser.c: test_infix_simple_add, test_infix_no_precedence, test_infix_explicit_grouping, test_infix_unary_neg, test_infix_chain_three_ops, test_infix_comparison_ops. All operators become [op lhs rhs] AST_COMMAND nodes."
     },
     {
       "id": "US-003",
@@ -67,8 +67,8 @@
         "build.sh passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented: src/prelude.jacl created with lambda macro. build.sh generates prelude_source.h. syntax.c modified to include generated header. User code CAN redefine prelude macros (documented behavior in syntax.c:1212-1221). Lambda tests in test_integration.c verify macro expansion works."
     },
     {
       "id": "US-004",

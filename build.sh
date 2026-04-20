@@ -201,6 +201,23 @@ else
 fi
 echo "$CURRENT_PLATFORM" > "$PLATFORM_STAMP"
 
+# Generate prelude_source.h from prelude.jacl if needed
+PRELUDE_SRC="$DIR/src/prelude.jacl"
+PRELUDE_HDR="$DIR/src/prelude_source.h"
+if [ ! -f "$PRELUDE_HDR" ] || [ "$PRELUDE_HDR" -ot "$PRELUDE_SRC" ]; then
+    echo -n "Generating prelude_source.h... "
+    {
+        echo '/* Auto-generated from prelude.jacl - do not edit */'
+        echo 'static const char *jacl_prelude_source ='
+        # Convert file contents to C string literal: escape backslashes, quotes, and wrap each line
+        sed 's/\\/\\\\/g; s/"/\\"/g; s/^/    "/; s/$/\\n"/' "$PRELUDE_SRC"
+        echo '    ;'
+    } > "$PRELUDE_HDR"
+    echo "ok"
+else
+    echo "prelude_source.h is up-to-date"
+fi
+
 # Phase 0: Build shared libjacl.a (compile the unity build once)
 LIBJACL="$BUILD_DIR/libjacl.a"
 JACL_OBJ="$BUILD_DIR/jacl.o"

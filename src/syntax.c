@@ -10,6 +10,9 @@
 #ifndef SYNTAX_C
 #define SYNTAX_C
 
+/* Include generated prelude source */
+#include "prelude_source.h"
+
 /* -------------------------------------------------------------------------
  * Helper: set source position on a syntax object from an AstNode
  * ------------------------------------------------------------------------- */
@@ -1124,19 +1127,10 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
 
     {
         if (!expand__prelude_ready) {
-            static const char *lambda_prelude =
-                "defmacro \\ {head ..rest} {\n"
-                "  def body [make-syntax \"command\" $head $rest]\n"
-                "  def blk [make-syntax \"block\" [vec $body]]\n"
-                "  def pn [make-syntax \"lit-string-caret\" \"it\"]\n"
-                "  def params [make-syntax \"command\" $pn [vec]]\n"
-                "  def nm [make-syntax \"lit-string\" \"\"]\n"
-                "  [make-syntax \"command\" [make-syntax \"lit-string\" \"proc\"] "
-                "[vec $nm $params $blk]]\n"
-                "}\n";
+            /* Use prelude source from generated prelude_source.h */
 
             /* Parse the prelude */
-            LexResult ltoks = lexer_lex(lambda_prelude, &expand__prelude_arena);
+            LexResult ltoks = lexer_lex(jacl_prelude_source, &expand__prelude_arena);
             ParseResult ppre = parser_parse(ltoks, &expand__prelude_arena);
             for (uint32_t pi = 0; pi < ppre.count; pi++) {
                 if (ppre.nodes[pi] && ppre.nodes[pi]->type == AST_DEFMACRO) {

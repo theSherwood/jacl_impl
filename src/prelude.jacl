@@ -1,0 +1,12 @@
+# JACL Prelude - Macro definitions loaded before user code
+# This file is converted to a C header (prelude_source.h) by build.sh
+
+# Lambda shorthand: [\ + $it 1] expands to proc {^it} { + $it 1 }
+defmacro \ {head ..rest} {
+  def body [make-syntax "command" $head $rest]
+  def blk [make-syntax "block" [vec $body]]
+  def pn [make-syntax "lit-string-caret" "it"]
+  def params [make-syntax "command" $pn [vec]]
+  def nm [make-syntax "lit-string" ""]
+  [make-syntax "command" [make-syntax "lit-string" "proc"] [vec $nm $params $blk]]
+}
