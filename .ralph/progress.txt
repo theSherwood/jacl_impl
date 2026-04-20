@@ -162,3 +162,38 @@ Thread: (current)
   - Temp files for stderr need unique names (PID + hash) to avoid collisions
 ---
 
+## 2026-04-20 - US-006
+Thread: (current)
+- Added OP_EXEC_FULL opcode to bytecode.c, jacl.h
+- Modified [exec ...] builtin in compiler.c to use OP_EXEC_FULL instead of OP_EXEC
+- !cmd syntax (AST_SHELL_CMD) still uses OP_EXEC for stream-with-error semantics
+- Added STREAM_KIND_EXEC_BUFFER constant (value 6) for pre-collected exec output
+- Implemented OP_EXEC_FULL in vm.c:
+  - Builds command string with stderr redirect to temp file (same as OP_EXEC)
+  - Uses popen() to spawn process and reads ALL stdout into buffer
+  - Reads stderr from temp file after process completes
+  - Gets exit code via pclose() + WEXITSTATUS()
+  - Creates STREAM_KIND_EXEC_BUFFER stream from stdout content
+  - Creates map with {stdout: stream, stderr: string, exit: i32}
+- Implemented STREAM_KIND_EXEC_BUFFER handling in vm__pull_stream_one:
+  - Yields lines WITH trailing newlines (like STREAM_KIND_EXEC)
+  - Advances position index after each line
+- Implemented STREAM_KIND_EXEC_BUFFER handling in OP_COLLECT:
+  - Returns the full pre-collected stdout string (not a vector of lines)
+- Updated test_shell_exec_direct_call to use new [exec ...] semantics
+- Added 6 integration tests:
+  - test_exec_full_returns_map: basic map structure with exit field
+  - test_exec_full_stdout_stream: stdout is a stream that can be collected
+  - test_exec_full_stderr: stderr captures error output
+  - test_exec_full_nonzero_exit: works with exit code 1 (no error value)
+  - test_exec_full_both_outputs: captures both stdout and stderr
+  - test_exec_full_stdout_lines: stdout can iterate line by line
+- Files changed: src/bytecode.c, src/compiler.c, src/gc.c, src/jacl.h, src/vm.c, test/test_bytecode.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - Maps support -> field access via OP_STRUCT_GET_DYN - no need for registered struct types
+  - STREAM_KIND_EXEC collects to single string; derived streams (LINES, etc.) collect to vector
+  - Created STREAM_KIND_EXEC_BUFFER to combine: line-by-line iteration + string collection
+  - jacl_map_ptr() converts jacl_map_node* to JaclVal, not jacl_map_val()
+  - jacl_map_set(NULL, k, v) creates new map from empty; can chain set calls
+---
+

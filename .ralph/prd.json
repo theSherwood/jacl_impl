@@ -107,8 +107,8 @@
         "build.sh passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added OP_EXEC_FULL opcode. [exec ...] returns map with {stdout, stderr, exit}. stdout is STREAM_KIND_EXEC_BUFFER (yields lines, collects to string). 6 integration tests added."
     },
     {
       "id": "US-007",
