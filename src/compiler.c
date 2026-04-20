@@ -7650,10 +7650,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* exec — spawn external command, return stdout stream (US-004)
-   * [exec cmd arg1 arg2 ...] spawns a subprocess and returns a stream
-   * that lazily reads stdout. The command and args are collected into
-   * a vector for OP_EXEC to process. */
+  /* exec — spawn external command, return map {stdout, stderr, exit} (US-006)
+   * [exec cmd arg1 arg2 ...] spawns a subprocess, waits for completion,
+   * and returns a map with stdout (stream), stderr (string), exit (i32).
+   * This is the "full form" that gives access to all process outputs. */
   if (compiler__head_matches(head, "exec", 4)) {
     if (argc < 1) {
       compiler__builtin_arity_error(c, line, col, "exec", "at least 1 argument", argc);
@@ -7670,8 +7670,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__emit_byte(c, OP_VEC, line);
     compiler__emit_byte(c, (uint8_t)argc, line);
-    compiler__emit_byte(c, OP_EXEC, line);
-    c->last_expr_type = TYPE_STREAM;
+    compiler__emit_byte(c, OP_EXEC_FULL, line);
+    c->last_expr_type = TYPE_MAP;
     return;
   }
 

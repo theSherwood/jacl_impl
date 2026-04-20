@@ -2339,7 +2339,7 @@ static int test_shell_exec_multiple_args(void) {
     TEST_PASS();
 }
 
-/* Test: [exec "cmd" args...] direct call works */
+/* Test: [exec "cmd" args...] direct call works — returns map with stdout */
 static int test_shell_exec_direct_call(void) {
     tracker_reset();
     arena_t arena = { .allocator = tracked_allocator };
@@ -2350,7 +2350,11 @@ static int test_shell_exec_direct_call(void) {
     vm.print_fn = capture_print;
     vm.print_ctx = &cap;
 
-    VMResult result = jacl_run("[print {[exec \"echo\" \"world\"] | collect}]", &vm, &arena);
+    /* US-006: [exec ...] now returns a map with {stdout, stderr, exit} fields */
+    VMResult result = jacl_run(
+        "def r [exec \"echo\" \"world\"]\n"
+        "[print {$r->stdout | collect}]",
+        &vm, &arena);
 
     ASSERT_INT_EQ(result, VM_OK);
     ASSERT_STR_EQ(cap.buf, "world\n\n");
@@ -2570,6 +2574,166 @@ static int test_shell_exec_success_returns_stdout(void) {
     TEST_PASS();
 }
 
+/* ===== US-006: Shell Interop - [exec ...] full form returns struct ===== */
+
+/* Test: [exec ...] returns map with stdout, stderr, exit fields */
+static int test_exec_full_returns_map(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult result = jacl_run(
+        "def r [exec \"echo\" \"hello\"]\n"
+        "[print $r->exit]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* exit code should be 0 */
+    ASSERT_STR_EQ(cap.buf, "0\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: $result->stdout is a stream that can be collected */
+static int test_exec_full_stdout_stream(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult result = jacl_run(
+        "def r [exec \"echo\" \"world\"]\n"
+        "[print {$r->stdout | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* stdout should contain "world\n" */
+    ASSERT(strstr(cap.buf, "world") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: $result->stderr captures stderr output */
+static int test_exec_full_stderr(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult result = jacl_run(
+        "def r [exec \"sh\" \"-c\" \"echo err >&2\"]\n"
+        "[print $r->stderr]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* stderr should contain "err" */
+    ASSERT(strstr(cap.buf, "err") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: exec-full works with non-zero exit (doesn't return error) */
+static int test_exec_full_nonzero_exit(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult result = jacl_run(
+        "def r [exec \"false\"]\n"
+        "[print $r->exit]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* exit code should be 1 for `false` command */
+    ASSERT_STR_EQ(cap.buf, "1\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: exec-full captures both stdout and stderr */
+static int test_exec_full_both_outputs(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult result = jacl_run(
+        "def r [exec \"sh\" \"-c\" \"echo out; echo err >&2\"]\n"
+        "[print {$r->stdout | collect}]\n"
+        "[print $r->stderr]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* stdout should have "out" and stderr should have "err" */
+    ASSERT(strstr(cap.buf, "out") != NULL);
+    ASSERT(strstr(cap.buf, "err") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: exec-full stdout can iterate line by line */
+static int test_exec_full_stdout_lines(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult result = jacl_run(
+        "def r [exec \"printf\" \"a\\nb\\nc\\n\"]\n"
+        "[print {$r->stdout | first}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* first line is "a\n" (exec buffer yields lines WITH trailing \n), plus print's \n */
+    ASSERT_STR_EQ(cap.buf, "a\n\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -2688,6 +2852,13 @@ int main(void) {
     { "shell_exec_err_pipe",     test_shell_exec_error_pipe_compose },
     { "shell_exec_err_try",      test_shell_exec_error_try_catch },
     { "shell_exec_success_out",  test_shell_exec_success_returns_stdout },
+    /* US-006: [exec ...] full form */
+    { "exec_full_returns_map",   test_exec_full_returns_map },
+    { "exec_full_stdout_stream", test_exec_full_stdout_stream },
+    { "exec_full_stderr",        test_exec_full_stderr },
+    { "exec_full_nonzero_exit",  test_exec_full_nonzero_exit },
+    { "exec_full_both_outputs",  test_exec_full_both_outputs },
+    { "exec_full_stdout_lines",  test_exec_full_stdout_lines },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

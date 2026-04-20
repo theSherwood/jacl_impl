@@ -176,6 +176,7 @@ typedef enum {
   OP_INTERPRET,     /* pop string, interpret as source, push result */
   OP_INTERPRET_PRELUDE, /* push default permissive prelude map for [interpret] */
   OP_EXEC,          /* pop args (vector) + cmd (string), spawn process, push stdout stream */
+  OP_EXEC_FULL,     /* pop args (vector) + cmd (string), run process, push map {stdout, stderr, exit} */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -467,6 +468,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_INTERPRET:           return "OP_INTERPRET";
     case OP_INTERPRET_PRELUDE:   return "OP_INTERPRET_PRELUDE";
     case OP_EXEC:                return "OP_EXEC";
+    case OP_EXEC_FULL:           return "OP_EXEC_FULL";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";

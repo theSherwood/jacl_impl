@@ -216,6 +216,7 @@ typedef struct {
 #define STREAM_KIND_TAKE       3
 #define STREAM_KIND_LINES      4
 #define STREAM_KIND_EXEC       5
+#define STREAM_KIND_EXEC_BUFFER 6
 #define STREAM_MAX_ARGS     8
 
 typedef struct {
@@ -756,6 +757,7 @@ typedef enum {
   OP_INTERPRET,    /* pop string, interpret as JACL source, push result */
   OP_INTERPRET_PRELUDE, /* push default permissive prelude map for [interpret] */
   OP_EXEC,         /* pop args (vector) + cmd (string), spawn process, push stdout stream */
+  OP_EXEC_FULL,    /* pop args (vector) + cmd (string), run process, push map {stdout, stderr, exit} */
   OP_HALT
 } OpCode;
 
