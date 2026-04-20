@@ -97,3 +97,37 @@ Thread: (current)
   - Shell commands transform to calls to exec (prelude function), not a new opcode
 ---
 
+## 2026-04-20 - US-004
+Thread: (current)
+- Added OP_EXEC opcode to bytecode (src/bytecode.c)
+- Added STREAM_KIND_EXEC constant (value 5) for exec streams (src/gc.c, src/jacl.h)
+- Added "exec" to jacl_non_core_builtins list for sandbox capability control
+- Updated compiler to emit OP_VEC + OP_EXEC directly for AST_SHELL_CMD:
+  - Compiles head and args, emits OP_VEC to create args vector, then OP_EXEC
+  - Added compile-time error for spread in shell commands (OP_VEC doesn't support it)
+- Implemented OP_EXEC in VM:
+  - Pops args vector, builds shell-quoted command string
+  - Calls popen() to spawn process
+  - Creates STREAM_KIND_EXEC stream with FILE* stored in args[0]
+- Implemented STREAM_KIND_EXEC handling in vm__pull_stream_one:
+  - Reads stdout line-by-line via fgets for lazy evaluation
+  - On EOF, pclose() and set STREAM_EXHAUSTED
+- Special-cased OP_COLLECT for exec streams:
+  - Reads all remaining output via fread
+  - Returns concatenated result as single string
+- Added AST_SHELL_CMD case to syntax_from_ast (src/syntax.c)
+- Added 5 integration tests:
+  - test_shell_exec_echo_basic: basic !echo hello
+  - test_shell_exec_multiple_args: !echo a b c
+  - test_shell_exec_direct_call: {!echo hello | collect}
+  - test_shell_exec_stream_lazy: large output doesn't buffer fully
+  - test_shell_exec_inherits_env: child inherits parent env
+- Updated test_bytecode.c: OP_HALT now 156, OP_EXEC = 155
+- Files changed: src/bytecode.c, src/compiler.c, src/gc.c, src/jacl.h, src/syntax.c, src/vm.c, test/test_bytecode.c, test/test_compiler.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - popen() is simpler than fork/exec for basic stdout capture
+  - Storing FILE* in stream args[0] requires uintptr_t cast
+  - Lexer splits paths like `/tmp` into `/` and `tmp` tokens - tests must avoid paths with special chars
+  - OP_VEC expects fixed element count, doesn't support spread - spread in shell commands deferred
+---
+

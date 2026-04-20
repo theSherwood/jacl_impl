@@ -71,8 +71,8 @@
         "build.sh passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added OP_EXEC opcode and STREAM_KIND_EXEC. Compiler emits OP_VEC + OP_EXEC directly for shell commands. VM spawns process via popen, returns lazy stdout stream. Collect on exec streams returns full output. 5 integration tests added."
     },
     {
       "id": "US-005",
