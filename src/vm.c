@@ -1053,6 +1053,35 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         return STREAM_PULL_VALUE;
     }
 
+    /* --- Exec stream (US-004): read stdout from spawned process --- */
+    if (stream->kind == STREAM_KIND_EXEC) {
+        FILE* fp = (FILE*)(uintptr_t)stream->args[0];
+        if (!fp) {
+            stream->state = STREAM_EXHAUSTED;
+            *out_value = JACL_NIL;
+            return STREAM_PULL_EXHAUSTED;
+        }
+
+        /* Read a line from the process output */
+        char line_buf[4096];
+        if (fgets(line_buf, sizeof(line_buf), fp) == NULL) {
+            /* EOF or error - close the pipe */
+            pclose(fp);
+            stream->args[0] = (JaclVal)0;  /* clear FILE* */
+            stream->state = STREAM_EXHAUSTED;
+            *out_value = JACL_NIL;
+            return STREAM_PULL_EXHAUSTED;
+        }
+
+        /* Create string from line (keep newline for now) */
+        uint32_t line_len = (uint32_t)strlen(line_buf);
+        gc__current_heap = &vm->heap;
+        JaclVal line_str = jacl_string_new(&vm->heap, vm->intern_table,
+                                           line_buf, line_len);
+        *out_value = line_str;
+        return STREAM_PULL_VALUE;
+    }
+
     /* --- Generator stream (state machine) --- */
     uint32_t caller_stack_top   = vm->stack_top;
     uint32_t caller_frame_count = vm->frame_count;
@@ -5414,6 +5443,58 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         JaclStream* stream = jacl_as_stream(coll_val);
 
+        /* US-004: Exec streams collect to a single string (concatenated stdout) */
+        if (stream->kind == STREAM_KIND_EXEC) {
+          FILE* fp = (FILE*)(uintptr_t)stream->args[0];
+          if (!fp) {
+            /* Already exhausted */
+            result = vm__push(vm, jacl_inline_string("", 0));
+            if (result != VM_OK) return result;
+            break;
+          }
+
+          /* Read all remaining output into arena-allocated buffer */
+          size_t capacity = 4096;
+          size_t length = 0;
+          char* buffer = (char*)arena_alloc(vm->arena, capacity);
+
+          while (1) {
+            size_t avail = capacity - length - 1;
+            if (avail < 256) {
+              /* Grow buffer */
+              size_t new_cap = capacity * 2;
+              char* new_buf = (char*)arena_alloc(vm->arena, new_cap);
+              memcpy(new_buf, buffer, length);
+              buffer = new_buf;
+              capacity = new_cap;
+              avail = capacity - length - 1;
+            }
+            size_t nread = fread(buffer + length, 1, avail, fp);
+            if (nread == 0) break;
+            length += nread;
+          }
+          buffer[length] = '\0';
+
+          /* Close the pipe */
+          pclose(fp);
+          stream->args[0] = (JaclVal)0;
+          stream->state = STREAM_EXHAUSTED;
+
+          /* Create the result string */
+          gc__current_heap = &vm->heap;
+          JaclVal result_str;
+          if (length == 0) {
+            result_str = jacl_inline_string("", 0);
+          } else {
+            result_str = jacl_string_new(&vm->heap, vm->intern_table,
+                                         buffer, (uint32_t)length);
+          }
+          frame = &vm->frames[vm->frame_count - 1];
+          result = vm__push(vm, result_str);
+          if (result != VM_OK) return result;
+          break;
+        }
+
         /* Derived streams (filter, etc.) use the unified pull helper */
         if (stream->kind != STREAM_KIND_GENERATOR) {
           gc__current_heap = &vm->heap;
@@ -6652,6 +6733,116 @@ interpret_done:
         }
 
         result = vm__push(vm, jacl_map_ptr(m));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      /* US-004: exec — spawn external command, return stdout stream
+       * Stack: [args_vec] -> [stream]
+       * args_vec = ["cmd", "arg1", "arg2", ...]
+       * Returns a lazy stream that reads stdout from the child process.
+       */
+      case OP_EXEC: {
+        JaclVal args_vec;
+        result = vm__pop(vm, &args_vec);
+        if (result != VM_OK) return result;
+
+        if (!jacl_is_vector(args_vec)) {
+          vm__set_error(vm, "exec requires a vector of arguments, got %s",
+                       vm__type_name(args_vec));
+          return VM_RUNTIME_ERROR;
+        }
+
+        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(args_vec);
+        uint32_t argc = jacl_vec_count(vec);
+        if (argc == 0) {
+          vm__set_error(vm, "exec requires at least a command name");
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Build the command string for popen.
+         * We join all args with spaces, quoting as needed for the shell. */
+        char cmd_buf[4096];
+        char* p = cmd_buf;
+        char* end = cmd_buf + sizeof(cmd_buf) - 1;
+
+        for (uint32_t i = 0; i < argc && p < end; i++) {
+          jacl_vec_get_result gr = jacl_vec_get(vec, i);
+          JaclVal arg_val = gr.value;
+          if (!jacl_is_string(arg_val)) {
+            vm__set_error(vm, "exec argument %d must be a string, got %s",
+                         (int)i, vm__type_name(arg_val));
+            return VM_RUNTIME_ERROR;
+          }
+          uint32_t arg_len = jacl_string_byte_len(arg_val);
+          char arg_buf[1024];
+          if (arg_len >= sizeof(arg_buf)) arg_len = sizeof(arg_buf) - 1;
+          jacl_string_data(arg_val, arg_buf, arg_len + 1);
+          arg_buf[arg_len] = '\0';
+
+          if (i > 0 && p < end) *p++ = ' ';
+
+          /* Simple quoting: if the arg contains spaces or special chars, quote it */
+          int needs_quote = 0;
+          for (uint32_t j = 0; j < arg_len; j++) {
+            char c = arg_buf[j];
+            if (c == ' ' || c == '\t' || c == '"' || c == '\'' ||
+                c == '\\' || c == '$' || c == '`' || c == '!' ||
+                c == '*' || c == '?' || c == '[' || c == ']' ||
+                c == '(' || c == ')' || c == '{' || c == '}' ||
+                c == '<' || c == '>' || c == '|' || c == '&' ||
+                c == ';' || c == '\n') {
+              needs_quote = 1;
+              break;
+            }
+          }
+
+          if (needs_quote) {
+            if (p < end) *p++ = '\'';
+            for (uint32_t j = 0; j < arg_len && p < end; j++) {
+              char c = arg_buf[j];
+              if (c == '\'') {
+                /* Escape single quote: end quote, escaped quote, start quote */
+                if (p + 4 <= end) {
+                  *p++ = '\'';
+                  *p++ = '\\';
+                  *p++ = '\'';
+                  *p++ = '\'';
+                }
+              } else {
+                *p++ = c;
+              }
+            }
+            if (p < end) *p++ = '\'';
+          } else {
+            for (uint32_t j = 0; j < arg_len && p < end; j++) {
+              *p++ = arg_buf[j];
+            }
+          }
+        }
+        *p = '\0';
+
+        /* Spawn the process with popen */
+        FILE* fp = popen(cmd_buf, "r");
+        if (!fp) {
+          vm__set_error(vm, "exec: failed to spawn process '%s'", cmd_buf);
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Create a stream to read stdout */
+        JaclVal stream_val = jacl_stream(&vm->heap);
+        JaclStream* stream = jacl_as_stream(stream_val);
+        stream->kind = STREAM_KIND_EXEC;
+        stream->state = STREAM_PENDING;
+        /* Store the FILE* pointer as a raw value in args[0] */
+        stream->args[0] = (JaclVal)(uintptr_t)fp;
+        /* Store the command for error messages */
+        gc__current_heap = &vm->heap;
+        stream->args[1] = jacl_intern(&vm->heap, vm->intern_table,
+                                       cmd_buf, (uint32_t)strlen(cmd_buf));
+        stream->arg_count = 2;
+
+        result = vm__push(vm, stream_val);
         if (result != VM_OK) return result;
         break;
       }

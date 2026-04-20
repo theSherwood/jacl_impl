@@ -175,6 +175,7 @@ typedef enum {
   OP_SYNTAX_OP,     /* uint8_t subop; introspect syntax object (kind/datum/head/args/commands/pos/to-string) */
   OP_INTERPRET,     /* pop string, interpret as source, push result */
   OP_INTERPRET_PRELUDE, /* push default permissive prelude map for [interpret] */
+  OP_EXEC,          /* pop args (vector) + cmd (string), spawn process, push stdout stream */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -465,6 +466,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_SYNTAX_OP:           return "OP_SYNTAX_OP";
     case OP_INTERPRET:           return "OP_INTERPRET";
     case OP_INTERPRET_PRELUDE:   return "OP_INTERPRET_PRELUDE";
+    case OP_EXEC:                return "OP_EXEC";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";

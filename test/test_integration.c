@@ -2289,6 +2289,130 @@ static int test_ctx_sequential_runs(void) {
     TEST_PASS();
 }
 
+/* ===== US-004: Shell Interop - exec returns stdout stream ===== */
+
+/* Test: basic !echo command collects to string */
+static int test_shell_exec_echo_basic(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Run !echo "hello" | collect and print the result */
+    VMResult result = jacl_run("[print {!echo hello | collect}]", &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* echo outputs "hello\n" */
+    ASSERT_STR_EQ(cap.buf, "hello\n\n");  /* output + print newline */
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: !echo with multiple word args passes correctly */
+static int test_shell_exec_multiple_args(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Run !echo with multiple args */
+    VMResult result = jacl_run("[print {!echo one two three | collect}]", &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* echo outputs "one two three\n" */
+    ASSERT_STR_EQ(cap.buf, "one two three\n\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: [exec "cmd" args...] direct call works */
+static int test_shell_exec_direct_call(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    VMResult result = jacl_run("[print {[exec \"echo\" \"world\"] | collect}]", &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT_STR_EQ(cap.buf, "world\n\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: exec stream is lazy - can iterate line by line */
+static int test_shell_exec_stream_lazy(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* printf outputs two lines, we take the first */
+    VMResult result = jacl_run(
+        "[print {!printf \"line1\\nline2\\n\" | first}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT_STR_EQ(cap.buf, "line1\n\n");
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: child process inherits working directory */
+static int test_shell_exec_inherits_env(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* pwd should output the current working directory - just verify non-empty */
+    VMResult result = jacl_run(
+        "[print {!pwd | collect}]",
+        &vm, &arena);
+
+    /* Should succeed and output should have non-zero length */
+    ASSERT_INT_EQ(result, VM_OK);
+    /* The output should contain at least "/" (the root) */
+    ASSERT(cap.len > 2);  /* "/something\n\n" at minimum */
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -2394,6 +2518,12 @@ int main(void) {
     { "jacl_run_restores_heap",  test_jacl_run_restores_heap },
     { "ctx_run_macros_heap",     test_ctx_run_with_macros_restores_heap },
     { "ctx_sequential_runs",     test_ctx_sequential_runs },
+    /* US-004 (Shell Interop): exec returns stdout stream */
+    { "shell_exec_echo_basic",   test_shell_exec_echo_basic },
+    { "shell_exec_multi_args",   test_shell_exec_multiple_args },
+    { "shell_exec_direct_call",  test_shell_exec_direct_call },
+    { "shell_exec_stream_lazy",  test_shell_exec_stream_lazy },
+    { "shell_exec_inherits_env", test_shell_exec_inherits_env },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

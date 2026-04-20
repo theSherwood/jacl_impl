@@ -256,6 +256,36 @@ JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap,
         break;
     }
 
+    case AST_SHELL_CMD: {
+        /* Shell commands convert to SYNTAX_COMMAND with "exec" as head
+         * and command name + args as the arguments.
+         * This matches the compiler's transformation of !cmd to [exec ...] */
+        syn->kind = SYNTAX_COMMAND;
+        /* Create head = syntax object for "exec" string */
+        JaclVal exec_syn_val = gc_alloc_syntax(heap);
+        JaclSyntax *exec_syn = jacl_as_syntax(exec_syn_val);
+        exec_syn->kind = SYNTAX_LIT_STRING;
+        exec_syn->data.lit_string.value = jacl_intern(heap, intern, "exec", 4);
+        syntax__set_pos(exec_syn, node);
+        syn->data.command.head = exec_syn_val;
+
+        /* Build args: [cmd_head, arg1, arg2, ...] */
+        uint32_t argc = node->data.shell_cmd.arg_count;
+        jacl_vec_root *args = jacl_vec_empty();
+        /* First arg is the command name */
+        JaclVal head_arg = syntax_from_ast(node->data.shell_cmd.head,
+                                           heap, intern);
+        args = jacl_vec_push_back(args, head_arg);
+        /* Add remaining args */
+        for (uint32_t i = 0; i < argc; i++) {
+            JaclVal arg = syntax_from_ast(node->data.shell_cmd.args[i],
+                                          heap, intern);
+            args = jacl_vec_push_back(args, arg);
+        }
+        syn->data.command.args = jacl_vector_ptr(args);
+        break;
+    }
+
     case AST_ERROR:
         /* AST_ERROR nodes cannot be converted to syntax objects.
          * Return nil to signal the error. Callers should check
