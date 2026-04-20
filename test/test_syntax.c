@@ -1863,7 +1863,7 @@ static int test_defmacro_registers_in_table(void) {
     CompileResult cr = compile_source(src, &arena, &vm);
     ASSERT(cr.error_count == 0);
     ASSERT(cr.macro_table != NULL);
-    ASSERT(cr.macro_table->count == 2);  /* 1 built-in (\) + 1 user-defined */
+    ASSERT(cr.macro_table->count == 9);  /* 8 prelude (\, =, :, |, and, or, not, ::) + 1 user-defined */
 
     MacroEntry* entry = macro_table_lookup(cr.macro_table, "unless", 6);
     ASSERT(entry != NULL);
@@ -1909,7 +1909,7 @@ static int test_defmacro_zero_params_registers(void) {
     CompileResult cr = compile_source(src, &arena, &vm);
     ASSERT(cr.error_count == 0);
     ASSERT(cr.macro_table != NULL);
-    ASSERT(cr.macro_table->count == 2);  /* 1 built-in (\) + 1 user-defined */
+    ASSERT(cr.macro_table->count == 9);  /* 8 prelude (\, =, :, |, and, or, not, ::) + 1 user-defined */
 
     MacroEntry* entry = macro_table_lookup(cr.macro_table, "now", 3);
     ASSERT(entry != NULL);
@@ -1937,7 +1937,7 @@ static int test_defmacro_multiple_register(void) {
     CompileResult cr = compile_source(src, &arena, &vm);
     ASSERT(cr.error_count == 0);
     ASSERT(cr.macro_table != NULL);
-    ASSERT(cr.macro_table->count == 3);  /* 1 built-in (\) + 2 user-defined */
+    ASSERT(cr.macro_table->count == 10);  /* 8 prelude (\, =, :, |, and, or, not, ::) + 2 user-defined */
 
     MacroEntry* e1 = macro_table_lookup(cr.macro_table, "unless", 6);
     ASSERT(e1 != NULL);
@@ -2127,7 +2127,7 @@ static int test_expand_unless(void) {
     ASSERT(err == NULL);
 
     /* After expansion, node[0] is defmacro (unchanged),
-     * node[1] should be the expanded [if [not [eq 1 2]] { print ok }] */
+     * node[1] should be the expanded [if [~ [eq 1 2]] { print ok }] */
     ASSERT(pr.count >= 2);
     AstNode* expanded = pr.nodes[1];
     ASSERT(expanded != NULL);
@@ -2141,16 +2141,17 @@ static int test_expand_unless(void) {
     ASSERT(expanded->data.command.head->type == AST_LIT_STRING);
     ASSERT(expanded->data.command.head->data.lit_string.length == 2);
     ASSERT(memcmp(expanded->data.command.head->data.lit_string.value, "if", 2) == 0);
-    /* Check 2 args: [not [eq 1 2]] and { print ok } */
+    /* Check 2 args: [~ [eq 1 2]] and { print ok } */
+    /* Note: 'not' is now a prelude macro that expands to '~' */
     ASSERT(expanded->data.command.arg_count == 2);
-    /* First arg: [not [eq 1 2]] */
+    /* First arg: [~ [eq 1 2]] */
     AstNode* not_cmd = expanded->data.command.args[0];
     ASSERT(not_cmd != NULL);
     ASSERT(not_cmd->type == AST_COMMAND);
     ASSERT(not_cmd->data.command.head->type == AST_LIT_STRING);
-    ASSERT(memcmp(not_cmd->data.command.head->data.lit_string.value, "not", 3) == 0);
+    ASSERT(memcmp(not_cmd->data.command.head->data.lit_string.value, "~", 1) == 0);
     ASSERT(not_cmd->data.command.arg_count == 1);
-    /* The arg to not should be [eq 1 2] */
+    /* The arg to ~ should be [eq 1 2] */
     AstNode* eq_cmd = not_cmd->data.command.args[0];
     ASSERT(eq_cmd != NULL);
     ASSERT(eq_cmd->type == AST_COMMAND);
@@ -2294,12 +2295,13 @@ static int test_expand_use_before_defmacro(void) {
     ASSERT(first->data.command.head->type == AST_LIT_STRING);
     ASSERT(first->data.command.head->data.lit_string.length == 2);
     ASSERT(memcmp(first->data.command.head->data.lit_string.value, "if", 2) == 0);
-    /* Verify expansion structure: [if [not [eq 1 2]] { print ok }] */
+    /* Verify expansion structure: [if [~ [eq 1 2]] { print ok }] */
+    /* Note: 'not' is now a prelude macro that expands to '~' */
     ASSERT(first->data.command.arg_count == 2);
     AstNode* not_cmd = first->data.command.args[0];
     ASSERT(not_cmd->type == AST_COMMAND);
     ASSERT(not_cmd->data.command.head->type == AST_LIT_STRING);
-    ASSERT(memcmp(not_cmd->data.command.head->data.lit_string.value, "not", 3) == 0);
+    ASSERT(memcmp(not_cmd->data.command.head->data.lit_string.value, "~", 1) == 0);
     AstNode* body = first->data.command.args[1];
     ASSERT(body->type == AST_BLOCK);
 

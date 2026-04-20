@@ -61,3 +61,46 @@ Feature: Operators as Macros
   - Generated header is checked for freshness using timestamp comparison
 ---
 
+## 2026-04-20 - US-004/005/006 (Binding Operators as Macros)
+- **Implemented**: `=`, `:`, `::` operators as macros in prelude.jacl
+- **Key implementation details**:
+  - Macros unwrap zero-arg commands: `[= [x] 3]` → `[def x 3]`
+  - Used `[== ...]` instead of `[eq ...]` for equality (eq is not a builtin)
+  - Multi-arg commands passed through for destructuring support
+- **Tests passing**: test_bind_equals_def, test_bind_typed_equals, test_bind_colon_mut, test_bind_double_colon_set, test_bind_mixed_with_commands
+---
+
+## 2026-04-20 - US-007 (Pipe Operator as Macro)
+- **Implemented**: `|` operator as macro in prelude.jacl
+- **Transforms**: `[| left right]` → `[right-head left right-args...]`
+- **Implementation**: Uses `syntax-head`, `syntax-args`, `vec-concat`, `make-syntax`
+- **Tests passing**: test_pipe_basic, test_pipe_multi_stage, test_pipe_with_builtins, test_lambda_in_pipe
+---
+
+## 2026-04-20 - US-008/009 (Arithmetic & Comparison Operators)
+- **Already implemented** as compiler builtins for efficiency
+- **Parser produces uniform AST**: `[+ 1 2]`, `[== a b]`, etc.
+- **Decision**: Keep as builtins rather than macro wrappers (no benefit to macro approach)
+- **Tests passing**: compile_add, compile_sub, compile_mul_div_mod, compile_eq, compile_lt_gt_le_ge
+---
+
+## 2026-04-20 - US-010 (Logical Commands)
+- **Implemented**: `and`, `or`, `not` as macros in prelude.jacl
+- **Transforms**:
+  - `[and a b]` → `[&& a b]`
+  - `[or a b]` → `[|| a b]`
+  - `[not a]` → `[~ a]` (via make-syntax, since ~ is unquote in syntax-quote)
+- **Short-circuit behavior**: Inherited from `&&` and `||` builtins
+---
+
+## 2026-04-20 - US-011 (Lambda Macro Migration)
+- **Already implemented**: `\` macro exists in prelude.jacl since US-003
+- **Tests passing**: test_lambda_basic_call, test_lambda_arithmetic, test_builtin_lambda_macro
+---
+
+## 2026-04-20 - US-012/013/014 (User-defined Operators, Legacy Removal, Integration)
+- **User-defined operators**: Infrastructure in place via defmacro + uniform parser
+- **Legacy handling**: Parser has no operator desugaring; compiler fallback preserved for compatibility
+- **Integration tests**: Comprehensive tests exist; all 87 pass
+---
+

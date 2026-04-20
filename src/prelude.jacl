@@ -10,3 +10,80 @@ defmacro \ {head ..rest} {
   def nm [make-syntax "lit-string" ""]
   [make-syntax "command" [make-syntax "lit-string" "proc"] [vec $nm $params $blk]]
 }
+
+# Binding operator =: x = 3 expands to [def x 3]
+# Parser produces [= [x] 3]; macro unwraps zero-arg commands to simple names
+defmacro = {lhs rhs} {
+  # Check if lhs is a zero-arg command (bare name from parser)
+  if [== [syntax-kind $lhs] "command"] {
+    if [== [vec-len [syntax-args $lhs]] 0] {
+      # Unwrap: [x] -> x
+      def name [syntax-head $lhs]
+      syntax-quote [def ~name ~rhs]
+    } else {
+      # Multi-arg command: destructuring pattern
+      syntax-quote [def ~lhs ~rhs]
+    }
+  } else {
+    # Not a command: pass through
+    syntax-quote [def ~lhs ~rhs]
+  }
+}
+
+# Mutable binding operator :: x : 0 expands to [mut x 0]
+defmacro : {lhs rhs} {
+  if [== [syntax-kind $lhs] "command"] {
+    if [== [vec-len [syntax-args $lhs]] 0] {
+      def name [syntax-head $lhs]
+      syntax-quote [mut ~name ~rhs]
+    } else {
+      syntax-quote [mut ~lhs ~rhs]
+    }
+  } else {
+    syntax-quote [mut ~lhs ~rhs]
+  }
+}
+
+# Pipe operator: foo a | bar b expands to [bar [foo a] b]
+# Threads lhs as first argument to rhs command
+defmacro | {lhs rhs} {
+  if [== [syntax-kind $rhs] "command"] {
+    def head [syntax-head $rhs]
+    def args [syntax-args $rhs]
+    def new-args [vec-concat [vec $lhs] $args]
+    [make-syntax "command" $head $new-args]
+  } else {
+    syntax-error "pipe operator | requires a command on the right side"
+  }
+}
+
+# Logical AND: [and a b] expands to [&& a b] for short-circuit behavior
+defmacro and {a b} {
+  syntax-quote [&& ~a ~b]
+}
+
+# Logical OR: [or a b] expands to [|| a b] for short-circuit behavior
+defmacro or {a b} {
+  syntax-quote [|| ~a ~b]
+}
+
+# Logical NOT: [not a] expands to [~ a]
+# Uses make-syntax because ~ is the unquote operator in syntax-quote
+defmacro not {a} {
+  def head [make-syntax "lit-string" "~"]
+  [make-syntax "command" $head [vec $a]]
+}
+
+# Reassignment operator ::: x :: 5 expands to [set x 5]
+defmacro :: {lhs rhs} {
+  if [== [syntax-kind $lhs] "command"] {
+    if [== [vec-len [syntax-args $lhs]] 0] {
+      def name [syntax-head $lhs]
+      syntax-quote [set ~name ~rhs]
+    } else {
+      syntax-quote [set ~lhs ~rhs]
+    }
+  } else {
+    syntax-quote [set ~lhs ~rhs]
+  }
+}
