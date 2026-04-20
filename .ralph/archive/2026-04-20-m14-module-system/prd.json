@@ -1,0 +1,148 @@
+{
+  "project": "JACL",
+  "branchName": "ralph/m14-module-system",
+  "description": "M14 Module System - File-based modules as first-class map values. [use \"path\"] compiles and loads a file, returning a map of public names. Module members accessed via -> syntax (extended to maps) or destructuring. Leading _ makes names private. Includes module cache and circular import detection.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Extend [.] to support maps",
+      "description": "As a developer, I want [. $map key] to work on maps (not just structs) so that I can use -> syntax for map field access.",
+      "acceptanceCriteria": [
+        "[. $map \"key\"] returns [map-get $map \"key\"] when $map is a map",
+        "$map->key desugars to [. $map key] (already works via parser)",
+        "Chaining works: $map->foo->bar when foo's value is also a map",
+        "Type error if value is not a struct or map",
+        "[. $map \"key\" value] (3-arg set form) returns [map-set $map \"key\" value] for maps",
+        "Existing struct behavior unchanged",
+        "build.sh passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Basic [use \"path\"] returns module map",
+      "description": "As a developer, I want [use \"./foo.jacl\"] to compile and execute a file, returning a map of its public top-level bindings.",
+      "acceptanceCriteria": [
+        "[use \"./foo.jacl\"] compiles the file relative to the current file's directory",
+        "Executes the module's top-level code once",
+        "Returns a map: {\"name1\": <value>, \"name2\": <closure>, ...}",
+        "Top-level def and proc bindings are included",
+        "Top-level mut bindings are NOT included (mutable state is module-private)",
+        "Macros defined in the module are NOT included (compile-time only)",
+        "Structs defined in the module are registered globally (available to importer)",
+        "File not found produces compile error with clear message",
+        "Parse/compile errors in module surface to importer with file:line",
+        "build.sh passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Private names with _ prefix",
+      "description": "As a module author, I want names starting with _ to be private so that I can hide implementation details.",
+      "acceptanceCriteria": [
+        "Top-level def _helper ... is NOT included in the returned map",
+        "Top-level proc _internal ... is NOT included in the returned map",
+        "Private names are still usable within the module",
+        "Single _ as a name is invalid (already handled by destructuring)",
+        "build.sh passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Module cache",
+      "description": "As the runtime, I want to cache compiled modules so that [use \"./foo.jacl\"] called multiple times returns the same map instance.",
+      "acceptanceCriteria": [
+        "First [use \"./foo.jacl\"] compiles, executes, caches result",
+        "Subsequent [use \"./foo.jacl\"] returns cached map (no re-execution)",
+        "Cache key is canonical absolute path (resolve symlinks, normalize ..)",
+        "Different relative paths to same file hit the cache: [use \"./foo.jacl\"] and [use \"../dir/foo.jacl\"]",
+        "Module's side effects (print, etc.) only happen once",
+        "build.sh passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Circular import detection",
+      "description": "As the compiler, I want to detect circular imports and produce a clear error so that developers don't hit infinite loops.",
+      "acceptanceCriteria": [
+        "a.jacl uses b.jacl, b.jacl uses a.jacl produces compile error",
+        "Error message shows the cycle: \"circular import: a.jacl -> b.jacl -> a.jacl\"",
+        "Detection happens at compile time, not runtime",
+        "Self-import [use \"./self.jacl\"] is detected",
+        "Transitive cycles (a -> b -> c -> a) are detected",
+        "build.sh passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Module-relative path resolution",
+      "description": "As a developer, I want paths in [use] to resolve relative to the containing file, not the current working directory.",
+      "acceptanceCriteria": [
+        "[use \"./util.jacl\"] in /project/lib/main.jacl looks for /project/lib/util.jacl",
+        "[use \"../common.jacl\"] in /project/lib/main.jacl looks for /project/common.jacl",
+        "Nested imports resolve correctly: if a.jacl uses ./b.jacl and b.jacl uses ./c.jacl, c is found relative to b",
+        "Absolute paths work: [use \"/usr/lib/jacl/std.jacl\"]",
+        "Missing .jacl extension is NOT auto-added (explicit paths only)",
+        "build.sh passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Destructuring import pattern",
+      "description": "As a developer, I want to destructure the module map inline to import specific names directly.",
+      "acceptanceCriteria": [
+        "def {foo, bar} [use \"./mod.jacl\"] binds foo and bar in current scope",
+        "def {foo, ..} [use \"./mod.jacl\"] binds foo plus all other public names (if spread supported for maps)",
+        "def {foo, ..rest} [use \"./mod.jacl\"] binds foo, remaining names go into rest map",
+        "Importing a non-existent name produces error: \"module has no export 'baz'\"",
+        "Works with existing named destructuring implementation",
+        "build.sh passes",
+        "Tests pass"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Integration tests - realistic module usage",
+      "description": "As the maintainer, I want end-to-end tests showing realistic module patterns.",
+      "acceptanceCriteria": [
+        "Test: utility module with helper procs, imported and called",
+        "Test: module with private _helper proc not visible to importer",
+        "Test: module defines struct, importer constructs instances",
+        "Test: diamond import (a uses b and c, both b and c use d) - d loaded once",
+        "Test: module with mut state, importer cannot access it directly",
+        "Test: chained -> access into nested module maps",
+        "build.sh passes",
+        "Tests pass"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

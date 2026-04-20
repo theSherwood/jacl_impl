@@ -1,6 +1,5 @@
 # Ralph Progress Log
-Started: Sun Apr 20 2026
-Feature: Operators as Macros
+Started: Thu Apr 17 2026
 
 ## Codebase Patterns
 (To be discovered during implementation)
