@@ -17,8 +17,8 @@
         "build.sh passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Lexer already had TOKEN_BANG support. Added 8 tests verifying shell interop syntax."
     },
     {
       "id": "US-002",

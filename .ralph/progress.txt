@@ -3,7 +3,32 @@ Started: Sun Apr 20 2026
 Feature: Shell Interop (!cmd)
 
 ## Codebase Patterns
-(To be filled in during first iteration)
+- Lexer already has many token types defined - check existing TOKEN_* before adding new ones
+- Lexer tests are in test/test_lexer.c with a main() test runner at the end
+- Tests follow pattern: setup(), lexer_lex(), assertions, teardown(), check_no_leaks()
+- `-flag` syntax lexes as TOKEN_OPERATOR (`-`) + TOKEN_WORD (`flag`), not a single token
+- build.sh runs all tests and reports pass/fail counts
 
+---
+
+## 2026-04-20 - US-001
+Thread: (current)
+- Verified TOKEN_BANG already exists in lexer (lexer.c:46)
+- Verified `!` at command position produces TOKEN_BANG (lines 1462-1469)
+- Added 8 comprehensive lexer tests for shell interop syntax:
+  - test_bang_ls: `!ls` → BANG + WORD
+  - test_bang_git_status: `!git status` → BANG + WORD + WORD
+  - test_bang_ls_la: `!ls -la` → BANG + WORD + OPERATOR + WORD
+  - test_bang_with_var: `!$cmd` → BANG + VAR
+  - test_bang_with_string: `!"my script.sh"` → BANG + STRING
+  - test_bang_with_splat: `!cmd ..$args` → BANG + WORD + DOTDOT + VAR
+  - test_bang_in_pipeline: `!ls | !grep foo` → proper pipeline tokens
+  - test_bang_neq_distinction: `!=` stays TOKEN_OPERATOR
+- Files changed: test/test_lexer.c
+- **Learnings for future iterations:**
+  - TOKEN_BANG was already implemented for other purposes - lexer was ahead of the PRD
+  - `-` followed by letters is not a single operator; it splits into OPERATOR + WORD
+  - Test helper `token_text_eq` compares token length with text length
+  - Test helper `var_text_eq` skips the `$` prefix (token.length - 1)
 ---
 
