@@ -1091,6 +1091,15 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
                 stderr_path[0] = '\0';
             }
 
+            /* US-007: Clean up stdin temp file if present */
+            if (stream->arg_count >= 4 && jacl_is_string(stream->args[3])) {
+                char stdin_path[64];
+                uint32_t path_len = jacl_string_byte_len(stream->args[3]);
+                jacl_string_data(stream->args[3], stdin_path, sizeof(stdin_path));
+                stdin_path[path_len < sizeof(stdin_path) - 1 ? path_len : sizeof(stdin_path) - 1] = '\0';
+                unlink(stdin_path);
+            }
+
             if (exit_code != 0) {
                 /* Read stderr content */
                 char stderr_buf[4096] = "";
@@ -5626,6 +5635,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             stderr_path[0] = '\0';
           }
 
+          /* US-007: Clean up stdin temp file if present */
+          if (stream->arg_count >= 4 && jacl_is_string(stream->args[3])) {
+            char stdin_path[64];
+            uint32_t path_len = jacl_string_byte_len(stream->args[3]);
+            jacl_string_data(stream->args[3], stdin_path, sizeof(stdin_path));
+            stdin_path[path_len < sizeof(stdin_path) - 1 ? path_len : sizeof(stdin_path) - 1] = '\0';
+            unlink(stdin_path);
+          }
+
           if (exit_code != 0) {
             /* Read stderr content */
             char stderr_buf[4096] = "";
@@ -7229,6 +7247,158 @@ interpret_done:
 
         JaclVal map_val = jacl_map_ptr(result_map);
         result = vm__push(vm, map_val);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      /* US-007: exec with stdin — spawn external command with piped stdin
+       * Stack: [args_vec, stdin_val] -> [stream]
+       * stdin_val is a string that will be written to the process's stdin.
+       */
+      case OP_EXEC_STDIN: {
+        JaclVal stdin_val;
+        result = vm__pop(vm, &stdin_val);
+        if (result != VM_OK) return result;
+
+        JaclVal args_vec;
+        result = vm__pop(vm, &args_vec);
+        if (result != VM_OK) return result;
+
+        if (!jacl_is_vector(args_vec)) {
+          vm__set_error(vm, "exec requires a vector of arguments, got %s",
+                       vm__type_name(args_vec));
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Convert stdin to string if needed */
+        char stdin_buf[65536];
+        uint32_t stdin_len = 0;
+        if (jacl_is_string(stdin_val)) {
+          stdin_len = jacl_string_byte_len(stdin_val);
+          if (stdin_len >= sizeof(stdin_buf)) stdin_len = sizeof(stdin_buf) - 1;
+          jacl_string_data(stdin_val, stdin_buf, stdin_len + 1);
+        } else {
+          vm__set_error(vm, "exec stdin must be a string, got %s",
+                       vm__type_name(stdin_val));
+          return VM_RUNTIME_ERROR;
+        }
+        stdin_buf[stdin_len] = '\0';
+
+        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(args_vec);
+        uint32_t argc = jacl_vec_count(vec);
+        if (argc == 0) {
+          vm__set_error(vm, "exec requires at least a command name");
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Build the command string for the shell */
+        char cmd_buf[4096];
+        char* p = cmd_buf;
+        char* end = cmd_buf + sizeof(cmd_buf) - 1;
+
+        for (uint32_t i = 0; i < argc && p < end; i++) {
+          jacl_vec_get_result gr = jacl_vec_get(vec, i);
+          JaclVal arg_val = gr.value;
+          if (!jacl_is_string(arg_val)) {
+            vm__set_error(vm, "exec argument %d must be a string, got %s",
+                         (int)i, vm__type_name(arg_val));
+            return VM_RUNTIME_ERROR;
+          }
+          uint32_t arg_len = jacl_string_byte_len(arg_val);
+          char arg_buf[1024];
+          if (arg_len >= sizeof(arg_buf)) arg_len = sizeof(arg_buf) - 1;
+          jacl_string_data(arg_val, arg_buf, arg_len + 1);
+          arg_buf[arg_len] = '\0';
+
+          if (i > 0 && p < end) *p++ = ' ';
+
+          /* Simple quoting: if the arg contains spaces or special chars, quote it */
+          int needs_quote = 0;
+          for (uint32_t j = 0; j < arg_len; j++) {
+            char c = arg_buf[j];
+            if (c == ' ' || c == '\t' || c == '"' || c == '\'' ||
+                c == '\\' || c == '$' || c == '`' || c == '!' ||
+                c == '*' || c == '?' || c == '[' || c == ']' ||
+                c == '(' || c == ')' || c == '{' || c == '}' ||
+                c == '<' || c == '>' || c == '|' || c == '&' ||
+                c == ';' || c == '\n') {
+              needs_quote = 1;
+              break;
+            }
+          }
+
+          if (needs_quote) {
+            if (p < end) *p++ = '\'';
+            for (uint32_t j = 0; j < arg_len && p < end; j++) {
+              char c = arg_buf[j];
+              if (c == '\'') {
+                if (p + 4 <= end) {
+                  *p++ = '\'';
+                  *p++ = '\\';
+                  *p++ = '\'';
+                  *p++ = '\'';
+                }
+              } else {
+                *p++ = c;
+              }
+            }
+            if (p < end) *p++ = '\'';
+          } else {
+            for (uint32_t j = 0; j < arg_len && p < end; j++) {
+              *p++ = arg_buf[j];
+            }
+          }
+        }
+        *p = '\0';
+
+        /* Create temp files for stdin and stderr */
+        char stdin_path[64];
+        snprintf(stdin_path, sizeof(stdin_path), "/tmp/jacl_stdin_%d_%lu",
+                 (int)getpid(), (unsigned long)time(NULL) ^ (unsigned long)cmd_buf);
+
+        char stderr_path[64];
+        snprintf(stderr_path, sizeof(stderr_path), "/tmp/jacl_stderr_%d_%lu",
+                 (int)getpid(), (unsigned long)(time(NULL) + 1) ^ (unsigned long)cmd_buf);
+
+        /* Write stdin content to temp file */
+        FILE* stdin_fp = fopen(stdin_path, "w");
+        if (!stdin_fp) {
+          vm__set_error(vm, "exec: failed to create stdin temp file");
+          return VM_RUNTIME_ERROR;
+        }
+        fwrite(stdin_buf, 1, stdin_len, stdin_fp);
+        fclose(stdin_fp);
+
+        /* Build full command with stdin and stderr redirection */
+        char full_cmd[4256];
+        snprintf(full_cmd, sizeof(full_cmd), "%s <%s 2>%s", cmd_buf, stdin_path, stderr_path);
+
+        /* Spawn the process with popen */
+        FILE* fp = popen(full_cmd, "r");
+        if (!fp) {
+          unlink(stdin_path);
+          unlink(stderr_path);
+          vm__set_error(vm, "exec: failed to spawn process '%s'", cmd_buf);
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Create a stream to read stdout.
+         * Store stdin_path in args[3] so we can clean it up on stream close. */
+        JaclVal stream_val = jacl_stream(&vm->heap);
+        JaclStream* stream = jacl_as_stream(stream_val);
+        stream->kind = STREAM_KIND_EXEC;
+        stream->state = STREAM_PENDING;
+        stream->args[0] = (JaclVal)(uintptr_t)fp;
+        gc__current_heap = &vm->heap;
+        stream->args[1] = jacl_intern(&vm->heap, vm->intern_table,
+                                       cmd_buf, (uint32_t)strlen(cmd_buf));
+        stream->args[2] = jacl_intern(&vm->heap, vm->intern_table,
+                                       stderr_path, (uint32_t)strlen(stderr_path));
+        stream->args[3] = jacl_intern(&vm->heap, vm->intern_table,
+                                       stdin_path, (uint32_t)strlen(stdin_path));
+        stream->arg_count = 4;
+
+        result = vm__push(vm, stream_val);
         if (result != VM_OK) return result;
         break;
       }

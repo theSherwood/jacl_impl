@@ -2734,6 +2734,142 @@ static int test_exec_full_stdout_lines(void) {
     TEST_PASS();
 }
 
+/* ===== US-007: Stdin from JACL strings ===== */
+
+/* Test: string piped to shell command goes to stdin via cat */
+static int test_shell_stdin_string(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Use cat to echo back the stdin content */
+    VMResult result = jacl_run(
+        "[print {\"hello world\" | !cat | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* cat should return the input unchanged */
+    ASSERT(strstr(cap.buf, "hello world") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: string with multiple lines piped to stdin */
+static int test_shell_stdin_multiline(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Use cat to verify multiline content passes through */
+    VMResult result = jacl_run(
+        "[print {\"line1\\nline2\\nline3\" | !cat | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* cat should return all three lines */
+    ASSERT(strstr(cap.buf, "line1") != NULL);
+    ASSERT(strstr(cap.buf, "line2") != NULL);
+    ASSERT(strstr(cap.buf, "line3") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: string variable piped to stdin */
+static int test_shell_stdin_var(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Use a variable as stdin source */
+    VMResult result = jacl_run(
+        "def data \"variable content\"\n"
+        "[print {$data | !cat | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(strstr(cap.buf, "variable content") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: stdin pipe to grep filters content */
+static int test_shell_stdin_grep(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* grep with pattern (no flag needed) */
+    VMResult result = jacl_run(
+        "[print {\"apple\\nbanana\\napricot\" | !grep ap | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* grep should return "apple\napricot\n" */
+    ASSERT(strstr(cap.buf, "apple") != NULL);
+    ASSERT(strstr(cap.buf, "apricot") != NULL);
+    /* banana should not be present */
+    ASSERT(strstr(cap.buf, "banana") == NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: stdin with computed expression (not just literals) */
+static int test_shell_stdin_expr(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Pipe the result of an if expression to stdin */
+    VMResult result = jacl_run(
+        "[print {if $true { \"yes\" } else { \"no\" } | !cat | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(strstr(cap.buf, "yes") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -2859,6 +2995,12 @@ int main(void) {
     { "exec_full_nonzero_exit",  test_exec_full_nonzero_exit },
     { "exec_full_both_outputs",  test_exec_full_both_outputs },
     { "exec_full_stdout_lines",  test_exec_full_stdout_lines },
+    /* US-007: Stdin from JACL strings */
+    { "shell_stdin_string",      test_shell_stdin_string },
+    { "shell_stdin_multiline",   test_shell_stdin_multiline },
+    { "shell_stdin_var",         test_shell_stdin_var },
+    { "shell_stdin_grep",        test_shell_stdin_grep },
+    { "shell_stdin_expr",        test_shell_stdin_expr },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

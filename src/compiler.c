@@ -4320,6 +4320,58 @@ void compiler__rewrite_binding_op(Compiler* c, AstNode* node,
 void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
   AstNode* lhs = node->data.command.args[0];
   AstNode* rhs = node->data.command.args[1];
+  uint32_t line = node->start.line;
+
+  /* US-007: Shell command as pipe RHS — pipe LHS to stdin
+   * [| expr [!cmd args...]] → compile LHS, compile cmd+args as vec, OP_EXEC_STDIN */
+  if (rhs->type == AST_SHELL_CMD) {
+    AstNode* head = rhs->data.shell_cmd.head;
+    uint32_t argc = rhs->data.shell_cmd.arg_count;
+    AstNode** args = rhs->data.shell_cmd.args;
+    uint32_t col  = rhs->start.column;
+
+    /* In prelude mode, check that `exec` is available */
+    if (c->has_prelude) {
+      JaclVal exec_name = compiler__name_val(c->heap, c->intern_table, "exec", 4);
+      GlobalArity* ga = compiler__find_global(c, exec_name);
+      if (!ga) {
+        compiler__error(c, line, col, "exec not available");
+        return;
+      }
+    }
+
+    /* Compile head (command name) as first element of args vector */
+    compiler__compile_node(c, head);
+    compiler__ensure_boxed(c, line);
+
+    /* Compile remaining arguments */
+    for (uint32_t i = 0; i < argc; i++) {
+      if (args[i]->type == AST_SPREAD) {
+        compiler__error(c, line, col, "spread in shell commands not yet supported");
+        return;
+      }
+      compiler__compile_node(c, args[i]);
+      compiler__ensure_boxed(c, line);
+    }
+
+    /* Build vector from stack elements: [head, arg1, arg2, ...] */
+    uint32_t total_elems = 1 + argc;
+    if (total_elems > 255) {
+      compiler__error(c, line, col, "too many arguments to shell command");
+      return;
+    }
+    compiler__emit_byte(c, OP_VEC, line);
+    compiler__emit_byte(c, (uint8_t)total_elems, line);
+
+    /* Compile LHS (will be stdin) */
+    compiler__compile_node(c, lhs);
+    compiler__ensure_boxed(c, line);
+
+    /* Emit OP_EXEC_STDIN: pops stdin, pops args_vec, spawns with stdin piped */
+    compiler__emit_byte(c, OP_EXEC_STDIN, line);
+    c->last_expr_type = TYPE_STREAM;
+    return;
+  }
 
   /* Build synthetic command: thread LHS result as first arg of RHS */
   AstNode* synth = ast_alloc(c->arena);

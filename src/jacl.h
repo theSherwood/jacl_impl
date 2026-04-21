@@ -758,6 +758,7 @@ typedef enum {
   OP_INTERPRET_PRELUDE, /* push default permissive prelude map for [interpret] */
   OP_EXEC,         /* pop args (vector) + cmd (string), spawn process, push stdout stream */
   OP_EXEC_FULL,    /* pop args (vector) + cmd (string), run process, push map {stdout, stderr, exit} */
+  OP_EXEC_STDIN,   /* pop stdin (string), pop args (vector), spawn with stdin piped, push stdout stream */
   OP_HALT
 } OpCode;
 
