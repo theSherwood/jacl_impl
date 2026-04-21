@@ -3563,6 +3563,130 @@ static int test_repl_fallback_disable(void) {
     TEST_PASS();
 }
 
+/* ===== US-013: Sandboxing — exec as prelude entry ===== */
+
+/* Test: [interpret-prelude] includes exec */
+static int test_sandbox_exec_in_prelude(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[map-has [interpret-prelude] \"exec\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_bool(result));
+    ASSERT(jacl_as_bool(result) == true);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret {} "!ls"] fails with compile error (exec not in prelude) */
+static int test_sandbox_exec_empty_prelude(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret [map] \"!echo hello\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);  /* outer succeeds */
+    ASSERT(jacl_is_error(result));          /* inner compile error: exec not available */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret [interpret-prelude] "!echo hello"] works */
+static int test_sandbox_exec_with_prelude(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret [interpret-prelude] \"{!echo hello | collect}\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_string(result));
+    /* Result should be "hello\n" */
+    char buf[64];
+    uint32_t len = jacl_string_byte_len(result);
+    jacl_string_data(result, buf, sizeof(buf));
+    buf[len] = '\0';
+    ASSERT(strcmp(buf, "hello\n") == 0);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: [interpret [map-remove [interpret-prelude] "exec"] "!echo hello"] fails */
+static int test_sandbox_exec_removed_from_prelude(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret [map-remove [interpret-prelude] \"exec\"] \"!echo hello\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);  /* outer succeeds */
+    ASSERT(jacl_is_error(result));          /* inner compile error: exec not available */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: Custom exec can be injected via prelude */
+static int test_sandbox_exec_custom_injection(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* Define a custom exec that returns a fixed string instead of running a command.
+     * Note: !cmd compiles to a call to exec, so we can override exec behavior.
+     * The custom exec receives the args vector: ["anything"] */
+    const char *src =
+        "proc my-exec {args} { \"custom-result\" };"
+        "[interpret [map-set [interpret-prelude] \"exec\" $my-exec] \"!anything\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(jacl_is_string(result));
+    char buf[64];
+    uint32_t len = jacl_string_byte_len(result);
+    jacl_string_data(result, buf, sizeof(buf));
+    buf[len] = '\0';
+    ASSERT(strcmp(buf, "custom-result") == 0);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: Jobs (&) also blocked when exec is unavailable */
+static int test_sandbox_job_blocked_without_exec(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret [map] \"!echo hello &\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);  /* outer succeeds */
+    ASSERT(jacl_is_error(result));          /* inner compile error: exec not available */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: OS pipes also blocked when exec is unavailable */
+static int test_sandbox_pipe_blocked_without_exec(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "[interpret [map] \"{!echo hello | !cat}\"]";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);  /* outer succeeds */
+    ASSERT(jacl_is_error(result));          /* inner compile error: exec not available */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -3722,6 +3846,14 @@ int main(void) {
     { "repl_fallback_needs_exec", test_repl_fallback_needs_exec },
     { "repl_fallback_proc_prec",  test_repl_fallback_proc_precedence },
     { "repl_fallback_disable",    test_repl_fallback_disable },
+    /* US-013: Sandboxing — exec as prelude entry */
+    { "sandbox_exec_in_prelude",  test_sandbox_exec_in_prelude },
+    { "sandbox_exec_empty_prel",  test_sandbox_exec_empty_prelude },
+    { "sandbox_exec_with_prel",   test_sandbox_exec_with_prelude },
+    { "sandbox_exec_removed",     test_sandbox_exec_removed_from_prelude },
+    { "sandbox_exec_custom",      test_sandbox_exec_custom_injection },
+    { "sandbox_job_blocked",      test_sandbox_job_blocked_without_exec },
+    { "sandbox_pipe_blocked",     test_sandbox_pipe_blocked_without_exec },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -9820,13 +9820,15 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
     case AST_SHELL_CMD: {
       /* Shell command: !cmd args... → OP_VEC + OP_EXEC
        * Compiles to a vector of [head, arg1, arg2, ...] then OP_EXEC.
-       * In prelude/sandbox mode, `exec` must be available. */
+       * In prelude/sandbox mode, `exec` must be available.
+       * If exec is a custom closure (not native fn ref), downgrade to call. */
       AstNode* head = node->data.shell_cmd.head;
       uint32_t argc = node->data.shell_cmd.arg_count;
       AstNode** args = node->data.shell_cmd.args;
       uint32_t col  = node->start.column;
 
-      /* In prelude mode, check that `exec` is available */
+      /* In prelude mode, check that `exec` is available and track if native */
+      int use_direct_opcode = 1;  /* Default: emit OP_EXEC directly */
       if (c->has_prelude) {
         JaclVal exec_name = compiler__name_val(c->heap, c->intern_table, "exec", 4);
         GlobalArity* ga = compiler__find_global(c, exec_name);
@@ -9834,6 +9836,18 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, "exec not available");
           break;
         }
+        /* If exec is a custom closure, we need to downgrade to a call */
+        if (!ga->prelude_is_native_fn) {
+          use_direct_opcode = 0;
+        }
+      }
+
+      /* If downgrading to call, emit OP_GET_GLOBAL first so exec fn is under args */
+      if (!use_direct_opcode) {
+        JaclVal gkey = compiler__global_name_val(c, "exec", 4);
+        uint16_t name_idx = chunk_add_constant(c->chunk, gkey);
+        compiler__emit_byte(c, OP_GET_GLOBAL, line);
+        compiler__emit_u16(c, name_idx, line);
       }
 
       /* Compile head (command name) as first element */
@@ -9860,17 +9874,24 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         break;
       }
 
-      /* Build vector from stack elements, then exec */
+      /* Build vector from stack elements */
       compiler__emit_byte(c, OP_VEC, line);
       compiler__emit_byte(c, (uint8_t)total_elems, line);
 
-      /* Check for background execution (!cmd &) */
-      if (node->data.shell_cmd.background) {
-        compiler__emit_byte(c, OP_EXEC_BG, line);
-        c->last_expr_type = TYPE_DYN;  /* Returns a Job map */
+      if (use_direct_opcode) {
+        /* Native exec: use direct opcode */
+        if (node->data.shell_cmd.background) {
+          compiler__emit_byte(c, OP_EXEC_BG, line);
+          c->last_expr_type = TYPE_DYN;  /* Returns a Job map */
+        } else {
+          compiler__emit_byte(c, OP_EXEC, line);
+          c->last_expr_type = TYPE_STREAM;
+        }
       } else {
-        compiler__emit_byte(c, OP_EXEC, line);
-        c->last_expr_type = TYPE_STREAM;
+        /* Custom exec closure: call it with the args vector */
+        compiler__emit_byte(c, OP_CALL, line);
+        compiler__emit_byte(c, 1, line);  /* 1 argument: the args vector */
+        c->last_expr_type = TYPE_DYN;
       }
       break;
     }
