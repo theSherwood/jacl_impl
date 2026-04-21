@@ -7960,8 +7960,7 @@ static int test_shell_cmd_compile_vars(void) {
   TEST_PASS();
 }
 
-/* Test: !cmd ..$args reports "not yet supported" error (spread in shell commands
- * requires special handling and is deferred to a future story) */
+/* Test: !cmd ..$args compiles successfully (US-014: spread support) */
 static int test_shell_cmd_compile_splat(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
@@ -7970,8 +7969,8 @@ static int test_shell_cmd_compile_splat(void) {
 
   CompileResult cr = compile_source("args = [vec \"-l\" \"-a\"]; !ls ..$args", &arena, &heap);
 
-  /* Spread in shell commands is not yet supported */
-  ASSERT(cr.error_count > 0);
+  /* US-014: Spread in shell commands now compiles successfully */
+  ASSERT_INT_EQ(cr.error_count, 0);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);

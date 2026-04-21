@@ -4359,29 +4359,57 @@ static void compiler__compile_shell_cmd_args(Compiler* c, AstNode* cmd) {
   AstNode** args = cmd->data.shell_cmd.args;
   uint32_t line = cmd->start.line;
   uint32_t col  = cmd->start.column;
+  (void)col;
 
-  /* Compile head (command name) as first element */
+  /* Check if any args are spread */
+  int has_spread = 0;
+  for (uint32_t i = 0; i < argc; i++) {
+    if (args[i]->type == AST_SPREAD) {
+      has_spread = 1;
+      break;
+    }
+  }
+
+  /* Compile head (command name) as first element - always fixed */
   compiler__compile_node(c, head);
   compiler__ensure_boxed(c, line);
 
-  /* Compile remaining arguments */
-  for (uint32_t i = 0; i < argc; i++) {
-    if (args[i]->type == AST_SPREAD) {
-      compiler__error(c, line, col, "spread in shell commands not yet supported");
+  if (has_spread) {
+    /* US-014: Spread support - use OP_VEC_SPREAD */
+    uint8_t fixed_args = 1;  /* head is always fixed */
+    uint8_t num_spreads = 0;
+
+    for (uint32_t i = 0; i < argc; i++) {
+      if (args[i]->type == AST_SPREAD) {
+        compiler__compile_node(c, args[i]->data.spread.expr);
+        compiler__emit_byte(c, OP_SPREAD, line);
+        num_spreads++;
+      } else {
+        compiler__compile_node(c, args[i]);
+        compiler__ensure_boxed(c, line);
+        fixed_args++;
+      }
+    }
+
+    compiler__emit_byte(c, OP_VEC_SPREAD, line);
+    compiler__emit_byte(c, fixed_args, line);
+    compiler__emit_byte(c, num_spreads, line);
+  } else {
+    /* No spread - use simpler OP_VEC */
+    for (uint32_t i = 0; i < argc; i++) {
+      compiler__compile_node(c, args[i]);
+      compiler__ensure_boxed(c, line);
+    }
+
+    /* Build vector from stack elements */
+    uint32_t total_elems = 1 + argc;
+    if (total_elems > 255) {
+      compiler__error(c, line, cmd->start.column, "too many arguments to shell command");
       return;
     }
-    compiler__compile_node(c, args[i]);
-    compiler__ensure_boxed(c, line);
+    compiler__emit_byte(c, OP_VEC, line);
+    compiler__emit_byte(c, (uint8_t)total_elems, line);
   }
-
-  /* Build vector from stack elements */
-  uint32_t total_elems = 1 + argc;
-  if (total_elems > 255) {
-    compiler__error(c, line, col, "too many arguments to shell command");
-    return;
-  }
-  compiler__emit_byte(c, OP_VEC, line);
-  compiler__emit_byte(c, (uint8_t)total_elems, line);
 }
 
 /* Helper: Compile all shell commands in chain (left to right order) */
@@ -9820,6 +9848,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
     case AST_SHELL_CMD: {
       /* Shell command: !cmd args... → OP_VEC + OP_EXEC
        * Compiles to a vector of [head, arg1, arg2, ...] then OP_EXEC.
+       * US-014: Supports spread args via OP_VEC_SPREAD.
        * In prelude/sandbox mode, `exec` must be available.
        * If exec is a custom closure (not native fn ref), downgrade to call. */
       AstNode* head = node->data.shell_cmd.head;
@@ -9850,33 +9879,57 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         compiler__emit_u16(c, name_idx, line);
       }
 
-      /* Compile head (command name) as first element */
+      /* US-014: Check if any args are spread */
+      int has_spread = 0;
+      for (uint32_t i = 0; i < argc; i++) {
+        if (args[i]->type == AST_SPREAD) {
+          has_spread = 1;
+          break;
+        }
+      }
+
+      /* Compile head (command name) as first element - always fixed */
       compiler__compile_node(c, head);
       compiler__ensure_boxed(c, line);
 
-      /* Compile remaining arguments */
-      for (uint32_t i = 0; i < argc; i++) {
-        if (args[i]->type == AST_SPREAD) {
-          /* For now, spread in shell commands is handled at runtime.
-           * This is a simplification - full spread support would need
-           * OP_VEC_SPREAD + OP_EXEC combo. */
-          compiler__error(c, line, col, "spread in shell commands not yet supported");
+      if (has_spread) {
+        /* US-014: Spread support - use OP_VEC_SPREAD */
+        uint8_t fixed_args = 1;  /* head is always fixed */
+        uint8_t num_spreads = 0;
+
+        for (uint32_t i = 0; i < argc; i++) {
+          if (args[i]->type == AST_SPREAD) {
+            compiler__compile_node(c, args[i]->data.spread.expr);
+            compiler__emit_byte(c, OP_SPREAD, line);
+            num_spreads++;
+          } else {
+            compiler__compile_node(c, args[i]);
+            compiler__ensure_boxed(c, line);
+            fixed_args++;
+          }
+        }
+
+        compiler__emit_byte(c, OP_VEC_SPREAD, line);
+        compiler__emit_byte(c, fixed_args, line);
+        compiler__emit_byte(c, num_spreads, line);
+      } else {
+        /* No spread - use simpler OP_VEC */
+        for (uint32_t i = 0; i < argc; i++) {
+          compiler__compile_node(c, args[i]);
+          compiler__ensure_boxed(c, line);
+        }
+
+        /* Total elements = 1 (head) + argc */
+        uint32_t total_elems = 1 + argc;
+        if (total_elems > 255) {
+          compiler__error(c, line, col, "too many arguments to shell command");
           break;
         }
-        compiler__compile_node(c, args[i]);
-        compiler__ensure_boxed(c, line);
-      }
 
-      /* Total elements = 1 (head) + argc */
-      uint32_t total_elems = 1 + argc;
-      if (total_elems > 255) {
-        compiler__error(c, line, col, "too many arguments to shell command");
-        break;
+        /* Build vector from stack elements */
+        compiler__emit_byte(c, OP_VEC, line);
+        compiler__emit_byte(c, (uint8_t)total_elems, line);
       }
-
-      /* Build vector from stack elements */
-      compiler__emit_byte(c, OP_VEC, line);
-      compiler__emit_byte(c, (uint8_t)total_elems, line);
 
       if (use_direct_opcode) {
         /* Native exec: use direct opcode */

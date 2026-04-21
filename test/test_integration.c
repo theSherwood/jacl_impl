@@ -3687,6 +3687,164 @@ static int test_sandbox_pipe_blocked_without_exec(void) {
     TEST_PASS();
 }
 
+/* --- US-014: Argument handling — literals and splat --- */
+
+/* Test: literal glob pattern passed as-is (no shell expansion) */
+static int test_arg_literal_glob(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* Echo passes args directly; *.txt should appear literally, not expanded */
+    const char *src = "{!echo \"*.txt\" | collect}";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_string(result));
+
+    char buf[64];
+    uint32_t len = jacl_string_byte_len(result);
+    jacl_string_data(result, buf, sizeof(buf));
+    buf[len] = '\0';
+    ASSERT(strcmp(buf, "*.txt\n") == 0);  /* literal, not expanded */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: variable as single arg */
+static int test_arg_variable_single(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "arg = \"hello world\"; {!echo $arg | collect}";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_string(result));
+
+    char buf[64];
+    uint32_t len = jacl_string_byte_len(result);
+    jacl_string_data(result, buf, sizeof(buf));
+    buf[len] = '\0';
+    ASSERT(strcmp(buf, "hello world\n") == 0);  /* single arg with space */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: spread vector elements as separate args */
+static int test_arg_splat_vector(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "args = [vec \"a\" \"b\" \"c\"]; {!echo ..$args | collect}";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_string(result));
+
+    char buf[64];
+    uint32_t len = jacl_string_byte_len(result);
+    jacl_string_data(result, buf, sizeof(buf));
+    buf[len] = '\0';
+    ASSERT(strcmp(buf, "a b c\n") == 0);  /* elements become separate args */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: empty splat adds no args */
+static int test_arg_splat_empty(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    /* ..[vec] is an empty vector spread - contributes zero args */
+    const char *src = "{!echo \"start\" ..[vec] \"end\" | collect}";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_string(result));
+
+    char buf[64];
+    uint32_t len = jacl_string_byte_len(result);
+    jacl_string_data(result, buf, sizeof(buf));
+    buf[len] = '\0';
+    ASSERT(strcmp(buf, "start end\n") == 0);  /* empty spread contributes nothing */
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: quoted string with spaces is single arg */
+static int test_arg_quoted_spaces(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "{!echo \"hello world\" | collect}";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_string(result));
+
+    char buf[64];
+    uint32_t len = jacl_string_byte_len(result);
+    jacl_string_data(result, buf, sizeof(buf));
+    buf[len] = '\0';
+    ASSERT(strcmp(buf, "hello world\n") == 0);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: mixed fixed args and spread */
+static int test_arg_mixed_splat(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "middle = [vec \"b\" \"c\"]; {!echo \"a\" ..$middle \"d\" | collect}";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_string(result));
+
+    char buf[64];
+    uint32_t len = jacl_string_byte_len(result);
+    jacl_string_data(result, buf, sizeof(buf));
+    buf[len] = '\0';
+    ASSERT(strcmp(buf, "a b c d\n") == 0);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
+/* Test: multiple spreads in one command */
+static int test_arg_multiple_splats(void) {
+    jacl_context_t *ctx = jacl_ctx_new(NULL);
+    ASSERT(ctx != NULL);
+
+    const char *src = "a = [vec \"1\" \"2\"]; b = [vec \"3\" \"4\"]; {!echo ..$a ..$b | collect}";
+    JaclError err;
+    JaclVal result = jacl_ctx_run_source(ctx, src, strlen(src), UINT64_MAX, &err);
+    ASSERT(err.kind == JACL_ERROR_NONE);
+    ASSERT(!jacl_is_error(result));
+    ASSERT(jacl_is_string(result));
+
+    char buf[64];
+    uint32_t len = jacl_string_byte_len(result);
+    jacl_string_data(result, buf, sizeof(buf));
+    buf[len] = '\0';
+    ASSERT(strcmp(buf, "1 2 3 4\n") == 0);
+
+    jacl_ctx_destroy(ctx);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -3854,6 +4012,14 @@ int main(void) {
     { "sandbox_exec_custom",      test_sandbox_exec_custom_injection },
     { "sandbox_job_blocked",      test_sandbox_job_blocked_without_exec },
     { "sandbox_pipe_blocked",     test_sandbox_pipe_blocked_without_exec },
+    /* US-014: Argument handling — literals and splat */
+    { "arg_literal_glob",         test_arg_literal_glob },
+    { "arg_variable_single",      test_arg_variable_single },
+    { "arg_splat_vector",         test_arg_splat_vector },
+    { "arg_splat_empty",          test_arg_splat_empty },
+    { "arg_quoted_spaces",        test_arg_quoted_spaces },
+    { "arg_mixed_splat",          test_arg_mixed_splat },
+    { "arg_multiple_splats",      test_arg_multiple_splats },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
