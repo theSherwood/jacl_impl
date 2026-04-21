@@ -372,3 +372,27 @@ Thread: (current)
   - :shell-fallback is a prelude config flag (like reserved : keys)
   - Fallback is compile-time: unknown barewords → OP_EXEC at compile time
 ---
+
+## 2026-04-21 - US-013
+Thread: (current)
+- Verified exec was already in jacl_non_core_builtins (added in US-004)
+- Verified exec is included in interpret-prelude default map
+- Modified AST_SHELL_CMD compilation to support custom exec closures:
+  - Check if exec prelude value is native fn ref vs closure
+  - Native fn ref: emit OP_VEC + OP_EXEC directly (existing fast path)
+  - Custom closure: emit OP_GET_GLOBAL("exec") + OP_VEC + OP_CALL(1)
+- Added 7 integration tests:
+  - test_sandbox_exec_in_prelude: exec is in interpret-prelude
+  - test_sandbox_exec_empty_prelude: empty prelude blocks !cmd
+  - test_sandbox_exec_with_prelude: full prelude allows !cmd
+  - test_sandbox_exec_removed_from_prelude: removing exec blocks !cmd
+  - test_sandbox_exec_custom_injection: custom closure can replace exec
+  - test_sandbox_job_blocked_without_exec: jobs (&) blocked without exec
+  - test_sandbox_pipe_blocked_without_exec: pipes blocked without exec
+- Files changed: src/compiler.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - Non-core builtins use GlobalArity.prelude_is_native_fn to decide fast vs slow path
+  - Custom closure path requires OP_GET_GLOBAL first, then args, then OP_CALL
+  - Stack order for calls: [fn, arg1, arg2, ...] then OP_CALL argc
+  - exec receives args as single vector: ["cmd", "arg1", "arg2", ...]
+---

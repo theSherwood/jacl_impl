@@ -224,8 +224,8 @@
         "build.sh passes"
       ],
       "priority": 13,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "exec was already in jacl_non_core_builtins. Added exec availability check at compile time. Custom exec closures trigger OP_GET_GLOBAL + OP_CALL path instead of OP_EXEC. 7 integration tests added."
     },
     {
       "id": "US-014",
