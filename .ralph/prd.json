@@ -123,8 +123,8 @@
         "build.sh passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added OP_EXEC_STDIN opcode. compiler__compile_pipe_op detects AST_SHELL_CMD RHS and emits stdin-piped exec. String stdin written to temp file, passed via shell redirection. 5 integration tests added. Note: -flag style args are split by lexer into separate tokens; tests use commands that don't require flags (cat, grep with pattern)."
     },
     {
       "id": "US-008",
