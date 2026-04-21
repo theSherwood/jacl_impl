@@ -190,8 +190,8 @@
         "build.sh passes"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added OP_SIGNAL and OP_CANCEL opcodes. [signal $job SIGNAME] supports SIGTERM, SIGKILL, SIGINT, SIGHUP, SIGUSR1, SIGUSR2. [cancel $job] is shorthand for SIGTERM. Returns $true on success, $false if process already exited. 5 integration tests added."
     },
     {
       "id": "US-012",
