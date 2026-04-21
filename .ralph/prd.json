@@ -242,8 +242,8 @@
         "build.sh passes"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Spread support implemented using OP_VEC_SPREAD. Literals pass through unchanged (no shell expansion). Note: glob builtin not implemented; tested with vector spread (..[vec ...]) and ..[expr] syntax. 7 integration tests added."
     }
   ]
 }

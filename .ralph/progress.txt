@@ -396,3 +396,30 @@ Thread: (current)
   - Stack order for calls: [fn, arg1, arg2, ...] then OP_CALL argc
   - exec receives args as single vector: ["cmd", "arg1", "arg2", ...]
 ---
+
+## 2026-04-21 - US-014
+Thread: (current)
+- Implemented spread/splat support for shell command arguments
+- Modified compiler__compile_shell_cmd_args to handle spread:
+  - Checks if any args are AST_SPREAD
+  - If spread present: uses OP_SPREAD + OP_VEC_SPREAD pattern
+  - If no spread: uses simpler OP_VEC pattern
+- Modified AST_SHELL_CMD case in compiler__compile_node:
+  - Same spread detection and handling
+  - Works with background (&) and custom exec closures
+- Updated test_shell_cmd_compile_splat to verify successful compilation (was error test)
+- Added 7 integration tests:
+  - test_arg_literal_glob: *.txt passed as literal (no expansion)
+  - test_arg_variable_single: $arg passed as single arg
+  - test_arg_splat_vector: ..$args splats vector elements
+  - test_arg_splat_empty: ..[vec] adds no args
+  - test_arg_quoted_spaces: "hello world" is single arg
+  - test_arg_mixed_splat: "a" ..$middle "d" works
+  - test_arg_multiple_splats: ..$a ..$b works
+- Files changed: src/compiler.c, test/test_compiler.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - OP_SPREAD pops vector, pushes elements individually, saves count to spread_counts
+  - OP_VEC_SPREAD reads fixed_args + num_spreads, pops all elements, builds vector
+  - Empty vector in JACL is [vec], not [] ([] is parse error)
+  - Spread in shell commands follows same pattern as [vec ..$args] builtin
+---
