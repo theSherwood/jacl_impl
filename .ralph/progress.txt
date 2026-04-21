@@ -197,3 +197,32 @@ Thread: (current)
   - jacl_map_set(NULL, k, v) creates new map from empty; can chain set calls
 ---
 
+## 2026-04-21 - US-007
+Thread: (current)
+- Added OP_EXEC_STDIN opcode to bytecode.c and jacl.h
+- Modified compiler__compile_pipe_op to detect AST_SHELL_CMD as pipe RHS:
+  - When RHS is shell command, compile args vector first, then LHS (stdin source)
+  - Emit OP_EXEC_STDIN instead of normal pipe rewriting
+- Implemented OP_EXEC_STDIN in VM:
+  - Pops stdin_val (string) and args_vec (vector)
+  - Writes stdin string to temp file
+  - Builds command with stdin redirect: `cmd args... < /tmp/stdin_file 2>/tmp/stderr_file`
+  - Uses popen() to spawn process, returns stdout stream
+  - Stores stdin temp file path in stream args[3] for cleanup
+- Added stdin temp file cleanup in stream exhaustion (vm__pull_stream_one) and OP_COLLECT
+- Updated test_bytecode.c: OP_EXEC_STDIN = 157, OP_HALT = 158
+- Added 5 integration tests:
+  - test_shell_stdin_string: basic string piped to cat
+  - test_shell_stdin_multiline: multiline strings
+  - test_shell_stdin_var: string variables piped to stdin
+  - test_shell_stdin_grep: filtering stdin content
+  - test_shell_stdin_expr: computed expression results piped to stdin
+- Files changed: src/bytecode.c, src/compiler.c, src/jacl.h, src/vm.c, test/test_bytecode.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - Lexer splits `-flag` into TOKEN_OPERATOR + TOKEN_WORD, causing flag args to be two separate args
+  - Tests should avoid commands requiring dash-prefixed flags; use cat, grep with pattern, etc.
+  - Pipe compilation order: args vector first, then stdin value, so OP_EXEC_STDIN pops in correct order
+  - JACL `if` syntax requires blocks: `if $cond { then } else { else }`, not `[if $cond then else]`
+  - Temp files need unique names using PID + time hash to avoid collisions across concurrent processes
+---
+
