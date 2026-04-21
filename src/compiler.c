@@ -2488,6 +2488,7 @@ struct Compiler {
   MacroTable*          macro_table;    /* compile-time macro definitions (root compiler owns) */
   uint32_t             current_scope_mark; /* hygiene: mark for newly introduced bindings */
   bool                 has_prelude;    /* true when compiling under a caller-supplied prelude map */
+  bool                 shell_fallback; /* true in REPL mode: unknown commands try PATH lookup */
   ModuleBinding        module_bindings[COMPILER_MODULE_BINDINGS_MAX];
   uint32_t             module_binding_count;
 };
@@ -2530,6 +2531,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->macro_table       = NULL;
   c->current_scope_mark = 0;
   c->has_prelude       = false;
+  c->shell_fallback    = false;
   c->module_binding_count = 0;
 }
 
@@ -4683,6 +4685,33 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       JaclVal nv = compiler__name_val(c->heap, c->intern_table, hname, hlen);
       GlobalArity* ga = compiler__find_global(c, nv);
       if (!ga) {
+        /* REPL shell fallback: if enabled and exec is available,
+         * treat unknown commands as shell commands (like !cmd args...) */
+        if (c->shell_fallback) {
+          JaclVal exec_name = compiler__name_val(c->heap, c->intern_table, "exec", 4);
+          GlobalArity* exec_ga = compiler__find_global(c, exec_name);
+          if (exec_ga) {
+            /* Emit shell command: compile head + args into vector, then OP_EXEC */
+            JaclVal cmd_str = compiler__name_val(c->heap, c->intern_table, hname, hlen);
+            uint16_t cmd_idx = chunk_add_constant(c->chunk, cmd_str);
+            compiler__emit_byte(c, OP_CONST, line);
+            compiler__emit_u16(c, cmd_idx, line);
+            for (uint32_t i = 0; i < argc; i++) {
+              compiler__compile_node(c, args[i]);
+              compiler__ensure_boxed(c, line);
+            }
+            uint32_t total_elems = 1 + argc;
+            if (total_elems > 255) {
+              compiler__error(c, line, col, "too many arguments to shell command");
+              return;
+            }
+            compiler__emit_byte(c, OP_VEC, line);
+            compiler__emit_byte(c, (uint8_t)total_elems, line);
+            compiler__emit_byte(c, OP_EXEC, line);
+            c->last_expr_type = TYPE_STREAM;
+            return;
+          }
+        }
         char err_msg[160];
         snprintf(err_msg, sizeof(err_msg),
                  "undefined name '%.*s'", (int)hlen, hname);
@@ -8444,7 +8473,39 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, (uint8_t)local_slot, line);
       } else {
         /* Prelude mode: reject names not in the prelude or source-defined globals */
-        if (c->has_prelude && !compiler__find_global(c, name_val)) {
+        GlobalArity* ga = compiler__find_global(c, name_val);
+        if (c->has_prelude && !ga) {
+          /* REPL shell fallback: if enabled and exec is available,
+           * treat unknown commands as shell commands (like !cmd args...) */
+          if (c->shell_fallback) {
+            JaclVal exec_name = compiler__name_val(c->heap, c->intern_table, "exec", 4);
+            GlobalArity* exec_ga = compiler__find_global(c, exec_name);
+            if (exec_ga) {
+              /* Emit shell command: compile head + args into vector, then OP_EXEC */
+              /* Compile command name as string constant */
+              JaclVal cmd_str = compiler__name_val(c->heap, c->intern_table,
+                  head->data.lit_string.value, name_len);
+              uint16_t cmd_idx = chunk_add_constant(c->chunk, cmd_str);
+              compiler__emit_byte(c, OP_CONST, line);
+              compiler__emit_u16(c, cmd_idx, line);
+              /* Compile arguments */
+              for (uint32_t i = 0; i < argc; i++) {
+                compiler__compile_node(c, args[i]);
+                compiler__ensure_boxed(c, line);
+              }
+              /* Build vector: 1 (head) + argc */
+              uint32_t total_elems = 1 + argc;
+              if (total_elems > 255) {
+                compiler__error(c, line, col, "too many arguments to shell command");
+                return;
+              }
+              compiler__emit_byte(c, OP_VEC, line);
+              compiler__emit_byte(c, (uint8_t)total_elems, line);
+              compiler__emit_byte(c, OP_EXEC, line);
+              c->last_expr_type = TYPE_STREAM;
+              return;
+            }
+          }
           char err_msg[160];
           snprintf(err_msg, sizeof(err_msg),
                    "undefined name '%.*s'", (int)name_len,
@@ -9936,6 +9997,12 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
       JaclVal value = jacl_map_value_from_leaf(pir.item);
       compiler__set_global_arity(&c, name_val, -1);
       compiler__set_global_prelude_native_fn(&c, name_val, jacl_is_native_fn(value));
+    }
+    /* Check for :shell-fallback config flag (REPL mode: unknown commands try PATH) */
+    JaclVal sf_key = compiler__name_val(heap, intern_table, ":shell-fallback", 15);
+    JaclVal sf_val = jacl_map_get(pmap, sf_key);
+    if (sf_val != JACL_NIL && jacl_is_bool(sf_val) && jacl_as_bool(sf_val)) {
+      c.shell_fallback = true;
     }
   }
   {

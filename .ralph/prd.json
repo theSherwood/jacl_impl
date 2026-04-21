@@ -206,8 +206,8 @@
         "build.sh passes"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added shell_fallback flag to Compiler. Prelude key :shell-fallback enables REPL shell fallback. When enabled and exec is available, unknown commands in command position are executed via OP_EXEC. 6 integration tests added."
     },
     {
       "id": "US-013",

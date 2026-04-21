@@ -3378,6 +3378,191 @@ static int test_cancel_completed_job(void) {
     TEST_PASS();
 }
 
+/* ==== US-012: REPL $PATH fallback ==== */
+
+/* Test: REPL mode (shell_fallback enabled) runs unknown commands via shell.
+ * When :shell-fallback is $true in prelude, bare "echo" runs /usr/bin/echo. */
+static int test_repl_fallback_echo(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Create prelude with :shell-fallback enabled and exec available */
+    VMResult result = jacl_run(
+        "prelude = [map-set [interpret-prelude] \":shell-fallback\" $true]; "
+        "{[interpret $prelude \"echo hello\"] | collect | print}",
+        &vm, &arena);
+
+    if (result != VM_OK) {
+        printf("\nError: %s\n", vm.error_message ? vm.error_message : "unknown");
+    }
+    ASSERT_INT_EQ(result, VM_OK);
+    /* Should contain "hello" from echo command */
+    ASSERT(strstr(cap.buf, "hello") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: REPL fallback passes arguments correctly */
+static int test_repl_fallback_with_args(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Use echo with multiple arguments */
+    VMResult result = jacl_run(
+        "prelude = [map-set [interpret-prelude] \":shell-fallback\" $true]; "
+        "{[interpret $prelude \"echo a b c\"] | collect | print}",
+        &vm, &arena);
+
+    if (result != VM_OK) {
+        printf("\nError: %s\n", vm.error_message ? vm.error_message : "unknown");
+    }
+    ASSERT_INT_EQ(result, VM_OK);
+    /* Should contain "a b c" */
+    ASSERT(strstr(cap.buf, "a b c") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: Without shell_fallback, undefined commands produce compile error */
+static int test_no_fallback_error(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Normal prelude (no :shell-fallback) should error on unknown command */
+    VMResult result = jacl_run(
+        "[interpret [interpret-prelude] \"unknowncmd\"]",
+        &vm, &arena);
+
+    /* jacl_run succeeds, but interpret returns an error value */
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(vm.stack_top > 0);
+    JaclVal val = vm.stack[vm.stack_top - 1];
+    /* Result should be an error value */
+    ASSERT(jacl_is_error(val));
+    /* Error should be about undefined name */
+    ASSERT(vm.error_message != NULL);
+    ASSERT(strstr(vm.error_message, "undefined") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: Shell fallback requires exec capability (no exec = no fallback) */
+static int test_repl_fallback_needs_exec(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Prelude with :shell-fallback but exec removed should produce error.
+     * Must start from interpret-prelude and remove exec to have valid prelude. */
+    VMResult result = jacl_run(
+        "base = [interpret-prelude]; "
+        "noexec = [map-remove $base \"exec\"]; "
+        "prelude = [map-set $noexec \":shell-fallback\" $true]; "
+        "[interpret $prelude \"unknowncmd arg\"]",
+        &vm, &arena);
+
+    /* jacl_run succeeds, but interpret returns an error value */
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(vm.stack_top > 0);
+    JaclVal val = vm.stack[vm.stack_top - 1];
+    /* Result should be an error value */
+    ASSERT(jacl_is_error(val));
+    /* Error should be about undefined name since fallback couldn't work */
+    ASSERT(vm.error_message != NULL);
+    ASSERT(strstr(vm.error_message, "undefined") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: Defined procs take precedence over shell fallback */
+static int test_repl_fallback_proc_precedence(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Define a proc that returns a known value - should take precedence over shell */
+    VMResult result = jacl_run(
+        "prelude = [map-set [interpret-prelude] \":shell-fallback\" $true]; "
+        "[interpret $prelude \"proc ls {} { 999 }; ls\"]",
+        &vm, &arena);
+
+    if (result != VM_OK) {
+        printf("\nError: %s\n", vm.error_message ? vm.error_message : "unknown");
+    }
+    ASSERT_INT_EQ(result, VM_OK);
+    /* Should use the custom proc that returns 999, not shell ls */
+    ASSERT(vm.stack_top > 0);
+    JaclVal val = vm.stack[vm.stack_top - 1];
+    ASSERT(jacl_is_i32(val));
+    ASSERT(jacl_as_i32(val) == 999);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: User can disable fallback by setting :shell-fallback to $false */
+static int test_repl_fallback_disable(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Prelude with :shell-fallback = $false should NOT enable fallback */
+    VMResult result = jacl_run(
+        "prelude = [map-set [interpret-prelude] \":shell-fallback\" $false]; "
+        "[interpret $prelude \"unknowncmd\"]",
+        &vm, &arena);
+
+    /* jacl_run succeeds, but interpret returns an error value */
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(vm.stack_top > 0);
+    JaclVal val = vm.stack[vm.stack_top - 1];
+    /* Result should be an error value since fallback is disabled */
+    ASSERT(jacl_is_error(val));
+    /* Error should be about undefined name */
+    ASSERT(vm.error_message != NULL);
+    ASSERT(strstr(vm.error_message, "undefined") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -3530,6 +3715,13 @@ int main(void) {
     { "cancel_job",               test_cancel_job },
     { "signal_completed_job",     test_signal_completed_job },
     { "cancel_completed_job",     test_cancel_completed_job },
+    /* US-012: REPL $PATH fallback */
+    { "repl_fallback_echo",       test_repl_fallback_echo },
+    { "repl_fallback_with_args",  test_repl_fallback_with_args },
+    { "no_fallback_error",        test_no_fallback_error },
+    { "repl_fallback_needs_exec", test_repl_fallback_needs_exec },
+    { "repl_fallback_proc_prec",  test_repl_fallback_proc_precedence },
+    { "repl_fallback_disable",    test_repl_fallback_disable },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

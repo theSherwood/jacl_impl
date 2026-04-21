@@ -346,3 +346,29 @@ Thread: (current)
   - signal.h provides SIGTERM, SIGKILL, etc. constants
   - OpCode enum is duplicated in both bytecode.c and jacl.h - must update both
 ---
+
+## 2026-04-21 - US-012
+Thread: (current)
+- Added REPL shell fallback feature for unknown commands
+- Compiler changes:
+  - Added `shell_fallback` flag to Compiler struct
+  - In compiler_compile, check for `:shell-fallback` key in prelude map
+  - When enabled and name not found, emit shell command code (OP_VEC + OP_EXEC)
+  - Fallback requires `exec` to be available in prelude
+- Two code paths modified to support fallback:
+  - Non-core builtin check in sandbox mode (line ~4687)
+  - Dynamic call path for string head (line ~8449)
+- Added 6 integration tests:
+  - test_repl_fallback_echo: basic shell fallback with echo
+  - test_repl_fallback_with_args: multiple args passed correctly
+  - test_no_fallback_error: without flag, undefined commands error
+  - test_repl_fallback_needs_exec: fallback requires exec capability
+  - test_repl_fallback_proc_precedence: defined procs take precedence
+  - test_repl_fallback_disable: :shell-fallback $false disables fallback
+- Files changed: src/compiler.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - [interpret ...] returns error VALUE, not runtime error - check jacl_is_error()
+  - Prelude must have valid base (interpret-prelude) for core syntax to work
+  - :shell-fallback is a prelude config flag (like reserved : keys)
+  - Fallback is compile-time: unknown barewords → OP_EXEC at compile time
+---
