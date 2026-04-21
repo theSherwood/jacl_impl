@@ -285,3 +285,34 @@ Thread: (current)
   - Mixed pipelines (shell -> JACL -> shell) don't use OP_EXEC_PIPE; they fall through to OP_EXEC_STDIN
 ---
 
+
+## 2026-04-21 - US-010
+Thread: (current)
+- Added background execution support for shell commands (`!cmd &`)
+- Parser changes:
+  - Added `background` field to shell_cmd struct in AST
+  - Parse TOKEN_AMP after shell command to set background flag
+- Compiler changes:
+  - Added OP_EXEC_BG opcode for background execution
+  - AST_SHELL_CMD with background=1 emits OP_EXEC_BG instead of OP_EXEC
+  - OP_AWAIT_SM now handles Job maps in addition to Futures
+- VM implementation:
+  - OP_EXEC_BG: fork(), redirect stdout/stderr to temp files, exec command
+  - Returns Job map: {pid, _is_job, _stdout_path, _stderr_path}
+  - OP_AWAIT_SM: detects Job maps via _is_job marker
+  - Does blocking waitpid(), reads temp files, returns ExecResult {stdout, stderr, exit}
+  - stdout is a STREAM_KIND_EXEC_BUFFER (same as [exec ...])
+- Added 4 integration tests:
+  - test_job_returns_map_with_pid: verify Job map structure
+  - test_job_await_returns_result: verify await returns ExecResult
+  - test_job_await_captures_stdout: verify stdout stream works
+  - test_job_doesnt_block: verify parent continues immediately
+- Files changed: src/ast.c, src/bytecode.c, src/compiler.c, src/jacl.h, src/parser.c, src/vm.c, test/test_bytecode.c, test/test_integration.c
+- **Bug fix:** Tests originally used `def job = !cmd &` syntax, but JACL requires `job = !cmd &` (= operator expands to def). Fixed tests to use correct syntax.
+- **Learnings for future iterations:**
+  - JACL syntax: `x = value` expands to `[def x value]` via prelude macro
+  - Writing `def x = value` parses as `[= [def x] value]` which gets wrong macro expansion
+  - Use `job = !cmd &` not `def job = !cmd &`
+  - Background jobs use temp files for stdout/stderr capture (not pipes)
+  - waitpid() blocks until child exits; true non-blocking requires WNOHANG and polling
+---
