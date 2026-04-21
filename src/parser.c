@@ -2351,6 +2351,14 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
     node->data.shell_cmd.head      = head;
     node->data.shell_cmd.args      = args.nodes;
     node->data.shell_cmd.arg_count = args.count;
+
+    /* Check for background execution: !cmd & */
+    node->data.shell_cmd.background = 0;
+    if (parser__peek(p)->type == TOKEN_AMP) {
+      parser__advance(p); /* consume '&' */
+      node->data.shell_cmd.background = 1;
+      node->end = parser__token_end(&p->tokens[p->pos - 1]);
+    }
     return node;
   }
 

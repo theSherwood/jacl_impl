@@ -1,5 +1,7 @@
 #include "test_helpers.h"
 #include "../src/jacl.h"
+#include <signal.h>
+#include <sys/wait.h>
 
 /* ===== Print capture helper ===== */
 
@@ -3085,6 +3087,147 @@ static int test_shell_pipe_last_exit_code(void) {
     TEST_PASS();
 }
 
+/* ===== US-010: Jobs — background execution with `&` ===== */
+
+/* Test: US-010 - !cmd & returns a Job map with pid */
+static int test_job_returns_map_with_pid(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Run a command in background, check that result is a map with pid */
+    VMResult result = jacl_run("!echo test &", &vm, &arena);
+
+    if (result != VM_OK) {
+        printf("\nError: %s\n", vm.error_message ? vm.error_message : "unknown");
+    }
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(vm.stack_top > 0);
+    JaclVal val = vm.stack[vm.stack_top - 1];
+    /* Result should be a map */
+    ASSERT(jacl_is_map(val));
+
+    /* Extract and check pid */
+    jacl_map_node* m = (jacl_map_node*)jacl_as_ptr(val);
+    gc__current_heap = &vm.heap;
+    JaclVal pid_key = jacl_intern(&vm.heap, vm.intern_table, "pid", 3);
+    JaclVal pid_val = jacl_map_get(m, pid_key);
+    ASSERT(jacl_is_i32(pid_val));
+    int32_t pid = jacl_as_i32(pid_val);
+    ASSERT(pid > 0);
+
+    /* Kill the background process so it doesn't linger */
+    kill((pid_t)pid, SIGKILL);
+    waitpid(pid, NULL, 0);  /* Clean up zombie */
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: US-010 - await $job returns ExecResult struct */
+static int test_job_await_returns_result(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Run a quick command in background and await it */
+    VMResult result = jacl_run(
+        "job = !echo hello &\nawait $job",
+        &vm, &arena);
+
+    if (result != VM_OK) {
+        printf("\nError: %s\n", vm.error_message ? vm.error_message : "unknown");
+    }
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(vm.stack_top > 0);
+    JaclVal val = vm.stack[vm.stack_top - 1];
+    /* Result should be a map */
+    ASSERT(jacl_is_map(val));
+
+    /* Check exit code */
+    jacl_map_node* m = (jacl_map_node*)jacl_as_ptr(val);
+    gc__current_heap = &vm.heap;
+    JaclVal exit_key = jacl_intern(&vm.heap, vm.intern_table, "exit", 4);
+    JaclVal exit_val = jacl_map_get(m, exit_key);
+    ASSERT(jacl_is_i32(exit_val));
+    ASSERT(jacl_as_i32(exit_val) == 0);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: US-010 - await $job captures stdout */
+static int test_job_await_captures_stdout(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    VM vm;
+    vm_init(&vm, &arena);
+
+    VMResult result = jacl_run(
+        "job = !echo hello &; res = {await $job}; {$res->stdout | collect}",
+        &vm, &arena);
+
+    if (result != VM_OK) {
+        printf("\nError: %s\n", vm.error_message ? vm.error_message : "unknown");
+    }
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(vm.stack_top > 0);
+    JaclVal val = vm.stack[vm.stack_top - 1];
+    ASSERT(jacl_is_string(val));
+
+    char buf[64];
+    uint32_t len = jacl_string_byte_len(val);
+    jacl_string_data(val, buf, sizeof(buf));
+    buf[len] = '\0';
+    /* Should contain "hello\n" */
+    ASSERT(strstr(buf, "hello") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: US-010 - Job doesn't block parent */
+static int test_job_doesnt_block(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Start a short command in background, immediately print, then await.
+     * If jobs blocked, "immediate" would print after command finished. */
+    VMResult result = jacl_run(
+        "job = !echo bg &; [print \"immediate\"]; {await $job}; [print \"done\"]",
+        &vm, &arena);
+
+    if (result != VM_OK) {
+        printf("\nError: %s\n", vm.error_message ? vm.error_message : "unknown");
+    }
+    ASSERT_INT_EQ(result, VM_OK);
+    /* Both prints should have executed */
+    ASSERT(strstr(cap.buf, "immediate") != NULL);
+    ASSERT(strstr(cap.buf, "done") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -3226,6 +3369,11 @@ int main(void) {
     { "shell_os_pipe_grep",       test_shell_os_pipe_grep },
     { "shell_mixed_pipes",        test_shell_mixed_pipes },
     { "shell_pipe_last_exit",     test_shell_pipe_last_exit_code },
+    /* US-010: Jobs — background execution with & */
+    { "job_returns_map_with_pid", test_job_returns_map_with_pid },
+    { "job_await_returns_result", test_job_await_returns_result },
+    { "job_await_captures_stdout", test_job_await_captures_stdout },
+    { "job_doesnt_block",         test_job_doesnt_block },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

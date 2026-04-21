@@ -7661,23 +7661,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* await — suspension point (state machine) */
+  /* await — suspension point (state machine) or job wait */
   if (compiler__head_matches(head, "await", 5)) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "await", "1 argument", argc);
       return;
     }
-    if (c->in_try_body) {
-      compiler__error(c, line, col,
-          "cannot suspend inside try/catch; use error capture on futures instead");
-      return;
-    }
-    if (c->in_non_suspending_callback) {
-      compiler__error(c, line, col,
-          "cannot suspend inside non-suspending callback");
-      return;
-    }
     if (c->sm_analysis) {
+      /* SM context: await is a suspension point */
+      if (c->in_try_body) {
+        compiler__error(c, line, col,
+            "cannot suspend inside try/catch; use error capture on futures instead");
+        return;
+      }
+      if (c->in_non_suspending_callback) {
+        compiler__error(c, line, col,
+            "cannot suspend inside non-suspending callback");
+        return;
+      }
       /* SM await: compile future, set resume_point, emit OP_AWAIT_SM.
          Inline (resolved): OP_AWAIT_SM pushes result, jump past resume push.
          Resume (pending):  dispatch table lands at resume label, push __rv. */
@@ -7700,8 +7701,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->last_expr_type = TYPE_DYN;
       return;
     }
-    compiler__error(c, line, col,
-        "await requires state machine compilation (internal error)");
+    /* Non-SM context: blocking await for jobs (and resolved futures).
+       Compile argument and emit OP_AWAIT_JOB which blocks on jobs. */
+    compiler__compile_node(c, args[0]);
+    compiler__emit_byte(c, OP_AWAIT_JOB, line);
+    c->last_expr_type = TYPE_DYN;
     return;
   }
 
@@ -9765,8 +9769,15 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       /* Build vector from stack elements, then exec */
       compiler__emit_byte(c, OP_VEC, line);
       compiler__emit_byte(c, (uint8_t)total_elems, line);
-      compiler__emit_byte(c, OP_EXEC, line);
-      c->last_expr_type = TYPE_STREAM;
+
+      /* Check for background execution (!cmd &) */
+      if (node->data.shell_cmd.background) {
+        compiler__emit_byte(c, OP_EXEC_BG, line);
+        c->last_expr_type = TYPE_DYN;  /* Returns a Job map */
+      } else {
+        compiler__emit_byte(c, OP_EXEC, line);
+        c->last_expr_type = TYPE_STREAM;
+      }
       break;
     }
 

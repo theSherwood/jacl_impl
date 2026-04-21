@@ -16,6 +16,7 @@
 #include <time.h>
 #include <fcntl.h>
 #include <sys/wait.h>
+#include <errno.h>
 
 /* --- Stack size --- */
 
@@ -6347,24 +6348,138 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_AWAIT_SM: {
-        /* State machine await: pop future from stack, read state object
-           from frame slot 0.  If future is already resolved, push the
-           result and continue execution inline.  If pending in runtime
-           mode, register the state machine object as a future waiter and
-           return VM_OK to suspend the current task.  Scheduler support
-           for resuming SM waiters is in runtime.c (US-014). */
-        JaclVal future_val;
-        result = vm__pop(vm, &future_val);
+        /* State machine await: pop value from stack.
+           - If it's a Job map: do blocking wait and return result
+           - If it's a Future: handle via SM suspension semantics */
+        JaclVal val;
+        result = vm__pop(vm, &val);
         if (result != VM_OK) return result;
 
-        if (!jacl_is_future(future_val)) {
-          vm__set_error(vm, "await requires a future value, got %s",
-                       vm__type_name(future_val));
+        /* US-010: Check if it's a Job map first */
+        if (jacl_is_map(val)) {
+          jacl_map_node* m = (jacl_map_node*)jacl_as_ptr(val);
+          gc__current_heap = &vm->heap;
+          JaclVal marker_key = jacl_intern(&vm->heap, vm->intern_table, "_is_job", 7);
+          JaclVal marker_val = jacl_map_get(m, marker_key);
+
+          if (marker_val == JACL_TRUE) {
+            /* It's a Job - extract pid and wait (blocking) */
+            JaclVal pid_key = jacl_intern(&vm->heap, vm->intern_table, "pid", 3);
+            JaclVal pid_val = jacl_map_get(m, pid_key);
+            if (!jacl_is_i32(pid_val)) {
+              vm__set_error(vm, "invalid job: missing pid");
+              return VM_RUNTIME_ERROR;
+            }
+            pid_t pid = (pid_t)jacl_as_i32(pid_val);
+
+            /* Wait for process to complete */
+            int status;
+            pid_t waited = waitpid(pid, &status, 0);
+            if (waited < 0) {
+              vm__set_error(vm, "waitpid failed: %s", strerror(errno));
+              return VM_RUNTIME_ERROR;
+            }
+
+            int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+
+            /* Read stdout from temp file */
+            JaclVal stdout_key = jacl_intern(&vm->heap, vm->intern_table, "_stdout_path", 12);
+            JaclVal stdout_path_val = jacl_map_get(m, stdout_key);
+            char stdout_path[128] = {0};
+            if (jacl_is_string(stdout_path_val)) {
+              uint32_t len = jacl_string_byte_len(stdout_path_val);
+              if (len < sizeof(stdout_path)) {
+                jacl_string_data(stdout_path_val, stdout_path, len + 1);
+              }
+            }
+
+            char* stdout_buf = NULL;
+            size_t stdout_len = 0;
+            if (stdout_path[0]) {
+              FILE* fp = fopen(stdout_path, "r");
+              if (fp) {
+                fseek(fp, 0, SEEK_END);
+                stdout_len = (size_t)ftell(fp);
+                fseek(fp, 0, SEEK_SET);
+                stdout_buf = (char*)arena_alloc(vm->arena, (uint32_t)(stdout_len + 1));
+                fread(stdout_buf, 1, stdout_len, fp);
+                stdout_buf[stdout_len] = '\0';
+                fclose(fp);
+              }
+              unlink(stdout_path);
+            }
+
+            /* Read stderr from temp file */
+            JaclVal stderr_key = jacl_intern(&vm->heap, vm->intern_table, "_stderr_path", 12);
+            JaclVal stderr_path_val = jacl_map_get(m, stderr_key);
+            char stderr_path[128] = {0};
+            if (jacl_is_string(stderr_path_val)) {
+              uint32_t len = jacl_string_byte_len(stderr_path_val);
+              if (len < sizeof(stderr_path)) {
+                jacl_string_data(stderr_path_val, stderr_path, len + 1);
+              }
+            }
+
+            char* stderr_buf = NULL;
+            size_t stderr_len = 0;
+            if (stderr_path[0]) {
+              FILE* fp = fopen(stderr_path, "r");
+              if (fp) {
+                fseek(fp, 0, SEEK_END);
+                stderr_len = (size_t)ftell(fp);
+                fseek(fp, 0, SEEK_SET);
+                stderr_buf = (char*)arena_alloc(vm->arena, (uint32_t)(stderr_len + 1));
+                fread(stderr_buf, 1, stderr_len, fp);
+                stderr_buf[stderr_len] = '\0';
+                fclose(fp);
+              }
+              unlink(stderr_path);
+            }
+
+            /* Create result map {stdout, stderr, exit} */
+            jacl_map_node* result_map = NULL;
+
+            /* Create stdout as a stream (like OP_EXEC_FULL) */
+            JaclVal stdout_stream_val = jacl_stream(&vm->heap);
+            JaclStream* stdout_stream = jacl_as_stream(stdout_stream_val);
+            stdout_stream->kind = STREAM_KIND_EXEC_BUFFER;
+            stdout_stream->state = STREAM_PENDING;
+            if (stdout_buf && stdout_len > 0) {
+              stdout_stream->args[0] = jacl_intern(&vm->heap, vm->intern_table,
+                                                   stdout_buf, (uint32_t)stdout_len);
+            } else {
+              stdout_stream->args[0] = jacl_intern(&vm->heap, vm->intern_table, "", 0);
+            }
+            stdout_stream->args[1] = jacl_i32(0); /* position index */
+            stdout_stream->arg_count = 2;
+
+            JaclVal out_key = jacl_intern(&vm->heap, vm->intern_table, "stdout", 6);
+            result_map = jacl_map_set(result_map, out_key, stdout_stream_val);
+
+            JaclVal err_key = jacl_intern(&vm->heap, vm->intern_table, "stderr", 6);
+            JaclVal err_val = stderr_buf && stderr_len > 0
+                ? jacl_intern(&vm->heap, vm->intern_table, stderr_buf, (uint32_t)stderr_len)
+                : jacl_intern(&vm->heap, vm->intern_table, "", 0);
+            result_map = jacl_map_set(result_map, err_key, err_val);
+
+            JaclVal exit_key = jacl_intern(&vm->heap, vm->intern_table, "exit", 4);
+            result_map = jacl_map_set(result_map, exit_key, jacl_i32(exit_code));
+
+            result = vm__push(vm, jacl_map_ptr(result_map));
+            if (result != VM_OK) return result;
+            break;
+          }
+        }
+
+        /* Not a job - must be a future */
+        if (!jacl_is_future(val)) {
+          vm__set_error(vm, "await requires a future or job, got %s",
+                       vm__type_name(val));
           return VM_RUNTIME_ERROR;
         }
 
         JaclVal state_val = vm->stack[frame->stack_base + 0];
-        JaclFuture *fut = jacl_as_future(future_val);
+        JaclFuture *fut = jacl_as_future(val);
         uint32_t fstate = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_ACQUIRE);
 
         if (fstate == FUTURE_RESOLVED || fstate == FUTURE_ERROR) {
@@ -7871,6 +7986,256 @@ interpret_done:
         result = vm__push(vm, stream_val);
         if (result != VM_OK) return result;
         break;
+      }
+
+      /* US-010: Background process execution.
+       * Stack: [args_vec] -> [Job map]
+       * Forks a child process and returns immediately with a Job map
+       * containing {pid, _is_job, _stdout_path, _stderr_path}.
+       */
+      case OP_EXEC_BG: {
+        JaclVal args_vec;
+        result = vm__pop(vm, &args_vec);
+        if (result != VM_OK) return result;
+
+        if (!jacl_is_vector(args_vec)) {
+          vm__set_error(vm, "exec requires a vector of arguments, got %s",
+                       vm__type_name(args_vec));
+          return VM_RUNTIME_ERROR;
+        }
+
+        jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(args_vec);
+        uint32_t argc = jacl_vec_count(vec);
+        if (argc == 0) {
+          vm__set_error(vm, "exec requires at least a command name");
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Build argv array for execvp */
+        char** argv = (char**)arena_alloc(vm->arena, sizeof(char*) * (argc + 1));
+        for (uint32_t i = 0; i < argc; i++) {
+          jacl_vec_get_result gr = jacl_vec_get(vec, i);
+          JaclVal arg_val = gr.value;
+          if (!jacl_is_string(arg_val)) {
+            vm__set_error(vm, "exec argument %d must be a string, got %s",
+                         (int)i, vm__type_name(arg_val));
+            return VM_RUNTIME_ERROR;
+          }
+          uint32_t arg_len = jacl_string_byte_len(arg_val);
+          char* arg_buf = (char*)arena_alloc(vm->arena, arg_len + 1);
+          jacl_string_data(arg_val, arg_buf, arg_len + 1);
+          arg_buf[arg_len] = '\0';
+          argv[i] = arg_buf;
+        }
+        argv[argc] = NULL;
+
+        /* Create temp files for stdout and stderr */
+        char stdout_path[64], stderr_path[64];
+        unsigned long hash = (unsigned long)time(NULL) ^ (unsigned long)(uintptr_t)argv;
+        snprintf(stdout_path, sizeof(stdout_path), "/tmp/jacl_bg_out_%d_%lu",
+                 (int)getpid(), hash);
+        snprintf(stderr_path, sizeof(stderr_path), "/tmp/jacl_bg_err_%d_%lu",
+                 (int)getpid(), hash);
+
+        pid_t pid = fork();
+        if (pid < 0) {
+          vm__set_error(vm, "fork failed: %s", strerror(errno));
+          return VM_RUNTIME_ERROR;
+        }
+
+        if (pid == 0) {
+          /* Child process: redirect stdout/stderr to temp files */
+          int stdout_fd = open(stdout_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+          int stderr_fd = open(stderr_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+          if (stdout_fd >= 0) {
+            dup2(stdout_fd, STDOUT_FILENO);
+            close(stdout_fd);
+          }
+          if (stderr_fd >= 0) {
+            dup2(stderr_fd, STDERR_FILENO);
+            close(stderr_fd);
+          }
+          execvp(argv[0], argv);
+          /* execvp failed */
+          fprintf(stderr, "execvp failed: %s\n", strerror(errno));
+          _exit(127);
+        }
+
+        /* Parent: create Job map with pid and file paths */
+        gc__current_heap = &vm->heap;
+        jacl_map_node* m = NULL;
+        JaclVal pid_key = jacl_intern(&vm->heap, vm->intern_table, "pid", 3);
+        JaclVal pid_val = jacl_i32((int32_t)pid);
+        m = jacl_map_set(m, pid_key, pid_val);
+
+        JaclVal marker_key = jacl_intern(&vm->heap, vm->intern_table, "_is_job", 7);
+        m = jacl_map_set(m, marker_key, JACL_TRUE);
+
+        JaclVal stdout_key = jacl_intern(&vm->heap, vm->intern_table, "_stdout_path", 12);
+        JaclVal stdout_val = jacl_intern(&vm->heap, vm->intern_table,
+                                         stdout_path, (uint32_t)strlen(stdout_path));
+        m = jacl_map_set(m, stdout_key, stdout_val);
+
+        JaclVal stderr_key = jacl_intern(&vm->heap, vm->intern_table, "_stderr_path", 12);
+        JaclVal stderr_val = jacl_intern(&vm->heap, vm->intern_table,
+                                         stderr_path, (uint32_t)strlen(stderr_path));
+        m = jacl_map_set(m, stderr_key, stderr_val);
+
+        result = vm__push(vm, jacl_map_ptr(m));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      /* US-010: Await job or future result.
+       * Stack: [value] -> [result]
+       * If value is a Job map (_is_job=true): waitpid, read files, return {stdout, stderr, exit}
+       * If value is a resolved future: return result
+       * If value is a pending future: error (non-SM context can't suspend)
+       */
+      case OP_AWAIT_JOB: {
+        JaclVal val;
+        result = vm__pop(vm, &val);
+        if (result != VM_OK) return result;
+
+        /* Check if it's a Job map */
+        if (jacl_is_map(val)) {
+          jacl_map_node* m = (jacl_map_node*)jacl_as_ptr(val);
+          JaclVal marker_key = jacl_intern(&vm->heap, vm->intern_table, "_is_job", 7);
+          JaclVal marker_val = jacl_map_get(m, marker_key);
+
+          if (marker_val == JACL_TRUE) {
+            /* It's a Job - extract pid and wait */
+            JaclVal pid_key = jacl_intern(&vm->heap, vm->intern_table, "pid", 3);
+            JaclVal pid_val = jacl_map_get(m, pid_key);
+            if (!jacl_is_i32(pid_val)) {
+              vm__set_error(vm, "invalid job: missing pid");
+              return VM_RUNTIME_ERROR;
+            }
+            pid_t pid = (pid_t)jacl_as_i32(pid_val);
+
+            /* Wait for process to complete */
+            int status;
+            pid_t waited = waitpid(pid, &status, 0);
+            if (waited < 0) {
+              vm__set_error(vm, "waitpid failed: %s", strerror(errno));
+              return VM_RUNTIME_ERROR;
+            }
+
+            int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+
+            /* Read stdout from temp file */
+            JaclVal stdout_key = jacl_intern(&vm->heap, vm->intern_table, "_stdout_path", 12);
+            JaclVal stdout_path_val = jacl_map_get(m, stdout_key);
+            char stdout_path[128] = {0};
+            if (jacl_is_string(stdout_path_val)) {
+              uint32_t len = jacl_string_byte_len(stdout_path_val);
+              if (len < sizeof(stdout_path)) {
+                jacl_string_data(stdout_path_val, stdout_path, len + 1);
+              }
+            }
+
+            char* stdout_buf = NULL;
+            size_t stdout_len = 0;
+            if (stdout_path[0]) {
+              FILE* fp = fopen(stdout_path, "r");
+              if (fp) {
+                fseek(fp, 0, SEEK_END);
+                stdout_len = (size_t)ftell(fp);
+                fseek(fp, 0, SEEK_SET);
+                stdout_buf = (char*)arena_alloc(vm->arena, (uint32_t)(stdout_len + 1));
+                fread(stdout_buf, 1, stdout_len, fp);
+                stdout_buf[stdout_len] = '\0';
+                fclose(fp);
+              }
+              unlink(stdout_path);
+            }
+
+            /* Read stderr from temp file */
+            JaclVal stderr_key = jacl_intern(&vm->heap, vm->intern_table, "_stderr_path", 12);
+            JaclVal stderr_path_val = jacl_map_get(m, stderr_key);
+            char stderr_path[128] = {0};
+            if (jacl_is_string(stderr_path_val)) {
+              uint32_t len = jacl_string_byte_len(stderr_path_val);
+              if (len < sizeof(stderr_path)) {
+                jacl_string_data(stderr_path_val, stderr_path, len + 1);
+              }
+            }
+
+            char* stderr_buf = NULL;
+            size_t stderr_len = 0;
+            if (stderr_path[0]) {
+              FILE* fp = fopen(stderr_path, "r");
+              if (fp) {
+                fseek(fp, 0, SEEK_END);
+                stderr_len = (size_t)ftell(fp);
+                fseek(fp, 0, SEEK_SET);
+                stderr_buf = (char*)arena_alloc(vm->arena, (uint32_t)(stderr_len + 1));
+                fread(stderr_buf, 1, stderr_len, fp);
+                stderr_buf[stderr_len] = '\0';
+                fclose(fp);
+              }
+              unlink(stderr_path);
+            }
+
+            /* Create result map {stdout, stderr, exit} */
+            gc__current_heap = &vm->heap;
+            jacl_map_node* result_map = NULL;
+
+            /* Create stdout as a stream (like OP_EXEC_FULL) */
+            JaclVal stdout_stream_val = jacl_stream(&vm->heap);
+            JaclStream* stdout_stream = jacl_as_stream(stdout_stream_val);
+            stdout_stream->kind = STREAM_KIND_EXEC_BUFFER;
+            stdout_stream->state = STREAM_PENDING;
+            if (stdout_buf && stdout_len > 0) {
+              stdout_stream->args[0] = jacl_intern(&vm->heap, vm->intern_table,
+                                                   stdout_buf, (uint32_t)stdout_len);
+            } else {
+              stdout_stream->args[0] = jacl_intern(&vm->heap, vm->intern_table, "", 0);
+            }
+            stdout_stream->args[1] = jacl_i32(0); /* position index */
+            stdout_stream->arg_count = 2;
+
+            JaclVal out_key = jacl_intern(&vm->heap, vm->intern_table, "stdout", 6);
+            result_map = jacl_map_set(result_map, out_key, stdout_stream_val);
+
+            JaclVal err_key = jacl_intern(&vm->heap, vm->intern_table, "stderr", 6);
+            JaclVal err_val = stderr_buf && stderr_len > 0
+                ? jacl_intern(&vm->heap, vm->intern_table, stderr_buf, (uint32_t)stderr_len)
+                : jacl_intern(&vm->heap, vm->intern_table, "", 0);
+            result_map = jacl_map_set(result_map, err_key, err_val);
+
+            JaclVal exit_key = jacl_intern(&vm->heap, vm->intern_table, "exit", 4);
+            result_map = jacl_map_set(result_map, exit_key, jacl_i32(exit_code));
+
+            result = vm__push(vm, jacl_map_ptr(result_map));
+            if (result != VM_OK) return result;
+            break;
+          }
+        }
+
+        /* Check if it's a Future */
+        if (jacl_is_future(val)) {
+          JaclFuture* fut = jacl_as_future(val);
+          uint32_t fstate = ATOMIC_LOAD_EXPLICIT(&fut->state, MEM_ACQUIRE);
+
+          if (fstate == FUTURE_RESOLVED) {
+            result = vm__push(vm, (JaclVal)fut->result);
+            if (result != VM_OK) return result;
+            break;
+          } else if (fstate == FUTURE_ERROR) {
+            JaclVal err = (JaclVal)fut->result;
+            result = vm__push(vm, err | JACL_FLAG_ERROR);
+            if (result != VM_OK) return result;
+            break;
+          } else {
+            vm__set_error(vm, "cannot await pending future outside async context");
+            return VM_RUNTIME_ERROR;
+          }
+        }
+
+        vm__set_error(vm, "await requires a Job or Future, got %s",
+                     vm__type_name(val));
+        return VM_RUNTIME_ERROR;
       }
 
       case OP_HALT: {

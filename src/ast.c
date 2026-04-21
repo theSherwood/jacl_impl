@@ -100,7 +100,7 @@ struct AstNode {
              const char* rest_name; uint32_t rest_name_len;
              int spread_all; } destructure_named;
     struct { AstNode* expr; }                                      spread;
-    struct { AstNode* head; AstNode** args; uint32_t arg_count; }  shell_cmd;
+    struct { AstNode* head; AstNode** args; uint32_t arg_count; uint8_t background; }  shell_cmd;
     struct { const char* message; }                                error;
   } data;
 };

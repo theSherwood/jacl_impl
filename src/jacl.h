@@ -555,7 +555,7 @@ struct AstNode {
              const char* rest_name; uint32_t rest_name_len;
              int spread_all; } destructure_named;
     struct { AstNode* expr; }                                      spread;
-    struct { AstNode* head; AstNode** args; uint32_t arg_count; }  shell_cmd;
+    struct { AstNode* head; AstNode** args; uint32_t arg_count; uint8_t background; }  shell_cmd;
     struct { const char* message; }                                error;
   } data;
 };
@@ -761,6 +761,8 @@ typedef enum {
   OP_EXEC_FULL,    /* pop args (vector) + cmd (string), run process, push map {stdout, stderr, exit} */
   OP_EXEC_STDIN,   /* pop stdin (string), pop args (vector), spawn with stdin piped, push stdout stream */
   OP_EXEC_PIPE,    /* uint8_t count; pop count arg vectors, spawn pipeline with OS pipes, push stdout stream */
+  OP_EXEC_BG,      /* pop args (vector), spawn bg process, push Job map {pid, _is_job, ...} */
+  OP_AWAIT_JOB,    /* pop value; if Job, waitpid + push result; if future, check resolved */
   OP_HALT
 } OpCode;
 

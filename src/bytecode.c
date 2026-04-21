@@ -179,6 +179,8 @@ typedef enum {
   OP_EXEC_FULL,     /* pop args (vector) + cmd (string), run process, push map {stdout, stderr, exit} */
   OP_EXEC_STDIN,    /* pop stdin (string), pop args (vector), spawn process with stdin piped, push stdout stream */
   OP_EXEC_PIPE,     /* uint8_t count; pop count arg vectors, spawn pipeline with OS pipes, push stdout stream */
+  OP_EXEC_BG,       /* pop args (vector), spawn background process, push Job map {pid, _is_job, _stdout_path, _stderr_path} */
+  OP_AWAIT_JOB,     /* pop value; if Job map, waitpid + read files + push {stdout, stderr, exit}; if future, check resolved */
   OP_HALT           /* stop execution */
 } OpCode;
 
@@ -473,6 +475,8 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_EXEC_FULL:           return "OP_EXEC_FULL";
     case OP_EXEC_STDIN:          return "OP_EXEC_STDIN";
     case OP_EXEC_PIPE:           return "OP_EXEC_PIPE";
+    case OP_EXEC_BG:             return "OP_EXEC_BG";
+    case OP_AWAIT_JOB:           return "OP_AWAIT_JOB";
     case OP_HALT:            return "OP_HALT";
   }
   return "OP_UNKNOWN";
