@@ -4457,8 +4457,9 @@ void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
     compiler__compile_shell_cmd_chain(c, lhs);
     compiler__compile_shell_cmd_args(c, rhs);
 
-    /* Emit OP_EXEC_PIPE with command count */
-    compiler__emit_byte(c, OP_EXEC_PIPE, line);
+    /* Emit OP_EXEC with EXEC_FLAG_PIPE and command count */
+    compiler__emit_byte(c, OP_EXEC, line);
+    compiler__emit_byte(c, EXEC_FLAG_PIPE, line);
     compiler__emit_byte(c, (uint8_t)cmd_count, line);
     c->last_expr_type = TYPE_STREAM;
     return;
@@ -4509,8 +4510,9 @@ void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
     compiler__compile_node(c, lhs);
     compiler__ensure_boxed(c, line);
 
-    /* Emit OP_EXEC_STDIN: pops stdin, pops args_vec, spawns with stdin piped */
-    compiler__emit_byte(c, OP_EXEC_STDIN, line);
+    /* Emit OP_EXEC with EXEC_FLAG_STDIN: pops stdin, pops args_vec, spawns with stdin piped */
+    compiler__emit_byte(c, OP_EXEC, line);
+    compiler__emit_byte(c, EXEC_FLAG_STDIN, line);
     c->last_expr_type = TYPE_STREAM;
     return;
   }
@@ -4736,6 +4738,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, OP_VEC, line);
             compiler__emit_byte(c, (uint8_t)total_elems, line);
             compiler__emit_byte(c, OP_EXEC, line);
+            compiler__emit_byte(c, 0, line);  /* Basic mode: flags = 0 */
             c->last_expr_type = TYPE_STREAM;
             return;
           }
@@ -7895,7 +7898,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__emit_byte(c, OP_VEC, line);
     compiler__emit_byte(c, (uint8_t)argc, line);
-    compiler__emit_byte(c, OP_EXEC_FULL, line);
+    compiler__emit_byte(c, OP_EXEC, line);
+    compiler__emit_byte(c, EXEC_FLAG_FULL, line);
     c->last_expr_type = TYPE_MAP;
     return;
   }
@@ -7926,9 +7930,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "cancel", "1 argument", argc);
       return;
     }
+    /* Compile as [signal $job SIGTERM] */
     compiler__compile_node(c, args[0]);
     compiler__ensure_boxed(c, line);
-    compiler__emit_byte(c, OP_CANCEL, line);
+    compiler__emit_constant(c, jacl_intern(c->heap, c->intern_table, "SIGTERM", 7), line);
+    compiler__emit_byte(c, OP_SIGNAL, line);
     c->last_expr_type = TYPE_BOOL;
     return;
   }
@@ -8530,6 +8536,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               compiler__emit_byte(c, OP_VEC, line);
               compiler__emit_byte(c, (uint8_t)total_elems, line);
               compiler__emit_byte(c, OP_EXEC, line);
+              compiler__emit_byte(c, 0, line);  /* Basic mode: flags = 0 */
               c->last_expr_type = TYPE_STREAM;
               return;
             }
@@ -9932,12 +9939,13 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       }
 
       if (use_direct_opcode) {
-        /* Native exec: use direct opcode */
+        /* Native exec: use direct opcode with flags byte */
+        compiler__emit_byte(c, OP_EXEC, line);
         if (node->data.shell_cmd.background) {
-          compiler__emit_byte(c, OP_EXEC_BG, line);
+          compiler__emit_byte(c, EXEC_FLAG_BG, line);
           c->last_expr_type = TYPE_DYN;  /* Returns a Job map */
         } else {
-          compiler__emit_byte(c, OP_EXEC, line);
+          compiler__emit_byte(c, 0, line);  /* Basic mode: flags = 0 */
           c->last_expr_type = TYPE_STREAM;
         }
       } else {

@@ -601,6 +601,12 @@ typedef struct {
 #define BYTECODE_INIT_CODE_CAP  256
 #define BYTECODE_INIT_CONST_CAP 64
 
+/* OP_EXEC flags byte — combine with | for mixed modes */
+#define EXEC_FLAG_FULL   0x01  /* Return map {stdout, stderr, exit} instead of stream */
+#define EXEC_FLAG_STDIN  0x02  /* Pop stdin value from stack before args */
+#define EXEC_FLAG_BG     0x04  /* Background: fork and return Job map immediately */
+#define EXEC_FLAG_PIPE   0x08  /* Pipe mode: next byte is command count (2+) */
+
 typedef enum {
   OP_CONST,
   OP_NIL,
@@ -757,14 +763,9 @@ typedef enum {
   OP_SYNTAX_OP,    /* uint8_t subop; pops syntax object(s), pushes introspection result */
   OP_INTERPRET,    /* pop string, interpret as JACL source, push result */
   OP_INTERPRET_PRELUDE, /* push default permissive prelude map for [interpret] */
-  OP_EXEC,         /* pop args (vector) + cmd (string), spawn process, push stdout stream */
-  OP_EXEC_FULL,    /* pop args (vector) + cmd (string), run process, push map {stdout, stderr, exit} */
-  OP_EXEC_STDIN,   /* pop stdin (string), pop args (vector), spawn with stdin piped, push stdout stream */
-  OP_EXEC_PIPE,    /* uint8_t count; pop count arg vectors, spawn pipeline with OS pipes, push stdout stream */
-  OP_EXEC_BG,      /* pop args (vector), spawn bg process, push Job map {pid, _is_job, ...} */
+  OP_EXEC,         /* uint8_t flags; unified exec opcode — see EXEC_FLAG_* constants */
   OP_AWAIT_JOB,    /* pop value; if Job, waitpid + push result; if future, check resolved */
   OP_SIGNAL,       /* pop signal_name + job; send signal to pid, push $true/$false */
-  OP_CANCEL,       /* pop job; send SIGTERM to pid, push $true/$false */
   OP_HALT
 } OpCode;
 

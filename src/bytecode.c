@@ -175,16 +175,17 @@ typedef enum {
   OP_SYNTAX_OP,     /* uint8_t subop; introspect syntax object (kind/datum/head/args/commands/pos/to-string) */
   OP_INTERPRET,     /* pop string, interpret as source, push result */
   OP_INTERPRET_PRELUDE, /* push default permissive prelude map for [interpret] */
-  OP_EXEC,          /* pop args (vector) + cmd (string), spawn process, push stdout stream */
-  OP_EXEC_FULL,     /* pop args (vector) + cmd (string), run process, push map {stdout, stderr, exit} */
-  OP_EXEC_STDIN,    /* pop stdin (string), pop args (vector), spawn process with stdin piped, push stdout stream */
-  OP_EXEC_PIPE,     /* uint8_t count; pop count arg vectors, spawn pipeline with OS pipes, push stdout stream */
-  OP_EXEC_BG,       /* pop args (vector), spawn background process, push Job map {pid, _is_job, _stdout_path, _stderr_path} */
+  OP_EXEC,          /* uint8_t flags; unified exec — flags: FULL=0x01, STDIN=0x02, BG=0x04, PIPE=0x08 (then uint8_t count) */
   OP_AWAIT_JOB,     /* pop value; if Job map, waitpid + read files + push {stdout, stderr, exit}; if future, check resolved */
-  OP_SIGNAL,        /* pop signal_num (i32), pop job map; send signal to pid, push $true on success, $false if already exited */
-  OP_CANCEL,        /* pop job map; send SIGTERM to pid, push $true on success, $false if already exited */
+  OP_SIGNAL,        /* pop signal_name (string) + job map; send signal to pid, push $true/$false */
   OP_HALT           /* stop execution */
 } OpCode;
+
+/* OP_EXEC flags byte — combine with | for mixed modes */
+#define EXEC_FLAG_FULL   0x01  /* Return map {stdout, stderr, exit} instead of stream */
+#define EXEC_FLAG_STDIN  0x02  /* Pop stdin value from stack before args */
+#define EXEC_FLAG_BG     0x04  /* Background: fork and return Job map immediately */
+#define EXEC_FLAG_PIPE   0x08  /* Pipe mode: next byte is command count (2+) */
 
 /* --- Initial capacities --- */
 
@@ -474,14 +475,9 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_INTERPRET:           return "OP_INTERPRET";
     case OP_INTERPRET_PRELUDE:   return "OP_INTERPRET_PRELUDE";
     case OP_EXEC:                return "OP_EXEC";
-    case OP_EXEC_FULL:           return "OP_EXEC_FULL";
-    case OP_EXEC_STDIN:          return "OP_EXEC_STDIN";
-    case OP_EXEC_PIPE:           return "OP_EXEC_PIPE";
-    case OP_EXEC_BG:             return "OP_EXEC_BG";
     case OP_AWAIT_JOB:           return "OP_AWAIT_JOB";
     case OP_SIGNAL:              return "OP_SIGNAL";
-    case OP_CANCEL:              return "OP_CANCEL";
-    case OP_HALT:            return "OP_HALT";
+    case OP_HALT:                return "OP_HALT";
   }
   return "OP_UNKNOWN";
 }
