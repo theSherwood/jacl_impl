@@ -173,8 +173,8 @@
         "build.sh passes"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added background field to AST shell_cmd, TOKEN_AMP parsing for & suffix. Added OP_EXEC_BG opcode. VM forks and returns Job map {pid, _is_job, _stdout_path, _stderr_path}. OP_AWAIT_SM detects Job maps and does blocking waitpid, returns ExecResult {stdout, stderr, exit}. 4 integration tests added."
     },
     {
       "id": "US-011",
