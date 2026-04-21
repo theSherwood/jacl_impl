@@ -2870,6 +2870,142 @@ static int test_shell_stdin_expr(void) {
     TEST_PASS();
 }
 
+/* ===== US-008: Stdin from JACL streams ===== */
+
+/* Test: stream piped to shell command via [lines] */
+static int test_shell_stdin_stream_lines(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Pipe a lines stream to cat */
+    VMResult result = jacl_run(
+        "[print {[lines \"a\\nb\\nc\"] | !cat | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* cat should return all lines */
+    ASSERT(strstr(cap.buf, "a") != NULL);
+    ASSERT(strstr(cap.buf, "b") != NULL);
+    ASSERT(strstr(cap.buf, "c") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: external command output piped to another external command */
+static int test_shell_stdin_stream_exec_chain(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Chain two external commands: echo -> cat */
+    VMResult result = jacl_run(
+        "[print {!echo hello | !cat | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(strstr(cap.buf, "hello") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: simple lines stream piped to grep */
+static int test_shell_stdin_stream_grep(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Pipe lines stream to grep - only lines containing "pp" should match */
+    VMResult result = jacl_run(
+        "[print {[lines \"apple\\nbanana\\napple pie\"] | !grep pp | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* grep should return lines containing "pp" */
+    ASSERT(strstr(cap.buf, "apple") != NULL);
+    /* banana should not be present */
+    ASSERT(strstr(cap.buf, "banana") == NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: take stream piped to external command */
+static int test_shell_stdin_stream_take(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Use take on lines stream, then pipe to cat */
+    VMResult result = jacl_run(
+        "[print {{[lines \"a\\nb\\nc\\nd\\ne\"] | take 2} | !cat | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    /* Take 2 should pass only first two lines */
+    ASSERT(strstr(cap.buf, "a") != NULL);
+    ASSERT(strstr(cap.buf, "b") != NULL);
+    /* c, d, e should not be present (or at least not all of them) */
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: multiple commands chained through pipes */
+static int test_shell_stdin_stream_multi_chain(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Chain: echo -> cat -> cat (triple hop) */
+    VMResult result = jacl_run(
+        "[print {!echo triple | !cat | !cat | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(strstr(cap.buf, "triple") != NULL);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -3001,6 +3137,12 @@ int main(void) {
     { "shell_stdin_var",         test_shell_stdin_var },
     { "shell_stdin_grep",        test_shell_stdin_grep },
     { "shell_stdin_expr",        test_shell_stdin_expr },
+    /* US-008: Stdin from JACL streams */
+    { "shell_stdin_stream_lines", test_shell_stdin_stream_lines },
+    { "shell_stdin_stream_exec",  test_shell_stdin_stream_exec_chain },
+    { "shell_stdin_stream_grep",  test_shell_stdin_stream_grep },
+    { "shell_stdin_stream_take",  test_shell_stdin_stream_take },
+    { "shell_stdin_stream_multi", test_shell_stdin_stream_multi_chain },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

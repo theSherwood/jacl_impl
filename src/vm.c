@@ -7251,9 +7251,9 @@ interpret_done:
         break;
       }
 
-      /* US-007: exec with stdin — spawn external command with piped stdin
+      /* US-007/US-008: exec with stdin — spawn external command with piped stdin
        * Stack: [args_vec, stdin_val] -> [stream]
-       * stdin_val is a string that will be written to the process's stdin.
+       * stdin_val is a string or stream that will be written to the process's stdin.
        */
       case OP_EXEC_STDIN: {
         JaclVal stdin_val;
@@ -7270,15 +7270,92 @@ interpret_done:
           return VM_RUNTIME_ERROR;
         }
 
-        /* Convert stdin to string if needed */
-        char stdin_buf[65536];
-        uint32_t stdin_len = 0;
+        /* Convert stdin to string — handles both string and stream inputs */
+        size_t stdin_cap = 4096;
+        size_t stdin_len = 0;
+        char* stdin_buf = (char*)arena_alloc(vm->arena, stdin_cap);
+
         if (jacl_is_string(stdin_val)) {
+          /* US-007: String input — copy directly */
           stdin_len = jacl_string_byte_len(stdin_val);
-          if (stdin_len >= sizeof(stdin_buf)) stdin_len = sizeof(stdin_buf) - 1;
-          jacl_string_data(stdin_val, stdin_buf, stdin_len + 1);
+          if (stdin_len >= stdin_cap) {
+            stdin_cap = stdin_len + 1;
+            stdin_buf = (char*)arena_alloc(vm->arena, stdin_cap);
+          }
+          jacl_string_data(stdin_val, stdin_buf, (uint32_t)(stdin_cap));
+        } else if (jacl_is_stream(stdin_val)) {
+          /* US-008: Stream input — collect elements and concatenate as strings */
+          JaclStream* src_stream = jacl_as_stream(stdin_val);
+
+          while (src_stream->state != STREAM_EXHAUSTED) {
+            JaclVal elem;
+            StreamPullResult pr = vm__pull_stream_one(vm, stdin_val, &elem);
+            if (pr == STREAM_PULL_ERROR) return VM_RUNTIME_ERROR;
+            if (pr == STREAM_PULL_EXHAUSTED) break;
+
+            /* Handle error values from upstream (e.g., !false | !cat) */
+            if (jacl_is_error(elem)) {
+              frame = &vm->frames[vm->frame_count - 1];
+              result = vm__push(vm, elem);
+              if (result != VM_OK) return result;
+              goto exec_stdin_done;
+            }
+
+            /* Convert element to string */
+            const char* elem_data = NULL;
+            uint32_t elem_len = 0;
+            char numbuf[32];
+
+            if (jacl_is_string(elem)) {
+              elem_len = jacl_string_byte_len(elem);
+              char* tmp = (char*)arena_alloc(vm->arena, elem_len + 1);
+              jacl_string_data(elem, tmp, elem_len + 1);
+              elem_data = tmp;
+            } else if (jacl_is_i32(elem)) {
+              snprintf(numbuf, sizeof(numbuf), "%d", jacl_as_i32(elem));
+              elem_data = numbuf;
+              elem_len = (uint32_t)strlen(numbuf);
+            } else if (jacl_is_f64(elem)) {
+              snprintf(numbuf, sizeof(numbuf), "%g", jacl_as_f64(elem));
+              elem_data = numbuf;
+              elem_len = (uint32_t)strlen(numbuf);
+            } else if (jacl_is_nil(elem)) {
+              /* Skip nil values */
+              continue;
+            } else {
+              /* For other types, use repr format */
+              VMFormatBuf fmt;
+              vm__fmt_init(&fmt, vm->arena);
+              vm__fmt_value(&fmt, elem);
+              elem_data = fmt.data;
+              elem_len = fmt.len;
+            }
+
+            /* Determine if we need to add a newline after this element.
+             * Lines stream elements don't have newlines, but exec stream elements do.
+             * Add newline if the element doesn't already end with one. */
+            int needs_newline = (elem_len == 0 || elem_data[elem_len - 1] != '\n');
+
+            /* Grow buffer if needed (extra byte for potential newline) */
+            while (stdin_len + elem_len + 2 >= stdin_cap) {
+              size_t new_cap = stdin_cap * 2;
+              char* new_buf = (char*)arena_alloc(vm->arena, new_cap);
+              memcpy(new_buf, stdin_buf, stdin_len);
+              stdin_buf = new_buf;
+              stdin_cap = new_cap;
+            }
+
+            /* Append element data */
+            memcpy(stdin_buf + stdin_len, elem_data, elem_len);
+            stdin_len += elem_len;
+
+            /* Add trailing newline if needed */
+            if (needs_newline) {
+              stdin_buf[stdin_len++] = '\n';
+            }
+          }
         } else {
-          vm__set_error(vm, "exec stdin must be a string, got %s",
+          vm__set_error(vm, "exec stdin must be a string or stream, got %s",
                        vm__type_name(stdin_val));
           return VM_RUNTIME_ERROR;
         }
@@ -7400,6 +7477,7 @@ interpret_done:
 
         result = vm__push(vm, stream_val);
         if (result != VM_OK) return result;
+        exec_stdin_done:
         break;
       }
 
