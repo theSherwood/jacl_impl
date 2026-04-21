@@ -3006,6 +3006,85 @@ static int test_shell_stdin_stream_multi_chain(void) {
     TEST_PASS();
 }
 
+/* Test: US-009 - OS pipes between shell commands with grep */
+static int test_shell_os_pipe_grep(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* Use grep to filter echo output - tests real OS piping */
+    VMResult result = jacl_run(
+        "[print {!echo \"yes\\nno\\nyes\" | !grep yes | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(strstr(cap.buf, "yes") != NULL);
+    ASSERT(strstr(cap.buf, "no") == NULL);  /* grep should filter out "no" */
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: US-009 - Mixed pipes (shell -> JACL take -> shell) */
+static int test_shell_mixed_pipes(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    PrintCapture cap = { .len = 0 };
+    VM vm;
+    vm_init(&vm, &arena);
+    vm.print_fn = capture_print;
+    vm.print_ctx = &cap;
+
+    /* echo -> JACL take -> cat: tests mixed pipeline handling */
+    VMResult result = jacl_run(
+        "[print {!echo \"foo\\nbar\\nbaz\" | take 2 | !cat | collect}]",
+        &vm, &arena);
+
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(strstr(cap.buf, "foo") != NULL);
+    ASSERT(strstr(cap.buf, "bar") != NULL);
+    /* baz should be filtered out by take 2 */
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: US-009 - Last command exit code determines pipeline success */
+static int test_shell_pipe_last_exit_code(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Pipeline: echo succeeds (exit 0), then sh -c "exit 1" fails
+     * Pipeline exit code is from LAST command, so should be error */
+    VMResult result = jacl_run(
+        "{!echo hello | !sh -c \"cat; exit 1\" | collect}",
+        &vm, &arena);
+
+    /* The pipeline should execute, but collect returns error from last cmd */
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(vm.stack_top > 0);
+    JaclVal val = vm.stack[vm.stack_top - 1];
+    ASSERT(jacl_is_error(val));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -3143,6 +3222,10 @@ int main(void) {
     { "shell_stdin_stream_grep",  test_shell_stdin_stream_grep },
     { "shell_stdin_stream_take",  test_shell_stdin_stream_take },
     { "shell_stdin_stream_multi", test_shell_stdin_stream_multi_chain },
+    /* US-009: OS pipes between adjacent external commands */
+    { "shell_os_pipe_grep",       test_shell_os_pipe_grep },
+    { "shell_mixed_pipes",        test_shell_mixed_pipes },
+    { "shell_pipe_last_exit",     test_shell_pipe_last_exit_code },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

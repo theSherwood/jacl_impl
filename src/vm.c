@@ -10,9 +10,11 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 
 /* --- Stack size --- */
@@ -1150,6 +1152,120 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         }
 
         /* Create string from line (keep newline for now) */
+        uint32_t line_len = (uint32_t)strlen(line_buf);
+        gc__current_heap = &vm->heap;
+        JaclVal line_str = jacl_string_new(&vm->heap, vm->intern_table,
+                                           line_buf, line_len);
+        *out_value = line_str;
+        return STREAM_PULL_VALUE;
+    }
+
+    /* --- Exec pipe stream (US-009): read stdout from pipeline of processes --- */
+    if (stream->kind == STREAM_KIND_EXEC_PIPE) {
+        FILE* fp = (FILE*)(uintptr_t)stream->args[0];
+        if (!fp) {
+            /* Already exhausted - check if we stored an error value */
+            if (stream->state == STREAM_ERROR && stream->cached_value != JACL_NIL) {
+                *out_value = stream->cached_value;
+                stream->cached_value = JACL_NIL;
+                return STREAM_PULL_VALUE;
+            }
+            stream->state = STREAM_EXHAUSTED;
+            *out_value = JACL_NIL;
+            return STREAM_PULL_EXHAUSTED;
+        }
+
+        /* Read a line from the pipeline output */
+        char line_buf[4096];
+        if (fgets(line_buf, sizeof(line_buf), fp) == NULL) {
+            /* EOF - close file and wait for all children */
+            fclose(fp);
+            stream->args[0] = (JaclVal)0;
+
+            /* Parse PIDs from args[1]: "count,pid1,pid2,..." */
+            int exit_code = 0;
+            if (jacl_is_string(stream->args[1])) {
+                char pid_buf[256];
+                uint32_t pid_len = jacl_string_byte_len(stream->args[1]);
+                jacl_string_data(stream->args[1], pid_buf, sizeof(pid_buf));
+                pid_buf[pid_len < sizeof(pid_buf) - 1 ? pid_len : sizeof(pid_buf) - 1] = '\0';
+
+                /* Parse count and PIDs */
+                char* p = pid_buf;
+                int cmd_count = (int)strtol(p, &p, 10);
+                pid_t* pids = (pid_t*)arena_alloc(vm->arena, cmd_count * sizeof(pid_t));
+                for (int i = 0; i < cmd_count && *p == ','; i++) {
+                    p++;
+                    pids[i] = (pid_t)strtol(p, &p, 10);
+                }
+
+                /* Wait for all children, get exit status of last */
+                for (int i = 0; i < cmd_count; i++) {
+                    int status;
+                    waitpid(pids[i], &status, 0);
+                    if (i == cmd_count - 1) {
+                        exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+                    }
+                }
+            }
+
+            /* Read and clean up stderr temp file */
+            char stderr_path[64];
+            if (stream->arg_count >= 3 && jacl_is_string(stream->args[2])) {
+                uint32_t path_len = jacl_string_byte_len(stream->args[2]);
+                jacl_string_data(stream->args[2], stderr_path, sizeof(stderr_path));
+                stderr_path[path_len < sizeof(stderr_path) - 1 ? path_len : sizeof(stderr_path) - 1] = '\0';
+            } else {
+                stderr_path[0] = '\0';
+            }
+
+            if (exit_code != 0) {
+                /* Read stderr content */
+                char stderr_buf[4096] = "";
+                if (stderr_path[0] != '\0') {
+                    FILE* stderr_fp = fopen(stderr_path, "r");
+                    if (stderr_fp) {
+                        size_t nread = fread(stderr_buf, 1, sizeof(stderr_buf) - 1, stderr_fp);
+                        stderr_buf[nread] = '\0';
+                        fclose(stderr_fp);
+                    }
+                    unlink(stderr_path);
+                }
+
+                /* Create error value */
+                gc__current_heap = &vm->heap;
+                JaclVal err_msg;
+                if (stderr_buf[0] != '\0') {
+                    size_t len = strlen(stderr_buf);
+                    while (len > 0 && (stderr_buf[len-1] == '\n' || stderr_buf[len-1] == '\r')) {
+                        stderr_buf[--len] = '\0';
+                    }
+                    err_msg = jacl_string_new(&vm->heap, vm->intern_table,
+                                              stderr_buf, (uint32_t)len);
+                } else {
+                    char default_msg[64];
+                    snprintf(default_msg, sizeof(default_msg), "command exited with code %d", exit_code);
+                    err_msg = jacl_string_new(&vm->heap, vm->intern_table,
+                                              default_msg, (uint32_t)strlen(default_msg));
+                }
+
+                stream->state = STREAM_ERROR;
+                stream->cached_value = JACL_NIL;
+                *out_value = jacl_set_error(err_msg);
+                return STREAM_PULL_VALUE;
+            }
+
+            /* Success - clean up stderr temp file */
+            if (stderr_path[0] != '\0') {
+                unlink(stderr_path);
+            }
+
+            stream->state = STREAM_EXHAUSTED;
+            *out_value = JACL_NIL;
+            return STREAM_PULL_EXHAUSTED;
+        }
+
+        /* Create string from line */
         uint32_t line_len = (uint32_t)strlen(line_buf);
         gc__current_heap = &vm->heap;
         JaclVal line_str = jacl_string_new(&vm->heap, vm->intern_table,
@@ -5716,6 +5832,133 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           break;
         }
 
+        /* US-009: Exec pipe streams collect all output from pipeline */
+        if (stream->kind == STREAM_KIND_EXEC_PIPE) {
+          FILE* fp = (FILE*)(uintptr_t)stream->args[0];
+          if (!fp) {
+            /* Already exhausted - check for cached error */
+            if (stream->state == STREAM_ERROR && stream->cached_value != JACL_NIL) {
+              result = vm__push(vm, stream->cached_value);
+              stream->cached_value = JACL_NIL;
+              if (result != VM_OK) return result;
+              break;
+            }
+            result = vm__push(vm, jacl_inline_string("", 0));
+            if (result != VM_OK) return result;
+            break;
+          }
+
+          /* Read all remaining output */
+          size_t capacity = 4096;
+          size_t length = 0;
+          char* buffer = (char*)arena_alloc(vm->arena, capacity);
+
+          while (1) {
+            size_t avail = capacity - length - 1;
+            if (avail < 256) {
+              size_t new_cap = capacity * 2;
+              char* new_buf = (char*)arena_alloc(vm->arena, new_cap);
+              memcpy(new_buf, buffer, length);
+              buffer = new_buf;
+              capacity = new_cap;
+              avail = capacity - length - 1;
+            }
+            size_t nread = fread(buffer + length, 1, avail, fp);
+            if (nread == 0) break;
+            length += nread;
+          }
+          buffer[length] = '\0';
+
+          /* Close file and wait for all children */
+          fclose(fp);
+          stream->args[0] = (JaclVal)0;
+
+          /* Parse PIDs and wait */
+          int exit_code = 0;
+          if (jacl_is_string(stream->args[1])) {
+            char pid_buf[256];
+            uint32_t pid_len = jacl_string_byte_len(stream->args[1]);
+            jacl_string_data(stream->args[1], pid_buf, sizeof(pid_buf));
+            pid_buf[pid_len < sizeof(pid_buf) - 1 ? pid_len : sizeof(pid_buf) - 1] = '\0';
+
+            char* p = pid_buf;
+            int cmd_count = (int)strtol(p, &p, 10);
+            for (int i = 0; i < cmd_count && *p == ','; i++) {
+              p++;
+              pid_t pid = (pid_t)strtol(p, &p, 10);
+              int status;
+              waitpid(pid, &status, 0);
+              if (i == cmd_count - 1) {
+                exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+              }
+            }
+          }
+
+          /* Handle stderr temp file */
+          char stderr_path[64];
+          if (stream->arg_count >= 3 && jacl_is_string(stream->args[2])) {
+            uint32_t path_len = jacl_string_byte_len(stream->args[2]);
+            jacl_string_data(stream->args[2], stderr_path, sizeof(stderr_path));
+            stderr_path[path_len < sizeof(stderr_path) - 1 ? path_len : sizeof(stderr_path) - 1] = '\0';
+          } else {
+            stderr_path[0] = '\0';
+          }
+
+          if (exit_code != 0) {
+            char stderr_buf[4096] = "";
+            if (stderr_path[0] != '\0') {
+              FILE* stderr_fp = fopen(stderr_path, "r");
+              if (stderr_fp) {
+                size_t nread = fread(stderr_buf, 1, sizeof(stderr_buf) - 1, stderr_fp);
+                stderr_buf[nread] = '\0';
+                fclose(stderr_fp);
+              }
+              unlink(stderr_path);
+            }
+
+            gc__current_heap = &vm->heap;
+            JaclVal err_msg;
+            if (stderr_buf[0] != '\0') {
+              size_t len = strlen(stderr_buf);
+              while (len > 0 && (stderr_buf[len-1] == '\n' || stderr_buf[len-1] == '\r')) {
+                stderr_buf[--len] = '\0';
+              }
+              err_msg = jacl_string_new(&vm->heap, vm->intern_table,
+                                        stderr_buf, (uint32_t)len);
+            } else {
+              char default_msg[64];
+              snprintf(default_msg, sizeof(default_msg), "command exited with code %d", exit_code);
+              err_msg = jacl_string_new(&vm->heap, vm->intern_table,
+                                        default_msg, (uint32_t)strlen(default_msg));
+            }
+
+            stream->state = STREAM_ERROR;
+            frame = &vm->frames[vm->frame_count - 1];
+            result = vm__push(vm, jacl_set_error(err_msg));
+            if (result != VM_OK) return result;
+            break;
+          }
+
+          /* Success */
+          if (stderr_path[0] != '\0') {
+            unlink(stderr_path);
+          }
+
+          stream->state = STREAM_EXHAUSTED;
+          gc__current_heap = &vm->heap;
+          JaclVal result_str;
+          if (length == 0) {
+            result_str = jacl_inline_string("", 0);
+          } else {
+            result_str = jacl_string_new(&vm->heap, vm->intern_table,
+                                         buffer, (uint32_t)length);
+          }
+          frame = &vm->frames[vm->frame_count - 1];
+          result = vm__push(vm, result_str);
+          if (result != VM_OK) return result;
+          break;
+        }
+
         /* Derived streams (filter, etc.) use the unified pull helper */
         if (stream->kind != STREAM_KIND_GENERATOR) {
           gc__current_heap = &vm->heap;
@@ -7478,6 +7721,155 @@ interpret_done:
         result = vm__push(vm, stream_val);
         if (result != VM_OK) return result;
         exec_stdin_done:
+        break;
+      }
+
+      /* US-009: OS pipe chain for adjacent shell commands
+       * Stack: [cmd1_args, cmd2_args, ..., cmdN_args] (N vectors)
+       * Creates N processes connected by N-1 OS pipes
+       * Returns stdout of last process as stream */
+      case OP_EXEC_PIPE: {
+        uint8_t cmd_count = vm__read_byte(vm);
+        if (cmd_count < 2) {
+          vm__set_error(vm, "exec pipe requires at least 2 commands");
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Pop command vectors from stack (last command on top) */
+        JaclVal* cmd_vecs = (JaclVal*)arena_alloc(vm->arena, cmd_count * sizeof(JaclVal));
+        for (int i = cmd_count - 1; i >= 0; i--) {
+          result = vm__pop(vm, &cmd_vecs[i]);
+          if (result != VM_OK) return result;
+          if (!jacl_is_vector(cmd_vecs[i])) {
+            vm__set_error(vm, "exec pipe: command %d must be a vector", i);
+            return VM_RUNTIME_ERROR;
+          }
+        }
+
+        /* Build command string arrays for each process */
+        char*** cmd_argv = (char***)arena_alloc(vm->arena, cmd_count * sizeof(char**));
+        for (uint32_t i = 0; i < cmd_count; i++) {
+          jacl_vec_root* vec = (jacl_vec_root*)jacl_as_ptr(cmd_vecs[i]);
+          uint32_t argc = jacl_vec_count(vec);
+          if (argc == 0) {
+            vm__set_error(vm, "exec pipe: command %d has no arguments", (int)i);
+            return VM_RUNTIME_ERROR;
+          }
+          cmd_argv[i] = (char**)arena_alloc(vm->arena, (argc + 1) * sizeof(char*));
+          for (uint32_t j = 0; j < argc; j++) {
+            jacl_vec_get_result gr = jacl_vec_get(vec, j);
+            JaclVal arg_val = gr.value;
+            if (!jacl_is_string(arg_val)) {
+              vm__set_error(vm, "exec pipe: command %d arg %d must be string", (int)i, (int)j);
+              return VM_RUNTIME_ERROR;
+            }
+            uint32_t arg_len = jacl_string_byte_len(arg_val);
+            char* arg_buf = (char*)arena_alloc(vm->arena, arg_len + 1);
+            jacl_string_data(arg_val, arg_buf, arg_len + 1);
+            cmd_argv[i][j] = arg_buf;
+          }
+          cmd_argv[i][argc] = NULL;
+        }
+
+        /* Create pipes: we need cmd_count pipes total:
+         * pipes[0..cmd_count-2] connect consecutive processes
+         * pipes[cmd_count-1] captures last process's stdout */
+        int (*pipes)[2] = (int(*)[2])arena_alloc(vm->arena, cmd_count * sizeof(int[2]));
+        for (uint32_t i = 0; i < cmd_count; i++) {
+          if (pipe(pipes[i]) < 0) {
+            vm__set_error(vm, "exec pipe: failed to create pipe");
+            return VM_RUNTIME_ERROR;
+          }
+        }
+
+        /* Create stderr temp file for last command */
+        char stderr_path[64];
+        snprintf(stderr_path, sizeof(stderr_path), "/tmp/jacl_stderr_%d_%lu",
+                 (int)getpid(), (unsigned long)time(NULL));
+
+        /* Fork processes */
+        pid_t* pids = (pid_t*)arena_alloc(vm->arena, cmd_count * sizeof(pid_t));
+        for (uint32_t i = 0; i < cmd_count; i++) {
+          pids[i] = fork();
+          if (pids[i] < 0) {
+            vm__set_error(vm, "exec pipe: fork failed");
+            return VM_RUNTIME_ERROR;
+          }
+          if (pids[i] == 0) {
+            /* Child process */
+            /* Set up stdin from previous pipe (except first process) */
+            if (i > 0) {
+              dup2(pipes[i-1][0], STDIN_FILENO);
+            }
+            /* Set up stdout to pipes[i] (for all processes including last) */
+            dup2(pipes[i][1], STDOUT_FILENO);
+            /* Last process: redirect stderr to temp file */
+            if (i == cmd_count - 1) {
+              int stderr_fd = open(stderr_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+              if (stderr_fd >= 0) {
+                dup2(stderr_fd, STDERR_FILENO);
+                close(stderr_fd);
+              }
+            }
+            /* Close all pipe fds */
+            for (uint32_t j = 0; j < cmd_count; j++) {
+              close(pipes[j][0]);
+              close(pipes[j][1]);
+            }
+            /* Execute command */
+            execvp(cmd_argv[i][0], cmd_argv[i]);
+            /* If exec fails, exit with error */
+            _exit(127);
+          }
+        }
+
+        /* Parent: close all pipe write ends and intermediate read ends.
+         * Keep only the read end of the last pipe (captures final stdout). */
+        for (uint32_t i = 0; i < cmd_count; i++) {
+          close(pipes[i][1]); /* close all write ends */
+          if (i < cmd_count - 1) {
+            close(pipes[i][0]); /* close all read ends except last */
+          }
+        }
+
+        /* The read end of the last pipe is our stdout stream.
+         * Use fdopen to get a FILE* for the stream. */
+        int stdout_fd = pipes[cmd_count - 1][0];
+        FILE* fp = fdopen(stdout_fd, "r");
+        if (!fp) {
+          close(stdout_fd);
+          vm__set_error(vm, "exec pipe: fdopen failed");
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Create stream to read stdout.
+         * Store: FILE* in args[0], pids in args[1] (as string encoding),
+         *        stderr_path in args[2], no stdin temp file in args[3] */
+        JaclVal stream_val = jacl_stream(&vm->heap);
+        JaclStream* stream = jacl_as_stream(stream_val);
+        stream->kind = STREAM_KIND_EXEC_PIPE;
+        stream->state = STREAM_PENDING;
+        stream->args[0] = (JaclVal)(uintptr_t)fp;
+        gc__current_heap = &vm->heap;
+
+        /* Encode PIDs and count into a string for storage */
+        char pid_buf[256];
+        int pid_offset = 0;
+        pid_offset += snprintf(pid_buf + pid_offset, sizeof(pid_buf) - pid_offset,
+                               "%d", (int)cmd_count);
+        for (uint32_t i = 0; i < cmd_count; i++) {
+          pid_offset += snprintf(pid_buf + pid_offset, sizeof(pid_buf) - pid_offset,
+                                 ",%d", (int)pids[i]);
+        }
+        stream->args[1] = jacl_intern(&vm->heap, vm->intern_table,
+                                      pid_buf, (uint32_t)strlen(pid_buf));
+        stream->args[2] = jacl_intern(&vm->heap, vm->intern_table,
+                                      stderr_path, (uint32_t)strlen(stderr_path));
+        stream->args[3] = JACL_NIL; /* no stdin temp file */
+        stream->arg_count = 4;
+
+        result = vm__push(vm, stream_val);
+        if (result != VM_OK) return result;
         break;
       }
 

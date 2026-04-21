@@ -171,7 +171,8 @@ static int test_opcode_enum(void) {
   ASSERT_INT_EQ(OP_EXEC,             155);
   ASSERT_INT_EQ(OP_EXEC_FULL,        156);
   ASSERT_INT_EQ(OP_EXEC_STDIN,       157);
-  ASSERT_INT_EQ(OP_HALT,             158);
+  ASSERT_INT_EQ(OP_EXEC_PIPE,        158);
+  ASSERT_INT_EQ(OP_HALT,             159);
   TEST_PASS();
 }
 

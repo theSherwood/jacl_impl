@@ -217,6 +217,7 @@ typedef struct {
 #define STREAM_KIND_LINES      4
 #define STREAM_KIND_EXEC       5
 #define STREAM_KIND_EXEC_BUFFER 6
+#define STREAM_KIND_EXEC_PIPE  7
 #define STREAM_MAX_ARGS     8
 
 typedef struct {
@@ -759,6 +760,7 @@ typedef enum {
   OP_EXEC,         /* pop args (vector) + cmd (string), spawn process, push stdout stream */
   OP_EXEC_FULL,    /* pop args (vector) + cmd (string), run process, push map {stdout, stderr, exit} */
   OP_EXEC_STDIN,   /* pop stdin (string), pop args (vector), spawn with stdin piped, push stdout stream */
+  OP_EXEC_PIPE,    /* uint8_t count; pop count arg vectors, spawn pipeline with OS pipes, push stdout stream */
   OP_HALT
 } OpCode;
 

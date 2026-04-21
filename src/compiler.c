@@ -4317,10 +4317,122 @@ void compiler__rewrite_binding_op(Compiler* c, AstNode* node,
   (void)line;
 }
 
+/* Helper: Check if node is a shell command chain (either shell cmd or pipe of shell cmds) */
+static int compiler__is_shell_cmd_chain(AstNode* node) {
+  if (node->type == AST_SHELL_CMD) return 1;
+  if (node->type == AST_COMMAND) {
+    AstNode* head = node->data.command.head;
+    if (head->type == AST_LIT_STRING &&
+        head->data.lit_string.length == 1 &&
+        head->data.lit_string.value[0] == '|' &&
+        node->data.command.arg_count == 2) {
+      AstNode* lhs = node->data.command.args[0];
+      AstNode* rhs = node->data.command.args[1];
+      return compiler__is_shell_cmd_chain(lhs) && compiler__is_shell_cmd_chain(rhs);
+    }
+  }
+  return 0;
+}
+
+/* Helper: Count shell commands in a chain */
+static uint32_t compiler__count_shell_cmds(AstNode* node) {
+  if (node->type == AST_SHELL_CMD) return 1;
+  if (node->type == AST_COMMAND) {
+    AstNode* head = node->data.command.head;
+    if (head->type == AST_LIT_STRING &&
+        head->data.lit_string.length == 1 &&
+        head->data.lit_string.value[0] == '|' &&
+        node->data.command.arg_count == 2) {
+      return compiler__count_shell_cmds(node->data.command.args[0]) +
+             compiler__count_shell_cmds(node->data.command.args[1]);
+    }
+  }
+  return 0;
+}
+
+/* Helper: Compile shell command args into vector on stack (without exec) */
+static void compiler__compile_shell_cmd_args(Compiler* c, AstNode* cmd) {
+  AstNode* head = cmd->data.shell_cmd.head;
+  uint32_t argc = cmd->data.shell_cmd.arg_count;
+  AstNode** args = cmd->data.shell_cmd.args;
+  uint32_t line = cmd->start.line;
+  uint32_t col  = cmd->start.column;
+
+  /* Compile head (command name) as first element */
+  compiler__compile_node(c, head);
+  compiler__ensure_boxed(c, line);
+
+  /* Compile remaining arguments */
+  for (uint32_t i = 0; i < argc; i++) {
+    if (args[i]->type == AST_SPREAD) {
+      compiler__error(c, line, col, "spread in shell commands not yet supported");
+      return;
+    }
+    compiler__compile_node(c, args[i]);
+    compiler__ensure_boxed(c, line);
+  }
+
+  /* Build vector from stack elements */
+  uint32_t total_elems = 1 + argc;
+  if (total_elems > 255) {
+    compiler__error(c, line, col, "too many arguments to shell command");
+    return;
+  }
+  compiler__emit_byte(c, OP_VEC, line);
+  compiler__emit_byte(c, (uint8_t)total_elems, line);
+}
+
+/* Helper: Compile all shell commands in chain (left to right order) */
+static void compiler__compile_shell_cmd_chain(Compiler* c, AstNode* node) {
+  if (node->type == AST_SHELL_CMD) {
+    compiler__compile_shell_cmd_args(c, node);
+    return;
+  }
+  /* Must be a pipe node */
+  AstNode* lhs = node->data.command.args[0];
+  AstNode* rhs = node->data.command.args[1];
+  /* Compile LHS first (leftmost commands), then RHS */
+  compiler__compile_shell_cmd_chain(c, lhs);
+  compiler__compile_shell_cmd_chain(c, rhs);
+}
+
 void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
   AstNode* lhs = node->data.command.args[0];
   AstNode* rhs = node->data.command.args[1];
   uint32_t line = node->start.line;
+
+  /* US-009: Adjacent shell commands use real OS pipes
+   * [| !cmd1 [| !cmd2 !cmd3]] → compile all cmd vectors, OP_EXEC_PIPE count */
+  if (rhs->type == AST_SHELL_CMD && compiler__is_shell_cmd_chain(lhs)) {
+    uint32_t col = rhs->start.column;
+
+    /* In prelude mode, check that `exec` is available */
+    if (c->has_prelude) {
+      JaclVal exec_name = compiler__name_val(c->heap, c->intern_table, "exec", 4);
+      GlobalArity* ga = compiler__find_global(c, exec_name);
+      if (!ga) {
+        compiler__error(c, line, col, "exec not available");
+        return;
+      }
+    }
+
+    /* Count total commands in the chain */
+    uint32_t cmd_count = compiler__count_shell_cmds(lhs) + 1; /* +1 for RHS */
+    if (cmd_count > 255) {
+      compiler__error(c, line, col, "too many commands in pipeline");
+      return;
+    }
+
+    /* Compile all command vectors in order (left to right) */
+    compiler__compile_shell_cmd_chain(c, lhs);
+    compiler__compile_shell_cmd_args(c, rhs);
+
+    /* Emit OP_EXEC_PIPE with command count */
+    compiler__emit_byte(c, OP_EXEC_PIPE, line);
+    compiler__emit_byte(c, (uint8_t)cmd_count, line);
+    c->last_expr_type = TYPE_STREAM;
+    return;
+  }
 
   /* US-007: Shell command as pipe RHS — pipe LHS to stdin
    * [| expr [!cmd args...]] → compile LHS, compile cmd+args as vec, OP_EXEC_STDIN */
