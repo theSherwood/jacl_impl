@@ -316,3 +316,33 @@ Thread: (current)
   - Background jobs use temp files for stdout/stderr capture (not pipes)
   - waitpid() blocks until child exits; true non-blocking requires WNOHANG and polling
 ---
+
+## 2026-04-21 - US-011
+Thread: (current)
+- Added signal/cancel support for background jobs
+- Bytecode changes:
+  - Added OP_SIGNAL opcode: pop signal_name + job, send signal, push $true/$false
+  - Added OP_CANCEL opcode: pop job, send SIGTERM, push $true/$false
+  - Added opcodes to both bytecode.c and jacl.h (dual definition pattern)
+- Compiler changes:
+  - Added "signal" and "cancel" to jacl_non_core_builtins
+  - Added [signal $job SIGNAME] builtin: compile job + signal_name, emit OP_SIGNAL
+  - Added [cancel $job] builtin: compile job, emit OP_CANCEL
+- VM implementation:
+  - OP_SIGNAL: validates job map (_is_job marker), extracts pid, parses signal name
+  - Supports SIGTERM, SIGKILL, SIGINT, SIGHUP, SIGUSR1, SIGUSR2
+  - Uses kill() syscall; returns $true on success, $false if ESRCH (process exited)
+  - OP_CANCEL: same as OP_SIGNAL but hardcoded to SIGTERM
+- Added 5 integration tests:
+  - test_signal_job_sigterm: send SIGTERM to running job
+  - test_signal_job_sigkill: send SIGKILL to running job
+  - test_cancel_job: cancel running job
+  - test_signal_completed_job: signal completed job returns $false
+  - test_cancel_completed_job: cancel completed job returns $false
+- Files changed: src/bytecode.c, src/compiler.c, src/jacl.h, src/vm.c, test/test_bytecode.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - Numeric literals like `10` are parsed as integers - quote them for shell args: `!sleep "10"`
+  - kill() returns -1 with errno=ESRCH if process doesn't exist (already exited)
+  - signal.h provides SIGTERM, SIGKILL, etc. constants
+  - OpCode enum is duplicated in both bytecode.c and jacl.h - must update both
+---
