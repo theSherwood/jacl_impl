@@ -3228,6 +3228,156 @@ static int test_job_doesnt_block(void) {
     TEST_PASS();
 }
 
+/* Test: US-011 - [signal $job SIGTERM] sends SIGTERM and returns $true */
+static int test_signal_job_sigterm(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Start a long-running command, signal it, then await */
+    VMResult result = jacl_run(
+        "job = !sleep \"10\" &; [signal $job SIGTERM]",
+        &vm, &arena);
+
+    if (result != VM_OK) {
+        printf("\nError: %s\n", vm.error_message ? vm.error_message : "unknown");
+    }
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(vm.stack_top > 0);
+    JaclVal val = vm.stack[vm.stack_top - 1];
+    /* Should return $true since process was running */
+    ASSERT(val == JACL_TRUE);
+
+    /* Clean up: await the job to prevent zombie */
+    VMResult result2 = jacl_run("{await $job}", &vm, &arena);
+    (void)result2;
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: US-011 - [signal $job SIGKILL] works */
+static int test_signal_job_sigkill(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Start a long-running command, signal with SIGKILL */
+    VMResult result = jacl_run(
+        "job = !sleep \"10\" &; [signal $job SIGKILL]",
+        &vm, &arena);
+
+    if (result != VM_OK) {
+        printf("\nError: %s\n", vm.error_message ? vm.error_message : "unknown");
+    }
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(vm.stack_top > 0);
+    JaclVal val = vm.stack[vm.stack_top - 1];
+    ASSERT(val == JACL_TRUE);
+
+    /* Clean up: await the job to prevent zombie */
+    VMResult result2 = jacl_run("{await $job}", &vm, &arena);
+    (void)result2;
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: US-011 - [cancel $job] sends SIGTERM */
+static int test_cancel_job(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Start a long-running command, cancel it */
+    VMResult result = jacl_run(
+        "job = !sleep \"10\" &; [cancel $job]",
+        &vm, &arena);
+
+    if (result != VM_OK) {
+        printf("\nError: %s\n", vm.error_message ? vm.error_message : "unknown");
+    }
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(vm.stack_top > 0);
+    JaclVal val = vm.stack[vm.stack_top - 1];
+    ASSERT(val == JACL_TRUE);
+
+    /* Clean up: await the job to prevent zombie */
+    VMResult result2 = jacl_run("{await $job}", &vm, &arena);
+    (void)result2;
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: US-011 - signal on completed job returns $false */
+static int test_signal_completed_job(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Run a quick command, await it to completion, then try to signal */
+    VMResult result = jacl_run(
+        "job = !echo done &; {await $job}; [signal $job SIGTERM]",
+        &vm, &arena);
+
+    if (result != VM_OK) {
+        printf("\nError: %s\n", vm.error_message ? vm.error_message : "unknown");
+    }
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(vm.stack_top > 0);
+    JaclVal val = vm.stack[vm.stack_top - 1];
+    /* Should return $false since process already exited */
+    ASSERT(val == JACL_FALSE);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
+/* Test: US-011 - cancel on completed job returns $false */
+static int test_cancel_completed_job(void) {
+    tracker_reset();
+    arena_t arena = { .allocator = tracked_allocator };
+
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Run a quick command, await it to completion, then try to cancel */
+    VMResult result = jacl_run(
+        "job = !echo done &; {await $job}; [cancel $job]",
+        &vm, &arena);
+
+    if (result != VM_OK) {
+        printf("\nError: %s\n", vm.error_message ? vm.error_message : "unknown");
+    }
+    ASSERT_INT_EQ(result, VM_OK);
+    ASSERT(vm.stack_top > 0);
+    JaclVal val = vm.stack[vm.stack_top - 1];
+    /* Should return $false since process already exited */
+    ASSERT(val == JACL_FALSE);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    ASSERT(check_no_leaks());
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -3374,6 +3524,12 @@ int main(void) {
     { "job_await_returns_result", test_job_await_returns_result },
     { "job_await_captures_stdout", test_job_await_captures_stdout },
     { "job_doesnt_block",         test_job_doesnt_block },
+    /* US-011: Jobs — signals and cancellation */
+    { "signal_job_sigterm",       test_signal_job_sigterm },
+    { "signal_job_sigkill",       test_signal_job_sigkill },
+    { "cancel_job",               test_cancel_job },
+    { "signal_completed_job",     test_signal_completed_job },
+    { "cancel_completed_job",     test_cancel_completed_job },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -16,6 +16,7 @@
 #include <time.h>
 #include <fcntl.h>
 #include <sys/wait.h>
+#include <signal.h>
 #include <errno.h>
 
 /* --- Stack size --- */
@@ -8236,6 +8237,141 @@ interpret_done:
         vm__set_error(vm, "await requires a Job or Future, got %s",
                      vm__type_name(val));
         return VM_RUNTIME_ERROR;
+      }
+
+      /* US-011: Send signal to a background job.
+       * Stack: [job_map, signal_name] -> [bool]
+       * Returns $true if signal sent, $false if process already exited.
+       */
+      case OP_SIGNAL: {
+        JaclVal sig_name_val;
+        result = vm__pop(vm, &sig_name_val);
+        if (result != VM_OK) return result;
+
+        JaclVal job_val;
+        result = vm__pop(vm, &job_val);
+        if (result != VM_OK) return result;
+
+        /* Validate signal name is a string */
+        if (!jacl_is_string(sig_name_val)) {
+          vm__set_error(vm, "signal requires a signal name string, got %s",
+                       vm__type_name(sig_name_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Validate job is a map with _is_job marker */
+        if (!jacl_is_map(job_val)) {
+          vm__set_error(vm, "signal requires a Job map, got %s",
+                       vm__type_name(job_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        jacl_map_node* m = (jacl_map_node*)jacl_as_ptr(job_val);
+        gc__current_heap = &vm->heap;
+        JaclVal marker_key = jacl_intern(&vm->heap, vm->intern_table, "_is_job", 7);
+        JaclVal marker_val = jacl_map_get(m, marker_key);
+
+        if (marker_val != JACL_TRUE) {
+          vm__set_error(vm, "signal requires a Job map (missing _is_job marker)");
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Extract PID */
+        JaclVal pid_key = jacl_intern(&vm->heap, vm->intern_table, "pid", 3);
+        JaclVal pid_val = jacl_map_get(m, pid_key);
+        if (!jacl_is_i32(pid_val)) {
+          vm__set_error(vm, "invalid job: missing pid");
+          return VM_RUNTIME_ERROR;
+        }
+        pid_t pid = (pid_t)jacl_as_i32(pid_val);
+
+        /* Parse signal name */
+        char sig_name[32];
+        uint32_t sig_len = jacl_string_byte_len(sig_name_val);
+        if (sig_len >= sizeof(sig_name)) {
+          vm__set_error(vm, "signal name too long");
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_string_data(sig_name_val, sig_name, sig_len + 1);
+        sig_name[sig_len] = '\0';
+
+        int signum = -1;
+        if (strcmp(sig_name, "SIGTERM") == 0) signum = SIGTERM;
+        else if (strcmp(sig_name, "SIGKILL") == 0) signum = SIGKILL;
+        else if (strcmp(sig_name, "SIGINT") == 0) signum = SIGINT;
+        else if (strcmp(sig_name, "SIGHUP") == 0) signum = SIGHUP;
+        else if (strcmp(sig_name, "SIGUSR1") == 0) signum = SIGUSR1;
+        else if (strcmp(sig_name, "SIGUSR2") == 0) signum = SIGUSR2;
+        else {
+          vm__set_error(vm, "unknown signal: %s", sig_name);
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Check if process still exists and send signal */
+        int kill_result = kill(pid, signum);
+        if (kill_result == 0) {
+          /* Signal sent successfully */
+          result = vm__push(vm, JACL_TRUE);
+        } else if (errno == ESRCH) {
+          /* Process already exited - return $false (no-op) */
+          result = vm__push(vm, JACL_FALSE);
+        } else {
+          vm__set_error(vm, "kill failed: %s", strerror(errno));
+          return VM_RUNTIME_ERROR;
+        }
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      /* US-011: Cancel a background job (send SIGTERM).
+       * Stack: [job_map] -> [bool]
+       * Shorthand for [signal $job SIGTERM].
+       */
+      case OP_CANCEL: {
+        JaclVal job_val;
+        result = vm__pop(vm, &job_val);
+        if (result != VM_OK) return result;
+
+        /* Validate job is a map with _is_job marker */
+        if (!jacl_is_map(job_val)) {
+          vm__set_error(vm, "cancel requires a Job map, got %s",
+                       vm__type_name(job_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        jacl_map_node* m = (jacl_map_node*)jacl_as_ptr(job_val);
+        gc__current_heap = &vm->heap;
+        JaclVal marker_key = jacl_intern(&vm->heap, vm->intern_table, "_is_job", 7);
+        JaclVal marker_val = jacl_map_get(m, marker_key);
+
+        if (marker_val != JACL_TRUE) {
+          vm__set_error(vm, "cancel requires a Job map (missing _is_job marker)");
+          return VM_RUNTIME_ERROR;
+        }
+
+        /* Extract PID */
+        JaclVal pid_key = jacl_intern(&vm->heap, vm->intern_table, "pid", 3);
+        JaclVal pid_val = jacl_map_get(m, pid_key);
+        if (!jacl_is_i32(pid_val)) {
+          vm__set_error(vm, "invalid job: missing pid");
+          return VM_RUNTIME_ERROR;
+        }
+        pid_t pid = (pid_t)jacl_as_i32(pid_val);
+
+        /* Send SIGTERM */
+        int kill_result = kill(pid, SIGTERM);
+        if (kill_result == 0) {
+          /* Signal sent successfully */
+          result = vm__push(vm, JACL_TRUE);
+        } else if (errno == ESRCH) {
+          /* Process already exited - return $false (no-op) */
+          result = vm__push(vm, JACL_FALSE);
+        } else {
+          vm__set_error(vm, "kill failed: %s", strerror(errno));
+          return VM_RUNTIME_ERROR;
+        }
+        if (result != VM_OK) return result;
+        break;
       }
 
       case OP_HALT: {

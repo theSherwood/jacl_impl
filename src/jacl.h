@@ -763,6 +763,8 @@ typedef enum {
   OP_EXEC_PIPE,    /* uint8_t count; pop count arg vectors, spawn pipeline with OS pipes, push stdout stream */
   OP_EXEC_BG,      /* pop args (vector), spawn bg process, push Job map {pid, _is_job, ...} */
   OP_AWAIT_JOB,    /* pop value; if Job, waitpid + push result; if future, check resolved */
+  OP_SIGNAL,       /* pop signal_name + job; send signal to pid, push $true/$false */
+  OP_CANCEL,       /* pop job; send SIGTERM to pid, push $true/$false */
   OP_HALT
 } OpCode;
 

@@ -4539,7 +4539,7 @@ const char *jacl_non_core_builtins[] = {
   "make-syntax", "syntax-error",
   "box", "atom", "deref", "reset", "swap",
   "lines", "stream_next",
-  "exec",
+  "exec", "signal", "cancel",
   NULL
 };
 
@@ -7840,6 +7840,39 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_byte(c, (uint8_t)argc, line);
     compiler__emit_byte(c, OP_EXEC_FULL, line);
     c->last_expr_type = TYPE_MAP;
+    return;
+  }
+
+  /* signal — send signal to a background job (US-011)
+   * [signal $job SIGTERM] sends signal to the job's process, returns $true/$false.
+   * Valid signal names: SIGTERM, SIGKILL, SIGINT, SIGHUP, SIGUSR1, SIGUSR2 */
+  if (compiler__head_matches(head, "signal", 6)) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "signal", "2 arguments", argc);
+      return;
+    }
+    /* First arg is the job */
+    compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
+    /* Second arg is the signal name (must resolve to string) */
+    compiler__compile_node(c, args[1]);
+    compiler__ensure_boxed(c, line);
+    compiler__emit_byte(c, OP_SIGNAL, line);
+    c->last_expr_type = TYPE_BOOL;
+    return;
+  }
+
+  /* cancel — send SIGTERM to a background job (US-011)
+   * [cancel $job] is shorthand for [signal $job SIGTERM] */
+  if (compiler__head_matches(head, "cancel", 6)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "cancel", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
+    compiler__emit_byte(c, OP_CANCEL, line);
+    c->last_expr_type = TYPE_BOOL;
     return;
   }
 
