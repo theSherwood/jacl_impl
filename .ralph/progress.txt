@@ -226,3 +226,31 @@ Thread: (current)
   - Temp files need unique names using PID + time hash to avoid collisions across concurrent processes
 ---
 
+## 2026-04-21 - US-008
+Thread: (current)
+- Extended OP_EXEC_STDIN to handle stream inputs in addition to strings
+- When stdin_val is a stream, collect elements incrementally via vm__pull_stream_one():
+  - Loop while src_stream->state != STREAM_EXHAUSTED
+  - Handle error propagation from upstream (e.g., !false | !cat)
+  - Convert elements to strings (string, i32, f64, repr for others)
+  - Skip nil values
+- Add trailing newlines for elements that don't end with \n:
+  - Lines stream elements don't have trailing newlines
+  - Exec stream elements (from !cmd) already have newlines
+  - Auto-detect and add as needed
+- Dynamic buffer allocation via arena (start 4096, grow 2x)
+- Added 5 integration tests:
+  - test_shell_stdin_stream_lines: [lines ...] | !cat
+  - test_shell_stdin_stream_exec_chain: !echo | !cat (external to external)
+  - test_shell_stdin_stream_grep: [lines ...] | !grep pattern
+  - test_shell_stdin_stream_take: [lines ...] | take N | !cat
+  - test_shell_stdin_stream_multi_chain: !cmd1 | !cmd2 | !cmd3
+- Files changed: src/vm.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - [lines ...] stream yields elements WITHOUT trailing newlines (stripped during parsing)
+  - STREAM_KIND_EXEC yields elements WITH trailing newlines (from fgets)
+  - When concatenating stream elements for stdin, add \n if element doesn't end with one
+  - vm__pull_stream_one() handles all stream kinds uniformly (generator, filter, transform, etc.)
+  - Stream collection for stdin materializes to memory - true lazy piping deferred to US-009 (OS pipes)
+---
+
