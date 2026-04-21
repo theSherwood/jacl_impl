@@ -156,8 +156,8 @@
         "build.sh passes"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": "Complex story - may need splitting if too large for one iteration"
+      "passes": true,
+      "notes": "Added OP_EXEC_PIPE opcode and STREAM_KIND_EXEC_PIPE. Compiler detects adjacent shell command chains and emits OP_EXEC_PIPE. VM uses fork()/pipe()/dup2()/execvp() to create true Unix pipelines. Last command exit code determines pipeline success. 3 integration tests added."
     },
     {
       "id": "US-010",

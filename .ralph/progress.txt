@@ -254,3 +254,34 @@ Thread: (current)
   - Stream collection for stdin materializes to memory - true lazy piping deferred to US-009 (OS pipes)
 ---
 
+## 2026-04-21 - US-009
+Thread: (current)
+- Added OP_EXEC_PIPE opcode and STREAM_KIND_EXEC_PIPE constant
+- Modified compiler to detect adjacent shell command chains:
+  - compiler__is_shell_cmd_chain(): checks if node is shell cmd or pipe of shell cmds
+  - compiler__count_shell_cmds(): counts commands in a chain
+  - compiler__compile_shell_cmd_chain(): compiles all commands in order
+  - compiler__compile_pipe_op(): detects `!cmd | !cmd` patterns, emits OP_EXEC_PIPE
+- Implemented OP_EXEC_PIPE in VM using true Unix pipeline semantics:
+  - Creates N pipes for N commands (last pipe captures final stdout)
+  - Forks N processes, each with stdin/stdout connected via dup2()
+  - Parent reads from last pipe's read end via fdopen()
+  - Stores child PIDs in stream args for proper cleanup
+- Implemented STREAM_KIND_EXEC_PIPE handling:
+  - vm__pull_stream_one: reads lines from pipeline, waits for all children on EOF
+  - OP_COLLECT: collects all output, waits for children, checks last exit code
+  - Exit code of LAST command determines pipeline success (Unix semantics)
+- Added 3 integration tests:
+  - test_shell_os_pipe_grep: grep filtering through OS pipe
+  - test_shell_mixed_pipes: shell -> JACL take -> shell
+  - test_shell_pipe_last_exit: last command exit code determines result
+- Files changed: src/bytecode.c, src/compiler.c, src/gc.c, src/jacl.h, src/vm.c, test/test_bytecode.c, test/test_integration.c
+- **Learnings for future iterations:**
+  - For N commands in pipeline, need N pipes (N-1 for connections + 1 for capturing last stdout)
+  - Unix pipeline exit code is from LAST command, not first command that fails
+  - Use fdopen() on pipe read end to get FILE* compatible with existing stream infrastructure
+  - Store child PIDs in stream args (encoded as string) for waitpid() on stream exhaustion
+  - fclose() doesn't waitpid(), must explicitly wait for all forked children
+  - Mixed pipelines (shell -> JACL -> shell) don't use OP_EXEC_PIPE; they fall through to OP_EXEC_STDIN
+---
+
