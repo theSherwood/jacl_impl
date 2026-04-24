@@ -13,4 +13,24 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
 - All `.field` access on registry entries changed to `->field` (pointer deref)
 - `struct_registry__destroy` called at all exit paths in `jacl_run` and `jacl_ctx_destroy`
 
+## US-002: Restrict struct fields to non-reference types
+- Added `is_struct_value_type()` helper to `compiler.c` — allows bool, i32, u32, f32, i64, u64, f64, and TYPE_STRUCT
+- Added validation in `AST_DEFSTRUCT` compilation: rejects str, vec, map, closure, dyn, stream with clear error message
+- Added validation in `compiler__register_inline_struct()` for inline anonymous struct types
+- New test `test_defstruct_ref_type_rejected` covers str, vec, map, dyn rejection
+- Updated `test_defstruct_all_field_types` and `test_struct_new_syntax_all_types`: `str g` → `bool g`
+- Updated `test/jacl/struct_all_types.jacl`: replaced `str g` with `i32 g` (value type)
+- Updated `test_e2e_gc_handle_struct`: `{str name, i32 val}` → `{i32 val, f64 score}`
+- Updated `test_named_destructure_long_name`: `{dyn user_name, dyn user_age}` → `{i64 user_id, i32 user_age}`
+- Files changed: `src/compiler.c`, `test/test_compiler.c`, `test/test_e2e_gc_handles.c`, `test/test_long_names.c`, `test/jacl/struct_all_types.jacl`
+- **Learnings for future iterations:**
+  - In JACL, `true` is a bare word string; use `$true` for the boolean value
+  - `$true` is typed `dyn` at compile time, so struct constructor type-checking rejects it for `bool` fields — use numeric types for struct tests
+  - `jacl_f64_val()` requires `(JaclVM*, double)` not just `(double)` in the embed API
+  - Parser tests (`test_parser.c`) only test parsing, not compilation — no need to update them for compiler-level restrictions
+---
+
 ## Codebase Patterns
+- In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
+- `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)
+- Parser tests are independent of compiler validation — only test AST structure
