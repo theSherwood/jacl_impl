@@ -50,6 +50,28 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
   - To test VM opcodes in isolation, construct a BytecodeChunk manually with `chunk_init`, `chunk_write`, `chunk_add_constant`
 ---
 
+## 2026-04-24 - US-004: Wide locals — state machine field storage
+- StateField gains `width` (uint16_t, default 1) and `struct_type_idx` (uint32_t) fields
+- StateLayout gains `total_slots` (sum of all field widths) and heap/intern_table pointers
+- `sm__add_state_field` takes width + struct_type_idx params; field_index computed from total_slots
+- `sm__find_field_width()` helper returns width for a given field name
+- `sm__walk_locals` takes `StructTypeRegistry*` param; typed `def` (argc==3) resolves struct width via registry
+- `sm__optimize_state_layout` re-indexes with width-aware `new_total_slots` tracking — wide fields are atomic units
+- All `sm_field_count` assignments changed from `field_count` to `total_slots` (5 sites)
+- New opcodes: `OP_GET_STATE_FIELD_WIDE` (base_idx, width) and `OP_SET_STATE_FIELD_WIDE` (base_idx, width)
+- VM handlers: GET pushes N consecutive slots from state machine; SET pops N slots into state machine
+- Updated bytecode enum test values (2 new opcodes inserted at positions 152-153)
+- 7 new tests: field width default, struct width indexing, walk_locals struct width, atomic liveness optimization, wide field opcode round-trip, struct generator heap path e2e, total_slots allocation
+- Files changed: `src/jacl.h`, `src/compiler.c`, `src/vm.c`, `src/bytecode.c`, `test/test_bytecode.c`, `test/test_compiler.c`
+- **Learnings for future iterations:**
+  - StateField/StateLayout must be updated in BOTH `jacl.h` AND `compiler.c` (unity build pattern)
+  - JACL yield syntax: `[yield $val]` (bracketed), not `yield $val`
+  - JACL stream_next: underscore not hyphen (`stream_next` not `stream-next`)
+  - JACL print syntax: `[print [expr]]` (bracketed command), not `print [expr]`
+  - `compiler__analyze_suspensions` takes struct registry param and passes to sm__walk_locals
+  - In proc AST, body is at args[2] (args[0]=name, args[1]=params, args[2]=body)
+---
+
 ## Codebase Patterns
 - In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
 - `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)
