@@ -94,7 +94,7 @@ struct JaclVM_s {
   uint32_t        native_fn_count;   /* number of registered functions */
   uint32_t        native_fn_cap;     /* capacity of native_fns array */
   /* Persistent struct registry — accumulates across all jacl_eval calls */
-  StructTypeRegistry persistent_struct_registry;
+  StructTypeRegistry* persistent_struct_registry;
   /* Live trampolines — freed on jacl_vm_free */
   JaclTrampoline* trampoline_list;
 };
@@ -174,8 +174,10 @@ JaclVM* jacl_vm_new_ex(const JaclConfig* config) {
   jvm->vm.gc_handle_slots = jvm->handle_slots;
   jvm->vm.gc_handle_count = max_handles;
 
-  /* Initialize persistent struct registry (accumulates across evals) */
-  jvm->persistent_struct_registry.count = 0;
+  /* Initialize persistent struct registry (accumulates across evals).
+     StructTypeDefs are allocated in jvm->arena which persists. */
+  jvm->persistent_struct_registry = (StructTypeRegistry*)calloc(1, sizeof(StructTypeRegistry));
+  struct_registry__init(jvm->persistent_struct_registry, &jvm->arena);
 
   /* Initialize trampoline list */
   jvm->trampoline_list = NULL;
@@ -208,6 +210,11 @@ void jacl_vm_free(JaclVM* vm) {
   vm->vm.call_native = NULL;
   vm->vm.native_fn_count = 0;
   embed__free_all_trampolines(vm);
+  if (vm->persistent_struct_registry) {
+    struct_registry__destroy(vm->persistent_struct_registry);
+    free(vm->persistent_struct_registry);
+    vm->persistent_struct_registry = NULL;
+  }
   intern_table_destroy(&vm->intern_table);
   vm_destroy(&vm->vm);
   arena_destroy(&vm->arena);
@@ -261,7 +268,7 @@ JaclVal jacl_eval(JaclVM* jvm, const char* source) {
 
   CompileResult cr = compiler_compile(parse, &jvm->arena,
                                       &jvm->intern_table, &vm->heap,
-                                      &jvm->persistent_struct_registry, &es,
+                                      jvm->persistent_struct_registry, &es,
                                       JACL_NIL);
 
   jacl_ctx_destroy(macro_ctx);
@@ -272,10 +279,10 @@ JaclVal jacl_eval(JaclVM* jvm, const char* source) {
                                                    : "compile error");
   }
 
-  /* Update persistent struct registry with any new struct defs from this eval */
-  if (cr.struct_registry) {
-    jvm->persistent_struct_registry = *cr.struct_registry;
-  }
+  /* The persistent struct registry is used directly during compilation,
+     so no copy-back is needed. cr.struct_registry == jvm->persistent_struct_registry
+     when a seed was provided. */
+  (void)cr.struct_registry;
 
   /* Save VM execution state for re-entrant calls */
   uint32_t saved_stack_top   = vm->stack_top;
@@ -901,14 +908,14 @@ JaclVal jacl_struct_new_val(JaclVM* jvm, const char* type_name,
                                     JaclVal* fields, int count) {
   if (!jvm || !type_name) return jacl_set_error(JACL_NIL);
 
-  StructTypeRegistry* reg = &jvm->persistent_struct_registry;
+  StructTypeRegistry* reg = jvm->persistent_struct_registry;
   uint32_t name_len = (uint32_t)strlen(type_name);
   uint32_t type_idx = struct_registry__find(reg, type_name, name_len);
   if (type_idx == UINT32_MAX) {
     return embed__make_error(jvm, "unknown struct type");
   }
 
-  StructTypeDef* sdef = &reg->defs[type_idx];
+  StructTypeDef* sdef = reg->defs[type_idx];
   if (count != (int)sdef->field_count) {
     return embed__make_error(jvm, "field count mismatch");
   }
@@ -944,12 +951,12 @@ JaclVal jacl_struct_get_val(JaclVM* jvm, JaclVal s_val,
   }
 
   JaclStruct* s = jacl_as_struct_ptr(s_val);
-  StructTypeRegistry* reg = &jvm->persistent_struct_registry;
+  StructTypeRegistry* reg = jvm->persistent_struct_registry;
   if (s->type_idx >= reg->count) {
     return embed__make_error(jvm, "invalid struct type index");
   }
 
-  StructTypeDef* sdef = &reg->defs[s->type_idx];
+  StructTypeDef* sdef = reg->defs[s->type_idx];
   uint32_t fname_len = (uint32_t)strlen(field_name);
 
   for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
@@ -975,10 +982,10 @@ bool jacl_struct_set_val(JaclVM* jvm, JaclVal s_val,
   if (!jacl_is_struct(s_val)) return false;
 
   JaclStruct* s = jacl_as_struct_ptr(s_val);
-  StructTypeRegistry* reg = &jvm->persistent_struct_registry;
+  StructTypeRegistry* reg = jvm->persistent_struct_registry;
   if (s->type_idx >= reg->count) return false;
 
-  StructTypeDef* sdef = &reg->defs[s->type_idx];
+  StructTypeDef* sdef = reg->defs[s->type_idx];
   uint32_t fname_len = (uint32_t)strlen(field_name);
 
   for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
@@ -1241,10 +1248,10 @@ const char* jacl_struct_type_name_val(JaclVM* jvm, JaclVal s_val) {
   if (!jacl_is_struct(s_val)) return NULL;
 
   JaclStruct* s = jacl_as_struct_ptr(s_val);
-  StructTypeRegistry* reg = &jvm->persistent_struct_registry;
+  StructTypeRegistry* reg = jvm->persistent_struct_registry;
   if (s->type_idx >= reg->count) return NULL;
 
-  StructTypeDef* sdef = &reg->defs[s->type_idx];
+  StructTypeDef* sdef = reg->defs[s->type_idx];
   /* Copy name to arena with null terminator for safe C string return */
   char* buf = (char*)arena_alloc(&jvm->arena, sdef->name_len + 1);
   memcpy(buf, sdef->name, sdef->name_len);

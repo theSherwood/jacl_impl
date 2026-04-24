@@ -5061,9 +5061,10 @@ static int test_inline_struct_basic(void) {
     printf("ERRORS: %u\n", cr.error_count);
   }
   ASSERT_U32_EQ(cr.error_count, 0);
-  /* Registry should have 2 entries: the anonymous struct and Wrapper */
+  /* Registry should have 2 struct types: the anonymous struct and Wrapper
+     (count includes reserved slot 0, so count == 3) */
   ASSERT(cr.struct_registry != NULL);
-  ASSERT(cr.struct_registry->count == 2);
+  ASSERT(cr.struct_registry->count == 3);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
@@ -5082,9 +5083,10 @@ static int test_inline_struct_equivalence(void) {
       "struct A {struct{x:i32,y:i32} p}\n"
       "struct B {struct{x:i32,y:i32} q}", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
-  /* Registry: anon_struct (shared), A, B = 3 entries */
+  /* Registry: anon_struct (shared), A, B = 3 struct types
+     (count includes reserved slot 0, so count == 4) */
   ASSERT(cr.struct_registry != NULL);
-  ASSERT(cr.struct_registry->count == 3);
+  ASSERT(cr.struct_registry->count == 4);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
@@ -5104,8 +5106,9 @@ static int test_inline_struct_nested(void) {
       &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT(cr.struct_registry != NULL);
-  /* inner struct (shared) + outer struct + C = 3 entries */
-  ASSERT(cr.struct_registry->count == 3);
+  /* inner struct (shared) + outer struct + C = 3 struct types
+     (count includes reserved slot 0, so count == 4) */
+  ASSERT(cr.struct_registry->count == 4);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);

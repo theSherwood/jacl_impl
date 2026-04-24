@@ -165,31 +165,75 @@ bool is_unboxed_type(JaclType t) {
 
 /* --- Struct type registry --- */
 
-#define STRUCT_REGISTRY_MAX 32
-#define STRUCT_MAX_FIELDS   64
+#define STRUCT_REGISTRY_INIT_CAP 32
+#define STRUCT_MAX_FIELDS   256   /* stack buffer limit for temp field arrays */
+
+typedef struct {
+  const char* name;
+  uint32_t    name_len;
+  JaclType    type;
+  uint32_t    struct_type_idx; /* index into registry if type==TYPE_STRUCT */
+  uint32_t    offset;          /* byte offset in struct memory (C-ABI) */
+  uint32_t    size;            /* field size in bytes (C-ABI) */
+} StructTypeField;
 
 typedef struct {
   const char* name;
   uint32_t    name_len;
   JaclVal     name_val;       /* inline string (for global_arities lookup) */
-  struct {
-    const char* name;
-    uint32_t    name_len;
-    JaclType    type;
-    uint32_t    struct_type_idx; /* index into registry if type==TYPE_STRUCT */
-    uint32_t    offset;          /* byte offset in struct memory (C-ABI) */
-    uint32_t    size;            /* field size in bytes (C-ABI) */
-  } fields[STRUCT_MAX_FIELDS];
-  uint32_t field_count;
-  uint32_t total_size;         /* total size including trailing padding */
-  uint32_t alignment;          /* max alignment of all fields */
+  uint32_t    field_count;
+  uint32_t    total_size;     /* total size including trailing padding */
+  uint32_t    alignment;      /* max alignment of all fields */
+  StructTypeField fields[];   /* flexible array member — variable field count */
 } StructTypeDef;
 
 struct StructTypeRegistry {
-  StructTypeDef defs[STRUCT_REGISTRY_MAX];
-  uint32_t count;
+  StructTypeDef** defs;       /* defs[type_idx] → StructTypeDef* (defs[0] = NULL, reserved for dyn) */
+  uint32_t count;             /* next available type_idx (starts at 1; 0 is reserved) */
+  uint32_t capacity;          /* capacity of defs pointer array */
+  arena_t* arena;             /* arena for StructTypeDef allocations (not owned) */
 };
 /* typedef already forward-declared above */
+
+/* Allocate a StructTypeDef with N fields in the registry's arena */
+static StructTypeDef* struct_registry__alloc_def(StructTypeRegistry* reg, uint32_t field_count) {
+  size_t sz = sizeof(StructTypeDef) + field_count * sizeof(StructTypeField);
+  return (StructTypeDef*)arena_alloc(reg->arena, sz);
+}
+
+/* Ensure the defs pointer array has room for at least one more entry */
+static bool struct_registry__grow(StructTypeRegistry* reg) {
+  if (reg->count < reg->capacity) return true;
+  uint32_t new_cap = reg->capacity * 2;
+  if (new_cap < STRUCT_REGISTRY_INIT_CAP) new_cap = STRUCT_REGISTRY_INIT_CAP;
+  StructTypeDef** new_defs = (StructTypeDef**)realloc(reg->defs, new_cap * sizeof(StructTypeDef*));
+  if (!new_defs) return false;
+  /* Zero new slots */
+  for (uint32_t i = reg->capacity; i < new_cap; i++) new_defs[i] = NULL;
+  reg->defs = new_defs;
+  reg->capacity = new_cap;
+  return true;
+}
+
+/* Initialize a struct type registry. Container is arena-allocated; defs array is heap-allocated.
+   arena: the arena used for StructTypeDef allocations (must outlive the registry). */
+static void struct_registry__init(StructTypeRegistry* reg, arena_t* arena) {
+  reg->arena = arena;
+  reg->capacity = STRUCT_REGISTRY_INIT_CAP;
+  reg->defs = (StructTypeDef**)calloc(reg->capacity, sizeof(StructTypeDef*));
+  reg->count = 1; /* slot 0 is reserved for plain dyn JaclVal boxes */
+  reg->defs[0] = NULL;
+}
+
+/* Free the heap-allocated defs pointer array. Does not free StructTypeDef entries
+   (those live in the arena and are freed when the arena is destroyed). */
+static void struct_registry__destroy(StructTypeRegistry* reg) {
+  if (!reg) return;
+  free(reg->defs);
+  reg->defs = NULL;
+  reg->count = 0;
+  reg->capacity = 0;
+}
 
 /* C-ABI size and alignment for a JaclType */
 uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx) {
@@ -209,8 +253,8 @@ uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_
     case TYPE_DYN:
     case TYPE_STREAM:  return 8; /* JaclVal / pointer */
     case TYPE_STRUCT:
-      if (reg && struct_idx < reg->count) {
-        return reg->defs[struct_idx].total_size;
+      if (reg && struct_idx < reg->count && reg->defs[struct_idx]) {
+        return reg->defs[struct_idx]->total_size;
       }
       return 8; /* fallback */
   }
@@ -234,8 +278,8 @@ uint32_t struct__type_align(JaclType t, StructTypeRegistry* reg, uint32_t struct
     case TYPE_DYN:
     case TYPE_STREAM:  return 8;
     case TYPE_STRUCT:
-      if (reg && struct_idx < reg->count) {
-        return reg->defs[struct_idx].alignment;
+      if (reg && struct_idx < reg->count && reg->defs[struct_idx]) {
+        return reg->defs[struct_idx]->alignment;
       }
       return 8;
   }
@@ -246,12 +290,14 @@ uint32_t struct__align_up(uint32_t offset, uint32_t align) {
   return (offset + align - 1) & ~(align - 1);
 }
 
-/* Look up a struct type by name in the registry. Returns index or UINT32_MAX if not found. */
+/* Look up a struct type by name in the registry. Returns type_idx or UINT32_MAX if not found.
+   type_idx values start at 1 (0 is reserved for plain dyn JaclVal boxes). */
 uint32_t struct_registry__find(StructTypeRegistry* reg, const char* name, uint32_t name_len) {
   if (!reg) return UINT32_MAX;
-  for (uint32_t i = 0; i < reg->count; i++) {
-    if (reg->defs[i].name_len == name_len &&
-        memcmp(reg->defs[i].name, name, name_len) == 0) {
+  for (uint32_t i = 1; i < reg->count; i++) {
+    if (reg->defs[i] &&
+        reg->defs[i]->name_len == name_len &&
+        memcmp(reg->defs[i]->name, name, name_len) == 0) {
       return i;
     }
   }
@@ -259,7 +305,7 @@ uint32_t struct_registry__find(StructTypeRegistry* reg, const char* name, uint32
 }
 
 /* Register an inline anonymous struct type from a canonical string like "struct{x:i32,y:i32}".
-   Returns registry index or UINT32_MAX on error. Uses structural equivalence: if an identical
+   Returns type_idx or UINT32_MAX on error. Uses structural equivalence: if an identical
    canonical string already exists in the registry, returns that index. */
 uint32_t compiler__register_inline_struct(
     StructTypeRegistry* reg, const char* spec, uint32_t spec_len) {
@@ -269,26 +315,23 @@ uint32_t compiler__register_inline_struct(
   uint32_t existing = struct_registry__find(reg, spec, spec_len);
   if (existing != UINT32_MAX) return existing;
 
-  if (reg->count >= STRUCT_REGISTRY_MAX) return UINT32_MAX;
+  if (!struct_registry__grow(reg)) return UINT32_MAX;
 
   /* Parse the canonical string: struct{name:type,name:type,...} */
   if (spec_len < 9 || memcmp(spec, "struct{", 7) != 0 || spec[spec_len - 1] != '}')
     return UINT32_MAX;
 
-  StructTypeDef* sdef = &reg->defs[reg->count];
-  sdef->name     = spec;
-  sdef->name_len = spec_len;
-  sdef->name_val = JACL_NIL; /* anonymous — no constructor */
-  sdef->field_count = 0;
+  /* First pass: parse into temporary stack array to count fields */
+  StructTypeField tmp_fields[256]; /* generous stack limit */
+  uint32_t tmp_count = 0;
 
-  /* Parse fields from the inner content between { and } */
   const char* p = spec + 7;
   const char* end = spec + spec_len - 1;
   uint32_t offset = 0;
   uint32_t max_align = 1;
 
   while (p < end) {
-    if (sdef->field_count >= STRUCT_MAX_FIELDS) return UINT32_MAX;
+    if (tmp_count >= 256) return UINT32_MAX;
 
     /* Parse field name (up to ':') */
     const char* colon = p;
@@ -335,13 +378,13 @@ uint32_t compiler__register_inline_struct(
     uint32_t falign = struct__type_align(ftype, reg, f_struct_idx);
     offset = struct__align_up(offset, falign);
 
-    sdef->fields[sdef->field_count].name           = fname;
-    sdef->fields[sdef->field_count].name_len       = fname_len;
-    sdef->fields[sdef->field_count].type           = ftype;
-    sdef->fields[sdef->field_count].struct_type_idx = f_struct_idx;
-    sdef->fields[sdef->field_count].offset         = offset;
-    sdef->fields[sdef->field_count].size           = fsize;
-    sdef->field_count++;
+    tmp_fields[tmp_count].name           = fname;
+    tmp_fields[tmp_count].name_len       = fname_len;
+    tmp_fields[tmp_count].type           = ftype;
+    tmp_fields[tmp_count].struct_type_idx = f_struct_idx;
+    tmp_fields[tmp_count].offset         = offset;
+    tmp_fields[tmp_count].size           = fsize;
+    tmp_count++;
 
     offset += fsize;
     if (falign > max_align) max_align = falign;
@@ -351,12 +394,21 @@ uint32_t compiler__register_inline_struct(
     if (p < end && *p == ',') p++;
   }
 
-  if (sdef->field_count == 0) return UINT32_MAX;
+  if (tmp_count == 0) return UINT32_MAX;
 
-  sdef->total_size = struct__align_up(offset, max_align);
-  sdef->alignment  = max_align;
+  /* Allocate StructTypeDef with exact field count in the registry arena */
+  StructTypeDef* sdef = struct_registry__alloc_def(reg, tmp_count);
+  if (!sdef) return UINT32_MAX;
+  sdef->name        = spec;
+  sdef->name_len    = spec_len;
+  sdef->name_val    = JACL_NIL; /* anonymous — no constructor */
+  sdef->field_count = tmp_count;
+  sdef->total_size  = struct__align_up(offset, max_align);
+  sdef->alignment   = max_align;
+  memcpy(sdef->fields, tmp_fields, tmp_count * sizeof(StructTypeField));
 
   uint32_t idx = reg->count;
+  reg->defs[idx] = sdef;
   reg->count++;
   return idx;
 }
@@ -3925,8 +3977,8 @@ void compiler__compile_destructure_named(
 
   if (rhs_type == TYPE_STRUCT && rhs_struct_idx != UINT32_MAX) {
     StructTypeRegistry* reg = compiler__get_struct_registry(c);
-    if (reg && rhs_struct_idx < reg->count) {
-      sdef = &reg->defs[rhs_struct_idx];
+    if (reg && rhs_struct_idx < reg->count && reg->defs[rhs_struct_idx]) {
+      sdef = reg->defs[rhs_struct_idx];
       use_struct_path = 1;
       /* Validate all field names at compile time */
       for (uint32_t i = 0; i < d_count; i++) {
@@ -6063,9 +6115,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Walk flat list to extract (type, name) pairs */
     JaclVal param_names_arr[COMPILER_MAX_PROC_PARAMS];
     JaclType param_types_arr[COMPILER_MAX_PROC_PARAMS];
+    uint32_t param_struct_idxs[COMPILER_MAX_PROC_PARAMS]; /* struct registry index per param */
     uint32_t param_scope_marks[COMPILER_MAX_PROC_PARAMS]; /* hygiene: per-param scope mark */
     uint8_t param_count = 0;
     bool is_variadic = false;
+    memset(param_struct_idxs, 0xFF, sizeof(param_struct_idxs)); /* UINT32_MAX = no struct */
 
     for (uint32_t fi = 0; fi < flat_count; fi++) {
       AstNode* elem = flat_elems[fi];
@@ -6139,6 +6193,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table,
             elem->data.lit_string.value, elem->data.lit_string.length);
         param_types_arr[param_count] = ptype;
+        /* If struct type, look up the struct registry index */
+        if (ptype == TYPE_STRUCT) {
+          StructTypeRegistry* reg = compiler__get_struct_registry(c);
+          param_struct_idxs[param_count] = struct_registry__find(reg, word, wlen);
+        }
         param_scope_marks[param_count] = elem->scope_mark;
         param_count++;
       } else {
@@ -6257,6 +6316,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         body_compiler.current_scope_mark = prev_mark;
         body_compiler.locals[body_compiler.local_count - 1].is_param = true;
         body_compiler.locals[body_compiler.local_count - 1].type = param_types_arr[i];
+        if (param_types_arr[i] == TYPE_STRUCT)
+          body_compiler.locals[body_compiler.local_count - 1].struct_type_idx = param_struct_idxs[i];
       }
     }
 
@@ -8263,8 +8324,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     if (struct_type == TYPE_STRUCT && struct_idx != UINT32_MAX) {
       StructTypeRegistry* reg = compiler__get_struct_registry(c);
-      if (reg && struct_idx < reg->count) {
-        StructTypeDef* sdef = &reg->defs[struct_idx];
+      if (reg && struct_idx < reg->count && reg->defs[struct_idx]) {
+        StructTypeDef* sdef = reg->defs[struct_idx];
         /* Find field by name */
         uint32_t fi;
         for (fi = 0; fi < sdef->field_count; fi++) {
@@ -8382,7 +8443,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     uint32_t struct_idx = struct_registry__find(reg,
         head->data.lit_string.value, name_len);
     if (struct_idx != UINT32_MAX) {
-      StructTypeDef* sdef = &reg->defs[struct_idx];
+      StructTypeDef* sdef = reg->defs[struct_idx];
 
       /* Arity check */
       if (argc != sdef->field_count) {
@@ -9401,7 +9462,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       if (!root->struct_registry) {
         root->struct_registry = (StructTypeRegistry*)arena_alloc(
             root->arena, sizeof(StructTypeRegistry));
-        root->struct_registry->count = 0;
+        struct_registry__init(root->struct_registry, root->arena);
       }
       StructTypeRegistry* reg = root->struct_registry;
 
@@ -9414,27 +9475,21 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         break;
       }
 
-      /* Check registry capacity */
-      if (reg->count >= STRUCT_REGISTRY_MAX) {
+      /* Ensure capacity for the new type */
+      if (!struct_registry__grow(reg)) {
         compiler__error(c, line, node->start.column,
-                        "too many struct type definitions");
+                        "struct registry allocation failure");
         break;
       }
 
-      /* Reserve slot first so inline struct registration doesn't overwrite it */
+      /* Reserve slot first so inline struct registration doesn't overwrite it.
+         We'll assign the actual StructTypeDef* after parsing fields. */
       uint32_t this_idx = reg->count;
       reg->count++;
-      StructTypeDef* sdef = &reg->defs[this_idx];
-      sdef->name     = struct_name;
-      sdef->name_len = struct_name_len;
-      if (struct_name_len <= 128) {
-        sdef->name_val = compiler__name_val(c->heap, c->intern_table, struct_name, struct_name_len);
-      } else {
-        sdef->name_val = JACL_NIL;
-      }
-      sdef->field_count = field_count;
+      reg->defs[this_idx] = NULL; /* placeholder */
 
-      /* Check for duplicate field names and resolve field types */
+      /* Parse fields into temporary stack array (FAM requires knowing count upfront) */
+      StructTypeField tmp_fields[256];
       uint32_t offset = 0;
       uint32_t max_align = 1;
       bool has_error = false;
@@ -9447,8 +9502,8 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
 
         /* Check for duplicate field names */
         for (uint32_t j = 0; j < fi; j++) {
-          if (sdef->fields[j].name_len == fname_len &&
-              memcmp(sdef->fields[j].name, fname, fname_len) == 0) {
+          if (tmp_fields[j].name_len == fname_len &&
+              memcmp(tmp_fields[j].name, fname, fname_len) == 0) {
             char err[128];
             snprintf(err, sizeof(err), "duplicate field name '%.*s' in struct '%.*s'",
                      (int)fname_len, fname, (int)struct_name_len, struct_name);
@@ -9503,12 +9558,12 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         uint32_t falign = struct__type_align(ftype, reg, f_struct_idx);
         offset = struct__align_up(offset, falign);
 
-        sdef->fields[fi].name           = fname;
-        sdef->fields[fi].name_len       = fname_len;
-        sdef->fields[fi].type           = ftype;
-        sdef->fields[fi].struct_type_idx = f_struct_idx;
-        sdef->fields[fi].offset         = offset;
-        sdef->fields[fi].size           = fsize;
+        tmp_fields[fi].name           = fname;
+        tmp_fields[fi].name_len       = fname_len;
+        tmp_fields[fi].type           = ftype;
+        tmp_fields[fi].struct_type_idx = f_struct_idx;
+        tmp_fields[fi].offset         = offset;
+        tmp_fields[fi].size           = fsize;
 
         offset += fsize;
         if (falign > max_align) max_align = falign;
@@ -9519,11 +9574,28 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         break;
       }
 
-      /* Trailing padding to struct alignment */
-      sdef->total_size = struct__align_up(offset, max_align);
-      sdef->alignment  = max_align;
+      /* Allocate StructTypeDef with exact field count in the registry arena */
+      StructTypeDef* sdef = struct_registry__alloc_def(reg, field_count);
+      if (!sdef) {
+        reg->count = this_idx;
+        compiler__error(c, line, node->start.column,
+                        "struct registry allocation failure");
+        break;
+      }
+      sdef->name     = struct_name;
+      sdef->name_len = struct_name_len;
+      if (struct_name_len <= 128) {
+        sdef->name_val = compiler__name_val(c->heap, c->intern_table, struct_name, struct_name_len);
+      } else {
+        sdef->name_val = JACL_NIL;
+      }
+      sdef->field_count = field_count;
+      sdef->total_size  = struct__align_up(offset, max_align);
+      sdef->alignment   = max_align;
+      memcpy(sdef->fields, tmp_fields, field_count * sizeof(StructTypeField));
 
-      /* Slot was already reserved above (reg->count++) */
+      /* Assign to reserved slot */
+      reg->defs[this_idx] = sdef;
 
       /* Register struct name as a global with arity = field_count (constructor)
          and type = TYPE_STRUCT */
@@ -10088,13 +10160,15 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     }
   }
   {
-    StructTypeRegistry* reg = (StructTypeRegistry*)arena_alloc(arena, sizeof(StructTypeRegistry));
     if (seed_registry) {
-      *reg = *seed_registry;  /* seed with accumulated struct defs */
+      /* Use the seed registry directly (persistent across evals) */
+      c.struct_registry = seed_registry;
     } else {
-      reg->count = 0;
+      /* Allocate a fresh registry in the compilation arena */
+      StructTypeRegistry* reg = (StructTypeRegistry*)arena_alloc(arena, sizeof(StructTypeRegistry));
+      struct_registry__init(reg, arena);
+      c.struct_registry = reg;
     }
-    c.struct_registry = reg;
   }
 
   /* Allocate macro table for compile-time macro definitions */
@@ -10538,7 +10612,7 @@ ProgramResult jacl_compile_program(const char* root_path,
   c.module_prefix  = module__build_prefix(canonical, arena, &c.module_prefix_len);
   {
     StructTypeRegistry* reg = (StructTypeRegistry*)arena_alloc(arena, sizeof(StructTypeRegistry));
-    reg->count = 0;
+    struct_registry__init(reg, arena);
     c.struct_registry = reg;
   }
 

@@ -831,8 +831,7 @@ typedef struct {
  * Types — compiler.c
  * ======================================================================== */
 
-#define STRUCT_REGISTRY_MAX 32
-#define STRUCT_MAX_FIELDS   64
+#define STRUCT_REGISTRY_INIT_CAP 32
 #define COMPILER_MAX_PROC_PARAMS 16
 #define MODULE_CACHE_MAX 64
 #define MODULE_EXPORTS_MAX 64
@@ -933,23 +932,27 @@ typedef enum {
 typedef struct {
   const char* name;
   uint32_t    name_len;
+  JaclType    type;
+  uint32_t    struct_type_idx;
+  uint32_t    offset;
+  uint32_t    size;
+} StructTypeField;
+
+typedef struct {
+  const char* name;
+  uint32_t    name_len;
   JaclVal     name_val;
-  struct {
-    const char* name;
-    uint32_t    name_len;
-    JaclType    type;
-    uint32_t    struct_type_idx;
-    uint32_t    offset;
-    uint32_t    size;
-  } fields[STRUCT_MAX_FIELDS];
-  uint32_t field_count;
-  uint32_t total_size;
-  uint32_t alignment;
+  uint32_t    field_count;
+  uint32_t    total_size;
+  uint32_t    alignment;
+  StructTypeField fields[];   /* flexible array member */
 } StructTypeDef;
 
 struct StructTypeRegistry {
-  StructTypeDef defs[STRUCT_REGISTRY_MAX];
-  uint32_t count;
+  StructTypeDef** defs;       /* defs[type_idx] → StructTypeDef* (defs[0] = NULL, reserved) */
+  uint32_t count;             /* next available type_idx (starts at 1; 0 is reserved) */
+  uint32_t capacity;
+  arena_t* arena;             /* arena for StructTypeDef allocations (not owned) */
 };
 
 typedef struct {
@@ -1408,7 +1411,7 @@ struct JaclVM_s {
   int8_t*         native_fn_arities;
   uint32_t        native_fn_count;
   uint32_t        native_fn_cap;
-  StructTypeRegistry persistent_struct_registry;
+  StructTypeRegistry* persistent_struct_registry;
   JaclTrampoline* trampoline_list;
 };
 

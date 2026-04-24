@@ -340,7 +340,7 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         /* Access the struct registry through a global pointer set before GC */
         if (gc__struct_registry) {
             StructTypeRegistry *sreg = (StructTypeRegistry *)gc__struct_registry;
-            StructTypeDef *sdef = &sreg->defs[s->type_idx];
+            StructTypeDef *sdef = sreg->defs[s->type_idx];
             for (uint32_t i = 0; i < sdef->field_count; i++) {
                 JaclType ft = sdef->fields[i].type;
                 if (ft == TYPE_STR || ft == TYPE_VEC || ft == TYPE_MAP ||

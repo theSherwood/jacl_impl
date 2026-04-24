@@ -1902,7 +1902,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena);
           if (vm->struct_registry && s->type_idx < vm->struct_registry->count) {
-            StructTypeDef* sdef = &vm->struct_registry->defs[s->type_idx];
+            StructTypeDef* sdef = vm->struct_registry->defs[s->type_idx];
             vm__fmt_append(&fmt, sdef->name, sdef->name_len);
             vm__fmt_append(&fmt, "{", 1);
             for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
@@ -2480,7 +2480,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         if (jacl_is_struct(src_val)) {
           JaclStruct* s = jacl_as_struct_ptr(src_val);
-          StructTypeDef* sdef = &vm->struct_registry->defs[s->type_idx];
+          StructTypeDef* sdef = vm->struct_registry->defs[s->type_idx];
           for (uint8_t i = 0; i < n; i++) {
             JaclVal name_val = frame->chunk->constants[name_indices[i]];
             char fname[64]; uint32_t flen;
@@ -2539,7 +2539,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         if (jacl_is_struct(src_val)) {
           JaclStruct* s = jacl_as_struct_ptr(src_val);
-          StructTypeDef* sdef = &vm->struct_registry->defs[s->type_idx];
+          StructTypeDef* sdef = vm->struct_registry->defs[s->type_idx];
 
           /* Push N explicit field values */
           for (uint8_t i = 0; i < n; i++) {
@@ -5302,7 +5302,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm__set_error(vm, "invalid struct type index");
           return VM_RUNTIME_ERROR;
         }
-        StructTypeDef* sdef = &vm->struct_registry->defs[s->type_idx];
+        StructTypeDef* sdef = vm->struct_registry->defs[s->type_idx];
         JaclVal name_val = frame->chunk->constants[name_idx];
         char fname[64]; uint32_t flen;
         flen = jacl_string_data(name_val, fname, sizeof(fname));
@@ -5357,7 +5357,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm__set_error(vm, "invalid struct type index");
           return VM_RUNTIME_ERROR;
         }
-        StructTypeDef* sdef2 = &vm->struct_registry->defs[sd->type_idx];
+        StructTypeDef* sdef2 = vm->struct_registry->defs[sd->type_idx];
         JaclVal name_val2 = frame->chunk->constants[name_idx];
         char fname2[64]; uint32_t flen2;
         flen2 = jacl_string_data(name_val2, fname2, sizeof(fname2));
@@ -5384,7 +5384,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm__set_error(vm, "invalid struct type index %u", (unsigned)type_idx);
           return VM_RUNTIME_ERROR;
         }
-        StructTypeDef* sdef = &vm->struct_registry->defs[type_idx];
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
         uint32_t field_count = sdef->field_count;
 
         /* Allocate struct on GC heap */
@@ -8208,6 +8208,9 @@ jacl_context_t *jacl_ctx_new(jacl_context_t *parent) {
 
 void jacl_ctx_destroy(jacl_context_t *ctx) {
     if (!ctx) return;
+    /* Free the defs pointer array in the struct registry (StructTypeDefs are in the arena) */
+    if (ctx->vm.struct_registry)
+        struct_registry__destroy(ctx->vm.struct_registry);
     vm_destroy(&ctx->vm);
     if (ctx->owns_intern_table)
         intern_table_destroy(&ctx->intern_table);
@@ -8478,6 +8481,7 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
 
   if (cr.error_count > 0) {
     vm->error_message = cr.error_message ? cr.error_message : "compile error";
+    struct_registry__destroy(cr.struct_registry);
     intern_table_destroy(&intern_table);
     return VM_RUNTIME_ERROR;
   }
@@ -8491,6 +8495,7 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
        get the closure, then call it. */
     VMResult r = vm_exec(vm, &cr.chunk);
     if (r != VM_OK) {
+      struct_registry__destroy(cr.struct_registry);
       intern_table_destroy(&intern_table);
       return r;
     }
@@ -8498,6 +8503,7 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
     JaclVal main_cl_val = vm->stack[0];
     if (!jacl_is_closure(main_cl_val)) {
       vm->error_message = "internal error: suspending top-level did not produce closure";
+      struct_registry__destroy(cr.struct_registry);
       intern_table_destroy(&intern_table);
       return VM_RUNTIME_ERROR;
     }
@@ -8535,6 +8541,7 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
       vm->top_chunk = &main_cl->chunk;
 
       r = vm__run(vm, 1);
+      struct_registry__destroy(cr.struct_registry);
       intern_table_destroy(&intern_table);
       return r;
     }
@@ -8575,11 +8582,13 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
       vm->stack[0] = (JaclVal)cfut->result;
       vm->stack_top = 1;
     }
+    struct_registry__destroy(cr.struct_registry);
     intern_table_destroy(&intern_table);
     return r;
   }
 
   VMResult result = vm_exec(vm, &cr.chunk);
+  struct_registry__destroy(cr.struct_registry);
   intern_table_destroy(&intern_table);
   return result;
 }
