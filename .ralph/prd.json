@@ -52,7 +52,7 @@
         "build.sh passes, struct creation works for stack-allocated structs"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

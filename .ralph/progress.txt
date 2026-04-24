@@ -30,7 +30,30 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
   - Parser tests (`test_parser.c`) only test parsing, not compilation — no need to update them for compiler-level restrictions
 ---
 
+## 2026-04-24 - US-003
+- Added `width` field to `Local` struct — tracks number of JaclVal stack slots (ceil(total_size / 8))
+- Added `want_inline_struct` flag to `Compiler` — controls inline vs heap struct construction
+- New opcode `OP_STRUCT_NEW_INLINE` — writes raw field bytes across consecutive stack slots
+- `struct__slot_width()` helper computes slot count from StructTypeDef
+- VM handler for OP_STRUCT_NEW_INLINE: pops field args, zero-fills width slots, writes field data at byte offsets
+- Handles nested struct fields by copying data from heap-allocated JaclStruct
+- Existing OP_STRUCT_NEW heap path unchanged — inline path activated via want_inline_struct flag
+- Compiler computes and stores width on struct locals but uses heap path by default (inline activation deferred to US-005/US-015 when field access supports inline structs)
+- Updated bytecode enum test values (OP_STRUCT_NEW_INLINE inserted at position 125)
+- 8 new tests: width tracking (Point/Vec3/Line), inline opcode execution, data integrity verification, wide struct (3 slots), padding zero verification, heap path regression
+- Files changed: `src/jacl.h`, `src/compiler.c`, `src/vm.c`, `src/bytecode.c`, `test/test_bytecode.c`, `test/test_compiler.c`
+- **Learnings for future iterations:**
+  - `Local` and `Compiler` are defined in BOTH `jacl.h` AND `compiler.c` (unity build) — must update both
+  - `proc name { ... }` syntax requires `proc name {} { ... }` with empty param braces in test code
+  - OP_STRUCT_NEW_INLINE can't be activated for struct locals until field access (OP_STRUCT_GET_INLINE, US-005) is implemented, because OP_GET_LOCAL reads 1 slot as JaclVal, not raw struct bytes
+  - Bytecode enum tests in test_bytecode.c have hardcoded opcode values — must update when inserting new opcodes
+  - To test VM opcodes in isolation, construct a BytecodeChunk manually with `chunk_init`, `chunk_write`, `chunk_add_constant`
+---
+
 ## Codebase Patterns
 - In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
 - `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)
 - Parser tests are independent of compiler validation — only test AST structure
+- `Local` and `Compiler` structs are defined in both `jacl.h` and `compiler.c` — update both when adding fields
+- Bytecode enum values are tested with hardcoded integers in `test/test_bytecode.c` — update after inserting opcodes
+- Test VM opcodes by constructing `BytecodeChunk` manually: `chunk_init`, `chunk_write`, `chunk_add_constant`
