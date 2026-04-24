@@ -163,6 +163,24 @@ bool is_unboxed_type(JaclType t) {
   return t == TYPE_I64 || t == TYPE_U64 || t == TYPE_F64;
 }
 
+/* Returns true if a type is allowed as a struct field (value types only).
+   Reference types (str, vec, map, closure, dyn, stream) are rejected. */
+bool is_struct_value_type(JaclType t) {
+  switch (t) {
+    case TYPE_BOOL:
+    case TYPE_I32:
+    case TYPE_U32:
+    case TYPE_F32:
+    case TYPE_I64:
+    case TYPE_U64:
+    case TYPE_F64:
+    case TYPE_STRUCT:
+      return true;
+    default:
+      return false;
+  }
+}
+
 /* --- Struct type registry --- */
 
 #define STRUCT_REGISTRY_INIT_CAP 32
@@ -372,6 +390,9 @@ uint32_t compiler__register_inline_struct(
       ftype = TYPE_STRUCT;
       f_struct_idx = idx;
     }
+
+    /* Reject reference types in inline structs */
+    if (!is_struct_value_type(ftype)) return UINT32_MAX;
 
     /* Compute C-ABI layout */
     uint32_t fsize  = struct__type_size(ftype, reg, f_struct_idx);
@@ -9551,6 +9572,17 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           }
           ftype = TYPE_STRUCT;
           f_struct_idx = idx;
+        }
+
+        /* Reject reference types — struct fields must be value types */
+        if (!is_struct_value_type(ftype)) {
+          char err[128];
+          snprintf(err, sizeof(err),
+                   "struct fields must be value types; '%.*s' is a reference type",
+                   (int)ftype_len, ftype_str);
+          compiler__error(c, line, node->start.column, err);
+          has_error = true;
+          break;
         }
 
         /* Compute C-ABI layout */

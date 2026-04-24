@@ -157,14 +157,14 @@ static int test_vec_destructure_long_name(void) {
 static int test_named_destructure_long_name(void) {
   PrintCapture cap;
   ASSERT(run_ok(
-    "struct PersonInfo {dyn user_name, dyn user_age}\n"
+    "struct PersonInfo {i64 user_id, i32 user_age}\n"
     "proc t {} {\n"
-    "  def {user_name, user_age} [PersonInfo \"Alice\" 30]\n"
-    "  print $user_name\n"
+    "  def {user_id, user_age} [PersonInfo 12345 30]\n"
+    "  print $user_id\n"
     "  print $user_age\n"
     "}\n"
     "[t]",
-    &cap, "Alice\n30\n"));
+    &cap, "12345\n30\n"));
   TEST_PASS();
 }
 

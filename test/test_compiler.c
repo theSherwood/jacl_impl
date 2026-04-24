@@ -4659,9 +4659,43 @@ static int test_defstruct_all_field_types(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
-      "struct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, str g}",
+      "struct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, bool g}",
       &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: reference types rejected as struct fields */
+static int test_defstruct_ref_type_rejected(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  /* str field should be rejected */
+  CompileResult cr1 = compile_source(
+      "struct Bad {str name, i32 val}", &arena, &heap);
+  ASSERT(cr1.error_count > 0);
+
+  /* vec field should be rejected */
+  CompileResult cr2 = compile_source(
+      "struct Bad2 {i32 x, vec items}", &arena, &heap);
+  ASSERT(cr2.error_count > 0);
+
+  /* map field should be rejected */
+  CompileResult cr3 = compile_source(
+      "struct Bad3 {map data}", &arena, &heap);
+  ASSERT(cr3.error_count > 0);
+
+  /* dyn field should be rejected */
+  CompileResult cr4 = compile_source(
+      "struct Bad4 {dyn val}", &arena, &heap);
+  ASSERT(cr4.error_count > 0);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
@@ -5215,7 +5249,7 @@ static int test_struct_new_syntax_all_types(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
-      "struct AllTypes {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, str g}",
+      "struct AllTypes {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, bool g}",
       &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
@@ -8230,6 +8264,7 @@ int main(void) {
     { "defstruct_nested_type",           test_defstruct_nested_type },
     { "defstruct_type_annotation",       test_defstruct_type_annotation },
     { "defstruct_all_field_types",       test_defstruct_all_field_types },
+    { "defstruct_ref_type_rejected",     test_defstruct_ref_type_rejected },
     { "defstruct_forward_ref_error",     test_defstruct_forward_ref_error },
     /* US-003 (Struct): Struct instantiation */
     { "struct_new_basic",                test_struct_new_basic },

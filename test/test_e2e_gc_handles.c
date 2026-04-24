@@ -127,27 +127,26 @@ static int test_e2e_gc_many_handles(void) {
   #undef N_GC_HANDLES
 }
 
-/* Test 4: handle to a struct — struct and its heap fields survive GC */
+/* Test 4: handle to a struct — struct survives GC (value-type fields only) */
 static int test_e2e_gc_handle_struct(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  /* Define a struct with a string field and an i32 field */
-  JaclVal def_r = jacl_eval(vm, "struct Item {str name, i32 val}");
+  /* Define a struct with value-type fields only */
+  JaclVal def_r = jacl_eval(vm, "struct Item {i32 val, f64 score}");
   ASSERT(!jacl_is_error(def_r));
 
-  /* Create struct from C with a heap string name (>7 bytes) */
-  JaclVal name_str = jacl_string_cstr_val(vm, "test item name here!");
-  JaclVal fields[2] = { name_str, jacl_i32_val(42) };
+  /* Create struct from C */
+  JaclVal fields[2] = { jacl_i32_val(42), jacl_f64_val(vm, 3.14) };
   JaclVal s = jacl_struct_new_val(vm, "Item", fields, 2);
   ASSERT(!jacl_is_error(s));
   ASSERT(jacl_is_struct(s));
 
-  /* Pin the struct — handle is the root that keeps struct + fields alive */
+  /* Pin the struct — handle is the root that keeps it alive */
   EmbedJaclHandle h = jacl_handle_new_val(vm, s);
   ASSERT(h.index != UINT32_MAX);
 
-  /* Force GC — struct and its string field must be traced and kept alive */
+  /* Force GC — struct must survive */
   force_gc_now(vm);
 
   /* Struct must have survived */
@@ -155,20 +154,16 @@ static int test_e2e_gc_handle_struct(void) {
   ASSERT(s2 == s);
   ASSERT(jacl_is_struct(s2));
 
-  /* String field must have survived with correct content */
-  JaclVal name_out = jacl_struct_get_val(vm, s2, "name");
-  ASSERT(!jacl_is_error(name_out));
-  ASSERT(jacl_is_string(name_out));
-  size_t len = 0;
-  const char* name_cstr = jacl_as_cstr_val(vm, name_out, &len);
-  ASSERT(name_cstr != NULL);
-  ASSERT_SIZE_EQ(len, 20);
-  ASSERT(memcmp(name_cstr, "test item name here!", 20) == 0);
-
   /* i32 field must have survived */
   JaclVal val_out = jacl_struct_get_val(vm, s2, "val");
   ASSERT(!jacl_is_error(val_out));
   ASSERT_INT_EQ(jacl_as_i32(val_out), 42);
+
+  /* f64 field must have survived */
+  JaclVal score_out = jacl_struct_get_val(vm, s2, "score");
+  ASSERT(!jacl_is_error(score_out));
+  double score_d = jacl_as_f64(score_out);
+  ASSERT(score_d > 3.13 && score_d < 3.15);
 
   jacl_handle_free_val(vm, h);
   jacl_vm_free(vm);

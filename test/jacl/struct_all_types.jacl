@@ -4,11 +4,11 @@
 # expect: 9999999
 # expect: 3
 # expect: 2.71828
-# expect: hello
-# Test struct with all supported field types
-struct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, str g}
+# expect: 99
+# Test struct with all supported value-type fields (no reference types)
+struct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, i32 g}
 
-def s [All 42 1000000 7 9999999 3.0 2.71828 "hello"]
+def s [All 42 1000000 7 9999999 3.0 2.71828 99]
 print $s->a
 print $s->b
 print $s->c
