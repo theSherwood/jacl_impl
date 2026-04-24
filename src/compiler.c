@@ -308,6 +308,13 @@ uint32_t struct__align_up(uint32_t offset, uint32_t align) {
   return (offset + align - 1) & ~(align - 1);
 }
 
+/* Compute the number of JaclVal stack slots needed to hold a struct inline.
+ * Each slot is sizeof(JaclVal) = 8 bytes. */
+uint32_t struct__slot_width(StructTypeRegistry* reg, uint32_t struct_idx) {
+  if (!reg || struct_idx >= reg->count || !reg->defs[struct_idx]) return 1;
+  return (reg->defs[struct_idx]->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+}
+
 /* Look up a struct type by name in the registry. Returns type_idx or UINT32_MAX if not found.
    type_idx values start at 1 (0 is reserved for plain dyn JaclVal boxes). */
 uint32_t struct_registry__find(StructTypeRegistry* reg, const char* name, uint32_t name_len) {
@@ -688,6 +695,7 @@ typedef struct {
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
   JaclType* param_types;  /* proc param types (NULL for non-procs, arena-allocated) */
   uint32_t  scope_mark;   /* hygiene: 0 = user code, >0 = macro-introduced */
+  uint16_t  width;        /* stack slot count: 1 for scalars, N for inline structs */
 } Local;
 
 /* --- Internal: Module binding tracking --- */
@@ -2561,6 +2569,7 @@ struct Compiler {
   MacroTable*          macro_table;    /* compile-time macro definitions (root compiler owns) */
   uint32_t             current_scope_mark; /* hygiene: mark for newly introduced bindings */
   bool                 has_prelude;    /* true when compiling under a caller-supplied prelude map */
+  bool                 want_inline_struct; /* request inline struct construction in next struct constructor */
   bool                 shell_fallback; /* true in REPL mode: unknown commands try PATH lookup */
   ModuleBinding        module_bindings[COMPILER_MODULE_BINDINGS_MAX];
   uint32_t             module_binding_count;
@@ -2604,6 +2613,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->macro_table       = NULL;
   c->current_scope_mark = 0;
   c->has_prelude       = false;
+  c->want_inline_struct = false;
   c->shell_fallback    = false;
   c->module_binding_count = 0;
 }
@@ -2722,6 +2732,7 @@ void compiler__add_local(Compiler* c, JaclVal name,
   local->return_type = TYPE_DYN;
   local->param_types = NULL;
   local->scope_mark  = c->current_scope_mark;
+  local->width       = 1;
 }
 
 /* Find module binding by local slot index */
@@ -6032,8 +6043,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       c->locals[c->local_count - 1].known_arity = rhs_arity;
       c->locals[c->local_count - 1].type = effective_type;
-      if (effective_type == TYPE_STRUCT)
+      if (effective_type == TYPE_STRUCT) {
         c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
+        /* Compute and track slot width for future inline storage (US-005).
+         * Currently still uses heap path (OP_STRUCT_NEW, width 1). */
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        uint32_t width = struct__slot_width(reg, c->last_struct_idx);
+        c->locals[c->local_count - 1].width = (uint16_t)width;
+      }
       /* def returns nil */
       compiler__emit_byte(c, OP_NIL, line);
     } else {
@@ -8477,6 +8494,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         return;
       }
 
+      /* Capture and clear inline flag before compiling args (prevents
+       * nested struct constructors from inheriting the flag). */
+      bool use_inline = c->want_inline_struct;
+      c->want_inline_struct = false;
+
       /* Compile and type-check each field argument */
       for (uint32_t i = 0; i < argc; i++) {
         JaclType field_type = sdef->fields[i].type;
@@ -8508,9 +8530,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
       }
 
-      /* Emit OP_STRUCT_NEW + uint16_t struct_type_index */
-      compiler__emit_byte(c, OP_STRUCT_NEW, line);
-      compiler__emit_u16(c, (uint16_t)struct_idx, line);
+      if (use_inline) {
+        /* Emit OP_STRUCT_NEW_INLINE — stores raw bytes across stack slots */
+        compiler__emit_byte(c, OP_STRUCT_NEW_INLINE, line);
+        compiler__emit_u16(c, (uint16_t)struct_idx, line);
+      } else {
+        /* Emit OP_STRUCT_NEW + uint16_t struct_type_index (heap path) */
+        compiler__emit_byte(c, OP_STRUCT_NEW, line);
+        compiler__emit_u16(c, (uint16_t)struct_idx, line);
+      }
 
       c->last_expr_type = TYPE_STRUCT;
       c->last_struct_idx = struct_idx;

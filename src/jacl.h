@@ -733,6 +733,7 @@ typedef enum {
   OP_STRUCT_SET,
   OP_STRUCT_GET_DYN,
   OP_STRUCT_SET_DYN,
+  OP_STRUCT_NEW_INLINE,
   OP_CLOSE_LOOP,
   OP_DESTRUCTURE_VEC,
   OP_DESTRUCTURE_NAMED,
@@ -1012,6 +1013,7 @@ typedef struct {
   JaclType  return_type;
   JaclType* param_types;
   uint32_t  scope_mark;
+  uint16_t  width;            /* stack slot count: 1 for scalars, N for inline structs */
 } Local;
 
 typedef struct {
@@ -1160,6 +1162,7 @@ struct Compiler {
   MacroTable*          macro_table;
   uint32_t             current_scope_mark;
   bool                 has_prelude;
+  bool                 want_inline_struct;
 };
 
 /* ========================================================================

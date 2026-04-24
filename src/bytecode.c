@@ -145,6 +145,7 @@ typedef enum {
   OP_STRUCT_SET,    /* field mutation: followed by uint16_t field_offset, uint8_t field_type */
   OP_STRUCT_GET_DYN,/* runtime field access: followed by uint16_t const_idx (field name) */
   OP_STRUCT_SET_DYN,/* runtime field mutation: followed by uint16_t const_idx (field name) */
+  OP_STRUCT_NEW_INLINE, /* construct inline struct on stack: followed by uint16_t struct_type_index */
   OP_CLOSE_LOOP,    /* pop N values under top-of-stack: followed by uint8_t count */
   OP_DESTRUCTURE_VEC, /* destructure vector: uint8_t N, uint8_t skip_mask; pop vec, push non-skipped elements */
   OP_DESTRUCTURE_NAMED, /* destructure struct/map by field names: uint8_t N, then N x uint16_t const_idx */
@@ -444,6 +445,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_STRUCT_SET:      return "OP_STRUCT_SET";
     case OP_STRUCT_GET_DYN:  return "OP_STRUCT_GET_DYN";
     case OP_STRUCT_SET_DYN:  return "OP_STRUCT_SET_DYN";
+    case OP_STRUCT_NEW_INLINE: return "OP_STRUCT_NEW_INLINE";
     case OP_CLOSE_LOOP:      return "OP_CLOSE_LOOP";
     case OP_DESTRUCTURE_VEC: return "OP_DESTRUCTURE_VEC";
     case OP_DESTRUCTURE_NAMED: return "OP_DESTRUCTURE_NAMED";

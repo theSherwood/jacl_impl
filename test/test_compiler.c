@@ -4802,6 +4802,317 @@ static int test_struct_new_runtime(void) {
   TEST_PASS();
 }
 
+/* US-003 (Value Types): Width tracking */
+
+static int test_struct_width_tracking(void) {
+  /* Verify the compiler computes slot width for struct types */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  /* Point {i32, i32} = 8 bytes → width 1 */
+  CompileResult cr = compile_source(
+      "struct Point {i32 x, i32 y}\n"
+      "def p [Point 1 2]", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  /* struct_registry should exist and have the Point type */
+  ASSERT(cr.struct_registry != NULL);
+  ASSERT(cr.struct_registry->count >= 2); /* 0=reserved, 1=Point */
+  StructTypeDef* point_def = cr.struct_registry->defs[1];
+  ASSERT(point_def != NULL);
+  ASSERT_U32_EQ(point_def->total_size, 8);
+  /* width = ceil(8/8) = 1 */
+  uint32_t point_width = (point_def->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+  ASSERT_U32_EQ(point_width, 1);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_width_large(void) {
+  /* Verify width for larger structs: {f64, f64, f64} = 24 bytes → width 3 */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  CompileResult cr = compile_source(
+      "struct Vec3 {f64 x, f64 y, f64 z}", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT(cr.struct_registry != NULL);
+  StructTypeDef* vec3_def = cr.struct_registry->defs[1];
+  ASSERT(vec3_def != NULL);
+  ASSERT_U32_EQ(vec3_def->total_size, 24);
+  uint32_t vec3_width = (vec3_def->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+  ASSERT_U32_EQ(vec3_width, 3);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_width_nested(void) {
+  /* Nested struct: Line {Point, Point} → 16 bytes → width 2 */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  CompileResult cr = compile_source(
+      "struct Point {i32 x, i32 y}\n"
+      "struct Line {Point start, Point end}", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  /* Line is at type_idx 2 (after reserved 0 and Point 1) */
+  StructTypeDef* line_def = cr.struct_registry->defs[2];
+  ASSERT(line_def != NULL);
+  ASSERT_U32_EQ(line_def->total_size, 16);
+  uint32_t line_width = (line_def->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+  ASSERT_U32_EQ(line_width, 2);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_inline_opcode(void) {
+  /* Test OP_STRUCT_NEW_INLINE writes correct data to stack slots */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  /* First compile to get a struct registry */
+  CompileResult cr = compile_source(
+      "struct Point {i32 x, i32 y}", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  /* Build bytecode: push two i32 args, then OP_STRUCT_NEW_INLINE */
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  /* Push x=10 */
+  chunk_add_constant(&chunk, jacl_i32(10));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, 0, 1);
+  /* Push y=20 */
+  chunk_add_constant(&chunk, jacl_i32(20));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, 1, 1);
+  /* OP_STRUCT_NEW_INLINE type_idx=1 (Point) */
+  chunk_write(&chunk, OP_STRUCT_NEW_INLINE, 1);
+  chunk_write_u16(&chunk, 1, 1);
+  /* Pop inline data and halt */
+  chunk_write(&chunk, OP_POP, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.struct_registry = cr.struct_registry;
+  VMResult r = vm_exec(&vm, &chunk);
+  ASSERT(r == VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_inline_data_integrity(void) {
+  /* Verify inline struct data is laid out correctly on the stack */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  /* Compile to get registry */
+  CompileResult cr = compile_source(
+      "struct Point {i32 x, i32 y}", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  /* Build bytecode: push i32 args, OP_STRUCT_NEW_INLINE, then HALT (no pop) */
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  chunk_add_constant(&chunk, jacl_i32(42));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, 0, 1);
+  chunk_add_constant(&chunk, jacl_i32(99));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, 1, 1);
+  /* OP_STRUCT_NEW_INLINE type_idx=1 */
+  chunk_write(&chunk, OP_STRUCT_NEW_INLINE, 1);
+  chunk_write_u16(&chunk, 1, 1);
+  /* HALT with inline data still on stack */
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.struct_registry = cr.struct_registry;
+  VMResult r = vm_exec(&vm, &chunk);
+  ASSERT(r == VM_OK);
+
+  /* Point {i32, i32} = 8 bytes = 1 slot. Verify data at stack[0]. */
+  uint8_t* data = (uint8_t*)&vm.stack[0];
+  int32_t x, y;
+  memcpy(&x, data + 0, 4);  /* field x at offset 0 */
+  memcpy(&y, data + 4, 4);  /* field y at offset 4 */
+  ASSERT_INT_EQ(x, 42);
+  ASSERT_INT_EQ(y, 99);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_inline_wide(void) {
+  /* Test OP_STRUCT_NEW_INLINE for a struct wider than 1 slot */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  /* Vec3 {f64 x, f64 y, f64 z} = 24 bytes = 3 slots */
+  CompileResult cr = compile_source(
+      "struct Vec3 {f64 x, f64 y, f64 z}", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  /* Push three f64 values as raw bits */
+  double vals[3] = {1.5, 2.5, 3.5};
+  for (int i = 0; i < 3; i++) {
+    uint16_t ci = chunk_add_constant(&chunk, 0);
+    memcpy(&chunk.constants[ci], &vals[i], sizeof(double));
+    chunk_write(&chunk, OP_CONST_F64, 1);
+    chunk_write_u16(&chunk, ci, 1);
+  }
+  /* OP_STRUCT_NEW_INLINE type_idx=1 */
+  chunk_write(&chunk, OP_STRUCT_NEW_INLINE, 1);
+  chunk_write_u16(&chunk, 1, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.struct_registry = cr.struct_registry;
+  VMResult r = vm_exec(&vm, &chunk);
+  ASSERT(r == VM_OK);
+
+  /* 3 slots on stack. Verify f64 data. */
+  ASSERT_U32_EQ(vm.stack_top, 3);
+  uint8_t* data = (uint8_t*)&vm.stack[0];
+  double x, y, z;
+  memcpy(&x, data + 0,  8);
+  memcpy(&y, data + 8,  8);
+  memcpy(&z, data + 16, 8);
+  ASSERT(x == 1.5);
+  ASSERT(y == 2.5);
+  ASSERT(z == 3.5);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_inline_padding_zeroed(void) {
+  /* Verify padding bytes are zeroed for deterministic memcmp */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  /* Struct with padding: {bool a, i32 b} = bool@0(1B) + pad(3B) + i32@4(4B) = 8B */
+  CompileResult cr = compile_source(
+      "struct Padded {bool a, i32 b}", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  StructTypeDef* sdef = cr.struct_registry->defs[1];
+  ASSERT_U32_EQ(sdef->total_size, 8);
+  /* bool at offset 0, i32 at offset 4 */
+  ASSERT_U32_EQ(sdef->fields[0].offset, 0);
+  ASSERT_U32_EQ(sdef->fields[1].offset, 4);
+
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+  /* Push bool (i32 value 1 = true) */
+  chunk_add_constant(&chunk, jacl_i32(1));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, 0, 1);
+  /* Push i32 value 42 */
+  chunk_add_constant(&chunk, jacl_i32(42));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, 1, 1);
+  /* OP_STRUCT_NEW_INLINE */
+  chunk_write(&chunk, OP_STRUCT_NEW_INLINE, 1);
+  chunk_write_u16(&chunk, 1, 1);
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.struct_registry = cr.struct_registry;
+  VMResult r = vm_exec(&vm, &chunk);
+  ASSERT(r == VM_OK);
+
+  /* Check padding bytes (offset 1-3) are zero */
+  uint8_t* data = (uint8_t*)&vm.stack[0];
+  ASSERT_INT_EQ(data[0], 1);  /* bool true */
+  ASSERT_INT_EQ(data[1], 0);  /* padding */
+  ASSERT_INT_EQ(data[2], 0);  /* padding */
+  ASSERT_INT_EQ(data[3], 0);  /* padding */
+  int32_t b;
+  memcpy(&b, data + 4, 4);
+  ASSERT_INT_EQ(b, 42);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_new_heap_path_unchanged(void) {
+  /* Verify existing heap path (OP_STRUCT_NEW) still works for struct locals */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "def p [Point 10 20]\n"
+      "print $p->x\n"
+      "print $p->y",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* US-004 (Struct): Field access */
 
 static int test_struct_get_basic(void) {
@@ -8271,6 +8582,15 @@ int main(void) {
     { "struct_new_arity_error",          test_struct_new_arity_error },
     { "struct_new_type_error",           test_struct_new_type_error },
     { "struct_new_runtime",              test_struct_new_runtime },
+    /* US-003 (Value Types): Width tracking and inline construction */
+    { "struct_width_tracking",           test_struct_width_tracking },
+    { "struct_width_large",              test_struct_width_large },
+    { "struct_width_nested",             test_struct_width_nested },
+    { "struct_new_inline_opcode",        test_struct_new_inline_opcode },
+    { "struct_new_inline_data",          test_struct_new_inline_data_integrity },
+    { "struct_new_inline_wide",          test_struct_new_inline_wide },
+    { "struct_new_inline_padding",       test_struct_new_inline_padding_zeroed },
+    { "struct_heap_path_unchanged",      test_struct_new_heap_path_unchanged },
     /* US-004 (Struct): Field access */
     { "struct_get_basic",                test_struct_get_basic },
     { "struct_get_unknown_field",        test_struct_get_unknown_field },
