@@ -5113,6 +5113,333 @@ static int test_struct_new_heap_path_unchanged(void) {
   TEST_PASS();
 }
 
+/* US-004 (Value Types): Wide locals — state machine field storage */
+
+static int test_sm_state_field_width_default(void) {
+  /* Non-struct state fields get width=1 and sequential field_index */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  StateLayout layout;
+  memset(&layout, 0, sizeof(layout));
+  layout.heap = &heap;
+  JaclInternTable intern;
+  intern_table_init(&intern, &arena);
+  layout.intern_table = &intern;
+
+  JaclVal a = jacl_inline_string("a", 1);
+  JaclVal b = jacl_inline_string("b", 1);
+  JaclVal c = jacl_inline_string("c", 1);
+  sm__add_state_field(&layout, a, false, false, 1, 0);
+  sm__add_state_field(&layout, b, true,  false, 1, 0);
+  sm__add_state_field(&layout, c, false, true,  1, 0);
+
+  ASSERT_U32_EQ(layout.field_count, 3);
+  ASSERT_U32_EQ(layout.total_slots, 3);
+  ASSERT_U32_EQ(layout.fields[0].field_index, 0);
+  ASSERT_U32_EQ(layout.fields[1].field_index, 1);
+  ASSERT_U32_EQ(layout.fields[2].field_index, 2);
+  ASSERT_U32_EQ(layout.fields[0].width, 1);
+  ASSERT_U32_EQ(layout.fields[1].width, 1);
+  ASSERT_U32_EQ(layout.fields[2].width, 1);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_sm_state_field_width_struct(void) {
+  /* Struct state fields get width=N and field_index accounts for width */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  StateLayout layout;
+  memset(&layout, 0, sizeof(layout));
+  layout.heap = &heap;
+  JaclInternTable intern;
+  intern_table_init(&intern, &arena);
+  layout.intern_table = &intern;
+
+  JaclVal a = jacl_inline_string("a", 1);
+  JaclVal s = jacl_inline_string("s", 1);
+  JaclVal c = jacl_inline_string("c", 1);
+
+  /* a: width 1 (scalar) */
+  sm__add_state_field(&layout, a, false, false, 1, 0);
+  /* s: width 3 (struct like Vec3 {f64 x, f64 y, f64 z}) */
+  sm__add_state_field(&layout, s, false, false, 3, 1);
+  /* c: width 1 (scalar) */
+  sm__add_state_field(&layout, c, false, false, 1, 0);
+
+  ASSERT_U32_EQ(layout.field_count, 3);
+  ASSERT_U32_EQ(layout.total_slots, 5);  /* 1 + 3 + 1 */
+  /* a at slot 0 */
+  ASSERT_U32_EQ(layout.fields[0].field_index, 0);
+  ASSERT_U32_EQ(layout.fields[0].width, 1);
+  /* s at slot 1, occupies slots 1-3 */
+  ASSERT_U32_EQ(layout.fields[1].field_index, 1);
+  ASSERT_U32_EQ(layout.fields[1].width, 3);
+  ASSERT_U32_EQ(layout.fields[1].struct_type_idx, 1);
+  /* c at slot 4 */
+  ASSERT_U32_EQ(layout.fields[2].field_index, 4);
+  ASSERT_U32_EQ(layout.fields[2].width, 1);
+
+  /* sm__find_field returns base slot index */
+  ASSERT_INT_EQ(sm__find_field(&layout, a), 0);
+  ASSERT_INT_EQ(sm__find_field(&layout, s), 1);
+  ASSERT_INT_EQ(sm__find_field(&layout, c), 4);
+  /* sm__find_field_width returns width */
+  ASSERT_U32_EQ(sm__find_field_width(&layout, s), 3);
+  ASSERT_U32_EQ(sm__find_field_width(&layout, a), 1);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_sm_walk_locals_struct_width(void) {
+  /* sm__walk_locals computes width for struct-typed locals */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  /* Compile just to register the struct type in the registry */
+  CompileResult cr = compile_source(
+      "struct Vec3 {f64 x, f64 y, f64 z}", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+
+  /* Now parse a proc body that declares a Vec3 local */
+  LexResult tokens = lexer_lex(
+      "proc gen {} {\n"
+      "  def Vec3 v [Vec3 1.0 2.0 3.0]\n"
+      "  yield $v\n"
+      "}", &arena);
+  ParseResult parse = parser_parse(tokens, &arena);
+  JaclInternTable intern;
+  intern_table_init(&intern, &arena);
+
+  /* Analyze suspensions — this runs sm__walk_locals with struct registry */
+  AstNode* proc_node = parse.nodes[0];
+  ASSERT(proc_node->type == AST_COMMAND);
+  /* proc gen {} { body } → args[0]=name, args[1]=params, args[2]=body */
+  AstNode* body = proc_node->data.command.args[2];
+
+  SuspensionMap map;
+  memset(&map, 0, sizeof(map));
+  SuspensionAnalysis analysis = compiler__analyze_suspensions(
+      body, NULL, 0, false, &map, &heap, &intern, cr.struct_registry);
+
+  /* Should have fields: v (width 3 for Vec3 = 24 bytes / 8 = 3 slots) */
+  JaclVal v_name = jacl_inline_string("v", 1);
+  int v_idx = sm__find_field(&analysis.state_layout, v_name);
+  ASSERT(v_idx >= 0);
+  uint16_t v_width = sm__find_field_width(&analysis.state_layout, v_name);
+  ASSERT_U32_EQ(v_width, 3);
+  ASSERT_U32_EQ(analysis.state_layout.total_slots >= 3, 1);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_sm_optimize_atomic_wide_field(void) {
+  /* Liveness optimization treats multi-slot fields as atomic units */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  StateLayout layout;
+  memset(&layout, 0, sizeof(layout));
+  layout.heap = &heap;
+  JaclInternTable intern;
+  intern_table_init(&intern, &arena);
+  layout.intern_table = &intern;
+
+  /* Add param (always kept), wide struct, and scalar */
+  JaclVal p = jacl_inline_string("p", 1);
+  JaclVal s = jacl_inline_string("s", 1);
+  JaclVal t = jacl_inline_string("t", 1);
+  sm__add_state_field(&layout, p, false, true,  1, 0);  /* param, width 1 */
+  sm__add_state_field(&layout, s, false, false, 3, 1);  /* struct, width 3 */
+  sm__add_state_field(&layout, t, false, false, 1, 0);  /* scalar, width 1 */
+
+  ASSERT_U32_EQ(layout.total_slots, 5);
+
+  /* Simulate compaction: remove t, keep p and s */
+  StateField new_fields[3];
+  uint32_t new_count = 0;
+  uint32_t new_total = 0;
+  for (uint32_t i = 0; i < layout.field_count; i++) {
+    if (layout.fields[i].name != t) {
+      new_fields[new_count] = layout.fields[i];
+      new_fields[new_count].field_index = new_total;
+      new_total += layout.fields[i].width;
+      new_count++;
+    }
+  }
+  memcpy(layout.fields, new_fields, sizeof(StateField) * new_count);
+  layout.field_count = new_count;
+  layout.total_slots = new_total;
+
+  ASSERT_U32_EQ(layout.field_count, 2);
+  ASSERT_U32_EQ(layout.total_slots, 4);  /* 1 + 3 */
+  ASSERT_U32_EQ(layout.fields[0].field_index, 0);
+  ASSERT_U32_EQ(layout.fields[0].width, 1);
+  ASSERT_U32_EQ(layout.fields[1].field_index, 1);
+  ASSERT_U32_EQ(layout.fields[1].width, 3);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_sm_wide_field_opcodes(void) {
+  /* Test OP_SET_STATE_FIELD_WIDE and OP_GET_STATE_FIELD_WIDE */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  /* Allocate a state machine with 5 slots */
+  JaclVal sm_val = gc_alloc_state_machine(&heap, 5);
+  JaclStateMachine* sm = jacl_as_state_machine(sm_val);
+
+  /* Build bytecode:
+     1. Push SM onto stack (frame slot 0)
+     2. Push 3 raw values (simulating inline struct data)
+     3. OP_SET_STATE_FIELD_WIDE base=1 width=3 (store into SM fields[1..3])
+     4. OP_GET_STATE_FIELD_WIDE base=1 width=3 (load back onto stack)
+     5. HALT */
+  BytecodeChunk chunk;
+  chunk_init(&chunk, &arena);
+
+  /* Push SM value as constant (slot 0 of frame) */
+  uint16_t sm_ci = chunk_add_constant(&chunk, sm_val);
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, sm_ci, 1);
+
+  /* Push 3 raw slot values */
+  uint16_t c0 = chunk_add_constant(&chunk, jacl_i32(111));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c0, 1);
+  uint16_t c1 = chunk_add_constant(&chunk, jacl_i32(222));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c1, 1);
+  uint16_t c2 = chunk_add_constant(&chunk, jacl_i32(333));
+  chunk_write(&chunk, OP_CONST, 1);
+  chunk_write_u16(&chunk, c2, 1);
+
+  /* OP_SET_STATE_FIELD_WIDE base_idx=1, width=3 */
+  chunk_write(&chunk, OP_SET_STATE_FIELD_WIDE, 1);
+  chunk_write(&chunk, 1, 1);  /* base_idx */
+  chunk_write(&chunk, 3, 1);  /* width */
+
+  /* OP_GET_STATE_FIELD_WIDE base_idx=1, width=3 */
+  chunk_write(&chunk, OP_GET_STATE_FIELD_WIDE, 1);
+  chunk_write(&chunk, 1, 1);  /* base_idx */
+  chunk_write(&chunk, 3, 1);  /* width */
+
+  chunk_write(&chunk, OP_HALT, 1);
+
+  VM vm;
+  vm_init(&vm, &arena);
+  VMResult r = vm_exec(&vm, &chunk);
+  ASSERT(r == VM_OK);
+
+  /* Verify SM fields were written correctly */
+  ASSERT(sm->fields[1] == jacl_i32(111));
+  ASSERT(sm->fields[2] == jacl_i32(222));
+  ASSERT(sm->fields[3] == jacl_i32(333));
+  ASSERT(sm->fields[0] == JACL_NIL);  /* untouched */
+  ASSERT(sm->fields[4] == JACL_NIL);  /* untouched */
+
+  /* Verify loaded values are on stack (after the SM at slot 0) */
+  /* Stack should be: [sm_val, 111, 222, 333] */
+  ASSERT_U32_EQ(vm.stack_top, 4);  /* SM + 3 loaded values */
+  ASSERT(vm.stack[1] == jacl_i32(111));
+  ASSERT(vm.stack[2] == jacl_i32(222));
+  ASSERT(vm.stack[3] == jacl_i32(333));
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_sm_struct_generator_heap_path(void) {
+  /* Struct locals in generators work correctly via heap path across suspension */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc gen {} {\n"
+      "  def p [Point 10 20]\n"
+      "  [yield $p->x]\n"
+      "  [yield $p->y]\n"
+      "}\n"
+      "def s [gen]\n"
+      "[print [stream_next $s]]\n"
+      "[print [stream_next $s]]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_sm_total_slots_allocation(void) {
+  /* sm_field_count uses total_slots, SM allocation sizes correctly */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  /* Allocate with total_slots=5 (e.g., 1 scalar + 1 struct(width=3) + 1 scalar) */
+  JaclVal sm_val = gc_alloc_state_machine(&heap, 5);
+  JaclStateMachine* sm = jacl_as_state_machine(sm_val);
+  ASSERT_U32_EQ(sm->field_count, 5);
+  /* All fields initialized to NIL */
+  for (uint32_t i = 0; i < 5; i++) {
+    ASSERT(sm->fields[i] == JACL_NIL);
+  }
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* US-004 (Struct): Field access */
 
 static int test_struct_get_basic(void) {
@@ -8591,6 +8918,14 @@ int main(void) {
     { "struct_new_inline_wide",          test_struct_new_inline_wide },
     { "struct_new_inline_padding",       test_struct_new_inline_padding_zeroed },
     { "struct_heap_path_unchanged",      test_struct_new_heap_path_unchanged },
+    /* US-004 (Value Types): Wide locals — state machine field storage */
+    { "sm_field_width_default",          test_sm_state_field_width_default },
+    { "sm_field_width_struct",           test_sm_state_field_width_struct },
+    { "sm_walk_locals_struct_width",     test_sm_walk_locals_struct_width },
+    { "sm_optimize_atomic_wide",        test_sm_optimize_atomic_wide_field },
+    { "sm_wide_field_opcodes",           test_sm_wide_field_opcodes },
+    { "sm_struct_gen_heap_path",         test_sm_struct_generator_heap_path },
+    { "sm_total_slots_allocation",       test_sm_total_slots_allocation },
     /* US-004 (Struct): Field access */
     { "struct_get_basic",                test_struct_get_basic },
     { "struct_get_unknown_field",        test_struct_get_unknown_field },

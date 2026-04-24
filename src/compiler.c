@@ -1088,13 +1088,16 @@ typedef struct {
 
 typedef struct {
   JaclVal  name;         /* variable name (for debug and lookup) */
-  uint32_t field_index;  /* sequential index in state object: 0, 1, 2, ... */
+  uint32_t field_index;  /* base slot index in state machine fields[] */
   bool     is_mutable;   /* true if declared with mut */
   bool     is_param;     /* true if this is a function parameter */
+  uint16_t width;        /* number of JaclVal slots occupied (default 1, N for inline structs) */
+  uint32_t struct_type_idx; /* struct registry index when width > 1, else 0 */
 } StateField;
 
 typedef struct {
   uint32_t         field_count;
+  uint32_t         total_slots;   /* sum of all field widths — actual fields[] size needed */
   StateField       fields[SM_MAX_STATE_FIELDS];
   ThreadHeap*      heap;          /* for interning names > 7 bytes */
   JaclInternTable* intern_table;  /* for interning names > 7 bytes */
@@ -1294,7 +1297,8 @@ void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
 
 /* Add a field to the state layout, skipping empty names and duplicates. */
 void sm__add_state_field(StateLayout* layout, JaclVal name,
-                                bool is_mutable, bool is_param) {
+                                bool is_mutable, bool is_param,
+                                uint16_t width, uint32_t struct_type_idx) {
   if (layout->field_count >= SM_MAX_STATE_FIELDS) return;
   /* Skip empty/wildcard names (compiler uses empty string for _ wildcards) */
   if (name == jacl_inline_string("", 0)) return;
@@ -1303,10 +1307,13 @@ void sm__add_state_field(StateLayout* layout, JaclVal name,
     if (layout->fields[i].name == name) return;
   }
   StateField* f = &layout->fields[layout->field_count];
-  f->name        = name;
-  f->field_index = layout->field_count;
-  f->is_mutable  = is_mutable;
-  f->is_param    = is_param;
+  f->name            = name;
+  f->field_index     = layout->total_slots;  /* base slot index */
+  f->is_mutable      = is_mutable;
+  f->is_param        = is_param;
+  f->width           = width;
+  f->struct_type_idx = struct_type_idx;
+  layout->total_slots += width;
   layout->field_count++;
 }
 
@@ -1326,6 +1333,13 @@ bool sm__is_field_mutable(const StateLayout* layout, JaclVal name) {
   return false;
 }
 
+uint16_t sm__find_field_width(const StateLayout* layout, JaclVal name) {
+  for (uint32_t i = 0; i < layout->field_count; i++) {
+    if (layout->fields[i].name == name) return layout->fields[i].width;
+  }
+  return 1;
+}
+
 /* Collect names from an AST_DESTRUCTURE_VEC node into the state layout. */
 void sm__collect_destructure_vec_names(AstNode* dv, StateLayout* layout,
                                               bool is_mutable) {
@@ -1333,14 +1347,14 @@ void sm__collect_destructure_vec_names(AstNode* dv, StateLayout* layout,
     const char* n = dv->data.destructure_vec.names[i];
     uint32_t nl = dv->data.destructure_vec.name_lens[i];
     if (nl == 1 && n[0] == '_') continue;  /* skip wildcard */
-    sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, n, nl), is_mutable, false);
+    sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, n, nl), is_mutable, false, 1, 0);
   }
   if (dv->data.destructure_vec.rest_name) {
     sm__add_state_field(layout,
         compiler__name_val(layout->heap, layout->intern_table,
                            dv->data.destructure_vec.rest_name,
                            dv->data.destructure_vec.rest_name_len),
-        is_mutable, false);
+        is_mutable, false, 1, 0);
   }
 }
 
@@ -1350,14 +1364,14 @@ void sm__collect_destructure_named_names(AstNode* dn, StateLayout* layout,
   for (uint32_t i = 0; i < dn->data.destructure_named.count; i++) {
     const char* n = dn->data.destructure_named.names[i];
     uint32_t nl = dn->data.destructure_named.name_lens[i];
-    sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, n, nl), is_mutable, false);
+    sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, n, nl), is_mutable, false, 1, 0);
   }
   if (dn->data.destructure_named.rest_name) {
     sm__add_state_field(layout,
         compiler__name_val(layout->heap, layout->intern_table,
                            dn->data.destructure_named.rest_name,
                            dn->data.destructure_named.rest_name_len),
-        is_mutable, false);
+        is_mutable, false, 1, 0);
   }
 }
 
@@ -1371,7 +1385,7 @@ void sm__collect_command_destructure_names(AstNode* pat,
     uint32_t sl = pat->data.command.head->data.lit_string.length;
     if (!(sl == 2 && s[0] == '.' && s[1] == '.') &&
         !(sl == 1 && s[0] == '_')) {
-      sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, s, sl), is_mutable, false);
+      sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, s, sl), is_mutable, false, 1, 0);
     }
   } else if (pat->data.command.head->type == AST_SPREAD) {
     AstNode* inner = pat->data.command.head->data.spread.expr;
@@ -1380,7 +1394,7 @@ void sm__collect_command_destructure_names(AstNode* pat,
           compiler__name_val(layout->heap, layout->intern_table,
                              inner->data.lit_string.value,
                              inner->data.lit_string.length),
-          is_mutable, false);
+          is_mutable, false, 1, 0);
     }
   }
   /* Arg elements */
@@ -1391,7 +1405,7 @@ void sm__collect_command_destructure_names(AstNode* pat,
       uint32_t sl = elem->data.lit_string.length;
       if (sl == 2 && s[0] == '.' && s[1] == '.') continue;
       if (sl == 1 && s[0] == '_') continue;
-      sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, s, sl), is_mutable, false);
+      sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, s, sl), is_mutable, false, 1, 0);
     } else if (elem->type == AST_SPREAD) {
       AstNode* inner = elem->data.spread.expr;
       if (inner && inner->type == AST_LIT_STRING) {
@@ -1399,7 +1413,7 @@ void sm__collect_command_destructure_names(AstNode* pat,
             compiler__name_val(layout->heap, layout->intern_table,
                                inner->data.lit_string.value,
                                inner->data.lit_string.length),
-            is_mutable, false);
+            is_mutable, false, 1, 0);
       }
     }
   }
@@ -1429,7 +1443,7 @@ void sm__collect_block_destructure_names(AstNode* blk,
             compiler__name_val(layout->heap, layout->intern_table,
                                cmd->data.command.args[0]->data.lit_string.value,
                                cmd->data.command.args[0]->data.lit_string.length),
-            is_mutable, false);
+            is_mutable, false, 1, 0);
       }
       continue;
     }
@@ -1440,11 +1454,11 @@ void sm__collect_block_destructure_names(AstNode* blk,
           compiler__name_val(layout->heap, layout->intern_table,
                              cmd->data.command.args[0]->data.lit_string.value,
                              cmd->data.command.args[0]->data.lit_string.length),
-          is_mutable, false);
+          is_mutable, false, 1, 0);
     } else if (cmd->data.command.arg_count == 0) {
       /* simple name: head only */
       sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, hstr, hlen),
-                          is_mutable, false);
+                          is_mutable, false, 1, 0);
     }
   }
 }
@@ -1452,7 +1466,8 @@ void sm__collect_block_destructure_names(AstNode* blk,
 /* Walk AST to collect all local variable declarations for state layout.
    Conservative strategy: ALL locals are included.
    Does NOT recurse into nested proc/spawn body/params (separate scopes). */
-void sm__walk_locals(AstNode* node, StateLayout* layout) {
+void sm__walk_locals(AstNode* node, StateLayout* layout,
+                            StructTypeRegistry* reg) {
   if (!node) return;
 
   switch (node->type) {
@@ -1482,13 +1497,27 @@ void sm__walk_locals(AstNode* node, StateLayout* layout) {
           } else if (argc >= 2 && args[0]->type == AST_LIT_STRING) {
             /* Simple: [def name value] or typed: [def type name value] */
             uint32_t name_idx = 0;
-            if (argc == 3) name_idx = 1;
+            uint16_t field_width = 1;
+            uint32_t field_struct_idx = 0;
+            if (argc == 3) {
+              name_idx = 1;
+              /* Check if the type is a struct — compute width from registry */
+              const char* type_name = args[0]->data.lit_string.value;
+              uint32_t type_len = args[0]->data.lit_string.length;
+              if (reg) {
+                uint32_t sidx = struct_registry__find(reg, type_name, type_len);
+                if (sidx != UINT32_MAX) {
+                  field_width = (uint16_t)struct__slot_width(reg, sidx);
+                  field_struct_idx = sidx;
+                }
+              }
+            }
             if (args[name_idx]->type == AST_LIT_STRING) {
               sm__add_state_field(layout,
                   compiler__name_val(layout->heap, layout->intern_table,
                                      args[name_idx]->data.lit_string.value,
                                      args[name_idx]->data.lit_string.length),
-                  is_mut, false);
+                  is_mut, false, field_width, field_struct_idx);
             }
           }
           /* Recurse into value expressions (may contain nested blocks) */
@@ -1496,7 +1525,7 @@ void sm__walk_locals(AstNode* node, StateLayout* layout) {
             if (i == 0 && (args[0]->type == AST_DESTRUCTURE_VEC ||
                            args[0]->type == AST_DESTRUCTURE_NAMED))
               continue;
-            sm__walk_locals(args[i], layout);
+            sm__walk_locals(args[i], layout, reg);
           }
           return;
         }
@@ -1511,16 +1540,16 @@ void sm__walk_locals(AstNode* node, StateLayout* layout) {
                 compiler__name_val(layout->heap, layout->intern_table,
                                    args[1]->data.lit_string.value,
                                    args[1]->data.lit_string.length),
-                false, false);
+                false, false, 1, 0);
           } else if (argc == 2 && args[1]->type == AST_BLOCK &&
                      !(args[0]->type == AST_BLOCK)) {
             /* [for coll { body }] — implicit "it" */
             sm__add_state_field(layout, jacl_inline_string("it", 2),  /* "it" is always <= 7 */
-                                false, false);
+                                false, false, 1, 0);
           }
           /* Recurse into all sub-expressions */
           for (uint32_t i = 0; i < argc; i++) {
-            sm__walk_locals(args[i], layout);
+            sm__walk_locals(args[i], layout, reg);
           }
           return;
         }
@@ -1532,7 +1561,7 @@ void sm__walk_locals(AstNode* node, StateLayout* layout) {
           for (uint32_t i = 0; i < argc; i++) {
             if (i == 1 && argc == 3 && args[1]->type == AST_LIT_STRING)
               continue;  /* skip catch binding name */
-            sm__walk_locals(args[i], layout);
+            sm__walk_locals(args[i], layout, reg);
           }
           return;
         }
@@ -1548,7 +1577,7 @@ void sm__walk_locals(AstNode* node, StateLayout* layout) {
             uint32_t pnl = args[name_idx]->data.lit_string.length;
             if (pnl > 0) {
               sm__add_state_field(layout, compiler__name_val(layout->heap, layout->intern_table, pn, pnl),
-                                  false, false);
+                                  false, false, 1, 0);
             }
           }
           return;
@@ -1562,39 +1591,39 @@ void sm__walk_locals(AstNode* node, StateLayout* layout) {
 
       /* Recurse into arguments for all other commands */
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        sm__walk_locals(node->data.command.args[i], layout);
+        sm__walk_locals(node->data.command.args[i], layout, reg);
       }
       break;
     }
     case AST_BLOCK: {
       for (uint32_t i = 0; i < node->data.block.count; i++) {
-        sm__walk_locals(node->data.block.commands[i], layout);
+        sm__walk_locals(node->data.block.commands[i], layout, reg);
       }
       break;
     }
     case AST_INTERP_STRING: {
       for (uint32_t i = 0; i < node->data.interp_string.count; i++) {
-        sm__walk_locals(node->data.interp_string.segments[i], layout);
+        sm__walk_locals(node->data.interp_string.segments[i], layout, reg);
       }
       break;
     }
     case AST_BREAK: {
       if (node->data.break_stmt.value) {
-        sm__walk_locals(node->data.break_stmt.value, layout);
+        sm__walk_locals(node->data.break_stmt.value, layout, reg);
       }
       break;
     }
     case AST_RETURN: {
       if (node->data.return_stmt.value) {
-        sm__walk_locals(node->data.return_stmt.value, layout);
+        sm__walk_locals(node->data.return_stmt.value, layout, reg);
       }
       break;
     }
     case AST_SHELL_CMD: {
       /* Recurse into head and args to find nested locals */
-      sm__walk_locals(node->data.shell_cmd.head, layout);
+      sm__walk_locals(node->data.shell_cmd.head, layout, reg);
       for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        sm__walk_locals(node->data.shell_cmd.args[i], layout);
+        sm__walk_locals(node->data.shell_cmd.args[i], layout, reg);
       }
       break;
     }
@@ -2104,18 +2133,23 @@ void sm__optimize_state_layout(SuspensionAnalysis* analysis,
   /* If all fields cross, nothing to filter */
   if (keep_count == layout->field_count) return;
 
-  /* Compact the layout: remove non-crossing fields, re-index */
+  /* Compact the layout: remove non-crossing fields, re-index with
+     width-aware slot assignment.  Multi-slot struct fields are treated
+     as atomic units — never partially evicted. */
   StateField new_fields[SM_MAX_STATE_FIELDS];
   uint32_t new_count = 0;
+  uint32_t new_total_slots = 0;
   for (uint32_t i = 0; i < layout->field_count; i++) {
     if (crosses[i]) {
       new_fields[new_count] = layout->fields[i];
-      new_fields[new_count].field_index = new_count;
+      new_fields[new_count].field_index = new_total_slots;
+      new_total_slots += layout->fields[i].width;
       new_count++;
     }
   }
   memcpy(layout->fields, new_fields, sizeof(StateField) * new_count);
   layout->field_count = new_count;
+  layout->total_slots = new_total_slots;
 }
 
 /* Analyze a function body's AST for state machine compilation.
@@ -2131,7 +2165,8 @@ SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
                                                         bool     optimize_liveness,
                                                         SuspensionMap* map,
                                                         ThreadHeap* heap,
-                                                        JaclInternTable* intern_table) {
+                                                        JaclInternTable* intern_table,
+                                                        StructTypeRegistry* struct_reg) {
   SuspensionAnalysis analysis;
   memset(&analysis, 0, sizeof(analysis));
   analysis.state_layout.heap = heap;
@@ -2155,15 +2190,16 @@ SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
   {
     /* Parameters go first in the layout */
     for (uint8_t i = 0; i < param_count; i++) {
-      sm__add_state_field(&analysis.state_layout, param_names[i], false, true);
+      sm__add_state_field(&analysis.state_layout, param_names[i], false, true, 1, 0);
     }
-    /* Then body locals */
+    /* Then body locals — pass struct registry for width computation */
     if (body->type == AST_BLOCK) {
       for (uint32_t i = 0; i < body->data.block.count; i++) {
-        sm__walk_locals(body->data.block.commands[i], &analysis.state_layout);
+        sm__walk_locals(body->data.block.commands[i], &analysis.state_layout,
+                        struct_reg);
       }
     } else {
-      sm__walk_locals(body, &analysis.state_layout);
+      sm__walk_locals(body, &analysis.state_layout, struct_reg);
     }
   }
 
@@ -3354,13 +3390,14 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   if (body_suspends) {
     /* SM parallel body: analyze suspensions, compile as state machine */
     sm_analysis_data = compiler__analyze_suspensions(
-        body_block, NULL, 0, true, c->suspension_map, c->heap, c->intern_table);
+        body_block, NULL, 0, true, c->suspension_map, c->heap, c->intern_table,
+        compiler__get_struct_registry(c));
     closure->param_count = 2;
     JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
     pnames[0] = jacl_inline_string("__sm", 4);
     pnames[1] = jacl_inline_string("__rv", 4);
     closure->param_names = pnames;
-    closure->sm_field_count = (uint8_t)sm_analysis_data.state_layout.field_count;
+    closure->sm_field_count = (uint8_t)sm_analysis_data.state_layout.total_slots;
     closure->is_sm_compiled = true;
   } else {
     closure->param_count = 0;
@@ -6273,7 +6310,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (proc_suspends_early) {
       sm_analysis_data = compiler__analyze_suspensions(
           args[body_arg_idx], param_names_arr, user_param_count, true, c->suspension_map,
-          c->heap, c->intern_table);
+          c->heap, c->intern_table, compiler__get_struct_registry(c));
       /* Always SM-compile suspending procs — even if suspension_count == 0
          (transitively suspending via calling other suspending procs). */
       use_sm_path = true;
@@ -6304,7 +6341,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       closure->param_names = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
       closure->param_names[0] = jacl_inline_string("__sm", 4);
       closure->param_names[1] = jacl_inline_string("__rv", 4);
-      closure->sm_field_count = (uint8_t)sm_analysis_data.state_layout.field_count;
+      closure->sm_field_count = (uint8_t)sm_analysis_data.state_layout.total_slots;
       closure->is_sm_compiled = true;
     } else {
       closure->param_count = param_count;
@@ -8184,13 +8221,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     if (spawn_suspends) {
       /* SM spawn body: analyze suspensions, compile as state machine */
-      spawn_sm_analysis = compiler__analyze_suspensions(body_block, NULL, 0, true, c->suspension_map, c->heap, c->intern_table);
+      spawn_sm_analysis = compiler__analyze_suspensions(body_block, NULL, 0, true, c->suspension_map, c->heap, c->intern_table, compiler__get_struct_registry(c));
       closure->param_count = 2;
       JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
       pnames[0] = jacl_inline_string("__sm", 4);
       pnames[1] = jacl_inline_string("__rv", 4);
       closure->param_names = pnames;
-      closure->sm_field_count = (uint8_t)spawn_sm_analysis.state_layout.field_count;
+      closure->sm_field_count = (uint8_t)spawn_sm_analysis.state_layout.total_slots;
       closure->is_sm_compiled = true;
     } else {
       closure->param_count = 0;
@@ -10347,7 +10384,8 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     fake_block.data.block.commands = non_proc_stmts;
 
     SuspensionAnalysis main_sm_analysis = compiler__analyze_suspensions(
-        &fake_block, NULL, 0, true, &suspension_map, heap, intern_table);
+        &fake_block, NULL, 0, true, &suspension_map, heap, intern_table,
+        c.struct_registry);
 
     JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
     chunk_init(&main_cl->chunk, arena);
@@ -10359,7 +10397,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     main_cl->variadic      = false;
     main_cl->pinned        = false;
     main_cl->pin_worker_id = -1;
-    main_cl->sm_field_count = (uint8_t)main_sm_analysis.state_layout.field_count;
+    main_cl->sm_field_count = (uint8_t)main_sm_analysis.state_layout.total_slots;
     main_cl->is_sm_compiled = true;
     JaclVal* main_pnames   = (JaclVal*)arena_alloc(arena, sizeof(JaclVal) * 2);
     main_pnames[0]         = jacl_inline_string("__sm", 4);
@@ -10759,7 +10797,8 @@ ProgramResult jacl_compile_program(const char* root_path,
     fake_block2.data.block.commands = non_proc_stmts;
 
     SuspensionAnalysis main_sm_analysis2 = compiler__analyze_suspensions(
-        &fake_block2, NULL, 0, true, &suspension_map, heap, intern_table);
+        &fake_block2, NULL, 0, true, &suspension_map, heap, intern_table,
+        c.struct_registry);
 
     JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
     chunk_init(&main_cl->chunk, arena);
@@ -10771,7 +10810,7 @@ ProgramResult jacl_compile_program(const char* root_path,
     main_cl->variadic      = false;
     main_cl->pinned        = false;
     main_cl->pin_worker_id = -1;
-    main_cl->sm_field_count = (uint8_t)main_sm_analysis2.state_layout.field_count;
+    main_cl->sm_field_count = (uint8_t)main_sm_analysis2.state_layout.total_slots;
     main_cl->is_sm_compiled = true;
     JaclVal* main_pnames   = (JaclVal*)arena_alloc(arena, sizeof(JaclVal) * 2);
     main_pnames[0]         = jacl_inline_string("__sm", 4);

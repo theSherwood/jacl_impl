@@ -6569,6 +6569,37 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_GET_STATE_FIELD_WIDE: {
+        /* Copy N consecutive JaclVal slots from SM fields to the stack.
+           Used to load a struct stored inline across multiple SM slots. */
+        uint8_t base_idx = vm__read_byte(vm);
+        uint8_t width    = vm__read_byte(vm);
+        JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JaclStateMachine *sm = jacl_as_state_machine(state_val);
+        for (uint8_t i = 0; i < width; i++) {
+          result = vm__push(vm, sm->fields[base_idx + i]);
+          if (result != VM_OK) return result;
+        }
+        break;
+      }
+
+      case OP_SET_STATE_FIELD_WIDE: {
+        /* Copy N consecutive JaclVal slots from stack top into SM fields.
+           The top-of-stack holds the raw struct data across width slots.
+           Byte-offset addressing: sm->fields[base_idx..base_idx+width-1]
+           map to the struct's raw data as JaclVal-sized chunks. */
+        uint8_t base_idx = vm__read_byte(vm);
+        uint8_t width    = vm__read_byte(vm);
+        JaclVal state_val = vm->stack[frame->stack_base + 0];
+        JaclStateMachine *sm = jacl_as_state_machine(state_val);
+        /* Copy from stack (bottom of the N-slot range first) */
+        for (uint8_t i = 0; i < width; i++) {
+          sm->fields[base_idx + i] = vm->stack[vm->stack_top - width + i];
+        }
+        vm->stack_top -= width;
+        break;
+      }
+
       case OP_GET_RESUME_POINT: {
         JaclVal state_val = vm->stack[frame->stack_base + 0];
         JaclStateMachine *sm = jacl_as_state_machine(state_val);

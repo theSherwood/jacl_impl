@@ -760,6 +760,8 @@ typedef enum {
   OP_CALL_SUSPEND,
   OP_GET_STATE_FIELD_CELL,
   OP_SET_STATE_FIELD_CELL,
+  OP_GET_STATE_FIELD_WIDE,  /* uint8_t base_idx, uint8_t width; copy N slots from SM to stack */
+  OP_SET_STATE_FIELD_WIDE,  /* uint8_t base_idx, uint8_t width; copy N slots from stack to SM */
   OP_SYNTAX_SPLICE,
   OP_SYNTAX_OP,    /* uint8_t subop; pops syntax object(s), pushes introspection result */
   OP_INTERPRET,    /* pop string, interpret as JACL source, push result */
@@ -1083,14 +1085,19 @@ typedef struct {
 
 typedef struct {
   JaclVal  name;
-  uint32_t field_index;
+  uint32_t field_index;  /* base slot index in state machine fields[] */
   bool     is_mutable;
   bool     is_param;
+  uint16_t width;        /* number of JaclVal slots occupied (default 1, N for inline structs) */
+  uint32_t struct_type_idx; /* struct registry index when width > 1, else 0 */
 } StateField;
 
 typedef struct {
-  uint32_t   field_count;
-  StateField fields[SM_MAX_STATE_FIELDS];
+  uint32_t         field_count;
+  uint32_t         total_slots;  /* sum of all field widths — actual fields[] size needed */
+  StateField       fields[SM_MAX_STATE_FIELDS];
+  ThreadHeap*      heap;          /* for interning names > 7 bytes */
+  JaclInternTable* intern_table;  /* for interning names > 7 bytes */
 } StateLayout;
 
 typedef struct {
@@ -1794,14 +1801,15 @@ extern void analyze__walk_body (AstNode *node, ProcSuspendInfo *info, ThreadHeap
 extern void analyze__collect_procs (AstNode *node, ProcSuspendInfoList *list, ThreadHeap *heap, JaclInternTable *intern_table);
 extern SuspensionMap compiler__analyze_suspension (AstNode **nodes, uint32_t count, ThreadHeap *heap, JaclInternTable *intern_table);
 extern void sm__walk_suspensions (AstNode *node, SuspensionAnalysis *analysis, SuspensionMap *map, ThreadHeap *heap, JaclInternTable *intern_table);
-extern void sm__add_state_field (StateLayout *layout, JaclVal name, bool is_mutable, bool is_param);
+extern void sm__add_state_field (StateLayout *layout, JaclVal name, bool is_mutable, bool is_param, uint16_t width, uint32_t struct_type_idx);
 extern int sm__find_field (const StateLayout *layout, JaclVal name);
 extern bool sm__is_field_mutable (const StateLayout *layout, JaclVal name);
+extern uint16_t sm__find_field_width (const StateLayout *layout, JaclVal name);
 extern void sm__collect_destructure_vec_names (AstNode *dv, StateLayout *layout, bool is_mutable);
 extern void sm__collect_destructure_named_names (AstNode *dn, StateLayout *layout, bool is_mutable);
 extern void sm__collect_command_destructure_names (AstNode *pat, StateLayout *layout, bool is_mutable);
 extern void sm__collect_block_destructure_names (AstNode *blk, StateLayout *layout, bool is_mutable);
-extern void sm__walk_locals (AstNode *node, StateLayout *layout);
+extern void sm__walk_locals (AstNode *node, StateLayout *layout, StructTypeRegistry *reg);
 extern void sm__liveness_mark_write (FieldLiveness *liveness, const StateLayout *layout, JaclVal name, int32_t segment);
 extern void sm__liveness_mark_read (FieldLiveness *liveness, const StateLayout *layout, JaclVal name, int32_t segment);
 extern JaclVal sm__lit_string_name (AstNode *node);
@@ -1809,7 +1817,7 @@ extern void sm__liveness_mark_binding_names (AstNode *pattern, const StateLayout
 extern bool sm__loop_body_suspends (AstNode *body);
 extern void sm__liveness_walk (AstNode *node, const StateLayout *layout, FieldLiveness *liveness, int32_t *segment);
 extern void sm__optimize_state_layout (SuspensionAnalysis *analysis, AstNode *body);
-extern SuspensionAnalysis compiler__analyze_suspensions (AstNode *body, JaclVal *param_names, uint8_t param_count, bool optimize_liveness, SuspensionMap *map, ThreadHeap *heap, JaclInternTable *intern_table);
+extern SuspensionAnalysis compiler__analyze_suspensions (AstNode *body, JaclVal *param_names, uint8_t param_count, bool optimize_liveness, SuspensionMap *map, ThreadHeap *heap, JaclInternTable *intern_table, StructTypeRegistry *struct_reg);
 extern bool ast__contains_suspension (AstNode *node, SuspensionMap *map);
 extern void ast__collect_local_muts (AstNode *node, JaclVal *names, uint32_t *count);
 extern bool ast__contains_nonlocal_set_impl (AstNode *node, JaclVal *local_muts, uint32_t local_mut_count);
