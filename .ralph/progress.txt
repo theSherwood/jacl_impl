@@ -2,4 +2,15 @@
 Started: Thu Apr 24 2026
 Feature: Struct Value Types — Headerless Stack-Allocated Structs
 
+## US-001: Arena-based struct type registry
+- Replaced fixed 32-slot `StructTypeDef[]` with `StructTypeDef**` pointer array + arena allocation
+- `StructTypeDef` now uses flexible array member (`StructTypeField fields[]`) — no `STRUCT_MAX_FIELDS` limit
+- `StructTypeField` extracted as named typedef for reuse
+- `type_idx == 0` reserved for plain dyn boxes; struct types start at 1
+- Registry init/destroy helpers: `struct_registry__init()`, `struct_registry__destroy()`, `struct_registry__grow()`, `struct_registry__alloc_def()`
+- Embed API: persistent registry is heap-allocated pointer, passed as seed directly (no copy-back)
+- Fixed latent bugs: default `struct_type_idx = 0` was valid under old 0-based scheme but maps to reserved NULL slot under 1-based — added NULL guards in field access and destructuring, added `param_struct_idxs[]` tracking for typed proc parameters
+- All `.field` access on registry entries changed to `->field` (pointer deref)
+- `struct_registry__destroy` called at all exit paths in `jacl_run` and `jacl_ctx_destroy`
+
 ## Codebase Patterns
