@@ -72,6 +72,26 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
   - In proc AST, body is at args[2] (args[0]=name, args[1]=params, args[2]=body)
 ---
 
+## 2026-04-25 - US-005: Struct field access — byte-offset addressing
+- New opcodes: `OP_STRUCT_GET_INLINE` (base_slot, byte_offset, field_type), `OP_STRUCT_SET_INLINE` (same), `OP_STRUCT_MATERIALIZE` (base_slot, type_idx)
+- OP_STRUCT_GET_INLINE: reads field from stack-resident inline struct via byte-offset addressing; TYPE_STRUCT variant reads additional uint16_t type_idx and materializes sub-struct to heap
+- OP_STRUCT_SET_INLINE: pops value, writes to inline struct field, pushes nil
+- OP_STRUCT_MATERIALIZE: converts entire inline struct to heap-allocated JaclStruct (for `print $p`, return values, etc.)
+- Compiler activates inline construction (`want_inline_struct`) for struct locals in `def` handler; sets `is_inline` flag and adds padding locals for wide structs
+- Field access `[. ...]` handler: Case 1 (direct var ref) and Case 2 (chained command) detect inline struct locals and emit byte-offset opcodes instead of legacy heap path
+- Nested offset chaining: `$ln->start->x` accumulates byte offsets at compile time using `inline_struct_ref`, `inline_ref_base_slot`, `inline_ref_offset` compiler state
+- Sub-struct field access (TYPE_STRUCT field): emits OP_STRUCT_GET_INLINE with TYPE_STRUCT + type_idx to materialize; if chained, outer handler pops materialized value and uses byte-offset instead
+- AST_VAR_REF handler: inline struct locals emit OP_STRUCT_MATERIALIZE for non-field-access use
+- Added `ModuleBinding` typedef and `COMPILER_MODULE_BINDINGS_MAX` to `jacl.h` (were only in `compiler.c`) to keep Compiler struct in sync
+- Updated bytecode enum test values (3 new opcodes at positions 126-128, HALT now 164)
+- 6 new tests: inline get basic, inline set basic, nested get with offset chaining, materialize, wide field types (Vec3), preserves other locals
+- Files changed: `src/jacl.h`, `src/compiler.c`, `src/vm.c`, `src/bytecode.c`, `test/test_bytecode.c`, `test/test_compiler.c`
+- **Learnings for future iterations:**
+  - When Compiler struct in jacl.h is out of sync with compiler.c, tests that stack-allocate Compiler (module import tests) get memory corruption — always verify both are in sync
+  - Sub-struct inline field access (TYPE_STRUCT field) must materialize to heap even if chaining is possible, because standalone use (return, print) needs a value on the stack; chaining handler pops the materialized value when it's not needed
+  - `ModuleBinding` and `COMPILER_MODULE_BINDINGS_MAX` were previously only in compiler.c — added to jacl.h to keep struct layouts identical
+---
+
 ## Codebase Patterns
 - In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
 - `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)

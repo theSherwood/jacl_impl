@@ -85,7 +85,7 @@
         "build.sh passes, field access tests pass for stack-resident structs"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
