@@ -734,6 +734,9 @@ typedef enum {
   OP_STRUCT_GET_DYN,
   OP_STRUCT_SET_DYN,
   OP_STRUCT_NEW_INLINE,
+  OP_STRUCT_GET_INLINE,  /* uint8_t base_slot, uint16_t byte_offset, uint8_t field_type; read from stack-resident struct */
+  OP_STRUCT_SET_INLINE,  /* uint8_t base_slot, uint16_t byte_offset, uint8_t field_type; write to stack-resident struct */
+  OP_STRUCT_MATERIALIZE, /* uint8_t base_slot, uint16_t type_idx; convert inline struct to heap JaclStruct */
   OP_CLOSE_LOOP,
   OP_DESTRUCTURE_VEC,
   OP_DESTRUCTURE_NAMED,
@@ -1016,6 +1019,7 @@ typedef struct {
   JaclType* param_types;
   uint32_t  scope_mark;
   uint16_t  width;            /* stack slot count: 1 for scalars, N for inline structs */
+  bool      is_inline;        /* true if struct is stored inline on stack (raw bytes, not heap pointer) */
 } Local;
 
 typedef struct {
@@ -1126,6 +1130,14 @@ typedef struct {
   uint32_t label_count;
 } SMDispatchContext;
 
+#define COMPILER_MODULE_BINDINGS_MAX 64
+
+typedef struct {
+  JaclVal name;       /* local variable name (interned) */
+  int     local_slot; /* slot in the locals array */
+  Module* module;     /* the module it binds to */
+} ModuleBinding;
+
 typedef struct Compiler Compiler;
 struct Compiler {
   BytecodeChunk*   chunk;
@@ -1170,6 +1182,12 @@ struct Compiler {
   uint32_t             current_scope_mark;
   bool                 has_prelude;
   bool                 want_inline_struct;
+  bool                 inline_struct_ref;
+  uint8_t              inline_ref_base_slot;
+  uint16_t             inline_ref_offset;
+  bool                 shell_fallback;
+  ModuleBinding        module_bindings[COMPILER_MODULE_BINDINGS_MAX];
+  uint32_t             module_binding_count;
 };
 
 /* ========================================================================

@@ -5440,6 +5440,209 @@ static int test_sm_total_slots_allocation(void) {
   TEST_PASS();
 }
 
+/* US-005 (Struct): Inline field access — byte-offset addressing */
+
+static int test_struct_inline_get_basic(void) {
+  /* Inline struct field read: $p->x, $p->y use OP_STRUCT_GET_INLINE */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def p [Point 10 20]\n"
+      "  print $p->x\n"
+      "  print $p->y\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_inline_set_basic(void) {
+  /* Inline struct field write: [. $p x 99] uses OP_STRUCT_SET_INLINE */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def p [Point 10 20]\n"
+      "  . $p x 99\n"
+      "  print $p->x\n"
+      "  print $p->y\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "99\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_inline_nested_get(void) {
+  /* Nested inline field access: $ln->start->x chains offsets at compile time */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "struct Line {Point start, Point end}\n"
+      "proc test {} {\n"
+      "  def ln [Line [Point 5 6] [Point 10 20]]\n"
+      "  print $ln->start->x\n"
+      "  print $ln->start->y\n"
+      "  print $ln->end->x\n"
+      "  print $ln->end->y\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "5\n6\n10\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_inline_materialize(void) {
+  /* Inline struct materialized to heap for non-field-access use (print $p) */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  VM vm;
+  vm_init(&vm, &arena);
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def p [Point 1 2]\n"
+      "  print $p\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_inline_wide_field_types(void) {
+  /* Inline struct with various field types: f64, bool, i64 */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Vec3 {f64 x, f64 y, f64 z}\n"
+      "proc test {} {\n"
+      "  def v [Vec3 1.5 2.5 3.5]\n"
+      "  print $v->x\n"
+      "  print $v->y\n"
+      "  print $v->z\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "1.5\n2.5\n3.5\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_inline_preserves_other_locals(void) {
+  /* Verify inline struct slots don't corrupt other locals */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Vec3 {f64 x, f64 y, f64 z}\n"
+      "proc test {} {\n"
+      "  def i32 before 42\n"
+      "  def v [Vec3 1.5 2.5 3.5]\n"
+      "  def i32 after 99\n"
+      "  print $before\n"
+      "  print $v->y\n"
+      "  print $after\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n2.5\n99\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* US-004 (Struct): Field access */
 
 static int test_struct_get_basic(void) {
@@ -8926,6 +9129,13 @@ int main(void) {
     { "sm_wide_field_opcodes",           test_sm_wide_field_opcodes },
     { "sm_struct_gen_heap_path",         test_sm_struct_generator_heap_path },
     { "sm_total_slots_allocation",       test_sm_total_slots_allocation },
+    /* US-005 (Value Types): Inline field access — byte-offset addressing */
+    { "struct_inline_get_basic",         test_struct_inline_get_basic },
+    { "struct_inline_set_basic",         test_struct_inline_set_basic },
+    { "struct_inline_nested_get",        test_struct_inline_nested_get },
+    { "struct_inline_materialize",       test_struct_inline_materialize },
+    { "struct_inline_wide_types",        test_struct_inline_wide_field_types },
+    { "struct_inline_preserves_locals",  test_struct_inline_preserves_other_locals },
     /* US-004 (Struct): Field access */
     { "struct_get_basic",                test_struct_get_basic },
     { "struct_get_unknown_field",        test_struct_get_unknown_field },

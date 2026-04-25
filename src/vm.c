@@ -5538,6 +5538,99 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_STRUCT_GET_INLINE: {
+        /* Read a field from a stack-resident inline struct.
+           Operands: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type.
+           The struct occupies consecutive stack slots starting at
+           frame->stack_base + base_slot; we interpret them as raw bytes. */
+        uint8_t base_slot = vm__read_byte(vm);
+        uint16_t byte_offset = vm__read_u16(vm);
+        uint8_t field_type = vm__read_byte(vm);
+        uint8_t* struct_base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
+        JaclVal field_val;
+        switch ((JaclType)field_type) {
+          case TYPE_BOOL: { uint8_t b = struct_base[byte_offset]; field_val = jacl_bool(b); break; }
+          case TYPE_I32: { int32_t n; memcpy(&n, struct_base + byte_offset, 4); field_val = jacl_i32(n); break; }
+          case TYPE_U32: { uint32_t n; memcpy(&n, struct_base + byte_offset, 4); field_val = jacl_u32(n); break; }
+          case TYPE_F32: { float f; memcpy(&f, struct_base + byte_offset, 4); field_val = jacl_f32(f); break; }
+          case TYPE_I64: { int64_t n; memcpy(&n, struct_base + byte_offset, 8); field_val = (JaclVal)n; break; }
+          case TYPE_U64: { uint64_t n; memcpy(&n, struct_base + byte_offset, 8); field_val = (JaclVal)n; break; }
+          case TYPE_F64: { double d; memcpy(&d, struct_base + byte_offset, 8); memcpy(&field_val, &d, 8); break; }
+          case TYPE_STRUCT: {
+            /* Sub-struct field: read additional uint16_t type_idx, materialize from inline bytes */
+            uint16_t sub_type_idx = vm__read_u16(vm);
+            if (!vm->struct_registry || sub_type_idx >= vm->struct_registry->count) {
+              vm__set_error(vm, "invalid struct type index %u for inline get", (unsigned)sub_type_idx);
+              return VM_RUNTIME_ERROR;
+            }
+            StructTypeDef* sub_sdef = vm->struct_registry->defs[sub_type_idx];
+            gc__current_heap = &vm->heap;
+            JaclStruct* sub_s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                       sizeof(JaclStruct) + sub_sdef->total_size);
+            sub_s->type_idx = sub_type_idx;
+            sub_s->_pad = 0;
+            memcpy(sub_s->data, struct_base + byte_offset, sub_sdef->total_size);
+            field_val = jacl_struct_val(sub_s);
+            break;
+          }
+          default: { memcpy(&field_val, struct_base + byte_offset, sizeof(JaclVal)); break; }
+        }
+        result = vm__push(vm, field_val);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_STRUCT_SET_INLINE: {
+        /* Write a field to a stack-resident inline struct.
+           Operands: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type.
+           Pops the new value from stack, writes to the struct's byte region,
+           pushes nil (mutation is in-place on the stack slots). */
+        uint8_t base_slot = vm__read_byte(vm);
+        uint16_t byte_offset = vm__read_u16(vm);
+        uint8_t field_type = vm__read_byte(vm);
+        JaclVal new_val;
+        result = vm__pop(vm, &new_val);
+        if (result != VM_OK) return result;
+        uint8_t* struct_base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
+        switch ((JaclType)field_type) {
+          case TYPE_BOOL: { uint8_t b = jacl_as_bool(new_val) ? 1 : 0; struct_base[byte_offset] = b; break; }
+          case TYPE_I32: { int32_t n = jacl_as_i32(new_val); memcpy(struct_base + byte_offset, &n, 4); break; }
+          case TYPE_U32: { uint32_t n = jacl_as_u32(new_val); memcpy(struct_base + byte_offset, &n, 4); break; }
+          case TYPE_F32: { float f = jacl_as_f32(new_val); memcpy(struct_base + byte_offset, &f, 4); break; }
+          case TYPE_I64: { int64_t n = (int64_t)new_val; memcpy(struct_base + byte_offset, &n, 8); break; }
+          case TYPE_U64: { uint64_t n = new_val; memcpy(struct_base + byte_offset, &n, 8); break; }
+          case TYPE_F64: { double d; memcpy(&d, &new_val, 8); memcpy(struct_base + byte_offset, &d, 8); break; }
+          default: { memcpy(struct_base + byte_offset, &new_val, sizeof(JaclVal)); break; }
+        }
+        result = vm__push(vm, JACL_NIL);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_STRUCT_MATERIALIZE: {
+        /* Convert an inline (stack-resident) struct to a heap-allocated JaclStruct.
+           Operands: uint8_t base_slot, uint16_t type_idx.
+           Reads raw bytes from stack slots, allocates JaclStruct, copies data, pushes pointer. */
+        uint8_t base_slot = vm__read_byte(vm);
+        uint16_t type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u for materialize", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        gc__current_heap = &vm->heap;
+        JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                sizeof(JaclStruct) + sdef->total_size);
+        s->type_idx = type_idx;
+        s->_pad = 0;
+        /* Copy raw bytes from stack slot region into heap struct data */
+        uint8_t* struct_base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
+        memcpy(s->data, struct_base, sdef->total_size);
+        result = vm__push(vm, jacl_struct_val(s));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_SPREAD: {
         JaclVal spread_val;
         result = vm__pop(vm, &spread_val);

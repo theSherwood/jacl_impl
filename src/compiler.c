@@ -696,6 +696,7 @@ typedef struct {
   JaclType* param_types;  /* proc param types (NULL for non-procs, arena-allocated) */
   uint32_t  scope_mark;   /* hygiene: 0 = user code, >0 = macro-introduced */
   uint16_t  width;        /* stack slot count: 1 for scalars, N for inline structs */
+  bool      is_inline;    /* true if struct is stored inline on stack (raw bytes, not heap pointer) */
 } Local;
 
 /* --- Internal: Module binding tracking --- */
@@ -2606,6 +2607,9 @@ struct Compiler {
   uint32_t             current_scope_mark; /* hygiene: mark for newly introduced bindings */
   bool                 has_prelude;    /* true when compiling under a caller-supplied prelude map */
   bool                 want_inline_struct; /* request inline struct construction in next struct constructor */
+  bool                 inline_struct_ref;  /* true if last expression is an inline struct reference (not on stack) */
+  uint8_t              inline_ref_base_slot; /* base local slot of the inline struct */
+  uint16_t             inline_ref_offset;    /* accumulated byte offset within the struct */
   bool                 shell_fallback; /* true in REPL mode: unknown commands try PATH lookup */
   ModuleBinding        module_bindings[COMPILER_MODULE_BINDINGS_MAX];
   uint32_t             module_binding_count;
@@ -2650,6 +2654,9 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->current_scope_mark = 0;
   c->has_prelude       = false;
   c->want_inline_struct = false;
+  c->inline_struct_ref  = false;
+  c->inline_ref_base_slot = 0;
+  c->inline_ref_offset    = 0;
   c->shell_fallback    = false;
   c->module_binding_count = 0;
 }
@@ -2769,6 +2776,7 @@ void compiler__add_local(Compiler* c, JaclVal name,
   local->param_types = NULL;
   local->scope_mark  = c->current_scope_mark;
   local->width       = 1;
+  local->is_inline   = false;
 }
 
 /* Find module binding by local slot index */
@@ -6018,6 +6026,25 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
+    /* US-005: check if RHS is a struct constructor — activate inline storage.
+     * Only for local scope, non-SM mode. */
+    bool activate_inline = false;
+    if (c->scope_depth > 0 && !c->sm_analysis) {
+      AstNode* val_node = args[value_arg_idx];
+      if (val_node->type == AST_COMMAND && val_node->data.command.head->type == AST_LIT_STRING) {
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        if (reg) {
+          const char* rhs_head_name = val_node->data.command.head->data.lit_string.value;
+          uint32_t rhs_head_len = val_node->data.command.head->data.lit_string.length;
+          uint32_t rhs_sidx = struct_registry__find(reg, rhs_head_name, rhs_head_len);
+          if (rhs_sidx != UINT32_MAX) {
+            activate_inline = true;
+            c->want_inline_struct = true;
+          }
+        }
+      }
+    }
+
     /* Compile the value expression with type context */
     c->expected_type = declared_type;
     compiler__compile_node(c, args[value_arg_idx]);
@@ -6082,11 +6109,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->locals[c->local_count - 1].type = effective_type;
       if (effective_type == TYPE_STRUCT) {
         c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
-        /* Compute and track slot width for future inline storage (US-005).
-         * Currently still uses heap path (OP_STRUCT_NEW, width 1). */
         StructTypeRegistry* reg = compiler__get_struct_registry(c);
         uint32_t width = struct__slot_width(reg, c->last_struct_idx);
         c->locals[c->local_count - 1].width = (uint16_t)width;
+        if (activate_inline) {
+          c->locals[c->local_count - 1].is_inline = true;
+          /* Reserve extra stack slots for wide inline structs (width > 1).
+           * Add padding locals so subsequent locals get correct slot indices. */
+          for (uint32_t w = 1; w < width; w++) {
+            compiler__add_local(c, jacl_inline_string("", 0), line, col);
+            c->locals[c->local_count - 1].depth = c->scope_depth;
+          }
+        }
       }
       /* def returns nil */
       compiler__emit_byte(c, OP_NIL, line);
@@ -8378,10 +8412,136 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
 
+    /* US-005: Check for inline struct field access.
+     * If args[0] is a var ref to an inline struct local, use byte-offset
+     * addressing directly from stack slots (no heap dereference). */
+    if (args[1]->type == AST_LIT_STRING && !c->sm_analysis) {
+      const char* field_name_i = args[1]->data.lit_string.value;
+      uint32_t field_name_len_i = args[1]->data.lit_string.length;
+      bool is_inline_access = false;
+      uint8_t inline_base = 0;
+      uint16_t inline_offset = 0;
+      uint32_t inline_sidx = UINT32_MAX;
+
+      /* Case 1: direct var ref to inline struct local */
+      if (args[0]->type == AST_VAR_REF && args[0]->data.var_ref.length <= 128) {
+        JaclVal vname = compiler__name_val(c->heap, c->intern_table,
+            args[0]->data.var_ref.name, args[0]->data.var_ref.length);
+        int slot = compiler__resolve_local(c, vname);
+        if (slot != -1 && c->locals[slot].type == TYPE_STRUCT &&
+            c->locals[slot].is_inline && !c->locals[slot].is_mutable) {
+          is_inline_access = true;
+          inline_base = (uint8_t)slot;
+          inline_offset = 0;
+          inline_sidx = c->locals[slot].struct_type_idx;
+        }
+      }
+
+      /* Case 2: chained access — compile inner expr, check for inline ref */
+      if (!is_inline_access && args[0]->type == AST_COMMAND) {
+        compiler__compile_node(c, args[0]);
+        if (c->inline_struct_ref) {
+          /* The inner expr emitted a materialized sub-struct; pop it since
+           * we'll use byte-offset chaining instead. */
+          compiler__emit_byte(c, OP_POP, line);
+          is_inline_access = true;
+          inline_base = c->inline_ref_base_slot;
+          inline_offset = c->inline_ref_offset;
+          inline_sidx = c->last_struct_idx;
+          c->inline_struct_ref = false;
+        }
+      }
+
+      if (is_inline_access && inline_sidx != UINT32_MAX) {
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        if (reg && inline_sidx < reg->count && reg->defs[inline_sidx]) {
+          StructTypeDef* sdef = reg->defs[inline_sidx];
+          uint32_t fi;
+          for (fi = 0; fi < sdef->field_count; fi++) {
+            if (sdef->fields[fi].name_len == field_name_len_i &&
+                memcmp(sdef->fields[fi].name, field_name_i, field_name_len_i) == 0)
+              break;
+          }
+          if (fi == sdef->field_count) {
+            char err_msg[128];
+            snprintf(err_msg, sizeof(err_msg),
+                     "struct '%.*s' has no field '%.*s'",
+                     (int)sdef->name_len, sdef->name,
+                     (int)field_name_len_i, field_name_i);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+          uint16_t total_offset = inline_offset + (uint16_t)sdef->fields[fi].offset;
+
+          if (is_set) {
+            /* Compile new value with type checking */
+            JaclType field_type = sdef->fields[fi].type;
+            c->expected_type = field_type;
+            compiler__compile_node(c, args[2]);
+            JaclType val_type = c->last_expr_type;
+            c->expected_type = TYPE_DYN;
+            if (field_type != TYPE_DYN && val_type != TYPE_DYN && val_type != field_type) {
+              char err_msg[192];
+              snprintf(err_msg, sizeof(err_msg),
+                       "type error: field '%.*s' of struct '%.*s' expected %s, got %s",
+                       (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
+                       (int)sdef->name_len, sdef->name,
+                       type_name(field_type), type_name(val_type));
+              compiler__error(c, line, col, err_msg);
+              return;
+            }
+            compiler__emit_byte(c, OP_STRUCT_SET_INLINE, line);
+            compiler__emit_byte(c, inline_base, line);
+            compiler__emit_u16(c, total_offset, line);
+            compiler__emit_byte(c, (uint8_t)field_type, line);
+            c->last_expr_type = TYPE_NIL;
+            c->last_struct_idx = UINT32_MAX;
+          } else {
+            if (sdef->fields[fi].type == TYPE_STRUCT) {
+              /* Nested struct field — emit materialization AND set chaining state.
+               * If this is chained (e.g. $ln->start->x), Case 2 will detect
+               * inline_struct_ref, pop the materialized value, and use byte-offset
+               * addressing instead. If standalone, the materialized value remains. */
+              compiler__emit_byte(c, OP_STRUCT_GET_INLINE, line);
+              compiler__emit_byte(c, inline_base, line);
+              compiler__emit_u16(c, total_offset, line);
+              compiler__emit_byte(c, (uint8_t)TYPE_STRUCT, line);
+              compiler__emit_u16(c, (uint16_t)sdef->fields[fi].struct_type_idx, line);
+              c->inline_struct_ref = true;
+              c->inline_ref_base_slot = inline_base;
+              c->inline_ref_offset = total_offset;
+              c->last_expr_type = TYPE_STRUCT;
+              c->last_struct_idx = sdef->fields[fi].struct_type_idx;
+            } else {
+              /* Scalar field — emit inline get */
+              compiler__emit_byte(c, OP_STRUCT_GET_INLINE, line);
+              compiler__emit_byte(c, inline_base, line);
+              compiler__emit_u16(c, total_offset, line);
+              compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
+              c->last_expr_type = sdef->fields[fi].type;
+              c->last_struct_idx = UINT32_MAX;
+            }
+          }
+          return;
+        }
+      }
+    }
+
     /* Compile struct/map expression */
     compiler__compile_node(c, args[0]);
     JaclType struct_type = c->last_expr_type;
     uint32_t struct_idx = c->last_struct_idx;
+
+    /* Handle inline struct ref from compiled sub-expression (non-command case) */
+    if (c->inline_struct_ref && struct_type == TYPE_STRUCT) {
+      /* The sub-expression was an inline struct ref that we didn't catch above.
+       * Fall through to normal path after materializing. */
+      compiler__emit_byte(c, OP_STRUCT_MATERIALIZE, line);
+      compiler__emit_byte(c, c->inline_ref_base_slot, line);
+      compiler__emit_u16(c, (uint16_t)struct_idx, line);
+      c->inline_struct_ref = false;
+      /* Now a heap struct is on the stack — proceed with normal path */
+    }
 
     if (struct_type != TYPE_STRUCT && struct_type != TYPE_MAP && struct_type != TYPE_DYN) {
       compiler__error(c, line, col, "type error: '.' requires a struct or map value");
@@ -9158,6 +9318,12 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
               compiler__emit_byte(c, (uint8_t)TYPE_DYN, line);
             }
           }
+        } else if (c->locals[local_slot].is_inline) {
+          /* US-005: inline struct local — materialize to heap for general use.
+           * Field access bypasses this by intercepting in the [. ...] handler. */
+          compiler__emit_byte(c, OP_STRUCT_MATERIALIZE, line);
+          compiler__emit_byte(c, (uint8_t)local_slot, line);
+          compiler__emit_u16(c, (uint16_t)c->locals[local_slot].struct_type_idx, line);
         } else {
           compiler__emit_byte(c, OP_GET_LOCAL, line);
           compiler__emit_byte(c, (uint8_t)local_slot, line);
