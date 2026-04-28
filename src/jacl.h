@@ -83,8 +83,13 @@ typedef struct { double value; } JaclHeapF64;
 #define JACL_FALSE  ((JaclVal)(JACL_TAG_BOOL))
 
 typedef struct {
-    JaclVal value;
+    uint32_t type_idx;    /* 0 = plain JaclVal box, >0 = struct type index */
+    uint32_t total_size;  /* size of data[] in bytes */
+    uint8_t  data[];      /* flexible array: JaclVal (8 bytes) for type_idx==0, raw struct bytes for type_idx>0 */
 } JaclMutableRef;
+
+/* Access the JaclVal stored in a type_idx==0 MutableRef's data[] */
+#define MREF_VAL(ref) (*(JaclVal*)(ref)->data)
 
 typedef char jacl_assert_ptr_fits_payload_[(sizeof(void *) <= sizeof(uint64_t)) ? 1 : -1];
 

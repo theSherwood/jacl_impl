@@ -197,8 +197,14 @@ bool jacl_is_bignum(JaclVal v) {
 /* --- Mutable reference (shared by cell, box, atom) --- */
 
 typedef struct {
-    JaclVal value;
+    uint32_t type_idx;
+    uint32_t total_size;
+    uint8_t  data[];
 } JaclMutableRef;
+
+#ifndef MREF_VAL
+#define MREF_VAL(ref) (*(JaclVal*)(ref)->data)
+#endif
 
 /* Cell: internal auto-boxing for mut locals */
 JaclVal jacl_cell_ptr(JaclMutableRef *p) {

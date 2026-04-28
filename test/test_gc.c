@@ -429,8 +429,9 @@ static int test_gc_mark_mutable_ref(void) {
     JaclVal inner = jacl_i64(&vm.heap, 55);
 
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(&vm.heap, OBJ_MUTABLE_REF,
-                                                      sizeof(JaclMutableRef));
-    ref->value = inner;
+                                                      sizeof(JaclMutableRef) + sizeof(JaclVal));
+    ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
+    MREF_VAL(ref) = inner;
 
     vm.stack[0] = jacl_box_ptr(ref);
     vm.stack_top = 1;
@@ -554,8 +555,9 @@ static int test_gc_mark_unreachable_not_marked(void) {
     /* Allocate several objects but don't push any onto stack or env */
     void *dead1 = gc_alloc(&vm.heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
     void *dead2 = gc_alloc(&vm.heap, OBJ_STRING, 32);
-    void *dead3 = gc_alloc(&vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
-    ((JaclMutableRef *)dead3)->value = JACL_NIL;
+    void *dead3 = gc_alloc(&vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+    ((JaclMutableRef *)dead3)->type_idx = 0; ((JaclMutableRef *)dead3)->total_size = sizeof(JaclVal);
+    MREF_VAL((JaclMutableRef *)dead3) = JACL_NIL;
 
     vm.stack_top = 0;
 

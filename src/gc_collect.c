@@ -142,7 +142,11 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
     /* --- Mutable ref (cell/box/atom): trace contained value --- */
     case OBJ_MUTABLE_REF: {
         JaclMutableRef *ref = (JaclMutableRef *)payload;
-        gc__ms_push_val(ms, ref->value);
+        /* Only trace for plain JaclVal boxes (type_idx==0).
+           Struct boxes (type_idx>0) contain raw bytes — no GC references. */
+        if (ref->type_idx == 0) {
+            gc__ms_push_val(ms, MREF_VAL(ref));
+        }
         break;
     }
 

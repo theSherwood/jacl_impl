@@ -86,8 +86,9 @@ static int test_gc_multi_type_survive(void) {
     JaclVal vf = jacl_f64(&vm.heap, 3.14);
 
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(&vm.heap, OBJ_MUTABLE_REF,
-                                                      sizeof(JaclMutableRef));
-    ref->value = vi;
+                                                      sizeof(JaclMutableRef) + sizeof(JaclVal));
+    ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
+    MREF_VAL(ref) = vi;
     JaclVal vbox = jacl_box_ptr(ref);
 
     /* Root all on stack */
@@ -108,7 +109,7 @@ static int test_gc_multi_type_survive(void) {
     ASSERT(jacl_as_i64(vi) == 42);
     ASSERT(jacl_as_u64(vu) == 100);
     ASSERT(jacl_as_f64(vf) == 3.14);
-    ASSERT(ref->value == vi);
+    ASSERT(MREF_VAL(ref) == vi);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
@@ -283,8 +284,9 @@ static int test_wb_satb_old_survives(void) {
     JaclVal new_val = jacl_i64(&vm.heap, 222);
 
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(&vm.heap, OBJ_MUTABLE_REF,
-                                                      sizeof(JaclMutableRef));
-    ref->value = old_val;
+                                                      sizeof(JaclMutableRef) + sizeof(JaclVal));
+    ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
+    MREF_VAL(ref) = old_val;
     vm.stack[0] = jacl_atom_ptr(ref);
     vm.stack_top = 1;
 
@@ -298,7 +300,7 @@ static int test_wb_satb_old_survives(void) {
      * The SATB barrier would push old_val to grey buffer.
      * In a real scenario, the grey buffer drain during mark would
      * re-trace old_val. Here we verify old_val stays marked. */
-    ref->value = new_val;
+    MREF_VAL(ref) = new_val;
 
     /* old_val is still marked from the trace above */
     ASSERT(gc__is_marked(jacl_as_ptr(old_val), mark));
@@ -326,8 +328,9 @@ static int test_wb_insertion_new_survives(void) {
 
     JaclVal initial = jacl_i64(&vm.heap, 10);
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(&vm.heap, OBJ_MUTABLE_REF,
-                                                      sizeof(JaclMutableRef));
-    ref->value = initial;
+                                                      sizeof(JaclMutableRef) + sizeof(JaclVal));
+    ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
+    MREF_VAL(ref) = initial;
     vm.stack[0] = jacl_atom_ptr(ref);
     vm.stack_top = 1;
 
@@ -341,7 +344,7 @@ static int test_wb_insertion_new_survives(void) {
      * Here we simulate: allocate new_val, mark it manually (as the
      * grey buffer drain would), then verify it survives sweep. */
     JaclVal new_val = jacl_i64(&vm.heap, 20);
-    ref->value = new_val;
+    MREF_VAL(ref) = new_val;
 
     /* Simulate grey buffer drain: mark new_val */
     gc_header_of(jacl_as_ptr(new_val))->mark = mark;
@@ -603,11 +606,11 @@ static void mt_stress__atom_swap(void *data) {
     for (int i = 0; i < count; i++) {
         for (;;) {
             JaclVal current = ATOMIC_LOAD_EXPLICIT(
-                &mt_atom_ref->value, MEM_ACQUIRE);
+                &MREF_VAL(mt_atom_ref), MEM_ACQUIRE);
             int64_t n = jacl_as_i64(current);
             JaclVal next = jacl_i64(&self->vm.heap, n + 1);
             JaclVal expected = current;
-            if (ATOMIC_CAS(&mt_atom_ref->value, &expected, next,
+            if (ATOMIC_CAS(&MREF_VAL(mt_atom_ref), &expected, next,
                            MEM_ACQ_REL, MEM_ACQUIRE)) {
                 break;
             }
@@ -627,9 +630,10 @@ static int test_mt_stress_atom_swap(void) {
     gc__current_heap = &rt.workers[0].vm.heap;
     gc__thread_epoch = 1;
     mt_atom_ref = (JaclMutableRef *)gc_alloc(
-        &rt.workers[0].vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+        &rt.workers[0].vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+    mt_atom_ref->type_idx = 0; mt_atom_ref->total_size = sizeof(JaclVal);
     JaclVal zero = jacl_i64(&rt.workers[0].vm.heap, 0);
-    ATOMIC_STORE_EXPLICIT(&mt_atom_ref->value, zero, MEM_RELEASE);
+    ATOMIC_STORE_EXPLICIT(&MREF_VAL(mt_atom_ref), zero, MEM_RELEASE);
     ATOMIC_STORE_EXPLICIT(&mt_atom_done, 0, MEM_RELEASE);
 
     int num_tasks = 4;
@@ -648,7 +652,7 @@ static int test_mt_stress_atom_swap(void) {
     intptr_t done = ATOMIC_LOAD_EXPLICIT(&mt_atom_done, MEM_ACQUIRE);
     ASSERT_I64_EQ(done, (int64_t)num_tasks);
 
-    JaclVal final_val = ATOMIC_LOAD_EXPLICIT(&mt_atom_ref->value, MEM_ACQUIRE);
+    JaclVal final_val = ATOMIC_LOAD_EXPLICIT(&MREF_VAL(mt_atom_ref), MEM_ACQUIRE);
     int64_t final_n = jacl_as_i64(final_val);
     ASSERT_I64_EQ(final_n, (int64_t)(num_tasks * swaps_per_task));
 
@@ -1016,8 +1020,9 @@ static int test_remembered_set_old_to_young(void) {
     /* Allocate atom (mutable ref) and promote to old gen */
     JaclVal initial = jacl_i64(&w->vm.heap, 10);
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
-        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
-    ref->value = initial;
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
+    MREF_VAL(ref) = initial;
     JaclVal atom_val = jacl_atom_ptr(ref);
 
     /* Manually promote atom to old gen */
@@ -1052,8 +1057,9 @@ static int test_remembered_set_young_to_young(void) {
     /* Allocate atom (young gen, the default) */
     JaclVal initial = jacl_i64(&w->vm.heap, 10);
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
-        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
-    ref->value = initial;
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
+    MREF_VAL(ref) = initial;
     JaclVal atom_val = jacl_atom_ptr(ref);
 
     /* Both atom and value are young */
@@ -1084,8 +1090,9 @@ static int test_remembered_set_drain_dedup(void) {
     /* Allocate old-gen atom */
     JaclVal initial = jacl_i64(&w->vm.heap, 10);
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
-        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
-    ref->value = initial;
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
+    MREF_VAL(ref) = initial;
     JaclVal atom_val = jacl_atom_ptr(ref);
     gc_header_of(ref)->gen = 1;
     gc_header_of(jacl_as_ptr(initial))->gen = 1;
@@ -1125,8 +1132,9 @@ static int test_remembered_set_old_to_old(void) {
 
     JaclVal initial = jacl_i64(&w->vm.heap, 10);
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
-        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
-    ref->value = initial;
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
+    MREF_VAL(ref) = initial;
     JaclVal atom_val = jacl_atom_ptr(ref);
     gc_header_of(ref)->gen = 1;
     gc_header_of(jacl_as_ptr(initial))->gen = 1;
@@ -1217,8 +1225,9 @@ static int test_minor_gc_remembered_set_saves_young(void) {
     /* Allocate old-gen atom holding a young value */
     JaclVal young_val = jacl_i64(&w->vm.heap, 77);
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
-        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
-    ref->value = young_val;
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
+    MREF_VAL(ref) = young_val;
     JaclVal atom_val = jacl_atom_ptr(ref);
 
     /* Promote atom to old gen */

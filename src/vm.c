@@ -636,16 +636,16 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
   } else if (jacl_is_cell(val)) {
     /* Cells are transparent — print the contained value directly */
     JaclMutableRef* ref = jacl_as_cell(val);
-    vm__fmt_value(buf, ref->value);
+    vm__fmt_value(buf, MREF_VAL(ref));
   } else if (jacl_is_box(val)) {
     JaclMutableRef* ref = jacl_as_box(val);
     vm__fmt_append(buf, "<box: ", 6);
-    vm__fmt_value(buf, ref->value);
+    vm__fmt_value(buf, MREF_VAL(ref));
     vm__fmt_append(buf, ">", 1);
   } else if (jacl_is_atom(val)) {
     JaclMutableRef* ref = jacl_as_atom(val);
     vm__fmt_append(buf, "<atom: ", 7);
-    vm__fmt_value(buf, ref->value);
+    vm__fmt_value(buf, MREF_VAL(ref));
     vm__fmt_append(buf, ">", 1);
   } else if (jacl_is_future(val)) {
     JaclFuture* fut = jacl_as_future(val);
@@ -1799,7 +1799,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         /* Cells are transparent — dereference before printing */
         if (jacl_is_cell(val)) {
           JaclMutableRef* ref = jacl_as_cell(val);
-          val = ref->value;
+          val = MREF_VAL(ref);
         }
 
         char buf[256];
@@ -2916,7 +2916,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         /* Cells are transparent — dereference before converting */
         if (jacl_is_cell(val)) {
           JaclMutableRef* ref = jacl_as_cell(val);
-          val = ref->value;
+          val = MREF_VAL(ref);
         }
 
         if (jacl_is_string(val)) {
@@ -4056,8 +4056,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       case OP_MAKE_CELL: {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
-        JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
-        ref->value = value;
+        JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        ref->type_idx = 0;
+        ref->total_size = sizeof(JaclVal);
+        MREF_VAL(ref) = value;
         result = vm__push(vm, jacl_cell_ptr(ref));
         if (result != VM_OK) return result;
         break;
@@ -4067,7 +4069,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint8_t slot = vm__read_byte(vm);
         JaclVal cell = vm->stack[frame->stack_base + slot];
         JaclMutableRef* ref = jacl_as_cell(cell);
-        result = vm__push(vm, ref->value);
+        result = vm__push(vm, MREF_VAL(ref));
         if (result != VM_OK) return result;
         break;
       }
@@ -4079,9 +4081,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal cell = vm->stack[frame->stack_base + slot];
         JaclMutableRef* ref = jacl_as_cell(cell);
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
-                         ref->value, new_value);
+                         MREF_VAL(ref), new_value);
         gc_remembered_set_barrier(vm->remembered_set, cell, new_value);
-        ref->value = new_value;
+        MREF_VAL(ref) = new_value;
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
         break;
@@ -4091,7 +4093,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint8_t index = vm__read_byte(vm);
         JaclVal cell = frame->closure->upvalues[index];
         JaclMutableRef* ref = jacl_as_cell(cell);
-        result = vm__push(vm, ref->value);
+        result = vm__push(vm, MREF_VAL(ref));
         if (result != VM_OK) return result;
         break;
       }
@@ -4103,9 +4105,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal cell = frame->closure->upvalues[index];
         JaclMutableRef* ref = jacl_as_cell(cell);
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
-                         ref->value, new_value);
+                         MREF_VAL(ref), new_value);
         gc_remembered_set_barrier(vm->remembered_set, cell, new_value);
-        ref->value = new_value;
+        MREF_VAL(ref) = new_value;
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
         break;
@@ -4129,8 +4131,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, value); if (result != VM_OK) return result;
           break;
         }
-        JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
-        ref->value = value;
+        JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        ref->type_idx = 0;
+        ref->total_size = sizeof(JaclVal);
+        MREF_VAL(ref) = value;
         result = vm__push(vm, jacl_box_ptr(ref));
         if (result != VM_OK) return result;
         break;
@@ -4143,8 +4147,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, value); if (result != VM_OK) return result;
           break;
         }
-        JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
-        ref->value = value;
+        JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        ref->type_idx = 0;
+        ref->total_size = sizeof(JaclVal);
+        MREF_VAL(ref) = value;
         result = vm__push(vm, jacl_atom_ptr(ref));
         if (result != VM_OK) return result;
         break;
@@ -4658,9 +4664,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
         JaclVal deref_val;
         if (jacl_is_atom(container)) {
-          deref_val = ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE);
+          deref_val = ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE);
         } else {
-          deref_val = ref->value;
+          deref_val = MREF_VAL(ref);
         }
         result = vm__push(vm, deref_val);
         if (result != VM_OK) return result;
@@ -4686,16 +4692,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
         if (jacl_is_atom(container)) {
-          JaclVal reset_old = ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE);
+          JaclVal reset_old = ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE);
           gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
                            reset_old, new_val);
           gc_remembered_set_barrier(vm->remembered_set, container, new_val);
-          ATOMIC_STORE_EXPLICIT(&ref->value, new_val, MEM_RELEASE);
+          ATOMIC_STORE_EXPLICIT(&MREF_VAL(ref), new_val, MEM_RELEASE);
         } else {
           gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
-                           ref->value, new_val);
+                           MREF_VAL(ref), new_val);
           gc_remembered_set_barrier(vm->remembered_set, container, new_val);
-          ref->value = new_val;
+          MREF_VAL(ref) = new_val;
         }
         result = vm__push(vm, new_val);
         if (result != VM_OK) return result;
@@ -4742,8 +4748,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         for (;;) {
           /* Read current value (atomic for atoms, plain for boxes) */
           JaclVal swap_old_val = swap_is_atom
-            ? ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE)
-            : ref->value;
+            ? ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE)
+            : MREF_VAL(ref);
 
           /* Push closure as callee slot + current value as argument */
           result = vm__push(vm, closure_val);
@@ -4777,7 +4783,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (swap_is_atom) {
             /* CAS loop: try to store result, retry if value changed */
             JaclVal expected = swap_old_val;
-            if (ATOMIC_CAS(&ref->value, &expected, swap_result,
+            if (ATOMIC_CAS(&MREF_VAL(ref), &expected, swap_result,
                            MEM_ACQ_REL, MEM_ACQUIRE)) {
               /* CAS succeeded — fire write barrier */
               gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
@@ -4793,7 +4799,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                              swap_old_val, swap_result);
             gc_remembered_set_barrier(vm->remembered_set,
                                       container, swap_result);
-            ref->value = swap_result;
+            MREF_VAL(ref) = swap_result;
             break; /* no retry for boxes */
           }
         }
@@ -6800,7 +6806,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
         JaclVal cell = sm->fields[field_index];
         JaclMutableRef *ref = jacl_as_cell(cell);
-        result = vm__push(vm, ref->value);
+        result = vm__push(vm, MREF_VAL(ref));
         if (result != VM_OK) return result;
         break;
       }
@@ -6815,9 +6821,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__pop(vm, &new_val);
         if (result != VM_OK) return result;
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
-                         ref->value, new_val);
+                         MREF_VAL(ref), new_val);
         gc_remembered_set_barrier(vm->remembered_set, cell, new_val);
-        ref->value = new_val;
+        MREF_VAL(ref) = new_val;
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
         break;

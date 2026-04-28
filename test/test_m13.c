@@ -3668,9 +3668,10 @@ static int test_gc_grey_buf_atom_reset(void) {
 
     /* Create an atom holding a heap value */
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(heap, OBJ_MUTABLE_REF,
-                                                      sizeof(JaclMutableRef));
+                                                      sizeof(JaclMutableRef) + sizeof(JaclVal));
+    ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
     JaclVal old_val = jacl_i64(heap, 111111LL);
-    ref->value = old_val;
+    MREF_VAL(ref) = old_val;
 
     JaclVal new_val = jacl_i64(heap, 222222LL);
 
@@ -3679,7 +3680,7 @@ static int test_gc_grey_buf_atom_reset(void) {
 
     /* Fire write barrier (same as OP_RESET on an atom) */
     gc_write_barrier(&w->grey_buf, &rt.gc_active, old_val, new_val);
-    ref->value = new_val;
+    MREF_VAL(ref) = new_val;
 
     /* Grey buffer should contain both old and new values */
     uint32_t gb_count = ATOMIC_LOAD_EXPLICIT(&w->grey_buf.count, MEM_ACQUIRE);

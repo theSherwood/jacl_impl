@@ -1076,12 +1076,13 @@ static int test_atom_deref_atomic(void) {
     gc__thread_epoch = 1;
 
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
-        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
     JaclVal val = jacl_i64(&w->vm.heap, 42);
-    ATOMIC_STORE_EXPLICIT(&ref->value, val, MEM_RELEASE);
+    ATOMIC_STORE_EXPLICIT(&MREF_VAL(ref), val, MEM_RELEASE);
 
     /* Read via atomic load (simulating what OP_DEREF does for atoms) */
-    JaclVal loaded = ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE);
+    JaclVal loaded = ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE);
     ASSERT(loaded == val);
 
     gc__thread_epoch = 0;
@@ -1097,15 +1098,16 @@ static int test_atom_reset_atomic(void) {
     gc__thread_epoch = 1;
 
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
-        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
     JaclVal old_val = jacl_i64(&w->vm.heap, 10);
     JaclVal new_val = jacl_i64(&w->vm.heap, 20);
-    ATOMIC_STORE_EXPLICIT(&ref->value, old_val, MEM_RELEASE);
+    ATOMIC_STORE_EXPLICIT(&MREF_VAL(ref), old_val, MEM_RELEASE);
 
     /* Atomic store (simulating what OP_RESET does for atoms) */
-    ATOMIC_STORE_EXPLICIT(&ref->value, new_val, MEM_RELEASE);
+    ATOMIC_STORE_EXPLICIT(&MREF_VAL(ref), new_val, MEM_RELEASE);
 
-    JaclVal loaded = ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE);
+    JaclVal loaded = ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE);
     ASSERT(loaded == new_val);
 
     gc__thread_epoch = 0;
@@ -1121,26 +1123,27 @@ static int test_atom_cas_basic(void) {
     gc__thread_epoch = 1;
 
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
-        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
     JaclVal val_a = jacl_i64(&w->vm.heap, 100);
     JaclVal val_b = jacl_i64(&w->vm.heap, 200);
     JaclVal val_c = jacl_i64(&w->vm.heap, 300);
-    ATOMIC_STORE_EXPLICIT(&ref->value, val_a, MEM_RELEASE);
+    ATOMIC_STORE_EXPLICIT(&MREF_VAL(ref), val_a, MEM_RELEASE);
 
     /* CAS with correct expected → succeeds */
     JaclVal expected = val_a;
-    bool ok = ATOMIC_CAS(&ref->value, &expected, val_b,
+    bool ok = ATOMIC_CAS(&MREF_VAL(ref), &expected, val_b,
                           MEM_ACQ_REL, MEM_ACQUIRE);
     ASSERT(ok);
-    ASSERT(ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE) == val_b);
+    ASSERT(ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE) == val_b);
 
     /* CAS with wrong expected → fails, expected updated to current */
     expected = val_a; /* stale */
-    ok = ATOMIC_CAS(&ref->value, &expected, val_c,
+    ok = ATOMIC_CAS(&MREF_VAL(ref), &expected, val_c,
                      MEM_ACQ_REL, MEM_ACQUIRE);
     ASSERT(!ok);
     ASSERT(expected == val_b); /* expected updated to actual current */
-    ASSERT(ATOMIC_LOAD_EXPLICIT(&ref->value, MEM_ACQUIRE) == val_b);
+    ASSERT(ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE) == val_b);
 
     gc__thread_epoch = 0;
     rt_test__destroy_no_threads(&rt);
@@ -1159,14 +1162,15 @@ static int test_atom_swap_write_barrier(void) {
     w->grey_buf.count = 0;
 
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
-        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
     JaclVal old_val = jacl_i64(&w->vm.heap, 50);
     JaclVal new_val = jacl_i64(&w->vm.heap, 60);
-    ATOMIC_STORE_EXPLICIT(&ref->value, old_val, MEM_RELEASE);
+    ATOMIC_STORE_EXPLICIT(&MREF_VAL(ref), old_val, MEM_RELEASE);
 
     /* Simulate successful CAS + write barrier */
     JaclVal expected = old_val;
-    bool ok = ATOMIC_CAS(&ref->value, &expected, new_val,
+    bool ok = ATOMIC_CAS(&MREF_VAL(ref), &expected, new_val,
                           MEM_ACQ_REL, MEM_ACQUIRE);
     ASSERT(ok);
     gc_write_barrier(&w->grey_buf, &rt.gc_active, old_val, new_val);
@@ -1177,7 +1181,7 @@ static int test_atom_swap_write_barrier(void) {
     /* Simulate failed CAS — no write barrier should fire */
     uint32_t count_before = w->grey_buf.count;
     expected = old_val; /* stale — will fail */
-    ok = ATOMIC_CAS(&ref->value, &expected, jacl_i64(&w->vm.heap, 70),
+    ok = ATOMIC_CAS(&MREF_VAL(ref), &expected, jacl_i64(&w->vm.heap, 70),
                      MEM_ACQ_REL, MEM_ACQUIRE);
     ASSERT(!ok);
     /* No write barrier on failed CAS */
@@ -1198,12 +1202,12 @@ static void cas_stress__increment(void *data) {
     for (int i = 0; i < iters; i++) {
         for (;;) {
             JaclVal current = ATOMIC_LOAD_EXPLICIT(
-                &cas_stress_atom->value, MEM_ACQUIRE);
+                &MREF_VAL(cas_stress_atom), MEM_ACQUIRE);
             int64_t n = jacl_as_i64(current);
             /* Allocate new value on this worker's heap */
             JaclVal next = jacl_i64(gc__current_heap, n + 1);
             JaclVal expected = current;
-            if (ATOMIC_CAS(&cas_stress_atom->value, &expected, next,
+            if (ATOMIC_CAS(&MREF_VAL(cas_stress_atom), &expected, next,
                            MEM_ACQ_REL, MEM_ACQUIRE)) {
                 break; /* CAS succeeded */
             }
@@ -1224,9 +1228,10 @@ static int test_atom_cas_concurrent(void) {
     gc__current_heap = &rt.workers[0].vm.heap;
     gc__thread_epoch = 1;
     cas_stress_atom = (JaclMutableRef *)gc_alloc(
-        &rt.workers[0].vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+        &rt.workers[0].vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+    cas_stress_atom->type_idx = 0; cas_stress_atom->total_size = sizeof(JaclVal);
     JaclVal zero = jacl_i64(&rt.workers[0].vm.heap, 0);
-    ATOMIC_STORE_EXPLICIT(&cas_stress_atom->value, zero, MEM_RELEASE);
+    ATOMIC_STORE_EXPLICIT(&MREF_VAL(cas_stress_atom), zero, MEM_RELEASE);
 
     ATOMIC_STORE_EXPLICIT(&cas_stress_done, 0, MEM_RELEASE);
 
@@ -1248,7 +1253,7 @@ static int test_atom_cas_concurrent(void) {
     ASSERT_I64_EQ(done, (int64_t)num_tasks);
 
     JaclVal final_val = ATOMIC_LOAD_EXPLICIT(
-        &cas_stress_atom->value, MEM_ACQUIRE);
+        &MREF_VAL(cas_stress_atom), MEM_ACQUIRE);
     int64_t final_n = jacl_as_i64(final_val);
     ASSERT_I64_EQ(final_n, (int64_t)(num_tasks * iters_per_worker));
 
@@ -1265,16 +1270,17 @@ static int test_box_non_atomic(void) {
     gc__thread_epoch = 1;
 
     JaclMutableRef *ref = (JaclMutableRef *)gc_alloc(
-        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef));
+        &w->vm.heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+        ref->type_idx = 0; ref->total_size = sizeof(JaclVal);
     JaclVal val = jacl_i64(&w->vm.heap, 99);
-    ref->value = val; /* plain store — box semantics */
+    MREF_VAL(ref) = val; /* plain store — box semantics */
 
     /* Plain read — box semantics */
-    ASSERT(ref->value == val);
+    ASSERT(MREF_VAL(ref) == val);
 
     JaclVal new_val = jacl_i64(&w->vm.heap, 100);
-    ref->value = new_val; /* plain store */
-    ASSERT(ref->value == new_val);
+    MREF_VAL(ref) = new_val; /* plain store */
+    ASSERT(MREF_VAL(ref) == new_val);
 
     gc__thread_epoch = 0;
     rt_test__destroy_no_threads(&rt);
