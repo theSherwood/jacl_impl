@@ -229,7 +229,7 @@
         "build.sh passes, GC tests pass"
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

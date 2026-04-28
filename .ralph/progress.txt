@@ -231,13 +231,40 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
   - `replace_all` on `_pad = 0` → `total_size = sdef->total_size` can break when the local variable is `sub_sdef`, not `sdef` — verify each site
 ---
 
+## 2026-04-28 - US-014: Remove GC tracing for value-type structs
+- Added `is_value_type` flag to `StructTypeDef` (jacl.h + compiler.c) — set during struct registration when all fields are non-reference types
+- Added `uint8_t inline_slot_bitmap[32]` to VM struct (jacl.h + vm.c) — marks which stack slots hold raw inline struct bytes
+- Added `uint8_t field_inline_bitmap[32]` to `JaclStateMachine` (jacl.h + gc.c) — marks which SM field slots hold raw struct bytes
+- Added `uint8_t upvalue_inline_bitmap[32]` to `JaclClosure` (jacl.h + bytecode.c) — marks which upvalue slots hold raw struct bytes
+- Added `BITMAP_SET/CLR/GET` macros (gc.c for unity build, jacl.h for tests)
+- GC stack root scanning: skips slots where `inline_slot_bitmap` bit is set (both gc_mark and gc_mark_minor)
+- GC OBJ_STRUCT tracing: skips field walking for value-type structs (`sdef->is_value_type`); legacy path retained for migration
+- GC OBJ_STATE_MACHINE tracing: skips field slots where `field_inline_bitmap` bit is set
+- GC OBJ_CLOSURE tracing: iterates `upvalue_total_slots` (not `upvalue_count`), skips struct upvalue slots via bitmap
+- VM bitmap maintenance: OP_STRUCT_NEW_INLINE and OP_STRUCT_STORE_INLINE set bits; OP_POP_N clears bits; OP_RETURN clears callee frame range; OP_GET_STATE_FIELD_WIDE sets bits on pushed stack slots; OP_SET_STATE_FIELD_WIDE sets bits in SM bitmap; OP_CLOSURE sets bits for wide upvalues
+- 5 new tests: bitmap skip (fake heap pointers), non-struct survives alongside struct slots, SM field bitmap skip, value-type struct no-trace, stress test (20 GC cycles with struct data)
+- Files changed: `src/jacl.h`, `src/gc.c`, `src/gc_collect.c`, `src/vm.c`, `src/compiler.c`, `src/bytecode.c`, `test/test_gc.c`
+- **Learnings for future iterations:**
+  - `JaclStateMachine` is duplicated in `jacl.h` AND `gc.c` — must update both when adding fields
+  - `JaclClosure` is duplicated in `jacl.h` AND `bytecode.c` — must update both when adding fields
+  - VM struct is duplicated in `jacl.h` AND `vm.c` — must update both when adding fields
+  - `gc__struct_registry` is a file-static global in gc.c, not exported in jacl.h — tests must use `gc_collect()` (which sets it) instead of accessing directly
+  - BITMAP macros must be defined in gc.c (early in unity build) for visibility in vm.c and gc_collect.c; also in jacl.h for test code
+  - When OP_RETURN clears bitmap, use `stack_top + 1` (return value was already popped) to cover the full callee frame
+---
+
 ## Codebase Patterns
 - In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
 - `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)
 - Parser tests are independent of compiler validation — only test AST structure
 - `Local` and `Compiler` structs are defined in both `jacl.h` and `compiler.c` — update both when adding fields
+- `VM` struct is defined in both `jacl.h` and `vm.c` — update both when adding fields
+- `JaclStateMachine` is duplicated in `jacl.h` AND `gc.c` — update both when changing its layout
+- `JaclClosure` is duplicated in `jacl.h` AND `bytecode.c` — update both when changing its layout
 - Bytecode enum values are tested with hardcoded integers in `test/test_bytecode.c` — update after inserting opcodes
 - Test VM opcodes by constructing `BytecodeChunk` manually: `chunk_init`, `chunk_write`, `chunk_add_constant`
 - JACL built-in commands use hyphens: `map-get`, `map-has`, `to-string`, `map-set` (not underscores)
 - `JaclStruct` is duplicated in `jacl.h` AND `gc.c` — must update both when changing its layout
 - Use `jacl_i32()` (value.c) not `jacl_i32_val()` (embed.c) when creating i32 values in vm.c — unity build order matters
+- Macros/defines needed by both vm.c and gc_collect.c should be defined in gc.c (early in unity build order)
+- `gc__struct_registry` is file-static in gc.c — not accessible from tests; use `gc_collect()` instead
