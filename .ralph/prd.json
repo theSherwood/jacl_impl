@@ -116,7 +116,7 @@
         "build.sh passes, return-by-value tests pass"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

@@ -108,6 +108,23 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
   - `jacl_as_struct` does NOT exist — use `jacl_as_struct_ptr(val)` to extract JaclStruct* from JaclVal
 ---
 
+## 2026-04-28 - US-007: Struct returns — pass by value
+- New opcode: `OP_STRUCT_STORE_INLINE` — reads heap JaclStruct from stack, de-materializes into inline (stack-resident) slots via memcpy
+- Added `return_struct_idx` field to `Local` and `GlobalArity` structs — tracks struct type index for function return types
+- Proc compilation: 4-arg proc syntax (`proc Point mkpt {i32 a, i32 b} { ... }`) resolves return type via `struct_registry__find` and stores `return_struct_idx`
+- `return_struct_idx` propagated from locals/globals to `call_return_struct_idx` at call sites; sets `c->last_struct_idx` after call compilation
+- Def handler extension: after compiling function call RHS, checks if `rhs_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX` to post-activate inline storage
+- Emits `OP_STRUCT_STORE_INLINE(base_slot, type_idx)` after adding inline local + padding locals
+- VM handler: reads base_slot + type_idx, extracts JaclStruct* from heap val, zero-fills width slots, memcpy struct data, adjusts stack_top
+- Updated bytecode enum test values (OP_STRUCT_STORE_INLINE at position 130, HALT now 166)
+- 3 new tests: basic return (mkpt returns Point), nested calls (mkpt called with field access args), value isolation (mutation of returned copy doesn't affect original)
+- Files changed: `src/jacl.h`, `src/compiler.c`, `src/vm.c`, `src/bytecode.c`, `test/test_bytecode.c`, `test/test_compiler.c`
+- **Learnings for future iterations:**
+  - JACL `+` operator returns `dyn` at compile time, not i32 — avoid using `+` in struct constructors when typed fields are needed; pass pre-computed i32 params instead
+  - `GlobalArity` struct also lives in both `jacl.h` and `compiler.c` — must keep in sync (same as Local, Compiler)
+  - `proc Type name {params} { body }` is the 4-arg proc syntax for declaring return types
+---
+
 ## Codebase Patterns
 - In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
 - `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)
