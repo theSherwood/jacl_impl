@@ -6407,6 +6407,155 @@ static int test_struct_atom_rejected(void) {
   TEST_PASS();
 }
 
+/* ===== US-011: box? type checking with flow typing ===== */
+
+static int test_box_typed_check_struct(void) {
+  /* [box? Point $val] returns true for Point boxes, false for dyn boxes */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def b1 [box [Point 10 20]]\n"
+      "  def b2 [box 42]\n"
+      "  print [box? Point $b1]\n"
+      "  print [box? Point $b2]\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\nfalse\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_box_typed_check_dyn(void) {
+  /* [box? dyn $val] returns true for dyn boxes, false for struct boxes */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def b1 [box 42]\n"
+      "  def b2 [box [Point 10 20]]\n"
+      "  print [box? dyn $b1]\n"
+      "  print [box? dyn $b2]\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\nfalse\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_box_flow_typing_unbox(void) {
+  /* Flow typing: if [box? Point $b] { def Point p [unbox $b] } */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def b [box [Point 10 20]]\n"
+      "  if [box? Point $b] {\n"
+      "    def p [unbox $b]\n"
+      "    print $p->x\n"
+      "    print $p->y\n"
+      "  }\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_unbox_outside_guard_rejected(void) {
+  /* [unbox $val] outside a box?-guarded branch is a compile error */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  CompileResult cr = compile_source(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def b [box [Point 10 20]]\n"
+      "  unbox $b\n"
+      "}\n",
+      &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_box_typed_unknown_type_rejected(void) {
+  /* [box? UnknownType $val] is a compile error */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  CompileResult cr = compile_source(
+      "def b [box 42]\n"
+      "box? Foo $b",
+      &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ===== US-008 (Struct): Inline anonymous struct types ===== */
 
 static int test_inline_struct_runtime(void) {
@@ -9663,6 +9812,12 @@ int main(void) {
     { "struct_box_swap",                   test_struct_box_swap },
     { "struct_box_deref_isolation",        test_struct_box_deref_isolation },
     { "struct_atom_rejected",              test_struct_atom_rejected },
+    /* US-011: box? type checking with flow typing */
+    { "box_typed_check_struct",            test_box_typed_check_struct },
+    { "box_typed_check_dyn",               test_box_typed_check_dyn },
+    { "box_flow_typing_unbox",             test_box_flow_typing_unbox },
+    { "unbox_outside_guard_rejected",      test_unbox_outside_guard_rejected },
+    { "box_typed_unknown_type_rejected",   test_box_typed_unknown_type_rejected },
     /* US-004 (Struct): Field access */
     { "struct_get_basic",                test_struct_get_basic },
     { "struct_get_unknown_field",        test_struct_get_unknown_field },

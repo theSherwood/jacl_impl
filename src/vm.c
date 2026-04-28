@@ -4190,6 +4190,20 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_IS_BOX_TYPED: {
+        uint16_t type_idx = vm__read_u16(vm);
+        JaclVal value;
+        result = vm__pop(vm, &value); if (result != VM_OK) return result;
+        bool match = false;
+        if (jacl_is_box(value)) {
+          JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(value);
+          match = (ref->type_idx == type_idx);
+        }
+        result = vm__push(vm, jacl_bool(match));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_IS_ATOM: {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;

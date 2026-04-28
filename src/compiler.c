@@ -2618,6 +2618,12 @@ struct Compiler {
   bool                 shell_fallback; /* true in REPL mode: unknown commands try PATH lookup */
   ModuleBinding        module_bindings[COMPILER_MODULE_BINDINGS_MAX];
   uint32_t             module_binding_count;
+  /* Flow typing: type narrowings from box? guards in if-branches */
+  struct {
+    uint16_t local_slot;     /* which local variable is narrowed */
+    uint32_t box_type_idx;   /* type_idx inside the box (0=dyn, >0=struct) */
+  } narrowings[8];
+  uint32_t             narrowing_count;
 };
 
 void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -2664,6 +2670,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->inline_ref_offset    = 0;
   c->shell_fallback    = false;
   c->module_binding_count = 0;
+  c->narrowing_count   = 0;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -6685,14 +6692,55 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
+    /* Detect [box? Type $var] condition for flow typing */
+    bool has_narrowing = false;
+    uint32_t saved_narrowing_count = c->narrowing_count;
+    if (args[0]->type == AST_COMMAND &&
+        args[0]->data.command.head &&
+        compiler__head_matches(args[0]->data.command.head, "box?", 4) &&
+        args[0]->data.command.arg_count == 2 &&
+        args[0]->data.command.args[1]->type == AST_VAR_REF &&
+        args[0]->data.command.args[0]->type == AST_LIT_STRING) {
+      /* Resolve the type name */
+      const char* tname = args[0]->data.command.args[0]->data.lit_string.value;
+      uint32_t tlen = args[0]->data.command.args[0]->data.lit_string.length;
+      uint32_t type_idx;
+      if (tlen == 3 && memcmp(tname, "dyn", 3) == 0) {
+        type_idx = 0;
+      } else {
+        type_idx = struct_registry__find(compiler__get_struct_registry(c), tname, tlen);
+      }
+      if (type_idx != UINT32_MAX) {
+        /* Resolve the variable to a local slot */
+        AstNode* var_node = args[0]->data.command.args[1];
+        uint32_t vlen = var_node->data.var_ref.length;
+        if (vlen <= 128) {
+          JaclVal vname = compiler__name_val(c->heap, c->intern_table,
+                                              var_node->data.var_ref.name, vlen);
+          int slot = compiler__resolve_local(c, vname);
+          if (slot >= 0 && c->narrowing_count < 8) {
+            has_narrowing = true;
+            c->narrowings[c->narrowing_count].local_slot = (uint16_t)slot;
+            c->narrowings[c->narrowing_count].box_type_idx = type_idx;
+            c->narrowing_count++;
+          }
+        }
+      }
+    }
+
     /* Compile condition */
     compiler__compile_node(c, args[0]);
 
     /* OP_JUMP_IF_FALSE over then-body */
     uint32_t then_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
 
-    /* Compile then-body as expression */
+    /* Compile then-body as expression (narrowing is active) */
     compiler__compile_block_expr(c, args[1]);
+
+    /* Pop narrowing before else-branch */
+    if (has_narrowing) {
+      c->narrowing_count = saved_narrowing_count;
+    }
 
     /* OP_JUMP over else-body */
     uint32_t else_jump = compiler__emit_jump(c, OP_JUMP, line);
@@ -7827,14 +7875,38 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* box? builtin (exactly 1 arg) */
+  /* box? builtin (1 or 2 args) */
   if (compiler__head_matches(head, "box?", 4)) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "box?", "1 argument", argc);
+    if (argc != 1 && argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "box?", "1 or 2 arguments", argc);
       return;
     }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_IS_BOX, line);
+    if (argc == 1) {
+      compiler__compile_node(c, args[0]);
+      compiler__emit_byte(c, OP_IS_BOX, line);
+    } else {
+      /* [box? Type $val] — typed box check */
+      if (args[0]->type != AST_LIT_STRING) {
+        compiler__error(c, line, col, "box?: first argument must be a type name");
+        return;
+      }
+      const char* tname = args[0]->data.lit_string.value;
+      uint32_t tlen = args[0]->data.lit_string.length;
+      uint32_t type_idx;
+      if (tlen == 3 && memcmp(tname, "dyn", 3) == 0) {
+        type_idx = 0;
+      } else {
+        type_idx = struct_registry__find(compiler__get_struct_registry(c), tname, tlen);
+        if (type_idx == UINT32_MAX) {
+          compiler__error(c, line, col, "box?: unknown type name");
+          return;
+        }
+      }
+      compiler__compile_node(c, args[1]);
+      compiler__emit_byte(c, OP_IS_BOX_TYPED, line);
+      compiler__emit_u16(c, (uint16_t)type_idx, line);
+    }
+    c->last_expr_type = TYPE_DYN;
     return;
   }
 
@@ -7868,6 +7940,43 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_DEREF, line);
+    return;
+  }
+
+  /* unbox builtin (exactly 1 arg) — requires flow-typed narrowing from box? guard */
+  if (compiler__head_matches(head, "unbox", 5)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "unbox", "1 argument", argc);
+      return;
+    }
+    /* Check if argument is a narrowed variable */
+    if (args[0]->type == AST_VAR_REF) {
+      uint32_t vlen = args[0]->data.var_ref.length;
+      if (vlen <= 128) {
+        JaclVal vname = compiler__name_val(c->heap, c->intern_table,
+                                            args[0]->data.var_ref.name, vlen);
+        int slot = compiler__resolve_local(c, vname);
+        if (slot >= 0) {
+          for (uint32_t ni = 0; ni < c->narrowing_count; ni++) {
+            if (c->narrowings[ni].local_slot == (uint16_t)slot) {
+              /* Found narrowing — compile as deref with known type */
+              compiler__compile_node(c, args[0]);
+              compiler__emit_byte(c, OP_DEREF, line);
+              uint32_t tidx = c->narrowings[ni].box_type_idx;
+              if (tidx > 0) {
+                c->last_expr_type = TYPE_STRUCT;
+                c->last_struct_idx = tidx;
+              } else {
+                c->last_expr_type = TYPE_DYN;
+              }
+              return;
+            }
+          }
+        }
+      }
+    }
+    compiler__error(c, line, col,
+        "unbox: variable must be inside a box?-guarded branch");
     return;
   }
 

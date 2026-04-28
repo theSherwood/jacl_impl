@@ -580,7 +580,7 @@ static int test_arity_swap(void) {
 }
 
 static int test_arity_box_pred(void) {
-  ASSERT(run_err("[box?]", "builtin 'box?' expects 1 argument"));
+  ASSERT(run_err("[box?]", "builtin 'box?' expects 1 or 2 arguments"));
   TEST_PASS();
 }
 

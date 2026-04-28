@@ -88,6 +88,7 @@ typedef enum {
   OP_RESET,         /* pop value + box/atom, store value, push new value */
   OP_SWAP,          /* pop closure + box/atom, apply closure to inner, store result */
   OP_IS_BOX,        /* pop value, push true if box, else false */
+  OP_IS_BOX_TYPED,  /* uint16_t type_idx; pop value, push true if box with matching type_idx */
   OP_IS_ATOM,       /* pop value, push true if atom, else false */
   OP_IS_FUTURE,     /* pop value, push true if future, else false */
   /* M13 CPS and concurrency opcodes */
@@ -406,6 +407,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_RESET:           return "OP_RESET";
     case OP_SWAP:            return "OP_SWAP";
     case OP_IS_BOX:          return "OP_IS_BOX";
+    case OP_IS_BOX_TYPED:    return "OP_IS_BOX_TYPED";
     case OP_IS_ATOM:         return "OP_IS_ATOM";
     case OP_IS_FUTURE:       return "OP_IS_FUTURE";
     case OP_AWAIT:           return "OP_AWAIT";

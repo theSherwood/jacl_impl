@@ -687,6 +687,7 @@ typedef enum {
   OP_RESET,
   OP_SWAP,
   OP_IS_BOX,
+  OP_IS_BOX_TYPED,   /* uint16_t type_idx; pop value, push true if box with matching type_idx */
   OP_IS_ATOM,
   OP_IS_FUTURE,
   OP_AWAIT,
@@ -1206,6 +1207,12 @@ struct Compiler {
   bool                 shell_fallback;
   ModuleBinding        module_bindings[COMPILER_MODULE_BINDINGS_MAX];
   uint32_t             module_binding_count;
+  /* Flow typing: type narrowings from box? guards in if-branches */
+  struct {
+    uint16_t local_slot;     /* which local variable is narrowed */
+    uint32_t box_type_idx;   /* type_idx inside the box (0=dyn, >0=struct) */
+  } narrowings[8];
+  uint32_t             narrowing_count;
 };
 
 /* ========================================================================
