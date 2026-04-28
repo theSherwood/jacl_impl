@@ -210,6 +210,27 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
   - `vm__fmt_init` now requires 3 args: `(buf, arena, registry)` — pass `vm->struct_registry` from all VM call sites
 ---
 
+## 2026-04-28 - US-013: Byte-level equality and hashing for unboxed structs
+- New opcodes: `OP_STRUCT_EQ_INLINE` (base_a, base_b, total_size), `OP_STRUCT_HASH_INLINE` (base_slot, total_size, type_idx), `OP_HASH` (generic hash)
+- `OP_STRUCT_EQ_INLINE`: memcmp raw bytes from two stack-resident inline struct slots, pushes bool
+- `OP_STRUCT_HASH_INLINE`: hashes type_idx + raw bytes from stack-resident inline struct, pushes i32
+- `OP_HASH`: pops any value, pushes i32 hash via `jacl_val_hash()`
+- `[== $a $b]` handler: detects both args as inline struct locals of same type → emits OP_STRUCT_EQ_INLINE (no materialization)
+- `compiler__compile_binary`: added TYPE_STRUCT handling — type mismatch error for different struct types
+- `[hash $expr]` builtin: inline struct locals emit OP_STRUCT_HASH_INLINE; other values emit OP_HASH
+- `jacl_val_eq`: added JACL_TAG_STRUCT case — compares type_idx + memcmp(data, data, total_size)
+- `jacl_val_hash`: added JACL_TAG_STRUCT case — hashes type_idx + raw data bytes
+- Renamed `JaclStruct._pad` → `JaclStruct.total_size` — stores byte size of data[] for equality/hashing without registry access
+- Updated duplicate JaclStruct definition in `gc.c` to match
+- Updated bytecode enum test values (3 new opcodes at positions 136-138, HALT now 174)
+- 7 new tests: inline eq same, inline eq different, inline hash equal, inline hash different, heap equality, padding zeroed, generic hash
+- Files changed: `src/jacl.h`, `src/compiler.c`, `src/vm.c`, `src/bytecode.c`, `src/collections.c`, `src/gc.c`, `src/embed.c`, `test/test_bytecode.c`, `test/test_compiler.c`
+- **Learnings for future iterations:**
+  - `JaclStruct` is duplicated in `jacl.h` AND `gc.c` — must update both when changing its layout
+  - Use `jacl_i32()` (from value.c) in vm.c, not `jacl_i32_val()` (from embed.c) — embed.c is included after vm.c in the unity build
+  - `replace_all` on `_pad = 0` → `total_size = sdef->total_size` can break when the local variable is `sub_sdef`, not `sdef` — verify each site
+---
+
 ## Codebase Patterns
 - In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
 - `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)
@@ -218,3 +239,5 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
 - Bytecode enum values are tested with hardcoded integers in `test/test_bytecode.c` — update after inserting opcodes
 - Test VM opcodes by constructing `BytecodeChunk` manually: `chunk_init`, `chunk_write`, `chunk_add_constant`
 - JACL built-in commands use hyphens: `map-get`, `map-has`, `to-string`, `map-set` (not underscores)
+- `JaclStruct` is duplicated in `jacl.h` AND `gc.c` — must update both when changing its layout
+- Use `jacl_i32()` (value.c) not `jacl_i32_val()` (embed.c) when creating i32 values in vm.c — unity build order matters
