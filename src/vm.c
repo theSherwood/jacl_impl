@@ -2301,6 +2301,11 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
            stack_base - 1 is where the caller's closure sits. */
         uint32_t src = vm->stack_top - arg_count - 1; /* callee position */
         uint32_t dst = frame->stack_base - 1;         /* overwrite current frame's closure */
+        /* US-014: clear stale bitmap bits for the old frame's entire range
+           before overwriting with new args (which are regular JaclVals). */
+        for (uint32_t si = dst; si < vm->stack_top; si++) {
+          BITMAP_CLR(vm->inline_slot_bitmap, si);
+        }
         for (uint32_t i = 0; i <= (uint32_t)arg_count; i++) {
           vm->stack[dst + i] = vm->stack[src + i];
         }
@@ -2410,6 +2415,15 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                 }
                 cl->upvalues[uv_slot + w] = vm->stack[src];
               }
+              /* US-014: propagate bitmap from stack to closure upvalues */
+              if (width > 1) {
+                for (uint8_t w = 0; w < width; w++) {
+                  uint32_t src = frame->stack_base + uv_index + w;
+                  if (BITMAP_GET(vm->inline_slot_bitmap, src)) {
+                    BITMAP_SET(cl->upvalue_inline_bitmap, uv_slot + w);
+                  }
+                }
+              }
             } else if (is_local == 2) {
               /* SM state field upvalue: read from the state machine object
                  at slot 0 of the current frame. uv_index is the field index.
@@ -2425,6 +2439,11 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                 return VM_RUNTIME_ERROR;
               }
               cl->upvalues[uv_slot] = sm->fields[uv_index];
+              /* US-014: SM field upvalue copies 1 slot only — propagate
+                 bitmap from SM, not from stack width */
+              if (BITMAP_GET(sm->field_inline_bitmap, uv_index)) {
+                BITMAP_SET(cl->upvalue_inline_bitmap, uv_slot);
+              }
             } else {
               /* US-008: copy width slots from parent closure upvalues */
               for (uint8_t w = 0; w < width; w++) {
@@ -2440,11 +2459,13 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                 }
                 cl->upvalues[uv_slot + w] = frame->closure->upvalues[uv_index + w];
               }
-            }
-            /* US-014: mark wide upvalue slots as raw struct bytes in bitmap */
-            if (width > 1) {
-              for (uint8_t w = 0; w < width; w++) {
-                BITMAP_SET(cl->upvalue_inline_bitmap, uv_slot + w);
+              /* US-014: propagate bitmap from parent closure upvalues */
+              if (width > 1) {
+                for (uint8_t w = 0; w < width; w++) {
+                  if (BITMAP_GET(frame->closure->upvalue_inline_bitmap, uv_index + w)) {
+                    BITMAP_SET(cl->upvalue_inline_bitmap, uv_slot + w);
+                  }
+                }
               }
             }
             uv_slot += width;
@@ -2478,8 +2499,16 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint8_t count = vm__read_byte(vm);
         if (count > 0) {
           JaclVal top = vm->stack[vm->stack_top - 1];
+          /* US-014: save top's bitmap state, clear removed range, restore */
+          uint8_t top_is_inline = BITMAP_GET(vm->inline_slot_bitmap, vm->stack_top - 1);
+          for (uint32_t si = vm->stack_top - 1 - count; si < vm->stack_top; si++) {
+            BITMAP_CLR(vm->inline_slot_bitmap, si);
+          }
           vm->stack_top -= count;
           vm->stack[vm->stack_top - 1] = top;
+          if (top_is_inline) {
+            BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top - 1);
+          }
         }
         break;
       }
