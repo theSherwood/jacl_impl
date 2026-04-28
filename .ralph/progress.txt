@@ -92,6 +92,22 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
   - `ModuleBinding` and `COMPILER_MODULE_BINDINGS_MAX` were previously only in compiler.c — added to jacl.h to keep struct layouts identical
 ---
 
+## 2026-04-28 - US-006: Struct arguments — pass by value
+- New opcode: `OP_STRUCT_COPY` — pops heap JaclStruct, allocates deep copy via gc_alloc + memcpy, pushes copy
+- Compiler emits OP_STRUCT_COPY after compiling each struct-typed argument at call sites
+- Condition: `arg_type == TYPE_STRUCT || expected_param_type == TYPE_STRUCT`
+- For inline struct locals: OP_STRUCT_MATERIALIZE (from var ref) already creates heap copy, OP_STRUCT_COPY adds redundant but harmless second copy
+- For heap struct params (received from callers): OP_STRUCT_COPY is essential — prevents shared pointer aliasing
+- Chained calls (outer→inner) correctly isolate each frame's struct data
+- Updated bytecode enum test values (OP_STRUCT_COPY at position 129, HALT now 165)
+- 3 new tests: basic pass-by-value (mutation isolation), recursive struct chaining, chained call isolation (outer→inner→test)
+- Files changed: `src/jacl.h`, `src/compiler.c`, `src/vm.c`, `src/bytecode.c`, `test/test_bytecode.c`, `test/test_compiler.c`
+- **Learnings for future iterations:**
+  - JACL struct field set syntax inside proc body: `. $p x 99` (top-level command, no brackets), NOT `[. $p x 99]` which causes parse errors
+  - Return values from proc calls are `dyn` at compile time — use `def Point r [foo $x]` (typed def) to get struct type for further struct-typed operations
+  - `jacl_as_struct` does NOT exist — use `jacl_as_struct_ptr(val)` to extract JaclStruct* from JaclVal
+---
+
 ## Codebase Patterns
 - In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
 - `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)
