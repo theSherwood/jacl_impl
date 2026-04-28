@@ -196,6 +196,20 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
   - Test programs that use flow typing must be wrapped in a proc to ensure variables are locals
 ---
 
+## 2026-04-28 - US-012: Generic operations on boxed structs
+- Equality (collections.c): `jacl_val_eq()` JACL_TAG_BOX case — compares type_idx + total_size; dyn boxes (type_idx==0) recurse via `jacl_val_eq(MREF_VAL)`; struct boxes memcmp raw data[]
+- Hashing (collections.c): `jacl_val_hash()` JACL_TAG_BOX case — hash = type_idx * golden_ratio, then byte-by-byte hash of data[]
+- Stringify (vm.c): `vm__fmt_value()` box case — struct boxes (type_idx > 0) format as `<box StructName: field1=val1 field2=val2>`; dyn boxes unchanged as `<box: value>`
+- `VMFormatBuf` gains `StructTypeRegistry*` field; `vm__fmt_init` takes registry param; all 7 call sites updated
+- Field formatting reads raw bytes from `ref->data` at field offsets; i64/u64/f64 handled inline (snprintf) to avoid heap allocation for formatting
+- Type name (vm.c): `vm__type_name()` extended with box, atom, cell, struct cases
+- 5 new tests: equality (same/different data/different type), hashing (map key lookup), stringify struct box, stringify dyn box, map key round-trip
+- Files changed: `src/collections.c`, `src/vm.c`, `test/test_compiler.c`
+- **Learnings for future iterations:**
+  - JACL built-in commands use hyphens: `map-get`, `map-has`, `to-string` (not underscores)
+  - `vm__fmt_init` now requires 3 args: `(buf, arena, registry)` — pass `vm->struct_registry` from all VM call sites
+---
+
 ## Codebase Patterns
 - In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
 - `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)
@@ -203,3 +217,4 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
 - `Local` and `Compiler` structs are defined in both `jacl.h` and `compiler.c` — update both when adding fields
 - Bytecode enum values are tested with hardcoded integers in `test/test_bytecode.c` — update after inserting opcodes
 - Test VM opcodes by constructing `BytecodeChunk` manually: `chunk_init`, `chunk_write`, `chunk_add_constant`
+- JACL built-in commands use hyphens: `map-get`, `map-has`, `to-string`, `map-set` (not underscores)
