@@ -121,6 +121,8 @@ typedef struct {
   uint32_t   macro_scope_mark;   /* >0 during staged macro eval; make-syntax applies this */
   /* US-010: gensym counter pointer — set by expand__node before staged closure invocation */
   uint32_t  *gensym_counter_ptr; /* points into ExpandState.gensym_counter; NULL outside staged eval */
+  /* US-014: bitmap marking stack slots that hold raw inline struct bytes (not GC-traceable JaclVals) */
+  uint8_t    inline_slot_bitmap[VM_STACK_MAX / 8];
 } VM;
 
 /* --- jacl_context_t: reentrant execution context ---
@@ -396,6 +398,7 @@ void vm_init(VM* vm, arena_t* arena) {
   vm->native_fn_count   = 0;
   vm->spread_count_top  = 0;
   vm->yield_value        = JACL_NIL;
+  memset(vm->inline_slot_bitmap, 0, sizeof(vm->inline_slot_bitmap));
 
   /* Initialize GC heap and make it available for collection templates */
   gc_block_pool_init(&vm->block_pool);
@@ -2321,6 +2324,11 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint32_t callee_base = frame->stack_base;
         uint8_t* caller_ip   = frame->return_ip;
 
+        /* US-014: clear inline struct bitmap bits for the callee's entire frame range */
+        for (uint32_t si = callee_base; si < vm->stack_top + 1; si++) {
+          BITMAP_CLR(vm->inline_slot_bitmap, si);
+        }
+
         vm->frame_count--;
 
         if (vm->frame_count == 0) {
@@ -2366,6 +2374,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         cl->is_generator  = template->is_generator;
         cl->is_sm_compiled = template->is_sm_compiled;
         cl->sm_field_count = template->sm_field_count;
+        /* US-014: initialize upvalue inline bitmap */
+        memset(cl->upvalue_inline_bitmap, 0, sizeof(cl->upvalue_inline_bitmap));
         /* All pinned closures run on thread 0 (the main worker thread).
            This ensures all non-local mutable state reads and writes go
            through a single worker, avoiding per-worker env isolation issues. */
@@ -2431,6 +2441,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                 cl->upvalues[uv_slot + w] = frame->closure->upvalues[uv_index + w];
               }
             }
+            /* US-014: mark wide upvalue slots as raw struct bytes in bitmap */
+            if (width > 1) {
+              for (uint8_t w = 0; w < width; w++) {
+                BITMAP_SET(cl->upvalue_inline_bitmap, uv_slot + w);
+              }
+            }
             uv_slot += width;
           }
         } else {
@@ -2446,6 +2462,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (vm->stack_top < count) {
           vm__set_error(vm, "stack underflow");
           return VM_RUNTIME_ERROR;
+        }
+        /* US-014: clear inline struct bitmap bits for popped slots */
+        for (uint32_t si = vm->stack_top - count; si < vm->stack_top; si++) {
+          BITMAP_CLR(vm->inline_slot_bitmap, si);
         }
         vm->stack_top -= count;
         break;
@@ -5719,6 +5739,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
 
         vm->stack_top = base + width;
+        /* US-014: mark these stack slots as raw struct bytes (not GC-traceable) */
+        for (uint32_t si = base; si < base + width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, si);
+        }
         break;
       }
 
@@ -5868,6 +5892,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         memcpy(&vm->stack[abs_base], src->data, sdef->total_size);
         /* Adjust stack_top to account for the N slots */
         vm->stack_top = abs_base + width;
+        /* US-014: mark these stack slots as raw struct bytes (not GC-traceable) */
+        for (uint32_t si = abs_base; si < abs_base + width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, si);
+        }
         break;
       }
 
@@ -7038,9 +7066,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint8_t width    = vm__read_byte(vm);
         JaclVal state_val = vm->stack[frame->stack_base + 0];
         JaclStateMachine *sm = jacl_as_state_machine(state_val);
+        uint32_t push_base = vm->stack_top;
         for (uint8_t i = 0; i < width; i++) {
           result = vm__push(vm, sm->fields[base_idx + i]);
           if (result != VM_OK) return result;
+        }
+        /* US-014: mark pushed slots as raw struct bytes */
+        for (uint32_t si = push_base; si < push_base + width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, si);
         }
         break;
       }
@@ -7057,6 +7090,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         /* Copy from stack (bottom of the N-slot range first) */
         for (uint8_t i = 0; i < width; i++) {
           sm->fields[base_idx + i] = vm->stack[vm->stack_top - width + i];
+        }
+        /* US-014: mark SM field slots as raw struct bytes */
+        for (uint8_t i = 0; i < width; i++) {
+          BITMAP_SET(sm->field_inline_bitmap, base_idx + i);
         }
         vm->stack_top -= width;
         break;

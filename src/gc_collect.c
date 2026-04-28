@@ -128,8 +128,16 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
     /* --- Closure: trace captured upvalues + chunk constants --- */
     case OBJ_CLOSURE: {
         JaclClosure *cl = (JaclClosure *)payload;
-        for (uint8_t i = 0; i < cl->upvalue_count; i++) {
-            gc__ms_push_val(ms, cl->upvalues[i]);
+        /* US-014: iterate upvalue_total_slots (not upvalue_count) to cover
+           wide struct upvalues. Skip slots marked as raw struct bytes. */
+        uint16_t uv_total = cl->upvalue_total_slots
+            ? cl->upvalue_total_slots : cl->upvalue_count;
+        if (cl->upvalues) {
+            for (uint16_t i = 0; i < uv_total; i++) {
+                if (!BITMAP_GET(cl->upvalue_inline_bitmap, i)) {
+                    gc__ms_push_val(ms, cl->upvalues[i]);
+                }
+            }
         }
         /* Trace chunk constants to keep heap literals alive.
          * Skip closures (arena-allocated templates, not GC objects). */
@@ -258,13 +266,16 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
-    /* --- State machine: trace error_k, sm_closure, and all field slots --- */
+    /* --- State machine: trace error_k, sm_closure, and non-struct field slots --- */
     case OBJ_STATE_MACHINE: {
         JaclStateMachine *sm = (JaclStateMachine *)payload;
         gc__ms_push_val(ms, sm->error_k);
         gc__ms_push_val(ms, sm->sm_closure);
+        /* US-014: skip field slots that hold raw inline struct bytes */
         for (uint32_t i = 0; i < sm->field_count; i++) {
-            gc__ms_push_val(ms, sm->fields[i]);
+            if (!BITMAP_GET(sm->field_inline_bitmap, i)) {
+                gc__ms_push_val(ms, sm->fields[i]);
+            }
         }
         break;
     }
@@ -331,27 +342,23 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
-    /* --- Struct: trace reference-type fields --- */
+    /* --- Struct: skip tracing for value-type structs (no GC references) --- */
     case OBJ_STRUCT: {
         JaclStruct *s = (JaclStruct *)payload;
-        /* To trace struct fields, we need the struct registry from the VM.
-         * For now, use a conservative approach: scan all 8-byte aligned
-         * slots in the data buffer as potential JaclVal references.
-         * The struct type registry is not available here, so we scan
-         * the data conservatively. Each field that stores a JaclVal
-         * (str, vec, map, closure, dyn, struct) is 8 bytes at an 8-byte
-         * aligned offset. We scan all 8-byte slots. */
-        /* Access the struct registry through a global pointer set before GC */
         if (gc__struct_registry) {
             StructTypeRegistry *sreg = (StructTypeRegistry *)gc__struct_registry;
             StructTypeDef *sdef = sreg->defs[s->type_idx];
-            for (uint32_t i = 0; i < sdef->field_count; i++) {
-                JaclType ft = sdef->fields[i].type;
-                if (ft == TYPE_STR || ft == TYPE_VEC || ft == TYPE_MAP ||
-                    ft == TYPE_CLOSURE || ft == TYPE_DYN || ft == TYPE_STRUCT) {
-                    JaclVal val;
-                    memcpy(&val, s->data + sdef->fields[i].offset, sizeof(JaclVal));
-                    gc__ms_push_val(ms, val);
+            /* US-014: value-type structs have no reference fields — skip tracing */
+            if (!sdef->is_value_type) {
+                /* Legacy path: trace reference-type fields for migration */
+                for (uint32_t i = 0; i < sdef->field_count; i++) {
+                    JaclType ft = sdef->fields[i].type;
+                    if (ft == TYPE_STR || ft == TYPE_VEC || ft == TYPE_MAP ||
+                        ft == TYPE_CLOSURE || ft == TYPE_DYN || ft == TYPE_STRUCT) {
+                        JaclVal val;
+                        memcpy(&val, s->data + sdef->fields[i].offset, sizeof(JaclVal));
+                        gc__ms_push_val(ms, val);
+                    }
                 }
             }
         }
@@ -375,9 +382,11 @@ void gc_mark(ThreadHeap *heap, VM *vm) {
 
     /* --- Root enumeration --- */
 
-    /* 1. VM stack values */
+    /* 1. VM stack values — skip slots containing raw inline struct bytes */
     for (uint32_t i = 0; i < vm->stack_top; i++) {
-        gc__ms_push_val(&ms, vm->stack[i]);
+        if (!BITMAP_GET(vm->inline_slot_bitmap, i)) {
+            gc__ms_push_val(&ms, vm->stack[i]);
+        }
     }
 
     /* 2. Call frame closures */
@@ -651,9 +660,11 @@ void gc_mark_minor(ThreadHeap *heap, VM *vm,
 
     /* --- Root enumeration (same as full GC) --- */
 
-    /* 1. VM stack values */
+    /* 1. VM stack values — skip slots containing raw inline struct bytes */
     for (uint32_t i = 0; i < vm->stack_top; i++) {
-        gc__ms_push_val(&ms, vm->stack[i]);
+        if (!BITMAP_GET(vm->inline_slot_bitmap, i)) {
+            gc__ms_push_val(&ms, vm->stack[i]);
+        }
     }
 
     /* 2. Call frame closures */

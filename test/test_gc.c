@@ -1518,6 +1518,224 @@ static int test_gc_oom_tier3_panic(void) {
     TEST_PASS();
 }
 
+/* ===== US-014: Remove GC tracing for value-type structs ===== */
+
+static int test_gc_inline_struct_bitmap_skip(void) {
+    /* Stack slots marked as inline struct data should be skipped by GC.
+       Write a bit pattern that looks like a heap pointer tag into a struct slot,
+       then run GC — it must NOT crash or follow the garbage pointer. */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Allocate a real heap object and put it on the stack as a root */
+    JaclVal vi = jacl_i64(&vm.heap, 42);
+    vm.stack[0] = vi;
+
+    /* Simulate inline struct data at slots [1, 2]:
+       Write a value that looks like a tagged heap pointer (JACL_TAG_STRING with a garbage address) */
+    uint64_t fake_heap_val = ((uint64_t)0x05 << 56) | 0xDEADBEEF;
+    vm.stack[1] = (JaclVal)fake_heap_val;
+    vm.stack[2] = (JaclVal)fake_heap_val;
+    vm.stack_top = 3;
+
+    /* Mark slots 1 and 2 as inline struct data */
+    BITMAP_SET(vm.inline_slot_bitmap, 1);
+    BITMAP_SET(vm.inline_slot_bitmap, 2);
+
+    uint8_t mark = vm.heap.current_mark;
+
+    /* GC should skip slots 1 and 2 — must not crash following garbage pointers */
+    gc_mark(&vm.heap, &vm);
+
+    /* The real heap object should be marked */
+    ASSERT(gc__is_marked(jacl_as_ptr(vi), mark));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_inline_struct_non_struct_survives(void) {
+    /* Non-struct stack values alongside inline struct data must still be traced.
+       Verify that a real heap object on the stack survives GC when struct
+       bitmap bits are set for adjacent slots. */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Slot 0: real heap value */
+    JaclVal vi = jacl_i64(&vm.heap, 100);
+    vm.stack[0] = vi;
+
+    /* Slot 1: inline struct data (bitmap set) */
+    vm.stack[1] = (JaclVal)0xFFFFFFFFFFFFFFFFULL;
+    BITMAP_SET(vm.inline_slot_bitmap, 1);
+
+    /* Slot 2: another real heap value */
+    JaclVal vf = jacl_f64(&vm.heap, 3.14);
+    vm.stack[2] = vf;
+
+    vm.stack_top = 3;
+
+    uint8_t mark = vm.heap.current_mark;
+    gc_mark(&vm.heap, &vm);
+
+    /* Both real heap objects survive */
+    ASSERT(gc__is_marked(jacl_as_ptr(vi), mark));
+    ASSERT(gc__is_marked(jacl_as_ptr(vf), mark));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_sm_field_bitmap_skip(void) {
+    /* State machine field slots marked as inline struct data should be skipped.
+       Write garbage into SM fields at bitmap-marked positions, then GC. */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Allocate a state machine with 4 fields */
+    JaclVal sm_val = gc_alloc_state_machine(&vm.heap, 4);
+    JaclStateMachine *sm = jacl_as_state_machine(sm_val);
+
+    /* Field 0: real heap value */
+    JaclVal vi = jacl_i64(&vm.heap, 99);
+    sm->fields[0] = vi;
+
+    /* Fields 1-2: inline struct data (garbage that looks like heap pointer) */
+    uint64_t fake_heap_val = ((uint64_t)0x05 << 56) | 0xCAFEBABE;
+    sm->fields[1] = (JaclVal)fake_heap_val;
+    sm->fields[2] = (JaclVal)fake_heap_val;
+    BITMAP_SET(sm->field_inline_bitmap, 1);
+    BITMAP_SET(sm->field_inline_bitmap, 2);
+
+    /* Field 3: real heap value */
+    JaclVal vf = jacl_f64(&vm.heap, 2.71);
+    sm->fields[3] = vf;
+
+    /* Root the SM on the stack */
+    vm.stack[0] = sm_val;
+    vm.stack_top = 1;
+
+    uint8_t mark = vm.heap.current_mark;
+    gc_mark(&vm.heap, &vm);
+
+    /* Real heap objects in SM fields survive */
+    ASSERT(gc__is_marked(jacl_as_ptr(vi), mark));
+    ASSERT(gc__is_marked(jacl_as_ptr(vf), mark));
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_value_type_struct_no_trace(void) {
+    /* A heap-allocated JaclStruct with is_value_type=true should not
+       have its fields traced by GC (no reference fields).
+       Use gc_collect which sets gc__struct_registry internally. */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    /* Set up a minimal struct registry with a value-type struct */
+    StructTypeRegistry reg;
+    reg.defs = (StructTypeDef**)calloc(4, sizeof(StructTypeDef*));
+    reg.count = 1;
+    reg.capacity = 4;
+    reg.arena = &arena;
+    reg.defs[0] = NULL; /* reserved */
+
+    /* Create a struct type def with 2 i32 fields (value type) */
+    size_t sdef_sz = sizeof(StructTypeDef) + 2 * sizeof(StructTypeField);
+    StructTypeDef *sdef = (StructTypeDef*)arena_alloc(&arena, sdef_sz);
+    sdef->name = "Point";
+    sdef->name_len = 5;
+    sdef->name_val = JACL_NIL;
+    sdef->field_count = 2;
+    sdef->total_size = 8;
+    sdef->alignment = 4;
+    sdef->is_value_type = true;
+    sdef->fields[0] = (StructTypeField){ "x", 1, TYPE_I32, 0, 0, 4 };
+    sdef->fields[1] = (StructTypeField){ "y", 1, TYPE_I32, 0, 4, 4 };
+    reg.defs[1] = sdef;
+    reg.count = 2;
+
+    vm.struct_registry = &reg;
+
+    /* Allocate a JaclStruct and put i32 data */
+    JaclStruct *s = (JaclStruct*)gc_alloc(&vm.heap, OBJ_STRUCT,
+                                           sizeof(JaclStruct) + 8);
+    s->type_idx = 1;
+    s->total_size = 8;
+    int32_t x = 42, y = 99;
+    memcpy(s->data, &x, 4);
+    memcpy(s->data + 4, &y, 4);
+
+    /* Root the struct on the stack */
+    vm.stack[0] = jacl_struct_val(s);
+    vm.stack_top = 1;
+
+    /* gc_collect sets gc__struct_registry from vm.struct_registry internally */
+    gc_collect(&vm.heap, &vm);
+
+    /* After gc_collect, mark is toggled. Live objects have previous mark. */
+    uint8_t mark = 1 - vm.heap.current_mark;
+    ASSERT(gc__is_marked(s, mark));
+
+    free(reg.defs);
+    vm.struct_registry = NULL;
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_gc_stress_inline_struct_gc_cycles(void) {
+    /* Stress test: run multiple GC cycles with inline struct data on the stack.
+       Ensures no crashes or memory corruption over repeated collections. */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    for (int cycle = 0; cycle < 20; cycle++) {
+        /* Allocate some heap objects */
+        JaclVal vi = jacl_i64(&vm.heap, cycle);
+        vm.stack[0] = vi;
+
+        /* Simulate inline struct data at slots 1-2 */
+        vm.stack[1] = (JaclVal)(0x0512345678000000ULL + (uint64_t)cycle);
+        vm.stack[2] = (JaclVal)(0x0EDEADBEEF000000ULL + (uint64_t)cycle);
+        BITMAP_SET(vm.inline_slot_bitmap, 1);
+        BITMAP_SET(vm.inline_slot_bitmap, 2);
+
+        /* Allocate more objects to fill memory */
+        JaclVal vf = jacl_f64(&vm.heap, (double)cycle);
+        vm.stack[3] = vf;
+        vm.stack_top = 4;
+
+        /* Run a full GC cycle */
+        gc_collect(&vm.heap, &vm);
+
+        /* Verify heap objects survived */
+        uint8_t mark = vm.heap.current_mark;
+        /* After gc_collect, mark is already toggled, so live objects have
+           the previous mark value (1 - current) */
+        uint8_t prev_mark = 1 - mark;
+        ASSERT(gc__is_marked(jacl_as_ptr(vi), prev_mark));
+        ASSERT(gc__is_marked(jacl_as_ptr(vf), prev_mark));
+    }
+
+    /* Clear bitmap and cleanup */
+    BITMAP_CLR(vm.inline_slot_bitmap, 1);
+    BITMAP_CLR(vm.inline_slot_bitmap, 2);
+
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1577,6 +1795,12 @@ int main(void) {
         { "gc_oom_tier1_emergency_gc",   test_gc_oom_tier1_emergency_gc },
         { "gc_oom_tier2_heap_growth",    test_gc_oom_tier2_heap_growth },
         { "gc_oom_tier3_panic",          test_gc_oom_tier3_panic },
+        /* US-014: Remove GC tracing for value-type structs */
+        { "gc_inline_bitmap_skip",       test_gc_inline_struct_bitmap_skip },
+        { "gc_inline_nonstr_survives",   test_gc_inline_struct_non_struct_survives },
+        { "gc_sm_field_bitmap_skip",     test_gc_sm_field_bitmap_skip },
+        { "gc_value_type_no_trace",      test_gc_value_type_struct_no_trace },
+        { "gc_stress_inline_struct",     test_gc_stress_inline_struct_gc_cycles },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

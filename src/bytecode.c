@@ -322,6 +322,7 @@ typedef struct {
   bool          is_generator;  /* true if proc body contains yield */
   bool          is_sm_compiled; /* true if compiled as state machine (not CPS) */
   uint8_t       sm_field_count; /* state machine field count for SM-compiled closures */
+  uint8_t       upvalue_inline_bitmap[32]; /* US-014: marks which upvalue slots hold raw struct bytes */
 } JaclClosure;
 
 JaclVal jacl_closure(JaclClosure* cl) {

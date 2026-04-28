@@ -9,6 +9,13 @@
 #ifndef GC_C
 #define GC_C
 
+/* --- Bitmap helpers for inline struct slot tracking (US-014) --- */
+#ifndef BITMAP_SET
+#define BITMAP_SET(bm, idx) ((bm)[(idx) / 8] |=  (uint8_t)(1u << ((idx) % 8)))
+#define BITMAP_CLR(bm, idx) ((bm)[(idx) / 8] &= (uint8_t)~(1u << ((idx) % 8)))
+#define BITMAP_GET(bm, idx) (((bm)[(idx) / 8] >> ((idx) % 8)) & 1u)
+#endif
+
 /* --- GC object type enumeration --- */
 
 typedef enum {
@@ -1117,6 +1124,7 @@ typedef struct {
     uint32_t field_count;    /* number of trailing field slots */
     JaclVal  error_k;        /* completion callback (closure or JACL_NIL) */
     JaclVal  sm_closure;     /* compiled state machine closure */
+    uint8_t  field_inline_bitmap[32]; /* US-014: marks which field slots hold raw struct bytes */
     JaclVal  fields[];       /* trailing array: fields[0..field_count-1] */
 } JaclStateMachine;
 
@@ -1135,6 +1143,7 @@ JaclVal gc_alloc_state_machine(ThreadHeap *heap, uint32_t field_count) {
     sm->field_count  = field_count;
     sm->error_k      = JACL_NIL;
     sm->sm_closure   = JACL_NIL;
+    memset(sm->field_inline_bitmap, 0, sizeof(sm->field_inline_bitmap));
     for (uint32_t i = 0; i < field_count; i++) {
         sm->fields[i] = JACL_NIL;
     }

@@ -254,6 +254,7 @@ typedef struct {
     uint32_t field_count;
     JaclVal  error_k;
     JaclVal  sm_closure;
+    uint8_t  field_inline_bitmap[32]; /* US-014: marks which field slots hold raw struct bytes */
     JaclVal  fields[];
 } JaclStateMachine;
 
@@ -817,6 +818,7 @@ typedef struct {
   bool          is_generator;
   bool          is_sm_compiled;
   uint8_t       sm_field_count;
+  uint8_t       upvalue_inline_bitmap[32]; /* US-014: marks which upvalue slots hold raw struct bytes */
 } JaclClosure;
 
 /* ========================================================================
@@ -967,6 +969,7 @@ typedef struct {
   uint32_t    field_count;
   uint32_t    total_size;
   uint32_t    alignment;
+  bool        is_value_type;  /* true if all fields are non-reference types (no GC tracing needed) */
   StructTypeField fields[];   /* flexible array member */
 } StructTypeDef;
 
@@ -1227,6 +1230,11 @@ struct Compiler {
 #define VM_ENV_INIT_CAP     16
 #define VM_STACK_TRACE_MAX  32
 
+/* Bitmap helpers for inline struct slot tracking */
+#define BITMAP_SET(bm, idx) ((bm)[(idx) / 8] |=  (uint8_t)(1u << ((idx) % 8)))
+#define BITMAP_CLR(bm, idx) ((bm)[(idx) / 8] &= (uint8_t)~(1u << ((idx) % 8)))
+#define BITMAP_GET(bm, idx) (((bm)[(idx) / 8] >> ((idx) % 8)) & 1u)
+
 typedef enum {
   VM_OK,
   VM_RUNTIME_ERROR,
@@ -1296,6 +1304,8 @@ typedef struct {
   uint32_t   macro_scope_mark;   /* >0 during staged macro eval; make-syntax applies this */
   /* US-010: gensym counter pointer — set by expand__node before staged closure invocation */
   uint32_t  *gensym_counter_ptr; /* points into ExpandState.gensym_counter; NULL outside staged eval */
+  /* US-014: bitmap marking stack slots that hold raw inline struct bytes (not GC-traceable JaclVals) */
+  uint8_t    inline_slot_bitmap[VM_STACK_MAX / 8];
 } VM;
 
 /* --- jacl_context_t: reentrant execution context (full definition) ---

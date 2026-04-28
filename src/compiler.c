@@ -202,6 +202,7 @@ typedef struct {
   uint32_t    field_count;
   uint32_t    total_size;     /* total size including trailing padding */
   uint32_t    alignment;      /* max alignment of all fields */
+  bool        is_value_type;  /* true if all fields are non-reference types (no GC tracing needed) */
   StructTypeField fields[];   /* flexible array member — variable field count */
 } StructTypeDef;
 
@@ -433,6 +434,14 @@ uint32_t compiler__register_inline_struct(
   sdef->field_count = tmp_count;
   sdef->total_size  = struct__align_up(offset, max_align);
   sdef->alignment   = max_align;
+  /* Check if all fields are value types (no GC references) */
+  sdef->is_value_type = true;
+  for (uint32_t i = 0; i < tmp_count; i++) {
+    if (!is_struct_value_type(tmp_fields[i].type)) {
+      sdef->is_value_type = false;
+      break;
+    }
+  }
   memcpy(sdef->fields, tmp_fields, tmp_count * sizeof(StructTypeField));
 
   uint32_t idx = reg->count;
@@ -10181,6 +10190,14 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       sdef->field_count = field_count;
       sdef->total_size  = struct__align_up(offset, max_align);
       sdef->alignment   = max_align;
+      /* Check if all fields are value types (no GC references) */
+      sdef->is_value_type = true;
+      for (uint32_t fi2 = 0; fi2 < field_count; fi2++) {
+        if (!is_struct_value_type(tmp_fields[fi2].type)) {
+          sdef->is_value_type = false;
+          break;
+        }
+      }
       memcpy(sdef->fields, tmp_fields, field_count * sizeof(StructTypeField));
 
       /* Assign to reserved slot */
