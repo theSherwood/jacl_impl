@@ -106,6 +106,8 @@ bool is_type_keyword(const char* word, size_t len) {
     if (memcmp(word, "f32", 3) == 0) return true;
     if (memcmp(word, "f64", 3) == 0) return true;
     if (memcmp(word, "str", 3) == 0) return true;
+    if (memcmp(word, "vec", 3) == 0) return true;
+    if (memcmp(word, "map", 3) == 0) return true;
     if (memcmp(word, "dyn", 3) == 0) return true;
   } else if (len == 4) {
     if (memcmp(word, "bool", 4) == 0) return true;
@@ -124,6 +126,8 @@ JaclType type_from_keyword(const char* word, size_t len) {
     if (memcmp(word, "f32", 3) == 0) return TYPE_F32;
     if (memcmp(word, "f64", 3) == 0) return TYPE_F64;
     if (memcmp(word, "str", 3) == 0) return TYPE_STR;
+    if (memcmp(word, "vec", 3) == 0) return TYPE_VEC;
+    if (memcmp(word, "map", 3) == 0) return TYPE_MAP;
     if (memcmp(word, "dyn", 3) == 0) return TYPE_DYN;
   } else if (len == 4) {
     if (memcmp(word, "bool", 4) == 0) return TYPE_BOOL;
@@ -398,9 +402,6 @@ uint32_t compiler__register_inline_struct(
       ftype = TYPE_STRUCT;
       f_struct_idx = idx;
     }
-
-    /* Reject reference types in inline structs */
-    if (!is_struct_value_type(ftype)) return UINT32_MAX;
 
     /* Compute C-ABI layout */
     uint32_t fsize  = struct__type_size(ftype, reg, f_struct_idx);
@@ -6136,8 +6137,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           uint32_t rhs_head_len = val_node->data.command.head->data.lit_string.length;
           uint32_t rhs_sidx = struct_registry__find(reg, rhs_head_name, rhs_head_len);
           if (rhs_sidx != UINT32_MAX) {
-            activate_inline = true;
-            c->want_inline_struct = true;
+            /* US-015: only inline value-type structs; legacy structs use heap */
+            StructTypeDef* rhs_sdef = reg->defs[rhs_sidx];
+            if (rhs_sdef && rhs_sdef->is_value_type) {
+              activate_inline = true;
+              c->want_inline_struct = true;
+            }
           }
         }
       }
@@ -6157,8 +6162,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (!activate_inline && rhs_type == TYPE_STRUCT &&
         c->last_struct_idx != UINT32_MAX &&
         c->scope_depth > 0 && !c->sm_analysis) {
-      activate_inline = true;
-      needs_store_inline = true;
+      /* US-015: only inline value-type structs; legacy structs use heap */
+      StructTypeRegistry* reg2 = compiler__get_struct_registry(c);
+      if (reg2 && c->last_struct_idx < reg2->count) {
+        StructTypeDef* ret_sdef = reg2->defs[c->last_struct_idx];
+        if (ret_sdef && ret_sdef->is_value_type) {
+          activate_inline = true;
+          needs_store_inline = true;
+        }
+      }
     }
 
     /* Type check for typed def */
@@ -9003,8 +9015,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
 
       /* Capture and clear inline flag before compiling args (prevents
-       * nested struct constructors from inheriting the flag). */
-      bool use_inline = c->want_inline_struct;
+       * nested struct constructors from inheriting the flag).
+       * US-015: only allow inline for value-type structs. */
+      bool use_inline = c->want_inline_struct && sdef->is_value_type;
       c->want_inline_struct = false;
 
       /* Compile and type-check each field argument */
@@ -10138,17 +10151,6 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           }
           ftype = TYPE_STRUCT;
           f_struct_idx = idx;
-        }
-
-        /* Reject reference types — struct fields must be value types */
-        if (!is_struct_value_type(ftype)) {
-          char err[128];
-          snprintf(err, sizeof(err),
-                   "struct fields must be value types; '%.*s' is a reference type",
-                   (int)ftype_len, ftype_str);
-          compiler__error(c, line, node->start.column, err);
-          has_error = true;
-          break;
         }
 
         /* Compute C-ABI layout */

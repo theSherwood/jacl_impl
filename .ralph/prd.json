@@ -244,7 +244,7 @@
         "build.sh passes, all existing struct tests pass, new value-type tests pass"
       ],
       "priority": 15,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ]

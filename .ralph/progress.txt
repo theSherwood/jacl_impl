@@ -253,6 +253,25 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
   - When OP_RETURN clears bitmap, use `stack_top + 1` (return value was already popped) to cover the full callee frame
 ---
 
+## 2026-04-28 - US-015: Migration scaffolding — dual path
+- Removed reference-type field rejection from both `compiler__register_inline_struct` and `AST_DEFSTRUCT` handler — structs with str/vec/map/dyn fields now compile
+- Added `vec` and `map` to `is_type_keyword()` and `type_from_keyword()` so they are recognized as field types in struct definitions
+- Gated inline storage activation on `sdef->is_value_type` in three places:
+  1. Direct struct constructor detection in `def` binding (line ~6135)
+  2. Function-return post-activation in `def` binding (line ~6157)
+  3. Belt-and-suspenders check at OP_STRUCT_NEW_INLINE emission (line ~9015)
+- Value-type structs (all primitive/struct fields) → `is_value_type=true` → inline stack storage (OP_STRUCT_NEW_INLINE)
+- Legacy structs (any str/vec/map/dyn/closure field) → `is_value_type=false` → heap allocation (OP_STRUCT_NEW)
+- Both paths coexist in the same program — no behavioral regressions
+- Updated `test_defstruct_ref_type_rejected` → `test_defstruct_ref_type_accepted` (ref types now allowed)
+- 5 new tests: value-type inline path, legacy heap path, is_value_type flag verification, both paths coexisting, legacy field mutation via dot syntax
+- Files changed: `src/compiler.c`, `test/test_compiler.c`, `.ralph/prd.json`
+- **Learnings for future iterations:**
+  - `is_type_keyword()` and `type_from_keyword()` must stay in sync — adding a type to one without the other causes silent fallback to TYPE_DYN
+  - Field mutation uses `. $var field value` syntax, not `set var->field value`
+  - Struct field set at global scope requires different compilation path — test struct operations inside `proc` for reliable behavior
+---
+
 ## Codebase Patterns
 - In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
 - `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)
