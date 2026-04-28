@@ -163,6 +163,23 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
   - Atomic operations on mutable refs work correctly with `&MREF_VAL(ref)` since the flexible array member provides a stable lvalue address
 ---
 
+## 2026-04-28 - US-010: Box struct values and deref/reset/swap
+- New opcode: `OP_BOX_STRUCT` (uint16_t type_idx) — pops heap JaclStruct, allocates `sizeof(JaclMutableRef) + total_size`, copies struct data into box
+- Compiler `[box $expr]` handler: checks `c->last_expr_type == TYPE_STRUCT` after compiling arg; emits OP_BOX_STRUCT + type_idx for structs, OP_BOX for non-structs
+- Compiler `[atom $expr]` handler: emits compile error if `c->last_expr_type == TYPE_STRUCT` ("struct values cannot be stored in atoms")
+- VM OP_BOX_STRUCT: validates type_idx, allocates JaclMutableRef with struct total_size, memcpy from JaclStruct.data
+- VM OP_DEREF: if `ref->type_idx > 0`, materializes struct from box data[] into new heap JaclStruct (value copy)
+- VM OP_RESET: if `ref->type_idx > 0`, validates struct type match, memcpy new struct data into box (no GC barriers needed for raw struct bytes)
+- VM OP_SWAP: if `ref->type_idx > 0`, materializes current value as JaclStruct, runs closure, copies result back into box
+- Updated bytecode enum test values (OP_BOX_STRUCT at position 68, all subsequent +1, HALT now 170)
+- 5 new tests: box roundtrip (box→deref), reset (replace contents), swap (closure-based update), deref isolation (copy semantics), atom rejection (compile error)
+- Files changed: `src/jacl.h`, `src/compiler.c`, `src/vm.c`, `src/bytecode.c`, `test/test_bytecode.c`, `test/test_compiler.c`
+- **Learnings for future iterations:**
+  - `c->last_expr_type` and `c->last_struct_idx` are set after compiling an argument — check them to detect struct types at compile time
+  - Struct boxes don't need GC write barriers since struct data contains no GC references (value types only)
+  - Swap on struct boxes is always non-atomic (atoms reject structs at compile time)
+---
+
 ## Codebase Patterns
 - In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
 - `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)
