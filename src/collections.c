@@ -104,6 +104,17 @@ uint32_t jacl_val_hash(JaclVal v) {
     return jacl_map_node_hash(map);
   }
 
+  /* Box: hash type_idx + data bytes */
+  if (tag == JACL_TAG_BOX) {
+    JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(v);
+    uint32_t h = ref->type_idx * 0x9E3779B9u;
+    const uint8_t* p = ref->data;
+    for (uint32_t i = 0; i < ref->total_size; i++) {
+      h = h * 31 + p[i];
+    }
+    return h;
+  }
+
   /* Fallback: hash the raw payload bits */
   uint64_t payload = v & JACL_PAYLOAD_MASK;
   return (uint32_t)(payload ^ (payload >> 32));
@@ -156,6 +167,21 @@ bool jacl_val_eq(JaclVal a, JaclVal b) {
       if (!jacl_val_eq(val_a, val_b)) return false;
     }
     return true;
+  }
+
+  /* Box equality: type_idx must match AND data[] must be byte-identical */
+  if (tag_a == JACL_TAG_BOX) {
+    JaclMutableRef* ra = (JaclMutableRef*)jacl_as_ptr(a);
+    JaclMutableRef* rb = (JaclMutableRef*)jacl_as_ptr(b);
+    if (ra == rb) return true;
+    if (ra->type_idx != rb->type_idx) return false;
+    if (ra->total_size != rb->total_size) return false;
+    if (ra->type_idx == 0) {
+      /* dyn box: compare contained JaclVal */
+      return jacl_val_eq(MREF_VAL(ra), MREF_VAL(rb));
+    }
+    /* struct box: memcmp raw bytes */
+    return memcmp(ra->data, rb->data, ra->total_size) == 0;
   }
 
   /* For all other types: same tag + same payload = equal */

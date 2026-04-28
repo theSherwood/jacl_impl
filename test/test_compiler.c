@@ -6556,6 +6556,179 @@ static int test_box_typed_unknown_type_rejected(void) {
   TEST_PASS();
 }
 
+/* ===== US-012: Generic operations on boxed structs ===== */
+
+static int test_struct_box_equality(void) {
+  /* Two boxes with same struct type and data are equal; different data are not */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def b1 [box [Point 10 20]]\n"
+      "  def b2 [box [Point 10 20]]\n"
+      "  def b3 [box [Point 10 99]]\n"
+      "  def b4 [box 42]\n"
+      "  print [== $b1 $b2]\n"
+      "  print [== $b1 $b3]\n"
+      "  print [== $b1 $b4]\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\nfalse\nfalse\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_box_hashing(void) {
+  /* Equal struct boxes produce same hash — usable as map keys */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def b1 [box [Point 10 20]]\n"
+      "  def b2 [box [Point 10 20]]\n"
+      "  def m [map $b1 hello]\n"
+      "  print [map-get $m $b2]\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "hello\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_box_stringify(void) {
+  /* Stringify of boxed struct shows struct name and field values */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def b [box [Point 10 20]]\n"
+      "  print [to-string $b]\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "<box Point: x=10 y=20>\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_box_stringify_dyn(void) {
+  /* Dyn box stringify is unchanged */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "proc test {} {\n"
+      "  def b [box 42]\n"
+      "  print [to-string $b]\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "<box: 42>\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_box_map_key(void) {
+  /* Boxed structs usable as map keys with correct equality + hashing */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def k1 [box [Point 1 2]]\n"
+      "  def k2 [box [Point 3 4]]\n"
+      "  def k3 [box [Point 1 2]]\n"
+      "  def m [map $k1 alpha $k2 beta]\n"
+      "  print [map-get $m $k3]\n"
+      "  print [map-get $m $k2]\n"
+      "  print [map-has $m $k1]\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "alpha\nbeta\ntrue\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ===== US-008 (Struct): Inline anonymous struct types ===== */
 
 static int test_inline_struct_runtime(void) {
@@ -9818,6 +9991,12 @@ int main(void) {
     { "box_flow_typing_unbox",             test_box_flow_typing_unbox },
     { "unbox_outside_guard_rejected",      test_unbox_outside_guard_rejected },
     { "box_typed_unknown_type_rejected",   test_box_typed_unknown_type_rejected },
+    /* US-012: Generic operations on boxed structs */
+    { "struct_box_equality",               test_struct_box_equality },
+    { "struct_box_hashing",                test_struct_box_hashing },
+    { "struct_box_stringify",              test_struct_box_stringify },
+    { "struct_box_stringify_dyn",           test_struct_box_stringify_dyn },
+    { "struct_box_map_key",                test_struct_box_map_key },
     /* US-004 (Struct): Field access */
     { "struct_get_basic",                test_struct_get_basic },
     { "struct_get_unknown_field",        test_struct_get_unknown_field },

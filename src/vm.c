@@ -295,6 +295,10 @@ const char* vm__type_name(JaclVal v) {
   if (jacl_is_future(v))        return "future";
   if (jacl_is_stream(v))       return "stream";
   if (jacl_is_native_fn(v))    return "native-fn";
+  if (jacl_is_box(v))          return "box";
+  if (jacl_is_atom(v))         return "atom";
+  if (jacl_is_cell(v))         return "cell";
+  if (jacl_is_struct(v))       return "struct";
   return "unknown";
 }
 
@@ -535,10 +539,12 @@ typedef struct {
   uint32_t  len;
   uint32_t  cap;
   arena_t*  arena;
+  StructTypeRegistry* registry;
 } VMFormatBuf;
 
-void vm__fmt_init(VMFormatBuf* buf, arena_t* arena) {
+void vm__fmt_init(VMFormatBuf* buf, arena_t* arena, StructTypeRegistry* registry) {
   buf->arena = arena;
+  buf->registry = registry;
   buf->len   = 0;
   buf->cap   = 128;
   buf->data  = (char*)arena_alloc(arena, 128);
@@ -639,9 +645,48 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
     vm__fmt_value(buf, MREF_VAL(ref));
   } else if (jacl_is_box(val)) {
     JaclMutableRef* ref = jacl_as_box(val);
-    vm__fmt_append(buf, "<box: ", 6);
-    vm__fmt_value(buf, MREF_VAL(ref));
-    vm__fmt_append(buf, ">", 1);
+    if (ref->type_idx > 0 && buf->registry &&
+        ref->type_idx < buf->registry->count) {
+      /* Struct box: format with struct name and field values */
+      StructTypeDef* sdef = buf->registry->defs[ref->type_idx];
+      if (sdef) {
+        vm__fmt_append(buf, "<box ", 5);
+        vm__fmt_append(buf, sdef->name, sdef->name_len);
+        vm__fmt_append(buf, ":", 1);
+        for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+          StructTypeField* sf = &sdef->fields[fi];
+          vm__fmt_append(buf, " ", 1);
+          vm__fmt_append(buf, sf->name, sf->name_len);
+          vm__fmt_append(buf, "=", 1);
+          /* Read field value from raw data bytes */
+          JaclVal fv;
+          switch (sf->type) {
+            case TYPE_BOOL: { uint8_t b = ref->data[sf->offset]; fv = jacl_bool(b); break; }
+            case TYPE_I32: { int32_t n; memcpy(&n, ref->data + sf->offset, 4); fv = jacl_i32(n); break; }
+            case TYPE_U32: { uint32_t n; memcpy(&n, ref->data + sf->offset, 4); fv = jacl_u32(n); break; }
+            case TYPE_F32: { float f; memcpy(&f, ref->data + sf->offset, 4); fv = jacl_f32(f); break; }
+            case TYPE_I64: { int64_t n; memcpy(&n, ref->data + sf->offset, 8);
+              char tb[32]; int tn = snprintf(tb, sizeof(tb), "%" PRIi64, n);
+              vm__fmt_append(buf, tb, (uint32_t)tn); continue; }
+            case TYPE_U64: { uint64_t n; memcpy(&n, ref->data + sf->offset, 8);
+              char tb[32]; int tn = snprintf(tb, sizeof(tb), "%" PRIu64, n);
+              vm__fmt_append(buf, tb, (uint32_t)tn); continue; }
+            case TYPE_F64: { double d; memcpy(&d, ref->data + sf->offset, 8);
+              char tb[32]; int tn = snprintf(tb, sizeof(tb), "%g", d);
+              vm__fmt_append(buf, tb, (uint32_t)tn); continue; }
+            default: { memcpy(&fv, ref->data + sf->offset, sizeof(JaclVal)); break; }
+          }
+          vm__fmt_value(buf, fv);
+        }
+        vm__fmt_append(buf, ">", 1);
+      } else {
+        vm__fmt_append(buf, "<box: unknown-struct>", 21);
+      }
+    } else {
+      vm__fmt_append(buf, "<box: ", 6);
+      vm__fmt_value(buf, MREF_VAL(ref));
+      vm__fmt_append(buf, ">", 1);
+    }
   } else if (jacl_is_atom(val)) {
     JaclMutableRef* ref = jacl_as_atom(val);
     vm__fmt_append(buf, "<atom: ", 7);
@@ -1522,7 +1567,7 @@ static int vm__exec_collect_stdin(VM* vm, JaclVal stdin_val, char** out_buf, siz
         continue;
       } else {
         VMFormatBuf fmt;
-        vm__fmt_init(&fmt, vm->arena);
+        vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
         vm__fmt_value(&fmt, elem);
         elem_data = fmt.data;
         elem_len = fmt.len;
@@ -1809,7 +1854,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (jacl_is_error(val)) {
           /* Format as <error: PAYLOAD> using the format buffer */
           VMFormatBuf fmt;
-          vm__fmt_init(&fmt, vm->arena);
+          vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
           vm__fmt_append(&fmt, "<error: ", 8);
           JaclVal payload = jacl_clear_error(val);
           /* Print payload: strings without quotes, other types with fmt_value */
@@ -1900,7 +1945,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         } else if (jacl_is_struct(val)) {
           JaclStruct* s = jacl_as_struct_ptr(val);
           VMFormatBuf fmt;
-          vm__fmt_init(&fmt, vm->arena);
+          vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
           if (vm->struct_registry && s->type_idx < vm->struct_registry->count) {
             StructTypeDef* sdef = vm->struct_registry->defs[s->type_idx];
             vm__fmt_append(&fmt, sdef->name, sdef->name_len);
@@ -1961,7 +2006,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           break;
         } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val)) {
           VMFormatBuf fmt;
-          vm__fmt_init(&fmt, vm->arena);
+          vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
           vm__fmt_value(&fmt, val);
           vm__fmt_append(&fmt, "\n", 1);
           vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
@@ -2925,7 +2970,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (result != VM_OK) return result;
         } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val)) {
           VMFormatBuf fmt;
-          vm__fmt_init(&fmt, vm->arena);
+          vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
           vm__fmt_value(&fmt, val);
           JaclVal str = jacl_string_new(&vm->heap, vm->intern_table,
                                          fmt.data, fmt.len);
@@ -4029,7 +4074,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (result != VM_OK) return result;
         } else {
           VMFormatBuf fmt;
-          vm__fmt_init(&fmt, vm->arena);
+          vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
           for (uint32_t i = 0; i < vm->stack_trace.count; i++) {
             StackTraceEntry* e = &vm->stack_trace.entries[i];
             char tmp[128];
@@ -7737,7 +7782,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         case 6: {  /* syntax->string — pretty-printed */
           VMFormatBuf fmt;
-          vm__fmt_init(&fmt, vm->arena);
+          vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
           vm__fmt_value(&fmt, val);
           JaclVal s = jacl_string_new(&vm->heap, vm->intern_table,
                                        fmt.data, fmt.len);
