@@ -146,6 +146,23 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
   - When using wide upvalues, all upvalue-index-based opcodes must use `base_slot` (position in upvalue array) not logical upvalue index
 ---
 
+## 2026-04-28 - US-009: Unified box representation — JaclMutableRef redesign
+- Replaced `JaclMutableRef { JaclVal value; }` with `JaclMutableRef { uint32_t type_idx; uint32_t total_size; uint8_t data[]; }` (flexible array member)
+- Added `#define MREF_VAL(ref) (*(JaclVal*)(ref)->data)` for accessing the JaclVal in type_idx==0 boxes
+- type_idx==0: box contains plain JaclVal (8 bytes in data[]). GC traces MREF_VAL(ref)
+- type_idx>0: reserved for struct boxes (raw bytes in data[]). GC does NOT trace into data[]
+- All `ref->value` usages → `MREF_VAL(ref)` across vm.c, gc_collect.c, value.c, test files
+- All allocation sites: `sizeof(JaclMutableRef) + sizeof(JaclVal)` with `ref->type_idx = 0; ref->total_size = sizeof(JaclVal);` initialization
+- GC tracing (gc_collect.c): OBJ_MUTABLE_REF case now guards trace behind `if (ref->type_idx == 0)`
+- Duplicate JaclMutableRef struct definition in `value.c` and `bytecode.c` updated to match new layout
+- Updated all test files: test_gc.c, test_m12.c, test_m13.c, test_runtime.c — allocation sizes, field initialization, atomic access patterns
+- Files changed: `src/jacl.h`, `src/vm.c`, `src/gc_collect.c`, `src/value.c`, `src/bytecode.c`, `test/test_gc.c`, `test/test_m12.c`, `test/test_m13.c`, `test/test_runtime.c`
+- **Learnings for future iterations:**
+  - JaclMutableRef is duplicated in `jacl.h`, `value.c`, AND `bytecode.c` — must update all three when changing its layout
+  - MREF_VAL macro must also be defined in `value.c` (which has its own copy of the struct)
+  - Atomic operations on mutable refs work correctly with `&MREF_VAL(ref)` since the flexible array member provides a stable lvalue address
+---
+
 ## Codebase Patterns
 - In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
 - `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)
