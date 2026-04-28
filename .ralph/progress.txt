@@ -180,6 +180,22 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
   - Swap on struct boxes is always non-atomic (atoms reject structs at compile time)
 ---
 
+## 2026-04-28 - US-011: box? type checking with flow typing
+- New opcode: `OP_IS_BOX_TYPED` (uint16_t type_idx) — pops value, checks if box AND ref->type_idx matches, pushes bool
+- `[box?]` handler extended: 1-arg form unchanged; 2-arg form `[box? Type $val]` resolves type name (struct or "dyn") and emits OP_IS_BOX_TYPED
+- `[unbox $var]` handler: looks up $var in narrowing table; if found, emits OP_DEREF and sets last_expr_type/last_struct_idx from narrowing; compile error if not narrowed
+- `if` handler extended: detects `[box? Type $var]` condition pattern; pushes narrowing (local_slot + box_type_idx) before then-branch, pops after
+- Narrowing stack added to Compiler struct: `narrowings[8]` array + `narrowing_count` (in both jacl.h and compiler.c)
+- Updated bytecode enum test values (OP_IS_BOX_TYPED at position 74, all subsequent +1, HALT now 171)
+- Updated test_m10.c: box? arity error message changed from "1 argument" to "1 or 2 arguments"
+- 5 new tests: typed check struct, typed check dyn, flow typing unbox round-trip, unbox outside guard rejected, unknown type rejected
+- Files changed: `src/jacl.h`, `src/compiler.c`, `src/vm.c`, `src/bytecode.c`, `test/test_bytecode.c`, `test/test_compiler.c`, `test/test_m10.c`
+- **Learnings for future iterations:**
+  - Use `compiler__get_struct_registry(c)` not `c->struct_registry` — child compilers have NULL registry; must traverse to root
+  - Flow typing only works for local variables (not globals) — `def` at scope depth 0 creates globals via OP_DEF_GLOBAL
+  - Test programs that use flow typing must be wrapped in a proc to ensure variables are locals
+---
+
 ## Codebase Patterns
 - In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
 - `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)
