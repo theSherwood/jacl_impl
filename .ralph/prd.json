@@ -132,7 +132,7 @@
         "build.sh passes, closure capture tests pass with struct locals"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

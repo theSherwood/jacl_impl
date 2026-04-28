@@ -125,6 +125,27 @@ Feature: Struct Value Types — Headerless Stack-Allocated Structs
   - `proc Type name {params} { body }` is the 4-arg proc syntax for declaring return types
 ---
 
+## 2026-04-28 - US-008: Closure capture of structs
+- Added `width` (uint16_t), `is_inline` (bool), `base_slot` (uint16_t) fields to Upvalue struct (both `jacl.h` and `compiler.c`)
+- Added `upvalue_total_slots` (uint16_t) to `JaclClosure` struct (both `jacl.h` and `bytecode.c`) — sum of all upvalue widths for allocation sizing
+- New opcodes: `OP_STRUCT_GET_UPVALUE`, `OP_STRUCT_SET_UPVALUE`, `OP_STRUCT_MATERIALIZE_UPVALUE` — upvalue-relative byte-offset addressing (parallel to OP_STRUCT_GET_INLINE/SET_INLINE/MATERIALIZE)
+- `compiler__add_upvalue`: computes `base_slot` as sum of prior upvalue widths; initializes width=1, is_inline=false by default
+- `compiler__resolve_upvalue`: propagates `width`/`is_inline` from enclosing locals (is_local=1) and parent upvalues (is_local=0); transitive capture uses parent's base_slot as index for wide upvalues
+- OP_CLOSURE encoding: now 3 bytes per upvalue (is_local, index, width) instead of 2
+- OP_CLOSURE VM handler: allocates `upvalue_total_slots` JaclVals; zero-fills; copies `width` slots per upvalue from parent locals/upvalues
+- Var ref handler: inline struct upvalues emit `OP_STRUCT_MATERIALIZE_UPVALUE` for general use
+- Field access handler: Case 1b checks upvalue inline structs; emits `OP_STRUCT_GET_UPVALUE`/`OP_STRUCT_SET_UPVALUE` with byte-offset addressing
+- All upvalue opcode emissions (OP_GET_UPVALUE, OP_GET_CELL_UPVALUE, OP_SET_CELL_UPVALUE) use `base_slot` instead of logical upvalue index
+- Updated bytecode enum test values (3 new opcodes at positions 131-133, HALT now 169)
+- Updated m13 OP_CLOSURE OOB tests: added width byte to handcrafted bytecode, updated error message format
+- 3 new tests: basic capture (field read via closure), capture isolation (mutation doesn't affect closure), materialize (captured struct returned as value)
+- Files changed: `src/jacl.h`, `src/compiler.c`, `src/vm.c`, `src/bytecode.c`, `test/test_bytecode.c`, `test/test_compiler.c`, `test/test_m13.c`
+- **Learnings for future iterations:**
+  - `JaclClosure` is defined in both `jacl.h` AND `bytecode.c` — must update both when adding fields
+  - OP_CLOSURE bytecode format changed: per-upvalue encoding is now (is_local, index, width) — any hand-crafted OP_CLOSURE bytecode in tests must include the width byte
+  - When using wide upvalues, all upvalue-index-based opcodes must use `base_slot` (position in upvalue array) not logical upvalue index
+---
+
 ## Codebase Patterns
 - In JACL, `$true`/`$false` are the boolean values; bare `true`/`false` are strings
 - `jacl_f64_val(vm, val)` requires a JaclVM pointer as first argument (unlike `jacl_i32_val(val)`)
