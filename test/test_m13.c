@@ -3427,13 +3427,14 @@ static int test_closure_oob_parent_upvalue(void) {
     chunk_write_u16(&main_chunk, ci, 1);
     chunk_write(&main_chunk, 0, 1);  /* is_local = 0 (parent upvalue) */
     chunk_write(&main_chunk, 5, 1);  /* uv_index = 5 (out of bounds) */
+    chunk_write(&main_chunk, 1, 1);  /* width = 1 */
     chunk_write(&main_chunk, OP_POP, 1);
     chunk_write(&main_chunk, OP_HALT, 1);
 
     VMResult r = vm_exec(&vm, &main_chunk);
     ASSERT(r == VM_RUNTIME_ERROR);
     ASSERT(vm.error_message != NULL);
-    ASSERT(strstr(vm.error_message, "upvalue index 5 out of bounds") != NULL);
+    ASSERT(strstr(vm.error_message, "upvalue index 5+0 out of bounds") != NULL);
 
     vm_destroy(&vm);
     arena_destroy(&arena);
@@ -3471,13 +3472,14 @@ static int test_closure_oob_local_capture(void) {
     chunk_write_u16(&main_chunk, ci, 1);
     chunk_write(&main_chunk, 1, 1);    /* is_local = 1 (local capture) */
     chunk_write(&main_chunk, 200, 1);  /* uv_index = 200 (way beyond stack) */
+    chunk_write(&main_chunk, 1, 1);    /* width = 1 */
     chunk_write(&main_chunk, OP_POP, 1);
     chunk_write(&main_chunk, OP_HALT, 1);
 
     VMResult r = vm_exec(&vm, &main_chunk);
     ASSERT(r == VM_RUNTIME_ERROR);
     ASSERT(vm.error_message != NULL);
-    ASSERT(strstr(vm.error_message, "local upvalue index 200 out of bounds") != NULL);
+    ASSERT(strstr(vm.error_message, "local upvalue index 200+0 out of bounds") != NULL);
 
     vm_destroy(&vm);
     arena_destroy(&arena);

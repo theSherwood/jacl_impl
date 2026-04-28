@@ -2303,8 +2303,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint16_t index = vm__read_u16(vm);
         JaclClosure* template = jacl_as_closure(vm->chunk->constants[index]);
 
-        /* Allocate closure + inline upvalue array on GC heap */
-        size_t uv_bytes = sizeof(JaclVal) * template->upvalue_count;
+        /* US-008: allocate using upvalue_total_slots to support wide struct upvalues */
+        uint16_t total_slots = template->upvalue_total_slots;
+        if (total_slots == 0) total_slots = template->upvalue_count; /* fallback for pre-US008 */
+        size_t uv_bytes = sizeof(JaclVal) * total_slots;
         JaclClosure* cl = (JaclClosure*)gc_alloc(&vm->heap, OBJ_CLOSURE,
                               sizeof(JaclClosure) + uv_bytes);
         cl->chunk        = template->chunk;
@@ -2312,6 +2314,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         cl->param_names  = template->param_names;
         cl->name         = template->name;
         cl->upvalue_count = template->upvalue_count;
+        cl->upvalue_total_slots = template->upvalue_total_slots;
         cl->min_args     = template->min_args;
         cl->variadic     = template->variadic;
         cl->pinned       = template->pinned;
@@ -2331,18 +2334,27 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         if (cl->upvalue_count > 0) {
           cl->upvalues = (JaclVal*)(cl + 1); /* trailing array */
+          /* US-008: zero-fill the upvalue array for wide struct upvalues */
+          memset(cl->upvalues, 0, uv_bytes);
+          uint16_t uv_slot = 0; /* current write position in upvalue array */
           for (uint8_t i = 0; i < cl->upvalue_count; i++) {
             uint8_t is_local = vm__read_byte(vm);
             uint8_t uv_index = vm__read_byte(vm);
+            uint8_t width    = vm__read_byte(vm);
+            if (width == 0) width = 1; /* safety fallback */
             if (is_local == 1) {
-              if (frame->stack_base + uv_index >= vm->stack_top - 1) {
-                vm__set_error(vm,
-                  "OP_CLOSURE: local upvalue index %d out of bounds "
-                  "(frame stack_base=%u, stack_top=%u)",
-                  uv_index, frame->stack_base, vm->stack_top);
-                return VM_RUNTIME_ERROR;
+              /* US-008: copy width slots from enclosing local stack */
+              for (uint8_t w = 0; w < width; w++) {
+                uint32_t src = frame->stack_base + uv_index + w;
+                if (src >= vm->stack_top - 1) {
+                  vm__set_error(vm,
+                    "OP_CLOSURE: local upvalue index %d+%d out of bounds "
+                    "(frame stack_base=%u, stack_top=%u)",
+                    uv_index, w, frame->stack_base, vm->stack_top);
+                  return VM_RUNTIME_ERROR;
+                }
+                cl->upvalues[uv_slot + w] = vm->stack[src];
               }
-              cl->upvalues[i] = vm->stack[frame->stack_base + uv_index];
             } else if (is_local == 2) {
               /* SM state field upvalue: read from the state machine object
                  at slot 0 of the current frame. uv_index is the field index.
@@ -2357,17 +2369,24 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                   uv_index, sm->field_count);
                 return VM_RUNTIME_ERROR;
               }
-              cl->upvalues[i] = sm->fields[uv_index];
+              cl->upvalues[uv_slot] = sm->fields[uv_index];
             } else {
-              if (uv_index >= frame->closure->upvalue_count) {
-                vm__set_error(vm,
-                  "OP_CLOSURE: upvalue index %d out of bounds "
-                  "(parent has %d upvalues)",
-                  uv_index, frame->closure->upvalue_count);
-                return VM_RUNTIME_ERROR;
+              /* US-008: copy width slots from parent closure upvalues */
+              for (uint8_t w = 0; w < width; w++) {
+                uint16_t parent_total = frame->closure->upvalue_total_slots
+                  ? frame->closure->upvalue_total_slots
+                  : frame->closure->upvalue_count;
+              if (uv_index + w >= parent_total) {
+                  vm__set_error(vm,
+                    "OP_CLOSURE: upvalue index %d+%d out of bounds "
+                    "(parent has %d upvalue slots)",
+                    uv_index, w, frame->closure->upvalue_total_slots);
+                  return VM_RUNTIME_ERROR;
+                }
+                cl->upvalues[uv_slot + w] = frame->closure->upvalues[uv_index + w];
               }
-              cl->upvalues[i] = frame->closure->upvalues[uv_index];
             }
+            uv_slot += width;
           }
         } else {
           cl->upvalues = NULL;
@@ -5684,6 +5703,92 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         memcpy(&vm->stack[abs_base], src->data, sdef->total_size);
         /* Adjust stack_top to account for the N slots */
         vm->stack_top = abs_base + width;
+        break;
+      }
+
+      case OP_STRUCT_GET_UPVALUE: {
+        /* US-008: Read a field from a closure-captured inline struct.
+           Same as OP_STRUCT_GET_INLINE but base is frame->closure->upvalues[base_uv_slot]. */
+        uint8_t base_uv_slot = vm__read_byte(vm);
+        uint16_t byte_offset = vm__read_u16(vm);
+        uint8_t field_type = vm__read_byte(vm);
+        uint8_t* struct_base = (uint8_t*)&frame->closure->upvalues[base_uv_slot];
+        JaclVal field_val;
+        switch ((JaclType)field_type) {
+          case TYPE_BOOL: { uint8_t b = struct_base[byte_offset]; field_val = jacl_bool(b); break; }
+          case TYPE_I32: { int32_t n; memcpy(&n, struct_base + byte_offset, 4); field_val = jacl_i32(n); break; }
+          case TYPE_U32: { uint32_t n; memcpy(&n, struct_base + byte_offset, 4); field_val = jacl_u32(n); break; }
+          case TYPE_F32: { float f; memcpy(&f, struct_base + byte_offset, 4); field_val = jacl_f32(f); break; }
+          case TYPE_I64: { int64_t n; memcpy(&n, struct_base + byte_offset, 8); field_val = (JaclVal)n; break; }
+          case TYPE_U64: { uint64_t n; memcpy(&n, struct_base + byte_offset, 8); field_val = (JaclVal)n; break; }
+          case TYPE_F64: { double d; memcpy(&d, struct_base + byte_offset, 8); memcpy(&field_val, &d, 8); break; }
+          case TYPE_STRUCT: {
+            uint16_t sub_type_idx = vm__read_u16(vm);
+            if (!vm->struct_registry || sub_type_idx >= vm->struct_registry->count) {
+              vm__set_error(vm, "invalid struct type index %u for upvalue get", (unsigned)sub_type_idx);
+              return VM_RUNTIME_ERROR;
+            }
+            StructTypeDef* sub_sdef = vm->struct_registry->defs[sub_type_idx];
+            gc__current_heap = &vm->heap;
+            JaclStruct* sub_s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                       sizeof(JaclStruct) + sub_sdef->total_size);
+            sub_s->type_idx = sub_type_idx;
+            sub_s->_pad = 0;
+            memcpy(sub_s->data, struct_base + byte_offset, sub_sdef->total_size);
+            field_val = jacl_struct_val(sub_s);
+            break;
+          }
+          default: { memcpy(&field_val, struct_base + byte_offset, sizeof(JaclVal)); break; }
+        }
+        result = vm__push(vm, field_val);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_STRUCT_SET_UPVALUE: {
+        /* US-008: Write a field to a closure-captured inline struct.
+           Same as OP_STRUCT_SET_INLINE but base is frame->closure->upvalues[base_uv_slot]. */
+        uint8_t base_uv_slot = vm__read_byte(vm);
+        uint16_t byte_offset = vm__read_u16(vm);
+        uint8_t field_type = vm__read_byte(vm);
+        JaclVal new_val;
+        result = vm__pop(vm, &new_val);
+        if (result != VM_OK) return result;
+        uint8_t* struct_base = (uint8_t*)&frame->closure->upvalues[base_uv_slot];
+        switch ((JaclType)field_type) {
+          case TYPE_BOOL: { uint8_t b = jacl_as_bool(new_val) ? 1 : 0; struct_base[byte_offset] = b; break; }
+          case TYPE_I32: { int32_t n = jacl_as_i32(new_val); memcpy(struct_base + byte_offset, &n, 4); break; }
+          case TYPE_U32: { uint32_t n = jacl_as_u32(new_val); memcpy(struct_base + byte_offset, &n, 4); break; }
+          case TYPE_F32: { float f = jacl_as_f32(new_val); memcpy(struct_base + byte_offset, &f, 4); break; }
+          case TYPE_I64: { int64_t n = (int64_t)new_val; memcpy(struct_base + byte_offset, &n, 8); break; }
+          case TYPE_U64: { uint64_t n = new_val; memcpy(struct_base + byte_offset, &n, 8); break; }
+          case TYPE_F64: { double d; memcpy(&d, &new_val, 8); memcpy(struct_base + byte_offset, &d, 8); break; }
+          default: { memcpy(struct_base + byte_offset, &new_val, sizeof(JaclVal)); break; }
+        }
+        result = vm__push(vm, JACL_NIL);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_STRUCT_MATERIALIZE_UPVALUE: {
+        /* US-008: Convert a closure-captured inline struct to a heap-allocated JaclStruct.
+           Same as OP_STRUCT_MATERIALIZE but base is frame->closure->upvalues[base_uv_slot]. */
+        uint8_t base_uv_slot = vm__read_byte(vm);
+        uint16_t type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u for materialize_upvalue", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        gc__current_heap = &vm->heap;
+        JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                sizeof(JaclStruct) + sdef->total_size);
+        s->type_idx = type_idx;
+        s->_pad = 0;
+        uint8_t* struct_base = (uint8_t*)&frame->closure->upvalues[base_uv_slot];
+        memcpy(s->data, struct_base, sdef->total_size);
+        result = vm__push(vm, jacl_struct_val(s));
+        if (result != VM_OK) return result;
         break;
       }
 

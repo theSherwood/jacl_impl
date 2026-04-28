@@ -5886,6 +5886,117 @@ static int test_struct_return_value_isolation(void) {
   TEST_PASS();
 }
 
+/* US-008: Closure capture of structs */
+
+static int test_struct_closure_capture_basic(void) {
+  /* Closure captures an inline struct local by value, reads fields */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def p [Point 10 20]\n"
+      "  proc inner {} {\n"
+      "    print $p->x\n"
+      "    print $p->y\n"
+      "  }\n"
+      "  [inner]\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_closure_capture_isolation(void) {
+  /* Mutation of captured struct inside closure doesn't affect original */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def p [Point 1 2]\n"
+      "  proc reader {} {\n"
+      "    print $p->x\n"
+      "  }\n"
+      "  . $p x 99\n"
+      "  [reader]\n"
+      "  print $p->x\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  /* reader sees original x=1 (captured at closure creation), outer sees mutated x=99 */
+  ASSERT_STR_EQ(cap.buf, "1\n99\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_closure_capture_materialize(void) {
+  /* Captured struct can be materialized (passed to print, used as value) */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def p [Point 42 99]\n"
+      "  proc getter {} { $p }\n"
+      "  def Point q [getter]\n"
+      "  print $q->x\n"
+      "  print $q->y\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n99\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* US-004 (Struct): Field access */
 
 static int test_struct_get_basic(void) {
@@ -9387,6 +9498,10 @@ int main(void) {
     { "struct_return_basic",             test_struct_return_basic },
     { "struct_return_nested_calls",      test_struct_return_nested_calls },
     { "struct_return_value_isolation",   test_struct_return_value_isolation },
+    /* US-008: Closure capture of structs */
+    { "struct_closure_capture_basic",       test_struct_closure_capture_basic },
+    { "struct_closure_capture_isolation",   test_struct_closure_capture_isolation },
+    { "struct_closure_capture_materialize", test_struct_closure_capture_materialize },
     /* US-004 (Struct): Field access */
     { "struct_get_basic",                test_struct_get_basic },
     { "struct_get_unknown_field",        test_struct_get_unknown_field },

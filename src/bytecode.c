@@ -151,6 +151,9 @@ typedef enum {
   OP_STRUCT_MATERIALIZE, /* inline to heap: uint8_t base_slot, uint16_t type_idx */
   OP_STRUCT_COPY,        /* pop heap struct, push deep copy */
   OP_STRUCT_STORE_INLINE, /* heap to inline: uint8_t base_slot, uint16_t type_idx */
+  OP_STRUCT_GET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type */
+  OP_STRUCT_SET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type */
+  OP_STRUCT_MATERIALIZE_UPVALUE, /* uint8_t base_uv_slot, uint16_t type_idx */
   OP_CLOSE_LOOP,    /* pop N values under top-of-stack: followed by uint8_t count */
   OP_DESTRUCTURE_VEC, /* destructure vector: uint8_t N, uint8_t skip_mask; pop vec, push non-skipped elements */
   OP_DESTRUCTURE_NAMED, /* destructure struct/map by field names: uint8_t N, then N x uint16_t const_idx */
@@ -304,6 +307,7 @@ typedef struct {
   JaclVal*      param_names;  /* inline string array (arena-allocated) */
   JaclVal*      upvalues;     /* captured values array (arena-allocated) */
   uint8_t       upvalue_count;/* number of upvalues */
+  uint16_t      upvalue_total_slots; /* total JaclVal slots in upvalues array (sum of widths) */
   const char*   name;         /* procedure name for debug, may be NULL */
   uint8_t       min_args;     /* minimum argument count (== param_count for fixed-arity) */
   bool          variadic;     /* true if proc accepts variable args (future use) */
@@ -458,6 +462,9 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_STRUCT_MATERIALIZE: return "OP_STRUCT_MATERIALIZE";
     case OP_STRUCT_COPY:        return "OP_STRUCT_COPY";
     case OP_STRUCT_STORE_INLINE: return "OP_STRUCT_STORE_INLINE";
+    case OP_STRUCT_GET_UPVALUE: return "OP_STRUCT_GET_UPVALUE";
+    case OP_STRUCT_SET_UPVALUE: return "OP_STRUCT_SET_UPVALUE";
+    case OP_STRUCT_MATERIALIZE_UPVALUE: return "OP_STRUCT_MATERIALIZE_UPVALUE";
     case OP_CLOSE_LOOP:      return "OP_CLOSE_LOOP";
     case OP_DESTRUCTURE_VEC: return "OP_DESTRUCTURE_VEC";
     case OP_DESTRUCTURE_NAMED: return "OP_DESTRUCTURE_NAMED";

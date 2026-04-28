@@ -738,6 +738,9 @@ typedef struct {
   JaclType  type;     /* compile-time type (default TYPE_DYN) */
   uint32_t  struct_type_idx; /* struct registry index when type==TYPE_STRUCT */
   uint32_t  scope_mark; /* hygiene: mark of the captured binding */
+  uint16_t  width;      /* JaclVal slot count: 1 for scalars, N for inline structs */
+  bool      is_inline;  /* true if capturing an inline struct (raw bytes, not heap) */
+  uint16_t  base_slot;  /* position in this closure's upvalue array */
 } Upvalue;
 
 /* --- Internal: Suspension analysis --- */
@@ -2906,6 +2909,11 @@ int compiler__add_upvalue(Compiler* c, uint8_t index, uint8_t is_local,
   if (c->upvalue_count >= COMPILER_UPVALUES_MAX) {
     return -1;
   }
+  /* Compute base_slot: sum of all prior upvalue widths */
+  uint16_t base = 0;
+  for (uint32_t i = 0; i < c->upvalue_count; i++) {
+    base += c->upvalues[i].width;
+  }
   c->upvalues[c->upvalue_count].index      = index;
   c->upvalues[c->upvalue_count].is_local   = is_local;
   c->upvalues[c->upvalue_count].name       = name;
@@ -2914,6 +2922,9 @@ int compiler__add_upvalue(Compiler* c, uint8_t index, uint8_t is_local,
   c->upvalues[c->upvalue_count].captures_mutable = false;
   c->upvalues[c->upvalue_count].type       = TYPE_DYN;
   c->upvalues[c->upvalue_count].scope_mark = c->current_scope_mark;
+  c->upvalues[c->upvalue_count].width      = 1;
+  c->upvalues[c->upvalue_count].is_inline  = false;
+  c->upvalues[c->upvalue_count].base_slot  = base;
   return (int)c->upvalue_count++;
 }
 
@@ -2939,6 +2950,11 @@ int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
       c->upvalues[uv].type = c->enclosing->locals[local].type;
       c->upvalues[uv].struct_type_idx = c->enclosing->locals[local].struct_type_idx;
       c->upvalues[uv].scope_mark = c->enclosing->locals[local].scope_mark;
+      /* US-008: propagate inline struct info from enclosing local */
+      if (c->enclosing->locals[local].is_inline) {
+        c->upvalues[uv].width = c->enclosing->locals[local].width;
+        c->upvalues[uv].is_inline = true;
+      }
     }
     return uv;
   }
@@ -2968,7 +2984,12 @@ int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
   int upvalue = compiler__resolve_upvalue(c->enclosing, name);
   if (upvalue != -1) {
     c->enclosing->current_scope_mark = enc_saved_mark;
-    int uv = compiler__add_upvalue(c, (uint8_t)upvalue, 0, name);
+    /* US-008: for transitive capture, use base_slot as the index so the VM
+       can locate wide upvalues in the parent's upvalue array correctly. */
+    uint8_t uv_idx_for_vm = c->enclosing->upvalues[upvalue].is_inline
+        ? (uint8_t)c->enclosing->upvalues[upvalue].base_slot
+        : (uint8_t)upvalue;
+    int uv = compiler__add_upvalue(c, uv_idx_for_vm, 0, name);
     if (uv != -1) {
       if (c->enclosing->upvalues[upvalue].is_mutable)
         c->upvalues[uv].is_mutable = true;
@@ -2977,6 +2998,11 @@ int compiler__resolve_upvalue(Compiler* c, JaclVal name) {
       c->upvalues[uv].type = c->enclosing->upvalues[upvalue].type;
       c->upvalues[uv].struct_type_idx = c->enclosing->upvalues[upvalue].struct_type_idx;
       c->upvalues[uv].scope_mark = c->enclosing->upvalues[upvalue].scope_mark;
+      /* US-008: propagate inline struct info from parent upvalue */
+      if (c->enclosing->upvalues[upvalue].is_inline) {
+        c->upvalues[uv].width = c->enclosing->upvalues[upvalue].width;
+        c->upvalues[uv].is_inline = true;
+      }
     }
     return uv;
   }
@@ -3381,6 +3407,7 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   chunk_init(&closure->chunk, c->arena);
   closure->name         = "<parallel>";
   closure->upvalue_count = 0;
+  closure->upvalue_total_slots = 0;
   closure->upvalues     = NULL;
   closure->param_names  = NULL;
   closure->min_args     = 0;
@@ -3459,6 +3486,13 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   }
 
   closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
+  /* US-008: compute upvalue_total_slots */
+  {
+    uint16_t total = 0;
+    for (uint32_t i = 0; i < body_compiler.upvalue_count; i++)
+      total += body_compiler.upvalues[i].width;
+    closure->upvalue_total_slots = total;
+  }
 
   /* Emit OP_CLOSURE + upvalue descriptors */
   uint16_t closure_idx = chunk_add_constant(c->chunk, jacl_closure(closure));
@@ -3467,6 +3501,7 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
   for (uint32_t i = 0; i < body_compiler.upvalue_count; i++) {
     compiler__emit_byte(c, body_compiler.upvalues[i].is_local, line);
     compiler__emit_byte(c, body_compiler.upvalues[i].index, line);
+    compiler__emit_byte(c, (uint8_t)body_compiler.upvalues[i].width, line);
   }
 }
 
@@ -5651,7 +5686,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, (uint8_t)target_type, line);
         }
         compiler__emit_byte(c, OP_SET_CELL_UPVALUE, line);
-        compiler__emit_byte(c, (uint8_t)upvalue_idx, line);
+        compiler__emit_byte(c, (uint8_t)c->upvalues[upvalue_idx].base_slot, line);
         return;
       }
       snprintf(err_msg, sizeof(err_msg), "cannot mutate immutable binding '%.*s'",
@@ -6520,6 +6555,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
     closure->is_generator  = body_compiler.has_yield;
 
+    /* US-008: compute upvalue_total_slots (sum of all upvalue widths) */
+    {
+      uint16_t total = 0;
+      for (uint32_t i = 0; i < body_compiler.upvalue_count; i++)
+        total += body_compiler.upvalues[i].width;
+      closure->upvalue_total_slots = total;
+    }
+
     /* Generators return streams — override return type for type tracking */
     if (body_compiler.has_yield && proc_return_type == TYPE_DYN) {
       proc_return_type = TYPE_STREAM;
@@ -6534,6 +6577,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     for (uint32_t i = 0; i < body_compiler.upvalue_count; i++) {
       compiler__emit_byte(c, body_compiler.upvalues[i].is_local, line);
       compiler__emit_byte(c, body_compiler.upvalues[i].index, line);
+      compiler__emit_byte(c, (uint8_t)body_compiler.upvalues[i].width, line);
     }
 
     /* Anonymous lambda (empty name): closure is already on stack, done */
@@ -8346,6 +8390,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     closure->upvalue_count = (uint8_t)body_compiler.upvalue_count;
+    /* US-008: compute upvalue_total_slots */
+    {
+      uint16_t total = 0;
+      for (uint32_t i = 0; i < body_compiler.upvalue_count; i++)
+        total += body_compiler.upvalues[i].width;
+      closure->upvalue_total_slots = total;
+    }
 
     /* Emit OP_CLOSURE + upvalue descriptors */
     uint16_t closure_idx = chunk_add_constant(c->chunk, jacl_closure(closure));
@@ -8354,6 +8405,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     for (uint32_t i = 0; i < body_compiler.upvalue_count; i++) {
       compiler__emit_byte(c, body_compiler.upvalues[i].is_local, line);
       compiler__emit_byte(c, body_compiler.upvalues[i].index, line);
+      compiler__emit_byte(c, (uint8_t)body_compiler.upvalues[i].width, line);
     }
 
     compiler__emit_byte(c, OP_SPAWN, line);
@@ -8445,13 +8497,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
 
-    /* US-005: Check for inline struct field access.
-     * If args[0] is a var ref to an inline struct local, use byte-offset
-     * addressing directly from stack slots (no heap dereference). */
+    /* US-005/US-008: Check for inline struct field access.
+     * If args[0] is a var ref to an inline struct local or upvalue,
+     * use byte-offset addressing directly (no heap dereference). */
     if (args[1]->type == AST_LIT_STRING && !c->sm_analysis) {
       const char* field_name_i = args[1]->data.lit_string.value;
       uint32_t field_name_len_i = args[1]->data.lit_string.length;
       bool is_inline_access = false;
+      bool is_upvalue_inline = false; /* US-008: true for upvalue-based inline access */
       uint8_t inline_base = 0;
       uint16_t inline_offset = 0;
       uint32_t inline_sidx = UINT32_MAX;
@@ -8467,6 +8520,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           inline_base = (uint8_t)slot;
           inline_offset = 0;
           inline_sidx = c->locals[slot].struct_type_idx;
+        }
+
+        /* US-008: Case 1b: var ref to inline struct upvalue */
+        if (!is_inline_access && slot == -1) {
+          int uv = compiler__resolve_upvalue(c, vname);
+          if (uv != -1 && c->upvalues[uv].type == TYPE_STRUCT &&
+              c->upvalues[uv].is_inline && !c->upvalues[uv].is_mutable) {
+            is_inline_access = true;
+            is_upvalue_inline = true;
+            inline_base = (uint8_t)c->upvalues[uv].base_slot;
+            inline_offset = 0;
+            inline_sidx = c->upvalues[uv].struct_type_idx;
+          }
         }
       }
 
@@ -8506,6 +8572,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           }
           uint16_t total_offset = inline_offset + (uint16_t)sdef->fields[fi].offset;
 
+          /* US-008: select local vs upvalue variant of struct opcodes */
+          uint8_t get_op = is_upvalue_inline ? OP_STRUCT_GET_UPVALUE : OP_STRUCT_GET_INLINE;
+          uint8_t set_op = is_upvalue_inline ? OP_STRUCT_SET_UPVALUE : OP_STRUCT_SET_INLINE;
+
           if (is_set) {
             /* Compile new value with type checking */
             JaclType field_type = sdef->fields[fi].type;
@@ -8523,7 +8593,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               compiler__error(c, line, col, err_msg);
               return;
             }
-            compiler__emit_byte(c, OP_STRUCT_SET_INLINE, line);
+            compiler__emit_byte(c, set_op, line);
             compiler__emit_byte(c, inline_base, line);
             compiler__emit_u16(c, total_offset, line);
             compiler__emit_byte(c, (uint8_t)field_type, line);
@@ -8535,7 +8605,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                * If this is chained (e.g. $ln->start->x), Case 2 will detect
                * inline_struct_ref, pop the materialized value, and use byte-offset
                * addressing instead. If standalone, the materialized value remains. */
-              compiler__emit_byte(c, OP_STRUCT_GET_INLINE, line);
+              compiler__emit_byte(c, get_op, line);
               compiler__emit_byte(c, inline_base, line);
               compiler__emit_u16(c, total_offset, line);
               compiler__emit_byte(c, (uint8_t)TYPE_STRUCT, line);
@@ -8547,7 +8617,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               c->last_struct_idx = sdef->fields[fi].struct_type_idx;
             } else {
               /* Scalar field — emit inline get */
-              compiler__emit_byte(c, OP_STRUCT_GET_INLINE, line);
+              compiler__emit_byte(c, get_op, line);
               compiler__emit_byte(c, inline_base, line);
               compiler__emit_u16(c, total_offset, line);
               compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
@@ -9382,9 +9452,12 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       } else {
         int upvalue_idx = compiler__resolve_upvalue(c, name_val);
         if (upvalue_idx != -1) {
+          /* US-008: all upvalue opcodes use base_slot to index into the
+             upvalue array, which accounts for wide struct upvalues. */
+          uint8_t uv_base = (uint8_t)c->upvalues[upvalue_idx].base_slot;
           if (c->upvalues[upvalue_idx].is_mutable) {
             compiler__emit_byte(c, OP_GET_CELL_UPVALUE, line);
-            compiler__emit_byte(c, (uint8_t)upvalue_idx, line);
+            compiler__emit_byte(c, uv_base, line);
             /* Cells store boxed values; unbox if typed */
             JaclType uv_type = c->upvalues[upvalue_idx].type;
             if (is_unboxed_type(uv_type)) {
@@ -9400,9 +9473,15 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
                 compiler__emit_byte(c, (uint8_t)TYPE_DYN, line);
               }
             }
+          } else if (c->upvalues[upvalue_idx].is_inline) {
+            /* US-008: inline struct upvalue — materialize to heap for general use.
+             * Field access bypasses this by intercepting in the [. ...] handler. */
+            compiler__emit_byte(c, OP_STRUCT_MATERIALIZE_UPVALUE, line);
+            compiler__emit_byte(c, (uint8_t)c->upvalues[upvalue_idx].base_slot, line);
+            compiler__emit_u16(c, (uint16_t)c->upvalues[upvalue_idx].struct_type_idx, line);
           } else {
             compiler__emit_byte(c, OP_GET_UPVALUE, line);
-            compiler__emit_byte(c, (uint8_t)upvalue_idx, line);
+            compiler__emit_byte(c, uv_base, line);
           }
           c->last_expr_type = c->upvalues[upvalue_idx].type;
           if (c->upvalues[upvalue_idx].type == TYPE_STRUCT)
@@ -10605,6 +10684,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     chunk_init(&main_cl->chunk, arena);
     main_cl->param_count   = 2; /* __sm, __rv */
     main_cl->upvalue_count = 0;
+    main_cl->upvalue_total_slots = 0;
     main_cl->upvalues      = NULL;
     main_cl->name          = "__main";
     main_cl->min_args      = 0;
@@ -10653,6 +10733,13 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     }
 
     main_cl->upvalue_count = (uint8_t)body.upvalue_count;
+    /* US-008: compute upvalue_total_slots */
+    {
+      uint16_t total = 0;
+      for (uint32_t i = 0; i < body.upvalue_count; i++)
+        total += body.upvalues[i].width;
+      main_cl->upvalue_total_slots = total;
+    }
 
     /* Emit OP_CLOSURE in outer chunk */
     uint16_t cl_idx = chunk_add_constant(&result.chunk, jacl_closure(main_cl));
@@ -10661,6 +10748,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     for (uint32_t i = 0; i < body.upvalue_count; i++) {
       compiler__emit_byte(&c, body.upvalues[i].is_local, 1);
       compiler__emit_byte(&c, body.upvalues[i].index, 1);
+      compiler__emit_byte(&c, (uint8_t)body.upvalues[i].width, 1);
     }
     compiler__emit_byte(&c, OP_HALT, 1);
 
@@ -11018,6 +11106,7 @@ ProgramResult jacl_compile_program(const char* root_path,
     chunk_init(&main_cl->chunk, arena);
     main_cl->param_count   = 2; /* __sm, __rv */
     main_cl->upvalue_count = 0;
+    main_cl->upvalue_total_slots = 0;
     main_cl->upvalues      = NULL;
     main_cl->name          = "__main";
     main_cl->min_args      = 0;
@@ -11065,6 +11154,13 @@ ProgramResult jacl_compile_program(const char* root_path,
     }
 
     main_cl->upvalue_count = (uint8_t)body.upvalue_count;
+    /* US-008: compute upvalue_total_slots */
+    {
+      uint16_t total = 0;
+      for (uint32_t i = 0; i < body.upvalue_count; i++)
+        total += body.upvalues[i].width;
+      main_cl->upvalue_total_slots = total;
+    }
 
     uint16_t cl_idx = chunk_add_constant(root_chunk, jacl_closure(main_cl));
     compiler__emit_byte(&c, OP_CLOSURE, 1);
@@ -11072,6 +11168,7 @@ ProgramResult jacl_compile_program(const char* root_path,
     for (uint32_t i = 0; i < body.upvalue_count; i++) {
       compiler__emit_byte(&c, body.upvalues[i].is_local, 1);
       compiler__emit_byte(&c, body.upvalues[i].index, 1);
+      compiler__emit_byte(&c, (uint8_t)body.upvalues[i].width, 1);
     }
     compiler__emit_byte(&c, OP_HALT, 1);
 

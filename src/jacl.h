@@ -739,6 +739,9 @@ typedef enum {
   OP_STRUCT_MATERIALIZE, /* uint8_t base_slot, uint16_t type_idx; convert inline struct to heap JaclStruct */
   OP_STRUCT_COPY,        /* pop heap JaclStruct, push deep copy (pass-by-value at call sites) */
   OP_STRUCT_STORE_INLINE, /* uint8_t base_slot, uint16_t type_idx; de-materialize heap struct to inline stack slots */
+  OP_STRUCT_GET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type; read from closure-captured inline struct */
+  OP_STRUCT_SET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type; write to closure-captured inline struct */
+  OP_STRUCT_MATERIALIZE_UPVALUE, /* uint8_t base_uv_slot, uint16_t type_idx; convert upvalue inline struct to heap */
   OP_CLOSE_LOOP,
   OP_DESTRUCTURE_VEC,
   OP_DESTRUCTURE_NAMED,
@@ -795,6 +798,7 @@ typedef struct {
   JaclVal*      param_names;
   JaclVal*      upvalues;
   uint8_t       upvalue_count;
+  uint16_t      upvalue_total_slots; /* total JaclVal slots in upvalues array (sum of widths) */
   const char*   name;
   uint8_t       min_args;
   bool          variadic;
@@ -1049,6 +1053,9 @@ typedef struct {
   JaclType  type;
   uint32_t  struct_type_idx;
   uint32_t  scope_mark;
+  uint16_t  width;      /* JaclVal slot count: 1 for scalars, N for inline structs */
+  bool      is_inline;  /* true if capturing an inline struct (raw bytes, not heap) */
+  uint16_t  base_slot;  /* position in this closure's upvalue array */
 } Upvalue;
 
 typedef struct {
