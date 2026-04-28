@@ -7136,6 +7136,108 @@ static int test_dual_path_legacy_field_mutation(void) {
   TEST_PASS();
 }
 
+static int test_set_arrow_inline(void) {
+  /* set n->field on value-type (inline) struct */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def p [Point 10 20]\n"
+      "  set p->x 99\n"
+      "  print $p->x\n"
+      "  print $p->y\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "99\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_set_arrow_heap(void) {
+  /* set n->field on legacy (heap) struct */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Named {str label, i32 value}\n"
+      "proc test {} {\n"
+      "  def n [Named \"hello\" 1]\n"
+      "  set n->value 42\n"
+      "  print $n->value\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_set_arrow_chained(void) {
+  /* set ln->start->x on nested struct */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "struct Line {Point start, Point end}\n"
+      "proc test {} {\n"
+      "  def ln [Line [Point 1 2] [Point 3 4]]\n"
+      "  set ln->start->x 77\n"
+      "  print $ln->start->x\n"
+      "  print $ln->end->y\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "77\n4\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ===== US-008 (Struct): Inline anonymous struct types ===== */
 
 static int test_inline_struct_runtime(void) {
@@ -10418,6 +10520,10 @@ int main(void) {
     { "dual_path_is_value_type_flag",      test_dual_path_is_value_type_flag },
     { "dual_path_both_coexist",            test_dual_path_both_coexist },
     { "dual_path_legacy_field_mut",        test_dual_path_legacy_field_mutation },
+    /* set n->field arrow syntax */
+    { "set_arrow_inline",                  test_set_arrow_inline },
+    { "set_arrow_heap",                    test_set_arrow_heap },
+    { "set_arrow_chained",                 test_set_arrow_chained },
     /* US-004 (Struct): Field access */
     { "struct_get_basic",                test_struct_get_basic },
     { "struct_get_unknown_field",        test_struct_get_unknown_field },

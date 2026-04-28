@@ -97,42 +97,38 @@ typedef enum {
   TYPE_STREAM
 } JaclType;
 
+/* Single table for type keyword recognition — keeps is_type_keyword and
+   type_from_keyword in sync automatically. */
+static const struct { const char* name; uint32_t len; JaclType type; } type_keyword_table[] = {
+  { "i32",    3, TYPE_I32 },
+  { "i64",    3, TYPE_I64 },
+  { "u32",    3, TYPE_U32 },
+  { "u64",    3, TYPE_U64 },
+  { "f32",    3, TYPE_F32 },
+  { "f64",    3, TYPE_F64 },
+  { "str",    3, TYPE_STR },
+  { "vec",    3, TYPE_VEC },
+  { "map",    3, TYPE_MAP },
+  { "dyn",    3, TYPE_DYN },
+  { "bool",   4, TYPE_BOOL },
+  { "stream", 6, TYPE_STREAM },
+};
+#define TYPE_KEYWORD_COUNT (sizeof(type_keyword_table) / sizeof(type_keyword_table[0]))
+
 bool is_type_keyword(const char* word, size_t len) {
-  if (len == 3) {
-    if (memcmp(word, "i32", 3) == 0) return true;
-    if (memcmp(word, "i64", 3) == 0) return true;
-    if (memcmp(word, "u32", 3) == 0) return true;
-    if (memcmp(word, "u64", 3) == 0) return true;
-    if (memcmp(word, "f32", 3) == 0) return true;
-    if (memcmp(word, "f64", 3) == 0) return true;
-    if (memcmp(word, "str", 3) == 0) return true;
-    if (memcmp(word, "vec", 3) == 0) return true;
-    if (memcmp(word, "map", 3) == 0) return true;
-    if (memcmp(word, "dyn", 3) == 0) return true;
-  } else if (len == 4) {
-    if (memcmp(word, "bool", 4) == 0) return true;
-  } else if (len == 6) {
-    if (memcmp(word, "stream", 6) == 0) return true;
+  for (uint32_t i = 0; i < TYPE_KEYWORD_COUNT; i++) {
+    if (type_keyword_table[i].len == (uint32_t)len &&
+        memcmp(word, type_keyword_table[i].name, len) == 0)
+      return true;
   }
   return false;
 }
 
 JaclType type_from_keyword(const char* word, size_t len) {
-  if (len == 3) {
-    if (memcmp(word, "i32", 3) == 0) return TYPE_I32;
-    if (memcmp(word, "i64", 3) == 0) return TYPE_I64;
-    if (memcmp(word, "u32", 3) == 0) return TYPE_U32;
-    if (memcmp(word, "u64", 3) == 0) return TYPE_U64;
-    if (memcmp(word, "f32", 3) == 0) return TYPE_F32;
-    if (memcmp(word, "f64", 3) == 0) return TYPE_F64;
-    if (memcmp(word, "str", 3) == 0) return TYPE_STR;
-    if (memcmp(word, "vec", 3) == 0) return TYPE_VEC;
-    if (memcmp(word, "map", 3) == 0) return TYPE_MAP;
-    if (memcmp(word, "dyn", 3) == 0) return TYPE_DYN;
-  } else if (len == 4) {
-    if (memcmp(word, "bool", 4) == 0) return TYPE_BOOL;
-  } else if (len == 6) {
-    if (memcmp(word, "stream", 6) == 0) return TYPE_STREAM;
+  for (uint32_t i = 0; i < TYPE_KEYWORD_COUNT; i++) {
+    if (type_keyword_table[i].len == (uint32_t)len &&
+        memcmp(word, type_keyword_table[i].name, len) == 0)
+      return type_keyword_table[i].type;
   }
   return TYPE_DYN;
 }
@@ -5628,6 +5624,53 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   /* set — reassign mutable binding */
   if (compiler__head_matches(head, "set", 3)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "set", "2 arguments", argc); return; }
+
+    /* Arrow desugar: `set n->field value` is parsed as set([. n field], value).
+       Rewrite to [. $n field value] — a 3-arg dot command (field mutation). */
+    if (args[0]->type == AST_COMMAND &&
+        args[0]->data.command.head->type == AST_LIT_STRING &&
+        args[0]->data.command.head->data.lit_string.length == 1 &&
+        args[0]->data.command.head->data.lit_string.value[0] == '.') {
+      /* Unwrap the outermost dot to find the chain.
+         For `n->x->y`, args[0] is [. [. n x] y].
+         We need to find the innermost `n`, convert it to $n (var ref),
+         then append `value` as the last arg of the outermost dot. */
+      AstNode* dot_cmd = args[0];
+      AstNode* value_expr = args[1];
+
+      /* Find the innermost target: walk [. [. ... x] y] chains */
+      AstNode* inner = dot_cmd;
+      while (inner->data.command.args[0]->type == AST_COMMAND &&
+             inner->data.command.args[0]->data.command.head->type == AST_LIT_STRING &&
+             inner->data.command.args[0]->data.command.head->data.lit_string.length == 1 &&
+             inner->data.command.args[0]->data.command.head->data.lit_string.value[0] == '.') {
+        inner = inner->data.command.args[0];
+      }
+      /* inner->data.command.args[0] is the bare name "n" — convert to $n var ref */
+      AstNode* bare_name = inner->data.command.args[0];
+      if (bare_name->type == AST_LIT_STRING) {
+        AstNode* var_ref = ast_alloc(c->arena);
+        var_ref->type = AST_VAR_REF;
+        var_ref->start = bare_name->start;
+        var_ref->end   = bare_name->end;
+        var_ref->data.var_ref.name   = bare_name->data.lit_string.value;
+        var_ref->data.var_ref.length = bare_name->data.lit_string.length;
+        inner->data.command.args[0] = var_ref;
+      }
+
+      /* Extend the outermost dot from 2 args to 3 args (add value) */
+      AstNode** new_args = ast_alloc_array(c->arena, 3);
+      new_args[0] = dot_cmd->data.command.args[0];
+      new_args[1] = dot_cmd->data.command.args[1];
+      new_args[2] = value_expr;
+      dot_cmd->data.command.args = new_args;
+      dot_cmd->data.command.arg_count = 3;
+
+      /* Compile the rewritten dot command */
+      compiler__compile_node(c, dot_cmd);
+      return;
+    }
+
     /* US-013: accept AST_LIT_STRING (normal set) or AST_VAR_REF with
        is_caret set (^name inside syntax-quote).
        US-014: also accept AST_VAR_REF with is_gensym set. */
