@@ -6729,6 +6729,246 @@ static int test_struct_box_map_key(void) {
   TEST_PASS();
 }
 
+/* ===== US-013: Byte-level equality and hashing for unboxed structs ===== */
+
+static int test_struct_inline_eq_same(void) {
+  /* Two inline structs with identical data should be equal */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def Point a [Point 10 20]\n"
+      "  def Point b [Point 10 20]\n"
+      "  print [== $a $b]\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_inline_eq_different(void) {
+  /* Two inline structs with different data should not be equal */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def Point a [Point 10 20]\n"
+      "  def Point b [Point 10 99]\n"
+      "  print [== $a $b]\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "false\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_inline_hash_equal(void) {
+  /* Equal inline structs produce the same hash */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def Point a [Point 10 20]\n"
+      "  def Point b [Point 10 20]\n"
+      "  print [== [hash $a] [hash $b]]\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_inline_hash_different(void) {
+  /* Different inline structs produce different hashes (no collision expected) */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc test {} {\n"
+      "  def Point a [Point 10 20]\n"
+      "  def Point b [Point 10 99]\n"
+      "  print [== [hash $a] [hash $b]]\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "false\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_heap_equality(void) {
+  /* Materialized (heap) structs from function returns compare correctly */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc Point mkpt {i32 a, i32 b} {\n"
+      "  return [Point $a $b]\n"
+      "}\n"
+      "proc test {} {\n"
+      "  def Point p1 [mkpt 5 10]\n"
+      "  def Point p2 [mkpt 5 10]\n"
+      "  def Point p3 [mkpt 5 99]\n"
+      "  print [== $p1 $p2]\n"
+      "  print [== $p1 $p3]\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\nfalse\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_eq_padding_zeroed(void) {
+  /* Padding bytes are zeroed so structs with same fields are equal
+     even when padding exists (e.g., i32 field in 8-byte-aligned struct) */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  /* A struct with a single i32 field has 4 bytes data but occupies
+     1 full JaclVal slot (8 bytes). Padding bytes must be zeroed. */
+  VMResult r = jacl_run(
+      "struct Small {i32 val}\n"
+      "proc test {} {\n"
+      "  def Small a [Small 42]\n"
+      "  def Small b [Small 42]\n"
+      "  print [== $a $b]\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_hash_generic(void) {
+  /* [hash $val] works on non-struct values too */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "proc test {} {\n"
+      "  def h1 [hash 42]\n"
+      "  def h2 [hash 42]\n"
+      "  print [== $h1 $h2]\n"
+      "}\n"
+      "test",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "true\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ===== US-008 (Struct): Inline anonymous struct types ===== */
 
 static int test_inline_struct_runtime(void) {
@@ -9997,6 +10237,14 @@ int main(void) {
     { "struct_box_stringify",              test_struct_box_stringify },
     { "struct_box_stringify_dyn",           test_struct_box_stringify_dyn },
     { "struct_box_map_key",                test_struct_box_map_key },
+    /* US-013: Byte-level equality and hashing for unboxed structs */
+    { "struct_inline_eq_same",             test_struct_inline_eq_same },
+    { "struct_inline_eq_different",         test_struct_inline_eq_different },
+    { "struct_inline_hash_equal",           test_struct_inline_hash_equal },
+    { "struct_inline_hash_different",       test_struct_inline_hash_different },
+    { "struct_heap_equality",              test_struct_heap_equality },
+    { "struct_eq_padding_zeroed",          test_struct_eq_padding_zeroed },
+    { "struct_hash_generic",               test_struct_hash_generic },
     /* US-004 (Struct): Field access */
     { "struct_get_basic",                test_struct_get_basic },
     { "struct_get_unknown_field",        test_struct_get_unknown_field },

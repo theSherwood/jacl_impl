@@ -926,7 +926,7 @@ JaclVal jacl_struct_new_val(JaclVM* jvm, const char* type_name,
   if (!s) return embed__make_error(jvm, "allocation failed");
 
   s->type_idx = type_idx;
-  s->_pad = 0;
+  s->total_size = sdef->total_size;
   memset(s->data, 0, sdef->total_size);
 
   /* Store each field value */

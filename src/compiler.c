@@ -3688,6 +3688,22 @@ void compiler__compile_binary(Compiler* c, AstNode** args,
   JaclType rhs_type = c->last_expr_type;
   c->expected_type = TYPE_DYN;
 
+  /* US-013: Static typing for struct comparisons */
+  if (lhs_type == TYPE_STRUCT || rhs_type == TYPE_STRUCT) {
+    if (lhs_type != rhs_type) {
+      char err[128];
+      snprintf(err, sizeof(err), "type error: cannot %s %s and %s",
+               op_verb, type_name(lhs_type), type_name(rhs_type));
+      compiler__error(c, line, col, err);
+      return;
+    }
+    /* Both are struct-typed (materialized on stack as heap JaclStruct values).
+       Equality is handled by jacl_val_eq which supports JACL_TAG_STRUCT. */
+    compiler__emit_byte(c, op, line);
+    c->last_expr_type = TYPE_DYN;
+    return;
+  }
+
   /* Type checking — only enforced when unboxed types (i64/u64/f64) are involved,
      since unboxed values can't go through dynamic dispatch */
   if (is_unboxed_type(lhs_type) || is_unboxed_type(rhs_type)) {
@@ -5081,6 +5097,35 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   /* Comparison builtins */
   if (compiler__head_matches(head, "==", 2)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "==", "2 arguments", argc); return; }
+    /* US-013: Check for inline struct comparison — avoid materialization */
+    if (args[0]->type == AST_VAR_REF && args[1]->type == AST_VAR_REF) {
+      JaclVal name_a = compiler__name_val(c->heap, c->intern_table,
+          args[0]->data.var_ref.name, args[0]->data.var_ref.length);
+      JaclVal name_b = compiler__name_val(c->heap, c->intern_table,
+          args[1]->data.var_ref.name, args[1]->data.var_ref.length);
+      int slot_a = compiler__resolve_local(c, name_a);
+      int slot_b = compiler__resolve_local(c, name_b);
+      if (slot_a != -1 && slot_b != -1 &&
+          c->locals[slot_a].type == TYPE_STRUCT && c->locals[slot_a].is_inline &&
+          c->locals[slot_b].type == TYPE_STRUCT && c->locals[slot_b].is_inline) {
+        if (c->locals[slot_a].struct_type_idx != c->locals[slot_b].struct_type_idx) {
+          compiler__error(c, line, col,
+              "type error: cannot compare different struct types");
+          return;
+        }
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        uint32_t sidx = c->locals[slot_a].struct_type_idx;
+        if (reg && sidx < reg->count && reg->defs[sidx]) {
+          uint16_t total_size = (uint16_t)reg->defs[sidx]->total_size;
+          compiler__emit_byte(c, OP_STRUCT_EQ_INLINE, line);
+          compiler__emit_byte(c, (uint8_t)slot_a, line);
+          compiler__emit_byte(c, (uint8_t)slot_b, line);
+          compiler__emit_u16(c, total_size, line);
+          c->last_expr_type = TYPE_DYN;
+          return;
+        }
+      }
+    }
     compiler__compile_binary(c, args, OP_EQ, "compare", line, col);
     return;
   }
@@ -7635,6 +7680,40 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__ensure_boxed(c, line);
     compiler__emit_byte(c, OP_TO_STRING, line);
     c->last_expr_type = TYPE_STR;
+    return;
+  }
+
+  /* US-013: hash builtin — hash any value, optimized for inline structs */
+  if (compiler__head_matches(head, "hash", 4)) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "hash", "1 argument", argc);
+      return;
+    }
+    /* Check for inline struct local — hash directly from stack slots */
+    if (args[0]->type == AST_VAR_REF) {
+      JaclVal name_val = compiler__name_val(c->heap, c->intern_table,
+          args[0]->data.var_ref.name, args[0]->data.var_ref.length);
+      int slot = compiler__resolve_local(c, name_val);
+      if (slot != -1 && c->locals[slot].type == TYPE_STRUCT &&
+          c->locals[slot].is_inline) {
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        uint32_t sidx = c->locals[slot].struct_type_idx;
+        if (reg && sidx < reg->count && reg->defs[sidx]) {
+          uint16_t total_size = (uint16_t)reg->defs[sidx]->total_size;
+          compiler__emit_byte(c, OP_STRUCT_HASH_INLINE, line);
+          compiler__emit_byte(c, (uint8_t)slot, line);
+          compiler__emit_u16(c, total_size, line);
+          compiler__emit_u16(c, (uint16_t)sidx, line);
+          c->last_expr_type = TYPE_DYN;
+          return;
+        }
+      }
+    }
+    /* Generic path: compile arg, push hash */
+    compiler__compile_node(c, args[0]);
+    compiler__ensure_boxed(c, line);
+    compiler__emit_byte(c, OP_HASH, line);
+    c->last_expr_type = TYPE_DYN;
     return;
   }
 

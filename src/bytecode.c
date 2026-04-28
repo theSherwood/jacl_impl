@@ -156,6 +156,9 @@ typedef enum {
   OP_STRUCT_GET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_SET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_MATERIALIZE_UPVALUE, /* uint8_t base_uv_slot, uint16_t type_idx */
+  OP_STRUCT_EQ_INLINE,   /* uint8_t base_a, uint8_t base_b, uint16_t total_size */
+  OP_STRUCT_HASH_INLINE, /* uint8_t base_slot, uint16_t total_size, uint16_t type_idx */
+  OP_HASH,               /* pop value, push i32 hash */
   OP_CLOSE_LOOP,    /* pop N values under top-of-stack: followed by uint8_t count */
   OP_DESTRUCTURE_VEC, /* destructure vector: uint8_t N, uint8_t skip_mask; pop vec, push non-skipped elements */
   OP_DESTRUCTURE_NAMED, /* destructure struct/map by field names: uint8_t N, then N x uint16_t const_idx */
@@ -469,6 +472,9 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_STRUCT_GET_UPVALUE: return "OP_STRUCT_GET_UPVALUE";
     case OP_STRUCT_SET_UPVALUE: return "OP_STRUCT_SET_UPVALUE";
     case OP_STRUCT_MATERIALIZE_UPVALUE: return "OP_STRUCT_MATERIALIZE_UPVALUE";
+    case OP_STRUCT_EQ_INLINE:   return "OP_STRUCT_EQ_INLINE";
+    case OP_STRUCT_HASH_INLINE: return "OP_STRUCT_HASH_INLINE";
+    case OP_HASH:               return "OP_HASH";
     case OP_CLOSE_LOOP:      return "OP_CLOSE_LOOP";
     case OP_DESTRUCTURE_VEC: return "OP_DESTRUCTURE_VEC";
     case OP_DESTRUCTURE_NAMED: return "OP_DESTRUCTURE_NAMED";

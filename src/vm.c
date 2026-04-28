@@ -4758,7 +4758,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
                                                   sizeof(JaclStruct) + sdef->total_size);
           s->type_idx = ref->type_idx;
-          s->_pad = 0;
+          s->total_size = sdef->total_size;
           memcpy(s->data, ref->data, sdef->total_size);
           result = vm__push(vm, jacl_struct_val(s));
           if (result != VM_OK) return result;
@@ -4867,7 +4867,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           JaclStruct* old_s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
                                                       sizeof(JaclStruct) + sdef->total_size);
           old_s->type_idx = ref->type_idx;
-          old_s->_pad = 0;
+          old_s->total_size = sdef->total_size;
           memcpy(old_s->data, ref->data, sdef->total_size);
           JaclVal swap_old_val = jacl_struct_val(old_s);
 
@@ -5576,7 +5576,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
                                                 sizeof(JaclStruct) + sdef->total_size);
         s->type_idx = type_idx;
-        s->_pad = 0;
+        s->total_size = sdef->total_size;
         memset(s->data, 0, sdef->total_size);
 
         /* Store each field value from the stack into struct data */
@@ -5752,7 +5752,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             JaclStruct* sub_s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
                                                        sizeof(JaclStruct) + sub_sdef->total_size);
             sub_s->type_idx = sub_type_idx;
-            sub_s->_pad = 0;
+            sub_s->total_size = sub_sdef->total_size;
             memcpy(sub_s->data, struct_base + byte_offset, sub_sdef->total_size);
             field_val = jacl_struct_val(sub_s);
             break;
@@ -5806,7 +5806,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
                                                 sizeof(JaclStruct) + sdef->total_size);
         s->type_idx = type_idx;
-        s->_pad = 0;
+        s->total_size = sdef->total_size;
         /* Copy raw bytes from stack slot region into heap struct data */
         uint8_t* struct_base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
         memcpy(s->data, struct_base, sdef->total_size);
@@ -5835,7 +5835,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclStruct* copy = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
                                                    sizeof(JaclStruct) + sdef->total_size);
         copy->type_idx = src->type_idx;
-        copy->_pad = 0;
+        copy->total_size = sdef->total_size;
         memcpy(copy->data, src->data, sdef->total_size);
         result = vm__push(vm, jacl_struct_val(copy));
         if (result != VM_OK) return result;
@@ -5898,7 +5898,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             JaclStruct* sub_s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
                                                        sizeof(JaclStruct) + sub_sdef->total_size);
             sub_s->type_idx = sub_type_idx;
-            sub_s->_pad = 0;
+            sub_s->total_size = sub_sdef->total_size;
             memcpy(sub_s->data, struct_base + byte_offset, sub_sdef->total_size);
             field_val = jacl_struct_val(sub_s);
             break;
@@ -5949,10 +5949,53 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
                                                 sizeof(JaclStruct) + sdef->total_size);
         s->type_idx = type_idx;
-        s->_pad = 0;
+        s->total_size = sdef->total_size;
         uint8_t* struct_base = (uint8_t*)&frame->closure->upvalues[base_uv_slot];
         memcpy(s->data, struct_base, sdef->total_size);
         result = vm__push(vm, jacl_struct_val(s));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_STRUCT_EQ_INLINE: {
+        /* US-013: Compare two stack-resident inline structs via memcmp.
+           Operands: uint8_t base_a, uint8_t base_b, uint16_t total_size.
+           Pushes bool result. */
+        uint8_t base_a = vm__read_byte(vm);
+        uint8_t base_b = vm__read_byte(vm);
+        uint16_t total_size = vm__read_u16(vm);
+        uint8_t* bytes_a = (uint8_t*)&vm->stack[frame->stack_base + base_a];
+        uint8_t* bytes_b = (uint8_t*)&vm->stack[frame->stack_base + base_b];
+        bool eq = (memcmp(bytes_a, bytes_b, total_size) == 0);
+        result = vm__push(vm, jacl_bool(eq));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_STRUCT_HASH_INLINE: {
+        /* US-013: Hash a stack-resident inline struct's raw bytes.
+           Operands: uint8_t base_slot, uint16_t total_size, uint16_t type_idx.
+           Pushes i32 hash result. */
+        uint8_t base_slot = vm__read_byte(vm);
+        uint16_t total_size = vm__read_u16(vm);
+        uint16_t type_idx = vm__read_u16(vm);
+        uint8_t* bytes = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
+        uint32_t h = (uint32_t)type_idx * 0x9E3779B9u;
+        for (uint16_t i = 0; i < total_size; i++) {
+          h = h * 31 + bytes[i];
+        }
+        result = vm__push(vm, jacl_i32((int32_t)h));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_HASH: {
+        /* US-013: Generic hash — pop any value, push i32 hash. */
+        JaclVal val;
+        result = vm__pop(vm, &val);
+        if (result != VM_OK) return result;
+        uint32_t h = jacl_val_hash(val);
+        result = vm__push(vm, jacl_i32((int32_t)h));
         if (result != VM_OK) return result;
         break;
       }

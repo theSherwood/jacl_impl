@@ -104,6 +104,17 @@ uint32_t jacl_val_hash(JaclVal v) {
     return jacl_map_node_hash(map);
   }
 
+  /* Struct: hash type_idx + raw data bytes */
+  if (tag == JACL_TAG_STRUCT) {
+    JaclStruct* s = jacl_as_struct_ptr(v);
+    uint32_t h = s->type_idx * 0x9E3779B9u;
+    const uint8_t* p = s->data;
+    for (uint32_t i = 0; i < s->total_size; i++) {
+      h = h * 31 + p[i];
+    }
+    return h;
+  }
+
   /* Box: hash type_idx + data bytes */
   if (tag == JACL_TAG_BOX) {
     JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(v);
@@ -167,6 +178,15 @@ bool jacl_val_eq(JaclVal a, JaclVal b) {
       if (!jacl_val_eq(val_a, val_b)) return false;
     }
     return true;
+  }
+
+  /* Struct equality: same type_idx AND memcmp of raw data bytes */
+  if (tag_a == JACL_TAG_STRUCT) {
+    JaclStruct* sa = jacl_as_struct_ptr(a);
+    JaclStruct* sb = jacl_as_struct_ptr(b);
+    if (sa == sb) return true;
+    if (sa->type_idx != sb->type_idx) return false;
+    return memcmp(sa->data, sb->data, sa->total_size) == 0;
   }
 
   /* Box equality: type_idx must match AND data[] must be byte-identical */

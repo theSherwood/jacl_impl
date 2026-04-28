@@ -457,9 +457,9 @@ got_block:
 /* --- Struct heap type --- */
 
 typedef struct {
-    uint32_t type_idx;    /* index into StructTypeRegistry */
-    uint32_t _pad;        /* padding to 8-byte alignment */
-    uint8_t  data[];      /* C-ABI laid out field data (total_size bytes) */
+    uint32_t type_idx;      /* index into StructTypeRegistry */
+    uint32_t total_size;    /* byte size of data[] (from StructTypeDef->total_size) */
+    uint8_t  data[];        /* C-ABI laid out field data (total_size bytes) */
 } JaclStruct;
 
 JaclStruct* jacl_as_struct_ptr(JaclVal v) {
