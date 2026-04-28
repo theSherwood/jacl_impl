@@ -4140,6 +4140,32 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_BOX_STRUCT: {
+        /* Pop a heap JaclStruct, create a struct box (type_idx > 0). */
+        uint16_t type_idx = vm__read_u16(vm);
+        JaclVal value;
+        result = vm__pop(vm, &value); if (result != VM_OK) return result;
+        if (jacl_is_error(value)) {
+          result = vm__push(vm, value); if (result != VM_OK) return result;
+          break;
+        }
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "box: invalid struct type index %u", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF,
+                                sizeof(JaclMutableRef) + sdef->total_size);
+        ref->type_idx = type_idx;
+        ref->total_size = sdef->total_size;
+        /* Copy struct data from JaclStruct into box */
+        JaclStruct* s = jacl_as_struct_ptr(value);
+        memcpy(ref->data, s->data, sdef->total_size);
+        result = vm__push(vm, jacl_box_ptr(ref));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_ATOM: {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
@@ -4662,14 +4688,31 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
-        JaclVal deref_val;
-        if (jacl_is_atom(container)) {
-          deref_val = ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE);
+        if (ref->type_idx > 0) {
+          /* Struct box: materialize data[] into a heap JaclStruct */
+          if (!vm->struct_registry || ref->type_idx >= vm->struct_registry->count) {
+            vm__set_error(vm, "deref: invalid struct type index %u", (unsigned)ref->type_idx);
+            return VM_RUNTIME_ERROR;
+          }
+          StructTypeDef* sdef = vm->struct_registry->defs[ref->type_idx];
+          gc__current_heap = &vm->heap;
+          JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                  sizeof(JaclStruct) + sdef->total_size);
+          s->type_idx = ref->type_idx;
+          s->_pad = 0;
+          memcpy(s->data, ref->data, sdef->total_size);
+          result = vm__push(vm, jacl_struct_val(s));
+          if (result != VM_OK) return result;
         } else {
-          deref_val = MREF_VAL(ref);
+          JaclVal deref_val;
+          if (jacl_is_atom(container)) {
+            deref_val = ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE);
+          } else {
+            deref_val = MREF_VAL(ref);
+          }
+          result = vm__push(vm, deref_val);
+          if (result != VM_OK) return result;
         }
-        result = vm__push(vm, deref_val);
-        if (result != VM_OK) return result;
         break;
       }
 
@@ -4691,19 +4734,31 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
-        if (jacl_is_atom(container)) {
+        if (ref->type_idx > 0) {
+          /* Struct box: copy new struct data into box */
+          JaclStruct* s = jacl_as_struct_ptr(new_val);
+          if (!s || s->type_idx != ref->type_idx) {
+            vm__set_error(vm, "reset!: struct type mismatch in box");
+            return VM_RUNTIME_ERROR;
+          }
+          StructTypeDef* sdef = vm->struct_registry->defs[ref->type_idx];
+          memcpy(ref->data, s->data, sdef->total_size);
+          /* No GC write barrier needed — struct data has no GC references */
+          result = vm__push(vm, new_val);
+        } else if (jacl_is_atom(container)) {
           JaclVal reset_old = ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE);
           gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
                            reset_old, new_val);
           gc_remembered_set_barrier(vm->remembered_set, container, new_val);
           ATOMIC_STORE_EXPLICIT(&MREF_VAL(ref), new_val, MEM_RELEASE);
+          result = vm__push(vm, new_val);
         } else {
           gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
                            MREF_VAL(ref), new_val);
           gc_remembered_set_barrier(vm->remembered_set, container, new_val);
           MREF_VAL(ref) = new_val;
+          result = vm__push(vm, new_val);
         }
-        result = vm__push(vm, new_val);
         if (result != VM_OK) return result;
         break;
       }
@@ -4745,19 +4800,23 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         BytecodeChunk* saved_chunk = vm->chunk;
         JaclVal swap_result;
 
-        for (;;) {
-          /* Read current value (atomic for atoms, plain for boxes) */
-          JaclVal swap_old_val = swap_is_atom
-            ? ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE)
-            : MREF_VAL(ref);
+        if (ref->type_idx > 0) {
+          /* Struct box swap: materialize current value, apply closure, copy result back.
+             Atoms cannot hold structs (compile error), so this is always non-atomic. */
+          StructTypeDef* sdef = vm->struct_registry->defs[ref->type_idx];
+          gc__current_heap = &vm->heap;
+          JaclStruct* old_s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                      sizeof(JaclStruct) + sdef->total_size);
+          old_s->type_idx = ref->type_idx;
+          old_s->_pad = 0;
+          memcpy(old_s->data, ref->data, sdef->total_size);
+          JaclVal swap_old_val = jacl_struct_val(old_s);
 
-          /* Push closure as callee slot + current value as argument */
           result = vm__push(vm, closure_val);
           if (result != VM_OK) return result;
           result = vm__push(vm, swap_old_val);
           if (result != VM_OK) return result;
 
-          /* Set up call frame */
           if (vm->frame_count >= VM_FRAMES_MAX) {
             vm__set_error(vm, "stack overflow");
             return VM_RUNTIME_ERROR;
@@ -4768,39 +4827,80 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           cf->return_ip  = vm->ip;
           cf->stack_base = vm->stack_top - 1;
           cf->chunk      = &closure->chunk;
-
-          /* Switch to closure code and execute */
           vm->ip    = closure->chunk.code;
           vm->chunk = &closure->chunk;
 
           VMResult call_result = vm__run(vm, caller_frame_count);
           if (call_result != VM_OK) return call_result;
 
-          /* Pop return value */
           result = vm__pop(vm, &swap_result);
           if (result != VM_OK) return result;
 
-          if (swap_is_atom) {
-            /* CAS loop: try to store result, retry if value changed */
-            JaclVal expected = swap_old_val;
-            if (ATOMIC_CAS(&MREF_VAL(ref), &expected, swap_result,
-                           MEM_ACQ_REL, MEM_ACQUIRE)) {
-              /* CAS succeeded — fire write barrier */
+          /* Copy new struct data back into box */
+          JaclStruct* new_s = jacl_as_struct_ptr(swap_result);
+          if (!new_s || new_s->type_idx != ref->type_idx) {
+            vm__set_error(vm, "swap!: struct type mismatch in box");
+            return VM_RUNTIME_ERROR;
+          }
+          memcpy(ref->data, new_s->data, sdef->total_size);
+        } else {
+          for (;;) {
+            /* Read current value (atomic for atoms, plain for boxes) */
+            JaclVal swap_old_val = swap_is_atom
+              ? ATOMIC_LOAD_EXPLICIT(&MREF_VAL(ref), MEM_ACQUIRE)
+              : MREF_VAL(ref);
+
+            /* Push closure as callee slot + current value as argument */
+            result = vm__push(vm, closure_val);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, swap_old_val);
+            if (result != VM_OK) return result;
+
+            /* Set up call frame */
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+            uint32_t caller_frame_count = vm->frame_count;
+            CallFrame* cf = &vm->frames[vm->frame_count++];
+            cf->closure    = closure;
+            cf->return_ip  = vm->ip;
+            cf->stack_base = vm->stack_top - 1;
+            cf->chunk      = &closure->chunk;
+
+            /* Switch to closure code and execute */
+            vm->ip    = closure->chunk.code;
+            vm->chunk = &closure->chunk;
+
+            VMResult call_result = vm__run(vm, caller_frame_count);
+            if (call_result != VM_OK) return call_result;
+
+            /* Pop return value */
+            result = vm__pop(vm, &swap_result);
+            if (result != VM_OK) return result;
+
+            if (swap_is_atom) {
+              /* CAS loop: try to store result, retry if value changed */
+              JaclVal expected = swap_old_val;
+              if (ATOMIC_CAS(&MREF_VAL(ref), &expected, swap_result,
+                             MEM_ACQ_REL, MEM_ACQUIRE)) {
+                /* CAS succeeded — fire write barrier */
+                gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                                 swap_old_val, swap_result);
+                gc_remembered_set_barrier(vm->remembered_set,
+                                          container, swap_result);
+                break; /* exit retry loop */
+              }
+              /* CAS failed — swap_result becomes garbage, retry */
+            } else {
+              /* Box: non-atomic store, write barrier always fires */
               gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
                                swap_old_val, swap_result);
               gc_remembered_set_barrier(vm->remembered_set,
                                         container, swap_result);
-              break; /* exit retry loop */
+              MREF_VAL(ref) = swap_result;
+              break; /* no retry for boxes */
             }
-            /* CAS failed — swap_result becomes garbage, retry */
-          } else {
-            /* Box: non-atomic store, write barrier always fires */
-            gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
-                             swap_old_val, swap_result);
-            gc_remembered_set_barrier(vm->remembered_set,
-                                      container, swap_result);
-            MREF_VAL(ref) = swap_result;
-            break; /* no retry for boxes */
           }
         }
 

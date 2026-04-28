@@ -6252,6 +6252,161 @@ static int test_struct_in_vec(void) {
   TEST_PASS();
 }
 
+/* ===== US-010: Box struct values and deref/reset/swap ===== */
+
+static int test_struct_box_roundtrip(void) {
+  /* [box $struct_val] creates a struct box, [deref] reads it back */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "def p [Point 10 20]\n"
+      "def b [box $p]\n"
+      "def q [deref $b]\n"
+      "print $q->x\n"
+      "print $q->y",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_box_reset(void) {
+  /* [reset $boxed_struct $new_struct] replaces struct contents */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "def p [Point 10 20]\n"
+      "def b [box $p]\n"
+      "def q [Point 30 40]\n"
+      "reset $b $q\n"
+      "def r [deref $b]\n"
+      "print $r->x\n"
+      "print $r->y",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "30\n40\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_box_swap(void) {
+  /* [swap $boxed_struct {closure}] swaps struct, returns old value */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "def p [Point 10 20]\n"
+      "def b [box $p]\n"
+      "swap $b {proc {dyn old} { [Point 99 88] }}\n"
+      "def r [deref $b]\n"
+      "print $r->x\n"
+      "print $r->y",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "99\n88\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_box_deref_isolation(void) {
+  /* Deref returns a copy — mutation of original box doesn't affect derefed value */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "def p [Point 10 20]\n"
+      "def b [box $p]\n"
+      "def q [deref $b]\n"
+      "reset $b [Point 99 88]\n"
+      "print $q->x\n"
+      "print $q->y",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "10\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_atom_rejected(void) {
+  /* [atom $struct_val] is a compile error */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  CompileResult cr = compile_source(
+      "struct Point {i32 x, i32 y}\n"
+      "def p [Point 10 20]\n"
+      "atom $p",
+      &arena, &heap);
+  ASSERT(cr.error_count > 0);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ===== US-008 (Struct): Inline anonymous struct types ===== */
 
 static int test_inline_struct_runtime(void) {
@@ -9502,6 +9657,12 @@ int main(void) {
     { "struct_closure_capture_basic",       test_struct_closure_capture_basic },
     { "struct_closure_capture_isolation",   test_struct_closure_capture_isolation },
     { "struct_closure_capture_materialize", test_struct_closure_capture_materialize },
+    /* US-010: Box struct values and deref/reset/swap */
+    { "struct_box_roundtrip",              test_struct_box_roundtrip },
+    { "struct_box_reset",                  test_struct_box_reset },
+    { "struct_box_swap",                   test_struct_box_swap },
+    { "struct_box_deref_isolation",        test_struct_box_deref_isolation },
+    { "struct_atom_rejected",              test_struct_atom_rejected },
     /* US-004 (Struct): Field access */
     { "struct_get_basic",                test_struct_get_basic },
     { "struct_get_unknown_field",        test_struct_get_unknown_field },

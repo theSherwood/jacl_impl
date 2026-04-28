@@ -164,7 +164,7 @@
         "build.sh passes, struct boxing round-trip tests pass"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

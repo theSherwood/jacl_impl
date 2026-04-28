@@ -681,6 +681,7 @@ typedef enum {
   OP_SET_CELL_UPVALUE,
   OP_SET_GLOBAL,
   OP_BOX,
+  OP_BOX_STRUCT,     /* uint16_t type_idx; pop struct, wrap in typed box, push box */
   OP_ATOM,
   OP_DEREF,
   OP_RESET,

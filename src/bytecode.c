@@ -82,6 +82,7 @@ typedef enum {
   OP_SET_CELL_UPVALUE,  /* pop value, store in cell at upvalue, push nil */
   OP_SET_GLOBAL,    /* pop value, set global by name index, push nil */
   OP_BOX,           /* pop value, wrap in box, push box */
+  OP_BOX_STRUCT,    /* uint16_t type_idx; pop struct, wrap in typed box, push box */
   OP_ATOM,          /* pop value, wrap in atom, push atom */
   OP_DEREF,         /* pop box/atom, push inner value */
   OP_RESET,         /* pop value + box/atom, store value, push new value */
@@ -399,6 +400,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_SET_CELL_UPVALUE: return "OP_SET_CELL_UPVALUE";
     case OP_SET_GLOBAL:      return "OP_SET_GLOBAL";
     case OP_BOX:             return "OP_BOX";
+    case OP_BOX_STRUCT:      return "OP_BOX_STRUCT";
     case OP_ATOM:            return "OP_ATOM";
     case OP_DEREF:           return "OP_DEREF";
     case OP_RESET:           return "OP_RESET";

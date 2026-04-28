@@ -7801,7 +7801,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_BOX, line);
+    if (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX) {
+      /* Struct box: emit OP_BOX_STRUCT with type_idx operand */
+      compiler__emit_byte(c, OP_BOX_STRUCT, line);
+      compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+    } else {
+      compiler__emit_byte(c, OP_BOX, line);
+    }
+    c->last_expr_type = TYPE_DYN;
     return;
   }
 
@@ -7812,6 +7819,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_STRUCT) {
+      compiler__error(c, line, col, "atom: struct values cannot be stored in atoms; use [box] instead");
+      return;
+    }
     compiler__emit_byte(c, OP_ATOM, line);
     return;
   }
