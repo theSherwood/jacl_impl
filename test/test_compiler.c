@@ -5769,6 +5769,123 @@ static int test_struct_pass_by_value_chain(void) {
   TEST_PASS();
 }
 
+/* US-007: Struct returns — pass by value */
+
+static int test_struct_return_basic(void) {
+  /* Typed proc returns struct, caller stores inline via OP_STRUCT_STORE_INLINE */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc Point mkpt {} {\n"
+      "  Point 42 99\n"
+      "}\n"
+      "proc test {} {\n"
+      "  def Point p [mkpt]\n"
+      "  print $p->x\n"
+      "  print $p->y\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  ASSERT_STR_EQ(cap.buf, "42\n99\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_return_nested_calls(void) {
+  /* Nested: A calls B which returns struct, A receives it correctly */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc Point mkpt {i32 a, i32 b} {\n"
+      "  Point $a $b\n"
+      "}\n"
+      "proc test {} {\n"
+      "  def Point p1 [mkpt 10 20]\n"
+      "  def Point p2 [mkpt $p1->x $p1->y]\n"
+      "  print $p1->x\n"
+      "  print $p1->y\n"
+      "  print $p2->x\n"
+      "  print $p2->y\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  /* p1 and p2 both get (10,20) through nested calls */
+  ASSERT_STR_EQ(cap.buf, "10\n20\n10\n20\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_return_value_isolation(void) {
+  /* Returned struct is isolated — mutation doesn't affect original */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc Point dup {Point p} {\n"
+      "  Point $p->x $p->y\n"
+      "}\n"
+      "proc test {} {\n"
+      "  def pt [Point 1 2]\n"
+      "  def Point copy [dup $pt]\n"
+      "  . $copy x 99\n"
+      "  print $pt->x\n"
+      "  print $copy->x\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  /* pt.x unchanged at 1, copy.x mutated to 99 */
+  ASSERT_STR_EQ(cap.buf, "1\n99\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* US-004 (Struct): Field access */
 
 static int test_struct_get_basic(void) {
@@ -9266,6 +9383,10 @@ int main(void) {
     { "struct_pass_by_value_basic",      test_struct_pass_by_value_basic },
     { "struct_pass_by_value_recursive",  test_struct_pass_by_value_recursive },
     { "struct_pass_by_value_chain",      test_struct_pass_by_value_chain },
+    /* US-007: Struct returns — pass by value */
+    { "struct_return_basic",             test_struct_return_basic },
+    { "struct_return_nested_calls",      test_struct_return_nested_calls },
+    { "struct_return_value_isolation",   test_struct_return_value_isolation },
     /* US-004 (Struct): Field access */
     { "struct_get_basic",                test_struct_get_basic },
     { "struct_get_unknown_field",        test_struct_get_unknown_field },

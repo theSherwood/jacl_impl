@@ -738,6 +738,7 @@ typedef enum {
   OP_STRUCT_SET_INLINE,  /* uint8_t base_slot, uint16_t byte_offset, uint8_t field_type; write to stack-resident struct */
   OP_STRUCT_MATERIALIZE, /* uint8_t base_slot, uint16_t type_idx; convert inline struct to heap JaclStruct */
   OP_STRUCT_COPY,        /* pop heap JaclStruct, push deep copy (pass-by-value at call sites) */
+  OP_STRUCT_STORE_INLINE, /* uint8_t base_slot, uint16_t type_idx; de-materialize heap struct to inline stack slots */
   OP_CLOSE_LOOP,
   OP_DESTRUCTURE_VEC,
   OP_DESTRUCTURE_NAMED,
@@ -1017,6 +1018,7 @@ typedef struct {
   JaclType  type;
   uint32_t  struct_type_idx;
   JaclType  return_type;
+  uint32_t  return_struct_idx;
   JaclType* param_types;
   uint32_t  scope_mark;
   uint16_t  width;            /* stack slot count: 1 for scalars, N for inline structs */
@@ -1029,9 +1031,11 @@ typedef struct {
   bool      is_mutable;
   bool      suspends;
   bool      captures_mutable;
+  bool      prelude_is_native_fn;
   JaclType  type;
   uint32_t  struct_type_idx;
   JaclType  return_type;
+  uint32_t  return_struct_idx;
   JaclType  param_types[COMPILER_MAX_PROC_PARAMS];
 } GlobalArity;
 

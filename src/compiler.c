@@ -693,6 +693,7 @@ typedef struct {
   JaclType  type;         /* compile-time type (default TYPE_DYN) */
   uint32_t  struct_type_idx; /* struct registry index when type==TYPE_STRUCT */
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
+  uint32_t  return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   JaclType* param_types;  /* proc param types (NULL for non-procs, arena-allocated) */
   uint32_t  scope_mark;   /* hygiene: 0 = user code, >0 = macro-introduced */
   uint16_t  width;        /* stack slot count: 1 for scalars, N for inline structs */
@@ -723,6 +724,7 @@ typedef struct {
   JaclType  type;         /* compile-time type (default TYPE_DYN) */
   uint32_t  struct_type_idx; /* struct registry index when type==TYPE_STRUCT */
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
+  uint32_t  return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   JaclType  param_types[COMPILER_MAX_PROC_PARAMS]; /* proc param types */
 } GlobalArity;
 
@@ -6051,6 +6053,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     c->expected_type = TYPE_DYN;
     JaclType rhs_type = c->last_expr_type;
 
+    /* US-007: activate inline for function calls returning struct types.
+     * If the RHS isn't already inline (struct constructor) but returns a
+     * struct type with a known struct index, post-activate inline and
+     * plan to emit OP_STRUCT_STORE_INLINE after adding the local. */
+    bool needs_store_inline = false;
+    if (!activate_inline && rhs_type == TYPE_STRUCT &&
+        c->last_struct_idx != UINT32_MAX &&
+        c->scope_depth > 0 && !c->sm_analysis) {
+      activate_inline = true;
+      needs_store_inline = true;
+    }
+
     /* Type check for typed def */
     if (declared_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != declared_type) {
       char err_msg[128];
@@ -6113,12 +6127,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         uint32_t width = struct__slot_width(reg, c->last_struct_idx);
         c->locals[c->local_count - 1].width = (uint16_t)width;
         if (activate_inline) {
-          c->locals[c->local_count - 1].is_inline = true;
+          uint32_t base_local_idx = c->local_count - 1;
+          c->locals[base_local_idx].is_inline = true;
           /* Reserve extra stack slots for wide inline structs (width > 1).
            * Add padding locals so subsequent locals get correct slot indices. */
           for (uint32_t w = 1; w < width; w++) {
             compiler__add_local(c, jacl_inline_string("", 0), line, col);
             c->locals[c->local_count - 1].depth = c->scope_depth;
+          }
+          /* US-007: de-materialize heap struct return value into inline slots */
+          if (needs_store_inline) {
+            compiler__emit_byte(c, OP_STRUCT_STORE_INLINE, line);
+            compiler__emit_byte(c, (uint8_t)base_local_idx, line);
+            compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
           }
         }
       }
@@ -6158,6 +6179,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Disambiguate: 4 args + first is type keyword → has return type.
        3 args → no return type (existing). */
     JaclType proc_return_type = TYPE_DYN;
+    uint32_t proc_return_struct_idx = UINT32_MAX;
     uint32_t name_arg_idx, params_arg_idx, body_arg_idx;
 
     if (argc == 4) {
@@ -6169,6 +6191,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col,
             "proc with 4 arguments requires type keyword as first argument");
         return;
+      }
+      if (proc_return_type == TYPE_STRUCT) {
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        if (reg) {
+          proc_return_struct_idx = struct_registry__find(reg,
+              args[0]->data.lit_string.value,
+              args[0]->data.lit_string.length);
+        }
       }
       name_arg_idx   = 1;
       params_arg_idx = 2;
@@ -6553,6 +6583,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__add_local(c, name_val, line, col);
         c->locals[c->local_count - 1].known_arity = is_variadic ? -1 : (int16_t)user_param_count;
         c->locals[c->local_count - 1].return_type = proc_return_type;
+        c->locals[c->local_count - 1].return_struct_idx = proc_return_struct_idx;
         c->locals[c->local_count - 1].param_types = stored_param_types;
         c->locals[c->local_count - 1].suspends    = proc_suspends;
         c->locals[c->local_count - 1].captures_mutable = proc_captures_mutable;
@@ -6563,6 +6594,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__add_local(c, name_val, line, col);
       c->locals[c->local_count - 1].known_arity = is_variadic ? -1 : (int16_t)user_param_count;
       c->locals[c->local_count - 1].return_type = proc_return_type;
+      c->locals[c->local_count - 1].return_struct_idx = proc_return_struct_idx;
       c->locals[c->local_count - 1].param_types = stored_param_types;
       c->locals[c->local_count - 1].suspends    = proc_suspends;
       c->locals[c->local_count - 1].captures_mutable = proc_captures_mutable;
@@ -6581,6 +6613,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         GlobalArity* ga = compiler__find_global(c, name_val);
         if (ga) {
           ga->return_type = proc_return_type;
+          ga->return_struct_idx = proc_return_struct_idx;
           ga->suspends    = proc_suspends;
           ga->captures_mutable = proc_captures_mutable;
           for (uint8_t i = 0; i < user_param_count && i < COMPILER_MAX_PROC_PARAMS; i++) {
@@ -8748,6 +8781,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Resolve callee param types for call-site type checking */
     JaclType* call_param_types = NULL;
     JaclType call_return_type = TYPE_DYN;
+    uint32_t call_return_struct_idx = UINT32_MAX;
     int16_t call_param_count = -1;
     const char* callee_name_str = NULL;
     uint32_t callee_name_len = 0;
@@ -8778,6 +8812,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           head_arity = c->locals[local_slot].known_arity;
           call_param_types = c->locals[local_slot].param_types;
           call_return_type = c->locals[local_slot].return_type;
+          call_return_struct_idx = c->locals[local_slot].return_struct_idx;
           call_param_count = head_arity;
         } else {
           GlobalArity* ga = compiler__find_global(c, name_val);
@@ -8785,6 +8820,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             head_arity = ga->known_arity;
             call_param_types = ga->param_types;
             call_return_type = ga->return_type;
+            call_return_struct_idx = ga->return_struct_idx;
             call_param_count = head_arity;
           }
         }
@@ -8886,12 +8922,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           if (slot != -1) {
             call_param_types = c->locals[slot].param_types;
             call_return_type = c->locals[slot].return_type;
+            call_return_struct_idx = c->locals[slot].return_struct_idx;
             call_param_count = c->locals[slot].known_arity;
           } else {
             GlobalArity* ga = compiler__find_global(c, vname);
             if (ga) {
               call_param_types = ga->param_types;
               call_return_type = ga->return_type;
+              call_return_struct_idx = ga->return_struct_idx;
               call_param_count = ga->known_arity;
             }
           }
@@ -8989,6 +9027,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Set result type from callee's return type */
     c->last_expr_type = call_return_type;
+    c->last_struct_idx = call_return_struct_idx;
   }
 }
 

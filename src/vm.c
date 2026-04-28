@@ -5658,6 +5658,35 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_STRUCT_STORE_INLINE: {
+        /* De-materialize a heap JaclStruct into N consecutive stack slots.
+           Operands: uint8_t base_slot, uint16_t type_idx.
+           Reads heap struct pointer from stack[base_slot], writes raw bytes
+           across N slots starting at base_slot, adjusts stack_top. */
+        uint8_t base_slot = vm__read_byte(vm);
+        uint16_t type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u for store_inline", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        uint32_t abs_base = frame->stack_base + base_slot;
+        /* Read the heap struct pointer from the base slot */
+        JaclVal heap_val = vm->stack[abs_base];
+        if (!jacl_is_struct(heap_val)) {
+          vm__set_error(vm, "OP_STRUCT_STORE_INLINE expects struct at slot %u", (unsigned)base_slot);
+          return VM_RUNTIME_ERROR;
+        }
+        JaclStruct* src = jacl_as_struct_ptr(heap_val);
+        /* Zero-fill N slots then copy raw struct bytes */
+        memset(&vm->stack[abs_base], 0, width * sizeof(JaclVal));
+        memcpy(&vm->stack[abs_base], src->data, sdef->total_size);
+        /* Adjust stack_top to account for the N slots */
+        vm->stack_top = abs_base + width;
+        break;
+      }
+
       case OP_SPREAD: {
         JaclVal spread_val;
         result = vm__pop(vm, &spread_val);
