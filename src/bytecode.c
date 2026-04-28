@@ -149,6 +149,7 @@ typedef enum {
   OP_STRUCT_GET_INLINE, /* inline field read: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_SET_INLINE, /* inline field write: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_MATERIALIZE, /* inline to heap: uint8_t base_slot, uint16_t type_idx */
+  OP_STRUCT_COPY,        /* pop heap struct, push deep copy */
   OP_CLOSE_LOOP,    /* pop N values under top-of-stack: followed by uint8_t count */
   OP_DESTRUCTURE_VEC, /* destructure vector: uint8_t N, uint8_t skip_mask; pop vec, push non-skipped elements */
   OP_DESTRUCTURE_NAMED, /* destructure struct/map by field names: uint8_t N, then N x uint16_t const_idx */
@@ -454,6 +455,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_STRUCT_GET_INLINE: return "OP_STRUCT_GET_INLINE";
     case OP_STRUCT_SET_INLINE: return "OP_STRUCT_SET_INLINE";
     case OP_STRUCT_MATERIALIZE: return "OP_STRUCT_MATERIALIZE";
+    case OP_STRUCT_COPY:        return "OP_STRUCT_COPY";
     case OP_CLOSE_LOOP:      return "OP_CLOSE_LOOP";
     case OP_DESTRUCTURE_VEC: return "OP_DESTRUCTURE_VEC";
     case OP_DESTRUCTURE_NAMED: return "OP_DESTRUCTURE_NAMED";

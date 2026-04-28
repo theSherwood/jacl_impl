@@ -8915,6 +8915,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       JaclType arg_type = c->last_expr_type;
       c->expected_type = TYPE_DYN;
 
+      /* US-006: pass-by-value for struct arguments.
+       * Emit OP_STRUCT_COPY so callee gets its own copy of the struct data.
+       * For inline struct locals, OP_STRUCT_MATERIALIZE already creates a heap
+       * copy, so OP_STRUCT_COPY is redundant but harmless. For heap struct
+       * params/return values, OP_STRUCT_COPY is essential. */
+      if (arg_type == TYPE_STRUCT || expected_param_type == TYPE_STRUCT) {
+        compiler__emit_byte(c, OP_STRUCT_COPY, line);
+      }
+
       /* Type check: argument vs declared param type */
       if (expected_param_type != TYPE_DYN) {
         if (arg_type != TYPE_DYN && arg_type != expected_param_type) {

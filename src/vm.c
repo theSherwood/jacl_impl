@@ -5631,6 +5631,33 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_STRUCT_COPY: {
+        /* Deep-copy a heap-allocated JaclStruct for pass-by-value semantics.
+           No operands. Pops struct, allocates copy, pushes copy. */
+        JaclVal src_val;
+        result = vm__pop(vm, &src_val);
+        if (result != VM_OK) return result;
+        if (!jacl_is_struct(src_val)) {
+          vm__set_error(vm, "OP_STRUCT_COPY expects struct, got other type");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclStruct* src = jacl_as_struct_ptr(src_val);
+        if (!vm->struct_registry || src->type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u for copy", (unsigned)src->type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[src->type_idx];
+        gc__current_heap = &vm->heap;
+        JaclStruct* copy = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                   sizeof(JaclStruct) + sdef->total_size);
+        copy->type_idx = src->type_idx;
+        copy->_pad = 0;
+        memcpy(copy->data, src->data, sdef->total_size);
+        result = vm__push(vm, jacl_struct_val(copy));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_SPREAD: {
         JaclVal spread_val;
         result = vm__pop(vm, &spread_val);

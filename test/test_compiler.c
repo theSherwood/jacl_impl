@@ -5643,6 +5643,132 @@ static int test_struct_inline_preserves_other_locals(void) {
   TEST_PASS();
 }
 
+/* US-006: Struct arguments — pass by value */
+
+static int test_struct_pass_by_value_basic(void) {
+  /* Passing struct to a function copies it — mutation doesn't affect caller */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc mutate {Point p} {\n"
+      "  . $p x 99\n"
+      "  print $p->x\n"
+      "}\n"
+      "proc test {} {\n"
+      "  def pt [Point 1 2]\n"
+      "  [mutate $pt]\n"
+      "  print $pt->x\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  /* mutate sees 99, but caller's pt still has 1 */
+  ASSERT_STR_EQ(cap.buf, "99\n1\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_pass_by_value_recursive(void) {
+  /* Recursive calls each get their own copy */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc bump {Point p} {\n"
+      "  . $p x [+ $p->x 10]\n"
+      "  $p\n"
+      "}\n"
+      "proc test {} {\n"
+      "  def pt [Point 0 0]\n"
+      "  def Point r1 [bump $pt]\n"
+      "  def Point r2 [bump $r1]\n"
+      "  def Point r3 [bump $r2]\n"
+      "  print $pt->x\n"
+      "  print $r1->x\n"
+      "  print $r2->x\n"
+      "  print $r3->x\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  /* Each bump gets a copy, mutates x+10, returns it.
+   * pt stays at 0, r1=10, r2=20, r3=30 */
+  ASSERT_STR_EQ(cap.buf, "0\n10\n20\n30\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_struct_pass_by_value_chain(void) {
+  /* Struct received as param, passed to another function — still copied */
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  PrintCapture cap = { .len = 0 };
+  VM vm;
+  vm_init(&vm, &arena);
+  vm.print_fn  = capture_print;
+  vm.print_ctx = &cap;
+
+  VMResult r = jacl_run(
+      "struct Point {i32 x, i32 y}\n"
+      "proc inner {Point p} {\n"
+      "  . $p x 99\n"
+      "  print $p->x\n"
+      "}\n"
+      "proc outer {Point p} {\n"
+      "  [inner $p]\n"
+      "  print $p->x\n"
+      "}\n"
+      "proc test {} {\n"
+      "  def pt [Point 1 2]\n"
+      "  [outer $pt]\n"
+      "  print $pt->x\n"
+      "}\n"
+      "[test]",
+      &vm, &arena);
+  ASSERT(r == VM_OK);
+  /* inner sees 99, outer still sees 1, test still sees 1 */
+  ASSERT_STR_EQ(cap.buf, "99\n1\n1\n");
+
+  vm_destroy(&vm);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* US-004 (Struct): Field access */
 
 static int test_struct_get_basic(void) {
@@ -9136,6 +9262,10 @@ int main(void) {
     { "struct_inline_materialize",       test_struct_inline_materialize },
     { "struct_inline_wide_types",        test_struct_inline_wide_field_types },
     { "struct_inline_preserves_locals",  test_struct_inline_preserves_other_locals },
+    /* US-006: Struct arguments — pass by value */
+    { "struct_pass_by_value_basic",      test_struct_pass_by_value_basic },
+    { "struct_pass_by_value_recursive",  test_struct_pass_by_value_recursive },
+    { "struct_pass_by_value_chain",      test_struct_pass_by_value_chain },
     /* US-004 (Struct): Field access */
     { "struct_get_basic",                test_struct_get_basic },
     { "struct_get_unknown_field",        test_struct_get_unknown_field },

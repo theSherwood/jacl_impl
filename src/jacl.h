@@ -737,6 +737,7 @@ typedef enum {
   OP_STRUCT_GET_INLINE,  /* uint8_t base_slot, uint16_t byte_offset, uint8_t field_type; read from stack-resident struct */
   OP_STRUCT_SET_INLINE,  /* uint8_t base_slot, uint16_t byte_offset, uint8_t field_type; write to stack-resident struct */
   OP_STRUCT_MATERIALIZE, /* uint8_t base_slot, uint16_t type_idx; convert inline struct to heap JaclStruct */
+  OP_STRUCT_COPY,        /* pop heap JaclStruct, push deep copy (pass-by-value at call sites) */
   OP_CLOSE_LOOP,
   OP_DESTRUCTURE_VEC,
   OP_DESTRUCTURE_NAMED,
