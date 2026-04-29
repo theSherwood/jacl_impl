@@ -603,9 +603,19 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
                 }
             }
         }
+
+        /* 6. Ctx pool free-list entries (keep pooled structs alive) */
+        if (w->vm.ctx_pool) {
+            uintptr_t fl = ATOMIC_LOAD_EXPLICIT(&w->vm.ctx_pool->free_list_head, MEM_ACQUIRE);
+            while (fl != 0) {
+                JaclStruct *ps = (JaclStruct *)fl;
+                gc__ms_push(ms, ps);
+                fl = *(uintptr_t *)ps->data;
+            }
+        }
     }
 
-    /* 6. Inbox tasks (external submissions awaiting pickup) */
+    /* 7. Inbox tasks (external submissions awaiting pickup) */
     MUTEX_LOCK(rt->inbox_mutex);
     for (intptr_t i = 0; i < rt->inbox_count; i++) {
         RuntimeTask *task = (RuntimeTask *)rt->inbox[i];

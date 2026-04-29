@@ -79,6 +79,89 @@ JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
                          uint32_t *gensym_counter,
                          uint32_t scope_mark, const char **err);
 
+/* --- Ctx Pool: GC-managed free-list of pre-allocated ctx structs --- */
+
+#define CTX_POOL_INIT_SIZE 8
+
+typedef struct {
+    volatile uintptr_t free_list_head; /* atomic: pointer to first free JaclStruct, or 0 */
+    uint32_t struct_size;              /* StructTypeDef->total_size (byte size of data[]) */
+    uint32_t type_idx;                 /* ctx struct type_idx in StructTypeRegistry */
+    StructTypeDef *sdef;               /* cached pointer to ctx StructTypeDef */
+} JaclCtxPool;
+
+void ctx_pool_init(JaclCtxPool *pool, ThreadHeap *heap,
+                   StructTypeRegistry *reg) {
+    uint32_t idx = reg->ctx_type_idx;
+    StructTypeDef *sdef = reg->defs[idx];
+    pool->free_list_head = 0;
+    pool->struct_size = sdef->total_size;
+    pool->type_idx = idx;
+    pool->sdef = sdef;
+
+    /* Pre-allocate CTX_POOL_INIT_SIZE ctx structs and link into free list */
+    for (int i = 0; i < CTX_POOL_INIT_SIZE; i++) {
+        JaclStruct *s = (JaclStruct *)gc_alloc(heap, OBJ_STRUCT,
+                          sizeof(JaclStruct) + sdef->total_size);
+        s->type_idx = idx;
+        s->total_size = sdef->total_size;
+        memset(s->data, 0, sdef->total_size);
+
+        /* Link into free list: store next pointer at byte 0 of data[] */
+        uintptr_t head;
+        do {
+            head = ATOMIC_LOAD_EXPLICIT(&pool->free_list_head, MEM_ACQUIRE);
+            *(uintptr_t *)s->data = head;
+        } while (!ATOMIC_CAS(&pool->free_list_head, &head,
+                              (uintptr_t)s, MEM_RELEASE, MEM_RELAXED));
+    }
+}
+
+JaclStruct *ctx_pool_alloc(JaclCtxPool *pool, ThreadHeap *heap) {
+    /* Try to pop from free list via atomic CAS */
+    uintptr_t head;
+    for (;;) {
+        head = ATOMIC_LOAD_EXPLICIT(&pool->free_list_head, MEM_ACQUIRE);
+        if (head == 0) break;
+        JaclStruct *s = (JaclStruct *)head;
+        uintptr_t next = *(uintptr_t *)s->data;
+        if (ATOMIC_CAS(&pool->free_list_head, &head, next,
+                        MEM_ACQ_REL, MEM_RELAXED)) {
+            /* Zero data before returning */
+            memset(s->data, 0, pool->struct_size);
+            return s;
+        }
+    }
+    /* Pool empty: allocate fresh via gc_alloc */
+    JaclStruct *s = (JaclStruct *)gc_alloc(heap, OBJ_STRUCT,
+                      sizeof(JaclStruct) + pool->struct_size);
+    s->type_idx = pool->type_idx;
+    s->total_size = pool->struct_size;
+    memset(s->data, 0, pool->struct_size);
+    return s;
+}
+
+void ctx_pool_free(JaclCtxPool *pool, JaclStruct *s) {
+    /* Clear reference fields to prevent stale GC pointers */
+    StructTypeDef *sdef = pool->sdef;
+    for (uint32_t i = 0; i < sdef->field_count; i++) {
+        JaclType ft = sdef->fields[i].type;
+        if (ft == TYPE_STR || ft == TYPE_VEC || ft == TYPE_MAP ||
+            ft == TYPE_CLOSURE || ft == TYPE_DYN || ft == TYPE_STRUCT) {
+            JaclVal nil_val = JACL_NIL;
+            memcpy(s->data + sdef->fields[i].offset, &nil_val, sizeof(JaclVal));
+        }
+    }
+
+    /* Push to free list: store next pointer at byte 0 of data[] */
+    uintptr_t head;
+    do {
+        head = ATOMIC_LOAD_EXPLICIT(&pool->free_list_head, MEM_ACQUIRE);
+        *(uintptr_t *)s->data = head;
+    } while (!ATOMIC_CAS(&pool->free_list_head, &head,
+                          (uintptr_t)s, MEM_RELEASE, MEM_RELAXED));
+}
+
 /* --- VM state --- */
 
 typedef struct {
@@ -105,6 +188,7 @@ typedef struct {
   uint32_t       error_line;     /* source line of last error */
   StackTrace     stack_trace;    /* most recent error's trace */
   StructTypeRegistry* struct_registry; /* struct type metadata from compiler */
+  JaclCtxPool *ctx_pool;       /* ctx struct pool (NULL until initialized) */
   JaclVal*   gc_handle_slots;  /* external GC root handles (owned by embedding layer) */
   uint32_t   gc_handle_count;  /* number of slots in gc_handle_slots */
   /* Native function registry (owned by embedding layer) */
@@ -390,6 +474,7 @@ void vm_init(VM* vm, arena_t* arena) {
   vm->error_line    = 0;
   vm->stack_trace.count = 0;
   vm->struct_registry = NULL;
+  vm->ctx_pool        = NULL;
   vm->gc_handle_slots = NULL;
   vm->gc_handle_count = 0;
   vm->call_native       = NULL;

@@ -1232,6 +1232,19 @@ struct Compiler {
 };
 
 /* ========================================================================
+ * Types — vm.c (ctx pool)
+ * ======================================================================== */
+
+#define CTX_POOL_INIT_SIZE 8
+
+typedef struct {
+    volatile uintptr_t free_list_head; /* atomic: pointer to first free JaclStruct, or 0 */
+    uint32_t struct_size;              /* StructTypeDef->total_size (byte size of data[]) */
+    uint32_t type_idx;                 /* ctx struct type_idx in StructTypeRegistry */
+    StructTypeDef *sdef;               /* cached pointer to ctx StructTypeDef */
+} JaclCtxPool;
+
+/* ========================================================================
  * Types — vm.c
  * ======================================================================== */
 
@@ -1302,6 +1315,7 @@ typedef struct {
   uint32_t       error_line;
   StackTrace     stack_trace;
   StructTypeRegistry* struct_registry;
+  JaclCtxPool *ctx_pool;
   JaclVal*   gc_handle_slots;
   uint32_t   gc_handle_count;
   JaclVal    (*call_native)(void* ctx, uint32_t fn_index, JaclVal* args, int argc);
@@ -1949,6 +1963,9 @@ extern void vm__set_error (VM *vm, const char *fmt, ...);
 extern void vm__default_print (const char *text, uint32_t len, void *ctx);
 extern bool vm__is_falsy (JaclVal v);
 extern void vm__capture_trace (VM *vm);
+extern void ctx_pool_init (JaclCtxPool *pool, ThreadHeap *heap, StructTypeRegistry *reg);
+extern JaclStruct *ctx_pool_alloc (JaclCtxPool *pool, ThreadHeap *heap);
+extern void ctx_pool_free (JaclCtxPool *pool, JaclStruct *s);
 extern void vm_init (VM *vm, arena_t *arena);
 extern void vm_destroy (VM *vm);
 extern VMResult vm__push (VM *vm, JaclVal value);

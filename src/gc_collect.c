@@ -421,6 +421,16 @@ void gc_mark(ThreadHeap *heap, VM *vm) {
         }
     }
 
+    /* 7. Ctx pool free-list entries (keep pooled structs alive) */
+    if (vm->ctx_pool) {
+        uintptr_t fl = ATOMIC_LOAD_EXPLICIT(&vm->ctx_pool->free_list_head, MEM_ACQUIRE);
+        while (fl != 0) {
+            JaclStruct *ps = (JaclStruct *)fl;
+            gc__ms_push(&ms, ps);
+            fl = *(uintptr_t *)ps->data;
+        }
+    }
+
     /* --- Mark loop --- */
     void *ptr;
     while (gc__ms_pop(&ms, &ptr)) {

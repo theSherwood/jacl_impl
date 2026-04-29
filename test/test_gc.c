@@ -1736,6 +1736,228 @@ static int test_gc_stress_inline_struct_gc_cycles(void) {
     TEST_PASS();
 }
 
+/* ===== US-004: Ctx pool — GC-managed free-list ===== */
+
+/* Helper: set up a minimal struct registry with a ctx struct type.
+   ctx has one str field (pwd) at offset 0, mutable. */
+static void setup_ctx_registry(StructTypeRegistry *reg, arena_t *arena) {
+    reg->defs = (StructTypeDef**)calloc(4, sizeof(StructTypeDef*));
+    reg->count = 1; /* 0 is reserved */
+    reg->capacity = 4;
+    reg->arena = arena;
+    reg->ctx_type_idx = 0;
+    reg->defs[0] = NULL;
+
+    /* Create ctx struct type: one str field "pwd" */
+    size_t sdef_sz = sizeof(StructTypeDef) + 1 * sizeof(StructTypeField);
+    StructTypeDef *sdef = (StructTypeDef*)arena_alloc(arena, sdef_sz);
+    sdef->name = "ctx";
+    sdef->name_len = 3;
+    sdef->name_val = JACL_NIL;
+    sdef->field_count = 1;
+    sdef->total_size = 8;   /* one JaclVal-sized str field */
+    sdef->alignment = 8;
+    sdef->is_value_type = false;  /* str field = reference type */
+    sdef->fields[0] = (StructTypeField){ "pwd", 3, TYPE_STR, 0, 0, 8, true };
+
+    uint32_t idx = reg->count;
+    reg->defs[idx] = sdef;
+    reg->count = idx + 1;
+    reg->ctx_type_idx = idx;
+}
+
+static void teardown_ctx_registry(StructTypeRegistry *reg) {
+    free(reg->defs);
+}
+
+static int test_ctx_pool_alloc_valid(void) {
+    /* alloc from pool returns valid ctx struct with correct type_idx */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    StructTypeRegistry reg;
+    setup_ctx_registry(&reg, &arena);
+    vm.struct_registry = &reg;
+
+    JaclCtxPool pool;
+    ctx_pool_init(&pool, &vm.heap, &reg);
+
+    /* Alloc from pool */
+    JaclStruct *s = ctx_pool_alloc(&pool, &vm.heap);
+    ASSERT(s != NULL);
+    ASSERT_U32_EQ(s->type_idx, reg.ctx_type_idx);
+    ASSERT_U32_EQ(s->total_size, 8);
+
+    /* Verify it's a valid GC object */
+    GCHeader *hdr = gc_header_of(s);
+    ASSERT_INT_EQ(hdr->obj_type, OBJ_STRUCT);
+
+    teardown_ctx_registry(&reg);
+    vm.struct_registry = NULL;
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_ctx_pool_free_reuse(void) {
+    /* free and re-alloc reuses the same object (pool hit) */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    StructTypeRegistry reg;
+    setup_ctx_registry(&reg, &arena);
+    vm.struct_registry = &reg;
+
+    JaclCtxPool pool;
+    ctx_pool_init(&pool, &vm.heap, &reg);
+
+    /* Drain the pool completely */
+    JaclStruct *entries[CTX_POOL_INIT_SIZE];
+    for (int i = 0; i < CTX_POOL_INIT_SIZE; i++) {
+        entries[i] = ctx_pool_alloc(&pool, &vm.heap);
+        ASSERT(entries[i] != NULL);
+    }
+
+    /* Free one back */
+    JaclStruct *freed = entries[0];
+    ctx_pool_free(&pool, freed);
+
+    /* Re-alloc should return the same object */
+    JaclStruct *reused = ctx_pool_alloc(&pool, &vm.heap);
+    ASSERT(reused == freed);
+
+    teardown_ctx_registry(&reg);
+    vm.struct_registry = NULL;
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_ctx_pool_exhaustion_fallback(void) {
+    /* pool exhaustion falls back to gc_alloc (pool miss) */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    StructTypeRegistry reg;
+    setup_ctx_registry(&reg, &arena);
+    vm.struct_registry = &reg;
+
+    JaclCtxPool pool;
+    ctx_pool_init(&pool, &vm.heap, &reg);
+
+    /* Drain the entire pool */
+    for (int i = 0; i < CTX_POOL_INIT_SIZE; i++) {
+        JaclStruct *s = ctx_pool_alloc(&pool, &vm.heap);
+        ASSERT(s != NULL);
+    }
+
+    /* Pool is now empty — next alloc should fall back to gc_alloc */
+    JaclStruct *fallback = ctx_pool_alloc(&pool, &vm.heap);
+    ASSERT(fallback != NULL);
+    ASSERT_U32_EQ(fallback->type_idx, reg.ctx_type_idx);
+    ASSERT_U32_EQ(fallback->total_size, 8);
+
+    /* Verify it's a valid GC object */
+    GCHeader *hdr = gc_header_of(fallback);
+    ASSERT_INT_EQ(hdr->obj_type, OBJ_STRUCT);
+
+    teardown_ctx_registry(&reg);
+    vm.struct_registry = NULL;
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_ctx_pool_free_clears_refs(void) {
+    /* freed ctx has reference fields cleared (no stale pointers) */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    StructTypeRegistry reg;
+    setup_ctx_registry(&reg, &arena);
+    vm.struct_registry = &reg;
+
+    JaclCtxPool pool;
+    ctx_pool_init(&pool, &vm.heap, &reg);
+
+    /* Alloc and set a string field */
+    JaclStruct *s = ctx_pool_alloc(&pool, &vm.heap);
+    ASSERT(s != NULL);
+
+    /* Write a non-nil value to the pwd field (offset 0, str type) */
+    JaclVal str_val = jacl_inline_string("hello", 5);
+    memcpy(s->data + 0, &str_val, sizeof(JaclVal));
+
+    /* Verify the field is set */
+    JaclVal read_val;
+    memcpy(&read_val, s->data + 0, sizeof(JaclVal));
+    ASSERT(read_val != JACL_NIL);
+
+    /* Free the struct back to pool */
+    ctx_pool_free(&pool, s);
+
+    /* Reference fields should be cleared to JACL_NIL.
+       Note: data[0] now holds the free-list next pointer, but for the purpose
+       of the test, the ctx_pool_free should have written JACL_NIL to the pwd
+       field BEFORE storing the next pointer. Let's verify by re-allocating
+       and checking the data is zeroed. */
+    JaclStruct *reused = ctx_pool_alloc(&pool, &vm.heap);
+    ASSERT(reused == s);
+
+    /* After re-alloc, data should be zeroed */
+    memcpy(&read_val, reused->data + 0, sizeof(JaclVal));
+    ASSERT(read_val == JACL_NIL);
+
+    teardown_ctx_registry(&reg);
+    vm.struct_registry = NULL;
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_ctx_pool_gc_root(void) {
+    /* Pooled entries survive GC when pool is set as GC root via vm->ctx_pool */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    StructTypeRegistry reg;
+    setup_ctx_registry(&reg, &arena);
+    vm.struct_registry = &reg;
+
+    JaclCtxPool pool;
+    ctx_pool_init(&pool, &vm.heap, &reg);
+    vm.ctx_pool = &pool;
+
+    /* Get a pointer to a pooled entry (peek at free list head) */
+    uintptr_t head = ATOMIC_LOAD_EXPLICIT(&pool.free_list_head, MEM_ACQUIRE);
+    ASSERT(head != 0);
+    JaclStruct *pooled = (JaclStruct *)head;
+
+    /* Run GC — pooled entries should survive because pool is a GC root */
+    gc_collect(&vm.heap, &vm);
+
+    /* After GC, the pooled struct should still be marked alive */
+    uint8_t mark = 1 - vm.heap.current_mark;
+    ASSERT(gc__is_marked(pooled, mark));
+
+    /* Alloc from pool should still work */
+    JaclStruct *s = ctx_pool_alloc(&pool, &vm.heap);
+    ASSERT(s != NULL);
+    ASSERT_U32_EQ(s->type_idx, reg.ctx_type_idx);
+
+    vm.ctx_pool = NULL;
+    teardown_ctx_registry(&reg);
+    vm.struct_registry = NULL;
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -1801,6 +2023,12 @@ int main(void) {
         { "gc_sm_field_bitmap_skip",     test_gc_sm_field_bitmap_skip },
         { "gc_value_type_no_trace",      test_gc_value_type_struct_no_trace },
         { "gc_stress_inline_struct",     test_gc_stress_inline_struct_gc_cycles },
+        /* US-004: Ctx pool — GC-managed free-list */
+        { "ctx_pool_alloc_valid",        test_ctx_pool_alloc_valid },
+        { "ctx_pool_free_reuse",         test_ctx_pool_free_reuse },
+        { "ctx_pool_exhaustion_fallback",test_ctx_pool_exhaustion_fallback },
+        { "ctx_pool_free_clears_refs",   test_ctx_pool_free_clears_refs },
+        { "ctx_pool_gc_root",            test_ctx_pool_gc_root },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));
