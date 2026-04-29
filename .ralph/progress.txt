@@ -200,3 +200,24 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
   - with-ctx override path intentionally skips mutability check — fork creates a new instance so all fields are writable
   - Nesting depth capped at 8 (runtime error if exceeded)
 ---
+
+## 2026-04-29 - US-010
+- Implemented SM integration — ctx across suspension points
+- Added implicit __ctx field to every SM-compiled proc's StateLayout (always added after liveness optimization, never pruned)
+- Added ctx_field_idx to SuspensionAnalysis (both compiler.c and jacl.h)
+- On SM entry (resume_point == 0): emits OP_GET_CTX + OP_SET_STATE_FIELD to save vm->ctx
+- On SM resume (resume_point > 0): dispatch table emits OP_GET_STATE_FIELD + OP_SET_CTX before jumping to resume label
+- Added OP_SET_CTX opcode: pops value from stack, stores in vm->ctx with write barrier
+- Added Phase 1c in compiler_compile: pre-registers ctx field declarations before Phase 2 proc hoisting
+- Added ctx_pre_registered flag to Compiler struct (both compiler.c and jacl.h)
+- Modified AST_CTX_DECL handler: allows pre-registered fields in SM body context (scope_depth > 0)
+- Fixed 8 sm_field_count assertions in test_yield.c (all +1 for __ctx)
+- Files changed: src/bytecode.c, src/compiler.c, src/jacl.h, src/vm.c, test/test_yield.c
+- New test files: test/jacl/ctx_sm_await.jacl, ctx_sm_set_persist.jacl, ctx_sm_with_ctx_await.jacl
+- **Learnings for future iterations:**
+  - When top-level code suspends, proc definitions (Phase 2) are compiled before non-proc statements (Phase 3) — ctx field declarations must be pre-registered
+  - SM body compilers have scope_depth=1 even for top-level code — use root->ctx_pre_registered to distinguish from actual nested scopes
+  - __ctx field is added AFTER liveness optimization to prevent pruning (it always crosses suspension boundaries)
+  - [str? $x] pattern fails inside SM procs after await — pre-existing issue, not related to ctx
+  - All SM procs now have +1 field count due to __ctx — test assertions must account for this
+---
