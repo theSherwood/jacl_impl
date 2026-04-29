@@ -339,7 +339,7 @@ void gc_concurrent_trigger(void *runtime_ptr);
 JaclVal runtime__create_resolve_closure(ThreadHeap *heap, arena_t *arena,
                                                 JaclVal future_val);
 void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
-                                        JaclVal future_val);
+                                        JaclVal future_val, JaclVal parent_ctx);
 void runtime__schedule_continuation(void *runtime_ptr,
                                             JaclClosure *continuation,
                                             JaclVal result);
@@ -352,10 +352,12 @@ void runtime__schedule_waiters(void *runtime_ptr,
 void runtime__submit_parallel_task(void *runtime_ptr,
                                            JaclClosure *closure,
                                            JaclVal agg_val,
-                                           uint32_t index);
+                                           uint32_t index,
+                                           JaclVal parent_ctx);
 void runtime__submit_race_task(void *runtime_ptr,
                                        JaclClosure *closure,
-                                       JaclVal agg_val);
+                                       JaclVal agg_val,
+                                       JaclVal parent_ctx);
 void runtime__complete_parallel_slot(void *runtime_ptr,
                                              VM *vm,
                                              JaclVal agg_val,
@@ -4426,11 +4428,25 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         if (vm->runtime) {
           /* Runtime mode: submit task to worker thread pool */
-          runtime__submit_spawn_task(vm->runtime, cl, f);
+          runtime__submit_spawn_task(vm->runtime, cl, f, vm->ctx);
           result = vm__push(vm, f);
           if (result != VM_OK) return result;
         } else {
           /* Single-threaded mode: execute closure synchronously */
+
+          /* Fork ctx for spawned task isolation */
+          JaclVal saved_ctx = vm->ctx;
+          if (vm->ctx != JACL_NIL && vm->ctx_pool) {
+            JaclStruct *parent_struct = jacl_as_struct_ptr(vm->ctx);
+            JaclStruct *forked = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
+            if (forked) {
+              StructTypeRegistry *reg = vm->struct_registry;
+              StructTypeDef *sdef = reg->defs[reg->ctx_type_idx];
+              memcpy(forked->data, parent_struct->data, sdef->total_size);
+              vm->ctx = jacl_struct_val(forked);
+            }
+          }
+
           uint8_t *saved_ip = vm->ip;
           BytecodeChunk *saved_chunk = vm->chunk;
           uint32_t saved_frame_count = vm->frame_count;
@@ -4478,12 +4494,23 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           } else if (sub != VM_OK) {
             JaclVal err = jacl_set_error(jacl_inline_string("error", 5));
             jacl_future_error(fut, err, vm->grey_buf, vm->gc_active_ptr);
+            /* Restore ctx after spawn error */
+            if (vm->ctx != saved_ctx && vm->ctx != JACL_NIL && vm->ctx_pool) {
+              ctx_pool_free(vm->ctx_pool, jacl_as_struct_ptr(vm->ctx));
+            }
+            vm->ctx = saved_ctx;
             result = vm__push(vm, f);
             if (result != VM_OK) return result;
             break;
           }
           jacl_future_resolve(fut, spawn_result,
                               vm->grey_buf, vm->gc_active_ptr);
+
+          /* Restore ctx after spawn completion */
+          if (vm->ctx != saved_ctx && vm->ctx != JACL_NIL && vm->ctx_pool) {
+            ctx_pool_free(vm->ctx_pool, jacl_as_struct_ptr(vm->ctx));
+          }
+          vm->ctx = saved_ctx;
 
           result = vm__push(vm, f);
           if (result != VM_OK) return result;
@@ -4593,7 +4620,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
           for (uint8_t i = 0; i < n; i++) {
             JaclClosure *cl = jacl_as_closure(closures[i]);
-            runtime__submit_parallel_task(vm->runtime, cl, agg_val, i);
+            runtime__submit_parallel_task(vm->runtime, cl, agg_val, i, vm->ctx);
           }
 
           /* Suspend: return from vm__run, worker picks up next task */
@@ -4608,6 +4635,19 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
           for (uint8_t i = 0; i < n; i++) {
             JaclClosure *cl = jacl_as_closure(closures[i]);
+
+            /* Fork ctx for parallel body isolation */
+            JaclVal par_saved_ctx = vm->ctx;
+            if (vm->ctx != JACL_NIL && vm->ctx_pool) {
+              JaclStruct *par_parent = jacl_as_struct_ptr(vm->ctx);
+              JaclStruct *par_forked = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
+              if (par_forked) {
+                StructTypeRegistry *par_reg = vm->struct_registry;
+                StructTypeDef *par_sdef = par_reg->defs[par_reg->ctx_type_idx];
+                memcpy(par_forked->data, par_parent->data, par_sdef->total_size);
+                vm->ctx = jacl_struct_val(par_forked);
+              }
+            }
 
             uint8_t *saved_ip = vm->ip;
             BytecodeChunk *saved_chunk = vm->chunk;
@@ -4710,6 +4750,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                 if (!has_error) { has_error = true; first_error = results[i]; }
               }
             }
+
+            /* Restore ctx after parallel body */
+            if (vm->ctx != par_saved_ctx && vm->ctx != JACL_NIL && vm->ctx_pool) {
+              ctx_pool_free(vm->ctx_pool, jacl_as_struct_ptr(vm->ctx));
+            }
+            vm->ctx = par_saved_ctx;
           }
 
           /* Build continuation argument */
@@ -4769,7 +4815,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
           for (uint8_t i = 0; i < n; i++) {
             JaclClosure *cl = jacl_as_closure(closures[i]);
-            runtime__submit_race_task(vm->runtime, cl, agg_val);
+            runtime__submit_race_task(vm->runtime, cl, agg_val, vm->ctx);
           }
 
           /* Suspend: return from vm__run, worker picks up next task */
@@ -4783,6 +4829,19 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
           for (uint8_t i = 0; i < n; i++) {
             JaclClosure *cl = jacl_as_closure(closures[i]);
+
+            /* Fork ctx for race body isolation */
+            JaclVal race_saved_ctx = vm->ctx;
+            if (vm->ctx != JACL_NIL && vm->ctx_pool) {
+              JaclStruct *race_parent = jacl_as_struct_ptr(vm->ctx);
+              JaclStruct *race_forked = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
+              if (race_forked) {
+                StructTypeRegistry *race_reg = vm->struct_registry;
+                StructTypeDef *race_sdef = race_reg->defs[race_reg->ctx_type_idx];
+                memcpy(race_forked->data, race_parent->data, race_sdef->total_size);
+                vm->ctx = jacl_struct_val(race_forked);
+              }
+            }
 
             uint8_t *saved_ip = vm->ip;
             BytecodeChunk *saved_chunk = vm->chunk;
@@ -4864,6 +4923,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                 if (sub == VM_OK && vm->stack_top > 0) vm->stack_top--;
               }
             }
+
+            /* Restore ctx after race body */
+            if (vm->ctx != race_saved_ctx && vm->ctx != JACL_NIL && vm->ctx_pool) {
+              ctx_pool_free(vm->ctx_pool, jacl_as_struct_ptr(vm->ctx));
+            }
+            vm->ctx = race_saved_ctx;
           }
 
           /* Push result directly (SM mode or nil continuation) */

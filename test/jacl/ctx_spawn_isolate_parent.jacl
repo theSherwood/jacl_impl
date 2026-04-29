@@ -1,0 +1,11 @@
+# expect: 42
+# Test: parent mutates ctx after spawn — spawned task ctx unchanged
+# The spawned task sleeps briefly to ensure parent mutation happens during execution,
+# but the spawned task should still see the value at spawn time (42).
+ctx mut i32 level = 42
+proc main {} {
+  def f [spawn { $ctx->level }]
+  set $ctx->level 99
+  print [await $f]
+}
+main

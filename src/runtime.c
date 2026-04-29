@@ -27,6 +27,7 @@ typedef struct {
     void *data;
     JaclVal gc_root;   /* Tagged value for GC root scanning, JACL_NIL if none */
     JaclVal gc_root2;  /* Second GC root: result for continuations, closure for spawn/parallel/race */
+    JaclVal gc_root3;  /* Third GC root: parent ctx for spawn/parallel/race ctx forking */
 } RuntimeTask;
 
 /* ======================================================================
@@ -451,6 +452,7 @@ void runtime_submit(Runtime *rt, void (*fn)(void *), void *data) {
     task->data     = data;
     task->gc_root  = JACL_NIL;
     task->gc_root2 = JACL_NIL;
+    task->gc_root3 = JACL_NIL;
 
     runtime__push_inbox(rt, task);
 }
@@ -506,6 +508,7 @@ void runtime_submit_task(Runtime *rt, JaclClosure *closure,
     task->gc_root  = JACL_TAG_CLOSURE
                    | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
     task->gc_root2 = JACL_NIL;
+    task->gc_root3 = JACL_NIL;
 
     runtime__push_inbox(rt, task);
 
@@ -540,6 +543,7 @@ void gc__scan_deque(rt_deque_deque *dq, GCMarkStack *ms) {
             RuntimeTask *task = (RuntimeTask *)val;
             gc__ms_push_val(ms, task->gc_root);
             gc__ms_push_val(ms, task->gc_root2);
+            gc__ms_push_val(ms, task->gc_root3);
         }
     }
 }
@@ -583,6 +587,7 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
             RuntimeTask *task = (RuntimeTask *)ce;
             gc__ms_push_val(ms, task->gc_root);
             gc__ms_push_val(ms, task->gc_root2);
+            gc__ms_push_val(ms, task->gc_root3);
         }
 
         /* 2–3. Deque snapshots (public + private) */
@@ -632,6 +637,7 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
         RuntimeTask *task = (RuntimeTask *)rt->inbox[i];
         gc__ms_push_val(ms, task->gc_root);
         gc__ms_push_val(ms, task->gc_root2);
+        gc__ms_push_val(ms, task->gc_root3);
     }
     MUTEX_UNLOCK(rt->inbox_mutex);
 }
@@ -1090,6 +1096,7 @@ void runtime__schedule_continuation(void *runtime_ptr,
     task->data     = ctd;
     task->gc_root  = jacl_closure_ptr(continuation);
     task->gc_root2 = result;
+    task->gc_root3 = JACL_NIL;
 
     if (continuation->pinned && continuation->pin_worker_id >= 0) {
         runtime__push_pinned(rt, task, continuation->pin_worker_id);
@@ -1160,6 +1167,7 @@ void runtime__schedule_sm_resumption(void *runtime_ptr,
     task->data     = smd;
     task->gc_root  = state_machine;
     task->gc_root2 = result;
+    task->gc_root3 = JACL_NIL;
 
     /* Respect pinning from the SM closure */
     JaclStateMachine *sm = jacl_as_state_machine(state_machine);
@@ -1187,6 +1195,7 @@ void runtime__schedule_waiters(void *runtime_ptr,
 typedef struct {
     JaclClosure *closure;
     JaclVal      future_val;
+    JaclVal      parent_ctx;  /* parent's ctx to fork for spawned task */
 } SpawnTaskData;
 
 void runtime__spawn_task_exec(void *data) {
@@ -1195,6 +1204,19 @@ void runtime__spawn_task_exec(void *data) {
     VM *vm = &self->vm;
     JaclClosure *cl = std->closure;
     JaclFuture *fut = jacl_as_future(std->future_val);
+
+    /* Fork parent ctx for spawned task isolation */
+    JaclVal saved_worker_ctx = vm->ctx;
+    if (std->parent_ctx != JACL_NIL && vm->ctx_pool) {
+        JaclStruct *parent_struct = jacl_as_struct_ptr(std->parent_ctx);
+        JaclStruct *forked = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
+        if (forked) {
+            StructTypeRegistry *reg = vm->struct_registry;
+            StructTypeDef *sdef = reg->defs[reg->ctx_type_idx];
+            memcpy(forked->data, parent_struct->data, sdef->total_size);
+            vm->ctx = jacl_struct_val(forked);
+        }
+    }
 
     if (cl->is_sm_compiled) {
         /* SM closure: create state machine, set error_k to resolve_k,
@@ -1256,16 +1278,24 @@ void runtime__spawn_task_exec(void *data) {
         }
     }
 
+    /* Restore worker's original ctx, free forked ctx to pool */
+    if (std->parent_ctx != JACL_NIL && vm->ctx_pool && vm->ctx != saved_worker_ctx) {
+        JaclStruct *forked = jacl_as_struct_ptr(vm->ctx);
+        ctx_pool_free(vm->ctx_pool, forked);
+    }
+    vm->ctx = saved_worker_ctx;
+
     free(std);
 }
 
 void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
-                                        JaclVal future_val) {
+                                        JaclVal future_val, JaclVal parent_ctx) {
     Runtime *rt = (Runtime *)runtime_ptr;
 
     SpawnTaskData *std = (SpawnTaskData *)malloc(sizeof(SpawnTaskData));
     std->closure    = closure;
     std->future_val = future_val;
+    std->parent_ctx = parent_ctx;
 
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
     task->fn       = runtime__spawn_task_exec;
@@ -1273,6 +1303,7 @@ void runtime__submit_spawn_task(void *runtime_ptr, JaclClosure *closure,
     task->gc_root  = future_val; /* Future is the GC root for this task */
     task->gc_root2 = JACL_TAG_CLOSURE
                    | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
+    task->gc_root3 = parent_ctx; /* Keep parent ctx alive until task starts */
 
     if (closure->pinned && closure->pin_worker_id >= 0) {
         runtime__push_pinned(rt, task, closure->pin_worker_id);
@@ -1293,6 +1324,7 @@ typedef struct {
     JaclClosure  *closure;
     JaclVal       agg_val;      /* tagged pointer to ParallelAgg */
     uint32_t      index;        /* position in results array */
+    JaclVal       parent_ctx;   /* parent's ctx to fork for parallel body */
 } ParallelTaskData;
 
 void runtime__parallel_task_exec(void *data) {
@@ -1301,6 +1333,19 @@ void runtime__parallel_task_exec(void *data) {
     VM *vm = &self->vm;
     JaclClosure *cl = ptd->closure;
     (void)as_parallel_agg(ptd->agg_val); /* validate tag */
+
+    /* Fork parent ctx for parallel body isolation */
+    JaclVal saved_worker_ctx = vm->ctx;
+    if (ptd->parent_ctx != JACL_NIL && vm->ctx_pool) {
+        JaclStruct *parent_struct = jacl_as_struct_ptr(ptd->parent_ctx);
+        JaclStruct *forked = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
+        if (forked) {
+            StructTypeRegistry *reg = vm->struct_registry;
+            StructTypeDef *sdef = reg->defs[reg->ctx_type_idx];
+            memcpy(forked->data, parent_struct->data, sdef->total_size);
+            vm->ctx = jacl_struct_val(forked);
+        }
+    }
 
     if (cl->is_sm_compiled) {
         /* SM closure: create state machine, set error_k to parallel_k */
@@ -1349,19 +1394,28 @@ void runtime__parallel_task_exec(void *data) {
                                          ptd->agg_val, ptd->index, task_result);
     }
 
+    /* Restore worker's original ctx, free forked ctx to pool */
+    if (ptd->parent_ctx != JACL_NIL && vm->ctx_pool && vm->ctx != saved_worker_ctx) {
+        JaclStruct *forked = jacl_as_struct_ptr(vm->ctx);
+        ctx_pool_free(vm->ctx_pool, forked);
+    }
+    vm->ctx = saved_worker_ctx;
+
     free(ptd);
 }
 
 void runtime__submit_parallel_task(void *runtime_ptr,
                                            JaclClosure *closure,
                                            JaclVal agg_val,
-                                           uint32_t index) {
+                                           uint32_t index,
+                                           JaclVal parent_ctx) {
     Runtime *rt = (Runtime *)runtime_ptr;
 
     ParallelTaskData *ptd = (ParallelTaskData *)malloc(sizeof(ParallelTaskData));
-    ptd->closure  = closure;
-    ptd->agg_val  = agg_val;
-    ptd->index    = index;
+    ptd->closure    = closure;
+    ptd->agg_val    = agg_val;
+    ptd->index      = index;
+    ptd->parent_ctx = parent_ctx;
 
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
     task->fn       = runtime__parallel_task_exec;
@@ -1369,6 +1423,7 @@ void runtime__submit_parallel_task(void *runtime_ptr,
     task->gc_root  = agg_val; /* Aggregate is the GC root — traces continuation + results */
     task->gc_root2 = JACL_TAG_CLOSURE
                    | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
+    task->gc_root3 = parent_ctx;
 
     if (closure->pinned && closure->pin_worker_id >= 0) {
         runtime__push_pinned(rt, task, closure->pin_worker_id);
@@ -1388,6 +1443,7 @@ void runtime__submit_parallel_task(void *runtime_ptr,
 typedef struct {
     JaclClosure  *closure;
     JaclVal       agg_val;      /* tagged pointer to RaceAgg */
+    JaclVal       parent_ctx;   /* parent's ctx to fork for race body */
 } RaceTaskData;
 
 void runtime__race_task_exec(void *data) {
@@ -1395,6 +1451,19 @@ void runtime__race_task_exec(void *data) {
     WorkerThread *self = rt__current_worker;
     VM *vm = &self->vm;
     JaclClosure *cl = rtd->closure;
+
+    /* Fork parent ctx for race body isolation */
+    JaclVal saved_worker_ctx = vm->ctx;
+    if (rtd->parent_ctx != JACL_NIL && vm->ctx_pool) {
+        JaclStruct *parent_struct = jacl_as_struct_ptr(rtd->parent_ctx);
+        JaclStruct *forked = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
+        if (forked) {
+            StructTypeRegistry *reg = vm->struct_registry;
+            StructTypeDef *sdef = reg->defs[reg->ctx_type_idx];
+            memcpy(forked->data, parent_struct->data, sdef->total_size);
+            vm->ctx = jacl_struct_val(forked);
+        }
+    }
 
     if (cl->is_sm_compiled) {
         /* SM closure: create state machine, set error_k to race_k */
@@ -1441,17 +1510,26 @@ void runtime__race_task_exec(void *data) {
                                      rtd->agg_val, task_result);
     }
 
+    /* Restore worker's original ctx, free forked ctx to pool */
+    if (rtd->parent_ctx != JACL_NIL && vm->ctx_pool && vm->ctx != saved_worker_ctx) {
+        JaclStruct *forked = jacl_as_struct_ptr(vm->ctx);
+        ctx_pool_free(vm->ctx_pool, forked);
+    }
+    vm->ctx = saved_worker_ctx;
+
     free(rtd);
 }
 
 void runtime__submit_race_task(void *runtime_ptr,
                                        JaclClosure *closure,
-                                       JaclVal agg_val) {
+                                       JaclVal agg_val,
+                                       JaclVal parent_ctx) {
     Runtime *rt = (Runtime *)runtime_ptr;
 
     RaceTaskData *rtd = (RaceTaskData *)malloc(sizeof(RaceTaskData));
-    rtd->closure  = closure;
-    rtd->agg_val  = agg_val;
+    rtd->closure    = closure;
+    rtd->agg_val    = agg_val;
+    rtd->parent_ctx = parent_ctx;
 
     RuntimeTask *task = (RuntimeTask *)malloc(sizeof(RuntimeTask));
     task->fn       = runtime__race_task_exec;
@@ -1459,6 +1537,7 @@ void runtime__submit_race_task(void *runtime_ptr,
     task->gc_root  = agg_val;
     task->gc_root2 = JACL_TAG_CLOSURE
                    | ((uint64_t)(uintptr_t)closure & JACL_PAYLOAD_MASK);
+    task->gc_root3 = parent_ctx;
 
     if (closure->pinned && closure->pin_worker_id >= 0) {
         runtime__push_pinned(rt, task, closure->pin_worker_id);
@@ -1478,7 +1557,7 @@ VMResult rt_run_to_completion(Runtime *rt, JaclClosure *closure,
     JaclVal completion = jacl_future(&rt->workers[0].vm.heap);
     JaclFuture *cfut = jacl_as_future(completion);
 
-    runtime__submit_spawn_task(rt, closure, completion);
+    runtime__submit_spawn_task(rt, closure, completion, JACL_NIL);
 
     /* Block until the completion future resolves (with timeout) */
     for (int ms = 0; ms < 5000; ms++) {
