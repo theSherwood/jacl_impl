@@ -1,0 +1,3 @@
+# expect-error: no field 'missing' on ctx
+# Test: unknown field produces compile error
+print $ctx->missing

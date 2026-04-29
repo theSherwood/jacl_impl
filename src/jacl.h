@@ -969,6 +969,7 @@ typedef struct {
   uint32_t    offset;
   uint32_t    size;
   bool        is_mutable;  /* true if field can be written via set */
+  JaclVal     default_val; /* default value for ctx fields (JACL_NIL if none) */
 } StructTypeField;
 
 typedef struct {

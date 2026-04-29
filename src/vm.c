@@ -8804,7 +8804,16 @@ static void ctx__init_vm(VM *vm, JaclCtxPool *pool_storage) {
     JaclStruct *ctx_struct = ctx_pool_alloc(pool_storage, &vm->heap);
     StructTypeDef *sdef = reg->defs[reg->ctx_type_idx];
 
-    /* Set built-in pwd field (field 0) to getcwd() */
+    /* Initialize all fields with their compile-time defaults */
+    for (uint32_t i = 0; i < sdef->field_count; i++) {
+        if (sdef->fields[i].default_val != JACL_NIL) {
+            vm__struct_write_field(ctx_struct, sdef->fields[i].offset,
+                                   sdef->fields[i].type,
+                                   sdef->fields[i].default_val);
+        }
+    }
+
+    /* Override built-in pwd field (field 0) with actual getcwd() */
     char cwd_buf[4096];
     if (getcwd(cwd_buf, sizeof(cwd_buf))) {
         size_t len = strlen(cwd_buf);

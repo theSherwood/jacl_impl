@@ -1,0 +1,3 @@
+# expect: true
+# Test: read built-in pwd field returns a string
+print [== $ctx->pwd $ctx->pwd]

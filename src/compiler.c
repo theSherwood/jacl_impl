@@ -194,6 +194,7 @@ typedef struct {
   uint32_t    offset;          /* byte offset in struct memory (C-ABI) */
   uint32_t    size;            /* field size in bytes (C-ABI) */
   bool        is_mutable;      /* true if field can be written via set */
+  JaclVal     default_val;     /* default value for ctx fields (JACL_NIL if none) */
 } StructTypeField;
 
 typedef struct {
@@ -269,6 +270,9 @@ typedef struct {
   JaclType    type;
   uint32_t    struct_type_idx;
   bool        is_mutable;
+  uint32_t    offset;   /* byte offset within ctx struct (computed on add) */
+  uint32_t    size;     /* field size in bytes (computed on add) */
+  JaclVal     default_val; /* default value for ctx initialization */
 } CtxField;
 
 typedef struct {
@@ -280,13 +284,32 @@ static void ctx_field_list__init(CtxFieldList* list) {
   list->count = 0;
 }
 
-/* Add a built-in or user-declared ctx field. Returns false if full or duplicate. */
+/* Forward declarations for layout helpers used by ctx field offset computation */
+uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx);
+uint32_t struct__type_align(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx);
+uint32_t struct__align_up(uint32_t offset, uint32_t align);
+
+/* Add a built-in or user-declared ctx field. Returns false if full or duplicate.
+   Computes byte offset incrementally using C-ABI layout rules. */
 static bool ctx_field_list__add(CtxFieldList* list,
                                 const char* name, uint32_t name_len,
                                 const char* type_name, uint32_t type_name_len,
                                 JaclType type, uint32_t struct_type_idx,
-                                bool is_mutable) {
+                                bool is_mutable,
+                                StructTypeRegistry* reg,
+                                JaclVal default_val) {
   if (list->count >= CTX_MAX_FIELDS) return false;
+
+  /* Compute offset from previous fields */
+  uint32_t offset = 0;
+  if (list->count > 0) {
+    CtxField* prev = &list->fields[list->count - 1];
+    offset = prev->offset + prev->size;
+  }
+  uint32_t fsize  = struct__type_size(type, reg, struct_type_idx);
+  uint32_t falign = struct__type_align(type, reg, struct_type_idx);
+  offset = struct__align_up(offset, falign);
+
   CtxField* f = &list->fields[list->count++];
   f->name           = name;
   f->name_len       = name_len;
@@ -295,6 +318,9 @@ static bool ctx_field_list__add(CtxFieldList* list,
   f->type           = type;
   f->struct_type_idx = struct_type_idx;
   f->is_mutable     = is_mutable;
+  f->offset         = offset;
+  f->size           = fsize;
+  f->default_val    = default_val;
   return true;
 }
 
@@ -307,11 +333,6 @@ static bool ctx_field_list__has(CtxFieldList* list, const char* name, uint32_t n
   }
   return false;
 }
-
-/* Forward declarations for layout helpers used by ctx finalization */
-uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx);
-uint32_t struct__type_align(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx);
-uint32_t struct__align_up(uint32_t offset, uint32_t align);
 
 /* Finalize the ctx struct: build a StructTypeDef from accumulated ctx fields
    and register it in the struct registry. Called after all modules are compiled.
@@ -344,6 +365,7 @@ static uint32_t ctx_field_list__finalize(CtxFieldList* list, StructTypeRegistry*
     tmp_fields[i].offset         = offset;
     tmp_fields[i].size           = fsize;
     tmp_fields[i].is_mutable     = cf->is_mutable;
+    tmp_fields[i].default_val    = cf->default_val;
 
     offset += fsize;
     if (falign > max_align) max_align = falign;
@@ -527,6 +549,7 @@ uint32_t compiler__register_inline_struct(
     tmp_fields[tmp_count].offset         = offset;
     tmp_fields[tmp_count].size           = fsize;
     tmp_fields[tmp_count].is_mutable     = false;
+    tmp_fields[tmp_count].default_val    = JACL_NIL;
     tmp_count++;
 
     offset += fsize;
@@ -9067,6 +9090,67 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     const char* field_name = args[1]->data.lit_string.value;
     uint32_t field_name_len = args[1]->data.lit_string.length;
 
+    /* US-007: $ctx->field — resolve from CtxFieldList during compilation */
+    if (struct_type == TYPE_STRUCT && struct_idx == CTX_STRUCT_PENDING) {
+      CtxFieldList* ctx_fl = compiler__get_ctx_fields(c);
+      if (ctx_fl) {
+        uint32_t fi;
+        for (fi = 0; fi < ctx_fl->count; fi++) {
+          if (ctx_fl->fields[fi].name_len == field_name_len &&
+              memcmp(ctx_fl->fields[fi].name, field_name, field_name_len) == 0)
+            break;
+        }
+        if (fi == ctx_fl->count) {
+          char err_msg[128];
+          snprintf(err_msg, sizeof(err_msg), "no field '%.*s' on ctx",
+                   (int)field_name_len, field_name);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        CtxField* cf = &ctx_fl->fields[fi];
+        if (is_set) {
+          /* US-008 will handle set — for now reject */
+          if (!cf->is_mutable) {
+            char err_msg[192];
+            snprintf(err_msg, sizeof(err_msg),
+                     "cannot mutate immutable field '%.*s' on struct 'ctx'",
+                     (int)cf->name_len, cf->name);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+          JaclType field_type = cf->type;
+          c->expected_type = field_type;
+          compiler__compile_node(c, args[2]);
+          JaclType val_type = c->last_expr_type;
+          c->expected_type = TYPE_DYN;
+          if (field_type != TYPE_DYN && val_type != TYPE_DYN && val_type != field_type) {
+            char err_msg[192];
+            snprintf(err_msg, sizeof(err_msg),
+                     "type error: field '%.*s' of struct 'ctx' expected %s, got %s",
+                     (int)cf->name_len, cf->name,
+                     type_name(field_type), type_name(val_type));
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+          compiler__emit_byte(c, OP_STRUCT_SET, line);
+          compiler__emit_u16(c, (uint16_t)cf->offset, line);
+          compiler__emit_byte(c, (uint8_t)field_type, line);
+          c->last_expr_type = TYPE_STRUCT;
+          c->last_struct_idx = CTX_STRUCT_PENDING;
+        } else {
+          compiler__emit_byte(c, OP_STRUCT_GET, line);
+          compiler__emit_u16(c, (uint16_t)cf->offset, line);
+          compiler__emit_byte(c, (uint8_t)cf->type, line);
+          c->last_expr_type = cf->type;
+          if (cf->type == TYPE_STRUCT)
+            c->last_struct_idx = cf->struct_type_idx;
+          else
+            c->last_struct_idx = UINT32_MAX;
+        }
+        return;
+      }
+    }
+
     if (struct_type == TYPE_STRUCT && struct_idx != UINT32_MAX) {
       StructTypeRegistry* reg = compiler__get_struct_registry(c);
       if (reg && struct_idx < reg->count && reg->defs[struct_idx]) {
@@ -10377,6 +10461,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         tmp_fields[fi].offset         = offset;
         tmp_fields[fi].size           = fsize;
         tmp_fields[fi].is_mutable     = node->data.defstruct.field_mutable[fi] != 0;
+        tmp_fields[fi].default_val    = JACL_NIL;
 
         offset += fsize;
         if (falign > max_align) max_align = falign;
@@ -10857,7 +10942,8 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_CTX_DECL: {
-      /* ctx [mut] Type name = default_expr — collect field into ctx field list */
+      /* ctx [mut] Type name = default_expr — collect field into ctx field list.
+         Evaluate compile-time constant default to JaclVal for runtime init. */
       if (c->scope_depth > 0) {
         compiler__error(c, line, node->start.column,
                         "ctx declarations must be at module top level");
@@ -10908,16 +10994,61 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         break;
       }
 
+      /* Evaluate compile-time constant default to JaclVal */
+      JaclVal def_val = JACL_NIL;
+      AstNode* dexpr = node->data.ctx_decl.default_expr;
+      if (dexpr) {
+        switch (dexpr->type) {
+          case AST_LIT_INT:
+            if (ftype == TYPE_I32) def_val = jacl_i32(dexpr->data.lit_int.value);
+            else if (ftype == TYPE_U32) def_val = jacl_u32((uint32_t)dexpr->data.lit_int.value);
+            else def_val = jacl_i32(dexpr->data.lit_int.value);
+            break;
+          case AST_LIT_FLOAT:
+            def_val = jacl_f32(dexpr->data.lit_float.value);
+            break;
+          case AST_LIT_STRING: {
+            /* booleans: "true"/"false" are AST_LIT_STRING in JACL */
+            const char* s = dexpr->data.lit_string.value;
+            uint32_t sl = dexpr->data.lit_string.length;
+            if (ftype == TYPE_BOOL) {
+              if (sl == 4 && memcmp(s, "true", 4) == 0)
+                def_val = jacl_bool(true);
+              else if (sl == 5 && memcmp(s, "false", 5) == 0)
+                def_val = jacl_bool(false);
+            } else {
+              /* actual string default */
+              if (sl <= 7) def_val = jacl_inline_string(s, sl);
+              /* longer strings need heap — stored as NIL, handled at runtime */
+            }
+            break;
+          }
+          default:
+            break;
+        }
+      }
+
       /* Add to ctx field list */
       if (!ctx_field_list__add(ctx, field_name, field_name_len,
                                type_name, type_name_len,
-                               ftype, f_struct_idx, is_mutable)) {
+                               ftype, f_struct_idx, is_mutable,
+                               compiler__get_struct_registry(c), def_val)) {
         compiler__error(c, line, node->start.column,
                         "too many ctx fields (max 64)");
         break;
       }
 
-      /* ctx declaration produces nil */
+      /* Emit initialization bytecode: OP_GET_CTX, default_expr, OP_STRUCT_SET */
+      if (node->data.ctx_decl.default_expr) {
+        CtxField* added = &ctx->fields[ctx->count - 1];
+        compiler__emit_byte(c, OP_GET_CTX, line);
+        compiler__compile_node(c, node->data.ctx_decl.default_expr);
+        compiler__emit_byte(c, OP_STRUCT_SET, line);
+        compiler__emit_u16(c, (uint16_t)added->offset, line);
+        compiler__emit_byte(c, (uint8_t)added->type, line);
+        /* OP_STRUCT_SET leaves struct on stack — pop it, push nil as statement result */
+        compiler__emit_byte(c, OP_POP, line);
+      }
       compiler__emit_byte(c, OP_NIL, line);
       break;
     }
@@ -11063,7 +11194,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     CtxFieldList* ctx = (CtxFieldList*)arena_alloc(arena, sizeof(CtxFieldList));
     ctx_field_list__init(ctx);
     /* Built-in: mut str pwd (default = process CWD) */
-    ctx_field_list__add(ctx, "pwd", 3, "str", 3, TYPE_STR, 0, true);
+    ctx_field_list__add(ctx, "pwd", 3, "str", 3, TYPE_STR, 0, true, c.struct_registry, JACL_NIL);
     c.ctx_fields = ctx;
   }
 
@@ -11532,7 +11663,7 @@ ProgramResult jacl_compile_program(const char* root_path,
   {
     CtxFieldList* ctx = (CtxFieldList*)arena_alloc(arena, sizeof(CtxFieldList));
     ctx_field_list__init(ctx);
-    ctx_field_list__add(ctx, "pwd", 3, "str", 3, TYPE_STR, 0, true);
+    ctx_field_list__add(ctx, "pwd", 3, "str", 3, TYPE_STR, 0, true, c.struct_registry, JACL_NIL);
     c.ctx_fields = ctx;
   }
 

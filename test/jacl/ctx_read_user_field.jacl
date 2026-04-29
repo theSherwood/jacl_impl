@@ -1,0 +1,4 @@
+# expect: 42
+# Test: read user-declared field returns correct value
+ctx i32 level = 42
+print $ctx->level
