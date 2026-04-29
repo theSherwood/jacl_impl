@@ -1958,6 +1958,152 @@ static int test_ctx_pool_gc_root(void) {
     TEST_PASS();
 }
 
+/* ===== US-005: vm->ctx register and GC root integration ===== */
+
+static int test_vm_ctx_set_at_startup(void) {
+    /* vm->ctx is set at startup and contains valid struct with pwd field */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    StructTypeRegistry reg;
+    setup_ctx_registry(&reg, &arena);
+    vm.struct_registry = &reg;
+
+    JaclCtxPool pool;
+    ctx_pool_init(&pool, &vm.heap, &reg);
+    vm.ctx_pool = &pool;
+
+    /* Allocate initial ctx (simulating startup) */
+    JaclStruct *ctx_struct = ctx_pool_alloc(&pool, &vm.heap);
+    ASSERT(ctx_struct != NULL);
+    ASSERT_U32_EQ(ctx_struct->type_idx, reg.ctx_type_idx);
+
+    /* Set pwd field to a test string */
+    JaclVal pwd_str = jacl_inline_string("/tmp", 4);
+    vm__struct_write_field(ctx_struct, 0, TYPE_STR, pwd_str);
+
+    /* Store as vm->ctx */
+    vm.ctx = jacl_struct_val(ctx_struct);
+    ASSERT(vm.ctx != JACL_NIL);
+
+    /* Read back the struct and verify pwd */
+    JaclStruct *read_back = jacl_as_struct_ptr(vm.ctx);
+    ASSERT(read_back == ctx_struct);
+    JaclVal read_pwd = vm__struct_read_field(&vm.heap, read_back, 0, TYPE_STR);
+    ASSERT(read_pwd == pwd_str);
+
+    vm.ctx = JACL_NIL;
+    vm.ctx_pool = NULL;
+    teardown_ctx_registry(&reg);
+    vm.struct_registry = NULL;
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_vm_ctx_gc_survives(void) {
+    /* GC cycle does not collect ctx or its pwd string */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    StructTypeRegistry reg;
+    setup_ctx_registry(&reg, &arena);
+    vm.struct_registry = &reg;
+
+    JaclCtxPool pool;
+    ctx_pool_init(&pool, &vm.heap, &reg);
+    vm.ctx_pool = &pool;
+
+    /* Allocate ctx and set a heap-allocated string as pwd */
+    JaclStruct *ctx_struct = ctx_pool_alloc(&pool, &vm.heap);
+    JaclVal pwd_str = jacl_rope_string_create(&vm.heap,
+                          (const uint8_t *)"/home/test/long-path-name", 25);
+    vm__struct_write_field(ctx_struct, 0, TYPE_STR, pwd_str);
+    vm.ctx = jacl_struct_val(ctx_struct);
+
+    /* Run GC — ctx struct and its pwd string should survive */
+    gc_collect(&vm.heap, &vm);
+
+    /* After GC, verify ctx struct is still marked alive */
+    uint8_t mark = 1 - vm.heap.current_mark;
+    ASSERT(gc__is_marked(ctx_struct, mark));
+
+    /* Verify pwd string is also alive (it's a heap object) */
+    void *pwd_ptr = jacl_as_ptr(pwd_str);
+    ASSERT(gc__is_marked(pwd_ptr, mark));
+
+    /* Verify ctx value is still valid and readable */
+    JaclStruct *read_back = jacl_as_struct_ptr(vm.ctx);
+    ASSERT(read_back == ctx_struct);
+    JaclVal read_pwd = vm__struct_read_field(&vm.heap, read_back, 0, TYPE_STR);
+    ASSERT(read_pwd == pwd_str);
+
+    vm.ctx = JACL_NIL;
+    vm.ctx_pool = NULL;
+    teardown_ctx_registry(&reg);
+    vm.struct_registry = NULL;
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
+static int test_vm_ctx_multiple_gc_cycles(void) {
+    /* After multiple GC cycles, ctx fields remain valid and accessible */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    StructTypeRegistry reg;
+    setup_ctx_registry(&reg, &arena);
+    vm.struct_registry = &reg;
+
+    JaclCtxPool pool;
+    ctx_pool_init(&pool, &vm.heap, &reg);
+    vm.ctx_pool = &pool;
+
+    /* Allocate ctx with a heap string */
+    JaclStruct *ctx_struct = ctx_pool_alloc(&pool, &vm.heap);
+    JaclVal pwd_str = jacl_rope_string_create(&vm.heap,
+                          (const uint8_t *)"/workspace/project", 18);
+    vm__struct_write_field(ctx_struct, 0, TYPE_STR, pwd_str);
+    vm.ctx = jacl_struct_val(ctx_struct);
+
+    /* Run multiple GC cycles */
+    for (int cycle = 0; cycle < 5; cycle++) {
+        /* Allocate some garbage to make GC do real work */
+        for (int j = 0; j < 10; j++) {
+            jacl_rope_string_create(&vm.heap,
+                (const uint8_t *)"garbage string data!", 20);
+        }
+
+        gc_collect(&vm.heap, &vm);
+
+        /* After each cycle, ctx struct should survive */
+        uint8_t mark = 1 - vm.heap.current_mark;
+        ASSERT(gc__is_marked(ctx_struct, mark));
+
+        /* pwd string should also survive */
+        void *pwd_ptr = jacl_as_ptr(pwd_str);
+        ASSERT(gc__is_marked(pwd_ptr, mark));
+
+        /* Read back to verify data integrity */
+        JaclStruct *read_back = jacl_as_struct_ptr(vm.ctx);
+        ASSERT(read_back == ctx_struct);
+        JaclVal read_pwd = vm__struct_read_field(&vm.heap, read_back, 0, TYPE_STR);
+        ASSERT(read_pwd == pwd_str);
+    }
+
+    vm.ctx = JACL_NIL;
+    vm.ctx_pool = NULL;
+    teardown_ctx_registry(&reg);
+    vm.struct_registry = NULL;
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -2029,6 +2175,10 @@ int main(void) {
         { "ctx_pool_exhaustion_fallback",test_ctx_pool_exhaustion_fallback },
         { "ctx_pool_free_clears_refs",   test_ctx_pool_free_clears_refs },
         { "ctx_pool_gc_root",            test_ctx_pool_gc_root },
+        /* US-005: vm->ctx register and GC root integration */
+        { "vm_ctx_set_at_startup",       test_vm_ctx_set_at_startup },
+        { "vm_ctx_gc_survives",          test_vm_ctx_gc_survives },
+        { "vm_ctx_multiple_gc_cycles",   test_vm_ctx_multiple_gc_cycles },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -189,6 +189,7 @@ typedef struct {
   StackTrace     stack_trace;    /* most recent error's trace */
   StructTypeRegistry* struct_registry; /* struct type metadata from compiler */
   JaclCtxPool *ctx_pool;       /* ctx struct pool (NULL until initialized) */
+  JaclVal    ctx;              /* current implicit context struct (never NIL during execution) */
   JaclVal*   gc_handle_slots;  /* external GC root handles (owned by embedding layer) */
   uint32_t   gc_handle_count;  /* number of slots in gc_handle_slots */
   /* Native function registry (owned by embedding layer) */
@@ -475,6 +476,7 @@ void vm_init(VM* vm, arena_t* arena) {
   vm->stack_trace.count = 0;
   vm->struct_registry = NULL;
   vm->ctx_pool        = NULL;
+  vm->ctx             = JACL_NIL;
   vm->gc_handle_slots = NULL;
   vm->gc_handle_count = 0;
   vm->call_native       = NULL;
@@ -8779,6 +8781,41 @@ interpret_done:
 
 /* --- Multi-module execution: jacl_exec_program --- */
 
+/* --- ctx subsystem startup ---
+ *
+ * Initialize the ctx pool and allocate the initial ctx struct for a VM.
+ * Sets vm->ctx_pool and vm->ctx.  pool_storage must remain valid for
+ * the VM's lifetime (typically stack-allocated by the caller).
+ */
+static void ctx__init_vm(VM *vm, JaclCtxPool *pool_storage) {
+    StructTypeRegistry *reg = vm->struct_registry;
+    if (!reg || reg->ctx_type_idx == 0) return;
+
+    ctx_pool_init(pool_storage, &vm->heap, reg);
+    vm->ctx_pool = pool_storage;
+
+    /* Allocate initial ctx from pool */
+    JaclStruct *ctx_struct = ctx_pool_alloc(pool_storage, &vm->heap);
+    StructTypeDef *sdef = reg->defs[reg->ctx_type_idx];
+
+    /* Set built-in pwd field (field 0) to getcwd() */
+    char cwd_buf[4096];
+    if (getcwd(cwd_buf, sizeof(cwd_buf))) {
+        size_t len = strlen(cwd_buf);
+        JaclVal pwd_str;
+        if (len <= 7) {
+            pwd_str = jacl_inline_string(cwd_buf, len);
+        } else {
+            pwd_str = jacl_rope_string_create(&vm->heap,
+                                              (const uint8_t *)cwd_buf, len);
+        }
+        vm__struct_write_field(ctx_struct, sdef->fields[0].offset,
+                               sdef->fields[0].type, pwd_str);
+    }
+
+    vm->ctx = jacl_struct_val(ctx_struct);
+}
+
 /**
  * Execute a compiled multi-module program.
  * Initializes modules in topological order (dependencies first),
@@ -8792,6 +8829,10 @@ VMResult jacl_exec_program(ProgramResult* program, VM* vm) {
   }
 
   vm->struct_registry = program->struct_registry;
+
+  /* Initialize ctx subsystem (pool + initial ctx with pwd) */
+  JaclCtxPool exec_ctx_pool;
+  ctx__init_vm(vm, &exec_ctx_pool);
 
   /* Execute each module's chunk in topological order.
      Dependencies come first, root module is last. */
@@ -9128,6 +9169,10 @@ JaclVal jacl_ctx_run_source(jacl_context_t *ctx, const char *src, size_t len,
     ctx->vm.intern_table   = itab;
     ctx->vm.struct_registry = cr.struct_registry;
 
+    /* Initialize ctx subsystem (pool + initial ctx with pwd) */
+    JaclCtxPool ctx_run_pool;
+    ctx__init_vm(&ctx->vm, &ctx_run_pool);
+
     VMResult r = vm_exec(&ctx->vm, &cr.chunk);
     if (r != VM_OK) {
         if (err_out) {
@@ -9261,6 +9306,10 @@ VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
 
   vm->intern_table = &intern_table;
   vm->struct_registry = cr.struct_registry;
+
+  /* Initialize ctx subsystem (pool + initial ctx with pwd) */
+  JaclCtxPool run_ctx_pool;
+  ctx__init_vm(vm, &run_ctx_pool);
 
   if (cr.suspending) {
     /* Top-level code contains suspension. The chunk contains OP_CLOSURE + OP_HALT

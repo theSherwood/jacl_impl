@@ -119,6 +119,8 @@ void runtime__init_worker_vm(WorkerThread *w) {
     vm->error_line    = 0;
     vm->stack_trace.count = 0;
     vm->struct_registry = NULL;
+    vm->ctx_pool        = NULL;
+    vm->ctx             = JACL_NIL;
 
     /* Init a local block pool (unused — heap points to shared pool).
      * We still init it so vm_destroy can safely destroy it. */
@@ -613,6 +615,9 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
                 fl = *(uintptr_t *)ps->data;
             }
         }
+
+        /* 7. Current ctx register (implicit context struct) */
+        gc__ms_push_val(ms, w->vm.ctx);
     }
 
     /* 7. Inbox tasks (external submissions awaiting pickup) */

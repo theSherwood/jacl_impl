@@ -1316,6 +1316,7 @@ typedef struct {
   StackTrace     stack_trace;
   StructTypeRegistry* struct_registry;
   JaclCtxPool *ctx_pool;
+  JaclVal    ctx;              /* current implicit context struct */
   JaclVal*   gc_handle_slots;
   uint32_t   gc_handle_count;
   JaclVal    (*call_native)(void* ctx, uint32_t fn_index, JaclVal* args, int argc);

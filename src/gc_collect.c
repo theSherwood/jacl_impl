@@ -431,6 +431,9 @@ void gc_mark(ThreadHeap *heap, VM *vm) {
         }
     }
 
+    /* 8. Current ctx register (implicit context struct) */
+    gc__ms_push_val(&ms, vm->ctx);
+
     /* --- Mark loop --- */
     void *ptr;
     while (gc__ms_pop(&ms, &ptr)) {
