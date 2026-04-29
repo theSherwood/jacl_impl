@@ -798,7 +798,8 @@ typedef enum {
   OP_HALT,
   OP_GET_CTX,      /* push vm->ctx (implicit context struct) onto stack */
   OP_CTX_FORK,     /* save old ctx to VM stack, alloc new ctx from pool, memcpy data, swap vm->ctx */
-  OP_CTX_RESTORE   /* pop saved ctx from VM save stack, free forked ctx to pool, restore vm->ctx */
+  OP_CTX_RESTORE,  /* pop saved ctx from VM save stack, free forked ctx to pool, restore vm->ctx */
+  OP_SET_CTX       /* pop value from stack and store in vm->ctx */
 } OpCode;
 
 typedef struct {
@@ -1146,6 +1147,7 @@ typedef struct {
   uint32_t        suspension_count;
   SuspensionPoint suspension_points[SM_MAX_SUSPENSION_POINTS];
   StateLayout     state_layout;
+  uint32_t        ctx_field_idx;  /* state field index for __ctx (UINT32_MAX if absent) */
 } SuspensionAnalysis;
 
 typedef struct {
@@ -1200,6 +1202,7 @@ struct Compiler {
   bool             in_concurrent_body;
   bool             pin_all_closures;
   bool             force_global_procs;
+  bool             ctx_pre_registered;
   JaclType         expected_type;
   JaclType         last_expr_type;
   uint32_t         last_struct_idx;

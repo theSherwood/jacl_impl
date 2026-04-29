@@ -1259,6 +1259,7 @@ typedef struct {
   uint32_t        suspension_count;
   SuspensionPoint suspension_points[SM_MAX_SUSPENSION_POINTS];
   StateLayout     state_layout;
+  uint32_t        ctx_field_idx;  /* state field index for __ctx (UINT32_MAX if absent) */
 } SuspensionAnalysis;
 
 /* Create a JaclVal from a name string, routing by length:
@@ -2321,6 +2322,7 @@ SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
                                                         StructTypeRegistry* struct_reg) {
   SuspensionAnalysis analysis;
   memset(&analysis, 0, sizeof(analysis));
+  analysis.ctx_field_idx = UINT32_MAX;
   analysis.state_layout.heap = heap;
   analysis.state_layout.intern_table = intern_table;
 
@@ -2360,6 +2362,12 @@ SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
   if (optimize_liveness) {
     sm__optimize_state_layout(&analysis, body);
   }
+
+  /* Add implicit __ctx field (always crosses suspension boundaries).
+     Added after liveness optimization so it's never pruned. */
+  analysis.ctx_field_idx = analysis.state_layout.total_slots;
+  sm__add_state_field(&analysis.state_layout,
+                      jacl_inline_string("__ctx", 5), false, false, 1, 0);
 
   return analysis;
 }
@@ -2738,6 +2746,7 @@ struct Compiler {
   bool             in_concurrent_body; /* true inside spawn/parallel/race body */
   bool             pin_all_closures;  /* true when concurrent body touches mutable globals */
   bool             force_global_procs; /* procs emit OP_DEF_GLOBAL even at scope>0 */
+  bool             ctx_pre_registered; /* true when ctx fields were pre-registered (Phase 1c) */
   JaclType         expected_type;   /* contextual type hint for RHS compilation */
   JaclType         last_expr_type;  /* type of the last compiled expression */
   uint32_t         last_struct_idx; /* struct type index when last_expr_type==TYPE_STRUCT */
@@ -2794,6 +2803,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->in_concurrent_body = false;
   c->pin_all_closures   = false;
   c->force_global_procs = false;
+  c->ctx_pre_registered = false;
   c->expected_type   = TYPE_DYN;
   c->last_expr_type  = TYPE_DYN;
   c->last_struct_idx = UINT32_MAX;
@@ -3452,6 +3462,13 @@ void compiler__emit_sm_dispatch_table(Compiler* c,
     /* Skip to next check if not equal */
     uint32_t skip_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
 
+    /* Restore vm->ctx from __ctx state field before jumping to resume label */
+    if (c->sm_analysis && c->sm_analysis->ctx_field_idx != UINT32_MAX) {
+      compiler__emit_byte(c, OP_GET_STATE_FIELD, line);
+      compiler__emit_byte(c, (uint8_t)c->sm_analysis->ctx_field_idx, line);
+      compiler__emit_byte(c, OP_SET_CTX, line);
+    }
+
     /* Forward jump to resume label (to be backpatched) */
     c->sm_dispatch.label_patches[i] = compiler__emit_jump(c, OP_JUMP, line);
 
@@ -3504,6 +3521,14 @@ void compiler__compile_sm_stmts(Compiler* c, AstNode** stmts,
   /* Emit dispatch table only when there are direct suspension points */
   if (analysis->suspension_count > 0) {
     compiler__emit_sm_dispatch_table(c, analysis->suspension_count, line);
+  }
+
+  /* On initial entry (resume_point == 0, falls through dispatch table):
+     save vm->ctx to the __ctx state field for later resume restore. */
+  if (analysis->ctx_field_idx != UINT32_MAX) {
+    compiler__emit_byte(c, OP_GET_CTX, line);
+    compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+    compiler__emit_byte(c, (uint8_t)analysis->ctx_field_idx, line);
   }
 
   /* Initialize suspension point counter for yield handler */
@@ -11044,10 +11069,14 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
     case AST_CTX_DECL: {
       /* ctx [mut] Type name = default_expr — collect field into ctx field list.
          Evaluate compile-time constant default to JaclVal for runtime init. */
-      if (c->scope_depth > 0) {
-        compiler__error(c, line, node->start.column,
-                        "ctx declarations must be at module top level");
-        break;
+      {
+        Compiler* root = c;
+        while (root->enclosing) root = root->enclosing;
+        if (c->scope_depth > 0 && !root->ctx_pre_registered) {
+          compiler__error(c, line, node->start.column,
+                          "ctx declarations must be at module top level");
+          break;
+        }
       }
 
       const char* type_name     = node->data.ctx_decl.type_name;
@@ -11085,8 +11114,13 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         break;
       }
 
-      /* Check for duplicate field name */
-      if (ctx_field_list__has(ctx, field_name, field_name_len)) {
+      /* Check for duplicate field name.  When top-level code suspends, ctx
+         fields are pre-registered (Phase 1c) so procs compiled in Phase 2
+         can resolve them.  In that case, skip the add but still emit bytecode. */
+      bool already_registered = ctx_field_list__has(ctx, field_name, field_name_len);
+      Compiler* root_c = c;
+      while (root_c->enclosing) root_c = root_c->enclosing;
+      if (already_registered && !root_c->ctx_pre_registered) {
         char err[128];
         snprintf(err, sizeof(err), "ctx field '%.*s' already declared",
                  (int)field_name_len, field_name);
@@ -11094,48 +11128,50 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         break;
       }
 
-      /* Evaluate compile-time constant default to JaclVal */
-      JaclVal def_val = JACL_NIL;
-      AstNode* dexpr = node->data.ctx_decl.default_expr;
-      if (dexpr) {
-        switch (dexpr->type) {
-          case AST_LIT_INT:
-            if (ftype == TYPE_I32) def_val = jacl_i32(dexpr->data.lit_int.value);
-            else if (ftype == TYPE_U32) def_val = jacl_u32((uint32_t)dexpr->data.lit_int.value);
-            else def_val = jacl_i32(dexpr->data.lit_int.value);
-            break;
-          case AST_LIT_FLOAT:
-            def_val = jacl_f32(dexpr->data.lit_float.value);
-            break;
-          case AST_LIT_STRING: {
-            /* booleans: "true"/"false" are AST_LIT_STRING in JACL */
-            const char* s = dexpr->data.lit_string.value;
-            uint32_t sl = dexpr->data.lit_string.length;
-            if (ftype == TYPE_BOOL) {
-              if (sl == 4 && memcmp(s, "true", 4) == 0)
-                def_val = jacl_bool(true);
-              else if (sl == 5 && memcmp(s, "false", 5) == 0)
-                def_val = jacl_bool(false);
-            } else {
-              /* actual string default */
-              if (sl <= 7) def_val = jacl_inline_string(s, sl);
-              /* longer strings need heap — stored as NIL, handled at runtime */
+      if (!already_registered) {
+        /* Evaluate compile-time constant default to JaclVal */
+        JaclVal def_val = JACL_NIL;
+        AstNode* dexpr = node->data.ctx_decl.default_expr;
+        if (dexpr) {
+          switch (dexpr->type) {
+            case AST_LIT_INT:
+              if (ftype == TYPE_I32) def_val = jacl_i32(dexpr->data.lit_int.value);
+              else if (ftype == TYPE_U32) def_val = jacl_u32((uint32_t)dexpr->data.lit_int.value);
+              else def_val = jacl_i32(dexpr->data.lit_int.value);
+              break;
+            case AST_LIT_FLOAT:
+              def_val = jacl_f32(dexpr->data.lit_float.value);
+              break;
+            case AST_LIT_STRING: {
+              /* booleans: "true"/"false" are AST_LIT_STRING in JACL */
+              const char* s = dexpr->data.lit_string.value;
+              uint32_t sl = dexpr->data.lit_string.length;
+              if (ftype == TYPE_BOOL) {
+                if (sl == 4 && memcmp(s, "true", 4) == 0)
+                  def_val = jacl_bool(true);
+                else if (sl == 5 && memcmp(s, "false", 5) == 0)
+                  def_val = jacl_bool(false);
+              } else {
+                /* actual string default */
+                if (sl <= 7) def_val = jacl_inline_string(s, sl);
+                /* longer strings need heap — stored as NIL, handled at runtime */
+              }
+              break;
             }
-            break;
+            default:
+              break;
           }
-          default:
-            break;
         }
-      }
 
-      /* Add to ctx field list */
-      if (!ctx_field_list__add(ctx, field_name, field_name_len,
-                               type_name, type_name_len,
-                               ftype, f_struct_idx, is_mutable,
-                               compiler__get_struct_registry(c), def_val)) {
-        compiler__error(c, line, node->start.column,
-                        "too many ctx fields (max 64)");
-        break;
+        /* Add to ctx field list */
+        if (!ctx_field_list__add(ctx, field_name, field_name_len,
+                                 type_name, type_name_len,
+                                 ftype, f_struct_idx, is_mutable,
+                                 compiler__get_struct_registry(c), def_val)) {
+          compiler__error(c, line, node->start.column,
+                          "too many ctx fields (max 64)");
+          break;
+        }
       }
 
       /* Emit initialization bytecode: OP_GET_CTX, default_expr, OP_STRUCT_SET */
@@ -11385,6 +11421,63 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
         }
       }
     }
+
+    /* Phase 1c: Pre-register ctx field declarations so proc bodies compiled
+       in Phase 2 can resolve ctx field accesses.  Only the field metadata is
+       registered here; the initialization bytecode is emitted during normal
+       compilation in Phase 3 (compiler_compile_node for AST_CTX_DECL). */
+    for (uint32_t i = 0; i < parse.count; i++) {
+      AstNode* node = parse.nodes[i];
+      if (node->type == AST_CTX_DECL) {
+        const char* type_name     = node->data.ctx_decl.type_name;
+        uint32_t    type_name_len = node->data.ctx_decl.type_name_len;
+        const char* field_name    = node->data.ctx_decl.field_name;
+        uint32_t    field_name_len = node->data.ctx_decl.field_name_len;
+        bool        is_mutable    = node->data.ctx_decl.is_mutable != 0;
+        JaclType ftype = TYPE_DYN;
+        uint32_t f_struct_idx = 0;
+        if (is_type_keyword(type_name, type_name_len)) {
+          ftype = type_from_keyword(type_name, type_name_len);
+        } else {
+          uint32_t idx = struct_registry__find(c.struct_registry, type_name, type_name_len);
+          if (idx != UINT32_MAX) { ftype = TYPE_STRUCT; f_struct_idx = idx; }
+        }
+        /* Evaluate constant default */
+        JaclVal def_val = JACL_NIL;
+        AstNode* dexpr = node->data.ctx_decl.default_expr;
+        if (dexpr) {
+          switch (dexpr->type) {
+            case AST_LIT_INT:
+              if (ftype == TYPE_I32) def_val = jacl_i32(dexpr->data.lit_int.value);
+              else if (ftype == TYPE_U32) def_val = jacl_u32((uint32_t)dexpr->data.lit_int.value);
+              else def_val = jacl_i32(dexpr->data.lit_int.value);
+              break;
+            case AST_LIT_FLOAT:
+              def_val = jacl_f32(dexpr->data.lit_float.value);
+              break;
+            case AST_LIT_STRING: {
+              const char* s = dexpr->data.lit_string.value;
+              uint32_t sl = dexpr->data.lit_string.length;
+              if (ftype == TYPE_BOOL) {
+                if (sl == 4 && memcmp(s, "true", 4) == 0) def_val = jacl_bool(true);
+                else if (sl == 5 && memcmp(s, "false", 5) == 0) def_val = jacl_bool(false);
+              } else {
+                if (sl <= 7) def_val = jacl_inline_string(s, sl);
+              }
+              break;
+            }
+            default: break;
+          }
+        }
+        if (!ctx_field_list__has(c.ctx_fields, field_name, field_name_len)) {
+          ctx_field_list__add(c.ctx_fields, field_name, field_name_len,
+                             type_name, type_name_len,
+                             ftype, f_struct_idx, is_mutable,
+                             c.struct_registry, def_val);
+        }
+      }
+    }
+    c.ctx_pre_registered = true;
 
     /* Phase 2: Hoist top-level proc definitions into the outer chunk so
        they are defined via OP_SET_GLOBAL before the SM closure executes.

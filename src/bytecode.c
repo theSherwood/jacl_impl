@@ -197,7 +197,8 @@ typedef enum {
   OP_HALT,          /* stop execution */
   OP_GET_CTX,       /* push vm->ctx (implicit context struct) onto stack */
   OP_CTX_FORK,      /* save old ctx to VM stack, alloc new ctx from pool, memcpy data, swap vm->ctx */
-  OP_CTX_RESTORE    /* pop saved ctx from VM save stack, free forked ctx to pool, restore vm->ctx */
+  OP_CTX_RESTORE,   /* pop saved ctx from VM save stack, free forked ctx to pool, restore vm->ctx */
+  OP_SET_CTX        /* pop value from stack and store in vm->ctx */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -518,6 +519,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_GET_CTX:             return "OP_GET_CTX";
     case OP_CTX_FORK:            return "OP_CTX_FORK";
     case OP_CTX_RESTORE:         return "OP_CTX_RESTORE";
+    case OP_SET_CTX:             return "OP_SET_CTX";
   }
   return "OP_UNKNOWN";
 }

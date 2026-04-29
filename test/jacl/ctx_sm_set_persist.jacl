@@ -1,0 +1,10 @@
+# expect: 99
+# Test: set $ctx->field before await, read after await — value persists
+ctx mut i32 level = 42
+proc main {} {
+  set $ctx->level 99
+  def f [spawn { 1 }]
+  def r [await $f]
+  print $ctx->level
+}
+main

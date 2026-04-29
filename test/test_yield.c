@@ -342,8 +342,8 @@ static int test_sm_compile_basic(void) {
   /* SM generator should have param_count = 2 (state_obj, resume_value) */
   ASSERT_INT_EQ(gen_cl->param_count, 2);
 
-  /* sm_field_count should be 0 (no params, no locals in this generator) */
-  ASSERT_INT_EQ(gen_cl->sm_field_count, 0);
+  /* sm_field_count should be 1 (no params/locals, but __ctx always added) */
+  ASSERT_INT_EQ(gen_cl->sm_field_count, 1);
 
   /* is_generator should be true */
   ASSERT(gen_cl->is_generator);
@@ -396,8 +396,8 @@ static int test_sm_compile_with_params(void) {
   }
   ASSERT(gen_cl != NULL);
 
-  /* SM with 2 user params: sm_field_count should be 2 */
-  ASSERT_INT_EQ(gen_cl->sm_field_count, 2);
+  /* SM with 2 user params + __ctx: sm_field_count should be 3 */
+  ASSERT_INT_EQ(gen_cl->sm_field_count, 3);
 
   /* Bytecode should contain OP_GET_STATE_FIELD for param access */
   int get_sf_count = 0;
@@ -451,7 +451,7 @@ static int test_sm_manual_drive(void) {
     }
   }
   ASSERT(gen_cl != NULL);
-  ASSERT_INT_EQ(gen_cl->sm_field_count, 1); /* one param: x */
+  ASSERT_INT_EQ(gen_cl->sm_field_count, 2); /* one param: x + __ctx */
 
   /* Create a state machine object with 1 field (for param x) */
   JaclVal sm_val = gc_alloc_state_machine(&vm.heap, 1);
@@ -1225,8 +1225,8 @@ static int test_sm_compile_mixed_yield_await(void) {
   ASSERT_INT_EQ(await_sm_count, 1);
   ASSERT_INT_EQ(yield_sm_count, 2);
 
-  /* sm_field_count should be 2 (f, result) */
-  ASSERT_INT_EQ(cl->sm_field_count, 2);
+  /* sm_field_count should be 3 (f, result + __ctx) */
+  ASSERT_INT_EQ(cl->sm_field_count, 3);
 
   intern_table_destroy(&intern_table);
   vm_destroy(&vm);
@@ -1281,8 +1281,8 @@ static int test_sm_compile_sequential_awaits(void) {
   ASSERT_INT_EQ(await_sm_count, 3);
   ASSERT_INT_EQ(yield_sm_count, 1);
 
-  /* sm_field_count: f1, f2, f3, a, b, c = 6 */
-  ASSERT_INT_EQ(cl->sm_field_count, 6);
+  /* sm_field_count: f1, f2, f3, a, b, c + __ctx = 7 */
+  ASSERT_INT_EQ(cl->sm_field_count, 7);
 
   intern_table_destroy(&intern_table);
   vm_destroy(&vm);
@@ -1963,8 +1963,8 @@ static int test_liveness_10_locals_2_cross(void) {
   }
   ASSERT(gen_cl != NULL);
 
-  /* State should contain: p (param) + cross1, cross2 = 3 fields total */
-  ASSERT_INT_EQ(gen_cl->sm_field_count, 3);
+  /* State should contain: p (param) + cross1, cross2 + __ctx = 4 fields total */
+  ASSERT_INT_EQ(gen_cl->sm_field_count, 4);
 
   intern_table_destroy(&intern_table);
   vm_destroy(&vm);
@@ -2111,8 +2111,8 @@ static int test_liveness_zero_fields(void) {
   }
   ASSERT(gen_cl != NULL);
 
-  /* No params, no crossing locals: state object has 0 fields */
-  ASSERT_INT_EQ(gen_cl->sm_field_count, 0);
+  /* No params, no crossing locals, but __ctx always added: 1 field */
+  ASSERT_INT_EQ(gen_cl->sm_field_count, 1);
 
   intern_table_destroy(&intern_table);
   vm_destroy(&vm);
@@ -2166,8 +2166,8 @@ static int test_liveness_conservative_fallback(void) {
      yield $a is in seg 0. After resume, yield $b reads b in seg 1.
      So b crosses (def seg 0, read seg 1).
      And a is only read at yield $a (seg 0), so a doesn't cross.
-     State should have: b = 1 field. */
-  ASSERT_INT_EQ(gen_cl->sm_field_count, 1);
+     State should have: b + __ctx = 2 fields. */
+  ASSERT_INT_EQ(gen_cl->sm_field_count, 2);
 
   intern_table_destroy(&intern_table);
   vm_destroy(&vm);

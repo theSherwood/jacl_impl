@@ -8831,6 +8831,16 @@ interpret_done:
         break;
       }
 
+      case OP_SET_CTX: {
+        /* Pop value from stack and store in vm->ctx (used by SM resume) */
+        JaclVal new_ctx;
+        result = vm__pop(vm, &new_ctx);
+        if (result != VM_OK) return result;
+        gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, vm->ctx, new_ctx);
+        vm->ctx = new_ctx;
+        break;
+      }
+
       default: {
         vm__set_error(vm, "unknown opcode %d", (int)instruction);
         return VM_RUNTIME_ERROR;
