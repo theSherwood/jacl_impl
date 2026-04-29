@@ -254,3 +254,19 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
   - JACL paths with / need quoting — `/test/path` without quotes is parsed as command with arguments
   - US-012 was effectively completed across US-003 (field declaration), US-005 (getcwd init), US-007 (field access) — just needed test coverage
 ---
+
+## 2026-04-29 - US-013
+- Implemented end-to-end integration and stress tests for full ctx system
+- Exported ctx__init_vm (was static in vm.c) so test harness can initialize ctx on worker VMs
+- Updated jacl.h declarations for runtime__submit_spawn_task, runtime__submit_parallel_task, runtime__submit_race_task (added parent_ctx parameter)
+- Fixed test_jacl_harness.c concurrent runner: set struct_registry on workers, init ctx pools, pass parent_ctx
+- Fixed test_yield.c and test_m13.c to use new 4-arg runtime__submit_spawn_task signature
+- 9 new e2e test files covering: propagation+isolation, multi-field, spawn+with-ctx, nested 3-level, struct-valued field, GC stress loop, concurrent stress, with-ctx pipe expression, error+restore
+- Files changed: src/vm.c, src/jacl.h, test/test_jacl_harness.c, test/test_yield.c, test/test_m13.c
+- New test files: test/jacl/ctx_e2e_propagation.jacl, ctx_e2e_multi_field.jacl, ctx_e2e_spawn_with_ctx.jacl, ctx_e2e_nested_3.jacl, ctx_e2e_struct_field.jacl, ctx_e2e_gc_stress.jacl, ctx_e2e_concurrent_stress.jacl, ctx_e2e_with_ctx_pipe.jacl, ctx_e2e_error_restore.jacl
+- **Learnings for future iterations:**
+  - jacl.h function declarations must be updated when changing signatures in runtime.c — tests compile against jacl.h, not unity build
+  - Test harness concurrent runner needs struct_registry and ctx_pool per worker for ctx-using tests
+  - `mut` variable syntax is `mut name value` (no `=` sign, no type annotation at top level)
+  - ctx__init_vm was static — needed to export for test harness; follow same pattern for any VM init helpers needed externally
+---
