@@ -241,3 +241,16 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
   - while loops with spawn/await in single-threaded mode can hit call_suspend errors — test with sequential spawns instead
   - ctx_pool_free takes 2 args (pool, struct) — StructTypeDef cached on pool, no need to pass registry
 ---
+
+## 2026-04-29 - US-012
+- Built-in pwd field and initial ctx setup — all functionality already implemented in US-003/US-005/US-007
+- pwd pre-declared as built-in ctx field (type str, mutable) in compiler.c ctx_field_list initialization
+- ctx__init_vm sets pwd from getcwd() at startup (vm.c)
+- set $ctx->pwd works (mutable field), with-ctx {pwd ...} works (override + restore)
+- Duplicate pwd declaration detected by ctx_field_list__has
+- Only needed new test files to verify acceptance criteria
+- New test files: test/jacl/ctx_set_pwd.jacl, ctx_with_ctx_pwd.jacl, ctx_dup_pwd_error.jacl
+- **Learnings for future iterations:**
+  - JACL paths with / need quoting — `/test/path` without quotes is parsed as command with arguments
+  - US-012 was effectively completed across US-003 (field declaration), US-005 (getcwd init), US-007 (field access) — just needed test coverage
+---
