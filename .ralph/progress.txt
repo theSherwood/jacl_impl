@@ -14,7 +14,11 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
 - New AST node types must also be handled in `src/syntax.c` (syntax_from_ast switch) to avoid -Wswitch warnings
 - `jacl_run()` in vm.c now extracts actual parse error messages recursively from AST_ERROR nodes (not just "parse error")
 - Parse error messages from jacl_run() are prefixed with "parse error: " for backwards compatibility
-- ctx keyword: TOKEN_CTX in lexer, AST_CTX_DECL in parser, placeholder in compiler (US-003 will add compilation)
+- ctx keyword: TOKEN_CTX in lexer, AST_CTX_DECL in parser, CtxFieldList collection in compiler
+- Compiler struct is duplicated in `src/compiler.c` AND `src/jacl.h` — adding new fields requires updating BOTH (size mismatch causes stack corruption in tests)
+- CtxFieldList is on root compiler, shared with module compilers via enclosing chain (like struct_registry)
+- ctx struct is always registered via ctx_field_list__finalize after compilation; ctx_type_idx stored on StructTypeRegistry
+- Tests that hard-code struct_registry->count need +1 when ctx struct is added
 
 ## 2026-04-29 - US-001
 - Implemented per-field mutability on StructTypeField
@@ -53,4 +57,25 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
   - jacl_run() previously returned generic "parse error" — now extracts actual error message recursively
   - Parse error messages are prefixed "parse error: " for backwards compatibility with integration tests
   - The compiler has a no-op placeholder for AST_CTX_DECL — US-003 will add actual compilation
+---
+
+## 2026-04-29 - US-003
+- Implemented ctx field collection and struct registration
+- Added CtxFieldList type (CtxField struct + init/add/has/finalize helpers) in compiler.c
+- Added ctx_type_idx field to StructTypeRegistry in both compiler.c and jacl.h
+- Added ctx_fields pointer to Compiler struct in both compiler.c and jacl.h
+- Pre-populated built-in `pwd` field (mut str) before user code compiles
+- Implemented AST_CTX_DECL handler: resolves type, checks duplicates, adds to ctx field list
+- Added ctx_field_list__finalize: builds StructTypeDef from accumulated fields, registers in StructTypeRegistry
+- Shared ctx_fields from root compiler to module compilers (like struct_registry)
+- Added finalization in both compiler_compile() and jacl_compile_program()
+- Fixed 3 existing struct registry count assertions (now +1 for ctx struct)
+- Files changed: src/compiler.c, src/jacl.h, test/test_compiler.c
+- 7 new tests: ctx_builtin_pwd, ctx_single_user_field, ctx_multiple_fields, ctx_duplicate_field_error, ctx_duplicate_pwd_error, ctx_fields_across_modules, ctx_dup_across_modules_error
+- **Learnings for future iterations:**
+  - CRITICAL: Compiler struct is duplicated between compiler.c and jacl.h — adding new fields to one but not the other causes stack corruption in tests that allocate Compiler on the stack
+  - ctx struct is always registered (even with no user ctx decls) because built-in pwd is always present
+  - Tests that hard-code struct_registry->count values need updating when adding new always-registered types
+  - Module compiler shares ctx_fields via root compiler (same pattern as struct_registry)
+  - ctx_field_list__finalize uses forward-declared layout helpers (struct__type_size, etc.) — order matters in unity build
 ---
