@@ -7277,9 +7277,9 @@ static int test_inline_struct_basic(void) {
   }
   ASSERT_U32_EQ(cr.error_count, 0);
   /* Registry should have 2 struct types: the anonymous struct and Wrapper
-     (count includes reserved slot 0, so count == 3) */
+     (count includes reserved slot 0 + ctx struct, so count == 4) */
   ASSERT(cr.struct_registry != NULL);
-  ASSERT(cr.struct_registry->count == 3);
+  ASSERT(cr.struct_registry->count == 4);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
@@ -7298,10 +7298,10 @@ static int test_inline_struct_equivalence(void) {
       "struct A {struct{x:i32,y:i32} p}\n"
       "struct B {struct{x:i32,y:i32} q}", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
-  /* Registry: anon_struct (shared), A, B = 3 struct types
-     (count includes reserved slot 0, so count == 4) */
+  /* Registry: anon_struct (shared), A, B = 3 struct types + ctx
+     (count includes reserved slot 0, so count == 5) */
   ASSERT(cr.struct_registry != NULL);
-  ASSERT(cr.struct_registry->count == 4);
+  ASSERT(cr.struct_registry->count == 5);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
@@ -7321,9 +7321,9 @@ static int test_inline_struct_nested(void) {
       &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT(cr.struct_registry != NULL);
-  /* inner struct (shared) + outer struct + C = 3 struct types
-     (count includes reserved slot 0, so count == 4) */
-  ASSERT(cr.struct_registry->count == 4);
+  /* inner struct (shared) + outer struct + C = 3 struct types + ctx
+     (count includes reserved slot 0, so count == 5) */
+  ASSERT(cr.struct_registry->count == 5);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
@@ -10263,6 +10263,233 @@ static int test_shell_cmd_quoted_name(void) {
   TEST_PASS();
 }
 
+/* --- Implicit Context (US-003): Ctx field collection and struct registration --- */
+
+/* Test: built-in pwd field present at offset 0 */
+static int test_ctx_builtin_pwd(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  /* Even empty source should get ctx struct with pwd field */
+  CompileResult cr = compile_source("42", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT(cr.struct_registry != NULL);
+  ASSERT(cr.struct_registry->ctx_type_idx != 0);
+
+  uint32_t ctx_idx = cr.struct_registry->ctx_type_idx;
+  ASSERT(ctx_idx < cr.struct_registry->count);
+  StructTypeDef* ctx_def = cr.struct_registry->defs[ctx_idx];
+  ASSERT(ctx_def != NULL);
+  ASSERT_U32_EQ(ctx_def->name_len, 3);
+  ASSERT(memcmp(ctx_def->name, "ctx", 3) == 0);
+  ASSERT(ctx_def->field_count >= 1);
+  /* pwd is first field at offset 0 */
+  ASSERT_U32_EQ(ctx_def->fields[0].offset, 0);
+  ASSERT_U32_EQ(ctx_def->fields[0].name_len, 3);
+  ASSERT(memcmp(ctx_def->fields[0].name, "pwd", 3) == 0);
+  ASSERT(ctx_def->fields[0].type == TYPE_STR);
+  ASSERT(ctx_def->fields[0].is_mutable == true);
+  /* ctx contains str, so is_value_type must be false */
+  ASSERT(ctx_def->is_value_type == false);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: single user ctx field registered with proper offset */
+static int test_ctx_single_user_field(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  CompileResult cr = compile_source(
+      "ctx i32 count = 0", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT(cr.struct_registry != NULL);
+  ASSERT(cr.struct_registry->ctx_type_idx != 0);
+
+  uint32_t ctx_idx = cr.struct_registry->ctx_type_idx;
+  StructTypeDef* ctx_def = cr.struct_registry->defs[ctx_idx];
+  ASSERT(ctx_def != NULL);
+  /* Should have 2 fields: pwd + count */
+  ASSERT_U32_EQ(ctx_def->field_count, 2);
+  /* pwd at offset 0, size 8 (str = JaclVal = 8 bytes) */
+  ASSERT_U32_EQ(ctx_def->fields[0].offset, 0);
+  ASSERT(memcmp(ctx_def->fields[0].name, "pwd", 3) == 0);
+  /* count at offset 8, size 4 (i32) */
+  ASSERT_U32_EQ(ctx_def->fields[1].offset, 8);
+  ASSERT(memcmp(ctx_def->fields[1].name, "count", 5) == 0);
+  ASSERT(ctx_def->fields[1].type == TYPE_I32);
+  ASSERT(ctx_def->fields[1].is_mutable == false);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: multiple ctx fields from one module */
+static int test_ctx_multiple_fields(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  CompileResult cr = compile_source(
+      "ctx mut i32 count = 0\n"
+      "ctx str name = \"default\"\n"
+      "ctx f64 ratio = 1.5", &arena, &heap);
+  ASSERT_U32_EQ(cr.error_count, 0);
+  ASSERT(cr.struct_registry != NULL);
+
+  uint32_t ctx_idx = cr.struct_registry->ctx_type_idx;
+  StructTypeDef* ctx_def = cr.struct_registry->defs[ctx_idx];
+  ASSERT(ctx_def != NULL);
+  /* Should have 4 fields: pwd + count + name + ratio */
+  ASSERT_U32_EQ(ctx_def->field_count, 4);
+  /* Check field names and types */
+  ASSERT(memcmp(ctx_def->fields[0].name, "pwd", 3) == 0);
+  ASSERT(memcmp(ctx_def->fields[1].name, "count", 5) == 0);
+  ASSERT(ctx_def->fields[1].is_mutable == true);
+  ASSERT(ctx_def->fields[1].type == TYPE_I32);
+  ASSERT(memcmp(ctx_def->fields[2].name, "name", 4) == 0);
+  ASSERT(ctx_def->fields[2].type == TYPE_STR);
+  ASSERT(ctx_def->fields[2].is_mutable == false);
+  ASSERT(memcmp(ctx_def->fields[3].name, "ratio", 5) == 0);
+  ASSERT(ctx_def->fields[3].type == TYPE_F64);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: duplicate ctx field name produces compile error */
+static int test_ctx_duplicate_field_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  CompileResult cr = compile_source(
+      "ctx i32 count = 0\n"
+      "ctx str count = \"x\"", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+  ASSERT(cr.error_message != NULL);
+  ASSERT(strstr(cr.error_message, "ctx field 'count' already declared") != NULL);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: duplicate with built-in pwd produces compile error */
+static int test_ctx_duplicate_pwd_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+
+  CompileResult cr = compile_source(
+      "ctx str pwd = \"foo\"", &arena, &heap);
+  ASSERT(cr.error_count > 0);
+  ASSERT(cr.error_message != NULL);
+  ASSERT(strstr(cr.error_message, "ctx field 'pwd' already declared") != NULL);
+
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: fields from two modules via use — both registered */
+static int test_ctx_fields_across_modules(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+  JaclInternTable intern; intern_table_init(&intern, &arena);
+
+  const char* dir = "/tmp/jacl_ctx_mod";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "lib.jacl",
+      "def lib_x 42\n"
+      "ctx i32 lib_count = 0\n");
+  write_temp_jacl(dir, "main.jacl",
+      "use \"lib.jacl\" {lib_x}\n"
+      "ctx str app_name = \"test\"\n");
+
+  ProgramResult pr = jacl_compile_program(
+      "/tmp/jacl_ctx_mod/main.jacl", &arena, &intern, &heap);
+
+  ASSERT_U32_EQ(pr.error_count, 0);
+  ASSERT(pr.struct_registry != NULL);
+  ASSERT(pr.struct_registry->ctx_type_idx != 0);
+
+  uint32_t ctx_idx = pr.struct_registry->ctx_type_idx;
+  StructTypeDef* ctx_def = pr.struct_registry->defs[ctx_idx];
+  ASSERT(ctx_def != NULL);
+  /* Should have 3 fields: pwd (built-in) + lib_count (from lib) + app_name (from main) */
+  ASSERT_U32_EQ(ctx_def->field_count, 3);
+  ASSERT(memcmp(ctx_def->fields[0].name, "pwd", 3) == 0);
+  ASSERT(memcmp(ctx_def->fields[1].name, "lib_count", 9) == 0);
+  ASSERT(ctx_def->fields[1].type == TYPE_I32);
+  ASSERT(memcmp(ctx_def->fields[2].name, "app_name", 8) == 0);
+  ASSERT(ctx_def->fields[2].type == TYPE_STR);
+
+  const char* files[] = { "main.jacl", "lib.jacl" };
+  cleanup_jacl_dir(dir, files, 2);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+/* Test: duplicate ctx field across modules produces compile error */
+static int test_ctx_duplicate_across_modules_error(void) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+  BlockPool pool; gc_block_pool_init(&pool);
+  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
+  JaclInternTable intern; intern_table_init(&intern, &arena);
+
+  const char* dir = "/tmp/jacl_ctx_dup";
+  mkdir(dir, 0755);
+  write_temp_jacl(dir, "lib.jacl",
+      "def lib_x 42\n"
+      "ctx i32 count = 0\n");
+  write_temp_jacl(dir, "main.jacl",
+      "use \"lib.jacl\" {lib_x}\n"
+      "ctx str count = \"x\"\n");
+
+  ProgramResult pr = jacl_compile_program(
+      "/tmp/jacl_ctx_dup/main.jacl", &arena, &intern, &heap);
+
+  ASSERT(pr.error_count > 0);
+  ASSERT(pr.error_message != NULL);
+  ASSERT(strstr(pr.error_message, "ctx field 'count' already declared") != NULL);
+
+  const char* files[] = { "main.jacl", "lib.jacl" };
+  cleanup_jacl_dir(dir, files, 2);
+  gc_heap_destroy(&heap);
+  gc_block_pool_destroy(&pool);
+  arena_destroy(&arena);
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -10663,6 +10890,14 @@ int main(void) {
     { "shell_cmd_no_exec_error",       test_shell_cmd_no_exec_error },
     { "shell_cmd_with_exec_prelude",   test_shell_cmd_with_exec_prelude },
     { "shell_cmd_quoted_name",         test_shell_cmd_quoted_name },
+    /* Implicit Context US-003: Ctx field collection and struct registration */
+    { "ctx_builtin_pwd",              test_ctx_builtin_pwd },
+    { "ctx_single_user_field",        test_ctx_single_user_field },
+    { "ctx_multiple_fields",          test_ctx_multiple_fields },
+    { "ctx_duplicate_field_error",    test_ctx_duplicate_field_error },
+    { "ctx_duplicate_pwd_error",      test_ctx_duplicate_pwd_error },
+    { "ctx_fields_across_modules",    test_ctx_fields_across_modules },
+    { "ctx_dup_across_modules_error", test_ctx_duplicate_across_modules_error },
   };
 
   int total = (int)(sizeof(tests) / sizeof(tests[0]));

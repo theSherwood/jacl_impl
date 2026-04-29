@@ -986,6 +986,7 @@ struct StructTypeRegistry {
   uint32_t count;             /* next available type_idx (starts at 1; 0 is reserved) */
   uint32_t capacity;
   arena_t* arena;             /* arena for StructTypeDef allocations (not owned) */
+  uint32_t ctx_type_idx;      /* type_idx of the ctx struct (0 = not yet registered) */
 };
 
 typedef struct {
@@ -1227,6 +1228,7 @@ struct Compiler {
     uint32_t box_type_idx;   /* type_idx inside the box (0=dyn, >0=struct) */
   } narrowings[8];
   uint32_t             narrowing_count;
+  void*                ctx_fields;       /* CtxFieldList* (opaque in header) */
 };
 
 /* ========================================================================

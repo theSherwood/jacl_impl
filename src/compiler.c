@@ -212,6 +212,7 @@ struct StructTypeRegistry {
   uint32_t count;             /* next available type_idx (starts at 1; 0 is reserved) */
   uint32_t capacity;          /* capacity of defs pointer array */
   arena_t* arena;             /* arena for StructTypeDef allocations (not owned) */
+  uint32_t ctx_type_idx;      /* type_idx of the ctx struct (0 = not yet registered) */
 };
 /* typedef already forward-declared above */
 
@@ -243,6 +244,7 @@ static void struct_registry__init(StructTypeRegistry* reg, arena_t* arena) {
   reg->defs = (StructTypeDef**)calloc(reg->capacity, sizeof(StructTypeDef*));
   reg->count = 1; /* slot 0 is reserved for plain dyn JaclVal boxes */
   reg->defs[0] = NULL;
+  reg->ctx_type_idx = 0; /* not yet registered */
 }
 
 /* Free the heap-allocated defs pointer array. Does not free StructTypeDef entries
@@ -253,6 +255,119 @@ static void struct_registry__destroy(StructTypeRegistry* reg) {
   reg->defs = NULL;
   reg->count = 0;
   reg->capacity = 0;
+}
+
+/* --- Ctx field list: accumulates ctx declarations during compilation --- */
+
+#define CTX_MAX_FIELDS 64
+
+typedef struct {
+  const char* name;
+  uint32_t    name_len;
+  const char* type_name;
+  uint32_t    type_name_len;
+  JaclType    type;
+  uint32_t    struct_type_idx;
+  bool        is_mutable;
+} CtxField;
+
+typedef struct {
+  CtxField fields[CTX_MAX_FIELDS];
+  uint32_t count;
+} CtxFieldList;
+
+static void ctx_field_list__init(CtxFieldList* list) {
+  list->count = 0;
+}
+
+/* Add a built-in or user-declared ctx field. Returns false if full or duplicate. */
+static bool ctx_field_list__add(CtxFieldList* list,
+                                const char* name, uint32_t name_len,
+                                const char* type_name, uint32_t type_name_len,
+                                JaclType type, uint32_t struct_type_idx,
+                                bool is_mutable) {
+  if (list->count >= CTX_MAX_FIELDS) return false;
+  CtxField* f = &list->fields[list->count++];
+  f->name           = name;
+  f->name_len       = name_len;
+  f->type_name      = type_name;
+  f->type_name_len  = type_name_len;
+  f->type           = type;
+  f->struct_type_idx = struct_type_idx;
+  f->is_mutable     = is_mutable;
+  return true;
+}
+
+/* Check if a field name already exists in the list */
+static bool ctx_field_list__has(CtxFieldList* list, const char* name, uint32_t name_len) {
+  for (uint32_t i = 0; i < list->count; i++) {
+    if (list->fields[i].name_len == name_len &&
+        memcmp(list->fields[i].name, name, name_len) == 0)
+      return true;
+  }
+  return false;
+}
+
+/* Forward declarations for layout helpers used by ctx finalization */
+uint32_t struct__type_size(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx);
+uint32_t struct__type_align(JaclType t, StructTypeRegistry* reg, uint32_t struct_idx);
+uint32_t struct__align_up(uint32_t offset, uint32_t align);
+
+/* Finalize the ctx struct: build a StructTypeDef from accumulated ctx fields
+   and register it in the struct registry. Called after all modules are compiled.
+   Returns the type_idx or 0 on error. */
+static uint32_t ctx_field_list__finalize(CtxFieldList* list, StructTypeRegistry* reg) {
+  if (!list || list->count == 0 || !reg) return 0;
+
+  /* Ensure capacity */
+  if (!struct_registry__grow(reg)) return 0;
+
+  uint32_t type_idx = reg->count;
+  reg->count++;
+  reg->defs[type_idx] = NULL; /* placeholder */
+
+  /* Compute C-ABI layout */
+  StructTypeField tmp_fields[CTX_MAX_FIELDS];
+  uint32_t offset = 0;
+  uint32_t max_align = 1;
+
+  for (uint32_t i = 0; i < list->count; i++) {
+    CtxField* cf = &list->fields[i];
+    uint32_t fsize  = struct__type_size(cf->type, reg, cf->struct_type_idx);
+    uint32_t falign = struct__type_align(cf->type, reg, cf->struct_type_idx);
+    offset = struct__align_up(offset, falign);
+
+    tmp_fields[i].name           = cf->name;
+    tmp_fields[i].name_len       = cf->name_len;
+    tmp_fields[i].type           = cf->type;
+    tmp_fields[i].struct_type_idx = cf->struct_type_idx;
+    tmp_fields[i].offset         = offset;
+    tmp_fields[i].size           = fsize;
+    tmp_fields[i].is_mutable     = cf->is_mutable;
+
+    offset += fsize;
+    if (falign > max_align) max_align = falign;
+  }
+
+  /* Allocate StructTypeDef */
+  StructTypeDef* sdef = struct_registry__alloc_def(reg, list->count);
+  if (!sdef) {
+    reg->count = type_idx; /* rollback */
+    return 0;
+  }
+  sdef->name        = "ctx";
+  sdef->name_len    = 3;
+  sdef->name_val    = JACL_NIL;
+  sdef->field_count = list->count;
+  sdef->total_size  = struct__align_up(offset, max_align);
+  sdef->alignment   = max_align;
+  /* ctx always has str pwd, so is_value_type = false */
+  sdef->is_value_type = false;
+  memcpy(sdef->fields, tmp_fields, list->count * sizeof(StructTypeField));
+
+  reg->defs[type_idx] = sdef;
+  reg->ctx_type_idx = type_idx;
+  return type_idx;
 }
 
 /* C-ABI size and alignment for a JaclType */
@@ -2632,6 +2747,7 @@ struct Compiler {
     uint32_t box_type_idx;   /* type_idx inside the box (0=dyn, >0=struct) */
   } narrowings[8];
   uint32_t             narrowing_count;
+  CtxFieldList*        ctx_fields;       /* ctx field accumulator (root compiler owns) */
 };
 
 void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -2679,6 +2795,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->shell_fallback    = false;
   c->module_binding_count = 0;
   c->narrowing_count   = 0;
+  c->ctx_fields        = NULL;
 }
 
 /* Forward declarations for module compilation (defined after compiler_compile) */
@@ -2879,6 +2996,12 @@ StructTypeRegistry* compiler__get_struct_registry(Compiler* c) {
   Compiler* root = c;
   while (root->enclosing) root = root->enclosing;
   return root->struct_registry;
+}
+
+CtxFieldList* compiler__get_ctx_fields(Compiler* c) {
+  Compiler* root = c;
+  while (root->enclosing) root = root->enclosing;
+  return root->ctx_fields;
 }
 
 /* Resolve a type annotation string to a JaclType.
@@ -10710,7 +10833,68 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
     }
 
     case AST_CTX_DECL: {
-      /* Placeholder — ctx field collection handled in US-003 */
+      /* ctx [mut] Type name = default_expr — collect field into ctx field list */
+      if (c->scope_depth > 0) {
+        compiler__error(c, line, node->start.column,
+                        "ctx declarations must be at module top level");
+        break;
+      }
+
+      const char* type_name     = node->data.ctx_decl.type_name;
+      uint32_t    type_name_len = node->data.ctx_decl.type_name_len;
+      const char* field_name    = node->data.ctx_decl.field_name;
+      uint32_t    field_name_len = node->data.ctx_decl.field_name_len;
+      bool        is_mutable    = node->data.ctx_decl.is_mutable != 0;
+
+      /* Resolve field type */
+      JaclType ftype = TYPE_DYN;
+      uint32_t f_struct_idx = 0;
+
+      if (is_type_keyword(type_name, type_name_len)) {
+        ftype = type_from_keyword(type_name, type_name_len);
+      } else {
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        uint32_t idx = struct_registry__find(reg, type_name, type_name_len);
+        if (idx == UINT32_MAX) {
+          char err[128];
+          snprintf(err, sizeof(err), "undefined type '%.*s' for ctx field '%.*s'",
+                   (int)type_name_len, type_name,
+                   (int)field_name_len, field_name);
+          compiler__error(c, line, node->start.column, err);
+          break;
+        }
+        ftype = TYPE_STRUCT;
+        f_struct_idx = idx;
+      }
+
+      /* Get ctx field list from root compiler */
+      CtxFieldList* ctx = compiler__get_ctx_fields(c);
+      if (!ctx) {
+        compiler__error(c, line, node->start.column,
+                        "internal error: ctx field list not initialized");
+        break;
+      }
+
+      /* Check for duplicate field name */
+      if (ctx_field_list__has(ctx, field_name, field_name_len)) {
+        char err[128];
+        snprintf(err, sizeof(err), "ctx field '%.*s' already declared",
+                 (int)field_name_len, field_name);
+        compiler__error(c, line, node->start.column, err);
+        break;
+      }
+
+      /* Add to ctx field list */
+      if (!ctx_field_list__add(ctx, field_name, field_name_len,
+                               type_name, type_name_len,
+                               ftype, f_struct_idx, is_mutable)) {
+        compiler__error(c, line, node->start.column,
+                        "too many ctx fields (max 64)");
+        break;
+      }
+
+      /* ctx declaration produces nil */
+      compiler__emit_byte(c, OP_NIL, line);
       break;
     }
 
@@ -10848,6 +11032,15 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
       struct_registry__init(reg, arena);
       c.struct_registry = reg;
     }
+  }
+
+  /* Allocate ctx field list and pre-populate built-in pwd field */
+  {
+    CtxFieldList* ctx = (CtxFieldList*)arena_alloc(arena, sizeof(CtxFieldList));
+    ctx_field_list__init(ctx);
+    /* Built-in: mut str pwd (default = process CWD) */
+    ctx_field_list__add(ctx, "pwd", 3, "str", 3, TYPE_STR, 0, true);
+    c.ctx_fields = ctx;
   }
 
   /* Allocate macro table for compile-time macro definitions */
@@ -11057,6 +11250,11 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
                         parse.count > 0 ? parse.nodes[parse.count - 1]->start.line : 1);
   }
 
+  /* Finalize ctx struct: register accumulated ctx fields as a StructTypeDef */
+  if (c.ctx_fields && c.ctx_fields->count > 0 && c.error_count == 0) {
+    ctx_field_list__finalize(c.ctx_fields, c.struct_registry);
+  }
+
   result.error_count  += c.error_count;
   result.error_message = c.first_error;
   result.struct_registry = c.struct_registry;
@@ -11171,10 +11369,11 @@ bool compiler__compile_module(const char* canonical_path,
   mc.current_module  = mod;
   mc.import_stack    = importer->import_stack;
   {
-    /* Share struct registry from importer root with module compiler */
+    /* Share struct registry and ctx field list from importer root with module compiler */
     Compiler* imp_root = importer;
     while (imp_root->enclosing) imp_root = imp_root->enclosing;
     mc.struct_registry = imp_root->struct_registry;
+    mc.ctx_fields      = imp_root->ctx_fields;
   }
   mc.module_prefix   = module__build_prefix(canonical_path, arena,
                                               &mc.module_prefix_len);
@@ -11303,6 +11502,14 @@ ProgramResult jacl_compile_program(const char* root_path,
     StructTypeRegistry* reg = (StructTypeRegistry*)arena_alloc(arena, sizeof(StructTypeRegistry));
     struct_registry__init(reg, arena);
     c.struct_registry = reg;
+  }
+
+  /* Allocate ctx field list and pre-populate built-in pwd field */
+  {
+    CtxFieldList* ctx = (CtxFieldList*)arena_alloc(arena, sizeof(CtxFieldList));
+    ctx_field_list__init(ctx);
+    ctx_field_list__add(ctx, "pwd", 3, "str", 3, TYPE_STR, 0, true);
+    c.ctx_fields = ctx;
   }
 
   if (top_suspends) {
@@ -11501,6 +11708,11 @@ ProgramResult jacl_compile_program(const char* root_path,
       j--;
     }
     result.modules[j] = key;
+  }
+
+  /* Finalize ctx struct: register accumulated ctx fields as a StructTypeDef */
+  if (c.ctx_fields && c.ctx_fields->count > 0 && c.error_count == 0) {
+    ctx_field_list__finalize(c.ctx_fields, c.struct_registry);
   }
 
   result.error_count   = c.error_count;
