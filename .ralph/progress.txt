@@ -221,3 +221,23 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
   - [str? $x] pattern fails inside SM procs after await — pre-existing issue, not related to ctx
   - All SM procs now have +1 field count due to __ctx — test assertions must account for this
 ---
+
+## 2026-04-29 - US-011
+- Implemented spawn integration — ctx fork at spawn time
+- OP_SPAWN runtime mode: passes vm->ctx as parent_ctx to runtime__submit_spawn_task
+- OP_SPAWN single-threaded mode: forks ctx before executing closure, restores after completion (both error and success paths)
+- runtime__spawn_task_exec: restores worker's original ctx and frees forked ctx to pool after task completes
+- Added parent_ctx to ParallelTaskData and RaceTaskData structs
+- runtime__parallel_task_exec and runtime__race_task_exec: fork ctx from parent at start, restore after completion
+- runtime__submit_parallel_task and runtime__submit_race_task: accept parent_ctx parameter, store in task data and gc_root3
+- Updated all call sites in vm.c (OP_SPAWN, OP_PARALLEL, OP_RACE) and rt_run_to_completion
+- OP_PARALLEL single-threaded: each body gets forked ctx, restored after body completes
+- OP_RACE single-threaded: each body gets forked ctx, restored after body completes
+- Files changed: src/vm.c, src/runtime.c
+- New test files: test/jacl/ctx_spawn_snapshot.jacl, ctx_spawn_isolate_child.jacl, ctx_spawn_isolate_parent.jacl, ctx_parallel_isolate.jacl, ctx_spawn_pool_reuse.jacl
+- **Learnings for future iterations:**
+  - rt_run_to_completion also calls runtime__submit_spawn_task — must update all call sites when changing signatures
+  - Single-threaded parallel/race paths execute bodies sequentially — ctx fork/restore wraps each body individually
+  - while loops with spawn/await in single-threaded mode can hit call_suspend errors — test with sequential spawns instead
+  - ctx_pool_free takes 2 args (pool, struct) — StructTypeDef cached on pool, no need to pass registry
+---
