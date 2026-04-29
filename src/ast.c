@@ -37,6 +37,7 @@ typedef enum {
   AST_DESTRUCTURE_NAMED, /* {x, y} named struct/map destructuring pattern */
   AST_SPREAD,        /* ..expr spread in command args */
   AST_SHELL_CMD,     /* !cmd args... external shell command */
+  AST_CTX_DECL,      /* ctx [mut] Type name = default_expr */
   AST_ERROR          /* parse error with recovery */
 } AstNodeType;
 
@@ -102,6 +103,10 @@ struct AstNode {
              int spread_all; } destructure_named;
     struct { AstNode* expr; }                                      spread;
     struct { AstNode* head; AstNode** args; uint32_t arg_count; uint8_t background; }  shell_cmd;
+    struct { uint8_t is_mutable;
+             const char* type_name; uint32_t type_name_len;
+             const char* field_name; uint32_t field_name_len;
+             AstNode* default_expr; }                             ctx_decl;
     struct { const char* message; }                                error;
   } data;
 };
@@ -552,6 +557,16 @@ void ast__pp_node(AstStrBuf* b, AstNode* node) {
         ast__buf_char(b, ' ');
         ast__pp_node(b, node->data.shell_cmd.args[i]);
       }
+      break;
+    }
+    case AST_CTX_DECL: {
+      ast__buf_cstr(b, "ctx ");
+      if (node->data.ctx_decl.is_mutable) ast__buf_cstr(b, "mut ");
+      ast__buf_str(b, node->data.ctx_decl.type_name, node->data.ctx_decl.type_name_len);
+      ast__buf_char(b, ' ');
+      ast__buf_str(b, node->data.ctx_decl.field_name, node->data.ctx_decl.field_name_len);
+      ast__buf_cstr(b, " = ");
+      ast__pp_node(b, node->data.ctx_decl.default_expr);
       break;
     }
     case AST_ERROR: {

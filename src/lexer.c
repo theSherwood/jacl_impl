@@ -71,6 +71,7 @@ typedef enum {
   TOKEN_BREAK,            /* break */
   TOKEN_CONTINUE,         /* continue */
   TOKEN_TRY,              /* try */
+  TOKEN_CTX,              /* ctx */
   TOKEN_CARET_WORD,       /* ^identifier (caller-scope inside syntax-quote) */
   TOKEN_NEWLINE,          /* newline (\n or \r\n) */
   TOKEN_ERROR,            /* lexer error with descriptive message */
@@ -1322,6 +1323,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
           else if (memcmp(wstart, "set", 3) == 0)  wtype = TOKEN_SET;
           else if (memcmp(wstart, "for", 3) == 0)  wtype = TOKEN_FOR;
           else if (memcmp(wstart, "try", 3) == 0)  wtype = TOKEN_TRY;
+          else if (memcmp(wstart, "ctx", 3) == 0)  wtype = TOKEN_CTX;
           break;
         case 4:
           if      (memcmp(wstart, "proc", 4) == 0) wtype = TOKEN_PROC;

@@ -286,6 +286,10 @@ JaclVal syntax_from_ast(AstNode *node, ThreadHeap *heap,
         break;
     }
 
+    case AST_CTX_DECL:
+        /* ctx declarations are handled by the compiler, not syntax objects */
+        return JACL_NIL;
+
     case AST_ERROR:
         /* AST_ERROR nodes cannot be converted to syntax objects.
          * Return nil to signal the error. Callers should check

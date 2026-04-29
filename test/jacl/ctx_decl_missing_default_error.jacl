@@ -1,0 +1,3 @@
+# expect-error: parse error: ctx field must have a default value
+# Test: missing default produces compile error
+ctx i32 count

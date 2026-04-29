@@ -1,0 +1,4 @@
+# expect-error: parse error: ctx field default must be a compile-time constant
+# Test: non-constant default produces compile error
+def x 42
+ctx i32 count = $x

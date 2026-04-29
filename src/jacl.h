@@ -430,6 +430,7 @@ typedef enum {
   TOKEN_BREAK,
   TOKEN_CONTINUE,
   TOKEN_TRY,
+  TOKEN_CTX,
   TOKEN_CARET_WORD,
   TOKEN_NEWLINE,
   TOKEN_ERROR,
@@ -506,6 +507,7 @@ typedef enum {
   AST_DESTRUCTURE_NAMED,
   AST_SPREAD,
   AST_SHELL_CMD,
+  AST_CTX_DECL,
   AST_ERROR
 } AstNodeType;
 
@@ -563,6 +565,10 @@ struct AstNode {
              int spread_all; } destructure_named;
     struct { AstNode* expr; }                                      spread;
     struct { AstNode* head; AstNode** args; uint32_t arg_count; uint8_t background; }  shell_cmd;
+    struct { uint8_t is_mutable;
+             const char* type_name; uint32_t type_name_len;
+             const char* field_name; uint32_t field_name_len;
+             AstNode* default_expr; }                             ctx_decl;
     struct { const char* message; }                                error;
   } data;
 };

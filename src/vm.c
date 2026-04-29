@@ -9104,11 +9104,48 @@ JaclVal jacl_ctx_run_closure(jacl_context_t *ctx, JaclClosure *closure,
  * Uses a stack-local ExpandState for reentrancy-safe macro expansion.
  * Returns VM_RUNTIME_ERROR on parse or compile errors (message in vm->error_message).
  */
+static const char* jacl__find_parse_error(AstNode* node) {
+  if (!node) return NULL;
+  if (node->type == AST_ERROR) return node->data.error.message;
+  /* Search inside blocks */
+  if (node->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < node->data.block.count; i++) {
+      const char* msg = jacl__find_parse_error(node->data.block.commands[i]);
+      if (msg) return msg;
+    }
+  }
+  /* Search inside commands (proc bodies, etc.) */
+  if (node->type == AST_COMMAND) {
+    const char* msg = jacl__find_parse_error(node->data.command.head);
+    if (msg) return msg;
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+      msg = jacl__find_parse_error(node->data.command.args[i]);
+      if (msg) return msg;
+    }
+  }
+  return NULL;
+}
+
 VMResult jacl_run(const char* source, VM* vm, arena_t* arena) {
   LexResult tokens = lexer_lex(source, arena);
   ParseResult parse = parser_parse(tokens, arena);
   if (parse.error_count > 0) {
-    vm->error_message = "parse error";
+    /* Extract first parse error message from AST_ERROR nodes (recursive) */
+    const char* parse_err = NULL;
+    for (uint32_t i = 0; i < parse.count && !parse_err; i++) {
+      parse_err = jacl__find_parse_error(parse.nodes[i]);
+    }
+    if (parse_err) {
+      /* Build "parse error: <detail>" message in arena */
+      size_t prefix_len = 13; /* "parse error: " */
+      size_t msg_len = strlen(parse_err);
+      char* buf = (char*)arena_alloc(arena, (uint32_t)(prefix_len + msg_len + 1));
+      memcpy(buf, "parse error: ", prefix_len);
+      memcpy(buf + prefix_len, parse_err, msg_len + 1);
+      vm->error_message = buf;
+    } else {
+      vm->error_message = "parse error";
+    }
     return VM_RUNTIME_ERROR;
   }
 

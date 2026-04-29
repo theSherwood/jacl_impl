@@ -265,7 +265,8 @@ AstNode* parser__parse_atom(Parser* p) {
     case TOKEN_RETURN:
     case TOKEN_BREAK:
     case TOKEN_CONTINUE:
-    case TOKEN_TRY: {
+    case TOKEN_TRY:
+    case TOKEN_CTX: {
       parser__advance(p);
       AstNode* node = ast_alloc(p->arena);
       node->type = AST_LIT_STRING;
@@ -1406,6 +1407,100 @@ AstNode* parser__parse_defstruct(Parser* p) {
 }
 
 /* -------------------------------------------------------------------------
+ * Internal: Check if an AST node is a compile-time constant expression
+ *
+ * Compile-time constants: literal int/float/bool/string, or command with
+ * only constant args (struct constructors).
+ * ------------------------------------------------------------------------- */
+
+static bool parser__is_constant_expr(AstNode* node) {
+  if (!node) return false;
+  switch (node->type) {
+    case AST_LIT_INT:
+    case AST_LIT_FLOAT:
+    case AST_LIT_STRING:
+      return true;
+    case AST_COMMAND:
+      /* Allow struct constructors: [Name lit1 lit2 ...] */
+      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+        if (!parser__is_constant_expr(node->data.command.args[i]))
+          return false;
+      }
+      return true;
+    default:
+      return false;
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Parse ctx field declaration
+ *
+ * Syntax: ctx [mut] Type name = default_expr
+ * Called when the current token is TOKEN_CTX.
+ * ------------------------------------------------------------------------- */
+
+AstNode* parser__parse_ctx_decl(Parser* p) {
+  Token* kw_tok = parser__advance(p); /* consume 'ctx' */
+  SourcePos start = parser__token_start(kw_tok);
+
+  /* Optional 'mut' keyword */
+  uint8_t is_mutable = 0;
+  if (!parser__at_end(p) && parser__peek(p)->type == TOKEN_MUT) {
+    parser__advance(p);
+    is_mutable = 1;
+  }
+
+  /* Expect type name (a word) */
+  Token* type_tok = parser__peek(p);
+  if (type_tok->type != TOKEN_WORD) {
+    return parser__error(p, "expected type name after 'ctx'", type_tok);
+  }
+  parser__advance(p);
+  const char* type_name = type_tok->payload.text;
+  uint32_t type_name_len = type_tok->length;
+
+  /* Expect field name (a word) */
+  Token* name_tok = parser__peek(p);
+  if (name_tok->type != TOKEN_WORD) {
+    return parser__error(p, "expected field name after type in ctx declaration", name_tok);
+  }
+  parser__advance(p);
+  const char* field_name = name_tok->payload.text;
+  uint32_t field_name_len = name_tok->length;
+
+  /* Expect '=' */
+  Token* eq_tok = parser__peek(p);
+  if (eq_tok->type != TOKEN_EQUALS) {
+    return parser__error(p, "ctx field must have a default value", eq_tok);
+  }
+  parser__advance(p); /* consume '=' */
+
+  /* Parse default expression */
+  AstNode* default_expr = parser__parse_expr(p);
+  if (default_expr == NULL) {
+    return parser__error(p, "expected expression after '=' in ctx declaration", eq_tok);
+  }
+  if (default_expr->type == AST_ERROR) return default_expr;
+
+  /* Validate: default must be a compile-time constant */
+  if (!parser__is_constant_expr(default_expr)) {
+    return parser__error(p, "ctx field default must be a compile-time constant", eq_tok);
+  }
+
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_CTX_DECL;
+  node->start = start;
+  node->end   = default_expr->end;
+  node->data.ctx_decl.is_mutable     = is_mutable;
+  node->data.ctx_decl.type_name      = type_name;
+  node->data.ctx_decl.type_name_len  = type_name_len;
+  node->data.ctx_decl.field_name     = field_name;
+  node->data.ctx_decl.field_name_len = field_name_len;
+  node->data.ctx_decl.default_expr   = default_expr;
+  return node;
+}
+
+/* -------------------------------------------------------------------------
  * Internal: Parse defmacro declaration
  *
  * Syntax: defmacro name {param1, param2, ...} { body }
@@ -2256,8 +2351,14 @@ AstNode* parser__parse_destructure_named_pattern(Parser* p) {
  * ------------------------------------------------------------------------- */
 
 AstNode* parser__parse_cmd_operand(Parser* p) {
-  /* break [value] → AST_BREAK */
+  /* ctx inside a block/proc — reject (must be at module top level) */
   Token* peek = parser__peek(p);
+  if (peek->type == TOKEN_CTX) {
+    Token* kw = parser__advance(p);
+    return parser__error(p, "ctx declarations must be at module top level", kw);
+  }
+
+  /* break [value] → AST_BREAK */
   if (peek->type == TOKEN_BREAK ||
       (peek->type == TOKEN_WORD && peek->length == 5 &&
        memcmp(peek->payload.text, "break", 5) == 0)) {
@@ -2772,6 +2873,8 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
       cmd = parser__parse_defstruct(&p);
     } else if (parser__peek(&p)->type == TOKEN_DEFMACRO) {
       cmd = parser__parse_defmacro(&p);
+    } else if (parser__peek(&p)->type == TOKEN_CTX) {
+      cmd = parser__parse_ctx_decl(&p);
     } else {
       cmd = parser__parse_cmd_expr(&p);
     }

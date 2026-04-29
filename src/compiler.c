@@ -10709,6 +10709,11 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       break;
     }
 
+    case AST_CTX_DECL: {
+      /* Placeholder — ctx field collection handled in US-003 */
+      break;
+    }
+
     case AST_ERROR: {
       compiler__error(c, line, node->start.column, "parse error in AST");
       break;

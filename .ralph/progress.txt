@@ -2,3 +2,55 @@
 Started: Tue Apr 29 2026
 Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, per-field mutability
 
+## Codebase Patterns
+- StructTypeField is defined in BOTH `src/ast.c` (used by unity build) AND `src/jacl.h` (public API) — update both when changing struct type definitions
+- StructTypeDef/StructTypeField/StructTypeRegistry are similarly duplicated between `src/compiler.c` and `src/jacl.h`
+- Struct field mutation paths: inline (OP_STRUCT_SET_INLINE), heap (OP_STRUCT_SET), upvalue (OP_STRUCT_SET_UPVALUE), dynamic (OP_STRUCT_SET_DYN) — all four need updating for field-level checks
+- Parser `mut` keyword token: TOKEN_MUT already existed in lexer, no new token needed
+- Test patterns: `# expect-error:` for compile errors, `# expect:` for output validation in .jacl files
+- C embedding API (jacl_struct_set_val in embed.c) bypasses compiler checks — operates at raw level
+- Unity build order: value.c → gc.c → string.c → lexer.c → ast.c → parser.c → bytecode.c → collections.c → compiler.c → vm.c → syntax.c → gc_collect.c → runtime.c → embed.c
+- TokenType enum is duplicated in BOTH `src/lexer.c` AND `src/jacl.h` — add new tokens to both
+- New AST node types must also be handled in `src/syntax.c` (syntax_from_ast switch) to avoid -Wswitch warnings
+- `jacl_run()` in vm.c now extracts actual parse error messages recursively from AST_ERROR nodes (not just "parse error")
+- Parse error messages from jacl_run() are prefixed with "parse error: " for backwards compatibility
+- ctx keyword: TOKEN_CTX in lexer, AST_CTX_DECL in parser, placeholder in compiler (US-003 will add compilation)
+
+## 2026-04-29 - US-001
+- Implemented per-field mutability on StructTypeField
+- Added `is_mutable` flag to StructTypeField in both compiler.c and jacl.h
+- Added `mut` keyword support in defstruct parser: `struct Foo {mut i32 x, i32 y}`
+- Added `field_mutable` array to defstruct AST data (both ast.c and jacl.h)
+- Compile-time mutability check in dot-set paths (both inline and heap)
+- Runtime mutability check in OP_STRUCT_SET_DYN
+- Files changed: src/ast.c, src/compiler.c, src/jacl.h, src/parser.c, src/vm.c, test/test_compiler.c, test/jacl/struct_set.jacl, test/jacl/struct_nested_set.jacl, test/jacl/struct_dyn.jacl
+- New test files: test/jacl/struct_immutable_error.jacl, test/jacl/struct_mutable_field.jacl
+- **Learnings for future iterations:**
+  - The codebase has duplicated type definitions between .c files (for unity build) and .h files (for public API) — always check both
+  - The `mut` keyword (TOKEN_MUT) was already defined in the lexer for variable declarations
+  - Existing mutation tests needed `mut` annotation — 3 JACL files and 15 C test functions updated
+  - Four separate opcode paths handle struct field writes — don't forget the dynamic path in vm.c
+---
+
+## 2026-04-29 - US-002
+- Implemented ctx declaration — AST and parser
+- Added TOKEN_CTX to TokenType enum in both lexer.c and jacl.h
+- Added AST_CTX_DECL to AstNodeType enum in both ast.c and jacl.h
+- Added ctx_decl data to AstNode union (is_mutable, type_name, field_name, default_expr)
+- Implemented parser__parse_ctx_decl() with constant expression validation
+- Wired TOKEN_CTX dispatch in parser_parse() top-level loop
+- Added ctx-in-block error in parser__parse_cmd_operand()
+- Added TOKEN_CTX to keyword fallback in parser__parse_atom()
+- Added AST_CTX_DECL placeholder case in compiler.c
+- Added AST_CTX_DECL case in syntax.c
+- Fixed jacl_run() to extract actual parse error messages recursively
+- Files changed: src/ast.c, src/compiler.c, src/jacl.h, src/lexer.c, src/parser.c, src/syntax.c, src/vm.c, test/test_parser.c
+- New test files: test/jacl/ctx_decl_missing_default_error.jacl, test/jacl/ctx_decl_nested_error.jacl, test/jacl/ctx_decl_non_constant_error.jacl
+- 10 new parser tests: basic, mutable, float/bool defaults, multiple, missing default, non-constant, nested block, nested bare block, struct constructor
+- **Learnings for future iterations:**
+  - TokenType is duplicated in lexer.c AND jacl.h — must add new tokens to both
+  - New AST node types must have cases in syntax.c (syntax_from_ast) to avoid -Wswitch warnings
+  - jacl_run() previously returned generic "parse error" — now extracts actual error message recursively
+  - Parse error messages are prefixed "parse error: " for backwards compatibility with integration tests
+  - The compiler has a no-op placeholder for AST_CTX_DECL — US-003 will add actual compilation
+---

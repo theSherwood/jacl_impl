@@ -3951,6 +3951,152 @@ static int test_shell_cmd_neq_not_shell(void) {
   TEST_PASS();
 }
 
+/* ---- Implicit Context US-002: ctx declarations ---- */
+
+static int test_ctx_decl_basic(void) {
+  setup();
+  /* ctx i32 count = 0 */
+  ParseResult r = parse("ctx i32 count = 0");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_CTX_DECL);
+  ASSERT(n->data.ctx_decl.is_mutable == 0);
+  ASSERT(n->data.ctx_decl.type_name_len == 3);
+  ASSERT(memcmp(n->data.ctx_decl.type_name, "i32", 3) == 0);
+  ASSERT(n->data.ctx_decl.field_name_len == 5);
+  ASSERT(memcmp(n->data.ctx_decl.field_name, "count", 5) == 0);
+  ASSERT(n->data.ctx_decl.default_expr != NULL);
+  ASSERT(n->data.ctx_decl.default_expr->type == AST_LIT_INT);
+  ASSERT(n->data.ctx_decl.default_expr->data.lit_int.value == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_ctx_decl_mutable(void) {
+  setup();
+  /* ctx mut str name = "default" */
+  ParseResult r = parse("ctx mut str name = \"default\"");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_CTX_DECL);
+  ASSERT(n->data.ctx_decl.is_mutable == 1);
+  ASSERT(n->data.ctx_decl.type_name_len == 3);
+  ASSERT(memcmp(n->data.ctx_decl.type_name, "str", 3) == 0);
+  ASSERT(n->data.ctx_decl.field_name_len == 4);
+  ASSERT(memcmp(n->data.ctx_decl.field_name, "name", 4) == 0);
+  ASSERT(n->data.ctx_decl.default_expr != NULL);
+  ASSERT(n->data.ctx_decl.default_expr->type == AST_LIT_STRING);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_ctx_decl_float_default(void) {
+  setup();
+  ParseResult r = parse("ctx f32 score = 3.14");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_CTX_DECL);
+  ASSERT(n->data.ctx_decl.is_mutable == 0);
+  ASSERT(memcmp(n->data.ctx_decl.type_name, "f32", 3) == 0);
+  ASSERT(memcmp(n->data.ctx_decl.field_name, "score", 5) == 0);
+  ASSERT(n->data.ctx_decl.default_expr->type == AST_LIT_FLOAT);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_ctx_decl_bool_default(void) {
+  setup();
+  ParseResult r = parse("ctx bool verbose = true");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_CTX_DECL);
+  ASSERT(memcmp(n->data.ctx_decl.type_name, "bool", 4) == 0);
+  ASSERT(memcmp(n->data.ctx_decl.field_name, "verbose", 7) == 0);
+  ASSERT(n->data.ctx_decl.default_expr->type == AST_LIT_STRING);
+  ASSERT(memcmp(n->data.ctx_decl.default_expr->data.lit_string.value, "true", 4) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_ctx_decl_multiple(void) {
+  setup();
+  ParseResult r = parse("ctx i32 x = 1\nctx mut str y = \"hi\"");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 2);
+  ASSERT(r.nodes[0]->type == AST_CTX_DECL);
+  ASSERT(r.nodes[1]->type == AST_CTX_DECL);
+  ASSERT(memcmp(r.nodes[0]->data.ctx_decl.field_name, "x", 1) == 0);
+  ASSERT(r.nodes[1]->data.ctx_decl.is_mutable == 1);
+  ASSERT(memcmp(r.nodes[1]->data.ctx_decl.field_name, "y", 1) == 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_ctx_decl_missing_default(void) {
+  setup();
+  /* Missing = and default: should produce error */
+  ParseResult r = parse("ctx i32 count");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_ctx_decl_non_constant(void) {
+  setup();
+  /* Variable reference as default — not a constant */
+  ParseResult r = parse("ctx i32 count = $x");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_ctx_decl_nested_in_block(void) {
+  setup();
+  /* ctx inside a block should produce error */
+  ParseResult r = parse("proc foo {} { ctx i32 x = 0 }");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_ctx_decl_nested_in_bare_block(void) {
+  setup();
+  /* ctx inside a bare block should produce error */
+  ParseResult r = parse("if true { ctx i32 x = 0 }");
+  ASSERT(r.error_count > 0);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
+static int test_ctx_decl_struct_constructor_default(void) {
+  setup();
+  /* Struct constructor with literal args is a valid constant default */
+  ParseResult r = parse("ctx Point origin = [Point 0 0]");
+  ASSERT_U32_EQ(r.error_count, 0);
+  ASSERT_U32_EQ(r.count, 1);
+  AstNode* n = r.nodes[0];
+  ASSERT(n->type == AST_CTX_DECL);
+  ASSERT(memcmp(n->data.ctx_decl.type_name, "Point", 5) == 0);
+  ASSERT(memcmp(n->data.ctx_decl.field_name, "origin", 6) == 0);
+  ASSERT(n->data.ctx_decl.default_expr->type == AST_COMMAND);
+  teardown();
+  ASSERT(check_no_leaks());
+  TEST_PASS();
+}
+
 /* ---- runner ---- */
 
 typedef int (*test_fn)(void);
@@ -4200,6 +4346,17 @@ int main(void) {
     {"shell_cmd_in_pipeline",   test_shell_cmd_in_pipeline},
     {"shell_cmd_error_no_name", test_shell_cmd_error_no_name},
     {"shell_cmd_neq_not_shell", test_shell_cmd_neq_not_shell},
+    /* Implicit Context US-002: ctx declarations */
+    {"ctx_decl_basic",         test_ctx_decl_basic},
+    {"ctx_decl_mutable",       test_ctx_decl_mutable},
+    {"ctx_decl_float_default", test_ctx_decl_float_default},
+    {"ctx_decl_bool_default",  test_ctx_decl_bool_default},
+    {"ctx_decl_multiple",      test_ctx_decl_multiple},
+    {"ctx_decl_missing_default", test_ctx_decl_missing_default},
+    {"ctx_decl_non_constant",  test_ctx_decl_non_constant},
+    {"ctx_decl_nested_block",  test_ctx_decl_nested_in_block},
+    {"ctx_decl_nested_bare",   test_ctx_decl_nested_in_bare_block},
+    {"ctx_decl_struct_ctor",   test_ctx_decl_struct_constructor_default},
   };
   int n = (int)(sizeof(tests) / sizeof(tests[0]));
   int passed = 0;
