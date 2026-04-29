@@ -434,6 +434,11 @@ void gc_mark(ThreadHeap *heap, VM *vm) {
     /* 8. Current ctx register (implicit context struct) */
     gc__ms_push_val(&ms, vm->ctx);
 
+    /* 9. Saved ctx stack (with-ctx nesting) */
+    for (uint8_t sci = 0; sci < vm->saved_ctx_count; sci++) {
+        gc__ms_push_val(&ms, vm->saved_ctx[sci]);
+    }
+
     /* --- Mark loop --- */
     void *ptr;
     while (gc__ms_pop(&ms, &ptr)) {

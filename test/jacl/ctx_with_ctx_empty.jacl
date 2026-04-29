@@ -1,0 +1,6 @@
+# expect: 42
+# Test: empty overrides creates a valid isolation fork
+ctx mut i32 level = 42
+with-ctx {} {
+  print $ctx->level
+}

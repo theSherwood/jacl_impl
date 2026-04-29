@@ -796,7 +796,9 @@ typedef enum {
   OP_AWAIT_JOB,    /* pop value; if Job, waitpid + push result; if future, check resolved */
   OP_SIGNAL,       /* pop signal_name + job; send signal to pid, push $true/$false */
   OP_HALT,
-  OP_GET_CTX       /* push vm->ctx (implicit context struct) onto stack */
+  OP_GET_CTX,      /* push vm->ctx (implicit context struct) onto stack */
+  OP_CTX_FORK,     /* save old ctx to VM stack, alloc new ctx from pool, memcpy data, swap vm->ctx */
+  OP_CTX_RESTORE   /* pop saved ctx from VM save stack, free forked ctx to pool, restore vm->ctx */
 } OpCode;
 
 typedef struct {
@@ -1319,6 +1321,8 @@ typedef struct {
   StructTypeRegistry* struct_registry;
   JaclCtxPool *ctx_pool;
   JaclVal    ctx;              /* current implicit context struct */
+  JaclVal    saved_ctx[8];     /* with-ctx save stack for nested forks */
+  uint8_t    saved_ctx_count;  /* number of entries in saved_ctx */
   JaclVal*   gc_handle_slots;
   uint32_t   gc_handle_count;
   JaclVal    (*call_native)(void* ctx, uint32_t fn_index, JaclVal* args, int argc);

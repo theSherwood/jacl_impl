@@ -195,7 +195,9 @@ typedef enum {
   OP_AWAIT_JOB,     /* pop value; if Job map, waitpid + read files + push {stdout, stderr, exit}; if future, check resolved */
   OP_SIGNAL,        /* pop signal_name (string) + job map; send signal to pid, push $true/$false */
   OP_HALT,          /* stop execution */
-  OP_GET_CTX        /* push vm->ctx (implicit context struct) onto stack */
+  OP_GET_CTX,       /* push vm->ctx (implicit context struct) onto stack */
+  OP_CTX_FORK,      /* save old ctx to VM stack, alloc new ctx from pool, memcpy data, swap vm->ctx */
+  OP_CTX_RESTORE    /* pop saved ctx from VM save stack, free forked ctx to pool, restore vm->ctx */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -514,6 +516,8 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_SIGNAL:              return "OP_SIGNAL";
     case OP_HALT:                return "OP_HALT";
     case OP_GET_CTX:             return "OP_GET_CTX";
+    case OP_CTX_FORK:            return "OP_CTX_FORK";
+    case OP_CTX_RESTORE:         return "OP_CTX_RESTORE";
   }
   return "OP_UNKNOWN";
 }

@@ -190,6 +190,8 @@ typedef struct {
   StructTypeRegistry* struct_registry; /* struct type metadata from compiler */
   JaclCtxPool *ctx_pool;       /* ctx struct pool (NULL until initialized) */
   JaclVal    ctx;              /* current implicit context struct (never NIL during execution) */
+  JaclVal    saved_ctx[8];     /* with-ctx save stack for nested forks */
+  uint8_t    saved_ctx_count;  /* number of entries in saved_ctx */
   JaclVal*   gc_handle_slots;  /* external GC root handles (owned by embedding layer) */
   uint32_t   gc_handle_count;  /* number of slots in gc_handle_slots */
   /* Native function registry (owned by embedding layer) */
@@ -477,6 +479,7 @@ void vm_init(VM* vm, arena_t* arena) {
   vm->struct_registry = NULL;
   vm->ctx_pool        = NULL;
   vm->ctx             = JACL_NIL;
+  vm->saved_ctx_count = 0;
   vm->gc_handle_slots = NULL;
   vm->gc_handle_count = 0;
   vm->call_native       = NULL;
@@ -8780,6 +8783,51 @@ interpret_done:
       case OP_GET_CTX: {
         result = vm__push(vm, vm->ctx);
         if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_CTX_FORK: {
+        /* Allocate a new ctx from the pool and copy current ctx data */
+        if (!vm->ctx_pool || vm->ctx == JACL_NIL) {
+          vm__set_error(vm, "with-ctx: no ctx available");
+          return VM_RUNTIME_ERROR;
+        }
+        if (vm->saved_ctx_count >= 8) {
+          vm__set_error(vm, "with-ctx: nesting too deep (max 8)");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclStruct *old_struct = jacl_as_struct_ptr(vm->ctx);
+        JaclStruct *new_struct = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
+        if (!new_struct) {
+          vm__set_error(vm, "with-ctx: failed to allocate ctx");
+          return VM_RUNTIME_ERROR;
+        }
+        /* Copy field data from old ctx to new ctx */
+        StructTypeRegistry *reg = vm->struct_registry;
+        StructTypeDef *sdef = reg->defs[reg->ctx_type_idx];
+        memcpy(new_struct->data, old_struct->data, sdef->total_size);
+        /* Save old ctx to VM save stack, swap vm->ctx to new */
+        JaclVal old_ctx = vm->ctx;
+        vm->saved_ctx[vm->saved_ctx_count++] = old_ctx;
+        vm->ctx = jacl_struct_val(new_struct);
+        /* SATB write barrier: protect old ctx during concurrent GC */
+        gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, old_ctx, vm->ctx);
+        break;
+      }
+
+      case OP_CTX_RESTORE: {
+        /* Pop saved ctx from VM save stack, free forked ctx to pool, restore */
+        if (vm->saved_ctx_count == 0) {
+          vm__set_error(vm, "ctx restore: no saved ctx");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclVal saved_ctx = vm->saved_ctx[--vm->saved_ctx_count];
+        /* Free the forked ctx back to the pool */
+        if (vm->ctx != JACL_NIL && vm->ctx_pool) {
+          JaclStruct *forked = jacl_as_struct_ptr(vm->ctx);
+          ctx_pool_free(vm->ctx_pool, forked);
+        }
+        vm->ctx = saved_ctx;
         break;
       }
 

@@ -7631,6 +7631,106 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* with-ctx {overrides} { body } — explicit context forking */
+  if (compiler__head_matches(head, "with-ctx", 8)) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "with-ctx", "2 arguments", argc);
+      return;
+    }
+    if (args[0]->type != AST_BLOCK) {
+      compiler__error(c, line, col, "with-ctx overrides must be a block");
+      return;
+    }
+    if (args[1]->type != AST_BLOCK) {
+      compiler__error(c, line, col, "with-ctx body must be a block");
+      return;
+    }
+
+    CtxFieldList *ctx_fl = compiler__get_ctx_fields(c);
+    if (!ctx_fl || ctx_fl->count == 0) {
+      compiler__error(c, line, col, "with-ctx: no ctx fields declared");
+      return;
+    }
+
+    /* Validate override fields at compile time */
+    AstNode *overrides_block = args[0];
+    uint32_t override_count = overrides_block->data.block.count;
+    for (uint32_t i = 0; i < override_count; i++) {
+      AstNode *override_cmd = overrides_block->data.block.commands[i];
+      if (override_cmd->type != AST_COMMAND || override_cmd->data.command.arg_count != 1) {
+        compiler__error(c, line, col, "with-ctx override must be: field_name value");
+        return;
+      }
+      AstNode *field_head = override_cmd->data.command.head;
+      if (field_head->type != AST_LIT_STRING) {
+        compiler__error(c, line, col, "with-ctx override field name must be an identifier");
+        return;
+      }
+      const char *fname = field_head->data.lit_string.value;
+      uint32_t flen = field_head->data.lit_string.length;
+      /* Find field in ctx_fields */
+      uint32_t fi;
+      for (fi = 0; fi < ctx_fl->count; fi++) {
+        if (ctx_fl->fields[fi].name_len == flen &&
+            memcmp(ctx_fl->fields[fi].name, fname, flen) == 0)
+          break;
+      }
+      if (fi == ctx_fl->count) {
+        char err[128];
+        snprintf(err, sizeof(err), "no field '%.*s' on ctx", (int)flen, fname);
+        compiler__error(c, line, col, err);
+        return;
+      }
+    }
+
+    /* Emit OP_CTX_FORK: alloc new ctx, copy data, push old ctx, swap vm->ctx */
+    compiler__emit_byte(c, OP_CTX_FORK, line);
+
+    /* Compile field overrides: each sets a field on the new (forked) ctx */
+    for (uint32_t i = 0; i < override_count; i++) {
+      AstNode *override_cmd = overrides_block->data.block.commands[i];
+      AstNode *field_head = override_cmd->data.command.head;
+      const char *fname = field_head->data.lit_string.value;
+      uint32_t flen = field_head->data.lit_string.length;
+      /* Find field again (already validated) */
+      uint32_t fi;
+      for (fi = 0; fi < ctx_fl->count; fi++) {
+        if (ctx_fl->fields[fi].name_len == flen &&
+            memcmp(ctx_fl->fields[fi].name, fname, flen) == 0)
+          break;
+      }
+      CtxField *cf = &ctx_fl->fields[fi];
+      /* Type check the override value */
+      compiler__emit_byte(c, OP_GET_CTX, line);
+      c->expected_type = cf->type;
+      compiler__compile_node(c, override_cmd->data.command.args[0]);
+      JaclType val_type = c->last_expr_type;
+      c->expected_type = TYPE_DYN;
+      if (cf->type != TYPE_DYN && val_type != TYPE_DYN && val_type != cf->type) {
+        char err[192];
+        snprintf(err, sizeof(err),
+                 "type error: field '%.*s' of struct 'ctx' expected %s, got %s",
+                 (int)cf->name_len, cf->name,
+                 type_name(cf->type), type_name(val_type));
+        compiler__error(c, line, col, err);
+        return;
+      }
+      compiler__emit_byte(c, OP_STRUCT_SET, line);
+      compiler__emit_u16(c, (uint16_t)cf->offset, line);
+      compiler__emit_byte(c, (uint8_t)cf->type, line);
+      compiler__emit_byte(c, OP_POP, line); /* discard struct result from OP_STRUCT_SET */
+    }
+
+    /* Compile body block as expression (result stays on stack).
+       OP_CTX_FORK/RESTORE use a VM-internal save stack — no value stack
+       involvement for the saved ctx, so body_result is naturally on top. */
+    compiler__compile_block_expr(c, args[1]);
+
+    /* Restore original ctx from VM save stack, free forked ctx to pool */
+    compiler__emit_byte(c, OP_CTX_RESTORE, line);
+    return;
+  }
+
   /* vec constructor (variadic: 0+ args) */
   if (compiler__head_matches(head, "vec", 3)) {
     for (uint32_t i = 0; i < argc; i++) {

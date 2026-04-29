@@ -1,0 +1,7 @@
+# expect: 99
+# Test: with-ctx as expression returns body value
+ctx mut i32 level = 42
+def result [with-ctx {level 99} {
+  $ctx->level
+}]
+print $result
