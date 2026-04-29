@@ -127,3 +127,24 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
   - JACL_NIL is 0x00, so calloc-zeroed VMs already have ctx = NIL, but explicit init is clearer
   - gc__ms_push_val safely handles JACL_NIL (skips it), so workers with uninitialized ctx don't cause issues
 ---
+
+## 2026-04-29 - US-006
+- Implemented $ctx variable resolution and OP_GET_CTX opcode
+- Added OP_GET_CTX opcode to OpCode enum in bytecode.c and jacl.h
+- Implemented OP_GET_CTX handler in vm.c: pushes vm->ctx onto the stack
+- Added $ctx recognition in compiler AST_VAR_REF handler: emits OP_GET_CTX, sets last_expr_type = TYPE_STRUCT
+- Added CTX_STRUCT_PENDING sentinel (UINT32_MAX - 1) for last_struct_idx during compilation (ctx struct not yet finalized)
+- Added reserved name checks: def/mut of 'ctx' produces compile error "'ctx' is reserved"
+- Fixed parser: added TOKEN_CTX cases in parser__parse_expr and parser__parse_infix_operand so `def ctx 42` is parsed correctly (not as ctx declaration)
+- Uses ctx_fields->count > 0 check instead of reg->ctx_type_idx > 0 (struct registry not finalized during compilation)
+- Files changed: src/bytecode.c, src/compiler.c, src/jacl.h, src/parser.c, src/vm.c
+- New test files: test/jacl/ctx_access.jacl, test/jacl/ctx_def_reserved_error.jacl, test/jacl/ctx_mut_reserved_error.jacl, test/jacl/ctx_nested_proc.jacl
+- **Learnings for future iterations:**
+  - ctx_type_idx is 0 during compilation because ctx_field_list__finalize runs AFTER compilation — use ctx_fields->count check instead
+  - Early finalization broke existing tests by shifting struct registry indices — avoid reordering the registry
+  - CTX_STRUCT_PENDING sentinel allows US-007 to recognize $ctx references for field resolution via ctx_fields
+  - JACL `!=` operator doesn't exist as a built-in; use `==` for comparison
+  - JACL `nil` (bare) is a string literal; use `$nil` for the nil value
+  - Proc definitions use `proc` keyword, not `def` (which is for variable binding)
+  - `==` type-checks operands at compile time — cannot compare TYPE_STRUCT with other types
+---
