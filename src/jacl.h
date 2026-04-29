@@ -1976,6 +1976,7 @@ extern void vm__capture_trace (VM *vm);
 extern void ctx_pool_init (JaclCtxPool *pool, ThreadHeap *heap, StructTypeRegistry *reg);
 extern JaclStruct *ctx_pool_alloc (JaclCtxPool *pool, ThreadHeap *heap);
 extern void ctx_pool_free (JaclCtxPool *pool, JaclStruct *s);
+extern void ctx__init_vm (VM *vm, JaclCtxPool *pool_storage);
 extern void vm_init (VM *vm, arena_t *arena);
 extern void vm_destroy (VM *vm);
 extern VMResult vm__push (VM *vm, JaclVal value);
@@ -2094,11 +2095,11 @@ extern void runtime__state_machine_task_exec (void *data);
 extern void runtime__schedule_sm_resumption (void *runtime_ptr, JaclVal state_machine, JaclVal result);
 extern void runtime__schedule_waiters (void *runtime_ptr, FutureWaiter *waiters, JaclVal result);
 extern void runtime__spawn_task_exec (void *data);
-extern void runtime__submit_spawn_task (void *runtime_ptr, JaclClosure *closure, JaclVal future_val);
+extern void runtime__submit_spawn_task (void *runtime_ptr, JaclClosure *closure, JaclVal future_val, JaclVal parent_ctx);
 extern void runtime__parallel_task_exec (void *data);
-extern void runtime__submit_parallel_task (void *runtime_ptr, JaclClosure *closure, JaclVal agg_val, uint32_t index);
+extern void runtime__submit_parallel_task (void *runtime_ptr, JaclClosure *closure, JaclVal agg_val, uint32_t index, JaclVal parent_ctx);
 extern void runtime__race_task_exec (void *data);
-extern void runtime__submit_race_task (void *runtime_ptr, JaclClosure *closure, JaclVal agg_val);
+extern void runtime__submit_race_task (void *runtime_ptr, JaclClosure *closure, JaclVal agg_val, JaclVal parent_ctx);
 extern VMResult rt_run_to_completion (Runtime *rt, JaclClosure *closure, arena_t *arena);
 
 /* --- embed.c --- */

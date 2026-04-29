@@ -1,0 +1,20 @@
+# mode: concurrent
+# expect: done
+# Test: concurrent stress — multiple workers spawning tasks with ctx forks
+ctx mut i32 level = 1
+
+proc main {} {
+  def r [parallel {
+    set $ctx->level 10
+    $ctx->level
+  } {
+    set $ctx->level 20
+    $ctx->level
+  } {
+    set $ctx->level 30
+    $ctx->level
+  }]
+  # All should complete without corruption
+  print done
+}
+main

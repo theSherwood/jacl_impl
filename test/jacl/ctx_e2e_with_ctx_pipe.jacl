@@ -1,0 +1,5 @@
+# expect: 198
+# Test: with-ctx as expression, return value propagates through pipe
+ctx mut i32 level = 42
+def doubled [* 2 [with-ctx {level 99} { $ctx->level }]]
+print $doubled

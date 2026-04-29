@@ -1,0 +1,15 @@
+# expect: 42
+# expect: 99
+# expect: 42
+# Test: user-declared ctx field + with-ctx + proc calls (propagation and isolation)
+ctx mut i32 level = 42
+
+proc read-level {} {
+  $ctx->level
+}
+
+print [read-level]
+with-ctx {level 99} {
+  print [read-level]
+}
+print [read-level]

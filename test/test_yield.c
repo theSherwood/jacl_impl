@@ -1539,7 +1539,7 @@ static int test_sm_async_concurrent_workers(void) {
   /* Submit closure and wait for completion */
   JaclVal completion = jacl_future(&rt.workers[0].vm.heap);
   JaclFuture* cfut = jacl_as_future(completion);
-  runtime__submit_spawn_task(&rt, wrapper, completion);
+  runtime__submit_spawn_task(&rt, wrapper, completion, JACL_NIL);
 
   for (;;) {
     uint32_t state = ATOMIC_LOAD_EXPLICIT(&cfut->state, MEM_ACQUIRE);

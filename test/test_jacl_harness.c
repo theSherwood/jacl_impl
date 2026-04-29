@@ -241,11 +241,15 @@ static int run_jacl_test_concurrent(const char* source, Expectations* exp) {
   memset(&tspc, 0, sizeof(tspc));
   MUTEX_INIT(tspc.mutex);
 
-  /* Configure all worker VMs: print capture, intern table, env */
+  /* Configure all worker VMs: print capture, intern table, env, struct_registry, ctx */
+  JaclCtxPool worker_ctx_pools[16]; /* max workers */
   for (i = 0; i < rt.num_workers; i++) {
     rt.workers[i].vm.print_fn = capture_print_threadsafe;
     rt.workers[i].vm.print_ctx = &tspc;
     rt.workers[i].vm.intern_table = &intern_table;
+    rt.workers[i].vm.struct_registry = cr.struct_registry;
+    /* Initialize ctx subsystem per worker */
+    ctx__init_vm(&rt.workers[i].vm, &worker_ctx_pools[i]);
     /* Copy env from temp VM so workers have user-defined procs */
     harness__copy_env(&rt.workers[i].vm, &vm);
   }
@@ -253,7 +257,7 @@ static int run_jacl_test_concurrent(const char* source, Expectations* exp) {
   /* Step 4: Submit closure and wait for completion */
   JaclVal completion = jacl_future(&rt.workers[0].vm.heap);
   JaclFuture *cfut = jacl_as_future(completion);
-  runtime__submit_spawn_task(&rt, closure, completion);
+  runtime__submit_spawn_task(&rt, closure, completion, rt.workers[0].vm.ctx);
 
   /* Block until completion future resolves (with timeout) */
   int __timed_out = 1;

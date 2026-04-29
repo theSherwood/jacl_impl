@@ -8924,7 +8924,7 @@ interpret_done:
  * Sets vm->ctx_pool and vm->ctx.  pool_storage must remain valid for
  * the VM's lifetime (typically stack-allocated by the caller).
  */
-static void ctx__init_vm(VM *vm, JaclCtxPool *pool_storage) {
+void ctx__init_vm(VM *vm, JaclCtxPool *pool_storage) {
     StructTypeRegistry *reg = vm->struct_registry;
     if (!reg || reg->ctx_type_idx == 0) return;
 

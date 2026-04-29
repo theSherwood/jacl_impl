@@ -1,0 +1,17 @@
+# expect: 1
+# expect: 2
+# expect: 3
+# expect: 2
+# expect: 1
+# Test: nested with-ctx 3+ levels deep with different overrides at each level
+ctx mut i32 level = 1
+
+print $ctx->level
+with-ctx {level 2} {
+  print $ctx->level
+  with-ctx {level 3} {
+    print $ctx->level
+  }
+  print $ctx->level
+}
+print $ctx->level

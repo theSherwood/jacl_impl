@@ -1325,7 +1325,7 @@ static int test_spawn_worker_execution(void) {
 
     /* Create future and submit spawn task */
     JaclVal f = jacl_future(&rt.workers[0].vm.heap);
-    runtime__submit_spawn_task(&rt, task_cl, f);
+    runtime__submit_spawn_task(&rt, task_cl, f, JACL_NIL);
 
     /* Wait for the future to resolve */
     JaclFuture *fut = jacl_as_future(f);
