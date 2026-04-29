@@ -1,0 +1,4 @@
+# expect-error: type error
+# Test: type mismatch produces compile error
+ctx mut i32 level = 42
+set $ctx->level "hello"

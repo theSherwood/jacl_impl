@@ -1,0 +1,5 @@
+# expect: 99
+# Test: write to mut field succeeds and value is readable
+ctx mut i32 level = 42
+set $ctx->level 99
+print $ctx->level

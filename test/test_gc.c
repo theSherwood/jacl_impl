@@ -2104,6 +2104,68 @@ static int test_vm_ctx_multiple_gc_cycles(void) {
     TEST_PASS();
 }
 
+static int test_ctx_set_write_barrier(void) {
+    /* Write barrier fires when updating reference-type ctx field during active GC */
+    arena_t arena = {0};
+    VM vm;
+    vm_init(&vm, &arena);
+
+    StructTypeRegistry reg;
+    setup_ctx_registry(&reg, &arena);
+    vm.struct_registry = &reg;
+
+    JaclCtxPool pool;
+    ctx_pool_init(&pool, &vm.heap, &reg);
+    vm.ctx_pool = &pool;
+
+    /* Allocate ctx with a heap string */
+    JaclStruct *ctx_struct = ctx_pool_alloc(&pool, &vm.heap);
+    JaclVal old_str = jacl_rope_string_create(&vm.heap,
+                          (const uint8_t *)"/old/path", 9);
+    vm__struct_write_field(ctx_struct, 0, TYPE_STR, old_str);
+    vm.ctx = jacl_struct_val(ctx_struct);
+
+    /* Set up grey buffer and gc_active to simulate active GC */
+    GreyBuffer gb;
+    grey_buf_init(&gb);
+    volatile uint32_t gc_active = 1;
+    vm.grey_buf = &gb;
+    vm.gc_active_ptr = (volatile uint32_t *)&gc_active;
+
+    /* Update pwd field with new string — should fire write barrier */
+    JaclVal new_str = jacl_rope_string_create(&vm.heap,
+                          (const uint8_t *)"/new/path", 9);
+
+    /* Read old value, fire barrier, write new value (same as OP_STRUCT_SET) */
+    JaclVal read_old;
+    memcpy(&read_old, ctx_struct->data + 0, sizeof(JaclVal));
+    gc_write_barrier(&gb, vm.gc_active_ptr, read_old, new_str);
+    vm__struct_write_field(ctx_struct, 0, TYPE_STR, new_str);
+
+    /* Grey buffer should contain old and new values */
+    ASSERT(gb.count >= 2);  /* old_str + new_str */
+
+    /* Verify the old string was pushed to grey buffer */
+    bool found_old = false;
+    for (uint32_t i = 0; i < gb.count; i++) {
+        if (gb.entries[i] == old_str) found_old = true;
+    }
+    ASSERT(found_old);
+
+    /* Clean up */
+    gc_active = 0;
+    vm.grey_buf = NULL;
+    vm.gc_active_ptr = NULL;
+    grey_buf_destroy(&gb);
+    vm.ctx = JACL_NIL;
+    vm.ctx_pool = NULL;
+    teardown_ctx_registry(&reg);
+    vm.struct_registry = NULL;
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    TEST_PASS();
+}
+
 /* --- Test Runner --- */
 
 typedef struct { const char* name; int (*fn)(void); } TestEntry;
@@ -2179,6 +2241,8 @@ int main(void) {
         { "vm_ctx_set_at_startup",       test_vm_ctx_set_at_startup },
         { "vm_ctx_gc_survives",          test_vm_ctx_gc_survives },
         { "vm_ctx_multiple_gc_cycles",   test_vm_ctx_multiple_gc_cycles },
+        /* US-008: ctx field write barrier */
+        { "ctx_set_write_barrier",       test_ctx_set_write_barrier },
     };
 
     int total = (int)(sizeof(tests) / sizeof(tests[0]));

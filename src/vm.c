@@ -5584,6 +5584,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         JaclStruct* s = jacl_as_struct_ptr(struct_val);
+        /* Write barrier for reference-type fields during active GC */
+        if (field_type == TYPE_DYN || field_type == TYPE_STR ||
+            field_type == TYPE_STRUCT || field_type == TYPE_MAP) {
+          JaclVal old_val;
+          memcpy(&old_val, s->data + field_offset, sizeof(JaclVal));
+          gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
+                           old_val, new_val);
+        }
         vm__struct_write_field(s, field_offset, field_type, new_val);
         /* Push struct value back (for chaining) */
         result = vm__push(vm, struct_val);
