@@ -168,3 +168,16 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
   - Struct constructor defaults (e.g., [Point 10 20]) work via bytecode emission, not compile-time JaclVal evaluation
   - The CTX_STRUCT_PENDING handler also supports `set` operations (is_set=true path), preparing for US-008
 ---
+
+## 2026-04-29 - US-008
+- Implemented set $ctx->field — mutable field writes with compile-time checks
+- The CTX_STRUCT_PENDING handler from US-007 already handled set operations (mutability check, type check, OP_STRUCT_SET emission)
+- Added write barrier to OP_STRUCT_SET in vm.c for reference-type fields (TYPE_DYN, TYPE_STR, TYPE_STRUCT, TYPE_MAP)
+- Write barrier reads old value before write, calls gc_write_barrier with grey buffer to protect old/new values during active GC
+- Files changed: src/vm.c, test/test_gc.c
+- New test files: test/jacl/ctx_set_mut_field.jacl, test/jacl/ctx_set_immutable_error.jacl, test/jacl/ctx_set_type_error.jacl
+- 1 new C test: ctx_set_write_barrier (verifies old string pushed to grey buffer during simulated active GC)
+- **Learnings for future iterations:**
+  - OP_STRUCT_SET previously had no write barrier — reference-type field mutations were not GC-safe during concurrent collection
+  - The CTX_STRUCT_PENDING handler naturally handled both get and set paths, so US-008 was mostly pre-implemented by US-007
+---
