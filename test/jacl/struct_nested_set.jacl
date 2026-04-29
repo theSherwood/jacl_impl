@@ -1,8 +1,8 @@
 # expect: 99
 # expect: 6
 # Test nested struct field mutation
-struct Point {i32 x, i32 y}
-struct Line {Point start, Point end}
+struct Point {mut i32 x, i32 y}
+struct Line {mut Point start, Point end}
 def ln [Line [Point 5 6] [Point 10 20]]
 . $ln->start x 99
 print $ln->start->x

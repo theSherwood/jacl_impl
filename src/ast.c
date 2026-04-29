@@ -79,6 +79,7 @@ struct AstNode {
     struct { const char* name; uint32_t name_len;
              const char** field_names; uint32_t* field_name_lens;
              const char** field_types; uint32_t* field_type_lens;
+             uint8_t* field_mutable;
              uint32_t field_count; }                              defstruct;
     struct { const char* name; uint32_t name_len;
              const char** param_names; uint32_t* param_name_lens;

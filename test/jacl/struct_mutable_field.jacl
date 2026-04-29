@@ -1,6 +1,6 @@
 # expect: 99
 # expect: 20
-# Test struct field mutation via 3-arg dot syntax
+# Test: mutable field write compiles and executes correctly
 struct Point {mut i32 x, i32 y}
 def p [Point 10 20]
 . $p x 99

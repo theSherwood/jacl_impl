@@ -5604,6 +5604,11 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                         (int)sdef2->name_len, sdef2->name, (int)flen2, fname2);
           return VM_RUNTIME_ERROR;
         }
+        if (!sdef2->fields[fi2].is_mutable) {
+          vm__set_error(vm, "cannot mutate immutable field '%.*s' on struct '%.*s'",
+                        (int)flen2, fname2, (int)sdef2->name_len, sdef2->name);
+          return VM_RUNTIME_ERROR;
+        }
         uint16_t foff2 = sdef2->fields[fi2].offset;
         vm__struct_write_field(sd, foff2, (int)sdef2->fields[fi2].type, new_val);
         result = vm__push(vm, struct_val);

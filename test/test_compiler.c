@@ -5489,7 +5489,7 @@ static int test_struct_inline_set_basic(void) {
   vm.print_ctx = &cap;
 
   VMResult r = jacl_run(
-      "struct Point {i32 x, i32 y}\n"
+      "struct Point {mut i32 x, i32 y}\n"
       "proc test {} {\n"
       "  def p [Point 10 20]\n"
       "  . $p x 99\n"
@@ -5659,7 +5659,7 @@ static int test_struct_pass_by_value_basic(void) {
   vm.print_ctx = &cap;
 
   VMResult r = jacl_run(
-      "struct Point {i32 x, i32 y}\n"
+      "struct Point {mut i32 x, i32 y}\n"
       "proc mutate {Point p} {\n"
       "  . $p x 99\n"
       "  print $p->x\n"
@@ -5697,7 +5697,7 @@ static int test_struct_pass_by_value_recursive(void) {
   vm.print_ctx = &cap;
 
   VMResult r = jacl_run(
-      "struct Point {i32 x, i32 y}\n"
+      "struct Point {mut i32 x, i32 y}\n"
       "proc bump {Point p} {\n"
       "  . $p x [+ $p->x 10]\n"
       "  $p\n"
@@ -5741,7 +5741,7 @@ static int test_struct_pass_by_value_chain(void) {
   vm.print_ctx = &cap;
 
   VMResult r = jacl_run(
-      "struct Point {i32 x, i32 y}\n"
+      "struct Point {mut i32 x, i32 y}\n"
       "proc inner {Point p} {\n"
       "  . $p x 99\n"
       "  print $p->x\n"
@@ -5861,7 +5861,7 @@ static int test_struct_return_value_isolation(void) {
   vm.print_ctx = &cap;
 
   VMResult r = jacl_run(
-      "struct Point {i32 x, i32 y}\n"
+      "struct Point {mut i32 x, i32 y}\n"
       "proc Point dup {Point p} {\n"
       "  Point $p->x $p->y\n"
       "}\n"
@@ -5938,7 +5938,7 @@ static int test_struct_closure_capture_isolation(void) {
   vm.print_ctx = &cap;
 
   VMResult r = jacl_run(
-      "struct Point {i32 x, i32 y}\n"
+      "struct Point {mut i32 x, i32 y}\n"
       "proc test {} {\n"
       "  def p [Point 1 2]\n"
       "  proc reader {} {\n"
@@ -6077,7 +6077,7 @@ static int test_struct_set_basic(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "struct Point {i32 x, i32 y}\n"
+      "struct Point {mut i32 x, i32 y}\n"
       "def p [Point 10 20]\n"
       ". $p x 99\n"
       "print $p->x\n"
@@ -6119,7 +6119,7 @@ static int test_struct_set_type_mismatch(void) {
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
   CompileResult cr = compile_source(
-      "struct Point {i32 x, i32 y}\n"
+      "struct Point {mut i32 x, i32 y}\n"
       "def p [Point 1 2]\n"
       ". $p x \"hello\"", &arena, &heap);
   ASSERT(cr.error_count > 0);
@@ -6140,7 +6140,7 @@ static int test_struct_set_preserves_other_fields(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "struct Pair {i32 a, i32 b}\n"
+      "struct Pair {mut i32 a, i32 b}\n"
       "def p [Pair 1 2]\n"
       ". $p a 42\n"
       "print $p->b",
@@ -6213,7 +6213,7 @@ static int test_struct_dyn_field_set(void) {
   VM vm;
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
-      "struct Point {i32 x, i32 y}\n"
+      "struct Point {mut i32 x, i32 y}\n"
       "def dyn d [Point 1 2]\n"
       ". $d x 99\n"
       "print $d->x",
@@ -7117,7 +7117,7 @@ static int test_dual_path_legacy_field_mutation(void) {
   vm.print_ctx = &cap;
 
   VMResult r = jacl_run(
-      "struct Named {str label, i32 value}\n"
+      "struct Named {str label, mut i32 value}\n"
       "proc test {} {\n"
       "  def n [Named \"hello\" 1]\n"
       "  . $n value 99\n"
@@ -7150,7 +7150,7 @@ static int test_set_arrow_inline(void) {
   vm.print_ctx = &cap;
 
   VMResult r = jacl_run(
-      "struct Point {i32 x, i32 y}\n"
+      "struct Point {mut i32 x, i32 y}\n"
       "proc test {} {\n"
       "  def p [Point 10 20]\n"
       "  set p->x 99\n"
@@ -7184,7 +7184,7 @@ static int test_set_arrow_heap(void) {
   vm.print_ctx = &cap;
 
   VMResult r = jacl_run(
-      "struct Named {str label, i32 value}\n"
+      "struct Named {str label, mut i32 value}\n"
       "proc test {} {\n"
       "  def n [Named \"hello\" 1]\n"
       "  set n->value 42\n"
@@ -7217,8 +7217,8 @@ static int test_set_arrow_chained(void) {
   vm.print_ctx = &cap;
 
   VMResult r = jacl_run(
-      "struct Point {i32 x, i32 y}\n"
-      "struct Line {Point start, Point end}\n"
+      "struct Point {mut i32 x, i32 y}\n"
+      "struct Line {mut Point start, Point end}\n"
       "proc test {} {\n"
       "  def ln [Line [Point 1 2] [Point 3 4]]\n"
       "  set ln->start->x 77\n"

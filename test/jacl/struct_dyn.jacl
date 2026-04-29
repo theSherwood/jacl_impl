@@ -2,7 +2,7 @@
 # expect: 1
 # expect: 99
 # Test struct boxing and dyn interop
-struct Point {i32 x, i32 y}
+struct Point {mut i32 x, i32 y}
 def dyn d [Point 1 2]
 print $d
 print $d->x

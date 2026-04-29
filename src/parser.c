@@ -1284,6 +1284,7 @@ AstNode* parser__parse_defstruct(Parser* p) {
   uint32_t tmp_fname_lens[DEFSTRUCT_MAX_FIELDS];
   const char* tmp_ftypes[DEFSTRUCT_MAX_FIELDS];
   uint32_t tmp_ftype_lens[DEFSTRUCT_MAX_FIELDS];
+  uint8_t tmp_fmutable[DEFSTRUCT_MAX_FIELDS];
 
   SourcePos last_end = parser__token_end(name_tok);
 
@@ -1300,6 +1301,13 @@ AstNode* parser__parse_defstruct(Parser* p) {
         parser__advance(p);
       }
       if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
+
+      /* Optional mut keyword before field type */
+      uint8_t field_is_mutable = 0;
+      if (!parser__at_end(p) && parser__peek(p)->type == TOKEN_MUT) {
+        parser__advance(p);
+        field_is_mutable = 1;
+      }
 
       /* Field type — word or keyword token */
       Token* type_tok = parser__peek(p);
@@ -1347,6 +1355,7 @@ AstNode* parser__parse_defstruct(Parser* p) {
       tmp_fname_lens[field_count] = fname_tok->length;
       tmp_ftypes[field_count] = type_str;
       tmp_ftype_lens[field_count] = type_len;
+      tmp_fmutable[field_count] = field_is_mutable;
       field_count++;
     }
 
@@ -1372,11 +1381,13 @@ AstNode* parser__parse_defstruct(Parser* p) {
   field_name_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * field_count);
   field_types = (const char**)arena_alloc(p->arena, sizeof(const char*) * field_count);
   field_type_lens = (uint32_t*)arena_alloc(p->arena, sizeof(uint32_t) * field_count);
+  uint8_t* field_mutable = (uint8_t*)arena_alloc(p->arena, sizeof(uint8_t) * field_count);
   for (uint32_t i = 0; i < field_count; i++) {
     field_names[i] = tmp_fnames[i];
     field_name_lens[i] = tmp_fname_lens[i];
     field_types[i] = tmp_ftypes[i];
     field_type_lens[i] = tmp_ftype_lens[i];
+    field_mutable[i] = tmp_fmutable[i];
   }
 
   AstNode* node = ast_alloc(p->arena);
@@ -1389,6 +1400,7 @@ AstNode* parser__parse_defstruct(Parser* p) {
   node->data.defstruct.field_name_lens = field_name_lens;
   node->data.defstruct.field_types = field_types;
   node->data.defstruct.field_type_lens = field_type_lens;
+  node->data.defstruct.field_mutable = field_mutable;
   node->data.defstruct.field_count = field_count;
   return node;
 }

@@ -193,6 +193,7 @@ typedef struct {
   uint32_t    struct_type_idx; /* index into registry if type==TYPE_STRUCT */
   uint32_t    offset;          /* byte offset in struct memory (C-ABI) */
   uint32_t    size;            /* field size in bytes (C-ABI) */
+  bool        is_mutable;      /* true if field can be written via set */
 } StructTypeField;
 
 typedef struct {
@@ -410,6 +411,7 @@ uint32_t compiler__register_inline_struct(
     tmp_fields[tmp_count].struct_type_idx = f_struct_idx;
     tmp_fields[tmp_count].offset         = offset;
     tmp_fields[tmp_count].size           = fsize;
+    tmp_fields[tmp_count].is_mutable     = false;
     tmp_count++;
 
     offset += fsize;
@@ -8840,6 +8842,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           uint8_t set_op = is_upvalue_inline ? OP_STRUCT_SET_UPVALUE : OP_STRUCT_SET_INLINE;
 
           if (is_set) {
+            /* Per-field mutability check */
+            if (!sdef->fields[fi].is_mutable) {
+              char err_msg[192];
+              snprintf(err_msg, sizeof(err_msg),
+                       "cannot mutate immutable field '%.*s' on struct '%.*s'",
+                       (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
+                       (int)sdef->name_len, sdef->name);
+              compiler__error(c, line, col, err_msg);
+              return;
+            }
             /* Compile new value with type checking */
             JaclType field_type = sdef->fields[fi].type;
             c->expected_type = field_type;
@@ -8946,6 +8958,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
 
         if (is_set) {
+          /* Per-field mutability check */
+          if (!sdef->fields[fi].is_mutable) {
+            char err_msg[192];
+            snprintf(err_msg, sizeof(err_msg),
+                     "cannot mutate immutable field '%.*s' on struct '%.*s'",
+                     (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
+                     (int)sdef->name_len, sdef->name);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
           /* Compile new value with type checking */
           JaclType field_type = sdef->fields[fi].type;
           c->expected_type = field_type;
@@ -10207,6 +10229,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         tmp_fields[fi].struct_type_idx = f_struct_idx;
         tmp_fields[fi].offset         = offset;
         tmp_fields[fi].size           = fsize;
+        tmp_fields[fi].is_mutable     = node->data.defstruct.field_mutable[fi] != 0;
 
         offset += fsize;
         if (falign > max_align) max_align = falign;
