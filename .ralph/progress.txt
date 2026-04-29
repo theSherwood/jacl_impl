@@ -181,3 +181,22 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
   - OP_STRUCT_SET previously had no write barrier — reference-type field mutations were not GC-safe during concurrent collection
   - The CTX_STRUCT_PENDING handler naturally handled both get and set paths, so US-008 was mostly pre-implemented by US-007
 ---
+
+## 2026-04-29 - US-009
+- Implemented with-ctx explicit forking primitive
+- Added saved_ctx[8] + saved_ctx_count to VM struct (both vm.c and jacl.h) for nested fork/restore
+- OP_CTX_FORK: saves old vm->ctx to VM save stack, allocs new ctx from pool, memcpy data, swaps vm->ctx
+- OP_CTX_RESTORE: pops from VM save stack, frees forked ctx to pool, restores vm->ctx
+- No value stack involvement for saved ctx — body result naturally remains on stack
+- Compiler handler: validates override fields at compile time, type-checks override values
+- Override fields can target both mutable and immutable fields (fork creates new instance)
+- Added GC root tracing for saved_ctx entries in both gc_collect.c and runtime.c
+- Initialized saved_ctx_count = 0 in vm_init (vm.c) and runtime__init_worker_vm (runtime.c)
+- Files changed: src/bytecode.c, src/compiler.c, src/gc_collect.c, src/jacl.h, src/runtime.c, src/vm.c
+- New test files: test/jacl/ctx_with_ctx_basic.jacl, ctx_with_ctx_nested.jacl, ctx_with_ctx_expr.jacl, ctx_with_ctx_bad_field_error.jacl, ctx_with_ctx_type_error.jacl, ctx_with_ctx_empty.jacl
+- **Learnings for future iterations:**
+  - Using a VM-internal save stack avoids all value stack manipulation complexity for with-ctx fork/restore
+  - ctx_pool_free takes only 2 args (pool, struct) — the StructTypeDef is cached on the pool itself
+  - with-ctx override path intentionally skips mutability check — fork creates a new instance so all fields are writable
+  - Nesting depth capped at 8 (runtime error if exceeded)
+---
