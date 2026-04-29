@@ -1,0 +1,4 @@
+# expect: /test/path
+# Test: set $ctx->pwd updates the value, readable after
+set $ctx->pwd "/test/path"
+print $ctx->pwd

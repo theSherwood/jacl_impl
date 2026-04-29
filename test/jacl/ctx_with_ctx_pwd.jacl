@@ -1,0 +1,8 @@
+# expect: /override/path
+# expect: true
+# Test: with-ctx overrides pwd in body, restores original after
+def original $ctx->pwd
+with-ctx {pwd "/override/path"} {
+  print $ctx->pwd
+}
+print [== $ctx->pwd $original]
