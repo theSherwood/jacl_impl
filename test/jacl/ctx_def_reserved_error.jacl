@@ -1,0 +1,3 @@
+# expect-error: 'ctx' is reserved
+# Test: shadowing $ctx with def produces compile error
+def ctx 42

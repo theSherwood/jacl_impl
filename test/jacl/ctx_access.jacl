@@ -1,0 +1,4 @@
+# expect: ok
+# Test: $ctx is accessible and returns a value
+def x $ctx
+print "ok"

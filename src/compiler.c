@@ -2718,6 +2718,7 @@ struct Compiler {
   JaclType         expected_type;   /* contextual type hint for RHS compilation */
   JaclType         last_expr_type;  /* type of the last compiled expression */
   uint32_t         last_struct_idx; /* struct type index when last_expr_type==TYPE_STRUCT */
+#define CTX_STRUCT_PENDING (UINT32_MAX - 1) /* sentinel: ctx struct not yet finalized */
   JaclType         return_type;     /* declared return type for current function */
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
   Module*          current_module;  /* module currently being compiled */
@@ -5632,6 +5633,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__error(c, line, col, "variable name exceeds 128-byte limit");
       return;
     }
+    if (name_len == 3 && memcmp(bind_name_ptr, "ctx", 3) == 0) {
+      compiler__error(c, line, col, "'ctx' is reserved");
+      return;
+    }
 
     /* Compile the value expression with type context */
     c->expected_type = declared_type;
@@ -6290,6 +6295,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     if (name_len > 128) {
       compiler__error(c, line, col, "variable name exceeds 128-byte limit");
+      return;
+    }
+    if (name_len == 3 && memcmp(bind_name_ptr, "ctx", 3) == 0) {
+      compiler__error(c, line, col, "'ctx' is reserved");
       return;
     }
 
@@ -9810,6 +9819,21 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
                         "variable name exceeds 128-byte limit");
         break;
       }
+
+      /* US-006: $ctx resolves to OP_GET_CTX — the implicit context struct */
+      if (name_len == 3 && memcmp(node->data.var_ref.name, "ctx", 3) == 0) {
+        CtxFieldList *ctx_fl = compiler__get_ctx_fields(c);
+        if (ctx_fl && ctx_fl->count > 0) {
+          compiler__emit_byte(c, OP_GET_CTX, line);
+          c->last_expr_type = TYPE_STRUCT;
+          c->last_struct_idx = CTX_STRUCT_PENDING;
+        } else {
+          compiler__error(c, line, node->start.column,
+                          "no ctx fields declared");
+        }
+        break;
+      }
+
       JaclVal name_val = compiler__name_val(c->heap, c->intern_table, node->data.var_ref.name, name_len);
 
       /* SM mode: resolve variables from state object fields first */

@@ -8769,6 +8769,12 @@ interpret_done:
         return VM_OK;
       }
 
+      case OP_GET_CTX: {
+        result = vm__push(vm, vm->ctx);
+        if (result != VM_OK) return result;
+        break;
+      }
+
       default: {
         vm__set_error(vm, "unknown opcode %d", (int)instruction);
         return VM_RUNTIME_ERROR;

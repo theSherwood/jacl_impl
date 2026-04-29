@@ -743,6 +743,7 @@ AstNode* parser__parse_infix_operand(Parser* p) {
     case TOKEN_BREAK:
     case TOKEN_CONTINUE:
     case TOKEN_TRY:
+    case TOKEN_CTX:
       result = parser__parse_atom(p);
       break;
     default:
@@ -981,6 +982,7 @@ AstNode* parser__parse_expr(Parser* p) {
     case TOKEN_BREAK:
     case TOKEN_CONTINUE:
     case TOKEN_TRY:
+    case TOKEN_CTX:
       result = parser__parse_atom(p);
       break;
 

@@ -194,7 +194,8 @@ typedef enum {
   OP_EXEC,          /* uint8_t flags; unified exec — flags: FULL=0x01, STDIN=0x02, BG=0x04, PIPE=0x08 (then uint8_t count) */
   OP_AWAIT_JOB,     /* pop value; if Job map, waitpid + read files + push {stdout, stderr, exit}; if future, check resolved */
   OP_SIGNAL,        /* pop signal_name (string) + job map; send signal to pid, push $true/$false */
-  OP_HALT           /* stop execution */
+  OP_HALT,          /* stop execution */
+  OP_GET_CTX        /* push vm->ctx (implicit context struct) onto stack */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -512,6 +513,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_AWAIT_JOB:           return "OP_AWAIT_JOB";
     case OP_SIGNAL:              return "OP_SIGNAL";
     case OP_HALT:                return "OP_HALT";
+    case OP_GET_CTX:             return "OP_GET_CTX";
   }
   return "OP_UNKNOWN";
 }

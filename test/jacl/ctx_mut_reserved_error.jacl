@@ -1,0 +1,3 @@
+# expect-error: 'ctx' is reserved
+# Test: shadowing $ctx with mut produces compile error
+mut ctx 42

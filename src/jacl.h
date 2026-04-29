@@ -795,7 +795,8 @@ typedef enum {
   OP_EXEC,         /* uint8_t flags; unified exec opcode — see EXEC_FLAG_* constants */
   OP_AWAIT_JOB,    /* pop value; if Job, waitpid + push result; if future, check resolved */
   OP_SIGNAL,       /* pop signal_name + job; send signal to pid, push $true/$false */
-  OP_HALT
+  OP_HALT,
+  OP_GET_CTX       /* push vm->ctx (implicit context struct) onto stack */
 } OpCode;
 
 typedef struct {
