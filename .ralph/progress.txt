@@ -148,3 +148,23 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
   - Proc definitions use `proc` keyword, not `def` (which is for variable binding)
   - `==` type-checks operands at compile time — cannot compare TYPE_STRUCT with other types
 ---
+
+## 2026-04-29 - US-007
+- Implemented $ctx->field read access with compile-time offset resolution
+- Added CTX_STRUCT_PENDING handler in dot/arrow field access path — resolves fields from CtxFieldList instead of StructTypeRegistry
+- Added offset and size fields to CtxField, computed incrementally via C-ABI layout helpers during ctx_field_list__add
+- Added default_val (JaclVal) to both CtxField and StructTypeField for compile-time constant defaults
+- Modified AST_CTX_DECL handler to emit initialization bytecode: OP_GET_CTX + default_expr + OP_STRUCT_SET
+- Updated ctx__init_vm to initialize all ctx fields from their default_val before setting pwd
+- Supported chained access ($ctx->field->subfield) via struct_type_idx propagation from CtxField
+- Also implemented ctx field set path (used by US-008) via CTX_STRUCT_PENDING handler
+- Moved forward declarations of struct__type_size/struct__type_align/struct__align_up earlier for ctx offset computation
+- Files changed: src/compiler.c, src/jacl.h, src/vm.c
+- New test files: test/jacl/ctx_read_pwd.jacl, test/jacl/ctx_read_user_field.jacl, test/jacl/ctx_unknown_field_error.jacl, test/jacl/ctx_chained_access.jacl
+- **Learnings for future iterations:**
+  - StructTypeField is used by both regular structs and ctx — always initialize default_val to JACL_NIL for non-ctx structs
+  - ctx_field_list__add now needs StructTypeRegistry for layout computation — pass registry to all call sites
+  - AST_CTX_DECL default initialization uses bytecode (OP_GET_CTX + expr + OP_STRUCT_SET), runs after ctx__init_vm
+  - Struct constructor defaults (e.g., [Point 10 20]) work via bytecode emission, not compile-time JaclVal evaluation
+  - The CTX_STRUCT_PENDING handler also supports `set` operations (is_set=true path), preparing for US-008
+---
