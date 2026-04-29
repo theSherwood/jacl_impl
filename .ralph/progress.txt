@@ -23,6 +23,11 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
 - VM struct is duplicated in `src/vm.c` AND `src/jacl.h` — adding new fields requires updating BOTH
 - Pool free-list next pointer stored at byte 0 of JaclStruct data[] — overlaps field data, valid only when in pool
 - GC root tracing for ctx pool: gc_mark (gc_collect.c) and gc_enumerate_roots (runtime.c) walk free-list from vm->ctx_pool
+- vm->ctx is traced as GC root in both gc_mark (single-threaded) and gc_enumerate_roots (concurrent)
+- ctx__init_vm helper in vm.c: initializes pool, allocates initial ctx from pool, sets pwd = getcwd(), sets vm->ctx
+- Three execution entry points need ctx init: jacl_run, jacl_exec_program, jacl_ctx_run_source — all use stack-allocated JaclCtxPool
+- jacl_rope_string_create creates GC-managed strings without needing an intern table (used for long pwd paths)
+- jacl_inline_string handles strings ≤ 7 bytes; longer strings use jacl_rope_string_create
 
 ## 2026-04-29 - US-001
 - Implemented per-field mutability on StructTypeField
@@ -102,4 +107,23 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
   - Pool free-list uses atomic CAS with uintptr_t for lock-free thread safety (follows existing codebase patterns from gc.c/runtime.c)
   - gc__struct_registry is a file-static global in gc.c, but ctx pool is accessed via vm->ctx_pool (per-VM, not global)
   - When creating test struct registries, use calloc for reg.defs (not arena_alloc) since tests free it explicitly
+---
+
+## 2026-04-29 - US-005
+- Implemented vm->ctx register and GC root integration
+- Added JaclVal ctx field to VM struct in both vm.c and jacl.h
+- Added vm->ctx initialization (JACL_NIL) in vm_init() and runtime__init_worker_vm()
+- Added vm->ctx as GC root in gc_mark() (single-threaded, gc_collect.c)
+- Added vm->ctx as GC root in gc_enumerate_roots() (concurrent, runtime.c — per worker)
+- Created ctx__init_vm() helper: inits pool, allocs initial ctx from pool, sets pwd = getcwd()
+- Integrated ctx__init_vm into three execution entry points: jacl_exec_program, jacl_run, jacl_ctx_run_source
+- Files changed: src/vm.c, src/jacl.h, src/gc_collect.c, src/runtime.c, test/test_gc.c
+- 3 new tests: vm_ctx_set_at_startup, vm_ctx_gc_survives, vm_ctx_multiple_gc_cycles
+- **Learnings for future iterations:**
+  - Three separate execution entry points (jacl_run, jacl_exec_program, jacl_ctx_run_source) all need ctx initialization — use the shared ctx__init_vm helper
+  - JaclCtxPool is stack-allocated at each entry point, valid for the duration of execution (same pattern as intern_table in jacl_run)
+  - jacl_rope_string_create works without an intern table — use it for runtime-generated strings like getcwd()
+  - jacl_inline_string handles ≤7 byte strings; longer strings need jacl_rope_string_create
+  - JACL_NIL is 0x00, so calloc-zeroed VMs already have ctx = NIL, but explicit init is clearer
+  - gc__ms_push_val safely handles JACL_NIL (skips it), so workers with uninitialized ctx don't cause issues
 ---
