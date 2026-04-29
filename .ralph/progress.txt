@@ -19,6 +19,10 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
 - CtxFieldList is on root compiler, shared with module compilers via enclosing chain (like struct_registry)
 - ctx struct is always registered via ctx_field_list__finalize after compilation; ctx_type_idx stored on StructTypeRegistry
 - Tests that hard-code struct_registry->count need +1 when ctx struct is added
+- JaclCtxPool is defined in vm.c (needs both gc.c and compiler.c types); also in jacl.h for tests
+- VM struct is duplicated in `src/vm.c` AND `src/jacl.h` — adding new fields requires updating BOTH
+- Pool free-list next pointer stored at byte 0 of JaclStruct data[] — overlaps field data, valid only when in pool
+- GC root tracing for ctx pool: gc_mark (gc_collect.c) and gc_enumerate_roots (runtime.c) walk free-list from vm->ctx_pool
 
 ## 2026-04-29 - US-001
 - Implemented per-field mutability on StructTypeField
@@ -78,4 +82,24 @@ Feature: Implicit Context ($ctx) — Pool-allocated struct, explicit forking, pe
   - Tests that hard-code struct_registry->count values need updating when adding new always-registered types
   - Module compiler shares ctx_fields via root compiler (same pattern as struct_registry)
   - ctx_field_list__finalize uses forward-declared layout helpers (struct__type_size, etc.) — order matters in unity build
+---
+
+## 2026-04-29 - US-004
+- Implemented ctx pool — GC-managed free-list of pre-allocated ctx structs
+- Added JaclCtxPool struct with atomic free-list head, struct_size, type_idx, cached StructTypeDef pointer
+- Implemented ctx_pool_init: pre-allocates 8 ctx structs via gc_alloc, links into atomic CAS free-list
+- Implemented ctx_pool_alloc: atomic CAS pop from free-list; falls back to gc_alloc on empty pool
+- Implemented ctx_pool_free: clears reference fields (set to JACL_NIL), then atomic CAS push to free-list
+- Free-list next pointer stored at byte 0 of struct data[] (overlaps field data, valid only when in pool)
+- Added ctx_pool field to VM struct (NULL until initialized)
+- Added GC root tracing: gc_mark walks vm->ctx_pool free-list in gc_collect.c
+- Added concurrent GC root tracing: gc_enumerate_roots walks worker vm.ctx_pool in runtime.c
+- Files changed: src/vm.c, src/jacl.h, src/gc_collect.c, src/runtime.c, test/test_gc.c
+- 5 new tests: ctx_pool_alloc_valid, ctx_pool_free_reuse, ctx_pool_exhaustion_fallback, ctx_pool_free_clears_refs, ctx_pool_gc_root
+- **Learnings for future iterations:**
+  - JaclCtxPool defined in vm.c (after compiler.c in unity build) because it needs both gc.c types (JaclStruct, gc_alloc) and compiler.c types (StructTypeDef)
+  - VM struct is duplicated in vm.c AND jacl.h — must add new fields to BOTH (same as Compiler struct pattern)
+  - Pool free-list uses atomic CAS with uintptr_t for lock-free thread safety (follows existing codebase patterns from gc.c/runtime.c)
+  - gc__struct_registry is a file-static global in gc.c, but ctx pool is accessed via vm->ctx_pool (per-VM, not global)
+  - When creating test struct registries, use calloc for reg.defs (not arena_alloc) since tests free it explicitly
 ---
