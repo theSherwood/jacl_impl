@@ -1205,18 +1205,7 @@ void runtime__spawn_task_exec(void *data) {
     JaclClosure *cl = std->closure;
     JaclFuture *fut = jacl_as_future(std->future_val);
 
-    /* Fork parent ctx for spawned task isolation */
-    JaclVal saved_worker_ctx = vm->ctx;
-    if (std->parent_ctx != JACL_NIL && vm->ctx_pool) {
-        JaclStruct *parent_struct = jacl_as_struct_ptr(std->parent_ctx);
-        JaclStruct *forked = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
-        if (forked) {
-            StructTypeRegistry *reg = vm->struct_registry;
-            StructTypeDef *sdef = reg->defs[reg->ctx_type_idx];
-            memcpy(forked->data, parent_struct->data, sdef->total_size);
-            vm->ctx = jacl_struct_val(forked);
-        }
-    }
+    JaclVal saved_worker_ctx = ctx_fork(vm, std->parent_ctx);
 
     if (cl->is_sm_compiled) {
         /* SM closure: create state machine, set error_k to resolve_k,
@@ -1278,12 +1267,7 @@ void runtime__spawn_task_exec(void *data) {
         }
     }
 
-    /* Restore worker's original ctx, free forked ctx to pool */
-    if (std->parent_ctx != JACL_NIL && vm->ctx_pool && vm->ctx != saved_worker_ctx) {
-        JaclStruct *forked = jacl_as_struct_ptr(vm->ctx);
-        ctx_pool_free(vm->ctx_pool, forked);
-    }
-    vm->ctx = saved_worker_ctx;
+    ctx_unfork(vm, saved_worker_ctx);
 
     free(std);
 }
@@ -1334,18 +1318,7 @@ void runtime__parallel_task_exec(void *data) {
     JaclClosure *cl = ptd->closure;
     (void)as_parallel_agg(ptd->agg_val); /* validate tag */
 
-    /* Fork parent ctx for parallel body isolation */
-    JaclVal saved_worker_ctx = vm->ctx;
-    if (ptd->parent_ctx != JACL_NIL && vm->ctx_pool) {
-        JaclStruct *parent_struct = jacl_as_struct_ptr(ptd->parent_ctx);
-        JaclStruct *forked = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
-        if (forked) {
-            StructTypeRegistry *reg = vm->struct_registry;
-            StructTypeDef *sdef = reg->defs[reg->ctx_type_idx];
-            memcpy(forked->data, parent_struct->data, sdef->total_size);
-            vm->ctx = jacl_struct_val(forked);
-        }
-    }
+    JaclVal saved_worker_ctx = ctx_fork(vm, ptd->parent_ctx);
 
     if (cl->is_sm_compiled) {
         /* SM closure: create state machine, set error_k to parallel_k */
@@ -1394,12 +1367,7 @@ void runtime__parallel_task_exec(void *data) {
                                          ptd->agg_val, ptd->index, task_result);
     }
 
-    /* Restore worker's original ctx, free forked ctx to pool */
-    if (ptd->parent_ctx != JACL_NIL && vm->ctx_pool && vm->ctx != saved_worker_ctx) {
-        JaclStruct *forked = jacl_as_struct_ptr(vm->ctx);
-        ctx_pool_free(vm->ctx_pool, forked);
-    }
-    vm->ctx = saved_worker_ctx;
+    ctx_unfork(vm, saved_worker_ctx);
 
     free(ptd);
 }
@@ -1452,18 +1420,7 @@ void runtime__race_task_exec(void *data) {
     VM *vm = &self->vm;
     JaclClosure *cl = rtd->closure;
 
-    /* Fork parent ctx for race body isolation */
-    JaclVal saved_worker_ctx = vm->ctx;
-    if (rtd->parent_ctx != JACL_NIL && vm->ctx_pool) {
-        JaclStruct *parent_struct = jacl_as_struct_ptr(rtd->parent_ctx);
-        JaclStruct *forked = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
-        if (forked) {
-            StructTypeRegistry *reg = vm->struct_registry;
-            StructTypeDef *sdef = reg->defs[reg->ctx_type_idx];
-            memcpy(forked->data, parent_struct->data, sdef->total_size);
-            vm->ctx = jacl_struct_val(forked);
-        }
-    }
+    JaclVal saved_worker_ctx = ctx_fork(vm, rtd->parent_ctx);
 
     if (cl->is_sm_compiled) {
         /* SM closure: create state machine, set error_k to race_k */
@@ -1510,12 +1467,7 @@ void runtime__race_task_exec(void *data) {
                                      rtd->agg_val, task_result);
     }
 
-    /* Restore worker's original ctx, free forked ctx to pool */
-    if (rtd->parent_ctx != JACL_NIL && vm->ctx_pool && vm->ctx != saved_worker_ctx) {
-        JaclStruct *forked = jacl_as_struct_ptr(vm->ctx);
-        ctx_pool_free(vm->ctx_pool, forked);
-    }
-    vm->ctx = saved_worker_ctx;
+    ctx_unfork(vm, saved_worker_ctx);
 
     free(rtd);
 }

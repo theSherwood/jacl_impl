@@ -954,6 +954,36 @@ void vm__struct_write_field(JaclStruct* s, uint32_t offset,
   }
 }
 
+/* --- ctx fork / unfork helpers ---
+ *
+ * ctx_fork:   allocates a new ctx from the pool, copies data from parent_ctx,
+ *             sets vm->ctx to the fork.  Returns the previous vm->ctx.
+ *             No-op (returns vm->ctx unchanged) when parent_ctx is nil or
+ *             pool is unavailable.
+ *
+ * ctx_unfork: frees current vm->ctx back to pool (if it differs from
+ *             saved_ctx) and restores vm->ctx.
+ */
+static JaclVal ctx_fork(VM *vm, JaclVal parent_ctx) {
+    JaclVal saved = vm->ctx;
+    if (parent_ctx == JACL_NIL || !vm->ctx_pool) return saved;
+    JaclStruct *src = jacl_as_struct_ptr(parent_ctx);
+    JaclStruct *dst = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
+    if (dst) {
+        StructTypeRegistry *reg = vm->struct_registry;
+        memcpy(dst->data, src->data, reg->defs[reg->ctx_type_idx]->total_size);
+        vm->ctx = jacl_struct_val(dst);
+    }
+    return saved;
+}
+
+static void ctx_unfork(VM *vm, JaclVal saved_ctx) {
+    if (vm->ctx != saved_ctx && vm->ctx != JACL_NIL && vm->ctx_pool) {
+        ctx_pool_free(vm->ctx_pool, jacl_as_struct_ptr(vm->ctx));
+    }
+    vm->ctx = saved_ctx;
+}
+
 /* Forward declaration for recursive call from OP_EACH */
 VMResult vm__run(VM* vm, uint32_t min_frame);
 
@@ -4434,18 +4464,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         } else {
           /* Single-threaded mode: execute closure synchronously */
 
-          /* Fork ctx for spawned task isolation */
-          JaclVal saved_ctx = vm->ctx;
-          if (vm->ctx != JACL_NIL && vm->ctx_pool) {
-            JaclStruct *parent_struct = jacl_as_struct_ptr(vm->ctx);
-            JaclStruct *forked = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
-            if (forked) {
-              StructTypeRegistry *reg = vm->struct_registry;
-              StructTypeDef *sdef = reg->defs[reg->ctx_type_idx];
-              memcpy(forked->data, parent_struct->data, sdef->total_size);
-              vm->ctx = jacl_struct_val(forked);
-            }
-          }
+          JaclVal saved_ctx = ctx_fork(vm, vm->ctx);
 
           uint8_t *saved_ip = vm->ip;
           BytecodeChunk *saved_chunk = vm->chunk;
@@ -4494,11 +4513,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           } else if (sub != VM_OK) {
             JaclVal err = jacl_set_error(jacl_inline_string("error", 5));
             jacl_future_error(fut, err, vm->grey_buf, vm->gc_active_ptr);
-            /* Restore ctx after spawn error */
-            if (vm->ctx != saved_ctx && vm->ctx != JACL_NIL && vm->ctx_pool) {
-              ctx_pool_free(vm->ctx_pool, jacl_as_struct_ptr(vm->ctx));
-            }
-            vm->ctx = saved_ctx;
+            ctx_unfork(vm, saved_ctx);
             result = vm__push(vm, f);
             if (result != VM_OK) return result;
             break;
@@ -4506,11 +4521,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           jacl_future_resolve(fut, spawn_result,
                               vm->grey_buf, vm->gc_active_ptr);
 
-          /* Restore ctx after spawn completion */
-          if (vm->ctx != saved_ctx && vm->ctx != JACL_NIL && vm->ctx_pool) {
-            ctx_pool_free(vm->ctx_pool, jacl_as_struct_ptr(vm->ctx));
-          }
-          vm->ctx = saved_ctx;
+          ctx_unfork(vm, saved_ctx);
 
           result = vm__push(vm, f);
           if (result != VM_OK) return result;
@@ -4636,18 +4647,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           for (uint8_t i = 0; i < n; i++) {
             JaclClosure *cl = jacl_as_closure(closures[i]);
 
-            /* Fork ctx for parallel body isolation */
-            JaclVal par_saved_ctx = vm->ctx;
-            if (vm->ctx != JACL_NIL && vm->ctx_pool) {
-              JaclStruct *par_parent = jacl_as_struct_ptr(vm->ctx);
-              JaclStruct *par_forked = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
-              if (par_forked) {
-                StructTypeRegistry *par_reg = vm->struct_registry;
-                StructTypeDef *par_sdef = par_reg->defs[par_reg->ctx_type_idx];
-                memcpy(par_forked->data, par_parent->data, par_sdef->total_size);
-                vm->ctx = jacl_struct_val(par_forked);
-              }
-            }
+            JaclVal par_saved_ctx = ctx_fork(vm, vm->ctx);
 
             uint8_t *saved_ip = vm->ip;
             BytecodeChunk *saved_chunk = vm->chunk;
@@ -4751,11 +4751,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               }
             }
 
-            /* Restore ctx after parallel body */
-            if (vm->ctx != par_saved_ctx && vm->ctx != JACL_NIL && vm->ctx_pool) {
-              ctx_pool_free(vm->ctx_pool, jacl_as_struct_ptr(vm->ctx));
-            }
-            vm->ctx = par_saved_ctx;
+            ctx_unfork(vm, par_saved_ctx);
           }
 
           /* Build continuation argument */
@@ -4830,18 +4826,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           for (uint8_t i = 0; i < n; i++) {
             JaclClosure *cl = jacl_as_closure(closures[i]);
 
-            /* Fork ctx for race body isolation */
-            JaclVal race_saved_ctx = vm->ctx;
-            if (vm->ctx != JACL_NIL && vm->ctx_pool) {
-              JaclStruct *race_parent = jacl_as_struct_ptr(vm->ctx);
-              JaclStruct *race_forked = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
-              if (race_forked) {
-                StructTypeRegistry *race_reg = vm->struct_registry;
-                StructTypeDef *race_sdef = race_reg->defs[race_reg->ctx_type_idx];
-                memcpy(race_forked->data, race_parent->data, race_sdef->total_size);
-                vm->ctx = jacl_struct_val(race_forked);
-              }
-            }
+            JaclVal race_saved_ctx = ctx_fork(vm, vm->ctx);
 
             uint8_t *saved_ip = vm->ip;
             BytecodeChunk *saved_chunk = vm->chunk;
@@ -4924,11 +4909,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               }
             }
 
-            /* Restore ctx after race body */
-            if (vm->ctx != race_saved_ctx && vm->ctx != JACL_NIL && vm->ctx_pool) {
-              ctx_pool_free(vm->ctx_pool, jacl_as_struct_ptr(vm->ctx));
-            }
-            vm->ctx = race_saved_ctx;
+            ctx_unfork(vm, race_saved_ctx);
           }
 
           /* Push result directly (SM mode or nil continuation) */
@@ -8852,7 +8833,6 @@ interpret_done:
       }
 
       case OP_CTX_FORK: {
-        /* Allocate a new ctx from the pool and copy current ctx data */
         if (!vm->ctx_pool || vm->ctx == JACL_NIL) {
           vm__set_error(vm, "with-ctx: no ctx available");
           return VM_RUNTIME_ERROR;
@@ -8861,21 +8841,12 @@ interpret_done:
           vm__set_error(vm, "with-ctx: nesting too deep (max 8)");
           return VM_RUNTIME_ERROR;
         }
-        JaclStruct *old_struct = jacl_as_struct_ptr(vm->ctx);
-        JaclStruct *new_struct = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
-        if (!new_struct) {
+        JaclVal old_ctx = ctx_fork(vm, vm->ctx);
+        if (vm->ctx == old_ctx) {
           vm__set_error(vm, "with-ctx: failed to allocate ctx");
           return VM_RUNTIME_ERROR;
         }
-        /* Copy field data from old ctx to new ctx */
-        StructTypeRegistry *reg = vm->struct_registry;
-        StructTypeDef *sdef = reg->defs[reg->ctx_type_idx];
-        memcpy(new_struct->data, old_struct->data, sdef->total_size);
-        /* Save old ctx to VM save stack, swap vm->ctx to new */
-        JaclVal old_ctx = vm->ctx;
         vm->saved_ctx[vm->saved_ctx_count++] = old_ctx;
-        vm->ctx = jacl_struct_val(new_struct);
-        /* SATB write barrier: protect old ctx during concurrent GC */
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, old_ctx, vm->ctx);
         break;
       }
@@ -8886,13 +8857,7 @@ interpret_done:
           vm__set_error(vm, "ctx restore: no saved ctx");
           return VM_RUNTIME_ERROR;
         }
-        JaclVal saved_ctx = vm->saved_ctx[--vm->saved_ctx_count];
-        /* Free the forked ctx back to the pool */
-        if (vm->ctx != JACL_NIL && vm->ctx_pool) {
-          JaclStruct *forked = jacl_as_struct_ptr(vm->ctx);
-          ctx_pool_free(vm->ctx_pool, forked);
-        }
-        vm->ctx = saved_ctx;
+        ctx_unfork(vm, vm->saved_ctx[--vm->saved_ctx_count]);
         break;
       }
 
