@@ -314,15 +314,11 @@ const char* lexer__unexpected_char_msg(Lexer* lex, char c) {
 void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
                                     uint32_t* error_count,
                                     uint32_t str_start, uint32_t str_line,
-                                    uint32_t str_col);
+                                    uint32_t str_col, bool is_triple);
 void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
                                     uint32_t* error_count);
 void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
                                      uint32_t* error_count);
-void lexer__lex_triple_string_body(Lexer* lex, TokenArray* arr,
-                                   uint32_t* error_count,
-                                   uint32_t str_start, uint32_t str_line,
-                                   uint32_t str_col);
 
 /* -------------------------------------------------------------------------
  * Internal: String escape sequence handler
@@ -578,7 +574,11 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
 }
 
 /* -------------------------------------------------------------------------
- * Internal: String body lexer (handles content after opening " consumed)
+ * Internal: String body lexer (handles content after opening delimiter)
+ *
+ * Handles both regular ("...") and triple-quoted ("""...""") strings.
+ * When is_triple is true, scans until closing """ and applies Kotlin-style
+ * indent stripping.
  *
  * Emits either:
  *   - A single TOKEN_STRING (no interpolation), or
@@ -590,7 +590,7 @@ void lexer__lex_number(Lexer* lex, TokenArray* arr,
 void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
                                     uint32_t* error_count,
                                     uint32_t str_start, uint32_t str_line,
-                                    uint32_t str_col) {
+                                    uint32_t str_col, bool is_triple) {
   StringBuf sb;
   strbuf_init(&sb, lex->arena);
   const char* str_error = NULL;
@@ -599,7 +599,17 @@ void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
   uint32_t seg_line  = str_line;
   uint32_t seg_col   = str_col;
 
-  while (lexer__peek(lex) != '\0' && lexer__peek(lex) != '"' && !str_error) {
+  while (lexer__peek(lex) != '\0' && !str_error) {
+    /* Check for closing delimiter */
+    if (is_triple) {
+      if (lexer__peek(lex) == '"' &&
+          lex->source[lex->pos + 1] == '"' &&
+          lex->source[lex->pos + 2] == '"')
+        break;
+    } else {
+      if (lexer__peek(lex) == '"')
+        break;
+    }
     char ch = lexer__peek(lex);
 
     /* Embedded newlines */
@@ -697,163 +707,12 @@ void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
 
   /* Check for unterminated string */
   if (!str_error && lexer__peek(lex) == '\0') {
-    str_error = "unterminated string";
+    str_error = is_triple ? "unterminated triple-quoted string"
+                          : "unterminated string";
   }
 
   if (str_error) {
-    /* Skip remaining string content for error recovery */
-    lexer__skip_to_string_end(lex);
-    Token tok = lexer__make_token(lex, TOKEN_ERROR, str_start, str_line, str_col);
-    tok.payload.error_msg = str_error;
-    lexer__arr_push(arr, tok);
-    (*error_count)++;
-  } else {
-    lexer__advance(lex); /* consume closing '"' */
-    strbuf_push(&sb, '\0');
-
-    if (has_interp) {
-      Token end_tok;
-      memset(&end_tok, 0, sizeof(Token));
-      end_tok.type   = TOKEN_STRING_END;
-      end_tok.line   = seg_line;
-      end_tok.column = seg_col;
-      end_tok.offset = seg_start;
-      end_tok.length = lex->pos - seg_start;
-      end_tok.payload.text = sb.data;
-      lexer__arr_push(arr, end_tok);
-    } else {
-      Token tok = lexer__make_token(lex, TOKEN_STRING, str_start, str_line, str_col);
-      tok.payload.text = sb.data;
-      lexer__arr_push(arr, tok);
-    }
-  }
-}
-
-/* -------------------------------------------------------------------------
- * Internal: Triple-quoted string lexer ("""...""")
- *
- * Scans until closing """, supports interpolation ($var, $[expr], $(expr)).
- * Applies Kotlin-style indent stripping: the indentation of the closing """
- * is stripped from each content line.
- * Called after the opening """ has been consumed.
- * ------------------------------------------------------------------------- */
-
-void lexer__lex_triple_string_body(Lexer* lex, TokenArray* arr,
-                                   uint32_t* error_count,
-                                   uint32_t str_start, uint32_t str_line,
-                                   uint32_t str_col) {
-  StringBuf sb;
-  strbuf_init(&sb, lex->arena);
-  const char* str_error = NULL;
-  int has_interp = 0;
-  uint32_t seg_start = str_start;
-  uint32_t seg_line  = str_line;
-  uint32_t seg_col   = str_col;
-
-  /* Scan until closing """ */
-  while (lexer__peek(lex) != '\0' && !str_error) {
-    /* Check for closing """ */
-    if (lexer__peek(lex) == '"' &&
-        lex->source[lex->pos + 1] == '"' &&
-        lex->source[lex->pos + 2] == '"') {
-      break; /* found closing """ */
-    }
-    char ch = lexer__peek(lex);
-
-    /* Embedded newlines */
-    if (ch == '\n' || ch == '\r') {
-      lexer__advance(lex);
-      if (ch == '\r' && lexer__peek(lex) == '\n')
-        lexer__advance(lex);
-      strbuf_push(&sb, '\n');
-      lex->line++;
-      lex->col = 1;
-      continue;
-    }
-
-    /* Escape sequences (same as regular strings) */
-    if (ch == '\\') {
-      lexer__advance(lex);
-      str_error = lexer__handle_escape(lex, &sb);
-      continue;
-    }
-
-    /* Interpolation: $var, $[expr], or $(expr) */
-    if (ch == '$') {
-      char next_ch = lex->source[lex->pos + 1];
-      if (lexer__is_word_start(next_ch) || next_ch == '[' || next_ch == '(') {
-        strbuf_push(&sb, '\0');
-        {
-          Token seg_tok;
-          memset(&seg_tok, 0, sizeof(Token));
-          seg_tok.type   = has_interp ? TOKEN_STRING_PART : TOKEN_STRING_BEGIN;
-          seg_tok.line   = seg_line;
-          seg_tok.column = seg_col;
-          seg_tok.offset = seg_start;
-          seg_tok.length = lex->pos - seg_start;
-          seg_tok.payload.text = sb.data;
-          lexer__arr_push(arr, seg_tok);
-        }
-        has_interp = 1;
-        strbuf_init(&sb, lex->arena);
-
-        if (next_ch == '[') {
-          uint32_t expr_start = lex->pos;
-          uint32_t expr_line  = lex->line;
-          uint32_t expr_col   = lex->col;
-          lexer__advance(lex); /* consume '$' */
-          lexer__advance(lex); /* consume '[' */
-          {
-            Token expr_tok = lexer__make_token(lex, TOKEN_INTERP_EXPR_START,
-                                               expr_start, expr_line, expr_col);
-            lexer__arr_push(arr, expr_tok);
-          }
-          lexer__lex_interp_expr(lex, arr, error_count);
-        } else if (next_ch == '(') {
-          uint32_t dp_start = lex->pos;
-          uint32_t dp_line  = lex->line;
-          uint32_t dp_col   = lex->col;
-          lexer__advance(lex); /* consume '$' */
-          lexer__advance(lex); /* consume '(' */
-          {
-            Token dp_tok = lexer__make_token(lex, TOKEN_DOLLAR_PAREN,
-                                             dp_start, dp_line, dp_col);
-            lexer__arr_push(arr, dp_tok);
-          }
-          lexer__lex_interp_infix(lex, arr, error_count);
-        } else {
-          uint32_t var_start = lex->pos;
-          uint32_t var_line  = lex->line;
-          uint32_t var_col   = lex->col;
-          lexer__advance(lex); /* consume '$' */
-          while (lexer__is_word_char_no_arrow(lex))
-            lexer__advance(lex);
-          {
-            Token var_tok = lexer__make_token(lex, TOKEN_INTERP_VAR,
-                                              var_start, var_line, var_col);
-            var_tok.payload.text = lex->source + var_start + 1;
-            lexer__arr_push(arr, var_tok);
-          }
-        }
-
-        seg_start = lex->pos;
-        seg_line  = lex->line;
-        seg_col   = lex->col;
-        continue;
-      }
-    }
-
-    /* Regular character */
-    strbuf_push(&sb, ch);
-    lexer__advance(lex);
-  }
-
-  /* Check for unterminated string */
-  if (!str_error && lexer__peek(lex) == '\0') {
-    str_error = "unterminated triple-quoted string";
-  }
-
-  if (str_error) {
+    if (!is_triple) lexer__skip_to_string_end(lex);
     Token tok = lexer__make_token(lex, TOKEN_ERROR, str_start, str_line, str_col);
     tok.payload.error_msg = str_error;
     lexer__arr_push(arr, tok);
@@ -861,26 +720,21 @@ void lexer__lex_triple_string_body(Lexer* lex, TokenArray* arr,
     return;
   }
 
-  /* Consume closing """ */
+  /* Consume closing delimiter */
   lexer__advance(lex); /* " */
-  lexer__advance(lex); /* " */
-  lexer__advance(lex); /* " */
+  if (is_triple) {
+    lexer__advance(lex); /* " */
+    lexer__advance(lex); /* " */
+  }
 
   strbuf_push(&sb, '\0');
 
-  /* --- Kotlin-style indent stripping ---
-   * Find the indentation of the closing """ (its column - 1 gives the
-   * number of leading spaces/tabs to strip from each line).
-   * We look at lex->col which now points just past the closing """.
-   * The closing """ started at col - 3, and the indent is col - 4.
-   * Actually: we need the whitespace *before* the closing """.
-   * The simplest approach: count whitespace on the last line of the
-   * raw content (everything after the last \n before closing """). */
-
-  /* Determine strip prefix from content: last line's leading whitespace */
-  const char* raw = has_interp ? NULL : sb.data;
-  if (!has_interp && raw != NULL) {
-    /* Find the last newline in the string content */
+  /* --- Triple-quoted: Kotlin-style indent stripping ---
+   * The indentation of the closing """ (measured as the leading whitespace
+   * on its line) is stripped from each content line. Only applies to
+   * non-interpolated triple strings. */
+  if (is_triple && !has_interp) {
+    const char* raw = sb.data;
     uint32_t content_len = (uint32_t)strlen(raw);
     int last_nl = -1;
     for (int i = (int)content_len - 1; i >= 0; i--) {
@@ -940,7 +794,6 @@ void lexer__lex_triple_string_body(Lexer* lex, TokenArray* arr,
           }
         }
         strbuf_push(&stripped, '\0');
-        /* Replace sb with stripped content */
         sb.data = stripped.data;
       }
     }
@@ -1147,7 +1000,7 @@ void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
       uint32_t sl = lex->line;
       uint32_t sc = lex->col;
       lexer__advance(lex);
-      lexer__lex_string_body(lex, arr, error_count, s, sl, sc);
+      lexer__lex_string_body(lex, arr, error_count, s, sl, sc, false);
       continue;
     }
 
@@ -1426,7 +1279,7 @@ void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
       uint32_t sl = lex->line;
       uint32_t sc = lex->col;
       lexer__advance(lex);
-      lexer__lex_string_body(lex, arr, error_count, s, sl, sc);
+      lexer__lex_string_body(lex, arr, error_count, s, sl, sc, false);
       continue;
     }
 
@@ -1857,10 +1710,10 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
         lexer__advance(&lex); /* consume first '"' */
         lexer__advance(&lex); /* consume second '"' */
         lexer__advance(&lex); /* consume third '"' */
-        lexer__lex_triple_string_body(&lex, &arr, &error_count, start, sline, scol);
+        lexer__lex_string_body(&lex, &arr, &error_count, start, sline, scol, true);
       } else {
         lexer__advance(&lex); /* consume opening '"' */
-        lexer__lex_string_body(&lex, &arr, &error_count, start, sline, scol);
+        lexer__lex_string_body(&lex, &arr, &error_count, start, sline, scol, false);
       }
       continue;
     }
