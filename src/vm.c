@@ -390,6 +390,8 @@ const char* vm__type_name(JaclVal v) {
   if (jacl_is_atom(v))         return "atom";
   if (jacl_is_cell(v))         return "cell";
   if (jacl_is_struct(v))       return "struct";
+  if (jacl_is_typed_vector(v)) return "typed-vec";
+  if (jacl_is_typed_map(v))    return "typed-map";
   return "unknown";
 }
 
@@ -726,6 +728,14 @@ void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
       vm__fmt_value(buf, value);
     }
     vm__fmt_append(buf, "]", 1);
+  } else if (jacl_is_typed_vector(val)) {
+    jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(val);
+    uint32_t count = jacl_typed_vec_count(tvec);
+    n = snprintf(tmp, sizeof(tmp), "<typed-vec %u>", count);
+    vm__fmt_append(buf, tmp, (uint32_t)n);
+  } else if (jacl_is_typed_map(val)) {
+    n = snprintf(tmp, sizeof(tmp), "<typed-map>");
+    vm__fmt_append(buf, tmp, (uint32_t)n);
   } else if (jacl_is_closure(val)) {
     JaclClosure* cl = jacl_as_closure(val);
     if (cl->name) {
@@ -2155,7 +2165,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           result = vm__push(vm, JACL_NIL);
           if (result != VM_OK) return result;
           break;
-        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val)) {
+        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val) || jacl_is_typed_vector(val) || jacl_is_typed_map(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
           vm__fmt_value(&fmt, val);
@@ -3165,7 +3175,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           /* Already a string — push back unchanged */
           result = vm__push(vm, val);
           if (result != VM_OK) return result;
-        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val)) {
+        } else if (jacl_is_vector(val) || jacl_is_map(val) || jacl_is_box(val) || jacl_is_atom(val) || jacl_is_future(val) || jacl_is_stream(val) || jacl_is_typed_vector(val) || jacl_is_typed_map(val)) {
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
           vm__fmt_value(&fmt, val);

@@ -246,6 +246,26 @@ static int test_typed_vec_gc_safety(void) {
   TEST_PASS();
 }
 
+/* ===== Typed Vec: Closure capture (upvalue path) ===== */
+
+static int test_typed_vec_closure_capture(void) {
+  PrintCapture cap;
+  /* Closure captures a typed vec local (not a parameter).
+     The upvalue path must propagate TYPE_TYPED_VEC so vec-len
+     emits OP_TYPED_VEC_LEN, not OP_VEC_LEN. */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc make-counter {} {\n"
+    "  def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "  proc count {} { [vec-len $points] }\n"
+    "  $count\n"
+    "}\n"
+    "def counter [make-counter]\n"
+    "[print [counter]]",
+    &cap, "2\n"));
+  TEST_PASS();
+}
+
 /* ===== Main ===== */
 
 int main(void) {
@@ -269,6 +289,7 @@ int main(void) {
   RUN(test_typed_vec_wide_struct);
   RUN(test_typed_vec_persistence);
   RUN(test_typed_vec_gc_safety);
+  RUN(test_typed_vec_closure_capture);
 
   printf("\n%d/%d passed\n", pass, pass + fail);
   return fail > 0 ? 1 : 0;

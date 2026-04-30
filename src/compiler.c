@@ -5973,7 +5973,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           if (root->global_arities[i].name == name_val) {
             root->global_arities[i].is_mutable = true;
             root->global_arities[i].type = effective_type;
-            if (effective_type == TYPE_STRUCT)
+            if (effective_type == TYPE_STRUCT || effective_type == TYPE_TYPED_VEC ||
+                effective_type == TYPE_TYPED_MAP)
               root->global_arities[i].struct_type_idx = c->last_struct_idx;
             break;
           }
@@ -6684,7 +6685,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         for (uint32_t i = 0; i < root->global_arity_count; i++) {
           if (root->global_arities[i].name == name_val) {
             root->global_arities[i].type = effective_type;
-            if (effective_type == TYPE_STRUCT)
+            if (effective_type == TYPE_STRUCT || effective_type == TYPE_TYPED_VEC ||
+                effective_type == TYPE_TYPED_MAP)
               root->global_arities[i].struct_type_idx = c->last_struct_idx;
             break;
           }
@@ -10429,7 +10431,9 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, uv_base, line);
           }
           c->last_expr_type = c->upvalues[upvalue_idx].type;
-          if (c->upvalues[upvalue_idx].type == TYPE_STRUCT)
+          if (c->upvalues[upvalue_idx].type == TYPE_STRUCT ||
+              c->upvalues[upvalue_idx].type == TYPE_TYPED_VEC ||
+              c->upvalues[upvalue_idx].type == TYPE_TYPED_MAP)
             c->last_struct_idx = c->upvalues[upvalue_idx].struct_type_idx;
         } else {
           GlobalArity* ga = compiler__find_global(c, name_val);
@@ -10463,7 +10467,8 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             }
           }
           c->last_expr_type = global_type;
-          if (global_type == TYPE_STRUCT) {
+          if (global_type == TYPE_STRUCT || global_type == TYPE_TYPED_VEC ||
+              global_type == TYPE_TYPED_MAP) {
             if (ga) c->last_struct_idx = ga->struct_type_idx;
           }
         }
