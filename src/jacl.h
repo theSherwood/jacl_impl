@@ -2177,4 +2177,22 @@ static void jacl__init_template_handlers(void) {
     });
 }
 
+/* --- Struct size consistency checks (embed.c) ---
+ * Returns sizeof(Type) from the unity build's .c definitions.
+ * Tests compiled against this header compare these against their own sizeof()
+ * to detect struct definition drift between .c files and jacl.h. */
+extern size_t jacl__sizeof_vm (void);
+extern size_t jacl__sizeof_compiler (void);
+extern size_t jacl__sizeof_compile_result (void);
+extern size_t jacl__sizeof_struct_type_field (void);
+extern size_t jacl__sizeof_struct_type_def (void);
+extern size_t jacl__sizeof_struct_type_registry (void);
+extern size_t jacl__sizeof_state_layout (void);
+extern size_t jacl__sizeof_suspension_analysis (void);
+extern size_t jacl__sizeof_call_frame (void);
+extern size_t jacl__sizeof_ctx_pool (void);
+extern size_t jacl__sizeof_environment (void);
+extern size_t jacl__sizeof_stack_trace (void);
+extern size_t jacl__sizeof_stack_trace_entry (void);
+
 #endif /* JACL_H */

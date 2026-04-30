@@ -144,6 +144,7 @@ TESTS=(
     "test/test_interpret_sandbox.c|interpret_sandbox|"
     "test/test_syntax.c|syntax|"
     "test/test_long_names.c|long_names|"
+    "test/test_struct_sizes.c|struct_sizes|"
     "test/test_bench.c|bench|"
 )
 

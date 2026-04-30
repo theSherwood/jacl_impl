@@ -1259,4 +1259,26 @@ const char* jacl_struct_type_name_val(JaclVM* jvm, JaclVal s_val) {
   return buf;
 }
 
+/* --- Struct size reporting for cross-TU consistency checks ---
+ *
+ * The unity build defines structs in .c files; tests compile against jacl.h
+ * which duplicates them.  These functions let tests verify that both sides
+ * agree on sizeof().  If a field is added to the .c copy but not jacl.h
+ * (or vice versa), the mismatch is caught at test time instead of silently
+ * corrupting memory.
+ */
+size_t jacl__sizeof_vm(void)                { return sizeof(VM); }
+size_t jacl__sizeof_compiler(void)          { return sizeof(Compiler); }
+size_t jacl__sizeof_compile_result(void)    { return sizeof(CompileResult); }
+size_t jacl__sizeof_struct_type_field(void) { return sizeof(StructTypeField); }
+size_t jacl__sizeof_struct_type_def(void)   { return sizeof(StructTypeDef); }
+size_t jacl__sizeof_struct_type_registry(void) { return sizeof(StructTypeRegistry); }
+size_t jacl__sizeof_state_layout(void)      { return sizeof(StateLayout); }
+size_t jacl__sizeof_suspension_analysis(void) { return sizeof(SuspensionAnalysis); }
+size_t jacl__sizeof_call_frame(void)        { return sizeof(CallFrame); }
+size_t jacl__sizeof_ctx_pool(void)          { return sizeof(JaclCtxPool); }
+size_t jacl__sizeof_environment(void)       { return sizeof(Environment); }
+size_t jacl__sizeof_stack_trace(void)       { return sizeof(StackTrace); }
+size_t jacl__sizeof_stack_trace_entry(void) { return sizeof(StackTraceEntry); }
+
 #endif /* EMBED_C */
