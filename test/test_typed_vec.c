@@ -1,87 +1,7 @@
 #include "test_helpers.h"
 #include "../src/jacl.h"
-
-/* ===== Print capture helper ===== */
-
-typedef struct {
-  char     buf[8192];
-  uint32_t len;
-} PrintCapture;
-
-static void capture_print(const char* text, uint32_t len, void* ctx) {
-  PrintCapture* cap = (PrintCapture*)ctx;
-  uint32_t remaining = (uint32_t)sizeof(cap->buf) - cap->len - 1;
-  uint32_t copy_len = len < remaining ? len : remaining;
-  memcpy(cap->buf + cap->len, text, copy_len);
-  cap->len += copy_len;
-  cap->buf[cap->len] = '\0';
-}
-
-/* Helper: run program, capture output, assert success */
-static int run_ok(const char* source, PrintCapture* cap, const char* expected) {
-  tracker_reset();
-  arena_t arena = { .allocator = tracked_allocator };
-
-  if (cap) { cap->len = 0; cap->buf[0] = '\0'; }
-  VM vm;
-  vm_init(&vm, &arena);
-  if (cap) {
-    vm.print_fn  = capture_print;
-    vm.print_ctx = cap;
-  }
-
-  VMResult result = jacl_run(source, &vm, &arena);
-  if (result != VM_OK) {
-    fprintf(stderr, "  Expected VM_OK but got error: %s\n",
-            vm.error_message ? vm.error_message : "(null)");
-    vm_destroy(&vm);
-    arena_destroy(&arena);
-    return 0;
-  }
-  if (expected && cap) {
-    if (strcmp(cap->buf, expected) != 0) {
-      fprintf(stderr, "  Output mismatch:\n  Actual:   '%s'\n  Expected: '%s'\n",
-              cap->buf, expected);
-      vm_destroy(&vm);
-      arena_destroy(&arena);
-      return 0;
-    }
-  }
-
-  vm_destroy(&vm);
-  arena_destroy(&arena);
-  if (!check_no_leaks()) return 0;
-  return 1;
-}
-
-/* Helper: run program, expect compile or runtime error containing substring */
-static int run_err(const char* source, const char* err_substr) {
-  tracker_reset();
-  arena_t arena = { .allocator = tracked_allocator };
-
-  VM vm;
-  vm_init(&vm, &arena);
-
-  VMResult result = jacl_run(source, &vm, &arena);
-  if (result != VM_RUNTIME_ERROR) {
-    fprintf(stderr, "  Expected VM_RUNTIME_ERROR but got VM_OK\n");
-    vm_destroy(&vm);
-    arena_destroy(&arena);
-    return 0;
-  }
-  if (err_substr && (!vm.error_message || !strstr(vm.error_message, err_substr))) {
-    fprintf(stderr, "  Error message '%s' does not contain '%s'\n",
-            vm.error_message ? vm.error_message : "(null)", err_substr);
-    vm_destroy(&vm);
-    arena_destroy(&arena);
-    return 0;
-  }
-
-  vm_destroy(&vm);
-  arena_destroy(&arena);
-  if (!check_no_leaks()) return 0;
-  return 1;
-}
+#define TEST_CAPTURE_BUF_SIZE 8192
+#include "test_run_helpers.h"
 
 /* ===== Typed Vec: Construction ===== */
 
@@ -373,6 +293,58 @@ static int test_typed_vec_reject_dyn_proc_param(void) {
   TEST_PASS();
 }
 
+/* ===== Typed Vec: Box round-trip ===== */
+
+static int test_typed_vec_box_roundtrip(void) {
+  PrintCapture cap;
+  /* box?/unbox flow typing requires locals, so wrap in proc */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc test {} {\n"
+    "  def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "  def boxed [box $points]\n"
+    "  if [box? [Vec Point] $boxed] {\n"
+    "    def pts [unbox $boxed]\n"
+    "    [print [vec-len $pts]]\n"
+    "    def p [vec-get $pts 0]\n"
+    "    [print $p->x]\n"
+    "    [print $p->y]\n"
+    "  } { [print nil] }\n"
+    "}\n"
+    "[test]",
+    &cap, "2\n10\n20\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_box_wrong_type(void) {
+  PrintCapture cap;
+  /* box? [Map Point] should return false for a boxed typed vec */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc test {} {\n"
+    "  def points [[Vec Point] [Point 1 2]]\n"
+    "  def boxed [box $points]\n"
+    "  if [box? [Map Point] $boxed] {\n"
+    "    [print yes]\n"
+    "  } { [print no] }\n"
+    "}\n"
+    "[test]",
+    &cap, "no\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_box_in_dyn_vec(void) {
+  PrintCapture cap;
+  /* boxed typed vec CAN be stored in a dyn vec */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point] [Point 1 2]]\n"
+    "def v [vec [box $points]]\n"
+    "[print [vec-len $v]]",
+    &cap, "1\n"));
+  TEST_PASS();
+}
+
 /* ===== Main ===== */
 
 int main(void) {
@@ -407,6 +379,9 @@ int main(void) {
   RUN(test_typed_vec_reject_in_dyn_vec);
   RUN(test_typed_vec_reject_in_dyn_map);
   RUN(test_typed_vec_reject_dyn_proc_param);
+  RUN(test_typed_vec_box_roundtrip);
+  RUN(test_typed_vec_box_wrong_type);
+  RUN(test_typed_vec_box_in_dyn_vec);
 
   printf("\n%d/%d passed\n", pass, pass + fail);
   return fail > 0 ? 1 : 0;

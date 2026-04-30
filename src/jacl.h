@@ -827,7 +827,10 @@ typedef enum {
   OP_TYPED_VEC_PRINT,    /* uint16_t type_idx; pop tvec; print elements with struct formatting */
   OP_TYPED_MAP_PRINT,    /* uint16_t type_idx; pop tmap; print entries with struct formatting */
   OP_TYPED_VEC_EQ,       /* uint16_t type_idx; pop tvec_b, pop tvec_a; push bool */
-  OP_TYPED_MAP_EQ        /* uint16_t type_idx; pop tmap_b, pop tmap_a; push bool */
+  OP_TYPED_MAP_EQ,       /* uint16_t type_idx; pop tmap_b, pop tmap_a; push bool */
+
+  OP_IS_BOX_TYPED_VEC,   /* no operand; pop val; push bool (is box containing typed vec?) */
+  OP_IS_BOX_TYPED_MAP    /* no operand; pop val; push bool (is box containing typed map?) */
 } OpCode;
 
 typedef struct {
@@ -1263,7 +1266,8 @@ struct Compiler {
   /* Flow typing: type narrowings from box? guards in if-branches */
   struct {
     uint16_t local_slot;     /* which local variable is narrowed */
-    uint32_t box_type_idx;   /* type_idx inside the box (0=dyn, >0=struct) */
+    uint32_t box_type_idx;   /* struct element type_idx (0=dyn, >0=struct/collection element) */
+    JaclType box_type;       /* TYPE_STRUCT, TYPE_TYPED_VEC, TYPE_TYPED_MAP, or TYPE_DYN */
   } narrowings[8];
   uint32_t             narrowing_count;
   void*                ctx_fields;       /* CtxFieldList* (opaque in header) */

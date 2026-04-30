@@ -4526,6 +4526,32 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_IS_BOX_TYPED_VEC: {
+        JaclVal value;
+        result = vm__pop(vm, &value); if (result != VM_OK) return result;
+        bool match = false;
+        if (jacl_is_box(value)) {
+          JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(value);
+          if (ref->type_idx == 0) match = jacl_is_typed_vector(MREF_VAL(ref));
+        }
+        result = vm__push(vm, jacl_bool(match));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_IS_BOX_TYPED_MAP: {
+        JaclVal value;
+        result = vm__pop(vm, &value); if (result != VM_OK) return result;
+        bool match = false;
+        if (jacl_is_box(value)) {
+          JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(value);
+          if (ref->type_idx == 0) match = jacl_is_typed_map(MREF_VAL(ref));
+        }
+        result = vm__push(vm, jacl_bool(match));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_IS_ATOM: {
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;

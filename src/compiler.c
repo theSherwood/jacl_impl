@@ -2818,7 +2818,8 @@ struct Compiler {
   /* Flow typing: type narrowings from box? guards in if-branches */
   struct {
     uint16_t local_slot;     /* which local variable is narrowed */
-    uint32_t box_type_idx;   /* type_idx inside the box (0=dyn, >0=struct) */
+    uint32_t box_type_idx;   /* struct element type_idx (0=dyn, >0=struct/collection element) */
+    JaclType box_type;       /* TYPE_STRUCT, TYPE_TYPED_VEC, TYPE_TYPED_MAP, or TYPE_DYN */
   } narrowings[8];
   uint32_t             narrowing_count;
   CtxFieldList*        ctx_fields;       /* ctx field accumulator (root compiler owns) */
@@ -7270,24 +7271,46 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    /* Detect [box? Type $var] condition for flow typing */
+    /* Detect [box? Type $var] or [box? [Vec Type] $var] condition for flow typing */
     bool has_narrowing = false;
     uint32_t saved_narrowing_count = c->narrowing_count;
     if (args[0]->type == AST_COMMAND &&
         args[0]->data.command.head &&
         compiler__head_matches(args[0]->data.command.head, "box?", 4) &&
         args[0]->data.command.arg_count == 2 &&
-        args[0]->data.command.args[1]->type == AST_VAR_REF &&
-        args[0]->data.command.args[0]->type == AST_LIT_STRING) {
-      /* Resolve the type name */
-      const char* tname = args[0]->data.command.args[0]->data.lit_string.value;
-      uint32_t tlen = args[0]->data.command.args[0]->data.lit_string.length;
-      uint32_t type_idx;
-      if (tlen == 3 && memcmp(tname, "dyn", 3) == 0) {
-        type_idx = 0;
-      } else {
-        type_idx = struct_registry__find(compiler__get_struct_registry(c), tname, tlen);
+        args[0]->data.command.args[1]->type == AST_VAR_REF) {
+      uint32_t type_idx = UINT32_MAX;
+      JaclType box_type = TYPE_DYN;
+      AstNode* type_arg = args[0]->data.command.args[0];
+
+      if (type_arg->type == AST_LIT_STRING) {
+        /* [box? StructName $var] — struct narrowing */
+        const char* tname = type_arg->data.lit_string.value;
+        uint32_t tlen = type_arg->data.lit_string.length;
+        if (tlen == 3 && memcmp(tname, "dyn", 3) == 0) {
+          type_idx = 0;
+          box_type = TYPE_DYN;
+        } else {
+          type_idx = struct_registry__find(compiler__get_struct_registry(c), tname, tlen);
+          box_type = TYPE_STRUCT;
+        }
+      } else if (type_arg->type == AST_COMMAND && type_arg->data.command.head &&
+                 type_arg->data.command.arg_count == 1 &&
+                 type_arg->data.command.args[0]->type == AST_LIT_STRING) {
+        /* [box? [Vec Type] $var] or [box? [Map Type] $var] — typed collection narrowing */
+        AstNode* th = type_arg->data.command.head;
+        bool is_vec = (th->type == AST_LIT_STRING && th->data.lit_string.length == 3
+                       && memcmp(th->data.lit_string.value, "Vec", 3) == 0);
+        bool is_map = (th->type == AST_LIT_STRING && th->data.lit_string.length == 3
+                       && memcmp(th->data.lit_string.value, "Map", 3) == 0);
+        if (is_vec || is_map) {
+          const char* ename = type_arg->data.command.args[0]->data.lit_string.value;
+          uint32_t elen = type_arg->data.command.args[0]->data.lit_string.length;
+          type_idx = struct_registry__find(compiler__get_struct_registry(c), ename, elen);
+          box_type = is_vec ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
+        }
       }
+
       if (type_idx != UINT32_MAX) {
         /* Resolve the variable to a local slot */
         AstNode* var_node = args[0]->data.command.args[1];
@@ -7300,6 +7323,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             has_narrowing = true;
             c->narrowings[c->narrowing_count].local_slot = (uint16_t)slot;
             c->narrowings[c->narrowing_count].box_type_idx = type_idx;
+            c->narrowings[c->narrowing_count].box_type = box_type;
             c->narrowing_count++;
           }
         }
@@ -8714,8 +8738,33 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (argc == 1) {
       compiler__compile_node(c, args[0]);
       compiler__emit_byte(c, OP_IS_BOX, line);
+    } else if (args[0]->type == AST_COMMAND && args[0]->data.command.head) {
+      /* [box? [Vec Type] $val] or [box? [Map Type] $val] — typed collection box check */
+      AstNode* type_head = args[0]->data.command.head;
+      bool is_vec = (type_head->type == AST_LIT_STRING && type_head->data.lit_string.length == 3
+                     && memcmp(type_head->data.lit_string.value, "Vec", 3) == 0);
+      bool is_map = (type_head->type == AST_LIT_STRING && type_head->data.lit_string.length == 3
+                     && memcmp(type_head->data.lit_string.value, "Map", 3) == 0);
+      if (!is_vec && !is_map) {
+        compiler__error(c, line, col, "box?: type expression must be [Vec Type] or [Map Type]");
+        return;
+      }
+      if (args[0]->data.command.arg_count != 1 ||
+          args[0]->data.command.args[0]->type != AST_LIT_STRING) {
+        compiler__error(c, line, col, "box?: type expression must be [Vec Type] or [Map Type]");
+        return;
+      }
+      const char* ename = args[0]->data.command.args[0]->data.lit_string.value;
+      uint32_t elen = args[0]->data.command.args[0]->data.lit_string.length;
+      uint32_t elem_idx = struct_registry__find(compiler__get_struct_registry(c), ename, elen);
+      if (elem_idx == UINT32_MAX) {
+        compiler__error(c, line, col, "box?: unknown element type name");
+        return;
+      }
+      compiler__compile_node(c, args[1]);
+      compiler__emit_byte(c, is_vec ? OP_IS_BOX_TYPED_VEC : OP_IS_BOX_TYPED_MAP, line);
     } else {
-      /* [box? Type $val] — typed box check */
+      /* [box? Type $val] — typed struct box check */
       if (args[0]->type != AST_LIT_STRING) {
         compiler__error(c, line, col, "box?: first argument must be a type name");
         return;
@@ -8794,8 +8843,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               /* Found narrowing — compile as deref with known type */
               compiler__compile_node(c, args[0]);
               compiler__emit_byte(c, OP_DEREF, line);
+              JaclType bt = c->narrowings[ni].box_type;
               uint32_t tidx = c->narrowings[ni].box_type_idx;
-              if (tidx > 0) {
+              if (bt == TYPE_TYPED_VEC || bt == TYPE_TYPED_MAP) {
+                c->last_expr_type = bt;
+                c->last_struct_idx = tidx;
+              } else if (tidx > 0) {
                 c->last_expr_type = TYPE_STRUCT;
                 c->last_struct_idx = tidx;
               } else {
