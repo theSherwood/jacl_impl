@@ -58,7 +58,7 @@ void hamt_print_rec(hamt_node* node, int level) {
   switch (node->type) {
     case hamt_NODE_LEAF: {
       hamt_leaf* leaf = (hamt_leaf*)node;
-      printf("Leaf: \"%s\" (Hash: %u, Refs: %ld)\n", leaf->key, leaf->hash, hamt_ref_count(leaf));
+      printf("Leaf: \"%s\" (Hash: %u, Refs: %ld)\n", hamt_key_from_leaf(leaf), leaf->hash, hamt_ref_count(leaf));
       break;
     }
     case hamt_NODE_COLLISION: {

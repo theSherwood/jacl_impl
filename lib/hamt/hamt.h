@@ -77,6 +77,13 @@
 #define H_SET_WIDE            H_NS(_set_wide)
 #define H_GET_PTR             H_NS(_get_ptr)
 #define H_VALUE_PTR_FROM_LEAF H_NS(_value_ptr_from_leaf)
+#define H_KEY_PTR_FROM_LEAF   H_NS(_key_ptr_from_leaf)
+#define H_UNSET_WIDE          H_NS(_unset_wide)
+#define H_HAS_WIDE            H_NS(_has_wide)
+#define H_WIDE_KEY_HASH       H_NS(_wide_key_hash)
+#define H_WIDE_KEY_EQ         H_NS(_wide_key_eq)
+#define H_LEAF_KEY_PTR(leaf)  ((leaf)->slots)
+#define H_LEAF_VAL_PTR(leaf)  ((HAMT_VAL_T*)((char*)(leaf)->slots + sizeof(HAMT_KEY_T) * (leaf)->key_stride))
 
 /* Internal helpers */
 #define H_NODE_DESTROY       H_NS(_node_destroy)
@@ -188,9 +195,9 @@ typedef struct H_INTERNAL {
 typedef struct H_LEAF {
   H_NODE     header;
   uint32_t   hash;
-  uint32_t   stride;  /* slots per value (1 = normal, >1 = wide/struct) */
-  HAMT_KEY_T key;
-  HAMT_VAL_T value[];
+  uint32_t   key_stride;  /* key slots (1 = normal, >1 = inline struct key) */
+  uint32_t   val_stride;  /* value slots (1 = normal, >1 = inline struct value) */
+  HAMT_KEY_T slots[];     /* key_stride keys then val_stride values (use H_LEAF_KEY_PTR/H_LEAF_VAL_PTR) */
 } H_LEAF;
 
 typedef struct H_COLLISION {
@@ -226,6 +233,26 @@ static H_LEAF_HOOK_FN H_ON_CREATE  = NULL;
 static H_LEAF_HOOK_FN H_ON_DESTROY = NULL;
 static H_KEY_HASH_FN  H_STRUCT_KEY_HASH = NULL;
 static H_VAL_HASH_FN  H_STRUCT_VAL_HASH = NULL;
+
+/* --- Key hash/eq dispatch: stride==1 uses handlers, stride>1 uses bitwise --- */
+
+static inline uint32_t H_WIDE_KEY_HASH(const HAMT_KEY_T* keys, uint32_t key_stride) {
+  if (key_stride == 1) return H_HASH_FN(keys[0]);
+  /* FNV-1a over raw key bytes */
+  uint32_t h = 2166136261u;
+  const uint8_t* p = (const uint8_t*)keys;
+  size_t len = sizeof(HAMT_KEY_T) * key_stride;
+  for (size_t i = 0; i < len; i++) {
+    h ^= p[i];
+    h *= 16777619u;
+  }
+  return h;
+}
+
+static inline bool H_WIDE_KEY_EQ(const HAMT_KEY_T* a, const HAMT_KEY_T* b, uint32_t key_stride) {
+  if (key_stride == 1) return H_EQ_FN(a[0], b[0]);
+  return memcmp(a, b, sizeof(HAMT_KEY_T) * key_stride) == 0;
+}
 
 /* --- Public configuration functions --- */
 
@@ -283,9 +310,14 @@ static inline uint32_t H_NODE_HASH(H_NODE* node) {
 
 static inline void H_LEAF_REHASH(H_LEAF* leaf) {
   if (!H_STRUCT_KEY_HASH || !H_STRUCT_VAL_HASH) { leaf->header.hash = 0; return; }
-  uint32_t h = H_STRUCT_KEY_HASH(leaf->key);
-  for (uint32_t i = 0; i < leaf->stride; i++) {
-    h ^= H_STRUCT_VAL_HASH(leaf->value[i]);
+  const HAMT_KEY_T* keys = H_LEAF_KEY_PTR(leaf);
+  const HAMT_VAL_T* vals = H_LEAF_VAL_PTR(leaf);
+  uint32_t h = 0;
+  for (uint32_t i = 0; i < leaf->key_stride; i++) {
+    h ^= H_STRUCT_KEY_HASH(keys[i]);
+  }
+  for (uint32_t i = 0; i < leaf->val_stride; i++) {
+    h ^= H_STRUCT_VAL_HASH(vals[i]);
   }
   leaf->header.hash = h;
 }
@@ -315,17 +347,19 @@ static void H_NODE_DESTROY(void* arg);
 
 /* --- Node construction --- */
 
-static inline H_LEAF* H_MK_LEAF(HAMT_KEY_T key, const HAMT_VAL_T* values, uint32_t hash, uint32_t stride) {
-  size_t sz       = sizeof(H_LEAF) + sizeof(HAMT_VAL_T) * stride;
+static inline H_LEAF* H_MK_LEAF(const HAMT_KEY_T* keys, uint32_t key_stride,
+                                 const HAMT_VAL_T* values, uint32_t val_stride, uint32_t hash) {
+  size_t sz       = sizeof(H_LEAF) + sizeof(HAMT_KEY_T) * key_stride + sizeof(HAMT_VAL_T) * val_stride;
   H_LEAF* node    = (H_LEAF*)H_ALLOC_LEAF(sz);
   node->header    = (H_NODE){.type = H_NODE_LEAF_VAL};
   node->hash      = hash;
-  node->stride    = stride;
-  node->key       = key;
-  memcpy(node->value, values, sizeof(HAMT_VAL_T) * stride);
+  node->key_stride = key_stride;
+  node->val_stride = val_stride;
+  memcpy(H_LEAF_KEY_PTR(node), keys, sizeof(HAMT_KEY_T) * key_stride);
+  memcpy(H_LEAF_VAL_PTR(node), values, sizeof(HAMT_VAL_T) * val_stride);
 
   if (H_ON_CREATE) {
-    H_ON_CREATE(key, values[0]);
+    H_ON_CREATE(keys[0], values[0]);
   }
 
   H_LEAF_REHASH(node);
@@ -396,7 +430,7 @@ static void H_NODE_DESTROY(void* arg) {
   } else if (node->type == H_NODE_LEAF_VAL) {
     H_LEAF* l = (H_LEAF*)node;
     if (H_ON_DESTROY) {
-      H_ON_DESTROY(l->key, l->value[0]);
+      H_ON_DESTROY(H_LEAF_KEY_PTR(l)[0], H_LEAF_VAL_PTR(l)[0]);
     }
   }
 }
@@ -404,17 +438,18 @@ static void H_NODE_DESTROY(void* arg) {
 
 /* --- Recursive set --- */
 
-static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T* values, uint32_t hash, int shift, uint32_t stride) {
+static H_NODE* H_SET_RECURSIVE(H_NODE* node, const HAMT_KEY_T* keys, uint32_t key_stride,
+                               const HAMT_VAL_T* values, uint32_t val_stride, uint32_t hash, int shift) {
   if (!node) {
-    return (H_NODE*)H_MK_LEAF(key, values, hash, stride);
+    return (H_NODE*)H_MK_LEAF(keys, key_stride, values, val_stride, hash);
   }
 
   if (node->type == H_NODE_LEAF_VAL) {
     H_LEAF* leaf = (H_LEAF*)node;
-    if (H_EQ_FN(leaf->key, key)) {
+    if (H_WIDE_KEY_EQ(H_LEAF_KEY_PTR(leaf), keys, key_stride)) {
       /* Update same key */
-      assert(leaf->stride == stride && "stride mismatch on key update");
-      return (H_NODE*)H_MK_LEAF(key, values, hash, stride);
+      assert(leaf->key_stride == key_stride && leaf->val_stride == val_stride && "stride mismatch on key update");
+      return (H_NODE*)H_MK_LEAF(keys, key_stride, values, val_stride, hash);
     }
 
     if (leaf->hash == hash) {
@@ -425,7 +460,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T* v
       col->hash            = hash;
       col->count           = 2;
       col->items[0]        = (H_LEAF*)H_REF(node);
-      col->items[1]        = H_MK_LEAF(key, values, hash, stride);
+      col->items[1]        = H_MK_LEAF(keys, key_stride, values, val_stride, hash);
       H_COLLISION_REHASH(col);
       return (H_NODE*)col;
     }
@@ -438,7 +473,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T* v
 
     if (old_idx == new_idx) {
       /* Same slot - recurse deeper */
-      H_NODE* child = H_SET_RECURSIVE(node, key, values, hash, shift + 5, stride);
+      H_NODE* child = H_SET_RECURSIVE(node, keys, key_stride, values, val_stride, hash, shift + 5);
       size_t  size  = sizeof(H_INTERNAL) + sizeof(H_NODE*);
 
       H_INTERNAL* internal = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
@@ -456,7 +491,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T* v
       internal->bitmap = old_bit | new_bit;
       internal->count  = 2;
 
-      H_LEAF* new_leaf = H_MK_LEAF(key, values, hash, stride);
+      H_LEAF* new_leaf = H_MK_LEAF(keys, key_stride, values, val_stride, hash);
       if (old_idx < new_idx) {
         internal->children[0] = H_REF(node);
         internal->children[1] = (H_NODE*)new_leaf;
@@ -480,7 +515,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T* v
 
       if (col_idx == new_idx) {
         /* Recurse deeper */
-        H_NODE* child = H_SET_RECURSIVE(node, key, values, hash, shift + 5, stride);
+        H_NODE* child = H_SET_RECURSIVE(node, keys, key_stride, values, val_stride, hash, shift + 5);
         size_t  size  = sizeof(H_INTERNAL) + sizeof(H_NODE*);
 
         H_INTERNAL* internal  = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
@@ -497,7 +532,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T* v
         internal->bitmap = col_bit | new_bit;
         internal->count  = col->count + 1;
 
-        H_LEAF* new_leaf = H_MK_LEAF(key, values, hash, stride);
+        H_LEAF* new_leaf = H_MK_LEAF(keys, key_stride, values, val_stride, hash);
         if (col_idx < new_idx) {
           internal->children[0] = H_REF(node);
           internal->children[1] = (H_NODE*)new_leaf;
@@ -512,8 +547,8 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T* v
 
     /* Same hash - update or extend collision */
     for (uint32_t i = 0; i < col->count; i++) {
-      if (H_EQ_FN(col->items[i]->key, key)) {
-        assert(col->items[i]->stride == stride && "stride mismatch on key update");
+      if (H_WIDE_KEY_EQ(H_LEAF_KEY_PTR(col->items[i]), keys, key_stride)) {
+        assert(col->items[i]->key_stride == key_stride && col->items[i]->val_stride == val_stride && "stride mismatch on key update");
         /* Update existing entry */
         size_t       size    = sizeof(H_COLLISION) + sizeof(H_LEAF*) * col->count;
         H_COLLISION* new_col = (H_COLLISION*)H_ALLOC_COLLISION(size);
@@ -522,7 +557,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T* v
         new_col->count       = col->count;
         for (uint32_t j = 0; j < col->count; j++) {
           if (j == i) {
-            new_col->items[j] = H_MK_LEAF(key, values, hash, stride);
+            new_col->items[j] = H_MK_LEAF(keys, key_stride, values, val_stride, hash);
           } else {
             new_col->items[j] = col->items[j];
             H_RC_REF((H_NODE*)col->items[j]);
@@ -543,7 +578,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T* v
       new_col->items[i] = col->items[i];
       H_RC_REF((H_NODE*)col->items[i]);
     }
-    new_col->items[col->count] = H_MK_LEAF(key, values, hash, stride);
+    new_col->items[col->count] = H_MK_LEAF(keys, key_stride, values, val_stride, hash);
     H_COLLISION_REHASH(new_col);
     return (H_NODE*)new_col;
   }
@@ -557,7 +592,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T* v
   if (internal->bitmap & bit) {
     /* Child exists, recurse */
     H_NODE* child     = internal->children[arr_idx];
-    H_NODE* new_child = H_SET_RECURSIVE(child, key, values, hash, shift + 5, stride);
+    H_NODE* new_child = H_SET_RECURSIVE(child, keys, key_stride, values, val_stride, hash, shift + 5);
 
     if (new_child == child) {
       H_UNREF(new_child);
@@ -568,7 +603,7 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T* v
     return (H_NODE*)new_internal;
   } else {
     /* Child missing, insert new leaf */
-    H_NODE*     new_leaf     = (H_NODE*)H_MK_LEAF(key, values, hash, stride);
+    H_NODE*     new_leaf     = (H_NODE*)H_MK_LEAF(keys, key_stride, values, val_stride, hash);
     H_INTERNAL* new_internal = H_MK_INTERNAL_COPY(internal, internal->bitmap | bit, new_leaf, arr_idx);
     return (H_NODE*)new_internal;
   }
@@ -576,12 +611,12 @@ static H_NODE* H_SET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T* v
 
 /* --- Recursive unset --- */
 
-static H_NODE* H_UNSET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, uint32_t hash, int shift) {
+static H_NODE* H_UNSET_RECURSIVE(H_NODE* node, const HAMT_KEY_T* keys, uint32_t key_stride, uint32_t hash, int shift) {
   if (!node) return NULL;
 
   if (node->type == H_NODE_LEAF_VAL) {
     H_LEAF* leaf = (H_LEAF*)node;
-    if (H_EQ_FN(leaf->key, key)) return NULL;
+    if (H_WIDE_KEY_EQ(H_LEAF_KEY_PTR(leaf), keys, key_stride)) return NULL;
     return H_REF(node);
   }
 
@@ -590,7 +625,7 @@ static H_NODE* H_UNSET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, uint32_t hash, in
 
     int found = -1;
     for (uint32_t i = 0; i < col->count; i++) {
-      if (H_EQ_FN(col->items[i]->key, key)) {
+      if (H_WIDE_KEY_EQ(H_LEAF_KEY_PTR(col->items[i]), keys, key_stride)) {
         found = (int)i;
         break;
       }
@@ -625,7 +660,7 @@ static H_NODE* H_UNSET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, uint32_t hash, in
   if (!(internal->bitmap & bit)) return H_REF(node);
 
   int     arr_idx      = H_GET_INDEX(internal->bitmap, bit);
-  H_NODE* result_child = H_UNSET_RECURSIVE(internal->children[arr_idx], key, hash, shift + 5);
+  H_NODE* result_child = H_UNSET_RECURSIVE(internal->children[arr_idx], keys, key_stride, hash, shift + 5);
 
   if (!result_child) {
     /* Child removed completely */
@@ -665,36 +700,42 @@ static H_NODE* H_UNSET_RECURSIVE(H_NODE* node, HAMT_KEY_T key, uint32_t hash, in
 
 static inline H_NODE* H_SET(H_NODE* root, HAMT_KEY_T key, HAMT_VAL_T value) {
   uint32_t h = H_HASH_FN(key);
-  return H_SET_RECURSIVE(root, key, &value, h, 0, 1);
+  return H_SET_RECURSIVE(root, &key, 1, &value, 1, h, 0);
 }
 
-static inline H_NODE* H_SET_WIDE(H_NODE* root, HAMT_KEY_T key, const HAMT_VAL_T* values, uint32_t stride) {
-  uint32_t h = H_HASH_FN(key);
-  return H_SET_RECURSIVE(root, key, values, h, 0, stride);
+static inline H_NODE* H_SET_WIDE(H_NODE* root, const HAMT_KEY_T* keys, uint32_t key_stride,
+                                  const HAMT_VAL_T* values, uint32_t val_stride) {
+  uint32_t h = H_WIDE_KEY_HASH(keys, key_stride);
+  return H_SET_RECURSIVE(root, keys, key_stride, values, val_stride, h, 0);
 }
 
 static inline H_NODE* H_UNSET(H_NODE* root, HAMT_KEY_T key) {
   uint32_t h = H_HASH_FN(key);
-  return H_UNSET_RECURSIVE(root, key, h, 0);
+  return H_UNSET_RECURSIVE(root, &key, 1, h, 0);
 }
 
-static inline H_LEAF* H_GET_LEAF(H_NODE* root, HAMT_KEY_T key) {
+static inline H_NODE* H_UNSET_WIDE(H_NODE* root, const HAMT_KEY_T* keys, uint32_t key_stride) {
+  uint32_t h = H_WIDE_KEY_HASH(keys, key_stride);
+  return H_UNSET_RECURSIVE(root, keys, key_stride, h, 0);
+}
+
+static inline H_LEAF* H_GET_LEAF(H_NODE* root, const HAMT_KEY_T* keys, uint32_t key_stride) {
   if (!root) return NULL;
-  uint32_t h     = H_HASH_FN(key);
+  uint32_t h     = H_WIDE_KEY_HASH(keys, key_stride);
   int      shift = 0;
   H_NODE*  node  = root;
 
   while (node) {
     if (node->type == H_NODE_LEAF_VAL) {
       H_LEAF* leaf = (H_LEAF*)node;
-      return H_EQ_FN(leaf->key, key) ? leaf : NULL;
+      return H_WIDE_KEY_EQ(H_LEAF_KEY_PTR(leaf), keys, key_stride) ? leaf : NULL;
     }
 
     if (node->type == H_NODE_COLLISION_VAL) {
       H_COLLISION* col = (H_COLLISION*)node;
       if (col->hash != h) return NULL;
       for (uint32_t i = 0; i < col->count; i++) {
-        if (H_EQ_FN(col->items[i]->key, key)) return col->items[i];
+        if (H_WIDE_KEY_EQ(H_LEAF_KEY_PTR(col->items[i]), keys, key_stride)) return col->items[i];
       }
       return NULL;
     }
@@ -711,28 +752,31 @@ static inline H_LEAF* H_GET_LEAF(H_NODE* root, HAMT_KEY_T key) {
 }
 
 static inline bool H_HAS(H_NODE* root, HAMT_KEY_T key) {
-  H_LEAF* leaf = H_GET_LEAF(root, key);
-  return leaf != NULL;
+  return H_GET_LEAF(root, &key, 1) != NULL;
+}
+
+static inline bool H_HAS_WIDE(H_NODE* root, const HAMT_KEY_T* keys, uint32_t key_stride) {
+  return H_GET_LEAF(root, keys, key_stride) != NULL;
 }
 
 static inline HAMT_VAL_T H_GET(H_NODE* root, HAMT_KEY_T key) {
-  H_LEAF* leaf = H_GET_LEAF(root, key);
+  H_LEAF* leaf = H_GET_LEAF(root, &key, 1);
   if (!leaf) return (HAMT_VAL_T){0};
-  assert(leaf->stride == 1 && "use get_ptr for strided maps");
-  return leaf->value[0];
+  assert(leaf->val_stride == 1 && "use get_ptr for strided maps");
+  return H_LEAF_VAL_PTR(leaf)[0];
 }
 
 static inline HAMT_VAL_T H_GET_OR_DEFAULT(H_NODE* root, HAMT_KEY_T key, HAMT_VAL_T default_value) {
-  H_LEAF* leaf = H_GET_LEAF(root, key);
+  H_LEAF* leaf = H_GET_LEAF(root, &key, 1);
   if (!leaf) return default_value;
-  assert(leaf->stride == 1 && "use get_ptr for strided maps");
-  return leaf->value[0];
+  assert(leaf->val_stride == 1 && "use get_ptr for strided maps");
+  return H_LEAF_VAL_PTR(leaf)[0];
 }
 
 static inline const HAMT_VAL_T* H_GET_PTR(H_NODE* root, HAMT_KEY_T key) {
-  H_LEAF* leaf = H_GET_LEAF(root, key);
+  H_LEAF* leaf = H_GET_LEAF(root, &key, 1);
   if (!leaf) return NULL;
-  return leaf->value;
+  return H_LEAF_VAL_PTR(leaf);
 }
 
 static inline size_t H_COUNT(H_NODE* root) {
@@ -741,18 +785,24 @@ static inline size_t H_COUNT(H_NODE* root) {
 
 static inline HAMT_KEY_T H_KEY_FROM_LEAF(H_LEAF* leaf) {
   if (!leaf) return (HAMT_KEY_T){0};
-  return leaf->key;
+  assert(leaf->key_stride == 1 && "use key_ptr_from_leaf for strided keys");
+  return H_LEAF_KEY_PTR(leaf)[0];
+}
+
+static inline const HAMT_KEY_T* H_KEY_PTR_FROM_LEAF(H_LEAF* leaf) {
+  if (!leaf) return NULL;
+  return H_LEAF_KEY_PTR(leaf);
 }
 
 static inline HAMT_VAL_T H_VALUE_FROM_LEAF(H_LEAF* leaf) {
   if (!leaf) return (HAMT_VAL_T){0};
-  assert(leaf->stride == 1 && "use value_ptr_from_leaf for strided maps");
-  return leaf->value[0];
+  assert(leaf->val_stride == 1 && "use value_ptr_from_leaf for strided maps");
+  return H_LEAF_VAL_PTR(leaf)[0];
 }
 
 static inline const HAMT_VAL_T* H_VALUE_PTR_FROM_LEAF(H_LEAF* leaf) {
   if (!leaf) return NULL;
-  return leaf->value;
+  return H_LEAF_VAL_PTR(leaf);
 }
 
 /* --- Iterator API --- */
@@ -848,17 +898,18 @@ static inline H_TRANSIENT* H_TRANSIENT_FN(H_NODE* root) {
 
 /* --- Transient recursive set (top-down owned/shared check) --- */
 
-static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T* values, uint32_t hash, int shift, uint32_t stride) {
+static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, const HAMT_KEY_T* keys, uint32_t key_stride,
+                                 const HAMT_VAL_T* values, uint32_t val_stride, uint32_t hash, int shift) {
   if (!node) {
-    return (H_NODE*)H_MK_LEAF(key, values, hash, stride);
+    return (H_NODE*)H_MK_LEAF(keys, key_stride, values, val_stride, hash);
   }
 
   if (node->type == H_NODE_LEAF_VAL) {
     H_LEAF* leaf = (H_LEAF*)node;
-    if (H_EQ_FN(leaf->key, key)) {
+    if (H_WIDE_KEY_EQ(H_LEAF_KEY_PTR(leaf), keys, key_stride)) {
       /* Update same key — always create new leaf */
-      assert(leaf->stride == stride && "stride mismatch on key update");
-      return (H_NODE*)H_MK_LEAF(key, values, hash, stride);
+      assert(leaf->key_stride == key_stride && leaf->val_stride == val_stride && "stride mismatch on key update");
+      return (H_NODE*)H_MK_LEAF(keys, key_stride, values, val_stride, hash);
     }
 
     if (leaf->hash == hash) {
@@ -869,7 +920,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T*
       col->hash         = hash;
       col->count        = 2;
       col->items[0]     = (H_LEAF*)H_REF(node);
-      col->items[1]     = H_MK_LEAF(key, values, hash, stride);
+      col->items[1]     = H_MK_LEAF(keys, key_stride, values, val_stride, hash);
       H_COLLISION_REHASH(col);
       return (H_NODE*)col;
     }
@@ -881,7 +932,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T*
     uint32_t new_bit = (1 << new_idx);
 
     if (old_idx == new_idx) {
-      H_NODE* child = H_SET_RECURSIVE_T(node, key, values, hash, shift + 5, stride);
+      H_NODE* child = H_SET_RECURSIVE_T(node, keys, key_stride, values, val_stride, hash, shift + 5);
       size_t  size  = sizeof(H_INTERNAL) + sizeof(H_NODE*);
 
       H_INTERNAL* internal  = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
@@ -898,7 +949,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T*
       internal->bitmap     = old_bit | new_bit;
       internal->count      = 2;
 
-      H_LEAF* new_leaf = H_MK_LEAF(key, values, hash, stride);
+      H_LEAF* new_leaf = H_MK_LEAF(keys, key_stride, values, val_stride, hash);
       if (old_idx < new_idx) {
         internal->children[0] = H_REF(node);
         internal->children[1] = (H_NODE*)new_leaf;
@@ -921,7 +972,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T*
       uint32_t new_bit = (1 << new_idx);
 
       if (col_idx == new_idx) {
-        H_NODE* child = H_SET_RECURSIVE_T(node, key, values, hash, shift + 5, stride);
+        H_NODE* child = H_SET_RECURSIVE_T(node, keys, key_stride, values, val_stride, hash, shift + 5);
         size_t  size  = sizeof(H_INTERNAL) + sizeof(H_NODE*);
 
         H_INTERNAL* internal  = (H_INTERNAL*)H_ALLOC_INTERNAL(size);
@@ -938,7 +989,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T*
         internal->bitmap     = col_bit | new_bit;
         internal->count      = col->count + 1;
 
-        H_LEAF* new_leaf = H_MK_LEAF(key, values, hash, stride);
+        H_LEAF* new_leaf = H_MK_LEAF(keys, key_stride, values, val_stride, hash);
         if (col_idx < new_idx) {
           internal->children[0] = H_REF(node);
           internal->children[1] = (H_NODE*)new_leaf;
@@ -953,11 +1004,11 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T*
 
     /* Same hash — check for update */
     for (uint32_t i = 0; i < col->count; i++) {
-      if (H_EQ_FN(col->items[i]->key, key)) {
-        assert(col->items[i]->stride == stride && "stride mismatch on key update");
+      if (H_WIDE_KEY_EQ(H_LEAF_KEY_PTR(col->items[i]), keys, key_stride)) {
+        assert(col->items[i]->key_stride == key_stride && col->items[i]->val_stride == val_stride && "stride mismatch on key update");
         if (H_RC_COUNT(node) == 1) {
           /* Owned — replace item in place */
-          H_LEAF* new_leaf = H_MK_LEAF(key, values, hash, stride);
+          H_LEAF* new_leaf = H_MK_LEAF(keys, key_stride, values, val_stride, hash);
           H_RC_UNREF((H_NODE*)col->items[i]);
           col->items[i] = new_leaf;
           H_COLLISION_REHASH(col);
@@ -971,7 +1022,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T*
           new_col->count       = col->count;
           for (uint32_t j = 0; j < col->count; j++) {
             if (j == i) {
-              new_col->items[j] = H_MK_LEAF(key, values, hash, stride);
+              new_col->items[j] = H_MK_LEAF(keys, key_stride, values, val_stride, hash);
             } else {
               new_col->items[j] = col->items[j];
               H_RC_REF((H_NODE*)col->items[j]);
@@ -994,7 +1045,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T*
         new_col->items[i] = col->items[i];
         H_RC_REF((H_NODE*)col->items[i]);
       }
-      new_col->items[col->count] = H_MK_LEAF(key, values, hash, stride);
+      new_col->items[col->count] = H_MK_LEAF(keys, key_stride, values, val_stride, hash);
       H_COLLISION_REHASH(new_col);
       return (H_NODE*)new_col;
     }
@@ -1012,7 +1063,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T*
       /* Owned — modify in place */
       H_NODE* child           = internal->children[arr_idx];
       size_t  old_child_count = H_GET_NODE_COUNT(child);
-      H_NODE* new_child       = H_SET_RECURSIVE_T(child, key, values, hash, shift + 5, stride);
+      H_NODE* new_child       = H_SET_RECURSIVE_T(child, keys, key_stride, values, val_stride, hash, shift + 5);
 
       if (new_child != child) {
         H_RC_UNREF(child);
@@ -1037,7 +1088,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T*
 
       H_NODE* child           = work->children[arr_idx];
       size_t  old_child_count = H_GET_NODE_COUNT(child);
-      H_NODE* new_child       = H_SET_RECURSIVE_T(child, key, values, hash, shift + 5, stride);
+      H_NODE* new_child       = H_SET_RECURSIVE_T(child, keys, key_stride, values, val_stride, hash, shift + 5);
 
       if (new_child != child) {
         H_RC_UNREF(child);
@@ -1049,7 +1100,7 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T*
     }
   } else {
     /* Child missing — insert new leaf */
-    H_NODE* new_leaf = (H_NODE*)H_MK_LEAF(key, values, hash, stride);
+    H_NODE* new_leaf = (H_NODE*)H_MK_LEAF(keys, key_stride, values, val_stride, hash);
 
     /* Insertion always needs new allocation (size changes) — caller handles unref */
     {
@@ -1061,12 +1112,12 @@ static H_NODE* H_SET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, const HAMT_VAL_T*
 
 /* --- Transient recursive unset (top-down owned/shared check) --- */
 
-static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, int shift) {
+static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, const HAMT_KEY_T* keys, uint32_t key_stride, uint32_t hash, int shift) {
   if (!node) return NULL;
 
   if (node->type == H_NODE_LEAF_VAL) {
     H_LEAF* leaf = (H_LEAF*)node;
-    if (H_EQ_FN(leaf->key, key)) return NULL;
+    if (H_WIDE_KEY_EQ(H_LEAF_KEY_PTR(leaf), keys, key_stride)) return NULL;
     return node; /* not found — return same pointer (no ref change for transient) */
   }
 
@@ -1075,7 +1126,7 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
 
     int found = -1;
     for (uint32_t i = 0; i < col->count; i++) {
-      if (H_EQ_FN(col->items[i]->key, key)) {
+      if (H_WIDE_KEY_EQ(H_LEAF_KEY_PTR(col->items[i]), keys, key_stride)) {
         found = (int)i;
         break;
       }
@@ -1134,7 +1185,7 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
     /* Owned — modify in place where possible */
     H_NODE* child       = internal->children[arr_idx];
     size_t  old_child_count = H_GET_NODE_COUNT(child);
-    H_NODE* result_child = H_UNSET_RECURSIVE_T(child, key, hash, shift + 5);
+    H_NODE* result_child = H_UNSET_RECURSIVE_T(child, keys, key_stride, hash, shift + 5);
 
     if (result_child == child) {
       /* Child may have been modified in-place — update count */
@@ -1192,7 +1243,7 @@ static H_NODE* H_UNSET_RECURSIVE_T(H_NODE* node, HAMT_KEY_T key, uint32_t hash, 
 
     H_NODE* child       = work->children[arr_idx];
     size_t  old_child_count = H_GET_NODE_COUNT(child);
-    H_NODE* result_child = H_UNSET_RECURSIVE_T(child, key, hash, shift + 5);
+    H_NODE* result_child = H_UNSET_RECURSIVE_T(child, keys, key_stride, hash, shift + 5);
 
     if (result_child == child) {
       /* Not found — discard copy */
@@ -1254,7 +1305,7 @@ static inline H_TRANSIENT* H_TRANSIENT_UNSET(H_TRANSIENT* t, HAMT_KEY_T key) {
   }
 
   uint32_t h        = H_HASH_FN(key);
-  H_NODE*  new_root = H_UNSET_RECURSIVE_T(t->root, key, h, 0);
+  H_NODE*  new_root = H_UNSET_RECURSIVE_T(t->root, &key, 1, h, 0);
 
   if (new_root != t->root) {
     if (t->root) H_RC_UNREF(t->root);
@@ -1277,7 +1328,7 @@ static inline H_TRANSIENT* H_TRANSIENT_SET(H_TRANSIENT* t, HAMT_KEY_T key, HAMT_
   }
 
   uint32_t h        = H_HASH_FN(key);
-  H_NODE*  new_root = H_SET_RECURSIVE_T(t->root, key, &value, h, 0, 1);
+  H_NODE*  new_root = H_SET_RECURSIVE_T(t->root, &key, 1, &value, 1, h, 0);
 
   if (new_root != t->root) {
     if (t->root) H_RC_UNREF(t->root);
@@ -1357,10 +1408,17 @@ static inline H_NODE* H_PERSISTENT_FN(H_TRANSIENT* t) {
 #undef H_NEXT_KEY
 #undef H_NEXT_VALUE
 #undef H_KEY_FROM_LEAF
+#undef H_KEY_PTR_FROM_LEAF
 #undef H_VALUE_FROM_LEAF
 #undef H_SET_WIDE
 #undef H_GET_PTR
 #undef H_VALUE_PTR_FROM_LEAF
+#undef H_UNSET_WIDE
+#undef H_HAS_WIDE
+#undef H_WIDE_KEY_HASH
+#undef H_WIDE_KEY_EQ
+#undef H_LEAF_KEY_PTR
+#undef H_LEAF_VAL_PTR
 #undef H_REF
 #undef H_UNREF
 #undef H_REF_COUNT
