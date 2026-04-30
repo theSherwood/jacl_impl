@@ -75,7 +75,11 @@ typedef enum {
   TOKEN_CARET_WORD,       /* ^identifier (caller-scope inside syntax-quote) */
   TOKEN_NEWLINE,          /* newline (\n or \r\n) */
   TOKEN_ERROR,            /* lexer error with descriptive message */
-  TOKEN_EOF               /* end of input */
+  TOKEN_EOF,              /* end of input */
+  TOKEN_PRAGMA,           /* #{ ... } pragma */
+  TOKEN_RANGE_EXCL,       /* ..< (exclusive range) */
+  TOKEN_RANGE_INCL,       /* ..= (inclusive range) */
+  TOKEN_OPTIONAL_CHAIN    /* ?. (optional chaining) */
 } TokenType;
 
 /* -------------------------------------------------------------------------
@@ -274,11 +278,13 @@ int lexer__is_word_char(char c) {
          || c == '?' || c == '!';
 }
 
-/* Check if current position is a word char, but stop before -> (arrow) */
+/* Check if current position is a word char, but stop before -> (arrow)
+   and ?. (optional chain) */
 int lexer__is_word_char_no_arrow(Lexer* lex) {
   char c = lex->source[lex->pos];
   if (!lexer__is_word_char(c)) return 0;
   if (c == '-' && lex->source[lex->pos + 1] == '>') return 0;
+  if (c == '?' && lex->source[lex->pos + 1] == '.') return 0;
   return 1;
 }
 
@@ -318,6 +324,10 @@ void lexer__lex_interp_expr(Lexer* lex, TokenArray* arr,
                                     uint32_t* error_count);
 void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
                                      uint32_t* error_count);
+void lexer__lex_triple_string_body(Lexer* lex, TokenArray* arr,
+                                   uint32_t* error_count,
+                                   uint32_t str_start, uint32_t str_line,
+                                   uint32_t str_col);
 
 /* -------------------------------------------------------------------------
  * Internal: String escape sequence handler
@@ -721,6 +731,240 @@ void lexer__lex_string_body(Lexer* lex, TokenArray* arr,
       tok.payload.text = sb.data;
       lexer__arr_push(arr, tok);
     }
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Triple-quoted string lexer ("""...""")
+ *
+ * Scans until closing """, supports interpolation ($var, $[expr], $(expr)).
+ * Applies Kotlin-style indent stripping: the indentation of the closing """
+ * is stripped from each content line.
+ * Called after the opening """ has been consumed.
+ * ------------------------------------------------------------------------- */
+
+void lexer__lex_triple_string_body(Lexer* lex, TokenArray* arr,
+                                   uint32_t* error_count,
+                                   uint32_t str_start, uint32_t str_line,
+                                   uint32_t str_col) {
+  StringBuf sb;
+  strbuf_init(&sb, lex->arena);
+  const char* str_error = NULL;
+  int has_interp = 0;
+  uint32_t seg_start = str_start;
+  uint32_t seg_line  = str_line;
+  uint32_t seg_col   = str_col;
+
+  /* Scan until closing """ */
+  while (lexer__peek(lex) != '\0' && !str_error) {
+    /* Check for closing """ */
+    if (lexer__peek(lex) == '"' &&
+        lex->source[lex->pos + 1] == '"' &&
+        lex->source[lex->pos + 2] == '"') {
+      break; /* found closing """ */
+    }
+    char ch = lexer__peek(lex);
+
+    /* Embedded newlines */
+    if (ch == '\n' || ch == '\r') {
+      lexer__advance(lex);
+      if (ch == '\r' && lexer__peek(lex) == '\n')
+        lexer__advance(lex);
+      strbuf_push(&sb, '\n');
+      lex->line++;
+      lex->col = 1;
+      continue;
+    }
+
+    /* Escape sequences (same as regular strings) */
+    if (ch == '\\') {
+      lexer__advance(lex);
+      str_error = lexer__handle_escape(lex, &sb);
+      continue;
+    }
+
+    /* Interpolation: $var, $[expr], or $(expr) */
+    if (ch == '$') {
+      char next_ch = lex->source[lex->pos + 1];
+      if (lexer__is_word_start(next_ch) || next_ch == '[' || next_ch == '(') {
+        strbuf_push(&sb, '\0');
+        {
+          Token seg_tok;
+          memset(&seg_tok, 0, sizeof(Token));
+          seg_tok.type   = has_interp ? TOKEN_STRING_PART : TOKEN_STRING_BEGIN;
+          seg_tok.line   = seg_line;
+          seg_tok.column = seg_col;
+          seg_tok.offset = seg_start;
+          seg_tok.length = lex->pos - seg_start;
+          seg_tok.payload.text = sb.data;
+          lexer__arr_push(arr, seg_tok);
+        }
+        has_interp = 1;
+        strbuf_init(&sb, lex->arena);
+
+        if (next_ch == '[') {
+          uint32_t expr_start = lex->pos;
+          uint32_t expr_line  = lex->line;
+          uint32_t expr_col   = lex->col;
+          lexer__advance(lex); /* consume '$' */
+          lexer__advance(lex); /* consume '[' */
+          {
+            Token expr_tok = lexer__make_token(lex, TOKEN_INTERP_EXPR_START,
+                                               expr_start, expr_line, expr_col);
+            lexer__arr_push(arr, expr_tok);
+          }
+          lexer__lex_interp_expr(lex, arr, error_count);
+        } else if (next_ch == '(') {
+          uint32_t dp_start = lex->pos;
+          uint32_t dp_line  = lex->line;
+          uint32_t dp_col   = lex->col;
+          lexer__advance(lex); /* consume '$' */
+          lexer__advance(lex); /* consume '(' */
+          {
+            Token dp_tok = lexer__make_token(lex, TOKEN_DOLLAR_PAREN,
+                                             dp_start, dp_line, dp_col);
+            lexer__arr_push(arr, dp_tok);
+          }
+          lexer__lex_interp_infix(lex, arr, error_count);
+        } else {
+          uint32_t var_start = lex->pos;
+          uint32_t var_line  = lex->line;
+          uint32_t var_col   = lex->col;
+          lexer__advance(lex); /* consume '$' */
+          while (lexer__is_word_char_no_arrow(lex))
+            lexer__advance(lex);
+          {
+            Token var_tok = lexer__make_token(lex, TOKEN_INTERP_VAR,
+                                              var_start, var_line, var_col);
+            var_tok.payload.text = lex->source + var_start + 1;
+            lexer__arr_push(arr, var_tok);
+          }
+        }
+
+        seg_start = lex->pos;
+        seg_line  = lex->line;
+        seg_col   = lex->col;
+        continue;
+      }
+    }
+
+    /* Regular character */
+    strbuf_push(&sb, ch);
+    lexer__advance(lex);
+  }
+
+  /* Check for unterminated string */
+  if (!str_error && lexer__peek(lex) == '\0') {
+    str_error = "unterminated triple-quoted string";
+  }
+
+  if (str_error) {
+    Token tok = lexer__make_token(lex, TOKEN_ERROR, str_start, str_line, str_col);
+    tok.payload.error_msg = str_error;
+    lexer__arr_push(arr, tok);
+    (*error_count)++;
+    return;
+  }
+
+  /* Consume closing """ */
+  lexer__advance(lex); /* " */
+  lexer__advance(lex); /* " */
+  lexer__advance(lex); /* " */
+
+  strbuf_push(&sb, '\0');
+
+  /* --- Kotlin-style indent stripping ---
+   * Find the indentation of the closing """ (its column - 1 gives the
+   * number of leading spaces/tabs to strip from each line).
+   * We look at lex->col which now points just past the closing """.
+   * The closing """ started at col - 3, and the indent is col - 4.
+   * Actually: we need the whitespace *before* the closing """.
+   * The simplest approach: count whitespace on the last line of the
+   * raw content (everything after the last \n before closing """). */
+
+  /* Determine strip prefix from content: last line's leading whitespace */
+  const char* raw = has_interp ? NULL : sb.data;
+  if (!has_interp && raw != NULL) {
+    /* Find the last newline in the string content */
+    uint32_t content_len = (uint32_t)strlen(raw);
+    int last_nl = -1;
+    for (int i = (int)content_len - 1; i >= 0; i--) {
+      if (raw[i] == '\n') { last_nl = i; break; }
+    }
+
+    if (last_nl >= 0) {
+      /* Measure indent after last newline */
+      uint32_t indent = 0;
+      for (uint32_t i = (uint32_t)(last_nl + 1); i < content_len; i++) {
+        if (raw[i] == ' ' || raw[i] == '\t') indent++;
+        else break;
+      }
+
+      /* Check if last line is whitespace-only (closing """ on its own line) */
+      bool last_line_blank = true;
+      for (uint32_t i = (uint32_t)(last_nl + 1); i < content_len; i++) {
+        if (raw[i] != ' ' && raw[i] != '\t') { last_line_blank = false; break; }
+      }
+
+      if (last_line_blank && indent > 0) {
+        /* Strip 'indent' leading chars from each line, and remove the
+         * trailing blank line (it's just the closing """'s indent). */
+        StringBuf stripped;
+        strbuf_init(&stripped, lex->arena);
+
+        /* Skip leading newline if content starts with one */
+        uint32_t ci = 0;
+        if (ci < content_len && raw[ci] == '\n') ci++;
+
+        while (ci < content_len) {
+          /* Skip up to 'indent' whitespace chars */
+          uint32_t skipped = 0;
+          while (ci < content_len && skipped < indent &&
+                 (raw[ci] == ' ' || raw[ci] == '\t')) {
+            ci++;
+            skipped++;
+          }
+          /* Copy rest of line */
+          while (ci < content_len && raw[ci] != '\n') {
+            strbuf_push(&stripped, raw[ci]);
+            ci++;
+          }
+          if (ci < content_len && raw[ci] == '\n') {
+            /* Check if this newline leads to the final blank line */
+            bool is_final_newline = true;
+            for (uint32_t j = ci + 1; j < content_len; j++) {
+              if (raw[j] != ' ' && raw[j] != '\t') {
+                is_final_newline = false;
+                break;
+              }
+            }
+            if (!is_final_newline) {
+              strbuf_push(&stripped, '\n');
+            }
+            ci++; /* consume \n */
+          }
+        }
+        strbuf_push(&stripped, '\0');
+        /* Replace sb with stripped content */
+        sb.data = stripped.data;
+      }
+    }
+  }
+
+  if (has_interp) {
+    Token end_tok;
+    memset(&end_tok, 0, sizeof(Token));
+    end_tok.type   = TOKEN_STRING_END;
+    end_tok.line   = seg_line;
+    end_tok.column = seg_col;
+    end_tok.offset = seg_start;
+    end_tok.length = lex->pos - seg_start;
+    end_tok.payload.text = sb.data;
+    lexer__arr_push(arr, end_tok);
+  } else {
+    Token tok = lexer__make_token(lex, TOKEN_STRING, str_start, str_line, str_col);
+    tok.payload.text = sb.data;
+    lexer__arr_push(arr, tok);
   }
 }
 
@@ -1134,6 +1378,17 @@ void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
             otype = TOKEN_OPERATOR;
           }
           break;
+        case '?':
+          lexer__advance(lex);
+          if (lexer__peek(lex) == '.') {
+            lexer__advance(lex);
+            otype = TOKEN_OPTIONAL_CHAIN;
+          } else {
+            while (lexer__is_operator_char(lexer__peek(lex)))
+              lexer__advance(lex);
+            otype = TOKEN_OPERATOR;
+          }
+          break;
         default:
           lexer__advance(lex);
           while (lexer__is_operator_char(lexer__peek(lex)))
@@ -1284,9 +1539,52 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       continue;
     }
 
-    /* Comments: # to end of line, no token emitted */
+    /* Pragmas: #{ ... } or Comments: # to end of line */
     if (c == '#') {
+      uint32_t start = lex.pos;
+      uint32_t sline = lex.line;
+      uint32_t scol  = lex.col;
       lexer__advance(&lex);
+
+      if (lexer__peek(&lex) == '{') {
+        /* Pragma: #{ ... } — scan to matching } */
+        lexer__advance(&lex); /* consume '{' */
+        StringBuf sb;
+        strbuf_init(&sb, lex.arena);
+        int depth = 1;
+        while (lexer__peek(&lex) != '\0' && depth > 0) {
+          char pc = lexer__peek(&lex);
+          if (pc == '{') depth++;
+          else if (pc == '}') { depth--; if (depth == 0) break; }
+          if (pc == '\n' || pc == '\r') {
+            lexer__advance(&lex);
+            if (pc == '\r' && lexer__peek(&lex) == '\n')
+              lexer__advance(&lex);
+            strbuf_push(&sb, '\n');
+            lex.line++;
+            lex.col = 1;
+            continue;
+          }
+          strbuf_push(&sb, pc);
+          lexer__advance(&lex);
+        }
+        if (lexer__peek(&lex) == '}') {
+          lexer__advance(&lex); /* consume closing '}' */
+        } else {
+          Token tok = lexer__make_token(&lex, TOKEN_ERROR, start, sline, scol);
+          tok.payload.error_msg = "unterminated pragma";
+          lexer__arr_push(&arr, tok);
+          error_count++;
+          continue;
+        }
+        strbuf_push(&sb, '\0');
+        Token tok = lexer__make_token(&lex, TOKEN_PRAGMA, start, sline, scol);
+        tok.payload.text = sb.data;
+        lexer__arr_push(&arr, tok);
+        continue;
+      }
+
+      /* Regular comment: skip to end of line */
       while (lexer__peek(&lex) != '\0' && lexer__peek(&lex) != '\n'
              && lexer__peek(&lex) != '\r') {
         lexer__advance(&lex);
@@ -1486,9 +1784,28 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
           lexer__advance(&lex);
           if (lexer__peek(&lex) == '.') {
             lexer__advance(&lex);
-            otype = TOKEN_DOTDOT;
+            if (lexer__peek(&lex) == '<') {
+              lexer__advance(&lex);
+              otype = TOKEN_RANGE_EXCL;
+            } else if (lexer__peek(&lex) == '=') {
+              lexer__advance(&lex);
+              otype = TOKEN_RANGE_INCL;
+            } else {
+              otype = TOKEN_DOTDOT;
+            }
           } else {
             /* greedy scan remaining operator chars */
+            while (lexer__is_operator_char(lexer__peek(&lex)))
+              lexer__advance(&lex);
+            otype = TOKEN_OPERATOR;
+          }
+          break;
+        case '?':
+          lexer__advance(&lex);
+          if (lexer__peek(&lex) == '.') {
+            lexer__advance(&lex);
+            otype = TOKEN_OPTIONAL_CHAIN;
+          } else {
             while (lexer__is_operator_char(lexer__peek(&lex)))
               lexer__advance(&lex);
             otype = TOKEN_OPERATOR;
@@ -1558,13 +1875,21 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
       }
     }
 
-    /* Strings: "..." with escape sequences and interpolation */
+    /* Strings: "..." or """...""" with escape sequences and interpolation */
     if (c == '"') {
       uint32_t start = lex.pos;
       uint32_t sline = lex.line;
       uint32_t scol  = lex.col;
-      lexer__advance(&lex); /* consume opening '"' */
-      lexer__lex_string_body(&lex, &arr, &error_count, start, sline, scol);
+      if (lex.source[lex.pos + 1] == '"' && lex.source[lex.pos + 2] == '"') {
+        /* Triple-quoted string */
+        lexer__advance(&lex); /* consume first '"' */
+        lexer__advance(&lex); /* consume second '"' */
+        lexer__advance(&lex); /* consume third '"' */
+        lexer__lex_triple_string_body(&lex, &arr, &error_count, start, sline, scol);
+      } else {
+        lexer__advance(&lex); /* consume opening '"' */
+        lexer__lex_string_body(&lex, &arr, &error_count, start, sline, scol);
+      }
       continue;
     }
 

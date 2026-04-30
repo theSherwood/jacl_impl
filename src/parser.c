@@ -137,7 +137,8 @@ AstNode* parser__error(Parser* p, const char* message, Token* tok) {
  * ------------------------------------------------------------------------- */
 
 void parser__skip_newlines(Parser* p) {
-  while (parser__peek(p)->type == TOKEN_NEWLINE) {
+  while (parser__peek(p)->type == TOKEN_NEWLINE ||
+         parser__peek(p)->type == TOKEN_PRAGMA) {
     parser__advance(p);
   }
 }
@@ -479,7 +480,10 @@ int parser__is_operator(Token* tok) {
       || tok->type == TOKEN_PIPE
       || tok->type == TOKEN_EQUALS
       || tok->type == TOKEN_COLON
-      || tok->type == TOKEN_DOUBLE_COLON;
+      || tok->type == TOKEN_DOUBLE_COLON
+      || tok->type == TOKEN_RANGE_EXCL
+      || tok->type == TOKEN_RANGE_INCL
+      || tok->type == TOKEN_OPTIONAL_CHAIN;
 }
 
 /* -------------------------------------------------------------------------
@@ -491,12 +495,17 @@ int parser__is_operator(Token* tok) {
  * ------------------------------------------------------------------------- */
 
 AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
-  while (!parser__at_end(p) && parser__peek(p)->type == TOKEN_ARROW) {
-    Token* arrow = parser__advance(p); /* consume '->' */
+  while (!parser__at_end(p) &&
+         (parser__peek(p)->type == TOKEN_ARROW ||
+          parser__peek(p)->type == TOKEN_OPTIONAL_CHAIN)) {
+    Token* arrow = parser__advance(p); /* consume '->' or '?.' */
+    bool is_optional = (arrow->type == TOKEN_OPTIONAL_CHAIN);
 
     Token* field_tok = parser__peek(p);
     if (field_tok->type != TOKEN_WORD) {
-      return parser__error(p, "expected field name after '->'", arrow);
+      return parser__error(p,
+        is_optional ? "expected field name after '?.'" : "expected field name after '->'",
+        arrow);
     }
     parser__advance(p); /* consume field name */
 
@@ -508,15 +517,15 @@ AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
     field->data.lit_string.value  = field_tok->payload.text;
     field->data.lit_string.length = field_tok->length;
 
-    /* Build "." head */
+    /* Build "." or "?." head */
     AstNode* dot_head = ast_alloc(p->arena);
     dot_head->type = AST_LIT_STRING;
     dot_head->start = parser__token_start(arrow);
     dot_head->end   = parser__token_end(arrow);
-    dot_head->data.lit_string.value  = ".";
-    dot_head->data.lit_string.length = 1;
+    dot_head->data.lit_string.value  = is_optional ? "?." : ".";
+    dot_head->data.lit_string.length = is_optional ? 2 : 1;
 
-    /* Build [. expr field] command */
+    /* Build [. expr field] or [?. expr field] command */
     AstNode** args = ast_alloc_array(p->arena, 2);
     args[0] = expr;
     args[1] = field;
@@ -1296,11 +1305,12 @@ AstNode* parser__parse_defstruct(Parser* p) {
     Token* open = parser__advance(p); /* consume '{' */
 
     while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
-      /* Skip commas and newlines between fields */
+      /* Skip commas, newlines, and pragmas between fields */
       while (!parser__at_end(p) &&
              (parser__peek(p)->type == TOKEN_COMMA ||
               parser__peek(p)->type == TOKEN_NEWLINE ||
-              parser__peek(p)->type == TOKEN_SEMICOLON)) {
+              parser__peek(p)->type == TOKEN_SEMICOLON ||
+              parser__peek(p)->type == TOKEN_PRAGMA)) {
         parser__advance(p);
       }
       if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
@@ -2610,11 +2620,12 @@ AstNode* parser__parse_block(Parser* p) {
 
   bool trailing_semi = false;
   while (!parser__at_end(p) && parser__peek(p)->type != TOKEN_RBRACE) {
-    /* Skip newlines, semicolons, and commas between commands */
+    /* Skip newlines, semicolons, commas, and pragmas between commands */
     bool saw_semi = false;
     while (parser__peek(p)->type == TOKEN_NEWLINE ||
            parser__peek(p)->type == TOKEN_SEMICOLON ||
-           parser__peek(p)->type == TOKEN_COMMA) {
+           parser__peek(p)->type == TOKEN_COMMA ||
+           parser__peek(p)->type == TOKEN_PRAGMA) {
       if (parser__peek(p)->type == TOKEN_SEMICOLON)
         saw_semi = true;
       parser__advance(p);
@@ -2860,10 +2871,11 @@ ParseResult parser_parse(LexResult tokens, arena_t* arena) {
   parser__arr_init(&top_level, arena);
 
   while (!parser__at_end(&p)) {
-    /* Skip newlines, semicolons, and commas between commands */
+    /* Skip newlines, semicolons, commas, and pragmas between commands */
     while (parser__peek(&p)->type == TOKEN_NEWLINE ||
            parser__peek(&p)->type == TOKEN_SEMICOLON ||
-           parser__peek(&p)->type == TOKEN_COMMA) {
+           parser__peek(&p)->type == TOKEN_COMMA ||
+           parser__peek(&p)->type == TOKEN_PRAGMA) {
       parser__advance(&p);
     }
     if (parser__at_end(&p)) break;

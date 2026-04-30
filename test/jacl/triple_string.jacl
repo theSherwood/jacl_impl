@@ -1,0 +1,4 @@
+# expect: hello world
+# Test: triple-quoted string basic
+def s """hello world"""
+print $s

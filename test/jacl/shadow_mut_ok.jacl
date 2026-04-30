@@ -1,0 +1,5 @@
+# expect: 2
+# Test: mutable bindings can be re-declared in same scope
+mut x 1
+mut x 2
+print $x

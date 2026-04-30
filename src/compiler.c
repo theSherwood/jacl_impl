@@ -2967,6 +2967,33 @@ void compiler__add_local(Compiler* c, JaclVal name,
     compiler__error(c, line, col, "too many local variables in function");
     return;
   }
+
+  /* Same-scope shadowing check: error if an immutable binding with the same
+   * name already exists at this scope depth.  Mutable bindings (mut) may be
+   * re-declared by anaphoric macros (^name), so we only reject when the
+   * existing binding is immutable (def).
+   * Skip for empty-name padding locals (inline struct wide slots). */
+  {
+    uint32_t name_len = jacl_string_byte_len(name);
+    if (c->scope_depth > 0 && name_len > 0) {
+      for (int i = (int)c->local_count - 1; i >= 0; i--) {
+        if (c->locals[i].depth < c->scope_depth) break;
+        if (c->locals[i].name == name && !c->locals[i].is_mutable) {
+          char nbuf[128];
+          uint32_t nlen = jacl_string_byte_len(name);
+          jacl_string_data(name, nbuf, sizeof(nbuf) - 1);
+          if (nlen >= sizeof(nbuf)) nlen = sizeof(nbuf) - 1;
+          nbuf[nlen] = '\0';
+          char err_msg[192];
+          snprintf(err_msg, sizeof(err_msg),
+                   "variable '%s' already defined in this scope", nbuf);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+      }
+    }
+  }
+
   Local* local = &c->locals[c->local_count++];
   local->name        = name;
   local->depth       = c->scope_depth;
@@ -5360,6 +5387,26 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (compiler__head_matches(head, ">=", 2)) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, ">=", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_GE, "compare", line, col);
+    return;
+  }
+
+  /* Range operators: ..< (exclusive) and ..= (inclusive) */
+  if (compiler__head_matches(head, "..<", 3)) {
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "..<", "2 arguments", argc); return; }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_RANGE, line);
+    compiler__emit_byte(c, 0, line); /* 0 = exclusive */
+    c->last_expr_type = TYPE_STREAM;
+    return;
+  }
+  if (compiler__head_matches(head, "..=", 3)) {
+    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "..=", "2 arguments", argc); return; }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_RANGE, line);
+    compiler__emit_byte(c, 1, line); /* 1 = inclusive */
+    c->last_expr_type = TYPE_STREAM;
     return;
   }
 
@@ -9416,6 +9463,30 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->last_struct_idx = UINT32_MAX;
       }
     }
+    return;
+  }
+
+  /* Optional chaining: [?. expr field] — nil-safe field access */
+  if (compiler__head_matches(head, "?.", 2)) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "?.", "2 arguments", argc);
+      return;
+    }
+    /* Compile the object expression */
+    compiler__compile_node(c, args[0]);
+    /* The field name must be a literal string */
+    if (args[1]->type != AST_LIT_STRING) {
+      compiler__error(c, line, col, "?. requires a literal field name");
+      return;
+    }
+    JaclVal name_val = compiler__name_val(c->heap, c->intern_table,
+        args[1]->data.lit_string.value,
+        args[1]->data.lit_string.length);
+    uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
+    compiler__emit_byte(c, OP_OPTIONAL_GET, line);
+    compiler__emit_u16(c, name_idx, line);
+    c->last_expr_type = TYPE_DYN;
+    c->last_struct_idx = UINT32_MAX;
     return;
   }
 

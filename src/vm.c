@@ -1495,6 +1495,32 @@ StreamPullResult vm__pull_stream_one(VM* vm, JaclVal stream_val,
         return STREAM_PULL_VALUE;
     }
 
+    /* --- Range stream: yield integers from start to end --- */
+    if (stream->kind == STREAM_KIND_RANGE) {
+        int64_t current   = jacl_as_i64(stream->args[0]);
+        int64_t end_bound = jacl_as_i64(stream->args[1]);
+        int32_t inclusive  = jacl_as_i32(stream->args[2]);
+
+        bool in_range = inclusive ? (current <= end_bound) : (current < end_bound);
+        if (!in_range) {
+            stream->state = STREAM_EXHAUSTED;
+            *out_value = JACL_NIL;
+            return STREAM_PULL_EXHAUSTED;
+        }
+
+        /* Advance to next value */
+        gc__current_heap = &vm->heap;
+        stream->args[0] = jacl_i64(&vm->heap, current + 1);
+
+        /* Return current as i64 (or i32 if it fits) */
+        if (current >= INT32_MIN && current <= INT32_MAX) {
+            *out_value = jacl_i32((int32_t)current);
+        } else {
+            *out_value = jacl_i64(&vm->heap, current);
+        }
+        return STREAM_PULL_VALUE;
+    }
+
     /* --- Generator stream (state machine) --- */
     uint32_t caller_stack_top   = vm->stack_top;
     uint32_t caller_frame_count = vm->frame_count;
@@ -5702,6 +5728,68 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_OPTIONAL_GET: {
+        uint16_t name_idx = vm__read_u16(vm);
+        JaclVal struct_val;
+        result = vm__pop(vm, &struct_val);
+        if (result != VM_OK) return result;
+        /* Nil-safe: if nil, just push nil and skip field access */
+        if (jacl_is_nil(struct_val)) {
+          result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
+          break;
+        }
+        /* Error propagation */
+        if (jacl_is_error(struct_val)) {
+          result = vm__push(vm, struct_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        /* Handle maps */
+        if (jacl_is_map(struct_val)) {
+          JaclVal name_val = frame->chunk->constants[name_idx];
+          jacl_map_node* map = (jacl_map_node*)jacl_as_ptr(struct_val);
+          if (jacl_map_has(map, name_val)) {
+            result = vm__push(vm, jacl_map_get(map, name_val));
+          } else {
+            result = vm__push(vm, JACL_NIL);
+          }
+          if (result != VM_OK) return result;
+          break;
+        }
+        /* Handle structs */
+        if (!jacl_is_struct(struct_val)) {
+          vm__set_error(vm, "?. requires struct, map, or nil");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclStruct* s = jacl_as_struct_ptr(struct_val);
+        if (!vm->struct_registry || s->type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index");
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[s->type_idx];
+        JaclVal name_val = frame->chunk->constants[name_idx];
+        char fname[64]; uint32_t flen;
+        flen = jacl_string_data(name_val, fname, sizeof(fname));
+        uint32_t fi;
+        for (fi = 0; fi < sdef->field_count; fi++) {
+          if (sdef->fields[fi].name_len == flen &&
+              memcmp(sdef->fields[fi].name, fname, flen) == 0) break;
+        }
+        if (fi == sdef->field_count) {
+          /* Optional chaining: missing field returns nil instead of error */
+          result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
+          break;
+        }
+        uint16_t foff = sdef->fields[fi].offset;
+        JaclVal field_val = vm__struct_read_field(&vm->heap, s, foff,
+                                                   (int)sdef->fields[fi].type);
+        result = vm__push(vm, field_val);
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_STRUCT_SET_DYN: {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal new_val;
@@ -8868,6 +8956,45 @@ interpret_done:
         if (result != VM_OK) return result;
         gc_write_barrier(vm->grey_buf, vm->gc_active_ptr, vm->ctx, new_ctx);
         vm->ctx = new_ctx;
+        break;
+      }
+
+      case OP_RANGE: {
+        /* Create a range stream: pop end, pop start, push stream.
+         * Next byte: 0 = exclusive (..<), 1 = inclusive (..=) */
+        uint8_t inclusive = *vm->ip++;
+        JaclVal end_val, start_val;
+        result = vm__pop(vm, &end_val);
+        if (result != VM_OK) return result;
+        result = vm__pop(vm, &start_val);
+        if (result != VM_OK) return result;
+
+        /* Coerce to i64 for range bounds */
+        int64_t start_i, end_i;
+        if (jacl_is_i32(start_val)) start_i = (int64_t)jacl_as_i32(start_val);
+        else if (jacl_is_i64(start_val)) start_i = jacl_as_i64(start_val);
+        else {
+          vm__set_error(vm, "range start must be an integer, got %s",
+                       vm__type_name(start_val));
+          return VM_RUNTIME_ERROR;
+        }
+        if (jacl_is_i32(end_val)) end_i = (int64_t)jacl_as_i32(end_val);
+        else if (jacl_is_i64(end_val)) end_i = jacl_as_i64(end_val);
+        else {
+          vm__set_error(vm, "range end must be an integer, got %s",
+                       vm__type_name(end_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        JaclVal range_stream = jacl_stream(&vm->heap);
+        JaclStream* rs = jacl_as_stream(range_stream);
+        rs->kind      = STREAM_KIND_RANGE;
+        rs->args[0]   = jacl_i64(&vm->heap, start_i);  /* current value */
+        rs->args[1]   = jacl_i64(&vm->heap, end_i);    /* end bound */
+        rs->args[2]   = jacl_i32((int32_t)inclusive); /* 0=excl, 1=incl */
+        rs->arg_count = 3;
+        result = vm__push(vm, range_stream);
+        if (result != VM_OK) return result;
         break;
       }
 

@@ -1,0 +1,8 @@
+# expect: line1
+# expect: line2
+# Test: triple-quoted multi-line string with indent stripping
+def s """
+    line1
+    line2
+    """
+print $s

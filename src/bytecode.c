@@ -198,7 +198,9 @@ typedef enum {
   OP_GET_CTX,       /* push vm->ctx (implicit context struct) onto stack */
   OP_CTX_FORK,      /* save old ctx to VM stack, alloc new ctx from pool, memcpy data, swap vm->ctx */
   OP_CTX_RESTORE,   /* pop saved ctx from VM save stack, free forked ctx to pool, restore vm->ctx */
-  OP_SET_CTX        /* pop value from stack and store in vm->ctx */
+  OP_SET_CTX,       /* pop value from stack and store in vm->ctx */
+  OP_RANGE,         /* uint8_t inclusive; pop end, pop start, push range stream */
+  OP_OPTIONAL_GET   /* uint16_t const_idx (field name); pop struct, push field or nil if struct is nil */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */

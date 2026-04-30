@@ -1008,6 +1008,7 @@ bool jacl_future_add_waiter(JaclFuture *f, JaclVal continuation,
 #define STREAM_KIND_EXEC       5
 #define STREAM_KIND_EXEC_BUFFER 6
 #define STREAM_KIND_EXEC_PIPE  7
+#define STREAM_KIND_RANGE      8
 
 #define STREAM_MAX_ARGS          8
 

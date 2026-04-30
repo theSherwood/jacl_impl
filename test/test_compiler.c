@@ -1525,25 +1525,23 @@ static int test_local_nested_scopes(void) {
   TEST_PASS();
 }
 
-/* Test: shadowing in same scope creates new local slot */
+/* Test: same-scope shadowing is now a compile error */
 static int test_local_same_scope_shadow(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
-  PrintCapture cap = { .len = 0 };
   VM vm;
   vm_init(&vm, &arena);
-  vm.print_fn = capture_print;
-  vm.print_ctx = &cap;
-  /* Redefining x in the same scope creates a new local; $x resolves to the latest */
+  /* Redefining x in the same scope is a compile error */
   VMResult result = jacl_run(
     "{ x = 1; x = 2; print $x }",
     &vm, &arena);
 
-  ASSERT_INT_EQ(result, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "2\n");
+  ASSERT_INT_EQ(result, VM_RUNTIME_ERROR);
+  ASSERT(vm.error_message != NULL);
+  ASSERT(strstr(vm.error_message, "already defined in this scope") != NULL);
 
   vm_destroy(&vm);
   gc_heap_destroy(&heap);
@@ -1601,15 +1599,15 @@ static int test_local_max_exceeded(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
-  /* Build source: { x = 0; x = 1; ...; x = 256 } — 257 defs */
-  char source[8192];
+  /* Build source: { x0 = 0; x1 = 1; ...; x256 = 256 } — 257 unique defs */
+  char source[16384];
   int pos = 0;
   pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "{ ");
   for (int i = 0; i <= 256; i++) {
     if (i > 0) {
       pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "; ");
     }
-    pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "x = %d", i);
+    pos += snprintf(source + pos, sizeof(source) - (size_t)pos, "x%d = %d", i, i);
   }
   pos += snprintf(source + pos, sizeof(source) - (size_t)pos, " }");
 

@@ -1,0 +1,6 @@
+# expect: hello
+# expect: nil
+# Test: optional chaining on map returns value or nil for missing key
+def m [map "name" "hello"]
+print $m?.name
+print $m?.missing

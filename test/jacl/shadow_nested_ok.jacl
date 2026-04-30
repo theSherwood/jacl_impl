@@ -1,0 +1,9 @@
+# expect: 2
+# expect: 1
+# Test: shadowing in a nested scope is allowed
+def x 1
+{
+  def x 2
+  print $x
+}
+print $x
