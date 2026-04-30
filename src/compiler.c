@@ -3999,11 +3999,13 @@ void compiler__compile_binary(Compiler* c, AstNode** args,
     compiler__emit_byte(c, compiler__typed_op(op, lhs_type), line);
     bool is_cmp = (op == OP_EQ || op == OP_LT || op == OP_GT ||
                    op == OP_LE || op == OP_GE);
-    c->last_expr_type = is_cmp ? TYPE_DYN : lhs_type;
+    c->last_expr_type = is_cmp ? TYPE_BOOL : lhs_type;
   } else {
     /* Both boxed/dyn — generic dispatch */
     compiler__emit_byte(c, op, line);
-    c->last_expr_type = TYPE_DYN;
+    bool is_cmp = (op == OP_EQ || op == OP_LT || op == OP_GT ||
+                   op == OP_LE || op == OP_GE);
+    c->last_expr_type = is_cmp ? TYPE_BOOL : TYPE_DYN;
   }
 }
 
@@ -5297,7 +5299,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__patch_jump(c, false_jump);
     compiler__emit_byte(c, OP_FALSE, line);
     compiler__patch_jump(c, end_jump);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_BOOL;
     return;
   }
 
@@ -5314,7 +5316,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__patch_jump(c, true_jump);
     compiler__compile_node(c, args[1]);
     compiler__patch_jump(c, end_jump);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_BOOL;
     return;
   }
 
@@ -5327,7 +5329,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__patch_jump(c, false_jump);
     compiler__emit_byte(c, OP_TRUE, line);
     compiler__patch_jump(c, end_jump);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_BOOL;
     return;
   }
 
@@ -5470,7 +5472,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_STR_LEN, line);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_I32;
     return;
   }
 
@@ -5482,7 +5484,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_STR_BYTE_LEN, line);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_I32;
     return;
   }
 
@@ -7164,6 +7166,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Compile then-body as expression (narrowing is active) */
     compiler__compile_block_expr(c, args[1]);
 
+    /* Save then-branch type for unification */
+    JaclType then_type = c->last_expr_type;
+    uint32_t then_struct_idx = c->last_struct_idx;
+
     /* Pop narrowing before else-branch */
     if (has_narrowing) {
       c->narrowing_count = saved_narrowing_count;
@@ -7185,6 +7191,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Patch JUMP to here */
     compiler__patch_jump(c, else_jump);
+
+    /* Type unification: preserve type if both branches agree */
+    if (then_type == c->last_expr_type) {
+      if (then_type != TYPE_STRUCT || then_struct_idx == c->last_struct_idx) {
+        c->last_expr_type = then_type;
+        c->last_struct_idx = then_struct_idx;
+      } else {
+        c->last_expr_type = TYPE_DYN;
+      }
+    } else {
+      c->last_expr_type = TYPE_DYN;
+    }
     return;
   }
 
@@ -7918,7 +7936,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__emit_byte(c, OP_VEC_LEN, line);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_I32;
     return;
   }
 
@@ -7936,7 +7954,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[1]);
     if (compiler__reject_bare_struct(c, line, col, "dyn vec")) return;
     compiler__emit_byte(c, OP_VEC_PUSH, line);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_VEC;
     return;
   }
 
@@ -7955,7 +7973,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[2]);
     if (compiler__reject_bare_struct(c, line, col, "dyn vec")) return;
     compiler__emit_byte(c, OP_VEC_SET, line);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_VEC;
     return;
   }
 
@@ -7972,7 +7990,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_VEC_CONCAT, line);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_VEC;
     return;
   }
 
@@ -7990,7 +8008,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[1]);
     compiler__compile_node(c, args[2]);
     compiler__emit_byte(c, OP_VEC_SLICE, line);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_VEC;
     return;
   }
 
@@ -8044,7 +8062,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_MAP_LEN, line);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_I32;
     return;
   }
 
@@ -8059,7 +8077,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[2]);
     if (compiler__reject_bare_struct(c, line, col, "dyn map")) return;
     compiler__emit_byte(c, OP_MAP_SET, line);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_MAP;
     return;
   }
 
@@ -8072,7 +8090,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_MAP_REMOVE, line);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_MAP;
     return;
   }
 
@@ -8084,7 +8102,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_MAP_KEYS, line);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_VEC;
     return;
   }
 
@@ -8096,7 +8114,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     compiler__emit_byte(c, OP_MAP_VALS, line);
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_VEC;
     return;
   }
 
