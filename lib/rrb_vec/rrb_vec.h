@@ -107,6 +107,7 @@
 #define RV_FIND_LEAF_OFF    RV_NS(_find_leaf_off)
 #define RV_BUILD_TREE       RV_NS(_build_tree)
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -476,6 +477,7 @@ static inline uint32_t RV_COUNT(RV_ROOT* root) {
 }
 
 static inline RV_ROOT* RV_PUSH_BACK(RV_ROOT* r, RRB_VEC_T value) {
+  assert(r->stride == 1 && "use push_back_wide for strided vecs");
   if (r->tail->count < RV_BRANCH) {
     /* Tail has room — copy tail and append */
     RV_LEAF* new_tail = RV_COPY_LEAF(r->tail);
@@ -569,6 +571,7 @@ static inline RV_ROOT* RV_PUSH_BACK_WIDE(RV_ROOT* r, const RRB_VEC_T* values) {
 }
 
 static inline RV_GET_RESULT RV_GET(RV_ROOT* r, uint32_t index) {
+  assert((!r || r->stride == 1) && "use get_ptr for strided vecs");
   if (!r || index >= r->count) {
     return (RV_GET_RESULT){.found = false};
   }
@@ -669,6 +672,7 @@ static inline RV_NODE* RV_SET_IN_TREE(uint32_t level, RV_NODE* node, uint32_t in
 }
 
 static inline RV_ROOT* RV_SET(RV_ROOT* r, uint32_t index, RRB_VEC_T value) {
+  assert((!r || r->stride == 1) && "use set_wide for strided vecs");
   if (!r || index >= r->count) return NULL;
 
   uint32_t tail_off = RV_TAIL_OFFSET(r);
@@ -958,6 +962,7 @@ static inline RV_NODE* RV_PUSH_TAIL_FULL(RV_ROOT* r, uint32_t* out_shift) {
 }
 
 static inline RV_ROOT* RV_CONCAT(RV_ROOT* left, RV_ROOT* right) {
+  assert((!left || !right || left->stride == right->stride) && "cannot concat vecs with different strides");
   if (!left || left->count == 0) return right ? RV_REF(right) : RV_EMPTY();
   if (!right || right->count == 0) return RV_REF(left);
 
@@ -1243,6 +1248,7 @@ static inline RV_POP_RESULT RV_REMOVE(RV_ROOT* r, uint32_t index) {
 /* --- Iterator --- */
 
 static inline RV_ITER_T RV_ITER_INIT(RV_ROOT* root) {
+  assert((!root || root->stride == 1) && "iterator yields single values; not usable with strided vecs");
   RV_ITER_T it;
   memset(&it, 0, sizeof(it));
   it.root = root;
@@ -1423,6 +1429,7 @@ static int RV_NS(_qsort_wrapper)(const void* a, const void* b) {
 }
 
 static inline RV_ROOT* RV_SORT(RV_ROOT* r, RV_CMP_FN cmp) {
+  assert((!r || r->stride == 1) && "sort not supported for strided vecs");
   if (!r || r->count == 0) return RV_EMPTY();
   if (r->count == 1) {
     return RV_REF(r);
@@ -1577,6 +1584,7 @@ static inline RV_NODE* RV_TRANSIENT_PUSH_TAIL(uint32_t level, uint32_t count, RV
 /* --- Transient push_back (in-place) --- */
 
 static inline RV_TRANSIENT* RV_TRANSIENT_PUSH_BACK(RV_TRANSIENT* t, RRB_VEC_T value) {
+  assert((!t || t->stride == 1) && "use transient wide API for strided vecs");
   if (!t) return NULL;
   /* Check if already invalidated (must come before owner check) */
   if (THREAD_EQUAL(t->owner, RV_NS(_invalid_owner))) {
@@ -1700,6 +1708,7 @@ static inline RV_NODE* RV_TRANSIENT_SET_IN_TREE(uint32_t level, RV_NODE* node, u
 }
 
 static inline RV_TRANSIENT* RV_TRANSIENT_SET(RV_TRANSIENT* t, uint32_t index, RRB_VEC_T value) {
+  assert((!t || t->stride == 1) && "use transient wide API for strided vecs");
   if (!t) return NULL;
   /* Check if already invalidated */
   if (THREAD_EQUAL(t->owner, RV_NS(_invalid_owner))) {
@@ -1888,6 +1897,7 @@ static inline RV_TRANSIENT_POP_RESULT_T RV_TRANSIENT_POP_BACK(RV_TRANSIENT* t) {
 /* --- Transient push_front (via concat) --- */
 
 static inline RV_TRANSIENT* RV_TRANSIENT_PUSH_FRONT(RV_TRANSIENT* t, RRB_VEC_T value) {
+  assert((!t || t->stride == 1) && "push_front not supported for strided vecs");
   if (!t) return NULL;
   /* Check if already invalidated */
   if (THREAD_EQUAL(t->owner, RV_NS(_invalid_owner))) {
