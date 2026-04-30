@@ -266,6 +266,113 @@ static int test_typed_vec_closure_capture(void) {
   TEST_PASS();
 }
 
+/* ===== Typed Vec: Print formatting ===== */
+
+static int test_typed_vec_print(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "[print $points]",
+    &cap, "[Point{x: 1, y: 2}, Point{x: 3, y: 4}]\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_print_empty(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "[print [[Vec Point]]]",
+    &cap, "[]\n"));
+  TEST_PASS();
+}
+
+/* ===== Typed Vec: Equality ===== */
+
+static int test_typed_vec_eq_same(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def b [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "[print [== $a $b]]",
+    &cap, "true\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_eq_different(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Vec Point] [Point 1 2]]\n"
+    "def b [[Vec Point] [Point 3 4]]\n"
+    "[print [== $a $b]]",
+    &cap, "false\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_eq_different_length(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Vec Point] [Point 1 2]]\n"
+    "def b [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "[print [== $a $b]]",
+    &cap, "false\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_eq_identity(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Vec Point] [Point 1 2]]\n"
+    "[print [== $a $a]]",
+    &cap, "true\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_eq_empty(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Vec Point]]\n"
+    "def b [[Vec Point]]\n"
+    "[print [== $a $b]]",
+    &cap, "true\n"));
+  TEST_PASS();
+}
+
+/* ===== Typed Vec: Boxing invariant ===== */
+
+static int test_typed_vec_reject_in_dyn_vec(void) {
+  ASSERT(run_err(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point] [Point 1 2]]\n"
+    "[vec $points]",
+    "cannot store bare"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_reject_in_dyn_map(void) {
+  ASSERT(run_err(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point] [Point 1 2]]\n"
+    "[map \"k\" $points]",
+    "cannot store bare"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_reject_dyn_proc_param(void) {
+  ASSERT(run_err(
+    "struct Point {i32 x, i32 y}\n"
+    "proc show-len {v} { [print [vec-len $v]] }\n"
+    "def points [[Vec Point] [Point 1 2]]\n"
+    "[show-len $points]",
+    "cannot pass bare"));
+  TEST_PASS();
+}
+
 /* ===== Main ===== */
 
 int main(void) {
@@ -290,6 +397,16 @@ int main(void) {
   RUN(test_typed_vec_persistence);
   RUN(test_typed_vec_gc_safety);
   RUN(test_typed_vec_closure_capture);
+  RUN(test_typed_vec_print);
+  RUN(test_typed_vec_print_empty);
+  RUN(test_typed_vec_eq_same);
+  RUN(test_typed_vec_eq_different);
+  RUN(test_typed_vec_eq_different_length);
+  RUN(test_typed_vec_eq_identity);
+  RUN(test_typed_vec_eq_empty);
+  RUN(test_typed_vec_reject_in_dyn_vec);
+  RUN(test_typed_vec_reject_in_dyn_map);
+  RUN(test_typed_vec_reject_dyn_proc_param);
 
   printf("\n%d/%d passed\n", pass, pass + fail);
   return fail > 0 ? 1 : 0;

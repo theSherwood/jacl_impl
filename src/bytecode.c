@@ -216,7 +216,12 @@ typedef enum {
   OP_TYPED_MAP_REMOVE,   /* no operand */
   OP_TYPED_MAP_LEN,      /* no operand */
   OP_TYPED_MAP_KEYS,     /* no operand */
-  OP_TYPED_MAP_VALS      /* uint16_t type_idx */
+  OP_TYPED_MAP_VALS,     /* uint16_t type_idx */
+
+  OP_TYPED_VEC_PRINT,    /* uint16_t type_idx */
+  OP_TYPED_MAP_PRINT,    /* uint16_t type_idx */
+  OP_TYPED_VEC_EQ,       /* uint16_t type_idx */
+  OP_TYPED_MAP_EQ        /* uint16_t type_idx */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -553,6 +558,10 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_TYPED_MAP_LEN:       return "OP_TYPED_MAP_LEN";
     case OP_TYPED_MAP_KEYS:      return "OP_TYPED_MAP_KEYS";
     case OP_TYPED_MAP_VALS:      return "OP_TYPED_MAP_VALS";
+    case OP_TYPED_VEC_PRINT:   return "OP_TYPED_VEC_PRINT";
+    case OP_TYPED_MAP_PRINT:   return "OP_TYPED_MAP_PRINT";
+    case OP_TYPED_VEC_EQ:      return "OP_TYPED_VEC_EQ";
+    case OP_TYPED_MAP_EQ:      return "OP_TYPED_MAP_EQ";
   }
   return "OP_UNKNOWN";
 }

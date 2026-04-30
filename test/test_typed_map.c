@@ -54,6 +54,35 @@ static int run_ok(const char* source, PrintCapture* cap, const char* expected) {
   return 1;
 }
 
+/* Helper: run program, expect compile or runtime error containing substring */
+static int run_err(const char* source, const char* err_substr) {
+  tracker_reset();
+  arena_t arena = { .allocator = tracked_allocator };
+
+  VM vm;
+  vm_init(&vm, &arena);
+
+  VMResult result = jacl_run(source, &vm, &arena);
+  if (result != VM_RUNTIME_ERROR) {
+    fprintf(stderr, "  Expected VM_RUNTIME_ERROR but got VM_OK\n");
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    return 0;
+  }
+  if (err_substr && (!vm.error_message || !strstr(vm.error_message, err_substr))) {
+    fprintf(stderr, "  Error message '%s' does not contain '%s'\n",
+            vm.error_message ? vm.error_message : "(null)", err_substr);
+    vm_destroy(&vm);
+    arena_destroy(&arena);
+    return 0;
+  }
+
+  vm_destroy(&vm);
+  arena_destroy(&arena);
+  if (!check_no_leaks()) return 0;
+  return 1;
+}
+
 /* ===== Typed Map: Construction ===== */
 
 static int test_typed_map_construct_empty(void) {
@@ -294,6 +323,95 @@ static int test_typed_map_closure_capture(void) {
   TEST_PASS();
 }
 
+/* ===== Typed Map: Print formatting ===== */
+
+static int test_typed_map_print(void) {
+  PrintCapture cap;
+  /* Single entry — deterministic iteration order */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Point] \"a\" [Point 1 2]]\n"
+    "[print $m]",
+    &cap, "{\"a\": Point{x: 1, y: 2}}\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_print_empty(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "[print [[Map Point]]]",
+    &cap, "{}\n"));
+  TEST_PASS();
+}
+
+/* ===== Typed Map: Equality ===== */
+
+static int test_typed_map_eq_same(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Map Point] \"k\" [Point 1 2]]\n"
+    "def b [[Map Point] \"k\" [Point 1 2]]\n"
+    "[print [== $a $b]]",
+    &cap, "true\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_eq_different_value(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Map Point] \"k\" [Point 1 2]]\n"
+    "def b [[Map Point] \"k\" [Point 3 4]]\n"
+    "[print [== $a $b]]",
+    &cap, "false\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_eq_different_key(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Map Point] \"x\" [Point 1 2]]\n"
+    "def b [[Map Point] \"y\" [Point 1 2]]\n"
+    "[print [== $a $b]]",
+    &cap, "false\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_eq_empty(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Map Point]]\n"
+    "def b [[Map Point]]\n"
+    "[print [== $a $b]]",
+    &cap, "true\n"));
+  TEST_PASS();
+}
+
+/* ===== Typed Map: Boxing invariant ===== */
+
+static int test_typed_map_reject_in_dyn_vec(void) {
+  ASSERT(run_err(
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Point] \"a\" [Point 1 2]]\n"
+    "[vec $m]",
+    "cannot store bare"));
+  TEST_PASS();
+}
+
+static int test_typed_map_reject_dyn_proc_param(void) {
+  ASSERT(run_err(
+    "struct Point {i32 x, i32 y}\n"
+    "proc show-len {m} { [print [map-len $m]] }\n"
+    "def m [[Map Point] \"a\" [Point 1 2]]\n"
+    "[show-len $m]",
+    "cannot pass bare"));
+  TEST_PASS();
+}
+
 /* ===== Main ===== */
 
 int main(void) {
@@ -322,6 +440,14 @@ int main(void) {
   RUN(test_typed_map_integer_keys);
   RUN(test_typed_map_gc_safety);
   RUN(test_typed_map_closure_capture);
+  RUN(test_typed_map_print);
+  RUN(test_typed_map_print_empty);
+  RUN(test_typed_map_eq_same);
+  RUN(test_typed_map_eq_different_value);
+  RUN(test_typed_map_eq_different_key);
+  RUN(test_typed_map_eq_empty);
+  RUN(test_typed_map_reject_in_dyn_vec);
+  RUN(test_typed_map_reject_dyn_proc_param);
 
   printf("\n%d/%d passed\n", pass, pass + fail);
   return fail > 0 ? 1 : 0;

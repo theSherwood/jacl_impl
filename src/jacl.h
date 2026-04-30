@@ -822,7 +822,12 @@ typedef enum {
   OP_TYPED_MAP_REMOVE,   /* pop key, pop tmap; push new tmap */
   OP_TYPED_MAP_LEN,      /* pop tmap; push i32 count */
   OP_TYPED_MAP_KEYS,     /* pop tmap; push dyn vec of keys */
-  OP_TYPED_MAP_VALS      /* uint16_t type_idx; pop tmap; push typed vec of values */
+  OP_TYPED_MAP_VALS,     /* uint16_t type_idx; pop tmap; push typed vec of values */
+
+  OP_TYPED_VEC_PRINT,    /* uint16_t type_idx; pop tvec; print elements with struct formatting */
+  OP_TYPED_MAP_PRINT,    /* uint16_t type_idx; pop tmap; print entries with struct formatting */
+  OP_TYPED_VEC_EQ,       /* uint16_t type_idx; pop tvec_b, pop tvec_a; push bool */
+  OP_TYPED_MAP_EQ        /* uint16_t type_idx; pop tmap_b, pop tmap_a; push bool */
 } OpCode;
 
 typedef struct {

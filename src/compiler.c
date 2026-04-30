@@ -167,6 +167,10 @@ bool is_unboxed_type(JaclType t) {
   return t == TYPE_I64 || t == TYPE_U64 || t == TYPE_F64;
 }
 
+bool is_typed_collection(JaclType t) {
+  return t == TYPE_TYPED_VEC || t == TYPE_TYPED_MAP;
+}
+
 /* Returns true if a type is allowed as a struct field (value types only).
    Reference types (str, vec, map, closure, dyn, stream) are rejected. */
 bool is_struct_value_type(JaclType t) {
@@ -3891,12 +3895,13 @@ void compiler__ensure_boxed(Compiler* c, uint32_t line) {
 
 /* --- Internal: Reject bare struct in dyn context (compile-time error) --- */
 
-static bool compiler__reject_bare_struct(Compiler* c, uint32_t line, uint32_t col,
-                                         const char* context) {
-  if (c->last_expr_type == TYPE_STRUCT) {
+static bool compiler__reject_bare_typed(Compiler* c, uint32_t line, uint32_t col,
+                                        const char* context) {
+  if (c->last_expr_type == TYPE_STRUCT || is_typed_collection(c->last_expr_type)) {
     char err_msg[128];
     snprintf(err_msg, sizeof(err_msg),
-             "cannot store bare struct in %s; use [box ...] to box it", context);
+             "cannot store bare %s in %s; use [box ...] to box it",
+             type_name(c->last_expr_type), context);
     compiler__error(c, line, col, err_msg);
     return true;
   }
@@ -3986,6 +3991,30 @@ void compiler__compile_binary(Compiler* c, AstNode** args,
        Equality is handled by jacl_val_eq which supports JACL_TAG_STRUCT. */
     compiler__emit_byte(c, op, line);
     c->last_expr_type = TYPE_DYN;
+    return;
+  }
+
+  /* Typed collection equality */
+  if (is_typed_collection(lhs_type) || is_typed_collection(rhs_type)) {
+    if (lhs_type != rhs_type) {
+      char err[128];
+      snprintf(err, sizeof(err), "type error: cannot %s %s and %s",
+               op_verb, type_name(lhs_type), type_name(rhs_type));
+      compiler__error(c, line, col, err);
+      return;
+    }
+    if (op == OP_EQ) {
+      uint8_t eq_op = (lhs_type == TYPE_TYPED_VEC) ? OP_TYPED_VEC_EQ : OP_TYPED_MAP_EQ;
+      compiler__emit_byte(c, eq_op, line);
+      compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      c->last_expr_type = TYPE_BOOL;
+      return;
+    }
+    /* Typed collections only support equality, not ordering */
+    char err[128];
+    snprintf(err, sizeof(err), "type error: cannot %s typed collections (only == supported)",
+             op_verb);
+    compiler__error(c, line, col, err);
     return;
   }
 
@@ -5202,7 +5231,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           num_spreads++;
         } else {
           compiler__compile_node(c, args[i]);
-          if (compiler__reject_bare_struct(c, line, col, "dyn vec")) return;
+          if (compiler__reject_bare_typed(c, line, col, "dyn vec")) return;
           fixed_args++;
         }
       }
@@ -5564,6 +5593,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (compiler__head_matches(head, "print", 5)) {
     if (argc != 1) { compiler__builtin_arity_error(c, line, col, "print", "1 argument", argc); return; }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_TYPED_VEC) {
+      compiler__emit_byte(c, OP_TYPED_VEC_PRINT, line);
+      compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      c->last_expr_type = TYPE_NIL;
+      return;
+    }
+    if (c->last_expr_type == TYPE_TYPED_MAP) {
+      compiler__emit_byte(c, OP_TYPED_MAP_PRINT, line);
+      compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      c->last_expr_type = TYPE_NIL;
+      return;
+    }
     compiler__ensure_boxed(c, line);
     compiler__emit_byte(c, OP_PRINT, line);
     c->last_expr_type = TYPE_NIL;
@@ -5942,8 +5983,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (declared_type != TYPE_DYN) {
       effective_type = declared_type;
     } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT ||
-               rhs_type == TYPE_STREAM || rhs_type == TYPE_TYPED_VEC ||
-               rhs_type == TYPE_TYPED_MAP) {
+               rhs_type == TYPE_STREAM || is_typed_collection(rhs_type)) {
       effective_type = rhs_type;
     } else {
       effective_type = TYPE_DYN;
@@ -5996,8 +6036,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       c->locals[c->local_count - 1].is_mutable = true;
       c->locals[c->local_count - 1].type = effective_type;
-      if (effective_type == TYPE_STRUCT || effective_type == TYPE_TYPED_VEC ||
-          effective_type == TYPE_TYPED_MAP)
+      if (effective_type == TYPE_STRUCT || is_typed_collection(effective_type))
         c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
       /* mut returns nil */
       compiler__emit_byte(c, OP_NIL, line);
@@ -6026,8 +6065,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           if (root->global_arities[i].name == name_val) {
             root->global_arities[i].is_mutable = true;
             root->global_arities[i].type = effective_type;
-            if (effective_type == TYPE_STRUCT || effective_type == TYPE_TYPED_VEC ||
-                effective_type == TYPE_TYPED_MAP)
+            if (effective_type == TYPE_STRUCT || is_typed_collection(effective_type))
               root->global_arities[i].struct_type_idx = c->last_struct_idx;
             break;
           }
@@ -6653,8 +6691,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (declared_type != TYPE_DYN) {
       effective_type = declared_type;
     } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT ||
-               rhs_type == TYPE_STREAM || rhs_type == TYPE_TYPED_VEC ||
-               rhs_type == TYPE_TYPED_MAP) {
+               rhs_type == TYPE_STREAM || is_typed_collection(rhs_type)) {
       /* Infer unboxed types, struct types, stream types, and typed collection types from RHS */
       effective_type = rhs_type;
     } else {
@@ -6694,7 +6731,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       c->locals[c->local_count - 1].known_arity = rhs_arity;
       c->locals[c->local_count - 1].type = effective_type;
-      if (effective_type == TYPE_TYPED_VEC || effective_type == TYPE_TYPED_MAP) {
+      if (is_typed_collection(effective_type)) {
         c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
       } else if (effective_type == TYPE_STRUCT) {
         c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
@@ -6738,8 +6775,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         for (uint32_t i = 0; i < root->global_arity_count; i++) {
           if (root->global_arities[i].name == name_val) {
             root->global_arities[i].type = effective_type;
-            if (effective_type == TYPE_STRUCT || effective_type == TYPE_TYPED_VEC ||
-                effective_type == TYPE_TYPED_MAP)
+            if (effective_type == TYPE_STRUCT || is_typed_collection(effective_type))
               root->global_arities[i].struct_type_idx = c->last_struct_idx;
             break;
           }
@@ -8013,7 +8049,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (compiler__head_matches(head, "vec", 3)) {
     for (uint32_t i = 0; i < argc; i++) {
       compiler__compile_node(c, args[i]);
-      if (compiler__reject_bare_struct(c, line, col, "dyn vec")) return;
+      if (compiler__reject_bare_typed(c, line, col, "dyn vec")) return;
     }
     compiler__emit_byte(c, OP_VEC, line);
     compiler__emit_byte(c, (uint8_t)argc, line);
@@ -8092,7 +8128,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[1]);
-    if (compiler__reject_bare_struct(c, line, col, "dyn vec")) return;
+    if (compiler__reject_bare_typed(c, line, col, "dyn vec")) return;
     compiler__emit_byte(c, OP_VEC_PUSH, line);
     c->last_expr_type = TYPE_VEC;
     return;
@@ -8125,7 +8161,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[1]);
     compiler__compile_node(c, args[2]);
-    if (compiler__reject_bare_struct(c, line, col, "dyn vec")) return;
+    if (compiler__reject_bare_typed(c, line, col, "dyn vec")) return;
     compiler__emit_byte(c, OP_VEC_SET, line);
     c->last_expr_type = TYPE_VEC;
     return;
@@ -8175,7 +8211,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     for (uint32_t i = 0; i < argc; i++) {
       compiler__compile_node(c, args[i]);
-      if (compiler__reject_bare_struct(c, line, col, "dyn map")) return;
+      if (compiler__reject_bare_typed(c, line, col, "dyn map")) return;
     }
     compiler__emit_byte(c, OP_MAP, line);
     compiler__emit_byte(c, (uint8_t)(argc / 2), line);
@@ -8263,7 +8299,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[1]);
     compiler__compile_node(c, args[2]);
-    if (compiler__reject_bare_struct(c, line, col, "dyn map")) return;
+    if (compiler__reject_bare_typed(c, line, col, "dyn map")) return;
     compiler__emit_byte(c, OP_MAP_SET, line);
     c->last_expr_type = TYPE_MAP;
     return;
@@ -10069,6 +10105,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, OP_STRUCT_COPY, line);
       }
 
+      /* Reject typed collections passed to untyped params */
+      if (expected_param_type == TYPE_DYN && is_typed_collection(arg_type)) {
+        char err_msg[192];
+        snprintf(err_msg, sizeof(err_msg),
+                 "cannot pass bare %s to untyped parameter; use [box ...] to box it",
+                 type_name(arg_type));
+        compiler__error(c, line, col, err_msg);
+        return;
+      }
+
       /* Type check: argument vs declared param type */
       if (expected_param_type != TYPE_DYN) {
         if (arg_type != TYPE_DYN && arg_type != expected_param_type) {
@@ -10500,8 +10546,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         }
         c->last_expr_type = c->locals[local_slot].type;
         if (c->locals[local_slot].type == TYPE_STRUCT ||
-            c->locals[local_slot].type == TYPE_TYPED_VEC ||
-            c->locals[local_slot].type == TYPE_TYPED_MAP)
+            is_typed_collection(c->locals[local_slot].type))
           c->last_struct_idx = c->locals[local_slot].struct_type_idx;
       } else {
         int upvalue_idx = compiler__resolve_upvalue(c, name_val, line,
@@ -10540,8 +10585,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           }
           c->last_expr_type = c->upvalues[upvalue_idx].type;
           if (c->upvalues[upvalue_idx].type == TYPE_STRUCT ||
-              c->upvalues[upvalue_idx].type == TYPE_TYPED_VEC ||
-              c->upvalues[upvalue_idx].type == TYPE_TYPED_MAP)
+              is_typed_collection(c->upvalues[upvalue_idx].type))
             c->last_struct_idx = c->upvalues[upvalue_idx].struct_type_idx;
         } else {
           GlobalArity* ga = compiler__find_global(c, name_val);
@@ -10575,8 +10619,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             }
           }
           c->last_expr_type = global_type;
-          if (global_type == TYPE_STRUCT || global_type == TYPE_TYPED_VEC ||
-              global_type == TYPE_TYPED_MAP) {
+          if (global_type == TYPE_STRUCT || is_typed_collection(global_type)) {
             if (ga) c->last_struct_idx = ga->struct_type_idx;
           }
         }
