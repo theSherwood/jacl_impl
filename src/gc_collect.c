@@ -168,11 +168,13 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
-    /* --- HAMT leaf: trace key and value --- */
+    /* --- HAMT leaf: trace key and all value slots --- */
     case OBJ_HAMT_LEAF: {
         jacl_map_leaf *leaf = (jacl_map_leaf *)payload;
         gc__ms_push_val(ms, leaf->key);
-        gc__ms_push_val(ms, leaf->value);
+        for (uint32_t i = 0; i < leaf->stride; i++) {
+            gc__ms_push_val(ms, leaf->value[i]);
+        }
         break;
     }
 
@@ -197,7 +199,8 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
     /* --- RRB leaf: trace element values --- */
     case OBJ_RRB_LEAF: {
         jacl_vec_leaf *leaf = (jacl_vec_leaf *)payload;
-        for (uint32_t i = 0; i < leaf->count; i++) {
+        uint32_t total_slots = leaf->count * leaf->stride;
+        for (uint32_t i = 0; i < total_slots; i++) {
             gc__ms_push_val(ms, leaf->elements[i]);
         }
         break;

@@ -63,6 +63,7 @@ TESTS=(
     "lib/hamt/test_hamt.c|hamt|"
     "lib/hamt/test_hamt_types.c|hamt_types|"
     "lib/hamt/test_hamt_transient.c|hamt_transient|"
+    "lib/hamt/test_hamt_stride.c|hamt_stride|"
     "lib/hamt/test_hamt_hash.c|hamt_hash|"
     "lib/hamt/test_hamt_ownership.c|hamt_ownership|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -DNDEBUG -lpthread"
     "lib/hamt/test_hamt_concurrent.c|hamt_concurrent|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
