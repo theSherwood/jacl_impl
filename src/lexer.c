@@ -76,10 +76,7 @@ typedef enum {
   TOKEN_NEWLINE,          /* newline (\n or \r\n) */
   TOKEN_ERROR,            /* lexer error with descriptive message */
   TOKEN_EOF,              /* end of input */
-  TOKEN_PRAGMA,           /* #{ ... } pragma */
-  TOKEN_RANGE_EXCL,       /* ..< (exclusive range) */
-  TOKEN_RANGE_INCL,       /* ..= (inclusive range) */
-  TOKEN_OPTIONAL_CHAIN    /* ?. (optional chaining) */
+  TOKEN_PRAGMA            /* #{ ... } pragma */
 } TokenType;
 
 /* -------------------------------------------------------------------------
@@ -278,13 +275,11 @@ int lexer__is_word_char(char c) {
          || c == '?' || c == '!';
 }
 
-/* Check if current position is a word char, but stop before -> (arrow)
-   and ?. (optional chain) */
+/* Check if current position is a word char, but stop before -> (arrow) */
 int lexer__is_word_char_no_arrow(Lexer* lex) {
   char c = lex->source[lex->pos];
   if (!lexer__is_word_char(c)) return 0;
   if (c == '-' && lex->source[lex->pos + 1] == '>') return 0;
-  if (c == '?' && lex->source[lex->pos + 1] == '.') return 0;
   return 1;
 }
 
@@ -1378,17 +1373,6 @@ void lexer__lex_interp_infix(Lexer* lex, TokenArray* arr,
             otype = TOKEN_OPERATOR;
           }
           break;
-        case '?':
-          lexer__advance(lex);
-          if (lexer__peek(lex) == '.') {
-            lexer__advance(lex);
-            otype = TOKEN_OPTIONAL_CHAIN;
-          } else {
-            while (lexer__is_operator_char(lexer__peek(lex)))
-              lexer__advance(lex);
-            otype = TOKEN_OPERATOR;
-          }
-          break;
         default:
           lexer__advance(lex);
           while (lexer__is_operator_char(lexer__peek(lex)))
@@ -1784,28 +1768,16 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
           lexer__advance(&lex);
           if (lexer__peek(&lex) == '.') {
             lexer__advance(&lex);
-            if (lexer__peek(&lex) == '<') {
-              lexer__advance(&lex);
-              otype = TOKEN_RANGE_EXCL;
-            } else if (lexer__peek(&lex) == '=') {
-              lexer__advance(&lex);
-              otype = TOKEN_RANGE_INCL;
+            if (lexer__is_operator_char(lexer__peek(&lex))) {
+              /* ..<, ..=, etc. — greedy scan, regular operator */
+              while (lexer__is_operator_char(lexer__peek(&lex)))
+                lexer__advance(&lex);
+              otype = TOKEN_OPERATOR;
             } else {
               otype = TOKEN_DOTDOT;
             }
           } else {
             /* greedy scan remaining operator chars */
-            while (lexer__is_operator_char(lexer__peek(&lex)))
-              lexer__advance(&lex);
-            otype = TOKEN_OPERATOR;
-          }
-          break;
-        case '?':
-          lexer__advance(&lex);
-          if (lexer__peek(&lex) == '.') {
-            lexer__advance(&lex);
-            otype = TOKEN_OPTIONAL_CHAIN;
-          } else {
             while (lexer__is_operator_char(lexer__peek(&lex)))
               lexer__advance(&lex);
             otype = TOKEN_OPERATOR;

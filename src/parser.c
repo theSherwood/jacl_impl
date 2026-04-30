@@ -481,9 +481,7 @@ int parser__is_operator(Token* tok) {
       || tok->type == TOKEN_EQUALS
       || tok->type == TOKEN_COLON
       || tok->type == TOKEN_DOUBLE_COLON
-      || tok->type == TOKEN_RANGE_EXCL
-      || tok->type == TOKEN_RANGE_INCL
-      || tok->type == TOKEN_OPTIONAL_CHAIN;
+;
 }
 
 /* -------------------------------------------------------------------------
@@ -496,16 +494,12 @@ int parser__is_operator(Token* tok) {
 
 AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
   while (!parser__at_end(p) &&
-         (parser__peek(p)->type == TOKEN_ARROW ||
-          parser__peek(p)->type == TOKEN_OPTIONAL_CHAIN)) {
-    Token* arrow = parser__advance(p); /* consume '->' or '?.' */
-    bool is_optional = (arrow->type == TOKEN_OPTIONAL_CHAIN);
+         parser__peek(p)->type == TOKEN_ARROW) {
+    Token* arrow = parser__advance(p); /* consume '->' */
 
     Token* field_tok = parser__peek(p);
     if (field_tok->type != TOKEN_WORD) {
-      return parser__error(p,
-        is_optional ? "expected field name after '?.'" : "expected field name after '->'",
-        arrow);
+      return parser__error(p, "expected field name after '->'", arrow);
     }
     parser__advance(p); /* consume field name */
 
@@ -517,15 +511,15 @@ AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
     field->data.lit_string.value  = field_tok->payload.text;
     field->data.lit_string.length = field_tok->length;
 
-    /* Build "." or "?." head */
+    /* Build "." head */
     AstNode* dot_head = ast_alloc(p->arena);
     dot_head->type = AST_LIT_STRING;
     dot_head->start = parser__token_start(arrow);
     dot_head->end   = parser__token_end(arrow);
-    dot_head->data.lit_string.value  = is_optional ? "?." : ".";
-    dot_head->data.lit_string.length = is_optional ? 2 : 1;
+    dot_head->data.lit_string.value  = ".";
+    dot_head->data.lit_string.length = 1;
 
-    /* Build [. expr field] or [?. expr field] command */
+    /* Build [. expr field] command */
     AstNode** args = ast_alloc_array(p->arena, 2);
     args[0] = expr;
     args[1] = field;
