@@ -53,6 +53,18 @@ bool jacl_val_eq(JaclVal a, JaclVal b);
 #define RRB_VEC_GC_OBJ_ROOT      OBJ_RRB_ROOT
 #include "../lib/rrb_vec/rrb_vec.h"
 
+/* --- Instantiate typed HAMT template: jacl_typed_map (GC-safe for raw struct value bytes) --- */
+
+#define HAMT_KEY_T             JaclVal
+#define HAMT_VAL_T             JaclVal
+#define HAMT_NAME              jacl_typed_map
+#define HAMT_GC_MODE
+#define HAMT_GC_ALLOC(t, sz)   gc_alloc(gc__current_heap, (t), (sz))
+#define HAMT_GC_OBJ_INTERNAL   OBJ_HAMT_INTERNAL
+#define HAMT_GC_OBJ_LEAF       OBJ_TYPED_HAMT_LEAF
+#define HAMT_GC_OBJ_COLLISION  OBJ_HAMT_COLLISION
+#include "../lib/hamt/hamt.h"
+
 /* --- JaclVal hash function (dispatches on type tag) --- */
 
 uint32_t jacl_val_hash(JaclVal v) {
@@ -226,6 +238,8 @@ void collections__init(void) {
   jacl_map_set_key_handlers(jacl_val_hash, jacl_val_eq);
   jacl_vec_set_hash_handler(jacl_val_hash);
   jacl_map_set_hash_handlers(jacl_val_hash, jacl_val_hash);
+  jacl_typed_map_set_key_handlers(jacl_val_hash, jacl_val_eq);
+  jacl_typed_map_set_hash_handlers(jacl_val_hash, jacl_val_hash);
 }
 
 #endif /* COLLECTIONS_C */

@@ -207,7 +207,16 @@ typedef enum {
   OP_TYPED_VEC_GET,      /* uint16_t type_idx; pop idx, pop tvec; push inline struct (width slots) */
   OP_TYPED_VEC_PUSH,     /* uint16_t type_idx; pop struct, pop tvec; push new tvec */
   OP_TYPED_VEC_SET,      /* uint16_t type_idx; pop struct, pop idx, pop tvec; push new tvec */
-  OP_TYPED_VEC_LEN       /* pop tvec; push i32 count */
+  OP_TYPED_VEC_LEN,      /* pop tvec; push i32 count */
+
+  OP_TYPED_MAP,          /* uint16_t type_idx, uint8_t pair_count */
+  OP_TYPED_MAP_GET,      /* uint16_t type_idx */
+  OP_TYPED_MAP_SET,      /* uint16_t type_idx */
+  OP_TYPED_MAP_HAS,      /* no operand */
+  OP_TYPED_MAP_REMOVE,   /* no operand */
+  OP_TYPED_MAP_LEN,      /* no operand */
+  OP_TYPED_MAP_KEYS,     /* no operand */
+  OP_TYPED_MAP_VALS      /* uint16_t type_idx */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -536,6 +545,14 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_TYPED_VEC_PUSH:     return "OP_TYPED_VEC_PUSH";
     case OP_TYPED_VEC_SET:       return "OP_TYPED_VEC_SET";
     case OP_TYPED_VEC_LEN:       return "OP_TYPED_VEC_LEN";
+    case OP_TYPED_MAP:           return "OP_TYPED_MAP";
+    case OP_TYPED_MAP_GET:       return "OP_TYPED_MAP_GET";
+    case OP_TYPED_MAP_SET:       return "OP_TYPED_MAP_SET";
+    case OP_TYPED_MAP_HAS:       return "OP_TYPED_MAP_HAS";
+    case OP_TYPED_MAP_REMOVE:    return "OP_TYPED_MAP_REMOVE";
+    case OP_TYPED_MAP_LEN:       return "OP_TYPED_MAP_LEN";
+    case OP_TYPED_MAP_KEYS:      return "OP_TYPED_MAP_KEYS";
+    case OP_TYPED_MAP_VALS:      return "OP_TYPED_MAP_VALS";
   }
   return "OP_UNKNOWN";
 }

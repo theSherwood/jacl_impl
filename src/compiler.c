@@ -5129,6 +5129,59 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* --- Typed map constructor: [[Map Type] key1 val1 key2 val2 ...] --- */
+  if (head->type == AST_COMMAND &&
+      head->data.command.head->type == AST_LIT_STRING &&
+      head->data.command.head->data.lit_string.length == 3 &&
+      memcmp(head->data.command.head->data.lit_string.value, "Map", 3) == 0) {
+    if (head->data.command.arg_count != 1 ||
+        head->data.command.args[0]->type != AST_LIT_STRING) {
+      compiler__error(c, line, col, "[Map Type] requires exactly one struct type name");
+      return;
+    }
+    const char* type_name_str = head->data.command.args[0]->data.lit_string.value;
+    uint32_t type_name_len = head->data.command.args[0]->data.lit_string.length;
+    StructTypeRegistry* reg = compiler__get_struct_registry(c);
+    uint32_t type_idx = struct_registry__find(reg, type_name_str, type_name_len);
+    if (type_idx == UINT32_MAX) {
+      char err[128];
+      snprintf(err, sizeof(err), "[Map %.*s]: unknown struct type '%.*s'",
+               (int)type_name_len, type_name_str,
+               (int)type_name_len, type_name_str);
+      compiler__error(c, line, col, err);
+      return;
+    }
+    if (argc % 2 != 0) {
+      compiler__error(c, line, col, "[Map ...] requires an even number of arguments (key-value pairs)");
+      return;
+    }
+    uint32_t pair_count = argc / 2;
+    if (pair_count > 255) {
+      compiler__error(c, line, col, "[Map ...] too many initial pairs (max 255)");
+      return;
+    }
+    /* Compile alternating key/value pairs. Keys are dyn, values must match struct type. */
+    for (uint32_t i = 0; i < pair_count; i++) {
+      compiler__compile_node(c, args[i * 2]);       /* key: any dyn type */
+      compiler__compile_node(c, args[i * 2 + 1]);   /* value: must be matching struct */
+      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != type_idx) {
+        char err[128];
+        snprintf(err, sizeof(err),
+                 "[Map %.*s]: value %u is not a %.*s struct",
+                 (int)type_name_len, type_name_str, i,
+                 (int)type_name_len, type_name_str);
+        compiler__error(c, line, col, err);
+        return;
+      }
+    }
+    compiler__emit_byte(c, OP_TYPED_MAP, line);
+    compiler__emit_u16(c, (uint16_t)type_idx, line);
+    compiler__emit_byte(c, (uint8_t)pair_count, line);
+    c->last_expr_type = TYPE_TYPED_MAP;
+    c->last_struct_idx = type_idx;
+    return;
+  }
+
   /* --- Spread call path: handles both builtins and user procs --- */
   if (has_spread) {
     /* Check for known binary builtins → use OP_FOLD_SPREAD */
@@ -8136,6 +8189,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_TYPED_MAP) {
+      uint32_t elem_type_idx = c->last_struct_idx;
+      compiler__compile_node(c, args[1]);
+      compiler__emit_byte(c, OP_TYPED_MAP_GET, line);
+      compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
+      c->last_expr_type = TYPE_STRUCT;
+      c->last_struct_idx = elem_type_idx;
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_MAP_GET, line);
     c->last_expr_type = TYPE_DYN;
@@ -8149,6 +8211,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_TYPED_MAP) {
+      compiler__compile_node(c, args[1]);
+      compiler__emit_byte(c, OP_TYPED_MAP_HAS, line);
+      c->last_expr_type = TYPE_BOOL;
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_MAP_HAS, line);
     c->last_expr_type = TYPE_BOOL;
@@ -8162,6 +8230,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_TYPED_MAP) {
+      compiler__emit_byte(c, OP_TYPED_MAP_LEN, line);
+      c->last_expr_type = TYPE_I32;
+      return;
+    }
     compiler__emit_byte(c, OP_MAP_LEN, line);
     c->last_expr_type = TYPE_I32;
     return;
@@ -8174,6 +8247,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_TYPED_MAP) {
+      uint32_t elem_type_idx = c->last_struct_idx;
+      compiler__compile_node(c, args[1]);  /* key: dyn */
+      compiler__compile_node(c, args[2]);  /* value: must match struct type */
+      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != elem_type_idx) {
+        compiler__error(c, line, col, "map-set: value type does not match typed map element type");
+        return;
+      }
+      compiler__emit_byte(c, OP_TYPED_MAP_SET, line);
+      compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
+      c->last_expr_type = TYPE_TYPED_MAP;
+      c->last_struct_idx = elem_type_idx;
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__compile_node(c, args[2]);
     if (compiler__reject_bare_struct(c, line, col, "dyn map")) return;
@@ -8189,6 +8276,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_TYPED_MAP) {
+      uint32_t elem_type_idx = c->last_struct_idx;
+      compiler__compile_node(c, args[1]);  /* key: dyn */
+      compiler__emit_byte(c, OP_TYPED_MAP_REMOVE, line);
+      c->last_expr_type = TYPE_TYPED_MAP;
+      c->last_struct_idx = elem_type_idx;
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_MAP_REMOVE, line);
     c->last_expr_type = TYPE_MAP;
@@ -8202,6 +8297,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_TYPED_MAP) {
+      compiler__emit_byte(c, OP_TYPED_MAP_KEYS, line);
+      c->last_expr_type = TYPE_VEC;  /* returns dyn vec of keys */
+      return;
+    }
     compiler__emit_byte(c, OP_MAP_KEYS, line);
     c->last_expr_type = TYPE_VEC;
     return;
@@ -8214,6 +8314,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
+    if (c->last_expr_type == TYPE_TYPED_MAP) {
+      uint32_t elem_type_idx = c->last_struct_idx;
+      compiler__emit_byte(c, OP_TYPED_MAP_VALS, line);
+      compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
+      c->last_expr_type = TYPE_TYPED_VEC;  /* returns typed vec of values */
+      c->last_struct_idx = elem_type_idx;
+      return;
+    }
     compiler__emit_byte(c, OP_MAP_VALS, line);
     c->last_expr_type = TYPE_VEC;
     return;

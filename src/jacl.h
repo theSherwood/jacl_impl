@@ -813,7 +813,16 @@ typedef enum {
   OP_TYPED_VEC_GET,      /* uint16_t type_idx; pop idx, pop tvec; push inline struct (width slots) */
   OP_TYPED_VEC_PUSH,     /* uint16_t type_idx; pop struct, pop tvec; push new tvec */
   OP_TYPED_VEC_SET,      /* uint16_t type_idx; pop struct, pop idx, pop tvec; push new tvec */
-  OP_TYPED_VEC_LEN       /* pop tvec; push i32 count */
+  OP_TYPED_VEC_LEN,      /* pop tvec; push i32 count */
+
+  OP_TYPED_MAP,          /* uint16_t type_idx, uint8_t pair_count; create typed map */
+  OP_TYPED_MAP_GET,      /* uint16_t type_idx; pop key, pop tmap; push heap struct or nil */
+  OP_TYPED_MAP_SET,      /* uint16_t type_idx; pop struct, pop key, pop tmap; push new tmap */
+  OP_TYPED_MAP_HAS,      /* pop key, pop tmap; push bool */
+  OP_TYPED_MAP_REMOVE,   /* pop key, pop tmap; push new tmap */
+  OP_TYPED_MAP_LEN,      /* pop tmap; push i32 count */
+  OP_TYPED_MAP_KEYS,     /* pop tmap; push dyn vec of keys */
+  OP_TYPED_MAP_VALS      /* uint16_t type_idx; pop tmap; push typed vec of values */
 } OpCode;
 
 typedef struct {

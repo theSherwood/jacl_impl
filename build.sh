@@ -147,6 +147,7 @@ TESTS=(
     "test/test_syntax.c|syntax|"
     "test/test_long_names.c|long_names|"
     "test/test_typed_vec.c|typed_vec|"
+    "test/test_typed_map.c|typed_map|"
     "test/test_struct_sizes.c|struct_sizes|"
     "test/test_bench.c|bench|"
 )
