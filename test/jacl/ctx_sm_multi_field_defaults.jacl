@@ -1,0 +1,12 @@
+# expect: 10
+# expect: 20
+# Test: multiple ctx fields with defaults in SM context — each field gets correct value
+ctx mut i32 x = 10
+ctx mut i32 y = 20
+proc main {} {
+  def f [spawn { 1 }]
+  def r [await $f]
+  print $ctx->x
+  print $ctx->y
+}
+main

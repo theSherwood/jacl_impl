@@ -324,14 +324,47 @@ static bool ctx_field_list__add(CtxFieldList* list,
   return true;
 }
 
-/* Check if a field name already exists in the list */
-static bool ctx_field_list__has(CtxFieldList* list, const char* name, uint32_t name_len) {
+/* Find a field by name; returns pointer or NULL */
+static CtxField* ctx_field_list__find(CtxFieldList* list, const char* name, uint32_t name_len) {
   for (uint32_t i = 0; i < list->count; i++) {
     if (list->fields[i].name_len == name_len &&
         memcmp(list->fields[i].name, name, name_len) == 0)
-      return true;
+      return &list->fields[i];
   }
-  return false;
+  return NULL;
+}
+
+/* Check if a field name already exists in the list */
+static bool ctx_field_list__has(CtxFieldList* list, const char* name, uint32_t name_len) {
+  return ctx_field_list__find(list, name, name_len) != NULL;
+}
+
+/* Evaluate a compile-time constant AST node to a JaclVal default.
+   Handles int, float, bool (true/false as AST_LIT_STRING), and short strings. */
+static JaclVal ctx_eval_const_default(AstNode* dexpr, JaclType ftype) {
+  if (!dexpr) return JACL_NIL;
+  switch (dexpr->type) {
+    case AST_LIT_INT:
+      if (ftype == TYPE_I32) return jacl_i32(dexpr->data.lit_int.value);
+      else if (ftype == TYPE_U32) return jacl_u32((uint32_t)dexpr->data.lit_int.value);
+      else return jacl_i32(dexpr->data.lit_int.value);
+    case AST_LIT_FLOAT:
+      return jacl_f32(dexpr->data.lit_float.value);
+    case AST_LIT_STRING: {
+      const char* s = dexpr->data.lit_string.value;
+      uint32_t sl = dexpr->data.lit_string.length;
+      if (ftype == TYPE_BOOL) {
+        if (sl == 4 && memcmp(s, "true", 4) == 0) return jacl_bool(true);
+        else if (sl == 5 && memcmp(s, "false", 5) == 0) return jacl_bool(false);
+      } else {
+        /* Short strings fit inline; longer strings remain NIL (no heap at compile time) */
+        if (sl <= 7) return jacl_inline_string(s, sl);
+      }
+      return JACL_NIL;
+    }
+    default:
+      return JACL_NIL;
+  }
 }
 
 /* Finalize the ctx struct: build a StructTypeDef from accumulated ctx fields
@@ -7693,14 +7726,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       const char *fname = field_head->data.lit_string.value;
       uint32_t flen = field_head->data.lit_string.length;
-      /* Find field in ctx_fields */
-      uint32_t fi;
-      for (fi = 0; fi < ctx_fl->count; fi++) {
-        if (ctx_fl->fields[fi].name_len == flen &&
-            memcmp(ctx_fl->fields[fi].name, fname, flen) == 0)
-          break;
-      }
-      if (fi == ctx_fl->count) {
+      if (!ctx_field_list__find(ctx_fl, fname, flen)) {
         char err[128];
         snprintf(err, sizeof(err), "no field '%.*s' on ctx", (int)flen, fname);
         compiler__error(c, line, col, err);
@@ -7717,14 +7743,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       AstNode *field_head = override_cmd->data.command.head;
       const char *fname = field_head->data.lit_string.value;
       uint32_t flen = field_head->data.lit_string.length;
-      /* Find field again (already validated) */
-      uint32_t fi;
-      for (fi = 0; fi < ctx_fl->count; fi++) {
-        if (ctx_fl->fields[fi].name_len == flen &&
-            memcmp(ctx_fl->fields[fi].name, fname, flen) == 0)
-          break;
-      }
-      CtxField *cf = &ctx_fl->fields[fi];
+      CtxField *cf = ctx_field_list__find(ctx_fl, fname, flen);
       /* Type check the override value */
       compiler__emit_byte(c, OP_GET_CTX, line);
       c->expected_type = cf->type;
@@ -11129,39 +11148,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       }
 
       if (!already_registered) {
-        /* Evaluate compile-time constant default to JaclVal */
-        JaclVal def_val = JACL_NIL;
-        AstNode* dexpr = node->data.ctx_decl.default_expr;
-        if (dexpr) {
-          switch (dexpr->type) {
-            case AST_LIT_INT:
-              if (ftype == TYPE_I32) def_val = jacl_i32(dexpr->data.lit_int.value);
-              else if (ftype == TYPE_U32) def_val = jacl_u32((uint32_t)dexpr->data.lit_int.value);
-              else def_val = jacl_i32(dexpr->data.lit_int.value);
-              break;
-            case AST_LIT_FLOAT:
-              def_val = jacl_f32(dexpr->data.lit_float.value);
-              break;
-            case AST_LIT_STRING: {
-              /* booleans: "true"/"false" are AST_LIT_STRING in JACL */
-              const char* s = dexpr->data.lit_string.value;
-              uint32_t sl = dexpr->data.lit_string.length;
-              if (ftype == TYPE_BOOL) {
-                if (sl == 4 && memcmp(s, "true", 4) == 0)
-                  def_val = jacl_bool(true);
-                else if (sl == 5 && memcmp(s, "false", 5) == 0)
-                  def_val = jacl_bool(false);
-              } else {
-                /* actual string default */
-                if (sl <= 7) def_val = jacl_inline_string(s, sl);
-                /* longer strings need heap — stored as NIL, handled at runtime */
-              }
-              break;
-            }
-            default:
-              break;
-          }
-        }
+        JaclVal def_val = ctx_eval_const_default(node->data.ctx_decl.default_expr, ftype);
 
         /* Add to ctx field list */
         if (!ctx_field_list__add(ctx, field_name, field_name_len,
@@ -11176,7 +11163,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
 
       /* Emit initialization bytecode: OP_GET_CTX, default_expr, OP_STRUCT_SET */
       if (node->data.ctx_decl.default_expr) {
-        CtxField* added = &ctx->fields[ctx->count - 1];
+        CtxField* added = ctx_field_list__find(ctx, field_name, field_name_len);
         compiler__emit_byte(c, OP_GET_CTX, line);
         compiler__compile_node(c, node->data.ctx_decl.default_expr);
         compiler__emit_byte(c, OP_STRUCT_SET, line);
@@ -11442,33 +11429,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
           uint32_t idx = struct_registry__find(c.struct_registry, type_name, type_name_len);
           if (idx != UINT32_MAX) { ftype = TYPE_STRUCT; f_struct_idx = idx; }
         }
-        /* Evaluate constant default */
-        JaclVal def_val = JACL_NIL;
-        AstNode* dexpr = node->data.ctx_decl.default_expr;
-        if (dexpr) {
-          switch (dexpr->type) {
-            case AST_LIT_INT:
-              if (ftype == TYPE_I32) def_val = jacl_i32(dexpr->data.lit_int.value);
-              else if (ftype == TYPE_U32) def_val = jacl_u32((uint32_t)dexpr->data.lit_int.value);
-              else def_val = jacl_i32(dexpr->data.lit_int.value);
-              break;
-            case AST_LIT_FLOAT:
-              def_val = jacl_f32(dexpr->data.lit_float.value);
-              break;
-            case AST_LIT_STRING: {
-              const char* s = dexpr->data.lit_string.value;
-              uint32_t sl = dexpr->data.lit_string.length;
-              if (ftype == TYPE_BOOL) {
-                if (sl == 4 && memcmp(s, "true", 4) == 0) def_val = jacl_bool(true);
-                else if (sl == 5 && memcmp(s, "false", 5) == 0) def_val = jacl_bool(false);
-              } else {
-                if (sl <= 7) def_val = jacl_inline_string(s, sl);
-              }
-              break;
-            }
-            default: break;
-          }
-        }
+        JaclVal def_val = ctx_eval_const_default(node->data.ctx_decl.default_expr, ftype);
         if (!ctx_field_list__has(c.ctx_fields, field_name, field_name_len)) {
           ctx_field_list__add(c.ctx_fields, field_name, field_name_len,
                              type_name, type_name_len,
