@@ -7,7 +7,7 @@ proc sum {Point, p} {
   + $p->x $p->y
 }
 
-proc mk {i32 a, i32 b} {
+proc Point mk {i32 a, i32 b} {
   Point $a $b
 }
 

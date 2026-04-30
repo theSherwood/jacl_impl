@@ -5696,7 +5696,7 @@ static int test_struct_pass_by_value_recursive(void) {
 
   VMResult r = jacl_run(
       "struct Point {mut i32 x, i32 y}\n"
-      "proc bump {Point p} {\n"
+      "proc Point bump {Point p} {\n"
       "  . $p x [+ $p->x 10]\n"
       "  $p\n"
       "}\n"
@@ -5902,8 +5902,9 @@ static int test_struct_closure_capture_basic(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def p [Point 10 20]\n"
+      "  def b [box [Point 10 20]]\n"
       "  proc inner {} {\n"
+      "    def Point p [deref $b]\n"
       "    print $p->x\n"
       "    print $p->y\n"
       "  }\n"
@@ -5939,8 +5940,10 @@ static int test_struct_closure_capture_isolation(void) {
       "struct Point {mut i32 x, i32 y}\n"
       "proc test {} {\n"
       "  def p [Point 1 2]\n"
+      "  def b [box $p]\n"
       "  proc reader {} {\n"
-      "    print $p->x\n"
+      "    def Point q [deref $b]\n"
+      "    print $q->x\n"
       "  }\n"
       "  . $p x 99\n"
       "  [reader]\n"
@@ -5949,7 +5952,7 @@ static int test_struct_closure_capture_isolation(void) {
       "[test]",
       &vm, &arena);
   ASSERT(r == VM_OK);
-  /* reader sees original x=1 (captured at closure creation), outer sees mutated x=99 */
+  /* reader sees boxed copy x=1, outer sees mutated x=99 */
   ASSERT_STR_EQ(cap.buf, "1\n99\n");
 
   vm_destroy(&vm);
@@ -5976,9 +5979,9 @@ static int test_struct_closure_capture_materialize(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
-      "  def p [Point 42 99]\n"
-      "  proc getter {} { $p }\n"
-      "  def Point q [getter]\n"
+      "  def b [box [Point 42 99]]\n"
+      "  proc getter {} { deref $b }\n"
+      "  def q [getter]\n"
       "  print $q->x\n"
       "  print $q->y\n"
       "}\n"
@@ -6236,8 +6239,8 @@ static int test_struct_in_vec(void) {
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "def v [vec [Point 1 2] [Point 3 4]]\n"
-      "def p [vec-get $v 1]\n"
+      "def v [vec [box [Point 1 2]] [box [Point 3 4]]]\n"
+      "def p [deref [vec-get $v 1]]\n"
       "print $p->x",
       &vm, &arena);
   ASSERT(r == VM_OK);
@@ -6335,7 +6338,8 @@ static int test_struct_box_swap(void) {
       "struct Point {i32 x, i32 y}\n"
       "def p [Point 10 20]\n"
       "def b [box $p]\n"
-      "swap $b {proc {dyn old} { [Point 99 88] }}\n"
+      "proc Point swapper {dyn old} { Point 99 88 }\n"
+      "swap $b $swapper\n"
       "def r [deref $b]\n"
       "print $r->x\n"
       "print $r->y",
@@ -9557,7 +9561,7 @@ static int test_arrow_on_expr_result(void) {
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "proc mkpt {} { Point 42 99 }\n"
+      "proc Point mkpt {} { Point 42 99 }\n"
       "print [mkpt]->x",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);

@@ -5053,6 +5053,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           num_spreads++;
         } else {
           compiler__compile_node(c, args[i]);
+          if (c->last_expr_type == TYPE_STRUCT) {
+            compiler__error(c, line, col,
+                "cannot store bare struct in dyn vec; use [box ...] to box it");
+            return;
+          }
           fixed_args++;
         }
       }
@@ -5416,6 +5421,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     compiler__ensure_boxed(c, line);
     compiler__emit_byte(c, OP_PRINT, line);
+    c->last_expr_type = TYPE_NIL;
     return;
   }
 
@@ -6020,6 +6026,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Resolve upvalue */
     int upvalue_idx = compiler__resolve_upvalue(c, name_val);
     if (upvalue_idx != -1) {
+      if (c->upvalues[upvalue_idx].type == TYPE_STRUCT) {
+        char err_msg[192];
+        snprintf(err_msg, sizeof(err_msg),
+                 "cannot capture bare struct '%.*s' in closure; "
+                 "use [box ...] to box it first",
+                 (int)name_len, set_name_ptr);
+        compiler__error(c, line, col, err_msg);
+        return;
+      }
       if (c->upvalues[upvalue_idx].is_mutable) {
         JaclType target_type = c->upvalues[upvalue_idx].type;
         c->expected_type = target_type;
@@ -6917,6 +6932,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                    type_name(proc_return_type), type_name(body_type));
           compiler__error(c, line, col, err_msg);
         }
+      } else if (body_compiler.last_expr_type == TYPE_STRUCT) {
+        /* Untyped proc returning a struct — require a return type annotation */
+        char err_msg[128];
+        snprintf(err_msg, sizeof(err_msg),
+                 "proc %.*s returns a struct but has no return type; "
+                 "add a return type annotation",
+                 (int)proc_name_len, proc_name);
+        compiler__error(c, line, col, err_msg);
       }
 
       /* Emit implicit return */
@@ -7826,6 +7849,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (compiler__head_matches(head, "vec", 3)) {
     for (uint32_t i = 0; i < argc; i++) {
       compiler__compile_node(c, args[i]);
+      if (c->last_expr_type == TYPE_STRUCT) {
+        compiler__error(c, line, col,
+            "cannot store bare struct in dyn vec; use [box ...] to box it");
+        return;
+      }
     }
     compiler__emit_byte(c, OP_VEC, line);
     compiler__emit_byte(c, (uint8_t)argc, line);
@@ -7875,6 +7903,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[1]);
+    if (c->last_expr_type == TYPE_STRUCT) {
+      compiler__error(c, line, col,
+          "cannot store bare struct in dyn vec; use [box ...] to box it");
+      return;
+    }
     compiler__emit_byte(c, OP_VEC_PUSH, line);
     return;
   }
@@ -7892,6 +7925,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[1]);
     compiler__compile_node(c, args[2]);
+    if (c->last_expr_type == TYPE_STRUCT) {
+      compiler__error(c, line, col,
+          "cannot store bare struct in dyn vec; use [box ...] to box it");
+      return;
+    }
     compiler__emit_byte(c, OP_VEC_SET, line);
     return;
   }
@@ -7938,6 +7976,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     for (uint32_t i = 0; i < argc; i++) {
       compiler__compile_node(c, args[i]);
+      if (c->last_expr_type == TYPE_STRUCT) {
+        compiler__error(c, line, col,
+            "cannot store bare struct in dyn map; use [box ...] to box it");
+        return;
+      }
     }
     compiler__emit_byte(c, OP_MAP, line);
     compiler__emit_byte(c, (uint8_t)(argc / 2), line);
@@ -7988,6 +8031,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     compiler__compile_node(c, args[1]);
     compiler__compile_node(c, args[2]);
+    if (c->last_expr_type == TYPE_STRUCT) {
+      compiler__error(c, line, col,
+          "cannot store bare struct in dyn map; use [box ...] to box it");
+      return;
+    }
     compiler__emit_byte(c, OP_MAP_SET, line);
     return;
   }
@@ -9136,6 +9184,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         /* US-008: Case 1b: var ref to inline struct upvalue */
         if (!is_inline_access && slot == -1) {
           int uv = compiler__resolve_upvalue(c, vname);
+          if (uv != -1 && c->upvalues[uv].type == TYPE_STRUCT) {
+            char err_msg[192];
+            snprintf(err_msg, sizeof(err_msg),
+                     "cannot capture bare struct '%.*s' in closure; "
+                     "use [box ...] to box it first",
+                     (int)args[0]->data.var_ref.length, args[0]->data.var_ref.name);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
           if (uv != -1 && c->upvalues[uv].type == TYPE_STRUCT &&
               c->upvalues[uv].is_inline && !c->upvalues[uv].is_mutable) {
             is_inline_access = true;
@@ -10195,6 +10252,18 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       } else {
         int upvalue_idx = compiler__resolve_upvalue(c, name_val);
         if (upvalue_idx != -1) {
+          /* Bare struct capture check: closures cannot capture struct locals
+             without boxing — the closure's upvalue array stores JaclVals,
+             which is a dyn boundary. */
+          if (c->upvalues[upvalue_idx].type == TYPE_STRUCT) {
+            char err_msg[192];
+            snprintf(err_msg, sizeof(err_msg),
+                     "cannot capture bare struct '%.*s' in closure; "
+                     "use [box ...] to box it first",
+                     (int)name_len, node->data.var_ref.name);
+            compiler__error(c, line, node->start.column, err_msg);
+            break;
+          }
           /* US-008: all upvalue opcodes use base_slot to index into the
              upvalue array, which accounts for wide struct upvalues. */
           uint8_t uv_base = (uint8_t)c->upvalues[upvalue_idx].base_slot;

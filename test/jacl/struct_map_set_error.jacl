@@ -1,0 +1,4 @@
+# expect-error: cannot store bare struct in dyn map; use [box ...] to box it
+struct Point {i32 x, i32 y}
+def m [map]
+def m2 [map-set $m "pt" [Point 1 2]]
