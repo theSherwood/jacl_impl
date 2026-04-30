@@ -63,6 +63,8 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_STREAM        ((uint64_t)0x15 << JACL_TAG_SHIFT)
 #define JACL_TAG_STATE_MACHINE ((uint64_t)0x16 << JACL_TAG_SHIFT)
 #define JACL_TAG_SYNTAX        ((uint64_t)0x17 << JACL_TAG_SHIFT)
+#define JACL_TAG_TYPED_VECTOR  ((uint64_t)0x18 << JACL_TAG_SHIFT)
+#define JACL_TAG_TYPED_MAP     ((uint64_t)0x19 << JACL_TAG_SHIFT)
 
 /* --- Heap structs for 64-bit numeric types --- */
 
@@ -292,6 +294,24 @@ bool jacl_is_syntax(JaclVal v) {
 
 JaclVal jacl_syntax_ptr(void *p) {
     return JACL_TAG_SYNTAX | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+/* Typed vector */
+bool jacl_is_typed_vector(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_TYPED_VECTOR;
+}
+
+JaclVal jacl_typed_vector_ptr(void *p) {
+    return JACL_TAG_TYPED_VECTOR | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
+}
+
+/* Typed map */
+bool jacl_is_typed_map(JaclVal v) {
+    return (v & JACL_TYPE_MASK) == JACL_TAG_TYPED_MAP;
+}
+
+JaclVal jacl_typed_map_ptr(void *p) {
+    return JACL_TAG_TYPED_MAP | ((uint64_t)(uintptr_t)p & JACL_PAYLOAD_MASK);
 }
 
 /* --- Inline string constructor --- */

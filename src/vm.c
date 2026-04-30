@@ -8971,6 +8971,132 @@ interpret_done:
         break;
       }
 
+      /* --- Typed vector operations --- */
+
+      case OP_TYPED_VEC: {
+        uint16_t type_idx = vm__read_u16(vm);
+        uint8_t count = vm__read_byte(vm);
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+
+        gc__current_heap = &vm->heap;
+        jacl_typed_vec_root* tvec = jacl_typed_vec_empty_strided(width);
+
+        for (uint8_t i = 0; i < count; i++) {
+          JaclVal struct_val = vm->stack[vm->stack_top - count + i];
+          JaclStruct* s = jacl_as_struct_ptr(struct_val);
+          /* Copy struct raw bytes into temp slot array for wide push */
+          JaclVal slots[width];
+          memset(slots, 0, width * sizeof(JaclVal));
+          memcpy(slots, s->data, sdef->total_size);
+          tvec = jacl_typed_vec_push_back_wide(tvec, slots);
+        }
+        vm->stack_top -= count;
+        result = vm__push(vm, jacl_typed_vector_ptr(tvec));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TYPED_VEC_GET: {
+        uint16_t type_idx = vm__read_u16(vm);
+        JaclVal idx_val, tvec_val;
+        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
+
+        if (!jacl_is_i32(idx_val)) {
+          vm__set_error(vm, "vec-get: expected i32 index, got %s",
+                       vm__type_name(idx_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        int32_t idx = jacl_as_i32(idx_val);
+
+        if (idx < 0 || (uint32_t)idx >= jacl_typed_vec_count(tvec)) {
+          result = vm__push(vm, JACL_NIL);
+          if (result != VM_OK) return result;
+          break;
+        }
+
+        const JaclVal* ptr = jacl_typed_vec_get_ptr(tvec, (uint32_t)idx);
+        /* Materialize to heap struct */
+        gc__current_heap = &vm->heap;
+        JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                               sizeof(JaclStruct) + sdef->total_size);
+        s->type_idx = type_idx;
+        s->total_size = sdef->total_size;
+        memcpy(s->data, ptr, sdef->total_size);
+        result = vm__push(vm, jacl_struct_val(s));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TYPED_VEC_PUSH: {
+        uint16_t type_idx = vm__read_u16(vm);
+        JaclVal struct_val, tvec_val;
+        result = vm__pop(vm, &struct_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
+
+        jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+
+        JaclStruct* s = jacl_as_struct_ptr(struct_val);
+        JaclVal slots[width];
+        memset(slots, 0, width * sizeof(JaclVal));
+        memcpy(slots, s->data, sdef->total_size);
+
+        gc__current_heap = &vm->heap;
+        jacl_typed_vec_root* new_tvec = jacl_typed_vec_push_back_wide(tvec, slots);
+        result = vm__push(vm, jacl_typed_vector_ptr(new_tvec));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TYPED_VEC_SET: {
+        uint16_t type_idx = vm__read_u16(vm);
+        JaclVal struct_val, idx_val, tvec_val;
+        result = vm__pop(vm, &struct_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
+
+        if (!jacl_is_i32(idx_val)) {
+          vm__set_error(vm, "vec-set: expected i32 index, got %s",
+                       vm__type_name(idx_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        int32_t idx = jacl_as_i32(idx_val);
+
+        JaclStruct* s = jacl_as_struct_ptr(struct_val);
+        JaclVal slots[width];
+        memset(slots, 0, width * sizeof(JaclVal));
+        memcpy(slots, s->data, sdef->total_size);
+
+        gc__current_heap = &vm->heap;
+        jacl_typed_vec_root* new_tvec = jacl_typed_vec_set_wide(tvec, (uint32_t)idx, slots);
+        if (!new_tvec) {
+          vm__set_error(vm, "vec-set: index %d out of bounds", idx);
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, jacl_typed_vector_ptr(new_tvec));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TYPED_VEC_LEN: {
+        JaclVal tvec_val;
+        result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
+        jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
+        result = vm__push(vm, jacl_i32((int32_t)jacl_typed_vec_count(tvec)));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       default: {
         vm__set_error(vm, "unknown opcode %d", (int)instruction);
         return VM_RUNTIME_ERROR;

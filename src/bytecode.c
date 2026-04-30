@@ -200,7 +200,14 @@ typedef enum {
   OP_CTX_RESTORE,   /* pop saved ctx from VM save stack, free forked ctx to pool, restore vm->ctx */
   OP_SET_CTX,       /* pop value from stack and store in vm->ctx */
   OP_RANGE,         /* uint8_t inclusive; pop end, pop start, push range stream */
-  OP_OPTIONAL_GET   /* uint16_t const_idx (field name); pop struct, push field or nil if struct is nil */
+  OP_OPTIONAL_GET,  /* uint16_t const_idx (field name); pop struct, push field or nil if struct is nil */
+
+  /* --- Typed vector operations --- */
+  OP_TYPED_VEC,          /* uint16_t type_idx, uint8_t count; create typed vec from stack elements */
+  OP_TYPED_VEC_GET,      /* uint16_t type_idx; pop idx, pop tvec; push inline struct (width slots) */
+  OP_TYPED_VEC_PUSH,     /* uint16_t type_idx; pop struct, pop tvec; push new tvec */
+  OP_TYPED_VEC_SET,      /* uint16_t type_idx; pop struct, pop idx, pop tvec; push new tvec */
+  OP_TYPED_VEC_LEN       /* pop tvec; push i32 count */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -522,6 +529,13 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_CTX_FORK:            return "OP_CTX_FORK";
     case OP_CTX_RESTORE:         return "OP_CTX_RESTORE";
     case OP_SET_CTX:             return "OP_SET_CTX";
+    case OP_RANGE:               return "OP_RANGE";
+    case OP_OPTIONAL_GET:        return "OP_OPTIONAL_GET";
+    case OP_TYPED_VEC:           return "OP_TYPED_VEC";
+    case OP_TYPED_VEC_GET:       return "OP_TYPED_VEC_GET";
+    case OP_TYPED_VEC_PUSH:     return "OP_TYPED_VEC_PUSH";
+    case OP_TYPED_VEC_SET:       return "OP_TYPED_VEC_SET";
+    case OP_TYPED_VEC_LEN:       return "OP_TYPED_VEC_LEN";
   }
   return "OP_UNKNOWN";
 }

@@ -94,7 +94,9 @@ typedef enum {
   TYPE_MAP,
   TYPE_CLOSURE,
   TYPE_STRUCT,
-  TYPE_STREAM
+  TYPE_STREAM,
+  TYPE_TYPED_VEC,
+  TYPE_TYPED_MAP
 } JaclType;
 
 /* Single table for type keyword recognition — keeps is_type_keyword and
@@ -148,8 +150,10 @@ const char* type_name(JaclType t) {
     case TYPE_VEC:     return "vec";
     case TYPE_MAP:     return "map";
     case TYPE_CLOSURE: return "closure";
-    case TYPE_STRUCT:  return "struct";
-    case TYPE_STREAM:  return "stream";
+    case TYPE_STRUCT:     return "struct";
+    case TYPE_STREAM:    return "stream";
+    case TYPE_TYPED_VEC: return "typed-vec";
+    case TYPE_TYPED_MAP: return "typed-map";
   }
   return "unknown";
 }
@@ -5076,6 +5080,55 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (args[i]->type == AST_SPREAD) { has_spread = 1; break; }
   }
 
+  /* --- Typed vec constructor: [[Vec Type] elem1 elem2 ...] --- */
+  if (head->type == AST_COMMAND &&
+      head->data.command.head->type == AST_LIT_STRING &&
+      head->data.command.head->data.lit_string.length == 3 &&
+      memcmp(head->data.command.head->data.lit_string.value, "Vec", 3) == 0) {
+    if (head->data.command.arg_count != 1 ||
+        head->data.command.args[0]->type != AST_LIT_STRING) {
+      compiler__error(c, line, col, "[Vec Type] requires exactly one struct type name");
+      return;
+    }
+    const char* type_name_str = head->data.command.args[0]->data.lit_string.value;
+    uint32_t type_name_len = head->data.command.args[0]->data.lit_string.length;
+    StructTypeRegistry* reg = compiler__get_struct_registry(c);
+    uint32_t type_idx = struct_registry__find(reg, type_name_str, type_name_len);
+    if (type_idx == UINT32_MAX) {
+      char err[128];
+      snprintf(err, sizeof(err), "[Vec %.*s]: unknown struct type '%.*s'",
+               (int)type_name_len, type_name_str,
+               (int)type_name_len, type_name_str);
+      compiler__error(c, line, col, err);
+      return;
+    }
+    if (argc > 255) {
+      compiler__error(c, line, col, "[Vec ...] too many initial elements (max 255)");
+      return;
+    }
+    /* Compile each element and verify it's the right struct type.
+     * Struct constructors produce heap structs by default (want_inline_struct
+     * is false), so each element will be a JACL_TAG_STRUCT JaclVal on stack. */
+    for (uint32_t i = 0; i < argc; i++) {
+      compiler__compile_node(c, args[i]);
+      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != type_idx) {
+        char err[128];
+        snprintf(err, sizeof(err),
+                 "[Vec %.*s]: element %u is not a %.*s struct",
+                 (int)type_name_len, type_name_str, i,
+                 (int)type_name_len, type_name_str);
+        compiler__error(c, line, col, err);
+        return;
+      }
+    }
+    compiler__emit_byte(c, OP_TYPED_VEC, line);
+    compiler__emit_u16(c, (uint16_t)type_idx, line);
+    compiler__emit_byte(c, (uint8_t)argc, line);
+    c->last_expr_type = TYPE_TYPED_VEC;
+    c->last_struct_idx = type_idx;
+    return;
+  }
+
   /* --- Spread call path: handles both builtins and user procs --- */
   if (has_spread) {
     /* Check for known binary builtins → use OP_FOLD_SPREAD */
@@ -5836,7 +5889,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (declared_type != TYPE_DYN) {
       effective_type = declared_type;
     } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT ||
-               rhs_type == TYPE_STREAM) {
+               rhs_type == TYPE_STREAM || rhs_type == TYPE_TYPED_VEC ||
+               rhs_type == TYPE_TYPED_MAP) {
       effective_type = rhs_type;
     } else {
       effective_type = TYPE_DYN;
@@ -5889,7 +5943,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       c->locals[c->local_count - 1].is_mutable = true;
       c->locals[c->local_count - 1].type = effective_type;
-      if (effective_type == TYPE_STRUCT)
+      if (effective_type == TYPE_STRUCT || effective_type == TYPE_TYPED_VEC ||
+          effective_type == TYPE_TYPED_MAP)
         c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
       /* mut returns nil */
       compiler__emit_byte(c, OP_NIL, line);
@@ -6544,8 +6599,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (declared_type != TYPE_DYN) {
       effective_type = declared_type;
     } else if (is_unboxed_type(rhs_type) || rhs_type == TYPE_STRUCT ||
-               rhs_type == TYPE_STREAM) {
-      /* Infer unboxed types, struct types, and stream types from RHS */
+               rhs_type == TYPE_STREAM || rhs_type == TYPE_TYPED_VEC ||
+               rhs_type == TYPE_TYPED_MAP) {
+      /* Infer unboxed types, struct types, stream types, and typed collection types from RHS */
       effective_type = rhs_type;
     } else {
       effective_type = TYPE_DYN;
@@ -6584,7 +6640,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       c->locals[c->local_count - 1].known_arity = rhs_arity;
       c->locals[c->local_count - 1].type = effective_type;
-      if (effective_type == TYPE_STRUCT) {
+      if (effective_type == TYPE_TYPED_VEC || effective_type == TYPE_TYPED_MAP) {
+        c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
+      } else if (effective_type == TYPE_STRUCT) {
         c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
         StructTypeRegistry* reg = compiler__get_struct_registry(c);
         uint32_t width = struct__slot_width(reg, c->last_struct_idx);
@@ -7918,6 +7976,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__error(c, line, col, "vec-get requires a vector; got stream (use collect to materialize)");
       return;
     }
+    if (c->last_expr_type == TYPE_TYPED_VEC) {
+      uint32_t elem_type_idx = c->last_struct_idx;
+      compiler__compile_node(c, args[1]);
+      compiler__emit_byte(c, OP_TYPED_VEC_GET, line);
+      compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
+      c->last_expr_type = TYPE_STRUCT;
+      c->last_struct_idx = elem_type_idx;
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_VEC_GET, line);
     c->last_expr_type = TYPE_DYN;
@@ -7933,6 +8000,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     if (c->last_expr_type == TYPE_STREAM) {
       compiler__error(c, line, col, "vec-len requires a vector; got stream (use collect to materialize)");
+      return;
+    }
+    if (c->last_expr_type == TYPE_TYPED_VEC) {
+      compiler__emit_byte(c, OP_TYPED_VEC_LEN, line);
+      c->last_expr_type = TYPE_I32;
       return;
     }
     compiler__emit_byte(c, OP_VEC_LEN, line);
@@ -7951,6 +8023,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__error(c, line, col, "vec-push requires a vector; got stream (use collect to materialize)");
       return;
     }
+    if (c->last_expr_type == TYPE_TYPED_VEC) {
+      uint32_t elem_type_idx = c->last_struct_idx;
+      compiler__compile_node(c, args[1]);
+      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != elem_type_idx) {
+        compiler__error(c, line, col, "vec-push: element type does not match typed vec element type");
+        return;
+      }
+      compiler__emit_byte(c, OP_TYPED_VEC_PUSH, line);
+      compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
+      c->last_expr_type = TYPE_TYPED_VEC;
+      c->last_struct_idx = elem_type_idx;
+      return;
+    }
     compiler__compile_node(c, args[1]);
     if (compiler__reject_bare_struct(c, line, col, "dyn vec")) return;
     compiler__emit_byte(c, OP_VEC_PUSH, line);
@@ -7967,6 +8052,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     if (c->last_expr_type == TYPE_STREAM) {
       compiler__error(c, line, col, "vec-set requires a vector; got stream (use collect to materialize)");
+      return;
+    }
+    if (c->last_expr_type == TYPE_TYPED_VEC) {
+      uint32_t elem_type_idx = c->last_struct_idx;
+      compiler__compile_node(c, args[1]);
+      compiler__compile_node(c, args[2]);
+      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != elem_type_idx) {
+        compiler__error(c, line, col, "vec-set: element type does not match typed vec element type");
+        return;
+      }
+      compiler__emit_byte(c, OP_TYPED_VEC_SET, line);
+      compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
+      c->last_expr_type = TYPE_TYPED_VEC;
+      c->last_struct_idx = elem_type_idx;
       return;
     }
     compiler__compile_node(c, args[1]);
@@ -10290,7 +10389,9 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, (uint8_t)local_slot, line);
         }
         c->last_expr_type = c->locals[local_slot].type;
-        if (c->locals[local_slot].type == TYPE_STRUCT)
+        if (c->locals[local_slot].type == TYPE_STRUCT ||
+            c->locals[local_slot].type == TYPE_TYPED_VEC ||
+            c->locals[local_slot].type == TYPE_TYPED_MAP)
           c->last_struct_idx = c->locals[local_slot].struct_type_idx;
       } else {
         int upvalue_idx = compiler__resolve_upvalue(c, name_val, line,

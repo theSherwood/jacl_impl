@@ -73,6 +73,8 @@ typedef uint64_t JaclVal;
 #define JACL_TAG_STREAM        ((uint64_t)0x15 << JACL_TAG_SHIFT)
 #define JACL_TAG_STATE_MACHINE ((uint64_t)0x16 << JACL_TAG_SHIFT)
 #define JACL_TAG_SYNTAX        ((uint64_t)0x17 << JACL_TAG_SHIFT)
+#define JACL_TAG_TYPED_VECTOR  ((uint64_t)0x18 << JACL_TAG_SHIFT)
+#define JACL_TAG_TYPED_MAP     ((uint64_t)0x19 << JACL_TAG_SHIFT)
 
 typedef struct { int64_t value; } JaclHeapI64;
 typedef struct { uint64_t value; } JaclHeapU64;
@@ -121,7 +123,9 @@ typedef enum {
     OBJ_ROPE_INTERNAL,
     OBJ_STREAM,
     OBJ_STATE_MACHINE,
-    OBJ_SYNTAX
+    OBJ_SYNTAX,
+    OBJ_TYPED_RRB_LEAF,     /* typed vec leaf: raw struct bytes, no GC tracing */
+    OBJ_TYPED_HAMT_LEAF      /* typed map leaf: trace dyn key only, skip struct value bytes */
 } GCObjType;
 
 #define GC_BLOCK_SIZE       65536
@@ -800,7 +804,16 @@ typedef enum {
   OP_GET_CTX,      /* push vm->ctx (implicit context struct) onto stack */
   OP_CTX_FORK,     /* save old ctx to VM stack, alloc new ctx from pool, memcpy data, swap vm->ctx */
   OP_CTX_RESTORE,  /* pop saved ctx from VM save stack, free forked ctx to pool, restore vm->ctx */
-  OP_SET_CTX       /* pop value from stack and store in vm->ctx */
+  OP_SET_CTX,      /* pop value from stack and store in vm->ctx */
+  OP_RANGE,        /* uint8_t inclusive; pop end, pop start, push range stream */
+  OP_OPTIONAL_GET, /* uint16_t const_idx (field name); pop struct, push field or nil if struct is nil */
+
+  /* --- Typed vector operations --- */
+  OP_TYPED_VEC,          /* uint16_t type_idx, uint8_t count; create typed vec from stack elements */
+  OP_TYPED_VEC_GET,      /* uint16_t type_idx; pop idx, pop tvec; push inline struct (width slots) */
+  OP_TYPED_VEC_PUSH,     /* uint16_t type_idx; pop struct, pop tvec; push new tvec */
+  OP_TYPED_VEC_SET,      /* uint16_t type_idx; pop struct, pop idx, pop tvec; push new tvec */
+  OP_TYPED_VEC_LEN       /* pop tvec; push i32 count */
 } OpCode;
 
 typedef struct {
@@ -862,6 +875,7 @@ typedef struct {
 #define HAMT_GC_OBJ_LEAF       OBJ_HAMT_LEAF
 #define HAMT_GC_OBJ_COLLISION  OBJ_HAMT_COLLISION
 #include "../lib/hamt/hamt.h"
+
 
 /* ========================================================================
  * Types — compiler.c
@@ -962,7 +976,9 @@ typedef enum {
   TYPE_MAP,
   TYPE_CLOSURE,
   TYPE_STRUCT,
-  TYPE_STREAM
+  TYPE_STREAM,
+  TYPE_TYPED_VEC,
+  TYPE_TYPED_MAP
 } JaclType;
 
 typedef struct {
@@ -1588,6 +1604,10 @@ extern bool jacl_is_state_machine (JaclVal v);
 extern JaclVal jacl_state_machine_ptr (void *p);
 extern bool jacl_is_syntax (JaclVal v);
 extern JaclVal jacl_syntax_ptr (void *p);
+extern bool jacl_is_typed_vector (JaclVal v);
+extern JaclVal jacl_typed_vector_ptr (void *p);
+extern bool jacl_is_typed_map (JaclVal v);
+extern JaclVal jacl_typed_map_ptr (void *p);
 extern JaclVal jacl_inline_string (const char *s, size_t len);
 extern bool jacl_is_inline_string (JaclVal v);
 extern size_t jacl_inline_string_len (JaclVal v);

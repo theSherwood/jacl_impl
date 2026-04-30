@@ -42,7 +42,9 @@ typedef enum {
     OBJ_ROPE_INTERNAL,
     OBJ_STREAM,
     OBJ_STATE_MACHINE,
-    OBJ_SYNTAX
+    OBJ_SYNTAX,
+    OBJ_TYPED_RRB_LEAF,
+    OBJ_TYPED_HAMT_LEAF
 } GCObjType;
 
 /* --- GC object header (8 bytes, prepended before payload) ---
@@ -100,7 +102,9 @@ bool jacl_is_heap_type(JaclVal v) {
         || tag == JACL_TAG_STRUCT
         || tag == JACL_TAG_ROPE_STRING
         || tag == JACL_TAG_STATE_MACHINE
-        || tag == JACL_TAG_SYNTAX;
+        || tag == JACL_TAG_SYNTAX
+        || tag == JACL_TAG_TYPED_VECTOR
+        || tag == JACL_TAG_TYPED_MAP;
 }
 
 /* ======================================================================

@@ -206,6 +206,21 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
+    /* --- Typed RRB leaf: all slots are raw struct bytes, no GC tracing --- */
+    case OBJ_TYPED_RRB_LEAF:
+        break;
+
+    /* --- Typed HAMT leaf: trace dyn key only, skip struct value bytes --- */
+    case OBJ_TYPED_HAMT_LEAF: {
+        jacl_map_leaf *tleaf = (jacl_map_leaf *)payload;
+        /* HAMT leaf layout: key slots then value slots.  key_stride slots
+           are JaclVal (dyn keys), val_stride slots are raw struct bytes. */
+        for (uint32_t i = 0; i < tleaf->key_stride; i++) {
+            gc__ms_push_val(ms, tleaf->slots[i]);
+        }
+        break;
+    }
+
     /* --- RRB root: trace tree root and tail --- */
     case OBJ_RRB_ROOT: {
         jacl_vec_root *root = (jacl_vec_root *)payload;

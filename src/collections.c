@@ -41,6 +41,18 @@ bool jacl_val_eq(JaclVal a, JaclVal b);
 #define HAMT_GC_OBJ_COLLISION  OBJ_HAMT_COLLISION
 #include "../lib/hamt/hamt.h"
 
+/* --- Instantiate typed RRB vector template: jacl_typed_vec (GC-safe for raw struct bytes) --- */
+
+#define RRB_VEC_T                JaclVal
+#define RRB_VEC_NAME             jacl_typed_vec
+#define RRB_VEC_ALLOCATOR        JACL_COLL_ALLOCATOR
+#define RRB_VEC_GC_MODE
+#define RRB_VEC_GC_ALLOC(t, sz)  gc_alloc(gc__current_heap, (t), (sz))
+#define RRB_VEC_GC_OBJ_INTERNAL  OBJ_RRB_INTERNAL
+#define RRB_VEC_GC_OBJ_LEAF      OBJ_TYPED_RRB_LEAF
+#define RRB_VEC_GC_OBJ_ROOT      OBJ_RRB_ROOT
+#include "../lib/rrb_vec/rrb_vec.h"
+
 /* --- JaclVal hash function (dispatches on type tag) --- */
 
 uint32_t jacl_val_hash(JaclVal v) {
