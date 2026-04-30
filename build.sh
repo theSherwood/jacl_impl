@@ -73,6 +73,7 @@ TESTS=(
     "lib/rrb_vec/test_rrb_vec_concurrent.c|rrb_vec_concurrent|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "lib/rrb_vec/test_rrb_vec_transient_functional.c|rrb_vec_transient_functional|"
     "lib/rrb_vec/test_rrb_vec_transient_functional_ownership.c|rrb_vec_transient_functional_ownership|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -DNDEBUG -lpthread"
+    "lib/rrb_vec/test_rrb_vec_stride.c|rrb_vec_stride|"
     "lib/rrb_vec/test_rrb_vec_hash.c|rrb_vec_hash|"
     "lib/platform/test_rwlock.c|rwlock|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "lib/sum_tree/test_sum_tree.c|sum_tree|"

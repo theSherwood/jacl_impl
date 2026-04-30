@@ -68,6 +68,14 @@
 #define RV_ITER_INIT   RV_NS(_iter_init)
 #define RV_ITER_NEXT   RV_NS(_iter_next)
 
+/* Stride API */
+#define RV_EMPTY_STRIDED   RV_NS(_empty_strided)
+#define RV_STRIDE          RV_NS(_stride)
+#define RV_PUSH_BACK_WIDE  RV_NS(_push_back_wide)
+#define RV_GET_PTR         RV_NS(_get_ptr)
+#define RV_SET_WIDE        RV_NS(_set_wide)
+#define RV_FROM_ARRAY_STRIDED RV_NS(_from_array_strided)
+
 /* Hash API */
 #define RV_SET_HASH_HANDLER  RV_NS(_set_hash_handler)
 #define RV_HASH              RV_NS(_hash)
@@ -90,6 +98,7 @@
 #define RV_GET_LEAF        RV_NS(_get_leaf)
 #define RV_COPY_INTERNAL   RV_NS(_copy_internal)
 #define RV_SET_IN_TREE     RV_NS(_set_in_tree)
+#define RV_SET_IN_TREE_WIDE RV_NS(_set_in_tree_wide)
 #define RV_POP_TAIL        RV_NS(_pop_tail)
 #define RV_RIGHTMOST_LEAF  RV_NS(_rightmost_leaf)
 #define RV_REMOVE_RIGHTMOST RV_NS(_remove_rightmost)
@@ -183,20 +192,22 @@ typedef struct RV_INTERNAL {
   RV_NODE*  children[RV_BRANCH];
 } RV_INTERNAL;
 
-/* Leaf node: array of elements */
+/* Leaf node: flexible array of elements (stride * RV_BRANCH slots allocated) */
 typedef struct RV_LEAF {
   RV_NODE     header;
   uint32_t    count;
-  RRB_VEC_T   elements[RV_BRANCH];
+  uint32_t    stride;  /* slots per element (1 = normal, >1 = wide/struct) */
+  RRB_VEC_T   elements[];
 } RV_LEAF;
 
 /* Root struct: holds tree root, tail, count, shift */
 typedef struct RV_ROOT {
-  RV_NODE*  root;   /* pointer to tree root node (NULL if all elements in tail) */
-  RV_LEAF*  tail;   /* pointer to tail leaf */
-  uint32_t  count;  /* total element count */
-  uint32_t  shift;  /* depth * RV_BITS */
-  uint32_t  hash;   /* structural hash: tree_root_hash ^ tail_hash */
+  RV_NODE*  root;    /* pointer to tree root node (NULL if all elements in tail) */
+  RV_LEAF*  tail;    /* pointer to tail leaf */
+  uint32_t  count;   /* total element count */
+  uint32_t  shift;   /* depth * RV_BITS */
+  uint32_t  hash;    /* structural hash: tree_root_hash ^ tail_hash */
+  uint32_t  stride;  /* slots per element (1 = normal, >1 = wide/struct) */
 } RV_ROOT;
 
 /* Result struct for get */
@@ -257,7 +268,8 @@ static inline uint32_t RV_ROTATE_LEFT(uint32_t x, uint32_t n) {
 static inline void RV_LEAF_REHASH(RV_LEAF* leaf) {
   if (!RV_ELEMENT_HASH_PTR) { leaf->header.hash = 0; return; }
   uint32_t h = 0;
-  for (uint32_t i = 0; i < leaf->count; i++) {
+  uint32_t total_slots = leaf->count * leaf->stride;
+  for (uint32_t i = 0; i < total_slots; i++) {
     h ^= RV_ROTATE_LEFT(RV_ELEMENT_HASH_PTR(leaf->elements[i]), i % 32);
   }
   leaf->header.hash = h;
@@ -284,10 +296,13 @@ static void RV_ROOT_DESTROY(void* arg);
 
 /* --- Node construction --- */
 
-static inline RV_LEAF* RV_MK_LEAF(void) {
-  RV_LEAF* leaf = (RV_LEAF*)RV_ALLOC_LEAF(sizeof(RV_LEAF));
+static inline RV_LEAF* RV_MK_LEAF(uint32_t stride) {
+  size_t elem_sz = sizeof(RRB_VEC_T) * RV_BRANCH * stride;
+  RV_LEAF* leaf = (RV_LEAF*)RV_ALLOC_LEAF(sizeof(RV_LEAF) + elem_sz);
   leaf->header  = (RV_NODE){.type = RV_NODE_LEAF_VAL};
   leaf->count   = 0;
+  leaf->stride  = stride;
+  memset(leaf->elements, 0, elem_sz);
   return leaf;
 }
 
@@ -300,12 +315,13 @@ static inline RV_INTERNAL* RV_MK_INTERNAL(void) {
   return node;
 }
 
-static inline RV_ROOT* RV_MK_ROOT(RV_NODE* root, RV_LEAF* tail, uint32_t count, uint32_t shift) {
+static inline RV_ROOT* RV_MK_ROOT(RV_NODE* root, RV_LEAF* tail, uint32_t count, uint32_t shift, uint32_t stride) {
   RV_ROOT* r = (RV_ROOT*)RV_ALLOC_ROOT(sizeof(RV_ROOT));
   r->root    = root;
   r->tail    = tail;
   r->count   = count;
   r->shift   = shift;
+  r->stride  = stride;
   r->hash    = (root ? root->hash : 0) ^ (tail ? tail->header.hash : 0);
   return r;
 }
@@ -340,9 +356,9 @@ static void RV_ROOT_DESTROY(void* arg) {
 /* --- Internal helpers for push_back / get --- */
 
 static inline RV_LEAF* RV_COPY_LEAF(RV_LEAF* src) {
-  RV_LEAF* dst = RV_MK_LEAF();
+  RV_LEAF* dst = RV_MK_LEAF(src->stride);
   dst->count = src->count;
-  memcpy(dst->elements, src->elements, sizeof(RRB_VEC_T) * src->count);
+  memcpy(dst->elements, src->elements, sizeof(RRB_VEC_T) * src->count * src->stride);
   dst->header.hash = src->header.hash;
   return dst;
 }
@@ -434,8 +450,17 @@ static inline RV_LEAF* RV_GET_LEAF(RV_ROOT* r, uint32_t index) {
 /* --- Public API --- */
 
 static inline RV_ROOT* RV_EMPTY(void) {
-  RV_LEAF* tail = RV_MK_LEAF();
-  return RV_MK_ROOT(NULL, tail, 0, RV_BITS);
+  RV_LEAF* tail = RV_MK_LEAF(1);
+  return RV_MK_ROOT(NULL, tail, 0, RV_BITS, 1);
+}
+
+static inline RV_ROOT* RV_EMPTY_STRIDED(uint32_t stride) {
+  RV_LEAF* tail = RV_MK_LEAF(stride);
+  return RV_MK_ROOT(NULL, tail, 0, RV_BITS, stride);
+}
+
+static inline uint32_t RV_STRIDE(RV_ROOT* root) {
+  return root ? root->stride : 1;
 }
 
 static inline RV_ROOT* RV_REF(RV_ROOT* root) {
@@ -454,15 +479,15 @@ static inline RV_ROOT* RV_PUSH_BACK(RV_ROOT* r, RRB_VEC_T value) {
   if (r->tail->count < RV_BRANCH) {
     /* Tail has room — copy tail and append */
     RV_LEAF* new_tail = RV_COPY_LEAF(r->tail);
-    new_tail->elements[new_tail->count] = value;
+    new_tail->elements[new_tail->count * r->stride] = value;
     new_tail->count++;
     RV_LEAF_REHASH(new_tail);
     RV_NODE* tree = r->root ? (RV_NODE*)RV_RC_REF(r->root) : NULL;
-    return RV_MK_ROOT(tree, new_tail, r->count + 1, r->shift);
+    return RV_MK_ROOT(tree, new_tail, r->count + 1, r->shift, r->stride);
   }
 
   /* Tail is full — push tail into the tree, start a new tail */
-  RV_LEAF* new_tail = RV_MK_LEAF();
+  RV_LEAF* new_tail = RV_MK_LEAF(r->stride);
   new_tail->elements[0] = value;
   new_tail->count = 1;
   RV_LEAF_REHASH(new_tail);
@@ -496,7 +521,51 @@ static inline RV_ROOT* RV_PUSH_BACK(RV_ROOT* r, RRB_VEC_T value) {
     }
   }
 
-  return RV_MK_ROOT(new_root_node, new_tail, r->count + 1, new_shift);
+  return RV_MK_ROOT(new_root_node, new_tail, r->count + 1, new_shift, r->stride);
+}
+
+static inline RV_ROOT* RV_PUSH_BACK_WIDE(RV_ROOT* r, const RRB_VEC_T* values) {
+  if (r->tail->count < RV_BRANCH) {
+    RV_LEAF* new_tail = RV_COPY_LEAF(r->tail);
+    memcpy(&new_tail->elements[new_tail->count * r->stride], values, sizeof(RRB_VEC_T) * r->stride);
+    new_tail->count++;
+    RV_LEAF_REHASH(new_tail);
+    RV_NODE* tree = r->root ? (RV_NODE*)RV_RC_REF(r->root) : NULL;
+    return RV_MK_ROOT(tree, new_tail, r->count + 1, r->shift, r->stride);
+  }
+
+  /* Tail is full — push tail into the tree, start a new tail */
+  RV_LEAF* new_tail = RV_MK_LEAF(r->stride);
+  memcpy(new_tail->elements, values, sizeof(RRB_VEC_T) * r->stride);
+  new_tail->count = 1;
+  RV_LEAF_REHASH(new_tail);
+
+  RV_NODE* new_root_node;
+  uint32_t new_shift = r->shift;
+
+  if (r->root == NULL) {
+    RV_INTERNAL* node = RV_MK_INTERNAL();
+    node->children[0] = (RV_NODE*)RV_RC_REF((RV_NODE*)r->tail);
+    node->child_count = 1;
+    RV_INTERNAL_REHASH(node);
+    new_root_node = (RV_NODE*)node;
+  } else {
+    uint32_t tree_count = RV_TAIL_OFFSET(r);
+    uint32_t capacity = (uint32_t)1 << (r->shift + RV_BITS);
+    if (tree_count >= capacity) {
+      RV_INTERNAL* new_top = RV_MK_INTERNAL();
+      new_top->children[0] = (RV_NODE*)RV_RC_REF(r->root);
+      new_top->children[1] = RV_NEW_PATH(r->shift, (RV_NODE*)RV_RC_REF((RV_NODE*)r->tail));
+      new_top->child_count = 2;
+      RV_INTERNAL_REHASH(new_top);
+      new_root_node = (RV_NODE*)new_top;
+      new_shift = r->shift + RV_BITS;
+    } else {
+      new_root_node = RV_PUSH_TAIL(r->shift, tree_count, r->root, (RV_NODE*)r->tail);
+    }
+  }
+
+  return RV_MK_ROOT(new_root_node, new_tail, r->count + 1, new_shift, r->stride);
 }
 
 static inline RV_GET_RESULT RV_GET(RV_ROOT* r, uint32_t index) {
@@ -505,7 +574,7 @@ static inline RV_GET_RESULT RV_GET(RV_ROOT* r, uint32_t index) {
   }
   uint32_t tail_off = RV_TAIL_OFFSET(r);
   if (index >= tail_off) {
-    return (RV_GET_RESULT){.value = r->tail->elements[index - tail_off], .found = true};
+    return (RV_GET_RESULT){.value = r->tail->elements[(index - tail_off) * r->stride], .found = true};
   }
   /* Traverse tree with index adjustment for both strict and relaxed nodes */
   RV_NODE* node = r->root;
@@ -523,7 +592,31 @@ static inline RV_GET_RESULT RV_GET(RV_ROOT* r, uint32_t index) {
     }
     node = n->children[slot];
   }
-  return (RV_GET_RESULT){.value = ((RV_LEAF*)node)->elements[idx], .found = true};
+  return (RV_GET_RESULT){.value = ((RV_LEAF*)node)->elements[idx * r->stride], .found = true};
+}
+
+static inline const RRB_VEC_T* RV_GET_PTR(RV_ROOT* r, uint32_t index) {
+  if (!r || index >= r->count) return NULL;
+  uint32_t tail_off = RV_TAIL_OFFSET(r);
+  if (index >= tail_off) {
+    return &r->tail->elements[(index - tail_off) * r->stride];
+  }
+  RV_NODE* node = r->root;
+  uint32_t idx = index;
+  for (uint32_t level = r->shift; level > 0; level -= RV_BITS) {
+    RV_INTERNAL* n = (RV_INTERNAL*)node;
+    uint32_t slot;
+    if (n->size_table) {
+      slot = 0;
+      while (n->size_table[slot] <= idx) slot++;
+      if (slot > 0) idx -= n->size_table[slot - 1];
+    } else {
+      slot = (idx >> level) & RV_MASK;
+      idx -= slot << level;
+    }
+    node = n->children[slot];
+  }
+  return &((RV_LEAF*)node)->elements[idx * r->stride];
 }
 
 /* --- Internal helpers for set --- */
@@ -549,7 +642,7 @@ static inline RV_NODE* RV_SET_IN_TREE(uint32_t level, RV_NODE* node, uint32_t in
     /* Leaf level — index is already adjusted to be leaf-local */
     RV_LEAF* old_leaf = (RV_LEAF*)node;
     RV_LEAF* new_leaf = RV_COPY_LEAF(old_leaf);
-    new_leaf->elements[index] = value;
+    new_leaf->elements[index * new_leaf->stride] = value;
     RV_LEAF_REHASH(new_leaf);
     return (RV_NODE*)new_leaf;
   }
@@ -583,16 +676,65 @@ static inline RV_ROOT* RV_SET(RV_ROOT* r, uint32_t index, RRB_VEC_T value) {
   if (index >= tail_off) {
     /* In the tail */
     RV_LEAF* new_tail = RV_COPY_LEAF(r->tail);
-    new_tail->elements[index - tail_off] = value;
+    new_tail->elements[(index - tail_off) * r->stride] = value;
     RV_LEAF_REHASH(new_tail);
     RV_NODE* tree = r->root ? (RV_NODE*)RV_RC_REF(r->root) : NULL;
-    return RV_MK_ROOT(tree, new_tail, r->count, r->shift);
+    return RV_MK_ROOT(tree, new_tail, r->count, r->shift, r->stride);
   }
 
   /* In the tree */
   RV_NODE* new_tree = RV_SET_IN_TREE(r->shift, r->root, index, value);
   RV_LEAF* new_tail = RV_COPY_LEAF(r->tail);
-  return RV_MK_ROOT(new_tree, new_tail, r->count, r->shift);
+  return RV_MK_ROOT(new_tree, new_tail, r->count, r->shift, r->stride);
+}
+
+/* Wide set: copy stride values into the tree */
+static inline RV_NODE* RV_SET_IN_TREE_WIDE(uint32_t level, RV_NODE* node, uint32_t index, const RRB_VEC_T* values) {
+  if (level == 0) {
+    RV_LEAF* old_leaf = (RV_LEAF*)node;
+    RV_LEAF* new_leaf = RV_COPY_LEAF(old_leaf);
+    memcpy(&new_leaf->elements[index * new_leaf->stride], values, sizeof(RRB_VEC_T) * new_leaf->stride);
+    RV_LEAF_REHASH(new_leaf);
+    return (RV_NODE*)new_leaf;
+  }
+
+  RV_INTERNAL* old = (RV_INTERNAL*)node;
+  RV_INTERNAL* new_node = RV_COPY_INTERNAL(old);
+
+  uint32_t slot;
+  uint32_t child_index;
+  if (old->size_table) {
+    slot = 0;
+    while (old->size_table[slot] <= index) slot++;
+    child_index = (slot > 0) ? index - old->size_table[slot - 1] : index;
+  } else {
+    slot = (index >> level) & RV_MASK;
+    child_index = index - (slot << level);
+  }
+
+  RV_NODE* new_child = RV_SET_IN_TREE_WIDE(level - RV_BITS, old->children[slot], child_index, values);
+  RV_RC_UNREF(new_node->children[slot]);
+  new_node->children[slot] = new_child;
+  RV_INTERNAL_REHASH(new_node);
+  return (RV_NODE*)new_node;
+}
+
+static inline RV_ROOT* RV_SET_WIDE(RV_ROOT* r, uint32_t index, const RRB_VEC_T* values) {
+  if (!r || index >= r->count) return NULL;
+
+  uint32_t tail_off = RV_TAIL_OFFSET(r);
+
+  if (index >= tail_off) {
+    RV_LEAF* new_tail = RV_COPY_LEAF(r->tail);
+    memcpy(&new_tail->elements[(index - tail_off) * r->stride], values, sizeof(RRB_VEC_T) * r->stride);
+    RV_LEAF_REHASH(new_tail);
+    RV_NODE* tree = r->root ? (RV_NODE*)RV_RC_REF(r->root) : NULL;
+    return RV_MK_ROOT(tree, new_tail, r->count, r->shift, r->stride);
+  }
+
+  RV_NODE* new_tree = RV_SET_IN_TREE_WIDE(r->shift, r->root, index, values);
+  RV_LEAF* new_tail = RV_COPY_LEAF(r->tail);
+  return RV_MK_ROOT(new_tree, new_tail, r->count, r->shift, r->stride);
 }
 
 /* --- Internal helpers for pop_back --- */
@@ -673,21 +815,23 @@ static inline RV_POP_RESULT RV_POP_BACK(RV_ROOT* r) {
     return (RV_POP_RESULT){.root = NULL, .found = false};
   }
 
-  RRB_VEC_T popped = r->tail->elements[r->tail->count - 1];
+  RRB_VEC_T popped = r->tail->elements[(r->tail->count - 1) * r->stride];
 
   if (r->count == 1) {
-    /* Popping last element — return empty vec */
-    return (RV_POP_RESULT){.root = RV_EMPTY(), .value = popped, .found = true};
+    /* Popping last element — return empty vec with same stride */
+    RV_LEAF* tail = RV_MK_LEAF(r->stride);
+    RV_ROOT* empty = RV_MK_ROOT(NULL, tail, 0, RV_BITS, r->stride);
+    return (RV_POP_RESULT){.root = empty, .value = popped, .found = true};
   }
 
   if (r->tail->count > 1) {
     /* Tail has more than one element — just shrink the tail */
-    RV_LEAF* new_tail = RV_MK_LEAF();
+    RV_LEAF* new_tail = RV_MK_LEAF(r->stride);
     new_tail->count = r->tail->count - 1;
-    memcpy(new_tail->elements, r->tail->elements, sizeof(RRB_VEC_T) * new_tail->count);
+    memcpy(new_tail->elements, r->tail->elements, sizeof(RRB_VEC_T) * new_tail->count * r->stride);
     RV_LEAF_REHASH(new_tail);
     RV_NODE* tree = r->root ? (RV_NODE*)RV_RC_REF(r->root) : NULL;
-    RV_ROOT* new_root = RV_MK_ROOT(tree, new_tail, r->count - 1, r->shift);
+    RV_ROOT* new_root = RV_MK_ROOT(tree, new_tail, r->count - 1, r->shift, r->stride);
     return (RV_POP_RESULT){.root = new_root, .value = popped, .found = true};
   }
 
@@ -709,7 +853,7 @@ static inline RV_POP_RESULT RV_POP_BACK(RV_ROOT* r) {
     }
   }
 
-  RV_ROOT* new_root = RV_MK_ROOT(new_tree, new_tail, r->count - 1, new_shift);
+  RV_ROOT* new_root = RV_MK_ROOT(new_tree, new_tail, r->count - 1, new_shift, r->stride);
   return (RV_POP_RESULT){.root = new_root, .value = popped, .found = true};
 }
 
@@ -817,6 +961,8 @@ static inline RV_ROOT* RV_CONCAT(RV_ROOT* left, RV_ROOT* right) {
   if (!left || left->count == 0) return right ? RV_REF(right) : RV_EMPTY();
   if (!right || right->count == 0) return RV_REF(left);
 
+  uint32_t stride = left->stride;
+
   /* Result tail is a copy of right's tail */
   RV_LEAF* new_tail = RV_COPY_LEAF(right->tail);
   uint32_t total = left->count + right->count;
@@ -828,7 +974,7 @@ static inline RV_ROOT* RV_CONCAT(RV_ROOT* left, RV_ROOT* right) {
 
   if (right->root == NULL) {
     /* Right has only a tail — result is left tree + right's tail */
-    return RV_MK_ROOT(l_tree, new_tail, total, l_shift);
+    return RV_MK_ROOT(l_tree, new_tail, total, l_shift, stride);
   }
 
   /* Both trees exist — merge them */
@@ -866,7 +1012,7 @@ static inline RV_ROOT* RV_CONCAT(RV_ROOT* left, RV_ROOT* right) {
   parent->size_table[1] = l_count + r_count;
   RV_INTERNAL_REHASH(parent);
 
-  return RV_MK_ROOT((RV_NODE*)parent, new_tail, total, max_shift + RV_BITS);
+  return RV_MK_ROOT((RV_NODE*)parent, new_tail, total, max_shift + RV_BITS, stride);
 }
 
 /* --- Internal helpers for slice --- */
@@ -983,10 +1129,10 @@ static inline RV_ROOT* RV_SLICE(RV_ROOT* r, uint32_t start, uint32_t end) {
       leaves[num_leaves] = (RV_NODE*)RV_RC_REF((RV_NODE*)leaf);
     } else {
       /* Boundary — partial copy */
-      RV_LEAF* partial = RV_MK_LEAF();
+      RV_LEAF* partial = RV_MK_LEAF(r->stride);
       partial->count = take;
-      memcpy(partial->elements, leaf->elements + local_start,
-             sizeof(RRB_VEC_T) * take);
+      memcpy(partial->elements, leaf->elements + local_start * r->stride,
+             sizeof(RRB_VEC_T) * take * r->stride);
       RV_LEAF_REHASH(partial);
       leaves[num_leaves] = (RV_NODE*)partial;
     }
@@ -1008,7 +1154,7 @@ static inline RV_ROOT* RV_SLICE(RV_ROOT* r, uint32_t start, uint32_t end) {
   RV_NS(_allocator).free(RV_NS(_allocator).ctx, leaves);
   RV_NS(_allocator).free(RV_NS(_allocator).ctx, leaf_counts);
 
-  return RV_MK_ROOT(tree_root, new_tail, total, shift);
+  return RV_MK_ROOT(tree_root, new_tail, total, shift, r->stride);
 }
 
 /* --- Deque access (push_front / pop_front) --- */
@@ -1115,7 +1261,7 @@ static inline RV_ITER_RESULT RV_ITER_NEXT(RV_ITER_T* it) {
     it->leaf = RV_FIND_LEAF_OFF(it->root, it->index, &it->leaf_base);
     local = it->index - it->leaf_base;
   }
-  RRB_VEC_T val = it->leaf->elements[local];
+  RRB_VEC_T val = it->leaf->elements[local * it->leaf->stride];
   it->index++;
   return (RV_ITER_RESULT){.value = val, .done = false};
 }
@@ -1190,20 +1336,34 @@ static inline RRB_VEC_T* RV_TO_ARRAY(RV_ROOT* r, uint32_t* out_count) {
     return NULL;
   }
   uint32_t n = r->count;
+  uint32_t stride = r->stride;
   *out_count = n;
   RRB_VEC_T* arr = (RRB_VEC_T*)RV_NS(_allocator).alloc(
-      RV_NS(_allocator).ctx, sizeof(RRB_VEC_T) * n);
+      RV_NS(_allocator).ctx, sizeof(RRB_VEC_T) * n * stride);
 
-  RV_ITER_T it = RV_ITER_INIT(r);
-  for (uint32_t i = 0; i < n; i++) {
-    RV_ITER_RESULT ir = RV_ITER_NEXT(&it);
-    arr[i] = ir.value;
+  /* Copy leaf-by-leaf for stride correctness */
+  uint32_t pos = 0;
+  uint32_t tail_off = RV_TAIL_OFFSET(r);
+  while (pos < n) {
+    uint32_t base;
+    RV_LEAF* leaf = RV_FIND_LEAF_OFF(r, pos, &base);
+    uint32_t local = pos - base;
+    uint32_t avail = leaf->count - local;
+    uint32_t remaining = n - pos;
+    uint32_t take = avail < remaining ? avail : remaining;
+    memcpy(arr + pos * stride, leaf->elements + local * stride,
+           sizeof(RRB_VEC_T) * take * stride);
+    pos += take;
   }
+  (void)tail_off;
   return arr;
 }
 
-static inline RV_ROOT* RV_FROM_ARRAY(RRB_VEC_T* array, uint32_t count) {
-  if (count == 0) return RV_EMPTY();
+static inline RV_ROOT* RV_FROM_ARRAY_STRIDED(RRB_VEC_T* array, uint32_t count, uint32_t stride) {
+  if (count == 0) {
+    RV_LEAF* tail = RV_MK_LEAF(stride);
+    return RV_MK_ROOT(NULL, tail, 0, RV_BITS, stride);
+  }
 
   /* Build leaves from the array */
   uint32_t num_leaves = (count + RV_BRANCH - 1) / RV_BRANCH;
@@ -1214,14 +1374,14 @@ static inline RV_ROOT* RV_FROM_ARRAY(RRB_VEC_T* array, uint32_t count) {
   /* Build the tail (last leaf) */
   uint32_t tail_start = tree_leaf_count * RV_BRANCH;
   uint32_t tail_count = count - tail_start;
-  RV_LEAF* tail = RV_MK_LEAF();
+  RV_LEAF* tail = RV_MK_LEAF(stride);
   tail->count = tail_count;
-  memcpy(tail->elements, array + tail_start, sizeof(RRB_VEC_T) * tail_count);
+  memcpy(tail->elements, array + tail_start * stride, sizeof(RRB_VEC_T) * tail_count * stride);
   RV_LEAF_REHASH(tail);
 
   if (tree_leaf_count == 0) {
     /* All elements fit in the tail */
-    return RV_MK_ROOT(NULL, tail, count, RV_BITS);
+    return RV_MK_ROOT(NULL, tail, count, RV_BITS, stride);
   }
 
   /* Build tree leaves */
@@ -1231,11 +1391,11 @@ static inline RV_ROOT* RV_FROM_ARRAY(RRB_VEC_T* array, uint32_t count) {
       RV_NS(_allocator).ctx, tree_leaf_count * sizeof(uint32_t));
 
   for (uint32_t i = 0; i < tree_leaf_count; i++) {
-    RV_LEAF* leaf = RV_MK_LEAF();
+    RV_LEAF* leaf = RV_MK_LEAF(stride);
     uint32_t start = i * RV_BRANCH;
     uint32_t lc = RV_BRANCH; /* all tree leaves are full */
     leaf->count = lc;
-    memcpy(leaf->elements, array + start, sizeof(RRB_VEC_T) * lc);
+    memcpy(leaf->elements, array + start * stride, sizeof(RRB_VEC_T) * lc * stride);
     RV_LEAF_REHASH(leaf);
     leaves[i] = (RV_NODE*)leaf;
     leaf_counts[i] = lc;
@@ -1247,7 +1407,11 @@ static inline RV_ROOT* RV_FROM_ARRAY(RRB_VEC_T* array, uint32_t count) {
   RV_NS(_allocator).free(RV_NS(_allocator).ctx, leaves);
   RV_NS(_allocator).free(RV_NS(_allocator).ctx, leaf_counts);
 
-  return RV_MK_ROOT(tree_root, tail, count, shift);
+  return RV_MK_ROOT(tree_root, tail, count, shift, stride);
+}
+
+static inline RV_ROOT* RV_FROM_ARRAY(RRB_VEC_T* array, uint32_t count) {
+  return RV_FROM_ARRAY_STRIDED(array, count, 1);
 }
 
 /* --- Sort --- */
@@ -1296,6 +1460,7 @@ typedef struct RV_TRANSIENT {
   uint32_t  count;
   uint32_t  shift;
   thread_t  owner;
+  uint32_t  stride;
 } RV_TRANSIENT;
 
 /* Sentinel owner value: all bits set — no real thread should match */
@@ -1311,12 +1476,13 @@ static inline void RV_NS(_transient_destroy)(void* arg) {
 static inline RV_TRANSIENT* RV_TRANSIENT_FN(RV_ROOT* r) {
   if (!r) return NULL;
   RV_TRANSIENT* t = (RV_TRANSIENT*)RV_RC_ALLOC(sizeof(RV_TRANSIENT), RV_NS(_transient_destroy));
-  t->root  = r->root ? (RV_NODE*)RV_RC_REF(r->root) : NULL;
+  t->root   = r->root ? (RV_NODE*)RV_RC_REF(r->root) : NULL;
   /* Eagerly copy the tail so the transient exclusively owns it */
-  t->tail  = RV_COPY_LEAF(r->tail);
-  t->count = r->count;
-  t->shift = r->shift;
-  t->owner = THREAD_SELF();
+  t->tail   = RV_COPY_LEAF(r->tail);
+  t->count  = r->count;
+  t->shift  = r->shift;
+  t->owner  = THREAD_SELF();
+  t->stride = r->stride;
   return t;
 }
 
@@ -1336,7 +1502,7 @@ static inline RV_ROOT* RV_PERSISTENT_FN(RV_TRANSIENT* t) {
   /* Take ownership of root and tail from the transient */
   RV_NODE* root = t->root ? (RV_NODE*)RV_RC_REF(t->root) : NULL;
   RV_LEAF* tail = (RV_LEAF*)RV_RC_REF((RV_NODE*)t->tail);
-  RV_ROOT* result = RV_MK_ROOT(root, tail, t->count, t->shift);
+  RV_ROOT* result = RV_MK_ROOT(root, tail, t->count, t->shift, t->stride);
   /* Invalidate the transient */
   t->owner = RV_NS(_invalid_owner);
   return result;
@@ -1426,7 +1592,7 @@ static inline RV_TRANSIENT* RV_TRANSIENT_PUSH_BACK(RV_TRANSIENT* t, RRB_VEC_T va
 
   if (t->tail->count < RV_BRANCH) {
     /* Tail has room — write directly */
-    t->tail->elements[t->tail->count] = value;
+    t->tail->elements[t->tail->count * t->stride] = value;
     t->tail->count++;
     RV_LEAF_REHASH(t->tail);
     t->count++;
@@ -1436,7 +1602,7 @@ static inline RV_TRANSIENT* RV_TRANSIENT_PUSH_BACK(RV_TRANSIENT* t, RRB_VEC_T va
   /* Tail is full — push into tree, create new tail */
   RV_LEAF* old_tail = t->tail;
   RV_LEAF_REHASH(old_tail);
-  RV_LEAF* new_tail = RV_MK_LEAF();
+  RV_LEAF* new_tail = RV_MK_LEAF(t->stride);
   new_tail->elements[0] = value;
   new_tail->count = 1;
   RV_LEAF_REHASH(new_tail);
@@ -1490,13 +1656,13 @@ static inline RV_NODE* RV_TRANSIENT_SET_IN_TREE(uint32_t level, RV_NODE* node, u
     RV_LEAF* leaf = (RV_LEAF*)node;
     if (RV_RC_COUNT(leaf) == 1) {
       /* Owned — mutate in place */
-      leaf->elements[index] = value;
+      leaf->elements[index * leaf->stride] = value;
       RV_LEAF_REHASH(leaf);
       return node;
     }
     /* Shared — copy */
     RV_LEAF* new_leaf = RV_COPY_LEAF(leaf);
-    new_leaf->elements[index] = value;
+    new_leaf->elements[index * new_leaf->stride] = value;
     RV_LEAF_REHASH(new_leaf);
     return (RV_NODE*)new_leaf;
   }
@@ -1558,7 +1724,7 @@ static inline RV_TRANSIENT* RV_TRANSIENT_SET(RV_TRANSIENT* t, uint32_t index, RR
   uint32_t tail_off = t->count - t->tail->count;
   if (index >= tail_off) {
     /* Tail is always owned — write directly */
-    t->tail->elements[index - tail_off] = value;
+    t->tail->elements[(index - tail_off) * t->stride] = value;
     RV_LEAF_REHASH(t->tail);
     return t;
   }
@@ -1668,7 +1834,7 @@ static inline RV_TRANSIENT_POP_RESULT_T RV_TRANSIENT_POP_BACK(RV_TRANSIENT* t) {
     return (RV_TRANSIENT_POP_RESULT_T){.transient = NULL, .found = false};
   }
 
-  RRB_VEC_T popped = t->tail->elements[t->tail->count - 1];
+  RRB_VEC_T popped = t->tail->elements[(t->tail->count - 1) * t->stride];
 
   if (t->tail->count > 1) {
     /* Tail has more than one element — just shrink */
@@ -1738,7 +1904,7 @@ static inline RV_TRANSIENT* RV_TRANSIENT_PUSH_FRONT(RV_TRANSIENT* t, RRB_VEC_T v
   /* Create a temporary persistent view of the transient's current state */
   RV_NODE* tmp_root = t->root ? (RV_NODE*)RV_RC_REF(t->root) : NULL;
   RV_LEAF* tmp_tail = (RV_LEAF*)RV_RC_REF((RV_NODE*)t->tail);
-  RV_ROOT* temp = RV_MK_ROOT(tmp_root, tmp_tail, t->count, t->shift);
+  RV_ROOT* temp = RV_MK_ROOT(tmp_root, tmp_tail, t->count, t->shift, t->stride);
 
   /* Create single-element vec and concat */
   RV_ROOT* single = RV_EMPTY();
@@ -1784,7 +1950,7 @@ static inline RV_TRANSIENT_POP_RESULT_T RV_TRANSIENT_POP_FRONT(RV_TRANSIENT* t) 
   /* Create a temporary persistent view of the transient's current state */
   RV_NODE* tmp_root = t->root ? (RV_NODE*)RV_RC_REF(t->root) : NULL;
   RV_LEAF* tmp_tail = (RV_LEAF*)RV_RC_REF((RV_NODE*)t->tail);
-  RV_ROOT* temp = RV_MK_ROOT(tmp_root, tmp_tail, t->count, t->shift);
+  RV_ROOT* temp = RV_MK_ROOT(tmp_root, tmp_tail, t->count, t->shift, t->stride);
 
   /* Get first element */
   RV_GET_RESULT gr = RV_GET(temp, 0);
@@ -2016,7 +2182,7 @@ static inline RV_ITER_RESULT RV_TRANSIENT_ITER_NEXT(RV_TRANSIENT_ITER_T* it) {
     }
     local = it->index - it->leaf_base;
   }
-  RRB_VEC_T val = it->leaf->elements[local];
+  RRB_VEC_T val = it->leaf->elements[local * it->leaf->stride];
   it->index++;
   return (RV_ITER_RESULT){.value = val, .done = false};
 }
@@ -2148,6 +2314,13 @@ static inline RV_TRANSIENT* RV_TRANSIENT_FILTER(RV_TRANSIENT* t, RV_PRED_FN pred
 #undef RV_ITER_INIT
 #undef RV_ITER_NEXT
 
+#undef RV_EMPTY_STRIDED
+#undef RV_STRIDE
+#undef RV_PUSH_BACK_WIDE
+#undef RV_GET_PTR
+#undef RV_SET_WIDE
+#undef RV_FROM_ARRAY_STRIDED
+
 #ifndef RRB_VEC_GC_MODE
 #undef RV_NODE_DESTROY
 #undef RV_ROOT_DESTROY
@@ -2162,6 +2335,7 @@ static inline RV_TRANSIENT* RV_TRANSIENT_FILTER(RV_TRANSIENT* t, RV_PRED_FN pred
 #undef RV_GET_LEAF
 #undef RV_COPY_INTERNAL
 #undef RV_SET_IN_TREE
+#undef RV_SET_IN_TREE_WIDE
 #undef RV_POP_TAIL
 #undef RV_RIGHTMOST_LEAF
 #undef RV_REMOVE_RIGHTMOST
