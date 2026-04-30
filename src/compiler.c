@@ -9474,6 +9474,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     /* Compile the object expression */
     compiler__compile_node(c, args[0]);
+    /* Reject structs at compile time — use -> for struct field access */
+    if (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX) {
+      StructTypeRegistry* reg = compiler__get_struct_registry(c);
+      StructTypeDef* sdef = reg->defs[c->last_struct_idx];
+      char err_msg[192];
+      snprintf(err_msg, sizeof(err_msg),
+               "?. cannot be used on struct '%.*s'; use -> for struct field access",
+               (int)sdef->name_len, sdef->name);
+      compiler__error(c, line, col, err_msg);
+      return;
+    }
     /* The field name must be a literal string */
     if (args[1]->type != AST_LIT_STRING) {
       compiler__error(c, line, col, "?. requires a literal field name");

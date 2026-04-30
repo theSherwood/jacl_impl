@@ -5757,37 +5757,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           if (result != VM_OK) return result;
           break;
         }
-        /* Handle structs */
-        if (!jacl_is_struct(struct_val)) {
-          vm__set_error(vm, "?. requires struct, map, or nil");
-          return VM_RUNTIME_ERROR;
-        }
-        JaclStruct* s = jacl_as_struct_ptr(struct_val);
-        if (!vm->struct_registry || s->type_idx >= vm->struct_registry->count) {
-          vm__set_error(vm, "invalid struct type index");
-          return VM_RUNTIME_ERROR;
-        }
-        StructTypeDef* sdef = vm->struct_registry->defs[s->type_idx];
-        JaclVal name_val = frame->chunk->constants[name_idx];
-        char fname[64]; uint32_t flen;
-        flen = jacl_string_data(name_val, fname, sizeof(fname));
-        uint32_t fi;
-        for (fi = 0; fi < sdef->field_count; fi++) {
-          if (sdef->fields[fi].name_len == flen &&
-              memcmp(sdef->fields[fi].name, fname, flen) == 0) break;
-        }
-        if (fi == sdef->field_count) {
-          /* Optional chaining: missing field returns nil instead of error */
-          result = vm__push(vm, JACL_NIL);
-          if (result != VM_OK) return result;
-          break;
-        }
-        uint16_t foff = sdef->fields[fi].offset;
-        JaclVal field_val = vm__struct_read_field(&vm->heap, s, foff,
-                                                   (int)sdef->fields[fi].type);
-        result = vm__push(vm, field_val);
-        if (result != VM_OK) return result;
-        break;
+        /* Structs must use -> not ?. */
+        vm__set_error(vm, "?. cannot be used on %s; use -> for struct field access",
+                      jacl_is_struct(struct_val) ? "structs" : "this type");
+        return VM_RUNTIME_ERROR;
       }
 
       case OP_STRUCT_SET_DYN: {
