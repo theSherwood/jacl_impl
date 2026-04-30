@@ -461,52 +461,50 @@ int test_hamt_key_val_stride(void) {
   TEST_PASS();
 }
 
-/* Test: wide key collision (bitwise hash collision with FNV-1a) */
+/* Test: wide key collision (real FNV-1a collision pair)
+ * {54000, 378003} and {60270, 421893} both hash to 0x196d2cad via FNV-1a
+ * on their raw bytes. This exercises the collision node path with memcmp
+ * key comparison (H_WIDE_KEY_EQ). */
 int test_hamt_key_stride_collision(void) {
   printf("  test_hamt_key_stride_collision: ");
   tracker_reset();
 
-  /* Use collision hash so all wide keys collide */
-  shamt_set_key_handlers(collision_hash, int_eq);
-  shamt_node* root = NULL;
+  shamt_set_key_handlers(int_hash, int_eq);
 
-  for (int i = 0; i < 5; i++) {
-    int wk[KEY_STRIDE];
-    make_wide_key(i, wk);
-    int val = i * 10;
-    shamt_node* next = shamt_set_wide(root, wk, KEY_STRIDE, &val, 1);
-    if (root) shamt_unref(root);
-    root = next;
-  }
-  ASSERT_INT_EQ((int)shamt_count(root), 5);
+  int ka[KEY_STRIDE] = {54000, 378003};
+  int kb[KEY_STRIDE] = {60270, 421893};
+  int val_a = 11, val_b = 22;
 
-  /* Verify all present */
-  for (int i = 0; i < 5; i++) {
-    int wk[KEY_STRIDE];
-    make_wide_key(i, wk);
-    ASSERT(shamt_has_wide(root, wk, KEY_STRIDE));
-    shamt_leaf* leaf = shamt_get_leaf(root, wk, KEY_STRIDE);
-    ASSERT(shamt_value_ptr_from_leaf(leaf)[0] == i * 10);
-  }
+  /* Insert both — should create a collision node */
+  shamt_node* r1 = shamt_set_wide(NULL, ka, KEY_STRIDE, &val_a, 1);
+  shamt_node* r2 = shamt_set_wide(r1, kb, KEY_STRIDE, &val_b, 1);
+  ASSERT_INT_EQ((int)shamt_count(r2), 2);
 
-  /* Update in collision chain */
-  int wk2[KEY_STRIDE];
-  make_wide_key(2, wk2);
-  int new_val = 777;
-  shamt_node* root2 = shamt_set_wide(root, wk2, KEY_STRIDE, &new_val, 1);
-  shamt_leaf* updated = shamt_get_leaf(root2, wk2, KEY_STRIDE);
-  ASSERT(shamt_value_ptr_from_leaf(updated)[0] == 777);
+  /* Both retrievable */
+  ASSERT(shamt_has_wide(r2, ka, KEY_STRIDE));
+  ASSERT(shamt_has_wide(r2, kb, KEY_STRIDE));
+  ASSERT_INT_EQ(shamt_value_ptr_from_leaf(shamt_get_leaf(r2, ka, KEY_STRIDE))[0], 11);
+  ASSERT_INT_EQ(shamt_value_ptr_from_leaf(shamt_get_leaf(r2, kb, KEY_STRIDE))[0], 22);
 
-  /* Remove from collision chain */
-  int wk3[KEY_STRIDE];
-  make_wide_key(3, wk3);
-  shamt_node* root3 = shamt_unset_wide(root2, wk3, KEY_STRIDE);
-  ASSERT_INT_EQ((int)shamt_count(root3), 4);
-  ASSERT(!shamt_has_wide(root3, wk3, KEY_STRIDE));
+  /* Update one key in the collision chain */
+  int val_a2 = 99;
+  shamt_node* r3 = shamt_set_wide(r2, ka, KEY_STRIDE, &val_a2, 1);
+  ASSERT_INT_EQ(shamt_value_ptr_from_leaf(shamt_get_leaf(r3, ka, KEY_STRIDE))[0], 99);
+  ASSERT_INT_EQ(shamt_value_ptr_from_leaf(shamt_get_leaf(r3, kb, KEY_STRIDE))[0], 22);
 
-  shamt_unref(root);
-  shamt_unref(root2);
-  shamt_unref(root3);
+  /* Original unchanged */
+  ASSERT_INT_EQ(shamt_value_ptr_from_leaf(shamt_get_leaf(r2, ka, KEY_STRIDE))[0], 11);
+
+  /* Remove one — collapses collision back to leaf */
+  shamt_node* r4 = shamt_unset_wide(r3, kb, KEY_STRIDE);
+  ASSERT_INT_EQ((int)shamt_count(r4), 1);
+  ASSERT(shamt_has_wide(r4, ka, KEY_STRIDE));
+  ASSERT(!shamt_has_wide(r4, kb, KEY_STRIDE));
+
+  shamt_unref(r1);
+  shamt_unref(r2);
+  shamt_unref(r3);
+  shamt_unref(r4);
   ASSERT(check_no_leaks());
   TEST_PASS();
 }

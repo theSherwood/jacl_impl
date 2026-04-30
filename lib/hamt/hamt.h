@@ -200,6 +200,13 @@ typedef struct H_LEAF {
   HAMT_KEY_T slots[];     /* key_stride keys then val_stride values (use H_LEAF_KEY_PTR/H_LEAF_VAL_PTR) */
 } H_LEAF;
 
+/* Ensure value pointer from H_LEAF_VAL_PTR is correctly aligned.
+ * sizeof(KEY_T) * key_stride must be a multiple of VAL_T's alignment.
+ * This holds whenever sizeof(KEY_T) >= _Alignof(VAL_T), which covers
+ * same-type instantiations and all practical JACL uses. */
+_Static_assert(sizeof(HAMT_KEY_T) % _Alignof(HAMT_VAL_T) == 0,
+               "HAMT_KEY_T size must be a multiple of HAMT_VAL_T alignment for safe H_LEAF_VAL_PTR access");
+
 typedef struct H_COLLISION {
   H_NODE   header;
   uint32_t hash;
