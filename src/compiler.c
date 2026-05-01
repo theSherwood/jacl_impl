@@ -2859,7 +2859,6 @@ struct Compiler {
   MacroTable*          macro_table;    /* compile-time macro definitions (root compiler owns) */
   uint32_t             current_scope_mark; /* hygiene: mark for newly introduced bindings */
   bool                 has_prelude;    /* true when compiling under a caller-supplied prelude map */
-  bool                 want_inline_struct; /* request inline struct construction in next struct constructor */
   bool                 last_is_inline;     /* true if last compiled expr pushed inline struct slots (not heap) */
   bool                 inline_struct_ref;  /* true if last expression is an inline struct reference (not on stack) */
   uint8_t              inline_ref_base_slot; /* base local slot of the inline struct */
@@ -2929,7 +2928,6 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->macro_table       = NULL;
   c->current_scope_mark = 0;
   c->has_prelude       = false;
-  c->want_inline_struct = false;
   c->last_is_inline     = false;
   c->inline_struct_ref  = false;
   c->inline_ref_base_slot = 0;
@@ -6861,7 +6859,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
      * — activate inline storage. Only for local scope, non-SM mode. */
     bool activate_inline = false;
     c->last_is_inline = false;
-    c->want_inline_struct = false;
     if (c->scope_depth > 0 && !c->sm_analysis) {
       AstNode* val_node = args[value_arg_idx];
       if (val_node->type == AST_COMMAND && val_node->data.command.head->type == AST_LIT_STRING) {
@@ -6881,11 +6878,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           }
           /* Hint: vec-get/map-get on typed collection may produce inline result.
            * The actual decision happens at compile time when we know the arg type. */
-          if (!activate_inline &&
-              ((rhs_head_len == 7 && memcmp(rhs_head_name, "vec-get", 7) == 0) ||
-               (rhs_head_len == 7 && memcmp(rhs_head_name, "map-get", 7) == 0))) {
-            c->want_inline_struct = true;
-          }
+          /* Phase 5f: vec-get/map-get always produce inline results now */
         }
       }
     }
@@ -10427,7 +10420,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* Phase 5c: value-type structs are always constructed inline.
        * Legacy (non-value-type) structs still use heap. */
       bool use_inline = sdef->is_value_type;
-      c->want_inline_struct = false;
 
       /* Compile and type-check each field argument */
       for (uint32_t i = 0; i < argc; i++) {
@@ -10662,13 +10654,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (expected_param_type != TYPE_DYN) {
         c->expected_type = expected_param_type;
       }
-      if (expected_param_type == TYPE_STRUCT) {
-        c->want_inline_struct = true;
-      }
       compiler__compile_node(c, args[i]);
       JaclType arg_type = c->last_expr_type;
       c->expected_type = TYPE_DYN;
-      c->want_inline_struct = false;
 
       /* Phase 5a: struct args passed inline (multi-slot) instead of as heap copies.
        * If the arg is already inline (from constructor or typed-get), nothing to do.

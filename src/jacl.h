@@ -1277,7 +1277,6 @@ struct Compiler {
   MacroTable*          macro_table;
   uint32_t             current_scope_mark;
   bool                 has_prelude;
-  bool                 want_inline_struct;
   bool                 inline_struct_ref;
   uint8_t              inline_ref_base_slot;
   uint16_t             inline_ref_offset;
