@@ -210,14 +210,16 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
     case OBJ_TYPED_RRB_LEAF:
         break;
 
-    /* --- Typed HAMT leaf: trace dyn key only, skip struct value bytes --- */
+    /* --- Typed HAMT leaf: trace dyn keys only, skip struct bytes --- */
     case OBJ_TYPED_HAMT_LEAF: {
         jacl_typed_map_leaf *tleaf = (jacl_typed_map_leaf *)payload;
-        /* HAMT leaf layout: key slots then value slots.  key_stride slots
-           are JaclVal (dyn keys), val_stride slots are raw struct bytes. */
-        for (uint32_t i = 0; i < tleaf->key_stride; i++) {
-            gc__ms_push_val(ms, tleaf->slots[i]);
+        /* key_stride == 1: single JaclVal key (dyn), trace it.
+           key_stride > 1: multi-slot struct key (raw bytes), no tracing.
+           val_stride slots are always raw struct bytes, never traced. */
+        if (tleaf->key_stride == 1) {
+            gc__ms_push_val(ms, tleaf->slots[0]);
         }
+        /* key_stride > 1: all slots are raw struct bytes, skip. */
         break;
     }
 

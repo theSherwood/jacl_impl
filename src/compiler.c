@@ -171,10 +171,13 @@ bool is_typed_collection(JaclType t) {
   return t == TYPE_TYPED_VEC || t == TYPE_TYPED_MAP;
 }
 
-/* Check if an AST_COMMAND node is a typed collection expression [Vec Type] or
-   [Map Type].  Returns 1 for Vec, 2 for Map, 0 if not a match.
-   When returning non-zero, *out_elem is set to the element type name node. */
-static int compiler__typed_collection_expr(AstNode* cmd, AstNode** out_elem) {
+/* Check if an AST_COMMAND node is a typed collection expression.
+   Returns 1 for [Vec Type], 2 for [Map Type] (dyn keys),
+   3 for [Map KeyType ValueType] (struct keys), 0 if not a match.
+   *out_elem is set to the value element type name node.
+   *out_key_elem is set to the key type name node (kind==3 only). */
+static int compiler__typed_collection_expr(AstNode* cmd, AstNode** out_elem,
+                                           AstNode** out_key_elem) {
   if (cmd->type != AST_COMMAND || !cmd->data.command.head) return 0;
   AstNode* th = cmd->data.command.head;
   if (th->type != AST_LIT_STRING || th->data.lit_string.length != 3) return 0;
@@ -182,6 +185,14 @@ static int compiler__typed_collection_expr(AstNode* cmd, AstNode** out_elem) {
   if (memcmp(th->data.lit_string.value, "Vec", 3) == 0) kind = 1;
   else if (memcmp(th->data.lit_string.value, "Map", 3) == 0) kind = 2;
   if (kind == 0) return 0;
+  /* [Map K V] — struct keys (2 args) */
+  if (kind == 2 && cmd->data.command.arg_count == 2 &&
+      cmd->data.command.args[0]->type == AST_LIT_STRING &&
+      cmd->data.command.args[1]->type == AST_LIT_STRING) {
+    if (out_key_elem) *out_key_elem = cmd->data.command.args[0];
+    if (out_elem) *out_elem = cmd->data.command.args[1];
+    return 3;
+  }
   if (cmd->data.command.arg_count != 1 ||
       cmd->data.command.args[0]->type != AST_LIT_STRING) return 0;
   if (out_elem) *out_elem = cmd->data.command.args[0];
@@ -896,6 +907,7 @@ typedef struct {
   bool      captures_mutable; /* true if bound to a closure that captures mutable state */
   JaclType  type;         /* compile-time type (default TYPE_DYN) */
   uint32_t  struct_type_idx; /* struct registry index when type==TYPE_STRUCT */
+  uint32_t  key_struct_idx;  /* key struct index for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
   uint32_t  return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   JaclType* param_types;  /* proc param types (NULL for non-procs, arena-allocated) */
@@ -927,6 +939,7 @@ typedef struct {
   bool      prelude_is_native_fn; /* true if prelude value is a native fn ref (emit direct opcode) */
   JaclType  type;         /* compile-time type (default TYPE_DYN) */
   uint32_t  struct_type_idx; /* struct registry index when type==TYPE_STRUCT */
+  uint32_t  key_struct_idx;  /* key struct index for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
   JaclType  return_type;  /* proc return type (TYPE_DYN for non-procs) */
   uint32_t  return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   JaclType  param_types[COMPILER_MAX_PROC_PARAMS]; /* proc param types */
@@ -941,6 +954,7 @@ typedef struct {
   bool      captures_mutable; /* true if capturing a closure that captures mutable state */
   JaclType  type;     /* compile-time type (default TYPE_DYN) */
   uint32_t  struct_type_idx; /* struct registry index when type==TYPE_STRUCT */
+  uint32_t  key_struct_idx;  /* key struct index for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
   uint32_t  scope_mark; /* hygiene: mark of the captured binding */
   uint16_t  width;      /* JaclVal slot count: 1 for scalars, N for inline structs */
   bool      is_inline;  /* true if capturing an inline struct (raw bytes, not heap) */
@@ -2808,6 +2822,7 @@ struct Compiler {
   JaclType         expected_type;   /* contextual type hint for RHS compilation */
   JaclType         last_expr_type;  /* type of the last compiled expression */
   uint32_t         last_struct_idx; /* struct type index when last_expr_type==TYPE_STRUCT */
+  uint32_t         last_key_struct_idx; /* key struct type for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
 #define CTX_STRUCT_PENDING (UINT32_MAX - 1) /* sentinel: ctx struct not yet finalized */
   JaclType         return_type;     /* declared return type for current function */
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
@@ -2837,6 +2852,7 @@ struct Compiler {
   struct {
     uint16_t local_slot;     /* which local variable is narrowed */
     uint32_t box_type_idx;   /* struct element type_idx (0=dyn, >0=struct/collection element) */
+    uint32_t box_key_type_idx; /* key struct idx for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
     JaclType box_type;       /* TYPE_STRUCT, TYPE_TYPED_VEC, TYPE_TYPED_MAP, or TYPE_DYN */
   } narrowings[8];
   uint32_t             narrowing_count;
@@ -2867,6 +2883,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->expected_type   = TYPE_DYN;
   c->last_expr_type  = TYPE_DYN;
   c->last_struct_idx = UINT32_MAX;
+  c->last_key_struct_idx = UINT32_MAX;
   c->return_type     = TYPE_DYN;
   c->module_cache    = NULL;
   c->current_module  = NULL;
@@ -3223,6 +3240,7 @@ int compiler__resolve_upvalue(Compiler* c, JaclVal name,
       c->upvalues[uv].suspends = c->enclosing->locals[local].suspends;
       c->upvalues[uv].type = c->enclosing->locals[local].type;
       c->upvalues[uv].struct_type_idx = c->enclosing->locals[local].struct_type_idx;
+      c->upvalues[uv].key_struct_idx = c->enclosing->locals[local].key_struct_idx;
       c->upvalues[uv].scope_mark = c->enclosing->locals[local].scope_mark;
       /* US-008: propagate inline struct info from enclosing local */
       if (c->enclosing->locals[local].is_inline) {
@@ -3284,6 +3302,7 @@ int compiler__resolve_upvalue(Compiler* c, JaclVal name,
       c->upvalues[uv].suspends = c->enclosing->upvalues[upvalue].suspends;
       c->upvalues[uv].type = c->enclosing->upvalues[upvalue].type;
       c->upvalues[uv].struct_type_idx = c->enclosing->upvalues[upvalue].struct_type_idx;
+      c->upvalues[uv].key_struct_idx = c->enclosing->upvalues[upvalue].key_struct_idx;
       c->upvalues[uv].scope_mark = c->enclosing->upvalues[upvalue].scope_mark;
       /* US-008: propagate inline struct info from parent upvalue */
       if (c->enclosing->upvalues[upvalue].is_inline) {
@@ -4027,6 +4046,8 @@ void compiler__compile_binary(Compiler* c, AstNode** args,
       uint8_t eq_op = (lhs_type == TYPE_TYPED_VEC) ? OP_TYPED_VEC_EQ : OP_TYPED_MAP_EQ;
       compiler__emit_byte(c, eq_op, line);
       compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      if (lhs_type == TYPE_TYPED_MAP)
+        compiler__emit_u16(c, (uint16_t)c->last_key_struct_idx, line);
       c->last_expr_type = TYPE_BOOL;
       return;
     }
@@ -4101,6 +4122,7 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
   compiler__compile_node(c, args[0]);
   JaclType col_type = c->last_expr_type;
   uint32_t col_struct_idx = c->last_struct_idx;
+  uint32_t col_key_struct_idx = c->last_key_struct_idx;
   {
     bool saved = c->in_non_suspending_callback;
     c->in_non_suspending_callback = true;
@@ -4116,9 +4138,13 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
     else                             typed_op = OP_TYPED_FILTER;
     compiler__emit_byte(c, typed_op, line);
     compiler__emit_u16(c, (uint16_t)col_struct_idx, line);
+    /* Always emit key_type_idx: 0xFFFF for typed vecs, actual idx for struct-key maps */
+    compiler__emit_u16(c, (col_type == TYPE_TYPED_MAP) ? (uint16_t)col_key_struct_idx : (uint16_t)0xFFFF, line);
     if (opcode == OP_FILTER) {
       c->last_expr_type = col_type;
       c->last_struct_idx = col_struct_idx;
+      if (col_type == TYPE_TYPED_MAP)
+        c->last_key_struct_idx = col_key_struct_idx;
     } else if (opcode == OP_TRANSFORM) {
       c->last_expr_type = TYPE_VEC;
     } else {
@@ -5151,7 +5177,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* --- Typed vec constructor: [[Vec Type] elem1 elem2 ...] --- */
   AstNode* _coll_elem = NULL;
-  int _coll_kind = compiler__typed_collection_expr(head, &_coll_elem);
+  AstNode* _coll_key_elem = NULL;
+  int _coll_kind = compiler__typed_collection_expr(head, &_coll_elem, &_coll_key_elem);
   if (_coll_kind == 1) {
     const char* type_name_str = _coll_elem->data.lit_string.value;
     uint32_t type_name_len = _coll_elem->data.lit_string.length;
@@ -5231,9 +5258,81 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__emit_byte(c, OP_TYPED_MAP, line);
     compiler__emit_u16(c, (uint16_t)type_idx, line);
+    compiler__emit_u16(c, (uint16_t)0xFFFF, line);  /* key_type_idx: dyn keys */
     compiler__emit_byte(c, (uint8_t)pair_count, line);
     c->last_expr_type = TYPE_TYPED_MAP;
     c->last_struct_idx = type_idx;
+    c->last_key_struct_idx = UINT32_MAX;
+    return;
+  }
+
+  /* --- Typed map constructor with struct keys: [[Map KeyType ValueType] k1 v1 ...] --- */
+  if (_coll_kind == 3) {
+    const char* val_name_str = _coll_elem->data.lit_string.value;
+    uint32_t val_name_len = _coll_elem->data.lit_string.length;
+    const char* key_name_str = _coll_key_elem->data.lit_string.value;
+    uint32_t key_name_len = _coll_key_elem->data.lit_string.length;
+    StructTypeRegistry* reg = compiler__get_struct_registry(c);
+    uint32_t val_type_idx = struct_registry__find(reg, val_name_str, val_name_len);
+    if (val_type_idx == UINT32_MAX) {
+      char err[128];
+      snprintf(err, sizeof(err), "[Map %.*s %.*s]: unknown value type '%.*s'",
+               (int)key_name_len, key_name_str,
+               (int)val_name_len, val_name_str,
+               (int)val_name_len, val_name_str);
+      compiler__error(c, line, col, err);
+      return;
+    }
+    uint32_t key_type_idx = struct_registry__find(reg, key_name_str, key_name_len);
+    if (key_type_idx == UINT32_MAX) {
+      char err[128];
+      snprintf(err, sizeof(err), "[Map %.*s %.*s]: unknown key type '%.*s'",
+               (int)key_name_len, key_name_str,
+               (int)val_name_len, val_name_str,
+               (int)key_name_len, key_name_str);
+      compiler__error(c, line, col, err);
+      return;
+    }
+    if (argc % 2 != 0) {
+      compiler__error(c, line, col, "[Map K V ...] requires an even number of arguments (key-value pairs)");
+      return;
+    }
+    uint32_t pair_count = argc / 2;
+    if (pair_count > 255) {
+      compiler__error(c, line, col, "[Map K V ...] too many initial pairs (max 255)");
+      return;
+    }
+    for (uint32_t i = 0; i < pair_count; i++) {
+      compiler__compile_node(c, args[i * 2]);       /* key: must match key struct type */
+      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != key_type_idx) {
+        char err[128];
+        snprintf(err, sizeof(err),
+                 "[Map %.*s %.*s]: key %u is not a %.*s struct",
+                 (int)key_name_len, key_name_str,
+                 (int)val_name_len, val_name_str, i,
+                 (int)key_name_len, key_name_str);
+        compiler__error(c, line, col, err);
+        return;
+      }
+      compiler__compile_node(c, args[i * 2 + 1]);   /* value: must match value struct type */
+      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != val_type_idx) {
+        char err[128];
+        snprintf(err, sizeof(err),
+                 "[Map %.*s %.*s]: value %u is not a %.*s struct",
+                 (int)key_name_len, key_name_str,
+                 (int)val_name_len, val_name_str, i,
+                 (int)val_name_len, val_name_str);
+        compiler__error(c, line, col, err);
+        return;
+      }
+    }
+    compiler__emit_byte(c, OP_TYPED_MAP, line);
+    compiler__emit_u16(c, (uint16_t)val_type_idx, line);
+    compiler__emit_u16(c, (uint16_t)key_type_idx, line);
+    compiler__emit_byte(c, (uint8_t)pair_count, line);
+    c->last_expr_type = TYPE_TYPED_MAP;
+    c->last_struct_idx = val_type_idx;
+    c->last_key_struct_idx = key_type_idx;
     return;
   }
 
@@ -5628,6 +5727,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       compiler__emit_byte(c, OP_TYPED_MAP_PRINT, line);
       compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      compiler__emit_u16(c, (uint16_t)c->last_key_struct_idx, line);
       c->last_expr_type = TYPE_NIL;
       return;
     }
@@ -6064,6 +6164,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->locals[c->local_count - 1].type = effective_type;
       if (effective_type == TYPE_STRUCT || is_typed_collection(effective_type))
         c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
+      if (effective_type == TYPE_TYPED_MAP)
+        c->locals[c->local_count - 1].key_struct_idx = c->last_key_struct_idx;
       /* mut returns nil */
       compiler__emit_byte(c, OP_NIL, line);
     } else {
@@ -6093,6 +6195,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             root->global_arities[i].type = effective_type;
             if (effective_type == TYPE_STRUCT || is_typed_collection(effective_type))
               root->global_arities[i].struct_type_idx = c->last_struct_idx;
+            if (effective_type == TYPE_TYPED_MAP)
+              root->global_arities[i].key_struct_idx = c->last_key_struct_idx;
             break;
           }
         }
@@ -6770,6 +6874,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->locals[c->local_count - 1].type = effective_type;
       if (is_typed_collection(effective_type)) {
         c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
+        if (effective_type == TYPE_TYPED_MAP)
+          c->locals[c->local_count - 1].key_struct_idx = c->last_key_struct_idx;
       } else if (effective_type == TYPE_STRUCT) {
         c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
         StructTypeRegistry* reg = compiler__get_struct_registry(c);
@@ -6814,6 +6920,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             root->global_arities[i].type = effective_type;
             if (effective_type == TYPE_STRUCT || is_typed_collection(effective_type))
               root->global_arities[i].struct_type_idx = c->last_struct_idx;
+            if (effective_type == TYPE_TYPED_MAP)
+              root->global_arities[i].key_struct_idx = c->last_key_struct_idx;
             break;
           }
         }
@@ -6904,18 +7012,21 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclVal param_names_arr[COMPILER_MAX_PROC_PARAMS];
     JaclType param_types_arr[COMPILER_MAX_PROC_PARAMS];
     uint32_t param_struct_idxs[COMPILER_MAX_PROC_PARAMS]; /* struct registry index per param */
+    uint32_t param_key_struct_idxs[COMPILER_MAX_PROC_PARAMS]; /* key struct idx for typed maps */
     uint32_t param_scope_marks[COMPILER_MAX_PROC_PARAMS]; /* hygiene: per-param scope mark */
     uint8_t param_count = 0;
     bool is_variadic = false;
     memset(param_struct_idxs, 0xFF, sizeof(param_struct_idxs)); /* UINT32_MAX = no struct */
+    memset(param_key_struct_idxs, 0xFF, sizeof(param_key_struct_idxs));
 
     for (uint32_t fi = 0; fi < flat_count; fi++) {
       AstNode* elem = flat_elems[fi];
 
-      /* Check for compound type expression: [Vec Type] or [Map Type] */
+      /* Check for compound type expression: [Vec Type], [Map Type], [Map K V] */
       {
         AstNode* ct_elem = NULL;
-        int ct_kind = compiler__typed_collection_expr(elem, &ct_elem);
+        AstNode* ct_key_elem = NULL;
+        int ct_kind = compiler__typed_collection_expr(elem, &ct_elem, &ct_key_elem);
         if (ct_kind > 0) {
           const char* ename = ct_elem->data.lit_string.value;
           uint32_t elen = ct_elem->data.lit_string.length;
@@ -6923,6 +7034,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           if (elem_idx == UINT32_MAX) {
             compiler__error(c, line, col, "unknown element type in typed collection parameter");
             return;
+          }
+          uint32_t key_idx = UINT32_MAX;
+          if (ct_kind == 3) {
+            key_idx = struct_registry__find(compiler__get_struct_registry(c),
+                ct_key_elem->data.lit_string.value, ct_key_elem->data.lit_string.length);
+            if (key_idx == UINT32_MAX) {
+              compiler__error(c, line, col, "unknown key type in typed map parameter");
+              return;
+            }
           }
           fi++;
           if (fi >= flat_count) {
@@ -6942,6 +7062,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               elem->data.lit_string.value, elem->data.lit_string.length);
           param_types_arr[param_count] = (ct_kind == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
           param_struct_idxs[param_count] = elem_idx;
+          param_key_struct_idxs[param_count] = key_idx;
           param_scope_marks[param_count] = elem->scope_mark;
           param_count++;
           continue;
@@ -7143,6 +7264,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         body_compiler.locals[body_compiler.local_count - 1].type = param_types_arr[i];
         if (param_types_arr[i] == TYPE_STRUCT || is_typed_collection(param_types_arr[i]))
           body_compiler.locals[body_compiler.local_count - 1].struct_type_idx = param_struct_idxs[i];
+        if (param_types_arr[i] == TYPE_TYPED_MAP)
+          body_compiler.locals[body_compiler.local_count - 1].key_struct_idx = param_key_struct_idxs[i];
       }
     }
 
@@ -7353,6 +7476,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         args[0]->data.command.arg_count == 2 &&
         args[0]->data.command.args[1]->type == AST_VAR_REF) {
       uint32_t type_idx = UINT32_MAX;
+      uint32_t key_type_idx = UINT32_MAX;
       JaclType box_type = TYPE_DYN;
       AstNode* type_arg = args[0]->data.command.args[0];
 
@@ -7370,11 +7494,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       } else {
         /* [box? [Vec Type] $var] or [box? [Map Type] $var] — typed collection narrowing */
         AstNode* ct_en = NULL;
-        int ct_k = compiler__typed_collection_expr(type_arg, &ct_en);
+        AstNode* ct_kn = NULL;
+        int ct_k = compiler__typed_collection_expr(type_arg, &ct_en, &ct_kn);
         if (ct_k > 0) {
           type_idx = struct_registry__find(compiler__get_struct_registry(c),
               ct_en->data.lit_string.value, ct_en->data.lit_string.length);
           box_type = (ct_k == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
+          if (ct_k == 3 && ct_kn) {
+            key_type_idx = struct_registry__find(compiler__get_struct_registry(c),
+                ct_kn->data.lit_string.value, ct_kn->data.lit_string.length);
+          }
         }
       }
 
@@ -7390,6 +7519,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             has_narrowing = true;
             c->narrowings[c->narrowing_count].local_slot = (uint16_t)slot;
             c->narrowings[c->narrowing_count].box_type_idx = type_idx;
+            c->narrowings[c->narrowing_count].box_key_type_idx = key_type_idx;
             c->narrowings[c->narrowing_count].box_type = box_type;
             c->narrowing_count++;
           }
@@ -8372,7 +8502,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       uint32_t elem_type_idx = c->last_struct_idx;
+      uint32_t key_type_idx = c->last_key_struct_idx;
       compiler__compile_node(c, args[1]);
+      if (key_type_idx != UINT32_MAX) {
+        if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != key_type_idx) {
+          compiler__error(c, line, col, "map-get: key type does not match typed map key type");
+          return;
+        }
+      }
       if (c->want_inline_struct) {
         compiler__emit_byte(c, OP_TYPED_MAP_GET_INLINE, line);
         c->last_is_inline = true;
@@ -8380,6 +8517,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, OP_TYPED_MAP_GET, line);
       }
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
+      compiler__emit_u16(c, (uint16_t)key_type_idx, line);
       c->last_expr_type = TYPE_STRUCT;
       c->last_struct_idx = elem_type_idx;
       return;
@@ -8398,8 +8536,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     if (c->last_expr_type == TYPE_TYPED_MAP) {
+      uint32_t key_type_idx = c->last_key_struct_idx;
       compiler__compile_node(c, args[1]);
+      if (key_type_idx != UINT32_MAX) {
+        if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != key_type_idx) {
+          compiler__error(c, line, col, "map-has: key type does not match typed map key type");
+          return;
+        }
+      }
       compiler__emit_byte(c, OP_TYPED_MAP_HAS, line);
+      compiler__emit_u16(c, (uint16_t)key_type_idx, line);
       c->last_expr_type = TYPE_BOOL;
       return;
     }
@@ -8435,7 +8581,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       uint32_t elem_type_idx = c->last_struct_idx;
-      compiler__compile_node(c, args[1]);  /* key: dyn */
+      uint32_t key_type_idx = c->last_key_struct_idx;
+      compiler__compile_node(c, args[1]);  /* key */
+      if (key_type_idx != UINT32_MAX) {
+        if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != key_type_idx) {
+          compiler__error(c, line, col, "map-set: key type does not match typed map key type");
+          return;
+        }
+      }
       compiler__compile_node(c, args[2]);  /* value: must match struct type */
       if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != elem_type_idx) {
         compiler__error(c, line, col, "map-set: value type does not match typed map element type");
@@ -8443,8 +8596,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       compiler__emit_byte(c, OP_TYPED_MAP_SET, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
+      compiler__emit_u16(c, (uint16_t)key_type_idx, line);
       c->last_expr_type = TYPE_TYPED_MAP;
       c->last_struct_idx = elem_type_idx;
+      c->last_key_struct_idx = key_type_idx;
       return;
     }
     compiler__compile_node(c, args[1]);
@@ -8464,10 +8619,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       uint32_t elem_type_idx = c->last_struct_idx;
-      compiler__compile_node(c, args[1]);  /* key: dyn */
+      uint32_t key_type_idx = c->last_key_struct_idx;
+      compiler__compile_node(c, args[1]);  /* key */
+      if (key_type_idx != UINT32_MAX) {
+        if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != key_type_idx) {
+          compiler__error(c, line, col, "map-remove: key type does not match typed map key type");
+          return;
+        }
+      }
       compiler__emit_byte(c, OP_TYPED_MAP_REMOVE, line);
+      compiler__emit_u16(c, (uint16_t)key_type_idx, line);
       c->last_expr_type = TYPE_TYPED_MAP;
       c->last_struct_idx = elem_type_idx;
+      c->last_key_struct_idx = key_type_idx;
       return;
     }
     compiler__compile_node(c, args[1]);
@@ -8484,8 +8648,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     if (c->last_expr_type == TYPE_TYPED_MAP) {
+      uint32_t key_type_idx = c->last_key_struct_idx;
       compiler__emit_byte(c, OP_TYPED_MAP_KEYS, line);
-      c->last_expr_type = TYPE_VEC;  /* returns dyn vec of keys */
+      compiler__emit_u16(c, (uint16_t)key_type_idx, line);
+      if (key_type_idx != UINT32_MAX) {
+        c->last_expr_type = TYPE_TYPED_VEC;  /* struct keys → typed vec */
+        c->last_struct_idx = key_type_idx;
+      } else {
+        c->last_expr_type = TYPE_VEC;  /* dyn keys → dyn vec */
+      }
       return;
     }
     compiler__emit_byte(c, OP_MAP_KEYS, line);
@@ -8868,7 +9039,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* [box? [Vec Type] $val] or [box? [Map Type] $val] — typed collection box check,
          or [box? Type $val] — typed struct box check */
       AstNode* box_elem = NULL;
-      int box_kind = compiler__typed_collection_expr(args[0], &box_elem);
+      AstNode* box_key_elem = NULL;
+      int box_kind = compiler__typed_collection_expr(args[0], &box_elem, &box_key_elem);
       if (box_kind > 0) {
         uint32_t elem_idx = struct_registry__find(compiler__get_struct_registry(c),
             box_elem->data.lit_string.value, box_elem->data.lit_string.length);
@@ -8963,6 +9135,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               if (bt == TYPE_TYPED_VEC || bt == TYPE_TYPED_MAP) {
                 c->last_expr_type = bt;
                 c->last_struct_idx = tidx;
+                if (bt == TYPE_TYPED_MAP)
+                  c->last_key_struct_idx = c->narrowings[ni].box_key_type_idx;
               } else if (tidx > 0) {
                 c->last_expr_type = TYPE_STRUCT;
                 c->last_struct_idx = tidx;
@@ -10716,6 +10890,8 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         if (c->locals[local_slot].type == TYPE_STRUCT ||
             is_typed_collection(c->locals[local_slot].type))
           c->last_struct_idx = c->locals[local_slot].struct_type_idx;
+        if (c->locals[local_slot].type == TYPE_TYPED_MAP)
+          c->last_key_struct_idx = c->locals[local_slot].key_struct_idx;
       } else {
         int upvalue_idx = compiler__resolve_upvalue(c, name_val, line,
                                                      node->start.column);
@@ -10755,6 +10931,8 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           if (c->upvalues[upvalue_idx].type == TYPE_STRUCT ||
               is_typed_collection(c->upvalues[upvalue_idx].type))
             c->last_struct_idx = c->upvalues[upvalue_idx].struct_type_idx;
+          if (c->upvalues[upvalue_idx].type == TYPE_TYPED_MAP)
+            c->last_key_struct_idx = c->upvalues[upvalue_idx].key_struct_idx;
         } else {
           GlobalArity* ga = compiler__find_global(c, name_val);
           /* Prelude mode: reject names not in the prelude or source-defined globals */
@@ -10790,6 +10968,8 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           if (global_type == TYPE_STRUCT || is_typed_collection(global_type)) {
             if (ga) c->last_struct_idx = ga->struct_type_idx;
           }
+          if (global_type == TYPE_TYPED_MAP && ga)
+            c->last_key_struct_idx = ga->key_struct_idx;
         }
       }
       break;

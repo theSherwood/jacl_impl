@@ -517,6 +517,293 @@ static int test_typed_map_filter_none(void) {
   TEST_PASS();
 }
 
+/* ===== Struct-Key Typed Map: Construction ===== */
+
+static int test_skey_construct_empty(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "[print [map-len [[Map Id Point]]]]\n",
+    &cap, "0\n"));
+  TEST_PASS();
+}
+
+static int test_skey_construct_elements(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "[print [map-len [[Map Id Point] [Id 1] [Point 10 20] [Id 2] [Point 30 40]]]]\n",
+    &cap, "2\n"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: Get ===== */
+
+static int test_skey_get(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Id Point] [Id 1] [Point 10 20] [Id 2] [Point 30 40]]\n"
+    "def p [map-get $m [Id 1]]\n"
+    "[print $p->x]\n"
+    "[print $p->y]\n"
+    "def q [map-get $m [Id 2]]\n"
+    "[print $q->x]\n"
+    "[print $q->y]\n",
+    &cap, "10\n20\n30\n40\n"));
+  TEST_PASS();
+}
+
+static int test_skey_get_missing(void) {
+  ASSERT(run_err(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Id Point] [Id 1] [Point 10 20]]\n"
+    "[map-get $m [Id 99]]\n",
+    "key not found"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: Has ===== */
+
+static int test_skey_has(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Id Point] [Id 42] [Point 1 2]]\n"
+    "[print [map-has $m [Id 42]]]\n"
+    "[print [map-has $m [Id 99]]]\n",
+    &cap, "true\nfalse\n"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: Set ===== */
+
+static int test_skey_set(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Id Point] [Id 1] [Point 10 20]]\n"
+    "def m2 [map-set $m [Id 2] [Point 30 40]]\n"
+    "[print [map-len $m2]]\n"
+    "def p [map-get $m2 [Id 2]]\n"
+    "[print $p->x]\n"
+    "[print $p->y]\n"
+    "# original unchanged\n"
+    "[print [map-len $m]]\n",
+    &cap, "2\n30\n40\n1\n"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: Remove ===== */
+
+static int test_skey_remove(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Id Point] [Id 1] [Point 10 20] [Id 2] [Point 30 40]]\n"
+    "def m2 [map-remove $m [Id 1]]\n"
+    "[print [map-len $m2]]\n"
+    "[print [map-has $m2 [Id 1]]]\n"
+    "[print [map-has $m2 [Id 2]]]\n",
+    &cap, "1\nfalse\ntrue\n"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: Len ===== */
+
+static int test_skey_len(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "[print [map-len [[Map Id Point]]]]\n"
+    "[print [map-len [[Map Id Point] [Id 1] [Point 1 2]]]]\n"
+    "[print [map-len [[Map Id Point] [Id 1] [Point 1 2] [Id 2] [Point 3 4] [Id 3] [Point 5 6]]]]\n",
+    &cap, "0\n1\n3\n"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: Keys ===== */
+
+static int test_skey_keys(void) {
+  PrintCapture cap;
+  /* struct keys: map-keys returns typed vec */
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Id Point] [Id 1] [Point 10 20] [Id 2] [Point 30 40]]\n"
+    "def ks [map-keys $m]\n"
+    "[print [vec-len $ks]]\n",
+    &cap, "2\n"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: Vals ===== */
+
+static int test_skey_vals(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Id Point] [Id 1] [Point 10 20]]\n"
+    "def vs [map-vals $m]\n"
+    "[print [vec-len $vs]]\n"
+    "def p [vec-get $vs 0]\n"
+    "[print $p->x]\n"
+    "[print $p->y]\n",
+    &cap, "1\n10\n20\n"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: Equality ===== */
+
+static int test_skey_eq_same(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Map Id Point] [Id 1] [Point 10 20]]\n"
+    "def b [[Map Id Point] [Id 1] [Point 10 20]]\n"
+    "[print [== $a $b]]\n",
+    &cap, "true\n"));
+  TEST_PASS();
+}
+
+static int test_skey_eq_different(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Map Id Point] [Id 1] [Point 10 20]]\n"
+    "def b [[Map Id Point] [Id 1] [Point 99 99]]\n"
+    "[print [== $a $b]]\n",
+    &cap, "false\n"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: Print ===== */
+
+static int test_skey_print(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Id Point] [Id 42] [Point 1 2]]\n"
+    "[print $m]\n",
+    &cap, "{Id{n: 42}: Point{x: 1, y: 2}}\n"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: Proc param ===== */
+
+static int test_skey_proc_param(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "proc get-len {[Map Id Point] m} { [map-len $m] }\n"
+    "def m [[Map Id Point] [Id 1] [Point 10 20] [Id 2] [Point 30 40]]\n"
+    "[print [get-len $m]]\n",
+    &cap, "2\n"));
+  TEST_PASS();
+}
+
+static int test_skey_proc_param_get(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "proc lookup {[Map Id Point] m Id k} {\n"
+    "  def p [map-get $m $k]\n"
+    "  $p->x\n"
+    "}\n"
+    "def m [[Map Id Point] [Id 1] [Point 42 99]]\n"
+    "[print [lookup $m [Id 1]]]\n",
+    &cap, "42\n"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: Each HOF ===== */
+
+static int test_skey_each(void) {
+  PrintCapture cap;
+  /* Sum values to avoid order dependence */
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Id Point] [Id 1] [Point 10 20] [Id 2] [Point 30 40]]\n"
+    "mut total 0\n"
+    "proc accum {Id k Point v} { set total [+ $total $v->x] }\n"
+    "[for $m $accum]\n"
+    "[print $total]\n",
+    &cap, "40\n"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: Filter HOF ===== */
+
+static int test_skey_filter(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "proc isbig {Id k Point v} { [> $v->x 10] }\n"
+    "def m [[Map Id Point] [Id 1] [Point 1 2] [Id 2] [Point 30 40]]\n"
+    "def big [filter $m $isbig]\n"
+    "[print [map-len $big]]\n"
+    "def p [map-get $big [Id 2]]\n"
+    "[print $p->x]\n",
+    &cap, "1\n30\n"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: GC safety ===== */
+
+static int test_skey_gc_safety(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Id {i32 n}\n"
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Id Point]]\n"
+    "def m [map-set $m [Id 1] [Point 1 2]]\n"
+    "def m [map-set $m [Id 2] [Point 3 4]]\n"
+    "def m [map-set $m [Id 3] [Point 5 6]]\n"
+    "def m [map-set $m [Id 4] [Point 7 8]]\n"
+    "def m [map-set $m [Id 5] [Point 9 10]]\n"
+    "[print [map-len $m]]\n"
+    "def p [map-get $m [Id 1]]\n"
+    "[print $p->x]\n"
+    "def q [map-get $m [Id 5]]\n"
+    "[print $q->y]\n",
+    &cap, "5\n1\n10\n"));
+  TEST_PASS();
+}
+
+/* ===== Struct-Key Typed Map: Wide struct key ===== */
+
+static int test_skey_wide_key(void) {
+  PrintCapture cap;
+  /* Key has 4 fields = 2 slots wide */
+  ASSERT(run_ok(
+    "struct Coord {i32 x, i32 y, i32 z, i32 w}\n"
+    "struct Val {i32 n}\n"
+    "def m [[Map Coord Val] [Coord 1 2 3 4] [Val 42]]\n"
+    "[print [map-len $m]]\n"
+    "def v [map-get $m [Coord 1 2 3 4]]\n"
+    "[print $v->n]\n"
+    "[print [map-has $m [Coord 1 2 3 4]]]\n"
+    "[print [map-has $m [Coord 9 9 9 9]]]\n",
+    &cap, "1\n42\ntrue\nfalse\n"));
+  TEST_PASS();
+}
+
 /* ===== Main ===== */
 
 int main(void) {
@@ -565,6 +852,27 @@ int main(void) {
   RUN(test_typed_map_transform);
   RUN(test_typed_map_filter);
   RUN(test_typed_map_filter_none);
+
+  // struct-key tests
+  RUN(test_skey_construct_empty);
+  RUN(test_skey_construct_elements);
+  RUN(test_skey_get);
+  RUN(test_skey_get_missing);
+  RUN(test_skey_has);
+  RUN(test_skey_set);
+  RUN(test_skey_remove);
+  RUN(test_skey_len);
+  RUN(test_skey_keys);
+  RUN(test_skey_vals);
+  RUN(test_skey_eq_same);
+  RUN(test_skey_eq_different);
+  RUN(test_skey_print);
+  RUN(test_skey_proc_param);
+  RUN(test_skey_proc_param_get);
+  RUN(test_skey_each);
+  RUN(test_skey_filter);
+  RUN(test_skey_gc_safety);
+  RUN(test_skey_wide_key);
 
   printf("\n%d/%d passed\n", pass, pass + fail);
   return fail > 0 ? 1 : 0;

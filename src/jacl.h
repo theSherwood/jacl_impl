@@ -1092,6 +1092,7 @@ typedef struct {
   bool      captures_mutable;
   JaclType  type;
   uint32_t  struct_type_idx;
+  uint32_t  key_struct_idx;   /* key struct index for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
   JaclType  return_type;
   uint32_t  return_struct_idx;
   JaclType* param_types;
@@ -1109,6 +1110,7 @@ typedef struct {
   bool      prelude_is_native_fn;
   JaclType  type;
   uint32_t  struct_type_idx;
+  uint32_t  key_struct_idx;   /* key struct index for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
   JaclType  return_type;
   uint32_t  return_struct_idx;
   JaclType  param_types[COMPILER_MAX_PROC_PARAMS];
@@ -1123,6 +1125,7 @@ typedef struct {
   bool      captures_mutable;
   JaclType  type;
   uint32_t  struct_type_idx;
+  uint32_t  key_struct_idx;   /* key struct index for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
   uint32_t  scope_mark;
   uint16_t  width;      /* JaclVal slot count: 1 for scalars, N for inline structs */
   bool      is_inline;  /* true if capturing an inline struct (raw bytes, not heap) */
@@ -1250,6 +1253,7 @@ struct Compiler {
   JaclType         expected_type;
   JaclType         last_expr_type;
   uint32_t         last_struct_idx;
+  uint32_t         last_key_struct_idx; /* key struct type for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
   JaclType         return_type;
   ModuleCache*     module_cache;
   Module*          current_module;
@@ -1277,6 +1281,7 @@ struct Compiler {
   struct {
     uint16_t local_slot;     /* which local variable is narrowed */
     uint32_t box_type_idx;   /* struct element type_idx (0=dyn, >0=struct/collection element) */
+    uint32_t box_key_type_idx; /* key struct idx for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
     JaclType box_type;       /* TYPE_STRUCT, TYPE_TYPED_VEC, TYPE_TYPED_MAP, or TYPE_DYN */
   } narrowings[8];
   uint32_t             narrowing_count;
