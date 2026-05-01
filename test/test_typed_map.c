@@ -332,6 +332,33 @@ static int test_typed_map_reject_dyn_proc_param(void) {
   TEST_PASS();
 }
 
+/* ===== Typed Map: Typed proc parameters ===== */
+
+static int test_typed_map_proc_param(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc get-len {[Map Point] m} { [map-len $m] }\n"
+    "def m [[Map Point] \"a\" [Point 1 2] \"b\" [Point 3 4]]\n"
+    "[print [get-len $m]]",
+    &cap, "2\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_proc_param_get(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc lookup-x {[Map Point] m} {\n"
+    "  def p [map-get $m \"a\"]\n"
+    "  $p->x\n"
+    "}\n"
+    "def m [[Map Point] \"a\" [Point 42 99]]\n"
+    "[print [lookup-x $m]]",
+    &cap, "42\n"));
+  TEST_PASS();
+}
+
 /* ===== Typed Map: Box round-trip ===== */
 
 static int test_typed_map_box_roundtrip(void) {
@@ -420,6 +447,8 @@ int main(void) {
   RUN(test_typed_map_eq_empty);
   RUN(test_typed_map_reject_in_dyn_vec);
   RUN(test_typed_map_reject_dyn_proc_param);
+  RUN(test_typed_map_proc_param);
+  RUN(test_typed_map_proc_param_get);
   RUN(test_typed_map_box_roundtrip);
   RUN(test_typed_map_box_wrong_type);
   RUN(test_typed_map_box_in_dyn_vec);

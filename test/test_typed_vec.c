@@ -293,6 +293,96 @@ static int test_typed_vec_reject_dyn_proc_param(void) {
   TEST_PASS();
 }
 
+/* ===== Typed Vec: Typed proc parameters ===== */
+
+static int test_typed_vec_proc_param(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc get-len {[Vec Point] pts} { [vec-len $pts] }\n"
+    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "[print [get-len $points]]",
+    &cap, "2\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_proc_param_get(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc first-x {[Vec Point] pts} {\n"
+    "  def p [vec-get $pts 0]\n"
+    "  $p->x\n"
+    "}\n"
+    "def points [[Vec Point] [Point 42 99]]\n"
+    "[print [first-x $points]]",
+    &cap, "42\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_proc_param_reject_dyn(void) {
+  /* Passing a dyn value to a typed collection param should error */
+  ASSERT(run_err(
+    "struct Point {i32 x, i32 y}\n"
+    "proc get-len {[Vec Point] pts} { [vec-len $pts] }\n"
+    "def v [vec 1 2 3]\n"
+    "[get-len $v]",
+    "type error"));
+  TEST_PASS();
+}
+
+/* ===== Typed Vec: For loop iteration ===== */
+
+static int test_typed_vec_for_loop(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "for $points p {\n"
+    "  [print $p->x]\n"
+    "}",
+    &cap, "10\n30\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_for_loop_field_access(void) {
+  PrintCapture cap;
+  /* Print each element's y field */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6]]\n"
+    "for $points p {\n"
+    "  [print $p->y]\n"
+    "}",
+    &cap, "2\n4\n6\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_for_loop_wide_struct(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
+    "def rects [[Vec Rect] [Rect 1 2 3 4] [Rect 5 6 7 8]]\n"
+    "for $rects r {\n"
+    "  [print $r->w]\n"
+    "}",
+    &cap, "3\n7\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_for_loop_empty(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point]]\n"
+    "for $points p {\n"
+    "  [print $p->x]\n"
+    "}\n"
+    "[print done]",
+    &cap, "done\n"));
+  TEST_PASS();
+}
+
 /* ===== Typed Vec: Box round-trip ===== */
 
 static int test_typed_vec_box_roundtrip(void) {
@@ -379,6 +469,13 @@ int main(void) {
   RUN(test_typed_vec_reject_in_dyn_vec);
   RUN(test_typed_vec_reject_in_dyn_map);
   RUN(test_typed_vec_reject_dyn_proc_param);
+  RUN(test_typed_vec_proc_param);
+  RUN(test_typed_vec_proc_param_get);
+  RUN(test_typed_vec_proc_param_reject_dyn);
+  RUN(test_typed_vec_for_loop);
+  RUN(test_typed_vec_for_loop_field_access);
+  RUN(test_typed_vec_for_loop_wide_struct);
+  RUN(test_typed_vec_for_loop_empty);
   RUN(test_typed_vec_box_roundtrip);
   RUN(test_typed_vec_box_wrong_type);
   RUN(test_typed_vec_box_in_dyn_vec);

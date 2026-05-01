@@ -6875,6 +6875,50 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     for (uint32_t fi = 0; fi < flat_count; fi++) {
       AstNode* elem = flat_elems[fi];
+
+      /* Check for compound type expression: [Vec Type] or [Map Type] */
+      if (elem->type == AST_COMMAND && elem->data.command.head) {
+        AstNode* th = elem->data.command.head;
+        bool is_vec = (th->type == AST_LIT_STRING && th->data.lit_string.length == 3
+                       && memcmp(th->data.lit_string.value, "Vec", 3) == 0);
+        bool is_map = (th->type == AST_LIT_STRING && th->data.lit_string.length == 3
+                       && memcmp(th->data.lit_string.value, "Map", 3) == 0);
+        if ((is_vec || is_map) &&
+            elem->data.command.arg_count == 1 &&
+            elem->data.command.args[0]->type == AST_LIT_STRING) {
+          const char* ename = elem->data.command.args[0]->data.lit_string.value;
+          uint32_t elen = elem->data.command.args[0]->data.lit_string.length;
+          uint32_t elem_idx = struct_registry__find(compiler__get_struct_registry(c), ename, elen);
+          if (elem_idx == UINT32_MAX) {
+            compiler__error(c, line, col, "unknown element type in typed collection parameter");
+            return;
+          }
+          fi++;
+          if (fi >= flat_count) {
+            compiler__error(c, line, col, "expected parameter name after type annotation");
+            return;
+          }
+          elem = flat_elems[fi];
+          if (elem->type != AST_LIT_STRING || elem->data.lit_string.length > 128) {
+            compiler__error(c, line, col, "proc parameter name invalid");
+            return;
+          }
+          if (param_count >= COMPILER_MAX_PROC_PARAMS) {
+            compiler__error(c, line, col, "too many proc parameters");
+            return;
+          }
+          param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table,
+              elem->data.lit_string.value, elem->data.lit_string.length);
+          param_types_arr[param_count] = is_vec ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
+          param_struct_idxs[param_count] = elem_idx;
+          param_scope_marks[param_count] = elem->scope_mark;
+          param_count++;
+          continue;
+        }
+        compiler__error(c, line, col, "proc parameter must be a name or type keyword");
+        return;
+      }
+
       if (elem->type != AST_LIT_STRING) {
         compiler__error(c, line, col, "proc parameter must be a name or type keyword");
         return;
@@ -7068,7 +7112,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         body_compiler.current_scope_mark = prev_mark;
         body_compiler.locals[body_compiler.local_count - 1].is_param = true;
         body_compiler.locals[body_compiler.local_count - 1].type = param_types_arr[i];
-        if (param_types_arr[i] == TYPE_STRUCT)
+        if (param_types_arr[i] == TYPE_STRUCT || is_typed_collection(param_types_arr[i]))
           body_compiler.locals[body_compiler.local_count - 1].struct_type_idx = param_struct_idxs[i];
       }
     }
@@ -7714,10 +7758,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* ====== Vector-based inlined for loop (original path) ======
        Hidden locals: __col, __len, __idx, $it/name */
 
+    /* Track typed vec element type for the loop binding */
+    bool is_typed_vec_loop = (col_type == TYPE_TYPED_VEC);
+    uint32_t elem_struct_idx = c->last_struct_idx;
+
     /* Compute length → local __len */
     compiler__emit_byte(c, OP_GET_LOCAL, line);
     compiler__emit_byte(c, (uint8_t)(c->local_count - 1), line);
-    compiler__emit_byte(c, OP_VEC_LEN, line);
+    compiler__emit_byte(c, is_typed_vec_loop ? OP_TYPED_VEC_LEN : OP_VEC_LEN, line);
     compiler__add_local(c, jacl_inline_string("__len", 5), line, col);
 
     /* Counter → local __idx (starts at 0) */
@@ -7728,6 +7776,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_byte(c, OP_NIL, line);
     JaclVal bind_val = compiler__name_val(c->heap, c->intern_table, bind_name, bind_name_len);
     compiler__add_local(c, bind_val, line, col);
+    if (is_typed_vec_loop) {
+      c->locals[c->local_count - 1].type = TYPE_STRUCT;
+      c->locals[c->local_count - 1].struct_type_idx = elem_struct_idx;
+    }
 
     uint8_t len_slot = (uint8_t)(saved_local_count + 1);
     uint8_t idx_slot = (uint8_t)(saved_local_count + 2);
@@ -7759,7 +7811,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_byte(c, col_slot, line);
     compiler__emit_byte(c, OP_GET_LOCAL, line);
     compiler__emit_byte(c, idx_slot, line);
-    compiler__emit_byte(c, OP_VEC_GET, line);
+    if (is_typed_vec_loop) {
+      compiler__emit_byte(c, OP_TYPED_VEC_GET, line);
+      compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
+    } else {
+      compiler__emit_byte(c, OP_VEC_GET, line);
+    }
     compiler__emit_byte(c, OP_SET_LOCAL, line);
     compiler__emit_byte(c, elem_slot, line);
     compiler__emit_byte(c, OP_POP, line);  /* discard SET_LOCAL's TOS */

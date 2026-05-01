@@ -1685,12 +1685,18 @@ AstNode* parser__parse_proc_params(Parser* p) {
     if (parser__at_end(p) || parser__peek(p)->type == TOKEN_RBRACE) break;
 
     /* Collect all words within one parameter slot (up to comma/brace).
-       Each slot is "name", "type name", or "& name". */
+       Each slot is "name", "type name", "& name", or "[Vec Type] name". */
     while (!parser__at_end(p) &&
            parser__peek(p)->type != TOKEN_COMMA &&
            parser__peek(p)->type != TOKEN_RBRACE &&
            parser__peek(p)->type != TOKEN_NEWLINE) {
-      AstNode* elem = parser__parse_atom(p);
+      AstNode* elem;
+      if (parser__peek(p)->type == TOKEN_LBRACKET) {
+        /* Bracket expression for compound type: [Vec Point], [Map Point] */
+        elem = parser__parse_expr(p);
+      } else {
+        elem = parser__parse_atom(p);
+      }
       if (elem == NULL) {
         return parser__error(p, "expected parameter name or type", parser__peek(p));
       }
