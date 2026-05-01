@@ -8468,13 +8468,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       uint32_t elem_type_idx = c->last_struct_idx;
       compiler__compile_node(c, args[1]);
-      if (c->want_inline_struct) {
-        compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
-        c->last_is_inline = true;
-      } else {
-        compiler__emit_byte(c, OP_TYPED_VEC_GET, line);
-      }
+      /* Phase 5f: always use inline get — reification at boundaries handles heap needs */
+      compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
+      c->last_is_inline = true;
       c->last_expr_type = TYPE_STRUCT;
       c->last_struct_idx = elem_type_idx;
       return;
@@ -8679,14 +8676,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           c->last_is_inline = false;
         }
       }
-      if (c->want_inline_struct) {
-        compiler__emit_byte(c, OP_TYPED_MAP_GET_INLINE, line);
-        c->last_is_inline = true;
-      } else {
-        compiler__emit_byte(c, OP_TYPED_MAP_GET, line);
-      }
+      /* Phase 5f: always use inline get — reification at boundaries handles heap needs */
+      compiler__emit_byte(c, OP_TYPED_MAP_GET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
+      c->last_is_inline = true;
       c->last_expr_type = TYPE_STRUCT;
       c->last_struct_idx = elem_type_idx;
       return;
