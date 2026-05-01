@@ -864,6 +864,7 @@ JaclVal runtime__create_resolve_closure(ThreadHeap *heap, arena_t *arena,
     cl->chunk.arena       = arena;
 
     cl->param_count   = 1;
+    cl->param_total_slots = 1;
     cl->upvalue_count = 1;
     cl->upvalues      = (JaclVal *)(cl + 1); /* trailing array */
     cl->upvalues[0]   = future_val;
@@ -915,6 +916,7 @@ JaclVal runtime__create_parallel_k(ThreadHeap *heap, arena_t *arena,
     cl->chunk.arena       = arena;
 
     cl->param_count   = 1;
+    cl->param_total_slots = 1;
     cl->upvalue_count = 2;
     cl->upvalues      = (JaclVal *)(cl + 1);
     cl->upvalues[0]   = agg_val;
@@ -1029,6 +1031,7 @@ JaclVal runtime__create_race_k(ThreadHeap *heap, arena_t *arena,
     cl->chunk.arena       = arena;
 
     cl->param_count   = 1;
+    cl->param_total_slots = 1;
     cl->upvalue_count = 1;
     cl->upvalues      = (JaclVal *)(cl + 1);
     cl->upvalues[0]   = agg_val;

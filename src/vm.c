@@ -2448,7 +2448,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                          (int)closure->min_args, (int)arg_count);
             return VM_RUNTIME_ERROR;
           }
-        } else if (arg_count != closure->param_count) {
+        } else if (arg_count != closure->param_total_slots) {
+          /* Phase 5a: arity check uses param_total_slots (includes multi-slot struct params) */
           vm__set_error(vm, "expected %d arguments but got %d",
                        (int)closure->param_count, (int)arg_count);
           return VM_RUNTIME_ERROR;
@@ -2530,7 +2531,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                          (int)closure->min_args, (int)arg_count);
             return VM_RUNTIME_ERROR;
           }
-        } else if (arg_count != closure->param_count) {
+        } else if (arg_count != closure->param_total_slots) {
+          /* Phase 5a: arity check uses param_total_slots */
           vm__set_error(vm, "expected %d arguments but got %d",
                        (int)closure->param_count, (int)arg_count);
           return VM_RUNTIME_ERROR;
@@ -2608,6 +2610,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                               sizeof(JaclClosure) + uv_bytes);
         cl->chunk        = template->chunk;
         cl->param_count  = template->param_count;
+        cl->param_total_slots = template->param_total_slots;
+        cl->has_inline_params = template->has_inline_params;
         cl->param_names  = template->param_names;
         cl->name         = template->name;
         cl->upvalue_count = template->upvalue_count;
@@ -6341,6 +6345,33 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_STRUCT_EXPAND: {
+        /* Phase 5a: Pop heap JaclStruct from stack top, push raw bytes as N inline slots.
+           Operand: uint16_t type_idx. */
+        uint16_t type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u for expand", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        /* Pop the heap struct pointer */
+        JaclVal heap_val = vm->stack[--vm->stack_top];
+        if (!jacl_is_struct(heap_val)) {
+          vm__set_error(vm, "OP_STRUCT_EXPAND expects struct value");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclStruct* src = jacl_as_struct_ptr(heap_val);
+        /* Push N inline slots (zero-fill then copy raw bytes) */
+        memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+        memcpy(&vm->stack[vm->stack_top], src->data, sdef->total_size);
+        for (uint32_t si = 0; si < width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+        }
+        vm->stack_top += width;
+        break;
+      }
+
       case OP_STRUCT_EQ_INLINE: {
         /* US-013: Compare two stack-resident inline structs via memcmp.
            Operands: uint8_t base_a, uint8_t base_b, uint16_t total_size.
@@ -9331,20 +9362,32 @@ interpret_done:
           }
           jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(coll_val);
           uint32_t count = jacl_typed_vec_count(tvec);
+          uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+          /* Phase 5a: push inline if closure has inline struct params */
+          bool push_inline = closure->has_inline_params;
 
           for (uint32_t i = 0; i < count; i++) {
             const JaclVal* ptr = jacl_typed_vec_get_ptr(tvec, i);
-            gc__current_heap = &vm->heap;
-            JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                   sizeof(JaclStruct) + sdef->total_size);
-            s->type_idx = type_idx;
-            s->total_size = sdef->total_size;
-            memcpy(s->data, ptr, sdef->total_size);
 
             result = vm__push(vm, closure_val);
             if (result != VM_OK) return result;
-            result = vm__push(vm, jacl_struct_val(s));
-            if (result != VM_OK) return result;
+            if (push_inline) {
+              memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+              memcpy(&vm->stack[vm->stack_top], ptr, sdef->total_size);
+              for (uint32_t si = 0; si < width; si++)
+                BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+              vm->stack_top += width;
+            } else {
+              /* Untyped callback (e.g. lambda $it): materialize to heap struct */
+              gc__current_heap = &vm->heap;
+              JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                     sizeof(JaclStruct) + sdef->total_size);
+              s->type_idx = type_idx;
+              s->total_size = sdef->total_size;
+              memcpy(s->data, ptr, sdef->total_size);
+              result = vm__push(vm, jacl_struct_val(s));
+              if (result != VM_OK) return result;
+            }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
               vm__set_error(vm, "stack overflow");
@@ -9354,7 +9397,7 @@ interpret_done:
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = closure;
             cf->return_ip  = vm->ip;
-            cf->stack_base = vm->stack_top - 1;
+            cf->stack_base = vm->stack_top - closure->param_total_slots;
             cf->chunk      = &closure->chunk;
 
             uint8_t* saved_ip = vm->ip;
@@ -9381,6 +9424,9 @@ interpret_done:
           }
           jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(coll_val);
           StructTypeDef* kdef = (key_type_idx != 0xFFFF) ? vm->struct_registry->defs[key_type_idx] : NULL;
+          uint32_t kwidth = kdef ? ((kdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal)) : 0;
+          uint32_t vwidth = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+          bool push_inline = closure->has_inline_params;
           jacl_typed_map_iter it = jacl_typed_map_iter_init(tmap);
           jacl_typed_map_iter_result ir;
 
@@ -9388,33 +9434,46 @@ interpret_done:
             ir = jacl_typed_map_next_leaf(&it);
             if (ir.done) break;
 
-            JaclVal key_arg;
-            if (kdef) {
-              /* Struct key: materialize to heap struct */
+            result = vm__push(vm, closure_val);
+            if (result != VM_OK) return result;
+            /* Push key: inline for struct-typed param, heap struct or dyn otherwise */
+            if (push_inline && kdef) {
+              memset(&vm->stack[vm->stack_top], 0, kwidth * sizeof(JaclVal));
+              memcpy(&vm->stack[vm->stack_top], ir.item->slots, kdef->total_size);
+              for (uint32_t si = 0; si < kwidth; si++)
+                BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+              vm->stack_top += kwidth;
+            } else if (kdef) {
               gc__current_heap = &vm->heap;
               JaclStruct* ks = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
                                                       sizeof(JaclStruct) + kdef->total_size);
               ks->type_idx = key_type_idx;
               ks->total_size = kdef->total_size;
               memcpy(ks->data, ir.item->slots, kdef->total_size);
-              key_arg = jacl_struct_val(ks);
+              result = vm__push(vm, jacl_struct_val(ks));
+              if (result != VM_OK) return result;
             } else {
-              key_arg = jacl_typed_map_key_from_leaf(ir.item);
+              result = vm__push(vm, jacl_typed_map_key_from_leaf(ir.item));
+              if (result != VM_OK) return result;
             }
+            /* Push value: inline for struct-typed param, heap struct otherwise */
             const JaclVal* val_ptr = jacl_typed_map_value_ptr_from_leaf(ir.item);
-            gc__current_heap = &vm->heap;
-            JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                   sizeof(JaclStruct) + sdef->total_size);
-            s->type_idx = type_idx;
-            s->total_size = sdef->total_size;
-            memcpy(s->data, val_ptr, sdef->total_size);
-
-            result = vm__push(vm, closure_val);
-            if (result != VM_OK) return result;
-            result = vm__push(vm, key_arg);
-            if (result != VM_OK) return result;
-            result = vm__push(vm, jacl_struct_val(s));
-            if (result != VM_OK) return result;
+            if (push_inline) {
+              memset(&vm->stack[vm->stack_top], 0, vwidth * sizeof(JaclVal));
+              memcpy(&vm->stack[vm->stack_top], val_ptr, sdef->total_size);
+              for (uint32_t si = 0; si < vwidth; si++)
+                BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+              vm->stack_top += vwidth;
+            } else {
+              gc__current_heap = &vm->heap;
+              JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                     sizeof(JaclStruct) + sdef->total_size);
+              s->type_idx = type_idx;
+              s->total_size = sdef->total_size;
+              memcpy(s->data, val_ptr, sdef->total_size);
+              result = vm__push(vm, jacl_struct_val(s));
+              if (result != VM_OK) return result;
+            }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
               vm__set_error(vm, "stack overflow");
@@ -9424,7 +9483,7 @@ interpret_done:
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = closure;
             cf->return_ip  = vm->ip;
-            cf->stack_base = vm->stack_top - 2;
+            cf->stack_base = vm->stack_top - closure->param_total_slots;
             cf->chunk      = &closure->chunk;
 
             uint8_t* saved_ip = vm->ip;
@@ -9478,22 +9537,32 @@ interpret_done:
           }
           jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(coll_val);
           uint32_t count = jacl_typed_vec_count(tvec);
+          uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+          bool push_inline = closure->has_inline_params;
           gc__current_heap = &vm->heap;
           jacl_vec_root* result_vec = jacl_vec_empty();
 
           for (uint32_t i = 0; i < count; i++) {
             const JaclVal* ptr = jacl_typed_vec_get_ptr(tvec, i);
-            gc__current_heap = &vm->heap;
-            JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                   sizeof(JaclStruct) + sdef->total_size);
-            s->type_idx = type_idx;
-            s->total_size = sdef->total_size;
-            memcpy(s->data, ptr, sdef->total_size);
 
             result = vm__push(vm, closure_val);
             if (result != VM_OK) return result;
-            result = vm__push(vm, jacl_struct_val(s));
-            if (result != VM_OK) return result;
+            if (push_inline) {
+              memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+              memcpy(&vm->stack[vm->stack_top], ptr, sdef->total_size);
+              for (uint32_t si = 0; si < width; si++)
+                BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+              vm->stack_top += width;
+            } else {
+              gc__current_heap = &vm->heap;
+              JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                     sizeof(JaclStruct) + sdef->total_size);
+              s->type_idx = type_idx;
+              s->total_size = sdef->total_size;
+              memcpy(s->data, ptr, sdef->total_size);
+              result = vm__push(vm, jacl_struct_val(s));
+              if (result != VM_OK) return result;
+            }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
               vm__set_error(vm, "stack overflow");
@@ -9503,7 +9572,7 @@ interpret_done:
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = closure;
             cf->return_ip  = vm->ip;
-            cf->stack_base = vm->stack_top - 1;
+            cf->stack_base = vm->stack_top - closure->param_total_slots;
             cf->chunk      = &closure->chunk;
 
             uint8_t* saved_ip = vm->ip;
@@ -9536,6 +9605,9 @@ interpret_done:
           }
           jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(coll_val);
           StructTypeDef* kdef = (key_type_idx != 0xFFFF) ? vm->struct_registry->defs[key_type_idx] : NULL;
+          uint32_t kwidth = kdef ? ((kdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal)) : 0;
+          uint32_t vwidth = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+          bool push_inline = closure->has_inline_params;
           jacl_typed_map_iter it = jacl_typed_map_iter_init(tmap);
           jacl_typed_map_iter_result ir;
           gc__current_heap = &vm->heap;
@@ -9545,32 +9617,44 @@ interpret_done:
             ir = jacl_typed_map_next_leaf(&it);
             if (ir.done) break;
 
-            JaclVal key_arg;
-            if (kdef) {
+            result = vm__push(vm, closure_val);
+            if (result != VM_OK) return result;
+            if (push_inline && kdef) {
+              memset(&vm->stack[vm->stack_top], 0, kwidth * sizeof(JaclVal));
+              memcpy(&vm->stack[vm->stack_top], ir.item->slots, kdef->total_size);
+              for (uint32_t si = 0; si < kwidth; si++)
+                BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+              vm->stack_top += kwidth;
+            } else if (kdef) {
               gc__current_heap = &vm->heap;
               JaclStruct* ks = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
                                                       sizeof(JaclStruct) + kdef->total_size);
               ks->type_idx = key_type_idx;
               ks->total_size = kdef->total_size;
               memcpy(ks->data, ir.item->slots, kdef->total_size);
-              key_arg = jacl_struct_val(ks);
+              result = vm__push(vm, jacl_struct_val(ks));
+              if (result != VM_OK) return result;
             } else {
-              key_arg = jacl_typed_map_key_from_leaf(ir.item);
+              result = vm__push(vm, jacl_typed_map_key_from_leaf(ir.item));
+              if (result != VM_OK) return result;
             }
             const JaclVal* val_ptr = jacl_typed_map_value_ptr_from_leaf(ir.item);
-            gc__current_heap = &vm->heap;
-            JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                   sizeof(JaclStruct) + sdef->total_size);
-            s->type_idx = type_idx;
-            s->total_size = sdef->total_size;
-            memcpy(s->data, val_ptr, sdef->total_size);
-
-            result = vm__push(vm, closure_val);
-            if (result != VM_OK) return result;
-            result = vm__push(vm, key_arg);
-            if (result != VM_OK) return result;
-            result = vm__push(vm, jacl_struct_val(s));
-            if (result != VM_OK) return result;
+            if (push_inline) {
+              memset(&vm->stack[vm->stack_top], 0, vwidth * sizeof(JaclVal));
+              memcpy(&vm->stack[vm->stack_top], val_ptr, sdef->total_size);
+              for (uint32_t si = 0; si < vwidth; si++)
+                BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+              vm->stack_top += vwidth;
+            } else {
+              gc__current_heap = &vm->heap;
+              JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                     sizeof(JaclStruct) + sdef->total_size);
+              s->type_idx = type_idx;
+              s->total_size = sdef->total_size;
+              memcpy(s->data, val_ptr, sdef->total_size);
+              result = vm__push(vm, jacl_struct_val(s));
+              if (result != VM_OK) return result;
+            }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
               vm__set_error(vm, "stack overflow");
@@ -9580,7 +9664,7 @@ interpret_done:
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = closure;
             cf->return_ip  = vm->ip;
-            cf->stack_base = vm->stack_top - 2;
+            cf->stack_base = vm->stack_top - closure->param_total_slots;
             cf->chunk      = &closure->chunk;
 
             uint8_t* saved_ip = vm->ip;
@@ -9639,22 +9723,31 @@ interpret_done:
           }
           jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(coll_val);
           uint32_t count = jacl_typed_vec_count(tvec);
+          bool push_inline = closure->has_inline_params;
           gc__current_heap = &vm->heap;
           jacl_typed_vec_root* result_tvec = jacl_typed_vec_empty_strided(width);
 
           for (uint32_t i = 0; i < count; i++) {
             const JaclVal* ptr = jacl_typed_vec_get_ptr(tvec, i);
-            gc__current_heap = &vm->heap;
-            JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                   sizeof(JaclStruct) + sdef->total_size);
-            s->type_idx = type_idx;
-            s->total_size = sdef->total_size;
-            memcpy(s->data, ptr, sdef->total_size);
 
             result = vm__push(vm, closure_val);
             if (result != VM_OK) return result;
-            result = vm__push(vm, jacl_struct_val(s));
-            if (result != VM_OK) return result;
+            if (push_inline) {
+              memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+              memcpy(&vm->stack[vm->stack_top], ptr, sdef->total_size);
+              for (uint32_t si = 0; si < width; si++)
+                BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+              vm->stack_top += width;
+            } else {
+              gc__current_heap = &vm->heap;
+              JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                     sizeof(JaclStruct) + sdef->total_size);
+              s->type_idx = type_idx;
+              s->total_size = sdef->total_size;
+              memcpy(s->data, ptr, sdef->total_size);
+              result = vm__push(vm, jacl_struct_val(s));
+              if (result != VM_OK) return result;
+            }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
               vm__set_error(vm, "stack overflow");
@@ -9664,7 +9757,7 @@ interpret_done:
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = closure;
             cf->return_ip  = vm->ip;
-            cf->stack_base = vm->stack_top - 1;
+            cf->stack_base = vm->stack_top - closure->param_total_slots;
             cf->chunk      = &closure->chunk;
 
             uint8_t* saved_ip = vm->ip;
@@ -9700,7 +9793,9 @@ interpret_done:
           }
           jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(coll_val);
           StructTypeDef* kdef = (key_type_idx != 0xFFFF) ? vm->struct_registry->defs[key_type_idx] : NULL;
-          uint32_t key_stride = kdef ? vm__struct_width(kdef) : 1;
+          uint32_t kwidth = kdef ? vm__struct_width(kdef) : 0;
+          uint32_t key_stride = kdef ? kwidth : 1;
+          bool push_inline = closure->has_inline_params;
           jacl_typed_map_iter it = jacl_typed_map_iter_init(tmap);
           jacl_typed_map_iter_result ir;
           gc__current_heap = &vm->heap;
@@ -9710,32 +9805,44 @@ interpret_done:
             ir = jacl_typed_map_next_leaf(&it);
             if (ir.done) break;
 
-            JaclVal key_arg;
-            if (kdef) {
+            result = vm__push(vm, closure_val);
+            if (result != VM_OK) return result;
+            if (push_inline && kdef) {
+              memset(&vm->stack[vm->stack_top], 0, kwidth * sizeof(JaclVal));
+              memcpy(&vm->stack[vm->stack_top], ir.item->slots, kdef->total_size);
+              for (uint32_t si = 0; si < kwidth; si++)
+                BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+              vm->stack_top += kwidth;
+            } else if (kdef) {
               gc__current_heap = &vm->heap;
               JaclStruct* ks = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
                                                       sizeof(JaclStruct) + kdef->total_size);
               ks->type_idx = key_type_idx;
               ks->total_size = kdef->total_size;
               memcpy(ks->data, ir.item->slots, kdef->total_size);
-              key_arg = jacl_struct_val(ks);
+              result = vm__push(vm, jacl_struct_val(ks));
+              if (result != VM_OK) return result;
             } else {
-              key_arg = jacl_typed_map_key_from_leaf(ir.item);
+              result = vm__push(vm, jacl_typed_map_key_from_leaf(ir.item));
+              if (result != VM_OK) return result;
             }
             const JaclVal* val_ptr = jacl_typed_map_value_ptr_from_leaf(ir.item);
-            gc__current_heap = &vm->heap;
-            JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                   sizeof(JaclStruct) + sdef->total_size);
-            s->type_idx = type_idx;
-            s->total_size = sdef->total_size;
-            memcpy(s->data, val_ptr, sdef->total_size);
-
-            result = vm__push(vm, closure_val);
-            if (result != VM_OK) return result;
-            result = vm__push(vm, key_arg);
-            if (result != VM_OK) return result;
-            result = vm__push(vm, jacl_struct_val(s));
-            if (result != VM_OK) return result;
+            if (push_inline) {
+              memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+              memcpy(&vm->stack[vm->stack_top], val_ptr, sdef->total_size);
+              for (uint32_t si = 0; si < width; si++)
+                BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+              vm->stack_top += width;
+            } else {
+              gc__current_heap = &vm->heap;
+              JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                     sizeof(JaclStruct) + sdef->total_size);
+              s->type_idx = type_idx;
+              s->total_size = sdef->total_size;
+              memcpy(s->data, val_ptr, sdef->total_size);
+              result = vm__push(vm, jacl_struct_val(s));
+              if (result != VM_OK) return result;
+            }
 
             if (vm->frame_count >= VM_FRAMES_MAX) {
               vm__set_error(vm, "stack overflow");
@@ -9745,7 +9852,7 @@ interpret_done:
             CallFrame* cf = &vm->frames[vm->frame_count++];
             cf->closure    = closure;
             cf->return_ip  = vm->ip;
-            cf->stack_base = vm->stack_top - 2;
+            cf->stack_base = vm->stack_top - closure->param_total_slots;
             cf->chunk      = &closure->chunk;
 
             uint8_t* saved_ip = vm->ip;

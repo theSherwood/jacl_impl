@@ -2068,8 +2068,10 @@ static int test_call_with_args(void) {
 
   /* Create a 2-arg closure: GET_LOCAL 0, GET_LOCAL 1, ADD, RETURN */
   JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
+  memset(cl, 0, sizeof(JaclClosure));
   chunk_init(&cl->chunk, &arena);
   cl->param_count = 2;
+  cl->param_total_slots = 2;
   cl->param_names = (JaclVal*)arena_alloc(&arena, 2 * sizeof(JaclVal));
   cl->param_names[0] = jacl_inline_string("a", 1);
   cl->param_names[1] = jacl_inline_string("b", 1);
@@ -2151,6 +2153,7 @@ static int test_call_arg_mismatch(void) {
   JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
   chunk_init(&cl->chunk, &arena);
   cl->param_count = 2;
+  cl->param_total_slots = 2;
   cl->param_names = NULL;
   cl->upvalue_count = 0;
   cl->upvalues = NULL;
@@ -2239,6 +2242,7 @@ static int test_tail_call_basic(void) {
   JaclClosure* inner = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
   chunk_init(&inner->chunk, &arena);
   inner->param_count = 1;
+  inner->param_total_slots = 1;
   inner->param_names = (JaclVal*)arena_alloc(&arena, sizeof(JaclVal));
   inner->param_names[0] = jacl_inline_string("x", 1);
   inner->upvalue_count = 0;
@@ -2257,6 +2261,7 @@ static int test_tail_call_basic(void) {
   JaclClosure* outer = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
   chunk_init(&outer->chunk, &arena);
   outer->param_count = 1;
+  outer->param_total_slots = 1;
   outer->param_names = (JaclVal*)arena_alloc(&arena, sizeof(JaclVal));
   outer->param_names[0] = jacl_inline_string("x", 1);
   outer->upvalue_count = 0;
@@ -2324,6 +2329,7 @@ static int test_tail_call_no_frame_overflow(void) {
   JaclClosure* cl = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
   chunk_init(&cl->chunk, &arena);
   cl->param_count = 1;
+  cl->param_total_slots = 1;
   cl->param_names = (JaclVal*)arena_alloc(&arena, sizeof(JaclVal));
   cl->param_names[0] = jacl_inline_string("n", 1);
   cl->upvalue_count = 0;
@@ -2439,6 +2445,7 @@ static int test_tail_call_arg_mismatch(void) {
   JaclClosure* target = (JaclClosure*)arena_alloc(&arena, sizeof(JaclClosure));
   chunk_init(&target->chunk, &arena);
   target->param_count = 2;
+  target->param_total_slots = 2;
   target->param_names = NULL;
   target->upvalue_count = 0;
   target->upvalues = NULL;

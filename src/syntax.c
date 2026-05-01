@@ -1072,6 +1072,7 @@ static const char *expand__compile_staged_body(MacroEntry *entry,
     memset(closure, 0, sizeof(JaclClosure));
     chunk_init(&closure->chunk, arena);
     closure->param_count = (uint8_t)param_count;
+    closure->param_total_slots = (uint8_t)param_count; /* macros never have struct params */
     closure->min_args    = entry->variadic
                              ? (uint8_t)(param_count > 0 ? param_count - 1 : 0)
                              : (uint8_t)param_count;

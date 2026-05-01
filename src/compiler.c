@@ -3775,6 +3775,7 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
         body_block, NULL, 0, true, c->suspension_map, c->heap, c->intern_table,
         compiler__get_struct_registry(c));
     closure->param_count = 2;
+    closure->param_total_slots = 2;
     JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
     pnames[0] = jacl_inline_string("__sm", 4);
     pnames[1] = jacl_inline_string("__rv", 4);
@@ -3783,6 +3784,7 @@ void compiler__compile_parallel_body(Compiler* c, AstNode* body_block,
     closure->is_sm_compiled = true;
   } else {
     closure->param_count = 0;
+    closure->param_total_slots = 0;
   }
 
   /* Create body compiler */
@@ -7214,6 +7216,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
          param_count stays as user's count for display; min_args used for arity checks.
          The body bytecode expects state_obj in slot 0, resume_value in slot 1. */
       closure->param_count = 2;
+      closure->param_total_slots = 2; /* SM params are always 1 slot each */
       closure->param_names = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
       closure->param_names[0] = jacl_inline_string("__sm", 4);
       closure->param_names[1] = jacl_inline_string("__rv", 4);
@@ -7221,6 +7224,28 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       closure->is_sm_compiled = true;
     } else {
       closure->param_count = param_count;
+      /* Phase 5a: compute param_total_slots (sum of widths for all params) */
+      {
+        uint8_t total_slots = 0;
+        bool has_inline = false;
+        StructTypeRegistry* preg = compiler__get_struct_registry(c);
+        for (uint8_t pi = 0; pi < param_count; pi++) {
+          if (param_types_arr[pi] == TYPE_STRUCT && param_struct_idxs[pi] != UINT32_MAX &&
+              preg && param_struct_idxs[pi] < preg->count) {
+            StructTypeDef* psdef = preg->defs[param_struct_idxs[pi]];
+            if (psdef && psdef->is_value_type) {
+              total_slots += (uint8_t)struct__slot_width(preg, param_struct_idxs[pi]);
+              has_inline = true;
+            } else {
+              total_slots += 1;
+            }
+          } else {
+            total_slots += 1;
+          }
+        }
+        closure->param_total_slots = total_slots;
+        closure->has_inline_params = has_inline;
+      }
       /* Allocate and fill param_names from parsed array */
       if (param_count > 0) {
         closure->param_names = (JaclVal*)arena_alloc(c->arena,
@@ -7259,7 +7284,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     } else {
       /* Normal: add params as locals in body compiler (slots 0..N-1) with types.
          Use each param's own scope mark (from its AST node) so that macro-generated
-         procs correctly match param names to body var-refs at the same scope. */
+         procs correctly match param names to body var-refs at the same scope.
+         Phase 5a: struct params are inline (multi-slot) from the start. */
       for (uint8_t i = 0; i < param_count; i++) {
         uint32_t prev_mark = body_compiler.current_scope_mark;
         body_compiler.current_scope_mark = param_scope_marks[i];
@@ -7268,6 +7294,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         body_compiler.locals[body_compiler.local_count - 1].is_param = true;
         TYPEINFO_SAVE(body_compiler.locals[body_compiler.local_count - 1],
           ((TypeInfo){ param_types_arr[i], param_struct_idxs[i], param_key_struct_idxs[i] }));
+        /* Phase 5a: struct-typed params arrive inline on the stack */
+        if (param_types_arr[i] == TYPE_STRUCT && param_struct_idxs[i] != UINT32_MAX) {
+          StructTypeRegistry* reg = compiler__get_struct_registry(c);
+          if (reg && param_struct_idxs[i] < reg->count) {
+            StructTypeDef* psdef = reg->defs[param_struct_idxs[i]];
+            if (psdef && psdef->is_value_type) {
+              uint32_t width = struct__slot_width(reg, param_struct_idxs[i]);
+              body_compiler.locals[body_compiler.local_count - 1].width = (uint16_t)width;
+              body_compiler.locals[body_compiler.local_count - 1].is_inline = true;
+              /* Reserve padding locals for multi-slot params */
+              for (uint32_t w = 1; w < width; w++) {
+                compiler__add_local(&body_compiler, jacl_inline_string("", 0), line, col);
+                body_compiler.locals[body_compiler.local_count - 1].depth = body_compiler.scope_depth;
+                body_compiler.locals[body_compiler.local_count - 1].is_param = true;
+              }
+            }
+          }
+        }
       }
     }
 
@@ -9625,6 +9669,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* SM spawn body: analyze suspensions, compile as state machine */
       spawn_sm_analysis = compiler__analyze_suspensions(body_block, NULL, 0, true, c->suspension_map, c->heap, c->intern_table, compiler__get_struct_registry(c));
       closure->param_count = 2;
+      closure->param_total_slots = 2;
       JaclVal* pnames = (JaclVal*)arena_alloc(c->arena, sizeof(JaclVal) * 2);
       pnames[0] = jacl_inline_string("__sm", 4);
       pnames[1] = jacl_inline_string("__rv", 4);
@@ -9633,6 +9678,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       closure->is_sm_compiled = true;
     } else {
       closure->param_count = 0;
+      closure->param_total_slots = 0;
     }
 
     /* Create body compiler */
@@ -10244,10 +10290,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         /* Emit OP_STRUCT_NEW_INLINE — stores raw bytes across stack slots */
         compiler__emit_byte(c, OP_STRUCT_NEW_INLINE, line);
         compiler__emit_u16(c, (uint16_t)struct_idx, line);
+        c->last_is_inline = true;
       } else {
         /* Emit OP_STRUCT_NEW + uint16_t struct_type_index (heap path) */
         compiler__emit_byte(c, OP_STRUCT_NEW, line);
         compiler__emit_u16(c, (uint16_t)struct_idx, line);
+        c->last_is_inline = false;
       }
 
       c->last_expr_type = TYPE_STRUCT;
@@ -10418,28 +10466,51 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__compile_node(c, head);
     }
 
-    /* Compile arguments with call-site type checking */
+    /* Compile arguments with call-site type checking.
+       Phase 5a: track total slot count (struct params may occupy multiple slots). */
+    uint32_t total_arg_slots = 0;
     for (uint32_t i = 0; i < argc; i++) {
       JaclType expected_param_type = TYPE_DYN;
       if (call_param_types && call_param_count > 0 && (int32_t)i < call_param_count) {
         expected_param_type = call_param_types[i];
       }
 
-      /* Set contextual type for argument */
+      /* Set contextual type for argument.
+         Phase 5a: request inline struct for struct-typed params so constructors
+         produce inline bytes directly. */
       if (expected_param_type != TYPE_DYN) {
         c->expected_type = expected_param_type;
+      }
+      if (expected_param_type == TYPE_STRUCT) {
+        c->want_inline_struct = true;
       }
       compiler__compile_node(c, args[i]);
       JaclType arg_type = c->last_expr_type;
       c->expected_type = TYPE_DYN;
+      c->want_inline_struct = false;
 
-      /* US-006: pass-by-value for struct arguments.
-       * Emit OP_STRUCT_COPY so callee gets its own copy of the struct data.
-       * For inline struct locals, OP_STRUCT_MATERIALIZE already creates a heap
-       * copy, so OP_STRUCT_COPY is redundant but harmless. For heap struct
-       * params/return values, OP_STRUCT_COPY is essential. */
-      if (arg_type == TYPE_STRUCT || expected_param_type == TYPE_STRUCT) {
-        compiler__emit_byte(c, OP_STRUCT_COPY, line);
+      /* Phase 5a: struct args passed inline (multi-slot) instead of as heap copies.
+       * If the arg is already inline (from constructor or typed-get), nothing to do.
+       * If it's a heap struct (from OP_STRUCT_MATERIALIZE or function return),
+       * expand it to inline slots via OP_STRUCT_EXPAND. */
+      if (expected_param_type == TYPE_STRUCT && arg_type == TYPE_STRUCT) {
+        uint32_t sidx = c->last_struct_idx;
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        if (reg && sidx != UINT32_MAX && sidx < reg->count &&
+            reg->defs[sidx] && reg->defs[sidx]->is_value_type) {
+          uint32_t width = struct__slot_width(reg, sidx);
+          if (!c->last_is_inline) {
+            /* Heap struct on stack — expand to inline slots */
+            compiler__emit_byte(c, OP_STRUCT_EXPAND, line);
+            compiler__emit_u16(c, (uint16_t)sidx, line);
+          }
+          total_arg_slots += width;
+        } else {
+          /* Non-value-type struct or unknown — treat as single slot (fallback) */
+          total_arg_slots += 1;
+        }
+      } else {
+        total_arg_slots += 1;
       }
 
       /* Reject typed collections passed to untyped params */
@@ -10510,9 +10581,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* Common path: result on stack */
       compiler__patch_jump(c, skip_jump);
     } else {
-      /* Regular call */
+      /* Regular call — Phase 5a: use total_arg_slots for slot-based arg count */
       compiler__emit_byte(c, OP_CALL, line);
-      compiler__emit_byte(c, (uint8_t)argc, line);
+      compiler__emit_byte(c, (uint8_t)total_arg_slots, line);
     }
 
     /* Set result type from callee's return type */
@@ -10877,6 +10948,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, OP_STRUCT_MATERIALIZE, line);
           compiler__emit_byte(c, (uint8_t)local_slot, line);
           compiler__emit_u16(c, (uint16_t)c->locals[local_slot].struct_type_idx, line);
+          c->last_is_inline = false; /* result is a heap pointer, not inline bytes */
         } else {
           compiler__emit_byte(c, OP_GET_LOCAL, line);
           compiler__emit_byte(c, (uint8_t)local_slot, line);
@@ -10913,6 +10985,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, OP_STRUCT_MATERIALIZE_UPVALUE, line);
             compiler__emit_byte(c, (uint8_t)c->upvalues[upvalue_idx].base_slot, line);
             compiler__emit_u16(c, (uint16_t)c->upvalues[upvalue_idx].struct_type_idx, line);
+            c->last_is_inline = false; /* result is a heap pointer, not inline bytes */
           } else {
             compiler__emit_byte(c, OP_GET_UPVALUE, line);
             compiler__emit_byte(c, uv_base, line);
@@ -11486,6 +11559,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             closure->upvalue_count  = 0;
             closure->upvalues       = NULL;
             closure->param_count    = (uint8_t)param_count;
+            closure->param_total_slots = (uint8_t)param_count; /* macros never have struct params */
             closure->min_args       = node->data.defmacro.variadic
                                         ? (uint8_t)(param_count > 0 ? param_count - 1 : 0)
                                         : (uint8_t)param_count;
@@ -11557,6 +11631,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         closure->upvalue_count  = 0;
         closure->upvalues       = NULL;
         closure->param_count    = (uint8_t)param_count;
+        closure->param_total_slots = (uint8_t)param_count; /* macros never have struct params */
         closure->min_args       = node->data.defmacro.variadic
                                     ? (uint8_t)(param_count > 0 ? param_count - 1 : 0)
                                     : (uint8_t)param_count;
@@ -12246,6 +12321,7 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
     chunk_init(&main_cl->chunk, arena);
     main_cl->param_count   = 2; /* __sm, __rv */
+    main_cl->param_total_slots = 2;
     main_cl->upvalue_count = 0;
     main_cl->upvalue_total_slots = 0;
     main_cl->upvalues      = NULL;
@@ -12682,6 +12758,7 @@ ProgramResult jacl_compile_program(const char* root_path,
     JaclClosure* main_cl = (JaclClosure*)arena_alloc(arena, sizeof(JaclClosure));
     chunk_init(&main_cl->chunk, arena);
     main_cl->param_count   = 2; /* __sm, __rv */
+    main_cl->param_total_slots = 2;
     main_cl->upvalue_count = 0;
     main_cl->upvalue_total_slots = 0;
     main_cl->upvalues      = NULL;

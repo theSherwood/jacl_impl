@@ -762,6 +762,7 @@ typedef enum {
   OP_STRUCT_GET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type; read from closure-captured inline struct */
   OP_STRUCT_SET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type; write to closure-captured inline struct */
   OP_STRUCT_MATERIALIZE_UPVALUE, /* uint8_t base_uv_slot, uint16_t type_idx; convert upvalue inline struct to heap */
+  OP_STRUCT_EXPAND,      /* uint16_t type_idx; pop heap JaclStruct, push as N inline stack slots */
   OP_STRUCT_EQ_INLINE,   /* uint8_t base_a, uint8_t base_b, uint16_t total_size; memcmp two inline structs, push bool */
   OP_STRUCT_HASH_INLINE, /* uint8_t base_slot, uint16_t total_size, uint16_t type_idx; hash inline struct bytes, push i32 */
   OP_HASH,               /* pop value, push i32 hash via jacl_val_hash */
@@ -858,6 +859,8 @@ typedef struct {
 typedef struct {
   BytecodeChunk chunk;
   uint8_t       param_count;
+  uint8_t       param_total_slots;   /* total JaclVal slots for all params (sum of widths; >= param_count) */
+  bool          has_inline_params;   /* true if any param is an inline struct (width > 1 or value-type struct) */
   JaclVal*      param_names;
   JaclVal*      upvalues;
   uint8_t       upvalue_count;
