@@ -843,7 +843,8 @@ typedef enum {
   OP_TYPED_VEC_GET_INLINE, /* uint16_t type_idx; pop idx, pop tvec; push width inline slots */
   OP_TYPED_MAP_GET_INLINE, /* uint16_t type_idx; pop key, pop tmap; push width inline slots */
   OP_INLINE_TO_LOCAL,      /* uint8_t base_slot, uint16_t type_idx; copy width inline TOS to local, pop */
-  OP_STRUCT_REIFY          /* uint16_t type_idx; pop TOS inline bytes, allocate heap JaclStruct, push ptr */
+  OP_STRUCT_REIFY,         /* uint16_t type_idx; pop TOS inline bytes, allocate heap JaclStruct, push ptr */
+  OP_DEREF_INLINE          /* uint16_t type_idx; pop box, push inline bytes from ref->data[] */
 } OpCode;
 
 typedef struct {

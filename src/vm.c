@@ -5257,21 +5257,38 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclVal swap_result;
 
         if (ref->type_idx > 0) {
-          /* Struct box swap: materialize current value, apply closure, copy result back.
+          /* Struct box swap: pass current value to closure, copy result back.
              Atoms cannot hold structs (compile error), so this is always non-atomic. */
           StructTypeDef* sdef = vm->struct_registry->defs[ref->type_idx];
-          gc__current_heap = &vm->heap;
-          JaclStruct* old_s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                      sizeof(JaclStruct) + sdef->total_size);
-          old_s->type_idx = ref->type_idx;
-          old_s->total_size = sdef->total_size;
-          memcpy(old_s->data, ref->data, sdef->total_size);
-          JaclVal swap_old_val = jacl_struct_val(old_s);
+          uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
 
+          /* Phase 5d: push inline bytes if closure expects struct param,
+             otherwise materialize to heap for dyn param */
           result = vm__push(vm, closure_val);
           if (result != VM_OK) return result;
-          result = vm__push(vm, swap_old_val);
-          if (result != VM_OK) return result;
+
+          if (closure->param_total_slots > closure->param_count) {
+            /* Closure expects inline struct param — push raw bytes */
+            if (vm->stack_top + width > VM_STACK_MAX) {
+              vm__set_error(vm, "stack overflow (swap inline)");
+              return VM_STACK_OVERFLOW;
+            }
+            memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+            memcpy(&vm->stack[vm->stack_top], ref->data, sdef->total_size);
+            for (uint32_t si = 0; si < width; si++)
+              BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+            vm->stack_top += width;
+          } else {
+            /* Closure expects dyn/heap param — materialize */
+            gc__current_heap = &vm->heap;
+            JaclStruct* old_s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                        sizeof(JaclStruct) + sdef->total_size);
+            old_s->type_idx = ref->type_idx;
+            old_s->total_size = sdef->total_size;
+            memcpy(old_s->data, ref->data, sdef->total_size);
+            result = vm__push(vm, jacl_struct_val(old_s));
+            if (result != VM_OK) return result;
+          }
 
           if (vm->frame_count >= VM_FRAMES_MAX) {
             vm__set_error(vm, "stack overflow");
@@ -5281,7 +5298,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           CallFrame* cf = &vm->frames[vm->frame_count++];
           cf->closure    = closure;
           cf->return_ip  = vm->ip;
-          cf->stack_base = vm->stack_top - 1;
+          cf->stack_base = vm->stack_top - closure->param_total_slots;
           cf->chunk      = &closure->chunk;
           vm->ip    = closure->chunk.code;
           vm->chunk = &closure->chunk;
@@ -5289,10 +5306,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           VMResult call_result = vm__run(vm, caller_frame_count);
           if (call_result != VM_OK) return call_result;
 
-          /* Phase 5b: closure may return inline bytes (OP_RETURN_WIDE) or heap ptr (OP_RETURN).
+          /* Closure may return inline bytes (OP_RETURN_WIDE) or heap ptr.
              Check bitmap to determine which. */
           {
-            uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
             uint32_t rb = vm->stack_top - width;
             if (BITMAP_GET(vm->inline_slot_bitmap, rb)) {
               /* Inline bytes — copy directly from stack to box */
@@ -5300,6 +5316,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               for (uint32_t si = 0; si < width; si++)
                 BITMAP_CLR(vm->inline_slot_bitmap, rb + si);
               vm->stack_top = rb;
+              /* swap_result = nil for struct swap (result is the box itself) */
+              swap_result = JACL_NIL;
             } else {
               result = vm__pop(vm, &swap_result);
               if (result != VM_OK) return result;
@@ -10400,6 +10418,37 @@ interpret_done:
         }
         result = vm__push(vm, jacl_bool(equal));
         if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_DEREF_INLINE: {
+        /* Phase 5d: Deref a struct box, push inline bytes directly.
+           Operand: uint16_t type_idx.
+           Avoids heap allocation (unlike OP_DEREF for struct boxes). */
+        uint16_t type_idx = vm__read_u16(vm);
+        JaclVal container;
+        result = vm__pop(vm, &container);
+        if (result != VM_OK) return result;
+        if (!jacl_is_box(container)) {
+          vm__set_error(vm, "deref: expected box, got %s", vm__type_name(container));
+          return VM_RUNTIME_ERROR;
+        }
+        JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "deref: invalid struct type index %u", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        if (vm->stack_top + width > VM_STACK_MAX) {
+          vm__set_error(vm, "stack overflow (deref inline)");
+          return VM_STACK_OVERFLOW;
+        }
+        memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+        memcpy(&vm->stack[vm->stack_top], ref->data, sdef->total_size);
+        for (uint32_t si = 0; si < width; si++)
+          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+        vm->stack_top += width;
         break;
       }
 

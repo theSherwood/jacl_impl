@@ -9324,15 +9324,28 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             if (c->narrowings[ni].local_slot == (uint16_t)slot) {
               /* Found narrowing — compile as deref with known type */
               compiler__compile_node(c, args[0]);
-              compiler__emit_byte(c, OP_DEREF, line);
               JaclType bt = c->narrowings[ni].box_type;
               uint32_t tidx = c->narrowings[ni].box_type_idx;
               if (bt == TYPE_TYPED_VEC || bt == TYPE_TYPED_MAP) {
+                compiler__emit_byte(c, OP_DEREF, line);
                 compiler__set_type(c, (TypeInfo){ bt, tidx, c->narrowings[ni].box_key_type_idx });
               } else if (tidx > 0) {
-                c->last_expr_type = TYPE_STRUCT;
-                c->last_struct_idx = tidx;
+                /* Phase 5d: deref struct box directly to inline bytes */
+                StructTypeRegistry* reg = compiler__get_struct_registry(c);
+                StructTypeDef* sdef = reg && tidx < reg->count ? reg->defs[tidx] : NULL;
+                if (sdef && sdef->is_value_type) {
+                  compiler__emit_byte(c, OP_DEREF_INLINE, line);
+                  compiler__emit_u16(c, (uint16_t)tidx, line);
+                  c->last_expr_type = TYPE_STRUCT;
+                  c->last_struct_idx = tidx;
+                  c->last_is_inline = true;
+                } else {
+                  compiler__emit_byte(c, OP_DEREF, line);
+                  c->last_expr_type = TYPE_STRUCT;
+                  c->last_struct_idx = tidx;
+                }
               } else {
+                compiler__emit_byte(c, OP_DEREF, line);
                 c->last_expr_type = TYPE_DYN;
               }
               return;
