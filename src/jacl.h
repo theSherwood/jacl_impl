@@ -654,6 +654,7 @@ typedef enum {
   OP_CALL,
   OP_TAIL_CALL,
   OP_RETURN,
+  OP_RETURN_WIDE,    /* return N inline struct slots: uint8_t width */
   OP_CLOSURE,
   OP_POP_N,
   OP_CONCAT,
@@ -841,7 +842,8 @@ typedef enum {
 
   OP_TYPED_VEC_GET_INLINE, /* uint16_t type_idx; pop idx, pop tvec; push width inline slots */
   OP_TYPED_MAP_GET_INLINE, /* uint16_t type_idx; pop key, pop tmap; push width inline slots */
-  OP_INLINE_TO_LOCAL       /* uint8_t base_slot, uint16_t type_idx; copy width inline TOS to local, pop */
+  OP_INLINE_TO_LOCAL,      /* uint8_t base_slot, uint16_t type_idx; copy width inline TOS to local, pop */
+  OP_STRUCT_REIFY          /* uint16_t type_idx; pop TOS inline bytes, allocate heap JaclStruct, push ptr */
 } OpCode;
 
 typedef struct {
@@ -1258,6 +1260,7 @@ struct Compiler {
   uint32_t         last_struct_idx;
   uint32_t         last_key_struct_idx; /* key struct type for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
   JaclType         return_type;
+  uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   ModuleCache*     module_cache;
   Module*          current_module;
   ImportStack*     import_stack;

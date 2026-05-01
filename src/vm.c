@@ -2598,6 +2598,47 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_RETURN_WIDE: {
+        uint8_t width = vm__read_byte(vm);
+
+        /* Read return slots from callee stack top */
+        uint32_t ret_base = vm->stack_top - width;
+
+        uint32_t callee_base = frame->stack_base;
+        uint8_t* caller_ip   = frame->return_ip;
+
+        /* Clear inline struct bitmap bits for the callee's entire frame range */
+        for (uint32_t si = callee_base; si < vm->stack_top; si++) {
+          BITMAP_CLR(vm->inline_slot_bitmap, si);
+        }
+
+        vm->frame_count--;
+
+        if (vm->frame_count == 0) {
+          memmove(&vm->stack[0], &vm->stack[ret_base], width * sizeof(JaclVal));
+          for (uint32_t si = 0; si < width; si++)
+            BITMAP_SET(vm->inline_slot_bitmap, si);
+          vm->stack_top = width;
+          return VM_OK;
+        }
+
+        /* Copy return slots to where the callee's closure was */
+        uint32_t dst = callee_base - 1;
+        memmove(&vm->stack[dst], &vm->stack[ret_base], width * sizeof(JaclVal));
+        for (uint32_t si = dst; si < dst + width; si++)
+          BITMAP_SET(vm->inline_slot_bitmap, si);
+        vm->stack_top = dst + width;
+
+        frame     = &vm->frames[vm->frame_count - 1];
+        vm->ip    = caller_ip;
+        vm->chunk = frame->chunk;
+
+        if (vm->frame_count <= min_frame) {
+          return VM_OK;
+        }
+        break;
+      }
+
       case OP_CLOSURE: {
         uint16_t index = vm__read_u16(vm);
         JaclClosure* template = jacl_as_closure(vm->chunk->constants[index]);
@@ -5224,16 +5265,28 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           VMResult call_result = vm__run(vm, caller_frame_count);
           if (call_result != VM_OK) return call_result;
 
-          result = vm__pop(vm, &swap_result);
-          if (result != VM_OK) return result;
-
-          /* Copy new struct data back into box */
-          JaclStruct* new_s = jacl_as_struct_ptr(swap_result);
-          if (!new_s || new_s->type_idx != ref->type_idx) {
-            vm__set_error(vm, "swap!: struct type mismatch in box");
-            return VM_RUNTIME_ERROR;
+          /* Phase 5b: closure may return inline bytes (OP_RETURN_WIDE) or heap ptr (OP_RETURN).
+             Check bitmap to determine which. */
+          {
+            uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+            uint32_t rb = vm->stack_top - width;
+            if (BITMAP_GET(vm->inline_slot_bitmap, rb)) {
+              /* Inline bytes — copy directly from stack to box */
+              memcpy(ref->data, &vm->stack[rb], sdef->total_size);
+              for (uint32_t si = 0; si < width; si++)
+                BITMAP_CLR(vm->inline_slot_bitmap, rb + si);
+              vm->stack_top = rb;
+            } else {
+              result = vm__pop(vm, &swap_result);
+              if (result != VM_OK) return result;
+              JaclStruct* new_s = jacl_as_struct_ptr(swap_result);
+              if (!new_s || new_s->type_idx != ref->type_idx) {
+                vm__set_error(vm, "swap!: struct type mismatch in box");
+                return VM_RUNTIME_ERROR;
+              }
+              memcpy(ref->data, new_s->data, sdef->total_size);
+            }
           }
-          memcpy(ref->data, new_s->data, sdef->total_size);
         } else {
           for (;;) {
             /* Read current value (atomic for atoms, plain for boxes) */
@@ -6369,6 +6422,36 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
         }
         vm->stack_top += width;
+        break;
+      }
+
+      case OP_STRUCT_REIFY: {
+        /* Phase 5b: Convert TOS inline bytes to heap JaclStruct.
+           Operand: uint16_t type_idx.
+           For width==1 structs: pops 1 inline slot, pushes 1 heap pointer. */
+        uint16_t type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u for reify", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        /* Read inline bytes from TOS */
+        uint8_t* src = (uint8_t*)&vm->stack[vm->stack_top - width];
+        /* Allocate heap struct */
+        gc__current_heap = &vm->heap;
+        JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                sizeof(JaclStruct) + sdef->total_size);
+        s->type_idx = type_idx;
+        s->total_size = sdef->total_size;
+        memcpy(s->data, src, sdef->total_size);
+        /* Clear inline bitmap, pop width slots, push heap pointer */
+        for (uint32_t si = 0; si < width; si++) {
+          BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - width + si);
+        }
+        vm->stack_top -= width;
+        result = vm__push(vm, jacl_struct_val(s));
+        if (result != VM_OK) return result;
         break;
       }
 

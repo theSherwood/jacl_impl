@@ -42,6 +42,7 @@ typedef enum {
   OP_CALL,          /* call closure: followed by uint8_t arg count */
   OP_TAIL_CALL,     /* tail call: followed by uint8_t arg count; reuses current frame */
   OP_RETURN,        /* return from call */
+  OP_RETURN_WIDE,   /* return N inline struct slots: followed by uint8_t width */
   OP_CLOSURE,       /* create closure: followed by uint16_t const index, then N upvalue descriptors */
   OP_POP_N,         /* discard N values: followed by uint8_t count */
   OP_CONCAT,        /* pop two strings, push concatenation */
@@ -235,7 +236,8 @@ typedef enum {
 
   OP_TYPED_VEC_GET_INLINE, /* uint16_t type_idx */
   OP_TYPED_MAP_GET_INLINE, /* uint16_t type_idx */
-  OP_INLINE_TO_LOCAL       /* uint8_t base_slot, uint16_t type_idx */
+  OP_INLINE_TO_LOCAL,      /* uint8_t base_slot, uint16_t type_idx */
+  OP_STRUCT_REIFY          /* uint16_t type_idx; pop TOS inline bytes, alloc heap JaclStruct, push ptr */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -408,6 +410,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_CALL:            return "OP_CALL";
     case OP_TAIL_CALL:       return "OP_TAIL_CALL";
     case OP_RETURN:          return "OP_RETURN";
+    case OP_RETURN_WIDE:     return "OP_RETURN_WIDE";
     case OP_CLOSURE:         return "OP_CLOSURE";
     case OP_POP_N:           return "OP_POP_N";
     case OP_CONCAT:          return "OP_CONCAT";
@@ -589,6 +592,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_TYPED_VEC_GET_INLINE: return "OP_TYPED_VEC_GET_INLINE";
     case OP_TYPED_MAP_GET_INLINE: return "OP_TYPED_MAP_GET_INLINE";
     case OP_INLINE_TO_LOCAL:   return "OP_INLINE_TO_LOCAL";
+    case OP_STRUCT_REIFY:      return "OP_STRUCT_REIFY";
   }
   return "OP_UNKNOWN";
 }

@@ -2843,6 +2843,7 @@ struct Compiler {
   uint32_t         last_key_struct_idx; /* key struct type for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
 #define CTX_STRUCT_PENDING (UINT32_MAX - 1) /* sentinel: ctx struct not yet finalized */
   JaclType         return_type;     /* declared return type for current function */
+  uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
   Module*          current_module;  /* module currently being compiled */
   ImportStack*     import_stack;    /* shared import stack for circular detection */
@@ -2913,6 +2914,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->expected_type   = TYPE_DYN;
   compiler__set_type(c, (TypeInfo){ TYPE_DYN, UINT32_MAX, UINT32_MAX });
   c->return_type     = TYPE_DYN;
+  c->return_struct_idx = UINT32_MAX;
   c->module_cache    = NULL;
   c->current_module  = NULL;
   c->import_stack    = NULL;
@@ -3163,6 +3165,31 @@ StructTypeRegistry* compiler__get_struct_registry(Compiler* c) {
   Compiler* root = c;
   while (root->enclosing) root = root->enclosing;
   return root->struct_registry;
+}
+
+/* --- Internal: emit struct-aware return --- */
+
+/* Phase 5b: emit OP_RETURN_WIDE if returning a value-type struct, else OP_RETURN.
+ * If the top of stack is a heap struct (last_is_inline == false), emits
+ * OP_STRUCT_EXPAND first to convert to inline slots. */
+static void compiler__emit_return(Compiler* c, uint32_t line) {
+  if (c->return_type == TYPE_STRUCT && c->return_struct_idx != UINT32_MAX) {
+    StructTypeRegistry* reg = compiler__get_struct_registry(c);
+    if (reg && c->return_struct_idx < reg->count) {
+      StructTypeDef* sdef = reg->defs[c->return_struct_idx];
+      if (sdef && sdef->is_value_type) {
+        uint32_t width = struct__slot_width(reg, c->return_struct_idx);
+        if (!c->last_is_inline) {
+          compiler__emit_byte(c, OP_STRUCT_EXPAND, line);
+          compiler__emit_u16(c, (uint16_t)c->return_struct_idx, line);
+        }
+        compiler__emit_byte(c, OP_RETURN_WIDE, line);
+        compiler__emit_byte(c, (uint8_t)width, line);
+        return;
+      }
+    }
+  }
+  compiler__emit_byte(c, OP_RETURN, line);
 }
 
 CtxFieldList* compiler__get_ctx_fields(Compiler* c) {
@@ -3954,6 +3981,12 @@ void compiler__ensure_boxed(Compiler* c, uint32_t line) {
   if (is_unboxed_type(c->last_expr_type)) {
     compiler__emit_byte(c, OP_TO_DYN, line);
     compiler__emit_byte(c, (uint8_t)c->last_expr_type, line);
+    c->last_expr_type = TYPE_DYN;
+  } else if (c->last_expr_type == TYPE_STRUCT && c->last_is_inline) {
+    /* Phase 5b: reify inline struct bytes to heap pointer for dyn contexts */
+    compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+    compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+    c->last_is_inline = false;
     c->last_expr_type = TYPE_DYN;
   }
 }
@@ -7263,6 +7296,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     body_compiler.scope_depth    = 1;
     body_compiler.enclosing      = c;
     body_compiler.return_type    = proc_return_type;
+    body_compiler.return_struct_idx = proc_return_struct_idx;
     body_compiler.suspension_map = c->suspension_map;
     body_compiler.current_scope_mark = c->current_scope_mark;
 
@@ -7369,8 +7403,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, err_msg);
       }
 
-      /* Emit implicit return */
-      compiler__emit_byte(&body_compiler, OP_RETURN, line);
+      /* Emit implicit return (Phase 5b: wide return for struct-returning procs) */
+      compiler__emit_return(&body_compiler, line);
     }
 
     /* Propagate errors from body compiler */
@@ -8165,7 +8199,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     } else {
       compiler__emit_byte(c, OP_NIL, line);
     }
-    compiler__emit_byte(c, OP_RETURN, line);
+    /* Phase 5b: wide return for struct-returning procs */
+    if (argc == 1) {
+      compiler__emit_return(c, line);
+    } else {
+      compiler__emit_byte(c, OP_RETURN, line);
+    }
     return;
   }
 
@@ -10092,6 +10131,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           return;
         }
 
+        /* Phase 5b: if struct is inline (from OP_RETURN_WIDE), reify to heap for field access */
+        if (c->last_is_inline) {
+          compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+          compiler__emit_u16(c, (uint16_t)struct_idx, line);
+          c->last_is_inline = false;
+        }
+
         if (is_set) {
           /* Per-field mutability check */
           if (!sdef->fields[fi].is_mutable) {
@@ -10510,6 +10556,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           total_arg_slots += 1;
         }
       } else {
+        /* Phase 5b: if arg is inline struct but param expects dyn, reify to heap pointer */
+        if (c->last_is_inline && arg_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX) {
+          compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+          compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+          c->last_is_inline = false;
+        }
         total_arg_slots += 1;
       }
 
@@ -10589,6 +10641,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Set result type from callee's return type */
     c->last_expr_type = call_return_type;
     c->last_struct_idx = call_return_struct_idx;
+    /* Phase 5b: struct-returning procs use OP_RETURN_WIDE → inline on caller's stack */
+    if (call_return_type == TYPE_STRUCT && call_return_struct_idx != UINT32_MAX) {
+      StructTypeRegistry* reg = compiler__get_struct_registry(c);
+      if (reg && call_return_struct_idx < reg->count) {
+        StructTypeDef* sdef = reg->defs[call_return_struct_idx];
+        if (sdef && sdef->is_value_type) {
+          c->last_is_inline = true;
+        }
+      }
+    }
   }
 }
 
@@ -11802,10 +11864,12 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       /* Compile return value (or nil) */
       if (node->data.return_stmt.value) {
         compiler__compile_node(c, node->data.return_stmt.value);
+        /* Phase 5b: wide return for struct-returning procs */
+        compiler__emit_return(c, line);
       } else {
         compiler__emit_byte(c, OP_NIL, line);
+        compiler__emit_byte(c, OP_RETURN, line);
       }
-      compiler__emit_byte(c, OP_RETURN, line);
       break;
     }
 
