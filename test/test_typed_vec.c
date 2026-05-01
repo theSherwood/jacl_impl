@@ -436,6 +436,35 @@ static int test_typed_vec_for_loop_accumulate(void) {
   TEST_PASS();
 }
 
+static int test_typed_vec_for_loop_break(void) {
+  PrintCapture cap;
+  /* Break inside typed vec for-loop: OP_CLOSE_LOOP must clean up
+   * inline padding locals and bitmap bits correctly. */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point] [Point 1 10] [Point 2 20] [Point 3 30]]\n"
+    "def result [for $points p {\n"
+    "  if [== $p->x 2] { [break $p->y] }\n"
+    "}]\n"
+    "[print $result]",
+    &cap, "20\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_for_loop_break_wide(void) {
+  PrintCapture cap;
+  /* Break with wide struct (2 slots) — padding locals must be cleaned up */
+  ASSERT(run_ok(
+    "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
+    "def rects [[Vec Rect] [Rect 1 2 3 4] [Rect 5 6 7 8] [Rect 9 10 11 12]]\n"
+    "def result [for $rects r {\n"
+    "  if [== $r->w 7] { [break $r->h] }\n"
+    "}]\n"
+    "[print $result]",
+    &cap, "8\n"));
+  TEST_PASS();
+}
+
 /* ===== Typed Vec: Box round-trip ===== */
 
 static int test_typed_vec_box_roundtrip(void) {
@@ -532,6 +561,8 @@ int main(void) {
   RUN(test_typed_vec_for_loop_wide_struct);
   RUN(test_typed_vec_for_loop_empty);
   RUN(test_typed_vec_for_loop_accumulate);
+  RUN(test_typed_vec_for_loop_break);
+  RUN(test_typed_vec_for_loop_break_wide);
   RUN(test_typed_vec_box_roundtrip);
   RUN(test_typed_vec_box_wrong_type);
   RUN(test_typed_vec_box_in_dyn_vec);
