@@ -41,12 +41,11 @@ static int test_typed_vec_get(void) {
 }
 
 static int test_typed_vec_get_oob(void) {
-  PrintCapture cap;
-  ASSERT(run_ok(
+  ASSERT(run_err(
     "struct Point {i32 x, i32 y}\n"
     "def points [[Vec Point] [Point 1 2]]\n"
     "[print [vec-get $points 99]]",
-    &cap, "nil\n"));
+    "out of bounds"));
   TEST_PASS();
 }
 
@@ -109,6 +108,45 @@ static int test_typed_vec_get_field_access(void) {
     "[print $p->x]\n"
     "[print $p->y]",
     &cap, "Point{x: 100, y: 200}\n100\n200\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_get_inline_local(void) {
+  PrintCapture cap;
+  /* def inside proc triggers inline path: OP_TYPED_VEC_GET_INLINE
+   * instead of OP_TYPED_VEC_GET + OP_STRUCT_STORE_INLINE */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc test {} {\n"
+    "  def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "  def p [vec-get $points 0]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "  def q [vec-get $points 1]\n"
+    "  [print $q->x]\n"
+    "  [print $q->y]\n"
+    "}\n"
+    "[test]",
+    &cap, "10\n20\n30\n40\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_get_inline_wide(void) {
+  PrintCapture cap;
+  /* Wide struct (4 fields = 2 slots) via inline get in local scope */
+  ASSERT(run_ok(
+    "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
+    "proc test {} {\n"
+    "  def rects [[Vec Rect] [Rect 1 2 3 4] [Rect 5 6 7 8]]\n"
+    "  def r [vec-get $rects 0]\n"
+    "  [print $r->x]\n"
+    "  [print $r->h]\n"
+    "  def s [vec-get $rects 1]\n"
+    "  [print $s->y]\n"
+    "  [print $s->w]\n"
+    "}\n"
+    "[test]",
+    &cap, "1\n4\n6\n7\n"));
   TEST_PASS();
 }
 
@@ -383,6 +421,21 @@ static int test_typed_vec_for_loop_empty(void) {
   TEST_PASS();
 }
 
+static int test_typed_vec_for_loop_accumulate(void) {
+  PrintCapture cap;
+  /* Accumulate sum of y fields using mut + set inside for loop */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point] [Point 1 10] [Point 2 20] [Point 3 30]]\n"
+    "mut sum 0\n"
+    "for $points p {\n"
+    "  set sum [+ $sum $p->y]\n"
+    "}\n"
+    "[print $sum]",
+    &cap, "60\n"));
+  TEST_PASS();
+}
+
 /* ===== Typed Vec: Box round-trip ===== */
 
 static int test_typed_vec_box_roundtrip(void) {
@@ -455,6 +508,8 @@ int main(void) {
   RUN(test_typed_vec_set);
   RUN(test_typed_vec_len);
   RUN(test_typed_vec_get_field_access);
+  RUN(test_typed_vec_get_inline_local);
+  RUN(test_typed_vec_get_inline_wide);
   RUN(test_typed_vec_wide_struct);
   RUN(test_typed_vec_persistence);
   RUN(test_typed_vec_gc_safety);
@@ -476,6 +531,7 @@ int main(void) {
   RUN(test_typed_vec_for_loop_field_access);
   RUN(test_typed_vec_for_loop_wide_struct);
   RUN(test_typed_vec_for_loop_empty);
+  RUN(test_typed_vec_for_loop_accumulate);
   RUN(test_typed_vec_box_roundtrip);
   RUN(test_typed_vec_box_wrong_type);
   RUN(test_typed_vec_box_in_dyn_vec);

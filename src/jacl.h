@@ -810,7 +810,7 @@ typedef enum {
 
   /* --- Typed vector operations --- */
   OP_TYPED_VEC,          /* uint16_t type_idx, uint8_t count; create typed vec from stack elements */
-  OP_TYPED_VEC_GET,      /* uint16_t type_idx; pop idx, pop tvec; push inline struct (width slots) */
+  OP_TYPED_VEC_GET,      /* uint16_t type_idx; pop idx, pop tvec; push heap struct or nil */
   OP_TYPED_VEC_PUSH,     /* uint16_t type_idx; pop struct, pop tvec; push new tvec */
   OP_TYPED_VEC_SET,      /* uint16_t type_idx; pop struct, pop idx, pop tvec; push new tvec */
   OP_TYPED_VEC_LEN,      /* pop tvec; push i32 count */
@@ -830,7 +830,10 @@ typedef enum {
   OP_TYPED_MAP_EQ,       /* uint16_t type_idx; pop tmap_b, pop tmap_a; push bool */
 
   OP_IS_BOX_TYPED_VEC,   /* no operand; pop val; push bool (is box containing typed vec?) */
-  OP_IS_BOX_TYPED_MAP    /* no operand; pop val; push bool (is box containing typed map?) */
+  OP_IS_BOX_TYPED_MAP,   /* no operand; pop val; push bool (is box containing typed map?) */
+
+  OP_TYPED_VEC_GET_INLINE, /* uint16_t type_idx; pop idx, pop tvec; push width inline slots */
+  OP_INLINE_TO_LOCAL       /* uint8_t base_slot, uint16_t type_idx; copy width inline TOS to local, pop */
 } OpCode;
 
 typedef struct {

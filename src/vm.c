@@ -9118,9 +9118,9 @@ interpret_done:
         int32_t idx = jacl_as_i32(idx_val);
 
         if (idx < 0 || (uint32_t)idx >= jacl_typed_vec_count(tvec)) {
-          result = vm__push(vm, JACL_NIL);
-          if (result != VM_OK) return result;
-          break;
+          vm__set_error(vm, "vec-get: index %d out of bounds (length %u)",
+                       idx, jacl_typed_vec_count(tvec));
+          return VM_RUNTIME_ERROR;
         }
 
         const JaclVal* ptr = jacl_typed_vec_get_ptr(tvec, (uint32_t)idx);
@@ -9133,6 +9133,64 @@ interpret_done:
         memcpy(s->data, ptr, sdef->total_size);
         result = vm__push(vm, jacl_struct_val(s));
         if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TYPED_VEC_GET_INLINE: {
+        uint16_t type_idx = vm__read_u16(vm);
+        JaclVal idx_val, tvec_val;
+        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
+
+        if (!jacl_is_i32(idx_val)) {
+          vm__set_error(vm, "vec-get: expected i32 index, got %s",
+                       vm__type_name(idx_val));
+          return VM_RUNTIME_ERROR;
+        }
+
+        jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = vm__struct_width(sdef);
+        int32_t idx = jacl_as_i32(idx_val);
+
+        if (idx < 0 || (uint32_t)idx >= jacl_typed_vec_count(tvec)) {
+          vm__set_error(vm, "vec-get: index %d out of bounds (length %u)",
+                       idx, jacl_typed_vec_count(tvec));
+          return VM_RUNTIME_ERROR;
+        }
+
+        const JaclVal* ptr = jacl_typed_vec_get_ptr(tvec, (uint32_t)idx);
+        /* Push width inline slots directly from RRB leaf data */
+        if (vm->stack_top + width > VM_STACK_MAX) {
+          vm__set_error(vm, "stack overflow in typed vec get inline");
+          return VM_RUNTIME_ERROR;
+        }
+        memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+        memcpy(&vm->stack[vm->stack_top], ptr, sdef->total_size);
+        for (uint32_t si = 0; si < width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+        }
+        vm->stack_top += width;
+        break;
+      }
+
+      case OP_INLINE_TO_LOCAL: {
+        uint8_t base_slot = vm__read_byte(vm);
+        uint16_t type_idx = vm__read_u16(vm);
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = vm__struct_width(sdef);
+        uint32_t abs_base = frame->stack_base + base_slot;
+        /* Copy width inline slots from TOS to local range */
+        memcpy(&vm->stack[abs_base], &vm->stack[vm->stack_top - width],
+               width * sizeof(JaclVal));
+        for (uint32_t si = 0; si < width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, abs_base + si);
+        }
+        /* Pop the width slots from stack */
+        for (uint32_t si = vm->stack_top - width; si < vm->stack_top; si++) {
+          BITMAP_CLR(vm->inline_slot_bitmap, si);
+        }
+        vm->stack_top -= width;
         break;
       }
 

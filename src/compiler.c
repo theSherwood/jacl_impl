@@ -171,6 +171,23 @@ bool is_typed_collection(JaclType t) {
   return t == TYPE_TYPED_VEC || t == TYPE_TYPED_MAP;
 }
 
+/* Check if an AST_COMMAND node is a typed collection expression [Vec Type] or
+   [Map Type].  Returns 1 for Vec, 2 for Map, 0 if not a match.
+   When returning non-zero, *out_elem is set to the element type name node. */
+static int compiler__typed_collection_expr(AstNode* cmd, AstNode** out_elem) {
+  if (cmd->type != AST_COMMAND || !cmd->data.command.head) return 0;
+  AstNode* th = cmd->data.command.head;
+  if (th->type != AST_LIT_STRING || th->data.lit_string.length != 3) return 0;
+  int kind = 0;
+  if (memcmp(th->data.lit_string.value, "Vec", 3) == 0) kind = 1;
+  else if (memcmp(th->data.lit_string.value, "Map", 3) == 0) kind = 2;
+  if (kind == 0) return 0;
+  if (cmd->data.command.arg_count != 1 ||
+      cmd->data.command.args[0]->type != AST_LIT_STRING) return 0;
+  if (out_elem) *out_elem = cmd->data.command.args[0];
+  return kind;
+}
+
 /* Returns true if a type is allowed as a struct field (value types only).
    Reference types (str, vec, map, closure, dyn, stream) are rejected. */
 bool is_struct_value_type(JaclType t) {
@@ -2809,6 +2826,7 @@ struct Compiler {
   uint32_t             current_scope_mark; /* hygiene: mark for newly introduced bindings */
   bool                 has_prelude;    /* true when compiling under a caller-supplied prelude map */
   bool                 want_inline_struct; /* request inline struct construction in next struct constructor */
+  bool                 last_is_inline;     /* true if last compiled expr pushed inline struct slots (not heap) */
   bool                 inline_struct_ref;  /* true if last expression is an inline struct reference (not on stack) */
   uint8_t              inline_ref_base_slot; /* base local slot of the inline struct */
   uint16_t             inline_ref_offset;    /* accumulated byte offset within the struct */
@@ -2865,6 +2883,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->current_scope_mark = 0;
   c->has_prelude       = false;
   c->want_inline_struct = false;
+  c->last_is_inline     = false;
   c->inline_struct_ref  = false;
   c->inline_ref_base_slot = 0;
   c->inline_ref_offset    = 0;
@@ -5111,17 +5130,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* --- Typed vec constructor: [[Vec Type] elem1 elem2 ...] --- */
-  if (head->type == AST_COMMAND &&
-      head->data.command.head->type == AST_LIT_STRING &&
-      head->data.command.head->data.lit_string.length == 3 &&
-      memcmp(head->data.command.head->data.lit_string.value, "Vec", 3) == 0) {
-    if (head->data.command.arg_count != 1 ||
-        head->data.command.args[0]->type != AST_LIT_STRING) {
-      compiler__error(c, line, col, "[Vec Type] requires exactly one struct type name");
-      return;
-    }
-    const char* type_name_str = head->data.command.args[0]->data.lit_string.value;
-    uint32_t type_name_len = head->data.command.args[0]->data.lit_string.length;
+  AstNode* _coll_elem = NULL;
+  int _coll_kind = compiler__typed_collection_expr(head, &_coll_elem);
+  if (_coll_kind == 1) {
+    const char* type_name_str = _coll_elem->data.lit_string.value;
+    uint32_t type_name_len = _coll_elem->data.lit_string.length;
     StructTypeRegistry* reg = compiler__get_struct_registry(c);
     uint32_t type_idx = struct_registry__find(reg, type_name_str, type_name_len);
     if (type_idx == UINT32_MAX) {
@@ -5160,17 +5173,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* --- Typed map constructor: [[Map Type] key1 val1 key2 val2 ...] --- */
-  if (head->type == AST_COMMAND &&
-      head->data.command.head->type == AST_LIT_STRING &&
-      head->data.command.head->data.lit_string.length == 3 &&
-      memcmp(head->data.command.head->data.lit_string.value, "Map", 3) == 0) {
-    if (head->data.command.arg_count != 1 ||
-        head->data.command.args[0]->type != AST_LIT_STRING) {
-      compiler__error(c, line, col, "[Map Type] requires exactly one struct type name");
-      return;
-    }
-    const char* type_name_str = head->data.command.args[0]->data.lit_string.value;
-    uint32_t type_name_len = head->data.command.args[0]->data.lit_string.length;
+  if (_coll_kind == 2) {
+    const char* type_name_str = _coll_elem->data.lit_string.value;
+    uint32_t type_name_len = _coll_elem->data.lit_string.length;
     StructTypeRegistry* reg = compiler__get_struct_registry(c);
     uint32_t type_idx = struct_registry__find(reg, type_name_str, type_name_len);
     if (type_idx == UINT32_MAX) {
@@ -6628,9 +6633,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
-    /* US-005: check if RHS is a struct constructor — activate inline storage.
-     * Only for local scope, non-SM mode. */
+    /* US-005: check if RHS is a struct constructor or typed vec/map get
+     * — activate inline storage. Only for local scope, non-SM mode. */
     bool activate_inline = false;
+    c->last_is_inline = false;
+    c->want_inline_struct = false;
     if (c->scope_depth > 0 && !c->sm_analysis) {
       AstNode* val_node = args[value_arg_idx];
       if (val_node->type == AST_COMMAND && val_node->data.command.head->type == AST_LIT_STRING) {
@@ -6647,6 +6654,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               c->want_inline_struct = true;
             }
           }
+          /* Hint: vec-get/map-get on typed collection may produce inline result.
+           * The actual decision happens at compile time when we know the arg type. */
+          if (!activate_inline &&
+              ((rhs_head_len == 7 && memcmp(rhs_head_name, "vec-get", 7) == 0) ||
+               (rhs_head_len == 7 && memcmp(rhs_head_name, "map-get", 7) == 0))) {
+            c->want_inline_struct = true;
+          }
         }
       }
     }
@@ -6658,9 +6672,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclType rhs_type = c->last_expr_type;
 
     /* US-007: activate inline for function calls returning struct types.
-     * If the RHS isn't already inline (struct constructor) but returns a
-     * struct type with a known struct index, post-activate inline and
-     * plan to emit OP_STRUCT_STORE_INLINE after adding the local. */
+     * If the RHS isn't already inline (struct constructor or inline get) but
+     * returns a struct type with a known struct index, post-activate inline
+     * and plan to emit OP_STRUCT_STORE_INLINE after adding the local. */
     bool needs_store_inline = false;
     if (!activate_inline && rhs_type == TYPE_STRUCT &&
         c->last_struct_idx != UINT32_MAX &&
@@ -6671,7 +6685,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         StructTypeDef* ret_sdef = reg2->defs[c->last_struct_idx];
         if (ret_sdef && ret_sdef->is_value_type) {
           activate_inline = true;
-          needs_store_inline = true;
+          /* If RHS already pushed inline slots (e.g. OP_TYPED_VEC_GET_INLINE),
+           * no de-materialization needed — slots ARE the local. */
+          needs_store_inline = !c->last_is_inline;
         }
       }
     }
@@ -6877,17 +6893,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       AstNode* elem = flat_elems[fi];
 
       /* Check for compound type expression: [Vec Type] or [Map Type] */
-      if (elem->type == AST_COMMAND && elem->data.command.head) {
-        AstNode* th = elem->data.command.head;
-        bool is_vec = (th->type == AST_LIT_STRING && th->data.lit_string.length == 3
-                       && memcmp(th->data.lit_string.value, "Vec", 3) == 0);
-        bool is_map = (th->type == AST_LIT_STRING && th->data.lit_string.length == 3
-                       && memcmp(th->data.lit_string.value, "Map", 3) == 0);
-        if ((is_vec || is_map) &&
-            elem->data.command.arg_count == 1 &&
-            elem->data.command.args[0]->type == AST_LIT_STRING) {
-          const char* ename = elem->data.command.args[0]->data.lit_string.value;
-          uint32_t elen = elem->data.command.args[0]->data.lit_string.length;
+      {
+        AstNode* ct_elem = NULL;
+        int ct_kind = compiler__typed_collection_expr(elem, &ct_elem);
+        if (ct_kind > 0) {
+          const char* ename = ct_elem->data.lit_string.value;
+          uint32_t elen = ct_elem->data.lit_string.length;
           uint32_t elem_idx = struct_registry__find(compiler__get_struct_registry(c), ename, elen);
           if (elem_idx == UINT32_MAX) {
             compiler__error(c, line, col, "unknown element type in typed collection parameter");
@@ -6909,14 +6920,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           }
           param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table,
               elem->data.lit_string.value, elem->data.lit_string.length);
-          param_types_arr[param_count] = is_vec ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
+          param_types_arr[param_count] = (ct_kind == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
           param_struct_idxs[param_count] = elem_idx;
           param_scope_marks[param_count] = elem->scope_mark;
           param_count++;
           continue;
         }
-        compiler__error(c, line, col, "proc parameter must be a name or type keyword");
-        return;
       }
 
       if (elem->type != AST_LIT_STRING) {
@@ -7338,20 +7347,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           type_idx = struct_registry__find(compiler__get_struct_registry(c), tname, tlen);
           box_type = TYPE_STRUCT;
         }
-      } else if (type_arg->type == AST_COMMAND && type_arg->data.command.head &&
-                 type_arg->data.command.arg_count == 1 &&
-                 type_arg->data.command.args[0]->type == AST_LIT_STRING) {
+      } else {
         /* [box? [Vec Type] $var] or [box? [Map Type] $var] — typed collection narrowing */
-        AstNode* th = type_arg->data.command.head;
-        bool is_vec = (th->type == AST_LIT_STRING && th->data.lit_string.length == 3
-                       && memcmp(th->data.lit_string.value, "Vec", 3) == 0);
-        bool is_map = (th->type == AST_LIT_STRING && th->data.lit_string.length == 3
-                       && memcmp(th->data.lit_string.value, "Map", 3) == 0);
-        if (is_vec || is_map) {
-          const char* ename = type_arg->data.command.args[0]->data.lit_string.value;
-          uint32_t elen = type_arg->data.command.args[0]->data.lit_string.length;
-          type_idx = struct_registry__find(compiler__get_struct_registry(c), ename, elen);
-          box_type = is_vec ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
+        AstNode* ct_en = NULL;
+        int ct_k = compiler__typed_collection_expr(type_arg, &ct_en);
+        if (ct_k > 0) {
+          type_idx = struct_registry__find(compiler__get_struct_registry(c),
+              ct_en->data.lit_string.value, ct_en->data.lit_string.length);
+          box_type = (ct_k == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
         }
       }
 
@@ -7779,6 +7782,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (is_typed_vec_loop) {
       c->locals[c->local_count - 1].type = TYPE_STRUCT;
       c->locals[c->local_count - 1].struct_type_idx = elem_struct_idx;
+      /* Mark as inline and add padding locals for width > 1 */
+      StructTypeRegistry* reg = compiler__get_struct_registry(c);
+      uint32_t elem_width = struct__slot_width(reg, elem_struct_idx);
+      c->locals[c->local_count - 1].width = (uint16_t)elem_width;
+      c->locals[c->local_count - 1].is_inline = true;
+      for (uint32_t w = 1; w < elem_width; w++) {
+        compiler__emit_byte(c, OP_NIL, line);
+        compiler__add_local(c, jacl_inline_string("", 0), line, col);
+        c->locals[c->local_count - 1].depth = c->scope_depth;
+      }
     }
 
     uint8_t len_slot = (uint8_t)(saved_local_count + 1);
@@ -7812,14 +7825,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_byte(c, OP_GET_LOCAL, line);
     compiler__emit_byte(c, idx_slot, line);
     if (is_typed_vec_loop) {
-      compiler__emit_byte(c, OP_TYPED_VEC_GET, line);
+      compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
+      compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
+      compiler__emit_byte(c, OP_INLINE_TO_LOCAL, line);
+      compiler__emit_byte(c, elem_slot, line);
       compiler__emit_u16(c, (uint16_t)elem_struct_idx, line);
     } else {
       compiler__emit_byte(c, OP_VEC_GET, line);
+      compiler__emit_byte(c, OP_SET_LOCAL, line);
+      compiler__emit_byte(c, elem_slot, line);
+      compiler__emit_byte(c, OP_POP, line);  /* discard SET_LOCAL's TOS */
     }
-    compiler__emit_byte(c, OP_SET_LOCAL, line);
-    compiler__emit_byte(c, elem_slot, line);
-    compiler__emit_byte(c, OP_POP, line);  /* discard SET_LOCAL's TOS */
 
     /* Compile body statements inline */
     uint32_t body_count = body_block->data.block.count;
@@ -8151,7 +8167,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       uint32_t elem_type_idx = c->last_struct_idx;
       compiler__compile_node(c, args[1]);
-      compiler__emit_byte(c, OP_TYPED_VEC_GET, line);
+      if (c->want_inline_struct) {
+        compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
+        c->last_is_inline = true;
+      } else {
+        compiler__emit_byte(c, OP_TYPED_VEC_GET, line);
+      }
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       c->last_expr_type = TYPE_STRUCT;
       c->last_struct_idx = elem_type_idx;
@@ -8795,52 +8816,41 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (argc == 1) {
       compiler__compile_node(c, args[0]);
       compiler__emit_byte(c, OP_IS_BOX, line);
-    } else if (args[0]->type == AST_COMMAND && args[0]->data.command.head) {
-      /* [box? [Vec Type] $val] or [box? [Map Type] $val] — typed collection box check */
-      AstNode* type_head = args[0]->data.command.head;
-      bool is_vec = (type_head->type == AST_LIT_STRING && type_head->data.lit_string.length == 3
-                     && memcmp(type_head->data.lit_string.value, "Vec", 3) == 0);
-      bool is_map = (type_head->type == AST_LIT_STRING && type_head->data.lit_string.length == 3
-                     && memcmp(type_head->data.lit_string.value, "Map", 3) == 0);
-      if (!is_vec && !is_map) {
-        compiler__error(c, line, col, "box?: type expression must be [Vec Type] or [Map Type]");
-        return;
-      }
-      if (args[0]->data.command.arg_count != 1 ||
-          args[0]->data.command.args[0]->type != AST_LIT_STRING) {
-        compiler__error(c, line, col, "box?: type expression must be [Vec Type] or [Map Type]");
-        return;
-      }
-      const char* ename = args[0]->data.command.args[0]->data.lit_string.value;
-      uint32_t elen = args[0]->data.command.args[0]->data.lit_string.length;
-      uint32_t elem_idx = struct_registry__find(compiler__get_struct_registry(c), ename, elen);
-      if (elem_idx == UINT32_MAX) {
-        compiler__error(c, line, col, "box?: unknown element type name");
-        return;
-      }
-      compiler__compile_node(c, args[1]);
-      compiler__emit_byte(c, is_vec ? OP_IS_BOX_TYPED_VEC : OP_IS_BOX_TYPED_MAP, line);
     } else {
-      /* [box? Type $val] — typed struct box check */
-      if (args[0]->type != AST_LIT_STRING) {
-        compiler__error(c, line, col, "box?: first argument must be a type name");
-        return;
-      }
-      const char* tname = args[0]->data.lit_string.value;
-      uint32_t tlen = args[0]->data.lit_string.length;
-      uint32_t type_idx;
-      if (tlen == 3 && memcmp(tname, "dyn", 3) == 0) {
-        type_idx = 0;
-      } else {
-        type_idx = struct_registry__find(compiler__get_struct_registry(c), tname, tlen);
-        if (type_idx == UINT32_MAX) {
-          compiler__error(c, line, col, "box?: unknown type name");
+      /* [box? [Vec Type] $val] or [box? [Map Type] $val] — typed collection box check,
+         or [box? Type $val] — typed struct box check */
+      AstNode* box_elem = NULL;
+      int box_kind = compiler__typed_collection_expr(args[0], &box_elem);
+      if (box_kind > 0) {
+        uint32_t elem_idx = struct_registry__find(compiler__get_struct_registry(c),
+            box_elem->data.lit_string.value, box_elem->data.lit_string.length);
+        if (elem_idx == UINT32_MAX) {
+          compiler__error(c, line, col, "box?: unknown element type name");
           return;
         }
+        compiler__compile_node(c, args[1]);
+        compiler__emit_byte(c, (box_kind == 1) ? OP_IS_BOX_TYPED_VEC : OP_IS_BOX_TYPED_MAP, line);
+      } else if (args[0]->type == AST_LIT_STRING) {
+        /* [box? Type $val] — typed struct box check */
+        const char* tname = args[0]->data.lit_string.value;
+        uint32_t tlen = args[0]->data.lit_string.length;
+        uint32_t type_idx;
+        if (tlen == 3 && memcmp(tname, "dyn", 3) == 0) {
+          type_idx = 0;
+        } else {
+          type_idx = struct_registry__find(compiler__get_struct_registry(c), tname, tlen);
+          if (type_idx == UINT32_MAX) {
+            compiler__error(c, line, col, "box?: unknown type name");
+            return;
+          }
+        }
+        compiler__compile_node(c, args[1]);
+        compiler__emit_byte(c, OP_IS_BOX_TYPED, line);
+        compiler__emit_u16(c, (uint16_t)type_idx, line);
+      } else {
+        compiler__error(c, line, col, "box?: first argument must be a type name or [Vec/Map Type]");
+        return;
       }
-      compiler__compile_node(c, args[1]);
-      compiler__emit_byte(c, OP_IS_BOX_TYPED, line);
-      compiler__emit_u16(c, (uint16_t)type_idx, line);
     }
     c->last_expr_type = TYPE_DYN;
     return;
