@@ -897,6 +897,24 @@ char* module__read_file(const char* path, arena_t* arena) {
 #define COMPILER_TRY_PATCHES_MAX 128
 /* COMPILER_MAX_PROC_PARAMS defined above with module structs */
 
+/* --- TypeInfo: bundled type metadata for save/load of locals/globals/upvalues --- */
+
+typedef struct {
+  JaclType  type;
+  uint32_t  struct_idx;      /* struct registry index (UINT32_MAX when N/A) */
+  uint32_t  key_struct_idx;  /* key struct index for typed maps (UINT32_MAX = dyn) */
+} TypeInfo;
+
+/* Save/load between TypeInfo and any struct with .type/.struct_type_idx/.key_struct_idx */
+#define TYPEINFO_SAVE(dest, ti) do { \
+  (dest).type = (ti).type; \
+  (dest).struct_type_idx = (ti).struct_idx; \
+  (dest).key_struct_idx = (ti).key_struct_idx; \
+} while(0)
+
+#define TYPEINFO_LOAD(src) \
+  ((TypeInfo){ (src).type, (src).struct_type_idx, (src).key_struct_idx })
+
 typedef struct {
   JaclVal   name;         /* inline string name */
   int       depth;        /* scope depth when declared */
@@ -2859,6 +2877,18 @@ struct Compiler {
   CtxFieldList*        ctx_fields;       /* ctx field accumulator (root compiler owns) */
 };
 
+/* --- TypeInfo accessors --- */
+
+static inline TypeInfo compiler__get_type(Compiler* c) {
+  return (TypeInfo){ c->last_expr_type, c->last_struct_idx, c->last_key_struct_idx };
+}
+
+static inline void compiler__set_type(Compiler* c, TypeInfo ti) {
+  c->last_expr_type      = ti.type;
+  c->last_struct_idx     = ti.struct_idx;
+  c->last_key_struct_idx = ti.key_struct_idx;
+}
+
 void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
                            JaclInternTable* intern_table, ThreadHeap* heap) {
   c->chunk         = chunk;
@@ -2881,9 +2911,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->force_global_procs = false;
   c->ctx_pre_registered = false;
   c->expected_type   = TYPE_DYN;
-  c->last_expr_type  = TYPE_DYN;
-  c->last_struct_idx = UINT32_MAX;
-  c->last_key_struct_idx = UINT32_MAX;
+  compiler__set_type(c, (TypeInfo){ TYPE_DYN, UINT32_MAX, UINT32_MAX });
   c->return_type     = TYPE_DYN;
   c->module_cache    = NULL;
   c->current_module  = NULL;
@@ -3238,9 +3266,7 @@ int compiler__resolve_upvalue(Compiler* c, JaclVal name,
         c->upvalues[uv].is_mutable = true;
       c->upvalues[uv].captures_mutable = c->enclosing->locals[local].captures_mutable;
       c->upvalues[uv].suspends = c->enclosing->locals[local].suspends;
-      c->upvalues[uv].type = c->enclosing->locals[local].type;
-      c->upvalues[uv].struct_type_idx = c->enclosing->locals[local].struct_type_idx;
-      c->upvalues[uv].key_struct_idx = c->enclosing->locals[local].key_struct_idx;
+      TYPEINFO_SAVE(c->upvalues[uv], TYPEINFO_LOAD(c->enclosing->locals[local]));
       c->upvalues[uv].scope_mark = c->enclosing->locals[local].scope_mark;
       /* US-008: propagate inline struct info from enclosing local */
       if (c->enclosing->locals[local].is_inline) {
@@ -3300,9 +3326,7 @@ int compiler__resolve_upvalue(Compiler* c, JaclVal name,
         c->upvalues[uv].is_mutable = true;
       c->upvalues[uv].captures_mutable = c->enclosing->upvalues[upvalue].captures_mutable;
       c->upvalues[uv].suspends = c->enclosing->upvalues[upvalue].suspends;
-      c->upvalues[uv].type = c->enclosing->upvalues[upvalue].type;
-      c->upvalues[uv].struct_type_idx = c->enclosing->upvalues[upvalue].struct_type_idx;
-      c->upvalues[uv].key_struct_idx = c->enclosing->upvalues[upvalue].key_struct_idx;
+      TYPEINFO_SAVE(c->upvalues[uv], TYPEINFO_LOAD(c->enclosing->upvalues[upvalue]));
       c->upvalues[uv].scope_mark = c->enclosing->upvalues[upvalue].scope_mark;
       /* US-008: propagate inline struct info from parent upvalue */
       if (c->enclosing->upvalues[upvalue].is_inline) {
@@ -4120,9 +4144,10 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
     return;
   }
   compiler__compile_node(c, args[0]);
-  JaclType col_type = c->last_expr_type;
-  uint32_t col_struct_idx = c->last_struct_idx;
-  uint32_t col_key_struct_idx = c->last_key_struct_idx;
+  TypeInfo col_ti = compiler__get_type(c);
+  JaclType col_type = col_ti.type;
+  uint32_t col_struct_idx = col_ti.struct_idx;
+  uint32_t col_key_struct_idx = col_ti.key_struct_idx;
   {
     bool saved = c->in_non_suspending_callback;
     c->in_non_suspending_callback = true;
@@ -4141,10 +4166,7 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
     /* Always emit key_type_idx: 0xFFFF for typed vecs, actual idx for struct-key maps */
     compiler__emit_u16(c, (col_type == TYPE_TYPED_MAP) ? (uint16_t)col_key_struct_idx : (uint16_t)0xFFFF, line);
     if (opcode == OP_FILTER) {
-      c->last_expr_type = col_type;
-      c->last_struct_idx = col_struct_idx;
-      if (col_type == TYPE_TYPED_MAP)
-        c->last_key_struct_idx = col_key_struct_idx;
+      compiler__set_type(c, (TypeInfo){ col_type, col_struct_idx, col_key_struct_idx });
     } else if (opcode == OP_TRANSFORM) {
       c->last_expr_type = TYPE_VEC;
     } else {
@@ -5260,9 +5282,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_u16(c, (uint16_t)type_idx, line);
     compiler__emit_u16(c, (uint16_t)0xFFFF, line);  /* key_type_idx: dyn keys */
     compiler__emit_byte(c, (uint8_t)pair_count, line);
-    c->last_expr_type = TYPE_TYPED_MAP;
-    c->last_struct_idx = type_idx;
-    c->last_key_struct_idx = UINT32_MAX;
+    compiler__set_type(c, (TypeInfo){ TYPE_TYPED_MAP, type_idx, UINT32_MAX });
     return;
   }
 
@@ -5330,9 +5350,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_u16(c, (uint16_t)val_type_idx, line);
     compiler__emit_u16(c, (uint16_t)key_type_idx, line);
     compiler__emit_byte(c, (uint8_t)pair_count, line);
-    c->last_expr_type = TYPE_TYPED_MAP;
-    c->last_struct_idx = val_type_idx;
-    c->last_key_struct_idx = key_type_idx;
+    compiler__set_type(c, (TypeInfo){ TYPE_TYPED_MAP, val_type_idx, key_type_idx });
     return;
   }
 
@@ -6161,11 +6179,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->current_scope_mark = prev_mark;
       }
       c->locals[c->local_count - 1].is_mutable = true;
-      c->locals[c->local_count - 1].type = effective_type;
-      if (effective_type == TYPE_STRUCT || is_typed_collection(effective_type))
-        c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
-      if (effective_type == TYPE_TYPED_MAP)
-        c->locals[c->local_count - 1].key_struct_idx = c->last_key_struct_idx;
+      { TypeInfo ti = compiler__get_type(c); ti.type = effective_type;
+        TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
       /* mut returns nil */
       compiler__emit_byte(c, OP_NIL, line);
     } else {
@@ -6192,11 +6207,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         for (uint32_t i = 0; i < root->global_arity_count; i++) {
           if (root->global_arities[i].name == name_val) {
             root->global_arities[i].is_mutable = true;
-            root->global_arities[i].type = effective_type;
-            if (effective_type == TYPE_STRUCT || is_typed_collection(effective_type))
-              root->global_arities[i].struct_type_idx = c->last_struct_idx;
-            if (effective_type == TYPE_TYPED_MAP)
-              root->global_arities[i].key_struct_idx = c->last_key_struct_idx;
+            { TypeInfo ti = compiler__get_type(c); ti.type = effective_type;
+              TYPEINFO_SAVE(root->global_arities[i], ti); }
             break;
           }
         }
@@ -6871,13 +6883,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->current_scope_mark = prev_mark;
       }
       c->locals[c->local_count - 1].known_arity = rhs_arity;
-      c->locals[c->local_count - 1].type = effective_type;
-      if (is_typed_collection(effective_type)) {
-        c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
-        if (effective_type == TYPE_TYPED_MAP)
-          c->locals[c->local_count - 1].key_struct_idx = c->last_key_struct_idx;
-      } else if (effective_type == TYPE_STRUCT) {
-        c->locals[c->local_count - 1].struct_type_idx = c->last_struct_idx;
+      { TypeInfo ti = compiler__get_type(c); ti.type = effective_type;
+        TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
+      if (effective_type == TYPE_STRUCT) {
         StructTypeRegistry* reg = compiler__get_struct_registry(c);
         uint32_t width = struct__slot_width(reg, c->last_struct_idx);
         c->locals[c->local_count - 1].width = (uint16_t)width;
@@ -6917,11 +6925,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         while (root->enclosing) root = root->enclosing;
         for (uint32_t i = 0; i < root->global_arity_count; i++) {
           if (root->global_arities[i].name == name_val) {
-            root->global_arities[i].type = effective_type;
-            if (effective_type == TYPE_STRUCT || is_typed_collection(effective_type))
-              root->global_arities[i].struct_type_idx = c->last_struct_idx;
-            if (effective_type == TYPE_TYPED_MAP)
-              root->global_arities[i].key_struct_idx = c->last_key_struct_idx;
+            { TypeInfo ti = compiler__get_type(c); ti.type = effective_type;
+              TYPEINFO_SAVE(root->global_arities[i], ti); }
             break;
           }
         }
@@ -7261,11 +7266,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__add_local(&body_compiler, closure->param_names[i], line, col);
         body_compiler.current_scope_mark = prev_mark;
         body_compiler.locals[body_compiler.local_count - 1].is_param = true;
-        body_compiler.locals[body_compiler.local_count - 1].type = param_types_arr[i];
-        if (param_types_arr[i] == TYPE_STRUCT || is_typed_collection(param_types_arr[i]))
-          body_compiler.locals[body_compiler.local_count - 1].struct_type_idx = param_struct_idxs[i];
-        if (param_types_arr[i] == TYPE_TYPED_MAP)
-          body_compiler.locals[body_compiler.local_count - 1].key_struct_idx = param_key_struct_idxs[i];
+        TYPEINFO_SAVE(body_compiler.locals[body_compiler.local_count - 1],
+          ((TypeInfo){ param_types_arr[i], param_struct_idxs[i], param_key_struct_idxs[i] }));
       }
     }
 
@@ -8597,9 +8599,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_TYPED_MAP_SET, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
-      c->last_expr_type = TYPE_TYPED_MAP;
-      c->last_struct_idx = elem_type_idx;
-      c->last_key_struct_idx = key_type_idx;
+      compiler__set_type(c, (TypeInfo){ TYPE_TYPED_MAP, elem_type_idx, key_type_idx });
       return;
     }
     compiler__compile_node(c, args[1]);
@@ -8629,9 +8629,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       compiler__emit_byte(c, OP_TYPED_MAP_REMOVE, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
-      c->last_expr_type = TYPE_TYPED_MAP;
-      c->last_struct_idx = elem_type_idx;
-      c->last_key_struct_idx = key_type_idx;
+      compiler__set_type(c, (TypeInfo){ TYPE_TYPED_MAP, elem_type_idx, key_type_idx });
       return;
     }
     compiler__compile_node(c, args[1]);
@@ -9133,10 +9131,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               JaclType bt = c->narrowings[ni].box_type;
               uint32_t tidx = c->narrowings[ni].box_type_idx;
               if (bt == TYPE_TYPED_VEC || bt == TYPE_TYPED_MAP) {
-                c->last_expr_type = bt;
-                c->last_struct_idx = tidx;
-                if (bt == TYPE_TYPED_MAP)
-                  c->last_key_struct_idx = c->narrowings[ni].box_key_type_idx;
+                compiler__set_type(c, (TypeInfo){ bt, tidx, c->narrowings[ni].box_key_type_idx });
               } else if (tidx > 0) {
                 c->last_expr_type = TYPE_STRUCT;
                 c->last_struct_idx = tidx;
@@ -10886,12 +10881,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, OP_GET_LOCAL, line);
           compiler__emit_byte(c, (uint8_t)local_slot, line);
         }
-        c->last_expr_type = c->locals[local_slot].type;
-        if (c->locals[local_slot].type == TYPE_STRUCT ||
-            is_typed_collection(c->locals[local_slot].type))
-          c->last_struct_idx = c->locals[local_slot].struct_type_idx;
-        if (c->locals[local_slot].type == TYPE_TYPED_MAP)
-          c->last_key_struct_idx = c->locals[local_slot].key_struct_idx;
+        compiler__set_type(c, TYPEINFO_LOAD(c->locals[local_slot]));
       } else {
         int upvalue_idx = compiler__resolve_upvalue(c, name_val, line,
                                                      node->start.column);
@@ -10927,12 +10917,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, OP_GET_UPVALUE, line);
             compiler__emit_byte(c, uv_base, line);
           }
-          c->last_expr_type = c->upvalues[upvalue_idx].type;
-          if (c->upvalues[upvalue_idx].type == TYPE_STRUCT ||
-              is_typed_collection(c->upvalues[upvalue_idx].type))
-            c->last_struct_idx = c->upvalues[upvalue_idx].struct_type_idx;
-          if (c->upvalues[upvalue_idx].type == TYPE_TYPED_MAP)
-            c->last_key_struct_idx = c->upvalues[upvalue_idx].key_struct_idx;
+          compiler__set_type(c, TYPEINFO_LOAD(c->upvalues[upvalue_idx]));
         } else {
           GlobalArity* ga = compiler__find_global(c, name_val);
           /* Prelude mode: reject names not in the prelude or source-defined globals */
@@ -10964,12 +10949,11 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
               compiler__emit_byte(c, (uint8_t)TYPE_DYN, line);
             }
           }
-          c->last_expr_type = global_type;
-          if (global_type == TYPE_STRUCT || is_typed_collection(global_type)) {
-            if (ga) c->last_struct_idx = ga->struct_type_idx;
+          if (ga) {
+            compiler__set_type(c, TYPEINFO_LOAD(*ga));
+          } else {
+            c->last_expr_type = TYPE_DYN;
           }
-          if (global_type == TYPE_TYPED_MAP && ga)
-            c->last_key_struct_idx = ga->key_struct_idx;
         }
       }
       break;
