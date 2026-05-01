@@ -517,6 +517,235 @@ static int test_typed_vec_box_in_dyn_vec(void) {
   TEST_PASS();
 }
 
+/* ===== Typed Vec: Concat ===== */
+
+static int test_typed_vec_concat(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def b [[Vec Point] [Point 5 6]]\n"
+    "def c [vec-concat $a $b]\n"
+    "[print [vec-len $c]]\n"
+    "def p [vec-get $c 2]\n"
+    "[print $p->x]\n"
+    "[print $p->y]",
+    &cap, "3\n5\n6\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_concat_empty(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Vec Point] [Point 1 2]]\n"
+    "def b [[Vec Point]]\n"
+    "def c [vec-concat $a $b]\n"
+    "[print [vec-len $c]]",
+    &cap, "1\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_concat_preserves_original(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def a [[Vec Point] [Point 1 2]]\n"
+    "def b [[Vec Point] [Point 3 4]]\n"
+    "def c [vec-concat $a $b]\n"
+    "[print [vec-len $a]]\n"
+    "[print [vec-len $c]]",
+    &cap, "1\n2\n"));
+  TEST_PASS();
+}
+
+/* ===== Typed Vec: Slice ===== */
+
+static int test_typed_vec_slice(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6] [Point 7 8]]\n"
+    "def s [vec-slice $points 1 3]\n"
+    "[print [vec-len $s]]\n"
+    "def p [vec-get $s 0]\n"
+    "[print $p->x]\n"
+    "def q [vec-get $s 1]\n"
+    "[print $q->x]",
+    &cap, "2\n3\n5\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_slice_empty_range(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def s [vec-slice $points 1 1]\n"
+    "[print [vec-len $s]]",
+    &cap, "0\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_slice_clamp(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def s [vec-slice $points 0 99]\n"
+    "[print [vec-len $s]]",
+    &cap, "2\n"));
+  TEST_PASS();
+}
+
+/* ===== Typed Vec: Each (HOF callback via for) ===== */
+
+static int test_typed_vec_each_hof(void) {
+  PrintCapture cap;
+  /* HOF form of for with typed proc callback */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "proc show {Point p} { [print $p->x] }\n"
+    "[for $points $show]",
+    &cap, "10\n30\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_each_lambda(void) {
+  PrintCapture cap;
+  /* HOF form of for with lambda — $it is materialized struct */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6]]\n"
+    "[for $points [\\ print $it]]",
+    &cap, "Point{x: 1, y: 2}\nPoint{x: 3, y: 4}\nPoint{x: 5, y: 6}\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_each_empty(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def points [[Vec Point]]\n"
+    "proc show {Point p} { [print $p->x] }\n"
+    "[for $points $show]\n"
+    "[print done]",
+    &cap, "done\n"));
+  TEST_PASS();
+}
+
+/* ===== Typed Vec: Transform (HOF) ===== */
+
+static int test_typed_vec_transform(void) {
+  PrintCapture cap;
+  /* Transform with typed proc — extract x field */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc getx {Point p} { $p->x }\n"
+    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def xs [transform $points $getx]\n"
+    "[print $xs]",
+    &cap, "[vec 1 3]\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_transform_empty(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc getx {Point p} { $p->x }\n"
+    "def points [[Vec Point]]\n"
+    "def xs [transform $points $getx]\n"
+    "[print [vec-len $xs]]",
+    &cap, "0\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_transform_to_sum(void) {
+  PrintCapture cap;
+  /* Transform struct to computed value */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc psum {Point p} { [+ $p->x $p->y] }\n"
+    "def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "def sums [transform $points $psum]\n"
+    "[print $sums]",
+    &cap, "[vec 30 70]\n"));
+  TEST_PASS();
+}
+
+/* ===== Typed Vec: Filter (HOF) ===== */
+
+static int test_typed_vec_filter(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc isbig {Point p} { [> $p->x 2] }\n"
+    "def points [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6]]\n"
+    "def big [filter $points $isbig]\n"
+    "[print [vec-len $big]]\n"
+    "def p [vec-get $big 0]\n"
+    "[print $p->x]\n"
+    "def q [vec-get $big 1]\n"
+    "[print $q->x]",
+    &cap, "2\n3\n5\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_filter_none(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc ishuge {Point p} { [> $p->x 99] }\n"
+    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def result [filter $points $ishuge]\n"
+    "[print [vec-len $result]]",
+    &cap, "0\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_filter_all(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc yes {Point p} { [>= $p->x 0] }\n"
+    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "def result [filter $points $yes]\n"
+    "[print [vec-len $result]]",
+    &cap, "2\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_filter_preserves_type(void) {
+  PrintCapture cap;
+  /* Result of filter is still a typed vec — can vec-get and access fields */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc bigy {Point p} { [> $p->y 25] }\n"
+    "def points [[Vec Point] [Point 10 20] [Point 30 40] [Point 50 60]]\n"
+    "def big [filter $points $bigy]\n"
+    "def p [vec-get $big 0]\n"
+    "[print $p->x]\n"
+    "[print $p->y]",
+    &cap, "30\n40\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_filter_wide_struct(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
+    "proc iswide {Rect r} { [> $r->w 15] }\n"
+    "def rects [[Vec Rect] [Rect 1 2 10 20] [Rect 3 4 30 40] [Rect 5 6 50 60]]\n"
+    "def big [filter $rects $iswide]\n"
+    "[print [vec-len $big]]\n"
+    "def r [vec-get $big 0]\n"
+    "[print $r->w]",
+    &cap, "2\n30\n"));
+  TEST_PASS();
+}
+
 /* ===== Main ===== */
 
 int main(void) {
@@ -566,6 +795,23 @@ int main(void) {
   RUN(test_typed_vec_box_roundtrip);
   RUN(test_typed_vec_box_wrong_type);
   RUN(test_typed_vec_box_in_dyn_vec);
+  RUN(test_typed_vec_concat);
+  RUN(test_typed_vec_concat_empty);
+  RUN(test_typed_vec_concat_preserves_original);
+  RUN(test_typed_vec_slice);
+  RUN(test_typed_vec_slice_empty_range);
+  RUN(test_typed_vec_slice_clamp);
+  RUN(test_typed_vec_each_hof);
+  RUN(test_typed_vec_each_lambda);
+  RUN(test_typed_vec_each_empty);
+  RUN(test_typed_vec_transform);
+  RUN(test_typed_vec_transform_empty);
+  RUN(test_typed_vec_transform_to_sum);
+  RUN(test_typed_vec_filter);
+  RUN(test_typed_vec_filter_none);
+  RUN(test_typed_vec_filter_all);
+  RUN(test_typed_vec_filter_preserves_type);
+  RUN(test_typed_vec_filter_wide_struct);
 
   printf("\n%d/%d passed\n", pass, pass + fail);
   return fail > 0 ? 1 : 0;

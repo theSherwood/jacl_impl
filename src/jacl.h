@@ -832,6 +832,12 @@ typedef enum {
   OP_IS_BOX_TYPED_VEC,   /* no operand; pop val; push bool (is box containing typed vec?) */
   OP_IS_BOX_TYPED_MAP,   /* no operand; pop val; push bool (is box containing typed map?) */
 
+  OP_TYPED_VEC_CONCAT,   /* uint16_t type_idx; pop tvec_b, pop tvec_a; push concatenated tvec */
+  OP_TYPED_VEC_SLICE,    /* uint16_t type_idx; pop end, pop start, pop tvec; push sliced tvec */
+  OP_TYPED_EACH,         /* uint16_t type_idx; pop closure, pop typed coll; iterate with materialized elements */
+  OP_TYPED_TRANSFORM,    /* uint16_t type_idx; pop closure, pop typed coll; transform → dyn vec */
+  OP_TYPED_FILTER,       /* uint16_t type_idx; pop closure, pop typed coll; filter → typed vec */
+
   OP_TYPED_VEC_GET_INLINE, /* uint16_t type_idx; pop idx, pop tvec; push width inline slots */
   OP_TYPED_MAP_GET_INLINE, /* uint16_t type_idx; pop key, pop tmap; push width inline slots */
   OP_INLINE_TO_LOCAL       /* uint8_t base_slot, uint16_t type_idx; copy width inline TOS to local, pop */

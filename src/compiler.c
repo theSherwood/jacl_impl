@@ -4100,11 +4100,31 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
   }
   compiler__compile_node(c, args[0]);
   JaclType col_type = c->last_expr_type;
+  uint32_t col_struct_idx = c->last_struct_idx;
   {
     bool saved = c->in_non_suspending_callback;
     c->in_non_suspending_callback = true;
     compiler__compile_node(c, args[1]);
     c->in_non_suspending_callback = saved;
+  }
+  /* Typed collection dispatch: emit typed HOF opcode with type_idx */
+  if ((col_type == TYPE_TYPED_VEC || col_type == TYPE_TYPED_MAP) &&
+      (opcode == OP_EACH || opcode == OP_TRANSFORM || opcode == OP_FILTER)) {
+    uint8_t typed_op;
+    if (opcode == OP_EACH)           typed_op = OP_TYPED_EACH;
+    else if (opcode == OP_TRANSFORM) typed_op = OP_TYPED_TRANSFORM;
+    else                             typed_op = OP_TYPED_FILTER;
+    compiler__emit_byte(c, typed_op, line);
+    compiler__emit_u16(c, (uint16_t)col_struct_idx, line);
+    if (opcode == OP_FILTER) {
+      c->last_expr_type = col_type;
+      c->last_struct_idx = col_struct_idx;
+    } else if (opcode == OP_TRANSFORM) {
+      c->last_expr_type = TYPE_VEC;
+    } else {
+      c->last_expr_type = col_type;
+    }
+    return;
   }
   compiler__emit_byte(c, opcode, line);
   /* Preserve collection type: stream→stream, vec→vec */
@@ -8280,6 +8300,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__error(c, line, col, "vec-concat requires a vector; got stream (use collect to materialize)");
       return;
     }
+    if (c->last_expr_type == TYPE_TYPED_VEC) {
+      uint32_t elem_type_idx = c->last_struct_idx;
+      compiler__compile_node(c, args[1]);
+      if (c->last_expr_type != TYPE_TYPED_VEC || c->last_struct_idx != elem_type_idx) {
+        compiler__error(c, line, col, "vec-concat: both vectors must have the same typed element type");
+        return;
+      }
+      compiler__emit_byte(c, OP_TYPED_VEC_CONCAT, line);
+      compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
+      c->last_expr_type = TYPE_TYPED_VEC;
+      c->last_struct_idx = elem_type_idx;
+      return;
+    }
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_VEC_CONCAT, line);
     c->last_expr_type = TYPE_VEC;
@@ -8295,6 +8328,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     if (c->last_expr_type == TYPE_STREAM) {
       compiler__error(c, line, col, "vec-slice requires a vector; got stream (use collect to materialize)");
+      return;
+    }
+    if (c->last_expr_type == TYPE_TYPED_VEC) {
+      uint32_t elem_type_idx = c->last_struct_idx;
+      compiler__compile_node(c, args[1]);
+      compiler__compile_node(c, args[2]);
+      compiler__emit_byte(c, OP_TYPED_VEC_SLICE, line);
+      compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
+      c->last_expr_type = TYPE_TYPED_VEC;
+      c->last_struct_idx = elem_type_idx;
       return;
     }
     compiler__compile_node(c, args[1]);

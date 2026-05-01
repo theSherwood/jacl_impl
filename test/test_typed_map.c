@@ -445,6 +445,78 @@ static int test_typed_map_box_in_dyn_vec(void) {
   TEST_PASS();
 }
 
+/* ===== Typed Map: Each (HOF via for) ===== */
+
+static int test_typed_map_each_hof(void) {
+  PrintCapture cap;
+  /* HOF form of for with typed map — callback receives key + materialized struct */
+  /* Sum values to avoid order-dependence */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Point] \"a\" [Point 10 20] \"b\" [Point 30 40]]\n"
+    "mut total 0\n"
+    "proc accum {k Point v} { set total [+ $total $v->x] }\n"
+    "[for $m $accum]\n"
+    "[print $total]",
+    &cap, "40\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_each_empty(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "def m [[Map Point]]\n"
+    "proc noop {k Point v} { }\n"
+    "[for $m $noop]\n"
+    "[print done]",
+    &cap, "done\n"));
+  TEST_PASS();
+}
+
+/* ===== Typed Map: Transform (HOF) ===== */
+
+static int test_typed_map_transform(void) {
+  PrintCapture cap;
+  /* Transform typed map — callback extracts x field */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc getx {k Point v} { $v->x }\n"
+    "def m [[Map Point] \"a\" [Point 1 2] \"b\" [Point 3 4]]\n"
+    "def xs [transform $m $getx]\n"
+    "[print [vec-len $xs]]",
+    &cap, "2\n"));
+  TEST_PASS();
+}
+
+/* ===== Typed Map: Filter (HOF) ===== */
+
+static int test_typed_map_filter(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc isbig {k Point v} { [> $v->x 10] }\n"
+    "def m [[Map Point] \"a\" [Point 1 2] \"b\" [Point 30 40] \"c\" [Point 5 6]]\n"
+    "def big [filter $m $isbig]\n"
+    "[print [map-len $big]]\n"
+    "def p [map-get $big \"b\"]\n"
+    "[print $p->x]",
+    &cap, "1\n30\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_filter_none(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc ishuge {k Point v} { [> $v->x 99] }\n"
+    "def m [[Map Point] \"a\" [Point 1 2]]\n"
+    "def result [filter $m $ishuge]\n"
+    "[print [map-len $result]]",
+    &cap, "0\n"));
+  TEST_PASS();
+}
+
 /* ===== Main ===== */
 
 int main(void) {
@@ -488,6 +560,11 @@ int main(void) {
   RUN(test_typed_map_box_roundtrip);
   RUN(test_typed_map_box_wrong_type);
   RUN(test_typed_map_box_in_dyn_vec);
+  RUN(test_typed_map_each_hof);
+  RUN(test_typed_map_each_empty);
+  RUN(test_typed_map_transform);
+  RUN(test_typed_map_filter);
+  RUN(test_typed_map_filter_none);
 
   printf("\n%d/%d passed\n", pass, pass + fail);
   return fail > 0 ? 1 : 0;

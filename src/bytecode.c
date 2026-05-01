@@ -226,6 +226,12 @@ typedef enum {
   OP_IS_BOX_TYPED_VEC,   /* no operand */
   OP_IS_BOX_TYPED_MAP,   /* no operand */
 
+  OP_TYPED_VEC_CONCAT,   /* uint16_t type_idx */
+  OP_TYPED_VEC_SLICE,    /* uint16_t type_idx */
+  OP_TYPED_EACH,         /* uint16_t type_idx */
+  OP_TYPED_TRANSFORM,    /* uint16_t type_idx */
+  OP_TYPED_FILTER,       /* uint16_t type_idx */
+
   OP_TYPED_VEC_GET_INLINE, /* uint16_t type_idx */
   OP_TYPED_MAP_GET_INLINE, /* uint16_t type_idx */
   OP_INLINE_TO_LOCAL       /* uint8_t base_slot, uint16_t type_idx */
@@ -571,6 +577,11 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_TYPED_MAP_EQ:      return "OP_TYPED_MAP_EQ";
     case OP_IS_BOX_TYPED_VEC:  return "OP_IS_BOX_TYPED_VEC";
     case OP_IS_BOX_TYPED_MAP:  return "OP_IS_BOX_TYPED_MAP";
+    case OP_TYPED_VEC_CONCAT:  return "OP_TYPED_VEC_CONCAT";
+    case OP_TYPED_VEC_SLICE:   return "OP_TYPED_VEC_SLICE";
+    case OP_TYPED_EACH:        return "OP_TYPED_EACH";
+    case OP_TYPED_TRANSFORM:   return "OP_TYPED_TRANSFORM";
+    case OP_TYPED_FILTER:      return "OP_TYPED_FILTER";
     case OP_TYPED_VEC_GET_INLINE: return "OP_TYPED_VEC_GET_INLINE";
     case OP_TYPED_MAP_GET_INLINE: return "OP_TYPED_MAP_GET_INLINE";
     case OP_INLINE_TO_LOCAL:   return "OP_INLINE_TO_LOCAL";

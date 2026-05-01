@@ -9257,6 +9257,487 @@ interpret_done:
         break;
       }
 
+      case OP_TYPED_VEC_CONCAT: {
+        uint16_t type_idx = vm__read_u16(vm);
+        (void)type_idx;
+        JaclVal b_val, a_val;
+        result = vm__pop(vm, &b_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &a_val); if (result != VM_OK) return result;
+        jacl_typed_vec_root* a = (jacl_typed_vec_root*)jacl_as_ptr(a_val);
+        jacl_typed_vec_root* b = (jacl_typed_vec_root*)jacl_as_ptr(b_val);
+        gc__current_heap = &vm->heap;
+        jacl_typed_vec_root* new_tvec = jacl_typed_vec_concat(a, b);
+        result = vm__push(vm, jacl_typed_vector_ptr(new_tvec));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TYPED_VEC_SLICE: {
+        uint16_t type_idx = vm__read_u16(vm);
+        (void)type_idx;
+        JaclVal end_val, start_val, tvec_val;
+        result = vm__pop(vm, &end_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &start_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
+        if (!jacl_is_i32(start_val)) {
+          vm__set_error(vm, "vec-slice: expected i32 start, got %s", vm__type_name(start_val));
+          return VM_RUNTIME_ERROR;
+        }
+        if (!jacl_is_i32(end_val)) {
+          vm__set_error(vm, "vec-slice: expected i32 end, got %s", vm__type_name(end_val));
+          return VM_RUNTIME_ERROR;
+        }
+        jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
+        int32_t start = jacl_as_i32(start_val);
+        int32_t end = jacl_as_i32(end_val);
+        uint32_t count = jacl_typed_vec_count(tvec);
+        if (start < 0) start = 0;
+        if (end < 0) end = 0;
+        if ((uint32_t)start > count) start = (int32_t)count;
+        if ((uint32_t)end > count) end = (int32_t)count;
+        if (start > end) start = end;
+        gc__current_heap = &vm->heap;
+        jacl_typed_vec_root* new_tvec = jacl_typed_vec_slice(tvec, (uint32_t)start, (uint32_t)end);
+        result = vm__push(vm, jacl_typed_vector_ptr(new_tvec));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      /* ===== Typed HOF opcodes ===== */
+
+      case OP_TYPED_EACH: {
+        uint16_t type_idx = vm__read_u16(vm);
+        JaclVal closure_val, coll_val;
+        result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
+        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; break; }
+
+        if (!jacl_is_closure(closure_val)) {
+          vm__set_error(vm, "type error in 'each': expected closure, got %s",
+                       vm__type_name(closure_val));
+          return VM_RUNTIME_ERROR;
+        }
+        JaclClosure* closure = jacl_as_closure(closure_val);
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+
+        if (jacl_is_typed_vector(coll_val)) {
+          if (closure->param_count != 1) {
+            vm__set_error(vm, "each on typed vector requires a proc with 1 parameter, got %d",
+                         (int)closure->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+          jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(coll_val);
+          uint32_t count = jacl_typed_vec_count(tvec);
+
+          for (uint32_t i = 0; i < count; i++) {
+            const JaclVal* ptr = jacl_typed_vec_get_ptr(tvec, i);
+            gc__current_heap = &vm->heap;
+            JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                   sizeof(JaclStruct) + sdef->total_size);
+            s->type_idx = type_idx;
+            s->total_size = sdef->total_size;
+            memcpy(s->data, ptr, sdef->total_size);
+
+            result = vm__push(vm, closure_val);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, jacl_struct_val(s));
+            if (result != VM_OK) return result;
+
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+            uint32_t caller_fc = vm->frame_count;
+            CallFrame* cf = &vm->frames[vm->frame_count++];
+            cf->closure    = closure;
+            cf->return_ip  = vm->ip;
+            cf->stack_base = vm->stack_top - 1;
+            cf->chunk      = &closure->chunk;
+
+            uint8_t* saved_ip = vm->ip;
+            BytecodeChunk* saved_chunk = vm->chunk;
+            vm->ip    = closure->chunk.code;
+            vm->chunk = &closure->chunk;
+
+            VMResult call_result = vm__run(vm, caller_fc);
+            if (call_result != VM_OK) return call_result;
+
+            JaclVal discard;
+            result = vm__pop(vm, &discard);
+            if (result != VM_OK) return result;
+
+            vm->ip    = saved_ip;
+            vm->chunk = saved_chunk;
+            frame = &vm->frames[vm->frame_count - 1];
+          }
+        } else if (jacl_is_typed_map(coll_val)) {
+          if (closure->param_count != 2) {
+            vm__set_error(vm, "each on typed map requires a proc with 2 parameters, got %d",
+                         (int)closure->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+          jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(coll_val);
+          jacl_typed_map_iter it = jacl_typed_map_iter_init(tmap);
+          jacl_typed_map_iter_result ir;
+
+          for (;;) {
+            ir = jacl_typed_map_next_leaf(&it);
+            if (ir.done) break;
+
+            JaclVal key = jacl_typed_map_key_from_leaf(ir.item);
+            const JaclVal* val_ptr = jacl_typed_map_value_ptr_from_leaf(ir.item);
+            gc__current_heap = &vm->heap;
+            JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                   sizeof(JaclStruct) + sdef->total_size);
+            s->type_idx = type_idx;
+            s->total_size = sdef->total_size;
+            memcpy(s->data, val_ptr, sdef->total_size);
+
+            result = vm__push(vm, closure_val);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, key);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, jacl_struct_val(s));
+            if (result != VM_OK) return result;
+
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+            uint32_t caller_fc = vm->frame_count;
+            CallFrame* cf = &vm->frames[vm->frame_count++];
+            cf->closure    = closure;
+            cf->return_ip  = vm->ip;
+            cf->stack_base = vm->stack_top - 2;
+            cf->chunk      = &closure->chunk;
+
+            uint8_t* saved_ip = vm->ip;
+            BytecodeChunk* saved_chunk = vm->chunk;
+            vm->ip    = closure->chunk.code;
+            vm->chunk = &closure->chunk;
+
+            VMResult call_result = vm__run(vm, caller_fc);
+            if (call_result != VM_OK) return call_result;
+
+            JaclVal discard;
+            result = vm__pop(vm, &discard);
+            if (result != VM_OK) return result;
+
+            vm->ip    = saved_ip;
+            vm->chunk = saved_chunk;
+            frame = &vm->frames[vm->frame_count - 1];
+          }
+        } else {
+          vm__set_error(vm, "type error in 'each': expected typed vector or map, got %s",
+                       vm__type_name(coll_val));
+          return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, JACL_NIL);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TYPED_TRANSFORM: {
+        uint16_t type_idx = vm__read_u16(vm);
+        JaclVal closure_val, coll_val;
+        result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
+        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; break; }
+
+        if (!jacl_is_closure(closure_val)) {
+          vm__set_error(vm, "type error in 'transform': expected closure, got %s",
+                       vm__type_name(closure_val));
+          return VM_RUNTIME_ERROR;
+        }
+        JaclClosure* closure = jacl_as_closure(closure_val);
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+
+        if (jacl_is_typed_vector(coll_val)) {
+          if (closure->param_count != 1) {
+            vm__set_error(vm, "transform on typed vector requires a proc with 1 parameter, got %d",
+                         (int)closure->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+          jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(coll_val);
+          uint32_t count = jacl_typed_vec_count(tvec);
+          gc__current_heap = &vm->heap;
+          jacl_vec_root* result_vec = jacl_vec_empty();
+
+          for (uint32_t i = 0; i < count; i++) {
+            const JaclVal* ptr = jacl_typed_vec_get_ptr(tvec, i);
+            gc__current_heap = &vm->heap;
+            JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                   sizeof(JaclStruct) + sdef->total_size);
+            s->type_idx = type_idx;
+            s->total_size = sdef->total_size;
+            memcpy(s->data, ptr, sdef->total_size);
+
+            result = vm__push(vm, closure_val);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, jacl_struct_val(s));
+            if (result != VM_OK) return result;
+
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+            uint32_t caller_fc = vm->frame_count;
+            CallFrame* cf = &vm->frames[vm->frame_count++];
+            cf->closure    = closure;
+            cf->return_ip  = vm->ip;
+            cf->stack_base = vm->stack_top - 1;
+            cf->chunk      = &closure->chunk;
+
+            uint8_t* saved_ip = vm->ip;
+            BytecodeChunk* saved_chunk = vm->chunk;
+            vm->ip    = closure->chunk.code;
+            vm->chunk = &closure->chunk;
+
+            VMResult call_result = vm__run(vm, caller_fc);
+            if (call_result != VM_OK) return call_result;
+
+            JaclVal ret;
+            result = vm__pop(vm, &ret);
+            if (result != VM_OK) return result;
+
+            gc__current_heap = &vm->heap;
+            result_vec = jacl_vec_push_back(result_vec, ret);
+
+            vm->ip    = saved_ip;
+            vm->chunk = saved_chunk;
+            frame = &vm->frames[vm->frame_count - 1];
+          }
+          result = vm__push(vm, jacl_vector_ptr(result_vec));
+          if (result != VM_OK) return result;
+
+        } else if (jacl_is_typed_map(coll_val)) {
+          if (closure->param_count != 2) {
+            vm__set_error(vm, "transform on typed map requires a proc with 2 parameters, got %d",
+                         (int)closure->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+          jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(coll_val);
+          jacl_typed_map_iter it = jacl_typed_map_iter_init(tmap);
+          jacl_typed_map_iter_result ir;
+          gc__current_heap = &vm->heap;
+          jacl_vec_root* result_vec = jacl_vec_empty();
+
+          for (;;) {
+            ir = jacl_typed_map_next_leaf(&it);
+            if (ir.done) break;
+
+            JaclVal key = jacl_typed_map_key_from_leaf(ir.item);
+            const JaclVal* val_ptr = jacl_typed_map_value_ptr_from_leaf(ir.item);
+            gc__current_heap = &vm->heap;
+            JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                   sizeof(JaclStruct) + sdef->total_size);
+            s->type_idx = type_idx;
+            s->total_size = sdef->total_size;
+            memcpy(s->data, val_ptr, sdef->total_size);
+
+            result = vm__push(vm, closure_val);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, key);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, jacl_struct_val(s));
+            if (result != VM_OK) return result;
+
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+            uint32_t caller_fc = vm->frame_count;
+            CallFrame* cf = &vm->frames[vm->frame_count++];
+            cf->closure    = closure;
+            cf->return_ip  = vm->ip;
+            cf->stack_base = vm->stack_top - 2;
+            cf->chunk      = &closure->chunk;
+
+            uint8_t* saved_ip = vm->ip;
+            BytecodeChunk* saved_chunk = vm->chunk;
+            vm->ip    = closure->chunk.code;
+            vm->chunk = &closure->chunk;
+
+            VMResult call_result = vm__run(vm, caller_fc);
+            if (call_result != VM_OK) return call_result;
+
+            JaclVal ret;
+            result = vm__pop(vm, &ret);
+            if (result != VM_OK) return result;
+
+            gc__current_heap = &vm->heap;
+            result_vec = jacl_vec_push_back(result_vec, ret);
+
+            vm->ip    = saved_ip;
+            vm->chunk = saved_chunk;
+            frame = &vm->frames[vm->frame_count - 1];
+          }
+          result = vm__push(vm, jacl_vector_ptr(result_vec));
+          if (result != VM_OK) return result;
+
+        } else {
+          vm__set_error(vm, "type error in 'transform': expected typed vector or map, got %s",
+                       vm__type_name(coll_val));
+          return VM_RUNTIME_ERROR;
+        }
+        break;
+      }
+
+      case OP_TYPED_FILTER: {
+        uint16_t type_idx = vm__read_u16(vm);
+        JaclVal closure_val, coll_val;
+        result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &coll_val); if (result != VM_OK) return result;
+        if (jacl_is_error(coll_val)) { result = vm__push(vm, coll_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(closure_val)) { result = vm__push(vm, closure_val); if (result != VM_OK) return result; break; }
+
+        if (!jacl_is_closure(closure_val)) {
+          vm__set_error(vm, "type error in 'filter': expected closure, got %s",
+                       vm__type_name(closure_val));
+          return VM_RUNTIME_ERROR;
+        }
+        JaclClosure* closure = jacl_as_closure(closure_val);
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = vm__struct_width(sdef);
+
+        if (jacl_is_typed_vector(coll_val)) {
+          if (closure->param_count != 1) {
+            vm__set_error(vm, "filter on typed vector requires a proc with 1 parameter, got %d",
+                         (int)closure->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+          jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(coll_val);
+          uint32_t count = jacl_typed_vec_count(tvec);
+          gc__current_heap = &vm->heap;
+          jacl_typed_vec_root* result_tvec = jacl_typed_vec_empty_strided(width);
+
+          for (uint32_t i = 0; i < count; i++) {
+            const JaclVal* ptr = jacl_typed_vec_get_ptr(tvec, i);
+            gc__current_heap = &vm->heap;
+            JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                   sizeof(JaclStruct) + sdef->total_size);
+            s->type_idx = type_idx;
+            s->total_size = sdef->total_size;
+            memcpy(s->data, ptr, sdef->total_size);
+
+            result = vm__push(vm, closure_val);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, jacl_struct_val(s));
+            if (result != VM_OK) return result;
+
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+            uint32_t caller_fc = vm->frame_count;
+            CallFrame* cf = &vm->frames[vm->frame_count++];
+            cf->closure    = closure;
+            cf->return_ip  = vm->ip;
+            cf->stack_base = vm->stack_top - 1;
+            cf->chunk      = &closure->chunk;
+
+            uint8_t* saved_ip = vm->ip;
+            BytecodeChunk* saved_chunk = vm->chunk;
+            vm->ip    = closure->chunk.code;
+            vm->chunk = &closure->chunk;
+
+            VMResult call_result = vm__run(vm, caller_fc);
+            if (call_result != VM_OK) return call_result;
+
+            JaclVal ret;
+            result = vm__pop(vm, &ret);
+            if (result != VM_OK) return result;
+
+            if (!vm__is_falsy(ret)) {
+              const JaclVal* ptr2 = jacl_typed_vec_get_ptr(tvec, i);
+              gc__current_heap = &vm->heap;
+              result_tvec = jacl_typed_vec_push_back_wide(result_tvec, ptr2);
+            }
+
+            vm->ip    = saved_ip;
+            vm->chunk = saved_chunk;
+            frame = &vm->frames[vm->frame_count - 1];
+          }
+          result = vm__push(vm, jacl_typed_vector_ptr(result_tvec));
+          if (result != VM_OK) return result;
+
+        } else if (jacl_is_typed_map(coll_val)) {
+          if (closure->param_count != 2) {
+            vm__set_error(vm, "filter on typed map requires a proc with 2 parameters, got %d",
+                         (int)closure->param_count);
+            return VM_RUNTIME_ERROR;
+          }
+          jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(coll_val);
+          jacl_typed_map_iter it = jacl_typed_map_iter_init(tmap);
+          jacl_typed_map_iter_result ir;
+          gc__current_heap = &vm->heap;
+          jacl_typed_map_node* result_tmap = NULL;
+
+          for (;;) {
+            ir = jacl_typed_map_next_leaf(&it);
+            if (ir.done) break;
+
+            JaclVal key = jacl_typed_map_key_from_leaf(ir.item);
+            const JaclVal* val_ptr = jacl_typed_map_value_ptr_from_leaf(ir.item);
+            gc__current_heap = &vm->heap;
+            JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                                   sizeof(JaclStruct) + sdef->total_size);
+            s->type_idx = type_idx;
+            s->total_size = sdef->total_size;
+            memcpy(s->data, val_ptr, sdef->total_size);
+
+            result = vm__push(vm, closure_val);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, key);
+            if (result != VM_OK) return result;
+            result = vm__push(vm, jacl_struct_val(s));
+            if (result != VM_OK) return result;
+
+            if (vm->frame_count >= VM_FRAMES_MAX) {
+              vm__set_error(vm, "stack overflow");
+              return VM_RUNTIME_ERROR;
+            }
+            uint32_t caller_fc = vm->frame_count;
+            CallFrame* cf = &vm->frames[vm->frame_count++];
+            cf->closure    = closure;
+            cf->return_ip  = vm->ip;
+            cf->stack_base = vm->stack_top - 2;
+            cf->chunk      = &closure->chunk;
+
+            uint8_t* saved_ip = vm->ip;
+            BytecodeChunk* saved_chunk = vm->chunk;
+            vm->ip    = closure->chunk.code;
+            vm->chunk = &closure->chunk;
+
+            VMResult call_result = vm__run(vm, caller_fc);
+            if (call_result != VM_OK) return call_result;
+
+            JaclVal ret;
+            result = vm__pop(vm, &ret);
+            if (result != VM_OK) return result;
+
+            if (!vm__is_falsy(ret)) {
+              gc__current_heap = &vm->heap;
+              result_tmap = jacl_typed_map_set_wide(result_tmap, &key, 1, val_ptr, width);
+            }
+
+            vm->ip    = saved_ip;
+            vm->chunk = saved_chunk;
+            frame = &vm->frames[vm->frame_count - 1];
+          }
+          result = vm__push(vm, jacl_typed_map_ptr(result_tmap));
+          if (result != VM_OK) return result;
+
+        } else {
+          vm__set_error(vm, "type error in 'filter': expected typed vector or map, got %s",
+                       vm__type_name(coll_val));
+          return VM_RUNTIME_ERROR;
+        }
+        break;
+      }
+
       /* ===== Typed Map opcodes ===== */
 
       case OP_TYPED_MAP: {
