@@ -833,6 +833,7 @@ typedef enum {
   OP_IS_BOX_TYPED_MAP,   /* no operand; pop val; push bool (is box containing typed map?) */
 
   OP_TYPED_VEC_GET_INLINE, /* uint16_t type_idx; pop idx, pop tvec; push width inline slots */
+  OP_TYPED_MAP_GET_INLINE, /* uint16_t type_idx; pop key, pop tmap; push width inline slots */
   OP_INLINE_TO_LOCAL       /* uint8_t base_slot, uint16_t type_idx; copy width inline TOS to local, pop */
 } OpCode;
 

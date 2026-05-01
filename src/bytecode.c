@@ -227,6 +227,7 @@ typedef enum {
   OP_IS_BOX_TYPED_MAP,   /* no operand */
 
   OP_TYPED_VEC_GET_INLINE, /* uint16_t type_idx */
+  OP_TYPED_MAP_GET_INLINE, /* uint16_t type_idx */
   OP_INLINE_TO_LOCAL       /* uint8_t base_slot, uint16_t type_idx */
 } OpCode;
 
@@ -571,6 +572,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_IS_BOX_TYPED_VEC:  return "OP_IS_BOX_TYPED_VEC";
     case OP_IS_BOX_TYPED_MAP:  return "OP_IS_BOX_TYPED_MAP";
     case OP_TYPED_VEC_GET_INLINE: return "OP_TYPED_VEC_GET_INLINE";
+    case OP_TYPED_MAP_GET_INLINE: return "OP_TYPED_MAP_GET_INLINE";
     case OP_INLINE_TO_LOCAL:   return "OP_INLINE_TO_LOCAL";
   }
   return "OP_UNKNOWN";

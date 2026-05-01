@@ -9292,9 +9292,8 @@ interpret_done:
         jacl_typed_map_leaf* leaf = jacl_typed_map_get_leaf(tmap, &key_val, 1);
 
         if (!leaf) {
-          result = vm__push(vm, JACL_NIL);
-          if (result != VM_OK) return result;
-          break;
+          vm__set_error(vm, "map-get: key not found in typed map");
+          return VM_RUNTIME_ERROR;
         }
 
         /* Materialize value bytes to heap struct */
@@ -9308,6 +9307,36 @@ interpret_done:
         memcpy(s->data, val_ptr, sdef->total_size);
         result = vm__push(vm, jacl_struct_val(s));
         if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_TYPED_MAP_GET_INLINE: {
+        uint16_t type_idx = vm__read_u16(vm);
+        JaclVal key_val, tmap_val;
+        result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
+        result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
+
+        jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
+        jacl_typed_map_leaf* leaf = jacl_typed_map_get_leaf(tmap, &key_val, 1);
+
+        if (!leaf) {
+          vm__set_error(vm, "map-get: key not found in typed map");
+          return VM_RUNTIME_ERROR;
+        }
+
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = vm__struct_width(sdef);
+        const JaclVal* val_ptr = jacl_typed_map_value_ptr_from_leaf(leaf);
+        if (vm->stack_top + width > VM_STACK_MAX) {
+          vm__set_error(vm, "stack overflow in typed map get inline");
+          return VM_RUNTIME_ERROR;
+        }
+        memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+        memcpy(&vm->stack[vm->stack_top], val_ptr, sdef->total_size);
+        for (uint32_t si = 0; si < width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+        }
+        vm->stack_top += width;
         break;
       }
 

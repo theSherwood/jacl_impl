@@ -41,12 +41,46 @@ static int test_typed_map_get(void) {
 }
 
 static int test_typed_map_get_missing(void) {
-  PrintCapture cap;
-  ASSERT(run_ok(
+  ASSERT(run_err(
     "struct Point {i32 x, i32 y}\n"
     "def m [[Map Point] \"a\" [Point 1 2]]\n"
     "[print [map-get $m \"zzz\"]]",
-    &cap, "nil\n"));
+    "key not found"));
+  TEST_PASS();
+}
+
+static int test_typed_map_get_inline_local(void) {
+  PrintCapture cap;
+  /* def inside proc triggers inline path: OP_TYPED_MAP_GET_INLINE */
+  ASSERT(run_ok(
+    "struct Point {i32 x, i32 y}\n"
+    "proc test {} {\n"
+    "  def m [[Map Point] \"a\" [Point 10 20] \"b\" [Point 30 40]]\n"
+    "  def p [map-get $m \"a\"]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "  def q [map-get $m \"b\"]\n"
+    "  [print $q->x]\n"
+    "  [print $q->y]\n"
+    "}\n"
+    "[test]",
+    &cap, "10\n20\n30\n40\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_get_inline_wide(void) {
+  PrintCapture cap;
+  /* Wide struct (4 fields = 2 slots) via inline map get */
+  ASSERT(run_ok(
+    "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
+    "proc test {} {\n"
+    "  def m [[Map Rect] \"r\" [Rect 1 2 3 4]]\n"
+    "  def r [map-get $m \"r\"]\n"
+    "  [print $r->x]\n"
+    "  [print $r->h]\n"
+    "}\n"
+    "[test]",
+    &cap, "1\n4\n"));
   TEST_PASS();
 }
 
@@ -427,6 +461,8 @@ int main(void) {
   RUN(test_typed_map_construct_elements);
   RUN(test_typed_map_get);
   RUN(test_typed_map_get_missing);
+  RUN(test_typed_map_get_inline_local);
+  RUN(test_typed_map_get_inline_wide);
   RUN(test_typed_map_has);
   RUN(test_typed_map_set);
   RUN(test_typed_map_set_overwrite);
