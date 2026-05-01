@@ -4544,6 +4544,12 @@ void compiler__compile_destructure_named(
 
   /* Compile RHS — pushes one value (struct or map) onto stack */
   compiler__compile_node(c, value_expr);
+  /* Phase 5c: reify inline struct for destructuring (OP_STRUCT_GET expects heap) */
+  if (c->last_is_inline && c->last_expr_type == TYPE_STRUCT) {
+    compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+    compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+    c->last_is_inline = false;
+  }
   JaclType rhs_type = c->last_expr_type;
   uint32_t rhs_struct_idx = c->last_struct_idx;
 
@@ -5253,9 +5259,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__error(c, line, col, "[Vec ...] too many initial elements (max 255)");
       return;
     }
-    /* Compile each element and verify it's the right struct type.
-     * Struct constructors produce heap structs by default (want_inline_struct
-     * is false), so each element will be a JACL_TAG_STRUCT JaclVal on stack. */
+    /* Compile each element, verify struct type, and reify inline to heap.
+     * OP_TYPED_VEC expects heap struct pointers on the stack. */
     for (uint32_t i = 0; i < argc; i++) {
       compiler__compile_node(c, args[i]);
       if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != type_idx) {
@@ -5266,6 +5271,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                  (int)type_name_len, type_name_str);
         compiler__error(c, line, col, err);
         return;
+      }
+      /* Phase 5c: struct constructors are always inline; reify for OP_TYPED_VEC */
+      if (c->last_is_inline) {
+        compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+        compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+        c->last_is_inline = false;
       }
     }
     compiler__emit_byte(c, OP_TYPED_VEC, line);
@@ -5311,6 +5322,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                  (int)type_name_len, type_name_str);
         compiler__error(c, line, col, err);
         return;
+      }
+      /* Phase 5c: reify inline struct values for OP_TYPED_MAP */
+      if (c->last_is_inline) {
+        compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+        compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+        c->last_is_inline = false;
       }
     }
     compiler__emit_byte(c, OP_TYPED_MAP, line);
@@ -5369,6 +5386,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, err);
         return;
       }
+      /* Phase 5c: reify inline struct keys for OP_TYPED_MAP */
+      if (c->last_is_inline) {
+        compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+        compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+        c->last_is_inline = false;
+      }
       compiler__compile_node(c, args[i * 2 + 1]);   /* value: must match value struct type */
       if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != val_type_idx) {
         char err[128];
@@ -5379,6 +5402,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                  (int)val_name_len, val_name_str);
         compiler__error(c, line, col, err);
         return;
+      }
+      /* Phase 5c: reify inline struct values for OP_TYPED_MAP */
+      if (c->last_is_inline) {
+        compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+        compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+        c->last_is_inline = false;
       }
     }
     compiler__emit_byte(c, OP_TYPED_MAP, line);
@@ -6376,6 +6405,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, OP_TO_DYN, line);
           compiler__emit_byte(c, (uint8_t)target_type, line);
         }
+        /* Phase 5c: reify inline struct for cell storage (expects heap pointer) */
+        if (c->last_is_inline && c->last_expr_type == TYPE_STRUCT) {
+          compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+          compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+          c->last_is_inline = false;
+        }
         compiler__emit_byte(c, OP_SET_CELL_LOCAL, line);
         compiler__emit_byte(c, (uint8_t)local_slot, line);
         return;
@@ -6421,6 +6456,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         if (is_unboxed_type(target_type)) {
           compiler__emit_byte(c, OP_TO_DYN, line);
           compiler__emit_byte(c, (uint8_t)target_type, line);
+        }
+        /* Phase 5c: reify inline struct for cell storage (expects heap pointer) */
+        if (c->last_is_inline && c->last_expr_type == TYPE_STRUCT) {
+          compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+          compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+          c->last_is_inline = false;
         }
         compiler__emit_byte(c, OP_SET_CELL_UPVALUE, line);
         compiler__emit_byte(c, (uint8_t)c->upvalues[upvalue_idx].base_slot, line);
@@ -6470,6 +6511,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, OP_TO_DYN, line);
             compiler__emit_byte(c, (uint8_t)target_type, line);
           }
+          /* Phase 5c: reify inline struct for OP_RESET (expects heap pointer) */
+          if (c->last_is_inline && c->last_expr_type == TYPE_STRUCT) {
+            compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+            compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+            c->last_is_inline = false;
+          }
           compiler__emit_byte(c, OP_RESET, line);
         } else {
           c->expected_type = target_type;
@@ -6497,6 +6544,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           if (is_unboxed_type(target_type)) {
             compiler__emit_byte(c, OP_TO_DYN, line);
             compiler__emit_byte(c, (uint8_t)target_type, line);
+          }
+          /* Phase 5c: reify inline struct for global storage */
+          if (c->last_is_inline && c->last_expr_type == TYPE_STRUCT) {
+            compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+            compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+            c->last_is_inline = false;
           }
           uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
           compiler__emit_byte(c, OP_SET_GLOBAL, line);
@@ -6822,7 +6875,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             StructTypeDef* rhs_sdef = reg->defs[rhs_sidx];
             if (rhs_sdef && rhs_sdef->is_value_type) {
               activate_inline = true;
-              c->want_inline_struct = true;
+              /* Phase 5c: want_inline_struct no longer needed here —
+               * value-type struct constructors are always inline. */
             }
           }
           /* Hint: vec-get/map-get on typed collection may produce inline result.
@@ -6890,6 +6944,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     if (c->sm_analysis) {
       /* SM mode: write value to state object field instead of local slot */
+      /* Phase 5c: reify inline struct for state field storage */
+      if (c->last_is_inline && c->last_expr_type == TYPE_STRUCT) {
+        compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+        compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+        c->last_is_inline = false;
+      }
       int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
       if (field_idx >= 0) {
         compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
@@ -6948,6 +7008,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (is_unboxed_type(effective_type)) {
         compiler__emit_byte(c, OP_TO_DYN, line);
         compiler__emit_byte(c, (uint8_t)effective_type, line);
+      }
+      /* Phase 5c: reify inline struct for global storage */
+      if (c->last_is_inline && effective_type == TYPE_STRUCT) {
+        compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+        compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+        c->last_is_inline = false;
       }
       JaclVal def_key = compiler__global_name_val(c, bind_name_ptr, name_len);
       uint16_t name_idx = chunk_add_constant(c->chunk, def_key);
@@ -8458,6 +8524,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, "vec-push: element type does not match typed vec element type");
         return;
       }
+      /* Phase 5c: reify inline struct for OP_TYPED_VEC_PUSH */
+      if (c->last_is_inline) {
+        compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+        compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+        c->last_is_inline = false;
+      }
       compiler__emit_byte(c, OP_TYPED_VEC_PUSH, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       c->last_expr_type = TYPE_TYPED_VEC;
@@ -8489,6 +8561,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != elem_type_idx) {
         compiler__error(c, line, col, "vec-set: element type does not match typed vec element type");
         return;
+      }
+      /* Phase 5c: reify inline struct for OP_TYPED_VEC_SET */
+      if (c->last_is_inline) {
+        compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+        compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+        c->last_is_inline = false;
       }
       compiler__emit_byte(c, OP_TYPED_VEC_SET, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
@@ -8594,6 +8672,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, "map-get: key type does not match typed map key type");
           return;
         }
+        /* Phase 5c: reify inline struct key for OP_TYPED_MAP_GET */
+        if (c->last_is_inline) {
+          compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+          compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+          c->last_is_inline = false;
+        }
       }
       if (c->want_inline_struct) {
         compiler__emit_byte(c, OP_TYPED_MAP_GET_INLINE, line);
@@ -8627,6 +8711,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != key_type_idx) {
           compiler__error(c, line, col, "map-has: key type does not match typed map key type");
           return;
+        }
+        /* Phase 5c: reify inline struct key for OP_TYPED_MAP_HAS */
+        if (c->last_is_inline) {
+          compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+          compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+          c->last_is_inline = false;
         }
       }
       compiler__emit_byte(c, OP_TYPED_MAP_HAS, line);
@@ -8673,11 +8763,23 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, "map-set: key type does not match typed map key type");
           return;
         }
+        /* Phase 5c: reify inline struct key for OP_TYPED_MAP_SET */
+        if (c->last_is_inline) {
+          compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+          compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+          c->last_is_inline = false;
+        }
       }
       compiler__compile_node(c, args[2]);  /* value: must match struct type */
       if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != elem_type_idx) {
         compiler__error(c, line, col, "map-set: value type does not match typed map element type");
         return;
+      }
+      /* Phase 5c: reify inline struct value for OP_TYPED_MAP_SET */
+      if (c->last_is_inline) {
+        compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+        compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+        c->last_is_inline = false;
       }
       compiler__emit_byte(c, OP_TYPED_MAP_SET, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
@@ -8708,6 +8810,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != key_type_idx) {
           compiler__error(c, line, col, "map-remove: key type does not match typed map key type");
           return;
+        }
+        /* Phase 5c: reify inline struct key for OP_TYPED_MAP_REMOVE */
+        if (c->last_is_inline) {
+          compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+          compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+          c->last_is_inline = false;
         }
       }
       compiler__emit_byte(c, OP_TYPED_MAP_REMOVE, line);
@@ -9082,6 +9190,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     if (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX) {
+      /* Phase 5c: reify inline struct for OP_BOX_STRUCT (expects heap pointer) */
+      if (c->last_is_inline) {
+        compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+        compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+        c->last_is_inline = false;
+      }
       /* Struct box: emit OP_BOX_STRUCT with type_idx operand */
       compiler__emit_byte(c, OP_BOX_STRUCT, line);
       compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
@@ -9240,6 +9354,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     compiler__compile_node(c, args[1]);
+    /* Phase 5c: reify inline struct for OP_RESET (expects heap pointer) */
+    if (c->last_is_inline && c->last_expr_type == TYPE_STRUCT) {
+      compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+      compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      c->last_is_inline = false;
+    }
     compiler__emit_byte(c, OP_RESET, line);
     c->last_expr_type = TYPE_NIL;
     return;
@@ -10003,6 +10123,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               c->inline_ref_offset = total_offset;
               c->last_expr_type = TYPE_STRUCT;
               c->last_struct_idx = sdef->fields[fi].struct_type_idx;
+              /* Result is a materialized heap pointer, NOT inline bytes */
+              c->last_is_inline = false;
             } else {
               /* Scalar field — emit inline get */
               compiler__emit_byte(c, get_op, line);
@@ -10295,10 +10417,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         return;
       }
 
-      /* Capture and clear inline flag before compiling args (prevents
-       * nested struct constructors from inheriting the flag).
-       * US-015: only allow inline for value-type structs. */
-      bool use_inline = c->want_inline_struct && sdef->is_value_type;
+      /* Phase 5c: value-type structs are always constructed inline.
+       * Legacy (non-value-type) structs still use heap. */
+      bool use_inline = sdef->is_value_type;
       c->want_inline_struct = false;
 
       /* Compile and type-check each field argument */
@@ -10329,6 +10450,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                    type_name(field_type));
           compiler__error(c, line, col, err_msg);
           return;
+        }
+        /* Phase 5c: nested struct field args are now inline — reify for
+           OP_STRUCT_NEW_INLINE which expects heap JaclStruct* fields */
+        if (c->last_is_inline && c->last_expr_type == TYPE_STRUCT) {
+          compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+          compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+          c->last_is_inline = false;
         }
       }
 
@@ -12077,6 +12205,12 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         CtxField* added = ctx_field_list__find(ctx, field_name, field_name_len);
         compiler__emit_byte(c, OP_GET_CTX, line);
         compiler__compile_node(c, node->data.ctx_decl.default_expr);
+        /* Phase 5c: struct default exprs are now inline — reify for OP_STRUCT_SET */
+        if (c->last_is_inline && c->last_expr_type == TYPE_STRUCT) {
+          compiler__emit_byte(c, OP_STRUCT_REIFY, line);
+          compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+          c->last_is_inline = false;
+        }
         compiler__emit_byte(c, OP_STRUCT_SET, line);
         compiler__emit_u16(c, (uint16_t)added->offset, line);
         compiler__emit_byte(c, (uint8_t)added->type, line);

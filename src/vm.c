@@ -1045,6 +1045,30 @@ void vm__struct_write_field(JaclStruct* s, uint32_t offset,
   }
 }
 
+/* Phase 5c: After reifying inline bytes to a heap JaclStruct, fix up any
+ * TYPE_STRUCT fields by allocating child heap structs from the raw bytes.
+ * This ensures OP_STRUCT_GET sees tagged pointers (not raw data) for nested
+ * struct fields — matching the convention established by OP_STRUCT_NEW (heap). */
+static void vm__reify_nested_structs(VM* vm, JaclStruct* s, StructTypeDef* sdef) {
+  for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+    if (sdef->fields[fi].type != TYPE_STRUCT) continue;
+    uint32_t nidx = sdef->fields[fi].struct_type_idx;
+    if (!vm->struct_registry || nidx >= vm->struct_registry->count) continue;
+    StructTypeDef* nsdef = vm->struct_registry->defs[nidx];
+    gc__current_heap = &vm->heap;
+    JaclStruct* ns = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
+                                             sizeof(JaclStruct) + nsdef->total_size);
+    ns->type_idx = nidx;
+    ns->total_size = nsdef->total_size;
+    memcpy(ns->data, s->data + sdef->fields[fi].offset, nsdef->total_size);
+    /* Recurse for nested-nested struct fields */
+    vm__reify_nested_structs(vm, ns, nsdef);
+    /* Store tagged pointer in parent's data at field offset */
+    JaclVal nval = jacl_struct_val(ns);
+    memcpy(s->data + sdef->fields[fi].offset, &nval, sizeof(JaclVal));
+  }
+}
+
 /* --- ctx fork / unfork helpers ---
  *
  * ctx_fork:   allocates a new ctx from the pool, copies data from parent_ctx,
@@ -6445,6 +6469,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         s->type_idx = type_idx;
         s->total_size = sdef->total_size;
         memcpy(s->data, src, sdef->total_size);
+        /* Phase 5c: fix up nested struct fields — convert raw data to
+           heap JaclStruct* pointers so OP_STRUCT_GET works uniformly.
+           Recursive: nested structs may themselves have nested fields. */
+        vm__reify_nested_structs(vm, s, sdef);
         /* Clear inline bitmap, pop width slots, push heap pointer */
         for (uint32_t si = 0; si < width; si++) {
           BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - width + si);
