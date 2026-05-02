@@ -5286,8 +5286,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, err);
         return;
       }
-      /* Phase 5c: struct constructors are always inline; reify for OP_TYPED_VEC */
-      compiler__reify_inline_struct(c, line);
+      /* OP_TYPED_VEC consumes inline struct bytes directly via vm__pop_struct. */
     }
     compiler__emit_byte(c, OP_TYPED_VEC, line);
     compiler__emit_u16(c, (uint16_t)type_idx, line);
@@ -5333,8 +5332,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, err);
         return;
       }
-      /* Phase 5c: reify inline struct values for OP_TYPED_MAP */
-      compiler__reify_inline_struct(c, line);
+      /* OP_TYPED_MAP consumes inline struct values directly via vm__pop_struct. */
     }
     compiler__emit_byte(c, OP_TYPED_MAP, line);
     compiler__emit_u16(c, (uint16_t)type_idx, line);
@@ -5392,8 +5390,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, err);
         return;
       }
-      /* Phase 5c: reify inline struct keys for OP_TYPED_MAP */
-      compiler__reify_inline_struct(c, line);
       compiler__compile_node(c, args[i * 2 + 1]);   /* value: must match value struct type */
       if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != val_type_idx) {
         char err[128];
@@ -5405,8 +5401,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, err);
         return;
       }
-      /* Phase 5c: reify inline struct values for OP_TYPED_MAP */
-      compiler__reify_inline_struct(c, line);
     }
     compiler__emit_byte(c, OP_TYPED_MAP, line);
     compiler__emit_u16(c, (uint16_t)val_type_idx, line);
@@ -8536,8 +8530,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, "vec-push: element type does not match typed vec element type");
         return;
       }
-      /* Phase 5c: reify inline struct for OP_TYPED_VEC_PUSH */
-      compiler__reify_inline_struct(c, line);
+      /* OP_TYPED_VEC_PUSH consumes inline struct bytes via vm__pop_struct. */
       compiler__emit_byte(c, OP_TYPED_VEC_PUSH, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       c->last_expr_type = TYPE_TYPED_VEC;
@@ -8570,8 +8563,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, "vec-set: element type does not match typed vec element type");
         return;
       }
-      /* Phase 5c: reify inline struct for OP_TYPED_VEC_SET */
-      compiler__reify_inline_struct(c, line);
+      /* OP_TYPED_VEC_SET consumes inline struct bytes via vm__pop_struct. */
       compiler__emit_byte(c, OP_TYPED_VEC_SET, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       c->last_expr_type = TYPE_TYPED_VEC;
@@ -8676,10 +8668,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, "map-get: key type does not match typed map key type");
           return;
         }
-        /* Phase 5c: reify inline struct key for OP_TYPED_MAP_GET */
-        compiler__reify_inline_struct(c, line);
       }
-      /* Phase 5f: always use inline get — reification at boundaries handles heap needs */
+      /* OP_TYPED_MAP_GET_INLINE consumes inline struct keys via vm__pop_struct. */
       compiler__emit_byte(c, OP_TYPED_MAP_GET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
@@ -8709,8 +8699,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, "map-has: key type does not match typed map key type");
           return;
         }
-        /* Phase 5c: reify inline struct key for OP_TYPED_MAP_HAS */
-        compiler__reify_inline_struct(c, line);
       }
       compiler__emit_byte(c, OP_TYPED_MAP_HAS, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
@@ -8756,16 +8744,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, "map-set: key type does not match typed map key type");
           return;
         }
-        /* Phase 5c: reify inline struct key for OP_TYPED_MAP_SET */
-        compiler__reify_inline_struct(c, line);
       }
       compiler__compile_node(c, args[2]);  /* value: must match struct type */
       if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != elem_type_idx) {
         compiler__error(c, line, col, "map-set: value type does not match typed map element type");
         return;
       }
-      /* Phase 5c: reify inline struct value for OP_TYPED_MAP_SET */
-      compiler__reify_inline_struct(c, line);
       compiler__emit_byte(c, OP_TYPED_MAP_SET, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
@@ -8796,8 +8780,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, "map-remove: key type does not match typed map key type");
           return;
         }
-        /* Phase 5c: reify inline struct key for OP_TYPED_MAP_REMOVE */
-        compiler__reify_inline_struct(c, line);
       }
       compiler__emit_byte(c, OP_TYPED_MAP_REMOVE, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);

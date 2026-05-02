@@ -589,6 +589,37 @@ static inline uint32_t vm__unpack_struct(VM* vm, uint16_t type_idx,
   return w;
 }
 
+/* Pop a struct from TOS into out[]. Handles both representations:
+ *   - Inline bytes (width consecutive slots, marked in inline_slot_bitmap)
+ *   - Heap HeapRecord pointer (single slot)
+ * Returns width. The out buffer must hold at least width slots. */
+static inline uint32_t vm__pop_struct(VM* vm, uint16_t type_idx, JaclVal* out) {
+  StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+  uint32_t width = vm__struct_width(sdef);
+  uint32_t total_size = sdef->total_size;
+  uint32_t buf_bytes = width * (uint32_t)sizeof(JaclVal);
+  bool is_inline = vm->stack_top > 0 &&
+                   BITMAP_GET(vm->inline_slot_bitmap, vm->stack_top - 1);
+  if (is_inline) {
+    memcpy(out, &vm->stack[vm->stack_top - width], total_size);
+    if (buf_bytes > total_size) {
+      memset((uint8_t*)out + total_size, 0, buf_bytes - total_size);
+    }
+    for (uint32_t si = 0; si < width; si++) {
+      BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - width + si);
+    }
+    vm->stack_top -= width;
+  } else {
+    JaclVal heap_val = vm->stack[--vm->stack_top];
+    HeapRecord* s = jacl_as_heap_record_ptr(heap_val);
+    memcpy(out, s->data, total_size);
+    if (buf_bytes > total_size) {
+      memset((uint8_t*)out + total_size, 0, buf_bytes - total_size);
+    }
+  }
+  return width;
+}
+
 /* --- Environment helpers --- */
 
 void vm__env_grow(VM* vm) {
@@ -9307,12 +9338,18 @@ interpret_done:
         gc__current_heap = &vm->heap;
         jacl_typed_vec_root* tvec = jacl_typed_vec_empty_strided(width);
 
-        for (uint8_t i = 0; i < count; i++) {
-          JaclVal slots[VM_MAX_STRUCT_SLOTS];
-          vm__unpack_struct(vm, type_idx, vm->stack[vm->stack_top - count + i], slots);
-          tvec = jacl_typed_vec_push_back_wide(tvec, slots);
+        /* Pop elements right-to-left into a buffer, then push left-to-right. */
+        JaclVal scratch[VM_MAX_STRUCT_SLOTS * 256];
+        if ((size_t)count * width > sizeof(scratch) / sizeof(JaclVal)) {
+          vm__set_error(vm, "typed-vec literal too large");
+          return VM_RUNTIME_ERROR;
         }
-        vm->stack_top -= count;
+        for (int32_t i = (int32_t)count - 1; i >= 0; i--) {
+          vm__pop_struct(vm, type_idx, &scratch[(uint32_t)i * width]);
+        }
+        for (uint8_t i = 0; i < count; i++) {
+          tvec = jacl_typed_vec_push_back_wide(tvec, &scratch[i * width]);
+        }
         result = vm__push(vm, jacl_typed_vector_ptr(tvec));
         if (result != VM_OK) return result;
         break;
@@ -9384,14 +9421,12 @@ interpret_done:
 
       case OP_TYPED_VEC_PUSH: {
         uint16_t type_idx = vm__read_u16(vm);
-        JaclVal struct_val, tvec_val;
-        result = vm__pop(vm, &struct_val); if (result != VM_OK) return result;
+        JaclVal slots[VM_MAX_STRUCT_SLOTS];
+        vm__pop_struct(vm, type_idx, slots);
+        JaclVal tvec_val;
         result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
 
         jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
-        JaclVal slots[VM_MAX_STRUCT_SLOTS];
-        vm__unpack_struct(vm, type_idx, struct_val, slots);
-
         gc__current_heap = &vm->heap;
         jacl_typed_vec_root* new_tvec = jacl_typed_vec_push_back_wide(tvec, slots);
         result = vm__push(vm, jacl_typed_vector_ptr(new_tvec));
@@ -9401,8 +9436,9 @@ interpret_done:
 
       case OP_TYPED_VEC_SET: {
         uint16_t type_idx = vm__read_u16(vm);
-        JaclVal struct_val, idx_val, tvec_val;
-        result = vm__pop(vm, &struct_val); if (result != VM_OK) return result;
+        JaclVal slots[VM_MAX_STRUCT_SLOTS];
+        vm__pop_struct(vm, type_idx, slots);
+        JaclVal idx_val, tvec_val;
         result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
         result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
 
@@ -9414,8 +9450,6 @@ interpret_done:
 
         jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
         int32_t idx = jacl_as_i32(idx_val);
-        JaclVal slots[VM_MAX_STRUCT_SLOTS];
-        vm__unpack_struct(vm, type_idx, struct_val, slots);
 
         gc__current_heap = &vm->heap;
         jacl_typed_vec_root* new_tvec = jacl_typed_vec_set_wide(tvec, (uint32_t)idx, slots);
@@ -10045,28 +10079,34 @@ interpret_done:
         gc__current_heap = &vm->heap;
         jacl_typed_map_node* tmap = NULL;
 
-        if (key_type_idx == 0xFFFF) {
-          /* Dyn keys: key is a single JaclVal per pair */
-          for (uint8_t i = 0; i < pair_count; i++) {
-            JaclVal key  = vm->stack[vm->stack_top - 2 * pair_count + 2 * i];
-            JaclVal sval = vm->stack[vm->stack_top - 2 * pair_count + 2 * i + 1];
-            JaclVal val_slots[VM_MAX_STRUCT_SLOTS];
-            uint32_t vw = vm__unpack_struct(vm, type_idx, sval, val_slots);
-            tmap = jacl_typed_map_set_wide(tmap, &key, 1, val_slots, vw);
+        /* Pop pairs right-to-left into scratch buffers. */
+        StructTypeDef* vsdef = vm->struct_registry->defs[type_idx];
+        uint32_t vw = vm__struct_width(vsdef);
+        uint32_t kw = 1;
+        if (key_type_idx != 0xFFFF) {
+          StructTypeDef* ksdef = vm->struct_registry->defs[key_type_idx];
+          kw = vm__struct_width(ksdef);
+        }
+        if ((size_t)pair_count * (kw + vw) > VM_MAX_STRUCT_SLOTS * 256) {
+          vm__set_error(vm, "typed-map literal too large");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclVal scratch[VM_MAX_STRUCT_SLOTS * 256];
+        for (int32_t i = (int32_t)pair_count - 1; i >= 0; i--) {
+          uint32_t off = (uint32_t)i * (kw + vw);
+          vm__pop_struct(vm, type_idx, &scratch[off + kw]);
+          if (key_type_idx == 0xFFFF) {
+            JaclVal k;
+            result = vm__pop(vm, &k); if (result != VM_OK) return result;
+            scratch[off] = k;
+          } else {
+            vm__pop_struct(vm, key_type_idx, &scratch[off]);
           }
-          vm->stack_top -= 2 * pair_count;
-        } else {
-          /* Struct keys: both key and value are struct JaclVals */
-          for (uint8_t i = 0; i < pair_count; i++) {
-            JaclVal kval = vm->stack[vm->stack_top - 2 * pair_count + 2 * i];
-            JaclVal sval = vm->stack[vm->stack_top - 2 * pair_count + 2 * i + 1];
-            JaclVal key_slots[VM_MAX_STRUCT_SLOTS];
-            uint32_t kw = vm__unpack_struct(vm, key_type_idx, kval, key_slots);
-            JaclVal val_slots[VM_MAX_STRUCT_SLOTS];
-            uint32_t vw = vm__unpack_struct(vm, type_idx, sval, val_slots);
-            tmap = jacl_typed_map_set_wide(tmap, key_slots, kw, val_slots, vw);
-          }
-          vm->stack_top -= 2 * pair_count;
+        }
+        for (uint8_t i = 0; i < pair_count; i++) {
+          uint32_t off = (uint32_t)i * (kw + vw);
+          tmap = jacl_typed_map_set_wide(tmap, &scratch[off], kw,
+                                         &scratch[off + kw], vw);
         }
         result = vm__push(vm, jacl_typed_map_ptr(tmap));
         if (result != VM_OK) return result;
@@ -10082,19 +10122,19 @@ interpret_done:
       case OP_TYPED_MAP_GET_INLINE: {
         uint16_t type_idx = vm__read_u16(vm);
         uint16_t key_type_idx = vm__read_u16(vm);
-        JaclVal key_val, tmap_val;
-        result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
-        result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
-
-        jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
         jacl_typed_map_leaf* leaf;
+        JaclVal key_slots[VM_MAX_STRUCT_SLOTS];
+        uint32_t kw;
         if (key_type_idx == 0xFFFF) {
-          leaf = jacl_typed_map_get_leaf(tmap, &key_val, 1);
+          result = vm__pop(vm, &key_slots[0]); if (result != VM_OK) return result;
+          kw = 1;
         } else {
-          JaclVal key_slots[VM_MAX_STRUCT_SLOTS];
-          uint32_t kw = vm__unpack_struct(vm, key_type_idx, key_val, key_slots);
-          leaf = jacl_typed_map_get_leaf(tmap, key_slots, kw);
+          kw = vm__pop_struct(vm, key_type_idx, key_slots);
         }
+        JaclVal tmap_val;
+        result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
+        jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
+        leaf = jacl_typed_map_get_leaf(tmap, key_slots, kw);
 
         if (!leaf) {
           vm__set_error(vm, "map-get: key not found in typed map");
@@ -10120,24 +10160,22 @@ interpret_done:
       case OP_TYPED_MAP_SET: {
         uint16_t type_idx = vm__read_u16(vm);
         uint16_t key_type_idx = vm__read_u16(vm);
-        JaclVal struct_val, key_val, tmap_val;
-        result = vm__pop(vm, &struct_val); if (result != VM_OK) return result;
-        result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
-        result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
-
-        jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
         JaclVal val_slots[VM_MAX_STRUCT_SLOTS];
-        uint32_t vw = vm__unpack_struct(vm, type_idx, struct_val, val_slots);
+        uint32_t vw = vm__pop_struct(vm, type_idx, val_slots);
+        JaclVal key_slots[VM_MAX_STRUCT_SLOTS];
+        uint32_t kw;
+        if (key_type_idx == 0xFFFF) {
+          result = vm__pop(vm, &key_slots[0]); if (result != VM_OK) return result;
+          kw = 1;
+        } else {
+          kw = vm__pop_struct(vm, key_type_idx, key_slots);
+        }
+        JaclVal tmap_val;
+        result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
+        jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
 
         gc__current_heap = &vm->heap;
-        jacl_typed_map_node* new_tmap;
-        if (key_type_idx == 0xFFFF) {
-          new_tmap = jacl_typed_map_set_wide(tmap, &key_val, 1, val_slots, vw);
-        } else {
-          JaclVal key_slots[VM_MAX_STRUCT_SLOTS];
-          uint32_t kw = vm__unpack_struct(vm, key_type_idx, key_val, key_slots);
-          new_tmap = jacl_typed_map_set_wide(tmap, key_slots, kw, val_slots, vw);
-        }
+        jacl_typed_map_node* new_tmap = jacl_typed_map_set_wide(tmap, key_slots, kw, val_slots, vw);
         result = vm__push(vm, jacl_typed_map_ptr(new_tmap));
         if (result != VM_OK) return result;
         break;
@@ -10145,19 +10183,20 @@ interpret_done:
 
       case OP_TYPED_MAP_HAS: {
         uint16_t key_type_idx = vm__read_u16(vm);
-        JaclVal key_val, tmap_val;
-        result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
-        result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
-
-        jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
-        bool found;
+        JaclVal key_slots[VM_MAX_STRUCT_SLOTS];
+        uint32_t kw;
         if (key_type_idx == 0xFFFF) {
-          found = jacl_typed_map_has(tmap, key_val);
+          result = vm__pop(vm, &key_slots[0]); if (result != VM_OK) return result;
+          kw = 1;
         } else {
-          JaclVal key_slots[VM_MAX_STRUCT_SLOTS];
-          uint32_t kw = vm__unpack_struct(vm, key_type_idx, key_val, key_slots);
-          found = jacl_typed_map_has_wide(tmap, key_slots, kw);
+          kw = vm__pop_struct(vm, key_type_idx, key_slots);
         }
+        JaclVal tmap_val;
+        result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
+        jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
+        bool found = (key_type_idx == 0xFFFF)
+                       ? jacl_typed_map_has(tmap, key_slots[0])
+                       : jacl_typed_map_has_wide(tmap, key_slots, kw);
         result = vm__push(vm, jacl_bool(found));
         if (result != VM_OK) return result;
         break;
@@ -10165,20 +10204,21 @@ interpret_done:
 
       case OP_TYPED_MAP_REMOVE: {
         uint16_t key_type_idx = vm__read_u16(vm);
-        JaclVal key_val, tmap_val;
-        result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
+        JaclVal key_slots[VM_MAX_STRUCT_SLOTS];
+        uint32_t kw;
+        if (key_type_idx == 0xFFFF) {
+          result = vm__pop(vm, &key_slots[0]); if (result != VM_OK) return result;
+          kw = 1;
+        } else {
+          kw = vm__pop_struct(vm, key_type_idx, key_slots);
+        }
+        JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
-
         jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
         gc__current_heap = &vm->heap;
-        jacl_typed_map_node* new_tmap;
-        if (key_type_idx == 0xFFFF) {
-          new_tmap = jacl_typed_map_unset(tmap, key_val);
-        } else {
-          JaclVal key_slots[VM_MAX_STRUCT_SLOTS];
-          uint32_t kw = vm__unpack_struct(vm, key_type_idx, key_val, key_slots);
-          new_tmap = jacl_typed_map_unset_wide(tmap, key_slots, kw);
-        }
+        jacl_typed_map_node* new_tmap = (key_type_idx == 0xFFFF)
+                       ? jacl_typed_map_unset(tmap, key_slots[0])
+                       : jacl_typed_map_unset_wide(tmap, key_slots, kw);
         result = vm__push(vm, jacl_typed_map_ptr(new_tmap));
         if (result != VM_OK) return result;
         break;
