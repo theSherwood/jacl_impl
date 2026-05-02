@@ -115,14 +115,25 @@ than the brief implied — see notes below.
 - **Reset** (compiler.c:6505, 9302). Box reset currently goes
   inline → heap → box. Improvable along with 3a.
 
-**Recommended next steps for full elimination:**
-1. Add `OP_LOAD_INLINE_LOCAL` + `OP_LOAD_INLINE_UPVALUE` ops; rewrite
-   var-ref of inline locals to use them. This unblocks 3a, 3d, and the
-   reset cleanup.
-2. Add inline-aware variants for typed vec/map ops to remove the transient
-   heap allocations (3b/3c).
-3. Decide on architecture for mut-struct bindings (wide cells vs. forced box).
-4. Convert remaining sites to errors once the alternatives exist.
+**Settled design calls (after Phase 3e):**
+- Mut struct bindings → user must `[box $val]`. No wide cells.
+- Typed vec/map ops → add inline-aware variants. No transient heap.
+- `print $struct` → add `OP_PRINT_STRUCT` (registry-aware formatter).
+- `eq` between dyn and struct → compile error (no transient reify).
+- `def dyn d [Point ...]` and similar dyn-storage of structs → compile error.
+
+**Order of remaining work:**
+1. Add `OP_LOAD_INLINE_LOCAL` + `OP_LOAD_INLINE_UPVALUE`. Switch var-ref of
+   inline struct locals/upvalues to use them. Unblocks 3a, 3d, reset.
+2. Reject dyn-storage of structs: `def dyn`, `mut`-bound struct without box,
+   set on dyn-typed cell/global. Migrate affected tests.
+3. Inline-aware typed-collection ops: `OP_TYPED_VEC_INLINE`,
+   `OP_TYPED_VEC_PUSH_INLINE`, `OP_TYPED_VEC_SET_INLINE`, and the map
+   counterparts.
+4. `OP_PRINT_STRUCT` typed variant.
+5. Compile-time reject `eq` between dyn and struct.
+6. 3d: rewrite destructure to use load-inline + `OP_STRUCT_GET_INLINE`.
+7. 3f: improve static-type tracking after RETURN_WIDE.
 
 The current state — Phase 1, Phase 2, and Phase 3e — already eliminates
 the *unintended* heap allocations for ref-bearing structs, keeps ctx as
