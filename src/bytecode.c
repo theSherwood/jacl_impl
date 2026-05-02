@@ -152,7 +152,7 @@ typedef enum {
   OP_STRUCT_GET_INLINE, /* inline field read: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_SET_INLINE, /* inline field write: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_MATERIALIZE, /* inline to heap: uint8_t base_slot, uint16_t type_idx */
-  OP_STRUCT_COPY,        /* pop heap struct, push deep copy */
+  OP_STRUCT_COPY,        /* DEAD — struct pass-by-value is now inline */
   OP_STRUCT_STORE_INLINE, /* heap to inline: uint8_t base_slot, uint16_t type_idx */
   OP_STRUCT_GET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_SET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type */
@@ -206,13 +206,13 @@ typedef enum {
 
   /* --- Typed vector operations --- */
   OP_TYPED_VEC,          /* uint16_t type_idx, uint8_t count; create typed vec from stack elements */
-  OP_TYPED_VEC_GET,      /* uint16_t type_idx; pop idx, pop tvec; push inline struct (width slots) */
+  OP_TYPED_VEC_GET,      /* DEAD — replaced by OP_TYPED_VEC_GET_INLINE */
   OP_TYPED_VEC_PUSH,     /* uint16_t type_idx; pop struct, pop tvec; push new tvec */
   OP_TYPED_VEC_SET,      /* uint16_t type_idx; pop struct, pop idx, pop tvec; push new tvec */
   OP_TYPED_VEC_LEN,      /* pop tvec; push i32 count */
 
   OP_TYPED_MAP,          /* uint16_t type_idx, uint8_t pair_count */
-  OP_TYPED_MAP_GET,      /* uint16_t type_idx */
+  OP_TYPED_MAP_GET,      /* DEAD — replaced by OP_TYPED_MAP_GET_INLINE */
   OP_TYPED_MAP_SET,      /* uint16_t type_idx */
   OP_TYPED_MAP_HAS,      /* no operand */
   OP_TYPED_MAP_REMOVE,   /* no operand */

@@ -6295,30 +6295,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_STRUCT_COPY: {
-        /* Deep-copy a heap-allocated JaclStruct for pass-by-value semantics.
-           No operands. Pops struct, allocates copy, pushes copy. */
-        JaclVal src_val;
-        result = vm__pop(vm, &src_val);
-        if (result != VM_OK) return result;
-        if (!jacl_is_struct(src_val)) {
-          vm__set_error(vm, "OP_STRUCT_COPY expects struct, got other type");
-          return VM_RUNTIME_ERROR;
-        }
-        JaclStruct* src = jacl_as_struct_ptr(src_val);
-        if (!vm->struct_registry || src->type_idx >= vm->struct_registry->count) {
-          vm__set_error(vm, "invalid struct type index %u for copy", (unsigned)src->type_idx);
-          return VM_RUNTIME_ERROR;
-        }
-        StructTypeDef* sdef = vm->struct_registry->defs[src->type_idx];
-        gc__current_heap = &vm->heap;
-        JaclStruct* copy = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                   sizeof(JaclStruct) + sdef->total_size);
-        copy->type_idx = src->type_idx;
-        copy->total_size = sdef->total_size;
-        memcpy(copy->data, src->data, sdef->total_size);
-        result = vm__push(vm, jacl_struct_val(copy));
-        if (result != VM_OK) return result;
-        break;
+        /* Dead opcode — struct pass-by-value is now handled inline (Phase 5a). */
+        vm__set_error(vm, "OP_STRUCT_COPY is no longer emitted");
+        return VM_RUNTIME_ERROR;
       }
 
       case OP_STRUCT_STORE_INLINE: {
@@ -9271,38 +9250,9 @@ interpret_done:
       }
 
       case OP_TYPED_VEC_GET: {
-        uint16_t type_idx = vm__read_u16(vm);
-        JaclVal idx_val, tvec_val;
-        result = vm__pop(vm, &idx_val); if (result != VM_OK) return result;
-        result = vm__pop(vm, &tvec_val); if (result != VM_OK) return result;
-
-        if (!jacl_is_i32(idx_val)) {
-          vm__set_error(vm, "vec-get: expected i32 index, got %s",
-                       vm__type_name(idx_val));
-          return VM_RUNTIME_ERROR;
-        }
-
-        jacl_typed_vec_root* tvec = (jacl_typed_vec_root*)jacl_as_ptr(tvec_val);
-        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
-        int32_t idx = jacl_as_i32(idx_val);
-
-        if (idx < 0 || (uint32_t)idx >= jacl_typed_vec_count(tvec)) {
-          vm__set_error(vm, "vec-get: index %d out of bounds (length %u)",
-                       idx, jacl_typed_vec_count(tvec));
-          return VM_RUNTIME_ERROR;
-        }
-
-        const JaclVal* ptr = jacl_typed_vec_get_ptr(tvec, (uint32_t)idx);
-        /* Materialize to heap struct */
-        gc__current_heap = &vm->heap;
-        JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                               sizeof(JaclStruct) + sdef->total_size);
-        s->type_idx = type_idx;
-        s->total_size = sdef->total_size;
-        memcpy(s->data, ptr, sdef->total_size);
-        result = vm__push(vm, jacl_struct_val(s));
-        if (result != VM_OK) return result;
-        break;
+        /* Dead opcode — replaced by OP_TYPED_VEC_GET_INLINE (Phase 5f). */
+        vm__set_error(vm, "OP_TYPED_VEC_GET is no longer emitted");
+        return VM_RUNTIME_ERROR;
       }
 
       case OP_TYPED_VEC_GET_INLINE: {
@@ -10055,39 +10005,9 @@ interpret_done:
       }
 
       case OP_TYPED_MAP_GET: {
-        uint16_t type_idx = vm__read_u16(vm);
-        uint16_t key_type_idx = vm__read_u16(vm);
-        JaclVal key_val, tmap_val;
-        result = vm__pop(vm, &key_val); if (result != VM_OK) return result;
-        result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
-
-        jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
-        jacl_typed_map_leaf* leaf;
-        if (key_type_idx == 0xFFFF) {
-          leaf = jacl_typed_map_get_leaf(tmap, &key_val, 1);
-        } else {
-          JaclVal key_slots[VM_MAX_STRUCT_SLOTS];
-          uint32_t kw = vm__unpack_struct(vm, key_type_idx, key_val, key_slots);
-          leaf = jacl_typed_map_get_leaf(tmap, key_slots, kw);
-        }
-
-        if (!leaf) {
-          vm__set_error(vm, "map-get: key not found in typed map");
-          return VM_RUNTIME_ERROR;
-        }
-
-        /* Materialize value bytes to heap struct */
-        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
-        const JaclVal* val_ptr = jacl_typed_map_value_ptr_from_leaf(leaf);
-        gc__current_heap = &vm->heap;
-        JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                               sizeof(JaclStruct) + sdef->total_size);
-        s->type_idx = type_idx;
-        s->total_size = sdef->total_size;
-        memcpy(s->data, val_ptr, sdef->total_size);
-        result = vm__push(vm, jacl_struct_val(s));
-        if (result != VM_OK) return result;
-        break;
+        /* Dead opcode — replaced by OP_TYPED_MAP_GET_INLINE (Phase 5f). */
+        vm__set_error(vm, "OP_TYPED_MAP_GET is no longer emitted");
+        return VM_RUNTIME_ERROR;
       }
 
       case OP_TYPED_MAP_GET_INLINE: {

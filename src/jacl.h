@@ -758,7 +758,7 @@ typedef enum {
   OP_STRUCT_GET_INLINE,  /* uint8_t base_slot, uint16_t byte_offset, uint8_t field_type; read from stack-resident struct */
   OP_STRUCT_SET_INLINE,  /* uint8_t base_slot, uint16_t byte_offset, uint8_t field_type; write to stack-resident struct */
   OP_STRUCT_MATERIALIZE, /* uint8_t base_slot, uint16_t type_idx; convert inline struct to heap JaclStruct */
-  OP_STRUCT_COPY,        /* pop heap JaclStruct, push deep copy (pass-by-value at call sites) */
+  OP_STRUCT_COPY,        /* DEAD — struct pass-by-value is now inline (Phase 5a) */
   OP_STRUCT_STORE_INLINE, /* uint8_t base_slot, uint16_t type_idx; de-materialize heap struct to inline stack slots */
   OP_STRUCT_GET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type; read from closure-captured inline struct */
   OP_STRUCT_SET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type; write to closure-captured inline struct */
@@ -812,13 +812,13 @@ typedef enum {
 
   /* --- Typed vector operations --- */
   OP_TYPED_VEC,          /* uint16_t type_idx, uint8_t count; create typed vec from stack elements */
-  OP_TYPED_VEC_GET,      /* uint16_t type_idx; pop idx, pop tvec; push heap struct or nil */
+  OP_TYPED_VEC_GET,      /* DEAD — replaced by OP_TYPED_VEC_GET_INLINE (Phase 5f) */
   OP_TYPED_VEC_PUSH,     /* uint16_t type_idx; pop struct, pop tvec; push new tvec */
   OP_TYPED_VEC_SET,      /* uint16_t type_idx; pop struct, pop idx, pop tvec; push new tvec */
   OP_TYPED_VEC_LEN,      /* pop tvec; push i32 count */
 
   OP_TYPED_MAP,          /* uint16_t type_idx, uint8_t pair_count; create typed map */
-  OP_TYPED_MAP_GET,      /* uint16_t type_idx; pop key, pop tmap; push heap struct or nil */
+  OP_TYPED_MAP_GET,      /* DEAD — replaced by OP_TYPED_MAP_GET_INLINE (Phase 5f) */
   OP_TYPED_MAP_SET,      /* uint16_t type_idx; pop struct, pop key, pop tmap; push new tmap */
   OP_TYPED_MAP_HAS,      /* pop key, pop tmap; push bool */
   OP_TYPED_MAP_REMOVE,   /* pop key, pop tmap; push new tmap */
