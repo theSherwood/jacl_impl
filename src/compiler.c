@@ -10609,7 +10609,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           total_arg_slots += 1;
         }
       } else {
-        /* Phase 5b: if arg is inline struct but param expects dyn, reify to heap pointer */
+        /* Reject struct passed to a dyn parameter — structs cannot cross
+           dyn boundaries except via [box $val]. */
+        if (arg_type == TYPE_STRUCT && expected_param_type != TYPE_STRUCT) {
+          char err_msg[192];
+          snprintf(err_msg, sizeof(err_msg),
+                   "cannot pass struct value to %s parameter — wrap with "
+                   "[box $val] or change the parameter type to the struct type",
+                   type_name(expected_param_type));
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
         compiler__reify_inline_struct(c, line);
         total_arg_slots += 1;
       }
