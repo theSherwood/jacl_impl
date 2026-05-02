@@ -130,7 +130,7 @@ uint32_t jacl_val_hash(JaclVal v) {
 
   /* Struct: hash type_idx + raw data bytes */
   if (tag == JACL_TAG_STRUCT) {
-    JaclStruct* s = jacl_as_struct_ptr(v);
+    HeapRecord* s = jacl_as_heap_record_ptr(v);
     uint32_t h = s->type_idx * 0x9E3779B9u;
     const uint8_t* p = s->data;
     for (uint32_t i = 0; i < s->total_size; i++) {
@@ -206,8 +206,8 @@ bool jacl_val_eq(JaclVal a, JaclVal b) {
 
   /* Struct equality: same type_idx AND memcmp of raw data bytes */
   if (tag_a == JACL_TAG_STRUCT) {
-    JaclStruct* sa = jacl_as_struct_ptr(a);
-    JaclStruct* sb = jacl_as_struct_ptr(b);
+    HeapRecord* sa = jacl_as_heap_record_ptr(a);
+    HeapRecord* sb = jacl_as_heap_record_ptr(b);
     if (sa == sb) return true;
     if (sa->type_idx != sb->type_idx) return false;
     return memcmp(sa->data, sb->data, sa->total_size) == 0;

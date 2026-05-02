@@ -84,7 +84,7 @@ JaclVal jacl_gensym_next(const char *prefix, uint32_t prefix_len,
 #define CTX_POOL_INIT_SIZE 8
 
 typedef struct {
-    volatile uintptr_t free_list_head; /* atomic: pointer to first free JaclStruct, or 0 */
+    volatile uintptr_t free_list_head; /* atomic: pointer to first free HeapRecord, or 0 */
     uint32_t struct_size;              /* StructTypeDef->total_size (byte size of data[]) */
     uint32_t type_idx;                 /* ctx struct type_idx in StructTypeRegistry */
     StructTypeDef *sdef;               /* cached pointer to ctx StructTypeDef */
@@ -101,8 +101,8 @@ void ctx_pool_init(JaclCtxPool *pool, ThreadHeap *heap,
 
     /* Pre-allocate CTX_POOL_INIT_SIZE ctx structs and link into free list */
     for (int i = 0; i < CTX_POOL_INIT_SIZE; i++) {
-        JaclStruct *s = (JaclStruct *)gc_alloc(heap, OBJ_STRUCT,
-                          sizeof(JaclStruct) + sdef->total_size);
+        HeapRecord *s = (HeapRecord *)gc_alloc(heap, OBJ_HEAP_RECORD,
+                          sizeof(HeapRecord) + sdef->total_size);
         s->type_idx = idx;
         s->total_size = sdef->total_size;
         memset(s->data, 0, sdef->total_size);
@@ -117,13 +117,13 @@ void ctx_pool_init(JaclCtxPool *pool, ThreadHeap *heap,
     }
 }
 
-JaclStruct *ctx_pool_alloc(JaclCtxPool *pool, ThreadHeap *heap) {
+HeapRecord *ctx_pool_alloc(JaclCtxPool *pool, ThreadHeap *heap) {
     /* Try to pop from free list via atomic CAS */
     uintptr_t head;
     for (;;) {
         head = ATOMIC_LOAD_EXPLICIT(&pool->free_list_head, MEM_ACQUIRE);
         if (head == 0) break;
-        JaclStruct *s = (JaclStruct *)head;
+        HeapRecord *s = (HeapRecord *)head;
         uintptr_t next = *(uintptr_t *)s->data;
         if (ATOMIC_CAS(&pool->free_list_head, &head, next,
                         MEM_ACQ_REL, MEM_RELAXED)) {
@@ -133,15 +133,15 @@ JaclStruct *ctx_pool_alloc(JaclCtxPool *pool, ThreadHeap *heap) {
         }
     }
     /* Pool empty: allocate fresh via gc_alloc */
-    JaclStruct *s = (JaclStruct *)gc_alloc(heap, OBJ_STRUCT,
-                      sizeof(JaclStruct) + pool->struct_size);
+    HeapRecord *s = (HeapRecord *)gc_alloc(heap, OBJ_HEAP_RECORD,
+                      sizeof(HeapRecord) + pool->struct_size);
     s->type_idx = pool->type_idx;
     s->total_size = pool->struct_size;
     memset(s->data, 0, pool->struct_size);
     return s;
 }
 
-void ctx_pool_free(JaclCtxPool *pool, JaclStruct *s) {
+void ctx_pool_free(JaclCtxPool *pool, HeapRecord *s) {
     /* Clear reference fields to prevent stale GC pointers */
     StructTypeDef *sdef = pool->sdef;
     for (uint32_t i = 0; i < sdef->field_count; i++) {
@@ -572,20 +572,20 @@ static inline uint32_t vm__struct_width(StructTypeDef* sdef) {
 
 /* Extract struct raw bytes into a JaclVal slot array for strided push/set.
    Caller must provide slots[] with at least vm__struct_width(sdef) elements. */
-static inline void vm__struct_to_slots(StructTypeDef* sdef, JaclStruct* s,
+static inline void vm__struct_to_slots(StructTypeDef* sdef, HeapRecord* s,
                                        JaclVal* slots, uint32_t width) {
   memset(slots, 0, width * sizeof(JaclVal));
   memcpy(slots, s->data, sdef->total_size);
 }
 
-/* Decompose a heap JaclStruct into a flat JaclVal slot array.
+/* Decompose a heap HeapRecord into a flat JaclVal slot array.
    Returns the slot width.  Caller provides out[] (VM_MAX_STRUCT_SLOTS). */
 #define VM_MAX_STRUCT_SLOTS 16
 static inline uint32_t vm__unpack_struct(VM* vm, uint16_t type_idx,
                                          JaclVal struct_val, JaclVal* out) {
   StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
   uint32_t w = vm__struct_width(sdef);
-  vm__struct_to_slots(sdef, jacl_as_struct_ptr(struct_val), out, w);
+  vm__struct_to_slots(sdef, jacl_as_heap_record_ptr(struct_val), out, w);
   return w;
 }
 
@@ -1003,7 +1003,7 @@ bool vm__deep_eq(JaclVal a, JaclVal b) {
 /* Read a field from struct data and return as JaclVal.
  * Pass heap=NULL for unboxed 64-bit types (raw bits, for typed arithmetic).
  * Pass heap!=NULL for boxed 64-bit types (heap-allocated, for dyn/embed). */
-JaclVal vm__struct_read_field(ThreadHeap* heap, JaclStruct* s,
+JaclVal vm__heap_record_read_field(ThreadHeap* heap, HeapRecord* s,
                                       uint32_t offset, int field_type) {
   switch ((JaclType)field_type) {
     case TYPE_BOOL: { uint8_t b = s->data[offset]; return jacl_bool(b); }
@@ -1031,7 +1031,7 @@ JaclVal vm__struct_read_field(ThreadHeap* heap, JaclStruct* s,
 
 /* Write a JaclVal to a struct field (caller must have already type-checked).
  * For i64/u64/f64, val must contain raw bits (unboxed VM representation). */
-void vm__struct_write_field(JaclStruct* s, uint32_t offset,
+void vm__heap_record_write_field(HeapRecord* s, uint32_t offset,
                                     int field_type, JaclVal val) {
   switch ((JaclType)field_type) {
     case TYPE_BOOL: { uint8_t b = jacl_as_bool(val) ? 1 : 0; s->data[offset] = b; break; }
@@ -1045,26 +1045,26 @@ void vm__struct_write_field(JaclStruct* s, uint32_t offset,
   }
 }
 
-/* Phase 5c: After reifying inline bytes to a heap JaclStruct, fix up any
+/* Phase 5c: After reifying inline bytes to a heap HeapRecord, fix up any
  * TYPE_STRUCT fields by allocating child heap structs from the raw bytes.
  * This ensures OP_STRUCT_GET sees tagged pointers (not raw data) for nested
  * struct fields — matching the convention established by OP_STRUCT_NEW (heap). */
-static void vm__reify_nested_structs(VM* vm, JaclStruct* s, StructTypeDef* sdef) {
+static void vm__reify_nested_heap_records(VM* vm, HeapRecord* s, StructTypeDef* sdef) {
   for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
     if (sdef->fields[fi].type != TYPE_STRUCT) continue;
     uint32_t nidx = sdef->fields[fi].struct_type_idx;
     if (!vm->struct_registry || nidx >= vm->struct_registry->count) continue;
     StructTypeDef* nsdef = vm->struct_registry->defs[nidx];
     gc__current_heap = &vm->heap;
-    JaclStruct* ns = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                             sizeof(JaclStruct) + nsdef->total_size);
+    HeapRecord* ns = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                             sizeof(HeapRecord) + nsdef->total_size);
     ns->type_idx = nidx;
     ns->total_size = nsdef->total_size;
     memcpy(ns->data, s->data + sdef->fields[fi].offset, nsdef->total_size);
     /* Recurse for nested-nested struct fields */
-    vm__reify_nested_structs(vm, ns, nsdef);
+    vm__reify_nested_heap_records(vm, ns, nsdef);
     /* Store tagged pointer in parent's data at field offset */
-    JaclVal nval = jacl_struct_val(ns);
+    JaclVal nval = jacl_heap_record_val(ns);
     memcpy(s->data + sdef->fields[fi].offset, &nval, sizeof(JaclVal));
   }
 }
@@ -1082,19 +1082,19 @@ static void vm__reify_nested_structs(VM* vm, JaclStruct* s, StructTypeDef* sdef)
 static JaclVal ctx_fork(VM *vm, JaclVal parent_ctx) {
     JaclVal saved = vm->ctx;
     if (parent_ctx == JACL_NIL || !vm->ctx_pool) return saved;
-    JaclStruct *src = jacl_as_struct_ptr(parent_ctx);
-    JaclStruct *dst = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
+    HeapRecord *src = jacl_as_heap_record_ptr(parent_ctx);
+    HeapRecord *dst = ctx_pool_alloc(vm->ctx_pool, &vm->heap);
     if (dst) {
         StructTypeRegistry *reg = vm->struct_registry;
         memcpy(dst->data, src->data, reg->defs[reg->ctx_type_idx]->total_size);
-        vm->ctx = jacl_struct_val(dst);
+        vm->ctx = jacl_heap_record_val(dst);
     }
     return saved;
 }
 
 static void ctx_unfork(VM *vm, JaclVal saved_ctx) {
     if (vm->ctx != saved_ctx && vm->ctx != JACL_NIL && vm->ctx_pool) {
-        ctx_pool_free(vm->ctx_pool, jacl_as_struct_ptr(vm->ctx));
+        ctx_pool_free(vm->ctx_pool, jacl_as_heap_record_ptr(vm->ctx));
     }
     vm->ctx = saved_ctx;
 }
@@ -2209,7 +2209,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             break;
           }
         } else if (jacl_is_struct(val)) {
-          JaclStruct* s = jacl_as_struct_ptr(val);
+          HeapRecord* s = jacl_as_heap_record_ptr(val);
           VMFormatBuf fmt;
           vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
           if (vm->struct_registry && s->type_idx < vm->struct_registry->count) {
@@ -2900,7 +2900,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (result != VM_OK) return result;
 
         if (jacl_is_struct(src_val)) {
-          JaclStruct* s = jacl_as_struct_ptr(src_val);
+          HeapRecord* s = jacl_as_heap_record_ptr(src_val);
           StructTypeDef* sdef = vm->struct_registry->defs[s->type_idx];
           for (uint8_t i = 0; i < n; i++) {
             JaclVal name_val = frame->chunk->constants[name_indices[i]];
@@ -2918,7 +2918,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                   (int)sdef->name_len, sdef->name, (int)flen, fname);
               return VM_RUNTIME_ERROR;
             }
-            JaclVal field_val = vm__struct_read_field(&vm->heap, s,
+            JaclVal field_val = vm__heap_record_read_field(&vm->heap, s,
                 sdef->fields[fi].offset, sdef->fields[fi].type);
             result = vm__push(vm, field_val);
             if (result != VM_OK) return result;
@@ -2959,7 +2959,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         if (result != VM_OK) return result;
 
         if (jacl_is_struct(src_val)) {
-          JaclStruct* s = jacl_as_struct_ptr(src_val);
+          HeapRecord* s = jacl_as_heap_record_ptr(src_val);
           StructTypeDef* sdef = vm->struct_registry->defs[s->type_idx];
 
           /* Push N explicit field values */
@@ -2978,7 +2978,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                   (int)sdef->name_len, sdef->name, (int)flen, fname);
               return VM_RUNTIME_ERROR;
             }
-            JaclVal field_val = vm__struct_read_field(&vm->heap, s,
+            JaclVal field_val = vm__heap_record_read_field(&vm->heap, s,
                 sdef->fields[fi].offset, sdef->fields[fi].type);
             result = vm__push(vm, field_val);
             if (result != VM_OK) return result;
@@ -3002,7 +3002,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             if (!is_explicit) {
               JaclVal key = jacl_inline_string(sdef->fields[fi].name,
                                                sdef->fields[fi].name_len);
-              JaclVal val = vm__struct_read_field(&vm->heap, s,
+              JaclVal val = vm__heap_record_read_field(&vm->heap, s,
                   sdef->fields[fi].offset, sdef->fields[fi].type);
               rest_map = jacl_map_set(rest_map, key, val);
             }
@@ -4543,7 +4543,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_BOX_STRUCT: {
-        /* Pop a heap JaclStruct, create a struct box (type_idx > 0). */
+        /* Pop a heap HeapRecord, create a struct box (type_idx > 0). */
         uint16_t type_idx = vm__read_u16(vm);
         JaclVal value;
         result = vm__pop(vm, &value); if (result != VM_OK) return result;
@@ -4560,8 +4560,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
                                 sizeof(JaclMutableRef) + sdef->total_size);
         ref->type_idx = type_idx;
         ref->total_size = sdef->total_size;
-        /* Copy struct data from JaclStruct into box */
-        JaclStruct* s = jacl_as_struct_ptr(value);
+        /* Copy struct data from HeapRecord into box */
+        HeapRecord* s = jacl_as_heap_record_ptr(value);
         memcpy(ref->data, s->data, sdef->total_size);
         result = vm__push(vm, jacl_box_ptr(ref));
         if (result != VM_OK) return result;
@@ -5145,19 +5145,19 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
         if (ref->type_idx > 0) {
-          /* Struct box: materialize data[] into a heap JaclStruct */
+          /* Struct box: materialize data[] into a heap HeapRecord */
           if (!vm->struct_registry || ref->type_idx >= vm->struct_registry->count) {
             vm__set_error(vm, "deref: invalid struct type index %u", (unsigned)ref->type_idx);
             return VM_RUNTIME_ERROR;
           }
           StructTypeDef* sdef = vm->struct_registry->defs[ref->type_idx];
           gc__current_heap = &vm->heap;
-          JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                  sizeof(JaclStruct) + sdef->total_size);
+          HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                  sizeof(HeapRecord) + sdef->total_size);
           s->type_idx = ref->type_idx;
           s->total_size = sdef->total_size;
           memcpy(s->data, ref->data, sdef->total_size);
-          result = vm__push(vm, jacl_struct_val(s));
+          result = vm__push(vm, jacl_heap_record_val(s));
           if (result != VM_OK) return result;
         } else {
           JaclVal deref_val;
@@ -5192,7 +5192,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(container);
         if (ref->type_idx > 0) {
           /* Struct box: copy new struct data into box */
-          JaclStruct* s = jacl_as_struct_ptr(new_val);
+          HeapRecord* s = jacl_as_heap_record_ptr(new_val);
           if (!s || s->type_idx != ref->type_idx) {
             vm__set_error(vm, "reset!: struct type mismatch in box");
             return VM_RUNTIME_ERROR;
@@ -5281,12 +5281,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           } else {
             /* Closure expects dyn/heap param — materialize */
             gc__current_heap = &vm->heap;
-            JaclStruct* old_s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                        sizeof(JaclStruct) + sdef->total_size);
+            HeapRecord* old_s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                        sizeof(HeapRecord) + sdef->total_size);
             old_s->type_idx = ref->type_idx;
             old_s->total_size = sdef->total_size;
             memcpy(old_s->data, ref->data, sdef->total_size);
-            result = vm__push(vm, jacl_struct_val(old_s));
+            result = vm__push(vm, jacl_heap_record_val(old_s));
             if (result != VM_OK) return result;
           }
 
@@ -5321,7 +5321,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             } else {
               result = vm__pop(vm, &swap_result);
               if (result != VM_OK) return result;
-              JaclStruct* new_s = jacl_as_struct_ptr(swap_result);
+              HeapRecord* new_s = jacl_as_heap_record_ptr(swap_result);
               if (!new_s || new_s->type_idx != ref->type_idx) {
                 vm__set_error(vm, "swap!: struct type mismatch in box");
                 return VM_RUNTIME_ERROR;
@@ -5848,9 +5848,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm__set_error(vm, "field access on non-struct value");
           return VM_RUNTIME_ERROR;
         }
-        JaclStruct* s = jacl_as_struct_ptr(struct_val);
+        HeapRecord* s = jacl_as_heap_record_ptr(struct_val);
         /* NULL heap → unboxed 64-bit (raw bits for typed arithmetic) */
-        JaclVal field_val = vm__struct_read_field(NULL, s, field_offset, field_type);
+        JaclVal field_val = vm__heap_record_read_field(NULL, s, field_offset, field_type);
         result = vm__push(vm, field_val);
         if (result != VM_OK) return result;
         break;
@@ -5874,7 +5874,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm__set_error(vm, "field mutation on non-struct value");
           return VM_RUNTIME_ERROR;
         }
-        JaclStruct* s = jacl_as_struct_ptr(struct_val);
+        HeapRecord* s = jacl_as_heap_record_ptr(struct_val);
         /* Write barrier for reference-type fields during active GC */
         if (field_type == TYPE_DYN || field_type == TYPE_STR ||
             field_type == TYPE_STRUCT || field_type == TYPE_MAP) {
@@ -5883,7 +5883,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           gc_write_barrier(vm->grey_buf, vm->gc_active_ptr,
                            old_val, new_val);
         }
-        vm__struct_write_field(s, field_offset, field_type, new_val);
+        vm__heap_record_write_field(s, field_offset, field_type, new_val);
         /* Push struct value back (for chaining) */
         result = vm__push(vm, struct_val);
         if (result != VM_OK) return result;
@@ -5916,7 +5916,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm__set_error(vm, "field access requires struct or map");
           return VM_RUNTIME_ERROR;
         }
-        JaclStruct* s = jacl_as_struct_ptr(struct_val);
+        HeapRecord* s = jacl_as_heap_record_ptr(struct_val);
         if (!vm->struct_registry || s->type_idx >= vm->struct_registry->count) {
           vm__set_error(vm, "invalid struct type index");
           return VM_RUNTIME_ERROR;
@@ -5937,7 +5937,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         /* heap != NULL → boxed 64-bit types (always boxed for dyn context) */
         uint16_t foff = sdef->fields[fi].offset;
-        JaclVal field_val = vm__struct_read_field(&vm->heap, s, foff,
+        JaclVal field_val = vm__heap_record_read_field(&vm->heap, s, foff,
                                                    (int)sdef->fields[fi].type);
         result = vm__push(vm, field_val);
         if (result != VM_OK) return result;
@@ -6006,7 +6006,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm__set_error(vm, "field mutation requires struct or map");
           return VM_RUNTIME_ERROR;
         }
-        JaclStruct* sd = jacl_as_struct_ptr(struct_val);
+        HeapRecord* sd = jacl_as_heap_record_ptr(struct_val);
         if (!vm->struct_registry || sd->type_idx >= vm->struct_registry->count) {
           vm__set_error(vm, "invalid struct type index");
           return VM_RUNTIME_ERROR;
@@ -6031,7 +6031,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           return VM_RUNTIME_ERROR;
         }
         uint16_t foff2 = sdef2->fields[fi2].offset;
-        vm__struct_write_field(sd, foff2, (int)sdef2->fields[fi2].type, new_val);
+        vm__heap_record_write_field(sd, foff2, (int)sdef2->fields[fi2].type, new_val);
         result = vm__push(vm, struct_val);
         if (result != VM_OK) return result;
         break;
@@ -6048,8 +6048,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
 
         /* Allocate struct on GC heap */
         gc__current_heap = &vm->heap;
-        JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                sizeof(JaclStruct) + sdef->total_size);
+        HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                sizeof(HeapRecord) + sdef->total_size);
         s->type_idx = type_idx;
         s->total_size = sdef->total_size;
         memset(s->data, 0, sdef->total_size);
@@ -6105,7 +6105,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
 
         vm->stack_top -= field_count;
-        result = vm__push(vm, jacl_struct_val(s));
+        result = vm__push(vm, jacl_heap_record_val(s));
         if (result != VM_OK) return result;
         break;
       }
@@ -6182,8 +6182,8 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               break;
             }
             case TYPE_STRUCT: {
-              /* Nested struct: copy raw data from heap-allocated JaclStruct */
-              JaclStruct* nested = jacl_as_struct_ptr(val);
+              /* Nested struct: copy raw data from heap-allocated HeapRecord */
+              HeapRecord* nested = jacl_as_heap_record_ptr(val);
               if (nested) {
                 memcpy(struct_base + off, nested->data, sdef->fields[i].size);
               }
@@ -6228,12 +6228,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             }
             StructTypeDef* sub_sdef = vm->struct_registry->defs[sub_type_idx];
             gc__current_heap = &vm->heap;
-            JaclStruct* sub_s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                       sizeof(JaclStruct) + sub_sdef->total_size);
+            HeapRecord* sub_s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                       sizeof(HeapRecord) + sub_sdef->total_size);
             sub_s->type_idx = sub_type_idx;
             sub_s->total_size = sub_sdef->total_size;
             memcpy(sub_s->data, struct_base + byte_offset, sub_sdef->total_size);
-            field_val = jacl_struct_val(sub_s);
+            field_val = jacl_heap_record_val(sub_s);
             break;
           }
           default: { memcpy(&field_val, struct_base + byte_offset, sizeof(JaclVal)); break; }
@@ -6271,9 +6271,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_STRUCT_MATERIALIZE: {
-        /* Convert an inline (stack-resident) struct to a heap-allocated JaclStruct.
+        /* Convert an inline (stack-resident) struct to a heap-allocated HeapRecord.
            Operands: uint8_t base_slot, uint16_t type_idx.
-           Reads raw bytes from stack slots, allocates JaclStruct, copies data, pushes pointer. */
+           Reads raw bytes from stack slots, allocates HeapRecord, copies data, pushes pointer. */
         uint8_t base_slot = vm__read_byte(vm);
         uint16_t type_idx = vm__read_u16(vm);
         if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
@@ -6282,14 +6282,14 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
         gc__current_heap = &vm->heap;
-        JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                sizeof(JaclStruct) + sdef->total_size);
+        HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                sizeof(HeapRecord) + sdef->total_size);
         s->type_idx = type_idx;
         s->total_size = sdef->total_size;
         /* Copy raw bytes from stack slot region into heap struct data */
         uint8_t* struct_base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
         memcpy(s->data, struct_base, sdef->total_size);
-        result = vm__push(vm, jacl_struct_val(s));
+        result = vm__push(vm, jacl_heap_record_val(s));
         if (result != VM_OK) return result;
         break;
       }
@@ -6301,7 +6301,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_STRUCT_STORE_INLINE: {
-        /* De-materialize a heap JaclStruct into N consecutive stack slots.
+        /* De-materialize a heap HeapRecord into N consecutive stack slots.
            Operands: uint8_t base_slot, uint16_t type_idx.
            Reads heap struct pointer from stack[base_slot], writes raw bytes
            across N slots starting at base_slot, adjusts stack_top. */
@@ -6320,7 +6320,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm__set_error(vm, "OP_STRUCT_STORE_INLINE expects struct at slot %u", (unsigned)base_slot);
           return VM_RUNTIME_ERROR;
         }
-        JaclStruct* src = jacl_as_struct_ptr(heap_val);
+        HeapRecord* src = jacl_as_heap_record_ptr(heap_val);
         /* Zero-fill N slots then copy raw struct bytes */
         memset(&vm->stack[abs_base], 0, width * sizeof(JaclVal));
         memcpy(&vm->stack[abs_base], src->data, sdef->total_size);
@@ -6357,12 +6357,12 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
             }
             StructTypeDef* sub_sdef = vm->struct_registry->defs[sub_type_idx];
             gc__current_heap = &vm->heap;
-            JaclStruct* sub_s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                       sizeof(JaclStruct) + sub_sdef->total_size);
+            HeapRecord* sub_s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                       sizeof(HeapRecord) + sub_sdef->total_size);
             sub_s->type_idx = sub_type_idx;
             sub_s->total_size = sub_sdef->total_size;
             memcpy(sub_s->data, struct_base + byte_offset, sub_sdef->total_size);
-            field_val = jacl_struct_val(sub_s);
+            field_val = jacl_heap_record_val(sub_s);
             break;
           }
           default: { memcpy(&field_val, struct_base + byte_offset, sizeof(JaclVal)); break; }
@@ -6398,7 +6398,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_STRUCT_MATERIALIZE_UPVALUE: {
-        /* US-008: Convert a closure-captured inline struct to a heap-allocated JaclStruct.
+        /* US-008: Convert a closure-captured inline struct to a heap-allocated HeapRecord.
            Same as OP_STRUCT_MATERIALIZE but base is frame->closure->upvalues[base_uv_slot]. */
         uint8_t base_uv_slot = vm__read_byte(vm);
         uint16_t type_idx = vm__read_u16(vm);
@@ -6408,19 +6408,19 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         }
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
         gc__current_heap = &vm->heap;
-        JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                sizeof(JaclStruct) + sdef->total_size);
+        HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                sizeof(HeapRecord) + sdef->total_size);
         s->type_idx = type_idx;
         s->total_size = sdef->total_size;
         uint8_t* struct_base = (uint8_t*)&frame->closure->upvalues[base_uv_slot];
         memcpy(s->data, struct_base, sdef->total_size);
-        result = vm__push(vm, jacl_struct_val(s));
+        result = vm__push(vm, jacl_heap_record_val(s));
         if (result != VM_OK) return result;
         break;
       }
 
       case OP_STRUCT_EXPAND: {
-        /* Phase 5a: Pop heap JaclStruct from stack top, push raw bytes as N inline slots.
+        /* Phase 5a: Pop heap HeapRecord from stack top, push raw bytes as N inline slots.
            Operand: uint16_t type_idx. */
         uint16_t type_idx = vm__read_u16(vm);
         if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
@@ -6435,7 +6435,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm__set_error(vm, "OP_STRUCT_EXPAND expects struct value");
           return VM_RUNTIME_ERROR;
         }
-        JaclStruct* src = jacl_as_struct_ptr(heap_val);
+        HeapRecord* src = jacl_as_heap_record_ptr(heap_val);
         /* Push N inline slots (zero-fill then copy raw bytes) */
         memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
         memcpy(&vm->stack[vm->stack_top], src->data, sdef->total_size);
@@ -6447,7 +6447,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_STRUCT_REIFY: {
-        /* Phase 5b: Convert TOS inline bytes to heap JaclStruct.
+        /* Phase 5b: Convert TOS inline bytes to heap HeapRecord.
            Operand: uint16_t type_idx.
            For width==1 structs: pops 1 inline slot, pushes 1 heap pointer. */
         uint16_t type_idx = vm__read_u16(vm);
@@ -6461,21 +6461,21 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint8_t* src = (uint8_t*)&vm->stack[vm->stack_top - width];
         /* Allocate heap struct */
         gc__current_heap = &vm->heap;
-        JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                sizeof(JaclStruct) + sdef->total_size);
+        HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                sizeof(HeapRecord) + sdef->total_size);
         s->type_idx = type_idx;
         s->total_size = sdef->total_size;
         memcpy(s->data, src, sdef->total_size);
         /* Phase 5c: fix up nested struct fields — convert raw data to
-           heap JaclStruct* pointers so OP_STRUCT_GET works uniformly.
+           heap HeapRecord* pointers so OP_STRUCT_GET works uniformly.
            Recursive: nested structs may themselves have nested fields. */
-        vm__reify_nested_structs(vm, s, sdef);
+        vm__reify_nested_heap_records(vm, s, sdef);
         /* Clear inline bitmap, pop width slots, push heap pointer */
         for (uint32_t si = 0; si < width; si++) {
           BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - width + si);
         }
         vm->stack_top -= width;
-        result = vm__push(vm, jacl_struct_val(s));
+        result = vm__push(vm, jacl_heap_record_val(s));
         if (result != VM_OK) return result;
         break;
       }
@@ -9459,12 +9459,12 @@ interpret_done:
             } else {
               /* Untyped callback (e.g. lambda $it): materialize to heap struct */
               gc__current_heap = &vm->heap;
-              JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                     sizeof(JaclStruct) + sdef->total_size);
+              HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                     sizeof(HeapRecord) + sdef->total_size);
               s->type_idx = type_idx;
               s->total_size = sdef->total_size;
               memcpy(s->data, ptr, sdef->total_size);
-              result = vm__push(vm, jacl_struct_val(s));
+              result = vm__push(vm, jacl_heap_record_val(s));
               if (result != VM_OK) return result;
             }
 
@@ -9524,12 +9524,12 @@ interpret_done:
               vm->stack_top += kwidth;
             } else if (kdef) {
               gc__current_heap = &vm->heap;
-              JaclStruct* ks = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                      sizeof(JaclStruct) + kdef->total_size);
+              HeapRecord* ks = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                      sizeof(HeapRecord) + kdef->total_size);
               ks->type_idx = key_type_idx;
               ks->total_size = kdef->total_size;
               memcpy(ks->data, ir.item->slots, kdef->total_size);
-              result = vm__push(vm, jacl_struct_val(ks));
+              result = vm__push(vm, jacl_heap_record_val(ks));
               if (result != VM_OK) return result;
             } else {
               result = vm__push(vm, jacl_typed_map_key_from_leaf(ir.item));
@@ -9545,12 +9545,12 @@ interpret_done:
               vm->stack_top += vwidth;
             } else {
               gc__current_heap = &vm->heap;
-              JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                     sizeof(JaclStruct) + sdef->total_size);
+              HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                     sizeof(HeapRecord) + sdef->total_size);
               s->type_idx = type_idx;
               s->total_size = sdef->total_size;
               memcpy(s->data, val_ptr, sdef->total_size);
-              result = vm__push(vm, jacl_struct_val(s));
+              result = vm__push(vm, jacl_heap_record_val(s));
               if (result != VM_OK) return result;
             }
 
@@ -9634,12 +9634,12 @@ interpret_done:
               vm->stack_top += width;
             } else {
               gc__current_heap = &vm->heap;
-              JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                     sizeof(JaclStruct) + sdef->total_size);
+              HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                     sizeof(HeapRecord) + sdef->total_size);
               s->type_idx = type_idx;
               s->total_size = sdef->total_size;
               memcpy(s->data, ptr, sdef->total_size);
-              result = vm__push(vm, jacl_struct_val(s));
+              result = vm__push(vm, jacl_heap_record_val(s));
               if (result != VM_OK) return result;
             }
 
@@ -9706,12 +9706,12 @@ interpret_done:
               vm->stack_top += kwidth;
             } else if (kdef) {
               gc__current_heap = &vm->heap;
-              JaclStruct* ks = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                      sizeof(JaclStruct) + kdef->total_size);
+              HeapRecord* ks = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                      sizeof(HeapRecord) + kdef->total_size);
               ks->type_idx = key_type_idx;
               ks->total_size = kdef->total_size;
               memcpy(ks->data, ir.item->slots, kdef->total_size);
-              result = vm__push(vm, jacl_struct_val(ks));
+              result = vm__push(vm, jacl_heap_record_val(ks));
               if (result != VM_OK) return result;
             } else {
               result = vm__push(vm, jacl_typed_map_key_from_leaf(ir.item));
@@ -9726,12 +9726,12 @@ interpret_done:
               vm->stack_top += vwidth;
             } else {
               gc__current_heap = &vm->heap;
-              JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                     sizeof(JaclStruct) + sdef->total_size);
+              HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                     sizeof(HeapRecord) + sdef->total_size);
               s->type_idx = type_idx;
               s->total_size = sdef->total_size;
               memcpy(s->data, val_ptr, sdef->total_size);
-              result = vm__push(vm, jacl_struct_val(s));
+              result = vm__push(vm, jacl_heap_record_val(s));
               if (result != VM_OK) return result;
             }
 
@@ -9819,12 +9819,12 @@ interpret_done:
               vm->stack_top += width;
             } else {
               gc__current_heap = &vm->heap;
-              JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                     sizeof(JaclStruct) + sdef->total_size);
+              HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                     sizeof(HeapRecord) + sdef->total_size);
               s->type_idx = type_idx;
               s->total_size = sdef->total_size;
               memcpy(s->data, ptr, sdef->total_size);
-              result = vm__push(vm, jacl_struct_val(s));
+              result = vm__push(vm, jacl_heap_record_val(s));
               if (result != VM_OK) return result;
             }
 
@@ -9894,12 +9894,12 @@ interpret_done:
               vm->stack_top += kwidth;
             } else if (kdef) {
               gc__current_heap = &vm->heap;
-              JaclStruct* ks = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                      sizeof(JaclStruct) + kdef->total_size);
+              HeapRecord* ks = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                      sizeof(HeapRecord) + kdef->total_size);
               ks->type_idx = key_type_idx;
               ks->total_size = kdef->total_size;
               memcpy(ks->data, ir.item->slots, kdef->total_size);
-              result = vm__push(vm, jacl_struct_val(ks));
+              result = vm__push(vm, jacl_heap_record_val(ks));
               if (result != VM_OK) return result;
             } else {
               result = vm__push(vm, jacl_typed_map_key_from_leaf(ir.item));
@@ -9914,12 +9914,12 @@ interpret_done:
               vm->stack_top += width;
             } else {
               gc__current_heap = &vm->heap;
-              JaclStruct* s = (JaclStruct*)gc_alloc(&vm->heap, OBJ_STRUCT,
-                                                     sizeof(JaclStruct) + sdef->total_size);
+              HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
+                                                     sizeof(HeapRecord) + sdef->total_size);
               s->type_idx = type_idx;
               s->total_size = sdef->total_size;
               memcpy(s->data, val_ptr, sdef->total_size);
-              result = vm__push(vm, jacl_struct_val(s));
+              result = vm__push(vm, jacl_heap_record_val(s));
               if (result != VM_OK) return result;
             }
 
@@ -10398,13 +10398,13 @@ void ctx__init_vm(VM *vm, JaclCtxPool *pool_storage) {
     vm->ctx_pool = pool_storage;
 
     /* Allocate initial ctx from pool */
-    JaclStruct *ctx_struct = ctx_pool_alloc(pool_storage, &vm->heap);
+    HeapRecord *ctx_struct = ctx_pool_alloc(pool_storage, &vm->heap);
     StructTypeDef *sdef = reg->defs[reg->ctx_type_idx];
 
     /* Initialize all fields with their compile-time defaults */
     for (uint32_t i = 0; i < sdef->field_count; i++) {
         if (sdef->fields[i].default_val != JACL_NIL) {
-            vm__struct_write_field(ctx_struct, sdef->fields[i].offset,
+            vm__heap_record_write_field(ctx_struct, sdef->fields[i].offset,
                                    sdef->fields[i].type,
                                    sdef->fields[i].default_val);
         }
@@ -10421,11 +10421,11 @@ void ctx__init_vm(VM *vm, JaclCtxPool *pool_storage) {
             pwd_str = jacl_rope_string_create(&vm->heap,
                                               (const uint8_t *)cwd_buf, len);
         }
-        vm__struct_write_field(ctx_struct, sdef->fields[0].offset,
+        vm__heap_record_write_field(ctx_struct, sdef->fields[0].offset,
                                sdef->fields[0].type, pwd_str);
     }
 
-    vm->ctx = jacl_struct_val(ctx_struct);
+    vm->ctx = jacl_heap_record_val(ctx_struct);
 }
 
 /**

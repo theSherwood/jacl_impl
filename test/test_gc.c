@@ -1633,7 +1633,7 @@ static int test_gc_sm_field_bitmap_skip(void) {
 }
 
 static int test_gc_value_type_struct_no_trace(void) {
-    /* A heap-allocated JaclStruct with is_value_type=true should not
+    /* A heap-allocated HeapRecord with is_value_type=true should not
        have its fields traced by GC (no reference fields).
        Use gc_collect which sets gc__struct_registry internally. */
     arena_t arena = {0};
@@ -1665,9 +1665,9 @@ static int test_gc_value_type_struct_no_trace(void) {
 
     vm.struct_registry = &reg;
 
-    /* Allocate a JaclStruct and put i32 data */
-    JaclStruct *s = (JaclStruct*)gc_alloc(&vm.heap, OBJ_STRUCT,
-                                           sizeof(JaclStruct) + 8);
+    /* Allocate a HeapRecord and put i32 data */
+    HeapRecord *s = (HeapRecord*)gc_alloc(&vm.heap, OBJ_HEAP_RECORD,
+                                           sizeof(HeapRecord) + 8);
     s->type_idx = 1;
     s->total_size = 8;
     int32_t x = 42, y = 99;
@@ -1675,7 +1675,7 @@ static int test_gc_value_type_struct_no_trace(void) {
     memcpy(s->data + 4, &y, 4);
 
     /* Root the struct on the stack */
-    vm.stack[0] = jacl_struct_val(s);
+    vm.stack[0] = jacl_heap_record_val(s);
     vm.stack_top = 1;
 
     /* gc_collect sets gc__struct_registry from vm.struct_registry internally */
@@ -1784,14 +1784,14 @@ static int test_ctx_pool_alloc_valid(void) {
     ctx_pool_init(&pool, &vm.heap, &reg);
 
     /* Alloc from pool */
-    JaclStruct *s = ctx_pool_alloc(&pool, &vm.heap);
+    HeapRecord *s = ctx_pool_alloc(&pool, &vm.heap);
     ASSERT(s != NULL);
     ASSERT_U32_EQ(s->type_idx, reg.ctx_type_idx);
     ASSERT_U32_EQ(s->total_size, 8);
 
     /* Verify it's a valid GC object */
     GCHeader *hdr = gc_header_of(s);
-    ASSERT_INT_EQ(hdr->obj_type, OBJ_STRUCT);
+    ASSERT_INT_EQ(hdr->obj_type, OBJ_HEAP_RECORD);
 
     teardown_ctx_registry(&reg);
     vm.struct_registry = NULL;
@@ -1814,18 +1814,18 @@ static int test_ctx_pool_free_reuse(void) {
     ctx_pool_init(&pool, &vm.heap, &reg);
 
     /* Drain the pool completely */
-    JaclStruct *entries[CTX_POOL_INIT_SIZE];
+    HeapRecord *entries[CTX_POOL_INIT_SIZE];
     for (int i = 0; i < CTX_POOL_INIT_SIZE; i++) {
         entries[i] = ctx_pool_alloc(&pool, &vm.heap);
         ASSERT(entries[i] != NULL);
     }
 
     /* Free one back */
-    JaclStruct *freed = entries[0];
+    HeapRecord *freed = entries[0];
     ctx_pool_free(&pool, freed);
 
     /* Re-alloc should return the same object */
-    JaclStruct *reused = ctx_pool_alloc(&pool, &vm.heap);
+    HeapRecord *reused = ctx_pool_alloc(&pool, &vm.heap);
     ASSERT(reused == freed);
 
     teardown_ctx_registry(&reg);
@@ -1850,19 +1850,19 @@ static int test_ctx_pool_exhaustion_fallback(void) {
 
     /* Drain the entire pool */
     for (int i = 0; i < CTX_POOL_INIT_SIZE; i++) {
-        JaclStruct *s = ctx_pool_alloc(&pool, &vm.heap);
+        HeapRecord *s = ctx_pool_alloc(&pool, &vm.heap);
         ASSERT(s != NULL);
     }
 
     /* Pool is now empty — next alloc should fall back to gc_alloc */
-    JaclStruct *fallback = ctx_pool_alloc(&pool, &vm.heap);
+    HeapRecord *fallback = ctx_pool_alloc(&pool, &vm.heap);
     ASSERT(fallback != NULL);
     ASSERT_U32_EQ(fallback->type_idx, reg.ctx_type_idx);
     ASSERT_U32_EQ(fallback->total_size, 8);
 
     /* Verify it's a valid GC object */
     GCHeader *hdr = gc_header_of(fallback);
-    ASSERT_INT_EQ(hdr->obj_type, OBJ_STRUCT);
+    ASSERT_INT_EQ(hdr->obj_type, OBJ_HEAP_RECORD);
 
     teardown_ctx_registry(&reg);
     vm.struct_registry = NULL;
@@ -1885,7 +1885,7 @@ static int test_ctx_pool_free_clears_refs(void) {
     ctx_pool_init(&pool, &vm.heap, &reg);
 
     /* Alloc and set a string field */
-    JaclStruct *s = ctx_pool_alloc(&pool, &vm.heap);
+    HeapRecord *s = ctx_pool_alloc(&pool, &vm.heap);
     ASSERT(s != NULL);
 
     /* Write a non-nil value to the pwd field (offset 0, str type) */
@@ -1905,7 +1905,7 @@ static int test_ctx_pool_free_clears_refs(void) {
        of the test, the ctx_pool_free should have written JACL_NIL to the pwd
        field BEFORE storing the next pointer. Let's verify by re-allocating
        and checking the data is zeroed. */
-    JaclStruct *reused = ctx_pool_alloc(&pool, &vm.heap);
+    HeapRecord *reused = ctx_pool_alloc(&pool, &vm.heap);
     ASSERT(reused == s);
 
     /* After re-alloc, data should be zeroed */
@@ -1936,7 +1936,7 @@ static int test_ctx_pool_gc_root(void) {
     /* Get a pointer to a pooled entry (peek at free list head) */
     uintptr_t head = ATOMIC_LOAD_EXPLICIT(&pool.free_list_head, MEM_ACQUIRE);
     ASSERT(head != 0);
-    JaclStruct *pooled = (JaclStruct *)head;
+    HeapRecord *pooled = (HeapRecord *)head;
 
     /* Run GC — pooled entries should survive because pool is a GC root */
     gc_collect(&vm.heap, &vm);
@@ -1946,7 +1946,7 @@ static int test_ctx_pool_gc_root(void) {
     ASSERT(gc__is_marked(pooled, mark));
 
     /* Alloc from pool should still work */
-    JaclStruct *s = ctx_pool_alloc(&pool, &vm.heap);
+    HeapRecord *s = ctx_pool_alloc(&pool, &vm.heap);
     ASSERT(s != NULL);
     ASSERT_U32_EQ(s->type_idx, reg.ctx_type_idx);
 
@@ -1975,22 +1975,22 @@ static int test_vm_ctx_set_at_startup(void) {
     vm.ctx_pool = &pool;
 
     /* Allocate initial ctx (simulating startup) */
-    JaclStruct *ctx_struct = ctx_pool_alloc(&pool, &vm.heap);
+    HeapRecord *ctx_struct = ctx_pool_alloc(&pool, &vm.heap);
     ASSERT(ctx_struct != NULL);
     ASSERT_U32_EQ(ctx_struct->type_idx, reg.ctx_type_idx);
 
     /* Set pwd field to a test string */
     JaclVal pwd_str = jacl_inline_string("/tmp", 4);
-    vm__struct_write_field(ctx_struct, 0, TYPE_STR, pwd_str);
+    vm__heap_record_write_field(ctx_struct, 0, TYPE_STR, pwd_str);
 
     /* Store as vm->ctx */
-    vm.ctx = jacl_struct_val(ctx_struct);
+    vm.ctx = jacl_heap_record_val(ctx_struct);
     ASSERT(vm.ctx != JACL_NIL);
 
     /* Read back the struct and verify pwd */
-    JaclStruct *read_back = jacl_as_struct_ptr(vm.ctx);
+    HeapRecord *read_back = jacl_as_heap_record_ptr(vm.ctx);
     ASSERT(read_back == ctx_struct);
-    JaclVal read_pwd = vm__struct_read_field(&vm.heap, read_back, 0, TYPE_STR);
+    JaclVal read_pwd = vm__heap_record_read_field(&vm.heap, read_back, 0, TYPE_STR);
     ASSERT(read_pwd == pwd_str);
 
     vm.ctx = JACL_NIL;
@@ -2017,11 +2017,11 @@ static int test_vm_ctx_gc_survives(void) {
     vm.ctx_pool = &pool;
 
     /* Allocate ctx and set a heap-allocated string as pwd */
-    JaclStruct *ctx_struct = ctx_pool_alloc(&pool, &vm.heap);
+    HeapRecord *ctx_struct = ctx_pool_alloc(&pool, &vm.heap);
     JaclVal pwd_str = jacl_rope_string_create(&vm.heap,
                           (const uint8_t *)"/home/test/long-path-name", 25);
-    vm__struct_write_field(ctx_struct, 0, TYPE_STR, pwd_str);
-    vm.ctx = jacl_struct_val(ctx_struct);
+    vm__heap_record_write_field(ctx_struct, 0, TYPE_STR, pwd_str);
+    vm.ctx = jacl_heap_record_val(ctx_struct);
 
     /* Run GC — ctx struct and its pwd string should survive */
     gc_collect(&vm.heap, &vm);
@@ -2035,9 +2035,9 @@ static int test_vm_ctx_gc_survives(void) {
     ASSERT(gc__is_marked(pwd_ptr, mark));
 
     /* Verify ctx value is still valid and readable */
-    JaclStruct *read_back = jacl_as_struct_ptr(vm.ctx);
+    HeapRecord *read_back = jacl_as_heap_record_ptr(vm.ctx);
     ASSERT(read_back == ctx_struct);
-    JaclVal read_pwd = vm__struct_read_field(&vm.heap, read_back, 0, TYPE_STR);
+    JaclVal read_pwd = vm__heap_record_read_field(&vm.heap, read_back, 0, TYPE_STR);
     ASSERT(read_pwd == pwd_str);
 
     vm.ctx = JACL_NIL;
@@ -2064,11 +2064,11 @@ static int test_vm_ctx_multiple_gc_cycles(void) {
     vm.ctx_pool = &pool;
 
     /* Allocate ctx with a heap string */
-    JaclStruct *ctx_struct = ctx_pool_alloc(&pool, &vm.heap);
+    HeapRecord *ctx_struct = ctx_pool_alloc(&pool, &vm.heap);
     JaclVal pwd_str = jacl_rope_string_create(&vm.heap,
                           (const uint8_t *)"/workspace/project", 18);
-    vm__struct_write_field(ctx_struct, 0, TYPE_STR, pwd_str);
-    vm.ctx = jacl_struct_val(ctx_struct);
+    vm__heap_record_write_field(ctx_struct, 0, TYPE_STR, pwd_str);
+    vm.ctx = jacl_heap_record_val(ctx_struct);
 
     /* Run multiple GC cycles */
     for (int cycle = 0; cycle < 5; cycle++) {
@@ -2089,9 +2089,9 @@ static int test_vm_ctx_multiple_gc_cycles(void) {
         ASSERT(gc__is_marked(pwd_ptr, mark));
 
         /* Read back to verify data integrity */
-        JaclStruct *read_back = jacl_as_struct_ptr(vm.ctx);
+        HeapRecord *read_back = jacl_as_heap_record_ptr(vm.ctx);
         ASSERT(read_back == ctx_struct);
-        JaclVal read_pwd = vm__struct_read_field(&vm.heap, read_back, 0, TYPE_STR);
+        JaclVal read_pwd = vm__heap_record_read_field(&vm.heap, read_back, 0, TYPE_STR);
         ASSERT(read_pwd == pwd_str);
     }
 
@@ -2119,11 +2119,11 @@ static int test_ctx_set_write_barrier(void) {
     vm.ctx_pool = &pool;
 
     /* Allocate ctx with a heap string */
-    JaclStruct *ctx_struct = ctx_pool_alloc(&pool, &vm.heap);
+    HeapRecord *ctx_struct = ctx_pool_alloc(&pool, &vm.heap);
     JaclVal old_str = jacl_rope_string_create(&vm.heap,
                           (const uint8_t *)"/old/path", 9);
-    vm__struct_write_field(ctx_struct, 0, TYPE_STR, old_str);
-    vm.ctx = jacl_struct_val(ctx_struct);
+    vm__heap_record_write_field(ctx_struct, 0, TYPE_STR, old_str);
+    vm.ctx = jacl_heap_record_val(ctx_struct);
 
     /* Set up grey buffer and gc_active to simulate active GC */
     GreyBuffer gb;
@@ -2140,7 +2140,7 @@ static int test_ctx_set_write_barrier(void) {
     JaclVal read_old;
     memcpy(&read_old, ctx_struct->data + 0, sizeof(JaclVal));
     gc_write_barrier(&gb, vm.gc_active_ptr, read_old, new_str);
-    vm__struct_write_field(ctx_struct, 0, TYPE_STR, new_str);
+    vm__heap_record_write_field(ctx_struct, 0, TYPE_STR, new_str);
 
     /* Grey buffer should contain old and new values */
     ASSERT(gb.count >= 2);  /* old_str + new_str */

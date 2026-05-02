@@ -36,7 +36,7 @@ typedef enum {
     OBJ_FUTURE_WAITER,
     OBJ_PARALLEL_AGG,
     OBJ_RACE_AGG,
-    OBJ_STRUCT,
+    OBJ_HEAP_RECORD,
     OBJ_ROPE_STRING,
     OBJ_ROPE_LEAF,
     OBJ_ROPE_INTERNAL,
@@ -471,13 +471,13 @@ typedef struct {
     uint32_t type_idx;      /* index into StructTypeRegistry */
     uint32_t total_size;    /* byte size of data[] (from StructTypeDef->total_size) */
     uint8_t  data[];        /* C-ABI laid out field data (total_size bytes) */
-} JaclStruct;
+} HeapRecord;
 
-JaclStruct* jacl_as_struct_ptr(JaclVal v) {
-    return (JaclStruct*)(uintptr_t)(v & JACL_PAYLOAD_MASK);
+HeapRecord* jacl_as_heap_record_ptr(JaclVal v) {
+    return (HeapRecord*)(uintptr_t)(v & JACL_PAYLOAD_MASK);
 }
 
-JaclVal jacl_struct_val(JaclStruct* s) {
+JaclVal jacl_heap_record_val(HeapRecord* s) {
     return JACL_TAG_STRUCT | ((uint64_t)(uintptr_t)s & JACL_PAYLOAD_MASK);
 }
 

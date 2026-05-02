@@ -616,7 +616,7 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
         if (w->vm.ctx_pool) {
             uintptr_t fl = ATOMIC_LOAD_EXPLICIT(&w->vm.ctx_pool->free_list_head, MEM_ACQUIRE);
             while (fl != 0) {
-                JaclStruct *ps = (JaclStruct *)fl;
+                HeapRecord *ps = (HeapRecord *)fl;
                 gc__ms_push(ms, ps);
                 fl = *(uintptr_t *)ps->data;
             }

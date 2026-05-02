@@ -875,14 +875,14 @@ bool embed__val_matches_field_type(JaclVal val, int field_type) {
 }
 
 /* Read a field from struct data and return as JaclVal (always boxed) */
-JaclVal embed__struct_read_field(JaclVM* jvm, JaclStruct* s,
+JaclVal embed__heap_record_read_field(JaclVM* jvm, HeapRecord* s,
                                          uint32_t offset, int field_type) {
-  return vm__struct_read_field(&jvm->vm.heap, s, offset, field_type);
+  return vm__heap_record_read_field(&jvm->vm.heap, s, offset, field_type);
 }
 
 /* Write a JaclVal to a struct field (caller must have already type-checked).
  * Unboxes 64-bit types from boxed embed API values before delegating. */
-void embed__struct_write_field(JaclStruct* s, uint32_t offset,
+void embed__heap_record_write_field(HeapRecord* s, uint32_t offset,
                                        int field_type, JaclVal val) {
   /* Embed API always passes boxed JaclVals; unbox 64-bit types for the
    * shared write function which uses the unboxed (raw-bits) VM convention. */
@@ -892,7 +892,7 @@ void embed__struct_write_field(JaclStruct* s, uint32_t offset,
     case TYPE_F64: { double d = jacl_as_f64(val); memcpy(&val, &d, 8); break; }
     default: break;
   }
-  vm__struct_write_field(s, offset, field_type, val);
+  vm__heap_record_write_field(s, offset, field_type, val);
 }
 
 /**
@@ -921,8 +921,8 @@ JaclVal jacl_struct_new_val(JaclVM* jvm, const char* type_name,
   }
 
   /* Allocate struct on GC heap */
-  JaclStruct* s = (JaclStruct*)gc_alloc(&jvm->vm.heap, OBJ_STRUCT,
-                                          sizeof(JaclStruct) + sdef->total_size);
+  HeapRecord* s = (HeapRecord*)gc_alloc(&jvm->vm.heap, OBJ_HEAP_RECORD,
+                                          sizeof(HeapRecord) + sdef->total_size);
   if (!s) return embed__make_error(jvm, "allocation failed");
 
   s->type_idx = type_idx;
@@ -931,11 +931,11 @@ JaclVal jacl_struct_new_val(JaclVM* jvm, const char* type_name,
 
   /* Store each field value */
   for (int i = 0; i < count; i++) {
-    embed__struct_write_field(s, sdef->fields[i].offset,
+    embed__heap_record_write_field(s, sdef->fields[i].offset,
                                (int)sdef->fields[i].type, fields[i]);
   }
 
-  return jacl_struct_val(s);
+  return jacl_heap_record_val(s);
 }
 
 /**
@@ -950,7 +950,7 @@ JaclVal jacl_struct_get_val(JaclVM* jvm, JaclVal s_val,
     return embed__make_error(jvm, "not a struct value");
   }
 
-  JaclStruct* s = jacl_as_struct_ptr(s_val);
+  HeapRecord* s = jacl_as_heap_record_ptr(s_val);
   StructTypeRegistry* reg = jvm->persistent_struct_registry;
   if (s->type_idx >= reg->count) {
     return embed__make_error(jvm, "invalid struct type index");
@@ -962,7 +962,7 @@ JaclVal jacl_struct_get_val(JaclVM* jvm, JaclVal s_val,
   for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
     if (sdef->fields[fi].name_len == fname_len &&
         memcmp(sdef->fields[fi].name, field_name, fname_len) == 0) {
-      return embed__struct_read_field(jvm, s, sdef->fields[fi].offset,
+      return embed__heap_record_read_field(jvm, s, sdef->fields[fi].offset,
                                       (int)sdef->fields[fi].type);
     }
   }
@@ -981,7 +981,7 @@ bool jacl_struct_set_val(JaclVM* jvm, JaclVal s_val,
   if (!jvm || !field_name) return false;
   if (!jacl_is_struct(s_val)) return false;
 
-  JaclStruct* s = jacl_as_struct_ptr(s_val);
+  HeapRecord* s = jacl_as_heap_record_ptr(s_val);
   StructTypeRegistry* reg = jvm->persistent_struct_registry;
   if (s->type_idx >= reg->count) return false;
 
@@ -1005,7 +1005,7 @@ bool jacl_struct_set_val(JaclVM* jvm, JaclVal s_val,
         gc_write_barrier(jvm->vm.grey_buf, jvm->vm.gc_active_ptr,
                          old_val, value);
       }
-      embed__struct_write_field(s, sdef->fields[fi].offset, field_type, value);
+      embed__heap_record_write_field(s, sdef->fields[fi].offset, field_type, value);
       return true;
     }
   }
@@ -1247,7 +1247,7 @@ const char* jacl_struct_type_name_val(JaclVM* jvm, JaclVal s_val) {
   if (!jvm) return NULL;
   if (!jacl_is_struct(s_val)) return NULL;
 
-  JaclStruct* s = jacl_as_struct_ptr(s_val);
+  HeapRecord* s = jacl_as_heap_record_ptr(s_val);
   StructTypeRegistry* reg = jvm->persistent_struct_registry;
   if (s->type_idx >= reg->count) return NULL;
 

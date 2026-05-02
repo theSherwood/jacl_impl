@@ -117,7 +117,7 @@ typedef enum {
     OBJ_FUTURE_WAITER,
     OBJ_PARALLEL_AGG,
     OBJ_RACE_AGG,
-    OBJ_STRUCT,
+    OBJ_HEAP_RECORD,
     OBJ_ROPE_STRING,
     OBJ_ROPE_LEAF,
     OBJ_ROPE_INTERNAL,
@@ -181,11 +181,16 @@ typedef struct {
     uint32_t   gc_cycle_count;
 } ThreadHeap;
 
+/* HeapRecord — heap-allocated, pointer-accessed struct shape. Used by ctx
+   (the lone builtin) and reachable from user code only via [box $val]
+   (which uses JaclMutableRef instead). May contain reference fields; the
+   GC traces fields via the StructTypeRegistry by type_idx. User defstructs
+   are inline (raw bytes across stack slots), not HeapRecords. */
 typedef struct {
     uint32_t type_idx;
     uint32_t total_size;   /* byte size of data[] (from StructTypeDef->total_size) */
     uint8_t  data[];
-} JaclStruct;
+} HeapRecord;
 
 typedef struct {
     JaclVal  *entries;
@@ -757,13 +762,13 @@ typedef enum {
   OP_STRUCT_NEW_INLINE,
   OP_STRUCT_GET_INLINE,  /* uint8_t base_slot, uint16_t byte_offset, uint8_t field_type; read from stack-resident struct */
   OP_STRUCT_SET_INLINE,  /* uint8_t base_slot, uint16_t byte_offset, uint8_t field_type; write to stack-resident struct */
-  OP_STRUCT_MATERIALIZE, /* uint8_t base_slot, uint16_t type_idx; convert inline struct to heap JaclStruct */
+  OP_STRUCT_MATERIALIZE, /* uint8_t base_slot, uint16_t type_idx; convert inline struct to heap HeapRecord */
   OP_STRUCT_COPY,        /* DEAD — struct pass-by-value is now inline (Phase 5a) */
   OP_STRUCT_STORE_INLINE, /* uint8_t base_slot, uint16_t type_idx; de-materialize heap struct to inline stack slots */
   OP_STRUCT_GET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type; read from closure-captured inline struct */
   OP_STRUCT_SET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type; write to closure-captured inline struct */
   OP_STRUCT_MATERIALIZE_UPVALUE, /* uint8_t base_uv_slot, uint16_t type_idx; convert upvalue inline struct to heap */
-  OP_STRUCT_EXPAND,      /* uint16_t type_idx; pop heap JaclStruct, push as N inline stack slots */
+  OP_STRUCT_EXPAND,      /* uint16_t type_idx; pop heap HeapRecord, push as N inline stack slots */
   OP_STRUCT_EQ_INLINE,   /* uint8_t base_a, uint8_t base_b, uint16_t total_size; memcmp two inline structs, push bool */
   OP_STRUCT_HASH_INLINE, /* uint8_t base_slot, uint16_t total_size, uint16_t type_idx; hash inline struct bytes, push i32 */
   OP_HASH,               /* pop value, push i32 hash via jacl_val_hash */
@@ -843,7 +848,7 @@ typedef enum {
   OP_TYPED_VEC_GET_INLINE, /* uint16_t type_idx; pop idx, pop tvec; push width inline slots */
   OP_TYPED_MAP_GET_INLINE, /* uint16_t type_idx; pop key, pop tmap; push width inline slots */
   OP_INLINE_TO_LOCAL,      /* uint8_t base_slot, uint16_t type_idx; copy width inline TOS to local, pop */
-  OP_STRUCT_REIFY,         /* uint16_t type_idx; pop TOS inline bytes, allocate heap JaclStruct, push ptr */
+  OP_STRUCT_REIFY,         /* uint16_t type_idx; pop TOS inline bytes, allocate heap HeapRecord, push ptr */
   OP_DEREF_INLINE          /* uint16_t type_idx; pop box, push inline bytes from ref->data[] */
 } OpCode;
 
@@ -1301,7 +1306,7 @@ struct Compiler {
 #define CTX_POOL_INIT_SIZE 8
 
 typedef struct {
-    volatile uintptr_t free_list_head; /* atomic: pointer to first free JaclStruct, or 0 */
+    volatile uintptr_t free_list_head; /* atomic: pointer to first free HeapRecord, or 0 */
     uint32_t struct_size;              /* StructTypeDef->total_size (byte size of data[]) */
     uint32_t type_idx;                 /* ctx struct type_idx in StructTypeRegistry */
     StructTypeDef *sdef;               /* cached pointer to ctx StructTypeDef */
@@ -1732,8 +1737,8 @@ extern bool gc__find_free_run (GCBlock *block, int from, int *out_start, int *ou
 extern bool gc__find_fit_in_block (ThreadHeap *heap, GCBlock *block, int needed_lines, int from);
 extern void *gc__bump_alloc (ThreadHeap *heap, size_t total, uint8_t obj_type);
 extern void *gc_alloc (ThreadHeap *heap, uint8_t obj_type, size_t payload_size);
-extern JaclStruct *jacl_as_struct_ptr (JaclVal v);
-extern JaclVal jacl_struct_val (JaclStruct *s);
+extern HeapRecord *jacl_as_heap_record_ptr (JaclVal v);
+extern JaclVal jacl_heap_record_val (HeapRecord *s);
 extern JaclVal jacl_i64 (ThreadHeap *heap, int64_t n);
 extern JaclVal jacl_u64 (ThreadHeap *heap, uint64_t n);
 extern JaclVal jacl_f64 (ThreadHeap *heap, double d);
@@ -2034,8 +2039,8 @@ extern void vm__default_print (const char *text, uint32_t len, void *ctx);
 extern bool vm__is_falsy (JaclVal v);
 extern void vm__capture_trace (VM *vm);
 extern void ctx_pool_init (JaclCtxPool *pool, ThreadHeap *heap, StructTypeRegistry *reg);
-extern JaclStruct *ctx_pool_alloc (JaclCtxPool *pool, ThreadHeap *heap);
-extern void ctx_pool_free (JaclCtxPool *pool, JaclStruct *s);
+extern HeapRecord *ctx_pool_alloc (JaclCtxPool *pool, ThreadHeap *heap);
+extern void ctx_pool_free (JaclCtxPool *pool, HeapRecord *s);
 extern void ctx__init_vm (VM *vm, JaclCtxPool *pool_storage);
 extern void vm_init (VM *vm, arena_t *arena);
 extern void vm_destroy (VM *vm);
@@ -2051,8 +2056,8 @@ extern void vm__fmt_ensure (VMFormatBuf *buf, uint32_t extra);
 extern void vm__fmt_append (VMFormatBuf *buf, const char *str, uint32_t len);
 extern void vm__fmt_value (VMFormatBuf *buf, JaclVal val);
 extern bool vm__deep_eq (JaclVal a, JaclVal b);
-extern JaclVal vm__struct_read_field (ThreadHeap *heap, JaclStruct *s, uint32_t offset, int field_type);
-extern void vm__struct_write_field (JaclStruct *s, uint32_t offset, int field_type, JaclVal val);
+extern JaclVal vm__heap_record_read_field (ThreadHeap *heap, HeapRecord *s, uint32_t offset, int field_type);
+extern void vm__heap_record_write_field (HeapRecord *s, uint32_t offset, int field_type, JaclVal val);
 extern VMResult vm_exec (VM *vm, BytecodeChunk *chunk);
 extern StreamPullResult vm__pull_stream_one (VM *vm, JaclVal stream_val, JaclVal *out_value);
 extern VMResult vm__run (VM *vm, uint32_t min_frame);
@@ -2199,8 +2204,8 @@ extern void jacl_handle_free_val (JaclVM *jvm, EmbedJaclHandle h);
 extern JaclVal jacl_call_val (JaclVM *jvm, JaclVal fn, JaclVal *args, int argc);
 extern JaclVal jacl_call_named_val (JaclVM *jvm, const char *name, JaclVal *args, int argc);
 extern bool embed__val_matches_field_type (JaclVal val, int field_type);
-extern JaclVal embed__struct_read_field (JaclVM *jvm, JaclStruct *s, uint32_t offset, int field_type);
-extern void embed__struct_write_field (JaclStruct *s, uint32_t offset, int field_type, JaclVal val);
+extern JaclVal embed__heap_record_read_field (JaclVM *jvm, HeapRecord *s, uint32_t offset, int field_type);
+extern void embed__heap_record_write_field (HeapRecord *s, uint32_t offset, int field_type, JaclVal val);
 extern JaclVal jacl_struct_new_val (JaclVM *jvm, const char *type_name, JaclVal *fields, int count);
 extern JaclVal jacl_struct_get_val (JaclVM *jvm, JaclVal s_val, const char *field_name);
 extern bool jacl_struct_set_val (JaclVM *jvm, JaclVal s_val, const char *field_name, JaclVal value);

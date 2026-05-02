@@ -363,8 +363,8 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
     }
 
     /* --- Struct: skip tracing for value-type structs (no GC references) --- */
-    case OBJ_STRUCT: {
-        JaclStruct *s = (JaclStruct *)payload;
+    case OBJ_HEAP_RECORD: {
+        HeapRecord *s = (HeapRecord *)payload;
         if (gc__struct_registry) {
             StructTypeRegistry *sreg = (StructTypeRegistry *)gc__struct_registry;
             StructTypeDef *sdef = sreg->defs[s->type_idx];
@@ -445,7 +445,7 @@ void gc_mark(ThreadHeap *heap, VM *vm) {
     if (vm->ctx_pool) {
         uintptr_t fl = ATOMIC_LOAD_EXPLICIT(&vm->ctx_pool->free_list_head, MEM_ACQUIRE);
         while (fl != 0) {
-            JaclStruct *ps = (JaclStruct *)fl;
+            HeapRecord *ps = (HeapRecord *)fl;
             gc__ms_push(&ms, ps);
             fl = *(uintptr_t *)ps->data;
         }

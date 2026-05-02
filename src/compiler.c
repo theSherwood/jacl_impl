@@ -452,7 +452,8 @@ static uint32_t ctx_field_list__finalize(CtxFieldList* list, StructTypeRegistry*
   sdef->field_count = list->count;
   sdef->total_size  = struct__align_up(offset, max_align);
   sdef->alignment   = max_align;
-  /* ctx always has str pwd, so is_value_type = false */
+  /* Ctx is the lone HeapRecord — accessed via pointer-deref opcodes, not
+     subject to the no-ref-fields rule that applies to user defstructs. */
   sdef->is_value_type = false;
   memcpy(sdef->fields, tmp_fields, list->count * sizeof(StructTypeField));
 
@@ -3983,7 +3984,7 @@ void compiler__builtin_arity_error(Compiler* c, uint32_t line,
   compiler__error(c, line, col, err_msg);
 }
 
-/* --- Internal: Reify inline struct to heap JaclStruct* if active ---
+/* --- Internal: Reify inline struct to heap HeapRecord* if active ---
  * Returns true if reification was emitted. */
 
 static bool compiler__reify_inline_struct(Compiler* c, uint32_t line) {
@@ -4102,7 +4103,7 @@ void compiler__compile_binary(Compiler* c, AstNode** args,
       compiler__error(c, line, col, err);
       return;
     }
-    /* Both are struct-typed (materialized on stack as heap JaclStruct values).
+    /* Both are struct-typed (materialized on stack as heap HeapRecord values).
        Equality is handled by jacl_val_eq which supports JACL_TAG_STRUCT. */
     compiler__emit_byte(c, op, line);
     c->last_expr_type = TYPE_DYN;
@@ -10384,7 +10385,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           return;
         }
         /* Phase 5c: nested struct field args are now inline — reify for
-           OP_STRUCT_NEW_INLINE which expects heap JaclStruct* fields */
+           OP_STRUCT_NEW_INLINE which expects heap HeapRecord* fields */
         compiler__reify_inline_struct(c, line);
       }
 
