@@ -71,29 +71,71 @@ related accessors and helpers. Ctx is identified by `reg->ctx_type_idx`
 
 ### Phase 3 — Convert reify call sites to compile errors
 
-Each `compiler__reify_inline_struct` call site becomes a typed compile error
-telling the user to `box`. One subphase per commit.
+Each `compiler__reify_inline_struct` call site needs to become either (a) a
+compile error directing users to `box`, (b) a typed-variant op that handles
+inline bytes directly, or (c) stay as-is if it's an architectural transient
+that other phases will clean up.
 
-- **3a. Box reifies first** (compiler.c:9123-9127). Internal cleanup; box
-  accepts inline structs directly via `OP_BOX_STRUCT`.
-- **3b. Untyped vec leaf** (compiler.c:5044, 5285, 5332, 5391, 5404). Error:
-  `struct value cannot be stored in untyped vec — declare 'vec<TypeName>' or use [box $val]`.
-- **3c. Untyped map** (compiler.c:8416, 8489, 8523, 8629, 8662, 8709, 8717, 8749).
-  Mirror of 3b for map values.
-- **3d. Destructure-from-dyn** (compiler.c:4560, 4002). Error:
-  `cannot destructure struct from a dyn slot — narrow with [box? Type $val] then [unbox $val] first`.
-  Also flip the typed-source path's `OP_STRUCT_GET` (compiler.c:4692) to
-  `OP_STRUCT_GET_INLINE`.
-- **3e. Dyn parameter passing** (compiler.c:10607-10609, 10384, 6402-6530, 7299/7366).
-  Error: `struct value cannot be passed to a dyn parameter — wrap with [box $val] or change the parameter type`.
-  **Highest-volume site; expect 10+ test migrations.**
-- **3f. Post-return-wide field access** (compiler.c:10189-10231). Use
-  `OP_STRUCT_GET_INLINE` against the wide-return slot when typing is known.
-  Error only if genuinely lost.
-- **3g. Ctx field default-init** (compiler.c:12119-12125). Rewrite to use the
-  renamed `OP_HEAP_RECORD_SET` directly without inline-then-reify.
+**Status as of writing:** 3e landed. The other subphases turned out deeper
+than the brief implied — see notes below.
 
-### Phase 4 — Delete dead opcodes & flag
+- **3a. Box reifies first** (compiler.c:9123-9127). *Blocked on missing
+  opcode.* Box currently consumes a heap HeapRecord pointer. Switching to
+  inline bytes requires the var-ref load path (compiler.c:11055) to push
+  inline bytes from a struct local, which today emits `OP_STRUCT_MATERIALIZE`
+  (heap). Needs a new `OP_LOAD_INLINE_LOCAL` opcode and a sweep of
+  consumers that currently expect a materialized heap pointer from var-ref.
+- **3b/3c. Untyped vec/map literal** (compiler.c:5290, 5337, 5396, 5409,
+  8494, 8528, 8634, 8667, 8714, 8722, 8754). These reify sites are inside
+  TYPED collection construction (`[[Vec Point] ...]`, `[[Map Point] ...]`)
+  and the typed `*_PUSH/*_SET/*_GET/*_HAS/*_REMOVE` ops. Today the typed
+  ops take heap struct pointers; tomorrow they should take inline bytes.
+  This is an *optimization*, not an error path — the user-facing behavior
+  is correct; we're just allocating transient HeapRecords. UNTYPED vec/map
+  storage of structs is already rejected via existing `reject_bare_typed`
+  calls (compiler.c:5439, 8419, 8502, 8537, 8610, 8731).
+- **3d. Destructure-from-dyn** (compiler.c:4566). Today destructure stores
+  the source in a temp local and emits `OP_STRUCT_GET` (heap field access).
+  Converting to error-on-dyn + inline-on-typed requires rewriting the
+  destructure code to use a wide local + `OP_STRUCT_GET_INLINE`. Non-trivial.
+- **3e. Dyn parameter passing** (compiler.c:10612). **DONE.** Errors with
+  "cannot pass struct value to dyn parameter — wrap with [box $val]".
+- **3f. Post-return-wide field access** (compiler.c:10195). The reify here
+  fires when the compiler can't statically resolve the struct type at the
+  field-access site after a wide return. Should be rare in well-typed code;
+  improving static type tracking eliminates most cases.
+- **3g. Ctx default-init** (compiler.c:12144). Ctx-only path; stays as-is
+  (it's the ctx HeapRecord, not user struct).
+- **Cell storage** (compiler.c:6407, 6455). `set` on a `mut`-bound struct
+  variable currently reifies because cells store JaclVals (8 bytes). To
+  keep mut-bindings of struct type without heap, would need wide cells —
+  an architectural change beyond Phase 3 scope.
+- **Global storage** (compiler.c:6535, 6986). Same as cell storage: globals
+  are JaclVal-shaped.
+- **Reset** (compiler.c:6505, 9302). Box reset currently goes
+  inline → heap → box. Improvable along with 3a.
+
+**Recommended next steps for full elimination:**
+1. Add `OP_LOAD_INLINE_LOCAL` + `OP_LOAD_INLINE_UPVALUE` ops; rewrite
+   var-ref of inline locals to use them. This unblocks 3a, 3d, and the
+   reset cleanup.
+2. Add inline-aware variants for typed vec/map ops to remove the transient
+   heap allocations (3b/3c).
+3. Decide on architecture for mut-struct bindings (wide cells vs. forced box).
+4. Convert remaining sites to errors once the alternatives exist.
+
+The current state — Phase 1, Phase 2, and Phase 3e — already eliminates
+the *unintended* heap allocations for ref-bearing structs, keeps ctx as
+the lone HeapRecord, and prevents the most common type-erasure path
+(struct-to-dyn-parameter). Subsequent passes can chip away at the
+remaining transient heap allocations without changing user-visible
+behavior except where required by the design (e.g. `def dyn d [Point ...]`
+becoming an error once a typed alternative is in place).
+
+### Phase 4 — Delete dead opcodes & flag (deferred)
+
+Blocked until Phase 3 fully lands: `OP_STRUCT_REIFY` and friends still
+have callers from the unconverted reify sites.
 
 Delete now-unreachable opcodes in `src/jacl.h:752-846` and their VM handlers:
 - `OP_STRUCT_REIFY`
