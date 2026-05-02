@@ -1277,8 +1277,8 @@ struct Compiler {
   MacroTable*          macro_table;
   uint32_t             current_scope_mark;
   bool                 has_prelude;
-  bool                 inline_struct_ref;
-  uint8_t              inline_ref_base_slot;
+  uint8_t              inline_repr;   /* INLINE_NONE / INLINE_STACK / INLINE_REF */
+  uint8_t              inline_ref_base;
   uint16_t             inline_ref_offset;
   bool                 shell_fallback;
   ModuleBinding        module_bindings[COMPILER_MODULE_BINDINGS_MAX];

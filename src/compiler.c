@@ -2812,6 +2812,13 @@ bool macro__is_special_form(const char* name, uint32_t len) {
 
 /* --- Internal: Compiler state --- */
 
+/* Inline struct representation enum (stored as uint8_t in Compiler). */
+enum {
+  INLINE_NONE  = 0,  /* normal heap value (single stack slot) */
+  INLINE_STACK = 1,  /* inline struct bytes on stack (multiple slots) */
+  INLINE_REF   = 2,  /* byte-offset reference into an inline struct local */
+};
+
 typedef struct Compiler Compiler;
 struct Compiler {
   BytecodeChunk*   chunk;
@@ -2859,10 +2866,10 @@ struct Compiler {
   MacroTable*          macro_table;    /* compile-time macro definitions (root compiler owns) */
   uint32_t             current_scope_mark; /* hygiene: mark for newly introduced bindings */
   bool                 has_prelude;    /* true when compiling under a caller-supplied prelude map */
-  bool                 last_is_inline;     /* true if last compiled expr pushed inline struct slots (not heap) */
-  bool                 inline_struct_ref;  /* true if last expression is an inline struct reference (not on stack) */
-  uint8_t              inline_ref_base_slot; /* base local slot of the inline struct */
-  uint16_t             inline_ref_offset;    /* accumulated byte offset within the struct */
+  /* Inline struct representation for the last compiled expression. */
+  uint8_t              inline_repr;     /* INLINE_NONE / INLINE_STACK / INLINE_REF */
+  uint8_t              inline_ref_base;     /* base local slot (valid when INLINE_REF) */
+  uint16_t             inline_ref_offset;   /* byte offset (valid when INLINE_REF) */
   bool                 shell_fallback; /* true in REPL mode: unknown commands try PATH lookup */
   ModuleBinding        module_bindings[COMPILER_MODULE_BINDINGS_MAX];
   uint32_t             module_binding_count;
@@ -2928,10 +2935,9 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->macro_table       = NULL;
   c->current_scope_mark = 0;
   c->has_prelude       = false;
-  c->last_is_inline     = false;
-  c->inline_struct_ref  = false;
-  c->inline_ref_base_slot = 0;
-  c->inline_ref_offset    = 0;
+  c->inline_repr        = INLINE_NONE;
+  c->inline_ref_base    = 0;
+  c->inline_ref_offset  = 0;
   c->shell_fallback    = false;
   c->module_binding_count = 0;
   c->narrowing_count   = 0;
@@ -3168,7 +3174,7 @@ StructTypeRegistry* compiler__get_struct_registry(Compiler* c) {
 /* --- Internal: emit struct-aware return --- */
 
 /* Phase 5b: emit OP_RETURN_WIDE if returning a value-type struct, else OP_RETURN.
- * If the top of stack is a heap struct (last_is_inline == false), emits
+ * If the top of stack is a heap struct (inline_repr != INLINE_STACK), emits
  * OP_STRUCT_EXPAND first to convert to inline slots. */
 static void compiler__emit_return(Compiler* c, uint32_t line) {
   if (c->return_type == TYPE_STRUCT && c->return_struct_idx != UINT32_MAX) {
@@ -3177,7 +3183,7 @@ static void compiler__emit_return(Compiler* c, uint32_t line) {
       StructTypeDef* sdef = reg->defs[c->return_struct_idx];
       if (sdef && sdef->is_value_type) {
         uint32_t width = struct__slot_width(reg, c->return_struct_idx);
-        if (!c->last_is_inline) {
+        if (c->inline_repr != INLINE_STACK) {
           compiler__emit_byte(c, OP_STRUCT_EXPAND, line);
           compiler__emit_u16(c, (uint16_t)c->return_struct_idx, line);
         }
@@ -3977,10 +3983,10 @@ void compiler__builtin_arity_error(Compiler* c, uint32_t line,
  * Returns true if reification was emitted. */
 
 static bool compiler__reify_inline_struct(Compiler* c, uint32_t line) {
-  if (c->last_is_inline && c->last_expr_type == TYPE_STRUCT) {
+  if (c->inline_repr == INLINE_STACK && c->last_expr_type == TYPE_STRUCT) {
     compiler__emit_byte(c, OP_STRUCT_REIFY, line);
     compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
-    c->last_is_inline = false;
+    c->inline_repr = INLINE_NONE;
     return true;
   }
   return false;
@@ -6831,7 +6837,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* US-005: check if RHS is a struct constructor or typed vec/map get
      * — activate inline storage. Only for local scope, non-SM mode. */
     bool activate_inline = false;
-    c->last_is_inline = false;
+    c->inline_repr = INLINE_NONE;
     if (c->scope_depth > 0 && !c->sm_analysis) {
       AstNode* val_node = args[value_arg_idx];
       if (val_node->type == AST_COMMAND && val_node->data.command.head->type == AST_LIT_STRING) {
@@ -6878,7 +6884,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           activate_inline = true;
           /* If RHS already pushed inline slots (e.g. OP_TYPED_VEC_GET_INLINE),
            * no de-materialization needed — slots ARE the local. */
-          needs_store_inline = !c->last_is_inline;
+          needs_store_inline = c->inline_repr != INLINE_STACK;
         }
       }
     }
@@ -8429,7 +8435,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* Phase 5f: always use inline get — reification at boundaries handles heap needs */
       compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
-      c->last_is_inline = true;
+      c->inline_repr = INLINE_STACK;
       c->last_expr_type = TYPE_STRUCT;
       c->last_struct_idx = elem_type_idx;
       return;
@@ -8626,7 +8632,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_TYPED_MAP_GET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
-      c->last_is_inline = true;
+      c->inline_repr = INLINE_STACK;
       c->last_expr_type = TYPE_STRUCT;
       c->last_struct_idx = elem_type_idx;
       return;
@@ -9258,7 +9264,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                   compiler__emit_u16(c, (uint16_t)tidx, line);
                   c->last_expr_type = TYPE_STRUCT;
                   c->last_struct_idx = tidx;
-                  c->last_is_inline = true;
+                  c->inline_repr = INLINE_STACK;
                 } else {
                   compiler__emit_byte(c, OP_DEREF, line);
                   c->last_expr_type = TYPE_STRUCT;
@@ -9966,15 +9972,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* Case 2: chained access — compile inner expr, check for inline ref */
       if (!is_inline_access && args[0]->type == AST_COMMAND) {
         compiler__compile_node(c, args[0]);
-        if (c->inline_struct_ref) {
+        if (c->inline_repr == INLINE_REF) {
           /* The inner expr emitted a materialized sub-struct; pop it since
            * we'll use byte-offset chaining instead. */
           compiler__emit_byte(c, OP_POP, line);
           is_inline_access = true;
-          inline_base = c->inline_ref_base_slot;
+          inline_base = c->inline_ref_base;
           inline_offset = c->inline_ref_offset;
           inline_sidx = c->last_struct_idx;
-          c->inline_struct_ref = false;
+          c->inline_repr = INLINE_NONE;
         }
       }
 
@@ -10040,20 +10046,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             if (sdef->fields[fi].type == TYPE_STRUCT) {
               /* Nested struct field — emit materialization AND set chaining state.
                * If this is chained (e.g. $ln->start->x), Case 2 will detect
-               * inline_struct_ref, pop the materialized value, and use byte-offset
+               * inline_repr == INLINE_REF, pop the materialized value, and use byte-offset
                * addressing instead. If standalone, the materialized value remains. */
               compiler__emit_byte(c, get_op, line);
               compiler__emit_byte(c, inline_base, line);
               compiler__emit_u16(c, total_offset, line);
               compiler__emit_byte(c, (uint8_t)TYPE_STRUCT, line);
               compiler__emit_u16(c, (uint16_t)sdef->fields[fi].struct_type_idx, line);
-              c->inline_struct_ref = true;
-              c->inline_ref_base_slot = inline_base;
+              c->inline_repr = INLINE_REF;
+              c->inline_ref_base = inline_base;
               c->inline_ref_offset = total_offset;
               c->last_expr_type = TYPE_STRUCT;
               c->last_struct_idx = sdef->fields[fi].struct_type_idx;
-              /* Result is a materialized heap pointer, NOT inline bytes */
-              c->last_is_inline = false;
             } else {
               /* Scalar field — emit inline get */
               compiler__emit_byte(c, get_op, line);
@@ -10075,13 +10079,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     uint32_t struct_idx = c->last_struct_idx;
 
     /* Handle inline struct ref from compiled sub-expression (non-command case) */
-    if (c->inline_struct_ref && struct_type == TYPE_STRUCT) {
+    if (c->inline_repr == INLINE_REF && struct_type == TYPE_STRUCT) {
       /* The sub-expression was an inline struct ref that we didn't catch above.
        * Fall through to normal path after materializing. */
       compiler__emit_byte(c, OP_STRUCT_MATERIALIZE, line);
-      compiler__emit_byte(c, c->inline_ref_base_slot, line);
+      compiler__emit_byte(c, c->inline_ref_base, line);
       compiler__emit_u16(c, (uint16_t)struct_idx, line);
-      c->inline_struct_ref = false;
+      c->inline_repr = INLINE_NONE;
       /* Now a heap struct is on the stack — proceed with normal path */
     }
 
@@ -10384,12 +10388,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         /* Emit OP_STRUCT_NEW_INLINE — stores raw bytes across stack slots */
         compiler__emit_byte(c, OP_STRUCT_NEW_INLINE, line);
         compiler__emit_u16(c, (uint16_t)struct_idx, line);
-        c->last_is_inline = true;
+        c->inline_repr = INLINE_STACK;
       } else {
         /* Emit OP_STRUCT_NEW + uint16_t struct_type_index (heap path) */
         compiler__emit_byte(c, OP_STRUCT_NEW, line);
         compiler__emit_u16(c, (uint16_t)struct_idx, line);
-        c->last_is_inline = false;
+        c->inline_repr = INLINE_NONE;
       }
 
       c->last_expr_type = TYPE_STRUCT;
@@ -10589,7 +10593,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         if (reg && sidx != UINT32_MAX && sidx < reg->count &&
             reg->defs[sidx] && reg->defs[sidx]->is_value_type) {
           uint32_t width = struct__slot_width(reg, sidx);
-          if (!c->last_is_inline) {
+          if (c->inline_repr != INLINE_STACK) {
             /* Heap struct on stack — expand to inline slots */
             compiler__emit_byte(c, OP_STRUCT_EXPAND, line);
             compiler__emit_u16(c, (uint16_t)sidx, line);
@@ -10687,7 +10691,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (reg && call_return_struct_idx < reg->count) {
         StructTypeDef* sdef = reg->defs[call_return_struct_idx];
         if (sdef && sdef->is_value_type) {
-          c->last_is_inline = true;
+          c->inline_repr = INLINE_STACK;
         }
       }
     }
@@ -11050,7 +11054,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, OP_STRUCT_MATERIALIZE, line);
           compiler__emit_byte(c, (uint8_t)local_slot, line);
           compiler__emit_u16(c, (uint16_t)c->locals[local_slot].struct_type_idx, line);
-          c->last_is_inline = false; /* result is a heap pointer, not inline bytes */
+          c->inline_repr = INLINE_NONE; /* result is a heap pointer, not inline bytes */
         } else {
           compiler__emit_byte(c, OP_GET_LOCAL, line);
           compiler__emit_byte(c, (uint8_t)local_slot, line);
@@ -11087,7 +11091,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, OP_STRUCT_MATERIALIZE_UPVALUE, line);
             compiler__emit_byte(c, (uint8_t)c->upvalues[upvalue_idx].base_slot, line);
             compiler__emit_u16(c, (uint16_t)c->upvalues[upvalue_idx].struct_type_idx, line);
-            c->last_is_inline = false; /* result is a heap pointer, not inline bytes */
+            c->inline_repr = INLINE_NONE; /* result is a heap pointer, not inline bytes */
           } else {
             compiler__emit_byte(c, OP_GET_UPVALUE, line);
             compiler__emit_byte(c, uv_base, line);
