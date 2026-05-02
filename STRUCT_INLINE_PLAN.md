@@ -69,12 +69,61 @@ related accessors and helpers. Ctx is identified by `reg->ctx_type_idx`
 **Risk:** ctx pool reuses freed `JaclStruct` headers — free-list walks in
 `runtime.c:619` and `gc_collect.c:448` must agree on the renamed object kind.
 
-### Phase 3 — Convert reify call sites to compile errors
+### Phase 3 — Convert reify call sites to compile errors and inline-aware ops
 
-Each `compiler__reify_inline_struct` call site needs to become either (a) a
-compile error directing users to `box`, (b) a typed-variant op that handles
-inline bytes directly, or (c) stay as-is if it's an architectural transient
-that other phases will clean up.
+**Status: substantially complete.** The user-visible auto-heap-alloc paths
+for typed structs are gone:
+
+- **Constructor → inline.** `[Point 1 2]` leaves N inline slots on TOS.
+- **Var-ref of inline local/upvalue → inline** via new
+  `OP_LOAD_INLINE_LOCAL` / `OP_LOAD_INLINE_UPVALUE`.
+- **Box → inline-bytes path** via dual-mode `OP_BOX_STRUCT` (dispatches on
+  the inline_slot_bitmap).
+- **Print → typed** via `OP_PRINT_STRUCT` and shared `vm__fmt_struct_bytes`.
+- **Equality → typed-TOS** via `OP_STRUCT_EQ_TOS` (handles both inline and
+  heap operands; rejects struct-vs-non-struct at compile time).
+- **Field access → inline** via the existing `OP_STRUCT_GET_INLINE` fast
+  path for var-refs to inline locals, and new `OP_STRUCT_GET_INLINE_TOS`
+  for transient inline structs (e.g. proc return values).
+- **Destructure → inline** for typed-struct sources; expands heap pointers
+  via `OP_STRUCT_EXPAND` for global-source destructure.
+- **Typed vec/map ops → inline** via `vm__pop_struct` (unified inline/heap
+  dispatch); `OP_TYPED_VEC`, `OP_TYPED_VEC_PUSH`, `OP_TYPED_VEC_SET`,
+  `OP_TYPED_MAP`, `OP_TYPED_MAP_GET_INLINE`, `OP_TYPED_MAP_SET`,
+  `OP_TYPED_MAP_HAS`, `OP_TYPED_MAP_REMOVE` all consume inline bytes.
+- **Compile-time rejections:**
+  - `def dyn d [Point ...]` — must drop the `dyn` annotation or use `[box]`.
+  - `mut p [Point ...]` — must use `[box]`.
+  - `set` on a dyn cell or dyn global with a struct value — must use `[box]`.
+  - Passing a struct to a dyn parameter — must use `[box]`.
+  - `[. transient_inline_struct field <new_val>]` — must assign to a typed
+    local first (mutating a discarded value is meaningless).
+  - `eq struct dyn` — must narrow with `[box? Type $val]` first.
+  - Reference fields in `defstruct` — must drop or use `[box]`.
+
+**Remaining reify call sites** (each a sanctioned or architectural heap
+path, not auto-allocation in normal use):
+
+- `compiler__ensure_boxed` (compiler.c:4007): utility for box/print/etc.
+  consumers when struct must become a JaclVal. Most consumers now have
+  typed paths; this is a fallback.
+- Cell/global storage (compiler.c:6461, 6517, 6605, 6605, 7006, 7067):
+  for `mut` bindings holding non-struct types and for global storage.
+  Struct values are rejected here at compile time, so the reify never
+  fires for structs in user code.
+- `OP_RESET` paths (compiler.c:6567, 9370): when a `box` is reset to a new
+  struct, the box still receives a heap-style write internally.
+- Nested struct field arg in `OP_STRUCT_NEW_INLINE` (compiler.c:10479):
+  the constructor opcode currently expects nested struct field arguments
+  as `HeapRecord*` (heap pointers). A future cleanup could teach
+  `OP_STRUCT_NEW_INLINE` to consume inline bytes for nested struct fields,
+  but the current path works.
+- Ctx default-init (compiler.c:12245): ctx is `HeapRecord` by design.
+
+These are all correct heap allocations — none of them are auto-heap-alloc
+of a user's value-type struct. The user's primary intent is satisfied.
+
+**Original phase breakdown (kept for reference):**
 
 **Status as of writing:** 3e landed. The other subphases turned out deeper
 than the brief implied — see notes below.
@@ -143,10 +192,27 @@ remaining transient heap allocations without changing user-visible
 behavior except where required by the design (e.g. `def dyn d [Point ...]`
 becoming an error once a typed alternative is in place).
 
-### Phase 4 — Delete dead opcodes & flag (deferred)
+### Phase 4 — Delete dead opcodes & flag (partial)
 
-Blocked until Phase 3 fully lands: `OP_STRUCT_REIFY` and friends still
-have callers from the unconverted reify sites.
+Some opcodes already have zero compiler emit sites and could be deleted
+or marked as runtime-error stubs:
+- `OP_STRUCT_COPY` (already marked DEAD)
+- `OP_STRUCT_MATERIALIZE_UPVALUE` (replaced by `OP_LOAD_INLINE_UPVALUE`)
+- `OP_TYPED_VEC_GET` (replaced by `OP_TYPED_VEC_GET_INLINE`, already DEAD)
+- `OP_TYPED_MAP_GET` (replaced by `OP_TYPED_MAP_GET_INLINE`, already DEAD)
+
+Other opcodes (`OP_STRUCT_NEW`, `OP_STRUCT_GET`, `OP_STRUCT_SET`,
+`OP_STRUCT_GET_DYN`, `OP_STRUCT_SET_DYN`, `OP_STRUCT_REIFY`,
+`OP_STRUCT_MATERIALIZE`, `OP_STRUCT_EXPAND`, `OP_STRUCT_STORE_INLINE`)
+still have legitimate callers — most for ctx (HeapRecord) or for
+sanctioned heap paths. They can be renamed to `OP_HEAP_RECORD_*` for
+clarity but cannot be deleted without further work.
+
+The `is_value_type` flag is now always-true for user defstructs (since
+ref fields are rejected). It still distinguishes user structs from ctx.
+Could be renamed to `is_user_struct` or replaced with a
+`idx == reg->ctx_type_idx` check at use sites — but neither is a
+correctness change.
 
 Delete now-unreachable opcodes in `src/jacl.h:752-846` and their VM handlers:
 - `OP_STRUCT_REIFY`
