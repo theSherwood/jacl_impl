@@ -4568,10 +4568,8 @@ void compiler__compile_destructure_named(
     }
   }
 
-  /* Compile RHS — pushes one value (struct or map) onto stack */
+  /* Compile RHS — pushes the source value onto stack. */
   compiler__compile_node(c, value_expr);
-  /* Phase 5c: reify inline struct for destructuring (OP_STRUCT_GET expects heap) */
-  compiler__reify_inline_struct(c, line);
   JaclType rhs_type = c->last_expr_type;
   uint32_t rhs_struct_idx = c->last_struct_idx;
 
@@ -4681,30 +4679,55 @@ void compiler__compile_destructure_named(
 
   if (c->scope_depth > 0) {
     /* --- Local scope --- */
-    /* Store source value in temp local for repeated access */
+    /* Store source value in temp local for repeated access. For a typed
+       struct RHS the source is a wide local holding inline bytes; we use
+       OP_STRUCT_GET_INLINE for fields. For map/dyn it's a single slot. */
     JaclVal temp_name = jacl_inline_string("", 0);
+    StructTypeRegistry* dreg = compiler__get_struct_registry(c);
+    uint32_t struct_width = (use_struct_path && dreg)
+                             ? struct__slot_width(dreg, rhs_struct_idx) : 1;
+    /* If the typed-struct RHS produced a heap pointer (e.g. global var-ref),
+       expand it to inline slots so we can adopt as a wide local. */
+    if (use_struct_path && c->inline_repr != INLINE_STACK) {
+      compiler__emit_byte(c, OP_STRUCT_EXPAND, line);
+      compiler__emit_u16(c, (uint16_t)rhs_struct_idx, line);
+      c->inline_repr = INLINE_STACK;
+    }
     compiler__add_local(c, temp_name, line, col);
     uint32_t src_slot = c->local_count - 1;
-    if (rhs_type == TYPE_STRUCT) {
+    if (use_struct_path) {
+      c->locals[src_slot].type = TYPE_STRUCT;
+      c->locals[src_slot].struct_type_idx = rhs_struct_idx;
+      c->locals[src_slot].is_inline = true;
+      c->locals[src_slot].width = (uint16_t)struct_width;
+      for (uint32_t w = 1; w < struct_width; w++) {
+        compiler__add_local(c, jacl_inline_string("", 0), line, col);
+        c->locals[c->local_count - 1].depth = c->scope_depth;
+      }
+    } else if (rhs_type == TYPE_STRUCT) {
       c->locals[src_slot].type = TYPE_STRUCT;
       c->locals[src_slot].struct_type_idx = rhs_struct_idx;
     }
 
     if (use_struct_path) {
-      /* Struct path: extract each field with compile-time resolved offsets */
+      /* Struct path: extract each field with OP_STRUCT_GET_INLINE — reads
+         bytes directly from the wide local, no heap allocation. */
       for (uint32_t i = 0; i < d_count; i++) {
-        compiler__emit_byte(c, OP_GET_LOCAL, line);
-        compiler__emit_byte(c, (uint8_t)src_slot, line);
-
         uint32_t fi;
         for (fi = 0; fi < sdef->field_count; fi++) {
           if (sdef->fields[fi].name_len == d_name_lens[i] &&
               memcmp(sdef->fields[fi].name, d_names[i], d_name_lens[i]) == 0)
             break;
         }
-        compiler__emit_byte(c, OP_STRUCT_GET, line);
+        compiler__emit_byte(c, OP_STRUCT_GET_INLINE, line);
+        compiler__emit_byte(c, (uint8_t)src_slot, line);
         compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
         compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
+        if (sdef->fields[fi].type == TYPE_STRUCT) {
+          /* OP_STRUCT_GET_INLINE for nested struct fields takes an extra
+             type_idx operand. */
+          compiler__emit_u16(c, (uint16_t)sdef->fields[fi].struct_type_idx, line);
+        }
 
         if (is_mutable) {
           compiler__emit_byte(c, OP_MAKE_CELL, line);
@@ -4726,11 +4749,13 @@ void compiler__compile_destructure_named(
         }
       }
 
-      /* Rest: build map from remaining struct fields */
+      /* Rest: build map from remaining struct fields. Materialize the wide
+         local to a heap HeapRecord first (rest is rare and the materialization
+         is local to this branch). */
       if (has_rest) {
-        compiler__emit_byte(c, OP_GET_LOCAL, line);
+        compiler__emit_byte(c, OP_STRUCT_MATERIALIZE, line);
         compiler__emit_byte(c, (uint8_t)src_slot, line);
-        /* Emit OP_DESTRUCTURE_NAMED_REST with explicit field names to exclude */
+        compiler__emit_u16(c, (uint16_t)rhs_struct_idx, line);
         compiler__emit_byte(c, OP_DESTRUCTURE_NAMED_REST, line);
         compiler__emit_byte(c, (uint8_t)d_count, line);
         for (uint32_t i = 0; i < d_count; i++) {
