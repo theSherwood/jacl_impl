@@ -159,6 +159,7 @@ typedef enum {
   OP_STRUCT_MATERIALIZE_UPVALUE, /* uint8_t base_uv_slot, uint16_t type_idx */
   OP_LOAD_INLINE_LOCAL,    /* uint8_t base_slot, uint16_t type_idx; copy inline bytes to TOS */
   OP_LOAD_INLINE_UPVALUE,  /* uint8_t base_uv_slot, uint16_t type_idx; copy inline bytes to TOS */
+  OP_PRINT_STRUCT,         /* uint16_t type_idx; pop inline struct, print Name{...} */
   OP_STRUCT_EXPAND,      /* uint16_t type_idx; pop heap struct, push inline slots */
   OP_STRUCT_EQ_INLINE,   /* uint8_t base_a, uint8_t base_b, uint16_t total_size */
   OP_STRUCT_HASH_INLINE, /* uint8_t base_slot, uint16_t total_size, uint16_t type_idx */
@@ -524,6 +525,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_STRUCT_MATERIALIZE_UPVALUE: return "OP_STRUCT_MATERIALIZE_UPVALUE";
     case OP_LOAD_INLINE_LOCAL:   return "OP_LOAD_INLINE_LOCAL";
     case OP_LOAD_INLINE_UPVALUE: return "OP_LOAD_INLINE_UPVALUE";
+    case OP_PRINT_STRUCT:        return "OP_PRINT_STRUCT";
     case OP_STRUCT_EXPAND:      return "OP_STRUCT_EXPAND";
     case OP_STRUCT_EQ_INLINE:   return "OP_STRUCT_EQ_INLINE";
     case OP_STRUCT_HASH_INLINE: return "OP_STRUCT_HASH_INLINE";

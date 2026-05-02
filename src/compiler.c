@@ -5805,6 +5805,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->last_expr_type = TYPE_NIL;
       return;
     }
+    if (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX) {
+      /* Typed struct print — no heap reify, formatter walks inline bytes. */
+      compiler__emit_byte(c, OP_PRINT_STRUCT, line);
+      compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      c->inline_repr = INLINE_NONE;
+      c->last_expr_type = TYPE_NIL;
+      return;
+    }
     compiler__ensure_boxed(c, line);
     compiler__emit_byte(c, OP_PRINT, line);
     c->last_expr_type = TYPE_NIL;

@@ -720,6 +720,58 @@ void vm__fmt_append(VMFormatBuf* buf, const char* str, uint32_t len) {
   buf->len += len;
 }
 
+/* Format a struct (Name{f1: v1, ...}) from raw C-ABI bytes.
+ * Used by both heap-struct OP_PRINT path and inline OP_PRINT_STRUCT. */
+void vm__fmt_struct_bytes(VMFormatBuf* buf, StructTypeDef* sdef, const uint8_t* data) {
+  vm__fmt_append(buf, sdef->name, sdef->name_len);
+  vm__fmt_append(buf, "{", 1);
+  for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+    if (fi > 0) vm__fmt_append(buf, ", ", 2);
+    vm__fmt_append(buf, sdef->fields[fi].name, sdef->fields[fi].name_len);
+    vm__fmt_append(buf, ": ", 2);
+    uint32_t off = sdef->fields[fi].offset;
+    char fbuf[64];
+    int flen;
+    switch (sdef->fields[fi].type) {
+      case TYPE_I32: { int32_t n; memcpy(&n, data + off, 4);
+        flen = snprintf(fbuf, sizeof(fbuf), "%d", n);
+        vm__fmt_append(buf, fbuf, (uint32_t)flen); break; }
+      case TYPE_I64: { int64_t n; memcpy(&n, data + off, 8);
+        flen = snprintf(fbuf, sizeof(fbuf), "%" PRIi64, n);
+        vm__fmt_append(buf, fbuf, (uint32_t)flen); break; }
+      case TYPE_U32: { uint32_t n; memcpy(&n, data + off, 4);
+        flen = snprintf(fbuf, sizeof(fbuf), "%u", n);
+        vm__fmt_append(buf, fbuf, (uint32_t)flen); break; }
+      case TYPE_U64: { uint64_t n; memcpy(&n, data + off, 8);
+        flen = snprintf(fbuf, sizeof(fbuf), "%" PRIu64, n);
+        vm__fmt_append(buf, fbuf, (uint32_t)flen); break; }
+      case TYPE_F32: { float f; memcpy(&f, data + off, 4);
+        flen = snprintf(fbuf, sizeof(fbuf), "%g", (double)f);
+        vm__fmt_append(buf, fbuf, (uint32_t)flen); break; }
+      case TYPE_F64: { double d; memcpy(&d, data + off, 8);
+        flen = snprintf(fbuf, sizeof(fbuf), "%g", d);
+        vm__fmt_append(buf, fbuf, (uint32_t)flen); break; }
+      case TYPE_BOOL: { uint8_t b = data[off];
+        vm__fmt_append(buf, b ? "true" : "false", b ? 4 : 5); break; }
+      case TYPE_STRUCT: {
+        if (buf->registry && sdef->fields[fi].struct_type_idx < buf->registry->count) {
+          StructTypeDef* nested = buf->registry->defs[sdef->fields[fi].struct_type_idx];
+          if (nested) vm__fmt_struct_bytes(buf, nested, data + off);
+          else vm__fmt_append(buf, "<struct>", 8);
+        } else {
+          vm__fmt_append(buf, "<struct>", 8);
+        }
+        break;
+      }
+      default: {
+        JaclVal fval; memcpy(&fval, data + off, sizeof(JaclVal));
+        vm__fmt_value(buf, fval); break;
+      }
+    }
+  }
+  vm__fmt_append(buf, "}", 1);
+}
+
 void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
   char tmp[64];
   int n;
@@ -2245,54 +2297,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
           if (vm->struct_registry && s->type_idx < vm->struct_registry->count) {
             StructTypeDef* sdef = vm->struct_registry->defs[s->type_idx];
-            vm__fmt_append(&fmt, sdef->name, sdef->name_len);
-            vm__fmt_append(&fmt, "{", 1);
-            for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
-              if (fi > 0) vm__fmt_append(&fmt, ", ", 2);
-              vm__fmt_append(&fmt, sdef->fields[fi].name, sdef->fields[fi].name_len);
-              vm__fmt_append(&fmt, ": ", 2);
-              switch (sdef->fields[fi].type) {
-                case TYPE_I32: {
-                  int32_t n; memcpy(&n, s->data + sdef->fields[fi].offset, 4);
-                  char fbuf[32]; int flen = snprintf(fbuf, sizeof(fbuf), "%d", n);
-                  vm__fmt_append(&fmt, fbuf, (uint32_t)flen); break;
-                }
-                case TYPE_I64: {
-                  int64_t n; memcpy(&n, s->data + sdef->fields[fi].offset, 8);
-                  char fbuf[32]; int flen = snprintf(fbuf, sizeof(fbuf), "%" PRIi64, n);
-                  vm__fmt_append(&fmt, fbuf, (uint32_t)flen); break;
-                }
-                case TYPE_U32: {
-                  uint32_t n; memcpy(&n, s->data + sdef->fields[fi].offset, 4);
-                  char fbuf[32]; int flen = snprintf(fbuf, sizeof(fbuf), "%u", n);
-                  vm__fmt_append(&fmt, fbuf, (uint32_t)flen); break;
-                }
-                case TYPE_U64: {
-                  uint64_t n; memcpy(&n, s->data + sdef->fields[fi].offset, 8);
-                  char fbuf[32]; int flen = snprintf(fbuf, sizeof(fbuf), "%" PRIu64, n);
-                  vm__fmt_append(&fmt, fbuf, (uint32_t)flen); break;
-                }
-                case TYPE_F32: {
-                  float f; memcpy(&f, s->data + sdef->fields[fi].offset, 4);
-                  char fbuf[32]; int flen = snprintf(fbuf, sizeof(fbuf), "%g", (double)f);
-                  vm__fmt_append(&fmt, fbuf, (uint32_t)flen); break;
-                }
-                case TYPE_F64: {
-                  double d; memcpy(&d, s->data + sdef->fields[fi].offset, 8);
-                  char fbuf[32]; int flen = snprintf(fbuf, sizeof(fbuf), "%g", d);
-                  vm__fmt_append(&fmt, fbuf, (uint32_t)flen); break;
-                }
-                case TYPE_BOOL: {
-                  uint8_t b = s->data[sdef->fields[fi].offset];
-                  vm__fmt_append(&fmt, b ? "true" : "false", b ? 4 : 5); break;
-                }
-                default: {
-                  JaclVal fval; memcpy(&fval, s->data + sdef->fields[fi].offset, sizeof(JaclVal));
-                  vm__fmt_value(&fmt, fval); break;
-                }
-              }
-            }
-            vm__fmt_append(&fmt, "}", 1);
+            vm__fmt_struct_bytes(&fmt, sdef, s->data);
           } else {
             vm__fmt_append(&fmt, "<struct>", 8);
           }
@@ -6491,6 +6496,33 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
         }
         vm->stack_top += width;
+        break;
+      }
+
+      case OP_PRINT_STRUCT: {
+        /* Pop N inline struct slots, format Name{f: v, ...}, print + newline.
+           Operand: uint16_t type_idx. */
+        uint16_t type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u for print_struct", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint8_t scratch[VM_MAX_STRUCT_SLOTS * sizeof(JaclVal)];
+        if (sdef->total_size > sizeof(scratch)) {
+          vm__set_error(vm, "print: struct too large");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclVal slots[VM_MAX_STRUCT_SLOTS];
+        vm__pop_struct(vm, type_idx, slots);
+        memcpy(scratch, slots, sdef->total_size);
+        VMFormatBuf fmt;
+        vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
+        vm__fmt_struct_bytes(&fmt, sdef, scratch);
+        vm__fmt_append(&fmt, "\n", 1);
+        vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
+        result = vm__push(vm, JACL_NIL);
+        if (result != VM_OK) return result;
         break;
       }
 
