@@ -1136,7 +1136,7 @@
   {
     "name": "struct_all_types",
     "category": "struct",
-    "code": "# expect: 42\n# expect: 1000000\n# expect: 7\n# expect: 9999999\n# expect: 3\n# expect: 2.71828\n# expect: hello\n# Test struct with all supported field types\nstruct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, str g}\n\ndef s [All 42 1000000 7 9999999 3.0 2.71828 \"hello\"]\nprint $s->a\nprint $s->b\nprint $s->c\nprint $s->d\nprint $s->e\nprint $s->f\nprint $s->g\n",
+    "code": "# expect: 42\n# expect: 1000000\n# expect: 7\n# expect: 9999999\n# expect: 3\n# expect: 2.71828\n# expect: 99\n# Test struct with all supported field types\nstruct All {i32 a, i64 b, u32 c, u64 d, f32 e, f64 f, i32 g}\n\ndef s [All 42 1000000 7 9999999 3.0 2.71828 99]\nprint $s->a\nprint $s->b\nprint $s->c\nprint $s->d\nprint $s->e\nprint $s->f\nprint $s->g\n",
     "concurrent": false,
     "description": "Test struct with all supported field types"
   },

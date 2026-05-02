@@ -606,6 +606,10 @@ uint32_t compiler__register_inline_struct(
       f_struct_idx = idx;
     }
 
+    /* Reject reference field types — structs hold value-type bytes only.
+       The caller surfaces this as "invalid inline struct type". */
+    if (!is_struct_value_type(ftype)) return UINT32_MAX;
+
     /* Compute C-ABI layout */
     uint32_t fsize  = struct__type_size(ftype, reg, f_struct_idx);
     uint32_t falign = struct__type_align(ftype, reg, f_struct_idx);
@@ -11542,6 +11546,20 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           }
           ftype = TYPE_STRUCT;
           f_struct_idx = idx;
+        }
+
+        /* Reject reference field types — structs hold value-type bytes only.
+           Use [box $val] to reference data through a struct. */
+        if (!is_struct_value_type(ftype)) {
+          char err[192];
+          snprintf(err, sizeof(err),
+                   "struct field '%.*s' has reference type '%s' — "
+                   "struct fields must be value types (primitives or nested structs); "
+                   "use [box $val] to hold a reference",
+                   (int)fname_len, fname, type_name(ftype));
+          compiler__error(c, line, node->start.column, err);
+          has_error = true;
+          break;
         }
 
         /* Compute C-ABI layout */

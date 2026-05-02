@@ -4668,32 +4668,38 @@ static int test_defstruct_all_field_types(void) {
   TEST_PASS();
 }
 
-/* US-015: reference-type fields now accepted — struct marked as legacy (not value-type) */
-static int test_defstruct_ref_type_accepted(void) {
+/* Reference-type fields are rejected — structs hold value-type bytes only.
+   Use [box $val] to reference data through a struct. */
+static int test_defstruct_ref_type_rejected(void) {
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
-  /* str field should compile — produces legacy (heap) struct */
+  /* str field is rejected */
   CompileResult cr1 = compile_source(
       "struct WithStr {str name, i32 val}", &arena, &heap);
-  ASSERT_U32_EQ(cr1.error_count, 0);
+  ASSERT(cr1.error_count > 0);
 
-  /* vec field should compile */
+  /* vec field is rejected */
   CompileResult cr2 = compile_source(
       "struct WithVec {i32 x, vec items}", &arena, &heap);
-  ASSERT_U32_EQ(cr2.error_count, 0);
+  ASSERT(cr2.error_count > 0);
 
-  /* map field should compile */
+  /* map field is rejected */
   CompileResult cr3 = compile_source(
       "struct WithMap {map data}", &arena, &heap);
-  ASSERT_U32_EQ(cr3.error_count, 0);
+  ASSERT(cr3.error_count > 0);
 
-  /* dyn field should compile */
+  /* dyn field is rejected */
   CompileResult cr4 = compile_source(
       "struct WithDyn {dyn val}", &arena, &heap);
-  ASSERT_U32_EQ(cr4.error_count, 0);
+  ASSERT(cr4.error_count > 0);
+
+  /* inline anonymous struct with a ref field is rejected */
+  CompileResult cr5 = compile_source(
+      "struct Outer {struct{x:i32,name:str} inner}", &arena, &heap);
+  ASSERT(cr5.error_count > 0);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
@@ -7006,138 +7012,6 @@ static int test_dual_path_value_type_inline(void) {
   TEST_PASS();
 }
 
-static int test_dual_path_legacy_heap(void) {
-  /* Legacy structs (with reference fields) use heap allocation */
-  tracker_reset();
-  arena_t arena = { .allocator = tracked_allocator };
-  BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
-
-  PrintCapture cap = { .len = 0 };
-  VM vm;
-  vm_init(&vm, &arena);
-  vm.print_fn  = capture_print;
-  vm.print_ctx = &cap;
-
-  VMResult r = jacl_run(
-      "struct Named {str label, i32 value}\n"
-      "proc test {} {\n"
-      "  def n [Named \"hello\" 42]\n"
-      "  print $n->label\n"
-      "  print $n->value\n"
-      "}\n"
-      "test",
-      &vm, &arena);
-  ASSERT(r == VM_OK);
-  ASSERT_STR_EQ(cap.buf, "hello\n42\n");
-
-  vm_destroy(&vm);
-  gc_heap_destroy(&heap);
-  gc_block_pool_destroy(&pool);
-  arena_destroy(&arena);
-  ASSERT(check_no_leaks());
-  TEST_PASS();
-}
-
-static int test_dual_path_is_value_type_flag(void) {
-  /* Verify is_value_type is correctly set based on field types */
-  tracker_reset();
-  arena_t arena = { .allocator = tracked_allocator };
-  BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
-
-  CompileResult cr = compile_source(
-      "struct Vals {i32 a, f64 b}\n"
-      "struct Mixed {str s, i32 n}\n",
-      &arena, &heap);
-  ASSERT_U32_EQ(cr.error_count, 0);
-  ASSERT(cr.struct_registry != NULL);
-  ASSERT(cr.struct_registry->count >= 3); /* 0=reserved, 1=Vals, 2=Mixed */
-
-  StructTypeDef* vals = cr.struct_registry->defs[1];
-  ASSERT(vals != NULL);
-  ASSERT(vals->is_value_type == true);
-
-  StructTypeDef* mixed = cr.struct_registry->defs[2];
-  ASSERT(mixed != NULL);
-  ASSERT(mixed->is_value_type == false);
-
-  gc_heap_destroy(&heap);
-  gc_block_pool_destroy(&pool);
-  arena_destroy(&arena);
-  ASSERT(check_no_leaks());
-  TEST_PASS();
-}
-
-static int test_dual_path_both_coexist(void) {
-  /* Both value-type and legacy structs in the same program */
-  tracker_reset();
-  arena_t arena = { .allocator = tracked_allocator };
-  BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
-
-  PrintCapture cap = { .len = 0 };
-  VM vm;
-  vm_init(&vm, &arena);
-  vm.print_fn  = capture_print;
-  vm.print_ctx = &cap;
-
-  VMResult r = jacl_run(
-      "struct Point {i32 x, i32 y}\n"
-      "struct Named {str label, i32 value}\n"
-      "proc test {} {\n"
-      "  def p [Point 3 4]\n"
-      "  def n [Named \"tag\" 99]\n"
-      "  print $p->x\n"
-      "  print $n->label\n"
-      "  print $n->value\n"
-      "}\n"
-      "test",
-      &vm, &arena);
-  ASSERT(r == VM_OK);
-  ASSERT_STR_EQ(cap.buf, "3\ntag\n99\n");
-
-  vm_destroy(&vm);
-  gc_heap_destroy(&heap);
-  gc_block_pool_destroy(&pool);
-  arena_destroy(&arena);
-  ASSERT(check_no_leaks());
-  TEST_PASS();
-}
-
-static int test_dual_path_legacy_field_mutation(void) {
-  /* Heap-path struct field mutation via dot syntax */
-  tracker_reset();
-  arena_t arena = { .allocator = tracked_allocator };
-  BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
-
-  PrintCapture cap = { .len = 0 };
-  VM vm;
-  vm_init(&vm, &arena);
-  vm.print_fn  = capture_print;
-  vm.print_ctx = &cap;
-
-  VMResult r = jacl_run(
-      "struct Named {str label, mut i32 value}\n"
-      "proc test {} {\n"
-      "  def n [Named \"hello\" 1]\n"
-      "  . $n value 99\n"
-      "  print $n->value\n"
-      "}\n"
-      "test",
-      &vm, &arena);
-  ASSERT(r == VM_OK);
-  ASSERT_STR_EQ(cap.buf, "99\n");
-
-  vm_destroy(&vm);
-  gc_heap_destroy(&heap);
-  gc_block_pool_destroy(&pool);
-  arena_destroy(&arena);
-  ASSERT(check_no_leaks());
-  TEST_PASS();
-}
-
 static int test_set_arrow_inline(void) {
   /* set n->field on value-type (inline) struct */
   tracker_reset();
@@ -7163,39 +7037,6 @@ static int test_set_arrow_inline(void) {
       &vm, &arena);
   ASSERT(r == VM_OK);
   ASSERT_STR_EQ(cap.buf, "99\n20\n");
-
-  vm_destroy(&vm);
-  gc_heap_destroy(&heap);
-  gc_block_pool_destroy(&pool);
-  arena_destroy(&arena);
-  ASSERT(check_no_leaks());
-  TEST_PASS();
-}
-
-static int test_set_arrow_heap(void) {
-  /* set n->field on legacy (heap) struct */
-  tracker_reset();
-  arena_t arena = { .allocator = tracked_allocator };
-  BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
-
-  PrintCapture cap = { .len = 0 };
-  VM vm;
-  vm_init(&vm, &arena);
-  vm.print_fn  = capture_print;
-  vm.print_ctx = &cap;
-
-  VMResult r = jacl_run(
-      "struct Named {str label, mut i32 value}\n"
-      "proc test {} {\n"
-      "  def n [Named \"hello\" 1]\n"
-      "  set n->value 42\n"
-      "  print $n->value\n"
-      "}\n"
-      "test",
-      &vm, &arena);
-  ASSERT(r == VM_OK);
-  ASSERT_STR_EQ(cap.buf, "42\n");
 
   vm_destroy(&vm);
   gc_heap_destroy(&heap);
@@ -10674,7 +10515,7 @@ int main(void) {
     { "defstruct_nested_type",           test_defstruct_nested_type },
     { "defstruct_type_annotation",       test_defstruct_type_annotation },
     { "defstruct_all_field_types",       test_defstruct_all_field_types },
-    { "defstruct_ref_type_accepted",     test_defstruct_ref_type_accepted },
+    { "defstruct_ref_type_rejected",     test_defstruct_ref_type_rejected },
     { "defstruct_forward_ref_error",     test_defstruct_forward_ref_error },
     /* US-003 (Struct): Struct instantiation */
     { "struct_new_basic",                test_struct_new_basic },
@@ -10743,15 +10584,9 @@ int main(void) {
     { "struct_heap_equality",              test_struct_heap_equality },
     { "struct_eq_padding_zeroed",          test_struct_eq_padding_zeroed },
     { "struct_hash_generic",               test_struct_hash_generic },
-    /* US-015: Migration scaffolding — dual path */
     { "dual_path_value_type_inline",       test_dual_path_value_type_inline },
-    { "dual_path_legacy_heap",             test_dual_path_legacy_heap },
-    { "dual_path_is_value_type_flag",      test_dual_path_is_value_type_flag },
-    { "dual_path_both_coexist",            test_dual_path_both_coexist },
-    { "dual_path_legacy_field_mut",        test_dual_path_legacy_field_mutation },
     /* set n->field arrow syntax */
     { "set_arrow_inline",                  test_set_arrow_inline },
-    { "set_arrow_heap",                    test_set_arrow_heap },
     { "set_arrow_chained",                 test_set_arrow_chained },
     /* US-004 (Struct): Field access */
     { "struct_get_basic",                test_struct_get_basic },
