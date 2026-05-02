@@ -4094,19 +4094,27 @@ void compiler__compile_binary(Compiler* c, AstNode** args,
   JaclType rhs_type = c->last_expr_type;
   c->expected_type = TYPE_DYN;
 
-  /* US-013: Static typing for struct comparisons */
+  /* Static typing for struct comparisons */
   if (lhs_type == TYPE_STRUCT || rhs_type == TYPE_STRUCT) {
-    if (lhs_type != rhs_type) {
+    if (lhs_type != rhs_type || c->last_struct_idx == UINT32_MAX) {
       char err[128];
-      snprintf(err, sizeof(err), "type error: cannot %s %s and %s",
+      snprintf(err, sizeof(err),
+               "type error: cannot %s %s and %s — structs only compare against "
+               "the same struct type; narrow with [box? Type $val] first",
                op_verb, type_name(lhs_type), type_name(rhs_type));
       compiler__error(c, line, col, err);
       return;
     }
-    /* Both are struct-typed (materialized on stack as heap HeapRecord values).
-       Equality is handled by jacl_val_eq which supports JACL_TAG_STRUCT. */
-    compiler__emit_byte(c, op, line);
-    c->last_expr_type = TYPE_DYN;
+    if (op != OP_EQ) {
+      compiler__error(c, line, col,
+                      "structs only support equality (==), not ordering");
+      return;
+    }
+    /* Both same struct type. Use OP_STRUCT_EQ_TOS — handles inline and heap
+       via vm__pop_struct dispatch, no transient heap allocation. */
+    compiler__emit_byte(c, OP_STRUCT_EQ_TOS, line);
+    compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+    c->last_expr_type = TYPE_BOOL;
     return;
   }
 

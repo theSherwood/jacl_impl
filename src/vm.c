@@ -6499,6 +6499,26 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_STRUCT_EQ_TOS: {
+        /* Pop two structs from TOS (rhs first, then lhs), memcmp, push bool.
+           Each can be inline or heap — vm__pop_struct dispatches.
+           Operand: uint16_t type_idx. */
+        uint16_t type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u for struct_eq", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        JaclVal rhs[VM_MAX_STRUCT_SLOTS];
+        JaclVal lhs[VM_MAX_STRUCT_SLOTS];
+        vm__pop_struct(vm, type_idx, rhs);
+        vm__pop_struct(vm, type_idx, lhs);
+        bool eq = (memcmp(lhs, rhs, sdef->total_size) == 0);
+        result = vm__push(vm, jacl_bool(eq));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_PRINT_STRUCT: {
         /* Pop N inline struct slots, format Name{f: v, ...}, print + newline.
            Operand: uint16_t type_idx. */
