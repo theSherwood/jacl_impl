@@ -4543,26 +4543,45 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_BOX_STRUCT: {
-        /* Pop a heap HeapRecord, create a struct box (type_idx > 0). */
+        /* Wrap a struct value in a JaclMutableRef. Accepts either:
+           - N inline struct slots on TOS (marked in inline_slot_bitmap), or
+           - a single heap HeapRecord pointer on TOS (legacy global path). */
         uint16_t type_idx = vm__read_u16(vm);
-        JaclVal value;
-        result = vm__pop(vm, &value); if (result != VM_OK) return result;
-        if (jacl_is_error(value)) {
-          result = vm__push(vm, value); if (result != VM_OK) return result;
-          break;
-        }
         if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
           vm__set_error(vm, "box: invalid struct type index %u", (unsigned)type_idx);
           return VM_RUNTIME_ERROR;
         }
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        if (vm->stack_top < 1) {
+          vm__set_error(vm, "box: stack underflow");
+          return VM_RUNTIME_ERROR;
+        }
+        bool tos_is_inline = BITMAP_GET(vm->inline_slot_bitmap, vm->stack_top - 1);
+        gc__current_heap = &vm->heap;
         JaclMutableRef* ref = (JaclMutableRef*)gc_alloc(&vm->heap, OBJ_MUTABLE_REF,
                                 sizeof(JaclMutableRef) + sdef->total_size);
         ref->type_idx = type_idx;
         ref->total_size = sdef->total_size;
-        /* Copy struct data from HeapRecord into box */
-        HeapRecord* s = jacl_as_heap_record_ptr(value);
-        memcpy(ref->data, s->data, sdef->total_size);
+        if (tos_is_inline) {
+          if (vm->stack_top < width) {
+            vm__set_error(vm, "box: stack underflow for inline struct");
+            return VM_RUNTIME_ERROR;
+          }
+          memcpy(ref->data, &vm->stack[vm->stack_top - width], sdef->total_size);
+          for (uint32_t si = 0; si < width; si++) {
+            BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - width + si);
+          }
+          vm->stack_top -= width;
+        } else {
+          JaclVal value = vm->stack[--vm->stack_top];
+          if (jacl_is_error(value)) {
+            result = vm__push(vm, value); if (result != VM_OK) return result;
+            break;
+          }
+          HeapRecord* s = jacl_as_heap_record_ptr(value);
+          memcpy(ref->data, s->data, sdef->total_size);
+        }
         result = vm__push(vm, jacl_box_ptr(ref));
         if (result != VM_OK) return result;
         break;
@@ -6416,6 +6435,56 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         memcpy(s->data, struct_base, sdef->total_size);
         result = vm__push(vm, jacl_heap_record_val(s));
         if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_LOAD_INLINE_LOCAL: {
+        /* Copy N inline struct slots from a local to TOS, no heap alloc.
+           Operands: uint8_t base_slot, uint16_t type_idx. */
+        uint8_t base_slot = vm__read_byte(vm);
+        uint16_t type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u for load_inline_local", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        if (vm->stack_top + width > VM_STACK_MAX) {
+          vm__set_error(vm, "stack overflow (load_inline_local)");
+          return VM_STACK_OVERFLOW;
+        }
+        uint8_t* src = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
+        memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+        memcpy(&vm->stack[vm->stack_top], src, sdef->total_size);
+        for (uint32_t si = 0; si < width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+        }
+        vm->stack_top += width;
+        break;
+      }
+
+      case OP_LOAD_INLINE_UPVALUE: {
+        /* Copy N inline struct slots from a closure upvalue to TOS, no heap alloc.
+           Operands: uint8_t base_uv_slot, uint16_t type_idx. */
+        uint8_t base_uv_slot = vm__read_byte(vm);
+        uint16_t type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u for load_inline_upvalue", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        if (vm->stack_top + width > VM_STACK_MAX) {
+          vm__set_error(vm, "stack overflow (load_inline_upvalue)");
+          return VM_STACK_OVERFLOW;
+        }
+        uint8_t* src = (uint8_t*)&frame->closure->upvalues[base_uv_slot];
+        memset(&vm->stack[vm->stack_top], 0, width * sizeof(JaclVal));
+        memcpy(&vm->stack[vm->stack_top], src, sdef->total_size);
+        for (uint32_t si = 0; si < width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+        }
+        vm->stack_top += width;
         break;
       }
 

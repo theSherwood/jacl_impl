@@ -9125,11 +9125,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     if (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX) {
-      /* Phase 5c: reify inline struct for OP_BOX_STRUCT (expects heap pointer) */
-      compiler__reify_inline_struct(c, line);
-      /* Struct box: emit OP_BOX_STRUCT with type_idx operand */
+      /* Box accepts inline struct bytes directly — no reify. */
       compiler__emit_byte(c, OP_BOX_STRUCT, line);
       compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      c->inline_repr = INLINE_NONE;
     } else {
       compiler__emit_byte(c, OP_BOX, line);
     }
@@ -11064,12 +11063,14 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             }
           }
         } else if (c->locals[local_slot].is_inline) {
-          /* US-005: inline struct local — materialize to heap for general use.
-           * Field access bypasses this by intercepting in the [. ...] handler. */
-          compiler__emit_byte(c, OP_STRUCT_MATERIALIZE, line);
+          /* Inline struct local — load bytes onto TOS as N consecutive
+             inline slots. Field access intercepts this in the [. ...]
+             handler and uses OP_STRUCT_GET_INLINE directly against the
+             local; this path is for when the whole struct value is needed. */
+          compiler__emit_byte(c, OP_LOAD_INLINE_LOCAL, line);
           compiler__emit_byte(c, (uint8_t)local_slot, line);
           compiler__emit_u16(c, (uint16_t)c->locals[local_slot].struct_type_idx, line);
-          c->inline_repr = INLINE_NONE; /* result is a heap pointer, not inline bytes */
+          c->inline_repr = INLINE_STACK;
         } else {
           compiler__emit_byte(c, OP_GET_LOCAL, line);
           compiler__emit_byte(c, (uint8_t)local_slot, line);
@@ -11101,12 +11102,11 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
               }
             }
           } else if (c->upvalues[upvalue_idx].is_inline) {
-            /* US-008: inline struct upvalue — materialize to heap for general use.
-             * Field access bypasses this by intercepting in the [. ...] handler. */
-            compiler__emit_byte(c, OP_STRUCT_MATERIALIZE_UPVALUE, line);
+            /* Inline struct upvalue — load bytes onto TOS as N inline slots. */
+            compiler__emit_byte(c, OP_LOAD_INLINE_UPVALUE, line);
             compiler__emit_byte(c, (uint8_t)c->upvalues[upvalue_idx].base_slot, line);
             compiler__emit_u16(c, (uint16_t)c->upvalues[upvalue_idx].struct_type_idx, line);
-            c->inline_repr = INLINE_NONE; /* result is a heap pointer, not inline bytes */
+            c->inline_repr = INLINE_STACK;
           } else {
             compiler__emit_byte(c, OP_GET_UPVALUE, line);
             compiler__emit_byte(c, uv_base, line);

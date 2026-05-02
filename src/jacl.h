@@ -768,6 +768,8 @@ typedef enum {
   OP_STRUCT_GET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type; read from closure-captured inline struct */
   OP_STRUCT_SET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type; write to closure-captured inline struct */
   OP_STRUCT_MATERIALIZE_UPVALUE, /* uint8_t base_uv_slot, uint16_t type_idx; convert upvalue inline struct to heap */
+  OP_LOAD_INLINE_LOCAL,    /* uint8_t base_slot, uint16_t type_idx; copy N inline slots from local to TOS */
+  OP_LOAD_INLINE_UPVALUE,  /* uint8_t base_uv_slot, uint16_t type_idx; copy N inline slots from closure upvalue to TOS */
   OP_STRUCT_EXPAND,      /* uint16_t type_idx; pop heap HeapRecord, push as N inline stack slots */
   OP_STRUCT_EQ_INLINE,   /* uint8_t base_a, uint8_t base_b, uint16_t total_size; memcmp two inline structs, push bool */
   OP_STRUCT_HASH_INLINE, /* uint8_t base_slot, uint16_t total_size, uint16_t type_idx; hash inline struct bytes, push i32 */
