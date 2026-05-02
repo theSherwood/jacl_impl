@@ -6409,6 +6409,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, err_msg);
           return;
         }
+        if (target_type == TYPE_DYN && rhs_type == TYPE_STRUCT) {
+          snprintf(err_msg, sizeof(err_msg),
+                   "cannot assign struct value to dyn binding '%.*s' — "
+                   "wrap with [box $val]",
+                   (int)name_len, set_name_ptr);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
         /* Box unboxed types for cell storage */
         if (is_unboxed_type(target_type)) {
           compiler__emit_byte(c, OP_TO_DYN, line);
@@ -6453,6 +6461,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           snprintf(err_msg, sizeof(err_msg),
                    "type error: cannot assign dyn to %s binding '%.*s'",
                    type_name(target_type),
+                   (int)name_len, set_name_ptr);
+          compiler__error(c, line, col, err_msg);
+          return;
+        }
+        if (target_type == TYPE_DYN && rhs_type == TYPE_STRUCT) {
+          snprintf(err_msg, sizeof(err_msg),
+                   "cannot assign struct value to dyn binding '%.*s' — "
+                   "wrap with [box $val]",
                    (int)name_len, set_name_ptr);
           compiler__error(c, line, col, err_msg);
           return;
@@ -6533,6 +6549,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             snprintf(err_msg, sizeof(err_msg),
                      "type error: cannot assign dyn to %s binding '%.*s'",
                      type_name(target_type),
+                     (int)name_len, set_name_ptr);
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+          if (target_type == TYPE_DYN && rhs_type == TYPE_STRUCT) {
+            snprintf(err_msg, sizeof(err_msg),
+                     "cannot assign struct value to dyn binding '%.*s' — "
+                     "wrap with [box $val]",
                      (int)name_len, set_name_ptr);
             compiler__error(c, line, col, err_msg);
             return;
