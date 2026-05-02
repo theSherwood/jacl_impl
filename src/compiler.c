@@ -10259,8 +10259,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           return;
         }
 
-        /* Phase 5b: if struct is inline (from OP_RETURN_WIDE), reify to heap for field access */
-        compiler__reify_inline_struct(c, line);
+        /* If struct is inline (e.g. from OP_RETURN_WIDE), use the TOS-aware
+           inline opcodes — no heap reify. Field write on a transient inline
+           struct is meaningless (the result is discarded), so reject it. */
+        bool tos_inline = (c->inline_repr == INLINE_STACK);
+        if (tos_inline && is_set) {
+          compiler__error(c, line, col,
+                          "cannot mutate a transient inline struct value — "
+                          "assign it to a typed local first");
+          return;
+        }
 
         if (is_set) {
           /* Per-field mutability check */
@@ -10300,10 +10308,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           c->last_expr_type = TYPE_STRUCT;
           c->last_struct_idx = struct_idx;
         } else {
-          /* Emit OP_STRUCT_GET + field_offset (u16) + field_type (u8) */
-          compiler__emit_byte(c, OP_STRUCT_GET, line);
-          compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
-          compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
+          if (tos_inline) {
+            /* Pop inline struct bytes, push the field value (or sub-struct
+               inline slots for TYPE_STRUCT). */
+            compiler__emit_byte(c, OP_STRUCT_GET_INLINE_TOS, line);
+            compiler__emit_u16(c, (uint16_t)struct_idx, line);
+            compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
+            compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
+            if (sdef->fields[fi].type == TYPE_STRUCT) {
+              compiler__emit_u16(c, (uint16_t)sdef->fields[fi].struct_type_idx, line);
+              c->inline_repr = INLINE_STACK;
+            } else {
+              c->inline_repr = INLINE_NONE;
+            }
+          } else {
+            compiler__emit_byte(c, OP_STRUCT_GET, line);
+            compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
+            compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
+          }
 
           c->last_expr_type = sdef->fields[fi].type;
           if (sdef->fields[fi].type == TYPE_STRUCT)

@@ -772,6 +772,7 @@ typedef enum {
   OP_LOAD_INLINE_UPVALUE,  /* uint8_t base_uv_slot, uint16_t type_idx; copy N inline slots from closure upvalue to TOS */
   OP_PRINT_STRUCT,         /* uint16_t type_idx; pop N inline slots and print Name{...} */
   OP_STRUCT_EQ_TOS,        /* uint16_t type_idx; pop two structs (inline or heap), memcmp, push bool */
+  OP_STRUCT_GET_INLINE_TOS,/* uint16_t type_idx, u16 byte_offset, u8 field_type [+ u16 type_idx if STRUCT]; pop inline struct from TOS, push field */
   OP_STRUCT_EXPAND,      /* uint16_t type_idx; pop heap HeapRecord, push as N inline stack slots */
   OP_STRUCT_EQ_INLINE,   /* uint8_t base_a, uint8_t base_b, uint16_t total_size; memcmp two inline structs, push bool */
   OP_STRUCT_HASH_INLINE, /* uint8_t base_slot, uint16_t total_size, uint16_t type_idx; hash inline struct bytes, push i32 */

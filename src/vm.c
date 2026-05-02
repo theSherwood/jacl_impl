@@ -6499,6 +6499,60 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_STRUCT_GET_INLINE_TOS: {
+        /* Pop an inline struct from TOS, push field value.
+           Operands: u16 type_idx, u16 byte_offset, u8 field_type
+           [+ u16 sub_type_idx if field_type == TYPE_STRUCT]. */
+        uint16_t type_idx = vm__read_u16(vm);
+        uint16_t byte_offset = vm__read_u16(vm);
+        uint8_t field_type = vm__read_byte(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid struct type index %u for get_inline_tos", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        JaclVal slots[VM_MAX_STRUCT_SLOTS];
+        vm__pop_struct(vm, type_idx, slots);
+        uint8_t* base = (uint8_t*)slots;
+        JaclVal field_val;
+        switch ((JaclType)field_type) {
+          case TYPE_BOOL: field_val = jacl_bool(base[byte_offset]); break;
+          case TYPE_I32: { int32_t n; memcpy(&n, base + byte_offset, 4); field_val = jacl_i32(n); break; }
+          case TYPE_U32: { uint32_t n; memcpy(&n, base + byte_offset, 4); field_val = jacl_u32(n); break; }
+          case TYPE_F32: { float f; memcpy(&f, base + byte_offset, 4); field_val = jacl_f32(f); break; }
+          case TYPE_I64: { int64_t n; memcpy(&n, base + byte_offset, 8); field_val = (JaclVal)n; break; }
+          case TYPE_U64: { uint64_t n; memcpy(&n, base + byte_offset, 8); field_val = (JaclVal)n; break; }
+          case TYPE_F64: { double d; memcpy(&d, base + byte_offset, 8); memcpy(&field_val, &d, 8); break; }
+          case TYPE_STRUCT: {
+            uint16_t sub_type_idx = vm__read_u16(vm);
+            if (sub_type_idx >= vm->struct_registry->count) {
+              vm__set_error(vm, "invalid sub-struct type index %u", (unsigned)sub_type_idx);
+              return VM_RUNTIME_ERROR;
+            }
+            StructTypeDef* sub = vm->struct_registry->defs[sub_type_idx];
+            uint32_t sub_width = (sub->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+            if (vm->stack_top + sub_width > VM_STACK_MAX) {
+              vm__set_error(vm, "stack overflow (get_inline_tos nested)");
+              return VM_STACK_OVERFLOW;
+            }
+            memset(&vm->stack[vm->stack_top], 0, sub_width * sizeof(JaclVal));
+            memcpy(&vm->stack[vm->stack_top], base + byte_offset, sub->total_size);
+            for (uint32_t si = 0; si < sub_width; si++) {
+              BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+            }
+            vm->stack_top += sub_width;
+            break;  /* nothing else to push */
+          }
+          default: { memcpy(&field_val, base + byte_offset, sizeof(JaclVal)); break; }
+        }
+        if ((JaclType)field_type != TYPE_STRUCT) {
+          result = vm__push(vm, field_val);
+          if (result != VM_OK) return result;
+        }
+        (void)sdef;
+        break;
+      }
+
       case OP_STRUCT_EQ_TOS: {
         /* Pop two structs from TOS (rhs first, then lhs), memcmp, push bool.
            Each can be inline or heap — vm__pop_struct dispatches.
