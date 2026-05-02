@@ -6184,6 +6184,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
 
+    /* Reject mut-bound struct: cells store JaclVals (8 bytes), so a struct
+       binding would need heap reification. Per design, mut struct bindings
+       must use [box $val] explicitly. */
+    if (rhs_type == TYPE_STRUCT) {
+      compiler__error(c, line, col,
+                      "cannot bind struct to a mut variable — wrap with "
+                      "[box $val] (mut p [box [Point 1 2]]) so the binding "
+                      "holds a box reference");
+      return;
+    }
+
     /* Determine effective type: declared type wins, else infer unboxed/struct from RHS */
     JaclType effective_type;
     if (declared_type != TYPE_DYN) {
@@ -6784,6 +6795,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     JaclType declared_type = TYPE_DYN;
+    bool type_explicit = false;
     uint32_t name_arg_idx  = 0;
     uint32_t value_arg_idx = 1;
 
@@ -6799,6 +6811,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, "def with 3 arguments requires type keyword as first argument");
         return;
       }
+      type_explicit = true;
       name_arg_idx   = 1;
       value_arg_idx  = 2;
     } else if (argc != 2) {
@@ -6900,6 +6913,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       snprintf(err_msg, sizeof(err_msg), "type error: expected %s, got %s",
                type_name(declared_type), type_name(rhs_type));
       compiler__error(c, line, col, err_msg);
+      return;
+    }
+
+    /* Reject explicit `def dyn name [Point ...]` — structs cannot live in
+       dyn slots. Use [box $val] or drop the `dyn` annotation. */
+    if (type_explicit && declared_type == TYPE_DYN && rhs_type == TYPE_STRUCT) {
+      compiler__error(c, line, col,
+                      "cannot store struct value in dyn slot — wrap with "
+                      "[box $val] or drop the 'dyn' annotation");
       return;
     }
 

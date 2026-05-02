@@ -6162,72 +6162,23 @@ static int test_struct_set_preserves_other_fields(void) {
   TEST_PASS();
 }
 
-/* ===== US-006 (Struct): Boxing and dyn interop ===== */
+/* ===== Dyn-struct interop is rejected — see test_struct_dyn_rejected ===== */
 
-static int test_struct_dyn_assign(void) {
+static int test_struct_dyn_rejected(void) {
+  /* `def dyn d [Point ...]` is a compile error per the always-inline design.
+     Use [box $val] to cross dyn boundaries. */
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
-  VM vm;
-  vm_init(&vm, &arena);
-  VMResult r = jacl_run(
+  CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
       "def dyn d [Point 1 2]\n"
       "print $d",
-      &vm, &arena);
-  ASSERT(r == VM_OK);
+      &arena, &heap);
+  ASSERT(cr.error_count > 0);
 
-  vm_destroy(&vm);
-  gc_heap_destroy(&heap);
-  gc_block_pool_destroy(&pool);
-  arena_destroy(&arena);
-  ASSERT(check_no_leaks());
-  TEST_PASS();
-}
-
-static int test_struct_dyn_field_access(void) {
-  tracker_reset();
-  arena_t arena = { .allocator = tracked_allocator };
-  BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
-
-  VM vm;
-  vm_init(&vm, &arena);
-  VMResult r = jacl_run(
-      "struct Point {i32 x, i32 y}\n"
-      "def dyn d [Point 10 20]\n"
-      "print $d->x\n"
-      "print $d->y",
-      &vm, &arena);
-  ASSERT(r == VM_OK);
-
-  vm_destroy(&vm);
-  gc_heap_destroy(&heap);
-  gc_block_pool_destroy(&pool);
-  arena_destroy(&arena);
-  ASSERT(check_no_leaks());
-  TEST_PASS();
-}
-
-static int test_struct_dyn_field_set(void) {
-  tracker_reset();
-  arena_t arena = { .allocator = tracked_allocator };
-  BlockPool pool; gc_block_pool_init(&pool);
-  ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
-
-  VM vm;
-  vm_init(&vm, &arena);
-  VMResult r = jacl_run(
-      "struct Point {mut i32 x, i32 y}\n"
-      "def dyn d [Point 1 2]\n"
-      ". $d x 99\n"
-      "print $d->x",
-      &vm, &arena);
-  ASSERT(r == VM_OK);
-
-  vm_destroy(&vm);
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
   arena_destroy(&arena);
@@ -10598,9 +10549,7 @@ int main(void) {
     { "struct_set_type_mismatch",        test_struct_set_type_mismatch },
     { "struct_set_preserves_other",      test_struct_set_preserves_other_fields },
     /* US-006 (Struct): Boxing and dyn interop */
-    { "struct_dyn_assign",               test_struct_dyn_assign },
-    { "struct_dyn_field_access",         test_struct_dyn_field_access },
-    { "struct_dyn_field_set",            test_struct_dyn_field_set },
+    { "struct_dyn_rejected",             test_struct_dyn_rejected },
     { "struct_in_vec",                   test_struct_in_vec },
     /* US-008 (Struct): Inline anonymous struct types */
     { "inline_struct_runtime",           test_inline_struct_runtime },
