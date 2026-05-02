@@ -6453,25 +6453,9 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_STRUCT_MATERIALIZE_UPVALUE: {
-        /* US-008: Convert a closure-captured inline struct to a heap-allocated HeapRecord.
-           Same as OP_STRUCT_MATERIALIZE but base is frame->closure->upvalues[base_uv_slot]. */
-        uint8_t base_uv_slot = vm__read_byte(vm);
-        uint16_t type_idx = vm__read_u16(vm);
-        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
-          vm__set_error(vm, "invalid struct type index %u for materialize_upvalue", (unsigned)type_idx);
-          return VM_RUNTIME_ERROR;
-        }
-        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
-        gc__current_heap = &vm->heap;
-        HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
-                                                sizeof(HeapRecord) + sdef->total_size);
-        s->type_idx = type_idx;
-        s->total_size = sdef->total_size;
-        uint8_t* struct_base = (uint8_t*)&frame->closure->upvalues[base_uv_slot];
-        memcpy(s->data, struct_base, sdef->total_size);
-        result = vm__push(vm, jacl_heap_record_val(s));
-        if (result != VM_OK) return result;
-        break;
+        /* Dead — replaced by OP_LOAD_INLINE_UPVALUE. */
+        vm__set_error(vm, "OP_STRUCT_MATERIALIZE_UPVALUE is no longer emitted");
+        return VM_RUNTIME_ERROR;
       }
 
       case OP_LOAD_INLINE_LOCAL: {

@@ -7,243 +7,213 @@ raw C ABI layout. Type metadata lives in a side-table (the struct registry),
 not in the value itself. Structs are value types that infect static typing —
 every producer and consumer must agree on the concrete type at compile time.
 
-## Current Architecture
+## Architecture
 
-Every struct instance is heap-allocated with a `GCHeader` (8 bytes) prepended,
-followed by a `JaclStruct` header (`type_idx` + pad, 8 bytes), then the field
-data in C ABI layout. Total overhead: 16 bytes per struct. The GC traces
-structs by walking fields via the `StructTypeRegistry`.
-
-## Proposed Architecture
-
-### Layout
-
-A struct is just its field bytes. No header, no tag, no `type_idx` inline.
-The layout follows C ABI alignment and sizing rules — identical to what a
-C compiler would produce for the same field sequence.
+A user-defined struct is just its field bytes — no header, no tag, no
+`type_idx` inline. The layout follows C ABI alignment and sizing rules,
+identical to what a C compiler would produce for the same field sequence.
 
 ```
-Current:  [GCHeader 8B][type_idx 4B][pad 4B][field data...]
-Proposed: [field data...]
+struct Point {i32 x, i32 y}    →    [x:4][y:4]   (8 bytes total)
 ```
 
-### Allowed Field Types
+Type metadata (field names, offsets, types) lives in the
+`StructTypeRegistry`, keyed by a sequential `type_idx`. A struct value
+carries no runtime tag — the static type system tracks it.
 
-Structs may only contain non-reference types:
+## Allowed Field Types
+
+Struct fields must be value types:
 
 | Allowed | Types |
 |---------|-------|
-| Integers | i8, u8, i16, u16, i32, u32, i64, u64 |
+| Integers | i32, u32, i64, u64 |
 | Floats | f32, f64 |
 | Boolean | bool |
 | Nested structs | inline (value, not pointer) |
 
-Reference types (str, vec, map, closure, dyn) are **not** allowed as struct
-fields. This eliminates GC scanning of structs entirely — no write barriers,
-no root registration, no tracing.
+Reference types (`str`, `vec`, `map`, `closure`, `dyn`) are **rejected at
+compile time** in `defstruct`. The error directs the user to `[box $val]`
+to hold a reference. This eliminates GC scanning of struct instances —
+no write barriers, no tracing.
 
-### Storage: Wide Locals
+## Storage
 
-Structs are stored inline wherever their containing scope lives:
+### VM stack (synchronous functions)
 
-**VM stack (synchronous functions):**
 A struct local occupies `ceil(total_size / 8)` consecutive `JaclVal` stack
-slots. The compiler tracks the base slot index and width. Field access
-computes a byte offset from the base slot, then reads/writes the raw bytes.
+slots. The compiler marks the local as `is_inline` with `width = N`. The
+slots are tracked in `vm->inline_slot_bitmap` so the GC knows not to
+trace them as `JaclVal`s.
 
 ```
 stack: [... | slot_base | slot_base+1 | slot_base+2 | ...]
              ^--- struct bytes laid out across slots ---^
 ```
 
-**State machine fields (async/generator functions):**
-Same approach — a struct local reserves N consecutive entries in the state
-object's `fields[]` array. The compiler records the base field index and
-width in the `StateLayout`. `OP_GET/SET_STATE_FIELD` get struct-aware
-variants that operate on N-slot regions.
+Field access uses `OP_STRUCT_GET_INLINE base_slot byte_offset field_type`
+(or `OP_STRUCT_SET_INLINE`) — direct byte arithmetic, no pointer
+dereference. Closure-captured structs use the `_UPVALUE` variants.
 
-No copying in/out at suspension points — the struct lives in `fields[]`
-permanently, accessed directly via byte offsets.
+### Transient values
 
-### Static Typing Infection
+A struct value left on TOS by an expression (a constructor, proc return,
+typed-vec-get, etc.) is a sequence of `width` inline slots, also marked in
+the bitmap.
 
-Structs opt into static typing at every boundary:
+- `OP_LOAD_INLINE_LOCAL base_slot type_idx` copies an inline local's bytes
+  to TOS.
+- `OP_LOAD_INLINE_UPVALUE base_uv_slot type_idx` does the same for a
+  closure upvalue.
+- `OP_STRUCT_GET_INLINE_TOS type_idx byte_offset field_type` pops the
+  inline bytes and pushes a single field — used for transient field
+  access like `$proc-result->x`.
+- `OP_STRUCT_EQ_TOS type_idx` pops two structs (each may be inline or
+  heap, dispatched via `vm__pop_struct`'s bitmap check) and pushes
+  `memcmp == 0`.
+- `OP_STRUCT_EXPAND type_idx` converts a heap pointer on TOS into inline
+  slots (used at boundaries where a heap struct meets the inline path).
 
-- **Function arguments:** The compiler knows the struct type and width at
-  every call site. N slots are pushed for a struct argument.
-- **Function returns:** The compiler knows the return type is a specific
-  struct. The calling convention reserves N return slots. A function that
-  returns a struct must always return that struct type — no polymorphic
-  returns.
-- **Closure capture:** If a closure captures a struct, the compiler knows
-  the type at capture time. The upvalue region is widened to hold the
-  struct's bytes.
-- **Nested calls:** If function A calls function B which returns a struct,
-  A must also statically know the struct type. The typing requirement
-  propagates through the call chain.
+### State machine fields (async/generator functions)
 
-### Equality and Hashing
+Same approach. `JaclStateMachine.field_inline_bitmap` records which
+`fields[]` slots are raw struct bytes. `OP_GET/SET_STATE_FIELD_WIDE`
+operate on N-slot regions.
 
-Since structs contain only value types (no reference fields), equality is
-byte-level comparison:
+## Static Typing Boundaries
 
-```c
-bool struct_equal(void* a, void* b, uint32_t size) {
-    return memcmp(a, b, size) == 0;
-}
-```
+Structs cannot live in a `dyn` slot. The following are compile-time
+rejections that direct the user to `[box $val]`:
 
-Hashing is the same — hash the raw bytes. No per-field dispatch, no
-recursive walk.
+- `def dyn d [Point ...]` — drop the `dyn` annotation or use `[box]`.
+- `mut p [Point ...]` — must wrap with `[box]` so the cell holds a box
+  reference (cells store `JaclVal`, not inline bytes).
+- `set` on a dyn binding with a struct value — same rule.
+- Passing a struct to a dyn parameter — same.
+- Storing a struct in an untyped vec/map — must use `[box]` or a typed
+  collection.
+- Comparing a struct to a non-struct (or to a struct of unknown type) —
+  must narrow with `[box? Type $val]` first.
+- Mutating a transient inline struct (e.g. proc return) — must assign to
+  a typed local first.
 
-### Unified Box Representation
+A struct value can only appear in:
+- a typed local / parameter / return / upvalue,
+- a typed vec/map element (stored inline in the leaf),
+- inside a `[box]` (sanctioned heap path).
 
-Struct boxing is unified with JACL's existing `box` (mutable container).
-A box is always a GC-managed mutable container for any value. The
-`JaclMutableRef` representation is extended to carry type information:
+## Box Representation
+
+Boxing is the **only** way for a struct to cross a `dyn` boundary. The
+`JaclMutableRef` is unified across all box uses:
 
 ```c
 typedef struct {
-    uint32_t type_idx;    // 0 = dyn JaclVal, N = struct type from registry
-    uint32_t total_size;  // byte count of data[]
-    uint8_t  data[];      // value bytes
+    uint32_t type_idx;    /* 0 = dyn JaclVal box, >0 = struct type index */
+    uint32_t total_size;  /* byte size of data[] */
+    uint8_t  data[];      /* JaclVal for type_idx==0, raw struct bytes otherwise */
 } JaclMutableRef;
 ```
 
-- **`type_idx == 0`:** Box contains a plain `JaclVal` (8 bytes). GC traces
-  the `JaclVal` in `data[]` (it could reference strings, vecs, etc.).
-- **`type_idx > 0`:** Box contains a struct. `data[]` holds raw C ABI bytes.
-  GC does not trace into `data[]` (no reference fields).
+`OP_BOX_STRUCT type_idx` allocates a `JaclMutableRef` and copies struct
+bytes into `data[]`. It dispatches on the inline bitmap at TOS:
+- inline → `memcpy width slots` directly into `data[]`,
+- heap → pop the `HeapRecord*` and copy `s->data`.
 
-This replaces the old `JaclMutableRef { JaclVal value; }` with a single
-unified representation. One allocation path, one GC object type, one set
-of operations.
+### Boxing syntax
 
-### Boxing Syntax
-
-Boxing is explicit — uses the existing `box` command:
-
-```
+```jacl
 def Point p [Point 1 2]
-def boxed [box $p]         # box a struct (copies bytes in)
+def boxed [box $p]              # JaclMutableRef{type_idx=Point, data=bytes}
 ```
 
-All existing box operations work:
-- `[deref $boxed]` — copy the struct out (by value)
-- `[reset $boxed $new-point]` — replace the contents
-- `[swap $boxed $new-point]` — swap contents, returns old value
+Box operations:
+- `[deref $boxed]` — copies the struct out (heap path); for an inline
+  destination, `OP_DEREF_INLINE type_idx` pushes inline slots.
+- `[reset $boxed $new-point]` — overwrites box contents.
+- `[swap $boxed $new-point]` — replace + return old.
 
-### Unboxing and Flow Typing
+### Unboxing and flow typing
 
-Unboxing uses `box?` for type narrowing and `unbox` for extraction. The
-`box?` predicate is extended to accept an optional type argument:
+`box?` narrows; `unbox` extracts.
 
-```
-# Check if a dyn value is any box
-[box? $val]
-
-# Check if a dyn value is a box containing a Point
-[box? Point $val]
-
-# [box? dyn $val] is the explicit form of [box? $val]
-[box? dyn $val]
-```
-
-The two-argument form enables **flow typing**: inside a branch guarded by
-`[box? Point $val]`, the compiler knows `$val` holds a boxed `Point`.
-The `unbox` command extracts the struct without needing a type argument —
-the compiler infers it from the narrowed type:
-
-```
+```jacl
 if [box? Point $val] {
-  def Point p [unbox $val]    # compiler knows it's a Point
+  def Point p [unbox $val]    # compiler infers Point from the narrowing
 }
 ```
 
-**`unbox` outside a narrowed scope is a compile error.** The compiler
-requires a `box?` type guard before allowing `unbox`. This ensures unboxing
-is always safe — the type check happens once in the guard, and the
-compiler statically verifies the extraction.
+`unbox` outside a `box?`-narrowed branch is a compile error. The two-arg
+form `[box? Point $val]` is the only safe extraction path. `box?`
+implicitly verifies the argument is a dynamic `JaclVal` — in statically
+typed code the compiler already knows.
 
-`box?` also implicitly checks that the argument is a dynamic `JaclVal` —
-in statically typed code the compiler already knows whether something is
-a box at compile time.
-
-### Generic Operations on Boxed Values
-
-Four operations work on boxed structs without unboxing:
+## Generic Operations on Boxed Structs
 
 | Operation | Implementation |
 |-----------|---------------|
-| **Equality** | Compare `type_idx`; if equal, `memcmp` the `data[]` bytes |
+| **Equality** | Compare `type_idx`; if equal, `memcmp` `data[]` |
 | **Hashing** | Hash `type_idx` + raw `data[]` bytes |
-| **Stringify** | Registry lookup by `type_idx` to get field names, walk fields by type for formatting |
-| **Type name** | Registry lookup by `type_idx`, return the struct's name |
+| **Stringify** | `vm__fmt_struct_bytes` walks the registry, formats from raw bytes |
+| **Type name** | Registry lookup by `type_idx` |
 
-Stringify is the only one that needs the registry at runtime. The others are
-pure byte operations.
+`vm__fmt_struct_bytes` is the shared formatter — used by `OP_PRINT_STRUCT`
+(typed inline path) and the legacy heap-struct print case (now only
+reached for ctx).
 
-### Registry Changes
+## ctx — the lone HeapRecord
 
-The `StructTypeRegistry` currently caps at 32 types (`STRUCT_REGISTRY_MAX`).
-This is replaced with an arena-based registry. Each `StructTypeDef` is
-allocated in the arena with its actual field count (no `STRUCT_MAX_FIELDS`
-limit). Lookups return a `StructTypeDef*` pointer into arena memory. A
-separate index array maps sequential `type_idx` values to arena pointers
-for box type checks. The arena grows by acquiring new pages — existing
-pointers remain stable.
+`ctx` is **not** a user `defstruct`. It is a builtin embedder-defined
+record that uses the heap representation:
 
-Note: `type_idx == 0` is reserved for plain `dyn JaclVal` boxes. Struct
-types start at `type_idx == 1`.
+```c
+typedef struct {
+    uint32_t type_idx;
+    uint32_t total_size;
+    uint8_t  data[];
+} HeapRecord;
+```
 
-### Compiler Changes
+`OBJ_HEAP_RECORD` is the GC object kind. Ctx may contain reference fields
+(e.g. `str pwd`) — the GC traces `data[]` through the registry. Field
+access uses the legacy `OP_STRUCT_GET` / `OP_STRUCT_SET` opcodes against
+a heap pointer.
 
-**StateLayout:**
-- `StateField` gains a `width` field (number of slots, default 1).
-- `sm__add_state_field` gets a width parameter for struct locals.
-- `sm__find_field` returns the base index; the compiler emits width from
-  the `StructTypeDef.total_size`.
-- Liveness optimization treats multi-slot struct fields as atomic units.
+This is the only sanctioned non-inline struct shape in the runtime.
+Future runtime builtins of similar shape can reuse `HeapRecord`, but
+there is no user-visible `Ptr T` syntax.
 
-**Stack frame:**
-- The compiler tracks which local ranges are struct regions (base slot +
-  width + type index).
-- Field access emits byte-offset arithmetic from the base slot rather
-  than pointer dereference.
+## Registry
 
-**New opcodes (or opcode variants):**
-- Struct field read/write by byte offset from a base slot.
-- Struct copy (N slots) for argument passing and return.
-- Box value (allocate unified `JaclMutableRef`, memcpy bytes in).
-- Unbox struct from box (memcpy bytes out, type inferred from flow typing).
+The `StructTypeRegistry` is arena-backed. Each `StructTypeDef` is
+allocated with its actual field count. Lookups return stable pointers; a
+separate index array maps `type_idx` → `StructTypeDef*`.
 
-### What This Eliminates
+`type_idx == 0` is reserved for plain `dyn JaclVal` boxes. Struct types
+start at `type_idx == 1`. `reg->ctx_type_idx` records ctx's slot.
 
-- `GCHeader` on struct instances (8 bytes saved per struct)
-- `JaclStruct` header (8 bytes saved per struct)
-- GC tracing of struct fields (no registry lookup during mark phase)
-- Write barriers for struct field writes
-- Heap allocation for short-lived structs (stack-allocated instead)
-- Per-allocation GC pressure from struct creation
+The `is_value_type` flag on `StructTypeDef` distinguishes user structs
+(true) from ctx (false). Since ref fields are now rejected, all user
+defstructs are value-type by construction; the flag could be replaced
+with a `idx == reg->ctx_type_idx` check.
 
-### Resolved Questions
+## What This Eliminates
 
-- **Boxing syntax:** Explicit via existing `box` command: `[box $point]`.
-  Boxing is unified — `box` always creates a `JaclMutableRef` with type info.
-- **Unboxing syntax:** `[unbox $val]` inside a `[box? Type $val]` flow-typed
-  branch. Compiler infers the struct type from narrowing. `unbox` outside a
-  narrowed scope is a compile error.
-- **Box representation:** Unified `JaclMutableRef` with `type_idx` (0 = dyn
-  JaclVal, N = struct type) + `total_size` + `data[]`. Replaces the old
-  `{ JaclVal value; }` representation.
-- **Struct creation syntax:** Preserved from existing implementation:
-  `struct Name {type field, ...}` for definition, `Name val1 val2` for
-  construction, `$s->field` for access.
+- Per-instance `GCHeader` (8 bytes) on user struct values.
+- The `HeapRecord` header (8 bytes) on user struct values.
+- GC tracing of user struct fields — no registry walk during mark.
+- Write barriers for struct field writes.
+- Auto-heap-allocation when a struct value crosses a typed boundary.
+- Transient `HeapRecord` allocations in typed vec/map ops, print, eq,
+  field access, destructure, and box.
 
-### Open Questions
+## Open Questions
 
-- **Fixed-size arrays in structs** (e.g., `[u8; 16]`): Useful since strings
-  aren't allowed. Not required for the initial implementation but the layout
-  system should accommodate them. Deferred to a follow-up PRD.
-- **Stack size:** `VM_STACK_MAX` is 256 slots. Struct-heavy code with deep
-  call stacks could exhaust this. May need to increase or add diagnostics.
+- **Fixed-size arrays in structs** (e.g., `[u8; 16]`): useful for byte
+  buffers without strings. Layout system can accommodate; not yet wired.
+- **Stack size:** `VM_STACK_MAX = 256` slots. Wide structs in deep call
+  stacks could exhaust this. No diagnostics yet.
+- **Wide cells / globals:** mut bindings and globals currently store
+  `JaclVal` slots; structs in those slots must go through `[box]`. A
+  wide-cell architecture could allow inline mut struct bindings, but
+  is not pursued here.
