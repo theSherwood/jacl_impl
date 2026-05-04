@@ -13046,6 +13046,10 @@ ProgramResult jacl_compile_program(const char* root_path,
     c.ctx_fields = ctx;
   }
 
+  /* Phase 3 typer pass for module programs (mirrors compiler_compile and
+   * compiler__compile_module). */
+  typer_infer(parse.nodes, parse.count);
+
   if (top_suspends) {
     /* Wrap top-level suspending code in SM closure — same logic as compiler_compile */
 

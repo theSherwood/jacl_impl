@@ -45,6 +45,8 @@ typedef struct {
   uint32_t    name_len;
   uint8_t     field_count;
   uint8_t     field_types[TYPER_MAX_STRUCT_FIELDS]; /* JaclType per field; TYPE_STRUCT if a nested struct */
+  const char* field_names[TYPER_MAX_STRUCT_FIELDS];
+  uint32_t    field_name_lens[TYPER_MAX_STRUCT_FIELDS];
 } TyperStruct;
 
 typedef struct {
@@ -196,30 +198,91 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       tc->expected_type = saved_et;
       uint32_t cnt = args[0]->data.destructure_named.count;
       /* If the value is a struct, look up field types from the registry
-       * (when present) so destructured names get the right type. */
+       * so destructured names get the right type. */
       const TyperStruct* src_struct = NULL;
       if (args[1]->inferred_type == TYPE_STRUCT &&
-          args[1]->inferred_struct_idx != UINT32_MAX) {
-        for (uint32_t si = 0; si < tc->struct_count; si++) {
-          /* No idx-to-struct mapping yet; struct registry indexed by typer. */
-          /* Skip — fall through to dyn for now. */
-          (void)si;
-        }
+          args[1]->inferred_struct_idx != UINT32_MAX &&
+          args[1]->inferred_struct_idx < tc->struct_count) {
+        src_struct = &tc->structs[args[1]->inferred_struct_idx];
       }
-      (void)src_struct;
       for (uint32_t i = 0; i < cnt; i++) {
         JaclType t = TYPE_DYN;
+        /* Explicit type annotation wins. */
         if (args[0]->data.destructure_named.types &&
             args[0]->data.destructure_named.types[i] &&
             is_type_keyword(args[0]->data.destructure_named.types[i],
                             args[0]->data.destructure_named.type_lens[i])) {
           t = type_from_keyword(args[0]->data.destructure_named.types[i],
                                 args[0]->data.destructure_named.type_lens[i]);
+        } else if (src_struct) {
+          /* Match destructured name against source struct's field names. */
+          const char* dn = args[0]->data.destructure_named.names[i];
+          uint32_t    dl = args[0]->data.destructure_named.name_lens[i];
+          for (uint32_t fi = 0; fi < src_struct->field_count; fi++) {
+            if (src_struct->field_name_lens[fi] == dl &&
+                memcmp(src_struct->field_names[fi], dn, dl) == 0) {
+              t = (JaclType)src_struct->field_types[fi];
+              break;
+            }
+          }
         }
         typer__scope_add(tc,
             args[0]->data.destructure_named.names[i],
             args[0]->data.destructure_named.name_lens[i],
             args[0]->scope_mark, (uint8_t)t, UINT32_MAX);
+      }
+      node->inferred_type = TYPE_NIL;
+      return true;
+    }
+    if (args[0]->type == AST_BLOCK) {
+      /* `{x, y}` named destructuring (parser produces AST_BLOCK
+       * with each name as a zero-arg AST_COMMAND inside).
+       * Match destructured names against the source struct's field
+       * types when available. */
+      JaclType saved_et = tc->expected_type;
+      tc->expected_type = TYPE_DYN;
+      typer__infer_node(tc, args[1]);
+      tc->expected_type = saved_et;
+      const TyperStruct* src_struct = NULL;
+      if (args[1]->inferred_type == TYPE_STRUCT &&
+          args[1]->inferred_struct_idx < tc->struct_count) {
+        src_struct = &tc->structs[args[1]->inferred_struct_idx];
+      }
+      uint32_t bcount = args[0]->data.block.count;
+      for (uint32_t i = 0; i < bcount; i++) {
+        AstNode* item = args[0]->data.block.commands[i];
+        const char* nm = NULL;
+        uint32_t    nl = 0;
+        JaclType    item_t = TYPE_DYN;
+        if (item->type == AST_COMMAND && item->data.command.head &&
+            item->data.command.head->type == AST_LIT_STRING) {
+          if (item->data.command.arg_count == 0) {
+            /* Bare name */
+            nm = item->data.command.head->data.lit_string.value;
+            nl = item->data.command.head->data.lit_string.length;
+          } else if (item->data.command.arg_count == 1 &&
+                     item->data.command.args[0]->type == AST_LIT_STRING &&
+                     is_type_keyword(item->data.command.head->data.lit_string.value,
+                                     item->data.command.head->data.lit_string.length)) {
+            /* Typed: `i32 x` */
+            item_t = type_from_keyword(item->data.command.head->data.lit_string.value,
+                                       item->data.command.head->data.lit_string.length);
+            nm = item->data.command.args[0]->data.lit_string.value;
+            nl = item->data.command.args[0]->data.lit_string.length;
+          }
+        }
+        if (!nm) continue;
+        if (item_t == TYPE_DYN && src_struct) {
+          for (uint32_t fi = 0; fi < src_struct->field_count; fi++) {
+            if (src_struct->field_name_lens[fi] == nl &&
+                memcmp(src_struct->field_names[fi], nm, nl) == 0) {
+              item_t = (JaclType)src_struct->field_types[fi];
+              break;
+            }
+          }
+        }
+        typer__scope_add(tc, nm, nl, item->scope_mark,
+                         (uint8_t)item_t, UINT32_MAX);
       }
       node->inferred_type = TYPE_NIL;
       return true;
@@ -528,7 +591,9 @@ static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t coun
          * literal arg narrowing (they wouldn't match TYPE_STRUCT). */
         ft = TYPE_STRUCT;
       }
-      s->field_types[i] = (uint8_t)ft;
+      s->field_types[i]     = (uint8_t)ft;
+      s->field_names[i]     = node->data.defstruct.field_names[i];
+      s->field_name_lens[i] = node->data.defstruct.field_name_lens[i];
     }
   }
 }
@@ -694,12 +759,20 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
    * arg types as expected_type for literals to narrow. */
   const TyperProc*   proc   = NULL;
   const TyperStruct* sdef   = NULL;
+  uint32_t           sdef_idx = UINT32_MAX;
   if (head && head->type == AST_LIT_STRING) {
     proc = typer__find_proc(tc,
         head->data.lit_string.value, head->data.lit_string.length);
     if (!proc) {
-      sdef = typer__find_struct(tc,
-          head->data.lit_string.value, head->data.lit_string.length);
+      for (uint32_t i = 0; i < tc->struct_count; i++) {
+        if (tc->structs[i].name_len == head->data.lit_string.length &&
+            memcmp(tc->structs[i].name, head->data.lit_string.value,
+                   head->data.lit_string.length) == 0) {
+          sdef = &tc->structs[i];
+          sdef_idx = i;
+          break;
+        }
+      }
     }
   }
   if (head) typer__infer_node(tc, head);
@@ -721,6 +794,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     node->inferred_struct_idx = proc->return_struct_idx;
   } else if (sdef) {
     node->inferred_type = TYPE_STRUCT;
+    node->inferred_struct_idx = sdef_idx;
   } else {
     node->inferred_type = TYPE_DYN;
   }
