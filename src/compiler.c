@@ -12297,23 +12297,28 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
 
 #ifdef JACL_TYPER_DUAL_TRACK
   /* Phase 3 dual-track check: warn if typer disagrees with compile-time
-   * inference. Only warn when both sides are confident (non-DYN); the
-   * typer is allowed to be conservative (DYN) where it lacks scope info.
+   * inference. Skip AST_COMMAND: compiler.c's last_expr_type for
+   * commands is inconsistent across branches.
    *
-   * Skip AST_COMMAND: compiler.c's last_expr_type for commands is
-   * inconsistent across branches (sometimes NIL, sometimes the value's
-   * type). The typer establishes the correct invariant; the compiler is
-   * the noisy ground truth. AST_COMMAND mismatches will resolve once
-   * Phase 3c switches consumers to the typer. */
-  if (node->type != AST_COMMAND &&
-      node->inferred_type != TYPE_DYN &&
-      c->last_expr_type   != TYPE_DYN &&
-      (JaclType)node->inferred_type != c->last_expr_type) {
-    fprintf(stderr,
-        "TYPER MISMATCH at %u:%u (AST_%d): typer=%s, compiler=%s\n",
-        node->start.line, node->start.column, (int)node->type,
-        type_name((JaclType)node->inferred_type),
-        type_name(c->last_expr_type));
+   * Two flavors:
+   *   MISMATCH — both sides non-DYN and disagree. This is a typer bug.
+   *   GAP      — compiler is non-DYN but typer is DYN. Typer is more
+   *              conservative; consumers that switch to the typer would
+   *              get worse codegen (unboxed → boxed) here. */
+  if (node->type != AST_COMMAND) {
+    JaclType nt = (JaclType)node->inferred_type;
+    JaclType ct = c->last_expr_type;
+    if (nt != TYPE_DYN && ct != TYPE_DYN && nt != ct) {
+      fprintf(stderr,
+          "TYPER MISMATCH at %u:%u (AST_%d): typer=%s, compiler=%s\n",
+          node->start.line, node->start.column, (int)node->type,
+          type_name(nt), type_name(ct));
+    } else if (nt == TYPE_DYN && ct != TYPE_DYN) {
+      fprintf(stderr,
+          "TYPER GAP at %u:%u (AST_%d): typer=dyn, compiler=%s\n",
+          node->start.line, node->start.column, (int)node->type,
+          type_name(ct));
+    }
   }
 #endif
 }
