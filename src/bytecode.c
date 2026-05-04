@@ -240,7 +240,6 @@ typedef enum {
   OP_TYPED_VEC_GET_INLINE, /* uint16_t type_idx */
   OP_TYPED_MAP_GET_INLINE, /* uint16_t type_idx */
   OP_INLINE_TO_LOCAL,      /* uint8_t base_slot, uint16_t type_idx */
-  OP_STRUCT_REIFY,         /* uint16_t type_idx; pop TOS inline bytes, alloc heap HeapRecord, push ptr */
   OP_DEREF_INLINE          /* uint16_t type_idx; pop box, push inline bytes from ref->data[] */
 } OpCode;
 
@@ -599,7 +598,6 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_TYPED_VEC_GET_INLINE: return "OP_TYPED_VEC_GET_INLINE";
     case OP_TYPED_MAP_GET_INLINE: return "OP_TYPED_MAP_GET_INLINE";
     case OP_INLINE_TO_LOCAL:   return "OP_INLINE_TO_LOCAL";
-    case OP_STRUCT_REIFY:      return "OP_STRUCT_REIFY";
     case OP_DEREF_INLINE:      return "OP_DEREF_INLINE";
   }
   return "OP_UNKNOWN";

@@ -1750,10 +1750,12 @@ void sm__walk_locals(AstNode* node, StateLayout* layout,
           } else if (argc >= 2 && args[0]->type == AST_LIT_STRING) {
             /* Simple: [def name value] or typed: [def type name value] */
             uint32_t name_idx = 0;
+            uint32_t value_idx = 1;
             uint16_t field_width = 1;
             uint32_t field_struct_idx = 0;
             if (argc == 3) {
               name_idx = 1;
+              value_idx = 2;
               /* Check if the type is a struct — compute width from registry */
               const char* type_name = args[0]->data.lit_string.value;
               uint32_t type_len = args[0]->data.lit_string.length;
@@ -1763,6 +1765,22 @@ void sm__walk_locals(AstNode* node, StateLayout* layout,
                   field_width = (uint16_t)struct__slot_width(reg, sidx);
                   field_struct_idx = sidx;
                 }
+              }
+            }
+            /* If width is still 1 (no explicit type) but the RHS is a
+               struct constructor [StructName ...], infer struct width
+               from the constructor name. This keeps untyped `def p [Point
+               1 2]` consistent with typed `def Point p [Point 1 2]` for
+               state field sizing. */
+            if (field_width == 1 && reg && value_idx < argc &&
+                args[value_idx]->type == AST_COMMAND &&
+                args[value_idx]->data.command.head->type == AST_LIT_STRING) {
+              const char* hd = args[value_idx]->data.command.head->data.lit_string.value;
+              uint32_t hl = args[value_idx]->data.command.head->data.lit_string.length;
+              uint32_t sidx = struct_registry__find(reg, hd, hl);
+              if (sidx != UINT32_MAX) {
+                field_width = (uint16_t)struct__slot_width(reg, sidx);
+                field_struct_idx = sidx;
               }
             }
             if (args[name_idx]->type == AST_LIT_STRING) {
@@ -3989,21 +4007,6 @@ void compiler__builtin_arity_error(Compiler* c, uint32_t line,
            "builtin '%s' expects %s but got %d",
            name, expected_desc, (int)got);
   compiler__error(c, line, col, err_msg);
-}
-
-/* --- Internal: Reify inline struct to heap HeapRecord* if active ---
- * Returns true if reification was emitted. */
-
-static bool compiler__reify_inline_struct(Compiler* c, uint32_t line) {
-  /* Both INLINE_STACK and INLINE_REF mean inline bytes on TOS. */
-  if ((c->inline_repr == INLINE_STACK || c->inline_repr == INLINE_REF) &&
-      c->last_expr_type == TYPE_STRUCT) {
-    compiler__emit_byte(c, OP_STRUCT_REIFY, line);
-    compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
-    c->inline_repr = INLINE_NONE;
-    return true;
-  }
-  return false;
 }
 
 /* --- Internal: Auto-box unboxed types (emit OP_TO_DYN if needed) --- */
@@ -6999,16 +7002,28 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     int16_t rhs_arity = compiler__node_known_arity(c, args[value_arg_idx]);
 
     if (c->sm_analysis) {
-      /* SM mode: write value to state object field instead of local slot.
-         For struct values, reify to a heap HeapRecord first — the SM
-         state field stores a single JaclVal, and OP_SET_STATE_FIELD_WIDE
-         is declared but never emitted. This is the one remaining
-         user-reachable reify path. */
-      compiler__reify_inline_struct(c, line);
+      /* SM mode: write value to state object field instead of local slot. */
       int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
       if (field_idx >= 0) {
-        compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
-        compiler__emit_byte(c, (uint8_t)field_idx, line);
+        /* Look up StateField width + struct_type_idx. */
+        uint16_t fwidth = 1;
+        uint32_t fstruct_idx = 0;
+        for (uint32_t i = 0; i < c->sm_analysis->state_layout.field_count; i++) {
+          if (c->sm_analysis->state_layout.fields[i].name == name_val) {
+            fwidth = c->sm_analysis->state_layout.fields[i].width;
+            fstruct_idx = c->sm_analysis->state_layout.fields[i].struct_type_idx;
+            break;
+          }
+        }
+        if (fstruct_idx != 0) {
+          /* Struct state field: write N inline slots. */
+          compiler__emit_byte(c, OP_SET_STATE_FIELD_WIDE, line);
+          compiler__emit_byte(c, (uint8_t)field_idx, line);
+          compiler__emit_byte(c, (uint8_t)fwidth, line);
+        } else {
+          compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
+          compiler__emit_byte(c, (uint8_t)field_idx, line);
+        }
         /* def returns nil */
         compiler__emit_byte(c, OP_NIL, line);
       } else {
@@ -11174,10 +11189,30 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
         if (field_idx >= 0) {
           bool is_mut = sm__is_field_mutable(&c->sm_analysis->state_layout, name_val);
-          compiler__emit_byte(c, is_mut ? OP_GET_STATE_FIELD_CELL
-                                        : OP_GET_STATE_FIELD, line);
-          compiler__emit_byte(c, (uint8_t)field_idx, line);
-          c->last_expr_type = TYPE_DYN;
+          /* Find the StateField to get width and struct_type_idx. */
+          uint16_t fwidth = 1;
+          uint32_t fstruct_idx = 0;  /* 0 == not a struct field */
+          for (uint32_t i = 0; i < c->sm_analysis->state_layout.field_count; i++) {
+            if (c->sm_analysis->state_layout.fields[i].name == name_val) {
+              fwidth = c->sm_analysis->state_layout.fields[i].width;
+              fstruct_idx = c->sm_analysis->state_layout.fields[i].struct_type_idx;
+              break;
+            }
+          }
+          if (fstruct_idx != 0 && !is_mut) {
+            /* Struct state field: push N inline slots via WIDE op. */
+            compiler__emit_byte(c, OP_GET_STATE_FIELD_WIDE, line);
+            compiler__emit_byte(c, (uint8_t)field_idx, line);
+            compiler__emit_byte(c, (uint8_t)fwidth, line);
+            c->inline_repr = INLINE_STACK;
+            c->last_expr_type = TYPE_STRUCT;
+            c->last_struct_idx = fstruct_idx;
+          } else {
+            compiler__emit_byte(c, is_mut ? OP_GET_STATE_FIELD_CELL
+                                          : OP_GET_STATE_FIELD, line);
+            compiler__emit_byte(c, (uint8_t)field_idx, line);
+            c->last_expr_type = TYPE_DYN;
+          }
           break;
         }
       }

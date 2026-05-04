@@ -6784,40 +6784,6 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
-      case OP_STRUCT_REIFY: {
-        /* Phase 5b: Convert TOS inline bytes to heap HeapRecord.
-           Operand: uint16_t type_idx.
-           For width==1 structs: pops 1 inline slot, pushes 1 heap pointer. */
-        uint16_t type_idx = vm__read_u16(vm);
-        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
-          vm__set_error(vm, "invalid struct type index %u for reify", (unsigned)type_idx);
-          return VM_RUNTIME_ERROR;
-        }
-        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
-        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
-        /* Read inline bytes from TOS */
-        uint8_t* src = (uint8_t*)&vm->stack[vm->stack_top - width];
-        /* Allocate heap struct */
-        gc__current_heap = &vm->heap;
-        HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
-                                                sizeof(HeapRecord) + sdef->total_size);
-        s->type_idx = type_idx;
-        s->total_size = sdef->total_size;
-        memcpy(s->data, src, sdef->total_size);
-        /* Phase 5c: fix up nested struct fields — convert raw data to
-           heap HeapRecord* pointers so OP_HEAP_RECORD_GET works uniformly.
-           Recursive: nested structs may themselves have nested fields. */
-        vm__reify_nested_heap_records(vm, s, sdef);
-        /* Clear inline bitmap, pop width slots, push heap pointer */
-        for (uint32_t si = 0; si < width; si++) {
-          BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - width + si);
-        }
-        vm->stack_top -= width;
-        result = vm__push(vm, jacl_heap_record_val(s));
-        if (result != VM_OK) return result;
-        break;
-      }
-
       case OP_STRUCT_EQ_INLINE: {
         /* US-013: Compare two stack-resident inline structs via memcmp.
            Operands: uint8_t base_a, uint8_t base_b, uint16_t total_size.
