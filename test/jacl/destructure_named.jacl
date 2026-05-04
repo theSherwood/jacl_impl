@@ -2,7 +2,10 @@
 # expect: 20
 # named struct destructuring
 struct Point {i32 x, i32 y}
-p = [Point 10 20]
-{x, y} = $p
-print $x
-print $y
+proc main {} {
+  def p [Point 10 20]
+  def {x, y} $p
+  print $x
+  print $y
+}
+main

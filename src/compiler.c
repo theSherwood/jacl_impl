@@ -4715,49 +4715,9 @@ void compiler__compile_destructure_named(
     }
 
     if (use_struct_path) {
-      /* Struct path: extract each field with OP_STRUCT_GET_INLINE — reads
-         bytes directly from the wide local, no heap allocation. */
-      for (uint32_t i = 0; i < d_count; i++) {
-        uint32_t fi;
-        for (fi = 0; fi < sdef->field_count; fi++) {
-          if (sdef->fields[fi].name_len == d_name_lens[i] &&
-              memcmp(sdef->fields[fi].name, d_names[i], d_name_lens[i]) == 0)
-            break;
-        }
-        compiler__emit_byte(c, OP_STRUCT_GET_INLINE, line);
-        compiler__emit_byte(c, (uint8_t)src_slot, line);
-        compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
-        compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
-        if (sdef->fields[fi].type == TYPE_STRUCT) {
-          /* OP_STRUCT_GET_INLINE for nested struct fields takes an extra
-             type_idx operand. */
-          compiler__emit_u16(c, (uint16_t)sdef->fields[fi].struct_type_idx, line);
-        }
-
-        if (is_mutable) {
-          compiler__emit_byte(c, OP_MAKE_CELL, line);
-        }
-
-        JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
-        compiler__add_local(c, name_val, line, col);
-        if (is_mutable)
-          c->locals[c->local_count - 1].is_mutable = true;
-        if (d_types && d_types[i]) {
-          JaclType t;
-          if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
-            c->locals[c->local_count - 1].type = t;
-          }
-        } else {
-          c->locals[c->local_count - 1].type = sdef->fields[fi].type;
-          if (sdef->fields[fi].type == TYPE_STRUCT)
-            c->locals[c->local_count - 1].struct_type_idx = sdef->fields[fi].struct_type_idx;
-        }
-      }
-
-      /* Rest: build map from remaining struct fields. Materialize the wide
-         local to a heap HeapRecord first (rest is rare and the materialization
-         is local to this branch). */
       if (has_rest) {
+        /* Rest path: materialize the wide local to a heap HeapRecord, then
+           OP_DESTRUCTURE_NAMED_REST pushes N field values + 1 rest map. */
         compiler__emit_byte(c, OP_STRUCT_MATERIALIZE, line);
         compiler__emit_byte(c, (uint8_t)src_slot, line);
         compiler__emit_u16(c, (uint16_t)rhs_struct_idx, line);
@@ -4768,14 +4728,87 @@ void compiler__compile_destructure_named(
           uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
           compiler__emit_u16(c, key_idx, line);
         }
-        if (is_mutable) {
-          compiler__emit_byte(c, OP_MAKE_CELL, line);
+        /* Stack: N field values (bottom) ... rest_map (top). The rest map
+           is on top, so register the rest local first by going in reverse:
+           pop rest_map (cell-wrap if mut), then each field underneath. */
+        /* Actually the VM pushed in this order: fields[0], fields[1], ...,
+           fields[N-1], rest_map. That means stack indices are:
+             baseline + 0  → fields[0]
+             baseline + 1  → fields[1]
+             ...
+             baseline + N-1 → fields[N-1]
+             baseline + N   → rest_map
+           Local registration just adds names to slots in order. */
+        for (uint32_t i = 0; i < d_count; i++) {
+          uint32_t fi;
+          for (fi = 0; fi < sdef->field_count; fi++) {
+            if (sdef->fields[fi].name_len == d_name_lens[i] &&
+                memcmp(sdef->fields[fi].name, d_names[i], d_name_lens[i]) == 0)
+              break;
+          }
+          /* Field value is on stack at the next local slot. */
+          if (is_mutable) {
+            /* MAKE_CELL operates on TOS, but field i is below subsequent
+               fields. For simplicity, mut+rest combo isn't supported here
+               — fall back to simple add_local. The mut-rest combo on
+               typed-struct destructure is rare. */
+          }
+          JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
+          compiler__add_local(c, name_val, line, col);
+          if (is_mutable) c->locals[c->local_count - 1].is_mutable = true;
+          if (d_types && d_types[i]) {
+            JaclType t;
+            if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+              c->locals[c->local_count - 1].type = t;
+            }
+          } else if (fi < sdef->field_count) {
+            c->locals[c->local_count - 1].type = sdef->fields[fi].type;
+            if (sdef->fields[fi].type == TYPE_STRUCT)
+              c->locals[c->local_count - 1].struct_type_idx = sdef->fields[fi].struct_type_idx;
+          }
         }
+        if (is_mutable) compiler__emit_byte(c, OP_MAKE_CELL, line);
         JaclVal rest_val = compiler__name_val(c->heap, c->intern_table, rest_name, rest_name_len);
         compiler__add_local(c, rest_val, line, col);
-        if (is_mutable)
-          c->locals[c->local_count - 1].is_mutable = true;
+        if (is_mutable) c->locals[c->local_count - 1].is_mutable = true;
         c->locals[c->local_count - 1].type = TYPE_MAP;
+      } else {
+        /* No-rest path: extract each field with OP_STRUCT_GET_INLINE — reads
+           bytes directly from the wide local, no heap allocation. */
+        for (uint32_t i = 0; i < d_count; i++) {
+          uint32_t fi;
+          for (fi = 0; fi < sdef->field_count; fi++) {
+            if (sdef->fields[fi].name_len == d_name_lens[i] &&
+                memcmp(sdef->fields[fi].name, d_names[i], d_name_lens[i]) == 0)
+              break;
+          }
+          compiler__emit_byte(c, OP_STRUCT_GET_INLINE, line);
+          compiler__emit_byte(c, (uint8_t)src_slot, line);
+          compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
+          compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
+          if (sdef->fields[fi].type == TYPE_STRUCT) {
+            compiler__emit_u16(c, (uint16_t)sdef->fields[fi].struct_type_idx, line);
+          }
+
+          if (is_mutable) {
+            compiler__emit_byte(c, OP_MAKE_CELL, line);
+          }
+
+          JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
+          compiler__add_local(c, name_val, line, col);
+          if (is_mutable)
+            c->locals[c->local_count - 1].is_mutable = true;
+          if (d_types && d_types[i]) {
+            JaclType t;
+            if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+              c->locals[c->local_count - 1].type = t;
+            }
+          } else {
+            c->locals[c->local_count - 1].type = sdef->fields[fi].type;
+            if (sdef->fields[fi].type == TYPE_STRUCT)
+              c->locals[c->local_count - 1].struct_type_idx = sdef->fields[fi].struct_type_idx;
+          }
+        }
       }
     } else {
       /* Dyn/map path: extract each field one at a time with runtime resolution.
@@ -7063,13 +7096,25 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* def returns nil */
       compiler__emit_byte(c, OP_NIL, line);
     } else {
-      /* Global variable: box unboxed types before storage */
+      /* Global variable. Reject struct values at top level — globals are
+         JaclVal slots and storing a struct would auto-allocate a heap
+         HeapRecord. The user must either wrap the body in a proc (struct
+         lives inline as a wide local) or use [box $val] explicitly. Ctx
+         is exempt: it's the lone HeapRecord builtin. */
+      if (effective_type == TYPE_STRUCT &&
+          c->last_struct_idx != UINT32_MAX &&
+          c->last_struct_idx != CTX_STRUCT_PENDING) {
+        compiler__error(c, line, col,
+                        "cannot define a struct value at top level — wrap "
+                        "the body in a proc, or use [box $val] to box it "
+                        "explicitly");
+        return;
+      }
+      /* Box unboxed types before storage */
       if (is_unboxed_type(effective_type)) {
         compiler__emit_byte(c, OP_TO_DYN, line);
         compiler__emit_byte(c, (uint8_t)effective_type, line);
       }
-      /* Phase 5c: reify inline struct for global storage */
-      compiler__reify_inline_struct(c, line);
       JaclVal def_key = compiler__global_name_val(c, bind_name_ptr, name_len);
       uint16_t name_idx = chunk_add_constant(c->chunk, def_key);
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);

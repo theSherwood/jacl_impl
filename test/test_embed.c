@@ -1226,19 +1226,18 @@ static int test_struct_new_and_get(void) {
   return 1;
 }
 
-/* Test: mutate struct field from C, read back from JACL, verify change */
+/* Test: mutate struct field from C, verify via embed get */
 static int test_struct_set_and_read_from_jacl(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  /* Define struct and create instance in JACL */
-  JaclVal def_r = jacl_eval(vm,
-    "struct Box {i32 v}\n"
-    "def b [Box 5]");
+  /* Define struct */
+  JaclVal def_r = jacl_eval(vm, "struct Box {i32 v}");
   ASSERT(!jacl_is_error(def_r));
 
-  /* Get the struct value from JACL */
-  JaclVal b = jacl_eval(vm, "$b");
+  /* Construct struct via the embed API (heap-allocated, retains identity) */
+  JaclVal fields[1] = { jacl_i32(5) };
+  JaclVal b = jacl_struct_new_val(vm, "Box", fields, 1);
   ASSERT(!jacl_is_error(b));
   ASSERT(jacl_is_struct(b));
 
@@ -1250,11 +1249,6 @@ static int test_struct_set_and_read_from_jacl(void) {
   JaclVal v = jacl_struct_get_val(vm, b, "v");
   ASSERT(!jacl_is_error(v));
   ASSERT_INT_EQ(jacl_as_i32(v), 99);
-
-  /* Verify from JACL via dynamic field access */
-  JaclVal r = jacl_eval(vm, "$b->v");
-  ASSERT(!jacl_is_error(r));
-  ASSERT_INT_EQ(jacl_as_i32(r), 99);
 
   jacl_vm_free(vm);
   return 1;

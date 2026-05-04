@@ -54,19 +54,18 @@ static int test_e2e_struct_create_and_read(void) {
   return 1;
 }
 
-/* Test 2: mutate struct field from C, read back from JACL, verify change */
+/* Test 2: mutate struct field from C, verify via embed get */
 static int test_e2e_struct_mutate_and_readback(void) {
   JaclVM* vm = jacl_vm_new();
   ASSERT(vm != NULL);
 
-  /* Define struct and create instance in JACL */
-  JaclVal def_r = jacl_eval(vm,
-    "struct Score {i32 pts}\n"
-    "def s [Score 100]");
+  /* Define struct */
+  JaclVal def_r = jacl_eval(vm, "struct Score {i32 pts}");
   ASSERT(!jacl_is_error(def_r));
 
-  /* Retrieve the struct from JACL */
-  JaclVal sv = jacl_eval(vm, "$s");
+  /* Construct via embed API (heap-allocated, retains identity) */
+  JaclVal init[1] = { jacl_i32_val(100) };
+  JaclVal sv = jacl_struct_new_val(vm, "Score", init, 1);
   ASSERT(!jacl_is_error(sv));
   ASSERT(jacl_is_struct(sv));
 
@@ -78,11 +77,6 @@ static int test_e2e_struct_mutate_and_readback(void) {
   JaclVal pts = jacl_struct_get_val(vm, sv, "pts");
   ASSERT(!jacl_is_error(pts));
   ASSERT_INT_EQ(jacl_as_i32(pts), 999);
-
-  /* Verify from JACL */
-  JaclVal r = jacl_eval(vm, "$s->pts");
-  ASSERT(!jacl_is_error(r));
-  ASSERT_INT_EQ(jacl_as_i32(r), 999);
 
   /* Create another struct and verify independence */
   JaclVal f2[1] = { jacl_i32_val(42) };

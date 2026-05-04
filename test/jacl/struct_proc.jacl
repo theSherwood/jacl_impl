@@ -11,6 +11,9 @@ proc Point mk {i32 a, i32 b} {
   Point $a $b
 }
 
-def p [Point 10 20]
-print [sum $p]
-print [mk 100 200]
+proc main {} {
+  def p [Point 10 20]
+  print [sum $p]
+  print [mk 100 200]
+}
+main

@@ -29,13 +29,16 @@ static int test_typed_vec_get(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
-    "def p [vec-get $points 0]\n"
-    "[print $p->x]\n"
-    "[print $p->y]\n"
-    "def q [vec-get $points 1]\n"
-    "[print $q->x]\n"
-    "[print $q->y]",
+    "proc main {} {\n"
+    "  def points [[Vec Point] [Point 10 20] [Point 30 40]]\n"
+    "  def p [vec-get $points 0]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "  def q [vec-get $points 1]\n"
+    "  [print $q->x]\n"
+    "  [print $q->y]\n"
+    "}\n"
+    "main",
     &cap, "10\n20\n30\n40\n"));
   TEST_PASS();
 }
@@ -55,12 +58,15 @@ static int test_typed_vec_push(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 2]]\n"
-    "def points2 [vec-push $points [Point 3 4]]\n"
-    "[print [vec-len $points2]]\n"
-    "def p [vec-get $points2 1]\n"
-    "[print $p->x]\n"
-    "[print $p->y]",
+    "proc main {} {\n"
+    "  def points [[Vec Point] [Point 1 2]]\n"
+    "  def points2 [vec-push $points [Point 3 4]]\n"
+    "  [print [vec-len $points2]]\n"
+    "  def p [vec-get $points2 1]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "}\n"
+    "main",
     &cap, "2\n3\n4\n"));
   TEST_PASS();
 }
@@ -71,14 +77,17 @@ static int test_typed_vec_set(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
-    "def points2 [vec-set $points 0 [Point 99 88]]\n"
-    "def p [vec-get $points2 0]\n"
-    "[print $p->x]\n"
-    "[print $p->y]\n"
-    "# original unchanged (persistent)\n"
-    "def q [vec-get $points 0]\n"
-    "[print $q->x]",
+    "proc main {} {\n"
+    "  def points [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "  def points2 [vec-set $points 0 [Point 99 88]]\n"
+    "  def p [vec-get $points2 0]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "  # original unchanged (persistent)\n"
+    "  def q [vec-get $points 0]\n"
+    "  [print $q->x]\n"
+    "}\n"
+    "main",
     &cap, "99\n88\n1\n"));
   TEST_PASS();
 }
@@ -102,11 +111,14 @@ static int test_typed_vec_get_field_access(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 100 200]]\n"
-    "def p [vec-get $points 0]\n"
-    "[print $p]\n"
-    "[print $p->x]\n"
-    "[print $p->y]",
+    "proc main {} {\n"
+    "  def points [[Vec Point] [Point 100 200]]\n"
+    "  def p [vec-get $points 0]\n"
+    "  [print $p]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "}\n"
+    "main",
     &cap, "Point{x: 100, y: 200}\n100\n200\n"));
   TEST_PASS();
 }
@@ -156,14 +168,17 @@ static int test_typed_vec_wide_struct(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
-    "def rects [[Vec Rect] [Rect 10 20 100 200] [Rect 30 40 300 400]]\n"
-    "[print [vec-len $rects]]\n"
-    "def r [vec-get $rects 0]\n"
-    "[print $r->x]\n"
-    "[print $r->w]\n"
-    "def s [vec-get $rects 1]\n"
-    "[print $s->y]\n"
-    "[print $s->h]",
+    "proc main {} {\n"
+    "  def rects [[Vec Rect] [Rect 10 20 100 200] [Rect 30 40 300 400]]\n"
+    "  [print [vec-len $rects]]\n"
+    "  def r [vec-get $rects 0]\n"
+    "  [print $r->x]\n"
+    "  [print $r->w]\n"
+    "  def s [vec-get $rects 1]\n"
+    "  [print $s->y]\n"
+    "  [print $s->h]\n"
+    "}\n"
+    "main",
     &cap, "2\n10\n100\n40\n400\n"));
   TEST_PASS();
 }
@@ -190,16 +205,19 @@ static int test_typed_vec_gc_safety(void) {
   /* Chained push + get: ensure type is propagated through multiple pushes */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Vec Point] [Point 1 2]]\n"
-    "def b [vec-push $a [Point 3 4]]\n"
-    "def c [vec-push $b [Point 5 6]]\n"
-    "def d [vec-push $c [Point 7 8]]\n"
-    "def e [vec-push $d [Point 9 10]]\n"
-    "[print [vec-len $e]]\n"
-    "def p [vec-get $e 0]\n"
-    "[print $p->x]\n"
-    "def q [vec-get $e 4]\n"
-    "[print $q->y]",
+    "proc main {} {\n"
+    "  def a [[Vec Point] [Point 1 2]]\n"
+    "  def b [vec-push $a [Point 3 4]]\n"
+    "  def c [vec-push $b [Point 5 6]]\n"
+    "  def d [vec-push $c [Point 7 8]]\n"
+    "  def e [vec-push $d [Point 9 10]]\n"
+    "  [print [vec-len $e]]\n"
+    "  def p [vec-get $e 0]\n"
+    "  [print $p->x]\n"
+    "  def q [vec-get $e 4]\n"
+    "  [print $q->y]\n"
+    "}\n"
+    "main",
     &cap, "5\n1\n10\n"));
   TEST_PASS();
 }
@@ -523,13 +541,16 @@ static int test_typed_vec_concat(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def a [[Vec Point] [Point 1 2] [Point 3 4]]\n"
-    "def b [[Vec Point] [Point 5 6]]\n"
-    "def c [vec-concat $a $b]\n"
-    "[print [vec-len $c]]\n"
-    "def p [vec-get $c 2]\n"
-    "[print $p->x]\n"
-    "[print $p->y]",
+    "proc main {} {\n"
+    "  def a [[Vec Point] [Point 1 2] [Point 3 4]]\n"
+    "  def b [[Vec Point] [Point 5 6]]\n"
+    "  def c [vec-concat $a $b]\n"
+    "  [print [vec-len $c]]\n"
+    "  def p [vec-get $c 2]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "}\n"
+    "main",
     &cap, "3\n5\n6\n"));
   TEST_PASS();
 }
@@ -565,13 +586,16 @@ static int test_typed_vec_slice(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def points [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6] [Point 7 8]]\n"
-    "def s [vec-slice $points 1 3]\n"
-    "[print [vec-len $s]]\n"
-    "def p [vec-get $s 0]\n"
-    "[print $p->x]\n"
-    "def q [vec-get $s 1]\n"
-    "[print $q->x]",
+    "proc main {} {\n"
+    "  def points [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6] [Point 7 8]]\n"
+    "  def s [vec-slice $points 1 3]\n"
+    "  [print [vec-len $s]]\n"
+    "  def p [vec-get $s 0]\n"
+    "  [print $p->x]\n"
+    "  def q [vec-get $s 1]\n"
+    "  [print $q->x]\n"
+    "}\n"
+    "main",
     &cap, "2\n3\n5\n"));
   TEST_PASS();
 }
@@ -682,13 +706,16 @@ static int test_typed_vec_filter(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc isbig {Point p} { [> $p->x 2] }\n"
-    "def points [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6]]\n"
-    "def big [filter $points $isbig]\n"
-    "[print [vec-len $big]]\n"
-    "def p [vec-get $big 0]\n"
-    "[print $p->x]\n"
-    "def q [vec-get $big 1]\n"
-    "[print $q->x]",
+    "proc main {} {\n"
+    "  def points [[Vec Point] [Point 1 2] [Point 3 4] [Point 5 6]]\n"
+    "  def big [filter $points $isbig]\n"
+    "  [print [vec-len $big]]\n"
+    "  def p [vec-get $big 0]\n"
+    "  [print $p->x]\n"
+    "  def q [vec-get $big 1]\n"
+    "  [print $q->x]\n"
+    "}\n"
+    "main",
     &cap, "2\n3\n5\n"));
   TEST_PASS();
 }
@@ -723,11 +750,14 @@ static int test_typed_vec_filter_preserves_type(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc bigy {Point p} { [> $p->y 25] }\n"
-    "def points [[Vec Point] [Point 10 20] [Point 30 40] [Point 50 60]]\n"
-    "def big [filter $points $bigy]\n"
-    "def p [vec-get $big 0]\n"
-    "[print $p->x]\n"
-    "[print $p->y]",
+    "proc main {} {\n"
+    "  def points [[Vec Point] [Point 10 20] [Point 30 40] [Point 50 60]]\n"
+    "  def big [filter $points $bigy]\n"
+    "  def p [vec-get $big 0]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "}\n"
+    "main",
     &cap, "30\n40\n"));
   TEST_PASS();
 }
@@ -737,11 +767,14 @@ static int test_typed_vec_filter_wide_struct(void) {
   ASSERT(run_ok(
     "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
     "proc iswide {Rect r} { [> $r->w 15] }\n"
-    "def rects [[Vec Rect] [Rect 1 2 10 20] [Rect 3 4 30 40] [Rect 5 6 50 60]]\n"
-    "def big [filter $rects $iswide]\n"
-    "[print [vec-len $big]]\n"
-    "def r [vec-get $big 0]\n"
-    "[print $r->w]",
+    "proc main {} {\n"
+    "  def rects [[Vec Rect] [Rect 1 2 10 20] [Rect 3 4 30 40] [Rect 5 6 50 60]]\n"
+    "  def big [filter $rects $iswide]\n"
+    "  [print [vec-len $big]]\n"
+    "  def r [vec-get $big 0]\n"
+    "  [print $r->w]\n"
+    "}\n"
+    "main",
     &cap, "2\n30\n"));
   TEST_PASS();
 }

@@ -37,10 +37,13 @@ static int test_spread_all_basic(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
-    "p = [Point 10 20]\n"
-    "[def {..} $p]\n"
-    "[print $x]\n"
-    "[print $y]\n",
+    "proc main {} {\n"
+    "  p = [Point 10 20]\n"
+    "  [def {..} $p]\n"
+    "  [print $x]\n"
+    "  [print $y]\n"
+    "}\n"
+    "main\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n20\n");
@@ -53,11 +56,14 @@ static int test_spread_all_explicit_plus(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Vec3 {i32 x, i32 y, i32 z}\n"
-    "v = [Vec3 1 2 3]\n"
-    "[def {x, ..} $v]\n"
-    "[print $x]\n"
-    "[print $y]\n"
-    "[print $z]\n",
+    "proc main {} {\n"
+    "  v = [Vec3 1 2 3]\n"
+    "  [def {x, ..} $v]\n"
+    "  [print $x]\n"
+    "  [print $y]\n"
+    "  [print $z]\n"
+    "}\n"
+    "main\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "1\n2\n3\n");
@@ -70,11 +76,14 @@ static int test_spread_all_different_struct(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Color {i32 r, i32 g, i32 b}\n"
-    "c = [Color 255 128 0]\n"
-    "[def {..} $c]\n"
-    "[print $r]\n"
-    "[print $g]\n"
-    "[print $b]\n",
+    "proc main {} {\n"
+    "  c = [Color 255 128 0]\n"
+    "  [def {..} $c]\n"
+    "  [print $r]\n"
+    "  [print $g]\n"
+    "  [print $b]\n"
+    "}\n"
+    "main\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "255\n128\n0\n");
@@ -87,10 +96,13 @@ static int test_spread_all_no_dup(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
-    "p = [Point 10 20]\n"
-    "[def {y, ..} $p]\n"
-    "[print $x]\n"
-    "[print $y]\n",
+    "proc main {} {\n"
+    "  p = [Point 10 20]\n"
+    "  [def {y, ..} $p]\n"
+    "  [print $x]\n"
+    "  [print $y]\n"
+    "}\n"
+    "main\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n20\n");
@@ -131,35 +143,26 @@ static int test_spread_all_shadow_error(void) {
   TEST_PASS();
 }
 
-/* --- Test: spread-all at global scope --- */
+/* --- Test: top-level struct def is rejected (force boxing) --- */
 static int test_spread_all_global(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
-    "p = [Point 42 99]\n"
-    "[def {..} $p]\n"
-    "[print $x]\n"
-    "[print $y]\n",
+    "p = [Point 42 99]\n",
     &cap);
-  ASSERT_INT_EQ(r, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "42\n99\n");
+  ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
 
-/* --- Test: explicit-plus-spread at global scope --- */
+/* --- Test: top-level struct def is rejected (force boxing) --- */
 static int test_spread_all_explicit_global(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Vec3 {i32 x, i32 y, i32 z}\n"
-    "v = [Vec3 5 6 7]\n"
-    "[def {z, ..} $v]\n"
-    "[print $x]\n"
-    "[print $y]\n"
-    "[print $z]\n",
+    "v = [Vec3 5 6 7]\n",
     &cap);
-  ASSERT_INT_EQ(r, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "5\n6\n7\n");
+  ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
@@ -187,9 +190,12 @@ static int test_spread_all_single_field(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Wrapper {i64 val}\n"
-    "w = [Wrapper 100]\n"
-    "[def {..} $w]\n"
-    "[print $val]\n",
+    "proc main {} {\n"
+    "  w = [Wrapper 100]\n"
+    "  [def {..} $w]\n"
+    "  [print $val]\n"
+    "}\n"
+    "main\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "100\n");

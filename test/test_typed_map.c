@@ -29,13 +29,16 @@ static int test_typed_map_get(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point] \"a\" [Point 10 20] \"b\" [Point 30 40]]\n"
-    "def p [map-get $m \"a\"]\n"
-    "[print $p->x]\n"
-    "[print $p->y]\n"
-    "def q [map-get $m \"b\"]\n"
-    "[print $q->x]\n"
-    "[print $q->y]",
+    "proc main {} {\n"
+    "  def m [[Map Point] \"a\" [Point 10 20] \"b\" [Point 30 40]]\n"
+    "  def p [map-get $m \"a\"]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "  def q [map-get $m \"b\"]\n"
+    "  [print $q->x]\n"
+    "  [print $q->y]\n"
+    "}\n"
+    "main",
     &cap, "10\n20\n30\n40\n"));
   TEST_PASS();
 }
@@ -103,14 +106,17 @@ static int test_typed_map_set(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point] \"a\" [Point 1 2]]\n"
-    "def m2 [map-set $m \"b\" [Point 3 4]]\n"
-    "[print [map-len $m2]]\n"
-    "def p [map-get $m2 \"b\"]\n"
-    "[print $p->x]\n"
-    "[print $p->y]\n"
-    "# original unchanged (persistent)\n"
-    "[print [map-len $m]]",
+    "proc main {} {\n"
+    "  def m [[Map Point] \"a\" [Point 1 2]]\n"
+    "  def m2 [map-set $m \"b\" [Point 3 4]]\n"
+    "  [print [map-len $m2]]\n"
+    "  def p [map-get $m2 \"b\"]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "  # original unchanged (persistent)\n"
+    "  [print [map-len $m]]\n"
+    "}\n"
+    "main",
     &cap, "2\n3\n4\n1\n"));
   TEST_PASS();
 }
@@ -119,12 +125,15 @@ static int test_typed_map_set_overwrite(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point] \"a\" [Point 1 2]]\n"
-    "def m2 [map-set $m \"a\" [Point 99 88]]\n"
-    "[print [map-len $m2]]\n"
-    "def p [map-get $m2 \"a\"]\n"
-    "[print $p->x]\n"
-    "[print $p->y]",
+    "proc main {} {\n"
+    "  def m [[Map Point] \"a\" [Point 1 2]]\n"
+    "  def m2 [map-set $m \"a\" [Point 99 88]]\n"
+    "  [print [map-len $m2]]\n"
+    "  def p [map-get $m2 \"a\"]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "}\n"
+    "main",
     &cap, "1\n99\n88\n"));
   TEST_PASS();
 }
@@ -179,12 +188,15 @@ static int test_typed_map_vals(void) {
   /* vals returns a typed vec of structs */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point] \"a\" [Point 10 20]]\n"
-    "def vals [map-vals $m]\n"
-    "[print [vec-len $vals]]\n"
-    "def p [vec-get $vals 0]\n"
-    "[print $p->x]\n"
-    "[print $p->y]",
+    "proc main {} {\n"
+    "  def m [[Map Point] \"a\" [Point 10 20]]\n"
+    "  def vals [map-vals $m]\n"
+    "  [print [vec-len $vals]]\n"
+    "  def p [vec-get $vals 0]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "}\n"
+    "main",
     &cap, "1\n10\n20\n"));
   TEST_PASS();
 }
@@ -195,14 +207,17 @@ static int test_typed_map_wide_struct(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Rect {i32 x, i32 y, i32 w, i32 h}\n"
-    "def m [[Map Rect] \"a\" [Rect 10 20 100 200] \"b\" [Rect 30 40 300 400]]\n"
-    "[print [map-len $m]]\n"
-    "def r [map-get $m \"a\"]\n"
-    "[print $r->x]\n"
-    "[print $r->w]\n"
-    "def s [map-get $m \"b\"]\n"
-    "[print $s->y]\n"
-    "[print $s->h]",
+    "proc main {} {\n"
+    "  def m [[Map Rect] \"a\" [Rect 10 20 100 200] \"b\" [Rect 30 40 300 400]]\n"
+    "  [print [map-len $m]]\n"
+    "  def r [map-get $m \"a\"]\n"
+    "  [print $r->x]\n"
+    "  [print $r->w]\n"
+    "  def s [map-get $m \"b\"]\n"
+    "  [print $s->y]\n"
+    "  [print $s->h]\n"
+    "}\n"
+    "main",
     &cap, "2\n10\n100\n40\n400\n"));
   TEST_PASS();
 }
@@ -228,12 +243,15 @@ static int test_typed_map_integer_keys(void) {
   PrintCapture cap;
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point] 42 [Point 1 2] 99 [Point 3 4]]\n"
-    "def p [map-get $m 42]\n"
-    "[print $p->x]\n"
-    "[print $p->y]\n"
-    "[print [map-has $m 99]]\n"
-    "[print [map-has $m 0]]",
+    "proc main {} {\n"
+    "  def m [[Map Point] 42 [Point 1 2] 99 [Point 3 4]]\n"
+    "  def p [map-get $m 42]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "  [print [map-has $m 99]]\n"
+    "  [print [map-has $m 0]]\n"
+    "}\n"
+    "main",
     &cap, "1\n2\ntrue\nfalse\n"));
   TEST_PASS();
 }
@@ -245,17 +263,20 @@ static int test_typed_map_gc_safety(void) {
   /* Chain set operations to allocate many nodes, exercising GC */
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Point]]\n"
-    "def m [map-set $m \"a\" [Point 1 2]]\n"
-    "def m [map-set $m \"b\" [Point 3 4]]\n"
-    "def m [map-set $m \"c\" [Point 5 6]]\n"
-    "def m [map-set $m \"d\" [Point 7 8]]\n"
-    "def m [map-set $m \"e\" [Point 9 10]]\n"
-    "[print [map-len $m]]\n"
-    "def p [map-get $m \"a\"]\n"
-    "[print $p->x]\n"
-    "def q [map-get $m \"e\"]\n"
-    "[print $q->y]",
+    "proc main {} {\n"
+    "  mut m [[Map Point]]\n"
+    "  set m [map-set $m \"a\" [Point 1 2]]\n"
+    "  set m [map-set $m \"b\" [Point 3 4]]\n"
+    "  set m [map-set $m \"c\" [Point 5 6]]\n"
+    "  set m [map-set $m \"d\" [Point 7 8]]\n"
+    "  set m [map-set $m \"e\" [Point 9 10]]\n"
+    "  [print [map-len $m]]\n"
+    "  def p [map-get $m \"a\"]\n"
+    "  [print $p->x]\n"
+    "  def q [map-get $m \"e\"]\n"
+    "  [print $q->y]\n"
+    "}\n"
+    "main",
     &cap, "5\n1\n10\n"));
   TEST_PASS();
 }
@@ -496,11 +517,14 @@ static int test_typed_map_filter(void) {
   ASSERT(run_ok(
     "struct Point {i32 x, i32 y}\n"
     "proc isbig {k Point v} { [> $v->x 10] }\n"
-    "def m [[Map Point] \"a\" [Point 1 2] \"b\" [Point 30 40] \"c\" [Point 5 6]]\n"
-    "def big [filter $m $isbig]\n"
-    "[print [map-len $big]]\n"
-    "def p [map-get $big \"b\"]\n"
-    "[print $p->x]",
+    "proc main {} {\n"
+    "  def m [[Map Point] \"a\" [Point 1 2] \"b\" [Point 30 40] \"c\" [Point 5 6]]\n"
+    "  def big [filter $m $isbig]\n"
+    "  [print [map-len $big]]\n"
+    "  def p [map-get $big \"b\"]\n"
+    "  [print $p->x]\n"
+    "}\n"
+    "main",
     &cap, "1\n30\n"));
   TEST_PASS();
 }
@@ -546,13 +570,16 @@ static int test_skey_get(void) {
   ASSERT(run_ok(
     "struct Id {i32 n}\n"
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Id Point] [Id 1] [Point 10 20] [Id 2] [Point 30 40]]\n"
-    "def p [map-get $m [Id 1]]\n"
-    "[print $p->x]\n"
-    "[print $p->y]\n"
-    "def q [map-get $m [Id 2]]\n"
-    "[print $q->x]\n"
-    "[print $q->y]\n",
+    "proc main {} {\n"
+    "  def m [[Map Id Point] [Id 1] [Point 10 20] [Id 2] [Point 30 40]]\n"
+    "  def p [map-get $m [Id 1]]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "  def q [map-get $m [Id 2]]\n"
+    "  [print $q->x]\n"
+    "  [print $q->y]\n"
+    "}\n"
+    "main\n",
     &cap, "10\n20\n30\n40\n"));
   TEST_PASS();
 }
@@ -588,14 +615,17 @@ static int test_skey_set(void) {
   ASSERT(run_ok(
     "struct Id {i32 n}\n"
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Id Point] [Id 1] [Point 10 20]]\n"
-    "def m2 [map-set $m [Id 2] [Point 30 40]]\n"
-    "[print [map-len $m2]]\n"
-    "def p [map-get $m2 [Id 2]]\n"
-    "[print $p->x]\n"
-    "[print $p->y]\n"
-    "# original unchanged\n"
-    "[print [map-len $m]]\n",
+    "proc main {} {\n"
+    "  def m [[Map Id Point] [Id 1] [Point 10 20]]\n"
+    "  def m2 [map-set $m [Id 2] [Point 30 40]]\n"
+    "  [print [map-len $m2]]\n"
+    "  def p [map-get $m2 [Id 2]]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "  # original unchanged\n"
+    "  [print [map-len $m]]\n"
+    "}\n"
+    "main\n",
     &cap, "2\n30\n40\n1\n"));
   TEST_PASS();
 }
@@ -652,12 +682,15 @@ static int test_skey_vals(void) {
   ASSERT(run_ok(
     "struct Id {i32 n}\n"
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Id Point] [Id 1] [Point 10 20]]\n"
-    "def vs [map-vals $m]\n"
-    "[print [vec-len $vs]]\n"
-    "def p [vec-get $vs 0]\n"
-    "[print $p->x]\n"
-    "[print $p->y]\n",
+    "proc main {} {\n"
+    "  def m [[Map Id Point] [Id 1] [Point 10 20]]\n"
+    "  def vs [map-vals $m]\n"
+    "  [print [vec-len $vs]]\n"
+    "  def p [vec-get $vs 0]\n"
+    "  [print $p->x]\n"
+    "  [print $p->y]\n"
+    "}\n"
+    "main\n",
     &cap, "1\n10\n20\n"));
   TEST_PASS();
 }
@@ -755,11 +788,14 @@ static int test_skey_filter(void) {
     "struct Id {i32 n}\n"
     "struct Point {i32 x, i32 y}\n"
     "proc isbig {Id k Point v} { [> $v->x 10] }\n"
-    "def m [[Map Id Point] [Id 1] [Point 1 2] [Id 2] [Point 30 40]]\n"
-    "def big [filter $m $isbig]\n"
-    "[print [map-len $big]]\n"
-    "def p [map-get $big [Id 2]]\n"
-    "[print $p->x]\n",
+    "proc main {} {\n"
+    "  def m [[Map Id Point] [Id 1] [Point 1 2] [Id 2] [Point 30 40]]\n"
+    "  def big [filter $m $isbig]\n"
+    "  [print [map-len $big]]\n"
+    "  def p [map-get $big [Id 2]]\n"
+    "  [print $p->x]\n"
+    "}\n"
+    "main\n",
     &cap, "1\n30\n"));
   TEST_PASS();
 }
@@ -771,17 +807,20 @@ static int test_skey_gc_safety(void) {
   ASSERT(run_ok(
     "struct Id {i32 n}\n"
     "struct Point {i32 x, i32 y}\n"
-    "def m [[Map Id Point]]\n"
-    "def m [map-set $m [Id 1] [Point 1 2]]\n"
-    "def m [map-set $m [Id 2] [Point 3 4]]\n"
-    "def m [map-set $m [Id 3] [Point 5 6]]\n"
-    "def m [map-set $m [Id 4] [Point 7 8]]\n"
-    "def m [map-set $m [Id 5] [Point 9 10]]\n"
-    "[print [map-len $m]]\n"
-    "def p [map-get $m [Id 1]]\n"
-    "[print $p->x]\n"
-    "def q [map-get $m [Id 5]]\n"
-    "[print $q->y]\n",
+    "proc main {} {\n"
+    "  mut m [[Map Id Point]]\n"
+    "  set m [map-set $m [Id 1] [Point 1 2]]\n"
+    "  set m [map-set $m [Id 2] [Point 3 4]]\n"
+    "  set m [map-set $m [Id 3] [Point 5 6]]\n"
+    "  set m [map-set $m [Id 4] [Point 7 8]]\n"
+    "  set m [map-set $m [Id 5] [Point 9 10]]\n"
+    "  [print [map-len $m]]\n"
+    "  def p [map-get $m [Id 1]]\n"
+    "  [print $p->x]\n"
+    "  def q [map-get $m [Id 5]]\n"
+    "  [print $q->y]\n"
+    "}\n"
+    "main\n",
     &cap, "5\n1\n10\n"));
   TEST_PASS();
 }
@@ -794,12 +833,15 @@ static int test_skey_wide_key(void) {
   ASSERT(run_ok(
     "struct Coord {i32 x, i32 y, i32 z, i32 w}\n"
     "struct Val {i32 n}\n"
-    "def m [[Map Coord Val] [Coord 1 2 3 4] [Val 42]]\n"
-    "[print [map-len $m]]\n"
-    "def v [map-get $m [Coord 1 2 3 4]]\n"
-    "[print $v->n]\n"
-    "[print [map-has $m [Coord 1 2 3 4]]]\n"
-    "[print [map-has $m [Coord 9 9 9 9]]]\n",
+    "proc main {} {\n"
+    "  def m [[Map Coord Val] [Coord 1 2 3 4] [Val 42]]\n"
+    "  [print [map-len $m]]\n"
+    "  def v [map-get $m [Coord 1 2 3 4]]\n"
+    "  [print $v->n]\n"
+    "  [print [map-has $m [Coord 1 2 3 4]]]\n"
+    "  [print [map-has $m [Coord 9 9 9 9]]]\n"
+    "}\n"
+    "main\n",
     &cap, "1\n42\ntrue\nfalse\n"));
   TEST_PASS();
 }

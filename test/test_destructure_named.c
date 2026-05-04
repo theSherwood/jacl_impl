@@ -38,10 +38,13 @@ static int test_struct_destructure_basic(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
-    "p = [Point 10 20]\n"
-    "[def {x, y} $p]\n"
-    "[print $x]\n"
-    "[print $y]\n",
+    "proc main {} {\n"
+    "  p = [Point 10 20]\n"
+    "  [def {x, y} $p]\n"
+    "  [print $x]\n"
+    "  [print $y]\n"
+    "}\n"
+    "main\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n20\n");
@@ -54,10 +57,13 @@ static int test_struct_destructure_keyword(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
-    "p = [Point 10 20]\n"
-    "[def {x, y} $p]\n"
-    "[print $x]\n"
-    "[print $y]\n",
+    "proc main {} {\n"
+    "  p = [Point 10 20]\n"
+    "  [def {x, y} $p]\n"
+    "  [print $x]\n"
+    "  [print $y]\n"
+    "}\n"
+    "main\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n20\n");
@@ -85,10 +91,13 @@ static int test_field_order_independence(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
-    "p = [Point 10 20]\n"
-    "[def {y, x} $p]\n"
-    "[print $x]\n"
-    "[print $y]\n",
+    "proc main {} {\n"
+    "  p = [Point 10 20]\n"
+    "  [def {y, x} $p]\n"
+    "  [print $x]\n"
+    "  [print $y]\n"
+    "}\n"
+    "main\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n20\n");
@@ -101,12 +110,15 @@ static int test_mut_destructure(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
-    "p = [Point 10 20]\n"
-    "[mut {x, y} $p]\n"
-    "[print $x]\n"
-    "[print $y]\n"
-    "x :: 99\n"
-    "[print $x]\n",
+    "proc main {} {\n"
+    "  p = [Point 10 20]\n"
+    "  [mut {x, y} $p]\n"
+    "  [print $x]\n"
+    "  [print $y]\n"
+    "  x :: 99\n"
+    "  [print $x]\n"
+    "}\n"
+    "main\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n20\n99\n");
@@ -119,10 +131,13 @@ static int test_typed_destructure(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
-    "p = [Point 5 6]\n"
-    "[def {i32 x, i32 y} $p]\n"
-    "[print $x]\n"
-    "[print $y]\n",
+    "proc main {} {\n"
+    "  p = [Point 5 6]\n"
+    "  [def {i32 x, i32 y} $p]\n"
+    "  [print $x]\n"
+    "  [print $y]\n"
+    "}\n"
+    "main\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "5\n6\n");
@@ -135,13 +150,16 @@ static int test_nested_scope(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
-    "p = [Point 1 2]\n"
-    "proc show {} {\n"
+    "proc show {Point, p} {\n"
     "  [def {x, y} $p]\n"
     "  [print $x]\n"
     "  [print $y]\n"
     "}\n"
-    "show\n",
+    "proc main {} {\n"
+    "  p = [Point 1 2]\n"
+    "  show $p\n"
+    "}\n"
+    "main\n",
     &cap);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "1\n2\n");
@@ -154,8 +172,11 @@ static int test_missing_struct_field_compile_error(void) {
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
-    "p = [Point 1 2]\n"
-    "[def {x, z} $p]\n",
+    "proc main {} {\n"
+    "  p = [Point 1 2]\n"
+    "  [def {x, z} $p]\n"
+    "}\n"
+    "main\n",
     &cap);
   ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
@@ -186,18 +207,16 @@ static int test_non_struct_map_error(void) {
   TEST_PASS();
 }
 
-/* --- Test: global scope struct destructuring --- */
+/* --- Test: top-level struct def is rejected (force boxing) --- */
 static int test_global_scope_destructure(void) {
+  /* Top-level struct values are no longer allowed — must wrap in a proc
+     or use [box]. This test confirms the rejection. */
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y}\n"
-    "p = [Point 100 200]\n"
-    "[def {x, y} $p]\n"
-    "[print $x]\n"
-    "[print $y]\n",
+    "p = [Point 100 200]\n",
     &cap);
-  ASSERT_INT_EQ(r, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "100\n200\n");
+  ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
   TEST_PASS();
 }

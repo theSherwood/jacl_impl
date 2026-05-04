@@ -2,5 +2,8 @@
 # Test inline anonymous struct type in defstruct field
 struct Point {i32 x, i32 y}
 struct Wrapper {struct{x:i32,y:i32} pos}
-def w [Wrapper [Point 42 10]]
-print $w->pos->x
+proc main {} {
+  def w [Wrapper [Point 42 10]]
+  print $w->pos->x
+}
+main

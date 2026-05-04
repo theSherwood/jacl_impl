@@ -4737,7 +4737,8 @@ static int test_struct_new_basic(void) {
 
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 1 2]", &arena, &heap);
+      "proc main {} { def p [Point 1 2] }\n"
+      "main", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   gc_heap_destroy(&heap);
@@ -4793,8 +4794,11 @@ static int test_struct_new_runtime(void) {
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 10 20]\n"
-      "print $p",
+      "proc main {} {\n"
+      "  def p [Point 10 20]\n"
+      "  print $p\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -4818,7 +4822,8 @@ static int test_struct_width_tracking(void) {
   /* Point {i32, i32} = 8 bytes → width 1 */
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 1 2]", &arena, &heap);
+      "proc main {} { def p [Point 1 2] }\n"
+      "main", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   /* struct_registry should exist and have the Point type */
   ASSERT(cr.struct_registry != NULL);
@@ -5102,9 +5107,12 @@ static int test_struct_new_heap_path_unchanged(void) {
 
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 10 20]\n"
-      "print $p->x\n"
-      "print $p->y",
+      "proc main {} {\n"
+      "  def p [Point 10 20]\n"
+      "  print $p->x\n"
+      "  print $p->y\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n20\n");
@@ -6016,9 +6024,12 @@ static int test_struct_get_basic(void) {
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 10 20]\n"
-      "print $p->x\n"
-      "print $p->y",
+      "proc main {} {\n"
+      "  def p [Point 10 20]\n"
+      "  print $p->x\n"
+      "  print $p->y\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -6060,8 +6071,11 @@ static int test_struct_get_nested(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "struct Line {Point start, Point end}\n"
-      "def ln [Line [Point 5 6] [Point 10 20]]\n"
-      "print $ln->start->x",
+      "proc main {} {\n"
+      "  def ln [Line [Point 5 6] [Point 10 20]]\n"
+      "  print $ln->start->x\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -6085,10 +6099,13 @@ static int test_struct_set_basic(void) {
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
       "struct Point {mut i32 x, i32 y}\n"
-      "def p [Point 10 20]\n"
-      ". $p x 99\n"
-      "print $p->x\n"
-      "print $p->y",
+      "proc main {} {\n"
+      "  def p [Point 10 20]\n"
+      "  . $p x 99\n"
+      "  print $p->x\n"
+      "  print $p->y\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -6148,9 +6165,12 @@ static int test_struct_set_preserves_other_fields(void) {
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
       "struct Pair {mut i32 a, i32 b}\n"
-      "def p [Pair 1 2]\n"
-      ". $p a 42\n"
-      "print $p->b",
+      "proc main {} {\n"
+      "  def p [Pair 1 2]\n"
+      "  . $p a 42\n"
+      "  print $p->b\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -6196,9 +6216,12 @@ static int test_struct_in_vec(void) {
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "def v [vec [box [Point 1 2]] [box [Point 3 4]]]\n"
-      "def p [deref [vec-get $v 1]]\n"
-      "print $p->x",
+      "proc main {} {\n"
+      "  def v [vec [box [Point 1 2]] [box [Point 3 4]]]\n"
+      "  def p [deref [vec-get $v 1]]\n"
+      "  print $p->x\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -6227,11 +6250,14 @@ static int test_struct_box_roundtrip(void) {
 
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 10 20]\n"
-      "def b [box $p]\n"
-      "def q [deref $b]\n"
-      "print $q->x\n"
-      "print $q->y",
+      "proc main {} {\n"
+      "  def p [Point 10 20]\n"
+      "  def b [box $p]\n"
+      "  def q [deref $b]\n"
+      "  print $q->x\n"
+      "  print $q->y\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n20\n");
@@ -6259,13 +6285,16 @@ static int test_struct_box_reset(void) {
 
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 10 20]\n"
-      "def b [box $p]\n"
-      "def q [Point 30 40]\n"
-      "reset $b $q\n"
-      "def r [deref $b]\n"
-      "print $r->x\n"
-      "print $r->y",
+      "proc main {} {\n"
+      "  def p [Point 10 20]\n"
+      "  def b [box $p]\n"
+      "  def q [Point 30 40]\n"
+      "  reset $b $q\n"
+      "  def r [deref $b]\n"
+      "  print $r->x\n"
+      "  print $r->y\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
   ASSERT_STR_EQ(cap.buf, "30\n40\n");
@@ -6293,13 +6322,16 @@ static int test_struct_box_swap(void) {
 
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 10 20]\n"
-      "def b [box $p]\n"
       "proc Point swapper {dyn old} { Point 99 88 }\n"
-      "swap $b $swapper\n"
-      "def r [deref $b]\n"
-      "print $r->x\n"
-      "print $r->y",
+      "proc main {} {\n"
+      "  def p [Point 10 20]\n"
+      "  def b [box $p]\n"
+      "  swap $b $swapper\n"
+      "  def r [deref $b]\n"
+      "  print $r->x\n"
+      "  print $r->y\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
   ASSERT_STR_EQ(cap.buf, "99\n88\n");
@@ -6327,12 +6359,15 @@ static int test_struct_box_deref_isolation(void) {
 
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 10 20]\n"
-      "def b [box $p]\n"
-      "def q [deref $b]\n"
-      "reset $b [Point 99 88]\n"
-      "print $q->x\n"
-      "print $q->y",
+      "proc main {} {\n"
+      "  def p [Point 10 20]\n"
+      "  def b [box $p]\n"
+      "  def q [deref $b]\n"
+      "  reset $b [Point 99 88]\n"
+      "  print $q->x\n"
+      "  print $q->y\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n20\n");
@@ -7045,8 +7080,11 @@ static int test_inline_struct_runtime(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "struct Wrapper {struct{x:i32,y:i32} pos}\n"
-      "def w [Wrapper [Point 42 10]]\n"
-      "print $w->pos->x",
+      "proc main {} {\n"
+      "  def w [Wrapper [Point 42 10]]\n"
+      "  print $w->pos->x\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -7141,8 +7179,11 @@ static int test_struct_module_import(void) {
     "struct Point {i32 x, i32 y}\n");
   write_temp_jacl(dir, "main.jacl",
     "use \"shapes.jacl\" {Point}\n"
-    "def p [Point 42 10]\n"
-    "print $p->x\n");
+    "proc main {} {\n"
+    "  def p [Point 42 10]\n"
+    "  print $p->x\n"
+    "}\n"
+    "main\n");
 
   ProgramResult pr = jacl_compile_program(
       "/tmp/jacl_us009a/main.jacl", &arena, &intern, &heap);
@@ -7204,8 +7245,11 @@ static int test_struct_new_syntax_runtime(void) {
   vm_init(&vm, &arena);
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 10 20]\n"
-      "print $p->x",
+      "proc main {} {\n"
+      "  def p [Point 10 20]\n"
+      "  print $p->x\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
 
@@ -7268,9 +7312,12 @@ static int test_struct_new_syntax_construct_and_access(void) {
 
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "def p [Point 3 7]\n"
-      "print $p->x\n"
-      "print $p->y",
+      "proc main {} {\n"
+      "  def p [Point 3 7]\n"
+      "  print $p->x\n"
+      "  print $p->y\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT(r == VM_OK);
   ASSERT_STR_EQ(cap.buf, "3\n7\n");
@@ -9296,9 +9343,12 @@ static int test_arrow_basic_get(void) {
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "p = [Point 10 20]\n"
-      "print $p->x\n"
-      "print $p->y",
+      "proc main {} {\n"
+      "  p = [Point 10 20]\n"
+      "  print $p->x\n"
+      "  print $p->y\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "10\n20\n");
@@ -9325,9 +9375,12 @@ static int test_arrow_chained_get(void) {
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
       "struct Line {Point start, Point end}\n"
-      "ln = [Line [Point 5 6] [Point 10 20]]\n"
-      "print $ln->start->x\n"
-      "print $ln->end->y",
+      "proc main {} {\n"
+      "  ln = [Line [Point 5 6] [Point 10 20]]\n"
+      "  print $ln->start->x\n"
+      "  print $ln->end->y\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "5\n20\n");
@@ -9380,8 +9433,11 @@ static int test_arrow_in_infix_mode(void) {
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "p = [Point 10 20]\n"
-      "print ($p->x + $p->y)",
+      "proc main {} {\n"
+      "  p = [Point 10 20]\n"
+      "  print ($p->x + $p->y)\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "30\n");
@@ -9407,8 +9463,11 @@ static int test_arrow_in_bracket_cmd(void) {
   vm.print_ctx = &cap;
   VMResult r = jacl_run(
       "struct Point {i32 x, i32 y}\n"
-      "p = [Point 10 20]\n"
-      "print [+ $p->x $p->y]",
+      "proc main {} {\n"
+      "  p = [Point 10 20]\n"
+      "  print [+ $p->x $p->y]\n"
+      "}\n"
+      "main",
       &vm, &arena);
   ASSERT_INT_EQ(r, VM_OK);
   ASSERT_STR_EQ(cap.buf, "30\n");
