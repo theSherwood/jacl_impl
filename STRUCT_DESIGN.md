@@ -98,9 +98,16 @@ rejections that direct the user to `[box $val]`:
   a typed local first.
 
 A struct value can only appear in:
-- a typed local / parameter / return / upvalue,
+- a typed local / parameter / return / upvalue (inline bytes across stack slots),
 - a typed vec/map element (stored inline in the leaf),
-- inside a `[box]` (sanctioned heap path).
+- inside a `[box]` (sanctioned heap path via `JaclMutableRef`).
+
+**Structs cannot live at top level.** A script like `def Point p [Point 1 2]`
+at top level is a compile error directing the user to either wrap the body
+in a proc (so `p` becomes a wide local) or use `[box]` explicitly. Globals
+are single-slot `JaclVal` storage and would force auto-allocation otherwise.
+Ctx is exempt — it's the lone HeapRecord builtin and is registered through
+its own embedder-side path.
 
 ## Box Representation
 

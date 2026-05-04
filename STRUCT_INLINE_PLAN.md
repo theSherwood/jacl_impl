@@ -170,6 +170,9 @@ than the brief implied — see notes below.
 - `print $struct` → add `OP_PRINT_STRUCT` (registry-aware formatter).
 - `eq` between dyn and struct → compile error (no transient reify).
 - `def dyn d [Point ...]` and similar dyn-storage of structs → compile error.
+- **Top-level struct globals → compile error.** User wraps in `proc main`
+  or uses `[box]`. No wide-globals architecture; consistent with the mut
+  rule and avoids the embed-boundary impedance mismatch.
 
 **Order of remaining work:**
 1. Add `OP_LOAD_INLINE_LOCAL` + `OP_LOAD_INLINE_UPVALUE`. Switch var-ref of
