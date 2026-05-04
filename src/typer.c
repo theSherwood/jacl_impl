@@ -811,6 +811,10 @@ void typer_infer(AstNode** nodes, uint32_t count) {
   tc.struct_count  = 0;
   tc.expected_type = TYPE_DYN;
 
+  /* Builtin: $ctx is always a struct (the ctx record). Add at the
+   * outer scope so all user code can resolve it. */
+  typer__scope_add(&tc, "ctx", 3, 0, TYPE_STRUCT, UINT32_MAX);
+
   /* Pre-pass: register top-level struct definitions and proc signatures
    * so constructor calls and proc calls (which may appear before the
    * definition) resolve correctly. */
