@@ -265,3 +265,49 @@ The typer is now correct enough to drive codegen for the cases it claims (litera
 ### Phase 3c planning
 
 The cleanest first switch is the `compile_binary` LHS-to-RHS narrowing at `compiler.c:4097-4100`. That code already does what the typer now mirrors; the compiler can read `lhs->inferred_type` instead of computing it via re-walking. After a few such conversions, the dual-track harness flips polarity: instead of checking the typer against the compiler, it'll check the compiler's residual computations against the typer.
+
+---
+
+## Phase 3b — completed
+
+92/92 tests pass throughout. Twelve commits drove the typer to provable equivalence with the compiler on every pattern in the test suite:
+
+| Commit | What |
+|---|---|
+| `71e9e6c` | Scope tracker, var-ref, def/mut/set/proc handlers, dual-track harness |
+| `741ffe6` | Literal expected_type propagation. m11: 123→35 mismatches |
+| `8a5cf72` | Proc signature pre-pass + call-arg propagation. m11: 35→26, harness: 10→6 |
+| `c62b48d` | Binary-op LHS-to-RHS narrowing. m11: 26→9 |
+| `6091abd` | Nested-proc registration. m11: 9→7 |
+| `50064bd` | `::` sugar, command boundary reset, proc-body return_type push. m11: 7→0 |
+| `bde0179` | Struct registry + constructor field narrowing. harness: 4→0 mismatches |
+| `3d6628d` | Dual-track distinguishes mismatch (typer bug) vs gap (typer conservative) |
+| `71b1ffd` | `=`/`:` sugar forms, completing all binding shapes |
+
+Final dual-track: **m11 0 mismatches / 0 gaps. harness 0 mismatches / 201 gaps.** All harness gaps are typer omissions (LIT_INT inside CTX_DECL, BLOCK result-type tracking through some struct cases, ERROR-node sites). Long tail; doesn't block Phase 3c.
+
+## Phase 3c — first consumer switches
+
+Two compile sites now read types from the typer's AST annotations instead of `c->last_expr_type`:
+
+| Commit | Site | What changed |
+|---|---|---|
+| `2e0de1e` | `compile_binary` | LHS and RHS types come from `args[i]->inferred_type` (with `c->last_expr_type` fallback for typer gaps) |
+| `71b1ffd` | def/mut value RHS type read | Same pattern at the typed-binding sites in `compile_command` |
+
+Each switch is behaviorally identical; the dual-track invariants are unchanged. The pattern works.
+
+### Next switches (mechanical, by frequency)
+
+1. The remaining 4 set! sites (compiler.c around 6366, 6420, 6478, 6510) read `rhs_type` after `compile_node`. Same pattern; same fallback.
+2. Struct field constructor and SET sites (Phase 1's six sites). `val_type` reads can move to AST.
+3. Return-type checking at proc body completion. Reads body's last expression's type.
+4. Eventually: every `JaclType x = c->last_expr_type;` after a `compile_node` call becomes `JaclType x = node->inferred_type;` (with fallback while gaps exist).
+
+### Long-tail typer expansions to close the 201 harness gaps
+
+- AST_CTX_DECL recursion (literal args inside ctx field defaults).
+- AST_BLOCK result type when last command is a struct constructor / typed call (some path leaves it DYN).
+- AST_USE / AST_DEFSTRUCT (typically don't matter for codegen-time decisions).
+
+Each is a small focused commit. Closing them shrinks the fallback path until consumers can drop `c->last_expr_type` reads entirely (at which point the writes can be deleted, and `compiler.c` shrinks materially).
