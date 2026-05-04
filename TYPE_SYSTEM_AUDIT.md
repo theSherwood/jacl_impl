@@ -311,3 +311,34 @@ Each switch is behaviorally identical; the dual-track invariants are unchanged. 
 - AST_USE / AST_DEFSTRUCT (typically don't matter for codegen-time decisions).
 
 Each is a small focused commit. Closing them shrinks the fallback path until consumers can drop `c->last_expr_type` reads entirely (at which point the writes can be deleted, and `compiler.c` shrinks materially).
+
+---
+
+## Phase 3c — substantive read-switch complete
+
+| Commit | What |
+|---|---|
+| `be65d9a` | Four set! sites (local mutable, upvalue, two global mutable variants) |
+| `d290639` | Struct field SET (inline + heap + ctx) and ctx fork override |
+| `09b9a3a` | Unary minus, struct constructor field args, proc call args |
+| `e6cadf3` | set! source struct path, for-loop col_type, to-cast src_type, take col_type, dot-access struct_type |
+| `beb9fc0` | if-expression then/else branch types via block AST nodes |
+
+**The only remaining read of `c->last_expr_type` at codegen time is the dual-track invariant check itself (compiler.c:12382).** Every substantive type-decision read now drives off the typer's AST annotations.
+
+Dual-track invariants preserved across every switch: m11 0/0, harness 0 mismatches / 201 gaps (unchanged from Phase 3b finish).
+
+### What this means
+
+The typer pass is now the *primary* type oracle for codegen. Compiler-side `last_expr_type` writes are still needed because of the 201 gap fallbacks, but those writes are no longer load-bearing for the typer-covered paths.
+
+### Path to compiler.c shrinking (Phase 3d?)
+
+The compiler.c shrink the audit predicted requires deleting the inference logic that *writes* to `c->last_expr_type`. To do that safely:
+
+1. **Close the remaining 201 typer gaps.** Each gap means at least one consumer site falls back to the compiler's tracker. Close all → fallbacks become dead code.
+2. **Remove the `if (x == TYPE_DYN) x = c->last_expr_type` fallbacks** from the ~15 switched consumer sites. After this, no one reads `c->last_expr_type`.
+3. **Delete the writes.** The ~50+ `c->last_expr_type = X` lines plus the propagation through return type checks, struct equality, etc. can be removed.
+4. **Delete the `last_expr_type` / `expected_type` / `last_struct_idx` fields** on `Compiler`. The corresponding type-tracking glue (~500 LOC by my earlier estimate) becomes deletable.
+
+The 201 gaps are concentrated: most are a few specific patterns (CTX_DECL recursion, certain block result types). A few focused commits should close them. After that, steps 2–4 are mechanical.
