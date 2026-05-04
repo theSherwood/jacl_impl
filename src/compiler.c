@@ -1572,25 +1572,21 @@ void sm__add_state_field(StateLayout* layout, JaclVal name,
 
 /* Look up a variable name in the StateLayout.
    Returns the field index (0..field_count-1) or -1 if not found. */
-int sm__find_field(const StateLayout* layout, JaclVal name) {
+const StateField* sm__get_field(const StateLayout* layout, JaclVal name) {
   for (uint32_t i = 0; i < layout->field_count; i++) {
-    if (layout->fields[i].name == name) return (int)layout->fields[i].field_index;
+    if (layout->fields[i].name == name) return &layout->fields[i];
   }
-  return -1;
+  return NULL;
+}
+
+int sm__find_field(const StateLayout* layout, JaclVal name) {
+  const StateField* f = sm__get_field(layout, name);
+  return f ? (int)f->field_index : -1;
 }
 
 bool sm__is_field_mutable(const StateLayout* layout, JaclVal name) {
-  for (uint32_t i = 0; i < layout->field_count; i++) {
-    if (layout->fields[i].name == name) return layout->fields[i].is_mutable;
-  }
-  return false;
-}
-
-uint16_t sm__find_field_width(const StateLayout* layout, JaclVal name) {
-  for (uint32_t i = 0; i < layout->field_count; i++) {
-    if (layout->fields[i].name == name) return layout->fields[i].width;
-  }
-  return 1;
+  const StateField* f = sm__get_field(layout, name);
+  return f ? f->is_mutable : false;
 }
 
 /* Collect names from an AST_DESTRUCTURE_VEC node into the state layout. */
@@ -7003,26 +6999,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     if (c->sm_analysis) {
       /* SM mode: write value to state object field instead of local slot. */
-      int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
-      if (field_idx >= 0) {
-        /* Look up StateField width + struct_type_idx. */
-        uint16_t fwidth = 1;
-        uint32_t fstruct_idx = 0;
-        for (uint32_t i = 0; i < c->sm_analysis->state_layout.field_count; i++) {
-          if (c->sm_analysis->state_layout.fields[i].name == name_val) {
-            fwidth = c->sm_analysis->state_layout.fields[i].width;
-            fstruct_idx = c->sm_analysis->state_layout.fields[i].struct_type_idx;
-            break;
-          }
-        }
-        if (fstruct_idx != 0) {
+      const StateField* sf = sm__get_field(&c->sm_analysis->state_layout, name_val);
+      if (sf) {
+        if (sf->struct_type_idx != 0) {
           /* Struct state field: write N inline slots. */
           compiler__emit_byte(c, OP_SET_STATE_FIELD_WIDE, line);
-          compiler__emit_byte(c, (uint8_t)field_idx, line);
-          compiler__emit_byte(c, (uint8_t)fwidth, line);
+          compiler__emit_byte(c, (uint8_t)sf->field_index, line);
+          compiler__emit_byte(c, (uint8_t)sf->width, line);
         } else {
           compiler__emit_byte(c, OP_SET_STATE_FIELD, line);
-          compiler__emit_byte(c, (uint8_t)field_idx, line);
+          compiler__emit_byte(c, (uint8_t)sf->field_index, line);
         }
         /* def returns nil */
         compiler__emit_byte(c, OP_NIL, line);
@@ -11186,31 +11172,20 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
 
       /* SM mode: resolve variables from state object fields first */
       if (c->sm_analysis) {
-        int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
-        if (field_idx >= 0) {
-          bool is_mut = sm__is_field_mutable(&c->sm_analysis->state_layout, name_val);
-          /* Find the StateField to get width and struct_type_idx. */
-          uint16_t fwidth = 1;
-          uint32_t fstruct_idx = 0;  /* 0 == not a struct field */
-          for (uint32_t i = 0; i < c->sm_analysis->state_layout.field_count; i++) {
-            if (c->sm_analysis->state_layout.fields[i].name == name_val) {
-              fwidth = c->sm_analysis->state_layout.fields[i].width;
-              fstruct_idx = c->sm_analysis->state_layout.fields[i].struct_type_idx;
-              break;
-            }
-          }
-          if (fstruct_idx != 0 && !is_mut) {
+        const StateField* sf = sm__get_field(&c->sm_analysis->state_layout, name_val);
+        if (sf) {
+          if (sf->struct_type_idx != 0 && !sf->is_mutable) {
             /* Struct state field: push N inline slots via WIDE op. */
             compiler__emit_byte(c, OP_GET_STATE_FIELD_WIDE, line);
-            compiler__emit_byte(c, (uint8_t)field_idx, line);
-            compiler__emit_byte(c, (uint8_t)fwidth, line);
+            compiler__emit_byte(c, (uint8_t)sf->field_index, line);
+            compiler__emit_byte(c, (uint8_t)sf->width, line);
             c->inline_repr = INLINE_STACK;
             c->last_expr_type = TYPE_STRUCT;
-            c->last_struct_idx = fstruct_idx;
+            c->last_struct_idx = sf->struct_type_idx;
           } else {
-            compiler__emit_byte(c, is_mut ? OP_GET_STATE_FIELD_CELL
-                                          : OP_GET_STATE_FIELD, line);
-            compiler__emit_byte(c, (uint8_t)field_idx, line);
+            compiler__emit_byte(c, sf->is_mutable ? OP_GET_STATE_FIELD_CELL
+                                                  : OP_GET_STATE_FIELD, line);
+            compiler__emit_byte(c, (uint8_t)sf->field_index, line);
             c->last_expr_type = TYPE_DYN;
           }
           break;

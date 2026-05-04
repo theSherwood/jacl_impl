@@ -1958,9 +1958,9 @@ extern void analyze__collect_procs (AstNode *node, ProcSuspendInfoList *list, Th
 extern SuspensionMap compiler__analyze_suspension (AstNode **nodes, uint32_t count, ThreadHeap *heap, JaclInternTable *intern_table);
 extern void sm__walk_suspensions (AstNode *node, SuspensionAnalysis *analysis, SuspensionMap *map, ThreadHeap *heap, JaclInternTable *intern_table);
 extern void sm__add_state_field (StateLayout *layout, JaclVal name, bool is_mutable, bool is_param, uint16_t width, uint32_t struct_type_idx);
+extern const StateField* sm__get_field (const StateLayout *layout, JaclVal name);
 extern int sm__find_field (const StateLayout *layout, JaclVal name);
 extern bool sm__is_field_mutable (const StateLayout *layout, JaclVal name);
-extern uint16_t sm__find_field_width (const StateLayout *layout, JaclVal name);
 extern void sm__collect_destructure_vec_names (AstNode *dv, StateLayout *layout, bool is_mutable);
 extern void sm__collect_destructure_named_names (AstNode *dn, StateLayout *layout, bool is_mutable);
 extern void sm__collect_command_destructure_names (AstNode *pat, StateLayout *layout, bool is_mutable);

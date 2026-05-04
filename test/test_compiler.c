@@ -5206,9 +5206,9 @@ static int test_sm_state_field_width_struct(void) {
   ASSERT_INT_EQ(sm__find_field(&layout, a), 0);
   ASSERT_INT_EQ(sm__find_field(&layout, s), 1);
   ASSERT_INT_EQ(sm__find_field(&layout, c), 4);
-  /* sm__find_field_width returns width */
-  ASSERT_U32_EQ(sm__find_field_width(&layout, s), 3);
-  ASSERT_U32_EQ(sm__find_field_width(&layout, a), 1);
+  /* sm__get_field exposes the full StateField (incl. width) */
+  ASSERT_U32_EQ(sm__get_field(&layout, s)->width, 3);
+  ASSERT_U32_EQ(sm__get_field(&layout, a)->width, 1);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);
@@ -5252,10 +5252,9 @@ static int test_sm_walk_locals_struct_width(void) {
 
   /* Should have fields: v (width 3 for Vec3 = 24 bytes / 8 = 3 slots) */
   JaclVal v_name = jacl_inline_string("v", 1);
-  int v_idx = sm__find_field(&analysis.state_layout, v_name);
-  ASSERT(v_idx >= 0);
-  uint16_t v_width = sm__find_field_width(&analysis.state_layout, v_name);
-  ASSERT_U32_EQ(v_width, 3);
+  const StateField* v_sf = sm__get_field(&analysis.state_layout, v_name);
+  ASSERT(v_sf != NULL);
+  ASSERT_U32_EQ(v_sf->width, 3);
   ASSERT_U32_EQ(analysis.state_layout.total_slots >= 3, 1);
 
   gc_heap_destroy(&heap);
