@@ -196,12 +196,31 @@ static bool typer__handle_set(TyperCtx* tc, AstNode* node) {
   AstNode* target = args[0];
   AstNode* value  = args[1];
 
-  /* Resolve target's type if it's a simple var-ref (skip field access etc.). */
+  /* Resolve target's type. For `set name value`, the name is parsed as a
+   * bare string literal (AST_LIT_STRING). For `$name :: value`, it's a
+   * var-ref. Both forms — plus the AST_COMMAND arrow form (handled
+   * separately in compiler.c) — should look up the binding. */
   JaclType target_type = TYPE_DYN;
+  const char* tname = NULL;
+  uint32_t    tlen  = 0;
   if (target->type == AST_VAR_REF) {
-    const TyperBinding* b = typer__scope_resolve(tc,
-        target->data.var_ref.name, target->data.var_ref.length,
-        target->scope_mark);
+    tname = target->data.var_ref.name;
+    tlen  = target->data.var_ref.length;
+  } else if (target->type == AST_LIT_STRING) {
+    tname = target->data.lit_string.value;
+    tlen  = target->data.lit_string.length;
+  } else if (target->type == AST_COMMAND &&
+             target->data.command.arg_count == 0 &&
+             target->data.command.head &&
+             target->data.command.head->type == AST_LIT_STRING) {
+    /* `x :: value` parses x as AST_COMMAND with head LIT_STRING and no
+     * args — a "command call with no args" form for bare identifiers
+     * on the LHS of an infix. Treat as a name lookup. */
+    tname = target->data.command.head->data.lit_string.value;
+    tlen  = target->data.command.head->data.lit_string.length;
+  }
+  if (tname) {
+    const TyperBinding* b = typer__scope_resolve(tc, tname, tlen, target->scope_mark);
     if (b) target_type = (JaclType)b->type;
   }
   typer__infer_node(tc, target);
@@ -350,7 +369,28 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
                      pn[i]->scope_mark, (uint8_t)pt[i], UINT32_MAX);
   }
 
-  typer__infer_node(tc, body);
+  /* Walk body. For the last statement, push return_type as expected_type
+   * so int/float literals at the tail position get narrowed (mirrors
+   * compiler.c:3851-3853). */
+  uint32_t body_count = body->data.block.count;
+  if (body_count == 0) {
+    body->inferred_type = TYPE_NIL;
+  } else {
+    for (uint32_t i = 0; i + 1 < body_count; i++) {
+      typer__infer_node(tc, body->data.block.commands[i]);
+    }
+    JaclType saved_et = tc->expected_type;
+    if (return_type != TYPE_DYN) tc->expected_type = return_type;
+    typer__infer_node(tc, body->data.block.commands[body_count - 1]);
+    tc->expected_type = saved_et;
+    if (!body->data.block.trailing_semi) {
+      AstNode* last = body->data.block.commands[body_count - 1];
+      body->inferred_type = last->inferred_type;
+      body->inferred_struct_idx = last->inferred_struct_idx;
+    } else {
+      body->inferred_type = TYPE_NIL;
+    }
+  }
 
   typer__scope_pop(tc);
   node->inferred_type = TYPE_DYN; /* proc def itself returns nil-ish */
@@ -418,19 +458,40 @@ static const TyperProc* typer__find_proc(TyperCtx* tc,
 
 /* --- Generic walkers --- */
 
+static void typer__infer_command_inner(TyperCtx* tc, AstNode* node);
+
 static void typer__infer_command(TyperCtx* tc, AstNode* node) {
+  /* Reset expected_type at command boundaries so sub-expressions don't
+   * inherit parent context. Individual handlers (typed def/mut, set,
+   * binary ops, proc calls) re-establish it for their own arguments.
+   * Restored on exit so the caller's expected_type is preserved.
+   * Mirrors compiler.c:5199. */
+  JaclType outer_et = tc->expected_type;
+  tc->expected_type = TYPE_DYN;
+  typer__infer_command_inner(tc, node);
+  tc->expected_type = outer_et;
+}
+
+static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   AstNode* head = node->data.command.head;
 
-  /* Recognize a few common command shapes. Anything not handled falls
-   * through to a generic call dispatch (which propagates known proc
-   * param types as expected_type for arg literals). */
+  /* Recognize a few common command shapes. Compiler.c rewrites `::` →
+   * set during its compile walk (compiler.c:5556); the typer runs
+   * before that rewrite, so it must recognize the sugar form directly.
+   * (`=` → def, `:` → mut have different AST shapes — LHS is a typed
+   * sub-command — so we handle those only via the keyword forms after
+   * the compiler's rewrite. Future: handle the sugar shapes too.)
+   * Anything not handled falls through to generic call dispatch. */
   if (head && head->type == AST_LIT_STRING) {
     const char* hname = head->data.lit_string.value;
     uint32_t    hlen  = head->data.lit_string.length;
-    if ((hlen == 3 && memcmp(hname, "def", 3) == 0) ||
-        (hlen == 3 && memcmp(hname, "mut", 3) == 0)) {
+    bool is_def_or_mut = (hlen == 3 && memcmp(hname, "def", 3) == 0) ||
+                         (hlen == 3 && memcmp(hname, "mut", 3) == 0);
+    bool is_set = (hlen == 3 && memcmp(hname, "set", 3) == 0) ||
+                  (hlen == 2 && memcmp(hname, "::", 2) == 0);
+    if (is_def_or_mut) {
       if (typer__handle_def_or_mut(tc, node)) return;
-    } else if (hlen == 3 && memcmp(hname, "set", 3) == 0) {
+    } else if (is_set) {
       if (typer__handle_set(tc, node)) return;
     } else if (hlen == 4 && memcmp(hname, "proc", 4) == 0) {
       if (typer__handle_proc(tc, node)) return;
