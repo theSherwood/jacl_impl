@@ -163,7 +163,67 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     /* Two-arg shapes:
      *   def NAME VALUE                           — keyword + bare name
      *   [TYPE NAME] = VALUE / [TYPE NAME] : VALUE — sugar with typed LHS
+     *   def DESTRUCTURE_VEC VALUE                 — vec destructuring
+     *   def DESTRUCTURE_NAMED VALUE               — struct/map destructuring
      * The sugar form's LHS is an AST_COMMAND with head=type and one arg=name. */
+    if (args[0]->type == AST_DESTRUCTURE_VEC) {
+      JaclType saved_et = tc->expected_type;
+      tc->expected_type = TYPE_DYN;
+      typer__infer_node(tc, args[1]);
+      tc->expected_type = saved_et;
+      uint32_t cnt = args[0]->data.destructure_vec.count;
+      for (uint32_t i = 0; i < cnt; i++) {
+        JaclType t = TYPE_DYN;
+        if (args[0]->data.destructure_vec.types &&
+            args[0]->data.destructure_vec.types[i] &&
+            is_type_keyword(args[0]->data.destructure_vec.types[i],
+                            args[0]->data.destructure_vec.type_lens[i])) {
+          t = type_from_keyword(args[0]->data.destructure_vec.types[i],
+                                args[0]->data.destructure_vec.type_lens[i]);
+        }
+        typer__scope_add(tc,
+            args[0]->data.destructure_vec.names[i],
+            args[0]->data.destructure_vec.name_lens[i],
+            args[0]->scope_mark, (uint8_t)t, UINT32_MAX);
+      }
+      node->inferred_type = TYPE_NIL;
+      return true;
+    }
+    if (args[0]->type == AST_DESTRUCTURE_NAMED) {
+      JaclType saved_et = tc->expected_type;
+      tc->expected_type = TYPE_DYN;
+      typer__infer_node(tc, args[1]);
+      tc->expected_type = saved_et;
+      uint32_t cnt = args[0]->data.destructure_named.count;
+      /* If the value is a struct, look up field types from the registry
+       * (when present) so destructured names get the right type. */
+      const TyperStruct* src_struct = NULL;
+      if (args[1]->inferred_type == TYPE_STRUCT &&
+          args[1]->inferred_struct_idx != UINT32_MAX) {
+        for (uint32_t si = 0; si < tc->struct_count; si++) {
+          /* No idx-to-struct mapping yet; struct registry indexed by typer. */
+          /* Skip — fall through to dyn for now. */
+          (void)si;
+        }
+      }
+      (void)src_struct;
+      for (uint32_t i = 0; i < cnt; i++) {
+        JaclType t = TYPE_DYN;
+        if (args[0]->data.destructure_named.types &&
+            args[0]->data.destructure_named.types[i] &&
+            is_type_keyword(args[0]->data.destructure_named.types[i],
+                            args[0]->data.destructure_named.type_lens[i])) {
+          t = type_from_keyword(args[0]->data.destructure_named.types[i],
+                                args[0]->data.destructure_named.type_lens[i]);
+        }
+        typer__scope_add(tc,
+            args[0]->data.destructure_named.names[i],
+            args[0]->data.destructure_named.name_lens[i],
+            args[0]->scope_mark, (uint8_t)t, UINT32_MAX);
+      }
+      node->inferred_type = TYPE_NIL;
+      return true;
+    }
     if (args[0]->type == AST_COMMAND &&
         args[0]->data.command.arg_count == 1 &&
         args[0]->data.command.head &&
@@ -180,7 +240,7 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   }
 
   if (name_node->type != AST_LIT_STRING) {
-    /* Destructuring or hygienic var-ref name forms — defer. */
+    /* Hygienic var-ref name forms — defer. */
     return false;
   }
 
