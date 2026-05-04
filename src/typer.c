@@ -21,6 +21,7 @@
 #define TYPER_MAX_PROC_PARAMS   32
 #define TYPER_MAX_STRUCTS      256
 #define TYPER_MAX_STRUCT_FIELDS 32
+#define TYPER_MAX_NARROWINGS   8
 
 typedef struct {
   const char* name;
@@ -67,6 +68,17 @@ typedef struct {
    * c->expected_type. Set by callers (e.g., typed def/mut) before recursing
    * into the value expression; restored after. */
   JaclType     expected_type;
+  /* Flow-typing narrowings from [box? Type $var] guards in if-branches.
+   * Mirrors compiler.c:2810-2817. Active only inside the then-branch of
+   * a box?-guarded if; saved/restored across branch boundaries. */
+  struct {
+    const char* name;
+    uint32_t    name_len;
+    uint32_t    scope_mark;
+    uint8_t     box_type;        /* JaclType */
+    uint32_t    box_struct_idx;  /* UINT32_MAX if not struct */
+  } narrowings[TYPER_MAX_NARROWINGS];
+  uint32_t     narrowing_count;
 } TyperCtx;
 
 static void typer__infer_node(TyperCtx* tc, AstNode* node);
@@ -781,6 +793,86 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       if (typer__handle_set(tc, node)) return;
     } else if (hlen == 4 && memcmp(hname, "proc", 4) == 0) {
       if (typer__handle_proc(tc, node)) return;
+    } else if (hlen == 2 && memcmp(hname, "if", 2) == 0 &&
+               (node->data.command.arg_count == 2 || node->data.command.arg_count == 3)) {
+      /* if [cond] {then} {else?} — detect [box? Type $var] for flow
+       * typing. Mirrors compiler.c:7651-7708. */
+      AstNode** as = node->data.command.args;
+      AstNode* cond = as[0];
+      bool pushed = false;
+      if (cond->type == AST_COMMAND && cond->data.command.head &&
+          cond->data.command.head->type == AST_LIT_STRING &&
+          cond->data.command.head->data.lit_string.length == 4 &&
+          memcmp(cond->data.command.head->data.lit_string.value, "box?", 4) == 0 &&
+          cond->data.command.arg_count == 2 &&
+          cond->data.command.args[1]->type == AST_VAR_REF &&
+          tc->narrowing_count < TYPER_MAX_NARROWINGS) {
+        AstNode* type_arg = cond->data.command.args[0];
+        AstNode* var_node = cond->data.command.args[1];
+        JaclType bt = TYPE_DYN;
+        uint32_t bsidx = UINT32_MAX;
+        if (type_arg->type == AST_LIT_STRING) {
+          if (is_type_keyword(type_arg->data.lit_string.value,
+                              type_arg->data.lit_string.length)) {
+            bt = type_from_keyword(type_arg->data.lit_string.value,
+                                   type_arg->data.lit_string.length);
+          } else {
+            for (uint32_t si = 0; si < tc->struct_count; si++) {
+              if (tc->structs[si].name_len == type_arg->data.lit_string.length &&
+                  memcmp(tc->structs[si].name, type_arg->data.lit_string.value,
+                         type_arg->data.lit_string.length) == 0) {
+                bt = TYPE_STRUCT;
+                bsidx = si;
+                break;
+              }
+            }
+          }
+        }
+        if (bt != TYPE_DYN) {
+          tc->narrowings[tc->narrowing_count].name       = var_node->data.var_ref.name;
+          tc->narrowings[tc->narrowing_count].name_len   = var_node->data.var_ref.length;
+          tc->narrowings[tc->narrowing_count].scope_mark = var_node->scope_mark;
+          tc->narrowings[tc->narrowing_count].box_type   = (uint8_t)bt;
+          tc->narrowings[tc->narrowing_count].box_struct_idx = bsidx;
+          tc->narrowing_count++;
+          pushed = true;
+        }
+      }
+      typer__infer_node(tc, cond);
+      typer__infer_node(tc, as[1]);
+      if (pushed) tc->narrowing_count--;
+      if (node->data.command.arg_count == 3) {
+        typer__infer_node(tc, as[2]);
+      }
+      /* Block-result unification: if both branches agree, propagate. */
+      JaclType then_t = (JaclType)as[1]->inferred_type;
+      JaclType else_t = (node->data.command.arg_count == 3)
+                          ? (JaclType)as[2]->inferred_type : TYPE_NIL;
+      if (then_t == else_t) {
+        node->inferred_type = then_t;
+        node->inferred_struct_idx = as[1]->inferred_struct_idx;
+      } else {
+        node->inferred_type = TYPE_DYN;
+      }
+      return;
+    } else if (hlen == 5 && memcmp(hname, "unbox", 5) == 0 &&
+               node->data.command.arg_count == 1 &&
+               node->data.command.args[0]->type == AST_VAR_REF) {
+      /* [unbox $var] inside a box?-guarded branch — look up the
+       * narrowing and adopt its type. */
+      AstNode* var_node = node->data.command.args[0];
+      typer__infer_node(tc, var_node);
+      for (uint32_t ni = 0; ni < tc->narrowing_count; ni++) {
+        if (tc->narrowings[ni].name_len == var_node->data.var_ref.length &&
+            memcmp(tc->narrowings[ni].name, var_node->data.var_ref.name,
+                   var_node->data.var_ref.length) == 0) {
+          node->inferred_type = tc->narrowings[ni].box_type;
+          node->inferred_struct_idx = tc->narrowings[ni].box_struct_idx;
+          return;
+        }
+      }
+      node->inferred_type = TYPE_DYN;
+      return;
     }
   }
 
@@ -1068,6 +1160,7 @@ void typer_infer(AstNode** nodes, uint32_t count) {
   tc.proc_count    = 0;
   tc.struct_count  = 0;
   tc.expected_type = TYPE_DYN;
+  tc.narrowing_count = 0;
 
   /* Builtin: $ctx is always a struct (the ctx record). Add at the
    * outer scope so all user code can resolve it. */
