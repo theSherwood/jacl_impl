@@ -8481,6 +8481,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, err);
         return;
       }
+      /* Ctx is a HeapRecord; struct-typed fields store a heap pointer.
+         If the override produced inline bytes (typed-struct constructor),
+         reify to a HeapRecord pointer before OP_HEAP_RECORD_SET. */
+      if (cf->type == TYPE_STRUCT) {
+        compiler__reify_inline_struct(c, line);
+      }
       compiler__emit_byte(c, OP_HEAP_RECORD_SET, line);
       compiler__emit_u16(c, (uint16_t)cf->offset, line);
       compiler__emit_byte(c, (uint8_t)cf->type, line);
@@ -10008,6 +10014,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* US-005/US-008: Check for inline struct field access.
      * If args[0] is a var ref to an inline struct local or upvalue,
      * use byte-offset addressing directly (no heap dereference). */
+    bool args0_compiled = false;  /* track Case 2 compilation to avoid double-compile */
     if (args[1]->type == AST_LIT_STRING && !c->sm_analysis) {
       const char* field_name_i = args[1]->data.lit_string.value;
       uint32_t field_name_len_i = args[1]->data.lit_string.length;
@@ -10049,6 +10056,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* Case 2: chained access — compile inner expr, check for inline ref */
       if (!is_inline_access && args[0]->type == AST_COMMAND) {
         compiler__compile_node(c, args[0]);
+        args0_compiled = true;
         if (c->inline_repr == INLINE_REF) {
           /* The inner expr emitted a materialized sub-struct; pop it since
            * we'll use byte-offset chaining instead. */
@@ -10150,18 +10158,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
 
-    /* Compile struct/map expression */
-    compiler__compile_node(c, args[0]);
+    /* Compile struct/map expression — only if Case 2 above didn't already
+       compile it. Re-compiling re-emits args[0]'s bytecode (running side
+       effects twice). */
+    if (!args0_compiled) {
+      compiler__compile_node(c, args[0]);
+    }
     JaclType struct_type = c->last_expr_type;
     uint32_t struct_idx = c->last_struct_idx;
 
-    /* Inline struct ref hint cleanup: OP_STRUCT_GET_INLINE for a nested
-       struct field already materialized a HeapRecord and pushed it to TOS.
-       The INLINE_REF flag is just a chaining hint that doesn't apply to a
-       non-chained consumer; clear it without emitting anything. */
-    if (c->inline_repr == INLINE_REF && struct_type == TYPE_STRUCT) {
-      c->inline_repr = INLINE_NONE;
-    }
+    /* INLINE_REF only flows out of the inline-fast-path's nested-struct
+       GET_INLINE inside this same function, and Case 2 above always catches
+       it (its only producer is AST_COMMAND form). No cleanup needed here. */
 
     if (struct_type != TYPE_STRUCT && struct_type != TYPE_MAP && struct_type != TYPE_DYN) {
       compiler__error(c, line, col, "type error: '.' requires a struct or map value");
