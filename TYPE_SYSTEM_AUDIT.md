@@ -373,13 +373,32 @@ These are deep edge cases. Closing them requires either:
 
 Neither is on the critical path for codegen-time type decisions. Both fall back to `c->last_expr_type` correctly via the consumer-side fallback.
 
-### Phase 3e — cleanup (next)
+### Phase 3e — cleanup (attempted; partial)
 
-With effectively zero gaps, the cleanup can begin:
+I attempted to strip the fallback `if (x == TYPE_DYN) x = c->last_expr_type;` lines, expecting that with ~zero gaps the typer alone would suffice. **It doesn't.** Some consumer types come from genuinely dynamic / flow-typing sources the static typer cannot model:
 
-1. **Strip fallbacks.** The ~15 `if (x == TYPE_DYN) x = c->last_expr_type;` lines added in Phase 3c can be removed (or kept as defensive but unused).
-2. **Delete unused `c->last_expr_type` writes.** Many of the ~50 writes are now unread. Trace via static analysis or just delete and run tests.
-3. **Delete `expected_type` field.** The typer maintains its own; the compiler-side propagation is no longer necessary at the read sites that switched.
-4. **Delete `last_struct_idx` field.** Same reasoning — the typer tracks it on AST nodes.
+- **`[unbox $b]` inside `[box? Type $b]` guards.** The compiler narrows the unbox result to the guarded type via flow-typing on the binding. The typer would need to model:
+  - The `box?` predicate's narrowing on the var-ref's type within the guarded branch
+  - The `unbox` builtin returning the narrowed type
+- **Runtime-typed map bindings** from module imports (`use lib { foo }` where `foo`'s type comes from runtime introspection).
+- **`yield` → stream** detection (a proc with `yield` returns a stream).
 
-Each of these is a focused commit. Final compiler.c size should drop substantially.
+These are real runtime/flow constructs. Modeling them in a static pass is possible but not cheap, and the consumer-side fallback to `c->last_expr_type` handles them correctly with one extra line. Stripping fallbacks broke ~15 tests across these patterns, so I reverted.
+
+**Realistic Phase 3 endpoint:** the typer is the *primary* oracle and covers ~99% of cases. The compiler-side `last_expr_type` tracker handles the dynamic/flow-typed long tail. This is the correct architecture — not the maximalist "delete everything" picture from the original plan.
+
+What was achieved (commits over Phases 3a–3d):
+- AST nodes carry `inferred_type` / `inferred_struct_idx`.
+- A separate typer pass populates these for ~99% of patterns.
+- Consumer sites at codegen time read from the typer first, fall back to compiler tracker.
+- 0 mismatches between typer and compiler across the entire test suite.
+- 2 remaining gaps (both flow-typing patterns).
+
+What was *not* achieved:
+- Deleting `c->last_expr_type` writes (still load-bearing for fallbacks).
+- Substantial `compiler.c` shrinkage (was the original goal).
+
+The architectural improvement is real even without the shrinkage: type info now lives on AST nodes (a queryable, typed AST), and consumer sites have a clear contract (read from the typer; fall back if it doesn't know). Future phases can:
+- Extend the typer to model flow-typing (`box?` narrowing, `unbox`, generators).
+- Once flow-typing lands, attempt the strip again.
+- Or accept the current architecture as the steady state — it's clean and correct.
