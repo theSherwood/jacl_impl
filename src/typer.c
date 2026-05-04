@@ -795,6 +795,19 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   } else if (sdef) {
     node->inferred_type = TYPE_STRUCT;
     node->inferred_struct_idx = sdef_idx;
+  } else if (head && head->type == AST_LIT_STRING) {
+    /* Recognize a small set of well-known builtins by their return
+     * type. Reduces typer gaps for last-expression-of-block cases. */
+    const char* hn = head->data.lit_string.value;
+    uint32_t    hl = head->data.lit_string.length;
+    if ((hl == 5 && memcmp(hn, "print", 5) == 0) ||
+        (hl == 4 && memcmp(hn, "puts", 4) == 0)) {
+      node->inferred_type = TYPE_NIL;
+    } else if (hl == 9 && memcmp(hn, "to-string", 9) == 0) {
+      node->inferred_type = TYPE_STR;
+    } else {
+      node->inferred_type = TYPE_DYN;
+    }
   } else {
     node->inferred_type = TYPE_DYN;
   }
