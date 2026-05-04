@@ -5274,6 +5274,63 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_RESET_INLINE: {
+        /* Struct-box reset with inline new bytes.
+           Operand: u16 type_idx.
+           Stack before: [..., box, s0, s1, ..., s{N-1}]
+           Stack after:  [..., s0, s1, ..., s{N-1}]
+           (the new bytes overwrite the box slot, so reset's return is the
+           new struct value as inline TOS — symmetric with OP_RESET). */
+        uint16_t type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "reset_inline: invalid struct type index %u", (unsigned)type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
+        uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        if (vm->stack_top < width + 1) {
+          vm__set_error(vm, "reset_inline: stack underflow");
+          return VM_RUNTIME_ERROR;
+        }
+        uint32_t box_pos = vm->stack_top - width - 1;
+        JaclVal box_val = vm->stack[box_pos];
+        if (jacl_is_error(box_val)) {
+          /* Drop inline slots; leave the error JaclVal at TOS. */
+          for (uint32_t si = 0; si < width; si++) {
+            BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - width + si);
+          }
+          vm->stack_top -= width;
+          break;
+        }
+        if (!jacl_is_box(box_val)) {
+          vm__set_error(vm, "reset_inline: expected struct box, got %s",
+                       vm__type_name(box_val));
+          return VM_RUNTIME_ERROR;
+        }
+        JaclMutableRef* ref = (JaclMutableRef*)jacl_as_ptr(box_val);
+        if (ref->type_idx != type_idx) {
+          vm__set_error(vm, "reset_inline: struct type mismatch in box");
+          return VM_RUNTIME_ERROR;
+        }
+        /* Copy new bytes into box->data BEFORE shuffling (shuffle would
+           overwrite the box-slot but the bytes source is above it). */
+        memcpy(ref->data, &vm->stack[vm->stack_top - width], sdef->total_size);
+        /* Shuffle inline slots down by 1 to overwrite the box slot. */
+        for (uint32_t si = 0; si < width; si++) {
+          uint32_t src_idx = vm->stack_top - width + si;
+          uint32_t dst_idx = box_pos + si;
+          vm->stack[dst_idx] = vm->stack[src_idx];
+          if (BITMAP_GET(vm->inline_slot_bitmap, src_idx)) {
+            BITMAP_SET(vm->inline_slot_bitmap, dst_idx);
+          } else {
+            BITMAP_CLR(vm->inline_slot_bitmap, dst_idx);
+          }
+        }
+        BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - 1);
+        vm->stack_top -= 1;
+        break;
+      }
+
       case OP_SWAP: {
         JaclVal closure_val, container;
         result = vm__pop(vm, &closure_val); if (result != VM_OK) return result;

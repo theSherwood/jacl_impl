@@ -150,6 +150,7 @@ typedef enum {
   OP_HEAP_RECORD_SET_DYN,/* runtime field mutation: followed by uint16_t const_idx (field name) */
   OP_HEAP_RECORD_GET_INLINE, /* u16 offset, u16 sub_type_idx; pop record, push N inline slots */
   OP_HEAP_RECORD_SET_INLINE, /* u16 offset, u16 sub_type_idx; pop N slots + record, write bytes, push record */
+  OP_RESET_INLINE,           /* u16 type_idx; struct-box reset with inline new bytes */
   OP_STRUCT_NEW_INLINE, /* construct inline struct on stack: followed by uint16_t struct_type_index */
   OP_STRUCT_GET_INLINE, /* inline field read: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_SET_INLINE, /* inline field write: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type */
@@ -515,6 +516,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_HEAP_RECORD_SET_DYN:  return "OP_HEAP_RECORD_SET_DYN";
     case OP_HEAP_RECORD_GET_INLINE: return "OP_HEAP_RECORD_GET_INLINE";
     case OP_HEAP_RECORD_SET_INLINE: return "OP_HEAP_RECORD_SET_INLINE";
+    case OP_RESET_INLINE:           return "OP_RESET_INLINE";
     case OP_STRUCT_NEW_INLINE: return "OP_STRUCT_NEW_INLINE";
     case OP_STRUCT_GET_INLINE: return "OP_STRUCT_GET_INLINE";
     case OP_STRUCT_SET_INLINE: return "OP_STRUCT_SET_INLINE";

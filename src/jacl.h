@@ -761,6 +761,7 @@ typedef enum {
   OP_HEAP_RECORD_SET_DYN,
   OP_HEAP_RECORD_GET_INLINE,  /* u16 byte_offset, u16 sub_type_idx; pop heap record, push N inline slots from data+offset */
   OP_HEAP_RECORD_SET_INLINE,  /* u16 byte_offset, u16 sub_type_idx; pop N inline slots, pop heap record, copy to data+offset, push record back */
+  OP_RESET_INLINE,            /* u16 type_idx; reset struct-box: copy N inline slots into box->data, shuffle box out, leave new bytes on TOS */
   OP_STRUCT_NEW_INLINE,
   OP_STRUCT_GET_INLINE,  /* uint8_t base_slot, uint16_t byte_offset, uint8_t field_type; read from stack-resident struct */
   OP_STRUCT_SET_INLINE,  /* uint8_t base_slot, uint16_t byte_offset, uint8_t field_type; write to stack-resident struct */

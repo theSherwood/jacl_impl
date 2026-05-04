@@ -6556,9 +6556,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, OP_TO_DYN, line);
             compiler__emit_byte(c, (uint8_t)target_type, line);
           }
-          /* Phase 5c: reify inline struct for OP_RESET (expects heap pointer) */
-          compiler__reify_inline_struct(c, line);
-          compiler__emit_byte(c, OP_RESET, line);
+          if (rhs_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX) {
+            /* Struct-box reset: inline bytes write directly. */
+            compiler__emit_byte(c, OP_RESET_INLINE, line);
+            compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+          } else {
+            compiler__emit_byte(c, OP_RESET, line);
+          }
         } else {
           c->expected_type = target_type;
           compiler__compile_node(c, args[1]);
@@ -9378,10 +9382,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     compiler__compile_node(c, args[1]);
-    /* Phase 5c: reify inline struct for OP_RESET (expects heap pointer) */
-    compiler__reify_inline_struct(c, line);
-    compiler__emit_byte(c, OP_RESET, line);
-    c->last_expr_type = TYPE_NIL;
+    if (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX) {
+      /* Struct-box reset: inline bytes write directly to box->data. */
+      compiler__emit_byte(c, OP_RESET_INLINE, line);
+      compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      c->inline_repr = INLINE_STACK;  /* new struct bytes left on TOS */
+    } else {
+      compiler__emit_byte(c, OP_RESET, line);
+      c->last_expr_type = TYPE_NIL;
+    }
     return;
   }
 
