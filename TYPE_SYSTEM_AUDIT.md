@@ -200,3 +200,36 @@ Done. 92/92 tests pass; 4 new soundness tests added in `test_m11.c`.
 
 - **Upvalue flow typing.** `[box? Type $b]` in an outer scope does not propagate the narrowing into a nested `proc inner {}` that captures `$b`. Two existing closure-capture tests had to be rewritten to pass typed values via parameters instead. Real limitation in the current flow-typer — cheap to fix in Phase 3 once types live on AST nodes.
 - **Top-level struct values.** `def Point p [Point ...]` at top level is rejected (pre-existing constraint, unrelated to Phase 1) — must be wrapped in a proc. Worth revisiting whether this is intentional.
+
+---
+
+## Phase 3a — foundation laid
+
+Done. 92/92 tests still pass. Commit `b0f9580`.
+
+**What landed:**
+- `AstNode` gains `inferred_type` (uint8_t / JaclType) and `inferred_struct_idx` (uint32_t, UINT32_MAX = none) fields.
+- New `src/typer.c` with `typer_infer(AstNode**, count)` walking the AST. Currently handles literals (`I32`/`F32`/`STR`/`NIL`), blocks (last-expression type), and structural recursion. Everything else defaults to `TYPE_DYN`.
+- `JaclType` enum + helpers (`is_type_keyword`, `type_from_keyword`, `type_name`, `is_numeric_type`, `is_unboxed_type`, `is_typed_collection`) relocated from `compiler.c` to `ast.c` so the typer (earlier in unity build) can use them. Public copy in `jacl.h` left alone.
+- Typer runs after macro expansion in `compiler_compile`. Dual-track mode: codegen does not yet read `node->inferred_type`; the existing `expected_type`/`last_expr_type` plumbing remains the source of truth.
+
+### What this unlocks
+
+The AST now carries type annotations; further subphases mostly fill them in correctly and switch consumers.
+
+### What's next (Phase 3b — scope-aware inference)
+
+The biggest remaining chunk before consumers can switch. Needs:
+- **Scope tracker** in the typer: locals (with type), upvalues, globals (proc return types, mut types), struct registry. ~300–400 LOC mirroring `compiler__resolve_local` etc.
+- **Var-ref inference**: read the binding's declared type.
+- **Command dispatch**: at minimum `def`/`mut`/`set` (to push expected types into RHS), `proc`/proc-call (to track return types), arithmetic builtins (to mirror `compile_binary`), struct constructor + field access.
+- **Forward references**: two-pass for top-level decls (collect signatures, then bodies). Recursive procs need this.
+
+Recommended sequencing:
+1. Skeleton scope tracker + var-ref + simple `def` (no command dispatch yet).
+2. Add `proc` registration + proc-call return type.
+3. Add arithmetic + comparison rules (mirror `compile_binary`).
+4. Add struct construction + field access.
+5. Add a dev-build assertion harness that compares typer output to `last_expr_type` at compile sites — catches inference bugs before consumers depend on them.
+
+Each step is its own commit. Total scope: ~2–4 weeks of focused work; should land `compiler.c` 1–2k lines lighter once consumers switch (3c).
