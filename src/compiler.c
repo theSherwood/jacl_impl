@@ -4013,9 +4013,11 @@ void compiler__ensure_boxed(Compiler* c, uint32_t line) {
     compiler__emit_byte(c, OP_TO_DYN, line);
     compiler__emit_byte(c, (uint8_t)c->last_expr_type, line);
     c->last_expr_type = TYPE_DYN;
-  } else if (compiler__reify_inline_struct(c, line)) {
-    c->last_expr_type = TYPE_DYN;
   }
+  /* Struct values never reach here in valid code: every consumer that
+     would otherwise need a JaclVal-shaped struct now has a typed inline
+     path (OP_PRINT_STRUCT, OP_STRUCT_EQ_TOS, OP_STRUCT_NEW_INLINE
+     consuming inline args, etc.) or a compile-time rejection. */
 }
 
 /* --- Internal: Reject bare struct in dyn context (compile-time error) --- */
@@ -6997,8 +6999,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     int16_t rhs_arity = compiler__node_known_arity(c, args[value_arg_idx]);
 
     if (c->sm_analysis) {
-      /* SM mode: write value to state object field instead of local slot */
-      /* Phase 5c: reify inline struct for state field storage */
+      /* SM mode: write value to state object field instead of local slot.
+         For struct values, reify to a heap HeapRecord first — the SM
+         state field stores a single JaclVal, and OP_SET_STATE_FIELD_WIDE
+         is declared but never emitted. This is the one remaining
+         user-reachable reify path. */
       compiler__reify_inline_struct(c, line);
       int field_idx = sm__find_field(&c->sm_analysis->state_layout, name_val);
       if (field_idx >= 0) {
