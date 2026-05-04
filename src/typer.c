@@ -1,44 +1,253 @@
 /*
- * JACL Type Inference Pass — Phase 3 foundation.
+ * JACL Type Inference Pass — Phase 3 foundation + scope skeleton.
  *
  * Walks the AST after parsing/macro-expansion and before codegen, populating
  * `node->inferred_type` (and `inferred_struct_idx` for structs).
  *
- * Current scope: literals only. Future commits expand to var refs, calls,
- * arithmetic, struct construction, etc., eventually replacing the
- * `expected_type`/`last_expr_type` plumbing in compiler.c.
+ * Phase 3a: literals + structural recursion.
+ * Phase 3b (this commit): scope tracker + var-ref + simple def/mut.
  *
  * Dual-track contract: compiler.c continues to compute types its own way;
  * the typer pass runs alongside but does not yet drive codegen decisions.
  * When typer and compiler disagree, that's a bug in the typer (compiler.c
- * is the ground truth until Phase 3b switches consumers).
+ * is the ground truth until Phase 3c switches consumers).
  */
 
 #ifndef TYPER_C
 #define TYPER_C
 
-/* AST_LIT_INT default type matches compiler.c:11116 — tagged i32 unless
- * the consumer's expected_type narrows it (i64/u64/f64/u32/f32). The
- * typer can't know expected_type without context propagation, so for
- * the foundation pass we mark literals with their "natural" type and
- * leave context-driven narrowing for a later subphase. */
+#define TYPER_MAX_BINDINGS 1024
 
-static void typer__infer_node(AstNode* node);
+typedef struct {
+  const char* name;
+  uint32_t    name_len;
+  uint32_t    scope_mark;   /* hygiene mark from binding's AST node */
+  uint8_t     type;         /* JaclType */
+  uint32_t    struct_idx;   /* UINT32_MAX if not a struct */
+  uint32_t    scope_depth;  /* depth at which this binding was pushed */
+} TyperBinding;
 
-static void typer__infer_command(AstNode* node) {
-  /* Recurse into head and args; don't yet derive the command's own type. */
-  if (node->data.command.head) typer__infer_node(node->data.command.head);
+typedef struct {
+  TyperBinding bindings[TYPER_MAX_BINDINGS];
+  uint32_t     binding_count;
+  uint32_t     scope_depth;
+} TyperCtx;
+
+static void typer__infer_node(TyperCtx* tc, AstNode* node);
+
+/* --- Scope helpers --- */
+
+static void typer__scope_push(TyperCtx* tc) {
+  tc->scope_depth++;
+}
+
+static void typer__scope_pop(TyperCtx* tc) {
+  while (tc->binding_count > 0 &&
+         tc->bindings[tc->binding_count - 1].scope_depth >= tc->scope_depth) {
+    tc->binding_count--;
+  }
+  if (tc->scope_depth > 0) tc->scope_depth--;
+}
+
+static void typer__scope_add(TyperCtx* tc, const char* name, uint32_t name_len,
+                             uint32_t scope_mark, uint8_t type,
+                             uint32_t struct_idx) {
+  if (tc->binding_count >= TYPER_MAX_BINDINGS) return;
+  TyperBinding* b = &tc->bindings[tc->binding_count++];
+  b->name        = name;
+  b->name_len    = name_len;
+  b->scope_mark  = scope_mark;
+  b->type        = type;
+  b->struct_idx  = struct_idx;
+  b->scope_depth = tc->scope_depth;
+}
+
+static const TyperBinding* typer__scope_resolve(TyperCtx* tc,
+                                                 const char* name,
+                                                 uint32_t name_len,
+                                                 uint32_t scope_mark) {
+  /* Walk inward-out: most recently pushed binding wins. Match scope_mark
+   * for hygiene — macro-introduced bindings shouldn't clash with user
+   * bindings of the same spelling. */
+  for (int32_t i = (int32_t)tc->binding_count - 1; i >= 0; i--) {
+    TyperBinding* b = &tc->bindings[i];
+    if (b->name_len == name_len &&
+        b->scope_mark == scope_mark &&
+        memcmp(b->name, name, name_len) == 0) {
+      return b;
+    }
+  }
+  /* Fallback: ignore scope_mark for unprefixed names (most common case). */
+  for (int32_t i = (int32_t)tc->binding_count - 1; i >= 0; i--) {
+    TyperBinding* b = &tc->bindings[i];
+    if (b->name_len == name_len &&
+        memcmp(b->name, name, name_len) == 0) {
+      return b;
+    }
+  }
+  return NULL;
+}
+
+/* --- Command handlers --- */
+
+/* Try to extract a JaclType keyword from a string literal node.
+ * Returns true and writes *out_type if the node is a known type keyword. */
+static bool typer__node_as_type_keyword(AstNode* node, JaclType* out_type) {
+  if (!node || node->type != AST_LIT_STRING) return false;
+  const char* w = node->data.lit_string.value;
+  uint32_t    n = node->data.lit_string.length;
+  if (!is_type_keyword(w, n)) return false;
+  *out_type = type_from_keyword(w, n);
+  return true;
+}
+
+/* Parse "def NAME EXPR" or "def TYPE NAME EXPR" or "mut ..." (same shape).
+ * Adds the binding to the current scope and recurses into EXPR.
+ * Returns true if handled (so the generic command handler can skip it).
+ * Does not handle destructuring forms — those default to TYPE_DYN. */
+static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
+  AstNode** args = node->data.command.args;
+  uint32_t  argc = node->data.command.arg_count;
+
+  JaclType  declared_type = TYPE_DYN;
+  uint32_t  name_arg_idx  = 0;
+  uint32_t  value_arg_idx = 1;
+
+  if (argc == 3) {
+    if (!typer__node_as_type_keyword(args[0], &declared_type)) {
+      /* args[0] may be a struct name; the typer doesn't have the struct
+       * registry yet, so defer to TYPE_DYN. */
+      return false;
+    }
+    name_arg_idx  = 1;
+    value_arg_idx = 2;
+  } else if (argc != 2) {
+    return false;
+  }
+
+  AstNode* name_node = args[name_arg_idx];
+  if (name_node->type != AST_LIT_STRING) {
+    /* Destructuring or hygienic var-ref name forms — defer. */
+    return false;
+  }
+
+  /* Recurse into the value expression first (it must not see the new
+   * binding — bindings come into scope only after their definition). */
+  AstNode* value_node = args[value_arg_idx];
+  typer__infer_node(tc, value_node);
+
+  /* Effective type: declared wins; otherwise inherit from RHS. */
+  JaclType effective = (declared_type != TYPE_DYN)
+                       ? declared_type : (JaclType)value_node->inferred_type;
+  uint32_t struct_idx = UINT32_MAX;
+  if (effective == TYPE_STRUCT) {
+    struct_idx = value_node->inferred_struct_idx;
+  }
+
+  typer__scope_add(tc, name_node->data.lit_string.value,
+                   name_node->data.lit_string.length,
+                   name_node->scope_mark,
+                   (uint8_t)effective,
+                   struct_idx);
+
+  /* def/mut returns nil. */
+  node->inferred_type = TYPE_NIL;
+  node->inferred_struct_idx = UINT32_MAX;
+  return true;
+}
+
+/* Set helper: "set NAME EXPR" (and "::" / set! sugar). The typer doesn't
+ * change the binding's type — set! must agree with the existing type
+ * (compiler.c enforces this). We just recurse into the value. */
+static bool typer__handle_set(TyperCtx* tc, AstNode* node) {
+  AstNode** args = node->data.command.args;
+  uint32_t  argc = node->data.command.arg_count;
+  if (argc != 2) return false;
+  /* Recurse into both children but don't add a new binding. */
+  typer__infer_node(tc, args[0]);
+  typer__infer_node(tc, args[1]);
+  node->inferred_type = TYPE_NIL;
+  return true;
+}
+
+/* Proc definition introduces a new isolated scope for params + body.
+ * Skeleton: enter scope, add params (typed if annotated), walk body, exit.
+ * Doesn't yet register the proc itself in any global table — that comes
+ * with the next subphase (proc-call return type tracking). */
+static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
+  AstNode** args = node->data.command.args;
+  uint32_t  argc = node->data.command.arg_count;
+  uint32_t  params_idx, body_idx;
+  if (argc == 4) { params_idx = 2; body_idx = 3; }
+  else if (argc == 3) { params_idx = 1; body_idx = 2; }
+  else return false;
+
+  AstNode* params = args[params_idx];
+  AstNode* body   = args[body_idx];
+  if (body->type != AST_BLOCK) return false;
+
+  typer__scope_push(tc);
+
+  /* Params: AST_COMMAND of the form [name1 name2 ...] or [TYPE name1 ...]
+   * Compiler parses these in pairs, but for the skeleton we conservatively
+   * mark all params as TYPE_DYN. Future subphase will walk type annotations. */
+  if (params && params->type == AST_COMMAND) {
+    AstNode* phead = params->data.command.head;
+    if (phead && phead->type == AST_LIT_STRING) {
+      typer__scope_add(tc, phead->data.lit_string.value,
+                       phead->data.lit_string.length,
+                       phead->scope_mark, TYPE_DYN, UINT32_MAX);
+    }
+    for (uint32_t i = 0; i < params->data.command.arg_count; i++) {
+      AstNode* p = params->data.command.args[i];
+      if (p->type == AST_LIT_STRING) {
+        typer__scope_add(tc, p->data.lit_string.value,
+                         p->data.lit_string.length,
+                         p->scope_mark, TYPE_DYN, UINT32_MAX);
+      }
+    }
+  }
+
+  typer__infer_node(tc, body);
+
+  typer__scope_pop(tc);
+  node->inferred_type = TYPE_DYN; /* proc def itself returns nil-ish */
+  return true;
+}
+
+/* --- Generic walkers --- */
+
+static void typer__infer_command(TyperCtx* tc, AstNode* node) {
+  AstNode* head = node->data.command.head;
+
+  /* Recognize a few common command shapes. Anything not handled falls
+   * through to TYPE_DYN with structural recursion. */
+  if (head && head->type == AST_LIT_STRING) {
+    const char* hname = head->data.lit_string.value;
+    uint32_t    hlen  = head->data.lit_string.length;
+    if ((hlen == 3 && memcmp(hname, "def", 3) == 0) ||
+        (hlen == 3 && memcmp(hname, "mut", 3) == 0)) {
+      if (typer__handle_def_or_mut(tc, node)) return;
+    } else if (hlen == 3 && memcmp(hname, "set", 3) == 0) {
+      if (typer__handle_set(tc, node)) return;
+    } else if (hlen == 4 && memcmp(hname, "proc", 4) == 0) {
+      if (typer__handle_proc(tc, node)) return;
+    }
+  }
+
+  /* Default: recurse, leave type as TYPE_DYN. */
+  if (head) typer__infer_node(tc, head);
   for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-    typer__infer_node(node->data.command.args[i]);
+    typer__infer_node(tc, node->data.command.args[i]);
   }
   node->inferred_type = TYPE_DYN;
 }
 
-static void typer__infer_block(AstNode* node) {
+static void typer__infer_block(TyperCtx* tc, AstNode* node) {
+  typer__scope_push(tc);
   for (uint32_t i = 0; i < node->data.block.count; i++) {
-    typer__infer_node(node->data.block.commands[i]);
+    typer__infer_node(tc, node->data.block.commands[i]);
   }
-  /* Block type is the type of its last expression, or NIL if empty/trailing-semi. */
   if (node->data.block.count > 0 && !node->data.block.trailing_semi) {
     AstNode* last = node->data.block.commands[node->data.block.count - 1];
     node->inferred_type = last->inferred_type;
@@ -46,9 +255,23 @@ static void typer__infer_block(AstNode* node) {
   } else {
     node->inferred_type = TYPE_NIL;
   }
+  typer__scope_pop(tc);
 }
 
-static void typer__infer_node(AstNode* node) {
+static void typer__infer_var_ref(TyperCtx* tc, AstNode* node) {
+  const TyperBinding* b = typer__scope_resolve(tc,
+      node->data.var_ref.name,
+      node->data.var_ref.length,
+      node->scope_mark);
+  if (b) {
+    node->inferred_type = b->type;
+    node->inferred_struct_idx = b->struct_idx;
+  } else {
+    node->inferred_type = TYPE_DYN;
+  }
+}
+
+static void typer__infer_node(TyperCtx* tc, AstNode* node) {
   if (!node) return;
   switch (node->type) {
     case AST_LIT_INT:
@@ -60,56 +283,56 @@ static void typer__infer_node(AstNode* node) {
     case AST_LIT_STRING:
       node->inferred_type = TYPE_STR;
       break;
+    case AST_VAR_REF:
+      typer__infer_var_ref(tc, node);
+      break;
     case AST_BLOCK:
-      typer__infer_block(node);
+      typer__infer_block(tc, node);
       break;
     case AST_COMMAND:
-      typer__infer_command(node);
+      typer__infer_command(tc, node);
       break;
     case AST_INTERP_STRING:
       for (uint32_t i = 0; i < node->data.interp_string.count; i++) {
-        typer__infer_node(node->data.interp_string.segments[i]);
+        typer__infer_node(tc, node->data.interp_string.segments[i]);
       }
       node->inferred_type = TYPE_STR;
       break;
     case AST_BREAK:
-      if (node->data.break_stmt.value) typer__infer_node(node->data.break_stmt.value);
+      if (node->data.break_stmt.value) typer__infer_node(tc, node->data.break_stmt.value);
       node->inferred_type = TYPE_NIL;
       break;
     case AST_RETURN:
-      if (node->data.return_stmt.value) typer__infer_node(node->data.return_stmt.value);
+      if (node->data.return_stmt.value) typer__infer_node(tc, node->data.return_stmt.value);
       node->inferred_type = TYPE_NIL;
       break;
     case AST_QUOTE:
-      if (node->data.quote.child) typer__infer_node(node->data.quote.child);
+      if (node->data.quote.child) typer__infer_node(tc, node->data.quote.child);
       node->inferred_type = TYPE_DYN;
       break;
     case AST_SYNTAX_QUOTE:
-      if (node->data.syntax_quote.child) typer__infer_node(node->data.syntax_quote.child);
+      if (node->data.syntax_quote.child) typer__infer_node(tc, node->data.syntax_quote.child);
       node->inferred_type = TYPE_DYN;
       break;
     case AST_UNQUOTE:
-      if (node->data.unquote.child) typer__infer_node(node->data.unquote.child);
+      if (node->data.unquote.child) typer__infer_node(tc, node->data.unquote.child);
       node->inferred_type = TYPE_DYN;
       break;
     case AST_UNQUOTE_SPLICING:
-      if (node->data.unquote_splicing.child) typer__infer_node(node->data.unquote_splicing.child);
+      if (node->data.unquote_splicing.child) typer__infer_node(tc, node->data.unquote_splicing.child);
       node->inferred_type = TYPE_DYN;
       break;
     case AST_SPREAD:
-      if (node->data.spread.expr) typer__infer_node(node->data.spread.expr);
+      if (node->data.spread.expr) typer__infer_node(tc, node->data.spread.expr);
       node->inferred_type = TYPE_DYN;
       break;
     case AST_SHELL_CMD:
-      if (node->data.shell_cmd.head) typer__infer_node(node->data.shell_cmd.head);
+      if (node->data.shell_cmd.head) typer__infer_node(tc, node->data.shell_cmd.head);
       for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        typer__infer_node(node->data.shell_cmd.args[i]);
+        typer__infer_node(tc, node->data.shell_cmd.args[i]);
       }
       node->inferred_type = TYPE_DYN;
       break;
-    /* Var refs, defs, struct construction, etc. need scope tracking — deferred
-     * to the next subphase. They default to TYPE_DYN which is sound. */
-    case AST_VAR_REF:
     case AST_USE:
     case AST_DEFSTRUCT:
     case AST_DEFMACRO:
@@ -125,8 +348,11 @@ static void typer__infer_node(AstNode* node) {
 }
 
 void typer_infer(AstNode** nodes, uint32_t count) {
+  TyperCtx tc;
+  tc.binding_count = 0;
+  tc.scope_depth   = 0;
   for (uint32_t i = 0; i < count; i++) {
-    typer__infer_node(nodes[i]);
+    typer__infer_node(&tc, nodes[i]);
   }
 }
 
