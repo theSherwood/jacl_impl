@@ -767,13 +767,35 @@ static void typer__infer_node(TyperCtx* tc, AstNode* node) {
       }
       node->inferred_type = TYPE_DYN;
       break;
+    case AST_CTX_DECL: {
+      /* ctx [mut] Type name = default_expr — recurse into default_expr
+       * with declared type as expected_type so int/float literals
+       * narrow correctly (mirrors compiler.c's ctx-decl handling).
+       * The compiler leaves last_expr_type as the value's type after
+       * emitting, so propagate that here for dual-track agreement. */
+      JaclType declared = TYPE_DYN;
+      if (node->data.ctx_decl.type_name) {
+        declared = type_from_keyword(node->data.ctx_decl.type_name,
+                                     node->data.ctx_decl.type_name_len);
+      }
+      if (node->data.ctx_decl.default_expr) {
+        JaclType saved_et = tc->expected_type;
+        tc->expected_type = declared;
+        typer__infer_node(tc, node->data.ctx_decl.default_expr);
+        tc->expected_type = saved_et;
+        node->inferred_type = node->data.ctx_decl.default_expr->inferred_type;
+        node->inferred_struct_idx = node->data.ctx_decl.default_expr->inferred_struct_idx;
+      } else {
+        node->inferred_type = TYPE_NIL;
+      }
+      break;
+    }
     case AST_USE:
     case AST_DEFSTRUCT:
     case AST_DEFMACRO:
     case AST_DESTRUCTURE_VEC:
     case AST_DESTRUCTURE_NAMED:
     case AST_CONTINUE:
-    case AST_CTX_DECL:
     case AST_ERROR:
     default:
       node->inferred_type = TYPE_DYN;
