@@ -6366,7 +6366,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->expected_type = target_type;
         compiler__compile_node(c, args[1]);
         c->expected_type = TYPE_DYN;
-        JaclType rhs_type = c->last_expr_type;
+        /* Phase 3c: read result type from the typer's pre-computed AST
+         * annotation; fall back to c->last_expr_type for typer gaps. */
+        JaclType rhs_type = (JaclType)args[1]->inferred_type;
+        if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
         /* Type check */
         if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
           snprintf(err_msg, sizeof(err_msg),
@@ -6420,7 +6423,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->expected_type = target_type;
         compiler__compile_node(c, args[1]);
         c->expected_type = TYPE_DYN;
-        JaclType rhs_type = c->last_expr_type;
+        /* Phase 3c: read result type from the typer's pre-computed AST
+         * annotation; fall back to c->last_expr_type for typer gaps. */
+        JaclType rhs_type = (JaclType)args[1]->inferred_type;
+        if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
         /* Type check */
         if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
           snprintf(err_msg, sizeof(err_msg),
@@ -6478,7 +6484,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           c->expected_type = target_type;
           compiler__compile_node(c, args[1]);
           c->expected_type = TYPE_DYN;
-          JaclType rhs_type = c->last_expr_type;
+          /* Phase 3c: read result type from the typer's pre-computed AST
+           * annotation; fall back to c->last_expr_type for typer gaps. */
+          JaclType rhs_type = (JaclType)args[1]->inferred_type;
+          if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
           if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
             snprintf(err_msg, sizeof(err_msg),
                      "type error: cannot assign %s to %s binding '%.*s'",
@@ -6510,7 +6519,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           c->expected_type = target_type;
           compiler__compile_node(c, args[1]);
           c->expected_type = TYPE_DYN;
-          JaclType rhs_type = c->last_expr_type;
+          /* Phase 3c: read result type from the typer's pre-computed AST
+           * annotation; fall back to c->last_expr_type for typer gaps. */
+          JaclType rhs_type = (JaclType)args[1]->inferred_type;
+          if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
           /* Type check */
           if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
             snprintf(err_msg, sizeof(err_msg),
