@@ -3193,7 +3193,9 @@ static void compiler__emit_return(Compiler* c, uint32_t line) {
       StructTypeDef* sdef = reg->defs[c->return_struct_idx];
       if (struct_def_is_user(sdef, reg)) {
         uint32_t width = struct__slot_width(reg, c->return_struct_idx);
-        if (c->inline_repr != INLINE_STACK) {
+        /* Both INLINE_STACK and INLINE_REF mean inline bytes are on TOS;
+           only INLINE_NONE needs OP_STRUCT_EXPAND from a heap pointer. */
+        if (c->inline_repr == INLINE_NONE) {
           compiler__emit_byte(c, OP_STRUCT_EXPAND, line);
           compiler__emit_u16(c, (uint16_t)c->return_struct_idx, line);
         }
@@ -3993,7 +3995,9 @@ void compiler__builtin_arity_error(Compiler* c, uint32_t line,
  * Returns true if reification was emitted. */
 
 static bool compiler__reify_inline_struct(Compiler* c, uint32_t line) {
-  if (c->inline_repr == INLINE_STACK && c->last_expr_type == TYPE_STRUCT) {
+  /* Both INLINE_STACK and INLINE_REF mean inline bytes on TOS. */
+  if ((c->inline_repr == INLINE_STACK || c->inline_repr == INLINE_REF) &&
+      c->last_expr_type == TYPE_STRUCT) {
     compiler__emit_byte(c, OP_STRUCT_REIFY, line);
     compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
     c->inline_repr = INLINE_NONE;
@@ -4692,8 +4696,9 @@ void compiler__compile_destructure_named(
     uint32_t struct_width = (use_struct_path && dreg)
                              ? struct__slot_width(dreg, rhs_struct_idx) : 1;
     /* If the typed-struct RHS produced a heap pointer (e.g. global var-ref),
-       expand it to inline slots so we can adopt as a wide local. */
-    if (use_struct_path && c->inline_repr != INLINE_STACK) {
+       expand it to inline slots so we can adopt as a wide local. Both
+       INLINE_STACK and INLINE_REF already have inline bytes on TOS. */
+    if (use_struct_path && c->inline_repr == INLINE_NONE) {
       compiler__emit_byte(c, OP_STRUCT_EXPAND, line);
       compiler__emit_u16(c, (uint16_t)rhs_struct_idx, line);
       c->inline_repr = INLINE_STACK;
@@ -6951,9 +6956,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         StructTypeDef* ret_sdef = reg2->defs[c->last_struct_idx];
         if (struct_def_is_user(ret_sdef, reg2)) {
           activate_inline = true;
-          /* If RHS already pushed inline slots (e.g. OP_TYPED_VEC_GET_INLINE),
-           * no de-materialization needed — slots ARE the local. */
-          needs_store_inline = c->inline_repr != INLINE_STACK;
+          /* If RHS already pushed inline slots (INLINE_STACK or INLINE_REF
+             from a chained nested-struct access), no de-materialization
+             needed — slots ARE the local. */
+          needs_store_inline = (c->inline_repr == INLINE_NONE);
         }
       }
     }
@@ -10058,9 +10064,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__compile_node(c, args[0]);
         args0_compiled = true;
         if (c->inline_repr == INLINE_REF) {
-          /* The inner expr emitted a materialized sub-struct; pop it since
-           * we'll use byte-offset chaining instead. */
-          compiler__emit_byte(c, OP_POP, line);
+          /* The inner expr pushed the nested struct as N inline slots.
+             We're switching to byte-offset chaining on the OUTER struct,
+             so drop the inner's slots. */
+          StructTypeRegistry* reg = compiler__get_struct_registry(c);
+          uint32_t inner_width = struct__slot_width(reg, c->last_struct_idx);
+          if (inner_width == 1) {
+            compiler__emit_byte(c, OP_POP, line);
+          } else {
+            compiler__emit_byte(c, OP_POP_N, line);
+            compiler__emit_byte(c, (uint8_t)inner_width, line);
+          }
           is_inline_access = true;
           inline_base = c->inline_ref_base;
           inline_offset = c->inline_ref_offset;
@@ -10129,10 +10143,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             c->last_struct_idx = UINT32_MAX;
           } else {
             if (sdef->fields[fi].type == TYPE_STRUCT) {
-              /* Nested struct field — emit materialization AND set chaining state.
-               * If this is chained (e.g. $ln->start->x), Case 2 will detect
-               * inline_repr == INLINE_REF, pop the materialized value, and use byte-offset
-               * addressing instead. If standalone, the materialized value remains. */
+              /* Nested struct field — push N inline slots (the field's
+               * bytes copied from the outer's stack region). If this is
+               * chained (e.g. $ln->start->x), Case 2 will detect
+               * inline_repr == INLINE_REF, pop those N slots, and use
+               * byte-offset addressing on the OUTER struct directly —
+               * no allocation either way. */
               compiler__emit_byte(c, get_op, line);
               compiler__emit_byte(c, inline_base, line);
               compiler__emit_u16(c, total_offset, line);
@@ -10268,10 +10284,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           return;
         }
 
-        /* If struct is inline (e.g. from OP_RETURN_WIDE), use the TOS-aware
-           inline opcodes — no heap reify. Field write on a transient inline
-           struct is meaningless (the result is discarded), so reject it. */
-        bool tos_inline = (c->inline_repr == INLINE_STACK);
+        /* If struct is inline (e.g. from OP_RETURN_WIDE or a nested-struct
+           field GET), use the TOS-aware inline opcodes — no heap reify.
+           Field write on a transient inline struct is meaningless (the
+           result is discarded), so reject it. */
+        bool tos_inline = (c->inline_repr == INLINE_STACK ||
+                           c->inline_repr == INLINE_REF);
         if (tos_inline && is_set) {
           compiler__error(c, line, col,
                           "cannot mutate a transient inline struct value — "

@@ -6266,6 +6266,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint8_t field_type = vm__read_byte(vm);
         uint8_t* struct_base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
         JaclVal field_val;
+        bool pushed_inline = false;
         switch ((JaclType)field_type) {
           case TYPE_BOOL: { uint8_t b = struct_base[byte_offset]; field_val = jacl_bool(b); break; }
           case TYPE_I32: { int32_t n; memcpy(&n, struct_base + byte_offset, 4); field_val = jacl_i32(n); break; }
@@ -6275,26 +6276,38 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
           case TYPE_U64: { uint64_t n; memcpy(&n, struct_base + byte_offset, 8); field_val = (JaclVal)n; break; }
           case TYPE_F64: { double d; memcpy(&d, struct_base + byte_offset, 8); memcpy(&field_val, &d, 8); break; }
           case TYPE_STRUCT: {
-            /* Sub-struct field: read additional uint16_t type_idx, materialize from inline bytes */
+            /* Sub-struct field: read additional uint16_t type_idx; copy
+               bytes onto stack as N inline slots (no heap allocation). */
             uint16_t sub_type_idx = vm__read_u16(vm);
             if (!vm->struct_registry || sub_type_idx >= vm->struct_registry->count) {
               vm__set_error(vm, "invalid struct type index %u for inline get", (unsigned)sub_type_idx);
               return VM_RUNTIME_ERROR;
             }
             StructTypeDef* sub_sdef = vm->struct_registry->defs[sub_type_idx];
-            gc__current_heap = &vm->heap;
-            HeapRecord* sub_s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
-                                                       sizeof(HeapRecord) + sub_sdef->total_size);
-            sub_s->type_idx = sub_type_idx;
-            sub_s->total_size = sub_sdef->total_size;
-            memcpy(sub_s->data, struct_base + byte_offset, sub_sdef->total_size);
-            field_val = jacl_heap_record_val(sub_s);
+            uint32_t sub_width = (sub_sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+            if (vm->stack_top + sub_width > VM_STACK_MAX) {
+              vm__set_error(vm, "stack overflow (struct_get_inline nested)");
+              return VM_STACK_OVERFLOW;
+            }
+            /* Note: struct_base is a pointer into vm->stack; it remains
+               valid as long as the inline local at base_slot lives, which
+               is the entire scope of this op. The destination slots are
+               above stack_top and don't overlap with the source. */
+            memset(&vm->stack[vm->stack_top], 0, sub_width * sizeof(JaclVal));
+            memcpy(&vm->stack[vm->stack_top], struct_base + byte_offset, sub_sdef->total_size);
+            for (uint32_t si = 0; si < sub_width; si++) {
+              BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+            }
+            vm->stack_top += sub_width;
+            pushed_inline = true;
             break;
           }
           default: { memcpy(&field_val, struct_base + byte_offset, sizeof(JaclVal)); break; }
         }
-        result = vm__push(vm, field_val);
-        if (result != VM_OK) return result;
+        if (!pushed_inline) {
+          result = vm__push(vm, field_val);
+          if (result != VM_OK) return result;
+        }
         break;
       }
 
@@ -6366,6 +6379,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint8_t field_type = vm__read_byte(vm);
         uint8_t* struct_base = (uint8_t*)&frame->closure->upvalues[base_uv_slot];
         JaclVal field_val;
+        bool pushed_inline = false;
         switch ((JaclType)field_type) {
           case TYPE_BOOL: { uint8_t b = struct_base[byte_offset]; field_val = jacl_bool(b); break; }
           case TYPE_I32: { int32_t n; memcpy(&n, struct_base + byte_offset, 4); field_val = jacl_i32(n); break; }
@@ -6381,19 +6395,26 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
               return VM_RUNTIME_ERROR;
             }
             StructTypeDef* sub_sdef = vm->struct_registry->defs[sub_type_idx];
-            gc__current_heap = &vm->heap;
-            HeapRecord* sub_s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
-                                                       sizeof(HeapRecord) + sub_sdef->total_size);
-            sub_s->type_idx = sub_type_idx;
-            sub_s->total_size = sub_sdef->total_size;
-            memcpy(sub_s->data, struct_base + byte_offset, sub_sdef->total_size);
-            field_val = jacl_heap_record_val(sub_s);
+            uint32_t sub_width = (sub_sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+            if (vm->stack_top + sub_width > VM_STACK_MAX) {
+              vm__set_error(vm, "stack overflow (struct_get_upvalue nested)");
+              return VM_STACK_OVERFLOW;
+            }
+            memset(&vm->stack[vm->stack_top], 0, sub_width * sizeof(JaclVal));
+            memcpy(&vm->stack[vm->stack_top], struct_base + byte_offset, sub_sdef->total_size);
+            for (uint32_t si = 0; si < sub_width; si++) {
+              BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+            }
+            vm->stack_top += sub_width;
+            pushed_inline = true;
             break;
           }
           default: { memcpy(&field_val, struct_base + byte_offset, sizeof(JaclVal)); break; }
         }
-        result = vm__push(vm, field_val);
-        if (result != VM_OK) return result;
+        if (!pushed_inline) {
+          result = vm__push(vm, field_val);
+          if (result != VM_OK) return result;
+        }
         break;
       }
 
