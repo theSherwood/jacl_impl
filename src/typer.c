@@ -388,6 +388,48 @@ static void typer__infer_command(TyperCtx* tc, AstNode* node) {
     }
   }
 
+  /* Recognize built-in binary ops where LHS type propagates to RHS
+   * (mirrors compiler.c:4097-4100). For + - * / %, < > <= >= == ,
+   * the compiler narrows literals on the RHS to match the LHS's type.
+   * Result type follows compile_binary: same as operand for arithmetic,
+   * BOOL for comparisons. */
+  if (head && head->type == AST_LIT_STRING) {
+    const char* hname = head->data.lit_string.value;
+    uint32_t    hlen  = head->data.lit_string.length;
+    bool is_arith = (hlen == 1 && (hname[0] == '+' || hname[0] == '-' ||
+                                    hname[0] == '*' || hname[0] == '/' ||
+                                    hname[0] == '%'));
+    bool is_cmp = false;
+    if (!is_arith) {
+      if ((hlen == 1 && (hname[0] == '<' || hname[0] == '>')) ||
+          (hlen == 2 && (memcmp(hname, "<=", 2) == 0 ||
+                         memcmp(hname, ">=", 2) == 0 ||
+                         memcmp(hname, "==", 2) == 0))) {
+        is_cmp = true;
+      }
+    }
+    if ((is_arith || is_cmp) && node->data.command.arg_count == 2) {
+      AstNode* lhs = node->data.command.args[0];
+      AstNode* rhs = node->data.command.args[1];
+      typer__infer_node(tc, lhs);
+      JaclType lhs_t = (JaclType)lhs->inferred_type;
+      JaclType saved_et = tc->expected_type;
+      if (lhs_t != TYPE_DYN) tc->expected_type = lhs_t;
+      typer__infer_node(tc, rhs);
+      tc->expected_type = saved_et;
+      JaclType rhs_t = (JaclType)rhs->inferred_type;
+      if (is_cmp) {
+        node->inferred_type = TYPE_BOOL;
+      } else if (lhs_t == rhs_t && lhs_t != TYPE_DYN) {
+        /* Tagged or unboxed arithmetic, both sides same type — preserve. */
+        node->inferred_type = lhs_t;
+      } else {
+        node->inferred_type = TYPE_DYN;
+      }
+      return;
+    }
+  }
+
   /* Generic call dispatch: if head is a known proc name, propagate
    * declared param types to args so int/float literals narrow. Then
    * propagate the proc's declared return type up. */
