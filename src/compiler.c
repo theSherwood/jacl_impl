@@ -81,6 +81,23 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
  * the typer pass (included before compiler.c in the unity build) can
  * use them. The definitions are now visible here via that earlier include. */
 
+/* Sentinel range for scalar element types in typed collections:
+ * 0xFF00 + (uint8_t)JaclType. Distinct from struct registry indices
+ * (which top out around the few hundred range). */
+#define COMPILER_SCALAR_VEC_BASE 0xFF00u
+#define COMPILER_IS_SCALAR_TYPE_IDX(idx) ((idx) >= COMPILER_SCALAR_VEC_BASE && (idx) < 0x10000u)
+#define COMPILER_SCALAR_TYPE_IDX(t) (COMPILER_SCALAR_VEC_BASE + (uint32_t)(t))
+#define COMPILER_TYPE_IDX_TO_SCALAR(idx) ((JaclType)((idx) - COMPILER_SCALAR_VEC_BASE))
+
+/* Element-type keywords supported as typed-collection scalars.
+ * Restricted to numeric value types — no GC tracing needed in typed
+ * leaves. (bool literal forms parse heterogeneously across var-ref vs
+ * call sites, so it's left out of the v1 set.) */
+static bool compiler__is_typed_collection_scalar(JaclType t) {
+  return t == TYPE_I32 || t == TYPE_I64 || t == TYPE_U32 || t == TYPE_U64 ||
+         t == TYPE_F32 || t == TYPE_F64;
+}
+
 /* Check if an AST_COMMAND node is a typed collection expression.
    Returns 1 for [Vec Type], 2 for [Map Type] (dyn keys),
    3 for [Map KeyType ValueType] (struct keys), 0 if not a match.
@@ -5224,6 +5241,50 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (_coll_kind == 1) {
     const char* type_name_str = _coll_elem->data.lit_string.value;
     uint32_t type_name_len = _coll_elem->data.lit_string.length;
+
+    /* Scalar element type: [Vec i64], [Vec f64], etc. Encoded with a
+     * sentinel type_idx in the COMPILER_SCALAR_VEC_BASE range. The VM's
+     * OP_TYPED_VEC handler dispatches struct vs scalar via this range. */
+    if (is_type_keyword(type_name_str, type_name_len)) {
+      JaclType elem_t = type_from_keyword(type_name_str, type_name_len);
+      if (!compiler__is_typed_collection_scalar(elem_t)) {
+        char err[128];
+        snprintf(err, sizeof(err),
+                 "[Vec %.*s]: only value-type scalars supported "
+                 "(i32, i64, u32, u64, f32, f64, bool)",
+                 (int)type_name_len, type_name_str);
+        compiler__error(c, line, col, err);
+        return;
+      }
+      if (argc > 255) {
+        compiler__error(c, line, col, "[Vec ...] too many initial elements (max 255)");
+        return;
+      }
+      /* Compile each element with declared type as expected_type so
+       * literals narrow correctly. Verify resulting type matches. */
+      for (uint32_t i = 0; i < argc; i++) {
+        c->expected_type = elem_t;
+        compiler__compile_node(c, args[i]);
+        c->expected_type = TYPE_DYN;
+        if (c->last_expr_type != elem_t) {
+          char err[160];
+          snprintf(err, sizeof(err),
+                   "[Vec %.*s]: element %u is not a %.*s value (got %s)",
+                   (int)type_name_len, type_name_str, i,
+                   (int)type_name_len, type_name_str,
+                   type_name(c->last_expr_type));
+          compiler__error(c, line, col, err);
+          return;
+        }
+      }
+      compiler__emit_byte(c, OP_TYPED_VEC, line);
+      compiler__emit_u16(c, (uint16_t)COMPILER_SCALAR_TYPE_IDX(elem_t), line);
+      compiler__emit_byte(c, (uint8_t)argc, line);
+      c->last_expr_type = TYPE_TYPED_VEC;
+      c->last_struct_idx = COMPILER_SCALAR_TYPE_IDX(elem_t);
+      return;
+    }
+
     StructTypeRegistry* reg = compiler__get_struct_registry(c);
     uint32_t type_idx = struct_registry__find(reg, type_name_str, type_name_len);
     if (type_idx == UINT32_MAX) {
@@ -8534,12 +8595,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       uint32_t elem_type_idx = c->last_struct_idx;
       compiler__compile_node(c, args[1]);
-      /* Phase 5f: always use inline get — reification at boundaries handles heap needs */
       compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
-      c->inline_repr = INLINE_STACK;
-      c->last_expr_type = TYPE_STRUCT;
-      c->last_struct_idx = elem_type_idx;
+      if (COMPILER_IS_SCALAR_TYPE_IDX(elem_type_idx)) {
+        /* Scalar element typed vec: result is a single value of that
+         * scalar JaclType; not inline struct bytes. */
+        c->last_expr_type = COMPILER_TYPE_IDX_TO_SCALAR(elem_type_idx);
+        c->last_struct_idx = UINT32_MAX;
+      } else {
+        c->inline_repr = INLINE_STACK;
+        c->last_expr_type = TYPE_STRUCT;
+        c->last_struct_idx = elem_type_idx;
+      }
       return;
     }
     compiler__compile_node(c, args[1]);
@@ -8582,12 +8649,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       uint32_t elem_type_idx = c->last_struct_idx;
+      bool scalar = COMPILER_IS_SCALAR_TYPE_IDX(elem_type_idx);
+      JaclType expected = scalar ? COMPILER_TYPE_IDX_TO_SCALAR(elem_type_idx) : TYPE_STRUCT;
+      if (scalar) c->expected_type = expected;
       compiler__compile_node(c, args[1]);
-      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != elem_type_idx) {
+      c->expected_type = TYPE_DYN;
+      bool match = scalar
+        ? (c->last_expr_type == expected)
+        : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == elem_type_idx);
+      if (!match) {
         compiler__error(c, line, col, "vec-push: element type does not match typed vec element type");
         return;
       }
-      /* OP_TYPED_VEC_PUSH consumes inline struct bytes via vm__pop_struct. */
       compiler__emit_byte(c, OP_TYPED_VEC_PUSH, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       c->last_expr_type = TYPE_TYPED_VEC;
@@ -8614,13 +8687,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       uint32_t elem_type_idx = c->last_struct_idx;
+      bool scalar = COMPILER_IS_SCALAR_TYPE_IDX(elem_type_idx);
+      JaclType expected = scalar ? COMPILER_TYPE_IDX_TO_SCALAR(elem_type_idx) : TYPE_STRUCT;
       compiler__compile_node(c, args[1]);
+      if (scalar) c->expected_type = expected;
       compiler__compile_node(c, args[2]);
-      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != elem_type_idx) {
+      c->expected_type = TYPE_DYN;
+      bool match = scalar
+        ? (c->last_expr_type == expected)
+        : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == elem_type_idx);
+      if (!match) {
         compiler__error(c, line, col, "vec-set: element type does not match typed vec element type");
         return;
       }
-      /* OP_TYPED_VEC_SET consumes inline struct bytes via vm__pop_struct. */
       compiler__emit_byte(c, OP_TYPED_VEC_SET, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       c->last_expr_type = TYPE_TYPED_VEC;

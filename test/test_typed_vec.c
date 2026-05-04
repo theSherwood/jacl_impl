@@ -779,6 +779,89 @@ static int test_typed_vec_filter_wide_struct(void) {
   TEST_PASS();
 }
 
+/* ===== Scalar element types: [Vec i64], [Vec f64], etc. ===== */
+
+static int test_typed_vec_scalar_i64_construct(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "def v [[Vec i64] 10 20 30]\n"
+    "print [to-string [vec-len $v]]",
+    &cap, "3\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_scalar_i64_get(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "proc t {} {\n"
+    "  def v [[Vec i64] 10 20 30]\n"
+    "  print [to-string [vec-get $v 1]]\n"
+    "}\n"
+    "[t]",
+    &cap, "20\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_scalar_f64_get(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "proc t {} {\n"
+    "  def v [[Vec f64] 1.5 2.5 3.5]\n"
+    "  print [to-string [vec-get $v 0]]\n"
+    "}\n"
+    "[t]",
+    &cap, "1.5\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_scalar_push(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "proc t {} {\n"
+    "  def v [vec-push [[Vec i64] 1 2] 3]\n"
+    "  print [to-string [vec-len $v]]\n"
+    "  print [to-string [vec-get $v 2]]\n"
+    "}\n"
+    "[t]",
+    &cap, "3\n3\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_scalar_set(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "proc t {} {\n"
+    "  def v [vec-set [[Vec i64] 1 2 3] 1 99]\n"
+    "  print [to-string [vec-get $v 1]]\n"
+    "}\n"
+    "[t]",
+    &cap, "99\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_scalar_print(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "def v [[Vec i64] 10 20 30]\n"
+    "print $v",
+    &cap, "[10, 20, 30]\n"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_scalar_type_error(void) {
+  ASSERT(run_err(
+    "def v [[Vec i64] 1 \"oops\" 3]\n",
+    "is not a i64 value (got str)"));
+  TEST_PASS();
+}
+
+static int test_typed_vec_scalar_unsupported_str(void) {
+  ASSERT(run_err(
+    "def v [[Vec str] \"hi\"]\n",
+    "only value-type scalars supported"));
+  TEST_PASS();
+}
+
 /* ===== Main ===== */
 
 int main(void) {
@@ -845,6 +928,15 @@ int main(void) {
   RUN(test_typed_vec_filter_all);
   RUN(test_typed_vec_filter_preserves_type);
   RUN(test_typed_vec_filter_wide_struct);
+
+  RUN(test_typed_vec_scalar_i64_construct);
+  RUN(test_typed_vec_scalar_i64_get);
+  RUN(test_typed_vec_scalar_f64_get);
+  RUN(test_typed_vec_scalar_push);
+  RUN(test_typed_vec_scalar_set);
+  RUN(test_typed_vec_scalar_print);
+  RUN(test_typed_vec_scalar_type_error);
+  RUN(test_typed_vec_scalar_unsupported_str);
 
   printf("\n%d/%d passed\n", pass, pass + fail);
   return fail > 0 ? 1 : 0;
