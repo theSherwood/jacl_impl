@@ -151,7 +151,6 @@ typedef enum {
   OP_STRUCT_NEW_INLINE, /* construct inline struct on stack: followed by uint16_t struct_type_index */
   OP_STRUCT_GET_INLINE, /* inline field read: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_SET_INLINE, /* inline field write: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type */
-  OP_STRUCT_MATERIALIZE, /* inline to heap: uint8_t base_slot, uint16_t type_idx */
   OP_STRUCT_STORE_INLINE, /* heap to inline: uint8_t base_slot, uint16_t type_idx */
   OP_STRUCT_GET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_SET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type */
@@ -515,7 +514,6 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_STRUCT_NEW_INLINE: return "OP_STRUCT_NEW_INLINE";
     case OP_STRUCT_GET_INLINE: return "OP_STRUCT_GET_INLINE";
     case OP_STRUCT_SET_INLINE: return "OP_STRUCT_SET_INLINE";
-    case OP_STRUCT_MATERIALIZE: return "OP_STRUCT_MATERIALIZE";
     case OP_STRUCT_STORE_INLINE: return "OP_STRUCT_STORE_INLINE";
     case OP_STRUCT_GET_UPVALUE: return "OP_STRUCT_GET_UPVALUE";
     case OP_STRUCT_SET_UPVALUE: return "OP_STRUCT_SET_UPVALUE";

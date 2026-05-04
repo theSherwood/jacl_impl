@@ -10155,15 +10155,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     JaclType struct_type = c->last_expr_type;
     uint32_t struct_idx = c->last_struct_idx;
 
-    /* Handle inline struct ref from compiled sub-expression (non-command case) */
+    /* Inline struct ref hint cleanup: OP_STRUCT_GET_INLINE for a nested
+       struct field already materialized a HeapRecord and pushed it to TOS.
+       The INLINE_REF flag is just a chaining hint that doesn't apply to a
+       non-chained consumer; clear it without emitting anything. */
     if (c->inline_repr == INLINE_REF && struct_type == TYPE_STRUCT) {
-      /* The sub-expression was an inline struct ref that we didn't catch above.
-       * Fall through to normal path after materializing. */
-      compiler__emit_byte(c, OP_STRUCT_MATERIALIZE, line);
-      compiler__emit_byte(c, c->inline_ref_base, line);
-      compiler__emit_u16(c, (uint16_t)struct_idx, line);
       c->inline_repr = INLINE_NONE;
-      /* Now a heap struct is on the stack — proceed with normal path */
     }
 
     if (struct_type != TYPE_STRUCT && struct_type != TYPE_MAP && struct_type != TYPE_DYN) {

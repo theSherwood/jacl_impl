@@ -6325,30 +6325,6 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
-      case OP_STRUCT_MATERIALIZE: {
-        /* Convert an inline (stack-resident) struct to a heap-allocated HeapRecord.
-           Operands: uint8_t base_slot, uint16_t type_idx.
-           Reads raw bytes from stack slots, allocates HeapRecord, copies data, pushes pointer. */
-        uint8_t base_slot = vm__read_byte(vm);
-        uint16_t type_idx = vm__read_u16(vm);
-        if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
-          vm__set_error(vm, "invalid struct type index %u for materialize", (unsigned)type_idx);
-          return VM_RUNTIME_ERROR;
-        }
-        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
-        gc__current_heap = &vm->heap;
-        HeapRecord* s = (HeapRecord*)gc_alloc(&vm->heap, OBJ_HEAP_RECORD,
-                                                sizeof(HeapRecord) + sdef->total_size);
-        s->type_idx = type_idx;
-        s->total_size = sdef->total_size;
-        /* Copy raw bytes from stack slot region into heap struct data */
-        uint8_t* struct_base = (uint8_t*)&vm->stack[frame->stack_base + base_slot];
-        memcpy(s->data, struct_base, sdef->total_size);
-        result = vm__push(vm, jacl_heap_record_val(s));
-        if (result != VM_OK) return result;
-        break;
-      }
-
       case OP_STRUCT_STORE_INLINE: {
         /* De-materialize a heap HeapRecord into N consecutive stack slots.
            Operands: uint8_t base_slot, uint16_t type_idx.
