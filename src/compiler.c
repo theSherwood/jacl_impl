@@ -8445,8 +8445,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_GET_CTX, line);
       c->expected_type = cf->type;
       compiler__compile_node(c, override_cmd->data.command.args[0]);
-      JaclType val_type = c->last_expr_type;
       c->expected_type = TYPE_DYN;
+      /* Phase 3c: read result type from the typer's pre-computed AST
+       * annotation; fall back to c->last_expr_type for typer gaps. */
+      JaclType val_type = (JaclType)override_cmd->data.command.args[0]->inferred_type;
+      if (val_type == TYPE_DYN) val_type = c->last_expr_type;
       if (cf->type != TYPE_DYN && val_type != TYPE_DYN && val_type != cf->type) {
         char err[192];
         snprintf(err, sizeof(err),
@@ -10108,8 +10111,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             JaclType field_type = sdef->fields[fi].type;
             c->expected_type = field_type;
             compiler__compile_node(c, args[2]);
-            JaclType val_type = c->last_expr_type;
             c->expected_type = TYPE_DYN;
+            /* Phase 3c: read result type from the typer's pre-computed AST
+             * annotation; fall back to c->last_expr_type for typer gaps. */
+            JaclType val_type = (JaclType)args[2]->inferred_type;
+            if (val_type == TYPE_DYN) val_type = c->last_expr_type;
             if (field_type != TYPE_DYN && val_type != TYPE_DYN && val_type != field_type) {
               char err_msg[192];
               snprintf(err_msg, sizeof(err_msg),
@@ -10226,8 +10232,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           JaclType field_type = cf->type;
           c->expected_type = field_type;
           compiler__compile_node(c, args[2]);
-          JaclType val_type = c->last_expr_type;
           c->expected_type = TYPE_DYN;
+          /* Phase 3c: read result type from the typer's pre-computed AST
+           * annotation; fall back to c->last_expr_type for typer gaps. */
+          JaclType val_type = (JaclType)args[2]->inferred_type;
+          if (val_type == TYPE_DYN) val_type = c->last_expr_type;
           if (field_type != TYPE_DYN && val_type != TYPE_DYN && val_type != field_type) {
             char err_msg[192];
             snprintf(err_msg, sizeof(err_msg),
@@ -10330,8 +10339,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           JaclType field_type = sdef->fields[fi].type;
           c->expected_type = field_type;
           compiler__compile_node(c, args[2]);
-          JaclType val_type = c->last_expr_type;
           c->expected_type = TYPE_DYN;
+          /* Phase 3c: read result type from the typer's pre-computed AST
+           * annotation; fall back to c->last_expr_type for typer gaps. */
+          JaclType val_type = (JaclType)args[2]->inferred_type;
+          if (val_type == TYPE_DYN) val_type = c->last_expr_type;
 
           if (field_type != TYPE_DYN && val_type != TYPE_DYN && val_type != field_type) {
             char err_msg[192];
