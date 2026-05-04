@@ -16,7 +16,9 @@
 #ifndef TYPER_C
 #define TYPER_C
 
-#define TYPER_MAX_BINDINGS 1024
+#define TYPER_MAX_BINDINGS    1024
+#define TYPER_MAX_PROCS        256
+#define TYPER_MAX_PROC_PARAMS   32
 
 typedef struct {
   const char* name;
@@ -28,9 +30,23 @@ typedef struct {
 } TyperBinding;
 
 typedef struct {
+  const char* name;
+  uint32_t    name_len;
+  uint8_t     return_type;          /* JaclType */
+  uint32_t    return_struct_idx;    /* UINT32_MAX if not struct */
+  uint8_t     param_count;
+  uint8_t     param_types[TYPER_MAX_PROC_PARAMS];
+} TyperProc;
+
+typedef struct {
   TyperBinding bindings[TYPER_MAX_BINDINGS];
   uint32_t     binding_count;
   uint32_t     scope_depth;
+  /* Global proc registry — populated by a pre-pass over top-level so
+   * that calls (which may appear before the proc definition) can look
+   * up signatures. */
+  TyperProc    procs[TYPER_MAX_PROCS];
+  uint32_t     proc_count;
   /* Contextual type hint: parent's "expected_type". Mirrors compiler.c's
    * c->expected_type. Set by callers (e.g., typed def/mut) before recursing
    * into the value expression; restored after. */
@@ -169,22 +185,99 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
 
 /* Set helper: "set NAME EXPR" (and "::" / set! sugar). The typer doesn't
  * change the binding's type — set! must agree with the existing type
- * (compiler.c enforces this). We just recurse into the value. */
+ * (compiler.c enforces this). Propagate the target's type as
+ * expected_type so int/float literals on the RHS narrow correctly
+ * (mirrors compiler.c:6424-6426). */
 static bool typer__handle_set(TyperCtx* tc, AstNode* node) {
   AstNode** args = node->data.command.args;
   uint32_t  argc = node->data.command.arg_count;
   if (argc != 2) return false;
-  /* Recurse into both children but don't add a new binding. */
-  typer__infer_node(tc, args[0]);
-  typer__infer_node(tc, args[1]);
+
+  AstNode* target = args[0];
+  AstNode* value  = args[1];
+
+  /* Resolve target's type if it's a simple var-ref (skip field access etc.). */
+  JaclType target_type = TYPE_DYN;
+  if (target->type == AST_VAR_REF) {
+    const TyperBinding* b = typer__scope_resolve(tc,
+        target->data.var_ref.name, target->data.var_ref.length,
+        target->scope_mark);
+    if (b) target_type = (JaclType)b->type;
+  }
+  typer__infer_node(tc, target);
+
+  JaclType saved_et = tc->expected_type;
+  tc->expected_type = target_type;
+  typer__infer_node(tc, value);
+  tc->expected_type = saved_et;
+
   node->inferred_type = TYPE_NIL;
   return true;
 }
 
+/* Walk a proc's params node and emit (name, type) pairs to the caller's
+ * callback via the out-arrays. Mirrors compiler.c:7100-7180 simple cases:
+ * plain name → TYPE_DYN, "TYPE name" pair → that type. Skips compound
+ * types ([Vec T], [Map K V]) — those mark the param TYPE_DYN here so we
+ * don't hand back wrong info. Returns the number of params written. */
+static uint32_t typer__parse_params(AstNode* params,
+                                    AstNode* (*name_nodes_out)[TYPER_MAX_PROC_PARAMS],
+                                    JaclType (*types_out)[TYPER_MAX_PROC_PARAMS]) {
+  uint32_t count = 0;
+  if (!params || params->type != AST_COMMAND) return 0;
+  /* Build flat element list: head + args */
+  AstNode* flat[TYPER_MAX_PROC_PARAMS * 2 + 2];
+  uint32_t flat_n = 0;
+  AstNode* phead = params->data.command.head;
+  if (phead && phead->type == AST_LIT_STRING && phead->data.lit_string.length > 0) {
+    flat[flat_n++] = phead;
+    for (uint32_t i = 0; i < params->data.command.arg_count
+                          && flat_n < sizeof(flat)/sizeof(flat[0]); i++) {
+      flat[flat_n++] = params->data.command.args[i];
+    }
+  }
+  for (uint32_t fi = 0; fi < flat_n; fi++) {
+    AstNode* elem = flat[fi];
+    if (count >= TYPER_MAX_PROC_PARAMS) break;
+    if (elem->type == AST_COMMAND) {
+      /* compound type expr — skip for now, conservatively dyn */
+      fi++;
+      if (fi >= flat_n) break;
+      elem = flat[fi];
+      if (elem->type != AST_LIT_STRING) continue;
+      (*name_nodes_out)[count] = elem;
+      (*types_out)[count]      = TYPE_DYN;
+      count++;
+      continue;
+    }
+    if (elem->type != AST_LIT_STRING) continue;
+    /* Type-keyword + name pair? */
+    if (is_type_keyword(elem->data.lit_string.value, elem->data.lit_string.length)) {
+      JaclType t = type_from_keyword(elem->data.lit_string.value, elem->data.lit_string.length);
+      fi++;
+      if (fi >= flat_n) break;
+      AstNode* next = flat[fi];
+      if (next->type != AST_LIT_STRING) continue;
+      (*name_nodes_out)[count] = next;
+      (*types_out)[count]      = t;
+      count++;
+    } else if (elem->data.lit_string.length == 3 &&
+               memcmp(elem->data.lit_string.value, "...", 3) == 0) {
+      /* variadic marker — skip */
+      continue;
+    } else {
+      /* Plain name — TYPE_DYN. Could also be a struct name; treat as dyn for now. */
+      (*name_nodes_out)[count] = elem;
+      (*types_out)[count]      = TYPE_DYN;
+      count++;
+    }
+  }
+  return count;
+}
+
 /* Proc definition introduces a new isolated scope for params + body.
- * Skeleton: enter scope, add params (typed if annotated), walk body, exit.
- * Doesn't yet register the proc itself in any global table — that comes
- * with the next subphase (proc-call return type tracking). */
+ * Adds typed params (parsed via typer__parse_params) into scope so
+ * var-refs inside the body resolve correctly. */
 static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   AstNode** args = node->data.command.args;
   uint32_t  argc = node->data.command.arg_count;
@@ -197,26 +290,15 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   AstNode* body   = args[body_idx];
   if (body->type != AST_BLOCK) return false;
 
-  typer__scope_push(tc);
+  AstNode* pn[TYPER_MAX_PROC_PARAMS];
+  JaclType pt[TYPER_MAX_PROC_PARAMS];
+  uint32_t pcount = typer__parse_params(params, &pn, &pt);
 
-  /* Params: AST_COMMAND of the form [name1 name2 ...] or [TYPE name1 ...]
-   * Compiler parses these in pairs, but for the skeleton we conservatively
-   * mark all params as TYPE_DYN. Future subphase will walk type annotations. */
-  if (params && params->type == AST_COMMAND) {
-    AstNode* phead = params->data.command.head;
-    if (phead && phead->type == AST_LIT_STRING) {
-      typer__scope_add(tc, phead->data.lit_string.value,
-                       phead->data.lit_string.length,
-                       phead->scope_mark, TYPE_DYN, UINT32_MAX);
-    }
-    for (uint32_t i = 0; i < params->data.command.arg_count; i++) {
-      AstNode* p = params->data.command.args[i];
-      if (p->type == AST_LIT_STRING) {
-        typer__scope_add(tc, p->data.lit_string.value,
-                         p->data.lit_string.length,
-                         p->scope_mark, TYPE_DYN, UINT32_MAX);
-      }
-    }
+  typer__scope_push(tc);
+  for (uint32_t i = 0; i < pcount; i++) {
+    typer__scope_add(tc, pn[i]->data.lit_string.value,
+                     pn[i]->data.lit_string.length,
+                     pn[i]->scope_mark, (uint8_t)pt[i], UINT32_MAX);
   }
 
   typer__infer_node(tc, body);
@@ -226,13 +308,73 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   return true;
 }
 
+/* Pre-pass: collect proc signatures from top-level so calls can look
+ * them up regardless of definition order. Matches compiler.c's
+ * Phase 1 proc registration behavior. */
+static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count) {
+  for (uint32_t ni = 0; ni < count; ni++) {
+    AstNode* node = nodes[ni];
+    if (node->type != AST_COMMAND) continue;
+    AstNode* head = node->data.command.head;
+    if (!head || head->type != AST_LIT_STRING ||
+        head->data.lit_string.length != 4 ||
+        memcmp(head->data.lit_string.value, "proc", 4) != 0) continue;
+
+    AstNode** args = node->data.command.args;
+    uint32_t  argc = node->data.command.arg_count;
+    uint32_t  name_idx, params_idx;
+    JaclType  return_type = TYPE_DYN;
+    if (argc == 4) {
+      AstNode* tn = args[0];
+      if (tn->type == AST_LIT_STRING &&
+          is_type_keyword(tn->data.lit_string.value, tn->data.lit_string.length)) {
+        return_type = type_from_keyword(tn->data.lit_string.value, tn->data.lit_string.length);
+      }
+      name_idx = 1; params_idx = 2;
+    } else if (argc == 3) {
+      name_idx = 0; params_idx = 1;
+    } else continue;
+
+    AstNode* name_node = args[name_idx];
+    if (name_node->type != AST_LIT_STRING) continue;
+
+    if (tc->proc_count >= TYPER_MAX_PROCS) break;
+    TyperProc* p = &tc->procs[tc->proc_count++];
+    p->name        = name_node->data.lit_string.value;
+    p->name_len    = name_node->data.lit_string.length;
+    p->return_type = (uint8_t)return_type;
+    p->return_struct_idx = UINT32_MAX;
+
+    AstNode* pn[TYPER_MAX_PROC_PARAMS];
+    JaclType pt[TYPER_MAX_PROC_PARAMS];
+    uint32_t pcount = typer__parse_params(args[params_idx], &pn, &pt);
+    if (pcount > TYPER_MAX_PROC_PARAMS) pcount = TYPER_MAX_PROC_PARAMS;
+    p->param_count = (uint8_t)pcount;
+    for (uint32_t i = 0; i < pcount; i++) {
+      p->param_types[i] = (uint8_t)pt[i];
+    }
+  }
+}
+
+static const TyperProc* typer__find_proc(TyperCtx* tc,
+                                         const char* name, uint32_t name_len) {
+  for (uint32_t i = 0; i < tc->proc_count; i++) {
+    if (tc->procs[i].name_len == name_len &&
+        memcmp(tc->procs[i].name, name, name_len) == 0) {
+      return &tc->procs[i];
+    }
+  }
+  return NULL;
+}
+
 /* --- Generic walkers --- */
 
 static void typer__infer_command(TyperCtx* tc, AstNode* node) {
   AstNode* head = node->data.command.head;
 
   /* Recognize a few common command shapes. Anything not handled falls
-   * through to TYPE_DYN with structural recursion. */
+   * through to a generic call dispatch (which propagates known proc
+   * param types as expected_type for arg literals). */
   if (head && head->type == AST_LIT_STRING) {
     const char* hname = head->data.lit_string.value;
     uint32_t    hlen  = head->data.lit_string.length;
@@ -246,12 +388,32 @@ static void typer__infer_command(TyperCtx* tc, AstNode* node) {
     }
   }
 
-  /* Default: recurse, leave type as TYPE_DYN. */
+  /* Generic call dispatch: if head is a known proc name, propagate
+   * declared param types to args so int/float literals narrow. Then
+   * propagate the proc's declared return type up. */
+  const TyperProc* proc = NULL;
+  if (head && head->type == AST_LIT_STRING) {
+    proc = typer__find_proc(tc,
+        head->data.lit_string.value, head->data.lit_string.length);
+  }
   if (head) typer__infer_node(tc, head);
   for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-    typer__infer_node(tc, node->data.command.args[i]);
+    AstNode* arg = node->data.command.args[i];
+    JaclType saved_et = tc->expected_type;
+    if (proc && i < proc->param_count) {
+      tc->expected_type = (JaclType)proc->param_types[i];
+    } else {
+      tc->expected_type = TYPE_DYN;
+    }
+    typer__infer_node(tc, arg);
+    tc->expected_type = saved_et;
   }
-  node->inferred_type = TYPE_DYN;
+  if (proc) {
+    node->inferred_type = proc->return_type;
+    node->inferred_struct_idx = proc->return_struct_idx;
+  } else {
+    node->inferred_type = TYPE_DYN;
+  }
 }
 
 static void typer__infer_block(TyperCtx* tc, AstNode* node) {
@@ -373,7 +535,13 @@ void typer_infer(AstNode** nodes, uint32_t count) {
   TyperCtx tc;
   tc.binding_count = 0;
   tc.scope_depth   = 0;
+  tc.proc_count    = 0;
   tc.expected_type = TYPE_DYN;
+
+  /* Pre-pass: register top-level proc signatures so calls (which may
+   * appear before the definition) resolve correctly. */
+  typer__register_procs(&tc, nodes, count);
+
   for (uint32_t i = 0; i < count; i++) {
     typer__infer_node(&tc, nodes[i]);
   }
