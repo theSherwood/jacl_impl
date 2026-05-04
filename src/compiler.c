@@ -6137,7 +6137,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     c->expected_type = declared_type;
     compiler__compile_node(c, args[value_arg_idx]);
     c->expected_type = TYPE_DYN;
-    JaclType rhs_type = c->last_expr_type;
+    /* Phase 3c: read result type from the typer's pre-computed AST
+     * annotation; fall back to c->last_expr_type for typer gaps. */
+    JaclType rhs_type = (JaclType)args[value_arg_idx]->inferred_type;
+    if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
 
     /* Type check for typed mut */
     if (declared_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != declared_type) {
@@ -6878,7 +6881,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     c->expected_type = declared_type;
     compiler__compile_node(c, args[value_arg_idx]);
     c->expected_type = TYPE_DYN;
-    JaclType rhs_type = c->last_expr_type;
+    /* Phase 3c: read result type from the typer's pre-computed AST
+     * annotation; fall back to c->last_expr_type for typer gaps. */
+    JaclType rhs_type = (JaclType)args[value_arg_idx]->inferred_type;
+    if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
 
     /* US-007: activate inline for function calls returning struct types.
      * If the RHS isn't already inline (struct constructor or inline get) but

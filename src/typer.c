@@ -135,31 +135,50 @@ static bool typer__node_as_type_keyword(AstNode* node, JaclType* out_type) {
   return true;
 }
 
-/* Parse "def NAME EXPR" or "def TYPE NAME EXPR" or "mut ..." (same shape).
- * Adds the binding to the current scope and recurses into EXPR.
- * Returns true if handled (so the generic command handler can skip it).
+/* Parse the family of binding forms that resolve to def/mut/set:
+ *   def NAME EXPR / mut NAME EXPR
+ *   def TYPE NAME EXPR / mut TYPE NAME EXPR
+ *   NAME = EXPR / NAME : EXPR     (sugar — argc=2, args[0]=name)
+ *   [TYPE NAME] = EXPR / [TYPE NAME] : EXPR  (sugar — argc=2, args[0]=AST_COMMAND)
+ * Adds the binding to the current scope and recurses into EXPR with
+ * declared_type pushed as expected_type. Returns true if handled.
  * Does not handle destructuring forms — those default to TYPE_DYN. */
 static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   AstNode** args = node->data.command.args;
   uint32_t  argc = node->data.command.arg_count;
 
   JaclType  declared_type = TYPE_DYN;
-  uint32_t  name_arg_idx  = 0;
-  uint32_t  value_arg_idx = 1;
+  AstNode*  name_node     = NULL;
+  AstNode*  value_node    = NULL;
 
   if (argc == 3) {
+    /* Keyword form: def TYPE NAME VALUE */
     if (!typer__node_as_type_keyword(args[0], &declared_type)) {
-      /* args[0] may be a struct name; the typer doesn't have the struct
-       * registry yet, so defer to TYPE_DYN. */
+      /* args[0] may be a struct name; treated as TYPE_DYN for now. */
       return false;
     }
-    name_arg_idx  = 1;
-    value_arg_idx = 2;
-  } else if (argc != 2) {
+    name_node  = args[1];
+    value_node = args[2];
+  } else if (argc == 2) {
+    /* Two-arg shapes:
+     *   def NAME VALUE                           — keyword + bare name
+     *   [TYPE NAME] = VALUE / [TYPE NAME] : VALUE — sugar with typed LHS
+     * The sugar form's LHS is an AST_COMMAND with head=type and one arg=name. */
+    if (args[0]->type == AST_COMMAND &&
+        args[0]->data.command.arg_count == 1 &&
+        args[0]->data.command.head &&
+        args[0]->data.command.head->type == AST_LIT_STRING &&
+        typer__node_as_type_keyword(args[0]->data.command.head, &declared_type)) {
+      name_node  = args[0]->data.command.args[0];
+      value_node = args[1];
+    } else {
+      name_node  = args[0];
+      value_node = args[1];
+    }
+  } else {
     return false;
   }
 
-  AstNode* name_node = args[name_arg_idx];
   if (name_node->type != AST_LIT_STRING) {
     /* Destructuring or hygienic var-ref name forms — defer. */
     return false;
@@ -169,7 +188,6 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
    * binding — bindings come into scope only after their definition).
    * Push declared_type as expected_type so int/float literals can be
    * narrowed (mirrors compiler.c:6127-6129 / 6939-6941). */
-  AstNode* value_node = args[value_arg_idx];
   JaclType saved_et   = tc->expected_type;
   tc->expected_type   = declared_type;
   typer__infer_node(tc, value_node);
@@ -555,7 +573,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     const char* hname = head->data.lit_string.value;
     uint32_t    hlen  = head->data.lit_string.length;
     bool is_def_or_mut = (hlen == 3 && memcmp(hname, "def", 3) == 0) ||
-                         (hlen == 3 && memcmp(hname, "mut", 3) == 0);
+                         (hlen == 3 && memcmp(hname, "mut", 3) == 0) ||
+                         (hlen == 1 && hname[0] == '=') ||
+                         (hlen == 1 && hname[0] == ':');
     bool is_set = (hlen == 3 && memcmp(hname, "set", 3) == 0) ||
                   (hlen == 2 && memcmp(hname, "::", 2) == 0);
     if (is_def_or_mut) {
