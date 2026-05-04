@@ -4000,18 +4000,28 @@ uint8_t compiler__typed_op(uint8_t dyn_op, JaclType type) {
 void compiler__compile_binary(Compiler* c, AstNode** args,
                                      uint8_t op, const char* op_verb,
                                      uint32_t line, uint32_t col) {
-  /* Compile LHS */
-  compiler__compile_node(c, args[0]);
-  JaclType lhs_type = c->last_expr_type;
+  /* Phase 3c: read LHS type from the typer pass's pre-computed
+   * annotation on the AST instead of walking LHS first to discover it.
+   * Fall back to c->last_expr_type for any node the typer left as
+   * TYPE_DYN (typer gaps) — the fallback can be removed once the typer
+   * covers all relevant shapes. */
+  JaclType lhs_type = (JaclType)args[0]->inferred_type;
 
-  /* Set contextual type for RHS (enables literal typing like [+ $a 1]) */
+  /* Compile LHS — caller already reset expected_type at command entry. */
+  compiler__compile_node(c, args[0]);
+  if (lhs_type == TYPE_DYN) lhs_type = c->last_expr_type;
+
+  /* Set contextual type for RHS so int/float literals on the RHS narrow
+   * to the LHS's type. (Compiling LHS may have left expected_type at
+   * TYPE_DYN even though we knew the type up front, so set it here.) */
   if (lhs_type != TYPE_DYN) {
     c->expected_type = lhs_type;
   }
 
   /* Compile RHS */
   compiler__compile_node(c, args[1]);
-  JaclType rhs_type = c->last_expr_type;
+  JaclType rhs_type = (JaclType)args[1]->inferred_type;
+  if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
   c->expected_type = TYPE_DYN;
 
   /* Static typing for struct comparisons */

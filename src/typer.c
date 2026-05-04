@@ -175,9 +175,22 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   typer__infer_node(tc, value_node);
   tc->expected_type   = saved_et;
 
-  /* Effective type: declared wins; otherwise inherit from RHS. */
-  JaclType effective = (declared_type != TYPE_DYN)
-                       ? declared_type : (JaclType)value_node->inferred_type;
+  /* Effective type: declared wins. For an untyped def/mut, mirror
+   * compiler.c:7013-7019: only unboxed scalars (i64/u64/f64), structs,
+   * streams, and typed collections are inherited from the RHS; tagged
+   * scalars (i32/u32/f32/bool/etc.) collapse to DYN. */
+  JaclType effective;
+  if (declared_type != TYPE_DYN) {
+    effective = declared_type;
+  } else {
+    JaclType rhs_t = (JaclType)value_node->inferred_type;
+    if (is_unboxed_type(rhs_t) || rhs_t == TYPE_STRUCT ||
+        rhs_t == TYPE_STREAM || is_typed_collection(rhs_t)) {
+      effective = rhs_t;
+    } else {
+      effective = TYPE_DYN;
+    }
+  }
   uint32_t struct_idx = UINT32_MAX;
   if (effective == TYPE_STRUCT) {
     struct_idx = value_node->inferred_struct_idx;
