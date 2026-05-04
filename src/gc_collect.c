@@ -362,9 +362,10 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
-    /* --- HeapRecord: trace any reference fields. The only HeapRecord type
-       in user-reachable code is ctx (the lone builtin). User defstructs are
-       inline and never become HeapRecords. --- */
+    /* --- HeapRecord: trace reference fields. The only HeapRecord type
+       in user-reachable code is ctx (the lone builtin). Struct-typed
+       fields store inline bytes (value-type only since ref fields are
+       rejected in defstruct), so they never need GC tracing. --- */
     case OBJ_HEAP_RECORD: {
         HeapRecord *s = (HeapRecord *)payload;
         if (gc__struct_registry) {
@@ -373,7 +374,7 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
             for (uint32_t i = 0; i < sdef->field_count; i++) {
                 JaclType ft = sdef->fields[i].type;
                 if (ft == TYPE_STR || ft == TYPE_VEC || ft == TYPE_MAP ||
-                    ft == TYPE_CLOSURE || ft == TYPE_DYN || ft == TYPE_STRUCT) {
+                    ft == TYPE_CLOSURE || ft == TYPE_DYN) {
                     JaclVal val;
                     memcpy(&val, s->data + sdef->fields[i].offset, sizeof(JaclVal));
                     gc__ms_push_val(ms, val);

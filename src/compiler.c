@@ -8481,16 +8481,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, err);
         return;
       }
-      /* Ctx is a HeapRecord; struct-typed fields store a heap pointer.
-         If the override produced inline bytes (typed-struct constructor),
-         reify to a HeapRecord pointer before OP_HEAP_RECORD_SET. */
+      /* Ctx struct fields store inline bytes embedded in ctx.data —
+         use the inline-aware SET op to write bytes directly. */
       if (cf->type == TYPE_STRUCT) {
-        compiler__reify_inline_struct(c, line);
+        compiler__emit_byte(c, OP_HEAP_RECORD_SET_INLINE, line);
+        compiler__emit_u16(c, (uint16_t)cf->offset, line);
+        compiler__emit_u16(c, (uint16_t)cf->struct_type_idx, line);
+      } else {
+        compiler__emit_byte(c, OP_HEAP_RECORD_SET, line);
+        compiler__emit_u16(c, (uint16_t)cf->offset, line);
+        compiler__emit_byte(c, (uint8_t)cf->type, line);
       }
-      compiler__emit_byte(c, OP_HEAP_RECORD_SET, line);
-      compiler__emit_u16(c, (uint16_t)cf->offset, line);
-      compiler__emit_byte(c, (uint8_t)cf->type, line);
-      compiler__emit_byte(c, OP_POP, line); /* discard struct result from OP_HEAP_RECORD_SET */
+      compiler__emit_byte(c, OP_POP, line); /* discard struct result */
     }
 
     /* Compile body block as expression (result stays on stack).
@@ -10214,7 +10216,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         }
         CtxField* cf = &ctx_fl->fields[fi];
         if (is_set) {
-          /* US-008 will handle set — for now reject */
           if (!cf->is_mutable) {
             char err_msg[192];
             snprintf(err_msg, sizeof(err_msg),
@@ -10237,20 +10238,35 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__error(c, line, col, err_msg);
             return;
           }
-          compiler__emit_byte(c, OP_HEAP_RECORD_SET, line);
-          compiler__emit_u16(c, (uint16_t)cf->offset, line);
-          compiler__emit_byte(c, (uint8_t)field_type, line);
+          if (field_type == TYPE_STRUCT) {
+            /* Inline struct field: write bytes directly into ctx.data,
+               no heap pointer intermediate. */
+            compiler__emit_byte(c, OP_HEAP_RECORD_SET_INLINE, line);
+            compiler__emit_u16(c, (uint16_t)cf->offset, line);
+            compiler__emit_u16(c, (uint16_t)cf->struct_type_idx, line);
+          } else {
+            compiler__emit_byte(c, OP_HEAP_RECORD_SET, line);
+            compiler__emit_u16(c, (uint16_t)cf->offset, line);
+            compiler__emit_byte(c, (uint8_t)field_type, line);
+          }
           c->last_expr_type = TYPE_STRUCT;
           c->last_struct_idx = CTX_STRUCT_PENDING;
         } else {
-          compiler__emit_byte(c, OP_HEAP_RECORD_GET, line);
-          compiler__emit_u16(c, (uint16_t)cf->offset, line);
-          compiler__emit_byte(c, (uint8_t)cf->type, line);
-          c->last_expr_type = cf->type;
-          if (cf->type == TYPE_STRUCT)
+          if (cf->type == TYPE_STRUCT) {
+            /* Inline struct field: push N inline slots from ctx.data. */
+            compiler__emit_byte(c, OP_HEAP_RECORD_GET_INLINE, line);
+            compiler__emit_u16(c, (uint16_t)cf->offset, line);
+            compiler__emit_u16(c, (uint16_t)cf->struct_type_idx, line);
+            c->inline_repr = INLINE_STACK;
+            c->last_expr_type = TYPE_STRUCT;
             c->last_struct_idx = cf->struct_type_idx;
-          else
+          } else {
+            compiler__emit_byte(c, OP_HEAP_RECORD_GET, line);
+            compiler__emit_u16(c, (uint16_t)cf->offset, line);
+            compiler__emit_byte(c, (uint8_t)cf->type, line);
+            c->last_expr_type = cf->type;
             c->last_struct_idx = UINT32_MAX;
+          }
         }
         return;
       }
@@ -12250,17 +12266,23 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         }
       }
 
-      /* Emit initialization bytecode: OP_GET_CTX, default_expr, OP_HEAP_RECORD_SET */
+      /* Emit initialization bytecode. Struct fields write inline bytes
+         directly into ctx.data via OP_HEAP_RECORD_SET_INLINE; primitive
+         and reference fields use OP_HEAP_RECORD_SET. */
       if (node->data.ctx_decl.default_expr) {
         CtxField* added = ctx_field_list__find(ctx, field_name, field_name_len);
         compiler__emit_byte(c, OP_GET_CTX, line);
         compiler__compile_node(c, node->data.ctx_decl.default_expr);
-        /* Phase 5c: struct default exprs are now inline — reify for OP_HEAP_RECORD_SET */
-        compiler__reify_inline_struct(c, line);
-        compiler__emit_byte(c, OP_HEAP_RECORD_SET, line);
-        compiler__emit_u16(c, (uint16_t)added->offset, line);
-        compiler__emit_byte(c, (uint8_t)added->type, line);
-        /* OP_HEAP_RECORD_SET leaves struct on stack — pop it, push nil as statement result */
+        if (added->type == TYPE_STRUCT) {
+          compiler__emit_byte(c, OP_HEAP_RECORD_SET_INLINE, line);
+          compiler__emit_u16(c, (uint16_t)added->offset, line);
+          compiler__emit_u16(c, (uint16_t)added->struct_type_idx, line);
+        } else {
+          compiler__emit_byte(c, OP_HEAP_RECORD_SET, line);
+          compiler__emit_u16(c, (uint16_t)added->offset, line);
+          compiler__emit_byte(c, (uint8_t)added->type, line);
+        }
+        /* SET leaves the heap record on stack — pop it, push nil. */
         compiler__emit_byte(c, OP_POP, line);
       }
       compiler__emit_byte(c, OP_NIL, line);

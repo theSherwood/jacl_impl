@@ -5945,6 +5945,83 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_HEAP_RECORD_GET_INLINE: {
+        /* Pop a heap record, push N inline slots from data+offset.
+           Operands: u16 byte_offset, u16 sub_type_idx. */
+        uint16_t field_offset = vm__read_u16(vm);
+        uint16_t sub_type_idx = vm__read_u16(vm);
+        JaclVal struct_val;
+        result = vm__pop(vm, &struct_val); if (result != VM_OK) return result;
+        if (jacl_is_error(struct_val)) {
+          result = vm__push(vm, struct_val); if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_struct(struct_val)) {
+          vm__set_error(vm, "field access on non-struct value");
+          return VM_RUNTIME_ERROR;
+        }
+        if (!vm->struct_registry || sub_type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid sub-struct type index %u", (unsigned)sub_type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sub_sdef = vm->struct_registry->defs[sub_type_idx];
+        uint32_t sub_width = (sub_sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        if (vm->stack_top + sub_width > VM_STACK_MAX) {
+          vm__set_error(vm, "stack overflow (heap_record_get_inline)");
+          return VM_STACK_OVERFLOW;
+        }
+        HeapRecord* s = jacl_as_heap_record_ptr(struct_val);
+        memset(&vm->stack[vm->stack_top], 0, sub_width * sizeof(JaclVal));
+        memcpy(&vm->stack[vm->stack_top], s->data + field_offset, sub_sdef->total_size);
+        for (uint32_t si = 0; si < sub_width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+        }
+        vm->stack_top += sub_width;
+        break;
+      }
+
+      case OP_HEAP_RECORD_SET_INLINE: {
+        /* Pop N inline struct slots, pop heap record, copy bytes to
+           data+offset, push record back (for chaining).
+           Operands: u16 byte_offset, u16 sub_type_idx. */
+        uint16_t field_offset = vm__read_u16(vm);
+        uint16_t sub_type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || sub_type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "invalid sub-struct type index %u for heap_record_set_inline", (unsigned)sub_type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sub_sdef = vm->struct_registry->defs[sub_type_idx];
+        uint32_t sub_width = (sub_sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        if (vm->stack_top < sub_width + 1) {
+          vm__set_error(vm, "heap_record_set_inline: stack underflow");
+          return VM_RUNTIME_ERROR;
+        }
+        /* Inline slots are above the heap record on stack: [..., record, s0, s1, ...] */
+        uint8_t* inline_src = (uint8_t*)&vm->stack[vm->stack_top - sub_width];
+        JaclVal struct_val = vm->stack[vm->stack_top - sub_width - 1];
+        if (jacl_is_error(struct_val)) {
+          /* Pop the inline slots and propagate error. */
+          for (uint32_t si = 0; si < sub_width; si++) {
+            BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - sub_width + si);
+          }
+          vm->stack_top -= sub_width;
+          /* error JaclVal already on TOS where record was; leave it */
+          break;
+        }
+        if (!jacl_is_struct(struct_val)) {
+          vm__set_error(vm, "field mutation on non-struct value");
+          return VM_RUNTIME_ERROR;
+        }
+        HeapRecord* s = jacl_as_heap_record_ptr(struct_val);
+        memcpy(s->data + field_offset, inline_src, sub_sdef->total_size);
+        /* Pop the inline slots; the heap record stays on TOS. */
+        for (uint32_t si = 0; si < sub_width; si++) {
+          BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - sub_width + si);
+        }
+        vm->stack_top -= sub_width;
+        break;
+      }
+
       case OP_HEAP_RECORD_GET_DYN: {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal struct_val;
