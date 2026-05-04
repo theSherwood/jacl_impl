@@ -4716,63 +4716,17 @@ void compiler__compile_destructure_named(
 
     if (use_struct_path) {
       if (has_rest) {
-        /* Rest path: materialize the wide local to a heap HeapRecord, then
-           OP_DESTRUCTURE_NAMED_REST pushes N field values + 1 rest map. */
-        compiler__emit_byte(c, OP_STRUCT_MATERIALIZE, line);
-        compiler__emit_byte(c, (uint8_t)src_slot, line);
-        compiler__emit_u16(c, (uint16_t)rhs_struct_idx, line);
-        compiler__emit_byte(c, OP_DESTRUCTURE_NAMED_REST, line);
-        compiler__emit_byte(c, (uint8_t)d_count, line);
-        for (uint32_t i = 0; i < d_count; i++) {
-          JaclVal key_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
-          uint16_t key_idx = chunk_add_constant(c->chunk, key_val);
-          compiler__emit_u16(c, key_idx, line);
-        }
-        /* Stack: N field values (bottom) ... rest_map (top). The rest map
-           is on top, so register the rest local first by going in reverse:
-           pop rest_map (cell-wrap if mut), then each field underneath. */
-        /* Actually the VM pushed in this order: fields[0], fields[1], ...,
-           fields[N-1], rest_map. That means stack indices are:
-             baseline + 0  → fields[0]
-             baseline + 1  → fields[1]
-             ...
-             baseline + N-1 → fields[N-1]
-             baseline + N   → rest_map
-           Local registration just adds names to slots in order. */
-        for (uint32_t i = 0; i < d_count; i++) {
-          uint32_t fi;
-          for (fi = 0; fi < sdef->field_count; fi++) {
-            if (sdef->fields[fi].name_len == d_name_lens[i] &&
-                memcmp(sdef->fields[fi].name, d_names[i], d_name_lens[i]) == 0)
-              break;
-          }
-          /* Field value is on stack at the next local slot. */
-          if (is_mutable) {
-            /* MAKE_CELL operates on TOS, but field i is below subsequent
-               fields. For simplicity, mut+rest combo isn't supported here
-               — fall back to simple add_local. The mut-rest combo on
-               typed-struct destructure is rare. */
-          }
-          JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
-          compiler__add_local(c, name_val, line, col);
-          if (is_mutable) c->locals[c->local_count - 1].is_mutable = true;
-          if (d_types && d_types[i]) {
-            JaclType t;
-            if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
-              c->locals[c->local_count - 1].type = t;
-            }
-          } else if (fi < sdef->field_count) {
-            c->locals[c->local_count - 1].type = sdef->fields[fi].type;
-            if (sdef->fields[fi].type == TYPE_STRUCT)
-              c->locals[c->local_count - 1].struct_type_idx = sdef->fields[fi].struct_type_idx;
-          }
-        }
-        if (is_mutable) compiler__emit_byte(c, OP_MAKE_CELL, line);
-        JaclVal rest_val = compiler__name_val(c->heap, c->intern_table, rest_name, rest_name_len);
-        compiler__add_local(c, rest_val, line, col);
-        if (is_mutable) c->locals[c->local_count - 1].is_mutable = true;
-        c->locals[c->local_count - 1].type = TYPE_MAP;
-      } else {
+        /* Rest patterns aren't supported on struct destructure — building
+           the rest map would require materializing the inline struct to a
+           heap HeapRecord (auto-allocation, against the design rule). The
+           user can list every field explicitly, or destructure into a map
+           via [box?] / [unbox] flow if they really want a dynamic rest. */
+        compiler__error(c, line, col,
+                        "rest pattern '..rest' is not supported when "
+                        "destructuring a struct — list each field explicitly");
+        return;
+      }
+      {
         /* No-rest path: extract each field with OP_STRUCT_GET_INLINE — reads
            bytes directly from the wide local, no heap allocation. */
         for (uint32_t i = 0; i < d_count; i++) {

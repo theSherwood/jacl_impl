@@ -139,22 +139,21 @@ static int test_vec_rest_unnamed(void) {
   TEST_PASS();
 }
 
-/* --- Test: named rest for struct --- */
+/* --- Test: rest patterns are rejected on struct destructure --- */
 static int test_named_rest_struct(void) {
+  /* Building a rest map from a struct would require materializing the
+     inline struct to a heap HeapRecord — an auto-allocation. The compiler
+     rejects this and asks the user to list every field explicitly. */
   PrintCapture cap;
   VMResult r = run_capture(
     "struct Point {i32 x, i32 y, i32 z}\n"
     "proc main {} {\n"
     "  p = [Point 10 20 30]\n"
     "  [def {x, ..rest} $p]\n"
-    "  [print $x]\n"
-    "  [print [map-get $rest \"y\"]]\n"
-    "  [print [map-get $rest \"z\"]]\n"
     "}\n"
     "main\n",
     &cap);
-  ASSERT_INT_EQ(r, VM_OK);
-  ASSERT_STR_EQ(cap.buf, "10\n20\n30\n");
+  ASSERT_INT_EQ(r, VM_RUNTIME_ERROR);
   ASSERT(check_no_leaks());
   TEST_PASS();
 }
