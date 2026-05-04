@@ -233,3 +233,35 @@ Recommended sequencing:
 5. Add a dev-build assertion harness that compares typer output to `last_expr_type` at compile sites — catches inference bugs before consumers depend on them.
 
 Each step is its own commit. Total scope: ~2–4 weeks of focused work; should land `compiler.c` 1–2k lines lighter once consumers switch (3c).
+
+---
+
+## Phase 3b — scope-aware inference (in progress)
+
+92/92 tests still pass throughout. Six commits land 3b's first arc:
+
+1. `71e9e6c` — scope tracker (push/pop/add/resolve), var-ref inference, def/mut/set/proc command handlers, dual-track check (`-DJACL_TYPER_DUAL_TRACK`).
+2. `741ffe6` — literal expected_type propagation (def/mut push declared_type to RHS literals). Dual-track on m11: 123 → 35.
+3. `8a5cf72` — proc signature pre-pass + call-arg expected_type propagation. m11: 35 → 26, harness: 10 → 6.
+4. `c62b48d` — binary op LHS-to-RHS expected_type propagation (mirrors `compile_binary`). m11: 26 → 9.
+5. (this commit) — nested proc registration so calls in same scope as a nested proc def find its signature. m11: 9 → 7.
+
+### Status of recommended sequencing
+
+- ✅ (1) Scope tracker, var-ref, simple def
+- ✅ (2) Proc registration + return type at calls
+- ✅ (3) Arithmetic + comparison rules
+- ⏳ (4) Struct construction + field access — not yet; would need struct registry threading in the typer.
+- ✅ (5) Dual-track assertion harness (gated by `-DJACL_TYPER_DUAL_TRACK`).
+
+### Remaining mismatches
+
+m11: 7. harness: 5. All same shape: `AST_LIT_INT` → `i32` vs `i64`/`u32`/`u64`/`f64`. Hard-to-pinpoint sites (mostly in interpolated strings, struct constructors, or context-narrowing forms not yet covered). Diminishing-returns territory for this phase.
+
+### What this unlocks
+
+The typer is now correct enough to drive codegen for the cases it claims (literals, var-refs, simple binary ops, proc calls, def/mut/set). Phase 3c (switching consumers in `compiler.c` to read `node->inferred_type`) is the next logical step — and it's incremental: pick one site, switch it, run tests, repeat.
+
+### Phase 3c planning
+
+The cleanest first switch is the `compile_binary` LHS-to-RHS narrowing at `compiler.c:4097-4100`. That code already does what the typer now mirrors; the compiler can read `lhs->inferred_type` instead of computing it via re-walking. After a few such conversions, the dual-track harness flips polarity: instead of checking the typer against the compiler, it'll check the compiler's residual computations against the typer.

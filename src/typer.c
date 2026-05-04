@@ -275,24 +275,73 @@ static uint32_t typer__parse_params(AstNode* params,
   return count;
 }
 
+/* Register a proc signature (used both by the top-level pre-pass and
+ * lazily for nested procs encountered during walk). Idempotent: a proc
+ * already registered (e.g., by the pre-pass) is updated, not duplicated. */
+static void typer__register_proc(TyperCtx* tc, AstNode* name_node,
+                                  JaclType return_type,
+                                  AstNode* (*pn)[TYPER_MAX_PROC_PARAMS],
+                                  JaclType (*pt)[TYPER_MAX_PROC_PARAMS],
+                                  uint32_t pcount) {
+  TyperProc* p = NULL;
+  for (uint32_t i = 0; i < tc->proc_count; i++) {
+    if (tc->procs[i].name_len == name_node->data.lit_string.length &&
+        memcmp(tc->procs[i].name, name_node->data.lit_string.value,
+               name_node->data.lit_string.length) == 0) {
+      p = &tc->procs[i];
+      break;
+    }
+  }
+  if (!p) {
+    if (tc->proc_count >= TYPER_MAX_PROCS) return;
+    p = &tc->procs[tc->proc_count++];
+    p->name     = name_node->data.lit_string.value;
+    p->name_len = name_node->data.lit_string.length;
+  }
+  p->return_type = (uint8_t)return_type;
+  p->return_struct_idx = UINT32_MAX;
+  if (pcount > TYPER_MAX_PROC_PARAMS) pcount = TYPER_MAX_PROC_PARAMS;
+  p->param_count = (uint8_t)pcount;
+  for (uint32_t i = 0; i < pcount; i++) {
+    p->param_types[i] = (uint8_t)(*pt)[i];
+  }
+}
+
 /* Proc definition introduces a new isolated scope for params + body.
  * Adds typed params (parsed via typer__parse_params) into scope so
- * var-refs inside the body resolve correctly. */
+ * var-refs inside the body resolve correctly. Also registers the proc
+ * in the global registry so subsequent calls in the same compilation
+ * unit can resolve its signature (handles nested-proc case where the
+ * top-level pre-pass missed it). */
 static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   AstNode** args = node->data.command.args;
   uint32_t  argc = node->data.command.arg_count;
-  uint32_t  params_idx, body_idx;
-  if (argc == 4) { params_idx = 2; body_idx = 3; }
-  else if (argc == 3) { params_idx = 1; body_idx = 2; }
-  else return false;
+  uint32_t  name_idx, params_idx, body_idx;
+  JaclType  return_type = TYPE_DYN;
+  if (argc == 4) {
+    AstNode* tn = args[0];
+    if (tn->type == AST_LIT_STRING &&
+        is_type_keyword(tn->data.lit_string.value, tn->data.lit_string.length)) {
+      return_type = type_from_keyword(tn->data.lit_string.value, tn->data.lit_string.length);
+    }
+    name_idx = 1; params_idx = 2; body_idx = 3;
+  } else if (argc == 3) {
+    name_idx = 0; params_idx = 1; body_idx = 2;
+  } else return false;
 
-  AstNode* params = args[params_idx];
-  AstNode* body   = args[body_idx];
+  AstNode* name_node = args[name_idx];
+  AstNode* params    = args[params_idx];
+  AstNode* body      = args[body_idx];
+  if (name_node->type != AST_LIT_STRING) return false;
   if (body->type != AST_BLOCK) return false;
 
   AstNode* pn[TYPER_MAX_PROC_PARAMS];
   JaclType pt[TYPER_MAX_PROC_PARAMS];
   uint32_t pcount = typer__parse_params(params, &pn, &pt);
+
+  /* Register (idempotent) so nested procs are visible to subsequent
+   * calls in the same scope. */
+  typer__register_proc(tc, name_node, return_type, &pn, &pt, pcount);
 
   typer__scope_push(tc);
   for (uint32_t i = 0; i < pcount; i++) {
