@@ -12907,6 +12907,11 @@ bool compiler__compile_module(const char* canonical_path,
   mc.module_prefix   = module__build_prefix(canonical_path, arena,
                                               &mc.module_prefix_len);
 
+  /* Phase 3 typer pass: walk the module AST so dual-track invariants
+   * hold during compile, and so consumer sites that read from
+   * inferred_type don't fall back unnecessarily. */
+  typer_infer(parse.nodes, parse.count);
+
   /* Compile all top-level statements */
   for (uint32_t i = 0; i < parse.count; i++) {
     compiler__compile_node(&mc, parse.nodes[i]);
