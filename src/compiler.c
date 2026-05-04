@@ -6454,8 +6454,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, OP_TO_DYN, line);
           compiler__emit_byte(c, (uint8_t)target_type, line);
         }
-        /* Phase 5c: reify inline struct for cell storage (expects heap pointer) */
-        compiler__reify_inline_struct(c, line);
         compiler__emit_byte(c, OP_SET_CELL_LOCAL, line);
         compiler__emit_byte(c, (uint8_t)local_slot, line);
         return;
@@ -6510,8 +6508,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, OP_TO_DYN, line);
           compiler__emit_byte(c, (uint8_t)target_type, line);
         }
-        /* Phase 5c: reify inline struct for cell storage (expects heap pointer) */
-        compiler__reify_inline_struct(c, line);
         compiler__emit_byte(c, OP_SET_CELL_UPVALUE, line);
         compiler__emit_byte(c, (uint8_t)c->upvalues[upvalue_idx].base_slot, line);
         return;
@@ -6598,8 +6594,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, OP_TO_DYN, line);
             compiler__emit_byte(c, (uint8_t)target_type, line);
           }
-          /* Phase 5c: reify inline struct for global storage */
-          compiler__reify_inline_struct(c, line);
           uint16_t name_idx = chunk_add_constant(c->chunk, name_val);
           compiler__emit_byte(c, OP_SET_GLOBAL, line);
           compiler__emit_u16(c, name_idx, line);
@@ -10737,7 +10731,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, err_msg);
           return;
         }
-        compiler__reify_inline_struct(c, line);
         total_arg_slots += 1;
       }
 
