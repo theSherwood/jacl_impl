@@ -7717,8 +7717,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Compile then-body as expression (narrowing is active) */
     compiler__compile_block_expr(c, args[1]);
 
-    /* Save then-branch type for unification */
-    JaclType then_type = c->last_expr_type;
+    /* Save then-branch type for unification.
+     * Phase 3c: read from the typer's pre-computed AST annotation;
+     * fall back to c->last_expr_type for typer gaps. */
+    JaclType then_type = (JaclType)args[1]->inferred_type;
+    if (then_type == TYPE_DYN) then_type = c->last_expr_type;
     uint32_t then_struct_idx = c->last_struct_idx;
 
     /* Pop narrowing before else-branch */
@@ -7732,19 +7735,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Patch JUMP_IF_FALSE to here */
     compiler__patch_jump(c, then_jump);
 
+    JaclType else_type;
     if (argc == 3) {
       /* Compile else-body as expression */
       compiler__compile_block_expr(c, args[2]);
+      /* Phase 3c: read from typer's pre-computed AST annotation. */
+      else_type = (JaclType)args[2]->inferred_type;
+      if (else_type == TYPE_DYN) else_type = c->last_expr_type;
     } else {
       /* No else: push nil */
       compiler__emit_byte(c, OP_NIL, line);
+      else_type = TYPE_NIL;
     }
 
     /* Patch JUMP to here */
     compiler__patch_jump(c, else_jump);
 
     /* Type unification: preserve type if both branches agree */
-    if (then_type == c->last_expr_type) {
+    if (then_type == else_type) {
       if (then_type != TYPE_STRUCT || then_struct_idx == c->last_struct_idx) {
         c->last_expr_type = then_type;
         c->last_struct_idx = then_struct_idx;
