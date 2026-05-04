@@ -10085,8 +10085,9 @@ static int test_ctx_builtin_pwd(void) {
   ASSERT(memcmp(ctx_def->fields[0].name, "pwd", 3) == 0);
   ASSERT(ctx_def->fields[0].type == TYPE_STR);
   ASSERT(ctx_def->fields[0].is_mutable == true);
-  /* ctx contains str, so is_value_type must be false */
-  ASSERT(ctx_def->is_value_type == false);
+  /* ctx is the lone HeapRecord — distinguished by reg->ctx_type_idx,
+     not by a per-def flag (the is_value_type field was removed). */
+  ASSERT_U32_EQ(cr.struct_registry->ctx_type_idx, ctx_idx);
 
   gc_heap_destroy(&heap);
   gc_block_pool_destroy(&pool);

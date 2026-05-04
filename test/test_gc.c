@@ -1657,7 +1657,6 @@ static int test_gc_value_type_struct_no_trace(void) {
     sdef->field_count = 2;
     sdef->total_size = 8;
     sdef->alignment = 4;
-    sdef->is_value_type = true;
     sdef->fields[0] = (StructTypeField){ "x", 1, TYPE_I32, 0, 0, 4 };
     sdef->fields[1] = (StructTypeField){ "y", 1, TYPE_I32, 0, 4, 4 };
     reg.defs[1] = sdef;
@@ -1757,7 +1756,6 @@ static void setup_ctx_registry(StructTypeRegistry *reg, arena_t *arena) {
     sdef->field_count = 1;
     sdef->total_size = 8;   /* one JaclVal-sized str field */
     sdef->alignment = 8;
-    sdef->is_value_type = false;  /* str field = reference type */
     sdef->fields[0] = (StructTypeField){ "pwd", 3, TYPE_STR, 0, 0, 8, true };
 
     uint32_t idx = reg->count;

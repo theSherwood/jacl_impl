@@ -1042,7 +1042,6 @@ typedef struct {
   uint32_t    field_count;
   uint32_t    total_size;
   uint32_t    alignment;
-  bool        is_value_type;  /* true if all fields are non-reference types (no GC tracing needed) */
   StructTypeField fields[];   /* flexible array member */
 } StructTypeDef;
 

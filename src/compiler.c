@@ -217,6 +217,7 @@ bool is_struct_value_type(JaclType t) {
   }
 }
 
+
 /* --- Struct type registry --- */
 
 #define STRUCT_REGISTRY_INIT_CAP 32
@@ -240,7 +241,6 @@ typedef struct {
   uint32_t    field_count;
   uint32_t    total_size;     /* total size including trailing padding */
   uint32_t    alignment;      /* max alignment of all fields */
-  bool        is_value_type;  /* true if all fields are non-reference types (no GC tracing needed) */
   StructTypeField fields[];   /* flexible array member — variable field count */
 } StructTypeDef;
 
@@ -271,6 +271,17 @@ static bool struct_registry__grow(StructTypeRegistry* reg) {
   reg->defs = new_defs;
   reg->capacity = new_cap;
   return true;
+}
+
+/* True for user-defined structs (which use the inline representation).
+   False for ctx, the lone HeapRecord builtin. With ref fields rejected at
+   defstruct, every user struct is value-type by construction; the only
+   non-inline struct is ctx, identified by reg->ctx_type_idx. */
+static inline bool struct_def_is_user(const StructTypeDef* sdef,
+                                      const StructTypeRegistry* reg) {
+  if (!sdef || !reg) return false;
+  if (reg->ctx_type_idx == 0) return true;
+  return sdef != reg->defs[reg->ctx_type_idx];
 }
 
 /* Initialize a struct type registry. Container is arena-allocated; defs array is heap-allocated.
@@ -452,9 +463,9 @@ static uint32_t ctx_field_list__finalize(CtxFieldList* list, StructTypeRegistry*
   sdef->field_count = list->count;
   sdef->total_size  = struct__align_up(offset, max_align);
   sdef->alignment   = max_align;
-  /* Ctx is the lone HeapRecord — accessed via pointer-deref opcodes, not
-     subject to the no-ref-fields rule that applies to user defstructs. */
-  sdef->is_value_type = false;
+  /* Ctx is the lone HeapRecord — accessed via pointer-deref opcodes,
+     not subject to the no-ref-fields rule that applies to user defstructs.
+     The struct_def_is_user helper distinguishes ctx via reg->ctx_type_idx. */
   memcpy(sdef->fields, tmp_fields, list->count * sizeof(StructTypeField));
 
   reg->defs[type_idx] = sdef;
@@ -645,14 +656,8 @@ uint32_t compiler__register_inline_struct(
   sdef->field_count = tmp_count;
   sdef->total_size  = struct__align_up(offset, max_align);
   sdef->alignment   = max_align;
-  /* Check if all fields are value types (no GC references) */
-  sdef->is_value_type = true;
-  for (uint32_t i = 0; i < tmp_count; i++) {
-    if (!is_struct_value_type(tmp_fields[i].type)) {
-      sdef->is_value_type = false;
-      break;
-    }
-  }
+  /* Ref fields were already rejected at the per-field check above, so all
+     fields here are value types — no extra flag needed. */
   memcpy(sdef->fields, tmp_fields, tmp_count * sizeof(StructTypeField));
 
   uint32_t idx = reg->count;
@@ -3186,7 +3191,7 @@ static void compiler__emit_return(Compiler* c, uint32_t line) {
     StructTypeRegistry* reg = compiler__get_struct_registry(c);
     if (reg && c->return_struct_idx < reg->count) {
       StructTypeDef* sdef = reg->defs[c->return_struct_idx];
-      if (sdef && sdef->is_value_type) {
+      if (struct_def_is_user(sdef, reg)) {
         uint32_t width = struct__slot_width(reg, c->return_struct_idx);
         if (c->inline_repr != INLINE_STACK) {
           compiler__emit_byte(c, OP_STRUCT_EXPAND, line);
@@ -6926,7 +6931,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           if (rhs_sidx != UINT32_MAX) {
             /* US-015: only inline value-type structs; legacy structs use heap */
             StructTypeDef* rhs_sdef = reg->defs[rhs_sidx];
-            if (rhs_sdef && rhs_sdef->is_value_type) {
+            if (struct_def_is_user(rhs_sdef, reg)) {
               activate_inline = true;
               /* Phase 5c: want_inline_struct no longer needed here —
                * value-type struct constructors are always inline. */
@@ -6957,7 +6962,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       StructTypeRegistry* reg2 = compiler__get_struct_registry(c);
       if (reg2 && c->last_struct_idx < reg2->count) {
         StructTypeDef* ret_sdef = reg2->defs[c->last_struct_idx];
-        if (ret_sdef && ret_sdef->is_value_type) {
+        if (struct_def_is_user(ret_sdef, reg2)) {
           activate_inline = true;
           /* If RHS already pushed inline slots (e.g. OP_TYPED_VEC_GET_INLINE),
            * no de-materialization needed — slots ARE the local. */
@@ -7382,7 +7387,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           if (param_types_arr[pi] == TYPE_STRUCT && param_struct_idxs[pi] != UINT32_MAX &&
               preg && param_struct_idxs[pi] < preg->count) {
             StructTypeDef* psdef = preg->defs[param_struct_idxs[pi]];
-            if (psdef && psdef->is_value_type) {
+            if (struct_def_is_user(psdef, preg)) {
               total_slots += (uint8_t)struct__slot_width(preg, param_struct_idxs[pi]);
               has_inline = true;
             } else {
@@ -7449,7 +7454,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           StructTypeRegistry* reg = compiler__get_struct_registry(c);
           if (reg && param_struct_idxs[i] < reg->count) {
             StructTypeDef* psdef = reg->defs[param_struct_idxs[i]];
-            if (psdef && psdef->is_value_type) {
+            if (struct_def_is_user(psdef, reg)) {
               uint32_t width = struct__slot_width(reg, param_struct_idxs[i]);
               body_compiler.locals[body_compiler.local_count - 1].width = (uint16_t)width;
               body_compiler.locals[body_compiler.local_count - 1].is_inline = true;
@@ -9332,7 +9337,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                 /* Phase 5d: deref struct box directly to inline bytes */
                 StructTypeRegistry* reg = compiler__get_struct_registry(c);
                 StructTypeDef* sdef = reg && tidx < reg->count ? reg->defs[tidx] : NULL;
-                if (sdef && sdef->is_value_type) {
+                if (struct_def_is_user(sdef, reg)) {
                   compiler__emit_byte(c, OP_DEREF_INLINE, line);
                   compiler__emit_u16(c, (uint16_t)tidx, line);
                   c->last_expr_type = TYPE_STRUCT;
@@ -10441,9 +10446,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         return;
       }
 
-      /* Phase 5c: value-type structs are always constructed inline.
-       * Legacy (non-value-type) structs still use heap. */
-      bool use_inline = sdef->is_value_type;
+      /* User defstructs are always inline; ctx (the lone HeapRecord) uses
+         the heap path. */
+      bool use_inline = struct_def_is_user(sdef, reg);
 
       /* Compile and type-check each field argument */
       for (uint32_t i = 0; i < argc; i++) {
@@ -10686,7 +10691,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         uint32_t sidx = c->last_struct_idx;
         StructTypeRegistry* reg = compiler__get_struct_registry(c);
         if (reg && sidx != UINT32_MAX && sidx < reg->count &&
-            reg->defs[sidx] && reg->defs[sidx]->is_value_type) {
+            struct_def_is_user(reg->defs[sidx], reg)) {
           uint32_t width = struct__slot_width(reg, sidx);
           if (c->inline_repr != INLINE_STACK) {
             /* Heap struct on stack — expand to inline slots */
@@ -10795,7 +10800,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       StructTypeRegistry* reg = compiler__get_struct_registry(c);
       if (reg && call_return_struct_idx < reg->count) {
         StructTypeDef* sdef = reg->defs[call_return_struct_idx];
-        if (sdef && sdef->is_value_type) {
+        if (struct_def_is_user(sdef, reg)) {
           c->inline_repr = INLINE_STACK;
         }
       }
@@ -11705,14 +11710,8 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
       sdef->field_count = field_count;
       sdef->total_size  = struct__align_up(offset, max_align);
       sdef->alignment   = max_align;
-      /* Check if all fields are value types (no GC references) */
-      sdef->is_value_type = true;
-      for (uint32_t fi2 = 0; fi2 < field_count; fi2++) {
-        if (!is_struct_value_type(tmp_fields[fi2].type)) {
-          sdef->is_value_type = false;
-          break;
-        }
-      }
+      /* Ref fields were already rejected at the per-field check above, so
+         all fields here are value types — no extra flag needed. */
       memcpy(sdef->fields, tmp_fields, field_count * sizeof(StructTypeField));
 
       /* Assign to reserved slot */

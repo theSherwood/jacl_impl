@@ -362,23 +362,21 @@ void gc__trace_object(void *payload, GCMarkStack *ms) {
         break;
     }
 
-    /* --- Struct: skip tracing for value-type structs (no GC references) --- */
+    /* --- HeapRecord: trace any reference fields. The only HeapRecord type
+       in user-reachable code is ctx (the lone builtin). User defstructs are
+       inline and never become HeapRecords. --- */
     case OBJ_HEAP_RECORD: {
         HeapRecord *s = (HeapRecord *)payload;
         if (gc__struct_registry) {
             StructTypeRegistry *sreg = (StructTypeRegistry *)gc__struct_registry;
             StructTypeDef *sdef = sreg->defs[s->type_idx];
-            /* US-014: value-type structs have no reference fields — skip tracing */
-            if (!sdef->is_value_type) {
-                /* Legacy path: trace reference-type fields for migration */
-                for (uint32_t i = 0; i < sdef->field_count; i++) {
-                    JaclType ft = sdef->fields[i].type;
-                    if (ft == TYPE_STR || ft == TYPE_VEC || ft == TYPE_MAP ||
-                        ft == TYPE_CLOSURE || ft == TYPE_DYN || ft == TYPE_STRUCT) {
-                        JaclVal val;
-                        memcpy(&val, s->data + sdef->fields[i].offset, sizeof(JaclVal));
-                        gc__ms_push_val(ms, val);
-                    }
+            for (uint32_t i = 0; i < sdef->field_count; i++) {
+                JaclType ft = sdef->fields[i].type;
+                if (ft == TYPE_STR || ft == TYPE_VEC || ft == TYPE_MAP ||
+                    ft == TYPE_CLOSURE || ft == TYPE_DYN || ft == TYPE_STRUCT) {
+                    JaclVal val;
+                    memcpy(&val, s->data + sdef->fields[i].offset, sizeof(JaclVal));
+                    gc__ms_push_val(ms, val);
                 }
             }
         }
