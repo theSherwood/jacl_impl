@@ -589,6 +589,27 @@ static inline uint32_t vm__unpack_struct(VM* vm, uint16_t type_idx,
   return w;
 }
 
+/* Compute element width from a typed-collection type_idx, dispatching
+ * on the scalar sentinel range (0xFF00..0xFFFF = scalar JaclType).
+ * Scalars always have width 1; structs use vm__struct_width. */
+static inline uint32_t vm__typed_elem_width(VM* vm, uint16_t type_idx) {
+  if (type_idx >= 0xFF00) return 1;
+  return vm__struct_width(vm->struct_registry->defs[type_idx]);
+}
+
+/* Pop a typed-collection element (struct or scalar) into out[].
+ * Returns width. */
+static inline uint32_t vm__pop_struct(VM* vm, uint16_t type_idx, JaclVal* out);
+
+static inline uint32_t vm__pop_typed_elem(VM* vm, uint16_t type_idx, JaclVal* out) {
+  if (type_idx >= 0xFF00) {
+    VMResult r = vm__pop(vm, &out[0]);
+    (void)r;
+    return 1;
+  }
+  return vm__pop_struct(vm, type_idx, out);
+}
+
 /* Pop a struct from TOS into out[]. Handles both representations:
  *   - Inline bytes (width consecutive slots, marked in inline_slot_bitmap)
  *   - Heap HeapRecord pointer (single slot)
@@ -10321,13 +10342,8 @@ interpret_done:
         jacl_typed_map_node* tmap = NULL;
 
         /* Pop pairs right-to-left into scratch buffers. */
-        StructTypeDef* vsdef = vm->struct_registry->defs[type_idx];
-        uint32_t vw = vm__struct_width(vsdef);
-        uint32_t kw = 1;
-        if (key_type_idx != 0xFFFF) {
-          StructTypeDef* ksdef = vm->struct_registry->defs[key_type_idx];
-          kw = vm__struct_width(ksdef);
-        }
+        uint32_t vw = vm__typed_elem_width(vm, type_idx);
+        uint32_t kw = (key_type_idx == 0xFFFF) ? 1 : vm__typed_elem_width(vm, key_type_idx);
         if ((size_t)pair_count * (kw + vw) > VM_MAX_STRUCT_SLOTS * 256) {
           vm__set_error(vm, "typed-map literal too large");
           return VM_RUNTIME_ERROR;
@@ -10335,13 +10351,13 @@ interpret_done:
         JaclVal scratch[VM_MAX_STRUCT_SLOTS * 256];
         for (int32_t i = (int32_t)pair_count - 1; i >= 0; i--) {
           uint32_t off = (uint32_t)i * (kw + vw);
-          vm__pop_struct(vm, type_idx, &scratch[off + kw]);
+          vm__pop_typed_elem(vm, type_idx, &scratch[off + kw]);
           if (key_type_idx == 0xFFFF) {
             JaclVal k;
             result = vm__pop(vm, &k); if (result != VM_OK) return result;
             scratch[off] = k;
           } else {
-            vm__pop_struct(vm, key_type_idx, &scratch[off]);
+            vm__pop_typed_elem(vm, key_type_idx, &scratch[off]);
           }
         }
         for (uint8_t i = 0; i < pair_count; i++) {
@@ -10364,7 +10380,7 @@ interpret_done:
           result = vm__pop(vm, &key_slots[0]); if (result != VM_OK) return result;
           kw = 1;
         } else {
-          kw = vm__pop_struct(vm, key_type_idx, key_slots);
+          kw = vm__pop_typed_elem(vm, key_type_idx, key_slots);
         }
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
@@ -10376,9 +10392,16 @@ interpret_done:
           return VM_RUNTIME_ERROR;
         }
 
+        const JaclVal* val_ptr = jacl_typed_map_value_ptr_from_leaf(leaf);
+        if (type_idx >= 0xFF00) {
+          /* Scalar value — single-slot copy. */
+          result = vm__push(vm, *val_ptr);
+          if (result != VM_OK) return result;
+          break;
+        }
+
         StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
         uint32_t width = vm__struct_width(sdef);
-        const JaclVal* val_ptr = jacl_typed_map_value_ptr_from_leaf(leaf);
         if (vm->stack_top + width > VM_STACK_MAX) {
           vm__set_error(vm, "stack overflow in typed map get inline");
           return VM_RUNTIME_ERROR;
@@ -10396,14 +10419,14 @@ interpret_done:
         uint16_t type_idx = vm__read_u16(vm);
         uint16_t key_type_idx = vm__read_u16(vm);
         JaclVal val_slots[VM_MAX_STRUCT_SLOTS];
-        uint32_t vw = vm__pop_struct(vm, type_idx, val_slots);
+        uint32_t vw = vm__pop_typed_elem(vm, type_idx, val_slots);
         JaclVal key_slots[VM_MAX_STRUCT_SLOTS];
         uint32_t kw;
         if (key_type_idx == 0xFFFF) {
           result = vm__pop(vm, &key_slots[0]); if (result != VM_OK) return result;
           kw = 1;
         } else {
-          kw = vm__pop_struct(vm, key_type_idx, key_slots);
+          kw = vm__pop_typed_elem(vm, key_type_idx, key_slots);
         }
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
@@ -10424,7 +10447,7 @@ interpret_done:
           result = vm__pop(vm, &key_slots[0]); if (result != VM_OK) return result;
           kw = 1;
         } else {
-          kw = vm__pop_struct(vm, key_type_idx, key_slots);
+          kw = vm__pop_typed_elem(vm, key_type_idx, key_slots);
         }
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
@@ -10445,7 +10468,7 @@ interpret_done:
           result = vm__pop(vm, &key_slots[0]); if (result != VM_OK) return result;
           kw = 1;
         } else {
-          kw = vm__pop_struct(vm, key_type_idx, key_slots);
+          kw = vm__pop_typed_elem(vm, key_type_idx, key_slots);
         }
         JaclVal tmap_val;
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
@@ -10489,9 +10512,8 @@ interpret_done:
           }
           result = vm__push(vm, jacl_vector_ptr(vec));
         } else {
-          /* Struct keys → return typed vec */
-          StructTypeDef* kdef = vm->struct_registry->defs[key_type_idx];
-          uint32_t kw = vm__struct_width(kdef);
+          /* Typed keys (struct or scalar) → typed vec with same elem type */
+          uint32_t kw = vm__typed_elem_width(vm, key_type_idx);
           jacl_typed_vec_root* tvec = jacl_typed_vec_empty_strided(kw);
           for (;;) {
             ir = jacl_typed_map_next_leaf(&it);
@@ -10511,8 +10533,7 @@ interpret_done:
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
 
         jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
-        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
-        uint32_t width = vm__struct_width(sdef);
+        uint32_t width = vm__typed_elem_width(vm, type_idx);
 
         gc__current_heap = &vm->heap;
         jacl_typed_vec_root* tvec = jacl_typed_vec_empty_strided(width);
@@ -10581,8 +10602,13 @@ interpret_done:
         result = vm__pop(vm, &tmap_val); if (result != VM_OK) return result;
 
         jacl_typed_map_node* tmap = (jacl_typed_map_node*)jacl_as_ptr(tmap_val);
-        StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
-        StructTypeDef* kdef = (key_type_idx != 0xFFFF) ? vm->struct_registry->defs[key_type_idx] : NULL;
+        bool val_is_scalar = (type_idx >= 0xFF00);
+        bool key_is_scalar = (key_type_idx >= 0xFF00 && key_type_idx != 0xFFFF);
+        StructTypeDef* sdef = val_is_scalar ? NULL : vm->struct_registry->defs[type_idx];
+        StructTypeDef* kdef = (key_type_idx != 0xFFFF && !key_is_scalar)
+                                ? vm->struct_registry->defs[key_type_idx] : NULL;
+        JaclType val_t = val_is_scalar ? (JaclType)(type_idx - 0xFF00) : TYPE_DYN;
+        JaclType key_t = key_is_scalar ? (JaclType)(key_type_idx - 0xFF00) : TYPE_DYN;
 
         VMFormatBuf fmt;
         vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
@@ -10594,16 +10620,45 @@ interpret_done:
           ir = jacl_typed_map_next_leaf(&it);
           if (ir.done) break;
           if (idx > 0) vm__fmt_append(&fmt, ", ", 2);
+          /* Format key */
           if (kdef) {
             const JaclVal* key_ptr = ir.item->slots;
             vm__fmt_struct_data(&fmt, kdef, (const uint8_t*)key_ptr);
+          } else if (key_is_scalar) {
+            const JaclVal* key_ptr = ir.item->slots;
+            char buf[64]; int n = 0;
+            switch (key_t) {
+              case TYPE_I32: n = snprintf(buf, sizeof(buf), "%d", jacl_as_i32(*key_ptr)); break;
+              case TYPE_U32: n = snprintf(buf, sizeof(buf), "%u", jacl_as_u32(*key_ptr)); break;
+              case TYPE_F32: n = snprintf(buf, sizeof(buf), "%g", (double)jacl_as_f32(*key_ptr)); break;
+              case TYPE_I64: n = snprintf(buf, sizeof(buf), "%" PRId64, (int64_t)*key_ptr); break;
+              case TYPE_U64: n = snprintf(buf, sizeof(buf), "%" PRIu64, (uint64_t)*key_ptr); break;
+              case TYPE_F64: { double d; memcpy(&d, key_ptr, 8); n = snprintf(buf, sizeof(buf), "%g", d); break; }
+              default: n = snprintf(buf, sizeof(buf), "?"); break;
+            }
+            if (n > 0) vm__fmt_append(&fmt, buf, (uint32_t)n);
           } else {
             JaclVal key = jacl_typed_map_key_from_leaf(ir.item);
             vm__fmt_value(&fmt, key);
           }
           vm__fmt_append(&fmt, ": ", 2);
+          /* Format value */
           const JaclVal* val_ptr = jacl_typed_map_value_ptr_from_leaf(ir.item);
-          vm__fmt_struct_data(&fmt, sdef, (const uint8_t*)val_ptr);
+          if (val_is_scalar) {
+            char buf[64]; int n = 0;
+            switch (val_t) {
+              case TYPE_I32: n = snprintf(buf, sizeof(buf), "%d", jacl_as_i32(*val_ptr)); break;
+              case TYPE_U32: n = snprintf(buf, sizeof(buf), "%u", jacl_as_u32(*val_ptr)); break;
+              case TYPE_F32: n = snprintf(buf, sizeof(buf), "%g", (double)jacl_as_f32(*val_ptr)); break;
+              case TYPE_I64: n = snprintf(buf, sizeof(buf), "%" PRId64, (int64_t)*val_ptr); break;
+              case TYPE_U64: n = snprintf(buf, sizeof(buf), "%" PRIu64, (uint64_t)*val_ptr); break;
+              case TYPE_F64: { double d; memcpy(&d, val_ptr, 8); n = snprintf(buf, sizeof(buf), "%g", d); break; }
+              default: n = snprintf(buf, sizeof(buf), "?"); break;
+            }
+            if (n > 0) vm__fmt_append(&fmt, buf, (uint32_t)n);
+          } else {
+            vm__fmt_struct_data(&fmt, sdef, (const uint8_t*)val_ptr);
+          }
           idx++;
         }
         vm__fmt_append(&fmt, "}\n", 2);

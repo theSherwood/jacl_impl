@@ -846,6 +846,87 @@ static int test_skey_wide_key(void) {
   TEST_PASS();
 }
 
+/* ===== Scalar element/key types ===== */
+
+static int test_typed_map_scalar_value_construct(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "def m [[Map i64] \"a\" 10 \"b\" 20]\n"
+    "print [to-string [map-len $m]]",
+    &cap, "2\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_scalar_value_get(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "proc t {} {\n"
+    "  def m [[Map i64] \"a\" 10 \"b\" 20]\n"
+    "  print [to-string [map-get $m \"b\"]]\n"
+    "}\n"
+    "[t]",
+    &cap, "20\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_scalar_kv(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "proc t {} {\n"
+    "  def m [[Map i32 i64] 1 100 2 200]\n"
+    "  print [to-string [map-get $m 2]]\n"
+    "}\n"
+    "[t]",
+    &cap, "200\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_scalar_value_set(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "proc t {} {\n"
+    "  def m [[Map i64] \"a\" 1]\n"
+    "  def m2 [map-set $m \"b\" 99]\n"
+    "  print [to-string [map-get $m2 \"b\"]]\n"
+    "}\n"
+    "[t]",
+    &cap, "99\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_scalar_value_has(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "def m [[Map i64] \"a\" 1]\n"
+    "print [to-string [map-has $m \"a\"]]\n"
+    "print [to-string [map-has $m \"z\"]]",
+    &cap, "true\nfalse\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_scalar_value_print(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "def m [[Map i64] \"x\" 10]\n"
+    "print $m",
+    &cap, "{\"x\": 10}\n"));
+  TEST_PASS();
+}
+
+static int test_typed_map_scalar_value_type_error(void) {
+  ASSERT(run_err(
+    "def m [[Map i64] \"a\" \"oops\"]\n",
+    "is not a i64 value (got str)"));
+  TEST_PASS();
+}
+
+static int test_typed_map_scalar_unsupported_str(void) {
+  ASSERT(run_err(
+    "def m [[Map str] \"a\" \"hi\"]\n",
+    "only value-type scalars supported"));
+  TEST_PASS();
+}
+
 /* ===== Main ===== */
 
 int main(void) {
@@ -915,6 +996,15 @@ int main(void) {
   RUN(test_skey_filter);
   RUN(test_skey_gc_safety);
   RUN(test_skey_wide_key);
+
+  RUN(test_typed_map_scalar_value_construct);
+  RUN(test_typed_map_scalar_value_get);
+  RUN(test_typed_map_scalar_kv);
+  RUN(test_typed_map_scalar_value_set);
+  RUN(test_typed_map_scalar_value_has);
+  RUN(test_typed_map_scalar_value_print);
+  RUN(test_typed_map_scalar_value_type_error);
+  RUN(test_typed_map_scalar_unsupported_str);
 
   printf("\n%d/%d passed\n", pass, pass + fail);
   return fail > 0 ? 1 : 0;

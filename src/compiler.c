@@ -5326,6 +5326,53 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (_coll_kind == 2) {
     const char* type_name_str = _coll_elem->data.lit_string.value;
     uint32_t type_name_len = _coll_elem->data.lit_string.length;
+
+    /* Scalar value type: [Map i64], [Map f64] etc. — dyn keys, scalar values. */
+    if (is_type_keyword(type_name_str, type_name_len)) {
+      JaclType val_t = type_from_keyword(type_name_str, type_name_len);
+      if (!compiler__is_typed_collection_scalar(val_t)) {
+        char err[160];
+        snprintf(err, sizeof(err),
+                 "[Map %.*s]: only value-type scalars supported "
+                 "(i32, i64, u32, u64, f32, f64)",
+                 (int)type_name_len, type_name_str);
+        compiler__error(c, line, col, err);
+        return;
+      }
+      if (argc % 2 != 0) {
+        compiler__error(c, line, col, "[Map ...] requires an even number of arguments (key-value pairs)");
+        return;
+      }
+      uint32_t pair_count = argc / 2;
+      if (pair_count > 255) {
+        compiler__error(c, line, col, "[Map ...] too many initial pairs (max 255)");
+        return;
+      }
+      uint32_t val_type_idx = COMPILER_SCALAR_TYPE_IDX(val_t);
+      for (uint32_t i = 0; i < pair_count; i++) {
+        compiler__compile_node(c, args[i * 2]);     /* key: any dyn type */
+        c->expected_type = val_t;
+        compiler__compile_node(c, args[i * 2 + 1]); /* value: must match scalar */
+        c->expected_type = TYPE_DYN;
+        if (c->last_expr_type != val_t) {
+          char err[160];
+          snprintf(err, sizeof(err),
+                   "[Map %.*s]: value %u is not a %.*s value (got %s)",
+                   (int)type_name_len, type_name_str, i,
+                   (int)type_name_len, type_name_str,
+                   type_name(c->last_expr_type));
+          compiler__error(c, line, col, err);
+          return;
+        }
+      }
+      compiler__emit_byte(c, OP_TYPED_MAP, line);
+      compiler__emit_u16(c, (uint16_t)val_type_idx, line);
+      compiler__emit_u16(c, (uint16_t)0xFFFF, line);  /* dyn keys */
+      compiler__emit_byte(c, (uint8_t)pair_count, line);
+      compiler__set_type(c, (TypeInfo){ TYPE_TYPED_MAP, val_type_idx, UINT32_MAX });
+      return;
+    }
+
     StructTypeRegistry* reg = compiler__get_struct_registry(c);
     uint32_t type_idx = struct_registry__find(reg, type_name_str, type_name_len);
     if (type_idx == UINT32_MAX) {
@@ -5368,33 +5415,78 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* --- Typed map constructor with struct keys: [[Map KeyType ValueType] k1 v1 ...] --- */
+  /* --- Typed map constructor with explicit key + value types:
+   *      [[Map KeyType ValueType] k1 v1 ...]
+   * Each of KeyType / ValueType may be a struct name or a numeric scalar
+   * keyword. Mixed combinations are allowed (struct key + scalar value,
+   * scalar key + struct value, both scalar, both struct). */
   if (_coll_kind == 3) {
     const char* val_name_str = _coll_elem->data.lit_string.value;
     uint32_t val_name_len = _coll_elem->data.lit_string.length;
     const char* key_name_str = _coll_key_elem->data.lit_string.value;
     uint32_t key_name_len = _coll_key_elem->data.lit_string.length;
     StructTypeRegistry* reg = compiler__get_struct_registry(c);
-    uint32_t val_type_idx = struct_registry__find(reg, val_name_str, val_name_len);
-    if (val_type_idx == UINT32_MAX) {
-      char err[128];
-      snprintf(err, sizeof(err), "[Map %.*s %.*s]: unknown value type '%.*s'",
-               (int)key_name_len, key_name_str,
-               (int)val_name_len, val_name_str,
-               (int)val_name_len, val_name_str);
-      compiler__error(c, line, col, err);
-      return;
+
+    /* Resolve key type: scalar keyword OR struct name. */
+    JaclType key_t = TYPE_DYN;
+    uint32_t key_type_idx;
+    bool key_is_scalar = false;
+    if (is_type_keyword(key_name_str, key_name_len)) {
+      key_t = type_from_keyword(key_name_str, key_name_len);
+      if (!compiler__is_typed_collection_scalar(key_t)) {
+        char err[160];
+        snprintf(err, sizeof(err),
+                 "[Map %.*s %.*s]: only numeric value-type scalars supported as keys",
+                 (int)key_name_len, key_name_str,
+                 (int)val_name_len, val_name_str);
+        compiler__error(c, line, col, err);
+        return;
+      }
+      key_type_idx = COMPILER_SCALAR_TYPE_IDX(key_t);
+      key_is_scalar = true;
+    } else {
+      key_type_idx = struct_registry__find(reg, key_name_str, key_name_len);
+      if (key_type_idx == UINT32_MAX) {
+        char err[128];
+        snprintf(err, sizeof(err), "[Map %.*s %.*s]: unknown key type '%.*s'",
+                 (int)key_name_len, key_name_str,
+                 (int)val_name_len, val_name_str,
+                 (int)key_name_len, key_name_str);
+        compiler__error(c, line, col, err);
+        return;
+      }
     }
-    uint32_t key_type_idx = struct_registry__find(reg, key_name_str, key_name_len);
-    if (key_type_idx == UINT32_MAX) {
-      char err[128];
-      snprintf(err, sizeof(err), "[Map %.*s %.*s]: unknown key type '%.*s'",
-               (int)key_name_len, key_name_str,
-               (int)val_name_len, val_name_str,
-               (int)key_name_len, key_name_str);
-      compiler__error(c, line, col, err);
-      return;
+
+    /* Resolve value type: scalar keyword OR struct name. */
+    JaclType val_t = TYPE_DYN;
+    uint32_t val_type_idx;
+    bool val_is_scalar = false;
+    if (is_type_keyword(val_name_str, val_name_len)) {
+      val_t = type_from_keyword(val_name_str, val_name_len);
+      if (!compiler__is_typed_collection_scalar(val_t)) {
+        char err[160];
+        snprintf(err, sizeof(err),
+                 "[Map %.*s %.*s]: only numeric value-type scalars supported as values",
+                 (int)key_name_len, key_name_str,
+                 (int)val_name_len, val_name_str);
+        compiler__error(c, line, col, err);
+        return;
+      }
+      val_type_idx = COMPILER_SCALAR_TYPE_IDX(val_t);
+      val_is_scalar = true;
+    } else {
+      val_type_idx = struct_registry__find(reg, val_name_str, val_name_len);
+      if (val_type_idx == UINT32_MAX) {
+        char err[128];
+        snprintf(err, sizeof(err), "[Map %.*s %.*s]: unknown value type '%.*s'",
+                 (int)key_name_len, key_name_str,
+                 (int)val_name_len, val_name_str,
+                 (int)val_name_len, val_name_str);
+        compiler__error(c, line, col, err);
+        return;
+      }
     }
+
     if (argc % 2 != 0) {
       compiler__error(c, line, col, "[Map K V ...] requires an even number of arguments (key-value pairs)");
       return;
@@ -5405,22 +5497,34 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     for (uint32_t i = 0; i < pair_count; i++) {
-      compiler__compile_node(c, args[i * 2]);       /* key: must match key struct type */
-      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != key_type_idx) {
-        char err[128];
+      /* key */
+      if (key_is_scalar) c->expected_type = key_t;
+      compiler__compile_node(c, args[i * 2]);
+      c->expected_type = TYPE_DYN;
+      bool k_ok = key_is_scalar
+        ? (c->last_expr_type == key_t)
+        : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == key_type_idx);
+      if (!k_ok) {
+        char err[160];
         snprintf(err, sizeof(err),
-                 "[Map %.*s %.*s]: key %u is not a %.*s struct",
+                 "[Map %.*s %.*s]: key %u is not a %.*s",
                  (int)key_name_len, key_name_str,
                  (int)val_name_len, val_name_str, i,
                  (int)key_name_len, key_name_str);
         compiler__error(c, line, col, err);
         return;
       }
-      compiler__compile_node(c, args[i * 2 + 1]);   /* value: must match value struct type */
-      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != val_type_idx) {
-        char err[128];
+      /* value */
+      if (val_is_scalar) c->expected_type = val_t;
+      compiler__compile_node(c, args[i * 2 + 1]);
+      c->expected_type = TYPE_DYN;
+      bool v_ok = val_is_scalar
+        ? (c->last_expr_type == val_t)
+        : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == val_type_idx);
+      if (!v_ok) {
+        char err[160];
         snprintf(err, sizeof(err),
-                 "[Map %.*s %.*s]: value %u is not a %.*s struct",
+                 "[Map %.*s %.*s]: value %u is not a %.*s",
                  (int)key_name_len, key_name_str,
                  (int)val_name_len, val_name_str, i,
                  (int)val_name_len, val_name_str);
@@ -8798,20 +8902,32 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       uint32_t elem_type_idx = c->last_struct_idx;
       uint32_t key_type_idx = c->last_key_struct_idx;
+      bool key_is_scalar = key_type_idx != UINT32_MAX
+                            && COMPILER_IS_SCALAR_TYPE_IDX(key_type_idx);
+      bool val_is_scalar = COMPILER_IS_SCALAR_TYPE_IDX(elem_type_idx);
+      if (key_is_scalar) c->expected_type = COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx);
       compiler__compile_node(c, args[1]);
+      c->expected_type = TYPE_DYN;
       if (key_type_idx != UINT32_MAX) {
-        if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != key_type_idx) {
+        bool ok = key_is_scalar
+          ? (c->last_expr_type == COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx))
+          : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == key_type_idx);
+        if (!ok) {
           compiler__error(c, line, col, "map-get: key type does not match typed map key type");
           return;
         }
       }
-      /* OP_TYPED_MAP_GET_INLINE consumes inline struct keys via vm__pop_struct. */
       compiler__emit_byte(c, OP_TYPED_MAP_GET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
-      c->inline_repr = INLINE_STACK;
-      c->last_expr_type = TYPE_STRUCT;
-      c->last_struct_idx = elem_type_idx;
+      if (val_is_scalar) {
+        c->last_expr_type = COMPILER_TYPE_IDX_TO_SCALAR(elem_type_idx);
+        c->last_struct_idx = UINT32_MAX;
+      } else {
+        c->inline_repr = INLINE_STACK;
+        c->last_expr_type = TYPE_STRUCT;
+        c->last_struct_idx = elem_type_idx;
+      }
       return;
     }
     compiler__compile_node(c, args[1]);
@@ -8829,9 +8945,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       uint32_t key_type_idx = c->last_key_struct_idx;
+      bool key_is_scalar = key_type_idx != UINT32_MAX
+                            && COMPILER_IS_SCALAR_TYPE_IDX(key_type_idx);
+      if (key_is_scalar) c->expected_type = COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx);
       compiler__compile_node(c, args[1]);
+      c->expected_type = TYPE_DYN;
       if (key_type_idx != UINT32_MAX) {
-        if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != key_type_idx) {
+        bool ok = key_is_scalar
+          ? (c->last_expr_type == COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx))
+          : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == key_type_idx);
+        if (!ok) {
           compiler__error(c, line, col, "map-has: key type does not match typed map key type");
           return;
         }
@@ -8874,15 +8997,28 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       uint32_t elem_type_idx = c->last_struct_idx;
       uint32_t key_type_idx = c->last_key_struct_idx;
+      bool key_is_scalar = key_type_idx != UINT32_MAX
+                            && COMPILER_IS_SCALAR_TYPE_IDX(key_type_idx);
+      bool val_is_scalar = COMPILER_IS_SCALAR_TYPE_IDX(elem_type_idx);
+      if (key_is_scalar) c->expected_type = COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx);
       compiler__compile_node(c, args[1]);  /* key */
+      c->expected_type = TYPE_DYN;
       if (key_type_idx != UINT32_MAX) {
-        if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != key_type_idx) {
+        bool ok = key_is_scalar
+          ? (c->last_expr_type == COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx))
+          : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == key_type_idx);
+        if (!ok) {
           compiler__error(c, line, col, "map-set: key type does not match typed map key type");
           return;
         }
       }
-      compiler__compile_node(c, args[2]);  /* value: must match struct type */
-      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != elem_type_idx) {
+      if (val_is_scalar) c->expected_type = COMPILER_TYPE_IDX_TO_SCALAR(elem_type_idx);
+      compiler__compile_node(c, args[2]);  /* value */
+      c->expected_type = TYPE_DYN;
+      bool v_ok = val_is_scalar
+        ? (c->last_expr_type == COMPILER_TYPE_IDX_TO_SCALAR(elem_type_idx))
+        : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == elem_type_idx);
+      if (!v_ok) {
         compiler__error(c, line, col, "map-set: value type does not match typed map element type");
         return;
       }
@@ -8910,9 +9046,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       uint32_t elem_type_idx = c->last_struct_idx;
       uint32_t key_type_idx = c->last_key_struct_idx;
+      bool key_is_scalar = key_type_idx != UINT32_MAX
+                            && COMPILER_IS_SCALAR_TYPE_IDX(key_type_idx);
+      if (key_is_scalar) c->expected_type = COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx);
       compiler__compile_node(c, args[1]);  /* key */
+      c->expected_type = TYPE_DYN;
       if (key_type_idx != UINT32_MAX) {
-        if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != key_type_idx) {
+        bool ok = key_is_scalar
+          ? (c->last_expr_type == COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx))
+          : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == key_type_idx);
+        if (!ok) {
           compiler__error(c, line, col, "map-remove: key type does not match typed map key type");
           return;
         }
