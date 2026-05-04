@@ -5638,7 +5638,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (compiler__head_matches(head, "-", 1)) {
     if (argc == 1) {
       compiler__compile_node(c, args[0]);
-      JaclType arg_type = c->last_expr_type;
+      /* Phase 3c: read result type from the typer's pre-computed AST
+       * annotation; fall back to c->last_expr_type for typer gaps. */
+      JaclType arg_type = (JaclType)args[0]->inferred_type;
+      if (arg_type == TYPE_DYN) arg_type = c->last_expr_type;
       if (arg_type == TYPE_U64) {
         compiler__error(c, line, col, "type error: cannot negate u64");
         return;
@@ -10517,8 +10520,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         JaclType field_type = sdef->fields[i].type;
         c->expected_type = field_type;
         compiler__compile_node(c, args[i]);
-        JaclType arg_type = c->last_expr_type;
         c->expected_type = TYPE_DYN;
+        /* Phase 3c: read result type from the typer's pre-computed AST
+         * annotation; fall back to c->last_expr_type for typer gaps. */
+        JaclType arg_type = (JaclType)args[i]->inferred_type;
+        if (arg_type == TYPE_DYN) arg_type = c->last_expr_type;
 
         if (field_type != TYPE_DYN && arg_type != TYPE_DYN &&
             arg_type != field_type) {
@@ -10741,8 +10747,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->expected_type = expected_param_type;
       }
       compiler__compile_node(c, args[i]);
-      JaclType arg_type = c->last_expr_type;
       c->expected_type = TYPE_DYN;
+      /* Phase 3c: read result type from the typer's pre-computed AST
+       * annotation; fall back to c->last_expr_type for typer gaps. */
+      JaclType arg_type = (JaclType)args[i]->inferred_type;
+      if (arg_type == TYPE_DYN) arg_type = c->last_expr_type;
 
       /* Phase 5a: struct args passed inline (multi-slot) instead of as heap copies.
        * If the arg is already inline (from constructor or typed-get), nothing to do.
