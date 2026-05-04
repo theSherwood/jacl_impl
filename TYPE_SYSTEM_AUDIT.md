@@ -347,22 +347,36 @@ The 201 gaps are concentrated: most are a few specific patterns (CTX_DECL recurs
 
 ## Phase 3d gap closure — substantive progress
 
-Five commits this round drove the gap count from 201 → 51 (75% reduction):
+Seven commits drove the gap count from 201 → 30 (85% reduction):
 
 | Commit | What | Gap delta |
 |---|---|---|
 | `e859175` | Typer recurses into AST_CTX_DECL default expressions, propagating declared type as expected_type | 201 → 137 |
 | `c4275d0` | Register `$ctx` as builtin TYPE_STRUCT binding at typer init | 137 → 63 |
 | `ca5cb09` | syntax_to_ast sets inferred_type on literal clones; expand__compile_staged_body runs typer_infer on macro bodies before compile; AST_DEFMACRO recursion | 137 → 51 |
+| `9accbdc` | compiler__compile_module invokes typer_infer on imported AST | 51 → 30 |
+| `4533b28` | Typer handles `def DESTRUCTURE_VEC` and `def DESTRUCTURE_NAMED` forms (foundation; type-aware destructured-binding lookup is a future extension) | 30 (no change; new bindings still TYPE_DYN) |
 
 92/92 tests pass throughout. 0 mismatches throughout.
 
-### Remaining 51 gaps
+### Remaining 30 gaps
 
-Concentrated in module-compilation paths — modules go through their own compile pipeline (not standalone `compiler_compile`) and don't currently invoke `typer_infer`. Closing them is a focused commit: thread the typer call into module compile.
+Breakdown:
+- 23 AST_LIT_INT (typer DYN → compiler i32) — likely from destructured struct fields where the typer doesn't yet propagate field types into bindings.
+- 4 AST_VAR_REF — same root cause: destructure or special-form bindings without typed lookup.
+- 2 AST_LIT_STRING — minor.
+- 1 AST_BLOCK — block-result inference edge case.
 
-Plus a small tail in stream/destructure patterns where some intermediate AST node isn't reached by my walker.
+All are harmless — consumers that read from `inferred_type` fall back to `c->last_expr_type` for these cases. Closing them needs:
+1. Storing field names alongside field types in TyperStruct (so destructure_named can map `{x, y}` → field types via the source struct's index).
+2. A few targeted typer expansions for stream/special-form patterns.
 
 ### Steps 2–4 (delete the fallback + writes + fields)
 
-Now feasible after step 1 finishes. Each consumer site I switched in Phase 3c has a `if (x == TYPE_DYN) x = c->last_expr_type;` fallback line. Once the gaps are zero, those lines can be deleted. Then the 50+ `c->last_expr_type = X` writes in compiler.c become unread; deleting them is mechanical. Once the field is gone, the inference glue (return type checks, struct_idx propagation, expected_type bookkeeping) follows.
+Even with 30 gaps, much of the cleanup can proceed:
+
+- The fallback `if (x == TYPE_DYN) x = c->last_expr_type;` lines remain load-bearing for the 30 gap cases. Removing them requires gap=0.
+- Many `c->last_expr_type = X` writes are now read only by the dual-track check and the fallback. Once gaps close, these become unreachable.
+- The `expected_type` field on `Compiler` is still load-bearing because consumer-side compile-node still sets it before calling compile_node (e.g., for literal context-narrowing inside an old code path). Removing it requires every literal compile site to read `expected_type` from the typer's expectation, not the compiler's.
+
+The path is clear; it's mechanical work that compounds.
