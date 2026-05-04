@@ -2136,7 +2136,7 @@ static int test_ctx_set_write_barrier(void) {
     JaclVal new_str = jacl_rope_string_create(&vm.heap,
                           (const uint8_t *)"/new/path", 9);
 
-    /* Read old value, fire barrier, write new value (same as OP_STRUCT_SET) */
+    /* Read old value, fire barrier, write new value (same as OP_HEAP_RECORD_SET) */
     JaclVal read_old;
     memcpy(&read_old, ctx_struct->data + 0, sizeof(JaclVal));
     gc_write_barrier(&gb, vm.gc_active_ptr, read_old, new_str);

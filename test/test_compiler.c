@@ -5088,7 +5088,7 @@ static int test_struct_new_inline_padding_zeroed(void) {
 }
 
 static int test_struct_new_heap_path_unchanged(void) {
-  /* Verify existing heap path (OP_STRUCT_NEW) still works for struct locals */
+  /* Verify existing heap path (OP_HEAP_RECORD_NEW) still works for struct locals */
   tracker_reset();
   arena_t arena = { .allocator = tracked_allocator };
   BlockPool pool; gc_block_pool_init(&pool);

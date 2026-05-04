@@ -143,11 +143,11 @@ typedef enum {
   OP_CONST_I64,     /* push raw i64 from constant pool */
   OP_CONST_U64,     /* push raw u64 from constant pool */
   OP_CONST_F64,     /* push raw f64 from constant pool */
-  OP_STRUCT_NEW,    /* construct struct: followed by uint16_t struct_type_index */
-  OP_STRUCT_GET,    /* field access: followed by uint16_t field_offset, uint8_t field_type */
-  OP_STRUCT_SET,    /* field mutation: followed by uint16_t field_offset, uint8_t field_type */
-  OP_STRUCT_GET_DYN,/* runtime field access: followed by uint16_t const_idx (field name) */
-  OP_STRUCT_SET_DYN,/* runtime field mutation: followed by uint16_t const_idx (field name) */
+  OP_HEAP_RECORD_NEW,    /* construct struct: followed by uint16_t struct_type_index */
+  OP_HEAP_RECORD_GET,    /* field access: followed by uint16_t field_offset, uint8_t field_type */
+  OP_HEAP_RECORD_SET,    /* field mutation: followed by uint16_t field_offset, uint8_t field_type */
+  OP_HEAP_RECORD_GET_DYN,/* runtime field access: followed by uint16_t const_idx (field name) */
+  OP_HEAP_RECORD_SET_DYN,/* runtime field mutation: followed by uint16_t const_idx (field name) */
   OP_STRUCT_NEW_INLINE, /* construct inline struct on stack: followed by uint16_t struct_type_index */
   OP_STRUCT_GET_INLINE, /* inline field read: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_SET_INLINE, /* inline field write: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type */
@@ -511,11 +511,11 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_CONST_I64:       return "OP_CONST_I64";
     case OP_CONST_U64:       return "OP_CONST_U64";
     case OP_CONST_F64:       return "OP_CONST_F64";
-    case OP_STRUCT_NEW:      return "OP_STRUCT_NEW";
-    case OP_STRUCT_GET:      return "OP_STRUCT_GET";
-    case OP_STRUCT_SET:      return "OP_STRUCT_SET";
-    case OP_STRUCT_GET_DYN:  return "OP_STRUCT_GET_DYN";
-    case OP_STRUCT_SET_DYN:  return "OP_STRUCT_SET_DYN";
+    case OP_HEAP_RECORD_NEW:      return "OP_HEAP_RECORD_NEW";
+    case OP_HEAP_RECORD_GET:      return "OP_HEAP_RECORD_GET";
+    case OP_HEAP_RECORD_SET:      return "OP_HEAP_RECORD_SET";
+    case OP_HEAP_RECORD_GET_DYN:  return "OP_HEAP_RECORD_GET_DYN";
+    case OP_HEAP_RECORD_SET_DYN:  return "OP_HEAP_RECORD_SET_DYN";
     case OP_STRUCT_NEW_INLINE: return "OP_STRUCT_NEW_INLINE";
     case OP_STRUCT_GET_INLINE: return "OP_STRUCT_GET_INLINE";
     case OP_STRUCT_SET_INLINE: return "OP_STRUCT_SET_INLINE";

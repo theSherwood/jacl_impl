@@ -4528,7 +4528,7 @@ void compiler__compile_destructure_vec(
 /* -------------------------------------------------------------------------
  * Compile named struct/map destructuring: def {x, y} $expr or mut {x, y} $expr
  *
- * For known struct types: emits OP_STRUCT_GET per field (compile-time resolved).
+ * For known struct types: emits OP_HEAP_RECORD_GET per field (compile-time resolved).
  * For dyn/map types: emits OP_DESTRUCTURE_NAMED (runtime resolved).
  * For mut: wraps each extracted value in a cell.
  * For globals: defines each extracted value as a global.
@@ -8477,10 +8477,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__error(c, line, col, err);
         return;
       }
-      compiler__emit_byte(c, OP_STRUCT_SET, line);
+      compiler__emit_byte(c, OP_HEAP_RECORD_SET, line);
       compiler__emit_u16(c, (uint16_t)cf->offset, line);
       compiler__emit_byte(c, (uint8_t)cf->type, line);
-      compiler__emit_byte(c, OP_POP, line); /* discard struct result from OP_STRUCT_SET */
+      compiler__emit_byte(c, OP_POP, line); /* discard struct result from OP_HEAP_RECORD_SET */
     }
 
     /* Compile body block as expression (result stays on stack).
@@ -10218,13 +10218,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__error(c, line, col, err_msg);
             return;
           }
-          compiler__emit_byte(c, OP_STRUCT_SET, line);
+          compiler__emit_byte(c, OP_HEAP_RECORD_SET, line);
           compiler__emit_u16(c, (uint16_t)cf->offset, line);
           compiler__emit_byte(c, (uint8_t)field_type, line);
           c->last_expr_type = TYPE_STRUCT;
           c->last_struct_idx = CTX_STRUCT_PENDING;
         } else {
-          compiler__emit_byte(c, OP_STRUCT_GET, line);
+          compiler__emit_byte(c, OP_HEAP_RECORD_GET, line);
           compiler__emit_u16(c, (uint16_t)cf->offset, line);
           compiler__emit_byte(c, (uint8_t)cf->type, line);
           c->last_expr_type = cf->type;
@@ -10299,8 +10299,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             return;
           }
 
-          /* Emit OP_STRUCT_SET + field_offset (u16) + field_type (u8) */
-          compiler__emit_byte(c, OP_STRUCT_SET, line);
+          /* Emit OP_HEAP_RECORD_SET + field_offset (u16) + field_type (u8) */
+          compiler__emit_byte(c, OP_HEAP_RECORD_SET, line);
           compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
           compiler__emit_byte(c, (uint8_t)field_type, line);
 
@@ -10322,7 +10322,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               c->inline_repr = INLINE_NONE;
             }
           } else {
-            compiler__emit_byte(c, OP_STRUCT_GET, line);
+            compiler__emit_byte(c, OP_HEAP_RECORD_GET, line);
             compiler__emit_u16(c, (uint16_t)sdef->fields[fi].offset, line);
             compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
           }
@@ -10368,15 +10368,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (is_set) {
         /* Compile the new value */
         compiler__compile_node(c, args[2]);
-        /* Emit OP_STRUCT_SET_DYN + const_idx (field name) */
-        compiler__emit_byte(c, OP_STRUCT_SET_DYN, line);
+        /* Emit OP_HEAP_RECORD_SET_DYN + const_idx (field name) */
+        compiler__emit_byte(c, OP_HEAP_RECORD_SET_DYN, line);
         compiler__emit_u16(c, name_idx, line);
         /* Result type is dyn (we don't know the struct type) */
         c->last_expr_type = TYPE_DYN;
         c->last_struct_idx = UINT32_MAX;
       } else {
-        /* Emit OP_STRUCT_GET_DYN + const_idx (field name) */
-        compiler__emit_byte(c, OP_STRUCT_GET_DYN, line);
+        /* Emit OP_HEAP_RECORD_GET_DYN + const_idx (field name) */
+        compiler__emit_byte(c, OP_HEAP_RECORD_GET_DYN, line);
         compiler__emit_u16(c, name_idx, line);
         /* Result type is dyn (field type unknown at compile time) */
         c->last_expr_type = TYPE_DYN;
@@ -10485,8 +10485,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_u16(c, (uint16_t)struct_idx, line);
         c->inline_repr = INLINE_STACK;
       } else {
-        /* Emit OP_STRUCT_NEW + uint16_t struct_type_index (heap path) */
-        compiler__emit_byte(c, OP_STRUCT_NEW, line);
+        /* Emit OP_HEAP_RECORD_NEW + uint16_t struct_type_index (heap path) */
+        compiler__emit_byte(c, OP_HEAP_RECORD_NEW, line);
         compiler__emit_u16(c, (uint16_t)struct_idx, line);
         c->inline_repr = INLINE_NONE;
       }
@@ -12236,17 +12236,17 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         }
       }
 
-      /* Emit initialization bytecode: OP_GET_CTX, default_expr, OP_STRUCT_SET */
+      /* Emit initialization bytecode: OP_GET_CTX, default_expr, OP_HEAP_RECORD_SET */
       if (node->data.ctx_decl.default_expr) {
         CtxField* added = ctx_field_list__find(ctx, field_name, field_name_len);
         compiler__emit_byte(c, OP_GET_CTX, line);
         compiler__compile_node(c, node->data.ctx_decl.default_expr);
-        /* Phase 5c: struct default exprs are now inline — reify for OP_STRUCT_SET */
+        /* Phase 5c: struct default exprs are now inline — reify for OP_HEAP_RECORD_SET */
         compiler__reify_inline_struct(c, line);
-        compiler__emit_byte(c, OP_STRUCT_SET, line);
+        compiler__emit_byte(c, OP_HEAP_RECORD_SET, line);
         compiler__emit_u16(c, (uint16_t)added->offset, line);
         compiler__emit_byte(c, (uint8_t)added->type, line);
-        /* OP_STRUCT_SET leaves struct on stack — pop it, push nil as statement result */
+        /* OP_HEAP_RECORD_SET leaves struct on stack — pop it, push nil as statement result */
         compiler__emit_byte(c, OP_POP, line);
       }
       compiler__emit_byte(c, OP_NIL, line);

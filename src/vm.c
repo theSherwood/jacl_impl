@@ -1130,8 +1130,8 @@ void vm__heap_record_write_field(HeapRecord* s, uint32_t offset,
 
 /* Phase 5c: After reifying inline bytes to a heap HeapRecord, fix up any
  * TYPE_STRUCT fields by allocating child heap structs from the raw bytes.
- * This ensures OP_STRUCT_GET sees tagged pointers (not raw data) for nested
- * struct fields — matching the convention established by OP_STRUCT_NEW (heap). */
+ * This ensures OP_HEAP_RECORD_GET sees tagged pointers (not raw data) for nested
+ * struct fields — matching the convention established by OP_HEAP_RECORD_NEW (heap). */
 static void vm__reify_nested_heap_records(VM* vm, HeapRecord* s, StructTypeDef* sdef) {
   for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
     if (sdef->fields[fi].type != TYPE_STRUCT) continue;
@@ -5888,7 +5888,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
-      case OP_STRUCT_GET: {
+      case OP_HEAP_RECORD_GET: {
         uint16_t field_offset = vm__read_u16(vm);
         uint8_t field_type = vm__read_byte(vm);
         JaclVal struct_val;
@@ -5911,7 +5911,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
-      case OP_STRUCT_SET: {
+      case OP_HEAP_RECORD_SET: {
         uint16_t field_offset = vm__read_u16(vm);
         uint8_t field_type = vm__read_byte(vm);
         JaclVal new_val;
@@ -5945,7 +5945,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
-      case OP_STRUCT_GET_DYN: {
+      case OP_HEAP_RECORD_GET_DYN: {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal struct_val;
         result = vm__pop(vm, &struct_val);
@@ -6034,7 +6034,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         return VM_RUNTIME_ERROR;
       }
 
-      case OP_STRUCT_SET_DYN: {
+      case OP_HEAP_RECORD_SET_DYN: {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal new_val;
         result = vm__pop(vm, &new_val);
@@ -6092,7 +6092,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
-      case OP_STRUCT_NEW: {
+      case OP_HEAP_RECORD_NEW: {
         uint16_t type_idx = vm__read_u16(vm);
         if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
           vm__set_error(vm, "invalid struct type index %u", (unsigned)type_idx);
@@ -6657,7 +6657,7 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         s->total_size = sdef->total_size;
         memcpy(s->data, src, sdef->total_size);
         /* Phase 5c: fix up nested struct fields — convert raw data to
-           heap HeapRecord* pointers so OP_STRUCT_GET works uniformly.
+           heap HeapRecord* pointers so OP_HEAP_RECORD_GET works uniformly.
            Recursive: nested structs may themselves have nested fields. */
         vm__reify_nested_heap_records(vm, s, sdef);
         /* Clear inline bitmap, pop width slots, push heap pointer */
