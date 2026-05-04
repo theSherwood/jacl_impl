@@ -19,6 +19,8 @@
 #define TYPER_MAX_BINDINGS    1024
 #define TYPER_MAX_PROCS        256
 #define TYPER_MAX_PROC_PARAMS   32
+#define TYPER_MAX_STRUCTS      256
+#define TYPER_MAX_STRUCT_FIELDS 32
 
 typedef struct {
   const char* name;
@@ -39,6 +41,13 @@ typedef struct {
 } TyperProc;
 
 typedef struct {
+  const char* name;
+  uint32_t    name_len;
+  uint8_t     field_count;
+  uint8_t     field_types[TYPER_MAX_STRUCT_FIELDS]; /* JaclType per field; TYPE_STRUCT if a nested struct */
+} TyperStruct;
+
+typedef struct {
   TyperBinding bindings[TYPER_MAX_BINDINGS];
   uint32_t     binding_count;
   uint32_t     scope_depth;
@@ -47,6 +56,11 @@ typedef struct {
    * up signatures. */
   TyperProc    procs[TYPER_MAX_PROCS];
   uint32_t     proc_count;
+  /* Global struct registry — populated by the same pre-pass. Used by
+   * struct constructor narrowing: when a command head matches a
+   * registered struct name, propagate field types to the args. */
+  TyperStruct  structs[TYPER_MAX_STRUCTS];
+  uint32_t     struct_count;
   /* Contextual type hint: parent's "expected_type". Mirrors compiler.c's
    * c->expected_type. Set by callers (e.g., typed def/mut) before recursing
    * into the value expression; restored after. */
@@ -397,6 +411,48 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   return true;
 }
 
+/* Pre-pass: collect struct definitions so struct constructor calls
+ * (which propagate field types to args) can resolve. */
+static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t count) {
+  for (uint32_t ni = 0; ni < count; ni++) {
+    AstNode* node = nodes[ni];
+    if (node->type != AST_DEFSTRUCT) continue;
+    if (tc->struct_count >= TYPER_MAX_STRUCTS) break;
+    TyperStruct* s = &tc->structs[tc->struct_count++];
+    s->name     = node->data.defstruct.name;
+    s->name_len = node->data.defstruct.name_len;
+    uint32_t fc = node->data.defstruct.field_count;
+    if (fc > TYPER_MAX_STRUCT_FIELDS) fc = TYPER_MAX_STRUCT_FIELDS;
+    s->field_count = (uint8_t)fc;
+    for (uint32_t i = 0; i < fc; i++) {
+      const char* tn = node->data.defstruct.field_types[i];
+      uint32_t    tl = node->data.defstruct.field_type_lens[i];
+      JaclType ft;
+      if (is_type_keyword(tn, tl)) {
+        ft = type_from_keyword(tn, tl);
+      } else {
+        /* Likely a nested struct name; mark as TYPE_STRUCT. The typer
+         * doesn't track per-field struct_idx yet, so narrowing here
+         * just becomes "expect a struct" — still better than DYN for
+         * literal arg narrowing (they wouldn't match TYPE_STRUCT). */
+        ft = TYPE_STRUCT;
+      }
+      s->field_types[i] = (uint8_t)ft;
+    }
+  }
+}
+
+static const TyperStruct* typer__find_struct(TyperCtx* tc,
+                                              const char* name, uint32_t name_len) {
+  for (uint32_t i = 0; i < tc->struct_count; i++) {
+    if (tc->structs[i].name_len == name_len &&
+        memcmp(tc->structs[i].name, name, name_len) == 0) {
+      return &tc->structs[i];
+    }
+  }
+  return NULL;
+}
+
 /* Pre-pass: collect proc signatures from top-level so calls can look
  * them up regardless of definition order. Matches compiler.c's
  * Phase 1 proc registration behavior. */
@@ -540,13 +596,18 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     }
   }
 
-  /* Generic call dispatch: if head is a known proc name, propagate
-   * declared param types to args so int/float literals narrow. Then
-   * propagate the proc's declared return type up. */
-  const TyperProc* proc = NULL;
+  /* Generic call/constructor dispatch: head may be a known proc name
+   * or a registered struct name. In both cases we propagate declared
+   * arg types as expected_type for literals to narrow. */
+  const TyperProc*   proc   = NULL;
+  const TyperStruct* sdef   = NULL;
   if (head && head->type == AST_LIT_STRING) {
     proc = typer__find_proc(tc,
         head->data.lit_string.value, head->data.lit_string.length);
+    if (!proc) {
+      sdef = typer__find_struct(tc,
+          head->data.lit_string.value, head->data.lit_string.length);
+    }
   }
   if (head) typer__infer_node(tc, head);
   for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
@@ -554,6 +615,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     JaclType saved_et = tc->expected_type;
     if (proc && i < proc->param_count) {
       tc->expected_type = (JaclType)proc->param_types[i];
+    } else if (sdef && i < sdef->field_count) {
+      tc->expected_type = (JaclType)sdef->field_types[i];
     } else {
       tc->expected_type = TYPE_DYN;
     }
@@ -563,6 +626,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   if (proc) {
     node->inferred_type = proc->return_type;
     node->inferred_struct_idx = proc->return_struct_idx;
+  } else if (sdef) {
+    node->inferred_type = TYPE_STRUCT;
   } else {
     node->inferred_type = TYPE_DYN;
   }
@@ -688,10 +753,13 @@ void typer_infer(AstNode** nodes, uint32_t count) {
   tc.binding_count = 0;
   tc.scope_depth   = 0;
   tc.proc_count    = 0;
+  tc.struct_count  = 0;
   tc.expected_type = TYPE_DYN;
 
-  /* Pre-pass: register top-level proc signatures so calls (which may
-   * appear before the definition) resolve correctly. */
+  /* Pre-pass: register top-level struct definitions and proc signatures
+   * so constructor calls and proc calls (which may appear before the
+   * definition) resolve correctly. */
+  typer__register_structs(&tc, nodes, count);
   typer__register_procs(&tc, nodes, count);
 
   for (uint32_t i = 0; i < count; i++) {
