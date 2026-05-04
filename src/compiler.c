@@ -98,6 +98,8 @@ static bool compiler__is_typed_collection_scalar(JaclType t) {
          t == TYPE_F32 || t == TYPE_F64;
 }
 
+/* (compiler__compile_typed_elem_arg defined after the Compiler struct.) */
+
 /* Check if an AST_COMMAND node is a typed collection expression.
    Returns 1 for [Vec Type], 2 for [Map Type] (dyn keys),
    3 for [Map KeyType ValueType] (struct keys), 0 if not a match.
@@ -186,11 +188,15 @@ static StructTypeDef* struct_registry__alloc_def(StructTypeRegistry* reg, uint32
   return (StructTypeDef*)arena_alloc(reg->arena, sz);
 }
 
-/* Ensure the defs pointer array has room for at least one more entry */
+/* Ensure the defs pointer array has room for at least one more entry.
+ * Returns false (without growing) if growing would push valid struct
+ * indices into the COMPILER_SCALAR_VEC_BASE sentinel range used by
+ * scalar-typed collections (see compiler.c near typed_collection_expr). */
 static bool struct_registry__grow(StructTypeRegistry* reg) {
   if (reg->count < reg->capacity) return true;
   uint32_t new_cap = reg->capacity * 2;
   if (new_cap < STRUCT_REGISTRY_INIT_CAP) new_cap = STRUCT_REGISTRY_INIT_CAP;
+  if (new_cap >= COMPILER_SCALAR_VEC_BASE) return false; /* sentinel collision */
   StructTypeDef** new_defs = (StructTypeDef**)realloc(reg->defs, new_cap * sizeof(StructTypeDef*));
   if (!new_defs) return false;
   /* Zero new slots */
@@ -2834,6 +2840,26 @@ struct Compiler {
   uint32_t             narrowing_count;
   CtxFieldList*        ctx_fields;       /* ctx field accumulator (root compiler owns) */
 };
+
+/* --- Phase 2 helper: compile a typed-collection element argument.
+ * Pushes expected_type for scalar-typed targets so literal narrowing
+ * fires, compiles the arg, restores expected_type, and returns true
+ * iff the result type matches. Caller emits the error on false. */
+void compiler__compile_node(Compiler* c, AstNode* node); /* fwd decl */
+
+static bool compiler__compile_typed_elem_arg(Compiler* c, AstNode* arg,
+                                             uint32_t expected_type_idx) {
+  bool is_scalar = COMPILER_IS_SCALAR_TYPE_IDX(expected_type_idx);
+  if (is_scalar) {
+    c->expected_type = COMPILER_TYPE_IDX_TO_SCALAR(expected_type_idx);
+  }
+  compiler__compile_node(c, arg);
+  c->expected_type = TYPE_DYN;
+  if (is_scalar) {
+    return c->last_expr_type == COMPILER_TYPE_IDX_TO_SCALAR(expected_type_idx);
+  }
+  return c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == expected_type_idx;
+}
 
 /* --- TypeInfo accessors --- */
 
@@ -8753,15 +8779,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       uint32_t elem_type_idx = c->last_struct_idx;
-      bool scalar = COMPILER_IS_SCALAR_TYPE_IDX(elem_type_idx);
-      JaclType expected = scalar ? COMPILER_TYPE_IDX_TO_SCALAR(elem_type_idx) : TYPE_STRUCT;
-      if (scalar) c->expected_type = expected;
-      compiler__compile_node(c, args[1]);
-      c->expected_type = TYPE_DYN;
-      bool match = scalar
-        ? (c->last_expr_type == expected)
-        : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == elem_type_idx);
-      if (!match) {
+      if (!compiler__compile_typed_elem_arg(c, args[1], elem_type_idx)) {
         compiler__error(c, line, col, "vec-push: element type does not match typed vec element type");
         return;
       }
@@ -8791,16 +8809,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       uint32_t elem_type_idx = c->last_struct_idx;
-      bool scalar = COMPILER_IS_SCALAR_TYPE_IDX(elem_type_idx);
-      JaclType expected = scalar ? COMPILER_TYPE_IDX_TO_SCALAR(elem_type_idx) : TYPE_STRUCT;
-      compiler__compile_node(c, args[1]);
-      if (scalar) c->expected_type = expected;
-      compiler__compile_node(c, args[2]);
-      c->expected_type = TYPE_DYN;
-      bool match = scalar
-        ? (c->last_expr_type == expected)
-        : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == elem_type_idx);
-      if (!match) {
+      compiler__compile_node(c, args[1]); /* index */
+      if (!compiler__compile_typed_elem_arg(c, args[2], elem_type_idx)) {
         compiler__error(c, line, col, "vec-set: element type does not match typed vec element type");
         return;
       }
@@ -8902,25 +8912,18 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       uint32_t elem_type_idx = c->last_struct_idx;
       uint32_t key_type_idx = c->last_key_struct_idx;
-      bool key_is_scalar = key_type_idx != UINT32_MAX
-                            && COMPILER_IS_SCALAR_TYPE_IDX(key_type_idx);
-      bool val_is_scalar = COMPILER_IS_SCALAR_TYPE_IDX(elem_type_idx);
-      if (key_is_scalar) c->expected_type = COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx);
-      compiler__compile_node(c, args[1]);
-      c->expected_type = TYPE_DYN;
       if (key_type_idx != UINT32_MAX) {
-        bool ok = key_is_scalar
-          ? (c->last_expr_type == COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx))
-          : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == key_type_idx);
-        if (!ok) {
+        if (!compiler__compile_typed_elem_arg(c, args[1], key_type_idx)) {
           compiler__error(c, line, col, "map-get: key type does not match typed map key type");
           return;
         }
+      } else {
+        compiler__compile_node(c, args[1]);
       }
       compiler__emit_byte(c, OP_TYPED_MAP_GET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
-      if (val_is_scalar) {
+      if (COMPILER_IS_SCALAR_TYPE_IDX(elem_type_idx)) {
         c->last_expr_type = COMPILER_TYPE_IDX_TO_SCALAR(elem_type_idx);
         c->last_struct_idx = UINT32_MAX;
       } else {
@@ -8945,19 +8948,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       uint32_t key_type_idx = c->last_key_struct_idx;
-      bool key_is_scalar = key_type_idx != UINT32_MAX
-                            && COMPILER_IS_SCALAR_TYPE_IDX(key_type_idx);
-      if (key_is_scalar) c->expected_type = COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx);
-      compiler__compile_node(c, args[1]);
-      c->expected_type = TYPE_DYN;
       if (key_type_idx != UINT32_MAX) {
-        bool ok = key_is_scalar
-          ? (c->last_expr_type == COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx))
-          : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == key_type_idx);
-        if (!ok) {
+        if (!compiler__compile_typed_elem_arg(c, args[1], key_type_idx)) {
           compiler__error(c, line, col, "map-has: key type does not match typed map key type");
           return;
         }
+      } else {
+        compiler__compile_node(c, args[1]);
       }
       compiler__emit_byte(c, OP_TYPED_MAP_HAS, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
@@ -8997,28 +8994,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       uint32_t elem_type_idx = c->last_struct_idx;
       uint32_t key_type_idx = c->last_key_struct_idx;
-      bool key_is_scalar = key_type_idx != UINT32_MAX
-                            && COMPILER_IS_SCALAR_TYPE_IDX(key_type_idx);
-      bool val_is_scalar = COMPILER_IS_SCALAR_TYPE_IDX(elem_type_idx);
-      if (key_is_scalar) c->expected_type = COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx);
-      compiler__compile_node(c, args[1]);  /* key */
-      c->expected_type = TYPE_DYN;
       if (key_type_idx != UINT32_MAX) {
-        bool ok = key_is_scalar
-          ? (c->last_expr_type == COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx))
-          : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == key_type_idx);
-        if (!ok) {
+        if (!compiler__compile_typed_elem_arg(c, args[1], key_type_idx)) {
           compiler__error(c, line, col, "map-set: key type does not match typed map key type");
           return;
         }
+      } else {
+        compiler__compile_node(c, args[1]);
       }
-      if (val_is_scalar) c->expected_type = COMPILER_TYPE_IDX_TO_SCALAR(elem_type_idx);
-      compiler__compile_node(c, args[2]);  /* value */
-      c->expected_type = TYPE_DYN;
-      bool v_ok = val_is_scalar
-        ? (c->last_expr_type == COMPILER_TYPE_IDX_TO_SCALAR(elem_type_idx))
-        : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == elem_type_idx);
-      if (!v_ok) {
+      if (!compiler__compile_typed_elem_arg(c, args[2], elem_type_idx)) {
         compiler__error(c, line, col, "map-set: value type does not match typed map element type");
         return;
       }
@@ -9046,19 +9030,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       uint32_t elem_type_idx = c->last_struct_idx;
       uint32_t key_type_idx = c->last_key_struct_idx;
-      bool key_is_scalar = key_type_idx != UINT32_MAX
-                            && COMPILER_IS_SCALAR_TYPE_IDX(key_type_idx);
-      if (key_is_scalar) c->expected_type = COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx);
-      compiler__compile_node(c, args[1]);  /* key */
-      c->expected_type = TYPE_DYN;
       if (key_type_idx != UINT32_MAX) {
-        bool ok = key_is_scalar
-          ? (c->last_expr_type == COMPILER_TYPE_IDX_TO_SCALAR(key_type_idx))
-          : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == key_type_idx);
-        if (!ok) {
+        if (!compiler__compile_typed_elem_arg(c, args[1], key_type_idx)) {
           compiler__error(c, line, col, "map-remove: key type does not match typed map key type");
           return;
         }
+      } else {
+        compiler__compile_node(c, args[1]);
       }
       compiler__emit_byte(c, OP_TYPED_MAP_REMOVE, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);

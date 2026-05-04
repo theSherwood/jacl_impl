@@ -793,6 +793,25 @@ void vm__fmt_struct_bytes(VMFormatBuf* buf, StructTypeDef* sdef, const uint8_t* 
   vm__fmt_append(buf, "}", 1);
 }
 
+/* Format a single scalar slot from a typed collection (typed vec/map
+ * with sentinel element type). The slot is one JaclVal-sized value
+ * holding either a tagged inline scalar (i32/u32/f32) or a raw
+ * unboxed numeric (i64/u64/f64). */
+void vm__fmt_typed_scalar(VMFormatBuf* buf, const JaclVal* ptr, JaclType t) {
+  char tmp[64];
+  int n = 0;
+  switch (t) {
+    case TYPE_I32: n = snprintf(tmp, sizeof(tmp), "%d", jacl_as_i32(*ptr)); break;
+    case TYPE_U32: n = snprintf(tmp, sizeof(tmp), "%u", jacl_as_u32(*ptr)); break;
+    case TYPE_F32: n = snprintf(tmp, sizeof(tmp), "%g", (double)jacl_as_f32(*ptr)); break;
+    case TYPE_I64: n = snprintf(tmp, sizeof(tmp), "%" PRId64, (int64_t)*ptr); break;
+    case TYPE_U64: n = snprintf(tmp, sizeof(tmp), "%" PRIu64, (uint64_t)*ptr); break;
+    case TYPE_F64: { double d; memcpy(&d, ptr, 8); n = snprintf(tmp, sizeof(tmp), "%g", d); break; }
+    default: n = snprintf(tmp, sizeof(tmp), "?"); break;
+  }
+  if (n > 0) vm__fmt_append(buf, tmp, (uint32_t)n);
+}
+
 void vm__fmt_value(VMFormatBuf* buf, JaclVal val) {
   char tmp[64];
   int n;
@@ -10562,23 +10581,10 @@ interpret_done:
         vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
         vm__fmt_append(&fmt, "[", 1);
         if (type_idx >= 0xFF00) {
-          /* Scalar element typed vec — format each element by JaclType. */
           JaclType elem_t = (JaclType)(type_idx - 0xFF00);
           for (uint32_t i = 0; i < count; i++) {
             if (i > 0) vm__fmt_append(&fmt, ", ", 2);
-            const JaclVal* ptr = jacl_typed_vec_get_ptr(tvec, i);
-            char buf[64];
-            int n = 0;
-            switch (elem_t) {
-              case TYPE_I32: n = snprintf(buf, sizeof(buf), "%d", jacl_as_i32(*ptr)); break;
-              case TYPE_U32: n = snprintf(buf, sizeof(buf), "%u", jacl_as_u32(*ptr)); break;
-              case TYPE_F32: n = snprintf(buf, sizeof(buf), "%g", (double)jacl_as_f32(*ptr)); break;
-              case TYPE_I64: n = snprintf(buf, sizeof(buf), "%" PRId64, (int64_t)*ptr); break;
-              case TYPE_U64: n = snprintf(buf, sizeof(buf), "%" PRIu64, (uint64_t)*ptr); break;
-              case TYPE_F64: { double d; memcpy(&d, ptr, 8); n = snprintf(buf, sizeof(buf), "%g", d); break; }
-              default: n = snprintf(buf, sizeof(buf), "?"); break;
-            }
-            if (n > 0) vm__fmt_append(&fmt, buf, (uint32_t)n);
+            vm__fmt_typed_scalar(&fmt, jacl_typed_vec_get_ptr(tvec, i), elem_t);
           }
         } else {
           StructTypeDef* sdef = vm->struct_registry->defs[type_idx];
@@ -10625,18 +10631,7 @@ interpret_done:
             const JaclVal* key_ptr = ir.item->slots;
             vm__fmt_struct_data(&fmt, kdef, (const uint8_t*)key_ptr);
           } else if (key_is_scalar) {
-            const JaclVal* key_ptr = ir.item->slots;
-            char buf[64]; int n = 0;
-            switch (key_t) {
-              case TYPE_I32: n = snprintf(buf, sizeof(buf), "%d", jacl_as_i32(*key_ptr)); break;
-              case TYPE_U32: n = snprintf(buf, sizeof(buf), "%u", jacl_as_u32(*key_ptr)); break;
-              case TYPE_F32: n = snprintf(buf, sizeof(buf), "%g", (double)jacl_as_f32(*key_ptr)); break;
-              case TYPE_I64: n = snprintf(buf, sizeof(buf), "%" PRId64, (int64_t)*key_ptr); break;
-              case TYPE_U64: n = snprintf(buf, sizeof(buf), "%" PRIu64, (uint64_t)*key_ptr); break;
-              case TYPE_F64: { double d; memcpy(&d, key_ptr, 8); n = snprintf(buf, sizeof(buf), "%g", d); break; }
-              default: n = snprintf(buf, sizeof(buf), "?"); break;
-            }
-            if (n > 0) vm__fmt_append(&fmt, buf, (uint32_t)n);
+            vm__fmt_typed_scalar(&fmt, ir.item->slots, key_t);
           } else {
             JaclVal key = jacl_typed_map_key_from_leaf(ir.item);
             vm__fmt_value(&fmt, key);
@@ -10645,17 +10640,7 @@ interpret_done:
           /* Format value */
           const JaclVal* val_ptr = jacl_typed_map_value_ptr_from_leaf(ir.item);
           if (val_is_scalar) {
-            char buf[64]; int n = 0;
-            switch (val_t) {
-              case TYPE_I32: n = snprintf(buf, sizeof(buf), "%d", jacl_as_i32(*val_ptr)); break;
-              case TYPE_U32: n = snprintf(buf, sizeof(buf), "%u", jacl_as_u32(*val_ptr)); break;
-              case TYPE_F32: n = snprintf(buf, sizeof(buf), "%g", (double)jacl_as_f32(*val_ptr)); break;
-              case TYPE_I64: n = snprintf(buf, sizeof(buf), "%" PRId64, (int64_t)*val_ptr); break;
-              case TYPE_U64: n = snprintf(buf, sizeof(buf), "%" PRIu64, (uint64_t)*val_ptr); break;
-              case TYPE_F64: { double d; memcpy(&d, val_ptr, 8); n = snprintf(buf, sizeof(buf), "%g", d); break; }
-              default: n = snprintf(buf, sizeof(buf), "?"); break;
-            }
-            if (n > 0) vm__fmt_append(&fmt, buf, (uint32_t)n);
+            vm__fmt_typed_scalar(&fmt, val_ptr, val_t);
           } else {
             vm__fmt_struct_data(&fmt, sdef, (const uint8_t*)val_ptr);
           }
