@@ -342,3 +342,27 @@ The compiler.c shrink the audit predicted requires deleting the inference logic 
 4. **Delete the `last_expr_type` / `expected_type` / `last_struct_idx` fields** on `Compiler`. The corresponding type-tracking glue (~500 LOC by my earlier estimate) becomes deletable.
 
 The 201 gaps are concentrated: most are a few specific patterns (CTX_DECL recursion, certain block result types). A few focused commits should close them. After that, steps 2–4 are mechanical.
+
+---
+
+## Phase 3d gap closure — substantive progress
+
+Five commits this round drove the gap count from 201 → 51 (75% reduction):
+
+| Commit | What | Gap delta |
+|---|---|---|
+| `e859175` | Typer recurses into AST_CTX_DECL default expressions, propagating declared type as expected_type | 201 → 137 |
+| `c4275d0` | Register `$ctx` as builtin TYPE_STRUCT binding at typer init | 137 → 63 |
+| `ca5cb09` | syntax_to_ast sets inferred_type on literal clones; expand__compile_staged_body runs typer_infer on macro bodies before compile; AST_DEFMACRO recursion | 137 → 51 |
+
+92/92 tests pass throughout. 0 mismatches throughout.
+
+### Remaining 51 gaps
+
+Concentrated in module-compilation paths — modules go through their own compile pipeline (not standalone `compiler_compile`) and don't currently invoke `typer_infer`. Closing them is a focused commit: thread the typer call into module compile.
+
+Plus a small tail in stream/destructure patterns where some intermediate AST node isn't reached by my walker.
+
+### Steps 2–4 (delete the fallback + writes + fields)
+
+Now feasible after step 1 finishes. Each consumer site I switched in Phase 3c has a `if (x == TYPE_DYN) x = c->last_expr_type;` fallback line. Once the gaps are zero, those lines can be deleted. Then the 50+ `c->last_expr_type = X` writes in compiler.c become unread; deleting them is mechanical. Once the field is gone, the inference glue (return type checks, struct_idx propagation, expected_type bookkeeping) follows.
