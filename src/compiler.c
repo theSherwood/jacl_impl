@@ -4174,7 +4174,18 @@ void compiler__compile_binary(Compiler* c, AstNode** args,
     compiler__emit_byte(c, op, line);
     bool is_cmp = (op == OP_EQ || op == OP_LT || op == OP_GT ||
                    op == OP_LE || op == OP_GE);
-    c->last_expr_type = is_cmp ? TYPE_BOOL : TYPE_DYN;
+    JaclType result_type;
+    if (is_cmp) {
+      result_type = TYPE_BOOL;
+    } else if (lhs_type == rhs_type &&
+               (lhs_type == TYPE_I32 || lhs_type == TYPE_U32 ||
+                lhs_type == TYPE_F32)) {
+      /* Tagged scalar arithmetic: result preserves operand tag */
+      result_type = lhs_type;
+    } else {
+      result_type = TYPE_DYN;
+    }
+    c->last_expr_type = result_type;
   }
 }
 
@@ -6216,6 +6227,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__error(c, line, col, err_msg);
       return;
     }
+    if (declared_type != TYPE_DYN && rhs_type == TYPE_DYN) {
+      char err_msg[160];
+      snprintf(err_msg, sizeof(err_msg),
+               "type error: cannot assign dyn to %s binding — use [to %s $val] to cast",
+               type_name(declared_type), type_name(declared_type));
+      compiler__error(c, line, col, err_msg);
+      return;
+    }
 
     /* Reject mut-bound struct: cells store JaclVals (8 bytes), so a struct
        binding would need heap reification. Per design, mut struct bindings
@@ -6968,6 +6987,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       char err_msg[128];
       snprintf(err_msg, sizeof(err_msg), "type error: expected %s, got %s",
                type_name(declared_type), type_name(rhs_type));
+      compiler__error(c, line, col, err_msg);
+      return;
+    }
+    if (declared_type != TYPE_DYN && rhs_type == TYPE_DYN) {
+      char err_msg[160];
+      snprintf(err_msg, sizeof(err_msg),
+               "type error: cannot assign dyn to %s binding — use [to %s $val] to cast",
+               type_name(declared_type), type_name(declared_type));
       compiler__error(c, line, col, err_msg);
       return;
     }
@@ -8488,6 +8515,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                  "type error: field '%.*s' of struct 'ctx' expected %s, got %s",
                  (int)cf->name_len, cf->name,
                  type_name(cf->type), type_name(val_type));
+        compiler__error(c, line, col, err);
+        return;
+      }
+      if (cf->type != TYPE_DYN && val_type == TYPE_DYN) {
+        char err[224];
+        snprintf(err, sizeof(err),
+                 "type error: field '%.*s' of struct 'ctx' expected %s, got dyn — use [to %s $val] to cast",
+                 (int)cf->name_len, cf->name,
+                 type_name(cf->type), type_name(cf->type));
         compiler__error(c, line, col, err);
         return;
       }
@@ -10146,6 +10182,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               compiler__error(c, line, col, err_msg);
               return;
             }
+            if (field_type != TYPE_DYN && val_type == TYPE_DYN) {
+              char err_msg[224];
+              snprintf(err_msg, sizeof(err_msg),
+                       "type error: field '%.*s' of struct '%.*s' expected %s, got dyn — use [to %s $val] to cast",
+                       (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
+                       (int)sdef->name_len, sdef->name,
+                       type_name(field_type), type_name(field_type));
+              compiler__error(c, line, col, err_msg);
+              return;
+            }
             compiler__emit_byte(c, set_op, line);
             compiler__emit_byte(c, inline_base, line);
             compiler__emit_u16(c, total_offset, line);
@@ -10253,6 +10299,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__error(c, line, col, err_msg);
             return;
           }
+          if (field_type != TYPE_DYN && val_type == TYPE_DYN) {
+            char err_msg[224];
+            snprintf(err_msg, sizeof(err_msg),
+                     "type error: field '%.*s' of struct 'ctx' expected %s, got dyn — use [to %s $val] to cast",
+                     (int)cf->name_len, cf->name,
+                     type_name(field_type), type_name(field_type));
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
           if (field_type == TYPE_STRUCT) {
             /* Inline struct field: write bytes directly into ctx.data,
                no heap pointer intermediate. */
@@ -10347,6 +10402,16 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                      (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
                      (int)sdef->name_len, sdef->name,
                      type_name(field_type), type_name(val_type));
+            compiler__error(c, line, col, err_msg);
+            return;
+          }
+          if (field_type != TYPE_DYN && val_type == TYPE_DYN) {
+            char err_msg[224];
+            snprintf(err_msg, sizeof(err_msg),
+                     "type error: field '%.*s' of struct '%.*s' expected %s, got dyn — use [to %s $val] to cast",
+                     (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
+                     (int)sdef->name_len, sdef->name,
+                     type_name(field_type), type_name(field_type));
             compiler__error(c, line, col, err_msg);
             return;
           }

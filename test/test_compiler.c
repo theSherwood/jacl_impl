@@ -4634,12 +4634,13 @@ static int test_defstruct_type_annotation(void) {
   BlockPool pool; gc_block_pool_init(&pool);
   ThreadHeap heap; gc_heap_init(&heap, &pool); gc__current_heap = &heap;
 
-  /* def Point p $x — struct name as type annotation with dyn RHS.
-     Verifies that 'Point' is accepted as a type keyword after struct. */
+  /* def Point p [Point 0 0] — struct name as type annotation.
+     Verifies that 'Point' is accepted as a type keyword after struct.
+     Wrapped in a proc since struct values cannot live at top level. */
   CompileResult cr = compile_source(
       "struct Point {i32 x, i32 y}\n"
-      "def x 0\n"
-      "def Point p $x", &arena, &heap);
+      "proc test {} { def Point p [Point 0 0] }",
+      &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
 
   gc_heap_destroy(&heap);
@@ -5916,12 +5917,13 @@ static int test_struct_closure_capture_basic(void) {
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
       "  def b [box [Point 10 20]]\n"
-      "  proc inner {} {\n"
-      "    def Point p [deref $b]\n"
+      "  proc inner {Point p} {\n"
       "    print $p->x\n"
       "    print $p->y\n"
       "  }\n"
-      "  [inner]\n"
+      "  if [box? Point $b] {\n"
+      "    [inner [unbox $b]]\n"
+      "  }\n"
       "}\n"
       "[test]",
       &vm, &arena);
@@ -5954,12 +5956,13 @@ static int test_struct_closure_capture_isolation(void) {
       "proc test {} {\n"
       "  def p [Point 1 2]\n"
       "  def b [box $p]\n"
-      "  proc reader {} {\n"
-      "    def Point q [deref $b]\n"
+      "  proc reader {Point q} {\n"
       "    print $q->x\n"
       "  }\n"
       "  . $p x 99\n"
-      "  [reader]\n"
+      "  if [box? Point $b] {\n"
+      "    [reader [unbox $b]]\n"
+      "  }\n"
       "  print $p->x\n"
       "}\n"
       "[test]",

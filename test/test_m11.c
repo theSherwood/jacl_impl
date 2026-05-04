@@ -309,6 +309,63 @@ static int test_set_type_error_dyn_to_i64(void) {
   TEST_PASS();
 }
 
+/* Phase 1 soundness: dyn → typed slots must be rejected at compile time
+ * unless explicitly cast via [to TYPE $val]. Prevents silent bit-cast of
+ * tagged JaclVals into raw inline-struct field bytes. */
+
+static int test_def_typed_from_dyn_call_rejected(void) {
+  ASSERT(run_err(
+    "proc dyn_src {} { 42 }\n"
+    "proc t {} {\n"
+    "  def i64 x [dyn_src]\n"
+    "  print $x\n"
+    "}\n"
+    "[t]",
+    "cannot assign dyn to i64 binding"));
+  TEST_PASS();
+}
+
+static int test_struct_field_set_from_dyn_rejected(void) {
+  ASSERT(run_err(
+    "struct Point {mut i32 x, i32 y}\n"
+    "proc dyn_src {} { 99 }\n"
+    "proc t {} {\n"
+    "  def p [Point 1 2]\n"
+    "  . $p x [dyn_src]\n"
+    "}\n"
+    "[t]",
+    "expected i32, got dyn"));
+  TEST_PASS();
+}
+
+static int test_struct_field_set_with_explicit_cast_ok(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "struct Point {mut i32 x, i32 y}\n"
+    "proc dyn_src {} { 99 }\n"
+    "proc t {} {\n"
+    "  def p [Point 1 2]\n"
+    "  . $p x [to i32 [dyn_src]]\n"
+    "  print $p->x\n"
+    "}\n"
+    "[t]",
+    &cap, "99\n"));
+  TEST_PASS();
+}
+
+static int test_def_typed_with_explicit_cast_ok(void) {
+  PrintCapture cap;
+  ASSERT(run_ok(
+    "proc dyn_src {} { 42 }\n"
+    "proc t {} {\n"
+    "  def i64 x [to i64 [dyn_src]]\n"
+    "  print $x\n"
+    "}\n"
+    "[t]",
+    &cap, "42\n"));
+  TEST_PASS();
+}
+
 static int test_set_typed_to_typed_ok(void) {
   PrintCapture cap;
   ASSERT(run_ok(
@@ -1066,6 +1123,11 @@ int main(void) {
     { "mut_u32_basic",                  test_mut_u32_basic },
     { "set_type_error_str_to_i64",      test_set_type_error_str_to_i64 },
     { "set_type_error_dyn_to_i64",      test_set_type_error_dyn_to_i64 },
+    /* Phase 1 soundness: dyn → typed slot rejection */
+    { "def_typed_from_dyn_call_rejected",     test_def_typed_from_dyn_call_rejected },
+    { "struct_field_set_from_dyn_rejected",   test_struct_field_set_from_dyn_rejected },
+    { "struct_field_set_with_explicit_cast_ok", test_struct_field_set_with_explicit_cast_ok },
+    { "def_typed_with_explicit_cast_ok",      test_def_typed_with_explicit_cast_ok },
     { "set_typed_to_typed_ok",          test_set_typed_to_typed_ok },
     { "set_untyped_mut_no_checking",    test_set_untyped_mut_no_checking },
     { "mut_i64_local",                  test_mut_i64_local },
