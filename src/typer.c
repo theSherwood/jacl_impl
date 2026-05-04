@@ -70,6 +70,7 @@ typedef struct {
 } TyperCtx;
 
 static void typer__infer_node(TyperCtx* tc, AstNode* node);
+static const TyperStruct* typer__find_struct(TyperCtx* tc, const char* name, uint32_t name_len);
 
 /* --- Scope helpers --- */
 
@@ -153,10 +154,24 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   AstNode*  name_node     = NULL;
   AstNode*  value_node    = NULL;
 
+  uint32_t declared_struct_idx = UINT32_MAX;
   if (argc == 3) {
-    /* Keyword form: def TYPE NAME VALUE */
-    if (!typer__node_as_type_keyword(args[0], &declared_type)) {
-      /* args[0] may be a struct name; treated as TYPE_DYN for now. */
+    /* Keyword form: def TYPE NAME VALUE, or def StructName NAME VALUE */
+    if (typer__node_as_type_keyword(args[0], &declared_type)) {
+      /* type keyword */
+    } else if (args[0]->type == AST_LIT_STRING) {
+      /* Possibly a registered struct name. */
+      const TyperStruct* sd = typer__find_struct(tc,
+          args[0]->data.lit_string.value, args[0]->data.lit_string.length);
+      if (sd) {
+        declared_type = TYPE_STRUCT;
+        for (uint32_t si = 0; si < tc->struct_count; si++) {
+          if (&tc->structs[si] == sd) { declared_struct_idx = si; break; }
+        }
+      } else {
+        return false;
+      }
+    } else {
       return false;
     }
     name_node  = args[1];
@@ -334,7 +349,12 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   }
   uint32_t struct_idx = UINT32_MAX;
   if (effective == TYPE_STRUCT) {
-    struct_idx = value_node->inferred_struct_idx;
+    /* Declared struct (def Point r ...) wins; otherwise inherit from RHS. */
+    if (declared_struct_idx != UINT32_MAX) {
+      struct_idx = declared_struct_idx;
+    } else {
+      struct_idx = value_node->inferred_struct_idx;
+    }
   }
 
   typer__scope_add(tc, name_node->data.lit_string.value,
@@ -404,12 +424,13 @@ static bool typer__handle_set(TyperCtx* tc, AstNode* node) {
 
 /* Walk a proc's params node and emit (name, type) pairs to the caller's
  * callback via the out-arrays. Mirrors compiler.c:7100-7180 simple cases:
- * plain name → TYPE_DYN, "TYPE name" pair → that type. Skips compound
- * types ([Vec T], [Map K V]) — those mark the param TYPE_DYN here so we
- * don't hand back wrong info. Returns the number of params written. */
-static uint32_t typer__parse_params(AstNode* params,
+ * plain name → TYPE_DYN, "TYPE name" pair → that type, "Struct name"
+ * pair → TYPE_STRUCT. Skips compound types ([Vec T], [Map K V]) —
+ * those mark the param TYPE_DYN. Returns the number of params written. */
+static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
                                     AstNode* (*name_nodes_out)[TYPER_MAX_PROC_PARAMS],
-                                    JaclType (*types_out)[TYPER_MAX_PROC_PARAMS]) {
+                                    JaclType (*types_out)[TYPER_MAX_PROC_PARAMS],
+                                    uint32_t (*struct_idxs_out)[TYPER_MAX_PROC_PARAMS]) {
   uint32_t count = 0;
   if (!params || params->type != AST_COMMAND) return 0;
   /* Build flat element list: head + args */
@@ -432,8 +453,9 @@ static uint32_t typer__parse_params(AstNode* params,
       if (fi >= flat_n) break;
       elem = flat[fi];
       if (elem->type != AST_LIT_STRING) continue;
-      (*name_nodes_out)[count] = elem;
-      (*types_out)[count]      = TYPE_DYN;
+      (*name_nodes_out)[count]   = elem;
+      (*types_out)[count]        = TYPE_DYN;
+      (*struct_idxs_out)[count]  = UINT32_MAX;
       count++;
       continue;
     }
@@ -445,18 +467,40 @@ static uint32_t typer__parse_params(AstNode* params,
       if (fi >= flat_n) break;
       AstNode* next = flat[fi];
       if (next->type != AST_LIT_STRING) continue;
-      (*name_nodes_out)[count] = next;
-      (*types_out)[count]      = t;
+      (*name_nodes_out)[count]   = next;
+      (*types_out)[count]        = t;
+      (*struct_idxs_out)[count]  = UINT32_MAX;
       count++;
     } else if (elem->data.lit_string.length == 3 &&
                memcmp(elem->data.lit_string.value, "...", 3) == 0) {
       /* variadic marker — skip */
       continue;
     } else {
-      /* Plain name — TYPE_DYN. Could also be a struct name; treat as dyn for now. */
-      (*name_nodes_out)[count] = elem;
-      (*types_out)[count]      = TYPE_DYN;
-      count++;
+      /* Struct-name + name pair? Look up. */
+      uint32_t found_idx = UINT32_MAX;
+      for (uint32_t si = 0; si < tc->struct_count; si++) {
+        if (tc->structs[si].name_len == elem->data.lit_string.length &&
+            memcmp(tc->structs[si].name, elem->data.lit_string.value,
+                   elem->data.lit_string.length) == 0) {
+          found_idx = si;
+          break;
+        }
+      }
+      if (found_idx != UINT32_MAX) {
+        fi++;
+        if (fi >= flat_n) break;
+        AstNode* next = flat[fi];
+        if (next->type != AST_LIT_STRING) continue;
+        (*name_nodes_out)[count]   = next;
+        (*types_out)[count]        = TYPE_STRUCT;
+        (*struct_idxs_out)[count]  = found_idx;
+        count++;
+      } else {
+        (*name_nodes_out)[count]   = elem;
+        (*types_out)[count]        = TYPE_DYN;
+        (*struct_idxs_out)[count]  = UINT32_MAX;
+        count++;
+      }
     }
   }
   return count;
@@ -467,6 +511,7 @@ static uint32_t typer__parse_params(AstNode* params,
  * already registered (e.g., by the pre-pass) is updated, not duplicated. */
 static void typer__register_proc(TyperCtx* tc, AstNode* name_node,
                                   JaclType return_type,
+                                  uint32_t return_struct_idx,
                                   AstNode* (*pn)[TYPER_MAX_PROC_PARAMS],
                                   JaclType (*pt)[TYPER_MAX_PROC_PARAMS],
                                   uint32_t pcount) {
@@ -486,7 +531,7 @@ static void typer__register_proc(TyperCtx* tc, AstNode* name_node,
     p->name_len = name_node->data.lit_string.length;
   }
   p->return_type = (uint8_t)return_type;
-  p->return_struct_idx = UINT32_MAX;
+  p->return_struct_idx = return_struct_idx;
   if (pcount > TYPER_MAX_PROC_PARAMS) pcount = TYPER_MAX_PROC_PARAMS;
   p->param_count = (uint8_t)pcount;
   for (uint32_t i = 0; i < pcount; i++) {
@@ -505,11 +550,23 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   uint32_t  argc = node->data.command.arg_count;
   uint32_t  name_idx, params_idx, body_idx;
   JaclType  return_type = TYPE_DYN;
+  uint32_t  return_struct_idx = UINT32_MAX;
   if (argc == 4) {
     AstNode* tn = args[0];
-    if (tn->type == AST_LIT_STRING &&
-        is_type_keyword(tn->data.lit_string.value, tn->data.lit_string.length)) {
-      return_type = type_from_keyword(tn->data.lit_string.value, tn->data.lit_string.length);
+    if (tn->type == AST_LIT_STRING) {
+      if (is_type_keyword(tn->data.lit_string.value, tn->data.lit_string.length)) {
+        return_type = type_from_keyword(tn->data.lit_string.value, tn->data.lit_string.length);
+      } else {
+        for (uint32_t si = 0; si < tc->struct_count; si++) {
+          if (tc->structs[si].name_len == tn->data.lit_string.length &&
+              memcmp(tc->structs[si].name, tn->data.lit_string.value,
+                     tn->data.lit_string.length) == 0) {
+            return_type = TYPE_STRUCT;
+            return_struct_idx = si;
+            break;
+          }
+        }
+      }
     }
     name_idx = 1; params_idx = 2; body_idx = 3;
   } else if (argc == 3) {
@@ -524,17 +581,18 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
 
   AstNode* pn[TYPER_MAX_PROC_PARAMS];
   JaclType pt[TYPER_MAX_PROC_PARAMS];
-  uint32_t pcount = typer__parse_params(params, &pn, &pt);
+  uint32_t ps[TYPER_MAX_PROC_PARAMS];
+  uint32_t pcount = typer__parse_params(tc, params, &pn, &pt, &ps);
 
   /* Register (idempotent) so nested procs are visible to subsequent
    * calls in the same scope. */
-  typer__register_proc(tc, name_node, return_type, &pn, &pt, pcount);
+  typer__register_proc(tc, name_node, return_type, return_struct_idx, &pn, &pt, pcount);
 
   typer__scope_push(tc);
   for (uint32_t i = 0; i < pcount; i++) {
     typer__scope_add(tc, pn[i]->data.lit_string.value,
                      pn[i]->data.lit_string.length,
-                     pn[i]->scope_mark, (uint8_t)pt[i], UINT32_MAX);
+                     pn[i]->scope_mark, (uint8_t)pt[i], ps[i]);
   }
 
   /* Walk body. For the last statement, push return_type as expected_type
@@ -625,11 +683,23 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
     uint32_t  argc = node->data.command.arg_count;
     uint32_t  name_idx, params_idx;
     JaclType  return_type = TYPE_DYN;
+    uint32_t  return_struct_idx = UINT32_MAX;
     if (argc == 4) {
       AstNode* tn = args[0];
-      if (tn->type == AST_LIT_STRING &&
-          is_type_keyword(tn->data.lit_string.value, tn->data.lit_string.length)) {
-        return_type = type_from_keyword(tn->data.lit_string.value, tn->data.lit_string.length);
+      if (tn->type == AST_LIT_STRING) {
+        if (is_type_keyword(tn->data.lit_string.value, tn->data.lit_string.length)) {
+          return_type = type_from_keyword(tn->data.lit_string.value, tn->data.lit_string.length);
+        } else {
+          for (uint32_t si = 0; si < tc->struct_count; si++) {
+            if (tc->structs[si].name_len == tn->data.lit_string.length &&
+                memcmp(tc->structs[si].name, tn->data.lit_string.value,
+                       tn->data.lit_string.length) == 0) {
+              return_type = TYPE_STRUCT;
+              return_struct_idx = si;
+              break;
+            }
+          }
+        }
       }
       name_idx = 1; params_idx = 2;
     } else if (argc == 3) {
@@ -644,11 +714,13 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
     p->name        = name_node->data.lit_string.value;
     p->name_len    = name_node->data.lit_string.length;
     p->return_type = (uint8_t)return_type;
-    p->return_struct_idx = UINT32_MAX;
+    p->return_struct_idx = return_struct_idx;
 
     AstNode* pn[TYPER_MAX_PROC_PARAMS];
     JaclType pt[TYPER_MAX_PROC_PARAMS];
-    uint32_t pcount = typer__parse_params(args[params_idx], &pn, &pt);
+    uint32_t ps[TYPER_MAX_PROC_PARAMS];
+    uint32_t pcount = typer__parse_params(tc, args[params_idx], &pn, &pt, &ps);
+    (void)ps;
     if (pcount > TYPER_MAX_PROC_PARAMS) pcount = TYPER_MAX_PROC_PARAMS;
     p->param_count = (uint8_t)pcount;
     for (uint32_t i = 0; i < pcount; i++) {
@@ -805,6 +877,38 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       node->inferred_type = TYPE_NIL;
     } else if (hl == 9 && memcmp(hn, "to-string", 9) == 0) {
       node->inferred_type = TYPE_STR;
+    } else if (hl == 2 && memcmp(hn, "to", 2) == 0 &&
+               node->data.command.arg_count >= 1 &&
+               node->data.command.args[0]->type == AST_LIT_STRING &&
+               is_type_keyword(node->data.command.args[0]->data.lit_string.value,
+                               node->data.command.args[0]->data.lit_string.length)) {
+      /* [to TYPE expr] — the result type is the keyword. */
+      node->inferred_type =
+          type_from_keyword(node->data.command.args[0]->data.lit_string.value,
+                            node->data.command.args[0]->data.lit_string.length);
+    } else if (hl == 1 && hn[0] == '.' &&
+               node->data.command.arg_count == 2) {
+      /* [. struct field] arrow access — result type is the accessed
+       * field's declared type. */
+      AstNode* tgt = node->data.command.args[0];
+      AstNode* fld = node->data.command.args[1];
+      if (tgt->inferred_type == TYPE_STRUCT &&
+          tgt->inferred_struct_idx < tc->struct_count &&
+          fld->type == AST_LIT_STRING) {
+        const TyperStruct* sd = &tc->structs[tgt->inferred_struct_idx];
+        const char* fn = fld->data.lit_string.value;
+        uint32_t    fnl = fld->data.lit_string.length;
+        node->inferred_type = TYPE_DYN;
+        for (uint32_t fi = 0; fi < sd->field_count; fi++) {
+          if (sd->field_name_lens[fi] == fnl &&
+              memcmp(sd->field_names[fi], fn, fnl) == 0) {
+            node->inferred_type = (uint8_t)sd->field_types[fi];
+            break;
+          }
+        }
+      } else {
+        node->inferred_type = TYPE_DYN;
+      }
     } else {
       node->inferred_type = TYPE_DYN;
     }
