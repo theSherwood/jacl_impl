@@ -340,6 +340,9 @@ AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena) {
     JaclSyntax *syn = jacl_as_syntax(syn_val);
     AstNode *node = ast_alloc(arena);
     memset(node, 0, sizeof(AstNode));
+    /* Restore the inferred_struct_idx sentinel after memset (ast_alloc
+     * sets UINT32_MAX = "no struct"; 0 is a valid struct idx). */
+    node->inferred_struct_idx = UINT32_MAX;
     syntax__set_ast_pos(node, syn);
 
     switch ((SyntaxKind)syn->kind) {
@@ -362,11 +365,13 @@ AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena) {
     case SYNTAX_LIT_INT:
         node->type = AST_LIT_INT;
         node->data.lit_int.value = syn->data.lit_int.value;
+        node->inferred_type = TYPE_I32; /* default; user-side typer may narrow */
         break;
 
     case SYNTAX_LIT_FLOAT:
         node->type = AST_LIT_FLOAT;
         node->data.lit_float.value = syn->data.lit_float.value;
+        node->inferred_type = TYPE_F32;
         break;
 
     case SYNTAX_LIT_STRING: {
@@ -374,6 +379,7 @@ AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena) {
         node->data.lit_string.value =
             syntax__string_to_arena(syn->data.lit_string.value, arena,
                                     &node->data.lit_string.length);
+        node->inferred_type = TYPE_STR;
         break;
     }
 
@@ -1102,6 +1108,12 @@ static const char *expand__compile_staged_body(MacroEntry *entry,
         body_compiler.locals[body_compiler.local_count - 1].is_param = true;
     }
 
+    /* Phase 3 typer pass: walk the macro body AST so its literals,
+     * var-refs, etc. carry inferred_type before compile_block_expr's
+     * dual-track checks fire. Without this the macro body's nodes
+     * default to TYPE_DYN and produce typer gaps during compile. */
+    typer_infer(&entry->body, 1);
+
     compiler__compile_block_expr(&body_compiler, entry->body);
     compiler__emit_byte(&body_compiler, OP_RETURN, 0);
 
@@ -1199,6 +1211,12 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
 
                 expand__prelude_count++;
             }
+
+            /* Phase 3 typer pass: walk the prelude AST so cloned macro
+             * template nodes carry inferred_type when later instantiated
+             * into user code. Without this, literals/var-refs inside
+             * prelude macro bodies remain TYPE_DYN by arena zero-init. */
+            typer_infer(ppre.nodes, ppre.count);
 
             gc__current_heap = prev_heap;
             expand__prelude_ready = true;

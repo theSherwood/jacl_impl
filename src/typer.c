@@ -790,9 +790,16 @@ static void typer__infer_node(TyperCtx* tc, AstNode* node) {
       }
       break;
     }
+    case AST_DEFMACRO:
+      /* Recurse into the body so any literals/var-refs inside get
+       * default types. The typer doesn't otherwise track macro semantics. */
+      if (node->data.defmacro.body) {
+        typer__infer_node(tc, node->data.defmacro.body);
+      }
+      node->inferred_type = TYPE_DYN;
+      break;
     case AST_USE:
     case AST_DEFSTRUCT:
-    case AST_DEFMACRO:
     case AST_DESTRUCTURE_VEC:
     case AST_DESTRUCTURE_NAMED:
     case AST_CONTINUE:
