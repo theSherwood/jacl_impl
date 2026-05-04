@@ -6300,6 +6300,10 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
       }
 
       case OP_STRUCT_NEW_INLINE: {
+        /* Construct an inline struct from field arguments on the stack.
+           Primitive field args occupy 1 stack slot each (JaclVal).
+           Nested struct field args occupy width inline slots (raw bytes).
+           Total input slots = sum over fields. */
         uint16_t type_idx = vm__read_u16(vm);
         if (!vm->struct_registry || type_idx >= vm->struct_registry->count) {
           vm__set_error(vm, "invalid struct type index %u", (unsigned)type_idx);
@@ -6309,84 +6313,109 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         uint32_t field_count = sdef->field_count;
         uint32_t width = (sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
 
-        /* Save field argument values before popping */
-        JaclVal field_vals[256];
+        /* Compute total input slots and remember each field's stack-byte
+           offset within the input region. */
+        uint32_t total_input_slots = 0;
+        uint32_t in_byte_offsets[256];
         for (uint32_t i = 0; i < field_count && i < 256; i++) {
-          field_vals[i] = vm->stack[vm->stack_top - field_count + i];
+          in_byte_offsets[i] = total_input_slots * sizeof(JaclVal);
+          if (sdef->fields[i].type == TYPE_STRUCT) {
+            StructTypeDef* sub = vm->struct_registry->defs[sdef->fields[i].struct_type_idx];
+            total_input_slots += (sub->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+          } else {
+            total_input_slots += 1;
+          }
+        }
+        if (vm->stack_top < total_input_slots) {
+          vm__set_error(vm, "struct_new_inline: stack underflow");
+          return VM_RUNTIME_ERROR;
         }
 
-        /* Pop field arguments */
-        vm->stack_top -= field_count;
+        /* Build the struct in a scratch buffer (input and output overlap). */
+        uint8_t scratch[VM_MAX_STRUCT_SLOTS * sizeof(JaclVal)];
+        if (sdef->total_size > sizeof(scratch)) {
+          vm__set_error(vm, "struct too large for inline construction");
+          return VM_RUNTIME_ERROR;
+        }
+        memset(scratch, 0, sdef->total_size);
+        uint8_t* in = (uint8_t*)&vm->stack[vm->stack_top - total_input_slots];
 
-        /* Check stack capacity for inline struct slots */
+        for (uint32_t i = 0; i < field_count; i++) {
+          uint32_t off = sdef->fields[i].offset;
+          uint8_t* src = in + in_byte_offsets[i];
+          switch (sdef->fields[i].type) {
+            case TYPE_BOOL: {
+              JaclVal v; memcpy(&v, src, sizeof(JaclVal));
+              scratch[off] = jacl_as_bool(v) ? 1 : 0;
+              break;
+            }
+            case TYPE_I32: {
+              JaclVal v; memcpy(&v, src, sizeof(JaclVal));
+              int32_t n = jacl_as_i32(v);
+              memcpy(scratch + off, &n, 4);
+              break;
+            }
+            case TYPE_U32: {
+              JaclVal v; memcpy(&v, src, sizeof(JaclVal));
+              uint32_t n = jacl_as_u32(v);
+              memcpy(scratch + off, &n, 4);
+              break;
+            }
+            case TYPE_F32: {
+              JaclVal v; memcpy(&v, src, sizeof(JaclVal));
+              float f = jacl_as_f32(v);
+              memcpy(scratch + off, &f, 4);
+              break;
+            }
+            case TYPE_I64: {
+              JaclVal v; memcpy(&v, src, sizeof(JaclVal));
+              int64_t n = (int64_t)v;
+              memcpy(scratch + off, &n, 8);
+              break;
+            }
+            case TYPE_U64: {
+              JaclVal v; memcpy(&v, src, sizeof(JaclVal));
+              uint64_t n = v;
+              memcpy(scratch + off, &n, 8);
+              break;
+            }
+            case TYPE_F64: {
+              JaclVal v; memcpy(&v, src, sizeof(JaclVal));
+              double d; memcpy(&d, &v, 8);
+              memcpy(scratch + off, &d, 8);
+              break;
+            }
+            case TYPE_STRUCT: {
+              /* Nested struct field: copy raw inline bytes from input. */
+              memcpy(scratch + off, src, sdef->fields[i].size);
+              break;
+            }
+            default: {
+              JaclVal v; memcpy(&v, src, sizeof(JaclVal));
+              memcpy(scratch + off, &v, sizeof(JaclVal));
+              break;
+            }
+          }
+        }
+
+        /* Clear bitmap for popped input slots, decrement stack_top. */
+        for (uint32_t si = 0; si < total_input_slots; si++) {
+          BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - total_input_slots + si);
+        }
+        vm->stack_top -= total_input_slots;
+
         if (vm->stack_top + width > VM_STACK_MAX) {
           vm__set_error(vm, "stack overflow (inline struct)");
           return VM_STACK_OVERFLOW;
         }
 
-        /* Zero-initialize struct slots (ensures padding bytes are deterministic) */
         uint32_t base = vm->stack_top;
         memset(&vm->stack[base], 0, width * sizeof(JaclVal));
-
-        /* Write each field at its byte offset within the stack slot region */
-        uint8_t* struct_base = (uint8_t*)&vm->stack[base];
-        for (uint32_t i = 0; i < field_count; i++) {
-          uint32_t off = sdef->fields[i].offset;
-          JaclVal val = field_vals[i];
-          switch (sdef->fields[i].type) {
-            case TYPE_BOOL: {
-              uint8_t b = jacl_as_bool(val) ? 1 : 0;
-              struct_base[off] = b;
-              break;
-            }
-            case TYPE_I32: {
-              int32_t n = jacl_as_i32(val);
-              memcpy(struct_base + off, &n, 4);
-              break;
-            }
-            case TYPE_U32: {
-              uint32_t n = jacl_as_u32(val);
-              memcpy(struct_base + off, &n, 4);
-              break;
-            }
-            case TYPE_F32: {
-              float f = jacl_as_f32(val);
-              memcpy(struct_base + off, &f, 4);
-              break;
-            }
-            case TYPE_I64: {
-              int64_t n = (int64_t)val;
-              memcpy(struct_base + off, &n, 8);
-              break;
-            }
-            case TYPE_U64: {
-              uint64_t n = val;
-              memcpy(struct_base + off, &n, 8);
-              break;
-            }
-            case TYPE_F64: {
-              double d;
-              memcpy(&d, &val, 8);
-              memcpy(struct_base + off, &d, 8);
-              break;
-            }
-            case TYPE_STRUCT: {
-              /* Nested struct: copy raw data from heap-allocated HeapRecord */
-              HeapRecord* nested = jacl_as_heap_record_ptr(val);
-              if (nested) {
-                memcpy(struct_base + off, nested->data, sdef->fields[i].size);
-              }
-              break;
-            }
-            default: break;
-          }
-        }
-
-        vm->stack_top = base + width;
-        /* US-014: mark these stack slots as raw struct bytes (not GC-traceable) */
+        memcpy(&vm->stack[base], scratch, sdef->total_size);
         for (uint32_t si = base; si < base + width; si++) {
           BITMAP_SET(vm->inline_slot_bitmap, si);
         }
+        vm->stack_top = base + width;
         break;
       }
 

@@ -10520,9 +10520,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__error(c, line, col, err_msg);
           return;
         }
-        /* Phase 5c: nested struct field args are now inline — reify for
-           OP_STRUCT_NEW_INLINE which expects heap HeapRecord* fields */
-        compiler__reify_inline_struct(c, line);
+        /* Nested struct field args stay inline — OP_STRUCT_NEW_INLINE
+           consumes them as inline bytes directly. */
       }
 
       if (use_inline) {
