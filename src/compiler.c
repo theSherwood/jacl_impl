@@ -4511,7 +4511,10 @@ void compiler__compile_destructure_named(
 
   /* Compile RHS — pushes the source value onto stack. */
   compiler__compile_node(c, value_expr);
-  JaclType rhs_type = c->last_expr_type;
+  /* Phase 3c: read result type from the typer's pre-computed AST
+   * annotation; fall back to c->last_expr_type for typer gaps. */
+  JaclType rhs_type = (JaclType)value_expr->inferred_type;
+  if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
   uint32_t rhs_struct_idx = c->last_struct_idx;
 
   /* Determine if we can use compile-time struct field resolution */
@@ -7979,7 +7982,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Compile collection → local __col */
     compiler__compile_node(c, args[0]);
-    JaclType col_type = c->last_expr_type;
+    /* Phase 3c: read result type from the typer's pre-computed AST
+     * annotation; fall back to c->last_expr_type for typer gaps. */
+    JaclType col_type = (JaclType)args[0]->inferred_type;
+    if (col_type == TYPE_DYN) col_type = c->last_expr_type;
     compiler__add_local(c, jacl_inline_string("__col", 5), line, col);
 
     uint8_t col_slot = (uint8_t)(saved_local_count);
@@ -9417,7 +9423,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Compile the expression */
     compiler__compile_node(c, args[1]);
-    JaclType src_type = c->last_expr_type;
+    /* Phase 3c: read result type from the typer's pre-computed AST
+     * annotation; fall back to c->last_expr_type for typer gaps. */
+    JaclType src_type = (JaclType)args[1]->inferred_type;
+    if (src_type == TYPE_DYN) src_type = c->last_expr_type;
 
     /* Validate conversion at compile time */
     if (src_type != TYPE_DYN && target_type != TYPE_DYN) {
@@ -9603,7 +9612,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    JaclType col_type = c->last_expr_type;
+    /* Phase 3c: read result type from the typer's pre-computed AST
+     * annotation; fall back to c->last_expr_type for typer gaps. */
+    JaclType col_type = (JaclType)args[0]->inferred_type;
+    if (col_type == TYPE_DYN) col_type = c->last_expr_type;
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_TAKE, line);
     c->last_expr_type = col_type;
@@ -10184,7 +10196,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (!args0_compiled) {
       compiler__compile_node(c, args[0]);
     }
-    JaclType struct_type = c->last_expr_type;
+    /* Phase 3c: read result type from the typer's pre-computed AST
+     * annotation; fall back to c->last_expr_type for typer gaps. */
+    JaclType struct_type = (JaclType)args[0]->inferred_type;
+    if (struct_type == TYPE_DYN) struct_type = c->last_expr_type;
     uint32_t struct_idx = c->last_struct_idx;
 
     /* INLINE_REF only flows out of the inline-fast-path's nested-struct
