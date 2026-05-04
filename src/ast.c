@@ -42,6 +42,106 @@ typedef enum {
 } AstNodeType;
 
 /* -------------------------------------------------------------------------
+ * Static type system enum + helpers
+ *
+ * Defined here (rather than in compiler.c) so the typer pass — included
+ * before compiler.c in the unity build — can populate `node->inferred_type`
+ * and use the keyword table without a forward declaration.
+ * ------------------------------------------------------------------------- */
+
+typedef enum {
+  TYPE_DYN = 0,
+  TYPE_BOOL,
+  TYPE_NIL,
+  TYPE_I32,
+  TYPE_I64,
+  TYPE_U32,
+  TYPE_U64,
+  TYPE_F32,
+  TYPE_F64,
+  TYPE_STR,
+  TYPE_VEC,
+  TYPE_MAP,
+  TYPE_CLOSURE,
+  TYPE_STRUCT,
+  TYPE_STREAM,
+  TYPE_TYPED_VEC,
+  TYPE_TYPED_MAP
+} JaclType;
+
+/* Single table for type keyword recognition — keeps is_type_keyword and
+   type_from_keyword in sync automatically. */
+static const struct { const char* name; uint32_t len; JaclType type; } type_keyword_table[] = {
+  { "i32",    3, TYPE_I32 },
+  { "i64",    3, TYPE_I64 },
+  { "u32",    3, TYPE_U32 },
+  { "u64",    3, TYPE_U64 },
+  { "f32",    3, TYPE_F32 },
+  { "f64",    3, TYPE_F64 },
+  { "str",    3, TYPE_STR },
+  { "vec",    3, TYPE_VEC },
+  { "map",    3, TYPE_MAP },
+  { "dyn",    3, TYPE_DYN },
+  { "bool",   4, TYPE_BOOL },
+  { "stream", 6, TYPE_STREAM },
+};
+#define TYPE_KEYWORD_COUNT (sizeof(type_keyword_table) / sizeof(type_keyword_table[0]))
+
+static bool is_type_keyword(const char* word, size_t len) {
+  for (uint32_t i = 0; i < TYPE_KEYWORD_COUNT; i++) {
+    if (type_keyword_table[i].len == (uint32_t)len &&
+        memcmp(word, type_keyword_table[i].name, len) == 0)
+      return true;
+  }
+  return false;
+}
+
+static JaclType type_from_keyword(const char* word, size_t len) {
+  for (uint32_t i = 0; i < TYPE_KEYWORD_COUNT; i++) {
+    if (type_keyword_table[i].len == (uint32_t)len &&
+        memcmp(word, type_keyword_table[i].name, len) == 0)
+      return type_keyword_table[i].type;
+  }
+  return TYPE_DYN;
+}
+
+static const char* type_name(JaclType t) {
+  switch (t) {
+    case TYPE_DYN:     return "dyn";
+    case TYPE_BOOL:    return "bool";
+    case TYPE_NIL:     return "nil";
+    case TYPE_I32:     return "i32";
+    case TYPE_I64:     return "i64";
+    case TYPE_U32:     return "u32";
+    case TYPE_U64:     return "u64";
+    case TYPE_F32:     return "f32";
+    case TYPE_F64:     return "f64";
+    case TYPE_STR:     return "str";
+    case TYPE_VEC:     return "vec";
+    case TYPE_MAP:     return "map";
+    case TYPE_CLOSURE: return "closure";
+    case TYPE_STRUCT:     return "struct";
+    case TYPE_STREAM:    return "stream";
+    case TYPE_TYPED_VEC: return "typed-vec";
+    case TYPE_TYPED_MAP: return "typed-map";
+  }
+  return "unknown";
+}
+
+static bool is_numeric_type(JaclType t) {
+  return t == TYPE_I32 || t == TYPE_I64 || t == TYPE_U32 ||
+         t == TYPE_U64 || t == TYPE_F32 || t == TYPE_F64;
+}
+
+static bool is_unboxed_type(JaclType t) {
+  return t == TYPE_I64 || t == TYPE_U64 || t == TYPE_F64;
+}
+
+static bool is_typed_collection(JaclType t) {
+  return t == TYPE_TYPED_VEC || t == TYPE_TYPED_MAP;
+}
+
+/* -------------------------------------------------------------------------
  * Source Position
  * ------------------------------------------------------------------------- */
 
@@ -64,6 +164,8 @@ struct AstNode {
   uint32_t    scope_mark;  /* hygiene: 0 = no macro context, >0 = macro expansion */
   uint8_t     is_caret;    /* US-013: ^name in syntax-quote — force scope mark 0 */
   uint8_t     is_gensym;   /* US-014: var-ref produced by gensym — accepted as binding name */
+  uint8_t     inferred_type; /* JaclType (TYPE_DYN default), populated by typer pass */
+  uint32_t    inferred_struct_idx; /* struct registry index when inferred_type==TYPE_STRUCT, UINT32_MAX otherwise */
   union {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count; } command;
     struct { int32_t   value; }                                    lit_int;
@@ -116,7 +218,9 @@ struct AstNode {
  * ------------------------------------------------------------------------- */
 
 AstNode* ast_alloc(arena_t* arena) {
-  return (AstNode*)arena_alloc(arena, sizeof(AstNode));
+  AstNode* node = (AstNode*)arena_alloc(arena, sizeof(AstNode));
+  node->inferred_struct_idx = UINT32_MAX;
+  return node;
 }
 
 AstNode** ast_alloc_array(arena_t* arena, uint32_t count) {

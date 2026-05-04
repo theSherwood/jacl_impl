@@ -536,6 +536,8 @@ struct AstNode {
   uint32_t    scope_mark;  /* hygiene: 0 = no macro context, >0 = macro expansion */
   uint8_t     is_caret;    /* US-013: ^name in syntax-quote — force scope mark 0 */
   uint8_t     is_gensym;   /* US-014: var-ref produced by gensym — accepted as binding name */
+  uint8_t     inferred_type; /* JaclType (TYPE_DYN default), populated by typer pass */
+  uint32_t    inferred_struct_idx; /* struct registry index when inferred_type==TYPE_STRUCT, UINT32_MAX otherwise */
   union {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count; } command;
     struct { int32_t   value; }                                    lit_int;

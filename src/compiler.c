@@ -77,99 +77,9 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
                               ExpandState *es,
                               uint32_t *out_error_line, uint32_t *out_error_col);
 
-/* --- Type system --- */
-
-typedef enum {
-  TYPE_DYN = 0,
-  TYPE_BOOL,
-  TYPE_NIL,
-  TYPE_I32,
-  TYPE_I64,
-  TYPE_U32,
-  TYPE_U64,
-  TYPE_F32,
-  TYPE_F64,
-  TYPE_STR,
-  TYPE_VEC,
-  TYPE_MAP,
-  TYPE_CLOSURE,
-  TYPE_STRUCT,
-  TYPE_STREAM,
-  TYPE_TYPED_VEC,
-  TYPE_TYPED_MAP
-} JaclType;
-
-/* Single table for type keyword recognition — keeps is_type_keyword and
-   type_from_keyword in sync automatically. */
-static const struct { const char* name; uint32_t len; JaclType type; } type_keyword_table[] = {
-  { "i32",    3, TYPE_I32 },
-  { "i64",    3, TYPE_I64 },
-  { "u32",    3, TYPE_U32 },
-  { "u64",    3, TYPE_U64 },
-  { "f32",    3, TYPE_F32 },
-  { "f64",    3, TYPE_F64 },
-  { "str",    3, TYPE_STR },
-  { "vec",    3, TYPE_VEC },
-  { "map",    3, TYPE_MAP },
-  { "dyn",    3, TYPE_DYN },
-  { "bool",   4, TYPE_BOOL },
-  { "stream", 6, TYPE_STREAM },
-};
-#define TYPE_KEYWORD_COUNT (sizeof(type_keyword_table) / sizeof(type_keyword_table[0]))
-
-bool is_type_keyword(const char* word, size_t len) {
-  for (uint32_t i = 0; i < TYPE_KEYWORD_COUNT; i++) {
-    if (type_keyword_table[i].len == (uint32_t)len &&
-        memcmp(word, type_keyword_table[i].name, len) == 0)
-      return true;
-  }
-  return false;
-}
-
-JaclType type_from_keyword(const char* word, size_t len) {
-  for (uint32_t i = 0; i < TYPE_KEYWORD_COUNT; i++) {
-    if (type_keyword_table[i].len == (uint32_t)len &&
-        memcmp(word, type_keyword_table[i].name, len) == 0)
-      return type_keyword_table[i].type;
-  }
-  return TYPE_DYN;
-}
-
-const char* type_name(JaclType t) {
-  switch (t) {
-    case TYPE_DYN:     return "dyn";
-    case TYPE_BOOL:    return "bool";
-    case TYPE_NIL:     return "nil";
-    case TYPE_I32:     return "i32";
-    case TYPE_I64:     return "i64";
-    case TYPE_U32:     return "u32";
-    case TYPE_U64:     return "u64";
-    case TYPE_F32:     return "f32";
-    case TYPE_F64:     return "f64";
-    case TYPE_STR:     return "str";
-    case TYPE_VEC:     return "vec";
-    case TYPE_MAP:     return "map";
-    case TYPE_CLOSURE: return "closure";
-    case TYPE_STRUCT:     return "struct";
-    case TYPE_STREAM:    return "stream";
-    case TYPE_TYPED_VEC: return "typed-vec";
-    case TYPE_TYPED_MAP: return "typed-map";
-  }
-  return "unknown";
-}
-
-bool is_numeric_type(JaclType t) {
-  return t == TYPE_I32 || t == TYPE_I64 || t == TYPE_U32 ||
-         t == TYPE_U64 || t == TYPE_F32 || t == TYPE_F64;
-}
-
-bool is_unboxed_type(JaclType t) {
-  return t == TYPE_I64 || t == TYPE_U64 || t == TYPE_F64;
-}
-
-bool is_typed_collection(JaclType t) {
-  return t == TYPE_TYPED_VEC || t == TYPE_TYPED_MAP;
-}
+/* JaclType, type-keyword table, and type predicates moved to ast.c so
+ * the typer pass (included before compiler.c in the unity build) can
+ * use them. The definitions are now visible here via that earlier include. */
 
 /* Check if an AST_COMMAND node is a typed collection expression.
    Returns 1 for [Vec Type], 2 for [Map Type] (dyn keys),
@@ -12541,6 +12451,15 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
     if (expand_err) {
       compiler__error(&c, err_line, err_col, expand_err);
     }
+  }
+
+  /* Phase 3 foundation: type-inference pass. Currently populates
+   * inferred_type for literals, blocks, and structural recursion only.
+   * Codegen does not yet consume these results — the existing
+   * expected_type/last_expr_type plumbing remains the source of truth.
+   * Future subphases will expand coverage and switch consumers. */
+  if (parse.error_count == 0) {
+    typer_infer(parse.nodes, parse.count);
   }
 
   /* Check if top-level code is suspending */

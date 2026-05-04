@@ -42,6 +42,7 @@
 #include "lexer.c"
 #include "ast.c"
 #include "parser.c"
+#include "typer.c"
 #include "bytecode.c"
 #include "collections.c"
 #include "compiler.c"
