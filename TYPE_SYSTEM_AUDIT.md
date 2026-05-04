@@ -373,19 +373,21 @@ These are deep edge cases. Closing them requires either:
 
 Neither is on the critical path for codegen-time type decisions. Both fall back to `c->last_expr_type` correctly via the consumer-side fallback.
 
-### Phase 3e — cleanup (attempted; partial)
+### Phase 3e — cleanup (attempted twice; partial)
 
-I attempted to strip the fallback `if (x == TYPE_DYN) x = c->last_expr_type;` lines, expecting that with ~zero gaps the typer alone would suffice. **It doesn't.** Some consumer types come from genuinely dynamic / flow-typing sources the static typer cannot model:
+**First attempt** stripped the fallback `if (x == TYPE_DYN) x = c->last_expr_type;` lines. ~15 tests broke. Reverted.
 
-- **`[unbox $b]` inside `[box? Type $b]` guards.** The compiler narrows the unbox result to the guarded type via flow-typing on the binding. The typer would need to model:
-  - The `box?` predicate's narrowing on the var-ref's type within the guarded branch
-  - The `unbox` builtin returning the narrowed type
-- **Runtime-typed map bindings** from module imports (`use lib { foo }` where `foo`'s type comes from runtime introspection).
-- **`yield` → stream** detection (a proc with `yield` returns a stream).
+**Second attempt** added `box?`/`unbox` flow-typing to the typer (commit `9ed8250`) and re-tried the strip. ~5 tests still broke, exposing three more typer extensions that would be needed:
 
-These are real runtime/flow constructs. Modeling them in a static pass is possible but not cheap, and the consumer-side fallback to `c->last_expr_type` handles them correctly with one extra line. Stripping fallbacks broke ~15 tests across these patterns, so I reverted.
+| Blocker | Source | Approx LOC |
+|---|---|---|
+| Cross-module struct registry | typer's struct table is per-`compile_compile` call; `use "lib.jacl" {Point}` imports aren't visible | ~80 |
+| `$ctx` field-type tracking | the compiler tracks ctx fields in a separate CtxFieldList; typer needs a parallel registry that ctx-decls populate | ~60 |
+| Stream / for-iteration patterns (`lines_for`, `stream_for`) | iteration variable scoping + stream return-type detection from `yield` | ~80 |
 
-**Realistic Phase 3 endpoint:** the typer is the *primary* oracle and covers ~99% of cases. The compiler-side `last_expr_type` tracker handles the dynamic/flow-typed long tail. This is the correct architecture — not the maximalist "delete everything" picture from the original plan.
+Net cost of pursuing the full strip: ~250 LOC of typer infrastructure to delete maybe ~50 LOC of fallback in `compiler.c`. **Cost/benefit unfavorable.** Reverted again.
+
+**Realistic Phase 3 endpoint:** the typer is the *primary* oracle covering ~99% of cases. The compiler-side `last_expr_type` tracker handles the dynamic/flow-typed long tail. This is the correct architecture — not the maximalist "delete everything" picture from the original plan.
 
 What was achieved (commits over Phases 3a–3d):
 - AST nodes carry `inferred_type` / `inferred_struct_idx`.
@@ -398,7 +400,17 @@ What was *not* achieved:
 - Deleting `c->last_expr_type` writes (still load-bearing for fallbacks).
 - Substantial `compiler.c` shrinkage (was the original goal).
 
-The architectural improvement is real even without the shrinkage: type info now lives on AST nodes (a queryable, typed AST), and consumer sites have a clear contract (read from the typer; fall back if it doesn't know). Future phases can:
-- Extend the typer to model flow-typing (`box?` narrowing, `unbox`, generators).
-- Once flow-typing lands, attempt the strip again.
-- Or accept the current architecture as the steady state — it's clean and correct.
+The architectural improvement is real even without the shrinkage: type info now lives on AST nodes (a queryable, typed AST), and consumer sites have a clear contract (read from the typer; fall back if it doesn't know).
+
+### Open work for future Phase 3 cleanup
+
+If someone returns to this and wants to push to a full strip:
+
+1. Cross-module struct registry sharing in the typer.
+2. `$ctx` field-type registry in the typer (parallel to compiler's CtxFieldList).
+3. Generator detection (`yield` → stream return type).
+4. Runtime-typed module bindings (`use` imports of mut globals).
+
+After all four, retry the fallback strip. Tests should pass. Then delete the writes and the `last_expr_type` field. Total payoff: ~200 LOC out of `compiler.c`.
+
+Pivot for now: **Phase 2 (typed collection element types)** — much higher leverage for actual user-visible type safety, and the original audit's primary recommendation after Phase 1.
