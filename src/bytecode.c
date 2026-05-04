@@ -152,11 +152,9 @@ typedef enum {
   OP_STRUCT_GET_INLINE, /* inline field read: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_SET_INLINE, /* inline field write: uint8_t base_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_MATERIALIZE, /* inline to heap: uint8_t base_slot, uint16_t type_idx */
-  OP_STRUCT_COPY,        /* DEAD — struct pass-by-value is now inline */
   OP_STRUCT_STORE_INLINE, /* heap to inline: uint8_t base_slot, uint16_t type_idx */
   OP_STRUCT_GET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type */
   OP_STRUCT_SET_UPVALUE,  /* uint8_t base_uv_slot, uint16_t byte_offset, uint8_t field_type */
-  OP_STRUCT_MATERIALIZE_UPVALUE, /* uint8_t base_uv_slot, uint16_t type_idx */
   OP_LOAD_INLINE_LOCAL,    /* uint8_t base_slot, uint16_t type_idx; copy inline bytes to TOS */
   OP_LOAD_INLINE_UPVALUE,  /* uint8_t base_uv_slot, uint16_t type_idx; copy inline bytes to TOS */
   OP_PRINT_STRUCT,         /* uint16_t type_idx; pop inline struct, print Name{...} */
@@ -211,13 +209,11 @@ typedef enum {
 
   /* --- Typed vector operations --- */
   OP_TYPED_VEC,          /* uint16_t type_idx, uint8_t count; create typed vec from stack elements */
-  OP_TYPED_VEC_GET,      /* DEAD — replaced by OP_TYPED_VEC_GET_INLINE */
   OP_TYPED_VEC_PUSH,     /* uint16_t type_idx; pop struct, pop tvec; push new tvec */
   OP_TYPED_VEC_SET,      /* uint16_t type_idx; pop struct, pop idx, pop tvec; push new tvec */
   OP_TYPED_VEC_LEN,      /* pop tvec; push i32 count */
 
   OP_TYPED_MAP,          /* uint16_t type_idx, uint8_t pair_count */
-  OP_TYPED_MAP_GET,      /* DEAD — replaced by OP_TYPED_MAP_GET_INLINE */
   OP_TYPED_MAP_SET,      /* uint16_t type_idx */
   OP_TYPED_MAP_HAS,      /* no operand */
   OP_TYPED_MAP_REMOVE,   /* no operand */
@@ -520,11 +516,9 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_STRUCT_GET_INLINE: return "OP_STRUCT_GET_INLINE";
     case OP_STRUCT_SET_INLINE: return "OP_STRUCT_SET_INLINE";
     case OP_STRUCT_MATERIALIZE: return "OP_STRUCT_MATERIALIZE";
-    case OP_STRUCT_COPY:        return "OP_STRUCT_COPY";
     case OP_STRUCT_STORE_INLINE: return "OP_STRUCT_STORE_INLINE";
     case OP_STRUCT_GET_UPVALUE: return "OP_STRUCT_GET_UPVALUE";
     case OP_STRUCT_SET_UPVALUE: return "OP_STRUCT_SET_UPVALUE";
-    case OP_STRUCT_MATERIALIZE_UPVALUE: return "OP_STRUCT_MATERIALIZE_UPVALUE";
     case OP_LOAD_INLINE_LOCAL:   return "OP_LOAD_INLINE_LOCAL";
     case OP_LOAD_INLINE_UPVALUE: return "OP_LOAD_INLINE_UPVALUE";
     case OP_PRINT_STRUCT:        return "OP_PRINT_STRUCT";
@@ -577,12 +571,10 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_RANGE:               return "OP_RANGE";
     case OP_OPTIONAL_GET:        return "OP_OPTIONAL_GET";
     case OP_TYPED_VEC:           return "OP_TYPED_VEC";
-    case OP_TYPED_VEC_GET:       return "OP_TYPED_VEC_GET";
     case OP_TYPED_VEC_PUSH:     return "OP_TYPED_VEC_PUSH";
     case OP_TYPED_VEC_SET:       return "OP_TYPED_VEC_SET";
     case OP_TYPED_VEC_LEN:       return "OP_TYPED_VEC_LEN";
     case OP_TYPED_MAP:           return "OP_TYPED_MAP";
-    case OP_TYPED_MAP_GET:       return "OP_TYPED_MAP_GET";
     case OP_TYPED_MAP_SET:       return "OP_TYPED_MAP_SET";
     case OP_TYPED_MAP_HAS:       return "OP_TYPED_MAP_HAS";
     case OP_TYPED_MAP_REMOVE:    return "OP_TYPED_MAP_REMOVE";

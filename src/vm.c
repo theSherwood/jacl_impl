@@ -6349,12 +6349,6 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
-      case OP_STRUCT_COPY: {
-        /* Dead opcode — struct pass-by-value is now handled inline (Phase 5a). */
-        vm__set_error(vm, "OP_STRUCT_COPY is no longer emitted");
-        return VM_RUNTIME_ERROR;
-      }
-
       case OP_STRUCT_STORE_INLINE: {
         /* De-materialize a heap HeapRecord into N consecutive stack slots.
            Operands: uint8_t base_slot, uint16_t type_idx.
@@ -6450,12 +6444,6 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         result = vm__push(vm, JACL_NIL);
         if (result != VM_OK) return result;
         break;
-      }
-
-      case OP_STRUCT_MATERIALIZE_UPVALUE: {
-        /* Dead — replaced by OP_LOAD_INLINE_UPVALUE. */
-        vm__set_error(vm, "OP_STRUCT_MATERIALIZE_UPVALUE is no longer emitted");
-        return VM_RUNTIME_ERROR;
       }
 
       case OP_LOAD_INLINE_LOCAL: {
@@ -9445,12 +9433,6 @@ interpret_done:
         break;
       }
 
-      case OP_TYPED_VEC_GET: {
-        /* Dead opcode — replaced by OP_TYPED_VEC_GET_INLINE (Phase 5f). */
-        vm__set_error(vm, "OP_TYPED_VEC_GET is no longer emitted");
-        return VM_RUNTIME_ERROR;
-      }
-
       case OP_TYPED_VEC_GET_INLINE: {
         uint16_t type_idx = vm__read_u16(vm);
         JaclVal idx_val, tvec_val;
@@ -10201,12 +10183,6 @@ interpret_done:
         result = vm__push(vm, jacl_typed_map_ptr(tmap));
         if (result != VM_OK) return result;
         break;
-      }
-
-      case OP_TYPED_MAP_GET: {
-        /* Dead opcode — replaced by OP_TYPED_MAP_GET_INLINE (Phase 5f). */
-        vm__set_error(vm, "OP_TYPED_MAP_GET is no longer emitted");
-        return VM_RUNTIME_ERROR;
       }
 
       case OP_TYPED_MAP_GET_INLINE: {
