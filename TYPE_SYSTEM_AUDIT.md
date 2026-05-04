@@ -414,3 +414,32 @@ If someone returns to this and wants to push to a full strip:
 After all four, retry the fallback strip. Tests should pass. Then delete the writes and the `last_expr_type` field. Total payoff: ~200 LOC out of `compiler.c`.
 
 Pivot for now: **Phase 2 (typed collection element types)** — much higher leverage for actual user-visible type safety, and the original audit's primary recommendation after Phase 1.
+
+---
+
+## Phase 2 — investigated, scoped, deferred
+
+A closer look at the existing code revealed Phase 2's framing in the original audit was somewhat overstated:
+
+- **Typed collections of structs already work.** `[Vec Point]`, `[Map StructA StructB]` — the compiler tracks element types via `last_struct_idx` / `last_key_struct_idx` (a side channel from the JaclType enum, but functionally equivalent). Iter vars in `for x in vec[Point]` are correctly typed as Point in `c->locals[].type` / `struct_type_idx`.
+- **What's actually missing**: *scalar* element types (`[Vec i64]`, `[Vec str]`). The runtime `typed_vec` heap node assumes struct elements (uses `vm__pop_struct`, reifies inline struct bytes). Adding scalar support requires a parallel runtime path: typed leaves storing JaclVals or raw bytes per element, separate `OP_TYPED_VEC_*` opcodes for scalar variants.
+
+Scope estimate: ~400–600 LOC across `runtime.c`, `vm.c`, `compiler.c`. Substantial.
+
+This is a feature addition (new typed-collection capability), not a soundness fix. The audit's Phase 2 framing — *"parameterize typed collections"* — described a hypothetical world where `TYPE_TYPED_VEC` was unparameterized. In practice it's already parameterized for the dominant case (structs). Adding scalars is real work but isn't repairing a defect.
+
+**Deferred** until there's a concrete user need for `[Vec i64]` and similar.
+
+---
+
+## Where we are now
+
+After this work, the type system is in a substantially better state than the audit started in:
+
+- **Phase 1** (soundness): six dyn → typed slot bypasses closed at compile time. The single-line bypass at `compiler.c:10139` plus its five siblings now require `[to TYPE $val]` casts. ~99% of programs unaffected; the rest fail at compile time with a clear cast-suggestion message.
+
+- **Phase 3** (inference pass): a separate `src/typer.c` walks the AST after parsing/macro-expansion and populates `inferred_type`/`inferred_struct_idx` on each node. Coverage includes literals, var-refs, def/mut/set, proc definitions and calls, struct constructors, `[. struct field]` access, `[to TYPE expr]` casts, `box?`/`unbox` flow-typing, command-boundary expected_type reset, sugar forms (`=`/`:`/`::`), destructure-by-block (`def {x, y} $value`). Dual-track verifies typer ≡ compiler at 0 mismatches with 2 long-tail gaps. ~15 codegen consumer sites read from the typer with `c->last_expr_type` fallback.
+
+- **Phase 2** (typed collection scalars): scoped, deferred as feature work.
+
+The audit's substantive findings are addressed. What remains is feature work and the long-tail cleanup blocked by runtime/flow-typing patterns that would require significant typer extensions to cover (cross-module struct registry, `$ctx` field types, generator-stream detection, unbox-flow narrowing in nested branches).
