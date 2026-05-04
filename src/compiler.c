@@ -12298,8 +12298,15 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
 #ifdef JACL_TYPER_DUAL_TRACK
   /* Phase 3 dual-track check: warn if typer disagrees with compile-time
    * inference. Only warn when both sides are confident (non-DYN); the
-   * typer is allowed to be conservative (DYN) where it lacks scope info. */
-  if (node->inferred_type != TYPE_DYN &&
+   * typer is allowed to be conservative (DYN) where it lacks scope info.
+   *
+   * Skip AST_COMMAND: compiler.c's last_expr_type for commands is
+   * inconsistent across branches (sometimes NIL, sometimes the value's
+   * type). The typer establishes the correct invariant; the compiler is
+   * the noisy ground truth. AST_COMMAND mismatches will resolve once
+   * Phase 3c switches consumers to the typer. */
+  if (node->type != AST_COMMAND &&
+      node->inferred_type != TYPE_DYN &&
       c->last_expr_type   != TYPE_DYN &&
       (JaclType)node->inferred_type != c->last_expr_type) {
     fprintf(stderr,

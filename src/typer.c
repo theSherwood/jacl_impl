@@ -31,6 +31,10 @@ typedef struct {
   TyperBinding bindings[TYPER_MAX_BINDINGS];
   uint32_t     binding_count;
   uint32_t     scope_depth;
+  /* Contextual type hint: parent's "expected_type". Mirrors compiler.c's
+   * c->expected_type. Set by callers (e.g., typed def/mut) before recursing
+   * into the value expression; restored after. */
+  JaclType     expected_type;
 } TyperCtx;
 
 static void typer__infer_node(TyperCtx* tc, AstNode* node);
@@ -132,9 +136,14 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   }
 
   /* Recurse into the value expression first (it must not see the new
-   * binding — bindings come into scope only after their definition). */
+   * binding — bindings come into scope only after their definition).
+   * Push declared_type as expected_type so int/float literals can be
+   * narrowed (mirrors compiler.c:6127-6129 / 6939-6941). */
   AstNode* value_node = args[value_arg_idx];
+  JaclType saved_et   = tc->expected_type;
+  tc->expected_type   = declared_type;
   typer__infer_node(tc, value_node);
+  tc->expected_type   = saved_et;
 
   /* Effective type: declared wins; otherwise inherit from RHS. */
   JaclType effective = (declared_type != TYPE_DYN)
@@ -150,7 +159,9 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
                    (uint8_t)effective,
                    struct_idx);
 
-  /* def/mut returns nil. */
+  /* def/mut returns nil. (compiler.c's last_expr_type is sometimes left
+   * as the value's type and sometimes set to NIL depending on the binding
+   * path — that's the kind of inconsistency the typer pass is replacing.) */
   node->inferred_type = TYPE_NIL;
   node->inferred_struct_idx = UINT32_MAX;
   return true;
@@ -274,11 +285,22 @@ static void typer__infer_var_ref(TyperCtx* tc, AstNode* node) {
 static void typer__infer_node(TyperCtx* tc, AstNode* node) {
   if (!node) return;
   switch (node->type) {
-    case AST_LIT_INT:
-      node->inferred_type = TYPE_I32;
+    case AST_LIT_INT: {
+      /* Mirror compiler.c:11061-11093: expected_type can promote an int
+       * literal to i64/u64/f64/u32/f32. Default is i32. */
+      switch (tc->expected_type) {
+        case TYPE_I64: node->inferred_type = TYPE_I64; break;
+        case TYPE_U64: node->inferred_type = TYPE_U64; break;
+        case TYPE_F64: node->inferred_type = TYPE_F64; break;
+        case TYPE_U32: node->inferred_type = TYPE_U32; break;
+        case TYPE_F32: node->inferred_type = TYPE_F32; break;
+        default:       node->inferred_type = TYPE_I32; break;
+      }
       break;
+    }
     case AST_LIT_FLOAT:
-      node->inferred_type = TYPE_F32;
+      /* Mirror compiler.c:11122-11138: expected_type can promote f32 → f64. */
+      node->inferred_type = (tc->expected_type == TYPE_F64) ? TYPE_F64 : TYPE_F32;
       break;
     case AST_LIT_STRING:
       node->inferred_type = TYPE_STR;
@@ -351,6 +373,7 @@ void typer_infer(AstNode** nodes, uint32_t count) {
   TyperCtx tc;
   tc.binding_count = 0;
   tc.scope_depth   = 0;
+  tc.expected_type = TYPE_DYN;
   for (uint32_t i = 0; i < count; i++) {
     typer__infer_node(&tc, nodes[i]);
   }
