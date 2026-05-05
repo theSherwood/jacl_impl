@@ -922,6 +922,83 @@ typedef struct {
   uint16_t  base_slot;  /* position in this closure's upvalue array */
 } Upvalue;
 
+/* --- Internal: AST walker shells ----------------------------------------
+ *
+ * Most AST analysis passes share the same recursion shape: at AST_BLOCK,
+ * AST_INTERP_STRING, AST_BREAK, AST_RETURN, AST_SHELL_CMD they recurse into
+ * their child nodes; at AST_COMMAND each pass does its own thing; and other
+ * leaf-ish kinds (literals, var-refs, destructuring patterns) are inert
+ * unless the pass cares about them specifically.
+ *
+ * These helpers centralize the boilerplate so each pass only writes what's
+ * specific to it. ast__walk_children calls `recurse` on each child of the
+ * shell-handled node kinds and returns true if it handled the node;
+ * ast__any_child does the same with short-circuit boolean semantics.
+ *
+ * If a pass cares about AST_COMMAND or AST_VAR_REF (etc.), it handles them
+ * before delegating to the helper.
+ * ------------------------------------------------------------------------- */
+
+static bool ast__walk_children(AstNode* node,
+                               void (*recurse)(AstNode*, void*),
+                               void* ctx) {
+  if (!node) return true;
+  switch (node->type) {
+    case AST_BLOCK:
+      for (uint32_t i = 0; i < node->data.block.count; i++)
+        recurse(node->data.block.commands[i], ctx);
+      return true;
+    case AST_INTERP_STRING:
+      for (uint32_t i = 0; i < node->data.interp_string.count; i++)
+        recurse(node->data.interp_string.segments[i], ctx);
+      return true;
+    case AST_BREAK:
+      if (node->data.break_stmt.value)
+        recurse(node->data.break_stmt.value, ctx);
+      return true;
+    case AST_RETURN:
+      if (node->data.return_stmt.value)
+        recurse(node->data.return_stmt.value, ctx);
+      return true;
+    case AST_SHELL_CMD:
+      recurse(node->data.shell_cmd.head, ctx);
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++)
+        recurse(node->data.shell_cmd.args[i], ctx);
+      return true;
+    default:
+      return false;  /* caller handles AST_COMMAND, AST_VAR_REF, leaves */
+  }
+}
+
+static bool ast__any_child(AstNode* node,
+                           bool (*pred)(AstNode*, void*),
+                           void* ctx) {
+  if (!node) return false;
+  switch (node->type) {
+    case AST_BLOCK:
+      for (uint32_t i = 0; i < node->data.block.count; i++)
+        if (pred(node->data.block.commands[i], ctx)) return true;
+      return false;
+    case AST_INTERP_STRING:
+      for (uint32_t i = 0; i < node->data.interp_string.count; i++)
+        if (pred(node->data.interp_string.segments[i], ctx)) return true;
+      return false;
+    case AST_BREAK:
+      return node->data.break_stmt.value &&
+             pred(node->data.break_stmt.value, ctx);
+    case AST_RETURN:
+      return node->data.return_stmt.value &&
+             pred(node->data.return_stmt.value, ctx);
+    case AST_SHELL_CMD:
+      if (pred(node->data.shell_cmd.head, ctx)) return true;
+      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++)
+        if (pred(node->data.shell_cmd.args[i], ctx)) return true;
+      return false;
+    default:
+      return false;
+  }
+}
+
 /* --- Internal: Suspension analysis --- */
 
 #define SUSPENSION_MAP_MAX 256
@@ -996,182 +1073,123 @@ static JaclVal compiler__name_val(ThreadHeap* heap, JaclInternTable* table,
 
 /* Walk an AST subtree within a proc body to find suspension points and callees.
    Does NOT recurse into nested proc definitions (they have their own scope). */
+typedef struct {
+  ProcSuspendInfo* info;
+  ThreadHeap*      heap;
+  JaclInternTable* intern_table;
+} WalkBodyCtx;
+
+static void analyze__walk_body__visit(AstNode* node, void* vctx) {
+  if (!node) return;
+  WalkBodyCtx* ctx = (WalkBodyCtx*)vctx;
+
+  if (node->type == AST_COMMAND) {
+    AstNode* head = node->data.command.head;
+    HeadId hid = (HeadId)node->data.command.head_id;
+    if (head->type == AST_LIT_STRING) {
+      /* Direct suspension points */
+      if (hid == HEAD_AWAIT || hid == HEAD_PARALLEL || hid == HEAD_RACE) {
+        ctx->info->direct_suspends = true;
+      } else if (hid == HEAD_YIELD) {
+        ctx->info->direct_suspends = true;
+        ctx->info->has_yield = true;
+      } else if (hid == HEAD_PROC || hid == HEAD_SPAWN) {
+        /* Skip recursion INTO nested proc/spawn bodies (separate scopes) */
+        return;
+      } else if (ctx->info->callee_count < SUSPENSION_CALLEES_MAX) {
+        /* Record callee name for transitive propagation */
+        ctx->info->callees[ctx->info->callee_count++] =
+            compiler__name_val(ctx->heap, ctx->intern_table,
+                               head->data.lit_string.value,
+                               head->data.lit_string.length);
+      }
+    } else if (head->type == AST_VAR_REF) {
+      /* Indirect call through variable ($f ...) */
+      ctx->info->has_indirect_call = true;
+    }
+    /* Recurse into arguments (and head, for $var heads) */
+    analyze__walk_body__visit(head, ctx);
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+      analyze__walk_body__visit(node->data.command.args[i], ctx);
+    }
+    return;
+  }
+
+  if (node->type == AST_SHELL_CMD &&
+      ctx->info->callee_count < SUSPENSION_CALLEES_MAX) {
+    /* Shell commands call exec - record as a callee */
+    ctx->info->callees[ctx->info->callee_count++] =
+        compiler__name_val(ctx->heap, ctx->intern_table, "exec", 4);
+  }
+  ast__walk_children(node, analyze__walk_body__visit, ctx);
+}
+
 void analyze__walk_body(AstNode* node, ProcSuspendInfo* info,
                         ThreadHeap* heap, JaclInternTable* intern_table) {
-  if (!node) return;
-
-  switch (node->type) {
-    case AST_COMMAND: {
-      AstNode* head = node->data.command.head;
-      HeadId hid = (HeadId)node->data.command.head_id;
-      if (head->type == AST_LIT_STRING) {
-        const char* name = head->data.lit_string.value;
-        uint32_t len = head->data.lit_string.length;
-
-        /* Direct suspension points */
-        if (hid == HEAD_AWAIT || hid == HEAD_PARALLEL || hid == HEAD_RACE) {
-          info->direct_suspends = true;
-          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            analyze__walk_body(node->data.command.args[i], info, heap, intern_table);
-          }
-          return;
-        }
-
-        /* Yield is a suspension point and marks proc as generator */
-        if (hid == HEAD_YIELD) {
-          info->direct_suspends = true;
-          info->has_yield = true;
-          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            analyze__walk_body(node->data.command.args[i], info, heap, intern_table);
-          }
-          return;
-        }
-
-        /* Skip recursion INTO nested proc/spawn bodies (separate scopes) */
-        if (hid == HEAD_PROC || hid == HEAD_SPAWN) {
-          return;
-        }
-
-        /* Record callee name for named calls (for transitive propagation) */
-        if (info->callee_count < SUSPENSION_CALLEES_MAX) {
-          info->callees[info->callee_count++] =
-              compiler__name_val(heap, intern_table, name, len);
-        }
-      } else if (head->type == AST_VAR_REF) {
-        /* Indirect call through variable ($f ...) */
-        info->has_indirect_call = true;
-      }
-
-      /* Recurse into arguments */
-      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        analyze__walk_body(node->data.command.args[i], info, heap, intern_table);
-      }
-      break;
-    }
-    case AST_BLOCK: {
-      for (uint32_t i = 0; i < node->data.block.count; i++) {
-        analyze__walk_body(node->data.block.commands[i], info, heap, intern_table);
-      }
-      break;
-    }
-    case AST_INTERP_STRING: {
-      for (uint32_t i = 0; i < node->data.interp_string.count; i++) {
-        analyze__walk_body(node->data.interp_string.segments[i], info, heap, intern_table);
-      }
-      break;
-    }
-    case AST_BREAK: {
-      if (node->data.break_stmt.value) {
-        analyze__walk_body(node->data.break_stmt.value, info, heap, intern_table);
-      }
-      break;
-    }
-    case AST_RETURN: {
-      if (node->data.return_stmt.value) {
-        analyze__walk_body(node->data.return_stmt.value, info, heap, intern_table);
-      }
-      break;
-    }
-    case AST_SHELL_CMD: {
-      /* Shell commands call exec - record as a callee */
-      if (info->callee_count < SUSPENSION_CALLEES_MAX) {
-        info->callees[info->callee_count++] =
-            compiler__name_val(heap, intern_table, "exec", 4);
-      }
-      /* Recurse into head and args */
-      analyze__walk_body(node->data.shell_cmd.head, info, heap, intern_table);
-      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        analyze__walk_body(node->data.shell_cmd.args[i], info, heap, intern_table);
-      }
-      break;
-    }
-    default:
-      break;
-  }
+  WalkBodyCtx ctx = { info, heap, intern_table };
+  analyze__walk_body__visit(node, &ctx);
 }
 
 /* Recursively collect proc definitions from AST, analyzing each body */
-void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list,
-                             ThreadHeap* heap, JaclInternTable* intern_table) {
+typedef struct {
+  ProcSuspendInfoList* list;
+  ThreadHeap*          heap;
+  JaclInternTable*     intern_table;
+} CollectProcsCtx;
+
+static void analyze__collect_procs__visit(AstNode* node, void* vctx) {
   if (!node) return;
+  CollectProcsCtx* ctx = (CollectProcsCtx*)vctx;
 
-  switch (node->type) {
-    case AST_COMMAND: {
-      uint32_t argc = node->data.command.arg_count;
-      AstNode** args = node->data.command.args;
+  if (node->type == AST_COMMAND) {
+    uint32_t argc = node->data.command.arg_count;
+    AstNode** args = node->data.command.args;
+    bool handled = false;
 
-      if (node->data.command.head_id == HEAD_PROC) {
+    if (node->data.command.head_id == HEAD_PROC) {
+      uint32_t name_idx, body_idx;
+      bool ok = false;
+      if (argc == 4)      { name_idx = 1; body_idx = 3; ok = true; }
+      else if (argc == 3) { name_idx = 0; body_idx = 2; ok = true; }
 
-        /* Determine name and body indices based on argc */
-        uint32_t name_idx, body_idx;
-        if (argc == 4)      { name_idx = 1; body_idx = 3; }
-        else if (argc == 3) { name_idx = 0; body_idx = 2; }
-        else goto recurse_args;
-
-        if (args[name_idx]->type != AST_LIT_STRING) goto recurse_args;
+      if (ok && args[name_idx]->type == AST_LIT_STRING &&
+          args[name_idx]->data.lit_string.length <= 128) {
         uint32_t name_len = args[name_idx]->data.lit_string.length;
-        if (name_len > 128) goto recurse_args;
-
         JaclVal proc_name = compiler__name_val(
-            heap, intern_table,
+            ctx->heap, ctx->intern_table,
             args[name_idx]->data.lit_string.value, name_len);
 
-        if (list->count < MAX_PROC_INFOS) {
-          ProcSuspendInfo* info = &list->procs[list->count++];
+        if (ctx->list->count < MAX_PROC_INFOS) {
+          ProcSuspendInfo* info = &ctx->list->procs[ctx->list->count++];
           info->name = proc_name;
           info->direct_suspends = false;
           info->has_yield = false;
           info->has_indirect_call = false;
           info->callee_count = 0;
-
-          /* Walk the body to find suspension points and callees */
           if (args[body_idx]->type == AST_BLOCK) {
-            analyze__walk_body(args[body_idx], info, heap, intern_table);
+            analyze__walk_body(args[body_idx], info, ctx->heap, ctx->intern_table);
           }
         }
-
-        /* Recurse into body to find nested procs */
         if (args[body_idx]->type == AST_BLOCK) {
-          analyze__collect_procs(args[body_idx], list, heap, intern_table);
+          analyze__collect_procs__visit(args[body_idx], ctx);
         }
-        return;
+        handled = true;
       }
-
-      recurse_args:
+    }
+    if (!handled) {
       for (uint32_t i = 0; i < argc; i++) {
-        analyze__collect_procs(args[i], list, heap, intern_table);
+        analyze__collect_procs__visit(args[i], ctx);
       }
-      break;
     }
-    case AST_BLOCK: {
-      for (uint32_t i = 0; i < node->data.block.count; i++) {
-        analyze__collect_procs(node->data.block.commands[i], list, heap, intern_table);
-      }
-      break;
-    }
-    case AST_BREAK: {
-      if (node->data.break_stmt.value) {
-        analyze__collect_procs(node->data.break_stmt.value, list, heap, intern_table);
-      }
-      break;
-    }
-    case AST_RETURN: {
-      if (node->data.return_stmt.value) {
-        analyze__collect_procs(node->data.return_stmt.value, list, heap, intern_table);
-      }
-      break;
-    }
-    case AST_SHELL_CMD: {
-      /* Recurse into head and args to find nested procs */
-      analyze__collect_procs(node->data.shell_cmd.head, list, heap, intern_table);
-      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        analyze__collect_procs(node->data.shell_cmd.args[i], list, heap, intern_table);
-      }
-      break;
-    }
-    default:
-      break;
+    return;
   }
+  ast__walk_children(node, analyze__collect_procs__visit, ctx);
+}
+
+void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list,
+                             ThreadHeap* heap, JaclInternTable* intern_table) {
+  CollectProcsCtx ctx = { list, heap, intern_table };
+  analyze__collect_procs__visit(node, &ctx);
 }
 
 /* Pre-compilation suspension analysis: walk AST to determine which procs suspend.
@@ -1297,122 +1315,73 @@ static JaclVal compiler__name_val(ThreadHeap* heap, JaclInternTable* table,
    Assigns sequential IDs to each discovered suspension point.
    When map is non-NULL, also treats calls to known suspending procs as
    suspension points (SUSPEND_CALL). */
+typedef struct {
+  SuspensionAnalysis* analysis;
+  SuspensionMap*      map;
+  ThreadHeap*         heap;
+  JaclInternTable*    intern_table;
+} WalkSuspensionsCtx;
+
+static void sm__record_suspension(SuspensionAnalysis* a, AstNode* node,
+                                  SuspensionPointType type) {
+  if (a->suspension_count >= SM_MAX_SUSPENSION_POINTS) return;
+  SuspensionPoint* sp = &a->suspension_points[a->suspension_count];
+  sp->id     = a->suspension_count;
+  sp->type   = type;
+  sp->node   = node;
+  sp->line   = node->start.line;
+  sp->column = node->start.column;
+  a->suspension_count++;
+}
+
+static void sm__walk_suspensions__visit(AstNode* node, void* vctx) {
+  if (!node) return;
+  WalkSuspensionsCtx* ctx = (WalkSuspensionsCtx*)vctx;
+
+  if (node->type == AST_COMMAND) {
+    AstNode* head = node->data.command.head;
+    if (head->type == AST_LIT_STRING) {
+      HeadId hid = (HeadId)node->data.command.head_id;
+      SuspensionPointType sp_type;
+      bool is_sp = true;
+      switch (hid) {
+        case HEAD_YIELD:    sp_type = SUSPEND_YIELD;    break;
+        case HEAD_AWAIT:    sp_type = SUSPEND_AWAIT;    break;
+        case HEAD_PARALLEL: sp_type = SUSPEND_PARALLEL; break;
+        case HEAD_RACE:     sp_type = SUSPEND_RACE;     break;
+        default:            is_sp = false; sp_type = SUSPEND_YIELD; break;
+      }
+
+      if (is_sp) {
+        sm__record_suspension(ctx->analysis, node, sp_type);
+      } else if (hid == HEAD_PROC || hid == HEAD_SPAWN) {
+        /* Separate closure scopes — don't recurse */
+        return;
+      } else if (ctx->map) {
+        /* Call to a known suspending proc is a suspension point */
+        JaclVal name_val = compiler__name_val(
+            ctx->heap, ctx->intern_table,
+            head->data.lit_string.value, head->data.lit_string.length);
+        if (suspension_map_lookup(ctx->map, name_val) &&
+            !suspension_map_is_generator(ctx->map, name_val)) {
+          sm__record_suspension(ctx->analysis, node, SUSPEND_CALL);
+        }
+      }
+    }
+    /* Recurse into args (suspension points may nest) */
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+      sm__walk_suspensions__visit(node->data.command.args[i], ctx);
+    }
+    return;
+  }
+  ast__walk_children(node, sm__walk_suspensions__visit, ctx);
+}
+
 void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
                                   SuspensionMap* map,
                                   ThreadHeap* heap, JaclInternTable* intern_table) {
-  if (!node) return;
-
-  switch (node->type) {
-    case AST_COMMAND: {
-      AstNode* head = node->data.command.head;
-      if (head->type == AST_LIT_STRING) {
-        HeadId hid = (HeadId)node->data.command.head_id;
-        SuspensionPointType sp_type;
-        bool is_suspension_point = true;
-        switch (hid) {
-          case HEAD_YIELD:    sp_type = SUSPEND_YIELD;    break;
-          case HEAD_AWAIT:    sp_type = SUSPEND_AWAIT;    break;
-          case HEAD_PARALLEL: sp_type = SUSPEND_PARALLEL; break;
-          case HEAD_RACE:     sp_type = SUSPEND_RACE;     break;
-          default:            is_suspension_point = false; sp_type = SUSPEND_YIELD; break;
-        }
-
-        if (is_suspension_point) {
-          if (analysis->suspension_count < SM_MAX_SUSPENSION_POINTS) {
-            SuspensionPoint* sp =
-                &analysis->suspension_points[analysis->suspension_count];
-            sp->id     = analysis->suspension_count;
-            sp->type   = sp_type;
-            sp->node   = node;
-            sp->line   = node->start.line;
-            sp->column = node->start.column;
-            analysis->suspension_count++;
-          }
-          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            sm__walk_suspensions(node->data.command.args[i], analysis, map,
-                                 heap, intern_table);
-          }
-          return;
-        }
-
-        /* Do NOT recurse into nested proc or spawn definitions —
-           they are separate closure scopes with their own analysis */
-        if (hid == HEAD_PROC || hid == HEAD_SPAWN) return;
-
-        /* Call to a known suspending proc is a suspension point */
-        if (map) {
-          const char* name = head->data.lit_string.value;
-          uint32_t len = head->data.lit_string.length;
-          JaclVal name_val = compiler__name_val(heap, intern_table, name, len);
-          if (suspension_map_lookup(map, name_val) &&
-              !suspension_map_is_generator(map, name_val)) {
-            if (analysis->suspension_count < SM_MAX_SUSPENSION_POINTS) {
-              SuspensionPoint* sp =
-                  &analysis->suspension_points[analysis->suspension_count];
-              sp->id     = analysis->suspension_count;
-              sp->type   = SUSPEND_CALL;
-              sp->node   = node;
-              sp->line   = node->start.line;
-              sp->column = node->start.column;
-              analysis->suspension_count++;
-            }
-            for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-              sm__walk_suspensions(node->data.command.args[i], analysis, map,
-                                   heap, intern_table);
-            }
-            return;
-          }
-        }
-      }
-
-      /* Recurse into arguments for all other commands */
-      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        sm__walk_suspensions(node->data.command.args[i], analysis, map,
-                             heap, intern_table);
-      }
-      break;
-    }
-    case AST_BLOCK: {
-      for (uint32_t i = 0; i < node->data.block.count; i++) {
-        sm__walk_suspensions(node->data.block.commands[i], analysis, map,
-                             heap, intern_table);
-      }
-      break;
-    }
-    case AST_INTERP_STRING: {
-      for (uint32_t i = 0; i < node->data.interp_string.count; i++) {
-        sm__walk_suspensions(node->data.interp_string.segments[i], analysis, map,
-                             heap, intern_table);
-      }
-      break;
-    }
-    case AST_BREAK: {
-      if (node->data.break_stmt.value) {
-        sm__walk_suspensions(node->data.break_stmt.value, analysis, map,
-                             heap, intern_table);
-      }
-      break;
-    }
-    case AST_RETURN: {
-      if (node->data.return_stmt.value) {
-        sm__walk_suspensions(node->data.return_stmt.value, analysis, map,
-                             heap, intern_table);
-      }
-      break;
-    }
-    case AST_SHELL_CMD: {
-      /* Recurse into head and args to find suspension points */
-      sm__walk_suspensions(node->data.shell_cmd.head, analysis, map,
-                           heap, intern_table);
-      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        sm__walk_suspensions(node->data.shell_cmd.args[i], analysis, map,
-                             heap, intern_table);
-      }
-      break;
-    }
-    default:
-      break;
-  }
+  WalkSuspensionsCtx ctx = { analysis, map, heap, intern_table };
+  sm__walk_suspensions__visit(node, &ctx);
 }
 
 /* --- State layout helpers --- */
@@ -1584,12 +1553,18 @@ void sm__collect_block_destructure_names(AstNode* blk,
 /* Walk AST to collect all local variable declarations for state layout.
    Conservative strategy: ALL locals are included.
    Does NOT recurse into nested proc/spawn body/params (separate scopes). */
-void sm__walk_locals(AstNode* node, StateLayout* layout,
-                            StructTypeRegistry* reg) {
-  if (!node) return;
+typedef struct {
+  StateLayout*        layout;
+  StructTypeRegistry* reg;
+} WalkLocalsCtx;
 
-  switch (node->type) {
-    case AST_COMMAND: {
+static void sm__walk_locals__visit(AstNode* node, void* vctx) {
+  if (!node) return;
+  WalkLocalsCtx* ctx = (WalkLocalsCtx*)vctx;
+  StateLayout* layout = ctx->layout;
+  StructTypeRegistry* reg = ctx->reg;
+
+  if (node->type == AST_COMMAND) {
       AstNode* head = node->data.command.head;
       if (head->type == AST_LIT_STRING) {
         HeadId hid = (HeadId)node->data.command.head_id;
@@ -1658,7 +1633,7 @@ void sm__walk_locals(AstNode* node, StateLayout* layout,
             if (i == 0 && (args[0]->type == AST_DESTRUCTURE_VEC ||
                            args[0]->type == AST_DESTRUCTURE_NAMED))
               continue;
-            sm__walk_locals(args[i], layout, reg);
+            sm__walk_locals__visit(args[i], ctx);
           }
           return;
         }
@@ -1682,7 +1657,7 @@ void sm__walk_locals(AstNode* node, StateLayout* layout,
           }
           /* Recurse into all sub-expressions */
           for (uint32_t i = 0; i < argc; i++) {
-            sm__walk_locals(args[i], layout, reg);
+            sm__walk_locals__visit(args[i], ctx);
           }
           return;
         }
@@ -1694,7 +1669,7 @@ void sm__walk_locals(AstNode* node, StateLayout* layout,
           for (uint32_t i = 0; i < argc; i++) {
             if (i == 1 && argc == 3 && args[1]->type == AST_LIT_STRING)
               continue;  /* skip catch binding name */
-            sm__walk_locals(args[i], layout, reg);
+            sm__walk_locals__visit(args[i], ctx);
           }
           return;
         }
@@ -1722,45 +1697,17 @@ void sm__walk_locals(AstNode* node, StateLayout* layout,
 
       /* Recurse into arguments for all other commands */
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        sm__walk_locals(node->data.command.args[i], layout, reg);
+        sm__walk_locals__visit(node->data.command.args[i], ctx);
       }
-      break;
-    }
-    case AST_BLOCK: {
-      for (uint32_t i = 0; i < node->data.block.count; i++) {
-        sm__walk_locals(node->data.block.commands[i], layout, reg);
-      }
-      break;
-    }
-    case AST_INTERP_STRING: {
-      for (uint32_t i = 0; i < node->data.interp_string.count; i++) {
-        sm__walk_locals(node->data.interp_string.segments[i], layout, reg);
-      }
-      break;
-    }
-    case AST_BREAK: {
-      if (node->data.break_stmt.value) {
-        sm__walk_locals(node->data.break_stmt.value, layout, reg);
-      }
-      break;
-    }
-    case AST_RETURN: {
-      if (node->data.return_stmt.value) {
-        sm__walk_locals(node->data.return_stmt.value, layout, reg);
-      }
-      break;
-    }
-    case AST_SHELL_CMD: {
-      /* Recurse into head and args to find nested locals */
-      sm__walk_locals(node->data.shell_cmd.head, layout, reg);
-      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        sm__walk_locals(node->data.shell_cmd.args[i], layout, reg);
-      }
-      break;
-    }
-    default:
-      break;
+      return;
   }
+  ast__walk_children(node, sm__walk_locals__visit, ctx);
+}
+
+void sm__walk_locals(AstNode* node, StateLayout* layout,
+                            StructTypeRegistry* reg) {
+  WalkLocalsCtx ctx = { layout, reg };
+  sm__walk_locals__visit(node, &ctx);
 }
 
 /* --- Liveness analysis for state object field optimization (US-022) ---
@@ -1940,22 +1887,30 @@ bool sm__loop_body_suspends(AstNode* body) {
 
 /* Liveness walker: walks AST tracking suspension segments and recording
    variable reads/writes per segment. */
-void sm__liveness_walk(AstNode* node, const StateLayout* layout,
-                               FieldLiveness* liveness, int32_t* segment) {
+typedef struct {
+  const StateLayout* layout;
+  FieldLiveness*     liveness;
+  int32_t*           segment;
+} LivenessCtx;
+
+static void sm__liveness_walk__visit(AstNode* node, void* vctx) {
   if (!node) return;
+  LivenessCtx* ctx = (LivenessCtx*)vctx;
+  const StateLayout* layout = ctx->layout;
+  FieldLiveness* liveness = ctx->liveness;
+  int32_t* segment = ctx->segment;
 
-  switch (node->type) {
-    case AST_VAR_REF: {
-      if (node->data.var_ref.length <= 128) {
-        JaclVal name = compiler__name_val(layout->heap, layout->intern_table,
-                                          node->data.var_ref.name,
-                                          node->data.var_ref.length);
-        sm__liveness_mark_read(liveness, layout, name, *segment);
-      }
-      break;
+  if (node->type == AST_VAR_REF) {
+    if (node->data.var_ref.length <= 128) {
+      JaclVal name = compiler__name_val(layout->heap, layout->intern_table,
+                                        node->data.var_ref.name,
+                                        node->data.var_ref.length);
+      sm__liveness_mark_read(liveness, layout, name, *segment);
     }
+    return;
+  }
 
-    case AST_COMMAND: {
+  if (node->type == AST_COMMAND) {
       AstNode* head = node->data.command.head;
       HeadId hid = (HeadId)node->data.command.head_id;
       uint32_t argc = node->data.command.arg_count;
@@ -1967,7 +1922,7 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
         if (hid == HEAD_YIELD || hid == HEAD_AWAIT ||
             hid == HEAD_PARALLEL || hid == HEAD_RACE) {
           for (uint32_t i = 0; i < argc; i++) {
-            sm__liveness_walk(args[i], layout, liveness, segment);
+            sm__liveness_walk__visit(args[i], ctx);
           }
           (*segment)++;
           return;
@@ -1978,7 +1933,7 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
             hid == HEAD_EQUALS || hid == HEAD_COLON) {
           uint32_t val_idx = (argc == 3) ? 2 : 1;
           if (val_idx < argc) {
-            sm__liveness_walk(args[val_idx], layout, liveness, segment);
+            sm__liveness_walk__visit(args[val_idx], ctx);
           }
           if (argc >= 2) {
             uint32_t name_idx = (argc == 3) ? 1 : 0;
@@ -1991,7 +1946,7 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
         /* --- set: mark target as write, walk value --- */
         if (hid == HEAD_SET || hid == HEAD_COLON_COLON) {
           if (argc >= 2) {
-            sm__liveness_walk(args[1], layout, liveness, segment);
+            sm__liveness_walk__visit(args[1], ctx);
             if (args[0]->type == AST_LIT_STRING) {
               sm__liveness_mark_write(liveness, layout,
                   sm__lit_string_name(layout, args[0]), *segment);
@@ -2010,8 +1965,8 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
               /* Record segment at loop entry */
               int32_t loop_start = *segment;
               /* Walk condition and body normally */
-              sm__liveness_walk(cond, layout, liveness, segment);
-              sm__liveness_walk(body, layout, liveness, segment);
+              sm__liveness_walk__visit(cond, ctx);
+              sm__liveness_walk__visit(body, ctx);
               int32_t loop_end = *segment;
               /* Expand ranges: any field touched during the loop
                  must span the full loop range due to back-edge */
@@ -2032,8 +1987,8 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
               }
             } else {
               /* Non-suspending loop: walk normally */
-              sm__liveness_walk(cond, layout, liveness, segment);
-              sm__liveness_walk(body, layout, liveness, segment);
+              sm__liveness_walk__visit(cond, ctx);
+              sm__liveness_walk__visit(body, ctx);
             }
           }
           return;
@@ -2048,7 +2003,7 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
             int32_t loop_start = *segment;
 
             /* Walk collection expression */
-            sm__liveness_walk(args[0], layout, liveness, segment);
+            sm__liveness_walk__visit(args[0], ctx);
 
             /* Mark for-loop binding variable */
             if (argc == 3 && args[1]->type == AST_LIT_STRING) {
@@ -2061,7 +2016,7 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
             }
 
             /* Walk body */
-            sm__liveness_walk(body, layout, liveness, segment);
+            sm__liveness_walk__visit(body, ctx);
 
             if (loop_suspends) {
               int32_t loop_end = *segment;
@@ -2087,8 +2042,8 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
 
         /* --- try: catch binding is scope-local (cannot suspend), skip it --- */
         if (hid == HEAD_TRY) {
-          if (argc >= 1) sm__liveness_walk(args[0], layout, liveness, segment);
-          if (argc >= 3) sm__liveness_walk(args[2], layout, liveness, segment);
+          if (argc >= 1) sm__liveness_walk__visit(args[0], ctx);
+          if (argc >= 3) sm__liveness_walk__visit(args[2], ctx);
           return;
         }
 
@@ -2124,63 +2079,25 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
       }
       /* Walk all arguments for any other command */
       for (uint32_t i = 0; i < argc; i++) {
-        sm__liveness_walk(args[i], layout, liveness, segment);
+        sm__liveness_walk__visit(args[i], ctx);
       }
-      break;
-    }
-
-    case AST_BLOCK: {
-      for (uint32_t i = 0; i < node->data.block.count; i++) {
-        sm__liveness_walk(node->data.block.commands[i], layout, liveness,
-                          segment);
-      }
-      break;
-    }
-
-    case AST_INTERP_STRING: {
-      for (uint32_t i = 0; i < node->data.interp_string.count; i++) {
-        sm__liveness_walk(node->data.interp_string.segments[i], layout,
-                          liveness, segment);
-      }
-      break;
-    }
-
-    case AST_BREAK: {
-      if (node->data.break_stmt.value) {
-        sm__liveness_walk(node->data.break_stmt.value, layout, liveness,
-                          segment);
-      }
-      break;
-    }
-
-    case AST_RETURN: {
-      if (node->data.return_stmt.value) {
-        sm__liveness_walk(node->data.return_stmt.value, layout, liveness,
-                          segment);
-      }
-      break;
-    }
-
-    case AST_SHELL_CMD: {
-      /* Recurse into head and args */
-      sm__liveness_walk(node->data.shell_cmd.head, layout, liveness, segment);
-      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        sm__liveness_walk(node->data.shell_cmd.args[i], layout, liveness,
-                          segment);
-      }
-      break;
-    }
-
-    case AST_SPREAD: {
-      if (node->data.spread.expr) {
-        sm__liveness_walk(node->data.spread.expr, layout, liveness, segment);
-      }
-      break;
-    }
-
-    default:
-      break;
+      return;
   }
+
+  if (node->type == AST_SPREAD) {
+    if (node->data.spread.expr) {
+      sm__liveness_walk__visit(node->data.spread.expr, ctx);
+    }
+    return;
+  }
+
+  ast__walk_children(node, sm__liveness_walk__visit, ctx);
+}
+
+void sm__liveness_walk(AstNode* node, const StateLayout* layout,
+                               FieldLiveness* liveness, int32_t* segment) {
+  LivenessCtx ctx = { layout, liveness, segment };
+  sm__liveness_walk__visit(node, &ctx);
 }
 
 /* Run liveness analysis and filter the state layout in-place.
@@ -2335,76 +2252,46 @@ SuspensionAnalysis compiler__analyze_suspensions(AstNode* body,
 
 /* Check if an AST subtree contains any suspension points.
    When map is non-NULL, also checks if named proc calls are suspending. */
+typedef struct {
+  SuspensionMap*   map;
+  ThreadHeap*      heap;
+  JaclInternTable* intern_table;
+} ContainsSuspCtx;
+
+static bool ast__contains_suspension__pred(AstNode* node, void* vctx) {
+  if (!node) return false;
+  ContainsSuspCtx* ctx = (ContainsSuspCtx*)vctx;
+
+  if (node->type == AST_COMMAND) {
+    AstNode* head = node->data.command.head;
+    if (head->type == AST_LIT_STRING) {
+      HeadId hid = (HeadId)node->data.command.head_id;
+      if (hid == HEAD_AWAIT || hid == HEAD_PARALLEL ||
+          hid == HEAD_RACE  || hid == HEAD_YIELD) {
+        return true;
+      }
+      if (hid == HEAD_PROC || hid == HEAD_SPAWN) return false;
+      if (ctx->map) {
+        JaclVal name_val = compiler__name_val(
+            ctx->heap, ctx->intern_table,
+            head->data.lit_string.value, head->data.lit_string.length);
+        if (suspension_map_lookup(ctx->map, name_val) &&
+            !suspension_map_is_generator(ctx->map, name_val)) return true;
+      }
+    }
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+      if (ast__contains_suspension__pred(node->data.command.args[i], ctx))
+        return true;
+    }
+    return false;
+  }
+  return ast__any_child(node, ast__contains_suspension__pred, ctx);
+}
+
 bool ast__contains_suspension(AstNode* node, SuspensionMap* map,
                                ThreadHeap* heap, JaclInternTable* intern_table) {
-  if (!node) return false;
-
-  switch (node->type) {
-    case AST_COMMAND: {
-      AstNode* head = node->data.command.head;
-      if (head->type == AST_LIT_STRING) {
-        HeadId hid = (HeadId)node->data.command.head_id;
-        if (hid == HEAD_AWAIT || hid == HEAD_PARALLEL ||
-            hid == HEAD_RACE  || hid == HEAD_YIELD) {
-          return true;
-        }
-        /* Don't recurse into nested proc or spawn definitions
-           (their block args are separate closure scopes) */
-        if (hid == HEAD_PROC || hid == HEAD_SPAWN) return false;
-        /* Check if this is a call to a known suspending proc.
-           Generator calls return a stream immediately — they don't suspend. */
-        if (map) {
-          const char* name = head->data.lit_string.value;
-          uint32_t len = head->data.lit_string.length;
-          JaclVal name_val = compiler__name_val(heap, intern_table, name, len);
-          if (suspension_map_lookup(map, name_val) &&
-              !suspension_map_is_generator(map, name_val)) return true;
-        }
-      }
-      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        if (ast__contains_suspension(node->data.command.args[i], map,
-                                     heap, intern_table))
-          return true;
-      }
-      return false;
-    }
-    case AST_BLOCK: {
-      for (uint32_t i = 0; i < node->data.block.count; i++) {
-        if (ast__contains_suspension(node->data.block.commands[i], map,
-                                     heap, intern_table))
-          return true;
-      }
-      return false;
-    }
-    case AST_BREAK: {
-      if (node->data.break_stmt.value) {
-        return ast__contains_suspension(node->data.break_stmt.value, map,
-                                        heap, intern_table);
-      }
-      return false;
-    }
-    case AST_RETURN: {
-      if (node->data.return_stmt.value) {
-        return ast__contains_suspension(node->data.return_stmt.value, map,
-                                        heap, intern_table);
-      }
-      return false;
-    }
-    case AST_SHELL_CMD: {
-      /* Check head and args for suspension */
-      if (ast__contains_suspension(node->data.shell_cmd.head, map,
-                                   heap, intern_table))
-        return true;
-      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        if (ast__contains_suspension(node->data.shell_cmd.args[i], map,
-                                     heap, intern_table))
-          return true;
-      }
-      return false;
-    }
-    default:
-      return false;
-  }
+  ContainsSuspCtx ctx = { map, heap, intern_table };
+  return ast__contains_suspension__pred(node, &ctx);
 }
 
 /* Check if an AST subtree contains any set! calls (mutable global mutation).
@@ -2415,60 +2302,50 @@ bool ast__contains_suspension(AstNode* node, SuspensionMap* map,
  * Skips nested proc/spawn/parallel/race scopes (they are separate bodies).
  */
 #define AST_LOCAL_MUTS_MAX 64
+typedef struct {
+  JaclVal*         names;
+  uint32_t*        count;
+  ThreadHeap*      heap;
+  JaclInternTable* intern_table;
+} CollectMutsCtx;
+
+static void ast__collect_local_muts__visit(AstNode* node, void* vctx) {
+  CollectMutsCtx* ctx = (CollectMutsCtx*)vctx;
+  if (!node || *ctx->count >= AST_LOCAL_MUTS_MAX) return;
+
+  if (node->type == AST_COMMAND) {
+    AstNode* head = node->data.command.head;
+    if (head->type == AST_LIT_STRING) {
+      HeadId hid = (HeadId)node->data.command.head_id;
+      if (hid == HEAD_MUT) {
+        uint32_t argc = node->data.command.arg_count;
+        if (argc >= 2 && node->data.command.args[0]->type == AST_LIT_STRING) {
+          AstNode* name_node = node->data.command.args[0];
+          ctx->names[*ctx->count] = compiler__name_val(
+              ctx->heap, ctx->intern_table,
+              name_node->data.lit_string.value,
+              name_node->data.lit_string.length);
+          (*ctx->count)++;
+        }
+        return;
+      }
+      if (hid == HEAD_PROC || hid == HEAD_SPAWN ||
+          hid == HEAD_PARALLEL || hid == HEAD_RACE) return;
+    }
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+      ast__collect_local_muts__visit(node->data.command.args[i], ctx);
+    }
+    return;
+  }
+  ast__walk_children(node, ast__collect_local_muts__visit, ctx);
+}
+
 void ast__collect_local_muts(AstNode* node, JaclVal* names,
                                      uint32_t* count,
                                      ThreadHeap* heap,
                                      JaclInternTable* intern_table) {
-  if (!node || *count >= AST_LOCAL_MUTS_MAX) return;
-
-  switch (node->type) {
-    case AST_COMMAND: {
-      AstNode* head = node->data.command.head;
-      if (head->type == AST_LIT_STRING) {
-        HeadId hid = (HeadId)node->data.command.head_id;
-        /* Record mut declarations */
-        if (hid == HEAD_MUT) {
-          uint32_t argc = node->data.command.arg_count;
-          if (argc >= 2 && node->data.command.args[0]->type == AST_LIT_STRING) {
-            AstNode* name_node = node->data.command.args[0];
-            names[*count] = compiler__name_val(
-                heap, intern_table,
-                name_node->data.lit_string.value,
-                name_node->data.lit_string.length);
-            (*count)++;
-          }
-          return;
-        }
-        /* Skip nested scope boundaries */
-        if (hid == HEAD_PROC || hid == HEAD_SPAWN ||
-            hid == HEAD_PARALLEL || hid == HEAD_RACE) return;
-      }
-      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        ast__collect_local_muts(node->data.command.args[i], names, count,
-                                heap, intern_table);
-      }
-      break;
-    }
-    case AST_BLOCK: {
-      for (uint32_t i = 0; i < node->data.block.count; i++) {
-        ast__collect_local_muts(node->data.block.commands[i], names, count,
-                                heap, intern_table);
-      }
-      break;
-    }
-    case AST_SHELL_CMD: {
-      /* Recurse into head and args */
-      ast__collect_local_muts(node->data.shell_cmd.head, names, count,
-                              heap, intern_table);
-      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        ast__collect_local_muts(node->data.shell_cmd.args[i], names, count,
-                                heap, intern_table);
-      }
-      break;
-    }
-    default:
-      break;
-  }
+  CollectMutsCtx ctx = { names, count, heap, intern_table };
+  ast__collect_local_muts__visit(node, &ctx);
 }
 
 /**
@@ -2489,71 +2366,54 @@ void ast__collect_local_muts(AstNode* node, JaclVal* names,
  *   - Box references stored in collections then retrieved on another thread
  *   - Dynamic box creation passed indirectly through data structures
  */
+typedef struct {
+  JaclVal*         local_muts;
+  uint32_t         local_mut_count;
+  ThreadHeap*      heap;
+  JaclInternTable* intern_table;
+} NonlocalSetCtx;
+
+static bool ast__contains_nonlocal_set__pred(AstNode* node, void* vctx) {
+  if (!node) return false;
+  NonlocalSetCtx* ctx = (NonlocalSetCtx*)vctx;
+
+  if (node->type == AST_COMMAND) {
+    AstNode* head = node->data.command.head;
+    if (head->type == AST_LIT_STRING) {
+      HeadId hid = (HeadId)node->data.command.head_id;
+      if (hid == HEAD_SET) {
+        uint32_t argc = node->data.command.arg_count;
+        if (argc >= 1 && node->data.command.args[0]->type == AST_LIT_STRING) {
+          AstNode* target = node->data.command.args[0];
+          JaclVal target_name = compiler__name_val(
+              ctx->heap, ctx->intern_table,
+              target->data.lit_string.value,
+              target->data.lit_string.length);
+          for (uint32_t i = 0; i < ctx->local_mut_count; i++) {
+            if (ctx->local_muts[i] == target_name) return false;
+          }
+        }
+        return true;
+      }
+      if (hid == HEAD_PROC || hid == HEAD_SPAWN ||
+          hid == HEAD_PARALLEL || hid == HEAD_RACE) return false;
+    }
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+      if (ast__contains_nonlocal_set__pred(node->data.command.args[i], ctx))
+        return true;
+    }
+    return false;
+  }
+  return ast__any_child(node, ast__contains_nonlocal_set__pred, ctx);
+}
+
 bool ast__contains_nonlocal_set_impl(AstNode* node,
                                              JaclVal* local_muts,
                                              uint32_t local_mut_count,
                                              ThreadHeap* heap,
                                              JaclInternTable* intern_table) {
-  if (!node) return false;
-
-  switch (node->type) {
-    case AST_COMMAND: {
-      AstNode* head = node->data.command.head;
-      if (head->type == AST_LIT_STRING) {
-        HeadId hid = (HeadId)node->data.command.head_id;
-        if (hid == HEAD_SET) {
-          /* Check if the target is a local mut */
-          uint32_t argc = node->data.command.arg_count;
-          if (argc >= 1 && node->data.command.args[0]->type == AST_LIT_STRING) {
-            AstNode* target = node->data.command.args[0];
-            JaclVal target_name = compiler__name_val(
-                heap, intern_table,
-                target->data.lit_string.value,
-                target->data.lit_string.length);
-            for (uint32_t i = 0; i < local_mut_count; i++) {
-              if (local_muts[i] == target_name) return false; /* local mut */
-            }
-          }
-          return true; /* non-local or unresolved — needs pinning */
-        }
-        /* Skip nested scope boundaries — they get their own pinning */
-        if (hid == HEAD_PROC || hid == HEAD_SPAWN ||
-            hid == HEAD_PARALLEL || hid == HEAD_RACE) return false;
-      }
-      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        if (ast__contains_nonlocal_set_impl(node->data.command.args[i],
-                                             local_muts, local_mut_count,
-                                             heap, intern_table))
-          return true;
-      }
-      return false;
-    }
-    case AST_BLOCK: {
-      for (uint32_t i = 0; i < node->data.block.count; i++) {
-        if (ast__contains_nonlocal_set_impl(node->data.block.commands[i],
-                                             local_muts, local_mut_count,
-                                             heap, intern_table))
-          return true;
-      }
-      return false;
-    }
-    case AST_SHELL_CMD: {
-      /* Check head and args */
-      if (ast__contains_nonlocal_set_impl(node->data.shell_cmd.head,
-                                           local_muts, local_mut_count,
-                                           heap, intern_table))
-        return true;
-      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        if (ast__contains_nonlocal_set_impl(node->data.shell_cmd.args[i],
-                                             local_muts, local_mut_count,
-                                             heap, intern_table))
-          return true;
-      }
-      return false;
-    }
-    default:
-      return false;
-  }
+  NonlocalSetCtx ctx = { local_muts, local_mut_count, heap, intern_table };
+  return ast__contains_nonlocal_set__pred(node, &ctx);
 }
 
 /**
@@ -3247,60 +3107,50 @@ int compiler__resolve_upvalue(Compiler* c, JaclVal name,
  * Skips nested proc/spawn/parallel/race scopes (they are separate bodies).
  */
 #define AST_LOCAL_NAMES_MAX 128
+typedef struct {
+  JaclVal*         names;
+  uint32_t*        count;
+  ThreadHeap*      heap;
+  JaclInternTable* intern_table;
+} CollectNamesCtx;
+
+static void ast__collect_local_names__visit(AstNode* node, void* vctx) {
+  CollectNamesCtx* ctx = (CollectNamesCtx*)vctx;
+  if (!node || *ctx->count >= AST_LOCAL_NAMES_MAX) return;
+
+  if (node->type == AST_COMMAND) {
+    AstNode* head = node->data.command.head;
+    if (head->type == AST_LIT_STRING) {
+      HeadId hid = (HeadId)node->data.command.head_id;
+      if (hid == HEAD_DEF || hid == HEAD_MUT) {
+        uint32_t argc = node->data.command.arg_count;
+        if (argc >= 2 && node->data.command.args[0]->type == AST_LIT_STRING) {
+          AstNode* name_node = node->data.command.args[0];
+          ctx->names[*ctx->count] = compiler__name_val(
+              ctx->heap, ctx->intern_table,
+              name_node->data.lit_string.value,
+              name_node->data.lit_string.length);
+          (*ctx->count)++;
+        }
+        return;
+      }
+      if (hid == HEAD_PROC || hid == HEAD_SPAWN ||
+          hid == HEAD_PARALLEL || hid == HEAD_RACE) return;
+    }
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+      ast__collect_local_names__visit(node->data.command.args[i], ctx);
+    }
+    return;
+  }
+  ast__walk_children(node, ast__collect_local_names__visit, ctx);
+}
+
 void ast__collect_local_names(AstNode* node, JaclVal* names,
                                       uint32_t* count,
                                       ThreadHeap* heap,
                                       JaclInternTable* intern_table) {
-  if (!node || *count >= AST_LOCAL_NAMES_MAX) return;
-
-  switch (node->type) {
-    case AST_COMMAND: {
-      AstNode* head = node->data.command.head;
-      if (head->type == AST_LIT_STRING) {
-        HeadId hid = (HeadId)node->data.command.head_id;
-        /* Record def and mut declarations */
-        if (hid == HEAD_DEF || hid == HEAD_MUT) {
-          uint32_t argc = node->data.command.arg_count;
-          if (argc >= 2 && node->data.command.args[0]->type == AST_LIT_STRING) {
-            AstNode* name_node = node->data.command.args[0];
-            names[*count] = compiler__name_val(
-                heap, intern_table,
-                name_node->data.lit_string.value,
-                name_node->data.lit_string.length);
-            (*count)++;
-          }
-          return;
-        }
-        /* Skip nested scope boundaries */
-        if (hid == HEAD_PROC || hid == HEAD_SPAWN ||
-            hid == HEAD_PARALLEL || hid == HEAD_RACE) return;
-      }
-      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        ast__collect_local_names(node->data.command.args[i], names, count,
-                                 heap, intern_table);
-      }
-      break;
-    }
-    case AST_BLOCK: {
-      for (uint32_t i = 0; i < node->data.block.count; i++) {
-        ast__collect_local_names(node->data.block.commands[i], names, count,
-                                 heap, intern_table);
-      }
-      break;
-    }
-    case AST_SHELL_CMD: {
-      /* Recurse into head and args */
-      ast__collect_local_names(node->data.shell_cmd.head, names, count,
-                               heap, intern_table);
-      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        ast__collect_local_names(node->data.shell_cmd.args[i], names, count,
-                                 heap, intern_table);
-      }
-      break;
-    }
-    default:
-      break;
-  }
+  CollectNamesCtx ctx = { names, count, heap, intern_table };
+  ast__collect_local_names__visit(node, &ctx);
 }
 
 /**
@@ -3331,84 +3181,68 @@ bool compiler__name_touches_mutable(Compiler* enclosing, JaclVal name) {
   return false;
 }
 
+typedef struct {
+  JaclVal*  local_names;
+  uint32_t  local_name_count;
+  Compiler* enclosing;
+} NonlocalMutCtx;
+
+static bool ast__refs_nonlocal_mutable__pred(AstNode* node, void* vctx) {
+  if (!node) return false;
+  NonlocalMutCtx* ctx = (NonlocalMutCtx*)vctx;
+
+  if (node->type == AST_VAR_REF) {
+    uint32_t len = node->data.var_ref.length;
+    if (len > 128) return false;
+    JaclVal name = compiler__name_val(ctx->enclosing->heap,
+                                       ctx->enclosing->intern_table,
+                                       node->data.var_ref.name, len);
+    for (uint32_t i = 0; i < ctx->local_name_count; i++) {
+      if (ctx->local_names[i] == name) return false;
+    }
+    return compiler__name_touches_mutable(ctx->enclosing, name);
+  }
+
+  if (node->type == AST_COMMAND) {
+    AstNode* head = node->data.command.head;
+    if (head->type == AST_LIT_STRING) {
+      HeadId hid = (HeadId)node->data.command.head_id;
+      /* Skip nested concurrent scopes — they get their own pinning */
+      if (hid == HEAD_SPAWN || hid == HEAD_PARALLEL || hid == HEAD_RACE)
+        return false;
+      /* Check if function call target is a non-local closure that
+         transitively captures mutable state (US-003). */
+      const char* hname = head->data.lit_string.value;
+      uint32_t hlen = head->data.lit_string.length;
+      if (hlen <= 128) {
+        JaclVal fname = compiler__name_val(ctx->enclosing->heap,
+                                            ctx->enclosing->intern_table,
+                                            hname, hlen);
+        bool is_local_name = false;
+        for (uint32_t i = 0; i < ctx->local_name_count; i++) {
+          if (ctx->local_names[i] == fname) { is_local_name = true; break; }
+        }
+        if (!is_local_name &&
+            compiler__name_touches_mutable(ctx->enclosing, fname))
+          return true;
+      }
+    }
+    if (ast__refs_nonlocal_mutable__pred(head, ctx)) return true;
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+      if (ast__refs_nonlocal_mutable__pred(node->data.command.args[i], ctx))
+        return true;
+    }
+    return false;
+  }
+  return ast__any_child(node, ast__refs_nonlocal_mutable__pred, ctx);
+}
+
 bool ast__refs_nonlocal_mutable_impl(AstNode* node,
                                              JaclVal* local_names,
                                              uint32_t local_name_count,
                                              Compiler* enclosing) {
-  if (!node) return false;
-
-  switch (node->type) {
-    case AST_VAR_REF: {
-      uint32_t len = node->data.var_ref.length;
-      if (len > 128) return false;
-      JaclVal name = compiler__name_val(enclosing->heap, enclosing->intern_table, node->data.var_ref.name, len);
-      /* Check if locally declared in the body */
-      for (uint32_t i = 0; i < local_name_count; i++) {
-        if (local_names[i] == name) return false;
-      }
-      /* Not local — check if mutable or captures_mutable in enclosing scope */
-      return compiler__name_touches_mutable(enclosing, name);
-    }
-    case AST_COMMAND: {
-      AstNode* head = node->data.command.head;
-      if (head->type == AST_LIT_STRING) {
-        HeadId hid = (HeadId)node->data.command.head_id;
-        /* Skip nested concurrent scopes — they get their own pinning */
-        if (hid == HEAD_SPAWN || hid == HEAD_PARALLEL || hid == HEAD_RACE)
-          return false;
-        /* Check if function call target is a non-local closure that
-           transitively captures mutable state (US-003). */
-        const char* hname = head->data.lit_string.value;
-        uint32_t hlen = head->data.lit_string.length;
-        if (hlen <= 128) {
-          JaclVal fname = compiler__name_val(enclosing->heap, enclosing->intern_table, hname, hlen);
-          bool is_local_name = false;
-          for (uint32_t i = 0; i < local_name_count; i++) {
-            if (local_names[i] == fname) { is_local_name = true; break; }
-          }
-          if (!is_local_name &&
-              compiler__name_touches_mutable(enclosing, fname))
-            return true;
-        }
-      }
-      /* Check head (for $var calls) */
-      if (ast__refs_nonlocal_mutable_impl(head, local_names,
-                                           local_name_count, enclosing))
-        return true;
-      for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-        if (ast__refs_nonlocal_mutable_impl(node->data.command.args[i],
-                                             local_names, local_name_count,
-                                             enclosing))
-          return true;
-      }
-      return false;
-    }
-    case AST_BLOCK: {
-      for (uint32_t i = 0; i < node->data.block.count; i++) {
-        if (ast__refs_nonlocal_mutable_impl(node->data.block.commands[i],
-                                             local_names, local_name_count,
-                                             enclosing))
-          return true;
-      }
-      return false;
-    }
-    case AST_SHELL_CMD: {
-      /* Check head and args */
-      if (ast__refs_nonlocal_mutable_impl(node->data.shell_cmd.head,
-                                           local_names, local_name_count,
-                                           enclosing))
-        return true;
-      for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
-        if (ast__refs_nonlocal_mutable_impl(node->data.shell_cmd.args[i],
-                                             local_names, local_name_count,
-                                             enclosing))
-          return true;
-      }
-      return false;
-    }
-    default:
-      return false;
-  }
+  NonlocalMutCtx ctx = { local_names, local_name_count, enclosing };
+  return ast__refs_nonlocal_mutable__pred(node, &ctx);
 }
 
 /**
@@ -12498,7 +12332,8 @@ bool compiler__top_level_suspends(AstNode** stmts, uint32_t count,
 }
 
 /* Check if any AST node requires macro expansion (defmacro or \ command). */
-static bool compiler__node_needs_expansion(AstNode *node) {
+static bool compiler__node_needs_expansion__pred(AstNode *node, void *vctx) {
+  (void)vctx;
   if (!node) return false;
   if (node->type == AST_DEFMACRO) return true;
   if (node->type == AST_COMMAND) {
@@ -12507,20 +12342,18 @@ static bool compiler__node_needs_expansion(AstNode *node) {
         && head->data.lit_string.length == 1
         && head->data.lit_string.value[0] == '\\')
       return true;
-    /* Recurse into head and args */
-    if (compiler__node_needs_expansion(head)) return true;
+    if (compiler__node_needs_expansion__pred(head, NULL)) return true;
     for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-      if (compiler__node_needs_expansion(node->data.command.args[i]))
+      if (compiler__node_needs_expansion__pred(node->data.command.args[i], NULL))
         return true;
     }
+    return false;
   }
-  if (node->type == AST_BLOCK) {
-    for (uint32_t i = 0; i < node->data.block.count; i++) {
-      if (compiler__node_needs_expansion(node->data.block.commands[i]))
-        return true;
-    }
-  }
-  return false;
+  return ast__any_child(node, compiler__node_needs_expansion__pred, NULL);
+}
+
+static bool compiler__node_needs_expansion(AstNode *node) {
+  return compiler__node_needs_expansion__pred(node, NULL);
 }
 
 static bool compiler__needs_expansion(AstNode **nodes, uint32_t count) {
