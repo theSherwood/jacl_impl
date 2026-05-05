@@ -34,6 +34,7 @@ LIB_ONLY=0
 FILTER=""
 CLEAN=0
 PARALLEL=0
+AUDIT=0
 for arg in "$@"; do
   case "$arg" in
     --lib) LIB_ONLY=1 ;;
@@ -41,8 +42,19 @@ for arg in "$@"; do
     --test=*) FILTER="${arg#--test=}" ;;
     --parallel|-j) PARALLEL=$(nproc) ;;
     --parallel=*|-j=*) PARALLEL="${arg#*=}" ;;
+    --audit) AUDIT=1 ;;
   esac
 done
+
+# --audit enables JACL_TYPER_AUDIT in libjacl.a: every compile_node
+# call logs a TYPER_AUDIT line to stderr when the typer's
+# inferred_type disagrees with c->last_expr_type, plus a SUMMARY
+# line at end of each compile. Used to drive Stage 1 of the
+# static-typing migration (see STATIC_TYPING_PLAN.md). Forces a
+# rebuild of libjacl.a since CFLAGS changes invalidate the cache.
+if [ "$AUDIT" -eq 1 ]; then
+  CFLAGS="$CFLAGS -DJACL_TYPER_AUDIT"
+fi
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
@@ -233,10 +245,23 @@ if [ ! -f "$LIBJACL" ]; then
 elif [ -n "$NEWEST_SRC" ] && [ "$LIBJACL" -ot "$NEWEST_SRC" ]; then
     NEED_LIB=1
 fi
+# Track whether the cached libjacl.a was built with --audit; force a
+# rebuild if the flag toggles between runs.
+AUDIT_STAMP="$BUILD_DIR/.audit_flag"
+if [ "$AUDIT" -eq 1 ] && [ ! -f "$AUDIT_STAMP" ]; then
+  NEED_LIB=1
+elif [ "$AUDIT" -eq 0 ] && [ -f "$AUDIT_STAMP" ]; then
+  NEED_LIB=1
+fi
 if [ "$NEED_LIB" -eq 1 ]; then
     echo -n "Building libjacl.a... "
     if $CC $CFLAGS $LIBFFI_COMPILE_FLAGS -c src/jacl.c -o "$JACL_OBJ" 2>"$BUILD_DIR/jacl.err"; then
         ar rcs "$LIBJACL" "$JACL_OBJ"
+        if [ "$AUDIT" -eq 1 ]; then
+          touch "$AUDIT_STAMP"
+        else
+          rm -f "$AUDIT_STAMP"
+        fi
         echo "ok"
     else
         echo "FAIL"
