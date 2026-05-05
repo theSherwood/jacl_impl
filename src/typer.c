@@ -341,6 +341,16 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       return true;
     }
     if (args[0]->type == AST_COMMAND &&
+        args[0]->data.command.arg_count == 0 &&
+        args[0]->data.command.head &&
+        args[0]->data.command.head->type == AST_LIT_STRING) {
+      /* `[name] = value` — bare identifier wrapped as a zero-arg command.
+       * Mirrors compiler__rewrite_binding_op's "unwrap to [target name RHS]"
+       * branch (compiler.c:4650). Without this, `x = 5` falls through to
+       * the AST_COMMAND name branch and bails with return false. */
+      name_node  = args[0]->data.command.head;
+      value_node = args[1];
+    } else if (args[0]->type == AST_COMMAND &&
         args[0]->data.command.arg_count == 1 &&
         args[0]->data.command.head &&
         args[0]->data.command.head->type == AST_LIT_STRING &&
@@ -662,7 +672,7 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   }
 
   typer__scope_pop(tc);
-  node->inferred_type = TYPE_DYN; /* proc def itself returns nil-ish */
+  node->inferred_type = TYPE_CLOSURE; /* proc def emits a closure value */
   return true;
 }
 
@@ -1272,7 +1282,12 @@ void typer_infer(AstNode** nodes, uint32_t count) {
   tc.binding_count = 0;
   tc.scope_depth   = 0;
   tc.proc_count    = 0;
-  tc.struct_count  = 0;
+  /* Reserve struct index 0 so typer indices align with the compiler's
+   * StructTypeRegistry (which keeps defs[0]=NULL "reserved for dyn",
+   * see compiler.c). Without this offset, typer reports struct_idx=0
+   * where compiler reports struct_idx=1 for the same Point/Line/etc. */
+  tc.struct_count  = 1;
+  memset(&tc.structs[0], 0, sizeof(tc.structs[0]));
   tc.expected_type = TYPE_DYN;
   tc.narrowing_count = 0;
 

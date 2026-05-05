@@ -8330,6 +8330,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__emit_byte(c, OP_VEC, line);
     compiler__emit_byte(c, (uint8_t)argc, line);
+    c->last_expr_type = TYPE_VEC;
     return;
   }
 
@@ -8497,6 +8498,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__emit_byte(c, OP_MAP, line);
     compiler__emit_byte(c, (uint8_t)(argc / 2), line);
+    c->last_expr_type = TYPE_MAP;
     return;
   }
 

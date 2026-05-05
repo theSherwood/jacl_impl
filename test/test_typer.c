@@ -290,6 +290,33 @@ static void test_map_has_returns_bool(void) {
   arena_destroy(&a);
 }
 
+static void test_def_sugar_returns_nil(void) {
+  /* `x = 5` parses as `[= [x] 5]` (zero-arg AST_COMMAND wrapping name).
+   * The typer must unwrap that shape, just like compiler__rewrite_binding_op,
+   * so the def returns nil instead of leaking dyn. Stage 1 fix. */
+  current_test = "def_sugar_returns_nil";
+  arena_t a = {0};
+  ParseResult r = run_typer("x = 5", &a);
+  ASSERT_TYPE(r.nodes[0], TYPE_NIL);
+  arena_destroy(&a);
+}
+
+static void test_mut_sugar_returns_nil(void) {
+  current_test = "mut_sugar_returns_nil";
+  arena_t a = {0};
+  ParseResult r = run_typer("x : 5", &a);
+  ASSERT_TYPE(r.nodes[0], TYPE_NIL);
+  arena_destroy(&a);
+}
+
+static void test_proc_def_returns_closure(void) {
+  current_test = "proc_def_returns_closure";
+  arena_t a = {0};
+  ParseResult r = run_typer("proc f {} { 1 }", &a);
+  ASSERT_TYPE(r.nodes[0], TYPE_CLOSURE);
+  arena_destroy(&a);
+}
+
 static void test_print_returns_nil(void) {
   current_test = "print_returns_nil";
   arena_t a = {0};
@@ -319,6 +346,9 @@ int main(void) {
   test_typed_vec_binding();
   test_vec_push_preserves_typed();
   test_map_has_returns_bool();
+  test_def_sugar_returns_nil();
+  test_mut_sugar_returns_nil();
+  test_proc_def_returns_closure();
   test_print_returns_nil();
 
   printf("\n%d/%d passed", passes, passes + failures);
