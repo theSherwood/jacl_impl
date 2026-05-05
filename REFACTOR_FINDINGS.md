@@ -88,6 +88,46 @@ real win is Phase C — but that's a real refactor, not a refactor of
 state. Each of those 208 reads needs classification: pure type query
 vs codegen scratchpad.
 
+#### Status as of next session
+
+**Phase A (partial) — done.** Added a HeadId→JaclType `fixed_returns`
+table to `typer__infer_command_inner` for builtins where the compiler's
+typed and untyped paths agree on the result:
+
+- predicates / logicals: `atom?` `future?` `error?` `box?` `map-has`
+  `&&` `||` `~` → `TYPE_BOOL`
+- lengths: `length` `byte-length` `count` `vec-len` `map-len` → `TYPE_I32`
+- strings: `to-string` `slice` `concat` → `TYPE_STR`
+- streams: `..<` `..=` `lines` → `TYPE_STREAM`
+- always-dyn collection constructors: `vec` `map` `collect` →
+  `TYPE_VEC`/`TYPE_MAP`/`TYPE_VEC`
+- side-effecting: `print` → `TYPE_NIL`
+
+That's 22 builtin entries (+~32 LOC). 93/93 tests pass.
+
+**Excluded from the table** because the compiler's typed and untyped
+paths disagree (annotating these would mask `TYPE_TYPED_VEC`/
+`TYPE_TYPED_MAP` at the 22 fallback sites and silently miscompile):
+`vec-push` `vec-set` `vec-concat` `vec-slice` `vec-get` `map-set`
+`map-remove` `map-keys` `map-vals` `map-get` — all need typed-collection
+tracking on `node->inferred_struct_idx` first.
+
+**Phase B turns out to be riskier than the original estimate.** Each
+fallback site reads not only `c->last_expr_type` but often also
+`c->last_struct_idx` and `c->last_key_struct_idx`. The typer propagates
+struct_idx through bindings but not through expression results, and
+doesn't track typed-collection idx at all. So removing a fallback at,
+e.g., `compile_binary` would lose the typed-vec equality error path
+entirely. The doc's "low risk, -50 LOC" framing for Phase B
+under-counted the typer's structural gaps.
+
+**Real path to Phase B/C:** extend the typer to propagate
+`inferred_struct_idx` (and a `key_struct_idx` companion) through call
+results — at least for the `vec-*`/`map-*` cluster where the compiler
+already has the info. Then most of the excluded builtins above can move
+into the table, and only after that does dropping fallbacks become the
+mechanical edit the doc described.
+
 ### "Move pure builtins to prelude" — turned out to be illusory
 
 Originally estimated at 300-700 LOC saved across compiler+VM. After

@@ -953,15 +953,61 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     node->inferred_struct_idx = sdef_idx;
   } else if (head && head->type == AST_LIT_STRING) {
     /* Recognize a small set of well-known builtins by their return
-     * type. Reduces typer gaps for last-expression-of-block cases. */
+     * type. Reduces typer gaps for last-expression-of-block cases.
+     *
+     * Only include entries where the compiler's typed and untyped code
+     * paths agree on the result. Builtins like vec-push (TYPE_VEC vs
+     * TYPE_TYPED_VEC depending on receiver) are intentionally absent —
+     * a wrong annotation here would mask the typed path at the 22
+     * `if (lhs_type == TYPE_DYN) lhs_type = c->last_expr_type` sites
+     * in compiler.c. */
     HeadId hid = (HeadId)node->data.command.head_id;
     const char* hn = head->data.lit_string.value;
     uint32_t    hl = head->data.lit_string.length;
-    if (hid == HEAD_PRINT || (hl == 4 && memcmp(hn, "puts", 4) == 0)) {
+    static const struct { HeadId hid; uint8_t ret; } fixed_returns[] = {
+      /* Predicates and short-circuit logicals — always bool. */
+      { HEAD_ATOM_Q,      TYPE_BOOL   },
+      { HEAD_FUTURE_Q,    TYPE_BOOL   },
+      { HEAD_ERROR_Q,     TYPE_BOOL   },
+      { HEAD_BOX_Q,       TYPE_BOOL   },
+      { HEAD_MAP_HAS,     TYPE_BOOL   },
+      { HEAD_AMP_AMP,     TYPE_BOOL   },
+      { HEAD_PIPE_PIPE,   TYPE_BOOL   },
+      { HEAD_TILDE,       TYPE_BOOL   },
+      /* Length-style builtins — always i32 (typed and untyped). */
+      { HEAD_LENGTH,      TYPE_I32    },
+      { HEAD_BYTE_LENGTH, TYPE_I32    },
+      { HEAD_COUNT,       TYPE_I32    },
+      { HEAD_VEC_LEN,     TYPE_I32    },
+      { HEAD_MAP_LEN,     TYPE_I32    },
+      /* String results. */
+      { HEAD_TO_STRING,   TYPE_STR    },
+      { HEAD_SLICE,       TYPE_STR    },
+      { HEAD_CONCAT,      TYPE_STR    },
+      /* Stream constructors. */
+      { HEAD_DOTDOT_LT,   TYPE_STREAM },
+      { HEAD_DOTDOT_EQ,   TYPE_STREAM },
+      { HEAD_LINES,       TYPE_STREAM },
+      /* Constructors that always produce dyn collections. */
+      { HEAD_VEC,         TYPE_VEC    },
+      { HEAD_MAP,         TYPE_MAP    },
+      { HEAD_COLLECT,     TYPE_VEC    },
+      /* Side-effecting — always nil. */
+      { HEAD_PRINT,       TYPE_NIL    },
+    };
+    bool matched = false;
+    for (size_t fi = 0; fi < sizeof(fixed_returns)/sizeof(fixed_returns[0]); fi++) {
+      if (hid == fixed_returns[fi].hid) {
+        node->inferred_type = fixed_returns[fi].ret;
+        matched = true;
+        break;
+      }
+    }
+    if (matched) {
+      /* handled */
+    } else if (hl == 4 && memcmp(hn, "puts", 4) == 0) {
       /* "puts" is not in the HeadId table — keep the memcmp here. */
       node->inferred_type = TYPE_NIL;
-    } else if (hid == HEAD_TO_STRING) {
-      node->inferred_type = TYPE_STR;
     } else if (hid == HEAD_TO &&
                node->data.command.arg_count >= 1 &&
                node->data.command.args[0]->type == AST_LIT_STRING &&
