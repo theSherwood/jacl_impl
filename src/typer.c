@@ -1321,6 +1321,22 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             }
           }
           return;
+        case HEAD_RESET:
+          /* reset on struct-box → returns the new struct bytes (TOS).
+           * reset on plain box → returns NIL. */
+          if (node->data.command.arg_count == 2) {
+            AstNode* val = node->data.command.args[1];
+            if ((JaclType)val->inferred_type == TYPE_STRUCT &&
+                val->inferred_struct_idx != UINT32_MAX) {
+              node->inferred_type = TYPE_STRUCT;
+              node->inferred_struct_idx = val->inferred_struct_idx;
+            } else {
+              node->inferred_type = TYPE_NIL;
+            }
+          } else {
+            node->inferred_type = TYPE_NIL;
+          }
+          return;
         case HEAD_FILTER:
           /* filter preserves the receiver's collection type, including
            * elem struct_idx. Mirrors compiler__compile_hof_builtin: typed
