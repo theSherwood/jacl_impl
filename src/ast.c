@@ -165,6 +165,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "exec", 4) == 0) return HEAD_EXEC;
       if (memcmp(s, "take", 4) == 0) return HEAD_TAKE;
       if (memcmp(s, "hash", 4) == 0) return HEAD_HASH;
+      if (memcmp(s, "swap", 4) == 0) return HEAD_SWAP;
       return HEAD_NONE;
     case 5:
       if (memcmp(s, "while", 5) == 0) return HEAD_WHILE;

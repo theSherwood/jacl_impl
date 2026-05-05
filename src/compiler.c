@@ -5248,6 +5248,7 @@ bool compiler__is_core_builtin(const char *name, uint32_t len) {
 
 void compiler__compile_command(Compiler* c, AstNode* node) {
   AstNode* head = node->data.command.head;
+  HeadId   hid  = (HeadId)node->data.command.head_id;
   uint32_t argc = node->data.command.arg_count;
   AstNode** args = node->data.command.args;
   uint32_t line = node->start.line;
@@ -5573,13 +5574,13 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (has_spread) {
     /* Check for known binary builtins → use OP_FOLD_SPREAD */
     int fold_op = -1;
-    if (compiler__head_matches(head, "+", 1))      fold_op = 0;
-    else if (compiler__head_matches(head, "*", 1)) fold_op = 2;
-    else if (compiler__head_matches(head, "-", 1)) fold_op = 1;
-    else if (compiler__head_matches(head, "/", 1)) fold_op = 3;
+    if (hid == HEAD_PLUS)      fold_op = 0;
+    else if (hid == HEAD_STAR) fold_op = 2;
+    else if (hid == HEAD_MINUS) fold_op = 1;
+    else if (hid == HEAD_SLASH) fold_op = 3;
 
     /* vec with spread args → OP_VEC_SPREAD */
-    if (compiler__head_matches(head, "vec", 3)) {
+    if (hid == HEAD_VEC) {
       uint8_t fixed_args = 0;
       uint8_t num_spreads = 0;
       for (uint32_t i = 0; i < argc; i++) {
@@ -5740,7 +5741,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   /* --- Operator forms from uniform parsing --- */
 
   /* = → def (immutable binding) */
-  if (compiler__head_matches(head, "=", 1)) {
+  if (hid == HEAD_EQUALS) {
     if (argc != 2) {
       compiler__error(c, line, col, "'=' requires exactly 2 operands");
       return;
@@ -5750,7 +5751,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* : → mut (mutable binding) */
-  if (compiler__head_matches(head, ":", 1)) {
+  if (hid == HEAD_COLON) {
     if (argc != 2) {
       compiler__error(c, line, col, "':' requires exactly 2 operands");
       return;
@@ -5760,7 +5761,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* :: → set (reassignment) */
-  if (compiler__head_matches(head, "::", 2)) {
+  if (hid == HEAD_COLON_COLON) {
     if (argc != 2) {
       compiler__error(c, line, col, "'::' requires exactly 2 operands");
       return;
@@ -5770,7 +5771,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* | → pipe threading */
-  if (compiler__head_matches(head, "|", 1)) {
+  if (hid == HEAD_PIPE) {
     if (argc != 2) {
       compiler__error(c, line, col, "'|' requires exactly 2 operands");
       return;
@@ -5780,7 +5781,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* && → short-circuit logical AND: if LHS { RHS } { false } */
-  if (compiler__head_matches(head, "&&", 2)) {
+  if (hid == HEAD_AMP_AMP) {
     if (argc != 2) {
       compiler__error(c, line, col, "'&&' requires exactly 2 operands");
       return;
@@ -5797,7 +5798,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* || → short-circuit logical OR: if LHS { true } { RHS } */
-  if (compiler__head_matches(head, "||", 2)) {
+  if (hid == HEAD_PIPE_PIPE) {
     if (argc != 2) {
       compiler__error(c, line, col, "'||' requires exactly 2 operands");
       return;
@@ -5814,7 +5815,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* ~ → logical NOT: if expr { false } { true } */
-  if (compiler__head_matches(head, "~", 1) && argc == 1) {
+  if (hid == HEAD_TILDE && argc == 1) {
     compiler__compile_node(c, args[0]);
     uint32_t false_jump = compiler__emit_jump(c, OP_JUMP_IF_FALSE, line);
     compiler__emit_byte(c, OP_FALSE, line);
@@ -5827,12 +5828,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* Arithmetic builtins */
-  if (compiler__head_matches(head, "+", 1)) {
+  if (hid == HEAD_PLUS) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "+", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_ADD, "add", line, col);
     return;
   }
-  if (compiler__head_matches(head, "-", 1)) {
+  if (hid == HEAD_MINUS) {
     if (argc == 1) {
       compiler__compile_node(c, args[0]);
       /* Phase 3c: read result type from the typer's pre-computed AST
@@ -5858,24 +5859,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     return;
   }
-  if (compiler__head_matches(head, "*", 1)) {
+  if (hid == HEAD_STAR) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "*", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_MUL, "multiply", line, col);
     return;
   }
-  if (compiler__head_matches(head, "/", 1)) {
+  if (hid == HEAD_SLASH) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "/", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_DIV, "divide", line, col);
     return;
   }
-  if (compiler__head_matches(head, "%", 1)) {
+  if (hid == HEAD_PERCENT) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "%", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_MOD, "modulo", line, col);
     return;
   }
 
   /* Comparison builtins */
-  if (compiler__head_matches(head, "==", 2)) {
+  if (hid == HEAD_EQ_EQ) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "==", "2 arguments", argc); return; }
     /* US-013: Check for inline struct comparison — avoid materialization */
     if (args[0]->type == AST_VAR_REF && args[1]->type == AST_VAR_REF) {
@@ -5909,29 +5910,29 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_binary(c, args, OP_EQ, "compare", line, col);
     return;
   }
-  if (compiler__head_matches(head, "<", 1)) {
+  if (hid == HEAD_LT) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "<", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_LT, "compare", line, col);
     return;
   }
-  if (compiler__head_matches(head, ">", 1)) {
+  if (hid == HEAD_GT) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, ">", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_GT, "compare", line, col);
     return;
   }
-  if (compiler__head_matches(head, "<=", 2)) {
+  if (hid == HEAD_LE) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "<=", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_LE, "compare", line, col);
     return;
   }
-  if (compiler__head_matches(head, ">=", 2)) {
+  if (hid == HEAD_GE) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, ">=", "2 arguments", argc); return; }
     compiler__compile_binary(c, args, OP_GE, "compare", line, col);
     return;
   }
 
   /* Range operators: ..< (exclusive) and ..= (inclusive) */
-  if (compiler__head_matches(head, "..<", 3)) {
+  if (hid == HEAD_DOTDOT_LT) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "..<", "2 arguments", argc); return; }
     compiler__compile_node(c, args[0]);
     compiler__compile_node(c, args[1]);
@@ -5940,7 +5941,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     c->last_expr_type = TYPE_STREAM;
     return;
   }
-  if (compiler__head_matches(head, "..=", 3)) {
+  if (hid == HEAD_DOTDOT_EQ) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "..=", "2 arguments", argc); return; }
     compiler__compile_node(c, args[0]);
     compiler__compile_node(c, args[1]);
@@ -5951,7 +5952,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* Print builtin */
-  if (compiler__head_matches(head, "print", 5)) {
+  if (hid == HEAD_PRINT) {
     if (argc != 1) { compiler__builtin_arity_error(c, line, col, "print", "1 argument", argc); return; }
     compiler__compile_node(c, args[0]);
     if (c->last_expr_type == TYPE_TYPED_VEC) {
@@ -5982,7 +5983,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* length builtin */
-  if (compiler__head_matches(head, "length", 6)) {
+  if (hid == HEAD_LENGTH) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "length", "1 argument", argc);
       return;
@@ -5994,7 +5995,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* byte-length builtin */
-  if (compiler__head_matches(head, "byte-length", 11)) {
+  if (hid == HEAD_BYTE_LENGTH) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "byte-length", "1 argument", argc);
       return;
@@ -6006,7 +6007,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* index builtin */
-  if (compiler__head_matches(head, "index", 5)) {
+  if (hid == HEAD_INDEX) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "index", "2 arguments", argc);
       return;
@@ -6019,7 +6020,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* slice builtin (2 or 3 args) */
-  if (compiler__head_matches(head, "slice", 5)) {
+  if (hid == HEAD_SLICE) {
     if (argc != 2 && argc != 3) {
       compiler__builtin_arity_error(c, line, col, "slice", "2 or 3 arguments", argc);
       return;
@@ -6038,7 +6039,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* concat builtin (variadic: 2+ args) */
-  if (compiler__head_matches(head, "concat", 6)) {
+  if (hid == HEAD_CONCAT) {
     if (argc < 2) {
       compiler__builtin_arity_error(c, line, col, "concat", "at least 2 arguments", argc);
       return;
@@ -6057,7 +6058,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* mut — mutable local binding with cell auto-boxing */
-  if (compiler__head_matches(head, "mut", 3)) {
+  if (hid == HEAD_MUT) {
     /* --- Destructuring: [mut [a b c] value] or [mut DESTRUCTURE_VEC value] --- */
     if (argc == 2 && args[0]->type == AST_DESTRUCTURE_VEC) {
       compiler__compile_destructure_vec(
@@ -6467,7 +6468,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* set — reassign mutable binding */
-  if (compiler__head_matches(head, "set", 3)) {
+  if (hid == HEAD_SET) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "set", "2 arguments", argc); return; }
 
     /* Arrow desugar: `set n->field value` is parsed as set([. n field], value).
@@ -6774,7 +6775,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* def builtin — supports [def name value] and [def TYPE name value]
      and [def [a b c] value] for vector destructuring */
-  if (compiler__head_matches(head, "def", 3)) {
+  if (hid == HEAD_DEF) {
     /* --- Destructuring: [def [a b c] value] or [def DESTRUCTURE_VEC value] --- */
     if (argc == 2 && args[0]->type == AST_DESTRUCTURE_VEC) {
       compiler__compile_destructure_vec(
@@ -7267,7 +7268,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* proc definition */
-  if (compiler__head_matches(head, "proc", 4)) {
+  if (hid == HEAD_PROC) {
     /* Disambiguate: 4 args + first is type keyword → has return type.
        3 args → no return type (existing). */
     JaclType proc_return_type = TYPE_DYN;
@@ -7828,7 +7829,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* if conditional */
-  if (compiler__head_matches(head, "if", 2)) {
+  if (hid == HEAD_IF) {
     if (argc != 2 && argc != 3) {
       compiler__builtin_arity_error(c, line, col, "if", "2 or 3 arguments", argc);
       return;
@@ -7960,7 +7961,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* while loop */
-  if (compiler__head_matches(head, "while", 5)) {
+  if (hid == HEAD_WHILE) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "while", "2 arguments", argc);
       return;
@@ -8035,7 +8036,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
        [for $collection name { body }]      — explicit binding
        [for $collection $callback]           — HOF via OP_EACH
   */
-  if (compiler__head_matches(head, "for", 3)) {
+  if (hid == HEAD_FOR) {
     /* C-style for: [for {init; cond; step} { body }] */
     if (argc == 2 && args[0]->type == AST_BLOCK && args[1]->type == AST_BLOCK) {
       AstNode* ctrl       = args[0];
@@ -8426,7 +8427,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* break [value] — bracket form */
-  if (compiler__head_matches(head, "break", 5)) {
+  if (hid == HEAD_BREAK) {
     if (argc > 1) {
       compiler__builtin_arity_error(c, line, col, "break", "0 or 1 arguments", argc);
       return;
@@ -8459,7 +8460,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* continue — bracket form */
-  if (compiler__head_matches(head, "continue", 8)) {
+  if (hid == HEAD_CONTINUE) {
     if (argc != 0) {
       compiler__builtin_arity_error(c, line, col, "continue", "0 arguments", argc);
       return;
@@ -8495,7 +8496,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* return [value] — bracket form */
-  if (compiler__head_matches(head, "return", 6)) {
+  if (hid == HEAD_RETURN) {
     if (argc > 1) {
       compiler__builtin_arity_error(c, line, col, "return", "0 or 1 arguments", argc);
       return;
@@ -8515,7 +8516,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* try special form: [try { body } name { handler }] */
-  if (compiler__head_matches(head, "try", 3)) {
+  if (hid == HEAD_TRY) {
     if (argc != 3) {
       compiler__builtin_arity_error(c, line, col, "try", "3 arguments", argc);
       return;
@@ -8598,7 +8599,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* with-ctx {overrides} { body } — explicit context forking */
-  if (compiler__head_matches(head, "with-ctx", 8)) {
+  if (hid == HEAD_WITH_CTX) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "with-ctx", "2 arguments", argc);
       return;
@@ -8704,7 +8705,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* vec constructor (variadic: 0+ args) */
-  if (compiler__head_matches(head, "vec", 3)) {
+  if (hid == HEAD_VEC) {
     for (uint32_t i = 0; i < argc; i++) {
       compiler__compile_node(c, args[i]);
       if (compiler__reject_bare_typed(c, line, col, "dyn vec")) return;
@@ -8715,7 +8716,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* vec-get builtin (exactly 2 args) */
-  if (compiler__head_matches(head, "vec-get", 7)) {
+  if (hid == HEAD_VEC_GET) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "vec-get", "2 arguments", argc);
       return;
@@ -8749,7 +8750,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* vec-len builtin (exactly 1 arg) */
-  if (compiler__head_matches(head, "vec-len", 7)) {
+  if (hid == HEAD_VEC_LEN) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "vec-len", "1 argument", argc);
       return;
@@ -8770,7 +8771,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* vec-push builtin (exactly 2 args) */
-  if (compiler__head_matches(head, "vec-push", 8)) {
+  if (hid == HEAD_VEC_PUSH) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "vec-push", "2 arguments", argc);
       return;
@@ -8800,7 +8801,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* vec-set builtin (exactly 3 args) */
-  if (compiler__head_matches(head, "vec-set", 7)) {
+  if (hid == HEAD_VEC_SET) {
     if (argc != 3) {
       compiler__builtin_arity_error(c, line, col, "vec-set", "3 arguments", argc);
       return;
@@ -8832,7 +8833,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* vec-concat builtin (exactly 2 args) */
-  if (compiler__head_matches(head, "vec-concat", 10)) {
+  if (hid == HEAD_VEC_CONCAT) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "vec-concat", "2 arguments", argc);
       return;
@@ -8862,7 +8863,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* vec-slice builtin (exactly 3 args) */
-  if (compiler__head_matches(head, "vec-slice", 9)) {
+  if (hid == HEAD_VEC_SLICE) {
     if (argc != 3) {
       compiler__builtin_arity_error(c, line, col, "vec-slice", "3 arguments", argc);
       return;
@@ -8890,7 +8891,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* map constructor (0 or any even number of args) */
-  if (compiler__head_matches(head, "map", 3)) {
+  if (hid == HEAD_MAP) {
     if (argc % 2 != 0) {
       compiler__builtin_arity_error(c, line, col, "map",
                                      "an even number of arguments", argc);
@@ -8906,7 +8907,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* map-get builtin (exactly 2 args) */
-  if (compiler__head_matches(head, "map-get", 7)) {
+  if (hid == HEAD_MAP_GET) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "map-get", "2 arguments", argc);
       return;
@@ -8943,7 +8944,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* map-has builtin (exactly 2 args) */
-  if (compiler__head_matches(head, "map-has", 7)) {
+  if (hid == HEAD_MAP_HAS) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "map-has", "2 arguments", argc);
       return;
@@ -8971,7 +8972,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* map-len builtin (exactly 1 arg) */
-  if (compiler__head_matches(head, "map-len", 7)) {
+  if (hid == HEAD_MAP_LEN) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "map-len", "1 argument", argc);
       return;
@@ -8988,7 +8989,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* map-set builtin (exactly 3 args) */
-  if (compiler__head_matches(head, "map-set", 7)) {
+  if (hid == HEAD_MAP_SET) {
     if (argc != 3) {
       compiler__builtin_arity_error(c, line, col, "map-set", "3 arguments", argc);
       return;
@@ -9024,7 +9025,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* map-remove builtin (exactly 2 args) */
-  if (compiler__head_matches(head, "map-remove", 10)) {
+  if (hid == HEAD_MAP_REMOVE) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "map-remove", "2 arguments", argc);
       return;
@@ -9053,7 +9054,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* map-keys builtin (exactly 1 arg) */
-  if (compiler__head_matches(head, "map-keys", 8)) {
+  if (hid == HEAD_MAP_KEYS) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "map-keys", "1 argument", argc);
       return;
@@ -9077,7 +9078,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* map-vals builtin (exactly 1 arg) */
-  if (compiler__head_matches(head, "map-vals", 8)) {
+  if (hid == HEAD_MAP_VALS) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "map-vals", "1 argument", argc);
       return;
@@ -9097,20 +9098,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* transform builtin (exactly 2 args — non-suspending callback) */
-  if (compiler__head_matches(head, "transform", 9)) {
+  if (hid == HEAD_TRANSFORM) {
     compiler__compile_hof_builtin(c, "transform", args, argc, OP_TRANSFORM, line, col);
     return;
   }
 
 
   /* filter builtin (exactly 2 args — non-suspending callback) */
-  if (compiler__head_matches(head, "filter", 6)) {
+  if (hid == HEAD_FILTER) {
     compiler__compile_hof_builtin(c, "filter", args, argc, OP_FILTER, line, col);
     return;
   }
 
   /* error builtin (exactly 1 arg) */
-  if (compiler__head_matches(head, "error", 5)) {
+  if (hid == HEAD_ERROR) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "error", "1 argument", argc);
       return;
@@ -9121,7 +9122,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* error? builtin (exactly 1 arg) */
-  if (compiler__head_matches(head, "error?", 6)) {
+  if (hid == HEAD_ERROR_Q) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "error?", "1 argument", argc);
       return;
@@ -9133,7 +9134,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* error-val builtin (exactly 1 arg) */
-  if (compiler__head_matches(head, "error-val", 9)) {
+  if (hid == HEAD_ERROR_VAL) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "error-val", "1 argument", argc);
       return;
@@ -9145,7 +9146,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* stack-trace builtin (exactly 0 args) */
-  if (compiler__head_matches(head, "stack-trace", 11)) {
+  if (hid == HEAD_STACK_TRACE) {
     if (argc != 0) {
       compiler__builtin_arity_error(c, line, col, "stack-trace", "0 arguments", argc);
       return;
@@ -9155,7 +9156,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* to-string builtin (exactly 1 arg) */
-  if (compiler__head_matches(head, "to-string", 9)) {
+  if (hid == HEAD_TO_STRING) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "to-string", "1 argument", argc);
       return;
@@ -9168,7 +9169,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* US-013: hash builtin — hash any value, optimized for inline structs */
-  if (compiler__head_matches(head, "hash", 4)) {
+  if (hid == HEAD_HASH) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "hash", "1 argument", argc);
       return;
@@ -9201,7 +9202,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  if (compiler__head_matches(head, "interpret", 9)) {
+  if (hid == HEAD_INTERPRET) {
     if (argc != 1 && argc != 2) {
       compiler__builtin_arity_error(c, line, col, "interpret", "1 or 2 arguments", argc);
       return;
@@ -9222,7 +9223,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  if (compiler__head_matches(head, "interpret-prelude", 17)) {
+  if (hid == HEAD_INTERPRET_PRELUDE) {
     if (argc != 0) {
       compiler__builtin_arity_error(c, line, col, "interpret-prelude", "0 arguments", argc);
       return;
@@ -9234,7 +9235,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   /* US-015: syntax object introspection builtins. Each compiles the single
    * argument to a syntax object value, then emits OP_SYNTAX_OP with a subop
    * byte indicating which introspection operation to perform. */
-  if (compiler__head_matches(head, "syntax-kind", 11)) {
+  if (hid == HEAD_SYNTAX_KIND) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "syntax-kind", "1 argument", argc);
       return;
@@ -9245,7 +9246,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     c->last_expr_type = TYPE_STR;
     return;
   }
-  if (compiler__head_matches(head, "syntax-datum", 12)) {
+  if (hid == HEAD_SYNTAX_DATUM) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "syntax-datum", "1 argument", argc);
       return;
@@ -9255,7 +9256,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_byte(c, 1 /* SYNTAX_OP_DATUM */, line);
     return;
   }
-  if (compiler__head_matches(head, "syntax-head", 11)) {
+  if (hid == HEAD_SYNTAX_HEAD) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "syntax-head", "1 argument", argc);
       return;
@@ -9265,7 +9266,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_byte(c, 2 /* SYNTAX_OP_HEAD */, line);
     return;
   }
-  if (compiler__head_matches(head, "syntax-args", 11)) {
+  if (hid == HEAD_SYNTAX_ARGS) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "syntax-args", "1 argument", argc);
       return;
@@ -9276,7 +9277,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     c->last_expr_type = TYPE_VEC;
     return;
   }
-  if (compiler__head_matches(head, "syntax-commands", 15)) {
+  if (hid == HEAD_SYNTAX_COMMANDS) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "syntax-commands", "1 argument", argc);
       return;
@@ -9287,7 +9288,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     c->last_expr_type = TYPE_VEC;
     return;
   }
-  if (compiler__head_matches(head, "syntax-pos", 10)) {
+  if (hid == HEAD_SYNTAX_POS) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "syntax-pos", "1 argument", argc);
       return;
@@ -9301,7 +9302,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   /* NOTE: PRD calls this syntax->string but the lexer tokenizes -> as a
    * separator (arrow), so the hyphenated form 'syntax-str' is used instead,
    * consistent with existing builtins like to-string and byte-length. */
-  if (compiler__head_matches(head, "syntax-str", 10)) {
+  if (hid == HEAD_SYNTAX_STR) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "syntax-str", "1 argument", argc);
       return;
@@ -9317,7 +9318,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
    * First arg is a bare word naming the kind; remaining args are the
    * payload. Kind dispatch happens at compile time, so the opcode only
    * needs the kind-specific subop. Subops 7..12 share OP_SYNTAX_OP. */
-  if (compiler__head_matches(head, "make-syntax", 11)) {
+  if (hid == HEAD_MAKE_SYNTAX) {
     if (argc < 1) {
       compiler__builtin_arity_error(c, line, col, "make-syntax",
                                     "at least 1 argument (kind)", argc);
@@ -9387,7 +9388,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
    * Implementation is a runtime error — macros in JACL are template-based,
    * so "compile-time" in the PRD sense means "at macro-expanded-code
    * execution time", which is the program's normal runtime. */
-  if (compiler__head_matches(head, "syntax-error", 12)) {
+  if (hid == HEAD_SYNTAX_ERROR) {
     if (argc != 1 && argc != 2) {
       compiler__builtin_arity_error(c, line, col, "syntax-error",
                                     "1 or 2 arguments (message, optional syntax)", argc);
@@ -9406,7 +9407,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* box builtin (exactly 1 arg) */
-  if (compiler__head_matches(head, "box", 3)) {
+  if (hid == HEAD_BOX) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "box", "1 argument", argc);
       return;
@@ -9425,7 +9426,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* atom builtin (exactly 1 arg) */
-  if (compiler__head_matches(head, "atom", 4)) {
+  if (hid == HEAD_ATOM) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "atom", "1 argument", argc);
       return;
@@ -9440,7 +9441,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* box? builtin (1 or 2 args) */
-  if (compiler__head_matches(head, "box?", 4)) {
+  if (hid == HEAD_BOX_Q) {
     if (argc != 1 && argc != 2) {
       compiler__builtin_arity_error(c, line, col, "box?", "1 or 2 arguments", argc);
       return;
@@ -9490,7 +9491,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* atom? builtin (exactly 1 arg) */
-  if (compiler__head_matches(head, "atom?", 5)) {
+  if (hid == HEAD_ATOM_Q) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "atom?", "1 argument", argc);
       return;
@@ -9502,7 +9503,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* future? builtin (exactly 1 arg) */
-  if (compiler__head_matches(head, "future?", 7)) {
+  if (hid == HEAD_FUTURE_Q) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "future?", "1 argument", argc);
       return;
@@ -9514,7 +9515,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* deref builtin (exactly 1 arg) */
-  if (compiler__head_matches(head, "deref", 5)) {
+  if (hid == HEAD_DEREF) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "deref", "1 argument", argc);
       return;
@@ -9525,7 +9526,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* unbox builtin (exactly 1 arg) — requires flow-typed narrowing from box? guard */
-  if (compiler__head_matches(head, "unbox", 5)) {
+  if (hid == HEAD_UNBOX) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "unbox", "1 argument", argc);
       return;
@@ -9578,7 +9579,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* reset builtin (exactly 2 args) */
-  if (compiler__head_matches(head, "reset", 5)) {
+  if (hid == HEAD_RESET) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "reset", "2 arguments", argc);
       return;
@@ -9598,7 +9599,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* swap builtin (exactly 2 args) */
-  if (compiler__head_matches(head, "swap", 4)) {
+  if (hid == HEAD_SWAP) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "swap", "2 arguments", argc);
       return;
@@ -9611,7 +9612,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* to builtin — explicit type conversion: [to TYPE expr] */
-  if (compiler__head_matches(head, "to", 2)) {
+  if (hid == HEAD_TO) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "to", "2 arguments", argc);
       return;
@@ -9698,7 +9699,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* await — suspension point (state machine) or job wait */
-  if (compiler__head_matches(head, "await", 5)) {
+  if (hid == HEAD_AWAIT) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "await", "1 argument", argc);
       return;
@@ -9746,7 +9747,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* yield — generator suspension point (state machine). */
-  if (compiler__head_matches(head, "yield", 5)) {
+  if (hid == HEAD_YIELD) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "yield", "1 argument", argc);
       return;
@@ -9781,7 +9782,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* stream_next — pull next element from a stream */
-  if (compiler__head_matches(head, "stream_next", 11)) {
+  if (hid == HEAD_STREAM_NEXT) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "stream_next", "1 argument", argc);
       return;
@@ -9793,7 +9794,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* collect — materialize stream into vector (identity on vectors) */
-  if (compiler__head_matches(head, "collect", 7)) {
+  if (hid == HEAD_COLLECT) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "collect", "1 argument", argc);
       return;
@@ -9805,7 +9806,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* count — count elements in stream or vector */
-  if (compiler__head_matches(head, "count", 5)) {
+  if (hid == HEAD_COUNT) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "count", "1 argument", argc);
       return;
@@ -9817,7 +9818,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* take — take first N elements from stream or vector */
-  if (compiler__head_matches(head, "take", 4)) {
+  if (hid == HEAD_TAKE) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "take", "2 arguments", argc);
       return;
@@ -9834,7 +9835,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* first — get first element from stream or vector */
-  if (compiler__head_matches(head, "first", 5)) {
+  if (hid == HEAD_FIRST) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "first", "1 argument", argc);
       return;
@@ -9846,7 +9847,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* lines — split string into lazy line stream */
-  if (compiler__head_matches(head, "lines", 5)) {
+  if (hid == HEAD_LINES) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "lines", "1 argument", argc);
       return;
@@ -9861,7 +9862,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
    * [exec cmd arg1 arg2 ...] spawns a subprocess, waits for completion,
    * and returns a map with stdout (stream), stderr (string), exit (i32).
    * This is the "full form" that gives access to all process outputs. */
-  if (compiler__head_matches(head, "exec", 4)) {
+  if (hid == HEAD_EXEC) {
     if (argc < 1) {
       compiler__builtin_arity_error(c, line, col, "exec", "at least 1 argument", argc);
       return;
@@ -9886,7 +9887,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   /* signal — send signal to a background job (US-011)
    * [signal $job SIGTERM] sends signal to the job's process, returns $true/$false.
    * Valid signal names: SIGTERM, SIGKILL, SIGINT, SIGHUP, SIGUSR1, SIGUSR2 */
-  if (compiler__head_matches(head, "signal", 6)) {
+  if (hid == HEAD_SIGNAL) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "signal", "2 arguments", argc);
       return;
@@ -9904,7 +9905,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* cancel — send SIGTERM to a background job (US-011)
    * [cancel $job] is shorthand for [signal $job SIGTERM] */
-  if (compiler__head_matches(head, "cancel", 6)) {
+  if (hid == HEAD_CANCEL) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "cancel", "1 argument", argc);
       return;
@@ -9919,7 +9920,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* parallel — suspension point (state machine) */
-  if (compiler__head_matches(head, "parallel", 8)) {
+  if (hid == HEAD_PARALLEL) {
     if (argc < 2) {
       compiler__builtin_arity_error(c, line, col, "parallel",
                                      "at least 2 arguments", argc);
@@ -9971,7 +9972,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* race — suspension point (state machine) */
-  if (compiler__head_matches(head, "race", 4)) {
+  if (hid == HEAD_RACE) {
     if (argc < 2) {
       compiler__builtin_arity_error(c, line, col, "race",
                                      "at least 2 arguments", argc);
@@ -10023,7 +10024,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* spawn — NOT a suspension point (runtime task submission) */
-  if (compiler__head_matches(head, "spawn", 5)) {
+  if (hid == HEAD_SPAWN) {
     if (argc != 1) {
       compiler__builtin_arity_error(c, line, col, "spawn", "1 argument", argc);
       return;
@@ -10147,7 +10148,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* Struct/map/module field access/mutation: [. $s field] or [. $s field value] */
-  if (compiler__head_matches(head, ".", 1)) {
+  if (hid == HEAD_DOT) {
     bool is_set = (argc == 3);
     if (argc != 2 && argc != 3) {
       compiler__builtin_arity_error(c, line, col, ".", "2 or 3 arguments", argc);
@@ -10683,7 +10684,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* Optional chaining: [?. expr field] — nil-safe field access */
-  if (compiler__head_matches(head, "?.", 2)) {
+  if (hid == HEAD_QDOT) {
     if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "?.", "2 arguments", argc);
       return;
