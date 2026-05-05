@@ -48,6 +48,10 @@ typedef struct {
   uint8_t     field_types[TYPER_MAX_STRUCT_FIELDS]; /* JaclType per field; TYPE_STRUCT if a nested struct */
   const char* field_names[TYPER_MAX_STRUCT_FIELDS];
   uint32_t    field_name_lens[TYPER_MAX_STRUCT_FIELDS];
+  /* For TYPE_STRUCT fields, the index of the nested struct in
+   * tc->structs (so chained `$x.field.subfield` can resolve the
+   * subfield's type). UINT32_MAX for non-struct fields or unresolved. */
+  uint32_t    field_struct_idxs[TYPER_MAX_STRUCT_FIELDS];
 } TyperStruct;
 
 typedef struct {
@@ -707,15 +711,18 @@ static uint32_t typer__register_ctx_struct(TyperCtx* tc,
     const char* tn = node->data.ctx_decl.type_name;
     uint32_t    tl = node->data.ctx_decl.type_name_len;
     JaclType ft = TYPE_DYN;
+    uint32_t f_struct_idx = UINT32_MAX;
     if (tn && is_type_keyword(tn, tl)) {
       ft = type_from_keyword(tn, tl);
     } else if (tn) {
-      /* Likely a registered struct name; mark as TYPE_STRUCT. */
       ft = TYPE_STRUCT;
+      const TyperStruct* found = typer__find_struct(tc, tn, tl);
+      if (found) f_struct_idx = (uint32_t)(found - tc->structs);
     }
-    s->field_types[fi]     = (uint8_t)ft;
-    s->field_names[fi]     = node->data.ctx_decl.field_name;
-    s->field_name_lens[fi] = node->data.ctx_decl.field_name_len;
+    s->field_types[fi]        = (uint8_t)ft;
+    s->field_names[fi]        = node->data.ctx_decl.field_name;
+    s->field_name_lens[fi]    = node->data.ctx_decl.field_name_len;
+    s->field_struct_idxs[fi]  = f_struct_idx;
     fi++;
   }
   return ctx_idx;
@@ -724,6 +731,10 @@ static uint32_t typer__register_ctx_struct(TyperCtx* tc,
 /* Pre-pass: collect struct definitions so struct constructor calls
  * (which propagate field types to args) can resolve. */
 static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t count) {
+  /* Pass 1: register names and primitive field types. Defer struct-
+   * typed field idx resolution to pass 2 so forward references work
+   * (struct A with field of type B, where B is defined after A). */
+  uint32_t first_added = tc->struct_count;
   for (uint32_t ni = 0; ni < count; ni++) {
     AstNode* node = nodes[ni];
     if (node->type != AST_DEFSTRUCT) continue;
@@ -741,15 +752,41 @@ static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t coun
       if (is_type_keyword(tn, tl)) {
         ft = type_from_keyword(tn, tl);
       } else {
-        /* Likely a nested struct name; mark as TYPE_STRUCT. The typer
-         * doesn't track per-field struct_idx yet, so narrowing here
-         * just becomes "expect a struct" — still better than DYN for
-         * literal arg narrowing (they wouldn't match TYPE_STRUCT). */
+        /* Nested struct — type set to TYPE_STRUCT here; struct_idx
+         * resolved in pass 2 below. */
         ft = TYPE_STRUCT;
       }
-      s->field_types[i]     = (uint8_t)ft;
-      s->field_names[i]     = node->data.defstruct.field_names[i];
-      s->field_name_lens[i] = node->data.defstruct.field_name_lens[i];
+      s->field_types[i]        = (uint8_t)ft;
+      s->field_names[i]        = node->data.defstruct.field_names[i];
+      s->field_name_lens[i]    = node->data.defstruct.field_name_lens[i];
+      s->field_struct_idxs[i]  = UINT32_MAX;
+    }
+  }
+  /* Pass 2: for each struct registered in pass 1, resolve struct-
+   * typed field indices by looking up the field's type-name in the
+   * (now complete) registry. Enables `$x.field.subfield` chains. */
+  for (uint32_t ni = 0; ni < count; ni++) {
+    AstNode* node = nodes[ni];
+    if (node->type != AST_DEFSTRUCT) continue;
+    /* Find the matching TyperStruct entry. */
+    TyperStruct* s = NULL;
+    for (uint32_t si = first_added; si < tc->struct_count; si++) {
+      if (tc->structs[si].name_len == node->data.defstruct.name_len &&
+          memcmp(tc->structs[si].name, node->data.defstruct.name,
+                 node->data.defstruct.name_len) == 0) {
+        s = &tc->structs[si];
+        break;
+      }
+    }
+    if (!s) continue;
+    for (uint32_t i = 0; i < s->field_count; i++) {
+      if (s->field_types[i] != TYPE_STRUCT) continue;
+      const char* tn = node->data.defstruct.field_types[i];
+      uint32_t    tl = node->data.defstruct.field_type_lens[i];
+      const TyperStruct* found = typer__find_struct(tc, tn, tl);
+      if (found) {
+        s->field_struct_idxs[i] = (uint32_t)(found - tc->structs);
+      }
     }
   }
 }
@@ -1172,7 +1209,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     } else if (hid == HEAD_DOT &&
                node->data.command.arg_count == 2) {
       /* [. struct field] arrow access — result type is the accessed
-       * field's declared type. */
+       * field's declared type. For struct-typed fields, propagate
+       * inferred_struct_idx so chained access (`$x.field.subfield`)
+       * resolves the subfield's type. */
       AstNode* tgt = node->data.command.args[0];
       AstNode* fld = node->data.command.args[1];
       if (tgt->inferred_type == TYPE_STRUCT &&
@@ -1186,6 +1225,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           if (sd->field_name_lens[fi] == fnl &&
               memcmp(sd->field_names[fi], fn, fnl) == 0) {
             node->inferred_type = (uint8_t)sd->field_types[fi];
+            if (sd->field_types[fi] == TYPE_STRUCT) {
+              node->inferred_struct_idx = sd->field_struct_idxs[fi];
+            }
             break;
           }
         }
