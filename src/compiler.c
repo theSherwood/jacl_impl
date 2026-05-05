@@ -2890,6 +2890,40 @@ void compiler__set_global_prelude_native_fn(Compiler* c, JaclVal name, bool is_n
   }
 }
 
+/* --- Internal: Mark a top-level global's GlobalArity as mutable.
+ *
+ * Both destructure compilers, when binding mutable globals, need to walk to
+ * the root compiler and flip the is_mutable flag on the matching arity entry.
+ * Centralized here. */
+static void compiler__mark_global_mutable(Compiler* c, JaclVal name) {
+  Compiler* root = c;
+  while (root->enclosing) root = root->enclosing;
+  for (uint32_t j = 0; j < root->global_arity_count; j++) {
+    if (root->global_arities[j].name == name) {
+      root->global_arities[j].is_mutable = true;
+      return;
+    }
+  }
+}
+
+/* --- Internal: Apply a destructure-pattern type annotation to the most
+ * recently added local.
+ *
+ * Both destructure compilers walk the d_types/d_type_lens arrays per binding
+ * and, if a type is given, resolve it and set local.type. Centralized so
+ * the boilerplate doesn't repeat 5+ times. */
+bool compiler__resolve_type(Compiler* c, const char* word, uint32_t len, JaclType* out);
+static void compiler__apply_destructure_type(Compiler* c,
+                                             const char** d_types,
+                                             uint32_t* d_type_lens,
+                                             uint32_t i) {
+  if (!d_types || !d_types[i]) return;
+  JaclType t;
+  if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
+    c->locals[c->local_count - 1].type = t;
+  }
+}
+
 /* --- Internal: Struct type registry access --- */
 
 StructTypeRegistry* compiler__get_struct_registry(Compiler* c) {
@@ -4026,12 +4060,7 @@ void compiler__compile_destructure_vec(
           } else {
             JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
             compiler__add_local(c, name_val, line, col);
-            if (d_types && d_types[i]) {
-              JaclType t;
-              if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
-                c->locals[c->local_count - 1].type = t;
-              }
-            }
+            compiler__apply_destructure_type(c, d_types, d_type_lens, i);
           }
         }
         /* Register local for rest vector */
@@ -4056,12 +4085,7 @@ void compiler__compile_destructure_vec(
           JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
           compiler__add_local(c, name_val, line, col);
           c->locals[c->local_count - 1].is_mutable = true;
-          if (d_types && d_types[i]) {
-            JaclType t;
-            if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
-              c->locals[c->local_count - 1].type = t;
-            }
-          }
+          compiler__apply_destructure_type(c, d_types, d_type_lens, i);
         }
         /* Rest: use OP_DESTRUCTURE_VEC_REST on a copy to get the rest vector,
            or manually build it with vec-slice. Simpler: push vec, emit
@@ -4102,16 +4126,7 @@ void compiler__compile_destructure_vec(
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, rest_idx, line);
       compiler__set_global_arity(c, rest_val, -1);
-      if (is_mutable) {
-        Compiler* root = c;
-        while (root->enclosing) root = root->enclosing;
-        for (uint32_t j = 0; j < root->global_arity_count; j++) {
-          if (root->global_arities[j].name == rest_val) {
-            root->global_arities[j].is_mutable = true;
-            break;
-          }
-        }
-      }
+      if (is_mutable) compiler__mark_global_mutable(c, rest_val);
       /* Now define positional elements in reverse order */
       for (int i = (int)d_count - 1; i >= 0; i--) {
         compiler__emit_byte(c, OP_POP, line); /* pop nil from previous OP_DEF_GLOBAL */
@@ -4131,16 +4146,7 @@ void compiler__compile_destructure_vec(
         compiler__emit_byte(c, OP_DEF_GLOBAL, line);
         compiler__emit_u16(c, name_idx, line);
         compiler__set_global_arity(c, name_val, -1);
-        if (is_mutable) {
-          Compiler* root = c;
-          while (root->enclosing) root = root->enclosing;
-          for (uint32_t j = 0; j < root->global_arity_count; j++) {
-            if (root->global_arities[j].name == name_val) {
-              root->global_arities[j].is_mutable = true;
-              break;
-            }
-          }
-        }
+        if (is_mutable) compiler__mark_global_mutable(c, name_val);
       }
     }
   } else {
@@ -4157,12 +4163,7 @@ void compiler__compile_destructure_vec(
           if (skip_mask & (1u << i)) continue; /* wildcard: no local */
           JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
           compiler__add_local(c, name_val, line, col);
-          if (d_types && d_types[i]) {
-            JaclType t;
-            if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
-              c->locals[c->local_count - 1].type = t;
-            }
-          }
+          compiler__apply_destructure_type(c, d_types, d_type_lens, i);
         }
       } else {
         /* mut: extract each element individually, wrap in cell.
@@ -4188,12 +4189,7 @@ void compiler__compile_destructure_vec(
           JaclVal name_val = compiler__name_val(c->heap, c->intern_table, d_names[i], d_name_lens[i]);
           compiler__add_local(c, name_val, line, col);
           c->locals[c->local_count - 1].is_mutable = true;
-          if (d_types && d_types[i]) {
-            JaclType t;
-            if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
-              c->locals[c->local_count - 1].type = t;
-            }
-          }
+          compiler__apply_destructure_type(c, d_types, d_type_lens, i);
         }
       }
       /* def/mut returns nil */
@@ -4225,16 +4221,7 @@ void compiler__compile_destructure_vec(
         compiler__emit_u16(c, name_idx, line);
         /* OP_DEF_GLOBAL pops value, pushes nil */
         compiler__set_global_arity(c, name_val, -1);
-        if (is_mutable) {
-          Compiler* root = c;
-          while (root->enclosing) root = root->enclosing;
-          for (uint32_t j = 0; j < root->global_arity_count; j++) {
-            if (root->global_arities[j].name == name_val) {
-              root->global_arities[j].is_mutable = true;
-              break;
-            }
-          }
-        }
+        if (is_mutable) compiler__mark_global_mutable(c, name_val);
       }
       /* If all positions were wildcards, push nil as return value */
       if (first_non_wildcard) {
@@ -4506,12 +4493,7 @@ void compiler__compile_destructure_named(
         compiler__add_local(c, name_val, line, col);
         if (is_mutable)
           c->locals[c->local_count - 1].is_mutable = true;
-        if (d_types && d_types[i]) {
-          JaclType t;
-          if (compiler__resolve_type(c, d_types[i], d_type_lens[i], &t)) {
-            c->locals[c->local_count - 1].type = t;
-          }
-        }
+        compiler__apply_destructure_type(c, d_types, d_type_lens, i);
       }
 
       /* Rest: build map from remaining fields */
@@ -4563,16 +4545,7 @@ void compiler__compile_destructure_named(
         compiler__emit_byte(c, OP_DEF_GLOBAL, line);
         compiler__emit_u16(c, name_idx, line);
         compiler__set_global_arity(c, name_val, -1);
-        if (is_mutable) {
-          Compiler* root = c;
-          while (root->enclosing) root = root->enclosing;
-          for (uint32_t j = 0; j < root->global_arity_count; j++) {
-            if (root->global_arities[j].name == name_val) {
-              root->global_arities[j].is_mutable = true;
-              break;
-            }
-          }
-        }
+        if (is_mutable) compiler__mark_global_mutable(c, name_val);
         if (i > 0) {
           compiler__emit_byte(c, OP_POP, line);
         }
@@ -4598,16 +4571,7 @@ void compiler__compile_destructure_named(
       compiler__emit_byte(c, OP_DEF_GLOBAL, line);
       compiler__emit_u16(c, rest_idx, line);
       compiler__set_global_arity(c, rest_val, -1);
-      if (is_mutable) {
-        Compiler* root = c;
-        while (root->enclosing) root = root->enclosing;
-        for (uint32_t j = 0; j < root->global_arity_count; j++) {
-          if (root->global_arities[j].name == rest_val) {
-            root->global_arities[j].is_mutable = true;
-            break;
-          }
-        }
-      }
+      if (is_mutable) compiler__mark_global_mutable(c, rest_val);
       /* Now define positional elements in reverse order */
       for (int i = (int)d_count - 1; i >= 0; i--) {
         compiler__emit_byte(c, OP_POP, line); /* pop nil from previous OP_DEF_GLOBAL */
@@ -4621,16 +4585,7 @@ void compiler__compile_destructure_named(
         compiler__emit_byte(c, OP_DEF_GLOBAL, line);
         compiler__emit_u16(c, name_idx, line);
         compiler__set_global_arity(c, name_val, -1);
-        if (is_mutable) {
-          Compiler* root = c;
-          while (root->enclosing) root = root->enclosing;
-          for (uint32_t j = 0; j < root->global_arity_count; j++) {
-            if (root->global_arities[j].name == name_val) {
-              root->global_arities[j].is_mutable = true;
-              break;
-            }
-          }
-        }
+        if (is_mutable) compiler__mark_global_mutable(c, name_val);
       }
     }
   }
