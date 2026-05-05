@@ -8999,7 +8999,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         return;
       }
     }
-    c->last_expr_type = TYPE_DYN;
+    c->last_expr_type = TYPE_BOOL;
     return;
   }
 
