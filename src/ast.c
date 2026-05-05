@@ -42,6 +42,220 @@ typedef enum {
 } AstNodeType;
 
 /* -------------------------------------------------------------------------
+ * HeadId — interned identifier for well-known command head names.
+ *
+ * Most AST_COMMAND nodes have a head whose value is a fixed bare word
+ * ("yield", "def", "+", "vec-get", ...). The compiler and several AST
+ * walkers dispatch on those names via repeated `memcmp` chains. Stamping
+ * `head_id` once at construction lets every consumer dispatch by integer
+ * compare instead.
+ *
+ * HEAD_NONE is the catch-all: head is not AST_LIT_STRING (e.g. AST_VAR_REF
+ * for `[$f x]`), or is a string outside this table (a user-defined call).
+ * Any caller still needing the exact string can read it from the head node.
+ * ------------------------------------------------------------------------- */
+
+typedef enum {
+  HEAD_NONE = 0,
+
+  /* Operators */
+  HEAD_PLUS, HEAD_MINUS, HEAD_STAR, HEAD_SLASH, HEAD_PERCENT,
+  HEAD_LT, HEAD_GT, HEAD_LE, HEAD_GE, HEAD_EQ_EQ,
+  HEAD_EQUALS, HEAD_COLON, HEAD_COLON_COLON,
+  HEAD_PIPE, HEAD_PIPE_PIPE, HEAD_AMP_AMP, HEAD_TILDE,
+  HEAD_DOTDOT_LT, HEAD_DOTDOT_EQ,
+  HEAD_DOT, HEAD_QDOT,
+
+  /* Bindings & defs */
+  HEAD_DEF, HEAD_MUT, HEAD_SET, HEAD_PROC,
+  HEAD_DEFSTRUCT, HEAD_DEFMACRO,
+
+  /* Control flow */
+  HEAD_IF, HEAD_WHILE, HEAD_FOR,
+  HEAD_BREAK, HEAD_CONTINUE, HEAD_RETURN,
+  HEAD_TRY, HEAD_WITH_CTX, HEAD_MATCH,
+
+  /* Concurrency / suspension */
+  HEAD_YIELD, HEAD_AWAIT, HEAD_SPAWN, HEAD_PARALLEL, HEAD_RACE,
+
+  /* Vec ops */
+  HEAD_VEC,
+  HEAD_VEC_GET, HEAD_VEC_LEN, HEAD_VEC_PUSH, HEAD_VEC_SET,
+  HEAD_VEC_CONCAT, HEAD_VEC_SLICE,
+
+  /* Map ops */
+  HEAD_MAP,
+  HEAD_MAP_GET, HEAD_MAP_HAS, HEAD_MAP_LEN, HEAD_MAP_SET,
+  HEAD_MAP_REMOVE, HEAD_MAP_KEYS, HEAD_MAP_VALS,
+
+  /* Builtins */
+  HEAD_PRINT, HEAD_LENGTH, HEAD_BYTE_LENGTH,
+  HEAD_INDEX, HEAD_SLICE, HEAD_CONCAT,
+  HEAD_HASH, HEAD_TO_STRING, HEAD_TRANSFORM, HEAD_FILTER,
+
+  /* Errors */
+  HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE,
+
+  /* Boxes / atoms / coercion */
+  HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
+  HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
+
+  /* Streams / async / shell */
+  HEAD_STREAM_NEXT, HEAD_COLLECT, HEAD_COUNT, HEAD_TAKE,
+  HEAD_FIRST, HEAD_LINES, HEAD_EXEC, HEAD_SIGNAL, HEAD_CANCEL,
+
+  /* Quote / syntax / macros */
+  HEAD_QUOTE, HEAD_SYNTAX_QUOTE, HEAD_INTERPRET, HEAD_INTERPRET_PRELUDE,
+  HEAD_SYNTAX_KIND, HEAD_SYNTAX_DATUM, HEAD_SYNTAX_HEAD,
+  HEAD_SYNTAX_ARGS, HEAD_SYNTAX_COMMANDS, HEAD_SYNTAX_POS,
+  HEAD_SYNTAX_STR, HEAD_MAKE_SYNTAX, HEAD_SYNTAX_ERROR,
+
+  HEAD_ID_COUNT  /* sentinel; must fit in uint8_t */
+} HeadId;
+
+/* Map a bare-word head string to its HeadId, or HEAD_NONE if not in the
+ * well-known set. Dispatched by length to keep the hot path branch-light. */
+static HeadId ast__head_id_for(const char* s, uint32_t len) {
+  if (!s || len == 0 || len > 17) return HEAD_NONE;
+  switch (len) {
+    case 1:
+      switch (s[0]) {
+        case '+': return HEAD_PLUS;
+        case '-': return HEAD_MINUS;
+        case '*': return HEAD_STAR;
+        case '/': return HEAD_SLASH;
+        case '%': return HEAD_PERCENT;
+        case '<': return HEAD_LT;
+        case '>': return HEAD_GT;
+        case '=': return HEAD_EQUALS;
+        case ':': return HEAD_COLON;
+        case '|': return HEAD_PIPE;
+        case '~': return HEAD_TILDE;
+        case '.': return HEAD_DOT;
+      }
+      return HEAD_NONE;
+    case 2:
+      if (s[0] == '=' && s[1] == '=') return HEAD_EQ_EQ;
+      if (s[0] == '<' && s[1] == '=') return HEAD_LE;
+      if (s[0] == '>' && s[1] == '=') return HEAD_GE;
+      if (s[0] == ':' && s[1] == ':') return HEAD_COLON_COLON;
+      if (s[0] == '|' && s[1] == '|') return HEAD_PIPE_PIPE;
+      if (s[0] == '&' && s[1] == '&') return HEAD_AMP_AMP;
+      if (s[0] == '?' && s[1] == '.') return HEAD_QDOT;
+      if (s[0] == 'i' && s[1] == 'f') return HEAD_IF;
+      if (s[0] == 't' && s[1] == 'o') return HEAD_TO;
+      return HEAD_NONE;
+    case 3:
+      if (memcmp(s, "..<", 3) == 0) return HEAD_DOTDOT_LT;
+      if (memcmp(s, "..=", 3) == 0) return HEAD_DOTDOT_EQ;
+      if (memcmp(s, "def", 3) == 0) return HEAD_DEF;
+      if (memcmp(s, "mut", 3) == 0) return HEAD_MUT;
+      if (memcmp(s, "set", 3) == 0) return HEAD_SET;
+      if (memcmp(s, "for", 3) == 0) return HEAD_FOR;
+      if (memcmp(s, "try", 3) == 0) return HEAD_TRY;
+      if (memcmp(s, "vec", 3) == 0) return HEAD_VEC;
+      if (memcmp(s, "map", 3) == 0) return HEAD_MAP;
+      if (memcmp(s, "box", 3) == 0) return HEAD_BOX;
+      return HEAD_NONE;
+    case 4:
+      if (memcmp(s, "proc", 4) == 0) return HEAD_PROC;
+      if (memcmp(s, "atom", 4) == 0) return HEAD_ATOM;
+      if (memcmp(s, "box?", 4) == 0) return HEAD_BOX_Q;
+      if (memcmp(s, "race", 4) == 0) return HEAD_RACE;
+      if (memcmp(s, "exec", 4) == 0) return HEAD_EXEC;
+      if (memcmp(s, "take", 4) == 0) return HEAD_TAKE;
+      if (memcmp(s, "hash", 4) == 0) return HEAD_HASH;
+      return HEAD_NONE;
+    case 5:
+      if (memcmp(s, "while", 5) == 0) return HEAD_WHILE;
+      if (memcmp(s, "yield", 5) == 0) return HEAD_YIELD;
+      if (memcmp(s, "await", 5) == 0) return HEAD_AWAIT;
+      if (memcmp(s, "spawn", 5) == 0) return HEAD_SPAWN;
+      if (memcmp(s, "match", 5) == 0) return HEAD_MATCH;
+      if (memcmp(s, "break", 5) == 0) return HEAD_BREAK;
+      if (memcmp(s, "print", 5) == 0) return HEAD_PRINT;
+      if (memcmp(s, "slice", 5) == 0) return HEAD_SLICE;
+      if (memcmp(s, "index", 5) == 0) return HEAD_INDEX;
+      if (memcmp(s, "error", 5) == 0) return HEAD_ERROR;
+      if (memcmp(s, "atom?", 5) == 0) return HEAD_ATOM_Q;
+      if (memcmp(s, "deref", 5) == 0) return HEAD_DEREF;
+      if (memcmp(s, "unbox", 5) == 0) return HEAD_UNBOX;
+      if (memcmp(s, "reset", 5) == 0) return HEAD_RESET;
+      if (memcmp(s, "first", 5) == 0) return HEAD_FIRST;
+      if (memcmp(s, "lines", 5) == 0) return HEAD_LINES;
+      if (memcmp(s, "count", 5) == 0) return HEAD_COUNT;
+      if (memcmp(s, "quote", 5) == 0) return HEAD_QUOTE;
+      return HEAD_NONE;
+    case 6:
+      if (memcmp(s, "return", 6) == 0) return HEAD_RETURN;
+      if (memcmp(s, "filter", 6) == 0) return HEAD_FILTER;
+      if (memcmp(s, "concat", 6) == 0) return HEAD_CONCAT;
+      if (memcmp(s, "length", 6) == 0) return HEAD_LENGTH;
+      if (memcmp(s, "error?", 6) == 0) return HEAD_ERROR_Q;
+      if (memcmp(s, "signal", 6) == 0) return HEAD_SIGNAL;
+      if (memcmp(s, "cancel", 6) == 0) return HEAD_CANCEL;
+      return HEAD_NONE;
+    case 7:
+      if (memcmp(s, "vec-get", 7) == 0) return HEAD_VEC_GET;
+      if (memcmp(s, "vec-len", 7) == 0) return HEAD_VEC_LEN;
+      if (memcmp(s, "vec-set", 7) == 0) return HEAD_VEC_SET;
+      if (memcmp(s, "map-get", 7) == 0) return HEAD_MAP_GET;
+      if (memcmp(s, "map-has", 7) == 0) return HEAD_MAP_HAS;
+      if (memcmp(s, "map-len", 7) == 0) return HEAD_MAP_LEN;
+      if (memcmp(s, "map-set", 7) == 0) return HEAD_MAP_SET;
+      if (memcmp(s, "future?", 7) == 0) return HEAD_FUTURE_Q;
+      if (memcmp(s, "collect", 7) == 0) return HEAD_COLLECT;
+      return HEAD_NONE;
+    case 8:
+      if (memcmp(s, "continue", 8) == 0) return HEAD_CONTINUE;
+      if (memcmp(s, "with-ctx", 8) == 0) return HEAD_WITH_CTX;
+      if (memcmp(s, "parallel", 8) == 0) return HEAD_PARALLEL;
+      if (memcmp(s, "vec-push", 8) == 0) return HEAD_VEC_PUSH;
+      if (memcmp(s, "map-keys", 8) == 0) return HEAD_MAP_KEYS;
+      if (memcmp(s, "map-vals", 8) == 0) return HEAD_MAP_VALS;
+      if (memcmp(s, "defmacro", 8) == 0) return HEAD_DEFMACRO;
+      return HEAD_NONE;
+    case 9:
+      if (memcmp(s, "transform", 9) == 0) return HEAD_TRANSFORM;
+      if (memcmp(s, "to-string", 9) == 0) return HEAD_TO_STRING;
+      if (memcmp(s, "vec-slice", 9) == 0) return HEAD_VEC_SLICE;
+      if (memcmp(s, "error-val", 9) == 0) return HEAD_ERROR_VAL;
+      if (memcmp(s, "interpret", 9) == 0) return HEAD_INTERPRET;
+      if (memcmp(s, "defstruct", 9) == 0) return HEAD_DEFSTRUCT;
+      return HEAD_NONE;
+    case 10:
+      if (memcmp(s, "vec-concat", 10) == 0) return HEAD_VEC_CONCAT;
+      if (memcmp(s, "map-remove", 10) == 0) return HEAD_MAP_REMOVE;
+      if (memcmp(s, "syntax-pos", 10) == 0) return HEAD_SYNTAX_POS;
+      if (memcmp(s, "syntax-str", 10) == 0) return HEAD_SYNTAX_STR;
+      return HEAD_NONE;
+    case 11:
+      if (memcmp(s, "byte-length", 11) == 0) return HEAD_BYTE_LENGTH;
+      if (memcmp(s, "stack-trace", 11) == 0) return HEAD_STACK_TRACE;
+      if (memcmp(s, "stream_next", 11) == 0) return HEAD_STREAM_NEXT;
+      if (memcmp(s, "syntax-kind", 11) == 0) return HEAD_SYNTAX_KIND;
+      if (memcmp(s, "syntax-head", 11) == 0) return HEAD_SYNTAX_HEAD;
+      if (memcmp(s, "syntax-args", 11) == 0) return HEAD_SYNTAX_ARGS;
+      if (memcmp(s, "make-syntax", 11) == 0) return HEAD_MAKE_SYNTAX;
+      return HEAD_NONE;
+    case 12:
+      if (memcmp(s, "syntax-quote", 12) == 0) return HEAD_SYNTAX_QUOTE;
+      if (memcmp(s, "syntax-datum", 12) == 0) return HEAD_SYNTAX_DATUM;
+      if (memcmp(s, "syntax-error", 12) == 0) return HEAD_SYNTAX_ERROR;
+      return HEAD_NONE;
+    case 15:
+      if (memcmp(s, "syntax-commands", 15) == 0) return HEAD_SYNTAX_COMMANDS;
+      return HEAD_NONE;
+    case 17:
+      if (memcmp(s, "interpret-prelude", 17) == 0) return HEAD_INTERPRET_PRELUDE;
+      return HEAD_NONE;
+  }
+  return HEAD_NONE;
+}
+
+/* ast__compute_head_id is defined further down, after struct AstNode. */
+
+/* -------------------------------------------------------------------------
  * Static type system enum + helpers
  *
  * Defined here (rather than in compiler.c) so the typer pass — included
@@ -167,7 +381,9 @@ struct AstNode {
   uint8_t     inferred_type; /* JaclType (TYPE_DYN default), populated by typer pass */
   uint32_t    inferred_struct_idx; /* struct registry index when inferred_type==TYPE_STRUCT, UINT32_MAX otherwise */
   union {
-    struct { AstNode*  head; AstNode** args; uint32_t arg_count; } command;
+    struct { AstNode*  head; AstNode** args; uint32_t arg_count;
+             uint8_t   head_id; /* HeadId, stamped at construction; HEAD_NONE if unknown */
+    } command;
     struct { int32_t   value; }                                    lit_int;
     struct { float     value; }                                    lit_float;
     struct { const char* value;   uint32_t length; }               lit_string;
@@ -204,7 +420,10 @@ struct AstNode {
              const char* rest_name; uint32_t rest_name_len;
              int spread_all; } destructure_named;
     struct { AstNode* expr; }                                      spread;
-    struct { AstNode* head; AstNode** args; uint32_t arg_count; uint8_t background; }  shell_cmd;
+    struct { AstNode* head; AstNode** args; uint32_t arg_count;
+             uint8_t background;
+             uint8_t head_id; /* HeadId for shell heads (rarely well-known) */
+    }  shell_cmd;
     struct { uint8_t is_mutable;
              const char* type_name; uint32_t type_name_len;
              const char* field_name; uint32_t field_name_len;
@@ -221,6 +440,14 @@ AstNode* ast_alloc(arena_t* arena) {
   AstNode* node = (AstNode*)arena_alloc(arena, sizeof(AstNode));
   node->inferred_struct_idx = UINT32_MAX;
   return node;
+}
+
+/* Compute head_id from a head AstNode. Returns HEAD_NONE for non-string
+ * heads (var-ref, spread, etc). Used at command-construction sites. */
+static HeadId ast__compute_head_id(AstNode* head) {
+  if (!head || head->type != AST_LIT_STRING) return HEAD_NONE;
+  return ast__head_id_for(head->data.lit_string.value,
+                          head->data.lit_string.length);
 }
 
 AstNode** ast_alloc_array(arena_t* arena, uint32_t count) {

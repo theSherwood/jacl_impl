@@ -521,6 +521,44 @@ typedef enum {
   AST_ERROR
 } AstNodeType;
 
+/* HeadId — interned identifier for well-known command head names.
+ * See src/ast.c for the canonical definition; this header mirrors it for
+ * external consumers. Keep these enums in sync. */
+typedef enum {
+  HEAD_NONE = 0,
+  HEAD_PLUS, HEAD_MINUS, HEAD_STAR, HEAD_SLASH, HEAD_PERCENT,
+  HEAD_LT, HEAD_GT, HEAD_LE, HEAD_GE, HEAD_EQ_EQ,
+  HEAD_EQUALS, HEAD_COLON, HEAD_COLON_COLON,
+  HEAD_PIPE, HEAD_PIPE_PIPE, HEAD_AMP_AMP, HEAD_TILDE,
+  HEAD_DOTDOT_LT, HEAD_DOTDOT_EQ,
+  HEAD_DOT, HEAD_QDOT,
+  HEAD_DEF, HEAD_MUT, HEAD_SET, HEAD_PROC,
+  HEAD_DEFSTRUCT, HEAD_DEFMACRO,
+  HEAD_IF, HEAD_WHILE, HEAD_FOR,
+  HEAD_BREAK, HEAD_CONTINUE, HEAD_RETURN,
+  HEAD_TRY, HEAD_WITH_CTX, HEAD_MATCH,
+  HEAD_YIELD, HEAD_AWAIT, HEAD_SPAWN, HEAD_PARALLEL, HEAD_RACE,
+  HEAD_VEC,
+  HEAD_VEC_GET, HEAD_VEC_LEN, HEAD_VEC_PUSH, HEAD_VEC_SET,
+  HEAD_VEC_CONCAT, HEAD_VEC_SLICE,
+  HEAD_MAP,
+  HEAD_MAP_GET, HEAD_MAP_HAS, HEAD_MAP_LEN, HEAD_MAP_SET,
+  HEAD_MAP_REMOVE, HEAD_MAP_KEYS, HEAD_MAP_VALS,
+  HEAD_PRINT, HEAD_LENGTH, HEAD_BYTE_LENGTH,
+  HEAD_INDEX, HEAD_SLICE, HEAD_CONCAT,
+  HEAD_HASH, HEAD_TO_STRING, HEAD_TRANSFORM, HEAD_FILTER,
+  HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE,
+  HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
+  HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
+  HEAD_STREAM_NEXT, HEAD_COLLECT, HEAD_COUNT, HEAD_TAKE,
+  HEAD_FIRST, HEAD_LINES, HEAD_EXEC, HEAD_SIGNAL, HEAD_CANCEL,
+  HEAD_QUOTE, HEAD_SYNTAX_QUOTE, HEAD_INTERPRET, HEAD_INTERPRET_PRELUDE,
+  HEAD_SYNTAX_KIND, HEAD_SYNTAX_DATUM, HEAD_SYNTAX_HEAD,
+  HEAD_SYNTAX_ARGS, HEAD_SYNTAX_COMMANDS, HEAD_SYNTAX_POS,
+  HEAD_SYNTAX_STR, HEAD_MAKE_SYNTAX, HEAD_SYNTAX_ERROR,
+  HEAD_ID_COUNT
+} HeadId;
+
 typedef struct {
   uint32_t line;
   uint32_t column;
@@ -539,7 +577,9 @@ struct AstNode {
   uint8_t     inferred_type; /* JaclType (TYPE_DYN default), populated by typer pass */
   uint32_t    inferred_struct_idx; /* struct registry index when inferred_type==TYPE_STRUCT, UINT32_MAX otherwise */
   union {
-    struct { AstNode*  head; AstNode** args; uint32_t arg_count; } command;
+    struct { AstNode*  head; AstNode** args; uint32_t arg_count;
+             uint8_t   head_id; /* HeadId, stamped at construction; HEAD_NONE if unknown */
+    } command;
     struct { int32_t   value; }                                    lit_int;
     struct { float     value; }                                    lit_float;
     struct { const char* value;   uint32_t length; }               lit_string;
@@ -576,7 +616,10 @@ struct AstNode {
              const char* rest_name; uint32_t rest_name_len;
              int spread_all; } destructure_named;
     struct { AstNode* expr; }                                      spread;
-    struct { AstNode* head; AstNode** args; uint32_t arg_count; uint8_t background; }  shell_cmd;
+    struct { AstNode* head; AstNode** args; uint32_t arg_count;
+             uint8_t background;
+             uint8_t head_id; /* HeadId for shell heads (rarely well-known) */
+    }  shell_cmd;
     struct { uint8_t is_mutable;
              const char* type_name; uint32_t type_name_len;
              const char* field_name; uint32_t field_name_len;

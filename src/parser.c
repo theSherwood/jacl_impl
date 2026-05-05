@@ -346,6 +346,7 @@ AstNode* parser__parse_command(Parser* p) {
     node->start = parser__token_start(open);
     node->end   = parser__token_end(close);
     node->data.command.head      = empty_head;
+    node->data.command.head_id   = HEAD_NONE;
     node->data.command.args      = NULL;
     node->data.command.arg_count = 0;
     return node;
@@ -435,6 +436,7 @@ AstNode* parser__parse_command(Parser* p) {
   node->start = cmd_start;
   node->end   = parser__token_end(close);
   node->data.command.head      = head;
+  node->data.command.head_id   = ast__compute_head_id(head);
   node->data.command.args      = args.nodes;
   node->data.command.arg_count = args.count;
   return node;
@@ -529,6 +531,7 @@ AstNode* parser__maybe_arrow_access(Parser* p, AstNode* expr) {
     node->start = expr->start;
     node->end   = parser__token_end(field_tok);
     node->data.command.head      = dot_head;
+    node->data.command.head_id   = HEAD_DOT;
     node->data.command.args      = args;
     node->data.command.arg_count = 2;
 
@@ -571,6 +574,7 @@ AstNode* parser__parse_infix_operand(Parser* p) {
     node->start = parser__token_start(op);
     node->end   = operand->end;
     node->data.command.head      = head;
+    node->data.command.head_id   = HEAD_MINUS;
     node->data.command.args      = args;
     node->data.command.arg_count = 1;
     return node;
@@ -615,6 +619,7 @@ AstNode* parser__parse_infix_operand(Parser* p) {
     node->start = parser__token_start(op);
     node->end   = operand->end;
     node->data.command.head      = head;
+    node->data.command.head_id   = HEAD_TILDE;
     node->data.command.args      = args;
     node->data.command.arg_count = 1;
     return node;
@@ -683,6 +688,7 @@ AstNode* parser__parse_infix_operand(Parser* p) {
       cmd->start = parser__token_start(db);
       cmd->end = end_pos;
       cmd->data.command.head = head;
+      cmd->data.command.head_id = ast__compute_head_id(head);
       cmd->data.command.args = args.nodes;
       cmd->data.command.arg_count = args.count;
       result = cmd;
@@ -821,6 +827,7 @@ AstNode* parser__parse_infix(Parser* p) {
     cmd->start = left->start;
     cmd->end   = right->end;
     cmd->data.command.head      = head;
+    cmd->data.command.head_id   = ast__compute_head_id(head);
     cmd->data.command.args      = args;
     cmd->data.command.arg_count = 2;
 
@@ -1726,11 +1733,13 @@ AstNode* parser__parse_proc_params(Parser* p) {
     empty_head->data.lit_string.length = 0;
 
     node->data.command.head      = empty_head;
+    node->data.command.head_id   = HEAD_NONE;
     node->data.command.args      = NULL;
     node->data.command.arg_count = 0;
   } else {
     /* head = first element, args = rest */
     node->data.command.head = elems.nodes[0];
+    node->data.command.head_id = ast__compute_head_id(elems.nodes[0]);
     if (elems.count > 1) {
       AstNode** args_arr = ast_alloc_array(p->arena, elems.count - 1);
       for (uint32_t i = 1; i < elems.count; i++) {
@@ -1813,6 +1822,7 @@ AstNode* parser__parse_proc_form(Parser* p, AstNode* proc_head) {
   node->start = start;
   node->end   = body->end;
   node->data.command.head      = proc_head;
+  node->data.command.head_id   = HEAD_PROC;
   node->data.command.args      = args.nodes;
   node->data.command.arg_count = args.count;
   return node;
@@ -1888,6 +1898,7 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
     node->start = start;
     node->end   = else_block->end;
     node->data.command.head      = if_head;
+    node->data.command.head_id   = HEAD_IF;
     node->data.command.args      = args;
     node->data.command.arg_count = 3;
     return node;
@@ -1918,6 +1929,7 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
     node->start = start;
     node->end   = else_block->end;
     node->data.command.head      = if_head;
+    node->data.command.head_id   = HEAD_IF;
     node->data.command.args      = args;
     node->data.command.arg_count = 3;
     return node;
@@ -1938,6 +1950,7 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
     node->start = start;
     node->end   = else_block->end;
     node->data.command.head      = if_head;
+    node->data.command.head_id   = HEAD_IF;
     node->data.command.args      = args;
     node->data.command.arg_count = 3;
     return node;
@@ -1953,6 +1966,7 @@ AstNode* parser__parse_if_form(Parser* p, AstNode* if_head) {
     node->start = start;
     node->end   = then_block->end;
     node->data.command.head      = if_head;
+    node->data.command.head_id   = HEAD_IF;
     node->data.command.args      = args;
     node->data.command.arg_count = 2;
     return node;
@@ -1994,6 +2008,7 @@ AstNode* parser__parse_while_form(Parser* p, AstNode* while_head) {
   node->start = start;
   node->end   = body->end;
   node->data.command.head      = while_head;
+  node->data.command.head_id   = HEAD_WHILE;
   node->data.command.args      = args;
   node->data.command.arg_count = 2;
   return node;
@@ -2543,6 +2558,7 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
       node->start = head->start;
       node->end   = head->end;
       node->data.command.head      = head;
+      node->data.command.head_id   = ast__compute_head_id(head);
       node->data.command.args      = NULL;
       node->data.command.arg_count = 0;
       return node;
@@ -2555,6 +2571,7 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
   node->start = head->start;
   node->end   = args.nodes[args.count - 1]->end;
   node->data.command.head      = head;
+  node->data.command.head_id   = ast__compute_head_id(head);
   node->data.command.args      = args.nodes;
   node->data.command.arg_count = args.count;
   return node;
@@ -2595,6 +2612,7 @@ AstNode* parser__parse_cmd_expr(Parser* p) {
     cmd->start = left->start;
     cmd->end   = right->end;
     cmd->data.command.head      = op_head;
+    cmd->data.command.head_id   = ast__compute_head_id(op_head);
     cmd->data.command.args      = args;
     cmd->data.command.arg_count = 2;
 
@@ -2751,6 +2769,7 @@ AstNode* parser__parse_interp_string(Parser* p) {
       cmd->start = cmd_start;
       cmd->end = cmd_end;
       cmd->data.command.head = head;
+      cmd->data.command.head_id = ast__compute_head_id(head);
       cmd->data.command.args = args.nodes;
       cmd->data.command.arg_count = args.count;
       parser__arr_push(&segments, cmd);
@@ -2804,6 +2823,7 @@ AstNode* parser__parse_interp_string(Parser* p) {
         cmd->start = left->start;
         cmd->end   = right->end;
         cmd->data.command.head      = head;
+        cmd->data.command.head_id   = ast__compute_head_id(head);
         cmd->data.command.args      = args;
         cmd->data.command.arg_count = 2;
 

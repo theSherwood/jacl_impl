@@ -350,6 +350,8 @@ AstNode *syntax_to_ast(JaclVal syn_val, arena_t *arena) {
     case SYNTAX_COMMAND: {
         node->type = AST_COMMAND;
         node->data.command.head = syntax_to_ast(syn->data.command.head, arena);
+        node->data.command.head_id =
+            ast__compute_head_id(node->data.command.head);
         /* Convert args vec */
         jacl_vec_root *args = (jacl_vec_root *)jacl_as_ptr(syn->data.command.args);
         uint32_t argc = jacl_vec_count(args);

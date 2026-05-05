@@ -4933,7 +4933,8 @@ void compiler__rewrite_binding_op(Compiler* c, AstNode* node,
   synth->type  = AST_COMMAND;
   synth->start = node->start;
   synth->end   = node->end;
-  synth->data.command.head = new_head;
+  synth->data.command.head    = new_head;
+  synth->data.command.head_id = ast__compute_head_id(new_head);
 
   /* Determine arg shape based on LHS type */
   if (lhs->type == AST_COMMAND && lhs->data.command.arg_count == 1 &&
@@ -5189,6 +5190,7 @@ void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
       new_args[1 + i] = rhs->data.command.args[i];
     }
     synth->data.command.head      = rhs->data.command.head;
+    synth->data.command.head_id   = rhs->data.command.head_id;
     synth->data.command.args      = new_args;
     synth->data.command.arg_count = new_count;
   } else {
@@ -5196,6 +5198,7 @@ void compiler__compile_pipe_op(Compiler* c, AstNode* node) {
     AstNode** new_args = ast_alloc_array(c->arena, 1);
     new_args[0] = lhs;
     synth->data.command.head      = rhs;
+    synth->data.command.head_id   = ast__compute_head_id(rhs);
     synth->data.command.args      = new_args;
     synth->data.command.arg_count = 1;
   }

@@ -90,6 +90,7 @@ TESTS=(
     "test/test_value.c|value|"
     "test/test_lexer.c|lexer|"
     "test/test_parser.c|parser|"
+    "test/test_head_id_stamp.c|head_id_stamp|"
     "test/test_bytecode.c|bytecode|"
     "test/test_vm.c|vm|"
     "test/test_compiler.c|compiler|"
