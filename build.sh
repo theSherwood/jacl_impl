@@ -104,6 +104,7 @@ TESTS=(
     "test/test_parser.c|parser|"
     "test/test_head_id_stamp.c|head_id_stamp|"
     "test/test_typer.c|typer|"
+    "test/test_type_errors.c|type_errors|"
     "test/test_bytecode.c|bytecode|"
     "test/test_vm.c|vm|"
     "test/test_compiler.c|compiler|"
