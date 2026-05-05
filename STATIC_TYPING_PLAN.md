@@ -102,47 +102,43 @@ Walk every AST shape; assign every node a real type. The typer becomes
 correct standalone, but the compiler still uses its own tracking. No
 behavior change.
 
-**Tasks:**
+**Tasks (status as of last commit in this branch):**
 
-1. **Add the missing AST annotation slots.**
-   - `inferred_key_struct_idx` (for typed-map keys; mirrors
-     `c->last_key_struct_idx`).
-   - `inline_repr` if needed — investigate whether this can be derived
-     from `inferred_type` + `inferred_struct_idx` alone, or whether it
-     needs its own field.
-2. **Stage 1a — control-flow result types.** `if`, `while`, `for`,
-   `try`, `match`, `with-ctx`, `break`-with-value, `return`. Today
-   most of these are TYPE_DYN. Decide unification rules (e.g., `if`
-   with mismatched branches → `dyn`; `while`/`for` → `nil` unless
-   `break` carries a value; `try` → unify body and handler).
-3. **Stage 1b — call returns.** Cover every well-known builtin
-   (currently 29 in `fixed_returns`; needs ~50 more — `await`,
-   `parallel`, `race`, `spawn`, `yield`, `vec-get`, `map-get`, `take`,
-   `first`, `deref`, `error`, `error-val`, `stream-next`, `hash`,
-   `index`, `interpret`, `make-syntax`, `exec`, `reset`, `swap`, plus
-   the FFI/trampoline cluster). Plus generic proc-return tracking
-   that follows imported modules and nested procs.
-4. **Stage 1c — typed-collection element narrowing.** `[vec-get
-   $typed_vec idx]` returns the element type, not DYN. Same for
-   `map-get`. Requires the typer to track elem type idx through call
-   chains.
-5. **Stage 1d — narrowing through every guard.** Today only
-   `[box? Type $x]` flows narrowings. Add the guard forms the
-   compiler currently special-cases (typed-collection box guards,
-   error guards in `try`).
-6. **Stage 1e — type errors emitted by the typer.** Move type-check
-   logic from `compiler.c` into the typer for: typed def/mut/set
-   bindings, struct field access, ctx field set, struct constructor
-   args, proc args, typed-collection element matches. The compiler
-   keeps emitting them as a backstop until Stage 2 lands.
-7. **Stage 1f — `dyn` as a real type.** Define typed semantics for
-   every operation when one or both operands are `dyn`:
-   - `[+ $dyn $dyn]` → `dyn` via `OP_ADD_GENERIC`
-   - `[+ $i32 $dyn]` → `i32` via narrow-then-add (typer assertion)
-   - Etc. Some of these are already in `compiler.c`; just write down
-     the rules and have the typer track them.
-8. **Run the audit-mode build continuously.** Every divergence
-   surfaced in Stage 0 must reduce to zero.
+1. **Add the missing AST annotation slots.** ⏳ DEFERRED.
+   - `inferred_key_struct_idx` was scoped here, but turns out the
+     typer already handles typed-map keys via `inferred_struct_idx`
+     for the value-type idx (compiler tracks key idx separately).
+     Stage 2 doesn't actually need a new field unless we want the
+     typer to *enforce* typed-map key types — currently a Stage 1c
+     follow-on, not blocking.
+   - `inline_repr` — confirmed in decision 3 that this stays in
+     compiler as codegen state. No AST field needed.
+2. **Stage 1a — control-flow result types.** ✅ PARTIAL.
+   Done: `while`, `for`, `yield`, `break`, `continue`, `dot`
+   field-set. Not done: `try`, `match`, `with-ctx` (each typer
+   says DYN today).
+3. **Stage 1b — call returns.** ✅ PARTIAL.
+   Done: ~30 entries in `fixed_returns` (predicates, lengths,
+   strings, streams, dyn collection ctors, signal/cancel, syntax-*
+   introspection, while/for/yield, signal/cancel). HEAD_PIPE result
+   inherits rhs. Not done: `await`/`parallel`/`race`/`spawn` (typer
+   gives DYN), `vec-get`/`map-get` element types, `take`/`first`/
+   `reset`/`swap`/`hash`/`interpret`/FFI cluster. Plus closures and
+   imported procs are absent from the typer's proc registry.
+4. **Stage 1c — typed-collection element narrowing.** ❌ NOT STARTED.
+   `[vec-get $typed_vec idx]` and `[map-get $typed_map key]` still
+   return DYN in the typer.
+5. **Stage 1d — narrowing through every guard.** ✅ PARTIAL.
+   Done: `[box? Type $x]`. Not done: typed-collection box guards
+   (`box? [Vec T]`), error guards in `try`.
+6. **Stage 1e — type errors emitted by the typer.** ❌ NOT STARTED.
+   The shared formatters in `src/type_error.c` are ready (Stage 0
+   commit `e5a31a8`); only the compiler currently calls them. Stage
+   1e would have the typer call the same helpers.
+7. **Stage 1f — `dyn` as a real type.** ❌ NOT STARTED.
+   The architecture is in place but no rules written yet.
+8. **Run the audit-mode build continuously.** ✅ DONE — see
+   "Running the audit" subsection below.
 
 **Exit criteria:**
 
@@ -159,6 +155,22 @@ behavior change.
 For each cluster of `c->last_expr_type` / `c->last_struct_idx` reads
 in `compiler.c`, switch to reading from the AST. Each cluster is one
 commit, fully tested, individually revertable.
+
+**Shortcut path enabled by Stage 0 commit `0860e56`:** all 22
+`c->last_expr_type` reads were already collapsed into a single
+helper `compiler__effective_type(c, n)` which reads
+`n->inferred_type` and falls back to `c->last_expr_type` when the
+typer left it DYN. Stage 2's true minimal edit is to **delete the
+fallback branch from that helper** — one edit, all 22 sites
+correct in one shot. Per-cluster framing below is then about
+verifying each cluster's tests still pass, not about the
+mechanical edits themselves.
+
+For `c->last_struct_idx` (read at ~80 sites unconditionally, not
+through a helper), the per-cluster migration is real work — each
+site needs to switch to `args[i]->inferred_struct_idx`. The typer
+now propagates struct_idx for bindings, struct field access, and
+typed-collection cases (Stage 1 commits `1f220a4` and `c4b9d65`).
 
 **Cluster groupings (approximate):**
 
@@ -180,15 +192,22 @@ inside the binary-op cluster).
 
 **Per-cluster recipe:**
 
-1. Identify all reads of `c->last_expr_type` / `c->last_struct_idx` /
-   `c->last_key_struct_idx` in the cluster.
-2. Replace each with `args[i]->inferred_type` /
-   `args[i]->inferred_struct_idx` / `args[i]->inferred_key_struct_idx`.
-3. Remove the corresponding writes if they exist only to feed this
+1. Identify all reads of `c->last_expr_type` / `c->last_struct_idx`
+   in the cluster. (`c->last_key_struct_idx` reads exist but the
+   typer has no `inferred_key_struct_idx` field yet — either add
+   one as a prerequisite or leave key-idx reads as compiler-side
+   for now; affects only typed-map sites.)
+2. For `c->last_expr_type`: prefer `compiler__effective_type(c,
+   args[i])`, which already does the right thing. If the helper's
+   fallback branch is gone (single global edit done first), the
+   reads naturally read from `inferred_type` only.
+3. For `c->last_struct_idx`: replace with
+   `args[i]->inferred_struct_idx`.
+4. Remove the corresponding writes if they exist only to feed this
    cluster.
-4. Run the full test suite.
-5. Run audit mode; remaining writes are still consumed somewhere.
-6. Commit.
+5. Run the full test suite.
+6. Run audit mode; remaining writes are still consumed somewhere.
+7. Commit.
 
 After all clusters migrate, `c->last_expr_type` writes still happen
 but are no longer read.
@@ -523,24 +542,92 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 
 ## How to start
 
-The first commits, in order:
+**Stage 0 is complete** (commits `86be2bb`, `5b00aa3`, `e30a308`,
+`e5a31a8`). The audit, both test harnesses, and the shared
+formatters are in place.
 
-1. **`typer: add audit-mode comparison build`** — Stage 0, task 2.
-   Add a `JACL_TYPER_AUDIT=1` build flag that, after each
-   `compile_node` call, asserts `args[i]->inferred_type ==
-   c->last_expr_type` (and the struct_idx companions). Log every
-   divergence with file:line:col. This is the bug list for Stage 1.
-2. **`tests: add typer-only test harness`** — Stage 0, task 1. Run
-   the typer alone on a corpus of `.jacl` programs and assert
-   annotations on specific AST nodes. Today the only way to test
-   the typer is end-to-end through codegen.
-3. **`tests: expand type-error corpus`** — Stage 0, task 3.
-4. **`refactor: extract jacl_format_type_mismatch and friends`** —
-   prep for decision 4. Both passes will call into these.
-5. Stage 1 begins with the easiest AST shape and walks outward
-   (sequence 1-12 above).
+**Stage 1 is at plateau** (~12 commits, last is `066e666`). Real
+divergences (GAP+MISMATCH) on the test_compiler audit are at 46,
+down from 665 — 93% reduction. Remaining work split into
+substeps with done/partial/not-started markers above.
+
+**Pick-up entry points** (in increasing depth of work):
+
+- **Stage 2 minimal edit (1 line, ~30 audit divergences cleared):**
+  delete the `c->last_expr_type` fallback from
+  `compiler__effective_type` in compiler.c. Run tests. Then audit
+  mode shows which other clusters need follow-up.
+- **Finish Stage 1c** (typed-collection elem narrowing for
+  `vec-get` / `map-get`) — small, targeted, ~13 audit GAPs gone.
+- **Stage 1e** (type errors emitted by typer) — bigger, but the
+  shared formatters are already extracted; mostly call-site moves.
+- **Stage 1f** (dyn as a real type) — the bigger architectural
+  step; requires writing down all dyn-touching op rules.
 
 Stop at the end of any Stage and the codebase is still better off.
+
+## Running the audit
+
+The audit-mode build prints a `TYPER_AUDIT` line to stderr for
+every divergence between `node->inferred_type` and
+`c->last_expr_type` after each `compile_node` call.
+
+```sh
+# Build with -DJACL_TYPER_AUDIT, run a single test, capture stderr:
+bash build.sh --audit --test=compiler 2>err.log
+
+# Triage the bug list:
+grep TYPER_AUDIT err.log \
+  | grep -v SUMMARY \
+  | sed 's/at [0-9]*:[0-9]*//' \
+  | sort | uniq -c | sort -rn \
+  | head -20
+
+# Just the category counts:
+grep TYPER_AUDIT err.log \
+  | grep -v SUMMARY \
+  | awk '{print $2}' | sort | uniq -c | sort -rn
+```
+
+Categories the audit reports:
+
+| Kind | Meaning |
+|------|---------|
+| `MISMATCH` | both passes non-DYN, types differ — typer or compiler bug |
+| `GAP` | typer DYN, compiler non-DYN — typer is missing a rule |
+| `EXTRA` | typer non-DYN, compiler DYN — compiler doesn't track this op (Stage 2 absorbs) |
+| `STRUCT_IDX` | types match but `inferred_struct_idx` differs — struct propagation bug |
+
+Each compile prints a `TYPER_AUDIT SUMMARY: total=N agree=N
+mismatch=N gap=N extra=N struct_idx_diff=N` line at end. Counters
+reset between compiles.
+
+The audit only fires when `compile_node` is called — i.e., for
+codegen-running tests, not for typer-only tests.
+
+## Stage 0 deliverables (reference)
+
+The four artifacts Stage 0 produced:
+
+- **Audit build** — `bash build.sh --audit` (commit `86be2bb`).
+- **Typer test harness** — `test/test_typer.c` (commit `5b00aa3`),
+  16 cases asserting on `inferred_type` directly.
+- **Type-error corpus** — `test/test_type_errors.c` (commit
+  `e30a308`), 11 cases locking in compile-time error messages.
+- **Shared formatters** — `src/type_error.c` (commit `e5a31a8`).
+  Seven helpers, all callable from typer.c when Stage 1e starts:
+  - `jacl_format_assign_mismatch`
+  - `jacl_format_assign_dyn_named`
+  - `jacl_format_assign_dyn_unnamed`
+  - `jacl_format_assign_struct_to_dyn`
+  - `jacl_format_field_mismatch`
+  - `jacl_format_field_dyn_assign`
+  - `jacl_format_proc_return_mismatch`
+
+  Two error variants are intentionally not extracted (struct
+  constructor "got dyn" without cast hint, immutable-binding
+  mutate); Stage 1e can either extract them or leave them in
+  compiler.c as one-offs.
 
 ## Progress snapshot
 
