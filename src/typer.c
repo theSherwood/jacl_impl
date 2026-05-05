@@ -1130,6 +1130,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        * unified to nil here; refine in a later commit if needed. */
       { HEAD_WHILE,       TYPE_NIL    },
       { HEAD_FOR,         TYPE_NIL    },
+      /* Yield — pushes nil after resume in current SM compilation. */
+      { HEAD_YIELD,       TYPE_NIL    },
       /* Job control — bool indicates delivered/cancelled. */
       { HEAD_SIGNAL,      TYPE_BOOL   },
       { HEAD_CANCEL,      TYPE_BOOL   },
