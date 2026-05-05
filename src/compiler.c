@@ -3960,10 +3960,9 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
     return;
   }
   compiler__compile_node(c, args[0]);
-  TypeInfo col_ti = compiler__get_type(c);
-  JaclType col_type = col_ti.type;
-  uint32_t col_struct_idx = col_ti.struct_idx;
-  uint32_t col_key_struct_idx = col_ti.key_struct_idx;
+  JaclType col_type = compiler__effective_type(c, args[0]);
+  uint32_t col_struct_idx = args[0]->inferred_struct_idx;
+  uint32_t col_key_struct_idx = c->last_key_struct_idx;
   {
     bool saved = c->in_non_suspending_callback;
     c->in_non_suspending_callback = true;
