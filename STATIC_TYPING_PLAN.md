@@ -232,10 +232,18 @@ Mechanical cleanup. The fields are dead by Stage 2's exit; remove
 them.
 
 **Status (Stage 2/3 progress):** `c->last_struct_idx` reads in
-compiler.c are down to **2 sites** (2025-05 / commit `698e951`):
+compiler.c are down to **2 sites** (2025-05 / commit `a1dfe64`):
 
-- compiler.c:10833, 10842 — audit-mode comparison code (audit
-  reads both sides by definition; not load-bearing for codegen).
+- compiler.c — audit-mode comparison code (audit reads both
+  sides by definition; not load-bearing for codegen).
+
+`c->last_key_struct_idx` reads in compiler.c are down to **0
+sites** (commit `a1dfe64`). The two consumers (typed-map equality,
+typed-map print) now read `args[i]->inferred_key_struct_idx` from
+the AST. Writes still exist throughout the compiler (they're paired
+with last_struct_idx writes via compiler__set_type and direct
+assignments) — these become deletable when last_struct_idx and
+last_expr_type go away as a unit.
 
 The CTX_STRUCT_PENDING sentinel was deleted in commit `698e951`.
 ctx now occupies pre-reserved struct_registry slot 1 in both the
@@ -243,6 +251,14 @@ compiler and the typer; the four sentinel uses became
 `reg->ctx_type_idx` reads. This also lets the typer fully type
 `$ctx.field` accesses via its existing HEAD_DOT rule (the ctx
 struct's field types are now in tc->structs[1]).
+
+**Why c->last_expr_type can't yet be deleted:** it's still load-
+bearing for compile-time dispatch decisions inside compile_command
+branches (`if (c->last_expr_type == TYPE_TYPED_VEC) { ...emit
+typed_op... }`). Migrating those dispatches to read
+`args[i]->inferred_type` is the missing piece — mostly mechanical,
+but spread across ~50 sites in compiler.c. Once done, the field
+declaration can be removed.
 
 `c->last_expr_type` reads still flow through helpers like
 `compile_typed_elem_arg`'s scalar branch (typer doesn't propagate
@@ -707,6 +723,7 @@ suite track progress:
 | After commit `7f5acd8` (parser defaults LIT_INT/LIT_FLOAT/LIT_STRING inferred_type) | 35 | 17 | 0 | 18 | 0 |
 | After commit `e78f933` (typed-elem-arg helper struct check → AST) | 35 | 17 | 0 | 18 | 0 |
 | After commit `698e951` (ctx is a real registered struct; CTX_STRUCT_PENDING deleted) | 35 | 17 | 0 | 18 | 0 |
+| After commit `a1dfe64` (AstNode.inferred_key_struct_idx propagated for typed-map) | 35 | 17 | 0 | 18 | 0 |
 
 **Real divergence (GAP+MISMATCH):** 665 → 46. 93% reduction.
 
