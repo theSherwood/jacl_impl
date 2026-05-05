@@ -562,8 +562,11 @@ suite track progress:
 | After commit `e6b0d6b` (set/:: pin nil + make-syntax pin dyn) | 107 | 59 | 15 | 33 | 0 |
 | After commit `8b595ea` (HEAD_PIPE result from rhs + atom dyn) | 96 | 48 | 15 | 33 | 0 |
 | After commit `a1d713f` (struct== inline → bool) | 91 | 48 | 15 | 28 | 0 |
+| After commit `cf5b87e` (HEAD_FOR compiler pin) | 82 | 48 | 9 | 25 | 0 |
+| After commit `5d089be` (HEAD_YIELD typer rule) | 82 | 48 | 9 | 25 | 0 |
+| After commit `c4b9d65` (per-field struct_idx for chained dot) | 71 | 37 | 9 | 25 | 0 |
 
-**Real divergence (GAP+MISMATCH):** 665 → 63. 90% reduction.
+**Real divergence (GAP+MISMATCH):** 665 → 46. 93% reduction.
 
 The ctx-struct pre-pass commit is setup for follow-on: future code
 referencing `$ctx.field` inside a `with-ctx` block will type the
@@ -577,8 +580,8 @@ its own focused investigation.
 
 | Cluster | Count | Shape |
 |---------|------:|-------|
-| GAP `head=.` | 11 | typer DYN compiler I32 — field access where typer fails to resolve receiver |
-| GAP `AST_LIT_INT` | 7 | macro-expanded literals never visited by typer |
+| GAP `head=.` | 0 | RESOLVED in commit `c4b9d65` — chained dot now propagates struct_idx |
+| GAP `AST_LIT_INT` | 7 | NOT macro-expansion: parser produces `[= [def x] 5]` for the surface `def x = 5`, and the typer's def-sugar handler bails because args[0] is a 1-arg AST_COMMAND with non-keyword head 'def'. Fix: extend handle_def_or_mut to unwrap that shape (similar to compiler__rewrite_binding_op's destructure-pattern branch). |
 | MISMATCH `head=for` | 6 | for body's last expr leaks (load-bearing in some path; can't pin) |
 | MISMATCH `head=def` | 5 | def-with-struct leaks for inline-vs-heap codegen (load-bearing; can't pin) |
 | EXTRA `AST_VAR_REF` (struct/dyn) | 5 | typer knows struct binding type, compiler tracks dyn |
