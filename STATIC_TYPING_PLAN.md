@@ -231,6 +231,26 @@ but are no longer read.
 Mechanical cleanup. The fields are dead by Stage 2's exit; remove
 them.
 
+**Status (Stage 2 progress):** `c->last_struct_idx` reads in
+compiler.c are down to **3 sites** (2025-05 / commit `e78f933`):
+
+- compiler.c:6883 — CTX_STRUCT_PENDING sentinel check in def's
+  global path. Migrating requires either (a) the typer to also
+  use CTX_STRUCT_PENDING for $ctx (sentinel collision risk with
+  typer's struct registry indices) or (b) restructuring the ctx
+  binding so the compiler can resolve it without a sentinel.
+- compiler.c:10832, 10841 — audit-mode comparison code (audit
+  reads both sides by definition).
+
+`c->last_expr_type` reads still flow through helpers like
+`compile_typed_elem_arg`'s scalar branch (typer doesn't propagate
+the helper's expected_type through AST_LIT_INT narrowing) and the
+hundred or so post-compile reads inside compile_command branches
+that use it for dispatch decisions.
+
+`compiler__get_type` (a TypeInfo getter that read all three
+fields) was deleted in commit `9b95e12` — no callers.
+
 **Tasks:**
 
 1. Delete `c->last_expr_type`, `c->last_struct_idx`,
@@ -683,6 +703,7 @@ suite track progress:
 | After commit `9b95e12` (delete unused compiler__get_type) | 44 | 26 | 0 | 18 | 0 |
 | After commit `e21b1fe` (typer pipe-binop simulation) | 41 | 23 | 0 | 18 | 0 |
 | After commit `7f5acd8` (parser defaults LIT_INT/LIT_FLOAT/LIT_STRING inferred_type) | 35 | 17 | 0 | 18 | 0 |
+| After commit `e78f933` (typed-elem-arg helper struct check → AST) | 35 | 17 | 0 | 18 | 0 |
 
 **Real divergence (GAP+MISMATCH):** 665 → 46. 93% reduction.
 
