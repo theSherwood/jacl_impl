@@ -7654,6 +7654,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Pop loop context */
     c->loop_depth--;
+    c->last_expr_type = TYPE_NIL;
     return;
   }
 
@@ -11810,6 +11811,9 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         compiler__error(c, line, node->start.column,
                         "too many break statements in loop");
       }
+      /* break compiles as a non-returning jump; the typer's view is
+       * nil (the surrounding loop's result type). Match it here. */
+      c->last_expr_type = TYPE_NIL;
       break;
     }
 
@@ -11841,6 +11845,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, (uint8_t)((offset >> 8) & 0xFF), line);
         compiler__emit_byte(c, (uint8_t)(offset & 0xFF), line);
       }
+      c->last_expr_type = TYPE_NIL;
       break;
     }
 
