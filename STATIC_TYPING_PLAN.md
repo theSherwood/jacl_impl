@@ -558,8 +558,17 @@ suite track progress:
 | After commit `7d0ed8b` (compiler box?=BOOL fix) | ~190 | 70 | 22 | 94 | 0 |
 | After commit `4447c01` (while/break/continue compiler pins) | ~165 | 70 | 22 | 70 | 0 |
 | After commit `f604819` (typer continue/shell rules) | 160 | 66 | 26 | 68 | 0 |
+| After commit `05dc74e` (typer ctx-struct pre-pass) | 160 | 66 | 26 | 68 | 0 |
 
 **Real divergence (GAP+MISMATCH):** 665 → 92. 86% reduction.
+
+The ctx-struct pre-pass commit is setup for follow-on: future code
+referencing `$ctx.field` inside a `with-ctx` block will type the
+field correctly. The remaining 11 `head=.` GAPs in the audit turned
+out to be field access on intra-proc struct locals where the
+typer's struct registry indexing diverges from the compiler's at
+some specific shape. Each remaining GAP cluster from this point is
+its own focused investigation.
 
 **Remaining work to drive Stage 1 to zero:**
 
