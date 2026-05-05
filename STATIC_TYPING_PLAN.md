@@ -231,16 +231,18 @@ but are no longer read.
 Mechanical cleanup. The fields are dead by Stage 2's exit; remove
 them.
 
-**Status (Stage 2 progress):** `c->last_struct_idx` reads in
-compiler.c are down to **3 sites** (2025-05 / commit `e78f933`):
+**Status (Stage 2/3 progress):** `c->last_struct_idx` reads in
+compiler.c are down to **2 sites** (2025-05 / commit `698e951`):
 
-- compiler.c:6883 — CTX_STRUCT_PENDING sentinel check in def's
-  global path. Migrating requires either (a) the typer to also
-  use CTX_STRUCT_PENDING for $ctx (sentinel collision risk with
-  typer's struct registry indices) or (b) restructuring the ctx
-  binding so the compiler can resolve it without a sentinel.
-- compiler.c:10832, 10841 — audit-mode comparison code (audit
-  reads both sides by definition).
+- compiler.c:10833, 10842 — audit-mode comparison code (audit
+  reads both sides by definition; not load-bearing for codegen).
+
+The CTX_STRUCT_PENDING sentinel was deleted in commit `698e951`.
+ctx now occupies pre-reserved struct_registry slot 1 in both the
+compiler and the typer; the four sentinel uses became
+`reg->ctx_type_idx` reads. This also lets the typer fully type
+`$ctx.field` accesses via its existing HEAD_DOT rule (the ctx
+struct's field types are now in tc->structs[1]).
 
 `c->last_expr_type` reads still flow through helpers like
 `compile_typed_elem_arg`'s scalar branch (typer doesn't propagate
@@ -704,6 +706,7 @@ suite track progress:
 | After commit `e21b1fe` (typer pipe-binop simulation) | 41 | 23 | 0 | 18 | 0 |
 | After commit `7f5acd8` (parser defaults LIT_INT/LIT_FLOAT/LIT_STRING inferred_type) | 35 | 17 | 0 | 18 | 0 |
 | After commit `e78f933` (typed-elem-arg helper struct check → AST) | 35 | 17 | 0 | 18 | 0 |
+| After commit `698e951` (ctx is a real registered struct; CTX_STRUCT_PENDING deleted) | 35 | 17 | 0 | 18 | 0 |
 
 **Real divergence (GAP+MISMATCH):** 665 → 46. 93% reduction.
 
