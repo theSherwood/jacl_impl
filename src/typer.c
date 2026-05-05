@@ -779,31 +779,23 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
    * the compiler's rewrite. Future: handle the sugar shapes too.)
    * Anything not handled falls through to generic call dispatch. */
   if (head && head->type == AST_LIT_STRING) {
-    const char* hname = head->data.lit_string.value;
-    uint32_t    hlen  = head->data.lit_string.length;
-    bool is_def_or_mut = (hlen == 3 && memcmp(hname, "def", 3) == 0) ||
-                         (hlen == 3 && memcmp(hname, "mut", 3) == 0) ||
-                         (hlen == 1 && hname[0] == '=') ||
-                         (hlen == 1 && hname[0] == ':');
-    bool is_set = (hlen == 3 && memcmp(hname, "set", 3) == 0) ||
-                  (hlen == 2 && memcmp(hname, "::", 2) == 0);
-    if (is_def_or_mut) {
+    HeadId hid = (HeadId)node->data.command.head_id;
+    if (hid == HEAD_DEF || hid == HEAD_MUT ||
+        hid == HEAD_EQUALS || hid == HEAD_COLON) {
       if (typer__handle_def_or_mut(tc, node)) return;
-    } else if (is_set) {
+    } else if (hid == HEAD_SET || hid == HEAD_COLON_COLON) {
       if (typer__handle_set(tc, node)) return;
-    } else if (hlen == 4 && memcmp(hname, "proc", 4) == 0) {
+    } else if (hid == HEAD_PROC) {
       if (typer__handle_proc(tc, node)) return;
-    } else if (hlen == 2 && memcmp(hname, "if", 2) == 0 &&
+    } else if (hid == HEAD_IF &&
                (node->data.command.arg_count == 2 || node->data.command.arg_count == 3)) {
       /* if [cond] {then} {else?} — detect [box? Type $var] for flow
        * typing. Mirrors compiler.c:7651-7708. */
       AstNode** as = node->data.command.args;
       AstNode* cond = as[0];
       bool pushed = false;
-      if (cond->type == AST_COMMAND && cond->data.command.head &&
-          cond->data.command.head->type == AST_LIT_STRING &&
-          cond->data.command.head->data.lit_string.length == 4 &&
-          memcmp(cond->data.command.head->data.lit_string.value, "box?", 4) == 0 &&
+      if (cond->type == AST_COMMAND &&
+          cond->data.command.head_id == HEAD_BOX_Q &&
           cond->data.command.arg_count == 2 &&
           cond->data.command.args[1]->type == AST_VAR_REF &&
           tc->narrowing_count < TYPER_MAX_NARROWINGS) {
@@ -855,7 +847,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         node->inferred_type = TYPE_DYN;
       }
       return;
-    } else if (hlen == 5 && memcmp(hname, "unbox", 5) == 0 &&
+    } else if (hid == HEAD_UNBOX &&
                node->data.command.arg_count == 1 &&
                node->data.command.args[0]->type == AST_VAR_REF) {
       /* [unbox $var] inside a box?-guarded branch — look up the
@@ -962,14 +954,15 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   } else if (head && head->type == AST_LIT_STRING) {
     /* Recognize a small set of well-known builtins by their return
      * type. Reduces typer gaps for last-expression-of-block cases. */
+    HeadId hid = (HeadId)node->data.command.head_id;
     const char* hn = head->data.lit_string.value;
     uint32_t    hl = head->data.lit_string.length;
-    if ((hl == 5 && memcmp(hn, "print", 5) == 0) ||
-        (hl == 4 && memcmp(hn, "puts", 4) == 0)) {
+    if (hid == HEAD_PRINT || (hl == 4 && memcmp(hn, "puts", 4) == 0)) {
+      /* "puts" is not in the HeadId table — keep the memcmp here. */
       node->inferred_type = TYPE_NIL;
-    } else if (hl == 9 && memcmp(hn, "to-string", 9) == 0) {
+    } else if (hid == HEAD_TO_STRING) {
       node->inferred_type = TYPE_STR;
-    } else if (hl == 2 && memcmp(hn, "to", 2) == 0 &&
+    } else if (hid == HEAD_TO &&
                node->data.command.arg_count >= 1 &&
                node->data.command.args[0]->type == AST_LIT_STRING &&
                is_type_keyword(node->data.command.args[0]->data.lit_string.value,
@@ -978,7 +971,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       node->inferred_type =
           type_from_keyword(node->data.command.args[0]->data.lit_string.value,
                             node->data.command.args[0]->data.lit_string.length);
-    } else if (hl == 1 && hn[0] == '.' &&
+    } else if (hid == HEAD_DOT &&
                node->data.command.arg_count == 2) {
       /* [. struct field] arrow access — result type is the accessed
        * field's declared type. */
