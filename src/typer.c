@@ -139,6 +139,28 @@ static const TyperBinding* typer__scope_resolve(TyperCtx* tc,
 
 /* --- Command handlers --- */
 
+/* Recognize [Vec T] / [Map V] / [Map K V] type expressions. Returns
+ * 1 for [Vec T], 2 for [Map V] (dyn keys), 3 for [Map K V] (struct
+ * keys), 0 if not a typed-collection expression. Mirrors
+ * compiler__typed_collection_expr in compiler.c. */
+static int typer__typed_collection_kind(AstNode* node) {
+  if (!node || node->type != AST_COMMAND || !node->data.command.head) return 0;
+  AstNode* h = node->data.command.head;
+  if (h->type != AST_LIT_STRING || h->data.lit_string.length != 3) return 0;
+  int kind = 0;
+  if (memcmp(h->data.lit_string.value, "Vec", 3) == 0) kind = 1;
+  else if (memcmp(h->data.lit_string.value, "Map", 3) == 0) kind = 2;
+  if (kind == 0) return 0;
+  uint32_t ac = node->data.command.arg_count;
+  if (kind == 2 && ac == 2 &&
+      node->data.command.args[0]->type == AST_LIT_STRING &&
+      node->data.command.args[1]->type == AST_LIT_STRING) {
+    return 3;
+  }
+  if (ac != 1 || node->data.command.args[0]->type != AST_LIT_STRING) return 0;
+  return kind;
+}
+
 /* Try to extract a JaclType keyword from a string literal node.
  * Returns true and writes *out_type if the node is a known type keyword. */
 static bool typer__node_as_type_keyword(AstNode* node, JaclType* out_type) {
@@ -168,7 +190,8 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
 
   uint32_t declared_struct_idx = UINT32_MAX;
   if (argc == 3) {
-    /* Keyword form: def TYPE NAME VALUE, or def StructName NAME VALUE */
+    /* Keyword form: def TYPE NAME VALUE, or def StructName NAME VALUE,
+     * or def [Vec T] / [Map K V] NAME VALUE for typed collections. */
     if (typer__node_as_type_keyword(args[0], &declared_type)) {
       /* type keyword */
     } else if (args[0]->type == AST_LIT_STRING) {
@@ -184,7 +207,10 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
         return false;
       }
     } else {
-      return false;
+      int tcoll = typer__typed_collection_kind(args[0]);
+      if (tcoll == 1) declared_type = TYPE_TYPED_VEC;
+      else if (tcoll == 2 || tcoll == 3) declared_type = TYPE_TYPED_MAP;
+      else return false;
     }
     name_node  = args[1];
     value_node = args[2];
@@ -460,13 +486,18 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
     AstNode* elem = flat[fi];
     if (count >= TYPER_MAX_PROC_PARAMS) break;
     if (elem->type == AST_COMMAND) {
-      /* compound type expr — skip for now, conservatively dyn */
+      /* compound type expr: [Vec T] / [Map K V] / [Map V] resolves to a
+       * typed collection; anything else falls back to dyn. */
+      int tcoll = typer__typed_collection_kind(elem);
+      JaclType t = TYPE_DYN;
+      if (tcoll == 1) t = TYPE_TYPED_VEC;
+      else if (tcoll == 2 || tcoll == 3) t = TYPE_TYPED_MAP;
       fi++;
       if (fi >= flat_n) break;
       elem = flat[fi];
       if (elem->type != AST_LIT_STRING) continue;
       (*name_nodes_out)[count]   = elem;
-      (*types_out)[count]        = TYPE_DYN;
+      (*types_out)[count]        = t;
       (*struct_idxs_out)[count]  = UINT32_MAX;
       count++;
       continue;
@@ -952,18 +983,53 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     node->inferred_type = TYPE_STRUCT;
     node->inferred_struct_idx = sdef_idx;
   } else if (head && head->type == AST_LIT_STRING) {
-    /* Recognize a small set of well-known builtins by their return
-     * type. Reduces typer gaps for last-expression-of-block cases.
-     *
-     * Only include entries where the compiler's typed and untyped code
-     * paths agree on the result. Builtins like vec-push (TYPE_VEC vs
-     * TYPE_TYPED_VEC depending on receiver) are intentionally absent —
-     * a wrong annotation here would mask the typed path at the 22
-     * `if (lhs_type == TYPE_DYN) lhs_type = c->last_expr_type` sites
-     * in compiler.c. */
     HeadId hid = (HeadId)node->data.command.head_id;
     const char* hn = head->data.lit_string.value;
     uint32_t    hl = head->data.lit_string.length;
+
+    /* Receiver-preserving vec/map builtins. Result depends on whether
+     * the typer knows the receiver type:
+     *   typed vec/map → typed result (with elem-type idx propagated)
+     *   plain vec/map → plain result
+     *   DYN          → DYN (compiler's c->last_expr_type fallback wins)
+     * Annotating DYN as VEC/MAP would mask a typed receiver that the
+     * compiler tracks but the typer does not, leading to silent miscompile. */
+    if (node->data.command.arg_count >= 1) {
+      AstNode*  recv = node->data.command.args[0];
+      JaclType  recv_t = (JaclType)recv->inferred_type;
+      switch (hid) {
+        case HEAD_VEC_PUSH:   case HEAD_VEC_SET:
+        case HEAD_VEC_CONCAT: case HEAD_VEC_SLICE:
+          if (recv_t == TYPE_TYPED_VEC) {
+            node->inferred_type = TYPE_TYPED_VEC;
+            node->inferred_struct_idx = recv->inferred_struct_idx;
+          } else if (recv_t == TYPE_VEC) {
+            node->inferred_type = TYPE_VEC;
+          }
+          return;
+        case HEAD_MAP_SET: case HEAD_MAP_REMOVE:
+          if (recv_t == TYPE_TYPED_MAP) {
+            node->inferred_type = TYPE_TYPED_MAP;
+            node->inferred_struct_idx = recv->inferred_struct_idx;
+          } else if (recv_t == TYPE_MAP) {
+            node->inferred_type = TYPE_MAP;
+          }
+          return;
+        case HEAD_MAP_KEYS: case HEAD_MAP_VALS:
+          if (recv_t == TYPE_TYPED_MAP) {
+            node->inferred_type = TYPE_TYPED_VEC;
+            node->inferred_struct_idx = recv->inferred_struct_idx;
+          } else if (recv_t == TYPE_MAP) {
+            node->inferred_type = TYPE_VEC;
+          }
+          return;
+        default: break;
+      }
+    }
+
+    /* Fixed-return table: builtins where the compiler's typed and untyped
+     * paths agree on the result. Vec/map mutations on typed receivers are
+     * handled above; the entries below cover the dyn-receiver path. */
     static const struct { HeadId hid; uint8_t ret; } fixed_returns[] = {
       /* Predicates and short-circuit logicals — always bool. */
       { HEAD_ATOM_Q,      TYPE_BOOL   },
