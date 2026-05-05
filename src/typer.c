@@ -994,6 +994,15 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       { HEAD_COLLECT,     TYPE_VEC    },
       /* Side-effecting — always nil. */
       { HEAD_PRINT,       TYPE_NIL    },
+      /* Job control — bool indicates delivered/cancelled. */
+      { HEAD_SIGNAL,      TYPE_BOOL   },
+      { HEAD_CANCEL,      TYPE_BOOL   },
+      /* Syntax-object introspection (US-015) — fixed result types. */
+      { HEAD_SYNTAX_KIND,     TYPE_STR },
+      { HEAD_SYNTAX_ARGS,     TYPE_VEC },
+      { HEAD_SYNTAX_COMMANDS, TYPE_VEC },
+      { HEAD_SYNTAX_POS,      TYPE_MAP },
+      { HEAD_SYNTAX_STR,      TYPE_STR },
     };
     bool matched = false;
     for (size_t fi = 0; fi < sizeof(fixed_returns)/sizeof(fixed_returns[0]); fi++) {

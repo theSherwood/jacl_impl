@@ -3299,6 +3299,16 @@ bool compiler__body_captures_mutable(Compiler* enclosing,
 /* Forward declaration for compile_block_expr */
 void compiler__compile_node(Compiler* c, AstNode* node);
 
+/* Effective AST-node type after the typer pass. The typer (typer.c)
+ * annotates each node with `inferred_type`; for nodes the typer leaves
+ * as TYPE_DYN (its remaining gaps), fall back to the just-set
+ * `c->last_expr_type` from compiling the node. Callers must compile
+ * the node before reading the fallback. */
+static inline JaclType compiler__effective_type(Compiler* c, AstNode* n) {
+  JaclType t = (JaclType)n->inferred_type;
+  return (t != TYPE_DYN) ? t : c->last_expr_type;
+}
+
 /* --- Internal: Jump patching helpers --- */
 
 uint32_t compiler__emit_jump(Compiler* c, uint8_t instruction,
@@ -3814,16 +3824,9 @@ uint8_t compiler__typed_op(uint8_t dyn_op, JaclType type) {
 void compiler__compile_binary(Compiler* c, AstNode** args,
                                      uint8_t op, const char* op_verb,
                                      uint32_t line, uint32_t col) {
-  /* Phase 3c: read LHS type from the typer pass's pre-computed
-   * annotation on the AST instead of walking LHS first to discover it.
-   * Fall back to c->last_expr_type for any node the typer left as
-   * TYPE_DYN (typer gaps) — the fallback can be removed once the typer
-   * covers all relevant shapes. */
-  JaclType lhs_type = (JaclType)args[0]->inferred_type;
-
   /* Compile LHS — caller already reset expected_type at command entry. */
   compiler__compile_node(c, args[0]);
-  if (lhs_type == TYPE_DYN) lhs_type = c->last_expr_type;
+  JaclType lhs_type = compiler__effective_type(c, args[0]);
 
   /* Set contextual type for RHS so int/float literals on the RHS narrow
    * to the LHS's type. (Compiling LHS may have left expected_type at
@@ -3834,8 +3837,7 @@ void compiler__compile_binary(Compiler* c, AstNode** args,
 
   /* Compile RHS */
   compiler__compile_node(c, args[1]);
-  JaclType rhs_type = (JaclType)args[1]->inferred_type;
-  if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
+  JaclType rhs_type = compiler__effective_type(c, args[1]);
   c->expected_type = TYPE_DYN;
 
   /* Static typing for struct comparisons */
@@ -4278,10 +4280,7 @@ void compiler__compile_destructure_named(
 
   /* Compile RHS — pushes the source value onto stack. */
   compiler__compile_node(c, value_expr);
-  /* Phase 3c: read result type from the typer's pre-computed AST
-   * annotation; fall back to c->last_expr_type for typer gaps. */
-  JaclType rhs_type = (JaclType)value_expr->inferred_type;
-  if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
+  JaclType rhs_type = compiler__effective_type(c, value_expr);
   uint32_t rhs_struct_idx = c->last_struct_idx;
 
   /* Determine if we can use compile-time struct field resolution */
@@ -5550,10 +5549,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (hid == HEAD_MINUS) {
     if (argc == 1) {
       compiler__compile_node(c, args[0]);
-      /* Phase 3c: read result type from the typer's pre-computed AST
-       * annotation; fall back to c->last_expr_type for typer gaps. */
-      JaclType arg_type = (JaclType)args[0]->inferred_type;
-      if (arg_type == TYPE_DYN) arg_type = c->last_expr_type;
+      JaclType arg_type = compiler__effective_type(c, args[0]);
       if (arg_type == TYPE_U64) {
         compiler__error(c, line, col, "type error: cannot negate u64");
         return;
@@ -6021,10 +6017,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     c->expected_type = declared_type;
     compiler__compile_node(c, args[value_arg_idx]);
     c->expected_type = TYPE_DYN;
-    /* Phase 3c: read result type from the typer's pre-computed AST
-     * annotation; fall back to c->last_expr_type for typer gaps. */
-    JaclType rhs_type = (JaclType)args[value_arg_idx]->inferred_type;
-    if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
+    JaclType rhs_type = compiler__effective_type(c, args[value_arg_idx]);
 
     /* Type check for typed mut */
     if (declared_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != declared_type) {
@@ -6250,10 +6243,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->expected_type = target_type;
         compiler__compile_node(c, args[1]);
         c->expected_type = TYPE_DYN;
-        /* Phase 3c: read result type from the typer's pre-computed AST
-         * annotation; fall back to c->last_expr_type for typer gaps. */
-        JaclType rhs_type = (JaclType)args[1]->inferred_type;
-        if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
+        JaclType rhs_type = compiler__effective_type(c, args[1]);
         /* Type check */
         if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
           snprintf(err_msg, sizeof(err_msg),
@@ -6307,10 +6297,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->expected_type = target_type;
         compiler__compile_node(c, args[1]);
         c->expected_type = TYPE_DYN;
-        /* Phase 3c: read result type from the typer's pre-computed AST
-         * annotation; fall back to c->last_expr_type for typer gaps. */
-        JaclType rhs_type = (JaclType)args[1]->inferred_type;
-        if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
+        JaclType rhs_type = compiler__effective_type(c, args[1]);
         /* Type check */
         if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
           snprintf(err_msg, sizeof(err_msg),
@@ -6368,10 +6355,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           c->expected_type = target_type;
           compiler__compile_node(c, args[1]);
           c->expected_type = TYPE_DYN;
-          /* Phase 3c: read result type from the typer's pre-computed AST
-           * annotation; fall back to c->last_expr_type for typer gaps. */
-          JaclType rhs_type = (JaclType)args[1]->inferred_type;
-          if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
+          JaclType rhs_type = compiler__effective_type(c, args[1]);
           if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
             snprintf(err_msg, sizeof(err_msg),
                      "type error: cannot assign %s to %s binding '%.*s'",
@@ -6403,10 +6387,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           c->expected_type = target_type;
           compiler__compile_node(c, args[1]);
           c->expected_type = TYPE_DYN;
-          /* Phase 3c: read result type from the typer's pre-computed AST
-           * annotation; fall back to c->last_expr_type for typer gaps. */
-          JaclType rhs_type = (JaclType)args[1]->inferred_type;
-          if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
+          JaclType rhs_type = compiler__effective_type(c, args[1]);
           /* Type check */
           if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
             snprintf(err_msg, sizeof(err_msg),
@@ -6777,10 +6758,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     c->expected_type = declared_type;
     compiler__compile_node(c, args[value_arg_idx]);
     c->expected_type = TYPE_DYN;
-    /* Phase 3c: read result type from the typer's pre-computed AST
-     * annotation; fall back to c->last_expr_type for typer gaps. */
-    JaclType rhs_type = (JaclType)args[value_arg_idx]->inferred_type;
-    if (rhs_type == TYPE_DYN) rhs_type = c->last_expr_type;
+    JaclType rhs_type = compiler__effective_type(c, args[value_arg_idx]);
 
     /* US-007: activate inline for function calls returning struct types.
      * If the RHS isn't already inline (struct constructor or inline get) but
@@ -7595,11 +7573,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Compile then-body as expression (narrowing is active) */
     compiler__compile_block_expr(c, args[1]);
 
-    /* Save then-branch type for unification.
-     * Phase 3c: read from the typer's pre-computed AST annotation;
-     * fall back to c->last_expr_type for typer gaps. */
-    JaclType then_type = (JaclType)args[1]->inferred_type;
-    if (then_type == TYPE_DYN) then_type = c->last_expr_type;
+    /* Save then-branch type for unification. */
+    JaclType then_type = compiler__effective_type(c, args[1]);
     uint32_t then_struct_idx = c->last_struct_idx;
 
     /* Pop narrowing before else-branch */
@@ -7617,9 +7592,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (argc == 3) {
       /* Compile else-body as expression */
       compiler__compile_block_expr(c, args[2]);
-      /* Phase 3c: read from typer's pre-computed AST annotation. */
-      else_type = (JaclType)args[2]->inferred_type;
-      if (else_type == TYPE_DYN) else_type = c->last_expr_type;
+      else_type = compiler__effective_type(c, args[2]);
     } else {
       /* No else: push nil */
       compiler__emit_byte(c, OP_NIL, line);
@@ -7868,10 +7841,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Compile collection → local __col */
     compiler__compile_node(c, args[0]);
-    /* Phase 3c: read result type from the typer's pre-computed AST
-     * annotation; fall back to c->last_expr_type for typer gaps. */
-    JaclType col_type = (JaclType)args[0]->inferred_type;
-    if (col_type == TYPE_DYN) col_type = c->last_expr_type;
+    JaclType col_type = compiler__effective_type(c, args[0]);
     compiler__add_local(c, jacl_inline_string("__col", 5), line, col);
 
     uint8_t col_slot = (uint8_t)(saved_local_count);
@@ -8341,10 +8311,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->expected_type = cf->type;
       compiler__compile_node(c, override_cmd->data.command.args[0]);
       c->expected_type = TYPE_DYN;
-      /* Phase 3c: read result type from the typer's pre-computed AST
-       * annotation; fall back to c->last_expr_type for typer gaps. */
-      JaclType val_type = (JaclType)override_cmd->data.command.args[0]->inferred_type;
-      if (val_type == TYPE_DYN) val_type = c->last_expr_type;
+      JaclType val_type = compiler__effective_type(c, override_cmd->data.command.args[0]);
       if (cf->type != TYPE_DYN && val_type != TYPE_DYN && val_type != cf->type) {
         char err[192];
         snprintf(err, sizeof(err),
@@ -9177,10 +9144,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Compile the expression */
     compiler__compile_node(c, args[1]);
-    /* Phase 3c: read result type from the typer's pre-computed AST
-     * annotation; fall back to c->last_expr_type for typer gaps. */
-    JaclType src_type = (JaclType)args[1]->inferred_type;
-    if (src_type == TYPE_DYN) src_type = c->last_expr_type;
+    JaclType src_type = compiler__effective_type(c, args[1]);
 
     /* Validate conversion at compile time */
     if (src_type != TYPE_DYN && target_type != TYPE_DYN) {
@@ -9330,10 +9294,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    /* Phase 3c: read result type from the typer's pre-computed AST
-     * annotation; fall back to c->last_expr_type for typer gaps. */
-    JaclType col_type = (JaclType)args[0]->inferred_type;
-    if (col_type == TYPE_DYN) col_type = c->last_expr_type;
+    JaclType col_type = compiler__effective_type(c, args[0]);
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_TAKE, line);
     c->last_expr_type = col_type;
@@ -9821,10 +9782,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             c->expected_type = field_type;
             compiler__compile_node(c, args[2]);
             c->expected_type = TYPE_DYN;
-            /* Phase 3c: read result type from the typer's pre-computed AST
-             * annotation; fall back to c->last_expr_type for typer gaps. */
-            JaclType val_type = (JaclType)args[2]->inferred_type;
-            if (val_type == TYPE_DYN) val_type = c->last_expr_type;
+            JaclType val_type = compiler__effective_type(c, args[2]);
             if (field_type != TYPE_DYN && val_type != TYPE_DYN && val_type != field_type) {
               char err_msg[192];
               snprintf(err_msg, sizeof(err_msg),
@@ -9890,10 +9848,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (!args0_compiled) {
       compiler__compile_node(c, args[0]);
     }
-    /* Phase 3c: read result type from the typer's pre-computed AST
-     * annotation; fall back to c->last_expr_type for typer gaps. */
-    JaclType struct_type = (JaclType)args[0]->inferred_type;
-    if (struct_type == TYPE_DYN) struct_type = c->last_expr_type;
+    JaclType struct_type = compiler__effective_type(c, args[0]);
     uint32_t struct_idx = c->last_struct_idx;
 
     /* INLINE_REF only flows out of the inline-fast-path's nested-struct
@@ -9945,10 +9900,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           c->expected_type = field_type;
           compiler__compile_node(c, args[2]);
           c->expected_type = TYPE_DYN;
-          /* Phase 3c: read result type from the typer's pre-computed AST
-           * annotation; fall back to c->last_expr_type for typer gaps. */
-          JaclType val_type = (JaclType)args[2]->inferred_type;
-          if (val_type == TYPE_DYN) val_type = c->last_expr_type;
+          JaclType val_type = compiler__effective_type(c, args[2]);
           if (field_type != TYPE_DYN && val_type != TYPE_DYN && val_type != field_type) {
             char err_msg[192];
             snprintf(err_msg, sizeof(err_msg),
@@ -10052,10 +10004,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           c->expected_type = field_type;
           compiler__compile_node(c, args[2]);
           c->expected_type = TYPE_DYN;
-          /* Phase 3c: read result type from the typer's pre-computed AST
-           * annotation; fall back to c->last_expr_type for typer gaps. */
-          JaclType val_type = (JaclType)args[2]->inferred_type;
-          if (val_type == TYPE_DYN) val_type = c->last_expr_type;
+          JaclType val_type = compiler__effective_type(c, args[2]);
 
           if (field_type != TYPE_DYN && val_type != TYPE_DYN && val_type != field_type) {
             char err_msg[192];
@@ -10230,10 +10179,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->expected_type = field_type;
         compiler__compile_node(c, args[i]);
         c->expected_type = TYPE_DYN;
-        /* Phase 3c: read result type from the typer's pre-computed AST
-         * annotation; fall back to c->last_expr_type for typer gaps. */
-        JaclType arg_type = (JaclType)args[i]->inferred_type;
-        if (arg_type == TYPE_DYN) arg_type = c->last_expr_type;
+        JaclType arg_type = compiler__effective_type(c, args[i]);
 
         if (field_type != TYPE_DYN && arg_type != TYPE_DYN &&
             arg_type != field_type) {
@@ -10457,10 +10403,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       compiler__compile_node(c, args[i]);
       c->expected_type = TYPE_DYN;
-      /* Phase 3c: read result type from the typer's pre-computed AST
-       * annotation; fall back to c->last_expr_type for typer gaps. */
-      JaclType arg_type = (JaclType)args[i]->inferred_type;
-      if (arg_type == TYPE_DYN) arg_type = c->last_expr_type;
+      JaclType arg_type = compiler__effective_type(c, args[i]);
 
       /* Phase 5a: struct args passed inline (multi-slot) instead of as heap copies.
        * If the arg is already inline (from constructor or typed-get), nothing to do.
