@@ -1012,8 +1012,16 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     if (hid == HEAD_DEF || hid == HEAD_MUT ||
         hid == HEAD_EQUALS || hid == HEAD_COLON) {
       if (typer__handle_def_or_mut(tc, node)) return;
+      /* Even if the def/mut shape didn't match a typed handler (e.g.,
+       * destructure with non-LIT_STRING name), all def/mut commands
+       * return NIL at runtime. Type as NIL here so the typer agrees
+       * with the compiler's HEAD_DEF/HEAD_MUT pin. */
+      node->inferred_type = TYPE_NIL;
+      return;
     } else if (hid == HEAD_SET || hid == HEAD_COLON_COLON) {
       if (typer__handle_set(tc, node)) return;
+      node->inferred_type = TYPE_NIL;
+      return;
     } else if (hid == HEAD_PROC) {
       if (typer__handle_proc(tc, node)) return;
     } else if (hid == HEAD_IF &&

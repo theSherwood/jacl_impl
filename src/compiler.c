@@ -6892,7 +6892,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         while (root->enclosing) root = root->enclosing;
         for (uint32_t i = 0; i < root->global_arity_count; i++) {
           if (root->global_arities[i].name == name_val) {
-            { TypeInfo ti = compiler__get_type(c); ti.type = effective_type;
+            { TypeInfo ti = { effective_type, rhs_struct_idx, c->last_key_struct_idx };
               TYPEINFO_SAVE(root->global_arities[i], ti); }
             break;
           }
@@ -11082,17 +11082,17 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
 
     case AST_COMMAND: {
       compiler__compile_command(c, node);
-      /* HEAD_SET / HEAD_COLON_COLON / HEAD_FOR are statements with
-       * many per-arm exits that leak last_expr_type from the value
-       * or body expression. Pin nil here. HEAD_DEF / HEAD_MUT are
-       * *not* pinned: downstream code reads c->last_expr_type +
-       * c->last_struct_idx after `def Point p [mkpt ...]` to drive
-       * inline-vs-heap codegen, and those paths rely on the leak
-       * (see commit 4447c01). */
+      /* Statement-shaped heads pin last_expr_type to NIL — Stage 2
+       * migrated downstream consumers off the leak. HEAD_DEF/HEAD_MUT
+       * used to leak STRUCT after `def Point p ...` to drive inline
+       * codegen; the def cluster now reads args[i]->inferred_*
+       * directly, so pinning here closes that leak. */
       switch (node->data.command.head_id) {
         case HEAD_SET:
         case HEAD_COLON_COLON:
         case HEAD_FOR:
+        case HEAD_DEF:
+        case HEAD_MUT:
           c->last_expr_type = TYPE_NIL;
           break;
         default: break;
