@@ -26,10 +26,12 @@
 typedef struct {
   const char* name;
   uint32_t    name_len;
-  uint32_t    scope_mark;   /* hygiene mark from binding's AST node */
-  uint8_t     type;         /* JaclType */
-  uint32_t    struct_idx;   /* UINT32_MAX if not a struct */
-  uint32_t    scope_depth;  /* depth at which this binding was pushed */
+  uint32_t    scope_mark;       /* hygiene mark from binding's AST node */
+  uint8_t     type;             /* JaclType */
+  uint32_t    struct_idx;       /* UINT32_MAX if not a struct/typed-collection;
+                                 * for typed-vec/map: element idx */
+  uint32_t    key_struct_idx;   /* TYPE_TYPED_MAP key idx; UINT32_MAX otherwise */
+  uint32_t    scope_depth;      /* depth at which this binding was pushed */
 } TyperBinding;
 
 typedef struct {
@@ -108,12 +110,13 @@ static void typer__scope_add(TyperCtx* tc, const char* name, uint32_t name_len,
                              uint32_t struct_idx) {
   if (tc->binding_count >= TYPER_MAX_BINDINGS) return;
   TyperBinding* b = &tc->bindings[tc->binding_count++];
-  b->name        = name;
-  b->name_len    = name_len;
-  b->scope_mark  = scope_mark;
-  b->type        = type;
-  b->struct_idx  = struct_idx;
-  b->scope_depth = tc->scope_depth;
+  b->name           = name;
+  b->name_len       = name_len;
+  b->scope_mark     = scope_mark;
+  b->type           = type;
+  b->struct_idx     = struct_idx;
+  b->key_struct_idx = UINT32_MAX;
+  b->scope_depth    = tc->scope_depth;
 }
 
 static const TyperBinding* typer__scope_resolve(TyperCtx* tc,
@@ -429,6 +432,7 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     }
   }
   uint32_t struct_idx = UINT32_MAX;
+  uint32_t key_struct_idx = UINT32_MAX;
   if (effective == TYPE_STRUCT || is_typed_collection(effective)) {
     /* Declared struct (def Point r ...) / typed-collection elem
      * (def [Vec Point] ps ...) wins; otherwise inherit from RHS. */
@@ -437,6 +441,10 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     } else {
       struct_idx = value_node->inferred_struct_idx;
     }
+    /* Typed-map: also inherit key idx from RHS. */
+    if (effective == TYPE_TYPED_MAP) {
+      key_struct_idx = value_node->inferred_key_struct_idx;
+    }
   }
 
   typer__scope_add(tc, name_node->data.lit_string.value,
@@ -444,6 +452,10 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
                    name_node->scope_mark,
                    (uint8_t)effective,
                    struct_idx);
+  /* scope_add doesn't take key_struct_idx as a param; patch in place. */
+  if (key_struct_idx != UINT32_MAX && tc->binding_count > 0) {
+    tc->bindings[tc->binding_count - 1].key_struct_idx = key_struct_idx;
+  }
 
   /* def/mut returns nil. (compiler.c's last_expr_type is sometimes left
    * as the value's type and sometimes set to NIL depending on the binding
@@ -1296,6 +1308,26 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           }
         }
       }
+      /* For [Map K V] (kind=3), also propagate the key type idx. */
+      if (tc_kind == 3) {
+        AstNode* key_node = head->data.command.args[0];
+        if (key_node && key_node->type == AST_LIT_STRING) {
+          const char* nm = key_node->data.lit_string.value;
+          uint32_t    nl = key_node->data.lit_string.length;
+          if (is_type_keyword(nm, nl)) {
+            node->inferred_key_struct_idx =
+                JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+          } else {
+            for (uint32_t si = 0; si < tc->struct_count; si++) {
+              if (tc->structs[si].name_len == nl &&
+                  memcmp(tc->structs[si].name, nm, nl) == 0) {
+                node->inferred_key_struct_idx = si;
+                break;
+              }
+            }
+          }
+        }
+      }
     } else {
       node->inferred_type = TYPE_DYN;
     }
@@ -1371,6 +1403,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           if (recv_t == TYPE_TYPED_MAP) {
             node->inferred_type = TYPE_TYPED_MAP;
             node->inferred_struct_idx = recv->inferred_struct_idx;
+            node->inferred_key_struct_idx = recv->inferred_key_struct_idx;
           } else if (recv_t == TYPE_MAP) {
             node->inferred_type = TYPE_MAP;
           }
@@ -1378,7 +1411,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         case HEAD_MAP_KEYS: case HEAD_MAP_VALS:
           if (recv_t == TYPE_TYPED_MAP) {
             node->inferred_type = TYPE_TYPED_VEC;
-            node->inferred_struct_idx = recv->inferred_struct_idx;
+            /* keys → typed-vec of key type; vals → typed-vec of value type */
+            node->inferred_struct_idx =
+                (hid == HEAD_MAP_KEYS) ? recv->inferred_key_struct_idx
+                                       : recv->inferred_struct_idx;
           } else if (recv_t == TYPE_MAP) {
             node->inferred_type = TYPE_VEC;
           }
@@ -1428,13 +1464,14 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           return;
         case HEAD_FILTER:
           /* filter preserves the receiver's collection type, including
-           * elem struct_idx. Mirrors compiler__compile_hof_builtin: typed
-           * receiver → typed result; plain → plain; stream → stream. */
+           * elem (and key) struct_idx. Mirrors compiler__compile_hof_builtin:
+           * typed receiver → typed result; plain → plain; stream → stream. */
           if (recv_t == TYPE_TYPED_VEC || recv_t == TYPE_TYPED_MAP ||
               recv_t == TYPE_VEC || recv_t == TYPE_MAP ||
               recv_t == TYPE_STREAM) {
             node->inferred_type = recv_t;
             node->inferred_struct_idx = recv->inferred_struct_idx;
+            node->inferred_key_struct_idx = recv->inferred_key_struct_idx;
           }
           return;
         case HEAD_TRANSFORM:
@@ -1588,6 +1625,7 @@ static void typer__infer_var_ref(TyperCtx* tc, AstNode* node) {
   if (b) {
     node->inferred_type = b->type;
     node->inferred_struct_idx = b->struct_idx;
+    node->inferred_key_struct_idx = b->key_struct_idx;
   } else {
     node->inferred_type = TYPE_DYN;
   }

@@ -389,7 +389,8 @@ struct AstNode {
   uint8_t     is_caret;    /* US-013: ^name in syntax-quote — force scope mark 0 */
   uint8_t     is_gensym;   /* US-014: var-ref produced by gensym — accepted as binding name */
   uint8_t     inferred_type; /* JaclType (TYPE_DYN default), populated by typer pass */
-  uint32_t    inferred_struct_idx; /* struct registry index when inferred_type==TYPE_STRUCT, UINT32_MAX otherwise */
+  uint32_t    inferred_struct_idx; /* struct registry index when inferred_type==TYPE_STRUCT or typed-collection (elem idx), UINT32_MAX otherwise */
+  uint32_t    inferred_key_struct_idx; /* key struct idx for TYPE_TYPED_MAP, UINT32_MAX otherwise */
   union {
     struct { AstNode*  head; AstNode** args; uint32_t arg_count;
              uint8_t   head_id; /* HeadId, stamped at construction; HEAD_NONE if unknown */
@@ -449,6 +450,7 @@ struct AstNode {
 AstNode* ast_alloc(arena_t* arena) {
   AstNode* node = (AstNode*)arena_alloc(arena, sizeof(AstNode));
   node->inferred_struct_idx = UINT32_MAX;
+  node->inferred_key_struct_idx = UINT32_MAX;
   return node;
 }
 

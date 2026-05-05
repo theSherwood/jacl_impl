@@ -3879,7 +3879,7 @@ void compiler__compile_binary(Compiler* c, AstNode** args,
       compiler__emit_byte(c, eq_op, line);
       compiler__emit_u16(c, (uint16_t)args[1]->inferred_struct_idx, line);
       if (lhs_type == TYPE_TYPED_MAP)
-        compiler__emit_u16(c, (uint16_t)c->last_key_struct_idx, line);
+        compiler__emit_u16(c, (uint16_t)args[1]->inferred_key_struct_idx, line);
       c->last_expr_type = TYPE_BOOL;
       return;
     }
@@ -5641,7 +5641,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       compiler__emit_byte(c, OP_TYPED_MAP_PRINT, line);
       compiler__emit_u16(c, (uint16_t)arg_struct_idx, line);
-      compiler__emit_u16(c, (uint16_t)c->last_key_struct_idx, line);
+      compiler__emit_u16(c, (uint16_t)args[0]->inferred_key_struct_idx, line);
       c->last_expr_type = TYPE_NIL;
       return;
     }
