@@ -2611,11 +2611,7 @@ static bool compiler__compile_typed_elem_arg(Compiler* c, AstNode* arg,
   return c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == expected_type_idx;
 }
 
-/* --- TypeInfo accessors --- */
-
-static inline TypeInfo compiler__get_type(Compiler* c) {
-  return (TypeInfo){ c->last_expr_type, c->last_struct_idx, c->last_key_struct_idx };
-}
+/* --- TypeInfo accessor --- */
 
 static inline void compiler__set_type(Compiler* c, TypeInfo ti) {
   c->last_expr_type      = ti.type;
