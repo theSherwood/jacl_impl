@@ -1070,6 +1070,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       { HEAD_COLLECT,     TYPE_VEC    },
       /* Side-effecting — always nil. */
       { HEAD_PRINT,       TYPE_NIL    },
+      /* Loop forms — emit OP_NIL at normal exit. break-with-value
+       * paths could carry a different type but are conservatively
+       * unified to nil here; refine in a later commit if needed. */
+      { HEAD_WHILE,       TYPE_NIL    },
+      { HEAD_FOR,         TYPE_NIL    },
       /* Job control — bool indicates delivered/cancelled. */
       { HEAD_SIGNAL,      TYPE_BOOL   },
       { HEAD_CANCEL,      TYPE_BOOL   },
@@ -1102,6 +1107,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       node->inferred_type =
           type_from_keyword(node->data.command.args[0]->data.lit_string.value,
                             node->data.command.args[0]->data.lit_string.length);
+    } else if (hid == HEAD_DOT &&
+               node->data.command.arg_count == 3) {
+      /* [. struct field new_value] field-set — emits OP_HEAP_RECORD_SET,
+       * leaves nil. Mirrors compiler.c's set path. */
+      node->inferred_type = TYPE_NIL;
     } else if (hid == HEAD_DOT &&
                node->data.command.arg_count == 2) {
       /* [. struct field] arrow access — result type is the accessed
