@@ -1973,6 +1973,9 @@ extern uint32_t jacl_val_hash (JaclVal v);
 extern bool jacl_val_eq (JaclVal a, JaclVal b);
 extern void collections__init (void);
 
+/* --- typer.c --- */
+extern void typer_infer (AstNode **nodes, uint32_t count);
+
 /* --- compiler.c --- */
 extern bool is_type_keyword (const char *word, size_t len);
 extern JaclType type_from_keyword (const char *word, size_t len);

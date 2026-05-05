@@ -320,7 +320,7 @@ static JaclType type_from_keyword(const char* word, size_t len) {
   return TYPE_DYN;
 }
 
-static const char* type_name(JaclType t) {
+const char* type_name(JaclType t) {
   switch (t) {
     case TYPE_DYN:     return "dyn";
     case TYPE_BOOL:    return "bool";
