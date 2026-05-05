@@ -669,37 +669,47 @@ suite track progress:
 | After commit `5d089be` (HEAD_YIELD typer rule) | 82 | 48 | 9 | 25 | 0 |
 | After commit `c4b9d65` (per-field struct_idx for chained dot) | 71 | 37 | 9 | 25 | 0 |
 | After commit `066e666` (typer 1-arg AST_COMMAND def-sugar generalization) | 71 | 37 | 9 | 25 | 0 |
+| **After commit `1501551` (Stage 2 minimal edit: drop helper fallback + 7 typer closures)** | 66 | 34 | 5 | 27 | 0 |
+| After commit `981c770` (Stage 2: bin-op + def cluster struct_idx → AST) | 66 | 34 | 5 | 27 | 0 |
+| After commit `9eca062` (Stage 2: mut/set/if/destructure clusters) | 66 | 34 | 5 | 27 | 0 |
+| After commit `26a558c` (pin def/mut to nil; typer NIL fallback for unhandled set/def shapes) | 61 | 33 | 0 | 28 | 0 |
+| After commit `e520bf8` (pin while to nil) | 58 | 33 | 0 | 25 | 0 |
+| After commit `df9352a` (typer rule for HEAD_RESET) | 54 | 29 | 0 | 25 | 0 |
 
 **Real divergence (GAP+MISMATCH):** 665 → 46. 93% reduction.
 
-**Stage 1 plateau.** At 71 total / 46 real divergences, the remaining
-clusters are:
+**Stage 2 in progress.** Stage 2's "minimal edit" landed at
+`1501551` (66 audit divergences). Subsequent commits migrated
+`c->last_struct_idx` reads in compile_binary, def, mut, set/reset,
+if-branch unification, and destructure paths to read
+`args[i]->inferred_struct_idx` instead. Then HEAD_DEF, HEAD_MUT,
+HEAD_WHILE got pinned to TYPE_NIL after dispatch; HEAD_RESET got a
+typer rule. Tests held at 95/95 throughout.
 
-- **5 MISMATCHes (`head=def` typer=nil compiler=struct):** load-
-  bearing leak — `def Point p [Ctor ...]` paths read the leaked
-  struct type to drive inline-vs-heap codegen. Pinning breaks
-  struct-flow tests. Stage 2 absorbs naturally when the consumer
-  reads `args[1]->inferred_type` instead of `c->last_expr_type`.
-- **5 EXTRAs each (AST_VAR_REF, AST_RETURN, head=`==`):** typer
-  is more correct than compiler tracks. Stage 2 absorbs.
-- **3 EXTRAs each (head=`while`, head=`for`):** compiler-side
-  pin opportunities exist (not yet attempted; risk profile similar
-  to the `def` MISMATCHes — would need to verify no downstream
-  reader relies on the leak).
-- **7 AST_LIT_INT GAPs + 2 head=def GAPs:** at top-level positions
-  the typer's handle_def_or_mut bails for some shape we haven't
-  pinned down; needs targeted reproducer + handler extension.
-- **3 head=`|` GAPs:** pipe rhs is a function call to a proc whose
-  return type the typer doesn't know (typer-only proc registry
-  doesn't include closures or imported procs).
-- **2 each across reset/yield/mut/etc.:** small clusters; each is
-  a focused 1-2 line typer rule.
+At 54 audit divergences, the remaining clusters are:
 
-**Recommendation:** at this point, further Stage 1 investment
-returns less per commit than starting Stage 2 (which absorbs ~30
-of the remaining 71 just by migrating consumers off
-`c->last_expr_type`). The typer is now correct for ~95% of AST
-shapes encountered in the test_compiler corpus.
+- **6 GAP `AST_LIT_INT`:** scattered top-level int literals where
+  the typer didn't reach. Some are `def x = 5` parsed as
+  `[= [def x] 5]` (now handled by 066e666), others appear to be
+  macro-rewrite artifacts where the post-rewrite tree has new
+  AST_LIT_INT nodes the typer never saw.
+- **5 EXTRA `AST_VAR_REF` (typer=struct, compiler=dyn):** typer
+  knows the binding's struct type but the compiler's local has
+  type=DYN. Mostly inline-struct receivers; clears as more
+  TypeInfo migrations move from c-state to AST.
+- **5 EXTRA `AST_RETURN` (typer=nil, compiler=dyn):** typer pins
+  return to NIL; compiler doesn't pin (tried, broke a
+  struct-comparison test that relies on a struct-returning proc's
+  body leaking the struct type back through last_expr_type — needs
+  per-proc analysis to know when the leak is safe to drop).
+- **3 GAP `head=|`:** pipe rhs is a function call to a proc
+  whose return type the typer doesn't track (closures, imported
+  procs aren't in the typer's proc registry).
+- **2 each reset/mut/def/::/.: macro-rewrite artifacts** — the
+  compiler's `:: → set` / sugar-form rewrites produce new
+  AST nodes after the typer has already run. Out of scope for
+  Stage 2 (would need typer to also run on rewritten trees, or
+  rewrite to copy inferred_type).
 
 The ctx-struct pre-pass commit is setup for follow-on: future code
 referencing `$ctx.field` inside a `with-ctx` block will type the
