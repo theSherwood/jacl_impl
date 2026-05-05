@@ -675,6 +675,8 @@ suite track progress:
 | After commit `26a558c` (pin def/mut to nil; typer NIL fallback for unhandled set/def shapes) | 61 | 33 | 0 | 28 | 0 |
 | After commit `e520bf8` (pin while to nil) | 58 | 33 | 0 | 25 | 0 |
 | After commit `df9352a` (typer rule for HEAD_RESET) | 54 | 29 | 0 | 25 | 0 |
+| After commit `2fdc066` (pin AST_RETURN to nil; proc body return-type check reads AST tail) | 47 | 27 | 0 | 20 | 0 |
+| After commit `a4aef7b` (pin print to nil; typer shell-cmd background→DYN) | 45 | 27 | 0 | 18 | 0 |
 
 **Real divergence (GAP+MISMATCH):** 665 → 46. 93% reduction.
 
