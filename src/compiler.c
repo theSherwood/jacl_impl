@@ -5021,7 +5021,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
      * OP_TYPED_VEC expects heap struct pointers on the stack. */
     for (uint32_t i = 0; i < argc; i++) {
       compiler__compile_node(c, args[i]);
-      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != type_idx) {
+      if ((JaclType)args[i]->inferred_type != TYPE_STRUCT ||
+          args[i]->inferred_struct_idx != type_idx) {
         char err[128];
         snprintf(err, sizeof(err),
                  "[Vec %.*s]: element %u is not a %.*s struct",
@@ -5114,7 +5115,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     for (uint32_t i = 0; i < pair_count; i++) {
       compiler__compile_node(c, args[i * 2]);       /* key: any dyn type */
       compiler__compile_node(c, args[i * 2 + 1]);   /* value: must be matching struct */
-      if (c->last_expr_type != TYPE_STRUCT || c->last_struct_idx != type_idx) {
+      AstNode* val = args[i * 2 + 1];
+      if ((JaclType)val->inferred_type != TYPE_STRUCT ||
+          val->inferred_struct_idx != type_idx) {
         char err[128];
         snprintf(err, sizeof(err),
                  "[Map %.*s]: value %u is not a %.*s struct",
@@ -5219,9 +5222,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (key_is_scalar) c->expected_type = key_t;
       compiler__compile_node(c, args[i * 2]);
       c->expected_type = TYPE_DYN;
+      AstNode* k_node = args[i * 2];
       bool k_ok = key_is_scalar
         ? (c->last_expr_type == key_t)
-        : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == key_type_idx);
+        : ((JaclType)k_node->inferred_type == TYPE_STRUCT &&
+           k_node->inferred_struct_idx == key_type_idx);
       if (!k_ok) {
         char err[160];
         snprintf(err, sizeof(err),
@@ -5236,9 +5241,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if (val_is_scalar) c->expected_type = val_t;
       compiler__compile_node(c, args[i * 2 + 1]);
       c->expected_type = TYPE_DYN;
+      AstNode* v_node = args[i * 2 + 1];
       bool v_ok = val_is_scalar
         ? (c->last_expr_type == val_t)
-        : (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == val_type_idx);
+        : ((JaclType)v_node->inferred_type == TYPE_STRUCT &&
+           v_node->inferred_struct_idx == val_type_idx);
       if (!v_ok) {
         char err[160];
         snprintf(err, sizeof(err),
