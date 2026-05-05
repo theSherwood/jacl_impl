@@ -8892,6 +8892,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__emit_byte(c, OP_SYNTAX_OP, line);
     compiler__emit_byte(c, subop, line);
+    /* make-syntax returns an opaque syntax object — typed as dyn since
+     * the typer doesn't model syntax kinds. Pin instead of leaking the
+     * last payload's type. */
+    c->last_expr_type = TYPE_DYN;
     return;
   }
 
@@ -11073,6 +11077,16 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
 
     case AST_COMMAND: {
       compiler__compile_command(c, node);
+      /* HEAD_SET / HEAD_COLON_COLON are statements: their many per-arm
+       * exits in compile_command leak last_expr_type from the value
+       * expression. Pin nil here. HEAD_DEF / HEAD_MUT are *not* pinned:
+       * downstream code reads c->last_expr_type+c->last_struct_idx
+       * after `def Point p [mkpt ...]` to drive inline-vs-heap codegen,
+       * and those paths rely on the leak (see commit 4447c01). */
+      if (node->data.command.head_id == HEAD_SET ||
+          node->data.command.head_id == HEAD_COLON_COLON) {
+        c->last_expr_type = TYPE_NIL;
+      }
       break;
     }
 
