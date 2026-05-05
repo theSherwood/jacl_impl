@@ -2605,10 +2605,17 @@ static bool compiler__compile_typed_elem_arg(Compiler* c, AstNode* arg,
   }
   compiler__compile_node(c, arg);
   c->expected_type = TYPE_DYN;
+  /* Scalar element narrowing relies on c->expected_type set above —
+   * use c->last_expr_type since the typer doesn't currently propagate
+   * expected_type through the compiler's own scalar-element path
+   * (typer's compile-time literal narrowing is a separate code path
+   * driven by tc->expected_type). Struct element check reads from
+   * the AST. */
   if (is_scalar) {
     return c->last_expr_type == COMPILER_TYPE_IDX_TO_SCALAR(expected_type_idx);
   }
-  return c->last_expr_type == TYPE_STRUCT && c->last_struct_idx == expected_type_idx;
+  return (JaclType)arg->inferred_type == TYPE_STRUCT &&
+         arg->inferred_struct_idx == expected_type_idx;
 }
 
 /* --- TypeInfo accessor --- */
