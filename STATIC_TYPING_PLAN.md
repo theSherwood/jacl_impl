@@ -125,9 +125,17 @@ behavior change.
    gives DYN), `vec-get`/`map-get` element types, `take`/`first`/
    `reset`/`swap`/`hash`/`interpret`/FFI cluster. Plus closures and
    imported procs are absent from the typer's proc registry.
-4. **Stage 1c — typed-collection element narrowing.** ❌ NOT STARTED.
-   `[vec-get $typed_vec idx]` and `[map-get $typed_map key]` still
-   return DYN in the typer.
+4. **Stage 1c — typed-collection element narrowing.** ✅ PARTIAL.
+   Done (this session): typed-collection constructor `[[Vec T] ...]` /
+   `[[Map K V] ...]` now types as TYPE_TYPED_VEC/MAP with element
+   `inferred_struct_idx` populated for struct elements. `[vec-get
+   $typed_vec idx]` / `[map-get $typed_map key]` narrow to TYPE_STRUCT
+   with the element struct_idx when the receiver carries it. Proc
+   params declared `[Vec T]` / `[Map K V]` and bindings declared with
+   typed-collection types also propagate the elem struct_idx. Not
+   done: scalar-element narrowing (`[Vec i64]` etc.) — still DYN
+   because the typer would need the compiler's
+   COMPILER_SCALAR_TYPE_IDX sentinel encoding.
 5. **Stage 1d — narrowing through every guard.** ✅ PARTIAL.
    Done: `[box? Type $x]`. Not done: typed-collection box guards
    (`box? [Vec T]`), error guards in `try`.
@@ -553,12 +561,25 @@ substeps with done/partial/not-started markers above.
 
 **Pick-up entry points** (in increasing depth of work):
 
-- **Stage 2 minimal edit (1 line, ~30 audit divergences cleared):**
-  delete the `c->last_expr_type` fallback from
-  `compiler__effective_type` in compiler.c. Run tests. Then audit
-  mode shows which other clusters need follow-up.
-- **Finish Stage 1c** (typed-collection elem narrowing for
-  `vec-get` / `map-get`) — small, targeted, ~13 audit GAPs gone.
+- **Stage 2 minimal edit — REVISED (NOT viable yet):** the prior
+  claim that deleting `compiler__effective_type`'s fallback would
+  clear ~30 audit divergences in one shot was only true for the
+  test_compiler corpus. Across the full test suite it breaks 7
+  suites (compiler, jacl_harness, stream_for/filter/transform,
+  typed_vec, typed_map). Concretely, the fallback was masking
+  typer GAPs in: typed-collection ctors (now closed),
+  `vec-get`/`map-get` element narrowing on typed receivers (now
+  closed), `[box? [Vec T]]` narrowing (open), `filter`/`transform`
+  return-type tracking (open), stream type propagation through
+  `parallel`/`each` (open). Stage 2 must be done **per-cluster**
+  (per-recipe in the Stage 2 section) until enough Stage 1 GAPs
+  are closed that the global helper-drop is safe.
+- **Finish Stage 1c** — partial as of this session. Done:
+  typed-collection constructor types and elem struct_idx
+  propagation; vec-get/map-get narrow to elem struct type. Open:
+  scalar-element typed-vec narrowing; box? narrowing for
+  `[Vec T]` / `[Map K V]`; filter/transform return type
+  preservation.
 - **Stage 1e** (type errors emitted by typer) — bigger, but the
   shared formatters are already extracted; mostly call-site moves.
 - **Stage 1f** (dyn as a real type) — the bigger architectural

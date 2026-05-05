@@ -215,6 +215,22 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       if (tcoll == 1) declared_type = TYPE_TYPED_VEC;
       else if (tcoll == 2 || tcoll == 3) declared_type = TYPE_TYPED_MAP;
       else return false;
+      /* Element struct_idx for [Vec T] / [Map V] / [Map K V] declared types. */
+      AstNode* type_arg = (tcoll == 3)
+          ? args[0]->data.command.args[1]
+          : args[0]->data.command.args[0];
+      if (type_arg && type_arg->type == AST_LIT_STRING &&
+          !is_type_keyword(type_arg->data.lit_string.value,
+                           type_arg->data.lit_string.length)) {
+        for (uint32_t si = 0; si < tc->struct_count; si++) {
+          if (tc->structs[si].name_len == type_arg->data.lit_string.length &&
+              memcmp(tc->structs[si].name, type_arg->data.lit_string.value,
+                     type_arg->data.lit_string.length) == 0) {
+            declared_struct_idx = si;
+            break;
+          }
+        }
+      }
     }
     name_node  = args[1];
     value_node = args[2];
@@ -409,8 +425,9 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     }
   }
   uint32_t struct_idx = UINT32_MAX;
-  if (effective == TYPE_STRUCT) {
-    /* Declared struct (def Point r ...) wins; otherwise inherit from RHS. */
+  if (effective == TYPE_STRUCT || is_typed_collection(effective)) {
+    /* Declared struct (def Point r ...) / typed-collection elem
+     * (def [Vec Point] ps ...) wins; otherwise inherit from RHS. */
     if (declared_struct_idx != UINT32_MAX) {
       struct_idx = declared_struct_idx;
     } else {
@@ -510,18 +527,38 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
     if (count >= TYPER_MAX_PROC_PARAMS) break;
     if (elem->type == AST_COMMAND) {
       /* compound type expr: [Vec T] / [Map K V] / [Map V] resolves to a
-       * typed collection; anything else falls back to dyn. */
+       * typed collection; anything else falls back to dyn. Element
+       * struct_idx is propagated so vec-get/map-get on the param can
+       * narrow the result to TYPE_STRUCT. */
       int tcoll = typer__typed_collection_kind(elem);
       JaclType t = TYPE_DYN;
+      uint32_t elem_sidx = UINT32_MAX;
       if (tcoll == 1) t = TYPE_TYPED_VEC;
       else if (tcoll == 2 || tcoll == 3) t = TYPE_TYPED_MAP;
+      if (tcoll == 1 || tcoll == 2 || tcoll == 3) {
+        AstNode* type_arg = (tcoll == 3)
+            ? elem->data.command.args[1]
+            : elem->data.command.args[0];
+        if (type_arg && type_arg->type == AST_LIT_STRING &&
+            !is_type_keyword(type_arg->data.lit_string.value,
+                             type_arg->data.lit_string.length)) {
+          for (uint32_t si = 0; si < tc->struct_count; si++) {
+            if (tc->structs[si].name_len == type_arg->data.lit_string.length &&
+                memcmp(tc->structs[si].name, type_arg->data.lit_string.value,
+                       type_arg->data.lit_string.length) == 0) {
+              elem_sidx = si;
+              break;
+            }
+          }
+        }
+      }
       fi++;
       if (fi >= flat_n) break;
       elem = flat[fi];
       if (elem->type != AST_LIT_STRING) continue;
       (*name_nodes_out)[count]   = elem;
       (*types_out)[count]        = t;
-      (*struct_idxs_out)[count]  = UINT32_MAX;
+      (*struct_idxs_out)[count]  = elem_sidx;
       count++;
       continue;
     }
@@ -1083,6 +1120,34 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   } else if (sdef) {
     node->inferred_type = TYPE_STRUCT;
     node->inferred_struct_idx = sdef_idx;
+  } else if (head && head->type == AST_COMMAND) {
+    /* Typed-collection constructor: [[Vec T] e1 ...] / [[Map K V] ...].
+     * Mirrors compiler__compile_command's typed-vec/typed-map branch.
+     * For struct-element types, propagate the element's struct_idx via
+     * inferred_struct_idx so vec-get/map-get can narrow the result type. */
+    int tc_kind = typer__typed_collection_kind(head);
+    if (tc_kind == 1 || tc_kind == 2 || tc_kind == 3) {
+      node->inferred_type = (tc_kind == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
+      /* Element type expr: args[0] for [Vec T] / [Map V]; args[1] for
+       * [Map K V]. Look up struct_idx if it names a registered struct. */
+      AstNode* elem_node = (tc_kind == 3)
+          ? head->data.command.args[1]
+          : head->data.command.args[0];
+      if (elem_node && elem_node->type == AST_LIT_STRING &&
+          !is_type_keyword(elem_node->data.lit_string.value,
+                           elem_node->data.lit_string.length)) {
+        for (uint32_t si = 0; si < tc->struct_count; si++) {
+          if (tc->structs[si].name_len == elem_node->data.lit_string.length &&
+              memcmp(tc->structs[si].name, elem_node->data.lit_string.value,
+                     elem_node->data.lit_string.length) == 0) {
+            node->inferred_struct_idx = si;
+            break;
+          }
+        }
+      }
+    } else {
+      node->inferred_type = TYPE_DYN;
+    }
   } else if (head && head->type == AST_LIT_STRING) {
     HeadId hid = (HeadId)node->data.command.head_id;
     const char* hn = head->data.lit_string.value;
@@ -1132,6 +1197,25 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             node->inferred_struct_idx = recv->inferred_struct_idx;
           } else if (recv_t == TYPE_MAP) {
             node->inferred_type = TYPE_VEC;
+          }
+          return;
+        case HEAD_VEC_GET:
+          /* Element narrowing: typed-vec of struct → result is that struct.
+           * Element struct_idx is propagated via the typed-vec's
+           * inferred_struct_idx (set by the typed-collection ctor rule). */
+          if (recv_t == TYPE_TYPED_VEC &&
+              recv->inferred_struct_idx != UINT32_MAX &&
+              recv->inferred_struct_idx < tc->struct_count) {
+            node->inferred_type = TYPE_STRUCT;
+            node->inferred_struct_idx = recv->inferred_struct_idx;
+          }
+          return;
+        case HEAD_MAP_GET:
+          if (recv_t == TYPE_TYPED_MAP &&
+              recv->inferred_struct_idx != UINT32_MAX &&
+              recv->inferred_struct_idx < tc->struct_count) {
+            node->inferred_type = TYPE_STRUCT;
+            node->inferred_struct_idx = recv->inferred_struct_idx;
           }
           return;
         default: break;
