@@ -1242,7 +1242,8 @@ static void typer__infer_node(TyperCtx* tc, AstNode* node) {
       for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
         typer__infer_node(tc, node->data.shell_cmd.args[i]);
       }
-      node->inferred_type = TYPE_DYN;
+      /* Shell commands compile to OP_EXEC which returns a stream. */
+      node->inferred_type = TYPE_STREAM;
       break;
     case AST_CTX_DECL: {
       /* ctx [mut] Type name = default_expr — recurse into default_expr
@@ -1275,11 +1276,15 @@ static void typer__infer_node(TyperCtx* tc, AstNode* node) {
       }
       node->inferred_type = TYPE_DYN;
       break;
+    case AST_CONTINUE:
+      /* continue is non-returning control flow; its compiled form
+       * leaves nothing meaningful on stack. The compiler reports nil. */
+      node->inferred_type = TYPE_NIL;
+      break;
     case AST_USE:
     case AST_DEFSTRUCT:
     case AST_DESTRUCTURE_VEC:
     case AST_DESTRUCTURE_NAMED:
-    case AST_CONTINUE:
     case AST_ERROR:
     default:
       node->inferred_type = TYPE_DYN;
