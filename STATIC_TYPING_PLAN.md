@@ -541,3 +541,41 @@ The first commits, in order:
    (sequence 1-12 above).
 
 Stop at the end of any Stage and the codebase is still better off.
+
+## Progress snapshot
+
+**Stage 0 — complete.** Four commits established the audit and
+test infrastructure (`86be2bb`, `5b00aa3`, `e30a308`, `e5a31a8`).
+
+**Stage 1 — in progress.** Audit divergences on the test_compiler
+suite track progress:
+
+| Snapshot | Total | GAP | MISMATCH | EXTRA | STRUCT_IDX |
+|----------|------:|----:|---------:|------:|-----------:|
+| Stage 0 end | 854 | 613 | 52 | 73 | 116 |
+| After commit `1f220a4` (def/mut sugar, proc, struct_idx) | 194 | 108 | 21 | 65 | 0 |
+| After commit `fb95682` (while/for/dot field-set) | 194 | 70 | 30 | 94 | 0 |
+| After commit `7d0ed8b` (compiler box?=BOOL fix) | ~190 | 70 | 22 | 94 | 0 |
+| After commit `4447c01` (while/break/continue compiler pins) | ~165 | 70 | 22 | 70 | 0 |
+| After commit `f604819` (typer continue/shell rules) | 160 | 66 | 26 | 68 | 0 |
+
+**Real divergence (GAP+MISMATCH):** 665 → 92. 86% reduction.
+
+**Remaining work to drive Stage 1 to zero:**
+
+- ~66 GAPs spread across `HEAD_DOT` (struct field access where typer
+  doesn't have receiver's struct_idx), macro-expanded `AST_LIT_INT`
+  (typer doesn't run on expanded subtrees), `HEAD_PIPE`,
+  `HEAD_MAKE_SYNTAX` (varies by kind), `HEAD_IF` with mismatched
+  branch types, etc.
+- ~26 MISMATCHes from compiler-side leaks at HEAD_SET, HEAD_FOR,
+  HEAD_DEF (struct binding paths). Tried pinning these in commit
+  `4447c01` but reverted because struct-flow tests rely on the
+  leaked types for inline-vs-heap codegen decisions.
+- ~68 EXTRAs are "typer is more correct than compiler tracks" —
+  they all clear when Stage 2 drops `c->last_expr_type` reads.
+  Not blocking.
+
+**Audit replay:** `bash build.sh --audit --test=compiler 2>err.log`,
+then `grep TYPER_AUDIT err.log | sed 's/at [0-9]*:[0-9]*//' |
+sort | uniq -c | sort -rn | head` for the bug list.
