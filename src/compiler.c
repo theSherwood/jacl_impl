@@ -4279,7 +4279,7 @@ void compiler__compile_destructure_named(
   /* Compile RHS — pushes the source value onto stack. */
   compiler__compile_node(c, value_expr);
   JaclType rhs_type = compiler__effective_type(c, value_expr);
-  uint32_t rhs_struct_idx = c->last_struct_idx;
+  uint32_t rhs_struct_idx = value_expr->inferred_struct_idx;
 
   /* Determine if we can use compile-time struct field resolution */
   int use_struct_path = 0;
@@ -6016,6 +6016,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[value_arg_idx]);
     c->expected_type = TYPE_DYN;
     JaclType rhs_type = compiler__effective_type(c, args[value_arg_idx]);
+    uint32_t rhs_struct_idx = args[value_arg_idx]->inferred_struct_idx;
 
     /* Type check for typed mut */
     if (declared_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != declared_type) {
@@ -6100,7 +6101,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->current_scope_mark = prev_mark;
       }
       c->locals[c->local_count - 1].is_mutable = true;
-      { TypeInfo ti = compiler__get_type(c); ti.type = effective_type;
+      { TypeInfo ti = { effective_type, rhs_struct_idx, c->last_key_struct_idx };
         TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
       /* mut returns nil */
       compiler__emit_byte(c, OP_NIL, line);
@@ -6128,7 +6129,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         for (uint32_t i = 0; i < root->global_arity_count; i++) {
           if (root->global_arities[i].name == name_val) {
             root->global_arities[i].is_mutable = true;
-            { TypeInfo ti = compiler__get_type(c); ti.type = effective_type;
+            { TypeInfo ti = { effective_type, rhs_struct_idx, c->last_key_struct_idx };
               TYPEINFO_SAVE(root->global_arities[i], ti); }
             break;
           }
@@ -6356,10 +6357,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, OP_TO_DYN, line);
             compiler__emit_byte(c, (uint8_t)target_type, line);
           }
-          if (rhs_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX) {
+          uint32_t reset_struct_idx = args[1]->inferred_struct_idx;
+          if (rhs_type == TYPE_STRUCT && reset_struct_idx != UINT32_MAX) {
             /* Struct-box reset: inline bytes write directly. */
             compiler__emit_byte(c, OP_RESET_INLINE, line);
-            compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+            compiler__emit_u16(c, (uint16_t)reset_struct_idx, line);
           } else {
             compiler__emit_byte(c, OP_RESET, line);
           }
@@ -7546,7 +7548,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Save then-branch type for unification. */
     JaclType then_type = compiler__effective_type(c, args[1]);
-    uint32_t then_struct_idx = c->last_struct_idx;
+    uint32_t then_struct_idx = args[1]->inferred_struct_idx;
 
     /* Pop narrowing before else-branch */
     if (has_narrowing) {
@@ -7575,7 +7577,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Type unification: preserve type if both branches agree */
     if (then_type == else_type) {
-      if (then_type != TYPE_STRUCT || then_struct_idx == c->last_struct_idx) {
+      uint32_t else_struct_idx =
+          (argc == 3) ? args[2]->inferred_struct_idx : UINT32_MAX;
+      if (then_type != TYPE_STRUCT || then_struct_idx == else_struct_idx) {
         c->last_expr_type = then_type;
         c->last_struct_idx = then_struct_idx;
       } else {
