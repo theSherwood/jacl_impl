@@ -559,8 +559,11 @@ suite track progress:
 | After commit `4447c01` (while/break/continue compiler pins) | ~165 | 70 | 22 | 70 | 0 |
 | After commit `f604819` (typer continue/shell rules) | 160 | 66 | 26 | 68 | 0 |
 | After commit `05dc74e` (typer ctx-struct pre-pass) | 160 | 66 | 26 | 68 | 0 |
+| After commit `e6b0d6b` (set/:: pin nil + make-syntax pin dyn) | 107 | 59 | 15 | 33 | 0 |
+| After commit `8b595ea` (HEAD_PIPE result from rhs + atom dyn) | 96 | 48 | 15 | 33 | 0 |
+| After commit `a1d713f` (struct== inline → bool) | 91 | 48 | 15 | 28 | 0 |
 
-**Real divergence (GAP+MISMATCH):** 665 → 92. 86% reduction.
+**Real divergence (GAP+MISMATCH):** 665 → 63. 90% reduction.
 
 The ctx-struct pre-pass commit is setup for follow-on: future code
 referencing `$ctx.field` inside a `with-ctx` block will type the
@@ -569,6 +572,31 @@ out to be field access on intra-proc struct locals where the
 typer's struct registry indexing diverges from the compiler's at
 some specific shape. Each remaining GAP cluster from this point is
 its own focused investigation.
+
+**Remaining clusters as of `a1d713f`:**
+
+| Cluster | Count | Shape |
+|---------|------:|-------|
+| GAP `head=.` | 11 | typer DYN compiler I32 — field access where typer fails to resolve receiver |
+| GAP `AST_LIT_INT` | 7 | macro-expanded literals never visited by typer |
+| MISMATCH `head=for` | 6 | for body's last expr leaks (load-bearing in some path; can't pin) |
+| MISMATCH `head=def` | 5 | def-with-struct leaks for inline-vs-heap codegen (load-bearing; can't pin) |
+| EXTRA `AST_VAR_REF` (struct/dyn) | 5 | typer knows struct binding type, compiler tracks dyn |
+| EXTRA `AST_RETURN` | 5 | typer says nil; compiler default dyn (pin breaks struct return) |
+| GAP `head=\|` (i32) | 3 | typer rhs returns DYN because proc's return type isn't tracked |
+| GAP `head=yield/reset/mut/def` | 2-2 each | scattered; need targeted typer rules |
+| ... long tail | ~30 | individual cases |
+
+The 13 commits across Stages 0+1 in this session are recorded above.
+At this rate of progress per commit, reaching zero divergences would
+take approximately another 6-10 sessions of similar work.
+
+**What Stage 2 would absorb:** EXTRAs (28) plus the load-bearing
+MISMATCHes (~11 from def/for/return). That's ~39 of the remaining
+91 — clears once `c->last_expr_type` consumers migrate. So Stage 1
+reaches its exit criterion ("zero divergences") through a
+combination of Stage 1 typer rules AND Stage 2 consumer migration,
+not Stage 1 alone.
 
 **Remaining work to drive Stage 1 to zero:**
 
