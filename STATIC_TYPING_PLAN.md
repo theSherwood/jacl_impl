@@ -240,6 +240,37 @@ separation is *interface clarity* — the compiler's input type becomes
 Worth doing if/when the compiler grows further; not critical for
 correctness.
 
+### Stage 5 — Pointer types for FFI (2-3 weeks)
+
+After the migration architecture is stable, add `*T` to the type
+system as a real, user-visible category. This is the FFI enablement
+work that motivated the inline-vs-pointer distinction in decision 3.
+
+**Tasks:**
+
+1. **Design the pointer type vocabulary.** `*T` only, or also
+   `*mut T`? Should `*T` apply to primitives (`*i32`, `*u8`) or only
+   to structs? Auto-deref on field access (`[. $p field]` works on
+   both `Point` and `*Point`), or always explicit? Defer the answers
+   to a design discussion when we get here.
+2. **Extend `JaclType` encoding.** The Stage 1 data-structure work
+   already left room (decision 3); fill it in.
+3. **Add operations:** `[ptr-deref $p]`, `[ptr-addr-of $val]`, and
+   `[ptr-offset $p $n]` at minimum. Plus FFI call signatures using
+   `*T` types.
+4. **Codegen.** New opcodes for pointer load/store; integration
+   with existing inline-struct codegen so a pointer to an inline
+   struct field works.
+5. **Typer rules.** `*T ↔ T` is a barrier crossing (consistent with
+   decision 1's model). Going from `T` to `*T` requires
+   `[ptr-addr-of]`; going from `*T` to `T` requires `[ptr-deref]`.
+   No implicit coercion.
+
+**Exit criteria:** can write a JACL program that calls a C function
+returning `*Point`, deref it, read fields, and the typer rejects
+treating the pointer as a value (or vice versa) without explicit
+ops.
+
 ---
 
 ## Open decisions (resolve before Stage 0)
@@ -247,75 +278,172 @@ correctness.
 These shape the rest of the work. Each needs an answer before the
 test infrastructure can be designed.
 
-### 1. How strict is the type checker?
+### 1. How strict is the type checker? — RESOLVED
 
-Two modes, or pick one:
+**Decision:** gradual sound typing.
 
-- **Permissive:** any program the compiler currently accepts must
-  still compile. The typer infers types, never rejects. Type errors
-  only at boundaries the compiler already checks today (typed
-  bindings, struct fields, etc.).
-- **Sound:** the typer can reject programs that "happen to work" at
-  runtime if their static types don't match. E.g., `[+ "hello" 5]`
-  would become a compile-time error even if the runtime would have
-  errored too.
+- **All operands `dyn`** → permissive. The operation compiles; the
+  runtime decides. Result is `dyn`.
+- **Any operand non-`dyn`** → sound. As soon as one operand has a
+  known type, the operation is type-checked. Mismatched concrete
+  types are compile-time errors.
+- **Barrier crossing** (decision 2) is itself part of the sound
+  rules: a `dyn` value can only enter a typed context, or vice
+  versa, via explicit `[to T $val]`.
 
-**Recommendation:** start permissive. Soundness is a follow-on once
-the architecture is in place.
+**Consequences:**
 
-### 2. Implicit `dyn` coercion: where?
+| Expression | Status |
+|------------|--------|
+| `[+ $dyn $dyn]` | compiles; result `dyn` |
+| `[+ $i32 $i32]` | compiles; result `i32` |
+| `[+ $i32 $f32]` | compile error (typed mismatch) |
+| `[+ $i32 $dyn]` | compile error (mixed; cast required) |
+| `[+ $i32 [to i32 $dyn]]` | compiles; result `i32` |
 
-When can a typed value be used where `dyn` is expected, and vice
-versa? Three options:
+**Migration cost:** existing programs that rely on implicit
+`dyn ↔ typed` flow at operators or function boundaries will need
+explicit casts. Stage 0's audit mode surfaces every instance
+before the architectural change ships.
 
-- **Both directions implicit.** Most permissive; matches today.
-- **Typed → dyn implicit, dyn → typed via explicit `[to T $val]`.**
-  Sound; matches Dart sound mode and TypeScript strict.
-- **Both explicit.** Most ceremony; probably wrong for a dynamic-by-
-  default language.
+**Why this and not "permissive default + opt-in strict":** the
+quarantine model is what makes the typer's job tractable. Once a
+value is typed, every operation it touches has known typed semantics
+— no exception cases for "this typed value happens to be flowing
+through dyn code." The typer's rules become a small, total set
+rather than a permissive layer with carve-outs.
 
-**Recommendation:** option 2. Keeps `dyn` ergonomic for incremental
-typing while preventing silent type holes from opening into typed
-code.
+### 2. Implicit `dyn` coercion: where? — RESOLVED
 
-### 3. `inline_repr` — type or codegen detail?
+**Decision:** no implicit coercion in either direction.
 
-The compiler tracks whether a struct value is currently inline-on-
-stack vs heap-pointer. This is a *representation* choice, not a type.
-But it's currently bundled with type tracking.
+Crossing the boundary requires `[to T $val]` (or `[to dyn $val]`):
 
-- **Option A:** keep `inline_repr` in the compiler (as codegen
-  state). Typer ignores it.
-- **Option B:** move it to the AST as `inferred_repr` so the typer
-  can predict it.
+- `def i32 x $dyn_val` → compile error. Use
+  `def i32 x [to i32 $dyn_val]`.
+- `[typed_proc $dyn_arg]` → compile error. Use
+  `[typed_proc [to T $dyn_arg]]`.
+- `[dyn_proc $i32_arg]` → compile error. Use
+  `[dyn_proc [to dyn $i32_arg]]` (or just don't have a dyn proc
+  taking what's clearly a typed value — usually a sign of a
+  modeling issue).
 
-**Recommendation:** option A. It's a codegen concern, not a type
-concern. Keep it in the compiler; the typer just says "this is a
-struct" and the compiler picks the rep.
+This is stricter than TypeScript's `noImplicitAny` (which lets
+typed → dyn flow implicitly) but matches Dart sound mode. The
+strictness is the point: every barrier crossing is visible in
+source, so reasoning about types is local.
 
-### 4. Where do type errors get formatted?
+**Sub-decision to flag:** does `def dyn x $i32_val` count as the
+explicit cast (the `dyn` keyword in the binding is itself the
+boundary marker), or is `def dyn x [to dyn $i32_val]` required? My
+inclination: the typed binding form (`def dyn x ...`) is itself
+explicit enough — it's already saying "I want this slot to be dyn"
+— so no additional cast needed. Same for `dyn` proc params and
+return types. Loop in if you disagree.
 
-Today error messages live in `compiler.c` with detailed context. If
-the typer detects errors first, do those messages move?
+### 3. `inline_repr` — type or codegen detail? — RESOLVED
 
-- **Option A:** typer emits its own errors via a `typer__error`
-  helper; format separately.
-- **Option B:** shared error machinery between typer and compiler.
+**Decision:** `inline_repr` stays in the compiler as codegen state.
+Pointer types are a separate, planned type-system feature owned by
+the typer (see Stage 5 below).
 
-**Recommendation:** option B. The error formatting is mostly correct;
-just have the typer call into the same helpers, parameterized by
-which pass detected the error.
+**The two distinctions, separated:**
 
-### 5. Migration order: top-down or bottom-up?
+- **`inline_repr` (codegen):** `INLINE_NONE` / `INLINE_STACK` /
+  `INLINE_REF` flags on `Compiler`. These describe how struct bytes
+  are *currently* arranged on the value stack mid-expression.
+  `INLINE_REF` in particular is a stack offset used during chained
+  field access (`[. [. $a b] c]`) — purely transient, never persists
+  past a single expression, invisible to the user. Not a type-level
+  concept. Stays in the compiler.
 
-- **Top-down:** start with `compile_module`'s entry, walk down,
-  migrate each AST shape's typer logic + consumer in tandem.
-- **Bottom-up:** migrate leaves first (literals, var-refs), then
-  expressions, then statements, then blocks.
+- **Pointer types (`*T`, future):** user-visible type distinction
+  for FFI. `*Point` (a C pointer) vs `Point` (a value) are different
+  types with different operations: `[ptr-deref $p]`,
+  `[ptr-addr-of $val]`, `[ptr-offset $p $n]`. The typer must track
+  these so FFI signatures type-check and pointer ops can't
+  accidentally apply to values (or vice versa). This is a real
+  type-system feature, scheduled as Stage 5.
 
-**Recommendation:** bottom-up by AST shape. Each AST node type is
-self-contained and can be migrated end-to-end (typer rule + compiler
-consumer) before moving on.
+**Implication for Stages 1-3:** the typer's `JaclType` representation
+must be designed *extensibly*. Specifically, the encoding should
+allow adding `TYPE_PTR_TO(t)` (or however we encode it) in Stage 5
+without restructuring `inferred_type` storage. A simple way: reserve
+high bits in the type field for pointer-depth, or use a small union.
+Decide the exact encoding when we get to Stage 1's data-structure
+design pass.
+
+**Sub-decision deferred:** the exact pointer type vocabulary and
+operations (`*T` vs `*mut T`, auto-deref or always-explicit, FFI
+call syntax). That's Stage 5's design work, not blocking on the
+migration.
+
+### 4. Where do type errors get formatted? — RESOLVED
+
+**Decision:** shared message formatters; per-pass reporting
+machinery.
+
+**Concretely:**
+
+- Extract type-mismatch message formatters into a shared location
+  (likely `jacl_type_error.c` or helpers in `ast.c`). Functions like
+  `jacl_format_type_mismatch(lhs_t, rhs_t, context)` and
+  `jacl_format_assignment_error(target_type, value_type, name)`
+  produce the *content* string.
+- Each pass keeps its own reporting machinery: `typer__error(tc,
+  line, col, msg)` mirrors `compiler__error(c, line, col, msg)`,
+  but both call into the same content formatters.
+- The pass that catches the error first reports it; the other
+  treats the affected AST node as poisoned (its `inferred_type`
+  becomes `TYPE_DYN` so downstream walks don't cascade-error) and
+  skips.
+- Codegen-only errors (e.g., "cannot expand inline struct here",
+  "suspension inside non-suspending callback") stay fully in
+  `compiler.c` — they're not type-mismatch errors.
+
+**Why shared:** message drift between passes erodes user-facing UX
+quietly; Stage 3 wants to delete the compiler's type-check sites
+cleanly, which is easier when they were calls-to-shared rather than
+embedded `snprintf`s. Extraction is small and one-time.
+
+### 5. Migration order: top-down or bottom-up? — RESOLVED
+
+**Decision:** bottom-up by AST shape, sub-stratified by complexity
+within each shape.
+
+Each commit picks one `AstNodeType` (or a sub-case of one), makes
+the typer total for that shape, migrates every `compile_node`
+consumer that produces a result of that shape from `c->last_*` to
+AST reads, runs tests plus audit mode, and ships.
+
+**Recommended sequence:**
+
+1. Literals (`AST_LIT_INT` / `LIT_FLOAT` / `LIT_STRING`) — already
+   done by Phase A; just verify under audit mode.
+2. `AST_VAR_REF` — already done; verify.
+3. `AST_INTERP_STRING`, `AST_QUOTE`, `AST_SYNTAX_QUOTE`,
+   `AST_UNQUOTE`, `AST_UNQUOTE_SPLICING`, `AST_SPREAD`,
+   `AST_SHELL_CMD` — small, mostly DYN today.
+4. `AST_BLOCK` — already mostly done.
+5. `AST_COMMAND`, simple heads — the `fixed_returns` cluster,
+   predicates, lengths, strings, syntax-* introspection.
+6. `AST_COMMAND`, binary ops — `compile_binary`'s consumers.
+7. `AST_COMMAND`, control-flow heads — `if`, `while`, `for`,
+   `try`, `match`, `with-ctx`.
+8. `AST_COMMAND`, def/mut/set — typed bindings (the cluster of
+   six fallback sites in compiler.c).
+9. `AST_COMMAND`, proc/struct constructor dispatch — call-return
+   tracking, including imported modules and nested procs.
+10. `AST_COMMAND`, vec-* / map-* with typed-collection narrowing —
+    builds on the work already done this session.
+11. `AST_DESTRUCTURE_VEC`, `AST_DESTRUCTURE_NAMED`.
+12. `AST_DEFSTRUCT`, `AST_DEFMACRO`, `AST_USE`, `AST_CTX_DECL`,
+    `AST_BREAK`, `AST_RETURN`, `AST_CONTINUE`, `AST_ERROR`.
+
+By step 5 we're past anything currently done. The sequence is
+checklist-shaped: at any point, the migration's status is "shapes
+1-N done; shape N+1 in progress; shapes N+2 onward pending." Easy
+to triage, easy to ship in pieces.
 
 ---
 
@@ -341,9 +469,10 @@ consumer) before moving on.
 | 1 — typer total + authoritative | 2-3 weeks | 2-3 weeks | medium |
 | 2 — migrate consumers | 1-2 weeks | 1-2 weeks | medium |
 | 3 — delete dead state | 2-3 days | 2-3 days | low |
-| 4 — separate TypedAstNode | 1 week | 1 week | low |
+| 4 — separate TypedAstNode (optional) | 1 week | 1 week | low |
+| 5 — pointer types for FFI | 2-3 weeks | 2-3 weeks | medium |
 | **Total (1-3)** | **4-6 weeks** | | |
-| **Total (1-4)** | **5-7 weeks** | | |
+| **Total (1-3 + 5)** | **6-9 weeks** | | |
 
 LOC outcome estimates (post-Stage 3):
 
@@ -357,32 +486,58 @@ LOC outcome estimates (post-Stage 3):
 
 To keep scope tight, the following are *not* part of this work:
 
-1. **Adding new type-system features.** No type variables, no
-   inheritance/subtyping beyond what exists, no type aliases, no
-   refinement types. We're moving the existing system to a clean
-   architecture, not extending it.
+1. **New type-system features beyond pointer types (Stage 5).** No
+   type variables, no inheritance/subtyping beyond what exists, no
+   type aliases, no refinement types. Stages 1-4 are pure
+   architectural migration; Stage 5 adds `*T` for FFI and that's the
+   only deliberate language addition.
 2. **Performance work.** The typer is an extra pass; if it's too slow
    we deal with that after correctness lands. No premature
    optimization.
 3. **Touching `vm.c`, `runtime.c`, `parser.c`, `lexer.c`,
-   `syntax.c`.** Type tracking lives in compiler.c and typer.c. Other
-   files are out of scope.
-4. **Changing the surface language.** Every program that compiles
-   today (with permissive mode, decision 1) must still compile.
+   `syntax.c`.** Type tracking lives in compiler.c and typer.c.
+   Stage 5 may need parser/lexer touches for `*T` syntax — that's
+   acknowledged scope for that stage only.
+4. **Changing the surface language for Stages 1-4.** Per decisions 1
+   and 2, existing programs that mix `dyn` and typed values
+   implicitly *will* need explicit casts to compile. Stage 0's audit
+   surfaces every instance. That's acknowledged migration cost,
+   not language redesign.
 5. **Adding a separate type-check command.** Type errors keep firing
    during normal compile; we don't add `jacl typecheck` as a
    standalone tool.
 
 ---
 
+## Decision summary
+
+All five Stage 0 decisions resolved (see "Open decisions" above):
+
+| # | Decision | Resolution |
+|---|----------|------------|
+| 1 | Strictness | Gradual sound: all-`dyn` permissive, any-non-`dyn` sound, barrier explicit |
+| 2 | Implicit `dyn` coercion | None — both directions require explicit `[to T $val]` |
+| 3 | `inline_repr` | Stays in compiler; pointer types are Stage 5 |
+| 4 | Error formatting | Shared content formatters; per-pass reporting |
+| 5 | Migration order | Bottom-up by AST shape, sub-stratified by complexity |
+
 ## How to start
 
-If this plan is approved, the first three commits are:
+The first commits, in order:
 
-1. `typer: add audit-mode comparison build` — Stage 0, task 2.
-2. `tests: add typer-only test harness` — Stage 0, task 1.
-3. `docs: STATIC_TYPING_PLAN — decisions resolved` — write the
-   decisions back into this doc once chosen.
+1. **`typer: add audit-mode comparison build`** — Stage 0, task 2.
+   Add a `JACL_TYPER_AUDIT=1` build flag that, after each
+   `compile_node` call, asserts `args[i]->inferred_type ==
+   c->last_expr_type` (and the struct_idx companions). Log every
+   divergence with file:line:col. This is the bug list for Stage 1.
+2. **`tests: add typer-only test harness`** — Stage 0, task 1. Run
+   the typer alone on a corpus of `.jacl` programs and assert
+   annotations on specific AST nodes. Today the only way to test
+   the typer is end-to-end through codegen.
+3. **`tests: expand type-error corpus`** — Stage 0, task 3.
+4. **`refactor: extract jacl_format_type_mismatch and friends`** —
+   prep for decision 4. Both passes will call into these.
+5. Stage 1 begins with the easiest AST shape and walks outward
+   (sequence 1-12 above).
 
-After that, Stage 1 begins with the smallest AST shape (literals) and
-walks outward.
+Stop at the end of any Stage and the codebase is still better off.
