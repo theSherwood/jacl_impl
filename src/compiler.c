@@ -5596,7 +5596,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, (uint8_t)slot_a, line);
           compiler__emit_byte(c, (uint8_t)slot_b, line);
           compiler__emit_u16(c, total_size, line);
-          c->last_expr_type = TYPE_DYN;
+          c->last_expr_type = TYPE_BOOL;
           return;
         }
       }
