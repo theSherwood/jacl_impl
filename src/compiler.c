@@ -1003,16 +1003,14 @@ void analyze__walk_body(AstNode* node, ProcSuspendInfo* info,
   switch (node->type) {
     case AST_COMMAND: {
       AstNode* head = node->data.command.head;
+      HeadId hid = (HeadId)node->data.command.head_id;
       if (head->type == AST_LIT_STRING) {
         const char* name = head->data.lit_string.value;
         uint32_t len = head->data.lit_string.length;
 
         /* Direct suspension points */
-        if ((len == 5 && memcmp(name, "await", 5) == 0) ||
-            (len == 8 && memcmp(name, "parallel", 8) == 0) ||
-            (len == 4 && memcmp(name, "race", 4) == 0)) {
+        if (hid == HEAD_AWAIT || hid == HEAD_PARALLEL || hid == HEAD_RACE) {
           info->direct_suspends = true;
-          /* Still recurse into args (they might contain calls) */
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
             analyze__walk_body(node->data.command.args[i], info, heap, intern_table);
           }
@@ -1020,24 +1018,17 @@ void analyze__walk_body(AstNode* node, ProcSuspendInfo* info,
         }
 
         /* Yield is a suspension point and marks proc as generator */
-        if (len == 5 && memcmp(name, "yield", 5) == 0) {
+        if (hid == HEAD_YIELD) {
           info->direct_suspends = true;
           info->has_yield = true;
-          /* Still recurse into args (they might contain calls) */
           for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
             analyze__walk_body(node->data.command.args[i], info, heap, intern_table);
           }
           return;
         }
 
-        /* Skip recursion INTO nested proc bodies (they have their own scope) */
-        if (len == 4 && memcmp(name, "proc", 4) == 0) {
-          return;
-        }
-
-        /* spawn is NOT a suspension point; its block arg is a separate
-           closure scope — skip recursion (like proc) */
-        if (len == 5 && memcmp(name, "spawn", 5) == 0) {
+        /* Skip recursion INTO nested proc/spawn bodies (separate scopes) */
+        if (hid == HEAD_PROC || hid == HEAD_SPAWN) {
           return;
         }
 
@@ -1106,13 +1097,10 @@ void analyze__collect_procs(AstNode* node, ProcSuspendInfoList* list,
 
   switch (node->type) {
     case AST_COMMAND: {
-      AstNode* head = node->data.command.head;
       uint32_t argc = node->data.command.arg_count;
       AstNode** args = node->data.command.args;
 
-      if (head->type == AST_LIT_STRING &&
-          head->data.lit_string.length == 4 &&
-          memcmp(head->data.lit_string.value, "proc", 4) == 0) {
+      if (node->data.command.head_id == HEAD_PROC) {
 
         /* Determine name and body indices based on argc */
         uint32_t name_idx, body_idx;
@@ -1318,74 +1306,23 @@ void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
     case AST_COMMAND: {
       AstNode* head = node->data.command.head;
       if (head->type == AST_LIT_STRING) {
-        const char* name = head->data.lit_string.value;
-        uint32_t len = head->data.lit_string.length;
-
-        /* yield is a suspension point */
-        if (len == 5 && memcmp(name, "yield", 5) == 0) {
-          if (analysis->suspension_count < SM_MAX_SUSPENSION_POINTS) {
-            SuspensionPoint* sp =
-                &analysis->suspension_points[analysis->suspension_count];
-            sp->id     = analysis->suspension_count;
-            sp->type   = SUSPEND_YIELD;
-            sp->node   = node;
-            sp->line   = node->start.line;
-            sp->column = node->start.column;
-            analysis->suspension_count++;
-          }
-          /* Still recurse into args (they might contain nested suspension) */
-          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            sm__walk_suspensions(node->data.command.args[i], analysis, map,
-                                 heap, intern_table);
-          }
-          return;
+        HeadId hid = (HeadId)node->data.command.head_id;
+        SuspensionPointType sp_type;
+        bool is_suspension_point = true;
+        switch (hid) {
+          case HEAD_YIELD:    sp_type = SUSPEND_YIELD;    break;
+          case HEAD_AWAIT:    sp_type = SUSPEND_AWAIT;    break;
+          case HEAD_PARALLEL: sp_type = SUSPEND_PARALLEL; break;
+          case HEAD_RACE:     sp_type = SUSPEND_RACE;     break;
+          default:            is_suspension_point = false; sp_type = SUSPEND_YIELD; break;
         }
 
-        /* await is a suspension point */
-        if (len == 5 && memcmp(name, "await", 5) == 0) {
+        if (is_suspension_point) {
           if (analysis->suspension_count < SM_MAX_SUSPENSION_POINTS) {
             SuspensionPoint* sp =
                 &analysis->suspension_points[analysis->suspension_count];
             sp->id     = analysis->suspension_count;
-            sp->type   = SUSPEND_AWAIT;
-            sp->node   = node;
-            sp->line   = node->start.line;
-            sp->column = node->start.column;
-            analysis->suspension_count++;
-          }
-          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            sm__walk_suspensions(node->data.command.args[i], analysis, map,
-                                 heap, intern_table);
-          }
-          return;
-        }
-
-        /* parallel is a suspension point */
-        if (len == 8 && memcmp(name, "parallel", 8) == 0) {
-          if (analysis->suspension_count < SM_MAX_SUSPENSION_POINTS) {
-            SuspensionPoint* sp =
-                &analysis->suspension_points[analysis->suspension_count];
-            sp->id     = analysis->suspension_count;
-            sp->type   = SUSPEND_PARALLEL;
-            sp->node   = node;
-            sp->line   = node->start.line;
-            sp->column = node->start.column;
-            analysis->suspension_count++;
-          }
-          for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
-            sm__walk_suspensions(node->data.command.args[i], analysis, map,
-                                 heap, intern_table);
-          }
-          return;
-        }
-
-        /* race is a suspension point */
-        if (len == 4 && memcmp(name, "race", 4) == 0) {
-          if (analysis->suspension_count < SM_MAX_SUSPENSION_POINTS) {
-            SuspensionPoint* sp =
-                &analysis->suspension_points[analysis->suspension_count];
-            sp->id     = analysis->suspension_count;
-            sp->type   = SUSPEND_RACE;
+            sp->type   = sp_type;
             sp->node   = node;
             sp->line   = node->start.line;
             sp->column = node->start.column;
@@ -1400,13 +1337,12 @@ void sm__walk_suspensions(AstNode* node, SuspensionAnalysis* analysis,
 
         /* Do NOT recurse into nested proc or spawn definitions —
            they are separate closure scopes with their own analysis */
-        if ((len == 4 && memcmp(name, "proc", 4) == 0) ||
-            (len == 5 && memcmp(name, "spawn", 5) == 0)) {
-          return;
-        }
+        if (hid == HEAD_PROC || hid == HEAD_SPAWN) return;
 
         /* Call to a known suspending proc is a suspension point */
         if (map) {
+          const char* name = head->data.lit_string.value;
+          uint32_t len = head->data.lit_string.length;
           JaclVal name_val = compiler__name_val(heap, intern_table, name, len);
           if (suspension_map_lookup(map, name_val) &&
               !suspension_map_is_generator(map, name_val)) {
@@ -1656,17 +1592,14 @@ void sm__walk_locals(AstNode* node, StateLayout* layout,
     case AST_COMMAND: {
       AstNode* head = node->data.command.head;
       if (head->type == AST_LIT_STRING) {
-        const char* hname = head->data.lit_string.value;
-        uint32_t hlen = head->data.lit_string.length;
+        HeadId hid = (HeadId)node->data.command.head_id;
         uint32_t argc = node->data.command.arg_count;
         AstNode** args = node->data.command.args;
 
         /* def / mut / = / : — local bindings (= is sugar for def, : for mut) */
-        if ((hlen == 3 && memcmp(hname, "def", 3) == 0) ||
-            (hlen == 3 && memcmp(hname, "mut", 3) == 0) ||
-            (hlen == 1 && hname[0] == '=') ||
-            (hlen == 1 && hname[0] == ':')) {
-          bool is_mut = (hname[0] == 'm' || hname[0] == ':');
+        if (hid == HEAD_DEF || hid == HEAD_MUT ||
+            hid == HEAD_EQUALS || hid == HEAD_COLON) {
+          bool is_mut = (hid == HEAD_MUT || hid == HEAD_COLON);
 
           if (argc >= 2 && args[0]->type == AST_DESTRUCTURE_VEC) {
             sm__collect_destructure_vec_names(args[0], layout, is_mut);
@@ -1731,7 +1664,7 @@ void sm__walk_locals(AstNode* node, StateLayout* layout,
         }
 
         /* for — creates loop bindings */
-        if (hlen == 3 && memcmp(hname, "for", 3) == 0) {
+        if (hid == HEAD_FOR) {
           /* C-style for: [for {init; cond; step} { body }] — init handled by recursion */
           if (argc == 3 && args[1]->type == AST_LIT_STRING &&
               args[2]->type == AST_BLOCK) {
@@ -1757,7 +1690,7 @@ void sm__walk_locals(AstNode* node, StateLayout* layout,
         /* try — catch binding is scope-local (handler cannot suspend),
            so do NOT add it to the state layout.  Only recurse into
            the try-body and handler body for nested bindings. */
-        if (hlen == 3 && memcmp(hname, "try", 3) == 0) {
+        if (hid == HEAD_TRY) {
           for (uint32_t i = 0; i < argc; i++) {
             if (i == 1 && argc == 3 && args[1]->type == AST_LIT_STRING)
               continue;  /* skip catch binding name */
@@ -1767,7 +1700,7 @@ void sm__walk_locals(AstNode* node, StateLayout* layout,
         }
 
         /* proc — named proc creates a binding; do NOT recurse into body */
-        if (hlen == 4 && memcmp(hname, "proc", 4) == 0) {
+        if (hid == HEAD_PROC) {
           uint32_t name_idx;
           if (argc == 3) name_idx = 0;
           else if (argc == 4) name_idx = 1;
@@ -1784,9 +1717,7 @@ void sm__walk_locals(AstNode* node, StateLayout* layout,
         }
 
         /* spawn — separate scope, do not recurse */
-        if (hlen == 5 && memcmp(hname, "spawn", 5) == 0) {
-          return;
-        }
+        if (hid == HEAD_SPAWN) return;
       }
 
       /* Recurse into arguments for all other commands */
@@ -2026,38 +1957,29 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
 
     case AST_COMMAND: {
       AstNode* head = node->data.command.head;
+      HeadId hid = (HeadId)node->data.command.head_id;
       uint32_t argc = node->data.command.arg_count;
       AstNode** args = node->data.command.args;
 
       if (head->type == AST_LIT_STRING) {
-        const char* hname = head->data.lit_string.value;
-        uint32_t hlen = head->data.lit_string.length;
 
         /* --- Suspension points: increment segment AFTER evaluating args --- */
-        if ((hlen == 5 && memcmp(hname, "yield", 5) == 0) ||
-            (hlen == 5 && memcmp(hname, "await", 5) == 0) ||
-            (hlen == 8 && memcmp(hname, "parallel", 8) == 0) ||
-            (hlen == 4 && memcmp(hname, "race", 4) == 0)) {
-          /* Walk args (evaluated before suspension) */
+        if (hid == HEAD_YIELD || hid == HEAD_AWAIT ||
+            hid == HEAD_PARALLEL || hid == HEAD_RACE) {
           for (uint32_t i = 0; i < argc; i++) {
             sm__liveness_walk(args[i], layout, liveness, segment);
           }
-          /* Suspension occurs — next code is in a new segment */
           (*segment)++;
           return;
         }
 
         /* --- def / mut / = / : — mark binding names as writes --- */
-        if ((hlen == 3 && memcmp(hname, "def", 3) == 0) ||
-            (hlen == 3 && memcmp(hname, "mut", 3) == 0) ||
-            (hlen == 1 && hname[0] == '=') ||
-            (hlen == 1 && hname[0] == ':')) {
-          /* Walk RHS first (it may reference variables) */
+        if (hid == HEAD_DEF || hid == HEAD_MUT ||
+            hid == HEAD_EQUALS || hid == HEAD_COLON) {
           uint32_t val_idx = (argc == 3) ? 2 : 1;
           if (val_idx < argc) {
             sm__liveness_walk(args[val_idx], layout, liveness, segment);
           }
-          /* Mark binding name as write */
           if (argc >= 2) {
             uint32_t name_idx = (argc == 3) ? 1 : 0;
             sm__liveness_mark_binding_names(args[name_idx], layout, liveness,
@@ -2067,12 +1989,9 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
         }
 
         /* --- set: mark target as write, walk value --- */
-        if ((hlen == 3 && memcmp(hname, "set", 3) == 0) ||
-            (hlen == 2 && memcmp(hname, "::", 2) == 0)) {
+        if (hid == HEAD_SET || hid == HEAD_COLON_COLON) {
           if (argc >= 2) {
-            /* Walk value expression (may read variables) */
             sm__liveness_walk(args[1], layout, liveness, segment);
-            /* Mark target as write */
             if (args[0]->type == AST_LIT_STRING) {
               sm__liveness_mark_write(liveness, layout,
                   sm__lit_string_name(layout, args[0]), *segment);
@@ -2082,7 +2001,7 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
         }
 
         /* --- while: handle suspending loops with back-edge expansion --- */
-        if (hlen == 5 && memcmp(hname, "while", 5) == 0) {
+        if (hid == HEAD_WHILE) {
           if (argc >= 2) {
             AstNode* cond = args[0];
             AstNode* body = args[argc - 1];
@@ -2121,7 +2040,7 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
         }
 
         /* --- for: loop variable binding + suspending loop handling --- */
-        if (hlen == 3 && memcmp(hname, "for", 3) == 0) {
+        if (hid == HEAD_FOR) {
           if (argc >= 2) {
             AstNode* body = args[argc - 1];
             bool loop_suspends = (body->type == AST_BLOCK) &&
@@ -2167,17 +2086,14 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
         }
 
         /* --- try: catch binding is scope-local (cannot suspend), skip it --- */
-        if (hlen == 3 && memcmp(hname, "try", 3) == 0) {
-          /* Walk try body */
+        if (hid == HEAD_TRY) {
           if (argc >= 1) sm__liveness_walk(args[0], layout, liveness, segment);
-          /* Skip catch binding name — not a state field */
-          /* Walk catch body */
           if (argc >= 3) sm__liveness_walk(args[2], layout, liveness, segment);
           return;
         }
 
         /* --- proc: named proc = write; don't recurse into body --- */
-        if (hlen == 4 && memcmp(hname, "proc", 4) == 0) {
+        if (hid == HEAD_PROC) {
           uint32_t name_idx;
           if (argc == 3) name_idx = 0;
           else if (argc == 4) name_idx = 1;
@@ -2190,9 +2106,7 @@ void sm__liveness_walk(AstNode* node, const StateLayout* layout,
         }
 
         /* --- spawn: separate scope, don't recurse --- */
-        if (hlen == 5 && memcmp(hname, "spawn", 5) == 0) {
-          return;
-        }
+        if (hid == HEAD_SPAWN) return;
       }
 
       /* Head might be a var ref or a bare-word proc call */
@@ -2429,23 +2343,19 @@ bool ast__contains_suspension(AstNode* node, SuspensionMap* map,
     case AST_COMMAND: {
       AstNode* head = node->data.command.head;
       if (head->type == AST_LIT_STRING) {
-        const char* name = head->data.lit_string.value;
-        uint32_t len = head->data.lit_string.length;
-        if ((len == 5 && memcmp(name, "await", 5) == 0) ||
-            (len == 8 && memcmp(name, "parallel", 8) == 0) ||
-            (len == 4 && memcmp(name, "race", 4) == 0) ||
-            (len == 5 && memcmp(name, "yield", 5) == 0)) {
+        HeadId hid = (HeadId)node->data.command.head_id;
+        if (hid == HEAD_AWAIT || hid == HEAD_PARALLEL ||
+            hid == HEAD_RACE  || hid == HEAD_YIELD) {
           return true;
         }
         /* Don't recurse into nested proc or spawn definitions
            (their block args are separate closure scopes) */
-        if ((len == 4 && memcmp(name, "proc", 4) == 0) ||
-            (len == 5 && memcmp(name, "spawn", 5) == 0)) {
-          return false;
-        }
+        if (hid == HEAD_PROC || hid == HEAD_SPAWN) return false;
         /* Check if this is a call to a known suspending proc.
            Generator calls return a stream immediately — they don't suspend. */
         if (map) {
+          const char* name = head->data.lit_string.value;
+          uint32_t len = head->data.lit_string.length;
           JaclVal name_val = compiler__name_val(heap, intern_table, name, len);
           if (suspension_map_lookup(map, name_val) &&
               !suspension_map_is_generator(map, name_val)) return true;
@@ -2515,10 +2425,9 @@ void ast__collect_local_muts(AstNode* node, JaclVal* names,
     case AST_COMMAND: {
       AstNode* head = node->data.command.head;
       if (head->type == AST_LIT_STRING) {
-        const char* hname = head->data.lit_string.value;
-        uint32_t hlen = head->data.lit_string.length;
+        HeadId hid = (HeadId)node->data.command.head_id;
         /* Record mut declarations */
-        if (hlen == 3 && memcmp(hname, "mut", 3) == 0) {
+        if (hid == HEAD_MUT) {
           uint32_t argc = node->data.command.arg_count;
           if (argc >= 2 && node->data.command.args[0]->type == AST_LIT_STRING) {
             AstNode* name_node = node->data.command.args[0];
@@ -2531,12 +2440,8 @@ void ast__collect_local_muts(AstNode* node, JaclVal* names,
           return;
         }
         /* Skip nested scope boundaries */
-        if ((hlen == 4 && memcmp(hname, "proc", 4) == 0) ||
-            (hlen == 5 && memcmp(hname, "spawn", 5) == 0) ||
-            (hlen == 8 && memcmp(hname, "parallel", 8) == 0) ||
-            (hlen == 4 && memcmp(hname, "race", 4) == 0)) {
-          return;
-        }
+        if (hid == HEAD_PROC || hid == HEAD_SPAWN ||
+            hid == HEAD_PARALLEL || hid == HEAD_RACE) return;
       }
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
         ast__collect_local_muts(node->data.command.args[i], names, count,
@@ -2595,9 +2500,8 @@ bool ast__contains_nonlocal_set_impl(AstNode* node,
     case AST_COMMAND: {
       AstNode* head = node->data.command.head;
       if (head->type == AST_LIT_STRING) {
-        const char* name = head->data.lit_string.value;
-        uint32_t len = head->data.lit_string.length;
-        if (len == 3 && memcmp(name, "set", 3) == 0) {
+        HeadId hid = (HeadId)node->data.command.head_id;
+        if (hid == HEAD_SET) {
           /* Check if the target is a local mut */
           uint32_t argc = node->data.command.arg_count;
           if (argc >= 1 && node->data.command.args[0]->type == AST_LIT_STRING) {
@@ -2613,12 +2517,8 @@ bool ast__contains_nonlocal_set_impl(AstNode* node,
           return true; /* non-local or unresolved — needs pinning */
         }
         /* Skip nested scope boundaries — they get their own pinning */
-        if ((len == 4 && memcmp(name, "proc", 4) == 0) ||
-            (len == 5 && memcmp(name, "spawn", 5) == 0) ||
-            (len == 8 && memcmp(name, "parallel", 8) == 0) ||
-            (len == 4 && memcmp(name, "race", 4) == 0)) {
-          return false;
-        }
+        if (hid == HEAD_PROC || hid == HEAD_SPAWN ||
+            hid == HEAD_PARALLEL || hid == HEAD_RACE) return false;
       }
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
         if (ast__contains_nonlocal_set_impl(node->data.command.args[i],
@@ -2741,29 +2641,19 @@ MacroEntry* macro_table_lookup(MacroTable* t, const char* name, uint32_t name_le
    must not shadow.  Only the core control-flow / binding keywords are
    blocked — library builtins (print, length, …) are fine to shadow. */
 bool macro__is_special_form(const char* name, uint32_t len) {
-  switch (len) {
-    case 2: return memcmp(name, "if", 2) == 0 ||
-                   memcmp(name, "to", 2) == 0;
-    case 3: return memcmp(name, "def", 3) == 0 ||
-                   memcmp(name, "mut", 3) == 0 ||
-                   memcmp(name, "set", 3) == 0 ||
-                   memcmp(name, "for", 3) == 0 ||
-                   memcmp(name, "try", 3) == 0;
-    case 4: return memcmp(name, "proc", 4) == 0;
-    case 5: return memcmp(name, "while", 5) == 0 ||
-                   memcmp(name, "break", 5) == 0 ||
-                   memcmp(name, "match", 5) == 0 ||
-                   memcmp(name, "quote", 5) == 0 ||
-                   memcmp(name, "spawn", 5) == 0 ||
-                   memcmp(name, "yield", 5) == 0 ||
-                   memcmp(name, "await", 5) == 0;
-    case 6: return memcmp(name, "return", 6) == 0;
-    case 8: return memcmp(name, "defmacro", 8) == 0 ||
-                   memcmp(name, "continue", 8) == 0 ||
-                   memcmp(name, "parallel", 8) == 0;
-    case 9: return memcmp(name, "defstruct", 9) == 0;
-    case 12: return memcmp(name, "syntax-quote", 12) == 0;
-    default: return false;
+  switch (ast__head_id_for(name, len)) {
+    case HEAD_IF:           case HEAD_TO:
+    case HEAD_DEF:          case HEAD_MUT:
+    case HEAD_SET:          case HEAD_FOR:
+    case HEAD_TRY:          case HEAD_PROC:
+    case HEAD_WHILE:        case HEAD_BREAK:
+    case HEAD_MATCH:        case HEAD_QUOTE:
+    case HEAD_SPAWN:        case HEAD_YIELD:
+    case HEAD_AWAIT:        case HEAD_RETURN:
+    case HEAD_DEFMACRO:     case HEAD_CONTINUE:
+    case HEAD_PARALLEL:     case HEAD_DEFSTRUCT:
+    case HEAD_SYNTAX_QUOTE: return true;
+    default:                return false;
   }
 }
 
@@ -3367,11 +3257,9 @@ void ast__collect_local_names(AstNode* node, JaclVal* names,
     case AST_COMMAND: {
       AstNode* head = node->data.command.head;
       if (head->type == AST_LIT_STRING) {
-        const char* hname = head->data.lit_string.value;
-        uint32_t hlen = head->data.lit_string.length;
+        HeadId hid = (HeadId)node->data.command.head_id;
         /* Record def and mut declarations */
-        if ((hlen == 3 && memcmp(hname, "def", 3) == 0) ||
-            (hlen == 3 && memcmp(hname, "mut", 3) == 0)) {
+        if (hid == HEAD_DEF || hid == HEAD_MUT) {
           uint32_t argc = node->data.command.arg_count;
           if (argc >= 2 && node->data.command.args[0]->type == AST_LIT_STRING) {
             AstNode* name_node = node->data.command.args[0];
@@ -3384,12 +3272,8 @@ void ast__collect_local_names(AstNode* node, JaclVal* names,
           return;
         }
         /* Skip nested scope boundaries */
-        if ((hlen == 4 && memcmp(hname, "proc", 4) == 0) ||
-            (hlen == 5 && memcmp(hname, "spawn", 5) == 0) ||
-            (hlen == 8 && memcmp(hname, "parallel", 8) == 0) ||
-            (hlen == 4 && memcmp(hname, "race", 4) == 0)) {
-          return;
-        }
+        if (hid == HEAD_PROC || hid == HEAD_SPAWN ||
+            hid == HEAD_PARALLEL || hid == HEAD_RACE) return;
       }
       for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
         ast__collect_local_names(node->data.command.args[i], names, count,
@@ -3468,16 +3352,14 @@ bool ast__refs_nonlocal_mutable_impl(AstNode* node,
     case AST_COMMAND: {
       AstNode* head = node->data.command.head;
       if (head->type == AST_LIT_STRING) {
-        const char* hname = head->data.lit_string.value;
-        uint32_t hlen = head->data.lit_string.length;
+        HeadId hid = (HeadId)node->data.command.head_id;
         /* Skip nested concurrent scopes — they get their own pinning */
-        if ((hlen == 5 && memcmp(hname, "spawn", 5) == 0) ||
-            (hlen == 8 && memcmp(hname, "parallel", 8) == 0) ||
-            (hlen == 4 && memcmp(hname, "race", 4) == 0)) {
+        if (hid == HEAD_SPAWN || hid == HEAD_PARALLEL || hid == HEAD_RACE)
           return false;
-        }
         /* Check if function call target is a non-local closure that
            transitively captures mutable state (US-003). */
+        const char* hname = head->data.lit_string.value;
+        uint32_t hlen = head->data.lit_string.length;
         if (hlen <= 128) {
           JaclVal fname = compiler__name_val(enclosing->heap, enclosing->intern_table, hname, hlen);
           bool is_local_name = false;
