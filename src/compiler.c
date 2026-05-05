@@ -7314,16 +7314,33 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       /* Normal non-suspending proc */
       compiler__compile_block_expr(&body_compiler, args[body_arg_idx]);
 
-      /* Return type checking: body's last expression type must match declared */
+      /* Return type checking: body's last expression type must match declared.
+       * Read from the AST. For an `AST_RETURN`-tail body, take the return
+       * value's inferred type (the return wraps the value as the proc's
+       * return); for any other tail, take the block's inferred type. */
+      AstNode* body_blk = args[body_arg_idx];
+      JaclType body_type = TYPE_DYN;
+      uint32_t body_struct_idx = UINT32_MAX;
+      if (body_blk->type == AST_BLOCK && body_blk->data.block.count > 0 &&
+          !body_blk->data.block.trailing_semi) {
+        AstNode* tail = body_blk->data.block.commands[body_blk->data.block.count - 1];
+        if (tail->type == AST_RETURN && tail->data.return_stmt.value) {
+          body_type = (JaclType)tail->data.return_stmt.value->inferred_type;
+          body_struct_idx = tail->data.return_stmt.value->inferred_struct_idx;
+        } else {
+          body_type = (JaclType)tail->inferred_type;
+          body_struct_idx = tail->inferred_struct_idx;
+        }
+      }
+      (void)body_struct_idx;
       if (proc_return_type != TYPE_DYN) {
-        JaclType body_type = body_compiler.last_expr_type;
         if (body_type != TYPE_DYN && body_type != proc_return_type) {
           char err_msg[128];
           jacl_format_proc_return_mismatch(err_msg, sizeof(err_msg),
               proc_name, proc_name_len, proc_return_type, body_type);
           compiler__error(c, line, col, err_msg);
         }
-      } else if (body_compiler.last_expr_type == TYPE_STRUCT) {
+      } else if (body_type == TYPE_STRUCT) {
         /* Untyped proc returning a struct — require a return type annotation */
         char err_msg[128];
         snprintf(err_msg, sizeof(err_msg),
@@ -11884,6 +11901,11 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         compiler__emit_byte(c, OP_NIL, line);
         compiler__emit_byte(c, OP_RETURN, line);
       }
+      /* return is unreachable past this point — pin nil for audit
+       * agreement with the typer. The proc-body return-type check
+       * reads the AST tail directly (not last_expr_type), so this
+       * is safe. */
+      c->last_expr_type = TYPE_NIL;
       break;
     }
 
