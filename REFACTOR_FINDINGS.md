@@ -128,6 +128,28 @@ already has the info. Then most of the excluded builtins above can move
 into the table, and only after that does dropping fallbacks become the
 mechanical edit the doc described.
 
+#### Progress (continued)
+
+**Helper extraction.** Pulled the 22 fallback sites' 4-line shape into
+`compiler__effective_type(c, node)`. compiler.c −48 LOC.
+
+**Fixed-returns table grew.** Added `signal` `cancel` and the syntax-*
+introspection set (`syntax-kind` `syntax-args` `syntax-commands`
+`syntax-pos` `syntax-str`).
+
+**Typed-collection tracking.** Typer now recognizes `[Vec T]` /
+`[Map V]` / `[Map K V]` in declared types and propagates
+`TYPE_TYPED_VEC` / `TYPE_TYPED_MAP` through `vec-push` `vec-set`
+`vec-concat` `vec-slice` `map-set` `map-remove` `map-keys` `map-vals`
+when the receiver is a typed collection. Unknown receivers stay `DYN`
+(annotating as plain `VEC`/`MAP` would mask a typed receiver tracked
+by `c->last_expr_type` and silently drop the typed-collection error
+path).
+
+The compiler still reads `inferred_struct_idx` zero times — the
+typer's idx propagation is wasted until a coordinated Phase B/C edit
+rewrites `c->last_struct_idx` consumers.
+
 ### "Move pure builtins to prelude" — turned out to be illusory
 
 Originally estimated at 300-700 LOC saved across compiler+VM. After
