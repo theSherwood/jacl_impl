@@ -220,15 +220,18 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       AstNode* type_arg = (tcoll == 3)
           ? args[0]->data.command.args[1]
           : args[0]->data.command.args[0];
-      if (type_arg && type_arg->type == AST_LIT_STRING &&
-          !is_type_keyword(type_arg->data.lit_string.value,
-                           type_arg->data.lit_string.length)) {
-        for (uint32_t si = 0; si < tc->struct_count; si++) {
-          if (tc->structs[si].name_len == type_arg->data.lit_string.length &&
-              memcmp(tc->structs[si].name, type_arg->data.lit_string.value,
-                     type_arg->data.lit_string.length) == 0) {
-            declared_struct_idx = si;
-            break;
+      if (type_arg && type_arg->type == AST_LIT_STRING) {
+        const char* nm = type_arg->data.lit_string.value;
+        uint32_t    nl = type_arg->data.lit_string.length;
+        if (is_type_keyword(nm, nl)) {
+          declared_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+        } else {
+          for (uint32_t si = 0; si < tc->struct_count; si++) {
+            if (tc->structs[si].name_len == nl &&
+                memcmp(tc->structs[si].name, nm, nl) == 0) {
+              declared_struct_idx = si;
+              break;
+            }
           }
         }
       }
@@ -545,15 +548,18 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
         AstNode* type_arg = (tcoll == 3)
             ? elem->data.command.args[1]
             : elem->data.command.args[0];
-        if (type_arg && type_arg->type == AST_LIT_STRING &&
-            !is_type_keyword(type_arg->data.lit_string.value,
-                             type_arg->data.lit_string.length)) {
-          for (uint32_t si = 0; si < tc->struct_count; si++) {
-            if (tc->structs[si].name_len == type_arg->data.lit_string.length &&
-                memcmp(tc->structs[si].name, type_arg->data.lit_string.value,
-                       type_arg->data.lit_string.length) == 0) {
-              elem_sidx = si;
-              break;
+        if (type_arg && type_arg->type == AST_LIT_STRING) {
+          const char* nm = type_arg->data.lit_string.value;
+          uint32_t    nl = type_arg->data.lit_string.length;
+          if (is_type_keyword(nm, nl)) {
+            elem_sidx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+          } else {
+            for (uint32_t si = 0; si < tc->struct_count; si++) {
+              if (tc->structs[si].name_len == nl &&
+                  memcmp(tc->structs[si].name, nm, nl) == 0) {
+                elem_sidx = si;
+                break;
+              }
             }
           }
         }
@@ -1201,25 +1207,28 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   } else if (head && head->type == AST_COMMAND) {
     /* Typed-collection constructor: [[Vec T] e1 ...] / [[Map K V] ...].
      * Mirrors compiler__compile_command's typed-vec/typed-map branch.
-     * For struct-element types, propagate the element's struct_idx via
-     * inferred_struct_idx so vec-get/map-get can narrow the result type. */
+     * Element struct_idx is propagated via inferred_struct_idx so
+     * vec-get/map-get can narrow the result type. Scalar element types
+     * (i32/i64/etc.) use the shared JACL_SCALAR_TYPE_IDX sentinel
+     * encoding so the compiler can read the same idx. */
     int tc_kind = typer__typed_collection_kind(head);
     if (tc_kind == 1 || tc_kind == 2 || tc_kind == 3) {
       node->inferred_type = (tc_kind == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
-      /* Element type expr: args[0] for [Vec T] / [Map V]; args[1] for
-       * [Map K V]. Look up struct_idx if it names a registered struct. */
       AstNode* elem_node = (tc_kind == 3)
           ? head->data.command.args[1]
           : head->data.command.args[0];
-      if (elem_node && elem_node->type == AST_LIT_STRING &&
-          !is_type_keyword(elem_node->data.lit_string.value,
-                           elem_node->data.lit_string.length)) {
-        for (uint32_t si = 0; si < tc->struct_count; si++) {
-          if (tc->structs[si].name_len == elem_node->data.lit_string.length &&
-              memcmp(tc->structs[si].name, elem_node->data.lit_string.value,
-                     elem_node->data.lit_string.length) == 0) {
-            node->inferred_struct_idx = si;
-            break;
+      if (elem_node && elem_node->type == AST_LIT_STRING) {
+        const char* nm = elem_node->data.lit_string.value;
+        uint32_t    nl = elem_node->data.lit_string.length;
+        if (is_type_keyword(nm, nl)) {
+          node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+        } else {
+          for (uint32_t si = 0; si < tc->struct_count; si++) {
+            if (tc->structs[si].name_len == nl &&
+                memcmp(tc->structs[si].name, nm, nl) == 0) {
+              node->inferred_struct_idx = si;
+              break;
+            }
           }
         }
       }
@@ -1278,22 +1287,30 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           }
           return;
         case HEAD_VEC_GET:
-          /* Element narrowing: typed-vec of struct → result is that struct.
-           * Element struct_idx is propagated via the typed-vec's
-           * inferred_struct_idx (set by the typed-collection ctor rule). */
+          /* Element narrowing: typed-vec elem_idx is either a real struct
+           * registry index (→ TYPE_STRUCT) or a JACL_SCALAR_TYPE_IDX
+           * sentinel (→ that scalar JaclType). */
           if (recv_t == TYPE_TYPED_VEC &&
-              recv->inferred_struct_idx != UINT32_MAX &&
-              recv->inferred_struct_idx < tc->struct_count) {
-            node->inferred_type = TYPE_STRUCT;
-            node->inferred_struct_idx = recv->inferred_struct_idx;
+              recv->inferred_struct_idx != UINT32_MAX) {
+            uint32_t eidx = recv->inferred_struct_idx;
+            if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
+              node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
+            } else if (eidx < tc->struct_count) {
+              node->inferred_type = TYPE_STRUCT;
+              node->inferred_struct_idx = eidx;
+            }
           }
           return;
         case HEAD_MAP_GET:
           if (recv_t == TYPE_TYPED_MAP &&
-              recv->inferred_struct_idx != UINT32_MAX &&
-              recv->inferred_struct_idx < tc->struct_count) {
-            node->inferred_type = TYPE_STRUCT;
-            node->inferred_struct_idx = recv->inferred_struct_idx;
+              recv->inferred_struct_idx != UINT32_MAX) {
+            uint32_t eidx = recv->inferred_struct_idx;
+            if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
+              node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
+            } else if (eidx < tc->struct_count) {
+              node->inferred_type = TYPE_STRUCT;
+              node->inferred_struct_idx = eidx;
+            }
           }
           return;
         case HEAD_FILTER:

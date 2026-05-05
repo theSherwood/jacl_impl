@@ -84,10 +84,10 @@ const char *ast_expand_macros(AstNode **program, uint32_t count,
 /* Sentinel range for scalar element types in typed collections:
  * 0xFF00 + (uint8_t)JaclType. Distinct from struct registry indices
  * (which top out around the few hundred range). */
-#define COMPILER_SCALAR_VEC_BASE 0xFF00u
-#define COMPILER_IS_SCALAR_TYPE_IDX(idx) ((idx) >= COMPILER_SCALAR_VEC_BASE && (idx) < 0x10000u)
-#define COMPILER_SCALAR_TYPE_IDX(t) (COMPILER_SCALAR_VEC_BASE + (uint32_t)(t))
-#define COMPILER_TYPE_IDX_TO_SCALAR(idx) ((JaclType)((idx) - COMPILER_SCALAR_VEC_BASE))
+#define COMPILER_SCALAR_VEC_BASE         JACL_SCALAR_VEC_BASE
+#define COMPILER_IS_SCALAR_TYPE_IDX(idx) JACL_IS_SCALAR_TYPE_IDX(idx)
+#define COMPILER_SCALAR_TYPE_IDX(t)      JACL_SCALAR_TYPE_IDX(t)
+#define COMPILER_TYPE_IDX_TO_SCALAR(idx) JACL_TYPE_IDX_TO_SCALAR(idx)
 
 /* Element-type keywords supported as typed-collection scalars.
  * Restricted to numeric value types — no GC tracing needed in typed
@@ -3839,7 +3839,8 @@ void compiler__compile_binary(Compiler* c, AstNode** args,
 
   /* Static typing for struct comparisons */
   if (lhs_type == TYPE_STRUCT || rhs_type == TYPE_STRUCT) {
-    if (lhs_type != rhs_type || c->last_struct_idx == UINT32_MAX) {
+    uint32_t rhs_struct_idx = args[1]->inferred_struct_idx;
+    if (lhs_type != rhs_type || rhs_struct_idx == UINT32_MAX) {
       char err[128];
       snprintf(err, sizeof(err),
                "type error: cannot %s %s and %s — structs only compare against "
@@ -3856,7 +3857,7 @@ void compiler__compile_binary(Compiler* c, AstNode** args,
     /* Both same struct type. Use OP_STRUCT_EQ_TOS — handles inline and heap
        via vm__pop_struct dispatch, no transient heap allocation. */
     compiler__emit_byte(c, OP_STRUCT_EQ_TOS, line);
-    compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+    compiler__emit_u16(c, (uint16_t)rhs_struct_idx, line);
     c->last_expr_type = TYPE_BOOL;
     return;
   }
@@ -3873,7 +3874,7 @@ void compiler__compile_binary(Compiler* c, AstNode** args,
     if (op == OP_EQ) {
       uint8_t eq_op = (lhs_type == TYPE_TYPED_VEC) ? OP_TYPED_VEC_EQ : OP_TYPED_MAP_EQ;
       compiler__emit_byte(c, eq_op, line);
-      compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      compiler__emit_u16(c, (uint16_t)args[1]->inferred_struct_idx, line);
       if (lhs_type == TYPE_TYPED_MAP)
         compiler__emit_u16(c, (uint16_t)c->last_key_struct_idx, line);
       c->last_expr_type = TYPE_BOOL;
@@ -6732,6 +6733,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[value_arg_idx]);
     c->expected_type = TYPE_DYN;
     JaclType rhs_type = compiler__effective_type(c, args[value_arg_idx]);
+    uint32_t rhs_struct_idx = args[value_arg_idx]->inferred_struct_idx;
 
     /* US-007: activate inline for function calls returning struct types.
      * If the RHS isn't already inline (struct constructor or inline get) but
@@ -6739,12 +6741,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
      * and plan to emit OP_STRUCT_STORE_INLINE after adding the local. */
     bool needs_store_inline = false;
     if (!activate_inline && rhs_type == TYPE_STRUCT &&
-        c->last_struct_idx != UINT32_MAX &&
+        rhs_struct_idx != UINT32_MAX &&
         c->scope_depth > 0 && !c->sm_analysis) {
       /* US-015: only inline value-type structs; legacy structs use heap */
       StructTypeRegistry* reg2 = compiler__get_struct_registry(c);
-      if (reg2 && c->last_struct_idx < reg2->count) {
-        StructTypeDef* ret_sdef = reg2->defs[c->last_struct_idx];
+      if (reg2 && rhs_struct_idx < reg2->count) {
+        StructTypeDef* ret_sdef = reg2->defs[rhs_struct_idx];
         if (struct_def_is_user(ret_sdef, reg2)) {
           activate_inline = true;
           /* If RHS already pushed inline slots (INLINE_STACK or INLINE_REF
@@ -6832,11 +6834,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->current_scope_mark = prev_mark;
       }
       c->locals[c->local_count - 1].known_arity = rhs_arity;
-      { TypeInfo ti = compiler__get_type(c); ti.type = effective_type;
+      { TypeInfo ti = { effective_type, rhs_struct_idx, c->last_key_struct_idx };
         TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
       if (effective_type == TYPE_STRUCT) {
         StructTypeRegistry* reg = compiler__get_struct_registry(c);
-        uint32_t width = struct__slot_width(reg, c->last_struct_idx);
+        uint32_t width = struct__slot_width(reg, rhs_struct_idx);
         c->locals[c->local_count - 1].width = (uint16_t)width;
         if (activate_inline) {
           uint32_t base_local_idx = c->local_count - 1;
@@ -6851,7 +6853,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           if (needs_store_inline) {
             compiler__emit_byte(c, OP_STRUCT_STORE_INLINE, line);
             compiler__emit_byte(c, (uint8_t)base_local_idx, line);
-            compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+            compiler__emit_u16(c, (uint16_t)rhs_struct_idx, line);
           }
         }
       }

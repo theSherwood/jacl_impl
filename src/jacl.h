@@ -1066,6 +1066,15 @@ typedef enum {
   TYPE_TYPED_MAP
 } JaclType;
 
+/* Typed-collection element encoding for struct_idx: real struct registry
+ * indices live below 0xFF00; values in [0xFF00, 0x10000) encode a scalar
+ * JaclType (used for [Vec i64], [Map i32 i64] etc.). Shared between
+ * the compiler and the typer so both can speak the same ABI. */
+#define JACL_SCALAR_VEC_BASE        0xFF00u
+#define JACL_IS_SCALAR_TYPE_IDX(idx) ((idx) >= JACL_SCALAR_VEC_BASE && (idx) < 0x10000u)
+#define JACL_SCALAR_TYPE_IDX(t)     (JACL_SCALAR_VEC_BASE + (uint32_t)(t))
+#define JACL_TYPE_IDX_TO_SCALAR(idx) ((JaclType)((idx) - JACL_SCALAR_VEC_BASE))
+
 typedef struct {
   const char* name;
   uint32_t    name_len;
