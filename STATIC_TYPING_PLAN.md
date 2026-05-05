@@ -679,6 +679,9 @@ suite track progress:
 | After commit `a4aef7b` (pin print to nil; typer shell-cmd background→DYN) | 45 | 27 | 0 | 18 | 0 |
 | After commit `f81bdeb` (typer rule for unary minus) | 44 | 26 | 0 | 18 | 0 |
 | After commit `5d31371` (HEAD_PROC closure fallback) | 44 | 26 | 0 | 18 | 0 |
+| After commits `152eabd`, `c3227c5`, `ba1b84e`, `cb97a4f` (Stage 2: print/box/reset/HOF/ctor-elem/vec-concat → AST) | 44 | 26 | 0 | 18 | 0 |
+| After commit `9b95e12` (delete unused compiler__get_type) | 44 | 26 | 0 | 18 | 0 |
+| After commit `e21b1fe` (typer pipe-binop simulation) | 41 | 23 | 0 | 18 | 0 |
 
 **Real divergence (GAP+MISMATCH):** 665 → 46. 93% reduction.
 
