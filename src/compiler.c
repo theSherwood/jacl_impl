@@ -11079,15 +11079,20 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
 
     case AST_COMMAND: {
       compiler__compile_command(c, node);
-      /* HEAD_SET / HEAD_COLON_COLON are statements: their many per-arm
-       * exits in compile_command leak last_expr_type from the value
-       * expression. Pin nil here. HEAD_DEF / HEAD_MUT are *not* pinned:
-       * downstream code reads c->last_expr_type+c->last_struct_idx
-       * after `def Point p [mkpt ...]` to drive inline-vs-heap codegen,
-       * and those paths rely on the leak (see commit 4447c01). */
-      if (node->data.command.head_id == HEAD_SET ||
-          node->data.command.head_id == HEAD_COLON_COLON) {
-        c->last_expr_type = TYPE_NIL;
+      /* HEAD_SET / HEAD_COLON_COLON / HEAD_FOR are statements with
+       * many per-arm exits that leak last_expr_type from the value
+       * or body expression. Pin nil here. HEAD_DEF / HEAD_MUT are
+       * *not* pinned: downstream code reads c->last_expr_type +
+       * c->last_struct_idx after `def Point p [mkpt ...]` to drive
+       * inline-vs-heap codegen, and those paths rely on the leak
+       * (see commit 4447c01). */
+      switch (node->data.command.head_id) {
+        case HEAD_SET:
+        case HEAD_COLON_COLON:
+        case HEAD_FOR:
+          c->last_expr_type = TYPE_NIL;
+          break;
+        default: break;
       }
       break;
     }
