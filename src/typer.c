@@ -1303,11 +1303,44 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     const char* hn = head->data.lit_string.value;
     uint32_t    hl = head->data.lit_string.length;
 
-    /* Pipe operator: result type is whatever the rhs evaluates to.
-     * The compiler's compile_pipe_op threads the lhs into the rhs;
-     * the final value on the stack is rhs's type. */
+    /* Pipe operator: the compiler's compile_pipe_op rewrites
+     * `[| lhs rhs]` into a synthetic command that prepends lhs as
+     * the first arg of rhs (or wraps rhs as head with lhs as the
+     * arg). The result type matches that synthetic call.
+     *
+     * Special case: rhs is a 1-arg binary-op call like `[* 3]` —
+     * after pipe rewrite this becomes `[* lhs 3]` (a binary op).
+     * The typer's binary-op rule only fires for arg_count==2, so
+     * we replay it here using lhs and rhs's single arg. */
     if (hid == HEAD_PIPE && node->data.command.arg_count == 2) {
+      AstNode* lhs = node->data.command.args[0];
       AstNode* rhs = node->data.command.args[1];
+      JaclType lhs_t = (JaclType)lhs->inferred_type;
+      if (rhs->type == AST_COMMAND && rhs->data.command.arg_count == 1 &&
+          rhs->data.command.head &&
+          rhs->data.command.head->type == AST_LIT_STRING) {
+        const char* hn2 = rhs->data.command.head->data.lit_string.value;
+        uint32_t    hl2 = rhs->data.command.head->data.lit_string.length;
+        bool is_arith2 = (hl2 == 1 && (hn2[0] == '+' || hn2[0] == '-' ||
+                                       hn2[0] == '*' || hn2[0] == '/' ||
+                                       hn2[0] == '%'));
+        bool is_cmp2 = (hl2 == 1 && (hn2[0] == '<' || hn2[0] == '>')) ||
+                       (hl2 == 2 && (memcmp(hn2, "<=", 2) == 0 ||
+                                     memcmp(hn2, ">=", 2) == 0 ||
+                                     memcmp(hn2, "==", 2) == 0));
+        if (is_arith2 || is_cmp2) {
+          AstNode* arg = rhs->data.command.args[0];
+          JaclType arg_t = (JaclType)arg->inferred_type;
+          if (is_cmp2) {
+            node->inferred_type = TYPE_BOOL;
+          } else if (lhs_t == arg_t && lhs_t != TYPE_DYN) {
+            node->inferred_type = lhs_t;
+          } else {
+            node->inferred_type = TYPE_DYN;
+          }
+          return;
+        }
+      }
       node->inferred_type = rhs->inferred_type;
       node->inferred_struct_idx = rhs->inferred_struct_idx;
       return;
