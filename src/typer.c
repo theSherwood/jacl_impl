@@ -87,6 +87,7 @@ typedef struct {
 
 static void typer__infer_node(TyperCtx* tc, AstNode* node);
 static const TyperStruct* typer__find_struct(TyperCtx* tc, const char* name, uint32_t name_len);
+static bool typer__body_yields(AstNode* node);
 
 /* --- Scope helpers --- */
 
@@ -511,11 +512,16 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
                                     uint32_t (*struct_idxs_out)[TYPER_MAX_PROC_PARAMS]) {
   uint32_t count = 0;
   if (!params || params->type != AST_COMMAND) return 0;
-  /* Build flat element list: head + args */
+  /* Build flat element list: head + args. Head may be a LIT_STRING
+   * (typical, e.g., `{i32 x}`) OR an AST_COMMAND for compound type
+   * params (`{[Vec Point] pts}` → head=[Vec Point], args=[pts]). */
   AstNode* flat[TYPER_MAX_PROC_PARAMS * 2 + 2];
   uint32_t flat_n = 0;
   AstNode* phead = params->data.command.head;
-  if (phead && phead->type == AST_LIT_STRING && phead->data.lit_string.length > 0) {
+  bool head_is_named =
+      phead && phead->type == AST_LIT_STRING && phead->data.lit_string.length > 0;
+  bool head_is_compound = phead && phead->type == AST_COMMAND;
+  if (head_is_named || head_is_compound) {
     flat[flat_n++] = phead;
     for (uint32_t i = 0; i < params->data.command.arg_count
                           && flat_n < sizeof(flat)/sizeof(flat[0]); i++) {
@@ -687,6 +693,14 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   uint32_t ps[TYPER_MAX_PROC_PARAMS];
   uint32_t pcount = typer__parse_params(tc, params, &pn, &pt, &ps);
 
+  /* Generator detection: yielding body without declared return type
+   * → returns TYPE_STREAM. Mirrors the pre-pass detection in
+   * typer__register_procs (handle_proc updates the entry, so we
+   * detect again here to avoid clobbering the pre-pass). */
+  if (return_type == TYPE_DYN && typer__body_yields(body)) {
+    return_type = TYPE_STREAM;
+  }
+
   /* Register (idempotent) so nested procs are visible to subsequent
    * calls in the same scope. */
   typer__register_proc(tc, name_node, return_type, return_struct_idx, &pn, &pt, pcount);
@@ -851,6 +865,35 @@ static const TyperStruct* typer__find_struct(TyperCtx* tc,
 /* Pre-pass: collect proc signatures from top-level so calls can look
  * them up regardless of definition order. Matches compiler.c's
  * Phase 1 proc registration behavior. */
+/* Returns true if the AST subtree contains an AST_COMMAND with HEAD_YIELD,
+ * not crossing into nested proc bodies. Used to detect generator procs. */
+static bool typer__body_yields(AstNode* node) {
+  if (!node) return false;
+  if (node->type == AST_COMMAND) {
+    AstNode* h = node->data.command.head;
+    if (h && h->type == AST_LIT_STRING &&
+        node->data.command.head_id == HEAD_YIELD) {
+      return true;
+    }
+    /* Don't descend into nested proc bodies — their yield belongs to them. */
+    if (h && h->type == AST_LIT_STRING &&
+        node->data.command.head_id == HEAD_PROC) {
+      return false;
+    }
+    if (h && typer__body_yields(h)) return true;
+    for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
+      if (typer__body_yields(node->data.command.args[i])) return true;
+    }
+    return false;
+  }
+  if (node->type == AST_BLOCK) {
+    for (uint32_t i = 0; i < node->data.block.count; i++) {
+      if (typer__body_yields(node->data.block.commands[i])) return true;
+    }
+  }
+  return false;
+}
+
 static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count) {
   for (uint32_t ni = 0; ni < count; ni++) {
     AstNode* node = nodes[ni];
@@ -894,6 +937,17 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
     TyperProc* p = &tc->procs[tc->proc_count++];
     p->name        = name_node->data.lit_string.value;
     p->name_len    = name_node->data.lit_string.length;
+
+    /* Generator detection: if the body contains a yield (and the user
+     * didn't declare a non-DYN return type), the proc returns a stream.
+     * Mirrors the compiler's runtime behavior: any yielding proc body
+     * is wrapped in a generator that produces a stream value. */
+    if (return_type == TYPE_DYN) {
+      uint32_t body_idx = (argc == 4) ? 3 : 2;
+      if (body_idx < argc && typer__body_yields(args[body_idx])) {
+        return_type = TYPE_STREAM;
+      }
+    }
     p->return_type = (uint8_t)return_type;
     p->return_struct_idx = return_struct_idx;
 
@@ -985,6 +1039,30 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                 bt = TYPE_STRUCT;
                 bsidx = si;
                 break;
+              }
+            }
+          }
+        } else if (type_arg->type == AST_COMMAND) {
+          /* [box? [Vec T] $x] / [box? [Map K V] $x] — narrow to typed
+           * collection. Look up element struct_idx so post-narrow
+           * vec-get/map-get can narrow further to the elem type. */
+          int tcoll = typer__typed_collection_kind(type_arg);
+          if (tcoll == 1) bt = TYPE_TYPED_VEC;
+          else if (tcoll == 2 || tcoll == 3) bt = TYPE_TYPED_MAP;
+          if (tcoll == 1 || tcoll == 2 || tcoll == 3) {
+            AstNode* elem_node = (tcoll == 3)
+                ? type_arg->data.command.args[1]
+                : type_arg->data.command.args[0];
+            if (elem_node && elem_node->type == AST_LIT_STRING &&
+                !is_type_keyword(elem_node->data.lit_string.value,
+                                 elem_node->data.lit_string.length)) {
+              for (uint32_t si = 0; si < tc->struct_count; si++) {
+                if (tc->structs[si].name_len == elem_node->data.lit_string.length &&
+                    memcmp(tc->structs[si].name, elem_node->data.lit_string.value,
+                           elem_node->data.lit_string.length) == 0) {
+                  bsidx = si;
+                  break;
+                }
               }
             }
           }
@@ -1216,6 +1294,28 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               recv->inferred_struct_idx < tc->struct_count) {
             node->inferred_type = TYPE_STRUCT;
             node->inferred_struct_idx = recv->inferred_struct_idx;
+          }
+          return;
+        case HEAD_FILTER:
+          /* filter preserves the receiver's collection type, including
+           * elem struct_idx. Mirrors compiler__compile_hof_builtin: typed
+           * receiver → typed result; plain → plain; stream → stream. */
+          if (recv_t == TYPE_TYPED_VEC || recv_t == TYPE_TYPED_MAP ||
+              recv_t == TYPE_VEC || recv_t == TYPE_MAP ||
+              recv_t == TYPE_STREAM) {
+            node->inferred_type = recv_t;
+            node->inferred_struct_idx = recv->inferred_struct_idx;
+          }
+          return;
+        case HEAD_TRANSFORM:
+          /* transform on typed_vec → plain TYPE_VEC (loses elem typing).
+           * On plain receivers preserves the receiver type (vec/stream).
+           * Mirrors compiler__compile_hof_builtin. */
+          if (recv_t == TYPE_TYPED_VEC || recv_t == TYPE_TYPED_MAP) {
+            node->inferred_type = TYPE_VEC;
+          } else if (recv_t == TYPE_VEC || recv_t == TYPE_MAP ||
+                     recv_t == TYPE_STREAM) {
+            node->inferred_type = recv_t;
           }
           return;
         default: break;
@@ -1500,7 +1600,37 @@ void typer_infer(AstNode** nodes, uint32_t count) {
 
   /* Pre-pass: register top-level struct definitions, the synthetic
    * ctx struct, and proc signatures so constructor calls and proc
-   * calls (which may appear before the definition) resolve correctly. */
+   * calls (which may appear before the definition) resolve correctly.
+   *
+   * Imported names from `use "path" {Name1, Name2}` are registered as
+   * placeholder structs (no fields) so `[Name ...]` constructor calls
+   * type as TYPE_STRUCT. Field access and proc-call narrowing for
+   * imported names stay DYN (we don't load the imported file), but
+   * the compiler's own struct registry has the real fields, so field
+   * access compiles correctly via the compiler's path. */
+  for (uint32_t ni = 0; ni < count; ni++) {
+    AstNode* node = nodes[ni];
+    if (node->type != AST_USE) continue;
+    for (uint32_t i = 0; i < node->data.use_decl.name_count; i++) {
+      if (tc.struct_count >= TYPER_MAX_STRUCTS) break;
+      const char* nm = node->data.use_decl.names[i];
+      uint32_t    nl = node->data.use_decl.name_lens[i];
+      /* Heuristic: only CapitalCase names are likely struct types.
+       * lowercase imports are treated as procs (typer leaves DYN; the
+       * compiler resolves them via its own proc registry). */
+      if (nl == 0 || !(nm[0] >= 'A' && nm[0] <= 'Z')) continue;
+      bool dup = false;
+      for (uint32_t si = 0; si < tc.struct_count; si++) {
+        if (tc.structs[si].name_len == nl &&
+            memcmp(tc.structs[si].name, nm, nl) == 0) { dup = true; break; }
+      }
+      if (dup) continue;
+      TyperStruct* s = &tc.structs[tc.struct_count++];
+      s->name        = nm;
+      s->name_len    = nl;
+      s->field_count = 0;
+    }
+  }
   typer__register_structs(&tc, nodes, count);
   uint32_t ctx_struct_idx = typer__register_ctx_struct(&tc, nodes, count);
 

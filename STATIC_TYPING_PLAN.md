@@ -561,25 +561,20 @@ substeps with done/partial/not-started markers above.
 
 **Pick-up entry points** (in increasing depth of work):
 
-- **Stage 2 minimal edit — REVISED (NOT viable yet):** the prior
-  claim that deleting `compiler__effective_type`'s fallback would
-  clear ~30 audit divergences in one shot was only true for the
-  test_compiler corpus. Across the full test suite it breaks 7
-  suites (compiler, jacl_harness, stream_for/filter/transform,
-  typed_vec, typed_map). Concretely, the fallback was masking
-  typer GAPs in: typed-collection ctors (now closed),
-  `vec-get`/`map-get` element narrowing on typed receivers (now
-  closed), `[box? [Vec T]]` narrowing (open), `filter`/`transform`
-  return-type tracking (open), stream type propagation through
-  `parallel`/`each` (open). Stage 2 must be done **per-cluster**
-  (per-recipe in the Stage 2 section) until enough Stage 1 GAPs
-  are closed that the global helper-drop is safe.
-- **Finish Stage 1c** — partial as of this session. Done:
-  typed-collection constructor types and elem struct_idx
-  propagation; vec-get/map-get narrow to elem struct type. Open:
-  scalar-element typed-vec narrowing; box? narrowing for
-  `[Vec T]` / `[Map K V]`; filter/transform return type
-  preservation.
+- **Stage 2 minimal edit — LANDED.** `compiler__effective_type` now
+  reads `n->inferred_type` only; the `c->last_expr_type` fallback
+  is gone. All 95/95 tests pass. Audit on test_compiler dropped
+  71→66 divergences, but the bigger win is eliminating dual-track
+  state for the 22 helper call sites. The Stage 1 closures needed
+  to land this:
+    1. typed-collection constructor types + elem struct_idx
+    2. `vec-get`/`map-get` elem narrowing on typed receivers
+    3. `[box? [Vec T]]` / `[box? [Map K V]]` narrowing
+    4. `filter` (preserves recv) / `transform` (typed→VEC) rules
+    5. Generator detection: yielding proc → TYPE_STREAM
+    6. Proc params with compound type heads (`{[Vec T] pts}`)
+    7. CapitalCase imported names → placeholder structs (so
+       `[Point ...]` from `use {Point}` types as STRUCT)
 - **Stage 1e** (type errors emitted by typer) — bigger, but the
   shared formatters are already extracted; mostly call-site moves.
 - **Stage 1f** (dyn as a real type) — the bigger architectural

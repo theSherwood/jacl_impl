@@ -3299,14 +3299,11 @@ bool compiler__body_captures_mutable(Compiler* enclosing,
 /* Forward declaration for compile_block_expr */
 void compiler__compile_node(Compiler* c, AstNode* node);
 
-/* Effective AST-node type after the typer pass. The typer (typer.c)
- * annotates each node with `inferred_type`; for nodes the typer leaves
- * as TYPE_DYN (its remaining gaps), fall back to the just-set
- * `c->last_expr_type` from compiling the node. Callers must compile
- * the node before reading the fallback. */
+/* Effective AST-node type: read straight from the typer's annotation.
+ * Stage 2 of STATIC_TYPING_PLAN: the typer is the sole authority. */
 static inline JaclType compiler__effective_type(Compiler* c, AstNode* n) {
-  JaclType t = (JaclType)n->inferred_type;
-  return (t != TYPE_DYN) ? t : c->last_expr_type;
+  (void)c;
+  return (JaclType)n->inferred_type;
 }
 
 /* --- Internal: Jump patching helpers --- */
