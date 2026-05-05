@@ -5621,23 +5621,24 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (hid == HEAD_PRINT) {
     if (argc != 1) { compiler__builtin_arity_error(c, line, col, "print", "1 argument", argc); return; }
     compiler__compile_node(c, args[0]);
+    uint32_t arg_struct_idx = args[0]->inferred_struct_idx;
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       compiler__emit_byte(c, OP_TYPED_VEC_PRINT, line);
-      compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      compiler__emit_u16(c, (uint16_t)arg_struct_idx, line);
       c->last_expr_type = TYPE_NIL;
       return;
     }
     if (c->last_expr_type == TYPE_TYPED_MAP) {
       compiler__emit_byte(c, OP_TYPED_MAP_PRINT, line);
-      compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      compiler__emit_u16(c, (uint16_t)arg_struct_idx, line);
       compiler__emit_u16(c, (uint16_t)c->last_key_struct_idx, line);
       c->last_expr_type = TYPE_NIL;
       return;
     }
-    if (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX) {
+    if (c->last_expr_type == TYPE_STRUCT && arg_struct_idx != UINT32_MAX) {
       /* Typed struct print — no heap reify, formatter walks inline bytes. */
       compiler__emit_byte(c, OP_PRINT_STRUCT, line);
-      compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      compiler__emit_u16(c, (uint16_t)arg_struct_idx, line);
       c->inline_repr = INLINE_NONE;
       c->last_expr_type = TYPE_NIL;
       return;
@@ -8951,10 +8952,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX) {
+    uint32_t box_arg_struct_idx = args[0]->inferred_struct_idx;
+    if (c->last_expr_type == TYPE_STRUCT && box_arg_struct_idx != UINT32_MAX) {
       /* Box accepts inline struct bytes directly — no reify. */
       compiler__emit_byte(c, OP_BOX_STRUCT, line);
-      compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      compiler__emit_u16(c, (uint16_t)box_arg_struct_idx, line);
       c->inline_repr = INLINE_NONE;
     } else {
       compiler__emit_byte(c, OP_BOX, line);
@@ -9092,10 +9094,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     compiler__compile_node(c, args[1]);
-    if (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX) {
+    uint32_t reset_val_struct_idx = args[1]->inferred_struct_idx;
+    if (c->last_expr_type == TYPE_STRUCT && reset_val_struct_idx != UINT32_MAX) {
       /* Struct-box reset: inline bytes write directly to box->data. */
       compiler__emit_byte(c, OP_RESET_INLINE, line);
-      compiler__emit_u16(c, (uint16_t)c->last_struct_idx, line);
+      compiler__emit_u16(c, (uint16_t)reset_val_struct_idx, line);
       c->inline_repr = INLINE_STACK;  /* new struct bytes left on TOS */
     } else {
       compiler__emit_byte(c, OP_RESET, line);
