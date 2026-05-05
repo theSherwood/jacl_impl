@@ -1575,8 +1575,14 @@ static void typer__infer_node(TyperCtx* tc, AstNode* node) {
       for (uint32_t i = 0; i < node->data.shell_cmd.arg_count; i++) {
         typer__infer_node(tc, node->data.shell_cmd.args[i]);
       }
-      /* Shell commands compile to OP_EXEC which returns a stream. */
-      node->inferred_type = TYPE_STREAM;
+      /* Foreground shell command (`!cmd`) compiles to OP_EXEC and
+       * returns a stream. Background (`!cmd &`) returns a Job map
+       * (typed dyn). The compiler also downgrades to a custom-exec
+       * closure call (returns DYN) when prelude provides a non-native
+       * `exec`; we don't try to detect that — leave such cases as the
+       * residual EXTRA in the audit. */
+      node->inferred_type =
+          node->data.shell_cmd.background ? TYPE_DYN : TYPE_STREAM;
       break;
     case AST_CTX_DECL: {
       /* ctx [mut] Type name = default_expr — recurse into default_expr

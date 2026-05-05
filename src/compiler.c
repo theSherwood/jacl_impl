@@ -11111,6 +11111,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         case HEAD_DEF:
         case HEAD_MUT:
         case HEAD_WHILE:
+        case HEAD_PRINT:
           c->last_expr_type = TYPE_NIL;
           break;
         default: break;
