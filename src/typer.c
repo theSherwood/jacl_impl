@@ -762,9 +762,10 @@ static uint32_t typer__register_ctx_struct(TyperCtx* tc,
     if (nodes[ni]->type == AST_CTX_DECL) fcount++;
   }
   if (fcount == 0) return UINT32_MAX;
-  if (tc->struct_count >= TYPER_MAX_STRUCTS) return UINT32_MAX;
 
-  uint32_t ctx_idx = tc->struct_count++;
+  /* Ctx occupies the pre-reserved slot 1 (see typer_infer init).
+   * Mirrors the compiler's struct_registry slot reservation. */
+  uint32_t ctx_idx = 1;
   TyperStruct* s = &tc->structs[ctx_idx];
   s->name = "ctx";
   s->name_len = 3;
@@ -1724,12 +1725,14 @@ void typer_infer(AstNode** nodes, uint32_t count) {
   tc.binding_count = 0;
   tc.scope_depth   = 0;
   tc.proc_count    = 0;
-  /* Reserve struct index 0 so typer indices align with the compiler's
-   * StructTypeRegistry (which keeps defs[0]=NULL "reserved for dyn",
-   * see compiler.c). Without this offset, typer reports struct_idx=0
-   * where compiler reports struct_idx=1 for the same Point/Line/etc. */
-  tc.struct_count  = 1;
-  memset(&tc.structs[0], 0, sizeof(tc.structs[0]));
+  /* Reserve struct indices 0 and 1 so typer indices align with the
+   * compiler's StructTypeRegistry: slot 0 is "dyn placeholder", slot
+   * 1 is reserved for the ctx struct (see compiler.c
+   * struct_registry__init). User structs start at slot 2.
+   * Without this alignment, typer would report different struct_idx
+   * values than the compiler for the same Point/Line/etc. */
+  tc.struct_count  = 2;
+  memset(&tc.structs[0], 0, sizeof(tc.structs[0]) * 2);
   tc.expected_type = TYPE_DYN;
   tc.narrowing_count = 0;
 

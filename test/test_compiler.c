@@ -4828,8 +4828,8 @@ static int test_struct_width_tracking(void) {
   ASSERT_U32_EQ(cr.error_count, 0);
   /* struct_registry should exist and have the Point type */
   ASSERT(cr.struct_registry != NULL);
-  ASSERT(cr.struct_registry->count >= 2); /* 0=reserved, 1=Point */
-  StructTypeDef* point_def = cr.struct_registry->defs[1];
+  ASSERT(cr.struct_registry->count >= 3); /* 0=reserved, 1=ctx-reserved, 2=Point */
+  StructTypeDef* point_def = cr.struct_registry->defs[2];
   ASSERT(point_def != NULL);
   ASSERT_U32_EQ(point_def->total_size, 8);
   /* width = ceil(8/8) = 1 */
@@ -4854,7 +4854,7 @@ static int test_struct_width_large(void) {
       "struct Vec3 {f64 x, f64 y, f64 z}", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
   ASSERT(cr.struct_registry != NULL);
-  StructTypeDef* vec3_def = cr.struct_registry->defs[1];
+  StructTypeDef* vec3_def = cr.struct_registry->defs[2];
   ASSERT(vec3_def != NULL);
   ASSERT_U32_EQ(vec3_def->total_size, 24);
   uint32_t vec3_width = (vec3_def->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
@@ -4878,8 +4878,8 @@ static int test_struct_width_nested(void) {
       "struct Point {i32 x, i32 y}\n"
       "struct Line {Point start, Point end}", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
-  /* Line is at type_idx 2 (after reserved 0 and Point 1) */
-  StructTypeDef* line_def = cr.struct_registry->defs[2];
+  /* Line is at type_idx 3 (after reserved 0, ctx-reserved 1, Point 2) */
+  StructTypeDef* line_def = cr.struct_registry->defs[3];
   ASSERT(line_def != NULL);
   ASSERT_U32_EQ(line_def->total_size, 16);
   uint32_t line_width = (line_def->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
@@ -4957,9 +4957,9 @@ static int test_struct_new_inline_data_integrity(void) {
   chunk_add_constant(&chunk, jacl_i32(99));
   chunk_write(&chunk, OP_CONST, 1);
   chunk_write_u16(&chunk, 1, 1);
-  /* OP_STRUCT_NEW_INLINE type_idx=1 */
+  /* OP_STRUCT_NEW_INLINE type_idx=2 (Point — slot 1 reserved for ctx) */
   chunk_write(&chunk, OP_STRUCT_NEW_INLINE, 1);
-  chunk_write_u16(&chunk, 1, 1);
+  chunk_write_u16(&chunk, 2, 1);
   /* HALT with inline data still on stack */
   chunk_write(&chunk, OP_HALT, 1);
 
@@ -5048,7 +5048,7 @@ static int test_struct_new_inline_padding_zeroed(void) {
   CompileResult cr = compile_source(
       "struct Padded {bool a, i32 b}", &arena, &heap);
   ASSERT_U32_EQ(cr.error_count, 0);
-  StructTypeDef* sdef = cr.struct_registry->defs[1];
+  StructTypeDef* sdef = cr.struct_registry->defs[2];
   ASSERT_U32_EQ(sdef->total_size, 8);
   /* bool at offset 0, i32 at offset 4 */
   ASSERT_U32_EQ(sdef->fields[0].offset, 0);
@@ -5064,9 +5064,9 @@ static int test_struct_new_inline_padding_zeroed(void) {
   chunk_add_constant(&chunk, jacl_i32(42));
   chunk_write(&chunk, OP_CONST, 1);
   chunk_write_u16(&chunk, 1, 1);
-  /* OP_STRUCT_NEW_INLINE */
+  /* OP_STRUCT_NEW_INLINE — Padded at slot 2 */
   chunk_write(&chunk, OP_STRUCT_NEW_INLINE, 1);
-  chunk_write_u16(&chunk, 1, 1);
+  chunk_write_u16(&chunk, 2, 1);
   chunk_write(&chunk, OP_HALT, 1);
 
   VM vm;

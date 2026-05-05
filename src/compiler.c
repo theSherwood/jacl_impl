@@ -213,7 +213,8 @@ static bool struct_registry__grow(StructTypeRegistry* reg) {
 static inline bool struct_def_is_user(const StructTypeDef* sdef,
                                       const StructTypeRegistry* reg) {
   if (!sdef || !reg) return false;
-  if (reg->ctx_type_idx == 0) return true;
+  /* ctx slot is fixed at index 1; reg->ctx_type_idx points at it.
+   * Compare by pointer so a NULL-placeholder ctx doesn't mis-classify. */
   return sdef != reg->defs[reg->ctx_type_idx];
 }
 
@@ -223,9 +224,14 @@ static void struct_registry__init(StructTypeRegistry* reg, arena_t* arena) {
   reg->arena = arena;
   reg->capacity = STRUCT_REGISTRY_INIT_CAP;
   reg->defs = (StructTypeDef**)calloc(reg->capacity, sizeof(StructTypeDef*));
-  reg->count = 1; /* slot 0 is reserved for plain dyn JaclVal boxes */
+  /* slot 0 is reserved for plain dyn JaclVal boxes;
+   * slot 1 is reserved for the ctx struct (filled by
+   * ctx_field_list__finalize, which now patches in place). User
+   * structs register starting at slot 2. */
+  reg->count = 2;
   reg->defs[0] = NULL;
-  reg->ctx_type_idx = 0; /* not yet registered */
+  reg->defs[1] = NULL;
+  reg->ctx_type_idx = 1;
 }
 
 /* Free the heap-allocated defs pointer array. Does not free StructTypeDef entries
@@ -353,12 +359,9 @@ static JaclVal ctx_eval_const_default(AstNode* dexpr, JaclType ftype) {
 static uint32_t ctx_field_list__finalize(CtxFieldList* list, StructTypeRegistry* reg) {
   if (!list || list->count == 0 || !reg) return 0;
 
-  /* Ensure capacity */
-  if (!struct_registry__grow(reg)) return 0;
-
-  uint32_t type_idx = reg->count;
-  reg->count++;
-  reg->defs[type_idx] = NULL; /* placeholder */
+  /* Ctx occupies the pre-reserved slot 1 (struct_registry__init).
+   * Just fill the placeholder in place. */
+  uint32_t type_idx = reg->ctx_type_idx;
 
   /* Compute C-ABI layout */
   StructTypeField tmp_fields[CTX_MAX_FIELDS];
@@ -387,7 +390,6 @@ static uint32_t ctx_field_list__finalize(CtxFieldList* list, StructTypeRegistry*
   /* Allocate StructTypeDef */
   StructTypeDef* sdef = struct_registry__alloc_def(reg, list->count);
   if (!sdef) {
-    reg->count = type_idx; /* rollback */
     return 0;
   }
   sdef->name        = "ctx";
@@ -402,7 +404,6 @@ static uint32_t ctx_field_list__finalize(CtxFieldList* list, StructTypeRegistry*
   memcpy(sdef->fields, tmp_fields, list->count * sizeof(StructTypeField));
 
   reg->defs[type_idx] = sdef;
-  reg->ctx_type_idx = type_idx;
   return type_idx;
 }
 
@@ -2555,7 +2556,6 @@ struct Compiler {
   JaclType         last_expr_type;  /* type of the last compiled expression */
   uint32_t         last_struct_idx; /* struct type index when last_expr_type==TYPE_STRUCT */
   uint32_t         last_key_struct_idx; /* key struct type for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
-#define CTX_STRUCT_PENDING (UINT32_MAX - 1) /* sentinel: ctx struct not yet finalized */
   JaclType         return_type;     /* declared return type for current function */
   uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
@@ -6879,8 +6879,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
          lives inline as a wide local) or use [box $val] explicitly. Ctx
          is exempt: it's the lone HeapRecord builtin. */
       if (effective_type == TYPE_STRUCT &&
-          c->last_struct_idx != UINT32_MAX &&
-          c->last_struct_idx != CTX_STRUCT_PENDING) {
+          rhs_struct_idx != UINT32_MAX &&
+          rhs_struct_idx != compiler__get_struct_registry(c)->ctx_type_idx) {
         compiler__error(c, line, col,
                         "cannot define a struct value at top level — wrap "
                         "the body in a proc, or use [box $val] to box it "
@@ -9879,7 +9879,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     uint32_t field_name_len = args[1]->data.lit_string.length;
 
     /* US-007: $ctx->field — resolve from CtxFieldList during compilation */
-    if (struct_type == TYPE_STRUCT && struct_idx == CTX_STRUCT_PENDING) {
+    if (struct_type == TYPE_STRUCT &&
+        struct_idx == compiler__get_struct_registry(c)->ctx_type_idx) {
       CtxFieldList* ctx_fl = compiler__get_ctx_fields(c);
       if (ctx_fl) {
         uint32_t fi;
@@ -9936,7 +9937,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, (uint8_t)field_type, line);
           }
           c->last_expr_type = TYPE_STRUCT;
-          c->last_struct_idx = CTX_STRUCT_PENDING;
+          c->last_struct_idx = compiler__get_struct_registry(c)->ctx_type_idx;
         } else {
           if (cf->type == TYPE_STRUCT) {
             /* Inline struct field: push N inline slots from ctx.data. */
@@ -10968,7 +10969,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         if (ctx_fl && ctx_fl->count > 0) {
           compiler__emit_byte(c, OP_GET_CTX, line);
           c->last_expr_type = TYPE_STRUCT;
-          c->last_struct_idx = CTX_STRUCT_PENDING;
+          c->last_struct_idx = compiler__get_struct_registry(c)->ctx_type_idx;
         } else {
           compiler__error(c, line, node->start.column,
                           "no ctx fields declared");
