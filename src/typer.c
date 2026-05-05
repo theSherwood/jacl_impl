@@ -357,8 +357,17 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     } else if (args[0]->type == AST_COMMAND &&
         args[0]->data.command.arg_count == 1 &&
         args[0]->data.command.head &&
-        args[0]->data.command.head->type == AST_LIT_STRING &&
-        typer__node_as_type_keyword(args[0]->data.command.head, &declared_type)) {
+        args[0]->data.command.head->type == AST_LIT_STRING) {
+      /* Two shapes:
+       *   [type_kw name] = value  → typed binding (declared_type set)
+       *   [def name] = value      → surface `def x = 5` parses as
+       *                             [= [def x] 5]; the redundant 'def'
+       *                             head means "just bind name to value"
+       *   [Struct name] = value   → typed struct binding (handled below
+       *                             via the struct-name branch in argc==3)
+       * For the typer, we just need to extract name_node; declared_type
+       * is set only when the outer head is a type keyword. */
+      typer__node_as_type_keyword(args[0]->data.command.head, &declared_type);
       name_node  = args[0]->data.command.args[0];
       value_node = args[1];
     } else {
