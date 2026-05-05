@@ -4984,13 +4984,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->expected_type = elem_t;
         compiler__compile_node(c, args[i]);
         c->expected_type = TYPE_DYN;
-        if (c->last_expr_type != elem_t) {
+        JaclType arg_t = (JaclType)args[i]->inferred_type;
+        if (arg_t != elem_t) {
           char err[160];
           snprintf(err, sizeof(err),
                    "[Vec %.*s]: element %u is not a %.*s value (got %s)",
                    (int)type_name_len, type_name_str, i,
                    (int)type_name_len, type_name_str,
-                   type_name(c->last_expr_type));
+                   type_name(arg_t));
           compiler__error(c, line, col, err);
           return;
         }
@@ -5224,7 +5225,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->expected_type = TYPE_DYN;
       AstNode* k_node = args[i * 2];
       bool k_ok = key_is_scalar
-        ? (c->last_expr_type == key_t)
+        ? ((JaclType)k_node->inferred_type == key_t)
         : ((JaclType)k_node->inferred_type == TYPE_STRUCT &&
            k_node->inferred_struct_idx == key_type_idx);
       if (!k_ok) {
@@ -5243,7 +5244,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->expected_type = TYPE_DYN;
       AstNode* v_node = args[i * 2 + 1];
       bool v_ok = val_is_scalar
-        ? (c->last_expr_type == val_t)
+        ? ((JaclType)v_node->inferred_type == val_t)
         : ((JaclType)v_node->inferred_type == TYPE_STRUCT &&
            v_node->inferred_struct_idx == val_type_idx);
       if (!v_ok) {
@@ -8471,9 +8472,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     if (!compiler__compile_vec_receiver(c, args[0], "vec-concat", line, col)) return;
     if (c->last_expr_type == TYPE_TYPED_VEC) {
-      uint32_t elem_type_idx = c->last_struct_idx;
+      uint32_t elem_type_idx = args[0]->inferred_struct_idx;
       compiler__compile_node(c, args[1]);
-      if (c->last_expr_type != TYPE_TYPED_VEC || c->last_struct_idx != elem_type_idx) {
+      if ((JaclType)args[1]->inferred_type != TYPE_TYPED_VEC ||
+          args[1]->inferred_struct_idx != elem_type_idx) {
         compiler__error(c, line, col, "vec-concat: both vectors must have the same typed element type");
         return;
       }

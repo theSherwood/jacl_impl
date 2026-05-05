@@ -1212,6 +1212,36 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     }
   }
   if (head) typer__infer_node(tc, head);
+
+  /* Typed-collection ctor: propagate elem (and key) types as expected_type
+   * so int/float literal args narrow to the declared element type.
+   * Mirrors the compiler's c->expected_type = elem_t / key_t before
+   * each compile_node call. */
+  int ctor_kind = (head && head->type == AST_COMMAND)
+                  ? typer__typed_collection_kind(head) : 0;
+  JaclType ctor_elem_t = TYPE_DYN;
+  JaclType ctor_key_t  = TYPE_DYN;
+  if (ctor_kind == 1 || ctor_kind == 2 || ctor_kind == 3) {
+    AstNode* elem_node = (ctor_kind == 3)
+        ? head->data.command.args[1]
+        : head->data.command.args[0];
+    if (elem_node && elem_node->type == AST_LIT_STRING &&
+        is_type_keyword(elem_node->data.lit_string.value,
+                        elem_node->data.lit_string.length)) {
+      ctor_elem_t = type_from_keyword(elem_node->data.lit_string.value,
+                                      elem_node->data.lit_string.length);
+    }
+    if (ctor_kind == 3) {
+      AstNode* key_node = head->data.command.args[0];
+      if (key_node && key_node->type == AST_LIT_STRING &&
+          is_type_keyword(key_node->data.lit_string.value,
+                          key_node->data.lit_string.length)) {
+        ctor_key_t = type_from_keyword(key_node->data.lit_string.value,
+                                       key_node->data.lit_string.length);
+      }
+    }
+  }
+
   for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
     AstNode* arg = node->data.command.args[i];
     JaclType saved_et = tc->expected_type;
@@ -1219,6 +1249,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       tc->expected_type = (JaclType)proc->param_types[i];
     } else if (sdef && i < sdef->field_count) {
       tc->expected_type = (JaclType)sdef->field_types[i];
+    } else if (ctor_kind == 1 && ctor_elem_t != TYPE_DYN) {
+      tc->expected_type = ctor_elem_t;
+    } else if ((ctor_kind == 2 || ctor_kind == 3) &&
+               (ctor_elem_t != TYPE_DYN || ctor_key_t != TYPE_DYN)) {
+      /* Map ctor: alternating key/value pairs. Even idx → key, odd → val. */
+      tc->expected_type = (i % 2 == 0) ? ctor_key_t : ctor_elem_t;
     } else {
       tc->expected_type = TYPE_DYN;
     }
