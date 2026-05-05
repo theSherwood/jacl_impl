@@ -682,6 +682,7 @@ suite track progress:
 | After commits `152eabd`, `c3227c5`, `ba1b84e`, `cb97a4f` (Stage 2: print/box/reset/HOF/ctor-elem/vec-concat → AST) | 44 | 26 | 0 | 18 | 0 |
 | After commit `9b95e12` (delete unused compiler__get_type) | 44 | 26 | 0 | 18 | 0 |
 | After commit `e21b1fe` (typer pipe-binop simulation) | 41 | 23 | 0 | 18 | 0 |
+| After commit `7f5acd8` (parser defaults LIT_INT/LIT_FLOAT/LIT_STRING inferred_type) | 35 | 17 | 0 | 18 | 0 |
 
 **Real divergence (GAP+MISMATCH):** 665 → 46. 93% reduction.
 
