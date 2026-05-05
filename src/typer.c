@@ -1169,6 +1169,21 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       }
       return;
     }
+    /* Unary minus: `[- $x]` — result preserves operand's numeric type. */
+    if (is_arith && hlen == 1 && hname[0] == '-' &&
+        node->data.command.arg_count == 1) {
+      AstNode* arg = node->data.command.args[0];
+      typer__infer_node(tc, arg);
+      JaclType t = (JaclType)arg->inferred_type;
+      if (t == TYPE_I32 || t == TYPE_I64 ||
+          t == TYPE_F32 || t == TYPE_F64 ||
+          t == TYPE_U32 || t == TYPE_U64) {
+        node->inferred_type = t;
+      } else {
+        node->inferred_type = TYPE_DYN;
+      }
+      return;
+    }
   }
 
   /* Generic call/constructor dispatch: head may be a known proc name
