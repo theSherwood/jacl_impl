@@ -195,6 +195,11 @@ AstNode* parser__parse_atom(Parser* p) {
       node->start = parser__token_start(tok);
       node->end   = parser__token_end(tok);
       node->data.lit_int.value = tok->payload.int_val;
+      /* Default to TYPE_I32 — matches the compiler's literal default
+       * and the typer's default. The typer will overwrite during
+       * its walk for narrowed contexts (e.g., declared i64 binding).
+       * Important for macro-expanded literals the typer never visits. */
+      node->inferred_type = TYPE_I32;
       return node;
     }
     case TOKEN_FLOAT: {
@@ -204,6 +209,7 @@ AstNode* parser__parse_atom(Parser* p) {
       node->start = parser__token_start(tok);
       node->end   = parser__token_end(tok);
       node->data.lit_float.value = tok->payload.float_val;
+      node->inferred_type = TYPE_F32;
       return node;
     }
     case TOKEN_WORD: {
@@ -214,6 +220,7 @@ AstNode* parser__parse_atom(Parser* p) {
       node->end   = parser__token_end(tok);
       node->data.lit_string.value  = tok->payload.text;
       node->data.lit_string.length = tok->length;
+      node->inferred_type = TYPE_STR;
       return node;
     }
     case TOKEN_STRING: {
