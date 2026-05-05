@@ -1024,6 +1024,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       return;
     } else if (hid == HEAD_PROC) {
       if (typer__handle_proc(tc, node)) return;
+      /* proc def emits a closure value regardless of which shape was
+       * recognized. Pin closure for shapes handle_proc bailed on. */
+      node->inferred_type = TYPE_CLOSURE;
+      return;
     } else if (hid == HEAD_IF &&
                (node->data.command.arg_count == 2 || node->data.command.arg_count == 3)) {
       /* if [cond] {then} {else?} — detect [box? Type $var] for flow
