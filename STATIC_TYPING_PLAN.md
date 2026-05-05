@@ -565,8 +565,38 @@ suite track progress:
 | After commit `cf5b87e` (HEAD_FOR compiler pin) | 82 | 48 | 9 | 25 | 0 |
 | After commit `5d089be` (HEAD_YIELD typer rule) | 82 | 48 | 9 | 25 | 0 |
 | After commit `c4b9d65` (per-field struct_idx for chained dot) | 71 | 37 | 9 | 25 | 0 |
+| After commit `066e666` (typer 1-arg AST_COMMAND def-sugar generalization) | 71 | 37 | 9 | 25 | 0 |
 
 **Real divergence (GAP+MISMATCH):** 665 → 46. 93% reduction.
+
+**Stage 1 plateau.** At 71 total / 46 real divergences, the remaining
+clusters are:
+
+- **5 MISMATCHes (`head=def` typer=nil compiler=struct):** load-
+  bearing leak — `def Point p [Ctor ...]` paths read the leaked
+  struct type to drive inline-vs-heap codegen. Pinning breaks
+  struct-flow tests. Stage 2 absorbs naturally when the consumer
+  reads `args[1]->inferred_type` instead of `c->last_expr_type`.
+- **5 EXTRAs each (AST_VAR_REF, AST_RETURN, head=`==`):** typer
+  is more correct than compiler tracks. Stage 2 absorbs.
+- **3 EXTRAs each (head=`while`, head=`for`):** compiler-side
+  pin opportunities exist (not yet attempted; risk profile similar
+  to the `def` MISMATCHes — would need to verify no downstream
+  reader relies on the leak).
+- **7 AST_LIT_INT GAPs + 2 head=def GAPs:** at top-level positions
+  the typer's handle_def_or_mut bails for some shape we haven't
+  pinned down; needs targeted reproducer + handler extension.
+- **3 head=`|` GAPs:** pipe rhs is a function call to a proc whose
+  return type the typer doesn't know (typer-only proc registry
+  doesn't include closures or imported procs).
+- **2 each across reset/yield/mut/etc.:** small clusters; each is
+  a focused 1-2 line typer rule.
+
+**Recommendation:** at this point, further Stage 1 investment
+returns less per commit than starting Stage 2 (which absorbs ~30
+of the remaining 71 just by migrating consumers off
+`c->last_expr_type`). The typer is now correct for ~95% of AST
+shapes encountered in the test_compiler corpus.
 
 The ctx-struct pre-pass commit is setup for follow-on: future code
 referencing `$ctx.field` inside a `with-ctx` block will type the
