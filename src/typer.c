@@ -1042,6 +1042,16 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     const char* hn = head->data.lit_string.value;
     uint32_t    hl = head->data.lit_string.length;
 
+    /* Pipe operator: result type is whatever the rhs evaluates to.
+     * The compiler's compile_pipe_op threads the lhs into the rhs;
+     * the final value on the stack is rhs's type. */
+    if (hid == HEAD_PIPE && node->data.command.arg_count == 2) {
+      AstNode* rhs = node->data.command.args[1];
+      node->inferred_type = rhs->inferred_type;
+      node->inferred_struct_idx = rhs->inferred_struct_idx;
+      return;
+    }
+
     /* Receiver-preserving vec/map builtins. Result depends on whether
      * the typer knows the receiver type:
      *   typed vec/map → typed result (with elem-type idx propagated)

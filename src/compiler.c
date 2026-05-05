@@ -8955,6 +8955,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__emit_byte(c, OP_ATOM, line);
+    /* atom returns an opaque atom value; element type isn't tracked. */
+    c->last_expr_type = TYPE_DYN;
     return;
   }
 
