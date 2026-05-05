@@ -676,6 +676,51 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   return true;
 }
 
+/* Pre-pass: collect AST_CTX_DECL nodes and populate a synthetic
+ * "ctx" entry in the typer's struct registry. Mirrors the compiler's
+ * CtxFieldList: each `ctx Type field_name = default` declaration adds
+ * one field. After this runs, the `ctx` binding (added by typer_infer)
+ * can be retargeted to point at the synthetic struct so `$ctx.field`
+ * resolves the field's type via the existing HEAD_DOT path. Returns
+ * the struct index of the ctx entry, or UINT32_MAX if no ctx fields
+ * were declared. */
+static uint32_t typer__register_ctx_struct(TyperCtx* tc,
+                                            AstNode** nodes, uint32_t count) {
+  /* Count fields first to decide whether to allocate a slot. */
+  uint32_t fcount = 0;
+  for (uint32_t ni = 0; ni < count; ni++) {
+    if (nodes[ni]->type == AST_CTX_DECL) fcount++;
+  }
+  if (fcount == 0) return UINT32_MAX;
+  if (tc->struct_count >= TYPER_MAX_STRUCTS) return UINT32_MAX;
+
+  uint32_t ctx_idx = tc->struct_count++;
+  TyperStruct* s = &tc->structs[ctx_idx];
+  s->name = "ctx";
+  s->name_len = 3;
+  if (fcount > TYPER_MAX_STRUCT_FIELDS) fcount = TYPER_MAX_STRUCT_FIELDS;
+  s->field_count = (uint8_t)fcount;
+  uint32_t fi = 0;
+  for (uint32_t ni = 0; ni < count && fi < fcount; ni++) {
+    AstNode* node = nodes[ni];
+    if (node->type != AST_CTX_DECL) continue;
+    const char* tn = node->data.ctx_decl.type_name;
+    uint32_t    tl = node->data.ctx_decl.type_name_len;
+    JaclType ft = TYPE_DYN;
+    if (tn && is_type_keyword(tn, tl)) {
+      ft = type_from_keyword(tn, tl);
+    } else if (tn) {
+      /* Likely a registered struct name; mark as TYPE_STRUCT. */
+      ft = TYPE_STRUCT;
+    }
+    s->field_types[fi]     = (uint8_t)ft;
+    s->field_names[fi]     = node->data.ctx_decl.field_name;
+    s->field_name_lens[fi] = node->data.ctx_decl.field_name_len;
+    fi++;
+  }
+  return ctx_idx;
+}
+
 /* Pre-pass: collect struct definitions so struct constructor calls
  * (which propagate field types to args) can resolve. */
 static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t count) {
@@ -1306,14 +1351,18 @@ void typer_infer(AstNode** nodes, uint32_t count) {
   tc.expected_type = TYPE_DYN;
   tc.narrowing_count = 0;
 
-  /* Builtin: $ctx is always a struct (the ctx record). Add at the
-   * outer scope so all user code can resolve it. */
-  typer__scope_add(&tc, "ctx", 3, 0, TYPE_STRUCT, UINT32_MAX);
-
-  /* Pre-pass: register top-level struct definitions and proc signatures
-   * so constructor calls and proc calls (which may appear before the
-   * definition) resolve correctly. */
+  /* Pre-pass: register top-level struct definitions, the synthetic
+   * ctx struct, and proc signatures so constructor calls and proc
+   * calls (which may appear before the definition) resolve correctly. */
   typer__register_structs(&tc, nodes, count);
+  uint32_t ctx_struct_idx = typer__register_ctx_struct(&tc, nodes, count);
+
+  /* Builtin: $ctx is always a struct (the ctx record). Bind it after
+   * the ctx struct is registered so $ctx.field resolves through the
+   * existing HEAD_DOT field-type path. If no ctx fields were declared,
+   * fall back to UINT32_MAX (no struct registry entry). */
+  typer__scope_add(&tc, "ctx", 3, 0, TYPE_STRUCT, ctx_struct_idx);
+
   typer__register_procs(&tc, nodes, count);
 
   for (uint32_t i = 0; i < count; i++) {
