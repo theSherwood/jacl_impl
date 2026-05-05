@@ -3688,6 +3688,27 @@ void compiler__ensure_boxed(Compiler* c, uint32_t line) {
      consuming inline args, etc.) or a compile-time rejection. */
 }
 
+/* --- Internal: Compile a vec-* receiver and reject TYPE_STREAM operands.
+ *
+ * All vec-* builtins share the same preamble: compile arg[0], then refuse
+ * to operate on a stream (the user must `collect` first). Centralizes the
+ * boilerplate; returns true on success, false if an error was reported. */
+
+static bool compiler__compile_vec_receiver(Compiler* c, AstNode* node,
+                                           const char* opname,
+                                           uint32_t line, uint32_t col) {
+  compiler__compile_node(c, node);
+  if (c->last_expr_type == TYPE_STREAM) {
+    char msg[128];
+    snprintf(msg, sizeof(msg),
+             "%s requires a vector; got stream (use collect to materialize)",
+             opname);
+    compiler__error(c, line, col, msg);
+    return false;
+  }
+  return true;
+}
+
 /* --- Internal: Reject bare struct in dyn context (compile-time error) --- */
 
 static bool compiler__reject_bare_typed(Compiler* c, uint32_t line, uint32_t col,
@@ -5543,12 +5564,34 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* Arithmetic builtins */
-  if (hid == HEAD_PLUS) {
-    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "+", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_ADD, "add", line, col);
-    return;
+  /* Arithmetic + comparison binary ops with uniform shape:
+   *   exactly 2 args, dispatch to compile_binary with the matching opcode.
+   * HEAD_MINUS and HEAD_EQ_EQ have extra paths and stay below. */
+  {
+    static const struct { HeadId hid; const char* name; uint8_t op;
+                          const char* verb; } binop_table[] = {
+      { HEAD_PLUS,    "+",  OP_ADD, "add"      },
+      { HEAD_STAR,    "*",  OP_MUL, "multiply" },
+      { HEAD_SLASH,   "/",  OP_DIV, "divide"   },
+      { HEAD_PERCENT, "%",  OP_MOD, "modulo"   },
+      { HEAD_LT,      "<",  OP_LT,  "compare"  },
+      { HEAD_GT,      ">",  OP_GT,  "compare"  },
+      { HEAD_LE,      "<=", OP_LE,  "compare"  },
+      { HEAD_GE,      ">=", OP_GE,  "compare"  },
+    };
+    for (size_t bi = 0; bi < sizeof(binop_table)/sizeof(binop_table[0]); bi++) {
+      if (hid != binop_table[bi].hid) continue;
+      if (argc != 2) {
+        compiler__builtin_arity_error(c, line, col,
+            binop_table[bi].name, "2 arguments", argc);
+        return;
+      }
+      compiler__compile_binary(c, args, binop_table[bi].op,
+                               binop_table[bi].verb, line, col);
+      return;
+    }
   }
+
   if (hid == HEAD_MINUS) {
     if (argc == 1) {
       compiler__compile_node(c, args[0]);
@@ -5575,22 +5618,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     return;
   }
-  if (hid == HEAD_STAR) {
-    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "*", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_MUL, "multiply", line, col);
-    return;
-  }
-  if (hid == HEAD_SLASH) {
-    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "/", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_DIV, "divide", line, col);
-    return;
-  }
-  if (hid == HEAD_PERCENT) {
-    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "%", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_MOD, "modulo", line, col);
-    return;
-  }
-
   /* Comparison builtins */
   if (hid == HEAD_EQ_EQ) {
     if (argc != 2) { compiler__builtin_arity_error(c, line, col, "==", "2 arguments", argc); return; }
@@ -5626,43 +5653,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_binary(c, args, OP_EQ, "compare", line, col);
     return;
   }
-  if (hid == HEAD_LT) {
-    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "<", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_LT, "compare", line, col);
-    return;
-  }
-  if (hid == HEAD_GT) {
-    if (argc != 2) { compiler__builtin_arity_error(c, line, col, ">", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_GT, "compare", line, col);
-    return;
-  }
-  if (hid == HEAD_LE) {
-    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "<=", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_LE, "compare", line, col);
-    return;
-  }
-  if (hid == HEAD_GE) {
-    if (argc != 2) { compiler__builtin_arity_error(c, line, col, ">=", "2 arguments", argc); return; }
-    compiler__compile_binary(c, args, OP_GE, "compare", line, col);
-    return;
-  }
-
   /* Range operators: ..< (exclusive) and ..= (inclusive) */
-  if (hid == HEAD_DOTDOT_LT) {
-    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "..<", "2 arguments", argc); return; }
+  if (hid == HEAD_DOTDOT_LT || hid == HEAD_DOTDOT_EQ) {
+    const char* rname = (hid == HEAD_DOTDOT_LT) ? "..<" : "..=";
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, rname, "2 arguments", argc);
+      return;
+    }
     compiler__compile_node(c, args[0]);
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_RANGE, line);
-    compiler__emit_byte(c, 0, line); /* 0 = exclusive */
-    c->last_expr_type = TYPE_STREAM;
-    return;
-  }
-  if (hid == HEAD_DOTDOT_EQ) {
-    if (argc != 2) { compiler__builtin_arity_error(c, line, col, "..=", "2 arguments", argc); return; }
-    compiler__compile_node(c, args[0]);
-    compiler__compile_node(c, args[1]);
-    compiler__emit_byte(c, OP_RANGE, line);
-    compiler__emit_byte(c, 1, line); /* 1 = inclusive */
+    compiler__emit_byte(c, (hid == HEAD_DOTDOT_EQ) ? 1 : 0, line);
     c->last_expr_type = TYPE_STREAM;
     return;
   }
@@ -5699,27 +5700,38 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* length builtin */
-  if (hid == HEAD_LENGTH) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "length", "1 argument", argc);
+  /* Table-driven dispatch for "compile single arg → emit one-byte op →
+   * set result type" builtins. set_type=false means leave last_expr_type
+   * unchanged (matches the few branches that don't reassign it). */
+  {
+    static const struct { HeadId hid; const char* name;
+                          uint8_t op; JaclType result; bool set_type; } unary_emit[] = {
+      { HEAD_LENGTH,      "length",      OP_STR_LEN,      TYPE_I32,    true  },
+      { HEAD_BYTE_LENGTH, "byte-length", OP_STR_BYTE_LEN, TYPE_I32,    true  },
+      { HEAD_ATOM_Q,      "atom?",       OP_IS_ATOM,      TYPE_BOOL,   true  },
+      { HEAD_FUTURE_Q,    "future?",     OP_IS_FUTURE,    TYPE_BOOL,   true  },
+      { HEAD_DEREF,       "deref",       OP_DEREF,        TYPE_DYN,    false },
+      { HEAD_ERROR,       "error",       OP_ERROR,        TYPE_DYN,    false },
+      { HEAD_ERROR_Q,     "error?",      OP_IS_ERROR,     TYPE_BOOL,   true  },
+      { HEAD_ERROR_VAL,   "error-val",   OP_ERROR_VAL,    TYPE_DYN,    true  },
+      { HEAD_STREAM_NEXT, "stream_next", OP_STREAM_NEXT,  TYPE_DYN,    true  },
+      { HEAD_COLLECT,     "collect",     OP_COLLECT,      TYPE_VEC,    true  },
+      { HEAD_COUNT,       "count",       OP_COUNT,        TYPE_I32,    true  },
+      { HEAD_FIRST,       "first",       OP_FIRST,        TYPE_DYN,    true  },
+      { HEAD_LINES,       "lines",       OP_LINES,        TYPE_STREAM, true  },
+    };
+    for (size_t ui = 0; ui < sizeof(unary_emit)/sizeof(unary_emit[0]); ui++) {
+      if (hid != unary_emit[ui].hid) continue;
+      if (argc != 1) {
+        compiler__builtin_arity_error(c, line, col,
+            unary_emit[ui].name, "1 argument", argc);
+        return;
+      }
+      compiler__compile_node(c, args[0]);
+      compiler__emit_byte(c, unary_emit[ui].op, line);
+      if (unary_emit[ui].set_type) c->last_expr_type = unary_emit[ui].result;
       return;
     }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_STR_LEN, line);
-    c->last_expr_type = TYPE_I32;
-    return;
-  }
-
-  /* byte-length builtin */
-  if (hid == HEAD_BYTE_LENGTH) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "byte-length", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_STR_BYTE_LEN, line);
-    c->last_expr_type = TYPE_I32;
-    return;
   }
 
   /* index builtin */
@@ -8437,11 +8449,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "vec-get", "2 arguments", argc);
       return;
     }
-    compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_STREAM) {
-      compiler__error(c, line, col, "vec-get requires a vector; got stream (use collect to materialize)");
-      return;
-    }
+    if (!compiler__compile_vec_receiver(c, args[0], "vec-get", line, col)) return;
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       uint32_t elem_type_idx = c->last_struct_idx;
       compiler__compile_node(c, args[1]);
@@ -8471,11 +8479,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "vec-len", "1 argument", argc);
       return;
     }
-    compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_STREAM) {
-      compiler__error(c, line, col, "vec-len requires a vector; got stream (use collect to materialize)");
-      return;
-    }
+    if (!compiler__compile_vec_receiver(c, args[0], "vec-len", line, col)) return;
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       compiler__emit_byte(c, OP_TYPED_VEC_LEN, line);
       c->last_expr_type = TYPE_I32;
@@ -8492,11 +8496,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "vec-push", "2 arguments", argc);
       return;
     }
-    compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_STREAM) {
-      compiler__error(c, line, col, "vec-push requires a vector; got stream (use collect to materialize)");
-      return;
-    }
+    if (!compiler__compile_vec_receiver(c, args[0], "vec-push", line, col)) return;
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       uint32_t elem_type_idx = c->last_struct_idx;
       if (!compiler__compile_typed_elem_arg(c, args[1], elem_type_idx)) {
@@ -8522,11 +8522,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "vec-set", "3 arguments", argc);
       return;
     }
-    compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_STREAM) {
-      compiler__error(c, line, col, "vec-set requires a vector; got stream (use collect to materialize)");
-      return;
-    }
+    if (!compiler__compile_vec_receiver(c, args[0], "vec-set", line, col)) return;
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       uint32_t elem_type_idx = c->last_struct_idx;
       compiler__compile_node(c, args[1]); /* index */
@@ -8554,11 +8550,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "vec-concat", "2 arguments", argc);
       return;
     }
-    compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_STREAM) {
-      compiler__error(c, line, col, "vec-concat requires a vector; got stream (use collect to materialize)");
-      return;
-    }
+    if (!compiler__compile_vec_receiver(c, args[0], "vec-concat", line, col)) return;
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       uint32_t elem_type_idx = c->last_struct_idx;
       compiler__compile_node(c, args[1]);
@@ -8584,11 +8576,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__builtin_arity_error(c, line, col, "vec-slice", "3 arguments", argc);
       return;
     }
-    compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_STREAM) {
-      compiler__error(c, line, col, "vec-slice requires a vector; got stream (use collect to materialize)");
-      return;
-    }
+    if (!compiler__compile_vec_receiver(c, args[0], "vec-slice", line, col)) return;
     if (c->last_expr_type == TYPE_TYPED_VEC) {
       uint32_t elem_type_idx = c->last_struct_idx;
       compiler__compile_node(c, args[1]);
@@ -8826,41 +8814,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* error builtin (exactly 1 arg) */
-  if (hid == HEAD_ERROR) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "error", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_ERROR, line);
-    return;
-  }
-
-  /* error? builtin (exactly 1 arg) */
-  if (hid == HEAD_ERROR_Q) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "error?", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_IS_ERROR, line);
-    c->last_expr_type = TYPE_BOOL;
-    return;
-  }
-
-  /* error-val builtin (exactly 1 arg) */
-  if (hid == HEAD_ERROR_VAL) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "error-val", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_ERROR_VAL, line);
-    c->last_expr_type = TYPE_DYN;
-    return;
-  }
-
   /* stack-trace builtin (exactly 0 args) */
   if (hid == HEAD_STACK_TRACE) {
     if (argc != 0) {
@@ -8950,84 +8903,36 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
   /* US-015: syntax object introspection builtins. Each compiles the single
    * argument to a syntax object value, then emits OP_SYNTAX_OP with a subop
-   * byte indicating which introspection operation to perform. */
-  if (hid == HEAD_SYNTAX_KIND) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "syntax-kind", "1 argument", argc);
+   * byte indicating which introspection operation to perform.
+   *
+   * NOTE: PRD calls one of these syntax->string but the lexer tokenizes ->
+   * as an arrow separator, so 'syntax-str' is used instead (consistent with
+   * to-string and byte-length). */
+  {
+    static const struct { HeadId hid; const char* name; uint8_t subop;
+                          JaclType result; } syntax_builtins[] = {
+      { HEAD_SYNTAX_KIND,     "syntax-kind",     0, TYPE_STR },
+      { HEAD_SYNTAX_DATUM,    "syntax-datum",    1, TYPE_DYN },
+      { HEAD_SYNTAX_HEAD,     "syntax-head",     2, TYPE_DYN },
+      { HEAD_SYNTAX_ARGS,     "syntax-args",     3, TYPE_VEC },
+      { HEAD_SYNTAX_COMMANDS, "syntax-commands", 4, TYPE_VEC },
+      { HEAD_SYNTAX_POS,      "syntax-pos",      5, TYPE_MAP },
+      { HEAD_SYNTAX_STR,      "syntax-str",      6, TYPE_STR },
+    };
+    for (size_t si = 0; si < sizeof(syntax_builtins)/sizeof(syntax_builtins[0]); si++) {
+      if (hid != syntax_builtins[si].hid) continue;
+      if (argc != 1) {
+        compiler__builtin_arity_error(c, line, col,
+            syntax_builtins[si].name, "1 argument", argc);
+        return;
+      }
+      compiler__compile_node(c, args[0]);
+      compiler__emit_byte(c, OP_SYNTAX_OP, line);
+      compiler__emit_byte(c, syntax_builtins[si].subop, line);
+      if (syntax_builtins[si].result != TYPE_DYN)
+        c->last_expr_type = syntax_builtins[si].result;
       return;
     }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_SYNTAX_OP, line);
-    compiler__emit_byte(c, 0 /* SYNTAX_OP_KIND */, line);
-    c->last_expr_type = TYPE_STR;
-    return;
-  }
-  if (hid == HEAD_SYNTAX_DATUM) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "syntax-datum", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_SYNTAX_OP, line);
-    compiler__emit_byte(c, 1 /* SYNTAX_OP_DATUM */, line);
-    return;
-  }
-  if (hid == HEAD_SYNTAX_HEAD) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "syntax-head", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_SYNTAX_OP, line);
-    compiler__emit_byte(c, 2 /* SYNTAX_OP_HEAD */, line);
-    return;
-  }
-  if (hid == HEAD_SYNTAX_ARGS) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "syntax-args", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_SYNTAX_OP, line);
-    compiler__emit_byte(c, 3 /* SYNTAX_OP_ARGS */, line);
-    c->last_expr_type = TYPE_VEC;
-    return;
-  }
-  if (hid == HEAD_SYNTAX_COMMANDS) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "syntax-commands", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_SYNTAX_OP, line);
-    compiler__emit_byte(c, 4 /* SYNTAX_OP_COMMANDS */, line);
-    c->last_expr_type = TYPE_VEC;
-    return;
-  }
-  if (hid == HEAD_SYNTAX_POS) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "syntax-pos", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_SYNTAX_OP, line);
-    compiler__emit_byte(c, 5 /* SYNTAX_OP_POS */, line);
-    c->last_expr_type = TYPE_MAP;
-    return;
-  }
-  /* NOTE: PRD calls this syntax->string but the lexer tokenizes -> as a
-   * separator (arrow), so the hyphenated form 'syntax-str' is used instead,
-   * consistent with existing builtins like to-string and byte-length. */
-  if (hid == HEAD_SYNTAX_STR) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "syntax-str", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_SYNTAX_OP, line);
-    compiler__emit_byte(c, 6 /* SYNTAX_OP_STRING */, line);
-    c->last_expr_type = TYPE_STR;
-    return;
   }
 
   /* US-016: make-syntax — programmatic construction of syntax objects.
@@ -9207,40 +9112,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   }
 
   /* atom? builtin (exactly 1 arg) */
-  if (hid == HEAD_ATOM_Q) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "atom?", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_IS_ATOM, line);
-    c->last_expr_type = TYPE_BOOL;
-    return;
-  }
-
-  /* future? builtin (exactly 1 arg) */
-  if (hid == HEAD_FUTURE_Q) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "future?", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_IS_FUTURE, line);
-    c->last_expr_type = TYPE_BOOL;
-    return;
-  }
-
-  /* deref builtin (exactly 1 arg) */
-  if (hid == HEAD_DEREF) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "deref", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_DEREF, line);
-    return;
-  }
-
   /* unbox builtin (exactly 1 arg) — requires flow-typed narrowing from box? guard */
   if (hid == HEAD_UNBOX) {
     if (argc != 1) {
@@ -9497,42 +9368,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
-  /* stream_next — pull next element from a stream */
-  if (hid == HEAD_STREAM_NEXT) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "stream_next", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_STREAM_NEXT, line);
-    c->last_expr_type = TYPE_DYN;
-    return;
-  }
-
-  /* collect — materialize stream into vector (identity on vectors) */
-  if (hid == HEAD_COLLECT) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "collect", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_COLLECT, line);
-    c->last_expr_type = TYPE_VEC;
-    return;
-  }
-
-  /* count — count elements in stream or vector */
-  if (hid == HEAD_COUNT) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "count", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_COUNT, line);
-    c->last_expr_type = TYPE_I32;
-    return;
-  }
-
   /* take — take first N elements from stream or vector */
   if (hid == HEAD_TAKE) {
     if (argc != 2) {
@@ -9547,30 +9382,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[1]);
     compiler__emit_byte(c, OP_TAKE, line);
     c->last_expr_type = col_type;
-    return;
-  }
-
-  /* first — get first element from stream or vector */
-  if (hid == HEAD_FIRST) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "first", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_FIRST, line);
-    c->last_expr_type = TYPE_DYN;
-    return;
-  }
-
-  /* lines — split string into lazy line stream */
-  if (hid == HEAD_LINES) {
-    if (argc != 1) {
-      compiler__builtin_arity_error(c, line, col, "lines", "1 argument", argc);
-      return;
-    }
-    compiler__compile_node(c, args[0]);
-    compiler__emit_byte(c, OP_LINES, line);
-    c->last_expr_type = TYPE_STREAM;
     return;
   }
 
