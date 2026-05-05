@@ -41,6 +41,7 @@
 #include "string.c"
 #include "lexer.c"
 #include "ast.c"
+#include "type_error.c"
 #include "parser.c"
 #include "typer.c"
 #include "bytecode.c"

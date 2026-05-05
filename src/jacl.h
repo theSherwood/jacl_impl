@@ -1976,6 +1976,32 @@ extern void collections__init (void);
 /* --- typer.c --- */
 extern void typer_infer (AstNode **nodes, uint32_t count);
 
+/* --- type_error.c — shared formatters used by both compiler and typer.
+ * Each writes to a caller buffer in snprintf style; the reporting
+ * machinery is per-pass (compiler__error / typer__error). See
+ * STATIC_TYPING_PLAN.md decision 4. */
+extern int jacl_format_assign_mismatch (char *buf, size_t bufsz,
+                                        JaclType target, JaclType actual,
+                                        const char *name, uint32_t name_len);
+extern int jacl_format_assign_dyn_named (char *buf, size_t bufsz,
+                                         JaclType target,
+                                         const char *name, uint32_t name_len);
+extern int jacl_format_assign_dyn_unnamed (char *buf, size_t bufsz,
+                                           JaclType target);
+extern int jacl_format_assign_struct_to_dyn (char *buf, size_t bufsz,
+                                             const char *name, uint32_t name_len);
+extern int jacl_format_field_mismatch (char *buf, size_t bufsz,
+                                       const char *struct_name, uint32_t struct_name_len,
+                                       const char *field_name, uint32_t field_name_len,
+                                       JaclType expected, JaclType actual);
+extern int jacl_format_field_dyn_assign (char *buf, size_t bufsz,
+                                         const char *struct_name, uint32_t struct_name_len,
+                                         const char *field_name, uint32_t field_name_len,
+                                         JaclType expected);
+extern int jacl_format_proc_return_mismatch (char *buf, size_t bufsz,
+                                             const char *proc_name, uint32_t proc_name_len,
+                                             JaclType declared, JaclType actual);
+
 /* --- compiler.c --- */
 extern bool is_type_keyword (const char *word, size_t len);
 extern JaclType type_from_keyword (const char *word, size_t len);

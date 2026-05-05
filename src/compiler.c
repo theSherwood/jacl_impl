@@ -6029,9 +6029,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     if (declared_type != TYPE_DYN && rhs_type == TYPE_DYN) {
       char err_msg[160];
-      snprintf(err_msg, sizeof(err_msg),
-               "type error: cannot assign dyn to %s binding — use [to %s $val] to cast",
-               type_name(declared_type), type_name(declared_type));
+      jacl_format_assign_dyn_unnamed(err_msg, sizeof(err_msg), declared_type);
       compiler__error(c, line, col, err_msg);
       return;
     }
@@ -6246,26 +6244,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         JaclType rhs_type = compiler__effective_type(c, args[1]);
         /* Type check */
         if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
-          snprintf(err_msg, sizeof(err_msg),
-                   "type error: cannot assign %s to %s binding '%.*s'",
-                   type_name(rhs_type), type_name(target_type),
-                   (int)name_len, set_name_ptr);
+          jacl_format_assign_mismatch(err_msg, sizeof(err_msg),
+              target_type, rhs_type, set_name_ptr, name_len);
           compiler__error(c, line, col, err_msg);
           return;
         }
         if (target_type != TYPE_DYN && rhs_type == TYPE_DYN) {
-          snprintf(err_msg, sizeof(err_msg),
-                   "type error: cannot assign dyn to %s binding '%.*s'",
-                   type_name(target_type),
-                   (int)name_len, set_name_ptr);
+          jacl_format_assign_dyn_named(err_msg, sizeof(err_msg),
+              target_type, set_name_ptr, name_len);
           compiler__error(c, line, col, err_msg);
           return;
         }
         if (target_type == TYPE_DYN && rhs_type == TYPE_STRUCT) {
-          snprintf(err_msg, sizeof(err_msg),
-                   "cannot assign struct value to dyn binding '%.*s' — "
-                   "wrap with [box $val]",
-                   (int)name_len, set_name_ptr);
+          jacl_format_assign_struct_to_dyn(err_msg, sizeof(err_msg),
+              set_name_ptr, name_len);
           compiler__error(c, line, col, err_msg);
           return;
         }
@@ -6300,26 +6292,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         JaclType rhs_type = compiler__effective_type(c, args[1]);
         /* Type check */
         if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
-          snprintf(err_msg, sizeof(err_msg),
-                   "type error: cannot assign %s to %s binding '%.*s'",
-                   type_name(rhs_type), type_name(target_type),
-                   (int)name_len, set_name_ptr);
+          jacl_format_assign_mismatch(err_msg, sizeof(err_msg),
+              target_type, rhs_type, set_name_ptr, name_len);
           compiler__error(c, line, col, err_msg);
           return;
         }
         if (target_type != TYPE_DYN && rhs_type == TYPE_DYN) {
-          snprintf(err_msg, sizeof(err_msg),
-                   "type error: cannot assign dyn to %s binding '%.*s'",
-                   type_name(target_type),
-                   (int)name_len, set_name_ptr);
+          jacl_format_assign_dyn_named(err_msg, sizeof(err_msg),
+              target_type, set_name_ptr, name_len);
           compiler__error(c, line, col, err_msg);
           return;
         }
         if (target_type == TYPE_DYN && rhs_type == TYPE_STRUCT) {
-          snprintf(err_msg, sizeof(err_msg),
-                   "cannot assign struct value to dyn binding '%.*s' — "
-                   "wrap with [box $val]",
-                   (int)name_len, set_name_ptr);
+          jacl_format_assign_struct_to_dyn(err_msg, sizeof(err_msg),
+              set_name_ptr, name_len);
           compiler__error(c, line, col, err_msg);
           return;
         }
@@ -6357,18 +6343,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           c->expected_type = TYPE_DYN;
           JaclType rhs_type = compiler__effective_type(c, args[1]);
           if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
-            snprintf(err_msg, sizeof(err_msg),
-                     "type error: cannot assign %s to %s binding '%.*s'",
-                     type_name(rhs_type), type_name(target_type),
-                     (int)name_len, set_name_ptr);
+            jacl_format_assign_mismatch(err_msg, sizeof(err_msg),
+                target_type, rhs_type, set_name_ptr, name_len);
             compiler__error(c, line, col, err_msg);
             return;
           }
           if (target_type != TYPE_DYN && rhs_type == TYPE_DYN) {
-            snprintf(err_msg, sizeof(err_msg),
-                     "type error: cannot assign dyn to %s binding '%.*s'",
-                     type_name(target_type),
-                     (int)name_len, set_name_ptr);
+            jacl_format_assign_dyn_named(err_msg, sizeof(err_msg),
+                target_type, set_name_ptr, name_len);
             compiler__error(c, line, col, err_msg);
             return;
           }
@@ -6390,26 +6372,20 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           JaclType rhs_type = compiler__effective_type(c, args[1]);
           /* Type check */
           if (target_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != target_type) {
-            snprintf(err_msg, sizeof(err_msg),
-                     "type error: cannot assign %s to %s binding '%.*s'",
-                     type_name(rhs_type), type_name(target_type),
-                     (int)name_len, set_name_ptr);
+            jacl_format_assign_mismatch(err_msg, sizeof(err_msg),
+                target_type, rhs_type, set_name_ptr, name_len);
             compiler__error(c, line, col, err_msg);
             return;
           }
           if (target_type != TYPE_DYN && rhs_type == TYPE_DYN) {
-            snprintf(err_msg, sizeof(err_msg),
-                     "type error: cannot assign dyn to %s binding '%.*s'",
-                     type_name(target_type),
-                     (int)name_len, set_name_ptr);
+            jacl_format_assign_dyn_named(err_msg, sizeof(err_msg),
+                target_type, set_name_ptr, name_len);
             compiler__error(c, line, col, err_msg);
             return;
           }
           if (target_type == TYPE_DYN && rhs_type == TYPE_STRUCT) {
-            snprintf(err_msg, sizeof(err_msg),
-                     "cannot assign struct value to dyn binding '%.*s' — "
-                     "wrap with [box $val]",
-                     (int)name_len, set_name_ptr);
+            jacl_format_assign_struct_to_dyn(err_msg, sizeof(err_msg),
+                set_name_ptr, name_len);
             compiler__error(c, line, col, err_msg);
             return;
           }
@@ -6792,9 +6768,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     if (declared_type != TYPE_DYN && rhs_type == TYPE_DYN) {
       char err_msg[160];
-      snprintf(err_msg, sizeof(err_msg),
-               "type error: cannot assign dyn to %s binding — use [to %s $val] to cast",
-               type_name(declared_type), type_name(declared_type));
+      jacl_format_assign_dyn_unnamed(err_msg, sizeof(err_msg), declared_type);
       compiler__error(c, line, col, err_msg);
       return;
     }
@@ -7344,10 +7318,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         JaclType body_type = body_compiler.last_expr_type;
         if (body_type != TYPE_DYN && body_type != proc_return_type) {
           char err_msg[128];
-          snprintf(err_msg, sizeof(err_msg),
-                   "type error: proc %.*s declared return type %s, but body returns %s",
-                   (int)proc_name_len, proc_name,
-                   type_name(proc_return_type), type_name(body_type));
+          jacl_format_proc_return_mismatch(err_msg, sizeof(err_msg),
+              proc_name, proc_name_len, proc_return_type, body_type);
           compiler__error(c, line, col, err_msg);
         }
       } else if (body_compiler.last_expr_type == TYPE_STRUCT) {
@@ -8314,19 +8286,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       JaclType val_type = compiler__effective_type(c, override_cmd->data.command.args[0]);
       if (cf->type != TYPE_DYN && val_type != TYPE_DYN && val_type != cf->type) {
         char err[192];
-        snprintf(err, sizeof(err),
-                 "type error: field '%.*s' of struct 'ctx' expected %s, got %s",
-                 (int)cf->name_len, cf->name,
-                 type_name(cf->type), type_name(val_type));
+        jacl_format_field_mismatch(err, sizeof(err),
+            "ctx", 3, cf->name, cf->name_len, cf->type, val_type);
         compiler__error(c, line, col, err);
         return;
       }
       if (cf->type != TYPE_DYN && val_type == TYPE_DYN) {
         char err[224];
-        snprintf(err, sizeof(err),
-                 "type error: field '%.*s' of struct 'ctx' expected %s, got dyn — use [to %s $val] to cast",
-                 (int)cf->name_len, cf->name,
-                 type_name(cf->type), type_name(cf->type));
+        jacl_format_field_dyn_assign(err, sizeof(err),
+            "ctx", 3, cf->name, cf->name_len, cf->type);
         compiler__error(c, line, col, err);
         return;
       }
@@ -9785,21 +9753,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             JaclType val_type = compiler__effective_type(c, args[2]);
             if (field_type != TYPE_DYN && val_type != TYPE_DYN && val_type != field_type) {
               char err_msg[192];
-              snprintf(err_msg, sizeof(err_msg),
-                       "type error: field '%.*s' of struct '%.*s' expected %s, got %s",
-                       (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
-                       (int)sdef->name_len, sdef->name,
-                       type_name(field_type), type_name(val_type));
+              jacl_format_field_mismatch(err_msg, sizeof(err_msg),
+                  sdef->name, sdef->name_len,
+                  sdef->fields[fi].name, sdef->fields[fi].name_len,
+                  field_type, val_type);
               compiler__error(c, line, col, err_msg);
               return;
             }
             if (field_type != TYPE_DYN && val_type == TYPE_DYN) {
               char err_msg[224];
-              snprintf(err_msg, sizeof(err_msg),
-                       "type error: field '%.*s' of struct '%.*s' expected %s, got dyn — use [to %s $val] to cast",
-                       (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
-                       (int)sdef->name_len, sdef->name,
-                       type_name(field_type), type_name(field_type));
+              jacl_format_field_dyn_assign(err_msg, sizeof(err_msg),
+                  sdef->name, sdef->name_len,
+                  sdef->fields[fi].name, sdef->fields[fi].name_len,
+                  field_type);
               compiler__error(c, line, col, err_msg);
               return;
             }
@@ -9903,19 +9869,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           JaclType val_type = compiler__effective_type(c, args[2]);
           if (field_type != TYPE_DYN && val_type != TYPE_DYN && val_type != field_type) {
             char err_msg[192];
-            snprintf(err_msg, sizeof(err_msg),
-                     "type error: field '%.*s' of struct 'ctx' expected %s, got %s",
-                     (int)cf->name_len, cf->name,
-                     type_name(field_type), type_name(val_type));
+            jacl_format_field_mismatch(err_msg, sizeof(err_msg),
+                "ctx", 3, cf->name, cf->name_len, field_type, val_type);
             compiler__error(c, line, col, err_msg);
             return;
           }
           if (field_type != TYPE_DYN && val_type == TYPE_DYN) {
             char err_msg[224];
-            snprintf(err_msg, sizeof(err_msg),
-                     "type error: field '%.*s' of struct 'ctx' expected %s, got dyn — use [to %s $val] to cast",
-                     (int)cf->name_len, cf->name,
-                     type_name(field_type), type_name(field_type));
+            jacl_format_field_dyn_assign(err_msg, sizeof(err_msg),
+                "ctx", 3, cf->name, cf->name_len, field_type);
             compiler__error(c, line, col, err_msg);
             return;
           }
@@ -10008,21 +9970,19 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
           if (field_type != TYPE_DYN && val_type != TYPE_DYN && val_type != field_type) {
             char err_msg[192];
-            snprintf(err_msg, sizeof(err_msg),
-                     "type error: field '%.*s' of struct '%.*s' expected %s, got %s",
-                     (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
-                     (int)sdef->name_len, sdef->name,
-                     type_name(field_type), type_name(val_type));
+            jacl_format_field_mismatch(err_msg, sizeof(err_msg),
+                sdef->name, sdef->name_len,
+                sdef->fields[fi].name, sdef->fields[fi].name_len,
+                field_type, val_type);
             compiler__error(c, line, col, err_msg);
             return;
           }
           if (field_type != TYPE_DYN && val_type == TYPE_DYN) {
             char err_msg[224];
-            snprintf(err_msg, sizeof(err_msg),
-                     "type error: field '%.*s' of struct '%.*s' expected %s, got dyn — use [to %s $val] to cast",
-                     (int)sdef->fields[fi].name_len, sdef->fields[fi].name,
-                     (int)sdef->name_len, sdef->name,
-                     type_name(field_type), type_name(field_type));
+            jacl_format_field_dyn_assign(err_msg, sizeof(err_msg),
+                sdef->name, sdef->name_len,
+                sdef->fields[fi].name, sdef->fields[fi].name_len,
+                field_type);
             compiler__error(c, line, col, err_msg);
             return;
           }
@@ -10184,11 +10144,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         if (field_type != TYPE_DYN && arg_type != TYPE_DYN &&
             arg_type != field_type) {
           char err_msg[192];
-          snprintf(err_msg, sizeof(err_msg),
-                   "type error: field '%.*s' of struct '%.*s' expected %s, got %s",
-                   (int)sdef->fields[i].name_len, sdef->fields[i].name,
-                   (int)name_len, head->data.lit_string.value,
-                   type_name(field_type), type_name(arg_type));
+          jacl_format_field_mismatch(err_msg, sizeof(err_msg),
+              head->data.lit_string.value, name_len,
+              sdef->fields[i].name, sdef->fields[i].name_len,
+              field_type, arg_type);
           compiler__error(c, line, col, err_msg);
           return;
         }
