@@ -430,29 +430,33 @@ indices, typed-collection element types) lives entirely on
 AstNode (`inferred_type`, `inferred_struct_idx`,
 `inferred_key_struct_idx`).
 
-**Tasks:**
+**Tasks (all complete):**
 
-1. Delete `c->last_expr_type`, `c->last_struct_idx`,
-   `c->last_key_struct_idx` field declarations and every write.
-2. Delete `c->expected_type` if its only consumers were literal
-   narrowing (which the typer now handles by stamping `inferred_type`
-   on the literal directly).
-3. Delete `compiler__effective_type` (the helper added in this
-   session); call sites become direct AST reads.
-4. Audit `c->inline_repr` — much of it is consumed by codegen for
-   actual representation choices, not type queries. Keep the codegen
-   uses; remove anything that was a type-tracking shadow.
-5. Delete dead helpers (e.g., `compiler__set_type` if it was only
-   feeding `last_*` fields).
-6. Re-flow `compile_binary`, `compile_node`, etc., to remove the
-   variables that only existed to thread `last_expr_type` through.
+1. ✅ `c->last_struct_idx` and `c->last_key_struct_idx` deleted
+   (commits `61ea693`, `ed1f4c3`). `c->last_expr_type` retained
+   intentionally — its only reader is `compiler__ensure_boxed`,
+   tracking post-emit stack representation rather than declared
+   type. Documented in commit `2297a56`.
+2. ✅ `c->expected_type` deleted. The two literal-narrowing reads
+   at AST_LIT_INT / AST_LIT_FLOAT now read `node->inferred_type`,
+   which the typer narrows via its own `tc->expected_type`
+   plumbing. ~30 writes deleted.
+3. ✅ `compiler__effective_type` inlined and deleted. Its ~25 call
+   sites read `(JaclType)n->inferred_type` directly.
+4. ✅ `c->inline_repr` audited — purely codegen state for chained
+   struct field access. No type-shadow uses to remove.
+5. ✅ `compiler__set_type` deleted. Was a one-line wrapper around
+   `c->last_expr_type = ti.type;` after struct_idx stopped being
+   tracked; call sites now assign directly.
+6. ✅ Re-flow done as part of (2) — the unused variable comments
+   and the `compile_binary` LHS push that did nothing got cleaned.
 
 **Exit criteria:**
 
-- `Compiler` struct no longer has type-tracking fields beyond what
-  codegen genuinely needs (e.g., `locals[i].type` for codegen
-  decisions on inline structs).
-- compiler.c LOC drops by 200-400 from this stage alone.
+- ✅ `Compiler` struct no longer has dead type-tracking fields.
+  Surviving fields (`last_expr_type`, locals[i].type, upvalues[i].type,
+  global_arities[i].type, return_type) all drive codegen decisions.
+- compiler.c LOC: net -120 across Stage 3 cleanup commits.
 
 ### Stage 4 — Optional: separate the typed AST (1 week)
 

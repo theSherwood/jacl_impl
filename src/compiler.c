@@ -2552,7 +2552,9 @@ struct Compiler {
   bool             pin_all_closures;  /* true when concurrent body touches mutable globals */
   bool             force_global_procs; /* procs emit OP_DEF_GLOBAL even at scope>0 */
   bool             ctx_pre_registered; /* true when ctx fields were pre-registered (Phase 1c) */
-  JaclType         last_expr_type;  /* type of the last compiled expression */
+  JaclType         last_expr_type;  /* runtime stack representation post-emit;
+                                       read only by compiler__ensure_boxed
+                                       (declared types live on AstNode) */
   JaclType         return_type;     /* declared return type for current function */
   uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
@@ -2605,17 +2607,6 @@ static bool compiler__compile_typed_elem_arg(Compiler* c, AstNode* arg,
          arg->inferred_struct_idx == expected_type_idx;
 }
 
-/* --- TypeInfo accessor --- */
-
-static inline void compiler__set_type(Compiler* c, TypeInfo ti) {
-  c->last_expr_type = ti.type;
-  /* struct_idx / key_struct_idx no longer tracked on Compiler —
-   * consumers were migrated to args[i]->inferred_struct_idx /
-   * inferred_key_struct_idx (Stage 3 cleanup). */
-  (void)ti.struct_idx;
-  (void)ti.key_struct_idx;
-}
-
 void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
                            JaclInternTable* intern_table, ThreadHeap* heap) {
   c->chunk         = chunk;
@@ -2637,7 +2628,7 @@ void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
   c->pin_all_closures   = false;
   c->force_global_procs = false;
   c->ctx_pre_registered = false;
-  compiler__set_type(c, (TypeInfo){ TYPE_DYN, UINT32_MAX, UINT32_MAX });
+  c->last_expr_type = TYPE_DYN;
   c->return_type     = TYPE_DYN;
   c->return_struct_idx = UINT32_MAX;
   c->module_cache    = NULL;
@@ -3958,7 +3949,7 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
     /* Always emit key_type_idx: 0xFFFF for typed vecs, actual idx for struct-key maps */
     compiler__emit_u16(c, (col_type == TYPE_TYPED_MAP) ? (uint16_t)col_key_struct_idx : (uint16_t)0xFFFF, line);
     if (opcode == OP_FILTER) {
-      compiler__set_type(c, (TypeInfo){ col_type, col_struct_idx, col_key_struct_idx });
+      c->last_expr_type = col_type;
     } else if (opcode == OP_TRANSFORM) {
       c->last_expr_type = TYPE_VEC;
     } else {
@@ -5056,7 +5047,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_u16(c, (uint16_t)val_type_idx, line);
       compiler__emit_u16(c, (uint16_t)0xFFFF, line);  /* dyn keys */
       compiler__emit_byte(c, (uint8_t)pair_count, line);
-      compiler__set_type(c, (TypeInfo){ TYPE_TYPED_MAP, val_type_idx, UINT32_MAX });
+      c->last_expr_type = TYPE_TYPED_MAP;
       return;
     }
 
@@ -5100,7 +5091,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_u16(c, (uint16_t)type_idx, line);
     compiler__emit_u16(c, (uint16_t)0xFFFF, line);  /* key_type_idx: dyn keys */
     compiler__emit_byte(c, (uint8_t)pair_count, line);
-    compiler__set_type(c, (TypeInfo){ TYPE_TYPED_MAP, type_idx, UINT32_MAX });
+    c->last_expr_type = TYPE_TYPED_MAP;
     return;
   }
 
@@ -5225,7 +5216,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_u16(c, (uint16_t)val_type_idx, line);
     compiler__emit_u16(c, (uint16_t)key_type_idx, line);
     compiler__emit_byte(c, (uint8_t)pair_count, line);
-    compiler__set_type(c, (TypeInfo){ TYPE_TYPED_MAP, val_type_idx, key_type_idx });
+    c->last_expr_type = TYPE_TYPED_MAP;
     return;
   }
 
@@ -8580,7 +8571,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_TYPED_MAP_SET, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
-      compiler__set_type(c, (TypeInfo){ TYPE_TYPED_MAP, elem_type_idx, key_type_idx });
+      c->last_expr_type = TYPE_TYPED_MAP;
       return;
     }
     compiler__compile_node(c, args[1]);
@@ -8611,7 +8602,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
       compiler__emit_byte(c, OP_TYPED_MAP_REMOVE, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
-      compiler__set_type(c, (TypeInfo){ TYPE_TYPED_MAP, elem_type_idx, key_type_idx });
+      c->last_expr_type = TYPE_TYPED_MAP;
       return;
     }
     compiler__compile_node(c, args[1]);
@@ -9003,7 +8994,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               uint32_t tidx = c->narrowings[ni].box_type_idx;
               if (bt == TYPE_TYPED_VEC || bt == TYPE_TYPED_MAP) {
                 compiler__emit_byte(c, OP_DEREF, line);
-                compiler__set_type(c, (TypeInfo){ bt, tidx, c->narrowings[ni].box_key_type_idx });
+                c->last_expr_type = bt;
               } else if (tidx > 0) {
                 /* Phase 5d: deref struct box directly to inline bytes */
                 StructTypeRegistry* reg = compiler__get_struct_registry(c);
@@ -10813,7 +10804,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
           compiler__emit_byte(c, OP_GET_LOCAL, line);
           compiler__emit_byte(c, (uint8_t)local_slot, line);
         }
-        compiler__set_type(c, TYPEINFO_LOAD(c->locals[local_slot]));
+        c->last_expr_type = c->locals[local_slot].type;
       } else {
         int upvalue_idx = compiler__resolve_upvalue(c, name_val, line,
                                                      node->start.column);
@@ -10849,7 +10840,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, OP_GET_UPVALUE, line);
             compiler__emit_byte(c, uv_base, line);
           }
-          compiler__set_type(c, TYPEINFO_LOAD(c->upvalues[upvalue_idx]));
+          c->last_expr_type = c->upvalues[upvalue_idx].type;
         } else {
           GlobalArity* ga = compiler__find_global(c, name_val);
           /* Prelude mode: reject names not in the prelude or source-defined globals */
@@ -10881,11 +10872,7 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
               compiler__emit_byte(c, (uint8_t)TYPE_DYN, line);
             }
           }
-          if (ga) {
-            compiler__set_type(c, TYPEINFO_LOAD(*ga));
-          } else {
-            c->last_expr_type = TYPE_DYN;
-          }
+          c->last_expr_type = ga ? ga->type : TYPE_DYN;
         }
       }
       break;

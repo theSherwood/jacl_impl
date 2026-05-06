@@ -1317,7 +1317,7 @@ struct Compiler {
   bool             pin_all_closures;
   bool             force_global_procs;
   bool             ctx_pre_registered;
-  JaclType         last_expr_type;
+  JaclType         last_expr_type; /* see compiler.c for documentation */
   JaclType         return_type;
   uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   ModuleCache*     module_cache;
