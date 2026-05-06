@@ -1622,10 +1622,32 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        * resolves the subfield's type. */
       AstNode* tgt = node->data.command.args[0];
       AstNode* fld = node->data.command.args[1];
-      if (tgt->inferred_type == TYPE_STRUCT &&
-          tgt->inferred_struct_idx < tc->struct_count &&
+
+      /* Resolve target struct type. Two shapes:
+       *   - tgt was already typed as STRUCT (e.g. $ln var-ref or a
+       *     nested dot expression).
+       *   - tgt is a bare LIT_STRING name on the LHS of a `set` chain
+       *     (e.g. `set ln->start->x 77` parses with bare `ln`). The
+       *     compiler's HEAD_SET rewrite later converts it to a
+       *     VAR_REF; we look up the binding here so the typer's
+       *     annotation matches what the rewrite produces. */
+      JaclType    tgt_t = (JaclType)tgt->inferred_type;
+      uint32_t    tgt_sidx = tgt->inferred_struct_idx;
+      if (tgt_t != TYPE_STRUCT && tgt->type == AST_LIT_STRING &&
+          tgt->data.lit_string.length > 0) {
+        const TyperBinding* b = typer__scope_resolve(tc,
+            tgt->data.lit_string.value,
+            tgt->data.lit_string.length,
+            tgt->scope_mark);
+        if (b && b->type == TYPE_STRUCT) {
+          tgt_t = TYPE_STRUCT;
+          tgt_sidx = b->struct_idx;
+        }
+      }
+      if (tgt_t == TYPE_STRUCT &&
+          tgt_sidx < tc->struct_count &&
           fld->type == AST_LIT_STRING) {
-        const TyperStruct* sd = &tc->structs[tgt->inferred_struct_idx];
+        const TyperStruct* sd = &tc->structs[tgt_sidx];
         const char* fn = fld->data.lit_string.value;
         uint32_t    fnl = fld->data.lit_string.length;
         node->inferred_type = TYPE_DYN;
