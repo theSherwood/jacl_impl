@@ -112,8 +112,11 @@ and typer's `tc->structs`):**
 - Stage 1f — `dyn` as a real type with defined-semantics ops.
   ✅ PARTIAL. Three rules landed (proc-call dyn-into-typed-param,
   binary-op arithmetic concrete-mismatch, binary-op unboxed
-  comparison). Two rules deferred pending corpus-migration audit
-  (mixed dyn/typed binary, dyn-return into typed proc).
+  comparison). One rule remaining (dyn-return into typed proc —
+  the missing fifth commitment-site rule). The previously-open
+  "mixed dyn/typed binary" case was resolved by the revised
+  decision 2 framing: expression-level mixing is permissive, the
+  barrier check fires at commitment sites only.
 - Stage 4 (separate `TypedAstNode` from `AstNode`) — optional;
   weighed against benefit. Not pursued.
 - Stage 5 (pointer types `*T` for FFI) — design pending.
@@ -321,9 +324,9 @@ behavior change.
    | `[+ $i32 $f32]` | typer errors (1f ✅, commit `aa702cd`) | error |
    | `[== $i32 $f32]` | accept; result `bool` (cross-type comparison meaningful) | accept |
    | `[== $i64 $i32]` | typer errors (1f ✅, mirrors compiler — unboxed can't dispatch) | error |
-   | `[+ $i32 $dyn]` | compiler accepts via dispatch; typer DYN | **OPEN** — decision 2 says error |
+   | `[+ $i32 $dyn]` | accept; result `dyn` | accept (decision 2 — expression-level mixing is permitted; result types `dyn`) |
    | `[+ $dyn $dyn]` | accept; result `dyn` | accept |
-   | proc returns `$dyn_val` to typed return | compiler skips (body DYN); typer skips | **OPEN** — decision 2 says error |
+   | proc returns `$dyn_val` to typed return | compiler skips (body DYN); typer skips | **OPEN** — decision 2 commitment-site rule says error |
 
    **Done in Stage 1f:**
    - Proc-call dyn-into-typed-param check fires from typer with cast
@@ -340,18 +343,21 @@ behavior change.
 
    **Open / deferred for Stage 1f:**
 
-   1. **Mixed dyn/typed binary** (`[+ $i32 $dyn]`): currently accepted
-      via dispatch. Decision 2 calls for an error. Broad migration
-      concern — many programs mix untyped values into typed contexts.
+   1. **Dyn return into typed proc**: currently both passes skip.
+      Decision 2's commitment-site rule calls for an error here:
+      the proc's declared return is a typed slot the body's tail
+      value commits into. Same shape as the four already-landed
+      commitment-site rules (binding/param/struct-field). May
+      need a corpus audit before flipping; smaller blast radius
+      than expression-level mixing.
 
-   2. **Dyn return into typed proc**: currently both passes skip.
-      Decision 2 calls for an error. Smaller blast radius than (1)
-      since typed return procs are less common.
+   **Resolved (no longer Stage 1f work):**
 
-   Both are language-level decisions with migration implications.
-   They each need an audit of the test corpus and possibly a
-   corpus update before flipping. Tracked here so a future session
-   can pick them up with full context.
+   - **Mixed dyn/typed binary** (`[+ $i32 $dyn]`): per the revised
+     decision 2, expression-level mixing is permitted and types as
+     `dyn`. Current behavior is correct; no rule needed. The
+     barrier check fires at whatever commitment site the result
+     flows into.
 8. **Run the audit-mode build continuously.** ✅ DONE during the
    migration; the audit machinery was deleted in commit `0aa722f`
    once it had served its purpose.
@@ -656,31 +662,53 @@ rather than a permissive layer with carve-outs.
 
 ### 2. Implicit `dyn` coercion: where? — RESOLVED
 
-**Decision:** no implicit coercion in either direction.
+**Decision:** no implicit coercion *at commitment sites*. Expression-
+level mixing flows through as `dyn`; commits get checked.
 
-Crossing the boundary requires `[to T $val]` (or `[to dyn $val]`):
+A "commitment site" is a place a value is stored into (or returned
+from) a slot whose type is declared. Crossing the dyn boundary at
+those sites requires `[to T $val]`:
 
 - `def i32 x $dyn_val` → compile error. Use
   `def i32 x [to i32 $dyn_val]`.
-- `[typed_proc $dyn_arg]` → compile error. Use
-  `[typed_proc [to T $dyn_arg]]`.
-- `[dyn_proc $i32_arg]` → compile error. Use
-  `[dyn_proc [to dyn $i32_arg]]` (or just don't have a dyn proc
-  taking what's clearly a typed value — usually a sign of a
-  modeling issue).
+- `mut i32 x $dyn_val` / `set typed_var $dyn_val` → same shape.
+- `[typed_proc $dyn_arg]` (param is a commitment slot) → compile
+  error. Use `[typed_proc [to T $dyn_arg]]`.
+- `[. $struct typed_field $dyn_val]` (struct/ctx field-set) →
+  compile error.
+- `proc i32 f {} { $dyn_val }` (declared return is a commitment to
+  the declared type) → compile error. Use `[to i32 $dyn_val]` at
+  the tail.
+- `dyn → dyn` (typed value flowing to a dyn slot) → permitted; the
+  typed binding form itself is the explicit "I want this dyn"
+  marker, so no cast needed (e.g. `def dyn x $i32_val` is fine).
 
-This is stricter than TypeScript's `noImplicitAny` (which lets
-typed → dyn flow implicitly) but matches Dart sound mode. The
-strictness is the point: every barrier crossing is visible in
-source, so reasoning about types is local.
+Expression-level mixing — binary ops, calls returning into a `def
+dyn`, vec-push into untyped vec, etc. — flows through implicitly
+and the result types as `dyn`. Examples:
 
-**Sub-decision to flag:** does `def dyn x $i32_val` count as the
-explicit cast (the `dyn` keyword in the binding is itself the
-boundary marker), or is `def dyn x [to dyn $i32_val]` required? My
-inclination: the typed binding form (`def dyn x ...`) is itself
-explicit enough — it's already saying "I want this slot to be dyn"
-— so no additional cast needed. Same for `dyn` proc params and
-return types. Loop in if you disagree.
+- `[+ $i64 $dyn]` → result types `dyn`. Runtime traps if the
+  dyn's tag isn't a numeric compatible with i64.
+- `def dyn r [+ $i64 $dyn_x]` → ok (dyn slot accepts dyn result).
+- `def i64 r [+ $i64 $dyn_x]` → compile error at the `def`,
+  because the `[+ ...]` result is dyn and the binding is i64.
+
+**Why this and not strict-everywhere:** mixing `dyn` and typed
+inside an expression doesn't introduce new failure modes — the
+runtime check happens at the operator either way. The user-
+facing benefit of forcing a cast at every operator site is small
+(documentation), and the migration cost is large (every read
+from an untyped source feeding typed arithmetic grows a `[to T
+…]`). Pushing the boundary check to commitment sites preserves
+soundness where it matters (a typed slot only ever holds a
+checked value) without paying the syntactic cost at every
+internal arithmetic step.
+
+This is closer in spirit to TypeScript's `noImplicitAny` (typed
+→ any flows implicitly; any → typed requires cast) than to Dart's
+fully-sound mode. The `[to T …]` cast at commitment sites is the
+single, well-named place a tag check happens — easier to reason
+about than runtime traps inside operators.
 
 ### 3. `inline_repr` — type or codegen detail? — RESOLVED
 
@@ -857,7 +885,7 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 | # | Decision | Resolution |
 |---|----------|------------|
 | 1 | Strictness | Gradual sound: all-`dyn` permissive, any-non-`dyn` sound, barrier explicit |
-| 2 | Implicit `dyn` coercion | None — both directions require explicit `[to T $val]` |
+| 2 | Implicit `dyn` coercion | None at commitment sites (def/mut/set/param/return/field-set); expression-level mixing flows as `dyn` |
 | 3 | `inline_repr` | Stays in compiler; pointer types are Stage 5 |
 | 4 | Error formatting | Shared content formatters; per-pass reporting |
 | 5 | Migration order | Bottom-up by AST shape, sub-stratified by complexity |
@@ -869,7 +897,7 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 | 0 — test infra + decisions | ✅ complete |
 | 1 — typer total + authoritative | ✅ substantially complete (1a–1d partial, see Stage 1 task list) |
 | 1e — typer emits errors | ✅ substantially complete (7/9 sites; see "Pickup points" below) |
-| 1f — dyn as a real type | ✅ partial (3 rules landed; 2 deferred for corpus migration) |
+| 1f — dyn as a real type | ✅ partial (3 rules landed; 1 remaining: proc-return commitment site) |
 | 2 — migrate compiler consumers | ✅ complete |
 | 3 — delete dead state | ✅ complete |
 | 4 — separate `TypedAstNode` | ⏭ skipped (optional, not pursued) |
@@ -898,32 +926,18 @@ be a single commit.
    the field-set rule preemptively.
 
 2. **Proc-return dyn-into-typed.** `proc i32 f {} { $dyn_val }`
-   currently passes both passes. Decision 2 calls for an error.
-   Smaller blast radius than mixed dyn/typed binary because typed
-   return procs are less common — still needs a corpus audit
-   first.
+   currently passes both passes. The proc return is a commitment
+   site (see decision 2), so this should be an error consistent
+   with the other four commitment-site rules already landed.
+   May need a corpus audit before flipping.
 
 ### Stage 1f — open language-level rules
 
-Both items below are real semantic tightenings that may break
-existing programs. Each needs a corpus audit before flipping. The
-rules table in the Stage 1 task list (item 7) is the source of
-truth for the intended end-state.
-
-1. **Mixed dyn/typed binary** (`[+ $i32 $dyn]`). Currently accepted
-   via runtime dispatch; decision 2 says error. Broadest blast
-   radius — many programs mix untyped values into typed contexts.
-   Recommended approach:
-   - Run the test corpus with the typer's rule provisionally
-     enabled (the rule lives at `typer.c:typer__infer_command_inner`
-     in the `is_arith || is_cmp` block — the existing `lhs_t !=
-     TYPE_DYN && rhs_t != TYPE_DYN` guard becomes `||`).
-   - Catalog every test that fails. Decide per-test whether to
-     update the test or revisit the decision.
-   - Land in one commit + corpus update.
-
-2. **Dyn return into typed proc.** Per Pickup-Point 3 above; same
-   approach.
+The expression-level mixing case (`[+ $i32 $dyn]`) is no longer an
+open item — per the revised decision 2 it stays permissive and
+the result types as `dyn`. The commitment-site rules are what's
+left, and the proc-return case (Pickup-Point 2 above) is the
+single remaining one.
 
 ### Stage 5 — pointer types for FFI
 
