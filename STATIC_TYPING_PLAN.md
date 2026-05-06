@@ -903,6 +903,34 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 | 1 — typer total + authoritative | ✅ substantially complete (1a–1d partial, see Stage 1 task list) |
 | 1e — typer emits errors | ✅ complete (8/8 sites — all type-mismatch errors fire from the typer) |
 | 1f — dyn as a real type | ✅ complete (4 rules landed; expression-level mixing resolved as permissive) |
+
+## Stage 1 long-tail status (post this session)
+
+Stage 1's leaf rules are largely complete. What remains is structural:
+
+- **Match arm-walk** (Stage 1a): typer says DYN today. Match isn't
+  load-bearing in the current corpus; deferred until used.
+- **Imported procs** (Stage 1b): the typer's proc registry only sees
+  procs defined at the top level of the current program. `use mod
+  proc_name` imports stay DYN. Loading imported modules' typer state
+  would mean re-running the typer on the imported source — bigger
+  scope than a single typer rule.
+- **Nested proc registration** (Stage 1b): procs defined inside a
+  proc body aren't registered in the typer's proc registry, so calls
+  to them from sibling positions fall through to DYN. Not surfaced
+  by the corpus.
+- **Closure literals** (Stage 1b): JACL's surface lambda is `proc`
+  with no name; AST_LIT_LAMBDA isn't a thing. Anonymous procs get
+  TYPE_CLOSURE via the same path as named procs. No remaining gap
+  in typing the closure value itself; typing call results through
+  closures (where the typer doesn't know the closure's signature)
+  still falls through to DYN.
+- **Box-element narrowing for `[deref $box]` / `[swap $box fn]`**:
+  the typer doesn't track box element types. Deref/swap stay DYN.
+  Adding TYPE_BOX_OF would mirror TYPE_FUTURE / TYPE_TYPED_VEC but
+  isn't load-bearing today.
+
+These are tracked as future work but not blockers.
 | 2 — migrate compiler consumers | ✅ complete |
 | 3 — delete dead state | ✅ complete |
 | 4 — separate `TypedAstNode` | ⏭ skipped (optional, not pursued) |
