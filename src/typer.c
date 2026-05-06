@@ -1523,9 +1523,66 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   if (proc) {
     node->inferred_type = proc->return_type;
     node->inferred_struct_idx = proc->return_struct_idx;
+    /* Check positional arg types against declared param types. Mirrors
+     * the compiler's typed-call check (compiler.c around 10328). Skipped
+     * when the param is DYN (boundary), the arg is DYN (let runtime or
+     * compiler catch it), or for struct-to-struct (typer's struct-idx
+     * narrowing not fully aligned across modules). */
+    uint32_t argc = node->data.command.arg_count;
+    AstNode** as = node->data.command.args;
+    uint32_t check_n = argc < proc->param_count ? argc : proc->param_count;
+    for (uint32_t i = 0; i < check_n; i++) {
+      JaclType param_t = (JaclType)proc->param_types[i];
+      if (param_t == TYPE_DYN) continue;
+      JaclType arg_t = (JaclType)as[i]->inferred_type;
+      if (arg_t == TYPE_DYN || arg_t == param_t) continue;
+      if (param_t == TYPE_STRUCT && arg_t == TYPE_STRUCT) continue;
+      char err[200];
+      snprintf(err, sizeof(err),
+               "type error: argument %u of %.*s expected %s, got %s",
+               i + 1,
+               (int)head->data.lit_string.length, head->data.lit_string.value,
+               type_name(param_t), type_name(arg_t));
+      typer__error(tc, as[i]->start.line, as[i]->start.column, err);
+      break;
+    }
   } else if (sdef) {
     node->inferred_type = TYPE_STRUCT;
     node->inferred_struct_idx = sdef_idx;
+    /* Check positional struct-constructor args against declared field
+     * types. Mirrors compiler.c:10094-10113. */
+    uint32_t argc = node->data.command.arg_count;
+    AstNode** as = node->data.command.args;
+    uint32_t check_n = argc < sdef->field_count ? argc : sdef->field_count;
+    for (uint32_t i = 0; i < check_n; i++) {
+      JaclType field_t = (JaclType)sdef->field_types[i];
+      if (field_t == TYPE_DYN) continue;
+      JaclType arg_t = (JaclType)as[i]->inferred_type;
+      if (arg_t == field_t) continue;
+      if (field_t == TYPE_STRUCT && arg_t == TYPE_STRUCT) continue;
+      if (arg_t == TYPE_DYN) {
+        /* Bespoke message (matches compiler.c:10106-10110): the
+         * shared field formatters embed "binding" wording, but the
+         * struct-ctor context calls these "args" of a struct, not
+         * named bindings. Keep the wording until a dedicated
+         * formatter exists. */
+        char err[224];
+        snprintf(err, sizeof(err),
+                 "type error: field '%.*s' of struct '%.*s' expected %s, got dyn",
+                 (int)sdef->field_name_lens[i], sdef->field_names[i],
+                 (int)sdef->name_len, sdef->name,
+                 type_name(field_t));
+        typer__error(tc, as[i]->start.line, as[i]->start.column, err);
+      } else {
+        char err[224];
+        jacl_format_field_mismatch(err, sizeof(err),
+            sdef->name, sdef->name_len,
+            sdef->field_names[i], sdef->field_name_lens[i],
+            field_t, arg_t);
+        typer__error(tc, as[i]->start.line, as[i]->start.column, err);
+      }
+      break;
+    }
   } else if (head && head->type == AST_COMMAND) {
     /* Typed-collection constructor: [[Vec T] e1 ...] / [[Map K V] ...].
      * Mirrors compiler__compile_command's typed-vec/typed-map branch.
