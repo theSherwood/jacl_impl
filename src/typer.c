@@ -1810,7 +1810,51 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     } else if (hid == HEAD_DOT &&
                node->data.command.arg_count == 3) {
       /* [. struct field new_value] field-set — emits OP_HEAP_RECORD_SET,
-       * leaves nil. Mirrors compiler.c's set path. */
+       * leaves nil. Mirrors compiler.c's set path. Also enforces the
+       * field-type / value-type rule via the shared formatters
+       * (compiler.c:9722-9738). */
+      AstNode* tgt = node->data.command.args[0];
+      AstNode* fld = node->data.command.args[1];
+      AstNode* val = node->data.command.args[2];
+      JaclType tgt_t    = (JaclType)tgt->inferred_type;
+      uint32_t tgt_sidx = tgt->inferred_struct_idx;
+      if (tgt_t != TYPE_STRUCT && tgt->type == AST_LIT_STRING &&
+          tgt->data.lit_string.length > 0) {
+        const TyperBinding* b = typer__scope_resolve(tc,
+            tgt->data.lit_string.value,
+            tgt->data.lit_string.length,
+            tgt->scope_mark);
+        if (b && b->type == TYPE_STRUCT) {
+          tgt_t = TYPE_STRUCT;
+          tgt_sidx = b->struct_idx;
+        }
+      }
+      if (tgt_t == TYPE_STRUCT && tgt_sidx < tc->struct_count &&
+          fld->type == AST_LIT_STRING) {
+        const TyperStruct* sd = &tc->structs[tgt_sidx];
+        const char* fn  = fld->data.lit_string.value;
+        uint32_t    fnl = fld->data.lit_string.length;
+        for (uint32_t fi = 0; fi < sd->field_count; fi++) {
+          if (sd->field_name_lens[fi] != fnl ||
+              memcmp(sd->field_names[fi], fn, fnl) != 0) continue;
+          JaclType field_t = (JaclType)sd->field_types[fi];
+          JaclType val_t   = (JaclType)val->inferred_type;
+          if (field_t != TYPE_DYN && val_t != TYPE_DYN &&
+              val_t != field_t &&
+              !(field_t == TYPE_STRUCT && val_t == TYPE_STRUCT)) {
+            char err[224];
+            jacl_format_field_mismatch(err, sizeof(err),
+                sd->name, sd->name_len, fn, fnl, field_t, val_t);
+            typer__error(tc, val->start.line, val->start.column, err);
+          } else if (field_t != TYPE_DYN && val_t == TYPE_DYN) {
+            char err[256];
+            jacl_format_field_dyn_assign(err, sizeof(err),
+                sd->name, sd->name_len, fn, fnl, field_t);
+            typer__error(tc, val->start.line, val->start.column, err);
+          }
+          break;
+        }
+      }
       node->inferred_type = TYPE_NIL;
     } else if (hid == HEAD_DOT &&
                node->data.command.arg_count == 2) {
