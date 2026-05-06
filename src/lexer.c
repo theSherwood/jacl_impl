@@ -72,6 +72,7 @@ typedef enum {
   TOKEN_CONTINUE,         /* continue */
   TOKEN_TRY,              /* try */
   TOKEN_CTX,              /* ctx */
+  TOKEN_EXTERN,           /* extern */
   TOKEN_CARET_WORD,       /* ^identifier (caller-scope inside syntax-quote) */
   TOKEN_NEWLINE,          /* newline (\n or \r\n) */
   TOKEN_ERROR,            /* lexer error with descriptive message */
@@ -1474,6 +1475,7 @@ LexResult lexer_lex(const char* source, arena_t* arena) {
         case 6:
           if      (memcmp(wstart, "return", 6) == 0) wtype = TOKEN_RETURN;
           else if (memcmp(wstart, "struct", 6) == 0) wtype = TOKEN_STRUCT;
+          else if (memcmp(wstart, "extern", 6) == 0) wtype = TOKEN_EXTERN;
           break;
         case 8:
           if (memcmp(wstart, "continue", 8) == 0) wtype = TOKEN_CONTINUE;

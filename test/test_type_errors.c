@@ -270,6 +270,26 @@ static void run_all(void) {
     .expect_substrings = { "type error", "pointers", "pointee" },
   });
 
+  /* extern declared with typed param: calling with the wrong arg
+   * type fires the same dyn/typed barrier as a JACL proc call would. */
+  RUN("extern_call_wrong_arg_type", {
+    .source =
+      "extern u64 add_one {u64 x}\n"
+      "[add_one \"oops\"]",
+    .expect_substrings = { "type error", "u64", "str" },
+  });
+
+  /* extern with [Ptr T] return: assigning the result to a different
+   * pointee binding is a compile error (commitment-site rule). */
+  RUN("extern_ptr_result_pointee_mismatch", {
+    .source =
+      "struct Point {i32 x i32 y}\n"
+      "struct Circle {i32 r}\n"
+      "extern [Ptr Point] make_pt {}\n"
+      "def [Ptr Circle] c [make_pt]",
+    .expect_substrings = { "type error", "pointer", "pointee" },
+  });
+
   /* await on a known concrete non-future operand — typer rejects.
    * Dyn operands and typed futures still pass; this is the
    * statically-knowable bad case. */

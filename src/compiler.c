@@ -6904,6 +6904,28 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* extern declaration — host-provided native fn signature.
+   *   extern TYPE name params         (argc==3)
+   *   extern      name params         (argc==2)
+   * The typer's pre-pass already registered the signature; the
+   * compiler emits no body code. Runtime dispatch flows through the
+   * existing native-fn registry by name (prelude_is_native_fn path
+   * at compiler.c:5371). The extern statement itself produces nil. */
+  if (hid == HEAD_EXTERN) {
+    if (argc < 2 || argc > 3) {
+      compiler__builtin_arity_error(c, line, col, "extern", "2 or 3 arguments", argc);
+      return;
+    }
+    uint32_t name_idx = (argc == 3) ? 1 : 0;
+    if (args[name_idx]->type != AST_LIT_STRING) {
+      compiler__error(c, line, col, "extern: name must be a string");
+      return;
+    }
+    compiler__emit_byte(c, OP_NIL, line);
+    c->last_expr_type = TYPE_NIL;
+    return;
+  }
+
   /* proc definition */
   if (hid == HEAD_PROC) {
     /* Disambiguate: 4 args + first is type keyword → has return type.
@@ -6913,22 +6935,46 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     uint32_t name_arg_idx, params_arg_idx, body_arg_idx;
 
     if (argc == 4) {
-      /* [proc TYPE name params body] */
-      if (args[0]->type != AST_LIT_STRING ||
-          !compiler__resolve_type(c, args[0]->data.lit_string.value,
-                                  args[0]->data.lit_string.length,
+      /* [proc TYPE name params body]. TYPE may be a keyword, struct
+       * name, or a compound AST_COMMAND ([Ptr T], [Future T], [Vec T],
+       * [Map K V]). For compound forms we route storage analogously to
+       * the def path: [Ptr T] → TYPE_U64 storage (typer carries pointee
+       * identity); other compound types → TYPE_DYN storage (typer is
+       * the source of truth for the static return type). */
+      AstNode* tn = args[0];
+      bool resolved = false;
+      if (tn->type == AST_LIT_STRING &&
+          compiler__resolve_type(c, tn->data.lit_string.value,
+                                  tn->data.lit_string.length,
                                   &proc_return_type)) {
-        compiler__error(c, line, col,
-            "proc with 4 arguments requires type keyword as first argument");
-        return;
-      }
-      if (proc_return_type == TYPE_STRUCT) {
-        StructTypeRegistry* reg = compiler__get_struct_registry(c);
-        if (reg) {
-          proc_return_struct_idx = struct_registry__find(reg,
-              args[0]->data.lit_string.value,
-              args[0]->data.lit_string.length);
+        if (proc_return_type == TYPE_STRUCT) {
+          StructTypeRegistry* reg = compiler__get_struct_registry(c);
+          if (reg) {
+            proc_return_struct_idx = struct_registry__find(reg,
+                tn->data.lit_string.value,
+                tn->data.lit_string.length);
+          }
         }
+        resolved = true;
+      } else if (tn->type == AST_COMMAND && tn->data.command.head &&
+                 tn->data.command.head->type == AST_LIT_STRING) {
+        const char* hn = tn->data.command.head->data.lit_string.value;
+        uint32_t    hl = tn->data.command.head->data.lit_string.length;
+        bool is_ptr = (hl == 3 && memcmp(hn, "Ptr", 3) == 0);
+        bool is_compound =
+            (hl == 3 && (memcmp(hn, "Vec", 3) == 0 ||
+                         memcmp(hn, "Map", 3) == 0)) ||
+            is_ptr ||
+            (hl == 6 && memcmp(hn, "Future", 6) == 0);
+        if (is_compound) {
+          proc_return_type = is_ptr ? TYPE_U64 : TYPE_DYN;
+          resolved = true;
+        }
+      }
+      if (!resolved) {
+        compiler__error(c, line, col,
+            "proc with 4 arguments requires a type annotation as first argument");
+        return;
       }
       name_arg_idx   = 1;
       params_arg_idx = 2;

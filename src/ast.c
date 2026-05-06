@@ -103,6 +103,9 @@ typedef enum {
   /* Typed pointers (Stage 5a) */
   HEAD_PTR_CAST, HEAD_PTR_ADDR,
 
+  /* Native fn declaration with typed signature (Stage 5a) */
+  HEAD_EXTERN,
+
   /* Streams / async / shell */
   HEAD_STREAM_NEXT, HEAD_COLLECT, HEAD_COUNT, HEAD_TAKE,
   HEAD_FIRST, HEAD_LINES, HEAD_EXEC, HEAD_SIGNAL, HEAD_CANCEL,
@@ -198,6 +201,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "error?", 6) == 0) return HEAD_ERROR_Q;
       if (memcmp(s, "signal", 6) == 0) return HEAD_SIGNAL;
       if (memcmp(s, "cancel", 6) == 0) return HEAD_CANCEL;
+      if (memcmp(s, "extern", 6) == 0) return HEAD_EXTERN;
       return HEAD_NONE;
     case 7:
       if (memcmp(s, "vec-get", 7) == 0) return HEAD_VEC_GET;

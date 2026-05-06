@@ -1374,6 +1374,53 @@ static int test_struct_null_safety(void) {
   return 1;
 }
 
+/* ===== Stage 5a: extern declarations with typed pointer returns ===== */
+
+/* Native fn that returns a u64 representing a fake pointer address.
+ * From JACL it's declared `extern [Ptr i32] fake_addr {}`; the typer
+ * trusts the declaration, so calls return TYPE_PTR. At runtime the
+ * value is just a u64 — pointers and u64s share the same bits. */
+static JaclVal native_fake_addr(JaclVM* vm, JaclVal* args, int argc) {
+  (void)args; (void)argc;
+  return jacl_u64(&vm->vm.heap, 0xfeedfaceULL);
+}
+
+/* Test: extern declaration accepted, call dispatches to native fn,
+ * and the typed pointer round-trips through ptr-addr. */
+static int test_extern_typed_ptr_native(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+  embed__register_native(vm, "fake_addr", native_fake_addr, 0);
+
+  JaclVal result = jacl_eval(vm,
+      "extern [Ptr i32] fake_addr {}\n"
+      "def [Ptr i32] p [fake_addr]\n"
+      "ptr-addr $p");
+  ASSERT(!jacl_is_error(result));
+  ASSERT(jacl_is_u64(result));
+  ASSERT(jacl_as_u64(result) == 0xfeedfaceULL);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: extern with a u64 return type — basic shape without pointers. */
+static int test_extern_u64_return(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+  embed__register_native(vm, "fake_addr", native_fake_addr, 0);
+
+  JaclVal result = jacl_eval(vm,
+      "extern u64 fake_addr {}\n"
+      "fake_addr");
+  ASSERT(!jacl_is_error(result));
+  ASSERT(jacl_is_u64(result));
+  ASSERT(jacl_as_u64(result) == 0xfeedfaceULL);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
 /* ===== US-010: Build system / libffi detection ===== */
 
 /* Test: jacl_has_trampolines returns a bool consistent with compile-time detection */
@@ -1632,6 +1679,10 @@ int main(void) {
   RUN(test_struct_new_wrong_count);
   RUN(test_struct_registry_persists);
   RUN(test_struct_null_safety);
+
+  printf("\n=== Embedding API: extern declarations (Stage 5a) ===\n");
+  RUN(test_extern_typed_ptr_native);
+  RUN(test_extern_u64_return);
 
   printf("\n=== Embedding API: Build system / libffi ===\n");
   RUN(test_has_trampolines);

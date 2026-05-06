@@ -662,16 +662,26 @@ PROGRESS.** Done in this commit:
   `.jacl` corpus files (`ptr_cast_roundtrip.jacl`,
   `ptr_struct_pointee.jacl`).
 
-**Stage 5a — typed externs (next commit)**
+**Stage 5a — typed externs ✅ COMPLETE**
 
-- New `extern <ret-type> <name> <params>` declaration form. Typer
-  records the signature so calls return the declared type;
-  runtime dispatch routes through the existing native-fn registry
-  as today (`embed__register_native` is still where the C function
-  lives).
-- Compound return types (`[Ptr T]`, `[Future T]`, `[Vec T]`, etc.)
-  accepted in extern's return-type position; `proc` return types
-  follow the same pattern.
+- New `extern [ret-type] name {params}` declaration form. Typer
+  registers the signature in its proc registry; calls return the
+  declared type without per-site casts. Runtime dispatch flows
+  through the existing native-fn registry as today
+  (`embed__register_native` is still where the C function lives) —
+  the extern statement itself produces nil at runtime.
+- Compound return types (`[Ptr T]`, `[Future T]`, `[Vec T]`,
+  `[Map K V]`) accepted in both `proc` and `extern` return
+  positions via the new `typer__resolve_return_type` helper.
+- New TOKEN_EXTERN + HEAD_EXTERN; dedicated parser path
+  `parser__parse_extern_form` mirrors `parser__parse_proc_form`
+  minus the body block.
+- Tests: 4 new typer-only cases (`test_proc_ptr_return`,
+  `test_proc_future_return_compound`, `test_extern_ptr_return_call`,
+  `test_extern_with_params`), 2 new type-error cases
+  (`extern_call_wrong_arg_type`,
+  `extern_ptr_result_pointee_mismatch`), 2 new embed integration
+  tests (`test_extern_typed_ptr_native`, `test_extern_u64_return`).
 
 **Stage 5b — deref + field auto-deref (~1 week)**
 
@@ -975,8 +985,8 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 | 2 — migrate compiler consumers | ✅ complete |
 | 3 — delete dead state | ✅ complete |
 | 4 — separate `TypedAstNode` | ⏭ skipped (optional, not pursued) |
-| 5a — pointer type + cast (foundation) | 🟡 in progress (this commit lands `TYPE_PTR` + `[Ptr T]` annotation + `[ptr-cast]` / `[ptr-addr]` + typer misuse rules) |
-| 5a — typed externs | ❌ next commit |
+| 5a — pointer type + cast (foundation) | ✅ complete (`TYPE_PTR` + `[Ptr T]` annotation + `[ptr-cast]` / `[ptr-addr]` + typer misuse rules) |
+| 5a — typed externs | ✅ complete (`extern [type] name {params}` + compound return types for proc/extern) |
 | 5b — deref + field auto-deref | ❌ not started |
 | 5c — pointer arithmetic | ❌ not started |
 

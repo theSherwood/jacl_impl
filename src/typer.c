@@ -904,6 +904,72 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
   return count;
 }
 
+/* Resolve a proc/extern return-type AST node to (type, struct_idx).
+ * Handles all annotation shapes: type keyword (i32, str, ...),
+ * struct name (Point), and compound forms ([Ptr T], [Future T],
+ * [Vec T], [Map K V]). Falls back to (TYPE_DYN, UINT32_MAX) on
+ * unrecognized shapes — the caller can leave the proc untyped. */
+static void typer__resolve_return_type(TyperCtx* tc, AstNode* tn,
+                                       JaclType* out_type,
+                                       uint32_t* out_struct_idx) {
+  *out_type = TYPE_DYN;
+  *out_struct_idx = UINT32_MAX;
+  if (!tn) return;
+  if (tn->type == AST_LIT_STRING) {
+    const char* nm = tn->data.lit_string.value;
+    uint32_t    nl = tn->data.lit_string.length;
+    if (is_type_keyword(nm, nl)) {
+      *out_type = type_from_keyword(nm, nl);
+      return;
+    }
+    for (uint32_t si = 0; si < tc->struct_count; si++) {
+      if (tc->structs[si].name_len == nl &&
+          memcmp(tc->structs[si].name, nm, nl) == 0) {
+        *out_type = TYPE_STRUCT;
+        *out_struct_idx = si;
+        return;
+      }
+    }
+    return;
+  }
+  if (tn->type == AST_COMMAND) {
+    uint32_t sidx;
+    if (typer__ptr_type(tc, tn, &sidx)) {
+      *out_type = TYPE_PTR;
+      *out_struct_idx = sidx;
+      return;
+    }
+    if (typer__future_type(tc, tn, &sidx)) {
+      *out_type = TYPE_FUTURE;
+      *out_struct_idx = sidx;
+      return;
+    }
+    int tcoll = typer__typed_collection_kind(tn);
+    if (tcoll == 1 || tcoll == 2 || tcoll == 3) {
+      *out_type = (tcoll == 1) ? TYPE_TYPED_VEC : TYPE_TYPED_MAP;
+      AstNode* type_arg = (tcoll == 3)
+          ? tn->data.command.args[1]
+          : tn->data.command.args[0];
+      if (type_arg && type_arg->type == AST_LIT_STRING) {
+        const char* nm = type_arg->data.lit_string.value;
+        uint32_t    nl = type_arg->data.lit_string.length;
+        if (is_type_keyword(nm, nl)) {
+          *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+        } else {
+          for (uint32_t si = 0; si < tc->struct_count; si++) {
+            if (tc->structs[si].name_len == nl &&
+                memcmp(tc->structs[si].name, nm, nl) == 0) {
+              *out_struct_idx = si;
+              break;
+            }
+          }
+        }
+      }
+      return;
+    }
+  }
+}
+
 /* Register a proc signature (used both by the top-level pre-pass and
  * lazily for nested procs encountered during walk). Idempotent: a proc
  * already registered (e.g., by the pre-pass) is updated, not duplicated. */
@@ -950,22 +1016,7 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
   JaclType  return_type = TYPE_DYN;
   uint32_t  return_struct_idx = UINT32_MAX;
   if (argc == 4) {
-    AstNode* tn = args[0];
-    if (tn->type == AST_LIT_STRING) {
-      if (is_type_keyword(tn->data.lit_string.value, tn->data.lit_string.length)) {
-        return_type = type_from_keyword(tn->data.lit_string.value, tn->data.lit_string.length);
-      } else {
-        for (uint32_t si = 0; si < tc->struct_count; si++) {
-          if (tc->structs[si].name_len == tn->data.lit_string.length &&
-              memcmp(tc->structs[si].name, tn->data.lit_string.value,
-                     tn->data.lit_string.length) == 0) {
-            return_type = TYPE_STRUCT;
-            return_struct_idx = si;
-            break;
-          }
-        }
-      }
-    }
+    typer__resolve_return_type(tc, args[0], &return_type, &return_struct_idx);
     name_idx = 1; params_idx = 2; body_idx = 3;
   } else if (argc == 3) {
     name_idx = 0; params_idx = 1; body_idx = 2;
@@ -1323,36 +1374,43 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
     AstNode* node = nodes[ni];
     if (node->type != AST_COMMAND) continue;
     AstNode* head = node->data.command.head;
-    if (!head || head->type != AST_LIT_STRING ||
-        head->data.lit_string.length != 4 ||
-        memcmp(head->data.lit_string.value, "proc", 4) != 0) continue;
+    if (!head || head->type != AST_LIT_STRING) continue;
+    bool is_proc =
+        head->data.lit_string.length == 4 &&
+        memcmp(head->data.lit_string.value, "proc", 4) == 0;
+    bool is_extern =
+        head->data.lit_string.length == 6 &&
+        memcmp(head->data.lit_string.value, "extern", 6) == 0;
+    if (!is_proc && !is_extern) continue;
 
     AstNode** args = node->data.command.args;
     uint32_t  argc = node->data.command.arg_count;
     uint32_t  name_idx, params_idx;
     JaclType  return_type = TYPE_DYN;
     uint32_t  return_struct_idx = UINT32_MAX;
-    if (argc == 4) {
-      AstNode* tn = args[0];
-      if (tn->type == AST_LIT_STRING) {
-        if (is_type_keyword(tn->data.lit_string.value, tn->data.lit_string.length)) {
-          return_type = type_from_keyword(tn->data.lit_string.value, tn->data.lit_string.length);
-        } else {
-          for (uint32_t si = 0; si < tc->struct_count; si++) {
-            if (tc->structs[si].name_len == tn->data.lit_string.length &&
-                memcmp(tc->structs[si].name, tn->data.lit_string.value,
-                       tn->data.lit_string.length) == 0) {
-              return_type = TYPE_STRUCT;
-              return_struct_idx = si;
-              break;
-            }
-          }
-        }
-      }
-      name_idx = 1; params_idx = 2;
-    } else if (argc == 3) {
-      name_idx = 0; params_idx = 1;
-    } else continue;
+    /* Layout differs by form:
+     *   proc TYPE name params body          (argc==4)
+     *   proc      name params body          (argc==3)
+     *   extern TYPE name params             (argc==3, no body)
+     *   extern      name params             (argc==2, no body)
+     * Disambiguate by head and arg shape: an extern's params arg is
+     * always last; for argc==3 we look at args[0] to tell extern's
+     * "type, name, params" apart from proc's "name, params, body". */
+    if (is_extern) {
+      if (argc == 3) {
+        typer__resolve_return_type(tc, args[0], &return_type, &return_struct_idx);
+        name_idx = 1; params_idx = 2;
+      } else if (argc == 2) {
+        name_idx = 0; params_idx = 1;
+      } else continue;
+    } else {
+      if (argc == 4) {
+        typer__resolve_return_type(tc, args[0], &return_type, &return_struct_idx);
+        name_idx = 1; params_idx = 2;
+      } else if (argc == 3) {
+        name_idx = 0; params_idx = 1;
+      } else continue;
+    }
 
     AstNode* name_node = args[name_idx];
     if (name_node->type != AST_LIT_STRING) continue;
@@ -1362,11 +1420,9 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
     p->name        = name_node->data.lit_string.value;
     p->name_len    = name_node->data.lit_string.length;
 
-    /* Generator detection: if the body contains a yield (and the user
-     * didn't declare a non-DYN return type), the proc returns a stream.
-     * Mirrors the compiler's runtime behavior: any yielding proc body
-     * is wrapped in a generator that produces a stream value. */
-    if (return_type == TYPE_DYN) {
+    /* Generator detection: only meaningful for procs with a body —
+     * externs are host-provided so we trust the declared return type. */
+    if (!is_extern && return_type == TYPE_DYN) {
       uint32_t body_idx = (argc == 4) ? 3 : 2;
       if (body_idx < argc && typer__body_yields(args[body_idx])) {
         return_type = TYPE_STREAM;

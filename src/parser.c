@@ -274,7 +274,8 @@ AstNode* parser__parse_atom(Parser* p) {
     case TOKEN_BREAK:
     case TOKEN_CONTINUE:
     case TOKEN_TRY:
-    case TOKEN_CTX: {
+    case TOKEN_CTX:
+    case TOKEN_EXTERN: {
       parser__advance(p);
       AstNode* node = ast_alloc(p->arena);
       node->type = AST_LIT_STRING;
@@ -372,6 +373,11 @@ AstNode* parser__parse_command(Parser* p) {
   /* Reject old-syntax forms inside brackets */
   if (head_token_type == TOKEN_PROC) {
     AstNode* err = parser__error(p, "proc must use command syntax: proc name {params} {body}", open);
+    parser__sync_bracket(p);
+    return err;
+  }
+  if (head_token_type == TOKEN_EXTERN) {
+    AstNode* err = parser__error(p, "extern must be used at top level: extern [type] name {params}", open);
     parser__sync_bracket(p);
     return err;
   }
@@ -760,6 +766,7 @@ AstNode* parser__parse_infix_operand(Parser* p) {
     case TOKEN_CONTINUE:
     case TOKEN_TRY:
     case TOKEN_CTX:
+    case TOKEN_EXTERN:
       result = parser__parse_atom(p);
       break;
     default:
@@ -1000,6 +1007,7 @@ AstNode* parser__parse_expr(Parser* p) {
     case TOKEN_CONTINUE:
     case TOKEN_TRY:
     case TOKEN_CTX:
+    case TOKEN_EXTERN:
       result = parser__parse_atom(p);
       break;
 
@@ -1760,6 +1768,69 @@ AstNode* parser__parse_proc_params(Parser* p) {
     }
   }
 
+  return node;
+}
+
+/* -------------------------------------------------------------------------
+ * Internal: Parse extern declaration
+ *
+ * Mirrors parser__parse_proc_form but without the body block. Handles:
+ *   extern [return_type] name {params}
+ *   extern              name {params}
+ * Used for declaring host-provided native fns with typed signatures so
+ * the typer can check call sites without per-site casts. The extern
+ * statement itself produces a no-op at runtime; dispatch flows through
+ * the existing native-fn registry by name.
+ * ------------------------------------------------------------------------- */
+AstNode* parser__parse_extern_form(Parser* p, AstNode* extern_head) {
+  SourcePos start = extern_head->start;
+  NodeArray args;
+  parser__arr_init(&args, p->arena);
+
+  /* Disambiguate: word { → name (no return type); word(/[) word { →
+   * return-type then name. Compound type returns ([Ptr T], [Future T])
+   * use TOKEN_LBRACKET as the leading token. */
+  if (p->tokens[p->pos + 1].type == TOKEN_LBRACE) {
+    /* extern name {params} */
+    AstNode* name = parser__parse_atom(p);
+    parser__arr_push(&args, name);
+  } else {
+    /* extern <type-expr> name {params}. type-expr is either a single
+     * word (TOKEN_WORD/TOKEN_STRUCT) or a bracketed compound
+     * ([Ptr T], etc.) parsed as an expression. */
+    AstNode* ret_type;
+    if (parser__peek(p)->type == TOKEN_LBRACKET) {
+      ret_type = parser__parse_expr(p);
+    } else {
+      ret_type = parser__parse_atom(p);
+    }
+    if (ret_type == NULL || ret_type->type == AST_ERROR) {
+      return parser__error(p, "expected return type after 'extern'", parser__peek(p));
+    }
+    parser__arr_push(&args, ret_type);
+    AstNode* name = parser__parse_atom(p);
+    if (name == NULL || name->type == AST_ERROR) {
+      return parser__error(p, "expected name after extern return type",
+                           parser__peek(p));
+    }
+    parser__arr_push(&args, name);
+  }
+
+  if (parser__peek(p)->type != TOKEN_LBRACE) {
+    return parser__error(p, "expected '{' for extern parameters", parser__peek(p));
+  }
+  AstNode* params = parser__parse_proc_params(p);
+  if (params->type == AST_ERROR) return params;
+  parser__arr_push(&args, params);
+
+  AstNode* node = ast_alloc(p->arena);
+  node->type  = AST_COMMAND;
+  node->start = start;
+  node->end   = params->end;
+  node->data.command.head      = extern_head;
+  node->data.command.head_id   = HEAD_EXTERN;
+  node->data.command.args      = args.nodes;
+  node->data.command.arg_count = args.count;
   return node;
 }
 
@@ -2526,6 +2597,14 @@ AstNode* parser__parse_cmd_operand(Parser* p) {
   if (head_token_type == TOKEN_PROC && !parser__is_operand_end(p) &&
       parser__peek(p)->type == TOKEN_LBRACE) {
     return parser__parse_proc_form(p, head);
+  }
+
+  /* extern declaration: extern [type] name {params} — no body. */
+  if (head_token_type == TOKEN_EXTERN && !parser__is_operand_end(p) &&
+      (parser__peek(p)->type == TOKEN_WORD ||
+       parser__peek(p)->type == TOKEN_STRUCT ||
+       parser__peek(p)->type == TOKEN_LBRACKET)) {
+    return parser__parse_extern_form(p, head);
   }
 
   /* New if syntax: if condition { body } [elif condition { body }]* [else { body }] */

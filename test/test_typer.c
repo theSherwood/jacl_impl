@@ -600,6 +600,67 @@ static void test_ptr_t_def_annotation(void) {
   arena_destroy(&a);
 }
 
+static void test_proc_ptr_return(void) {
+  current_test = "proc_ptr_return";
+  arena_t a = {0};
+  /* proc with [Ptr Point] return type — call site narrows to TYPE_PTR
+   * with Point's pointee idx. */
+  ParseResult r = run_typer(
+      "struct Point {i32 x i32 y}\n"
+      "proc [Ptr Point] make {} {\n"
+      "  def u64 a 0\n"
+      "  ptr-cast [Ptr Point] $a\n"
+      "}\n"
+      "def p [make]", &a);
+  /* The 'make' call returns the proc's declared type (TYPE_PTR). */
+  AstNode* call = find_cmd(r.nodes[2], "make");
+  ASSERT_NOT_NULL(call);
+  ASSERT_TYPE(call, TYPE_PTR);
+  arena_destroy(&a);
+}
+
+static void test_proc_future_return_compound(void) {
+  current_test = "proc_future_return_compound";
+  arena_t a = {0};
+  /* proc with [Future i64] return type — call returns TYPE_FUTURE
+   * with i64 element idx; await unwraps to i64. */
+  ParseResult r = run_typer(
+      "proc [Future i64] mk {} { spawn { 42 } }\n"
+      "def f [mk]\n"
+      "def x [await $f]", &a);
+  AstNode* aw = find_cmd(r.nodes[2], "await");
+  ASSERT_NOT_NULL(aw);
+  ASSERT_TYPE(aw, TYPE_I64);
+  arena_destroy(&a);
+}
+
+static void test_extern_ptr_return_call(void) {
+  current_test = "extern_ptr_return_call";
+  arena_t a = {0};
+  /* extern declaration registers a typed signature with the typer.
+   * Subsequent calls narrow to the declared return type. */
+  ParseResult r = run_typer(
+      "struct Point {i32 x i32 y}\n"
+      "extern [Ptr Point] get_pt {}\n"
+      "def p [get_pt]", &a);
+  AstNode* call = find_cmd(r.nodes[2], "get_pt");
+  ASSERT_NOT_NULL(call);
+  ASSERT_TYPE(call, TYPE_PTR);
+  arena_destroy(&a);
+}
+
+static void test_extern_with_params(void) {
+  current_test = "extern_with_params";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "extern u64 add_one {u64 x}\n"
+      "def r [add_one 41]", &a);
+  AstNode* call = find_cmd(r.nodes[1], "add_one");
+  ASSERT_NOT_NULL(call);
+  ASSERT_TYPE(call, TYPE_U64);
+  arena_destroy(&a);
+}
+
 /* --- Driver ------------------------------------------------------- */
 
 int main(void) {
@@ -645,6 +706,10 @@ int main(void) {
   test_ptr_cast_struct_pointee();
   test_ptr_addr_returns_u64();
   test_ptr_t_def_annotation();
+  test_proc_ptr_return();
+  test_proc_future_return_compound();
+  test_extern_ptr_return_call();
+  test_extern_with_params();
 
   printf("\n%d/%d passed", passes, passes + failures);
   if (failures > 0) {
