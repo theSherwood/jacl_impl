@@ -281,7 +281,8 @@ typedef enum {
   TYPE_STRUCT,
   TYPE_STREAM,
   TYPE_TYPED_VEC,
-  TYPE_TYPED_MAP
+  TYPE_TYPED_MAP,
+  TYPE_FUTURE
 } JaclType;
 
 /* Typed-collection element encoding for struct_idx: real struct registry
@@ -348,6 +349,7 @@ const char* type_name(JaclType t) {
     case TYPE_STREAM:    return "stream";
     case TYPE_TYPED_VEC: return "typed-vec";
     case TYPE_TYPED_MAP: return "typed-map";
+    case TYPE_FUTURE:    return "future";
   }
   return "unknown";
 }

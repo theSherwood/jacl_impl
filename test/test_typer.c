@@ -338,6 +338,59 @@ static void test_parallel_returns_vec(void) {
   arena_destroy(&a);
 }
 
+static void test_spawn_returns_future(void) {
+  current_test = "spawn_returns_future";
+  arena_t a = {0};
+  ParseResult r = run_typer("def f [spawn { 42 }]", &a);
+  AstNode* sp = find_cmd(r.nodes[0], "spawn");
+  ASSERT_NOT_NULL(sp);
+  ASSERT_TYPE(sp, TYPE_FUTURE);
+  arena_destroy(&a);
+}
+
+static void test_await_of_future_narrows_to_element(void) {
+  current_test = "await_of_future_narrows_to_element";
+  arena_t a = {0};
+  /* Body's tail is i32 (default int literal type). Spawn's element
+   * idx is set to JACL_SCALAR_TYPE_IDX(TYPE_I32); await unwraps to i32. */
+  ParseResult r = run_typer(
+      "def f [spawn { 42 }]\n"
+      "def x [await $f]", &a);
+  AstNode* aw = find_cmd(r.nodes[1], "await");
+  ASSERT_NOT_NULL(aw);
+  ASSERT_TYPE(aw, TYPE_I32);
+  arena_destroy(&a);
+}
+
+static void test_await_of_dyn_stays_dyn(void) {
+  current_test = "await_of_dyn_stays_dyn";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "proc f {x} { [await $x] }", &a);
+  AstNode* proc = r.nodes[0];
+  AstNode* aw = find_cmd(proc, "await");
+  ASSERT_NOT_NULL(aw);
+  ASSERT_TYPE(aw, TYPE_DYN);
+  arena_destroy(&a);
+}
+
+static void test_future_t_annotation(void) {
+  current_test = "future_t_annotation";
+  arena_t a = {0};
+  /* Explicit [Future i64] annotation in def: spawn body produces i64
+   * (literal narrowed by expected_type push), binding is TYPE_FUTURE
+   * with i64 element idx, await unwraps to i64. Typer-only test —
+   * the compiler doesn't yet accept [Future T] as a def annotation
+   * (same gap exists for [Vec T] / [Map T] in def position). */
+  ParseResult r = run_typer(
+      "def [Future i64] f [spawn { 42 }]\n"
+      "def x [await $f]", &a);
+  AstNode* aw = find_cmd(r.nodes[1], "await");
+  ASSERT_NOT_NULL(aw);
+  ASSERT_TYPE(aw, TYPE_I64);
+  arena_destroy(&a);
+}
+
 /* --- Driver ------------------------------------------------------- */
 
 int main(void) {
@@ -363,6 +416,10 @@ int main(void) {
   test_proc_def_returns_closure();
   test_print_returns_nil();
   test_parallel_returns_vec();
+  test_spawn_returns_future();
+  test_await_of_future_narrows_to_element();
+  test_await_of_dyn_stays_dyn();
+  test_future_t_annotation();
 
   printf("\n%d/%d passed", passes, passes + failures);
   if (failures > 0) {

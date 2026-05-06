@@ -1064,7 +1064,8 @@ typedef enum {
   TYPE_STRUCT,
   TYPE_STREAM,
   TYPE_TYPED_VEC,
-  TYPE_TYPED_MAP
+  TYPE_TYPED_MAP,
+  TYPE_FUTURE
 } JaclType;
 
 /* Typed-collection element encoding for struct_idx: real struct registry

@@ -196,6 +196,42 @@ static bool typer__is_typed_collection_scalar(JaclType t) {
          t == TYPE_F32 || t == TYPE_F64;
 }
 
+/* Recognize [Future T] type-annotation expressions. Returns true and
+ * writes *out_struct_idx with the element type encoding (scalar
+ * sentinel for type keywords, real struct idx for struct names) when
+ * the node is a valid [Future T]. Used by typer__handle_def_or_mut
+ * and typer__parse_params to set the binding's TYPE_FUTURE element
+ * type. The compiler doesn't need a parallel recognizer because
+ * futures don't have a typed-constructor surface form like
+ * [[Vec T] e1 e2 ...] — the only producer is `spawn`. */
+static bool typer__future_type(TyperCtx* tc, AstNode* node,
+                               uint32_t* out_struct_idx) {
+  *out_struct_idx = UINT32_MAX;
+  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  AstNode* h = node->data.command.head;
+  if (h->type != AST_LIT_STRING || h->data.lit_string.length != 6 ||
+      memcmp(h->data.lit_string.value, "Future", 6) != 0) return false;
+  if (node->data.command.arg_count != 1) return false;
+  AstNode* arg = node->data.command.args[0];
+  if (arg->type != AST_LIT_STRING) return false;
+  const char* nm = arg->data.lit_string.value;
+  uint32_t    nl = arg->data.lit_string.length;
+  if (is_type_keyword(nm, nl)) {
+    *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+    return true;
+  }
+  for (uint32_t si = 0; si < tc->struct_count; si++) {
+    if (tc->structs[si].name_len == nl &&
+        memcmp(tc->structs[si].name, nm, nl) == 0) {
+      *out_struct_idx = si;
+      return true;
+    }
+  }
+  /* Unknown type name — still recognize as Future so the compiler
+   * can backstop the unknown-type error. Element idx stays sentinel. */
+  return true;
+}
+
 /* Recognize [Vec T] / [Map V] / [Map K V] type expressions. Returns
  * 1 for [Vec T], 2 for [Map V] (dyn keys), 3 for [Map K V] (struct
  * keys), 0 if not a typed-collection expression. Mirrors
@@ -264,25 +300,31 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
         return false;
       }
     } else {
-      int tcoll = typer__typed_collection_kind(args[0]);
-      if (tcoll == 1) declared_type = TYPE_TYPED_VEC;
-      else if (tcoll == 2 || tcoll == 3) declared_type = TYPE_TYPED_MAP;
-      else return false;
-      /* Element struct_idx for [Vec T] / [Map V] / [Map K V] declared types. */
-      AstNode* type_arg = (tcoll == 3)
-          ? args[0]->data.command.args[1]
-          : args[0]->data.command.args[0];
-      if (type_arg && type_arg->type == AST_LIT_STRING) {
-        const char* nm = type_arg->data.lit_string.value;
-        uint32_t    nl = type_arg->data.lit_string.length;
-        if (is_type_keyword(nm, nl)) {
-          declared_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
-        } else {
-          for (uint32_t si = 0; si < tc->struct_count; si++) {
-            if (tc->structs[si].name_len == nl &&
-                memcmp(tc->structs[si].name, nm, nl) == 0) {
-              declared_struct_idx = si;
-              break;
+      uint32_t fut_sidx;
+      if (typer__future_type(tc, args[0], &fut_sidx)) {
+        declared_type = TYPE_FUTURE;
+        declared_struct_idx = fut_sidx;
+      } else {
+        int tcoll = typer__typed_collection_kind(args[0]);
+        if (tcoll == 1) declared_type = TYPE_TYPED_VEC;
+        else if (tcoll == 2 || tcoll == 3) declared_type = TYPE_TYPED_MAP;
+        else return false;
+        /* Element struct_idx for [Vec T] / [Map V] / [Map K V] declared types. */
+        AstNode* type_arg = (tcoll == 3)
+            ? args[0]->data.command.args[1]
+            : args[0]->data.command.args[0];
+        if (type_arg && type_arg->type == AST_LIT_STRING) {
+          const char* nm = type_arg->data.lit_string.value;
+          uint32_t    nl = type_arg->data.lit_string.length;
+          if (is_type_keyword(nm, nl)) {
+            declared_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+          } else {
+            for (uint32_t si = 0; si < tc->struct_count; si++) {
+              if (tc->structs[si].name_len == nl &&
+                  memcmp(tc->structs[si].name, nm, nl) == 0) {
+                declared_struct_idx = si;
+                break;
+              }
             }
           }
         }
@@ -497,7 +539,8 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   } else {
     JaclType rhs_t = (JaclType)value_node->inferred_type;
     if (is_unboxed_type(rhs_t) || rhs_t == TYPE_STRUCT ||
-        rhs_t == TYPE_STREAM || is_typed_collection(rhs_t)) {
+        rhs_t == TYPE_STREAM || is_typed_collection(rhs_t) ||
+        rhs_t == TYPE_FUTURE) {
       effective = rhs_t;
     } else {
       effective = TYPE_DYN;
@@ -505,7 +548,8 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   }
   uint32_t struct_idx = UINT32_MAX;
   uint32_t key_struct_idx = UINT32_MAX;
-  if (effective == TYPE_STRUCT || is_typed_collection(effective)) {
+  if (effective == TYPE_STRUCT || is_typed_collection(effective) ||
+      effective == TYPE_FUTURE) {
     /* Declared struct (def Point r ...) / typed-collection elem
      * (def [Vec Point] ps ...) wins; otherwise inherit from RHS. */
     if (declared_struct_idx != UINT32_MAX) {
@@ -2073,6 +2117,44 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     }
     if (matched) {
       /* handled */
+    } else if (hid == HEAD_SPAWN && node->data.command.arg_count == 1 &&
+               node->data.command.args[0]->type == AST_BLOCK) {
+      /* spawn: runtime returns a future (vm.c:4763). Element type is
+       * the body's tail type when concrete, dyn otherwise. The body
+       * was already typed by the args walk; its inferred_type is the
+       * type of the last expression (or NIL if trailing semi). */
+      AstNode* body = node->data.command.args[0];
+      node->inferred_type = TYPE_FUTURE;
+      JaclType body_t = (JaclType)body->inferred_type;
+      if (body_t == TYPE_STRUCT) {
+        node->inferred_struct_idx = body->inferred_struct_idx;
+      } else if (body_t != TYPE_DYN) {
+        node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(body_t);
+      }
+    } else if (hid == HEAD_AWAIT && node->data.command.arg_count == 1) {
+      /* await: unwraps a future. If the operand is a TYPE_FUTURE with
+       * a known element type, narrow the result to that element type;
+       * otherwise dyn. We don't error on await of a concrete non-
+       * future type today — m13's structural-error tests use
+       * `await 42` as a placeholder for "any suspending operation",
+       * and pre-empting them with a type error masks the more
+       * informative "cannot suspend inside try/catch" diagnostic.
+       * The runtime still traps on non-future operands. */
+      AstNode* arg = node->data.command.args[0];
+      JaclType arg_t = (JaclType)arg->inferred_type;
+      if (arg_t == TYPE_FUTURE) {
+        uint32_t e_idx = arg->inferred_struct_idx;
+        if (e_idx == UINT32_MAX) {
+          node->inferred_type = TYPE_DYN;
+        } else if (JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
+          node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+        } else {
+          node->inferred_type = TYPE_STRUCT;
+          node->inferred_struct_idx = e_idx;
+        }
+      } else {
+        node->inferred_type = TYPE_DYN;
+      }
     } else if (hl == 4 && memcmp(hn, "puts", 4) == 0) {
       /* "puts" is not in the HeadId table — keep the memcmp here. */
       node->inferred_type = TYPE_NIL;

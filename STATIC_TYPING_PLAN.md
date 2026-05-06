@@ -240,10 +240,16 @@ behavior change.
    Done: ~30 entries in `fixed_returns` (predicates, lengths,
    strings, streams, dyn collection ctors, signal/cancel, syntax-*
    introspection, while/for/yield, signal/cancel). HEAD_PIPE result
-   inherits rhs. Not done: `await`/`parallel`/`race`/`spawn` (typer
-   gives DYN), `vec-get`/`map-get` element types, `take`/`first`/
-   `reset`/`swap`/`hash`/`interpret`/FFI cluster. Plus closures and
-   imported procs are absent from the typer's proc registry.
+   inherits rhs. parallel→TYPE_VEC. spawn→TYPE_FUTURE with element
+   type from body's tail; await of TYPE_FUTURE narrows to the
+   element type. New `TYPE_FUTURE` enum value (jacl.h, ast.c).
+   `[Future T]` surface annotation recognized by the typer in
+   def/mut (compiler-side support for `def [Future T]` is the same
+   gap that exists for `def [Vec T]` — typer-only today). Not done:
+   `race` element-type narrowing (returns DYN today), `vec-get`/
+   `map-get` element types, `take`/`first`/`reset`/`swap`/`hash`/
+   `interpret`/FFI cluster. Plus closures and imported procs are
+   absent from the typer's proc registry.
 4. **Stage 1c — typed-collection element narrowing.** ✅ PARTIAL.
    Done (this session): typed-collection constructor `[[Vec T] ...]` /
    `[[Map K V] ...]` now types as TYPE_TYPED_VEC/MAP with element
