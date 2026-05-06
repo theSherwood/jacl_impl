@@ -102,58 +102,77 @@ and typer's `tc->structs`):**
 | Shared scalar-elem encoding | `ast.c` (the `JACL_SCALAR_*` macros, after `JaclType` enum) |
 | Compiler's runtime-state tracker | `compiler.c:compiler__ensure_boxed` (only reader of `c->last_expr_type`) |
 
-**What's *not* here yet** (deliberately skipped):
+**What's *not* here yet:**
 
+- Stage 1e — typer emits type errors directly. ✅ SUBSTANTIALLY
+  COMPLETE. Six error sites fire from the typer using the shared
+  formatters in `src/type_error.c`. Three minor sites remain as
+  follow-ons (typed-collection element ctor mismatches, the
+  `set $ctx.field val` arrow form, and proc-return dyn-into-typed).
+- Stage 1f — `dyn` as a real type with defined-semantics ops.
+  ✅ PARTIAL. Three rules landed (proc-call dyn-into-typed-param,
+  binary-op arithmetic concrete-mismatch, binary-op unboxed
+  comparison). Two rules deferred pending corpus-migration audit
+  (mixed dyn/typed binary, dyn-return into typed proc).
 - Stage 4 (separate `TypedAstNode` from `AstNode`) — optional;
   weighed against benefit. Not pursued.
-- Stage 1e (typer emits type errors directly) — typer flags
-  divergences in `inferred_type=DYN` but doesn't report errors.
-  The compiler still owns error reporting (using the shared
-  formatters in `src/type_error.c`).
-- Stage 1f (`dyn` as a real type with defined-semantics ops) —
-  the architecture supports it but the rules aren't written.
 - Stage 5 (pointer types `*T` for FFI) — design pending.
 
 ---
 
 ## End state
 
-After all stages land, the architecture looks like:
+The architecture today (after Stages 0–3 and the partial 1e/1f
+work):
 
 ```
-parser    →  AST                    (untyped, scope_marks stamped)
-typer     →  AST + type annotations (every node has a non-sentinel type)
-compiler  →  bytecode               (reads only from AST; emits no type questions)
+parser    →  AST                    (untyped, scope_marks stamped;
+                                      LIT_INT/FLOAT/STRING get
+                                      parser-set inferred_type defaults)
+typer     →  AST + type annotations (every node reachable from the
+                                      walk has inferred_type)
+compiler  →  bytecode               (reads type identity from AST;
+                                      tracks runtime stack rep in
+                                      c->last_expr_type for ensure_boxed)
 ```
 
-**Compiler invariants after migration:**
+**Compiler invariants, achieved:**
 
-- The compiler never *infers* a type. It only *consumes* annotations.
-- Functions that need a type read it from the AST node, not from
-  `Compiler` state.
-- Type errors are detected and reported during typing, not codegen.
-- `c->expected_type` is gone — the typer pushes context down during
-  the walk and stamps each node with its expected/effective type.
+- ✅ The compiler never *infers* a type for declared identity. It
+  only *consumes* AST annotations. The surviving `last_expr_type`
+  field tracks post-emit stack representation, not type identity.
+- ✅ Functions that need a type read it from the AST node, not
+  from `Compiler` state.
+- ✅ `c->expected_type`, `c->last_struct_idx`, `c->last_key_struct_idx`
+  are gone — the typer pushes context down during its walk and
+  stamps each node with the narrowed type.
+- 🟡 Type errors are detected and reported during typing for six
+  sites (Stage 1e); the compiler still detects + reports for the
+  rest (typed-collection element ctor, plus the deferred Stage 1f
+  rules). Both passes use the same shared formatters when a
+  formatter exists.
 
-**Typer invariants after migration:**
+**Typer invariants, achieved:**
 
-- Every `AstNode` reachable by the walk has `inferred_type` set to a
-  real `JaclType`. `TYPE_DYN` *is* a real type ("dynamically-typed
-  value"), not "I don't know."
-- Where the typer can't decide, it reports a type error rather than
-  silently leaving DYN.
-- Operations on `dyn` operands have known typed semantics (e.g.,
-  `[+ $a $b]` where both are `dyn` types as `dyn` and selects the
-  generic add opcode).
+- ✅ Every `AstNode` reachable by the walk has `inferred_type` set
+  to a real `JaclType`.
+- 🟡 `TYPE_DYN` is mostly treated as a real type ("dynamically-typed
+  value") rather than "I don't know" — Stage 1f's three landed
+  rules treat dyn as a first-class boundary marker. The two
+  deferred rules still treat dyn permissively in mixed contexts.
+- ✅ Operations on dyn operands have defined typed semantics:
+  `[+ $a $b]` types as dyn when both operands are dyn, types as
+  the operand's type when both are the same concrete type, errors
+  on concrete-mismatch arithmetic.
 
 **The `dyn` type, properly:**
 
-| Today                                           | After migration                        |
+| Today (before migration)                        | Now                                    |
 |------------------------------------------------|----------------------------------------|
 | `TYPE_DYN` = "typer gap; ask `c->last_expr_type`" | `TYPE_DYN` = "value of unknown static type; runtime-tagged"     |
-| Implicit fallback at 22 sites                   | No fallback; `dyn` flows through ops with defined typed semantics |
-| Untyped def/mut → DYN binding                  | Same, but DYN binding is a known thing, not a hole |
-| Mixed-type if-branches → DYN                    | Same, but DYN is the unified result, not a punt |
+| Implicit fallback at 22 sites                   | No fallback (`compiler__effective_type` was deleted) |
+| Untyped def/mut → DYN binding                  | Same; DYN binding is the explicit boundary marker (decision 2) |
+| Mixed-type if-branches → DYN                    | Same; DYN is the unified result |
 
 ---
 
@@ -326,15 +345,17 @@ behavior change.
    They each need an audit of the test corpus and possibly a
    corpus update before flipping. Tracked here so a future session
    can pick them up with full context.
-8. **Run the audit-mode build continuously.** ✅ DONE — see
-   "Running the audit" subsection below.
+8. **Run the audit-mode build continuously.** ✅ DONE during the
+   migration; the audit machinery was deleted in commit `0aa722f`
+   once it had served its purpose.
 
-**Exit criteria:**
+**Exit criteria (historical — Stage 1 hit them through the
+combination of typer rules in Stage 1 + consumer migration in
+Stage 2):**
 
 - Audit mode reports zero typer↔compiler disagreements across the
   full test corpus.
 - Typer assigns a non-sentinel type to every node in every test.
-  (Add an assertion in audit mode.)
 - New typer-only tests pass.
 - Compiler unchanged behaviorally; no `c->last_expr_type`
   consumers migrated yet.
@@ -834,228 +855,108 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 | 4 | Error formatting | Shared content formatters; per-pass reporting |
 | 5 | Migration order | Bottom-up by AST shape, sub-stratified by complexity |
 
-## How to start
+## Status summary (current session)
 
-**Stage 0 is complete** (commits `86be2bb`, `5b00aa3`, `e30a308`,
-`e5a31a8`). The audit, both test harnesses, and the shared
-formatters are in place.
+| Stage | Status |
+|---|---|
+| 0 — test infra + decisions | ✅ complete |
+| 1 — typer total + authoritative | ✅ substantially complete (1a–1d partial, see Stage 1 task list) |
+| 1e — typer emits errors | ✅ substantially complete (6/9 sites; see "Pickup points" below) |
+| 1f — dyn as a real type | ✅ partial (3 rules landed; 2 deferred for corpus migration) |
+| 2 — migrate compiler consumers | ✅ complete |
+| 3 — delete dead state | ✅ complete |
+| 4 — separate `TypedAstNode` | ⏭ skipped (optional, not pursued) |
+| 5 — pointer types `*T` for FFI | ❌ not started |
 
-**Stage 1 is at plateau** (~12 commits, last is `066e666`). Real
-divergences (GAP+MISMATCH) on the test_compiler audit are at 46,
-down from 665 — 93% reduction. Remaining work split into
-substeps with done/partial/not-started markers above.
+Tests: 95/95 passing. Type-error corpus: 11/11 passing. The audit
+machinery from Stages 0–2 was deleted in commit `0aa722f` after it
+served its purpose.
 
-**Pick-up entry points** (in increasing depth of work):
+## Pickup points
 
-- **Stage 2 minimal edit — LANDED.** `compiler__effective_type` now
-  reads `n->inferred_type` only; the `c->last_expr_type` fallback
-  is gone. All 95/95 tests pass. Audit on test_compiler dropped
-  71→66 divergences, but the bigger win is eliminating dual-track
-  state for the 22 helper call sites. The Stage 1 closures needed
-  to land this:
-    1. typed-collection constructor types + elem struct_idx
-    2. `vec-get`/`map-get` elem narrowing on typed receivers
-    3. `[box? [Vec T]]` / `[box? [Map K V]]` narrowing
-    4. `filter` (preserves recv) / `transform` (typed→VEC) rules
-    5. Generator detection: yielding proc → TYPE_STREAM
-    6. Proc params with compound type heads (`{[Vec T] pts}`)
-    7. CapitalCase imported names → placeholder structs (so
-       `[Point ...]` from `use {Point}` types as STRUCT)
-- **Stage 1e** (type errors emitted by typer) — bigger, but the
-  shared formatters are already extracted; mostly call-site moves.
-- **Stage 1f** (dyn as a real type) — the bigger architectural
-  step; requires writing down all dyn-touching op rules.
+In rough order from "smallest, lowest-risk increment" to "freshest
+architectural piece". Each is independently shippable.
 
-Stop at the end of any Stage and the codebase is still better off.
+### Small follow-ons
 
-## Running the audit
+These are mechanical extensions of work already landed; should each
+be a single commit.
 
-The audit-mode build prints a `TYPER_AUDIT` line to stderr for
-every divergence between `node->inferred_type` and
-`c->last_expr_type` after each `compile_node` call.
+1. **Typed-collection element ctor mismatches.** `[[Vec T] e1 e2 ...]`
+   element-type checks fire from the compiler today
+   (compiler.c:4945-4996) with bespoke wording. To migrate, add a
+   `jacl_format_typed_vec_elem` / `jacl_format_typed_map_elem`
+   formatter in `type_error.c`, then call it from both passes —
+   typer in the `else if (head && head->type == AST_COMMAND)`
+   branch of `typer__infer_command_inner` after the args walk;
+   compiler at the existing snprintf sites.
 
-```sh
-# Build with -DJACL_TYPER_AUDIT, run a single test, capture stderr:
-bash build.sh --audit --test=compiler 2>err.log
+2. **Ctx-field-set arrow form.** `set $ctx.field val` is rewritten
+   by HEAD_SET's arrow desugar; the typer doesn't see the
+   rewritten tree. The bare `[. $ctx field val]` form already
+   typer-checks via the rule from commit `402fd47`. Either run the
+   typer on rewritten trees, or have the typer recognize the
+   pre-rewrite shape (`set` with an arrow-LHS of `$ctx`) and apply
+   the field-set rule preemptively.
 
-# Triage the bug list:
-grep TYPER_AUDIT err.log \
-  | grep -v SUMMARY \
-  | sed 's/at [0-9]*:[0-9]*//' \
-  | sort | uniq -c | sort -rn \
-  | head -20
+3. **Proc-return dyn-into-typed.** `proc i32 f {} { $dyn_val }`
+   currently passes both passes. Decision 2 calls for an error.
+   Smaller blast radius than mixed dyn/typed binary because typed
+   return procs are less common — still needs a corpus audit
+   first.
 
-# Just the category counts:
-grep TYPER_AUDIT err.log \
-  | grep -v SUMMARY \
-  | awk '{print $2}' | sort | uniq -c | sort -rn
-```
+### Stage 1f — open language-level rules
 
-Categories the audit reports:
+Both items below are real semantic tightenings that may break
+existing programs. Each needs a corpus audit before flipping. The
+rules table in the Stage 1 task list (item 7) is the source of
+truth for the intended end-state.
 
-| Kind | Meaning |
-|------|---------|
-| `MISMATCH` | both passes non-DYN, types differ — typer or compiler bug |
-| `GAP` | typer DYN, compiler non-DYN — typer is missing a rule |
-| `EXTRA` | typer non-DYN, compiler DYN — compiler doesn't track this op (Stage 2 absorbs) |
-| `STRUCT_IDX` | types match but `inferred_struct_idx` differs — struct propagation bug |
+1. **Mixed dyn/typed binary** (`[+ $i32 $dyn]`). Currently accepted
+   via runtime dispatch; decision 2 says error. Broadest blast
+   radius — many programs mix untyped values into typed contexts.
+   Recommended approach:
+   - Run the test corpus with the typer's rule provisionally
+     enabled (the rule lives at `typer.c:typer__infer_command_inner`
+     in the `is_arith || is_cmp` block — the existing `lhs_t !=
+     TYPE_DYN && rhs_t != TYPE_DYN` guard becomes `||`).
+   - Catalog every test that fails. Decide per-test whether to
+     update the test or revisit the decision.
+   - Land in one commit + corpus update.
 
-Each compile prints a `TYPER_AUDIT SUMMARY: total=N agree=N
-mismatch=N gap=N extra=N struct_idx_diff=N` line at end. Counters
-reset between compiles.
+2. **Dyn return into typed proc.** Per Pickup-Point 3 above; same
+   approach.
 
-The audit only fires when `compile_node` is called — i.e., for
-codegen-running tests, not for typer-only tests.
+### Stage 5 — pointer types for FFI
 
-## Stage 0 deliverables (reference)
+A fresh architectural piece, separate from the migration work. The
+existing Stage 5 task list (above, in the "Stages" section) is the
+starting point. Open sub-decisions: `*T` only or also `*mut T`;
+auto-deref vs. always explicit; FFI call syntax. Resolve those
+before starting work.
 
-The four artifacts Stage 0 produced:
+### Stage 1 long tail (Stage 1a–1d)
 
-- **Audit build** — `bash build.sh --audit` (commit `86be2bb`).
-- **Typer test harness** — `test/test_typer.c` (commit `5b00aa3`),
-  16 cases asserting on `inferred_type` directly.
-- **Type-error corpus** — `test/test_type_errors.c` (commit
-  `e30a308`), 11 cases locking in compile-time error messages.
-- **Shared formatters** — `src/type_error.c` (commit `e5a31a8`).
-  Seven helpers, all callable from typer.c when Stage 1e starts:
-  - `jacl_format_assign_mismatch`
-  - `jacl_format_assign_dyn_named`
-  - `jacl_format_assign_dyn_unnamed`
-  - `jacl_format_assign_struct_to_dyn`
-  - `jacl_format_field_mismatch`
-  - `jacl_format_field_dyn_assign`
-  - `jacl_format_proc_return_mismatch`
+The Stage 1 sub-task statuses (1a–1d) listed above still have
+"not done" items (e.g., `try` / `match` / `with-ctx` result types,
+`await`/`parallel`/`race`/`spawn` returns, scalar-element narrowing
+for `[Vec i64]` — these are now annotated correctly thanks to commit
+`a1dfe64`'s key-struct-idx propagation, double-check). Each is a
+focused typer rule; pick whichever is most impactful to user-visible
+typing in your scenario.
 
-  Two error variants are intentionally not extracted (struct
-  constructor "got dyn" without cast hint, immutable-binding
-  mutate); Stage 1e can either extract them or leave them in
-  compiler.c as one-offs.
+## Test infrastructure
 
-## Progress snapshot
+- **`test/test_typer.c`** — 16 typer-only cases asserting on
+  `inferred_type` directly. Doesn't go through codegen, so silent
+  typer bugs are visible here.
+- **`test/test_type_errors.c`** — 11 cases locking in compile-time
+  error messages via substring matching. Tolerates message
+  rewordings within reason; lock in the wording you want by
+  asserting on the load-bearing tokens (type names, "type error",
+  proc/struct names) rather than the full sentence.
+- **`src/type_error.c`** — shared formatters. Add new ones here
+  whenever a previously bespoke `snprintf` site moves to the typer.
 
-**Stage 0 — complete.** Four commits established the audit and
-test infrastructure (`86be2bb`, `5b00aa3`, `e30a308`, `e5a31a8`).
-
-**Stage 1 — in progress.** Audit divergences on the test_compiler
-suite track progress:
-
-| Snapshot | Total | GAP | MISMATCH | EXTRA | STRUCT_IDX |
-|----------|------:|----:|---------:|------:|-----------:|
-| Stage 0 end | 854 | 613 | 52 | 73 | 116 |
-| After commit `1f220a4` (def/mut sugar, proc, struct_idx) | 194 | 108 | 21 | 65 | 0 |
-| After commit `fb95682` (while/for/dot field-set) | 194 | 70 | 30 | 94 | 0 |
-| After commit `7d0ed8b` (compiler box?=BOOL fix) | ~190 | 70 | 22 | 94 | 0 |
-| After commit `4447c01` (while/break/continue compiler pins) | ~165 | 70 | 22 | 70 | 0 |
-| After commit `f604819` (typer continue/shell rules) | 160 | 66 | 26 | 68 | 0 |
-| After commit `05dc74e` (typer ctx-struct pre-pass) | 160 | 66 | 26 | 68 | 0 |
-| After commit `e6b0d6b` (set/:: pin nil + make-syntax pin dyn) | 107 | 59 | 15 | 33 | 0 |
-| After commit `8b595ea` (HEAD_PIPE result from rhs + atom dyn) | 96 | 48 | 15 | 33 | 0 |
-| After commit `a1d713f` (struct== inline → bool) | 91 | 48 | 15 | 28 | 0 |
-| After commit `cf5b87e` (HEAD_FOR compiler pin) | 82 | 48 | 9 | 25 | 0 |
-| After commit `5d089be` (HEAD_YIELD typer rule) | 82 | 48 | 9 | 25 | 0 |
-| After commit `c4b9d65` (per-field struct_idx for chained dot) | 71 | 37 | 9 | 25 | 0 |
-| After commit `066e666` (typer 1-arg AST_COMMAND def-sugar generalization) | 71 | 37 | 9 | 25 | 0 |
-| **After commit `1501551` (Stage 2 minimal edit: drop helper fallback + 7 typer closures)** | 66 | 34 | 5 | 27 | 0 |
-| After commit `981c770` (Stage 2: bin-op + def cluster struct_idx → AST) | 66 | 34 | 5 | 27 | 0 |
-| After commit `9eca062` (Stage 2: mut/set/if/destructure clusters) | 66 | 34 | 5 | 27 | 0 |
-| After commit `26a558c` (pin def/mut to nil; typer NIL fallback for unhandled set/def shapes) | 61 | 33 | 0 | 28 | 0 |
-| After commit `e520bf8` (pin while to nil) | 58 | 33 | 0 | 25 | 0 |
-| After commit `df9352a` (typer rule for HEAD_RESET) | 54 | 29 | 0 | 25 | 0 |
-| After commit `2fdc066` (pin AST_RETURN to nil; proc body return-type check reads AST tail) | 47 | 27 | 0 | 20 | 0 |
-| After commit `a4aef7b` (pin print to nil; typer shell-cmd background→DYN) | 45 | 27 | 0 | 18 | 0 |
-| After commit `f81bdeb` (typer rule for unary minus) | 44 | 26 | 0 | 18 | 0 |
-| After commit `5d31371` (HEAD_PROC closure fallback) | 44 | 26 | 0 | 18 | 0 |
-| After commits `152eabd`, `c3227c5`, `ba1b84e`, `cb97a4f` (Stage 2: print/box/reset/HOF/ctor-elem/vec-concat → AST) | 44 | 26 | 0 | 18 | 0 |
-| After commit `9b95e12` (delete unused compiler__get_type) | 44 | 26 | 0 | 18 | 0 |
-| After commit `e21b1fe` (typer pipe-binop simulation) | 41 | 23 | 0 | 18 | 0 |
-| After commit `7f5acd8` (parser defaults LIT_INT/LIT_FLOAT/LIT_STRING inferred_type) | 35 | 17 | 0 | 18 | 0 |
-| After commit `e78f933` (typed-elem-arg helper struct check → AST) | 35 | 17 | 0 | 18 | 0 |
-| After commit `698e951` (ctx is a real registered struct; CTX_STRUCT_PENDING deleted) | 35 | 17 | 0 | 18 | 0 |
-| After commit `a1dfe64` (AstNode.inferred_key_struct_idx propagated for typed-map) | 35 | 17 | 0 | 18 | 0 |
-
-**Real divergence (GAP+MISMATCH):** 665 → 46. 93% reduction.
-
-**Stage 2 in progress.** Stage 2's "minimal edit" landed at
-`1501551` (66 audit divergences). Subsequent commits migrated
-`c->last_struct_idx` reads in compile_binary, def, mut, set/reset,
-if-branch unification, and destructure paths to read
-`args[i]->inferred_struct_idx` instead. Then HEAD_DEF, HEAD_MUT,
-HEAD_WHILE got pinned to TYPE_NIL after dispatch; HEAD_RESET got a
-typer rule. Tests held at 95/95 throughout.
-
-At 54 audit divergences, the remaining clusters are:
-
-- **6 GAP `AST_LIT_INT`:** scattered top-level int literals where
-  the typer didn't reach. Some are `def x = 5` parsed as
-  `[= [def x] 5]` (now handled by 066e666), others appear to be
-  macro-rewrite artifacts where the post-rewrite tree has new
-  AST_LIT_INT nodes the typer never saw.
-- **5 EXTRA `AST_VAR_REF` (typer=struct, compiler=dyn):** typer
-  knows the binding's struct type but the compiler's local has
-  type=DYN. Mostly inline-struct receivers; clears as more
-  TypeInfo migrations move from c-state to AST.
-- **5 EXTRA `AST_RETURN` (typer=nil, compiler=dyn):** typer pins
-  return to NIL; compiler doesn't pin (tried, broke a
-  struct-comparison test that relies on a struct-returning proc's
-  body leaking the struct type back through last_expr_type — needs
-  per-proc analysis to know when the leak is safe to drop).
-- **3 GAP `head=|`:** pipe rhs is a function call to a proc
-  whose return type the typer doesn't track (closures, imported
-  procs aren't in the typer's proc registry).
-- **2 each reset/mut/def/::/.: macro-rewrite artifacts** — the
-  compiler's `:: → set` / sugar-form rewrites produce new
-  AST nodes after the typer has already run. Out of scope for
-  Stage 2 (would need typer to also run on rewritten trees, or
-  rewrite to copy inferred_type).
-
-The ctx-struct pre-pass commit is setup for follow-on: future code
-referencing `$ctx.field` inside a `with-ctx` block will type the
-field correctly. The remaining 11 `head=.` GAPs in the audit turned
-out to be field access on intra-proc struct locals where the
-typer's struct registry indexing diverges from the compiler's at
-some specific shape. Each remaining GAP cluster from this point is
-its own focused investigation.
-
-**Remaining clusters as of `a1d713f`:**
-
-| Cluster | Count | Shape |
-|---------|------:|-------|
-| GAP `head=.` | 0 | RESOLVED in commit `c4b9d65` — chained dot now propagates struct_idx |
-| GAP `AST_LIT_INT` | 7 | NOT macro-expansion: parser produces `[= [def x] 5]` for the surface `def x = 5`, and the typer's def-sugar handler bails because args[0] is a 1-arg AST_COMMAND with non-keyword head 'def'. Fix: extend handle_def_or_mut to unwrap that shape (similar to compiler__rewrite_binding_op's destructure-pattern branch). |
-| MISMATCH `head=for` | 6 | for body's last expr leaks (load-bearing in some path; can't pin) |
-| MISMATCH `head=def` | 5 | def-with-struct leaks for inline-vs-heap codegen (load-bearing; can't pin) |
-| EXTRA `AST_VAR_REF` (struct/dyn) | 5 | typer knows struct binding type, compiler tracks dyn |
-| EXTRA `AST_RETURN` | 5 | typer says nil; compiler default dyn (pin breaks struct return) |
-| GAP `head=\|` (i32) | 3 | typer rhs returns DYN because proc's return type isn't tracked |
-| GAP `head=yield/reset/mut/def` | 2-2 each | scattered; need targeted typer rules |
-| ... long tail | ~30 | individual cases |
-
-The 13 commits across Stages 0+1 in this session are recorded above.
-At this rate of progress per commit, reaching zero divergences would
-take approximately another 6-10 sessions of similar work.
-
-**What Stage 2 would absorb:** EXTRAs (28) plus the load-bearing
-MISMATCHes (~11 from def/for/return). That's ~39 of the remaining
-91 — clears once `c->last_expr_type` consumers migrate. So Stage 1
-reaches its exit criterion ("zero divergences") through a
-combination of Stage 1 typer rules AND Stage 2 consumer migration,
-not Stage 1 alone.
-
-**Remaining work to drive Stage 1 to zero:**
-
-- ~66 GAPs spread across `HEAD_DOT` (struct field access where typer
-  doesn't have receiver's struct_idx), macro-expanded `AST_LIT_INT`
-  (typer doesn't run on expanded subtrees), `HEAD_PIPE`,
-  `HEAD_MAKE_SYNTAX` (varies by kind), `HEAD_IF` with mismatched
-  branch types, etc.
-- ~26 MISMATCHes from compiler-side leaks at HEAD_SET, HEAD_FOR,
-  HEAD_DEF (struct binding paths). Tried pinning these in commit
-  `4447c01` but reverted because struct-flow tests rely on the
-  leaked types for inline-vs-heap codegen decisions.
-- ~68 EXTRAs are "typer is more correct than compiler tracks" —
-  they all clear when Stage 2 drops `c->last_expr_type` reads.
-  Not blocking.
-
-**Audit replay:** `bash build.sh --audit --test=compiler 2>err.log`,
-then `grep TYPER_AUDIT err.log | sed 's/at [0-9]*:[0-9]*//' |
-sort | uniq -c | sort -rn | head` for the bug list.
+Run the suite with `bash build.sh`. Type-error binary:
+`/jacl_impl/.build/type_errors`.
