@@ -237,11 +237,11 @@ behavior change.
 5. **Stage 1d — narrowing through every guard.** ✅ PARTIAL.
    Done: `[box? Type $x]`. Not done: typed-collection box guards
    (`box? [Vec T]`), error guards in `try`.
-6. **Stage 1e — type errors emitted by the typer.** ✅ PARTIAL.
-   Done: typer error infrastructure (`TyperResult`, `typer__error`)
-   plumbed through `typer_infer` to `compiler_compile`'s reporting
-   machinery (commit `77709de`). Four error sites converted to use
-   the shared formatters and fire from the typer:
+6. **Stage 1e — type errors emitted by the typer.** ✅ SUBSTANTIALLY
+   COMPLETE. Typer error infrastructure (`TyperResult`,
+   `typer__error`) plumbed through `typer_infer` to
+   `compiler_compile`'s reporting machinery (commit `77709de`). Six
+   error sites converted to fire from the typer:
    - typed def/mut mismatch (`jacl_format_assign_mismatch` /
      `jacl_format_assign_dyn_unnamed`) — commit `640ae7d`
    - typed set mismatch (`jacl_format_assign_mismatch` /
@@ -250,17 +250,32 @@ behavior change.
      (`jacl_format_proc_return_mismatch`) — commit `f1a6af2`
    - struct field-set mismatch (`jacl_format_field_mismatch` /
      `jacl_format_field_dyn_assign`) — commit `402fd47`
+   - struct constructor positional-arg field-type mismatch
+     (`jacl_format_field_mismatch` + bespoke wording for the
+     "got dyn" case) — commit `16db519`
+   - proc call positional-arg param-type mismatch (compiler-matched
+     bespoke wording — no shared `argument N of NAME` formatter
+     yet) — commit `16db519`
 
    The compiler's parallel checks at compiler.c:5983-5995, 6204-6221,
-   6714-6726, 7272-7293, 9722-9738 still exist as a backstop; the
-   typer fires first and its message reaches the user via
-   compiler__error re-injection. Struct-to-struct narrowing is left
-   to the compiler for now (typer's same-struct-idx tracking is not
-   fully aligned with the compiler's across module boundaries).
+   6714-6726, 7272-7293, 9722-9738, 10094-10113, 10359-10378 still
+   exist as a backstop; the typer fires first and its message reaches
+   the user via `compiler__error` re-injection at the `typer_infer`
+   call site. Struct-to-struct narrowing stays compiler-owned (the
+   typer's same-struct-idx tracking isn't fully aligned with the
+   compiler's across module boundaries — would need a follow-on).
 
-   Not done: struct-constructor arg-type mismatches, typed-collection
-   element mismatches, proc-call argument typing, ctx-field-set
-   mismatches.
+   **Remaining (incremental, not blocking):**
+   - Typed-collection element ctor mismatches (`[[Vec T] e1 e2 ...]`)
+     — needs a new shared formatter (`jacl_format_typed_vec_elem` /
+     `_typed_map_elem`) since the compiler's wording is bespoke.
+   - Proc-call dyn-into-typed-param mismatch (the typer currently
+     skips DYN args; the compiler still flags them via the
+     `(use [to T $val])` cast hint).
+   - Ctx-field-set via the `set $ctx.field val` arrow form
+     (currently handled by the compiler's HEAD_SET rewrite; the
+     bare `[. $ctx field val]` form already typer-checks via the
+     general struct field-set rule from commit `402fd47`).
 7. **Stage 1f — `dyn` as a real type.** ❌ NOT STARTED.
    The architecture is in place but no rules written yet.
 8. **Run the audit-mode build continuously.** ✅ DONE — see
