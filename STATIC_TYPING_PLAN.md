@@ -769,6 +769,65 @@ walks an array via `[ptr-offset]`, reads `$p->x` from each element,
 and sums them. The typer rejects pointee mismatches, pointer
 arithmetic via `+`, and non-numeric offsets at compile time.
 
+### Stage 5 — known gaps & next directions
+
+The core debugger-scripting workflow is complete and tested. These
+items are not blockers but are worth tracking:
+
+**Polish / ergonomics:**
+
+- **`print` formatting for `[Ptr T]` values.** Today a typed pointer
+  prints as a raw u64 (e.g., `4096` or however `print` formats u64
+  values), losing the pointee identity that the typer tracks. A
+  Stage-5-aware print would format as `Ptr<Point>(0x1000)` or
+  similar. Requires the print path to consult `inferred_type` /
+  `inferred_struct_idx` on the AST node, or carry a runtime tag
+  for pointers — neither exists today.
+- **Null pointer literal.** No way to express `null` / a null
+  `[Ptr T]` in JACL source today. `[ptr-cast [Ptr T] 0]` works as
+  a workaround. A `[null [Ptr T]]` builtin or `null` keyword would
+  be cleaner; runtime traps already fire on null deref via
+  `OP_PTR_LOAD` and friends.
+- **Better error wording.** Several typer messages embed bespoke
+  `snprintf` patterns rather than going through `src/type_error.c`.
+  A small extraction pass would put pointer messages in the same
+  shared formatter file as the rest of Stage 1e/1f.
+
+**Language design (deferred decisions):**
+
+- **`*mut T` distinction.** Per Stage 5's design decisions, mutability
+  was deliberately not split into `[Ptr T]` vs `[Ptr mut T]` for the
+  first cut. Adding it later is mostly typer work — declare a binding
+  as `[Ptr T]` (read-only), and reject writes (`set $p->x val` and
+  `[ptr-store ...]`). No runtime change needed.
+- **Bounds-checked array variants.** `[ptr-offset]` accepts any
+  signed offset and trusts the user. A `[ptr-array T n]` type that
+  carries a length and rejects out-of-bounds offsets at compile time
+  would be a useful safer surface for the debugger-scripting use
+  case (where reading past an array bound is a common bug).
+- **`memcpy` / bulk read.** No way to read a sized slice (`[u8]`,
+  raw bytes) through a pointer for printing buffers or hex dumps.
+  Could be added as `[ptr-read-bytes $p $n]` returning a `vec` of
+  u8 — useful for debugger inspection.
+
+**Runtime / FFI integration (out of scope for the typer):**
+
+- **Layout validation.** The user must hand-mirror the C struct
+  layout (field types, order) in their JACL `struct` declaration.
+  Mismatches cause silent misreads. A future `extern struct CPoint
+  {...}` form could pull layout from a header / DWARF, but that's
+  a separate FFI tooling project, not typer work.
+- **Out-of-process inspection.** Stage 5 chose in-process semantics
+  per design decision. An out-of-process variant (ptrace /
+  `process_vm_readv`) would replace the runtime read-byte primitive
+  in `OP_PTR_LOAD*` with a function pointer; the typer / compiler
+  would not change. Worth a follow-on stage when the workload
+  appears.
+
+**Stage 5 long-tail items deferred until a real debugger workload
+drives them.** Picking any one is unblocked but speculative without
+a concrete script that needs it.
+
 ---
 
 ## Open decisions (resolve before Stage 0)
