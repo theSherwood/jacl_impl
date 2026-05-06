@@ -18,6 +18,104 @@ typer grows. The seam between them gets cleaner.
 
 ---
 
+## Where the type system lives now (post-Stage-3)
+
+Stages 0–3 are complete. This section captures the final architecture
+so you don't have to read the migration history to understand the
+present-day code.
+
+**Pipeline:**
+
+```
+parser   →  AST                    (untyped; LIT_INT/FLOAT/STRING get
+                                    parser-set inferred_type defaults)
+typer    →  AST + annotations      (every node reachable from the walk
+                                    has inferred_type, inferred_struct_idx,
+                                    inferred_key_struct_idx populated)
+compiler →  bytecode               (reads type identity from AST; tracks
+                                    runtime stack representation in
+                                    c->last_expr_type for ensure_boxed)
+```
+
+**Where each piece of state lives:**
+
+| State | Lives on | Purpose |
+|---|---|---|
+| Declared type of an expression | `AstNode.inferred_type` | Set by typer; what the value's type *is*. |
+| Struct registry index for STRUCT/typed-vec/typed-map | `AstNode.inferred_struct_idx` | Set by typer; aligned with compiler's `struct_registry`. For typed collections, this is the *element* idx (or a `JACL_SCALAR_TYPE_IDX` sentinel for scalar elements). |
+| Map key struct index for typed-map | `AstNode.inferred_key_struct_idx` | Set by typer. |
+| Runtime stack representation post-emit | `Compiler.last_expr_type` | Reflects what's *actually on the stack* mid-codegen — distinct from declared type when var-ref loads emit unbox code (e.g. mutable cell loads emit `OP_GET_CELL_LOCAL + OP_TO_DYN`, leaving the stack DYN even when the binding is i64). Read only by `compiler__ensure_boxed`. |
+| Inline-struct stack arrangement | `Compiler.inline_repr`, `inline_ref_base`, `inline_ref_offset` | Codegen state for chained struct field access. Not type-system state despite the name. |
+
+**Shared encoding:**
+
+`JACL_SCALAR_VEC_BASE` (= 0xFF00, in `ast.c`) defines the sentinel
+range for typed-collection element indices. Real struct registry
+entries live below 0xFF00; values in `[0xFF00, 0x10000)` encode a
+scalar `JaclType` (e.g. `[Vec i64]` carries `JACL_SCALAR_TYPE_IDX(TYPE_I64)`
+in its `inferred_struct_idx`). Both typer and compiler use the same
+encoding via the `JACL_SCALAR_TYPE_IDX` / `JACL_TYPE_IDX_TO_SCALAR` /
+`JACL_IS_SCALAR_TYPE_IDX` macros.
+
+**Slot reservations in both registries (compiler's `struct_registry`
+and typer's `tc->structs`):**
+
+- Slot 0: reserved for "dyn placeholder" (`defs[0] = NULL`).
+- Slot 1: reserved for the ctx struct. Always populated (built-in
+  `pwd: str` field, plus any user `ctx Type field = default`
+  declarations). Both passes pre-reserve at registry-init time so the
+  slot indices align across registries without runtime coordination.
+- Slot 2 and up: user-declared structs in source order. Anonymous
+  inline struct types (`struct{x:i32,y:i32}`) are registered on
+  demand by both passes during the defstruct walk; same source order
+  → same slot indices.
+
+**Key invariants:**
+
+1. The typer is the sole authority on `inferred_type` /
+   `inferred_struct_idx` / `inferred_key_struct_idx`. The compiler
+   reads them; never writes them.
+2. Compile-time AST rewrites (e.g. `HEAD_SET`'s arrow desugar) must
+   either preserve outer-node identity (so the typer's annotation
+   on the outer survives) or be rare enough that the typer's
+   bare-name-receiver fallback handles them. Currently only the
+   set-rewrite exists, and it's covered by the typer's fallback.
+3. `compiler__ensure_boxed` is the only place that reads
+   `c->last_expr_type`. New code that needs to know "what type was
+   just compiled" should read `args[i]->inferred_type` from the AST,
+   *unless* it specifically needs the post-emit stack representation
+   (which is rare — the only reason ensure_boxed needs it is the
+   var-ref-load-of-mutable-cell case where the load emits an unbox
+   that the AST type doesn't reflect).
+
+**Where to find things in the source:**
+
+| What | File:Function |
+|---|---|
+| Typer entry point | `typer.c:typer_infer` |
+| Typer struct/proc/ctx pre-passes | `typer.c:typer__register_structs / __register_procs / __register_ctx_struct` |
+| Typer anonymous-struct registration | `typer.c:typer__register_inline_struct` |
+| Typer command type rules | `typer.c:typer__infer_command_inner` |
+| Typer's HEAD_DOT field-resolve | `typer.c:typer__infer_command_inner` (search "HEAD_DOT") |
+| Compiler reads type from AST | `compiler.c:compiler__effective_type` (one-line wrapper around `n->inferred_type`) |
+| ctx struct slot reservation | `compiler.c:struct_registry__init`, `typer.c:typer_infer` |
+| Shared scalar-elem encoding | `ast.c` (the `JACL_SCALAR_*` macros, after `JaclType` enum) |
+| Compiler's runtime-state tracker | `compiler.c:compiler__ensure_boxed` (only reader of `c->last_expr_type`) |
+
+**What's *not* here yet** (deliberately skipped):
+
+- Stage 4 (separate `TypedAstNode` from `AstNode`) — optional;
+  weighed against benefit. Not pursued.
+- Stage 1e (typer emits type errors directly) — typer flags
+  divergences in `inferred_type=DYN` but doesn't report errors.
+  The compiler still owns error reporting (using the shared
+  formatters in `src/type_error.c`).
+- Stage 1f (`dyn` as a real type with defined-semantics ops) —
+  the architecture supports it but the rules aren't written.
+- Stage 5 (pointer types `*T` for FFI) — design pending.
+
+---
+
 ## End state
 
 After all stages land, the architecture looks like:
