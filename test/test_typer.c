@@ -374,6 +374,33 @@ static void test_await_of_dyn_stays_dyn(void) {
   arena_destroy(&a);
 }
 
+static void test_vec_get_scalar_narrows(void) {
+  current_test = "vec_get_scalar_narrows";
+  arena_t a = {0};
+  /* [vec-get $typed_vec idx] narrows to the element type when the
+   * receiver is a typed vec with a scalar element idx (encoded via
+   * the JACL_SCALAR_TYPE_IDX sentinel). */
+  ParseResult r = run_typer(
+      "def [Vec i64] xs [[Vec i64] 1 2 3]\n"
+      "def n [vec-get $xs 0]", &a);
+  AstNode* vg = find_cmd(r.nodes[1], "vec-get");
+  ASSERT_NOT_NULL(vg);
+  ASSERT_TYPE(vg, TYPE_I64);
+  arena_destroy(&a);
+}
+
+static void test_map_get_scalar_narrows(void) {
+  current_test = "map_get_scalar_narrows";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "def [Map i32] m [[Map i32] \"a\" 1 \"b\" 2]\n"
+      "def v [map-get $m \"a\"]", &a);
+  AstNode* mg = find_cmd(r.nodes[1], "map-get");
+  ASSERT_NOT_NULL(mg);
+  ASSERT_TYPE(mg, TYPE_I32);
+  arena_destroy(&a);
+}
+
 static void test_try_unifies_body_and_handler(void) {
   current_test = "try_unifies_body_and_handler";
   arena_t a = {0};
@@ -476,6 +503,8 @@ int main(void) {
   test_spawn_returns_future();
   test_await_of_future_narrows_to_element();
   test_await_of_dyn_stays_dyn();
+  test_vec_get_scalar_narrows();
+  test_map_get_scalar_narrows();
   test_try_unifies_body_and_handler();
   test_try_heterogeneous_stays_dyn();
   test_with_ctx_inherits_body_type();

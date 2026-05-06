@@ -255,17 +255,16 @@ behavior change.
    `map-get` element types, `take`/`first`/`reset`/`swap`/`hash`/
    `interpret`/FFI cluster. Plus closures and imported procs are
    absent from the typer's proc registry.
-4. **Stage 1c — typed-collection element narrowing.** ✅ PARTIAL.
-   Done (this session): typed-collection constructor `[[Vec T] ...]` /
-   `[[Map K V] ...]` now types as TYPE_TYPED_VEC/MAP with element
-   `inferred_struct_idx` populated for struct elements. `[vec-get
-   $typed_vec idx]` / `[map-get $typed_map key]` narrow to TYPE_STRUCT
-   with the element struct_idx when the receiver carries it. Proc
-   params declared `[Vec T]` / `[Map K V]` and bindings declared with
-   typed-collection types also propagate the elem struct_idx. Not
-   done: scalar-element narrowing (`[Vec i64]` etc.) — still DYN
-   because the typer would need the compiler's
-   COMPILER_SCALAR_TYPE_IDX sentinel encoding.
+4. **Stage 1c — typed-collection element narrowing.** ✅ DONE.
+   Typed-collection constructor `[[Vec T] ...]` / `[[Map K V] ...]`
+   types as TYPE_TYPED_VEC/MAP with element `inferred_struct_idx`
+   populated. `[vec-get $typed_vec idx]` / `[map-get $typed_map key]`
+   narrow to the element type — TYPE_STRUCT for struct elements,
+   the scalar JaclType for scalar elements (via the shared
+   `JACL_SCALAR_TYPE_IDX` sentinel encoding). Proc params declared
+   `[Vec T]` / `[Map K V]` and bindings declared with typed-
+   collection types also propagate the elem struct_idx. Both
+   scalar and struct cases are covered.
 5. **Stage 1d — narrowing through every guard.** ✅ PARTIAL.
    Done: `[box? Type $x]`. Not done: typed-collection box guards
    (`box? [Vec T]`), error guards in `try`.
