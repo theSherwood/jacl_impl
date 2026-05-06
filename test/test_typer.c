@@ -374,6 +374,28 @@ static void test_await_of_dyn_stays_dyn(void) {
   arena_destroy(&a);
 }
 
+static void test_hash_returns_i32(void) {
+  current_test = "hash_returns_i32";
+  arena_t a = {0};
+  ParseResult r = run_typer("def h [hash \"key\"]", &a);
+  AstNode* h = find_cmd(r.nodes[0], "hash");
+  ASSERT_NOT_NULL(h);
+  ASSERT_TYPE(h, TYPE_I32);
+  arena_destroy(&a);
+}
+
+static void test_take_preserves_typed_vec(void) {
+  current_test = "take_preserves_typed_vec";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "def [Vec i64] xs [[Vec i64] 1 2 3]\n"
+      "def ys [take $xs 2]", &a);
+  AstNode* tk = find_cmd(r.nodes[1], "take");
+  ASSERT_NOT_NULL(tk);
+  ASSERT_TYPE(tk, TYPE_TYPED_VEC);
+  arena_destroy(&a);
+}
+
 static void test_vec_get_scalar_narrows(void) {
   current_test = "vec_get_scalar_narrows";
   arena_t a = {0};
@@ -503,6 +525,8 @@ int main(void) {
   test_spawn_returns_future();
   test_await_of_future_narrows_to_element();
   test_await_of_dyn_stays_dyn();
+  test_hash_returns_i32();
+  test_take_preserves_typed_vec();
   test_vec_get_scalar_narrows();
   test_map_get_scalar_narrows();
   test_try_unifies_body_and_handler();

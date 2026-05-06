@@ -2079,6 +2079,17 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             node->inferred_type = recv_t;
           }
           return;
+        case HEAD_TAKE:
+          /* take preserves the receiver's collection kind:
+           * vec → vec, typed_vec → typed_vec (slice keeps element types),
+           * stream → stream. Mirrors vm.c:OP_TAKE branches. */
+          if (recv_t == TYPE_TYPED_VEC) {
+            node->inferred_type = TYPE_TYPED_VEC;
+            node->inferred_struct_idx = recv->inferred_struct_idx;
+          } else if (recv_t == TYPE_VEC || recv_t == TYPE_STREAM) {
+            node->inferred_type = recv_t;
+          }
+          return;
         default: break;
       }
     }
@@ -2102,6 +2113,8 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       { HEAD_COUNT,       TYPE_I32    },
       { HEAD_VEC_LEN,     TYPE_I32    },
       { HEAD_MAP_LEN,     TYPE_I32    },
+      /* Hash — OP_HASH always pushes an i32 (vm.c:6859). */
+      { HEAD_HASH,        TYPE_I32    },
       /* String results. */
       { HEAD_TO_STRING,   TYPE_STR    },
       { HEAD_SLICE,       TYPE_STR    },

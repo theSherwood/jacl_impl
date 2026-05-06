@@ -251,10 +251,12 @@ behavior change.
    accepted by the compiler in def position (routed through the
    untyped-def path so the binding inherits the RHS's effective
    type — the typer remains the source of truth for the static
-   type identity). Not done: `vec-get`/
-   `map-get` element types, `take`/`first`/`reset`/`swap`/`hash`/
-   `interpret`/FFI cluster. Plus closures and imported procs are
-   absent from the typer's proc registry.
+   type identity). hash → i32. take preserves the receiver's
+   collection kind (typed_vec → typed_vec, vec → vec, stream →
+   stream). reset on a struct-box → TYPE_STRUCT, else NIL. Not
+   done: `first`, `swap`, `interpret`, FFI cluster — these type
+   to dyn today. Plus closures and imported procs are absent from
+   the typer's proc registry.
 4. **Stage 1c — typed-collection element narrowing.** ✅ DONE.
    Typed-collection constructor `[[Vec T] ...]` / `[[Map K V] ...]`
    types as TYPE_TYPED_VEC/MAP with element `inferred_struct_idx`
