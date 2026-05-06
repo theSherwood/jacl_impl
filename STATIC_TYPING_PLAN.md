@@ -304,21 +304,33 @@ ctx with the built-in `pwd: str` field. With those, the chained-
 dot reads migrate to the AST and `c->last_struct_idx` is deleted
 from compiler.c and jacl.h.
 
-**Status:** `c->last_expr_type` is the only Compiler-side type
-tracker still alive. It's read by audit-mode comparison code; the
-writes throughout compile_command keep it valid. Deletion is
-mechanical (delete writes, delete audit's last_expr_type
-comparison) but the audit serves as future-regression insurance
-during the env-into-ctx work that's queued next, so deferring.
+**Update (commit `0aa722f`):** typer-audit machinery deleted —
+the audit served its purpose as a Stage-1/2 development bridge.
+Removed: `TyperAuditStats`, `compiler__audit_*` functions, the
+`JACL_TYPER_AUDIT` compile flag, build.sh's `--audit` option.
 
-`c->last_expr_type` reads still flow through helpers like
-`compile_typed_elem_arg`'s scalar branch (typer doesn't propagate
-the helper's expected_type through AST_LIT_INT narrowing) and the
-hundred or so post-compile reads inside compile_command branches
-that use it for dispatch decisions.
+**Final state of Stage 3:**
 
-`compiler__get_type` (a TypeInfo getter that read all three
-fields) was deleted in commit `9b95e12` — no callers.
+`c->last_expr_type` survives. Its only reader is
+`compiler__ensure_boxed`, which has runtime-state semantics: it
+reflects the post-emit stack representation, not the declared
+AST type. Var-ref loads of mutable cells emit
+`OP_GET_CELL_LOCAL + OP_TO_DYN` as a pair (compiler.c ~10973),
+leaving last_expr_type=DYN even when the binding's declared
+type is e.g. i64. Reading `args[i]->inferred_type` instead would
+re-emit OP_TO_DYN on a value that's already boxed, corrupting
+the stack. Documented in commit `2297a56`.
+
+`c->last_struct_idx` and `c->last_key_struct_idx` are deleted.
+`compiler__get_type` (TypeInfo getter) is deleted.
+The typer-audit machinery is deleted.
+
+The compiler's type tracking is now narrowly scoped to:
+"what's on the stack right now, for ensure_boxed's auto-boxing."
+Type identity (declared types of bindings, struct registry
+indices, typed-collection element types) lives entirely on
+AstNode (`inferred_type`, `inferred_struct_idx`,
+`inferred_key_struct_idx`).
 
 **Tasks:**
 
