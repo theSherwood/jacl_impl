@@ -592,36 +592,105 @@ separation is *interface clarity* — the compiler's input type becomes
 Worth doing if/when the compiler grows further; not critical for
 correctness.
 
-### Stage 5 — Pointer types for FFI (2-3 weeks)
+### Stage 5 — Pointer types for in-process debugger scripting
 
-After the migration architecture is stable, add `*T` to the type
-system as a real, user-visible category. This is the FFI enablement
-work that motivated the inline-vs-pointer distinction in decision 3.
+After the migration architecture is stable, add typed pointers to the
+language so JACL can drive in-process memory inspection of C structs
+(the use case: gdb/lldb-style scripts that walk `[Ptr Point]`,
+read/write fields, scan arrays).
 
-**Tasks:**
+**Surface syntax:** `[Ptr T]` — bracketed compound type annotation
+matching the existing `[Vec T]`, `[Map K V]`, `[Future T]` idiom. The
+arrow form `$p->x` reuses the existing `->` field-access syntax
+(already lexed and routed through the dot-handler today).
 
-1. **Design the pointer type vocabulary.** `*T` only, or also
-   `*mut T`? Should `*T` apply to primitives (`*i32`, `*u8`) or only
-   to structs? Auto-deref on field access (`[. $p field]` works on
-   both `Point` and `*Point`), or always explicit? Defer the answers
-   to a design discussion when we get here.
-2. **Extend `JaclType` encoding.** The Stage 1 data-structure work
-   already left room (decision 3); fill it in.
-3. **Add operations:** `[ptr-deref $p]`, `[ptr-addr-of $val]`, and
-   `[ptr-offset $p $n]` at minimum. Plus FFI call signatures using
-   `*T` types.
-4. **Codegen.** New opcodes for pointer load/store; integration
-   with existing inline-struct codegen so a pointer to an inline
-   struct field works.
-5. **Typer rules.** `*T ↔ T` is a barrier crossing (consistent with
-   decision 1's model). Going from `T` to `*T` requires
-   `[ptr-addr-of]`; going from `*T` to `T` requires `[ptr-deref]`.
-   No implicit coercion.
+**Design decisions (resolved before implementation):**
 
-**Exit criteria:** can write a JACL program that calls a C function
-returning `*Point`, deref it, read fields, and the typer rejects
-treating the pointer as a value (or vice versa) without explicit
-ops.
+1. **Mutability:** `[Ptr T]` only; reads and writes both legal.
+   `[Ptr mut T]` distinction deferred — adds parse complexity for low
+   payoff in an inspection workflow.
+2. **Deref ergonomics:** auto-deref on field access. `$p->x` reading
+   through `[Ptr Point]` matches debugger user expectations. Single
+   deref only — no implicit `[Ptr [Ptr T]]` chains.
+3. **Operations:** `[ptr-cast [Ptr T] $u64]` (raw addr → typed
+   pointer), `[ptr-addr $p]` (back to u64), `[ptr-deref $p]` (load
+   pointee), `[ptr-offset $p $n]` (typed: adds `n * sizeof(T)`),
+   `[ptr-diff]`, `[ptr-eq]`, `[ptr-lt]`. Field auto-deref handles the
+   common case; `ptr-deref` is for scalar-pointer loads (`[Ptr i32]`).
+4. **Typed externs:** new top-level `extern <ret-type> <name>
+   <params>` mirrors `proc` syntax minus the body. Lets the typer
+   record native-fn signatures so calls type-check without per-site
+   casts.
+5. **Generic over pointee:** one `TYPE_PTR` enum value carries the
+   pointee parameter via the existing `inferred_struct_idx` slot
+   (struct registry idx for `[Ptr Point]`; `JACL_SCALAR_TYPE_IDX`
+   sentinel for `[Ptr i32]`). Same encoding pattern as typed
+   collections and `[Future T]`.
+
+**Stage 5a — pointer type + cast (foundation, ~1 week) — IN
+PROGRESS.** Done in this commit:
+
+- `TYPE_PTR` added to `JaclType` enum (`ast.c` canonical, `jacl.h`
+  mirror).
+- `[Ptr T]` recognized by the typer in def/mut/set and proc-param
+  positions; `typer__ptr_type` helper mirrors `typer__future_type`.
+- Compiler accepts `[Ptr T]` annotations: in def positions
+  `declared_type` becomes `TYPE_U64` (the runtime storage rep), with
+  a `ptr_u64_compat` exception in the type-check so `def [Ptr T] p
+  [ptr-cast …]` compiles. In proc-param positions the parameter is
+  registered as `TYPE_PTR` with the pointee idx.
+- `HEAD_PTR_CAST` and `HEAD_PTR_ADDR` head IDs added (ast.c lookup
+  table + jacl.h mirror).
+- `[ptr-cast [Ptr T] $u64]` builtin: typer marks the AST node as
+  `TYPE_PTR` + pointee idx; the compiler emits no opcode beyond the
+  value expression. Errors on non-`[Ptr T]` first arg or non-u64
+  value.
+- `[ptr-addr $p]` builtin: typer narrows the result to `TYPE_U64`,
+  errors on non-pointer operand.
+- Typer rules:
+  - Pointer arithmetic via `+ - * / %` → compile error (use
+    `ptr-offset`).
+  - Comparing two pointers with different pointees → compile error.
+  - Assigning a pointer of the wrong pointee to a typed binding →
+    compile error.
+- Tests: 4 new typer-only cases (`test_ptr_cast_returns_typed_ptr`,
+  `test_ptr_cast_struct_pointee`, `test_ptr_addr_returns_u64`,
+  `test_ptr_t_def_annotation`); 6 new type-error cases
+  (`ptr_cast_bad_first_arg`, `ptr_cast_value_not_u64`,
+  `ptr_addr_not_ptr`, `ptr_pointee_mismatch_assign`,
+  `ptr_arithmetic_plus`, `ptr_compare_different_pointees`); 2 new
+  `.jacl` corpus files (`ptr_cast_roundtrip.jacl`,
+  `ptr_struct_pointee.jacl`).
+
+**Stage 5a — typed externs (next commit)**
+
+- New `extern <ret-type> <name> <params>` declaration form. Typer
+  records the signature so calls return the declared type;
+  runtime dispatch routes through the existing native-fn registry
+  as today (`embed__register_native` is still where the C function
+  lives).
+- Compound return types (`[Ptr T]`, `[Future T]`, `[Vec T]`, etc.)
+  accepted in extern's return-type position; `proc` return types
+  follow the same pattern.
+
+**Stage 5b — deref + field auto-deref (~1 week)**
+
+- `[ptr-deref $p]` for scalar-pointee loads.
+- `$p->x` and `[. $p field]` auto-deref when receiver is `[Ptr
+  Struct]`.
+- `set $p->x val` and `[. $p field val]` auto-deref for write.
+- New opcode(s) for typed pointer load/store; reuse existing struct
+  layout (`struct__type_size` / field offsets).
+
+**Stage 5c — pointer arithmetic for array walking (~3-5 days)**
+
+- `[ptr-offset $p $n]`, `[ptr-diff]`, `[ptr-eq]`, `[ptr-lt]`.
+
+**Exit criteria (Stage 5 overall):** can write a JACL debugger
+script that takes a raw u64 address from a registered native fn,
+casts to `[Ptr Point]`, reads `$p->x` / `$p->y`, walks an array via
+`[ptr-offset]`, and the typer rejects pointee/value/arithmetic
+confusion at compile time.
 
 ---
 
@@ -906,7 +975,10 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 | 2 — migrate compiler consumers | ✅ complete |
 | 3 — delete dead state | ✅ complete |
 | 4 — separate `TypedAstNode` | ⏭ skipped (optional, not pursued) |
-| 5 — pointer types `*T` for FFI | ❌ not started |
+| 5a — pointer type + cast (foundation) | 🟡 in progress (this commit lands `TYPE_PTR` + `[Ptr T]` annotation + `[ptr-cast]` / `[ptr-addr]` + typer misuse rules) |
+| 5a — typed externs | ❌ next commit |
+| 5b — deref + field auto-deref | ❌ not started |
+| 5c — pointer arithmetic | ❌ not started |
 
 Tests: 95/95 corpus + 35/35 typer-only + 16/16 type-error. The audit
 machinery from Stages 0–2 was deleted in commit `0aa722f` after it

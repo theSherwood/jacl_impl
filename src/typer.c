@@ -232,6 +232,40 @@ static bool typer__future_type(TyperCtx* tc, AstNode* node,
   return true;
 }
 
+/* Recognize [Ptr T] type-annotation expressions. Returns true and writes
+ * *out_struct_idx with the pointee encoding (scalar sentinel for type
+ * keywords like *i32, real struct idx for *Point). Used everywhere a
+ * [Ptr T] annotation appears (def/mut/set, proc params/return, extern).
+ * Mirrors typer__future_type's shape — single type-name argument. */
+static bool typer__ptr_type(TyperCtx* tc, AstNode* node,
+                            uint32_t* out_struct_idx) {
+  *out_struct_idx = UINT32_MAX;
+  if (!node || node->type != AST_COMMAND || !node->data.command.head) return false;
+  AstNode* h = node->data.command.head;
+  if (h->type != AST_LIT_STRING || h->data.lit_string.length != 3 ||
+      memcmp(h->data.lit_string.value, "Ptr", 3) != 0) return false;
+  if (node->data.command.arg_count != 1) return false;
+  AstNode* arg = node->data.command.args[0];
+  if (arg->type != AST_LIT_STRING) return false;
+  const char* nm = arg->data.lit_string.value;
+  uint32_t    nl = arg->data.lit_string.length;
+  if (is_type_keyword(nm, nl)) {
+    *out_struct_idx = JACL_SCALAR_TYPE_IDX(type_from_keyword(nm, nl));
+    return true;
+  }
+  for (uint32_t si = 0; si < tc->struct_count; si++) {
+    if (tc->structs[si].name_len == nl &&
+        memcmp(tc->structs[si].name, nm, nl) == 0) {
+      *out_struct_idx = si;
+      return true;
+    }
+  }
+  /* Unknown pointee — still recognize as Ptr; the typer's pointee
+   * lookups will fail safely (UNKNOWN sentinel) without losing the
+   * annotation's type identity. */
+  return true;
+}
+
 /* Recognize [Vec T] / [Map V] / [Map K V] type expressions. Returns
  * 1 for [Vec T], 2 for [Map V] (dyn keys), 3 for [Map K V] (struct
  * keys), 0 if not a typed-collection expression. Mirrors
@@ -301,9 +335,13 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       }
     } else {
       uint32_t fut_sidx;
+      uint32_t ptr_sidx;
       if (typer__future_type(tc, args[0], &fut_sidx)) {
         declared_type = TYPE_FUTURE;
         declared_struct_idx = fut_sidx;
+      } else if (typer__ptr_type(tc, args[0], &ptr_sidx)) {
+        declared_type = TYPE_PTR;
+        declared_struct_idx = ptr_sidx;
       } else {
         int tcoll = typer__typed_collection_kind(args[0]);
         if (tcoll == 1) declared_type = TYPE_TYPED_VEC;
@@ -526,6 +564,19 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
           name_node->data.lit_string.value,
           name_node->data.lit_string.length);
       typer__error(tc, name_node->start.line, name_node->start.column, err);
+    } else if (declared_type == TYPE_PTR && rhs_t == TYPE_PTR &&
+               declared_struct_idx != UINT32_MAX &&
+               value_node->inferred_struct_idx != UINT32_MAX &&
+               declared_struct_idx != value_node->inferred_struct_idx) {
+      /* Both sides typed pointers but pointee idx mismatch — different
+       * concrete types in spirit even though the JaclType tag matches. */
+      char err[200];
+      snprintf(err, sizeof(err),
+               "type error: cannot assign pointer to different pointee type "
+               "to binding '%.*s'",
+               (int)name_node->data.lit_string.length,
+               name_node->data.lit_string.value);
+      typer__error(tc, name_node->start.line, name_node->start.column, err);
     }
   }
 
@@ -549,9 +600,10 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   uint32_t struct_idx = UINT32_MAX;
   uint32_t key_struct_idx = UINT32_MAX;
   if (effective == TYPE_STRUCT || is_typed_collection(effective) ||
-      effective == TYPE_FUTURE) {
+      effective == TYPE_FUTURE || effective == TYPE_PTR) {
     /* Declared struct (def Point r ...) / typed-collection elem
-     * (def [Vec Point] ps ...) wins; otherwise inherit from RHS. */
+     * (def [Vec Point] ps ...) / pointer pointee
+     * (def [Ptr Point] p ...) wins; otherwise inherit from RHS. */
     if (declared_struct_idx != UINT32_MAX) {
       struct_idx = declared_struct_idx;
     } else {
@@ -754,9 +806,22 @@ static uint32_t typer__parse_params(TyperCtx* tc, AstNode* params,
     if (count >= TYPER_MAX_PROC_PARAMS) break;
     if (elem->type == AST_COMMAND) {
       /* compound type expr: [Vec T] / [Map K V] / [Map V] resolves to a
-       * typed collection; anything else falls back to dyn. Element
-       * struct_idx is propagated so vec-get/map-get on the param can
-       * narrow the result to TYPE_STRUCT. */
+       * typed collection; [Ptr T] resolves to a typed pointer; anything
+       * else falls back to dyn. Element/pointee struct_idx is
+       * propagated so vec-get/map-get/auto-deref on the param can
+       * narrow the result. */
+      uint32_t ptr_sidx;
+      if (typer__ptr_type(tc, elem, &ptr_sidx)) {
+        fi++;
+        if (fi >= flat_n) break;
+        AstNode* nameelem = flat[fi];
+        if (nameelem->type != AST_LIT_STRING) continue;
+        (*name_nodes_out)[count]   = nameelem;
+        (*types_out)[count]        = TYPE_PTR;
+        (*struct_idxs_out)[count]  = ptr_sidx;
+        count++;
+        continue;
+      }
       int tcoll = typer__typed_collection_kind(elem);
       JaclType t = TYPE_DYN;
       uint32_t elem_sidx = UINT32_MAX;
@@ -1567,6 +1632,27 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        *  - Comparison of tagged scalars: still allowed; cross-type
        *    equality is meaningful (always false) and tests rely on it.
        *  - Mixed dyn/typed: stays permissive (decision 2 deferred). */
+      /* TYPE_PTR-specific rules (Stage 5a):
+       *  - Arithmetic with any pointer operand → error (use [ptr-offset]).
+       *  - Comparison of two TYPE_PTR values → require matching pointee
+       *    idx; otherwise it's a type error.
+       *  - Comparison of TYPE_PTR with a non-pointer concrete type
+       *    falls through to the generic concrete-mismatch check below. */
+      if ((lhs_t == TYPE_PTR || rhs_t == TYPE_PTR) && is_arith) {
+        char err[160];
+        snprintf(err, sizeof(err),
+                 "type error: cannot perform arithmetic on pointer values "
+                 "— use [ptr-offset $p $n] for typed pointer arithmetic");
+        typer__error(tc, lhs->start.line, lhs->start.column, err);
+      } else if (lhs_t == TYPE_PTR && rhs_t == TYPE_PTR && is_cmp &&
+                 lhs->inferred_struct_idx != rhs->inferred_struct_idx &&
+                 lhs->inferred_struct_idx != UINT32_MAX &&
+                 rhs->inferred_struct_idx != UINT32_MAX) {
+        char err[160];
+        snprintf(err, sizeof(err),
+                 "type error: cannot compare pointers to different pointee types");
+        typer__error(tc, lhs->start.line, lhs->start.column, err);
+      }
       bool concrete_mismatch = (lhs_t != rhs_t &&
                                 lhs_t != TYPE_DYN && rhs_t != TYPE_DYN);
       bool unboxed_either = is_unboxed_type(lhs_t) || is_unboxed_type(rhs_t);
@@ -2262,6 +2348,44 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         typer__error(tc, arg->start.line, arg->start.column, err);
         node->inferred_type = TYPE_DYN;
       }
+    } else if (hid == HEAD_PTR_CAST && node->data.command.arg_count == 2) {
+      /* [ptr-cast [Ptr T] $u64_value]: re-tag a u64 address as a typed
+       * pointer. The annotation supplies pointee identity; the value
+       * must be u64 (or dyn — the cast is the explicit boundary). */
+      AstNode* type_node = node->data.command.args[0];
+      AstNode* val_node  = node->data.command.args[1];
+      uint32_t pointee_sidx = UINT32_MAX;
+      if (!typer__ptr_type(tc, type_node, &pointee_sidx)) {
+        char err[128];
+        snprintf(err, sizeof(err),
+                 "type error: ptr-cast first argument must be [Ptr T]");
+        typer__error(tc, type_node->start.line, type_node->start.column, err);
+        node->inferred_type = TYPE_DYN;
+      } else {
+        JaclType val_t = (JaclType)val_node->inferred_type;
+        if (val_t != TYPE_U64 && val_t != TYPE_DYN) {
+          char err[128];
+          snprintf(err, sizeof(err),
+                   "type error: ptr-cast value must be u64, got %s",
+                   type_name(val_t));
+          typer__error(tc, val_node->start.line, val_node->start.column, err);
+        }
+        node->inferred_type       = TYPE_PTR;
+        node->inferred_struct_idx = pointee_sidx;
+      }
+    } else if (hid == HEAD_PTR_ADDR && node->data.command.arg_count == 1) {
+      /* [ptr-addr $p]: typed pointer → raw u64. Dyn is permitted; any
+       * other concrete type is a compile-time error. */
+      AstNode* arg = node->data.command.args[0];
+      JaclType arg_t = (JaclType)arg->inferred_type;
+      if (arg_t != TYPE_PTR && arg_t != TYPE_DYN) {
+        char err[128];
+        snprintf(err, sizeof(err),
+                 "type error: ptr-addr expects a pointer, got %s",
+                 type_name(arg_t));
+        typer__error(tc, arg->start.line, arg->start.column, err);
+      }
+      node->inferred_type = TYPE_U64;
     } else if (hl == 4 && memcmp(hn, "puts", 4) == 0) {
       /* "puts" is not in the HeadId table — keep the memcmp here. */
       node->inferred_type = TYPE_NIL;

@@ -100,6 +100,9 @@ typedef enum {
   HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
   HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
 
+  /* Typed pointers (Stage 5a) */
+  HEAD_PTR_CAST, HEAD_PTR_ADDR,
+
   /* Streams / async / shell */
   HEAD_STREAM_NEXT, HEAD_COLLECT, HEAD_COUNT, HEAD_TAKE,
   HEAD_FIRST, HEAD_LINES, HEAD_EXEC, HEAD_SIGNAL, HEAD_CANCEL,
@@ -215,6 +218,8 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "map-keys", 8) == 0) return HEAD_MAP_KEYS;
       if (memcmp(s, "map-vals", 8) == 0) return HEAD_MAP_VALS;
       if (memcmp(s, "defmacro", 8) == 0) return HEAD_DEFMACRO;
+      if (memcmp(s, "ptr-cast", 8) == 0) return HEAD_PTR_CAST;
+      if (memcmp(s, "ptr-addr", 8) == 0) return HEAD_PTR_ADDR;
       return HEAD_NONE;
     case 9:
       if (memcmp(s, "transform", 9) == 0) return HEAD_TRANSFORM;
@@ -282,7 +287,8 @@ typedef enum {
   TYPE_STREAM,
   TYPE_TYPED_VEC,
   TYPE_TYPED_MAP,
-  TYPE_FUTURE
+  TYPE_FUTURE,
+  TYPE_PTR        /* typed pointer; pointee idx in inferred_struct_idx */
 } JaclType;
 
 /* Typed-collection element encoding for struct_idx: real struct registry
@@ -350,6 +356,7 @@ const char* type_name(JaclType t) {
     case TYPE_TYPED_VEC: return "typed-vec";
     case TYPE_TYPED_MAP: return "typed-map";
     case TYPE_FUTURE:    return "future";
+    case TYPE_PTR:       return "ptr";
   }
   return "unknown";
 }

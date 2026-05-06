@@ -128,6 +128,21 @@ static int compiler__typed_collection_expr(AstNode* cmd, AstNode** out_elem,
   return kind;
 }
 
+/* Recognize a [Ptr T] type-annotation expression. Returns true and sets
+ * *out_pointee to the pointee type-name node. The compiler doesn't drive
+ * pointer typing — this is just a parser-shape recognizer so proc params
+ * and def annotations can carry the [Ptr T] syntax through to the typer. */
+static bool compiler__ptr_type_expr(AstNode* cmd, AstNode** out_pointee) {
+  if (cmd->type != AST_COMMAND || !cmd->data.command.head) return false;
+  AstNode* th = cmd->data.command.head;
+  if (th->type != AST_LIT_STRING || th->data.lit_string.length != 3 ||
+      memcmp(th->data.lit_string.value, "Ptr", 3) != 0) return false;
+  if (cmd->data.command.arg_count != 1) return false;
+  if (cmd->data.command.args[0]->type != AST_LIT_STRING) return false;
+  if (out_pointee) *out_pointee = cmd->data.command.args[0];
+  return true;
+}
+
 /* Returns true if a type is allowed as a struct field (value types only).
    Reference types (str, vec, map, closure, dyn, stream) are rejected. */
 bool is_struct_value_type(JaclType t) {
@@ -6604,13 +6619,25 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             tn->data.command.head->type == AST_LIT_STRING) {
           const char* hn = tn->data.command.head->data.lit_string.value;
           uint32_t    hl = tn->data.command.head->data.lit_string.length;
+          bool is_ptr_type = (hl == 3 && memcmp(hn, "Ptr", 3) == 0);
           bool is_compound_type =
               (hl == 3 && (memcmp(hn, "Vec", 3) == 0 ||
                            memcmp(hn, "Map", 3) == 0)) ||
+              is_ptr_type ||
               (hl == 6 && memcmp(hn, "Future", 6) == 0);
           if (is_compound_type) {
-            declared_type = TYPE_DYN;
-            type_explicit = false;
+            /* [Ptr T] storage is a u64 (the runtime rep of any pointer);
+             * the typer separately tracks the pointee identity on the
+             * AST node. For other compound types ([Vec T], [Map T],
+             * [Future T]) the binding inherits its type from the RHS,
+             * since there's no single primitive storage rep. */
+            if (is_ptr_type) {
+              declared_type = TYPE_U64;
+              type_explicit = true;
+            } else {
+              declared_type = TYPE_DYN;
+              type_explicit = false;
+            }
             name_arg_idx   = 1;
             value_arg_idx  = 2;
             goto def_args_resolved;
@@ -6726,8 +6753,15 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
     }
 
-    /* Type check for typed def */
-    if (declared_type != TYPE_DYN && rhs_type != TYPE_DYN && rhs_type != declared_type) {
+    /* Type check for typed def. TYPE_PTR is treated as compatible with
+     * TYPE_U64 here because pointer storage is u64 at runtime — the
+     * pointer identity is tracked by the typer on the AST node. The
+     * typer's pointee-mismatch check fires before reaching here. */
+    bool ptr_u64_compat =
+        (declared_type == TYPE_U64 && rhs_type == TYPE_PTR) ||
+        (declared_type == TYPE_PTR && rhs_type == TYPE_U64);
+    if (declared_type != TYPE_DYN && rhs_type != TYPE_DYN &&
+        rhs_type != declared_type && !ptr_u64_compat) {
       char err_msg[128];
       snprintf(err_msg, sizeof(err_msg), "type error: expected %s, got %s",
                type_name(declared_type), type_name(rhs_type));
@@ -6960,6 +6994,37 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     for (uint32_t fi = 0; fi < flat_count; fi++) {
       AstNode* elem = flat_elems[fi];
+
+      /* Check for [Ptr T] parameter — typed pointer. The typer is the
+       * source of truth for pointee tracking; the compiler just needs
+       * to consume the parameter's name and accept the annotation. */
+      {
+        AstNode* ptr_pointee = NULL;
+        if (compiler__ptr_type_expr(elem, &ptr_pointee)) {
+          fi++;
+          if (fi >= flat_count) {
+            compiler__error(c, line, col, "expected parameter name after [Ptr T] annotation");
+            return;
+          }
+          elem = flat_elems[fi];
+          if (elem->type != AST_LIT_STRING || elem->data.lit_string.length > 128) {
+            compiler__error(c, line, col, "proc parameter name invalid");
+            return;
+          }
+          if (param_count >= COMPILER_MAX_PROC_PARAMS) {
+            compiler__error(c, line, col, "too many proc parameters");
+            return;
+          }
+          param_names_arr[param_count] = compiler__name_val(c->heap, c->intern_table,
+              elem->data.lit_string.value, elem->data.lit_string.length);
+          param_types_arr[param_count] = TYPE_PTR;
+          /* pointee idx isn't tracked by the compiler today — the typer
+           * carries it on the AST node. Leave struct/key idxs sentinel. */
+          param_scope_marks[param_count] = elem->scope_mark;
+          param_count++;
+          continue;
+        }
+      }
 
       /* Check for compound type expression: [Vec Type], [Map Type], [Map K V] */
       {
@@ -9155,6 +9220,36 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_byte(c, opcode, line);
     compiler__emit_byte(c, (uint8_t)src_type, line);
     c->last_expr_type = target_type;
+    return;
+  }
+
+  /* ptr-cast — [ptr-cast [Ptr T] $u64_value]: re-tags a u64 address as
+   * a typed pointer. Pure compile-time op — at runtime a pointer is the
+   * same bits as a u64. The typer marks this node as TYPE_PTR with the
+   * pointee idx; the compiler just compiles the value expression. */
+  if (hid == HEAD_PTR_CAST) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "ptr-cast", "2 arguments", argc);
+      return;
+    }
+    AstNode* type_node = args[0];
+    AstNode* ptr_pointee = NULL;
+    if (!compiler__ptr_type_expr(type_node, &ptr_pointee)) {
+      compiler__error(c, line, col, "ptr-cast: first argument must be a [Ptr T] annotation");
+      return;
+    }
+    compiler__compile_node(c, args[1]);
+    return;
+  }
+
+  /* ptr-addr — [ptr-addr $p]: typed pointer → raw u64. Same runtime bits;
+   * the typer narrows the result type to TYPE_U64. */
+  if (hid == HEAD_PTR_ADDR) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "ptr-addr", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
     return;
   }
 

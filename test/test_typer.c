@@ -523,6 +523,83 @@ static void test_future_t_annotation(void) {
   arena_destroy(&a);
 }
 
+/* --- Stage 5a: typed pointers --- */
+
+static void test_ptr_cast_returns_typed_ptr(void) {
+  current_test = "ptr_cast_returns_typed_ptr";
+  arena_t a = {0};
+  /* [ptr-cast [Ptr i32] $addr] types as TYPE_PTR with i32-pointee idx
+   * (scalar sentinel). */
+  ParseResult r = run_typer(
+      "def u64 addr 0\n"
+      "def p [ptr-cast [Ptr i32] $addr]", &a);
+  AstNode* pc = find_cmd(r.nodes[1], "ptr-cast");
+  ASSERT_NOT_NULL(pc);
+  ASSERT_TYPE(pc, TYPE_PTR);
+  if (pc) {
+    uint32_t want = JACL_SCALAR_TYPE_IDX(TYPE_I32);
+    if (pc->inferred_struct_idx != want) {
+      fprintf(stderr, "  FAIL %s: pointee idx expected %u got %u\n",
+              current_test, want, pc->inferred_struct_idx);
+      failures++;
+    } else { passes++; }
+  }
+  arena_destroy(&a);
+}
+
+static void test_ptr_cast_struct_pointee(void) {
+  current_test = "ptr_cast_struct_pointee";
+  arena_t a = {0};
+  /* [ptr-cast [Ptr Point] $addr] types as TYPE_PTR with Point's struct
+   * registry index as pointee. */
+  ParseResult r = run_typer(
+      "struct Point {i32 x i32 y}\n"
+      "def u64 addr 0\n"
+      "def p [ptr-cast [Ptr Point] $addr]", &a);
+  AstNode* pc = find_cmd(r.nodes[2], "ptr-cast");
+  ASSERT_NOT_NULL(pc);
+  ASSERT_TYPE(pc, TYPE_PTR);
+  if (pc) {
+    /* Point is the first user struct; its idx should be a real
+     * registry idx, not a scalar sentinel. */
+    if (JACL_IS_SCALAR_TYPE_IDX(pc->inferred_struct_idx)) {
+      fprintf(stderr, "  FAIL %s: pointee should be struct idx, got scalar sentinel %u\n",
+              current_test, pc->inferred_struct_idx);
+      failures++;
+    } else { passes++; }
+  }
+  arena_destroy(&a);
+}
+
+static void test_ptr_addr_returns_u64(void) {
+  current_test = "ptr_addr_returns_u64";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "def u64 addr 0\n"
+      "def [Ptr i32] p [ptr-cast [Ptr i32] $addr]\n"
+      "def back [ptr-addr $p]", &a);
+  AstNode* pa = find_cmd(r.nodes[2], "ptr-addr");
+  ASSERT_NOT_NULL(pa);
+  ASSERT_TYPE(pa, TYPE_U64);
+  arena_destroy(&a);
+}
+
+static void test_ptr_t_def_annotation(void) {
+  current_test = "ptr_t_def_annotation";
+  arena_t a = {0};
+  /* def [Ptr Point] p ... — binding's static type is TYPE_PTR with
+   * Point's pointee idx; annotation parsing routes through typer. */
+  ParseResult r = run_typer(
+      "struct Point {i32 x i32 y}\n"
+      "def u64 addr 0\n"
+      "def [Ptr Point] p [ptr-cast [Ptr Point] $addr]\n"
+      "$p", &a);
+  AstNode* var = find_var_ref(r.nodes[3], "p");
+  ASSERT_NOT_NULL(var);
+  ASSERT_TYPE(var, TYPE_PTR);
+  arena_destroy(&a);
+}
+
 /* --- Driver ------------------------------------------------------- */
 
 int main(void) {
@@ -563,6 +640,11 @@ int main(void) {
   test_race_homogeneous_narrows();
   test_race_heterogeneous_stays_dyn();
   test_future_t_annotation();
+
+  test_ptr_cast_returns_typed_ptr();
+  test_ptr_cast_struct_pointee();
+  test_ptr_addr_returns_u64();
+  test_ptr_t_def_annotation();
 
   printf("\n%d/%d passed", passes, passes + failures);
   if (failures > 0) {

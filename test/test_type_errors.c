@@ -218,6 +218,58 @@ static void run_all(void) {
     .expect_substrings = { "type error", "i32", "dyn", "to i32" },
   });
 
+  /* --- Stage 5a: typed pointer misuse rejections --- */
+
+  /* ptr-cast first arg must be a [Ptr T] annotation. */
+  RUN("ptr_cast_bad_first_arg", {
+    .source = "def u64 addr 0\ndef p [ptr-cast i32 $addr]",
+    .expect_substrings = { "ptr-cast", "Ptr T" },
+  });
+
+  /* ptr-cast value arg must be u64 (or dyn). i32 here is wrong. */
+  RUN("ptr_cast_value_not_u64", {
+    .source = "def i32 a 0\ndef p [ptr-cast [Ptr i32] $a]",
+    .expect_substrings = { "ptr-cast", "u64", "i32" },
+  });
+
+  /* ptr-addr expects a pointer; passing a u64 directly is wrong. */
+  RUN("ptr_addr_not_ptr", {
+    .source = "def u64 a 0\ndef back [ptr-addr $a]",
+    .expect_substrings = { "ptr-addr", "pointer", "u64" },
+  });
+
+  /* Assigning a pointer of the wrong pointee to a typed binding. */
+  RUN("ptr_pointee_mismatch_assign", {
+    .source =
+      "struct Point {i32 x i32 y}\n"
+      "struct Circle {i32 r}\n"
+      "def u64 addr 0\n"
+      "def [Ptr Point] p [ptr-cast [Ptr Point] $addr]\n"
+      "def [Ptr Circle] c $p",
+    .expect_substrings = { "type error", "pointer", "pointee", "c" },
+  });
+
+  /* Pointer arithmetic via + is rejected; user must use [ptr-offset]. */
+  RUN("ptr_arithmetic_plus", {
+    .source =
+      "def u64 addr 0\n"
+      "def [Ptr i32] p [ptr-cast [Ptr i32] $addr]\n"
+      "+ $p 4",
+    .expect_substrings = { "type error", "arithmetic", "pointer" },
+  });
+
+  /* Comparing two pointers with different pointees is rejected. */
+  RUN("ptr_compare_different_pointees", {
+    .source =
+      "struct Point {i32 x i32 y}\n"
+      "struct Circle {i32 r}\n"
+      "def u64 addr 0\n"
+      "def [Ptr Point] p [ptr-cast [Ptr Point] $addr]\n"
+      "def [Ptr Circle] c [ptr-cast [Ptr Circle] $addr]\n"
+      "if [== $p $c] { print \"eq\" }",
+    .expect_substrings = { "type error", "pointers", "pointee" },
+  });
+
   /* await on a known concrete non-future operand — typer rejects.
    * Dyn operands and typed futures still pass; this is the
    * statically-knowable bad case. */

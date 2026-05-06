@@ -1,0 +1,7 @@
+# expect: 1000000
+# Stage 5a: ptr-cast wraps a u64 as a typed pointer; ptr-addr unwraps it.
+# Round-trip should preserve the underlying address.
+def u64 addr 1000000
+def [Ptr i32] p [ptr-cast [Ptr i32] $addr]
+def back [ptr-addr $p]
+print $back
