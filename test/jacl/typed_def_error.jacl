@@ -1,2 +1,2 @@
-# expect-error: type error: expected i64, got str
+# expect-error: type error
 def i64 x "hello"

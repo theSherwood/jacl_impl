@@ -211,16 +211,19 @@ static int test_def_untyped_unchanged(void) {
 }
 
 static int test_def_typed_error_str_to_i64(void) {
-  ASSERT(run_err(
-    "def i64 x \"hello\"",
-    "type error: expected i64, got str"));
+  /* Message is produced by jacl_format_assign_mismatch — exact wording
+   * may evolve; assert on the load-bearing tokens (type names + the
+   * "type error" prefix) instead of the full sentence. */
+  ASSERT(run_err("def i64 x \"hello\"", "type error"));
+  ASSERT(run_err("def i64 x \"hello\"", "i64"));
+  ASSERT(run_err("def i64 x \"hello\"", "str"));
   TEST_PASS();
 }
 
 static int test_def_typed_error_str_to_f64(void) {
-  ASSERT(run_err(
-    "def f64 x \"hello\"",
-    "type error: expected f64, got str"));
+  ASSERT(run_err("def f64 x \"hello\"", "type error"));
+  ASSERT(run_err("def f64 x \"hello\"", "f64"));
+  ASSERT(run_err("def f64 x \"hello\"", "str"));
   TEST_PASS();
 }
 

@@ -453,6 +453,29 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   typer__infer_node(tc, value_node);
   tc->expected_type   = saved_et;
 
+  /* Type-check declared vs. actual. Mirrors compiler.c:6714-6726 (def)
+   * and 5983-5995 (mut), but uses the shared formatters consistently.
+   * Skipped for DYN declarations (decision 2 — DYN binding is itself
+   * the explicit boundary marker; no cast required). Also skipped for
+   * struct-to-struct since the typer doesn't yet enforce same-struct-
+   * idx narrowing (compiler still owns that check). */
+  if (declared_type != TYPE_DYN) {
+    JaclType rhs_t = (JaclType)value_node->inferred_type;
+    if (rhs_t == TYPE_DYN) {
+      char err[160];
+      jacl_format_assign_dyn_unnamed(err, sizeof(err), declared_type);
+      typer__error(tc, name_node->start.line, name_node->start.column, err);
+    } else if (rhs_t != declared_type &&
+               !(declared_type == TYPE_STRUCT && rhs_t == TYPE_STRUCT)) {
+      char err[160];
+      jacl_format_assign_mismatch(err, sizeof(err),
+          declared_type, rhs_t,
+          name_node->data.lit_string.value,
+          name_node->data.lit_string.length);
+      typer__error(tc, name_node->start.line, name_node->start.column, err);
+    }
+  }
+
   /* Effective type: declared wins. For an untyped def/mut, mirror
    * compiler.c:7013-7019: only unboxed scalars (i64/u64/f64), structs,
    * streams, and typed collections are inherited from the RHS; tagged
