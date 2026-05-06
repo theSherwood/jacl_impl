@@ -384,6 +384,18 @@ static void test_hash_returns_i32(void) {
   arena_destroy(&a);
 }
 
+static void test_first_narrows_typed_vec_elem(void) {
+  current_test = "first_narrows_typed_vec_elem";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "def [Vec i64] xs [[Vec i64] 1 2 3]\n"
+      "def n [first $xs]", &a);
+  AstNode* fst = find_cmd(r.nodes[1], "first");
+  ASSERT_NOT_NULL(fst);
+  ASSERT_TYPE(fst, TYPE_I64);
+  arena_destroy(&a);
+}
+
 static void test_take_preserves_typed_vec(void) {
   current_test = "take_preserves_typed_vec";
   arena_t a = {0};
@@ -540,6 +552,7 @@ int main(void) {
   test_await_of_future_narrows_to_element();
   test_await_of_dyn_stays_dyn();
   test_hash_returns_i32();
+  test_first_narrows_typed_vec_elem();
   test_take_preserves_typed_vec();
   test_vec_get_scalar_narrows();
   test_map_get_scalar_narrows();

@@ -2099,6 +2099,22 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
             node->inferred_type = recv_t;
           }
           return;
+        case HEAD_FIRST:
+          /* first returns the receiver's first element. Narrow when
+           * the receiver is a typed-vec with a knowable element type
+           * (same encoding as vec-get / map-get). Plain vec / map /
+           * stream → DYN since elements are heterogeneously typed. */
+          if (recv_t == TYPE_TYPED_VEC &&
+              recv->inferred_struct_idx != UINT32_MAX) {
+            uint32_t eidx = recv->inferred_struct_idx;
+            if (JACL_IS_SCALAR_TYPE_IDX(eidx)) {
+              node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(eidx);
+            } else if (eidx < tc->struct_count) {
+              node->inferred_type = TYPE_STRUCT;
+              node->inferred_struct_idx = eidx;
+            }
+          }
+          return;
         default: break;
       }
     }
