@@ -1255,6 +1255,14 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     }
   }
 
+  /* For typed-collection mutators (vec-push/-set, map-set/-remove/-get/-has),
+   * once args[0] (the receiver) is typed, derive elem_t / key_t from its
+   * inferred_struct_idx / inferred_key_struct_idx so subsequent value/key
+   * args narrow correctly. Scalar idx → scalar JaclType; struct idx →
+   * TYPE_STRUCT. */
+  HeadId mutator_hid = (head && head->type == AST_LIT_STRING)
+                       ? (HeadId)node->data.command.head_id : HEAD_NONE;
+
   for (uint32_t i = 0; i < node->data.command.arg_count; i++) {
     AstNode* arg = node->data.command.args[i];
     JaclType saved_et = tc->expected_type;
@@ -1268,6 +1276,46 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
                (ctor_elem_t != TYPE_DYN || ctor_key_t != TYPE_DYN)) {
       /* Map ctor: alternating key/value pairs. Even idx → key, odd → val. */
       tc->expected_type = (i % 2 == 0) ? ctor_key_t : ctor_elem_t;
+    } else if (i > 0 && (mutator_hid == HEAD_VEC_PUSH ||
+                         mutator_hid == HEAD_VEC_SET ||
+                         mutator_hid == HEAD_MAP_SET ||
+                         mutator_hid == HEAD_MAP_REMOVE ||
+                         mutator_hid == HEAD_MAP_GET ||
+                         mutator_hid == HEAD_MAP_HAS)) {
+      AstNode* recv = node->data.command.args[0];
+      JaclType recv_t = (JaclType)recv->inferred_type;
+      uint32_t e_idx = recv->inferred_struct_idx;
+      uint32_t k_idx = recv->inferred_key_struct_idx;
+      JaclType target = TYPE_DYN;
+      /* Pick the right slot:
+       *   vec-push i=1 → elem
+       *   vec-set  i=1 → idx (DYN), i=2 → elem
+       *   map-set  i=1 → key, i=2 → val
+       *   map-remove/get/has i=1 → key
+       */
+      if (recv_t == TYPE_TYPED_VEC) {
+        if (mutator_hid == HEAD_VEC_PUSH ||
+            (mutator_hid == HEAD_VEC_SET && i == 2)) {
+          if (e_idx != UINT32_MAX && JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
+            target = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+          }
+        }
+      } else if (recv_t == TYPE_TYPED_MAP) {
+        bool is_key_slot =
+            (mutator_hid == HEAD_MAP_REMOVE ||
+             mutator_hid == HEAD_MAP_GET ||
+             mutator_hid == HEAD_MAP_HAS ||
+             (mutator_hid == HEAD_MAP_SET && i == 1));
+        bool is_val_slot = (mutator_hid == HEAD_MAP_SET && i == 2);
+        if (is_key_slot && k_idx != UINT32_MAX &&
+            JACL_IS_SCALAR_TYPE_IDX(k_idx)) {
+          target = JACL_TYPE_IDX_TO_SCALAR(k_idx);
+        } else if (is_val_slot && e_idx != UINT32_MAX &&
+                   JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
+          target = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+        }
+      }
+      tc->expected_type = target;
     } else {
       tc->expected_type = TYPE_DYN;
     }

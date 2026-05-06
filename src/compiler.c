@@ -2605,14 +2605,9 @@ static bool compiler__compile_typed_elem_arg(Compiler* c, AstNode* arg,
   }
   compiler__compile_node(c, arg);
   c->expected_type = TYPE_DYN;
-  /* Scalar element narrowing relies on c->expected_type set above —
-   * use c->last_expr_type since the typer doesn't currently propagate
-   * expected_type through the compiler's own scalar-element path
-   * (typer's compile-time literal narrowing is a separate code path
-   * driven by tc->expected_type). Struct element check reads from
-   * the AST. */
   if (is_scalar) {
-    return c->last_expr_type == COMPILER_TYPE_IDX_TO_SCALAR(expected_type_idx);
+    return (JaclType)arg->inferred_type ==
+           COMPILER_TYPE_IDX_TO_SCALAR(expected_type_idx);
   }
   return (JaclType)arg->inferred_type == TYPE_STRUCT &&
          arg->inferred_struct_idx == expected_type_idx;
@@ -3742,7 +3737,7 @@ static bool compiler__compile_vec_receiver(Compiler* c, AstNode* node,
                                            const char* opname,
                                            uint32_t line, uint32_t col) {
   compiler__compile_node(c, node);
-  if (c->last_expr_type == TYPE_STREAM) {
+  if ((JaclType)node->inferred_type == TYPE_STREAM) {
     char msg[128];
     snprintf(msg, sizeof(msg),
              "%s requires a vector; got stream (use collect to materialize)",
@@ -3755,13 +3750,15 @@ static bool compiler__compile_vec_receiver(Compiler* c, AstNode* node,
 
 /* --- Internal: Reject bare struct in dyn context (compile-time error) --- */
 
-static bool compiler__reject_bare_typed(Compiler* c, uint32_t line, uint32_t col,
+static bool compiler__reject_bare_typed(Compiler* c, AstNode* node,
+                                        uint32_t line, uint32_t col,
                                         const char* context) {
-  if (c->last_expr_type == TYPE_STRUCT || is_typed_collection(c->last_expr_type)) {
+  JaclType t = (JaclType)node->inferred_type;
+  if (t == TYPE_STRUCT || is_typed_collection(t)) {
     char err_msg[128];
     snprintf(err_msg, sizeof(err_msg),
              "cannot store bare %s in %s; use [box ...] to box it",
-             type_name(c->last_expr_type), context);
+             type_name(t), context);
     compiler__error(c, line, col, err_msg);
     return true;
   }
@@ -5077,13 +5074,14 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->expected_type = val_t;
         compiler__compile_node(c, args[i * 2 + 1]); /* value: must match scalar */
         c->expected_type = TYPE_DYN;
-        if (c->last_expr_type != val_t) {
+        JaclType v_t = (JaclType)args[i * 2 + 1]->inferred_type;
+        if (v_t != val_t) {
           char err[160];
           snprintf(err, sizeof(err),
                    "[Map %.*s]: value %u is not a %.*s value (got %s)",
                    (int)type_name_len, type_name_str, i,
                    (int)type_name_len, type_name_str,
-                   type_name(c->last_expr_type));
+                   type_name(v_t));
           compiler__error(c, line, col, err);
           return;
         }
@@ -5289,7 +5287,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           num_spreads++;
         } else {
           compiler__compile_node(c, args[i]);
-          if (compiler__reject_bare_typed(c, line, col, "dyn vec")) return;
+          if (compiler__reject_bare_typed(c, args[i], line, col, "dyn vec")) return;
           fixed_args++;
         }
       }
@@ -5631,21 +5629,22 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (hid == HEAD_PRINT) {
     if (argc != 1) { compiler__builtin_arity_error(c, line, col, "print", "1 argument", argc); return; }
     compiler__compile_node(c, args[0]);
+    JaclType arg_type = (JaclType)args[0]->inferred_type;
     uint32_t arg_struct_idx = args[0]->inferred_struct_idx;
-    if (c->last_expr_type == TYPE_TYPED_VEC) {
+    if (arg_type == TYPE_TYPED_VEC) {
       compiler__emit_byte(c, OP_TYPED_VEC_PRINT, line);
       compiler__emit_u16(c, (uint16_t)arg_struct_idx, line);
       c->last_expr_type = TYPE_NIL;
       return;
     }
-    if (c->last_expr_type == TYPE_TYPED_MAP) {
+    if (arg_type == TYPE_TYPED_MAP) {
       compiler__emit_byte(c, OP_TYPED_MAP_PRINT, line);
       compiler__emit_u16(c, (uint16_t)arg_struct_idx, line);
       compiler__emit_u16(c, (uint16_t)args[0]->inferred_key_struct_idx, line);
       c->last_expr_type = TYPE_NIL;
       return;
     }
-    if (c->last_expr_type == TYPE_STRUCT && arg_struct_idx != UINT32_MAX) {
+    if (arg_type == TYPE_STRUCT && arg_struct_idx != UINT32_MAX) {
       /* Typed struct print — no heap reify, formatter walks inline bytes. */
       compiler__emit_byte(c, OP_PRINT_STRUCT, line);
       compiler__emit_u16(c, (uint16_t)arg_struct_idx, line);
@@ -8358,7 +8357,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
   if (hid == HEAD_VEC) {
     for (uint32_t i = 0; i < argc; i++) {
       compiler__compile_node(c, args[i]);
-      if (compiler__reject_bare_typed(c, line, col, "dyn vec")) return;
+      if (compiler__reject_bare_typed(c, args[i], line, col, "dyn vec")) return;
     }
     compiler__emit_byte(c, OP_VEC, line);
     compiler__emit_byte(c, (uint8_t)argc, line);
@@ -8373,8 +8372,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     if (!compiler__compile_vec_receiver(c, args[0], "vec-get", line, col)) return;
-    if (c->last_expr_type == TYPE_TYPED_VEC) {
-      uint32_t elem_type_idx = c->last_struct_idx;
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_VEC) {
+      uint32_t elem_type_idx = args[0]->inferred_struct_idx;
       compiler__compile_node(c, args[1]);
       compiler__emit_byte(c, OP_TYPED_VEC_GET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
@@ -8403,7 +8402,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     if (!compiler__compile_vec_receiver(c, args[0], "vec-len", line, col)) return;
-    if (c->last_expr_type == TYPE_TYPED_VEC) {
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_VEC) {
       compiler__emit_byte(c, OP_TYPED_VEC_LEN, line);
       c->last_expr_type = TYPE_I32;
       return;
@@ -8420,8 +8419,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     if (!compiler__compile_vec_receiver(c, args[0], "vec-push", line, col)) return;
-    if (c->last_expr_type == TYPE_TYPED_VEC) {
-      uint32_t elem_type_idx = c->last_struct_idx;
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_VEC) {
+      uint32_t elem_type_idx = args[0]->inferred_struct_idx;
       if (!compiler__compile_typed_elem_arg(c, args[1], elem_type_idx)) {
         compiler__error(c, line, col, "vec-push: element type does not match typed vec element type");
         return;
@@ -8433,7 +8432,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[1]);
-    if (compiler__reject_bare_typed(c, line, col, "dyn vec")) return;
+    if (compiler__reject_bare_typed(c, args[1], line, col, "dyn vec")) return;
     compiler__emit_byte(c, OP_VEC_PUSH, line);
     c->last_expr_type = TYPE_VEC;
     return;
@@ -8446,8 +8445,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     if (!compiler__compile_vec_receiver(c, args[0], "vec-set", line, col)) return;
-    if (c->last_expr_type == TYPE_TYPED_VEC) {
-      uint32_t elem_type_idx = c->last_struct_idx;
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_VEC) {
+      uint32_t elem_type_idx = args[0]->inferred_struct_idx;
       compiler__compile_node(c, args[1]); /* index */
       if (!compiler__compile_typed_elem_arg(c, args[2], elem_type_idx)) {
         compiler__error(c, line, col, "vec-set: element type does not match typed vec element type");
@@ -8461,7 +8460,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[1]);
     compiler__compile_node(c, args[2]);
-    if (compiler__reject_bare_typed(c, line, col, "dyn vec")) return;
+    if (compiler__reject_bare_typed(c, args[2], line, col, "dyn vec")) return;
     compiler__emit_byte(c, OP_VEC_SET, line);
     c->last_expr_type = TYPE_VEC;
     return;
@@ -8474,7 +8473,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     if (!compiler__compile_vec_receiver(c, args[0], "vec-concat", line, col)) return;
-    if (c->last_expr_type == TYPE_TYPED_VEC) {
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_VEC) {
       uint32_t elem_type_idx = args[0]->inferred_struct_idx;
       compiler__compile_node(c, args[1]);
       if ((JaclType)args[1]->inferred_type != TYPE_TYPED_VEC ||
@@ -8501,8 +8500,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     if (!compiler__compile_vec_receiver(c, args[0], "vec-slice", line, col)) return;
-    if (c->last_expr_type == TYPE_TYPED_VEC) {
-      uint32_t elem_type_idx = c->last_struct_idx;
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_VEC) {
+      uint32_t elem_type_idx = args[0]->inferred_struct_idx;
       compiler__compile_node(c, args[1]);
       compiler__compile_node(c, args[2]);
       compiler__emit_byte(c, OP_TYPED_VEC_SLICE, line);
@@ -8527,7 +8526,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     for (uint32_t i = 0; i < argc; i++) {
       compiler__compile_node(c, args[i]);
-      if (compiler__reject_bare_typed(c, line, col, "dyn map")) return;
+      if (compiler__reject_bare_typed(c, args[i], line, col, "dyn map")) return;
     }
     compiler__emit_byte(c, OP_MAP, line);
     compiler__emit_byte(c, (uint8_t)(argc / 2), line);
@@ -8542,9 +8541,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_TYPED_MAP) {
-      uint32_t elem_type_idx = c->last_struct_idx;
-      uint32_t key_type_idx = c->last_key_struct_idx;
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_MAP) {
+      uint32_t elem_type_idx = args[0]->inferred_struct_idx;
+      uint32_t key_type_idx = args[0]->inferred_key_struct_idx;
       if (key_type_idx != UINT32_MAX) {
         if (!compiler__compile_typed_elem_arg(c, args[1], key_type_idx)) {
           compiler__error(c, line, col, "map-get: key type does not match typed map key type");
@@ -8579,8 +8578,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_TYPED_MAP) {
-      uint32_t key_type_idx = c->last_key_struct_idx;
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_MAP) {
+      uint32_t key_type_idx = args[0]->inferred_key_struct_idx;
       if (key_type_idx != UINT32_MAX) {
         if (!compiler__compile_typed_elem_arg(c, args[1], key_type_idx)) {
           compiler__error(c, line, col, "map-has: key type does not match typed map key type");
@@ -8607,7 +8606,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_TYPED_MAP) {
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_MAP) {
       compiler__emit_byte(c, OP_TYPED_MAP_LEN, line);
       c->last_expr_type = TYPE_I32;
       return;
@@ -8624,9 +8623,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_TYPED_MAP) {
-      uint32_t elem_type_idx = c->last_struct_idx;
-      uint32_t key_type_idx = c->last_key_struct_idx;
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_MAP) {
+      uint32_t elem_type_idx = args[0]->inferred_struct_idx;
+      uint32_t key_type_idx = args[0]->inferred_key_struct_idx;
       if (key_type_idx != UINT32_MAX) {
         if (!compiler__compile_typed_elem_arg(c, args[1], key_type_idx)) {
           compiler__error(c, line, col, "map-set: key type does not match typed map key type");
@@ -8647,7 +8646,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[1]);
     compiler__compile_node(c, args[2]);
-    if (compiler__reject_bare_typed(c, line, col, "dyn map")) return;
+    if (compiler__reject_bare_typed(c, args[2], line, col, "dyn map")) return;
     compiler__emit_byte(c, OP_MAP_SET, line);
     c->last_expr_type = TYPE_MAP;
     return;
@@ -8660,9 +8659,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_TYPED_MAP) {
-      uint32_t elem_type_idx = c->last_struct_idx;
-      uint32_t key_type_idx = c->last_key_struct_idx;
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_MAP) {
+      uint32_t elem_type_idx = args[0]->inferred_struct_idx;
+      uint32_t key_type_idx = args[0]->inferred_key_struct_idx;
       if (key_type_idx != UINT32_MAX) {
         if (!compiler__compile_typed_elem_arg(c, args[1], key_type_idx)) {
           compiler__error(c, line, col, "map-remove: key type does not match typed map key type");
@@ -8689,8 +8688,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_TYPED_MAP) {
-      uint32_t key_type_idx = c->last_key_struct_idx;
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_MAP) {
+      uint32_t key_type_idx = args[0]->inferred_key_struct_idx;
       compiler__emit_byte(c, OP_TYPED_MAP_KEYS, line);
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
       if (key_type_idx != UINT32_MAX) {
@@ -8713,8 +8712,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_TYPED_MAP) {
-      uint32_t elem_type_idx = c->last_struct_idx;
+    if ((JaclType)args[0]->inferred_type == TYPE_TYPED_MAP) {
+      uint32_t elem_type_idx = args[0]->inferred_struct_idx;
       compiler__emit_byte(c, OP_TYPED_MAP_VALS, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       c->last_expr_type = TYPE_TYPED_VEC;  /* returns typed vec of values */
@@ -8964,7 +8963,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
     compiler__compile_node(c, args[0]);
     uint32_t box_arg_struct_idx = args[0]->inferred_struct_idx;
-    if (c->last_expr_type == TYPE_STRUCT && box_arg_struct_idx != UINT32_MAX) {
+    if ((JaclType)args[0]->inferred_type == TYPE_STRUCT &&
+        box_arg_struct_idx != UINT32_MAX) {
       /* Box accepts inline struct bytes directly — no reify. */
       compiler__emit_byte(c, OP_BOX_STRUCT, line);
       compiler__emit_u16(c, (uint16_t)box_arg_struct_idx, line);
@@ -8983,7 +8983,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       return;
     }
     compiler__compile_node(c, args[0]);
-    if (c->last_expr_type == TYPE_STRUCT) {
+    if ((JaclType)args[0]->inferred_type == TYPE_STRUCT) {
       compiler__error(c, line, col, "atom: struct values cannot be stored in atoms; use [box] instead");
       return;
     }
@@ -9106,7 +9106,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__compile_node(c, args[0]);
     compiler__compile_node(c, args[1]);
     uint32_t reset_val_struct_idx = args[1]->inferred_struct_idx;
-    if (c->last_expr_type == TYPE_STRUCT && reset_val_struct_idx != UINT32_MAX) {
+    if ((JaclType)args[1]->inferred_type == TYPE_STRUCT &&
+        reset_val_struct_idx != UINT32_MAX) {
       /* Struct-box reset: inline bytes write directly to box->data. */
       compiler__emit_byte(c, OP_RESET_INLINE, line);
       compiler__emit_u16(c, (uint16_t)reset_val_struct_idx, line);
@@ -10127,9 +10128,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     /* Compile the object expression */
     compiler__compile_node(c, args[0]);
     /* Reject structs at compile time — use -> for struct field access */
-    if (c->last_expr_type == TYPE_STRUCT && c->last_struct_idx != UINT32_MAX) {
+    if ((JaclType)args[0]->inferred_type == TYPE_STRUCT &&
+        args[0]->inferred_struct_idx != UINT32_MAX) {
       StructTypeRegistry* reg = compiler__get_struct_registry(c);
-      StructTypeDef* sdef = reg->defs[c->last_struct_idx];
+      StructTypeDef* sdef = reg->defs[args[0]->inferred_struct_idx];
       char err_msg[192];
       snprintf(err_msg, sizeof(err_msg),
                "?. cannot be used on struct '%.*s'; use -> for struct field access",
