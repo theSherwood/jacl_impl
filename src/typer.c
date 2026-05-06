@@ -1524,10 +1524,10 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     node->inferred_type = proc->return_type;
     node->inferred_struct_idx = proc->return_struct_idx;
     /* Check positional arg types against declared param types. Mirrors
-     * the compiler's typed-call check (compiler.c around 10328). Skipped
-     * when the param is DYN (boundary), the arg is DYN (let runtime or
-     * compiler catch it), or for struct-to-struct (typer's struct-idx
-     * narrowing not fully aligned across modules). */
+     * the compiler's typed-call check (compiler.c:10359-10378). Both
+     * concrete-mismatch and dyn-into-typed (decision 2: no implicit
+     * coercion) fire; struct-to-struct stays compiler-owned (typer's
+     * struct-idx tracking is not fully aligned across modules). */
     uint32_t argc = node->data.command.arg_count;
     AstNode** as = node->data.command.args;
     uint32_t check_n = argc < proc->param_count ? argc : proc->param_count;
@@ -1535,14 +1535,22 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       JaclType param_t = (JaclType)proc->param_types[i];
       if (param_t == TYPE_DYN) continue;
       JaclType arg_t = (JaclType)as[i]->inferred_type;
-      if (arg_t == TYPE_DYN || arg_t == param_t) continue;
+      if (arg_t == param_t) continue;
       if (param_t == TYPE_STRUCT && arg_t == TYPE_STRUCT) continue;
-      char err[200];
-      snprintf(err, sizeof(err),
-               "type error: argument %u of %.*s expected %s, got %s",
-               i + 1,
-               (int)head->data.lit_string.length, head->data.lit_string.value,
-               type_name(param_t), type_name(arg_t));
+      char err[224];
+      if (arg_t == TYPE_DYN) {
+        snprintf(err, sizeof(err),
+                 "type error: argument %u of %.*s expected %s, got dyn (use [to %s $val])",
+                 i + 1,
+                 (int)head->data.lit_string.length, head->data.lit_string.value,
+                 type_name(param_t), type_name(param_t));
+      } else {
+        snprintf(err, sizeof(err),
+                 "type error: argument %u of %.*s expected %s, got %s",
+                 i + 1,
+                 (int)head->data.lit_string.length, head->data.lit_string.value,
+                 type_name(param_t), type_name(arg_t));
+      }
       typer__error(tc, as[i]->start.line, as[i]->start.column, err);
       break;
     }
