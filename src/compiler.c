@@ -3717,15 +3717,16 @@ void compiler__builtin_arity_error(Compiler* c, uint32_t line,
 /* --- Internal: Auto-box unboxed types (emit OP_TO_DYN if needed) --- */
 
 void compiler__ensure_boxed(Compiler* c, uint32_t line) {
+  /* State-dependent: reads c->last_expr_type because the just-emitted
+   * code may have already unboxed (e.g. mutable cell loads emit
+   * OP_GET_CELL_LOCAL + OP_TO_DYN, leaving last_expr_type=DYN). The
+   * AST node's inferred_type is the binding's *declared* type, which
+   * doesn't reflect runtime stack representation after such a load. */
   if (is_unboxed_type(c->last_expr_type)) {
     compiler__emit_byte(c, OP_TO_DYN, line);
     compiler__emit_byte(c, (uint8_t)c->last_expr_type, line);
     c->last_expr_type = TYPE_DYN;
   }
-  /* Struct values never reach here in valid code: every consumer that
-     would otherwise need a JaclVal-shaped struct now has a typed inline
-     path (OP_PRINT_STRUCT, OP_STRUCT_EQ_TOS, OP_STRUCT_NEW_INLINE
-     consuming inline args, etc.) or a compile-time rejection. */
 }
 
 /* --- Internal: Compile a vec-* receiver and reject TYPE_STREAM operands.
