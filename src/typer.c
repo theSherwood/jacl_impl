@@ -573,6 +573,25 @@ static bool typer__handle_set(TyperCtx* tc, AstNode* node) {
   typer__infer_node(tc, value);
   tc->expected_type = saved_et;
 
+  /* Type-check value vs. target binding's type. Mirrors compiler.c:
+   * 6204-6221 (local mut path) etc. Same rules as def: skip when
+   * target is DYN (boundary marker), skip struct-to-struct (compiler
+   * still owns same-struct-idx narrowing). */
+  if (target_type != TYPE_DYN && tname) {
+    JaclType rhs_t = (JaclType)value->inferred_type;
+    if (rhs_t == TYPE_DYN) {
+      char err[160];
+      jacl_format_assign_dyn_named(err, sizeof(err), target_type, tname, tlen);
+      typer__error(tc, target->start.line, target->start.column, err);
+    } else if (rhs_t != target_type &&
+               !(target_type == TYPE_STRUCT && rhs_t == TYPE_STRUCT)) {
+      char err[160];
+      jacl_format_assign_mismatch(err, sizeof(err),
+          target_type, rhs_t, tname, tlen);
+      typer__error(tc, target->start.line, target->start.column, err);
+    }
+  }
+
   node->inferred_type = TYPE_NIL;
   return true;
 }
@@ -811,6 +830,33 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
       body->inferred_struct_idx = last->inferred_struct_idx;
     } else {
       body->inferred_type = TYPE_NIL;
+    }
+  }
+
+  /* Check declared return type vs body's tail type. Mirrors
+   * compiler.c:7272-7293: peek through a tail-position AST_RETURN to
+   * the returned value's type, then compare. Skipped when no declared
+   * return, for generators (return_type synthesized to TYPE_STREAM),
+   * and when the resolved tail type is DYN (typer's coverage is
+   * incomplete for some tail expressions — leave to the compiler). */
+  if (return_type != TYPE_DYN && return_type != TYPE_STREAM &&
+      body->type == AST_BLOCK && body->data.block.count > 0 &&
+      !body->data.block.trailing_semi) {
+    AstNode* tail = body->data.block.commands[body->data.block.count - 1];
+    JaclType body_t = TYPE_DYN;
+    if (tail->type == AST_RETURN && tail->data.return_stmt.value) {
+      body_t = (JaclType)tail->data.return_stmt.value->inferred_type;
+    } else if (tail->type != AST_RETURN) {
+      body_t = (JaclType)tail->inferred_type;
+    }
+    if (body_t != TYPE_DYN && body_t != return_type &&
+        !(return_type == TYPE_STRUCT && body_t == TYPE_STRUCT)) {
+      char err[200];
+      jacl_format_proc_return_mismatch(err, sizeof(err),
+          name_node->data.lit_string.value,
+          name_node->data.lit_string.length,
+          return_type, body_t);
+      typer__error(tc, name_node->start.line, name_node->start.column, err);
     }
   }
 
