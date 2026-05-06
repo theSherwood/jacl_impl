@@ -2555,7 +2555,6 @@ struct Compiler {
   JaclType         expected_type;   /* contextual type hint for RHS compilation */
   JaclType         last_expr_type;  /* type of the last compiled expression */
   uint32_t         last_struct_idx; /* struct type index when last_expr_type==TYPE_STRUCT */
-  uint32_t         last_key_struct_idx; /* key struct type for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
   JaclType         return_type;     /* declared return type for current function */
   uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
@@ -2616,9 +2615,11 @@ static bool compiler__compile_typed_elem_arg(Compiler* c, AstNode* arg,
 /* --- TypeInfo accessor --- */
 
 static inline void compiler__set_type(Compiler* c, TypeInfo ti) {
-  c->last_expr_type      = ti.type;
-  c->last_struct_idx     = ti.struct_idx;
-  c->last_key_struct_idx = ti.key_struct_idx;
+  c->last_expr_type  = ti.type;
+  c->last_struct_idx = ti.struct_idx;
+  /* key_struct_idx no longer tracked on Compiler — consumers were
+   * migrated to args[i]->inferred_key_struct_idx (Stage 3 cleanup). */
+  (void)ti.key_struct_idx;
 }
 
 void compiler__init(Compiler* c, BytecodeChunk* chunk, arena_t* arena,
@@ -3962,7 +3963,7 @@ void compiler__compile_hof_builtin(Compiler* c, const char* name,
   compiler__compile_node(c, args[0]);
   JaclType col_type = compiler__effective_type(c, args[0]);
   uint32_t col_struct_idx = args[0]->inferred_struct_idx;
-  uint32_t col_key_struct_idx = c->last_key_struct_idx;
+  uint32_t col_key_struct_idx = args[0]->inferred_key_struct_idx;
   {
     bool saved = c->in_non_suspending_callback;
     c->in_non_suspending_callback = true;
@@ -6111,7 +6112,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->current_scope_mark = prev_mark;
       }
       c->locals[c->local_count - 1].is_mutable = true;
-      { TypeInfo ti = { effective_type, rhs_struct_idx, c->last_key_struct_idx };
+      { TypeInfo ti = { effective_type, rhs_struct_idx, args[value_arg_idx]->inferred_key_struct_idx };
         TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
       /* mut returns nil */
       compiler__emit_byte(c, OP_NIL, line);
@@ -6139,7 +6140,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         for (uint32_t i = 0; i < root->global_arity_count; i++) {
           if (root->global_arities[i].name == name_val) {
             root->global_arities[i].is_mutable = true;
-            { TypeInfo ti = { effective_type, rhs_struct_idx, c->last_key_struct_idx };
+            { TypeInfo ti = { effective_type, rhs_struct_idx, args[value_arg_idx]->inferred_key_struct_idx };
               TYPEINFO_SAVE(root->global_arities[i], ti); }
             break;
           }
@@ -6846,7 +6847,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         c->current_scope_mark = prev_mark;
       }
       c->locals[c->local_count - 1].known_arity = rhs_arity;
-      { TypeInfo ti = { effective_type, rhs_struct_idx, c->last_key_struct_idx };
+      { TypeInfo ti = { effective_type, rhs_struct_idx, args[value_arg_idx]->inferred_key_struct_idx };
         TYPEINFO_SAVE(c->locals[c->local_count - 1], ti); }
       if (effective_type == TYPE_STRUCT) {
         StructTypeRegistry* reg = compiler__get_struct_registry(c);
@@ -6902,7 +6903,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         while (root->enclosing) root = root->enclosing;
         for (uint32_t i = 0; i < root->global_arity_count; i++) {
           if (root->global_arities[i].name == name_val) {
-            { TypeInfo ti = { effective_type, rhs_struct_idx, c->last_key_struct_idx };
+            { TypeInfo ti = { effective_type, rhs_struct_idx, args[value_arg_idx]->inferred_key_struct_idx };
               TYPEINFO_SAVE(root->global_arities[i], ti); }
             break;
           }

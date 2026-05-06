@@ -1320,7 +1320,6 @@ struct Compiler {
   JaclType         expected_type;
   JaclType         last_expr_type;
   uint32_t         last_struct_idx;
-  uint32_t         last_key_struct_idx; /* key struct type for TYPE_TYPED_MAP (UINT32_MAX=dyn) */
   JaclType         return_type;
   uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   ModuleCache*     module_cache;
