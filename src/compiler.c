@@ -4948,11 +4948,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         JaclType arg_t = (JaclType)args[i]->inferred_type;
         if (arg_t != elem_t) {
           char err[160];
-          snprintf(err, sizeof(err),
-                   "[Vec %.*s]: element %u is not a %.*s value (got %s)",
-                   (int)type_name_len, type_name_str, i,
-                   (int)type_name_len, type_name_str,
-                   type_name(arg_t));
+          jacl_format_typed_vec_elem(err, sizeof(err),
+              type_name_str, type_name_len, i, true, arg_t);
           compiler__error(c, line, col, err);
           return;
         }
@@ -4985,10 +4982,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if ((JaclType)args[i]->inferred_type != TYPE_STRUCT ||
           args[i]->inferred_struct_idx != type_idx) {
         char err[128];
-        snprintf(err, sizeof(err),
-                 "[Vec %.*s]: element %u is not a %.*s struct",
-                 (int)type_name_len, type_name_str, i,
-                 (int)type_name_len, type_name_str);
+        jacl_format_typed_vec_elem(err, sizeof(err),
+            type_name_str, type_name_len, i, false, TYPE_DYN);
         compiler__error(c, line, col, err);
         return;
       }
@@ -5034,11 +5029,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         JaclType v_t = (JaclType)args[i * 2 + 1]->inferred_type;
         if (v_t != val_t) {
           char err[160];
-          snprintf(err, sizeof(err),
-                   "[Map %.*s]: value %u is not a %.*s value (got %s)",
-                   (int)type_name_len, type_name_str, i,
-                   (int)type_name_len, type_name_str,
-                   type_name(v_t));
+          jacl_format_typed_map_value(err, sizeof(err),
+              type_name_str, type_name_len, i, true, v_t);
           compiler__error(c, line, col, err);
           return;
         }
@@ -5078,10 +5070,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       if ((JaclType)val->inferred_type != TYPE_STRUCT ||
           val->inferred_struct_idx != type_idx) {
         char err[128];
-        snprintf(err, sizeof(err),
-                 "[Map %.*s]: value %u is not a %.*s struct",
-                 (int)type_name_len, type_name_str, i,
-                 (int)type_name_len, type_name_str);
+        jacl_format_typed_map_value(err, sizeof(err),
+            type_name_str, type_name_len, i, false, TYPE_DYN);
         compiler__error(c, line, col, err);
         return;
       }
@@ -5186,11 +5176,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
            k_node->inferred_struct_idx == key_type_idx);
       if (!k_ok) {
         char err[160];
-        snprintf(err, sizeof(err),
-                 "[Map %.*s %.*s]: key %u is not a %.*s",
-                 (int)key_name_len, key_name_str,
-                 (int)val_name_len, val_name_str, i,
-                 (int)key_name_len, key_name_str);
+        jacl_format_typed_map_kv(err, sizeof(err),
+            key_name_str, key_name_len,
+            val_name_str, val_name_len, i, false);
         compiler__error(c, line, col, err);
         return;
       }
@@ -5203,11 +5191,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
            v_node->inferred_struct_idx == val_type_idx);
       if (!v_ok) {
         char err[160];
-        snprintf(err, sizeof(err),
-                 "[Map %.*s %.*s]: value %u is not a %.*s",
-                 (int)key_name_len, key_name_str,
-                 (int)val_name_len, val_name_str, i,
-                 (int)val_name_len, val_name_str);
+        jacl_format_typed_map_kv(err, sizeof(err),
+            key_name_str, key_name_len,
+            val_name_str, val_name_len, i, true);
         compiler__error(c, line, col, err);
         return;
       }

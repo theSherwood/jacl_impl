@@ -98,4 +98,57 @@ int jacl_format_proc_return_mismatch(char* buf, size_t bufsz,
                   type_name(declared), type_name(actual));
 }
 
+/* "[Vec T]: element <idx> is not a T value (got <actual>)" / "is not a T struct"
+ * Used by [Vec T] constructor element-type checks. is_scalar selects the
+ * scalar wording (with "got <actual>") vs struct wording. */
+int jacl_format_typed_vec_elem(char* buf, size_t bufsz,
+                               const char* elem_name, uint32_t elem_name_len,
+                               uint32_t idx, bool is_scalar, JaclType actual) {
+  if (is_scalar) {
+    return snprintf(buf, bufsz,
+                    "[Vec %.*s]: element %u is not a %.*s value (got %s)",
+                    (int)elem_name_len, elem_name, idx,
+                    (int)elem_name_len, elem_name, type_name(actual));
+  }
+  return snprintf(buf, bufsz,
+                  "[Vec %.*s]: element %u is not a %.*s struct",
+                  (int)elem_name_len, elem_name, idx,
+                  (int)elem_name_len, elem_name);
+}
+
+/* "[Map T]: value <idx> is not a T value (got <actual>)" / "is not a T struct"
+ * Used by [Map T] (single-type, dyn-key) constructor value-type checks. */
+int jacl_format_typed_map_value(char* buf, size_t bufsz,
+                                const char* val_name, uint32_t val_name_len,
+                                uint32_t idx, bool is_scalar, JaclType actual) {
+  if (is_scalar) {
+    return snprintf(buf, bufsz,
+                    "[Map %.*s]: value %u is not a %.*s value (got %s)",
+                    (int)val_name_len, val_name, idx,
+                    (int)val_name_len, val_name, type_name(actual));
+  }
+  return snprintf(buf, bufsz,
+                  "[Map %.*s]: value %u is not a %.*s struct",
+                  (int)val_name_len, val_name, idx,
+                  (int)val_name_len, val_name);
+}
+
+/* "[Map K V]: key <idx> is not a K" / "value <idx> is not a V"
+ * Used by [Map K V] (explicit key+value type) constructor checks.
+ * is_value_slot=false → key check, true → value check. */
+int jacl_format_typed_map_kv(char* buf, size_t bufsz,
+                             const char* key_name, uint32_t key_name_len,
+                             const char* val_name, uint32_t val_name_len,
+                             uint32_t idx, bool is_value_slot) {
+  const char* slot_word = is_value_slot ? "value" : "key";
+  const char* tn  = is_value_slot ? val_name : key_name;
+  uint32_t    tnl = is_value_slot ? val_name_len : key_name_len;
+  return snprintf(buf, bufsz,
+                  "[Map %.*s %.*s]: %s %u is not a %.*s",
+                  (int)key_name_len, key_name,
+                  (int)val_name_len, val_name,
+                  slot_word, idx,
+                  (int)tnl, tn);
+}
+
 #endif /* JACL_TYPE_ERROR_C */

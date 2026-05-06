@@ -105,10 +105,10 @@ and typer's `tc->structs`):**
 **What's *not* here yet:**
 
 - Stage 1e — typer emits type errors directly. ✅ SUBSTANTIALLY
-  COMPLETE. Six error sites fire from the typer using the shared
-  formatters in `src/type_error.c`. Three minor sites remain as
-  follow-ons (typed-collection element ctor mismatches, the
-  `set $ctx.field val` arrow form, and proc-return dyn-into-typed).
+  COMPLETE. Seven error sites fire from the typer using the shared
+  formatters in `src/type_error.c`. Two minor sites remain as
+  follow-ons (the `set $ctx.field val` arrow form, and proc-return
+  dyn-into-typed).
 - Stage 1f — `dyn` as a real type with defined-semantics ops.
   ✅ PARTIAL. Three rules landed (proc-call dyn-into-typed-param,
   binary-op arithmetic concrete-mismatch, binary-op unboxed
@@ -285,9 +285,6 @@ behavior change.
    compiler's across module boundaries — would need a follow-on).
 
    **Remaining (incremental, not blocking):**
-   - Typed-collection element ctor mismatches (`[[Vec T] e1 e2 ...]`)
-     — needs a new shared formatter (`jacl_format_typed_vec_elem` /
-     `_typed_map_elem`) since the compiler's wording is bespoke.
    - Proc-call dyn-into-typed-param mismatch (the typer currently
      skips DYN args; the compiler still flags them via the
      `(use [to T $val])` cast hint).
@@ -295,6 +292,16 @@ behavior change.
      (currently handled by the compiler's HEAD_SET rewrite; the
      bare `[. $ctx field val]` form already typer-checks via the
      general struct field-set rule from commit `402fd47`).
+
+   **Landed since first writing of this plan:**
+   - Typed-collection element ctor mismatches (`[[Vec T] e1 e2 ...]`,
+     `[[Map T] k v ...]`, `[[Map K V] k v ...]`). Three new shared
+     formatters in `src/type_error.c`: `jacl_format_typed_vec_elem`,
+     `jacl_format_typed_map_value`, `jacl_format_typed_map_kv`. Both
+     typer and compiler call them; typer fires first when both
+     element and key/value types are knowable from the typer's
+     struct registry. Compiler still backstops for unknown structs
+     and unsupported scalars.
 7. **Stage 1f — `dyn` as a real type.** ✅ PARTIAL.
 
    **The rules** (per decisions 1 and 2):
@@ -861,14 +868,14 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 |---|---|
 | 0 — test infra + decisions | ✅ complete |
 | 1 — typer total + authoritative | ✅ substantially complete (1a–1d partial, see Stage 1 task list) |
-| 1e — typer emits errors | ✅ substantially complete (6/9 sites; see "Pickup points" below) |
+| 1e — typer emits errors | ✅ substantially complete (7/9 sites; see "Pickup points" below) |
 | 1f — dyn as a real type | ✅ partial (3 rules landed; 2 deferred for corpus migration) |
 | 2 — migrate compiler consumers | ✅ complete |
 | 3 — delete dead state | ✅ complete |
 | 4 — separate `TypedAstNode` | ⏭ skipped (optional, not pursued) |
 | 5 — pointer types `*T` for FFI | ❌ not started |
 
-Tests: 95/95 passing. Type-error corpus: 11/11 passing. The audit
+Tests: 95/95 passing. Type-error corpus: 14/14 passing. The audit
 machinery from Stages 0–2 was deleted in commit `0aa722f` after it
 served its purpose.
 
@@ -882,16 +889,7 @@ architectural piece". Each is independently shippable.
 These are mechanical extensions of work already landed; should each
 be a single commit.
 
-1. **Typed-collection element ctor mismatches.** `[[Vec T] e1 e2 ...]`
-   element-type checks fire from the compiler today
-   (compiler.c:4945-4996) with bespoke wording. To migrate, add a
-   `jacl_format_typed_vec_elem` / `jacl_format_typed_map_elem`
-   formatter in `type_error.c`, then call it from both passes —
-   typer in the `else if (head && head->type == AST_COMMAND)`
-   branch of `typer__infer_command_inner` after the args walk;
-   compiler at the existing snprintf sites.
-
-2. **Ctx-field-set arrow form.** `set $ctx.field val` is rewritten
+1. **Ctx-field-set arrow form.** `set $ctx.field val` is rewritten
    by HEAD_SET's arrow desugar; the typer doesn't see the
    rewritten tree. The bare `[. $ctx field val]` form already
    typer-checks via the rule from commit `402fd47`. Either run the
@@ -899,7 +897,7 @@ be a single commit.
    pre-rewrite shape (`set` with an arrow-LHS of `$ctx`) and apply
    the field-set rule preemptively.
 
-3. **Proc-return dyn-into-typed.** `proc i32 f {} { $dyn_val }`
+2. **Proc-return dyn-into-typed.** `proc i32 f {} { $dyn_val }`
    currently passes both passes. Decision 2 calls for an error.
    Smaller blast radius than mixed dyn/typed binary because typed
    return procs are less common — still needs a corpus audit

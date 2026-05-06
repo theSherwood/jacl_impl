@@ -191,6 +191,24 @@ static void run_all(void) {
       "[f \"oops\"]",
     .expect_substrings = { "type error", "i32", "str" },
   });
+
+  /* [Vec T] constructor with wrong scalar element type. */
+  RUN("typed_vec_ctor_scalar_mismatch", {
+    .source = "def xs [[Vec i32] 1 \"oops\" 3]",
+    .expect_substrings = { "Vec", "i32", "element", "str" },
+  });
+
+  /* [Map T] constructor with wrong scalar value type. */
+  RUN("typed_map_ctor_scalar_value_mismatch", {
+    .source = "def m [[Map i64] \"k\" 1 \"k2\" \"oops\"]",
+    .expect_substrings = { "Map", "i64", "value", "str" },
+  });
+
+  /* [Map K V] constructor with wrong key type. */
+  RUN("typed_map_kv_ctor_key_mismatch", {
+    .source = "def m [[Map i32 str] \"oops\" \"v\"]",
+    .expect_substrings = { "Map", "i32", "str", "key" },
+  });
 }
 
 /* --- Driver ------------------------------------------------------- */

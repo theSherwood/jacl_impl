@@ -185,6 +185,17 @@ static const TyperBinding* typer__scope_resolve(TyperCtx* tc,
 
 /* --- Command handlers --- */
 
+/* Mirror of compiler__is_typed_collection_scalar — the JaclTypes valid
+ * as scalar element/key/value types in [Vec T] / [Map T] / [Map K V]
+ * constructors. Used by the typer's element-type checks so we only
+ * fire when the declared scalar type is actually a supported one;
+ * otherwise we leave the error to the compiler's separate
+ * "only value-type scalars supported" diagnostic. */
+static bool typer__is_typed_collection_scalar(JaclType t) {
+  return t == TYPE_I32 || t == TYPE_I64 || t == TYPE_U32 || t == TYPE_U64 ||
+         t == TYPE_F32 || t == TYPE_F64;
+}
+
 /* Recognize [Vec T] / [Map V] / [Map K V] type expressions. Returns
  * 1 for [Vec T], 2 for [Map V] (dyn keys), 3 for [Map K V] (struct
  * keys), 0 if not a typed-collection expression. Mirrors
@@ -1644,8 +1655,9 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         }
       }
       /* For [Map K V] (kind=3), also propagate the key type idx. */
+      AstNode* key_node = NULL;
       if (tc_kind == 3) {
-        AstNode* key_node = head->data.command.args[0];
+        key_node = head->data.command.args[0];
         if (key_node && key_node->type == AST_LIT_STRING) {
           const char* nm = key_node->data.lit_string.value;
           uint32_t    nl = key_node->data.lit_string.length;
@@ -1661,6 +1673,89 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
               }
             }
           }
+        }
+      }
+      /* Element-type checks: each arg's typer-inferred type must match
+       * the declared element (and key, for kind=3) type. Mirrors the
+       * compiler's per-element check in compiler__compile_command's
+       * typed-vec/typed-map branches; uses the same shared formatters
+       * so wording stays in sync. We skip when the declared scalar is
+       * not a supported typed-collection scalar (compiler reports the
+       * "only value-type scalars supported" error first), and skip
+       * struct checks for unknown struct names (compiler backstops
+       * unknown-type errors). */
+      if (elem_node && elem_node->type == AST_LIT_STRING) {
+        const char* elem_nm = elem_node->data.lit_string.value;
+        uint32_t    elem_nl = elem_node->data.lit_string.length;
+        bool elem_is_scalar = is_type_keyword(elem_nm, elem_nl);
+        JaclType elem_t = elem_is_scalar
+                          ? type_from_keyword(elem_nm, elem_nl) : TYPE_DYN;
+        uint32_t elem_sidx = node->inferred_struct_idx;
+        bool elem_known = elem_is_scalar
+            ? typer__is_typed_collection_scalar(elem_t)
+            : (elem_sidx != UINT32_MAX &&
+               !JACL_IS_SCALAR_TYPE_IDX(elem_sidx));
+
+        const char* key_nm = NULL;
+        uint32_t    key_nl = 0;
+        bool key_is_scalar = false;
+        JaclType key_t = TYPE_DYN;
+        uint32_t key_sidx = UINT32_MAX;
+        bool key_known = false;
+        if (tc_kind == 3 && key_node && key_node->type == AST_LIT_STRING) {
+          key_nm = key_node->data.lit_string.value;
+          key_nl = key_node->data.lit_string.length;
+          key_is_scalar = is_type_keyword(key_nm, key_nl);
+          key_t = key_is_scalar
+                  ? type_from_keyword(key_nm, key_nl) : TYPE_DYN;
+          key_sidx = node->inferred_key_struct_idx;
+          key_known = key_is_scalar
+              ? typer__is_typed_collection_scalar(key_t)
+              : (key_sidx != UINT32_MAX &&
+                 !JACL_IS_SCALAR_TYPE_IDX(key_sidx));
+        }
+
+        uint32_t argc = node->data.command.arg_count;
+        AstNode** as = node->data.command.args;
+        for (uint32_t i = 0; i < argc; i++) {
+          /* For Map kinds, even idx → key, odd idx → value.
+           * For Vec, every idx → element. */
+          bool is_map = (tc_kind == 2 || tc_kind == 3);
+          bool is_value_slot = !is_map || (i % 2 == 1);
+          /* kind=2 keys are dyn — skip key slots. */
+          if (tc_kind == 2 && !is_value_slot) continue;
+          /* kind=3 key slot uses key_t/key_sidx; otherwise elem. */
+          bool slot_is_key = (tc_kind == 3 && !is_value_slot);
+          bool       slot_known      = slot_is_key ? key_known      : elem_known;
+          bool       slot_is_scalar  = slot_is_key ? key_is_scalar  : elem_is_scalar;
+          JaclType   slot_t          = slot_is_key ? key_t          : elem_t;
+          uint32_t   slot_sidx       = slot_is_key ? key_sidx       : elem_sidx;
+          if (!slot_known) continue;
+          AstNode* arg = as[i];
+          JaclType arg_t = (JaclType)arg->inferred_type;
+          if (arg_t == TYPE_DYN) continue;  /* dyn flow-in: compiler handles */
+          bool ok;
+          if (slot_is_scalar) {
+            ok = (arg_t == slot_t);
+          } else {
+            ok = (arg_t == TYPE_STRUCT && arg->inferred_struct_idx == slot_sidx);
+          }
+          if (ok) continue;
+          char err[224];
+          uint32_t pair_or_elem_idx = is_map ? (i / 2) : i;
+          if (tc_kind == 1) {
+            jacl_format_typed_vec_elem(err, sizeof(err),
+                elem_nm, elem_nl, pair_or_elem_idx, slot_is_scalar, arg_t);
+          } else if (tc_kind == 2) {
+            jacl_format_typed_map_value(err, sizeof(err),
+                elem_nm, elem_nl, pair_or_elem_idx, slot_is_scalar, arg_t);
+          } else {
+            jacl_format_typed_map_kv(err, sizeof(err),
+                key_nm, key_nl, elem_nm, elem_nl,
+                pair_or_elem_idx, is_value_slot);
+          }
+          typer__error(tc, arg->start.line, arg->start.column, err);
+          break;
         }
       }
     } else {
