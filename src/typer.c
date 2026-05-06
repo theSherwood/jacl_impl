@@ -1374,14 +1374,19 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       typer__infer_node(tc, rhs);
       tc->expected_type = saved_et;
       JaclType rhs_t = (JaclType)rhs->inferred_type;
-      /* Unboxed mismatch (i64/u64/f64): the compiler hard-rejects these
-       * at compiler.c:3859-3868 because unboxed values can't go through
-       * dynamic dispatch. Mirror it here so the typer fires first.
-       * Tagged-mismatch (i32+f32 etc.) and mixed dyn/typed currently
-       * stay permissive — see Stage 1f rules table in
-       * STATIC_TYPING_PLAN.md. */
-      if (lhs_t != rhs_t &&
-          (is_unboxed_type(lhs_t) || is_unboxed_type(rhs_t))) {
+      /* Concrete-mismatch (both sides non-DYN, different types):
+       *  - Arithmetic (+ - * / %): always error per decision 1
+       *    (no implicit widening; explicit cast required).
+       *  - Comparison (== < > etc.) of unboxed scalars (i64/u64/f64):
+       *    error to mirror the compiler at compiler.c:3859-3868
+       *    (unboxed values can't go through dynamic dispatch).
+       *  - Comparison of tagged scalars: still allowed; cross-type
+       *    equality is meaningful (always false) and tests rely on it.
+       *  - Mixed dyn/typed: stays permissive (decision 2 deferred). */
+      bool concrete_mismatch = (lhs_t != rhs_t &&
+                                lhs_t != TYPE_DYN && rhs_t != TYPE_DYN);
+      bool unboxed_either = is_unboxed_type(lhs_t) || is_unboxed_type(rhs_t);
+      if (concrete_mismatch && (is_arith || unboxed_either)) {
         const char* verb = is_cmp ? "compare" :
                            (hname[0] == '+' ? "add" :
                             hname[0] == '-' ? "subtract" :
