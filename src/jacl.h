@@ -1319,7 +1319,6 @@ struct Compiler {
   bool             ctx_pre_registered;
   JaclType         expected_type;
   JaclType         last_expr_type;
-  uint32_t         last_struct_idx;
   JaclType         return_type;
   uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   ModuleCache*     module_cache;

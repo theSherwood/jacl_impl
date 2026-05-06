@@ -2554,7 +2554,6 @@ struct Compiler {
   bool             ctx_pre_registered; /* true when ctx fields were pre-registered (Phase 1c) */
   JaclType         expected_type;   /* contextual type hint for RHS compilation */
   JaclType         last_expr_type;  /* type of the last compiled expression */
-  uint32_t         last_struct_idx; /* struct type index when last_expr_type==TYPE_STRUCT */
   JaclType         return_type;     /* declared return type for current function */
   uint32_t         return_struct_idx; /* struct registry index when return_type==TYPE_STRUCT */
   ModuleCache*     module_cache;    /* shared cache of compiled modules */
@@ -2615,10 +2614,11 @@ static bool compiler__compile_typed_elem_arg(Compiler* c, AstNode* arg,
 /* --- TypeInfo accessor --- */
 
 static inline void compiler__set_type(Compiler* c, TypeInfo ti) {
-  c->last_expr_type  = ti.type;
-  c->last_struct_idx = ti.struct_idx;
-  /* key_struct_idx no longer tracked on Compiler — consumers were
-   * migrated to args[i]->inferred_key_struct_idx (Stage 3 cleanup). */
+  c->last_expr_type = ti.type;
+  /* struct_idx / key_struct_idx no longer tracked on Compiler —
+   * consumers were migrated to args[i]->inferred_struct_idx /
+   * inferred_key_struct_idx (Stage 3 cleanup). */
+  (void)ti.struct_idx;
   (void)ti.key_struct_idx;
 }
 
@@ -5001,7 +5001,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_u16(c, (uint16_t)COMPILER_SCALAR_TYPE_IDX(elem_t), line);
       compiler__emit_byte(c, (uint8_t)argc, line);
       c->last_expr_type = TYPE_TYPED_VEC;
-      c->last_struct_idx = COMPILER_SCALAR_TYPE_IDX(elem_t);
       return;
     }
 
@@ -5039,7 +5038,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_u16(c, (uint16_t)type_idx, line);
     compiler__emit_byte(c, (uint8_t)argc, line);
     c->last_expr_type = TYPE_TYPED_VEC;
-    c->last_struct_idx = type_idx;
     return;
   }
 
@@ -7609,7 +7607,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           (argc == 3) ? args[2]->inferred_struct_idx : UINT32_MAX;
       if (then_type != TYPE_STRUCT || then_struct_idx == else_struct_idx) {
         c->last_expr_type = then_type;
-        c->last_struct_idx = then_struct_idx;
       } else {
         c->last_expr_type = TYPE_DYN;
       }
@@ -8382,11 +8379,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         /* Scalar element typed vec: result is a single value of that
          * scalar JaclType; not inline struct bytes. */
         c->last_expr_type = COMPILER_TYPE_IDX_TO_SCALAR(elem_type_idx);
-        c->last_struct_idx = UINT32_MAX;
       } else {
         c->inline_repr = INLINE_STACK;
         c->last_expr_type = TYPE_STRUCT;
-        c->last_struct_idx = elem_type_idx;
       }
       return;
     }
@@ -8429,7 +8424,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_TYPED_VEC_PUSH, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       c->last_expr_type = TYPE_TYPED_VEC;
-      c->last_struct_idx = elem_type_idx;
       return;
     }
     compiler__compile_node(c, args[1]);
@@ -8456,7 +8450,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_TYPED_VEC_SET, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       c->last_expr_type = TYPE_TYPED_VEC;
-      c->last_struct_idx = elem_type_idx;
       return;
     }
     compiler__compile_node(c, args[1]);
@@ -8485,7 +8478,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_TYPED_VEC_CONCAT, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       c->last_expr_type = TYPE_TYPED_VEC;
-      c->last_struct_idx = elem_type_idx;
       return;
     }
     compiler__compile_node(c, args[1]);
@@ -8508,7 +8500,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_TYPED_VEC_SLICE, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       c->last_expr_type = TYPE_TYPED_VEC;
-      c->last_struct_idx = elem_type_idx;
       return;
     }
     compiler__compile_node(c, args[1]);
@@ -8558,11 +8549,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
       if (COMPILER_IS_SCALAR_TYPE_IDX(elem_type_idx)) {
         c->last_expr_type = COMPILER_TYPE_IDX_TO_SCALAR(elem_type_idx);
-        c->last_struct_idx = UINT32_MAX;
       } else {
         c->inline_repr = INLINE_STACK;
         c->last_expr_type = TYPE_STRUCT;
-        c->last_struct_idx = elem_type_idx;
       }
       return;
     }
@@ -8695,7 +8684,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_u16(c, (uint16_t)key_type_idx, line);
       if (key_type_idx != UINT32_MAX) {
         c->last_expr_type = TYPE_TYPED_VEC;  /* struct keys → typed vec */
-        c->last_struct_idx = key_type_idx;
       } else {
         c->last_expr_type = TYPE_VEC;  /* dyn keys → dyn vec */
       }
@@ -8718,7 +8706,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__emit_byte(c, OP_TYPED_MAP_VALS, line);
       compiler__emit_u16(c, (uint16_t)elem_type_idx, line);
       c->last_expr_type = TYPE_TYPED_VEC;  /* returns typed vec of values */
-      c->last_struct_idx = elem_type_idx;
       return;
     }
     compiler__emit_byte(c, OP_MAP_VALS, line);
@@ -9076,12 +9063,10 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
                   compiler__emit_byte(c, OP_DEREF_INLINE, line);
                   compiler__emit_u16(c, (uint16_t)tidx, line);
                   c->last_expr_type = TYPE_STRUCT;
-                  c->last_struct_idx = tidx;
                   c->inline_repr = INLINE_STACK;
                 } else {
                   compiler__emit_byte(c, OP_DEREF, line);
                   c->last_expr_type = TYPE_STRUCT;
-                  c->last_struct_idx = tidx;
                 }
               } else {
                 compiler__emit_byte(c, OP_DEREF, line);
@@ -9682,7 +9667,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
           /* Set type info from export */
           c->last_expr_type = found_export->type;
-          c->last_struct_idx = UINT32_MAX;
           return;
         }
       }
@@ -9739,7 +9723,8 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
              We're switching to byte-offset chaining on the OUTER struct,
              so drop the inner's slots. */
           StructTypeRegistry* reg = compiler__get_struct_registry(c);
-          uint32_t inner_width = struct__slot_width(reg, c->last_struct_idx);
+          uint32_t inner_struct_idx = args[0]->inferred_struct_idx;
+          uint32_t inner_width = struct__slot_width(reg, inner_struct_idx);
           if (inner_width == 1) {
             compiler__emit_byte(c, OP_POP, line);
           } else {
@@ -9749,7 +9734,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           is_inline_access = true;
           inline_base = c->inline_ref_base;
           inline_offset = c->inline_ref_offset;
-          inline_sidx = c->last_struct_idx;
+          inline_sidx = inner_struct_idx;
           c->inline_repr = INLINE_NONE;
         }
       }
@@ -9819,7 +9804,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__emit_u16(c, total_offset, line);
             compiler__emit_byte(c, (uint8_t)field_type, line);
             c->last_expr_type = TYPE_NIL;
-            c->last_struct_idx = UINT32_MAX;
           } else {
             if (sdef->fields[fi].type == TYPE_STRUCT) {
               /* Nested struct field — push N inline slots (the field's
@@ -9837,7 +9821,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               c->inline_ref_base = inline_base;
               c->inline_ref_offset = total_offset;
               c->last_expr_type = TYPE_STRUCT;
-              c->last_struct_idx = sdef->fields[fi].struct_type_idx;
             } else {
               /* Scalar field — emit inline get */
               compiler__emit_byte(c, get_op, line);
@@ -9845,7 +9828,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
               compiler__emit_u16(c, total_offset, line);
               compiler__emit_byte(c, (uint8_t)sdef->fields[fi].type, line);
               c->last_expr_type = sdef->fields[fi].type;
-              c->last_struct_idx = UINT32_MAX;
             }
           }
           return;
@@ -9860,7 +9842,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       compiler__compile_node(c, args[0]);
     }
     JaclType struct_type = compiler__effective_type(c, args[0]);
-    uint32_t struct_idx = c->last_struct_idx;
+    uint32_t struct_idx = args[0]->inferred_struct_idx;
 
     /* INLINE_REF only flows out of the inline-fast-path's nested-struct
        GET_INLINE inside this same function, and Case 2 above always catches
@@ -9939,7 +9921,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, (uint8_t)field_type, line);
           }
           c->last_expr_type = TYPE_STRUCT;
-          c->last_struct_idx = compiler__get_struct_registry(c)->ctx_type_idx;
         } else {
           if (cf->type == TYPE_STRUCT) {
             /* Inline struct field: push N inline slots from ctx.data. */
@@ -9948,13 +9929,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
             compiler__emit_u16(c, (uint16_t)cf->struct_type_idx, line);
             c->inline_repr = INLINE_STACK;
             c->last_expr_type = TYPE_STRUCT;
-            c->last_struct_idx = cf->struct_type_idx;
           } else {
             compiler__emit_byte(c, OP_HEAP_RECORD_GET, line);
             compiler__emit_u16(c, (uint16_t)cf->offset, line);
             compiler__emit_byte(c, (uint8_t)cf->type, line);
             c->last_expr_type = cf->type;
-            c->last_struct_idx = UINT32_MAX;
           }
         }
         return;
@@ -10040,7 +10019,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
           /* Returns struct value */
           c->last_expr_type = TYPE_STRUCT;
-          c->last_struct_idx = struct_idx;
         } else {
           if (tos_inline) {
             /* Pop inline struct bytes, push the field value (or sub-struct
@@ -10062,8 +10040,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
           }
 
           c->last_expr_type = sdef->fields[fi].type;
-          if (sdef->fields[fi].type == TYPE_STRUCT)
-            c->last_struct_idx = sdef->fields[fi].struct_type_idx;
         }
         return;
       }
@@ -10081,14 +10057,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__compile_node(c, args[2]);
         compiler__emit_byte(c, OP_MAP_SET, line);
         c->last_expr_type = TYPE_MAP;
-        c->last_struct_idx = UINT32_MAX;
       } else {
         /* Push key, then emit OP_MAP_GET */
         compiler__emit_byte(c, OP_CONST, line);
         compiler__emit_u16(c, name_idx, line);
         compiler__emit_byte(c, OP_MAP_GET, line);
         c->last_expr_type = TYPE_DYN;
-        c->last_struct_idx = UINT32_MAX;
       }
       return;
     }
@@ -10107,14 +10081,12 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
         compiler__emit_u16(c, name_idx, line);
         /* Result type is dyn (we don't know the struct type) */
         c->last_expr_type = TYPE_DYN;
-        c->last_struct_idx = UINT32_MAX;
       } else {
         /* Emit OP_HEAP_RECORD_GET_DYN + const_idx (field name) */
         compiler__emit_byte(c, OP_HEAP_RECORD_GET_DYN, line);
         compiler__emit_u16(c, name_idx, line);
         /* Result type is dyn (field type unknown at compile time) */
         c->last_expr_type = TYPE_DYN;
-        c->last_struct_idx = UINT32_MAX;
       }
     }
     return;
@@ -10152,7 +10124,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     compiler__emit_byte(c, OP_OPTIONAL_GET, line);
     compiler__emit_u16(c, name_idx, line);
     c->last_expr_type = TYPE_DYN;
-    c->last_struct_idx = UINT32_MAX;
     return;
   }
 
@@ -10225,7 +10196,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       }
 
       c->last_expr_type = TYPE_STRUCT;
-      c->last_struct_idx = struct_idx;
       return;
     }
   }
@@ -10521,7 +10491,6 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Set result type from callee's return type */
     c->last_expr_type = call_return_type;
-    c->last_struct_idx = call_return_struct_idx;
     /* Phase 5b: struct-returning procs use OP_RETURN_WIDE → inline on caller's stack */
     if (call_return_type == TYPE_STRUCT && call_return_struct_idx != UINT32_MAX) {
       StructTypeRegistry* reg = compiler__get_struct_registry(c);
@@ -10960,7 +10929,6 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
         if (ctx_fl && ctx_fl->count > 0) {
           compiler__emit_byte(c, OP_GET_CTX, line);
           c->last_expr_type = TYPE_STRUCT;
-          c->last_struct_idx = compiler__get_struct_registry(c)->ctx_type_idx;
         } else {
           compiler__error(c, line, node->start.column,
                           "no ctx fields declared");
@@ -10981,7 +10949,6 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
             compiler__emit_byte(c, (uint8_t)sf->width, line);
             c->inline_repr = INLINE_STACK;
             c->last_expr_type = TYPE_STRUCT;
-            c->last_struct_idx = sf->struct_type_idx;
           } else {
             compiler__emit_byte(c, sf->is_mutable ? OP_GET_STATE_FIELD_CELL
                                                   : OP_GET_STATE_FIELD, line);

@@ -90,6 +90,8 @@ typedef struct {
 static void typer__infer_node(TyperCtx* tc, AstNode* node);
 static const TyperStruct* typer__find_struct(TyperCtx* tc, const char* name, uint32_t name_len);
 static bool typer__body_yields(AstNode* node);
+static uint32_t typer__register_inline_struct(TyperCtx* tc,
+                                               const char* spec, uint32_t spec_len);
 
 /* --- Scope helpers --- */
 
@@ -768,23 +770,23 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
  * were declared. */
 static uint32_t typer__register_ctx_struct(TyperCtx* tc,
                                             AstNode** nodes, uint32_t count) {
-  /* Count fields first to decide whether to allocate a slot. */
-  uint32_t fcount = 0;
-  for (uint32_t ni = 0; ni < count; ni++) {
-    if (nodes[ni]->type == AST_CTX_DECL) fcount++;
-  }
-  if (fcount == 0) return UINT32_MAX;
-
-  /* Ctx occupies the pre-reserved slot 1 (see typer_infer init).
-   * Mirrors the compiler's struct_registry slot reservation. */
+  /* Ctx always has at least the built-in `pwd` field (see compiler.c
+   * ctx_field_list__init), so always register the ctx struct in the
+   * pre-reserved slot 1. User AST_CTX_DECL nodes append more fields. */
   uint32_t ctx_idx = 1;
   TyperStruct* s = &tc->structs[ctx_idx];
   s->name = "ctx";
   s->name_len = 3;
-  if (fcount > TYPER_MAX_STRUCT_FIELDS) fcount = TYPER_MAX_STRUCT_FIELDS;
-  s->field_count = (uint8_t)fcount;
-  uint32_t fi = 0;
-  for (uint32_t ni = 0; ni < count && fi < fcount; ni++) {
+  s->field_count = 0;
+
+  /* Built-in: mut str pwd */
+  s->field_types[s->field_count]      = (uint8_t)TYPE_STR;
+  s->field_names[s->field_count]      = "pwd";
+  s->field_name_lens[s->field_count]  = 3;
+  s->field_struct_idxs[s->field_count] = UINT32_MAX;
+  s->field_count++;
+
+  for (uint32_t ni = 0; ni < count && s->field_count < TYPER_MAX_STRUCT_FIELDS; ni++) {
     AstNode* node = nodes[ni];
     if (node->type != AST_CTX_DECL) continue;
     const char* tn = node->data.ctx_decl.type_name;
@@ -798,17 +800,97 @@ static uint32_t typer__register_ctx_struct(TyperCtx* tc,
       const TyperStruct* found = typer__find_struct(tc, tn, tl);
       if (found) f_struct_idx = (uint32_t)(found - tc->structs);
     }
-    s->field_types[fi]        = (uint8_t)ft;
-    s->field_names[fi]        = node->data.ctx_decl.field_name;
-    s->field_name_lens[fi]    = node->data.ctx_decl.field_name_len;
-    s->field_struct_idxs[fi]  = f_struct_idx;
-    fi++;
+    s->field_types[s->field_count]       = (uint8_t)ft;
+    s->field_names[s->field_count]       = node->data.ctx_decl.field_name;
+    s->field_name_lens[s->field_count]   = node->data.ctx_decl.field_name_len;
+    s->field_struct_idxs[s->field_count] = f_struct_idx;
+    s->field_count++;
   }
   return ctx_idx;
 }
 
 /* Pre-pass: collect struct definitions so struct constructor calls
  * (which propagate field types to args) can resolve. */
+/* Register an anonymous inline struct from a canonical string like
+ * "struct{x:i32,y:i32}". Mirrors compiler__register_inline_struct so
+ * the typer's struct_idx for each anonymous struct aligns with the
+ * compiler's (both register on demand in source order during defstruct
+ * walk). Returns the typer idx, or UINT32_MAX on parse error. */
+static uint32_t typer__register_inline_struct(TyperCtx* tc,
+                                               const char* spec, uint32_t spec_len) {
+  /* Already registered? Look up by canonical string. */
+  for (uint32_t i = 0; i < tc->struct_count; i++) {
+    if (tc->structs[i].name_len == spec_len &&
+        memcmp(tc->structs[i].name, spec, spec_len) == 0) {
+      return i;
+    }
+  }
+  /* Validate "struct{...}" wrapper */
+  if (spec_len < 9 || memcmp(spec, "struct{", 7) != 0 || spec[spec_len - 1] != '}')
+    return UINT32_MAX;
+  if (tc->struct_count >= TYPER_MAX_STRUCTS) return UINT32_MAX;
+
+  /* Reserve slot and parse fields. */
+  uint32_t idx = tc->struct_count++;
+  TyperStruct* s = &tc->structs[idx];
+  s->name        = spec;
+  s->name_len    = spec_len;
+  s->field_count = 0;
+
+  const char* p   = spec + 7;
+  const char* end = spec + spec_len - 1;
+  while (p < end && s->field_count < TYPER_MAX_STRUCT_FIELDS) {
+    /* Field name up to ':' */
+    const char* colon = p;
+    while (colon < end && *colon != ':') colon++;
+    if (colon >= end) return UINT32_MAX;
+    uint32_t fname_len = (uint32_t)(colon - p);
+    const char* fname = p;
+
+    /* Field type up to ',' or end (handle nested struct{} braces) */
+    const char* tstart = colon + 1;
+    const char* tp = tstart;
+    int depth = 0;
+    while (tp < end) {
+      if (*tp == '{') depth++;
+      else if (*tp == '}') { if (depth == 0) break; depth--; }
+      else if (*tp == ',' && depth == 0) break;
+      tp++;
+    }
+    uint32_t tlen = (uint32_t)(tp - tstart);
+
+    JaclType ftype = TYPE_DYN;
+    uint32_t f_struct_idx = UINT32_MAX;
+    if (is_type_keyword(tstart, tlen)) {
+      ftype = type_from_keyword(tstart, tlen);
+    } else if (tlen > 7 && memcmp(tstart, "struct{", 7) == 0) {
+      uint32_t nested = typer__register_inline_struct(tc, tstart, tlen);
+      if (nested == UINT32_MAX) return UINT32_MAX;
+      ftype = TYPE_STRUCT;
+      f_struct_idx = nested;
+      /* re-fetch: recursive registration may have moved tc->structs base
+       * (no — fixed-size array), but reassign s in case. */
+      s = &tc->structs[idx];
+    } else {
+      /* Named struct — resolve in pass 2 (or now if already registered) */
+      const TyperStruct* found = typer__find_struct(tc, tstart, tlen);
+      if (found) {
+        ftype = TYPE_STRUCT;
+        f_struct_idx = (uint32_t)(found - tc->structs);
+      }
+    }
+    uint32_t fi = s->field_count++;
+    s->field_types[fi]       = (uint8_t)ftype;
+    s->field_names[fi]       = fname;
+    s->field_name_lens[fi]   = fname_len;
+    s->field_struct_idxs[fi] = f_struct_idx;
+
+    p = tp;
+    if (p < end && *p == ',') p++;
+  }
+  return idx;
+}
+
 static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t count) {
   /* Pass 1: register names and primitive field types. Defer struct-
    * typed field idx resolution to pass 2 so forward references work
@@ -862,9 +944,20 @@ static void typer__register_structs(TyperCtx* tc, AstNode** nodes, uint32_t coun
       if (s->field_types[i] != TYPE_STRUCT) continue;
       const char* tn = node->data.defstruct.field_types[i];
       uint32_t    tl = node->data.defstruct.field_type_lens[i];
-      const TyperStruct* found = typer__find_struct(tc, tn, tl);
-      if (found) {
-        s->field_struct_idxs[i] = (uint32_t)(found - tc->structs);
+      if (tl > 7 && memcmp(tn, "struct{", 7) == 0) {
+        /* Anonymous inline struct field — register on demand so the
+         * typer's struct_idx aligns with the compiler's (which calls
+         * compiler__register_inline_struct in the same defstruct walk). */
+        uint32_t nested = typer__register_inline_struct(tc, tn, tl);
+        /* Re-fetch s in case TyperStruct array layout shifts (it
+         * doesn't — fixed-size — but defensive). */
+        s = &tc->structs[(uint32_t)(s - tc->structs)];
+        if (nested != UINT32_MAX) s->field_struct_idxs[i] = nested;
+      } else {
+        const TyperStruct* found = typer__find_struct(tc, tn, tl);
+        if (found) {
+          s->field_struct_idxs[i] = (uint32_t)(found - tc->structs);
+        }
       }
     }
   }
