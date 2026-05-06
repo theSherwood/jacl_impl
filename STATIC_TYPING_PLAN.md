@@ -895,50 +895,50 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 | 4 | Error formatting | Shared content formatters; per-pass reporting |
 | 5 | Migration order | Bottom-up by AST shape, sub-stratified by complexity |
 
-## Status summary (current session)
+## Status summary
 
 | Stage | Status |
 |---|---|
 | 0 — test infra + decisions | ✅ complete |
-| 1 — typer total + authoritative | ✅ substantially complete (1a–1d partial, see Stage 1 task list) |
+| 1 — typer total + authoritative | ✅ substantially complete (1a–1d done modulo structural items below) |
 | 1e — typer emits errors | ✅ complete (8/8 sites — all type-mismatch errors fire from the typer) |
 | 1f — dyn as a real type | ✅ complete (4 rules landed; expression-level mixing resolved as permissive) |
+| 2 — migrate compiler consumers | ✅ complete |
+| 3 — delete dead state | ✅ complete |
+| 4 — separate `TypedAstNode` | ⏭ skipped (optional, not pursued) |
+| 5 — pointer types `*T` for FFI | ❌ not started |
 
-## Stage 1 long-tail status (post this session)
+Tests: 95/95 corpus + 35/35 typer-only + 16/16 type-error. The audit
+machinery from Stages 0–2 was deleted in commit `0aa722f` after it
+served its purpose.
 
-Stage 1's leaf rules are largely complete. What remains is structural:
+## Stage 1 long-tail — what's left
+
+Stage 1's leaf rules are largely complete. What remains is
+structural rather than per-builtin:
 
 - **Match arm-walk** (Stage 1a): typer says DYN today. Match isn't
   load-bearing in the current corpus; deferred until used.
 - **Imported procs** (Stage 1b): the typer's proc registry only sees
   procs defined at the top level of the current program. `use mod
-  proc_name` imports stay DYN. Loading imported modules' typer state
-  would mean re-running the typer on the imported source — bigger
-  scope than a single typer rule.
+  proc_name` imports stay DYN. Loading imported modules' typer
+  state would mean re-running the typer on the imported source —
+  bigger scope than a single typer rule.
 - **Nested proc registration** (Stage 1b): procs defined inside a
-  proc body aren't registered in the typer's proc registry, so calls
-  to them from sibling positions fall through to DYN. Not surfaced
-  by the corpus.
-- **Closure literals** (Stage 1b): JACL's surface lambda is `proc`
-  with no name; AST_LIT_LAMBDA isn't a thing. Anonymous procs get
-  TYPE_CLOSURE via the same path as named procs. No remaining gap
-  in typing the closure value itself; typing call results through
-  closures (where the typer doesn't know the closure's signature)
-  still falls through to DYN.
+  proc body aren't registered in the typer's proc registry, so
+  calls to them from sibling positions fall through to DYN. Not
+  surfaced by the corpus.
+- **Closure literals as call results** (Stage 1b): anonymous procs
+  get TYPE_CLOSURE via the same path as named procs (no remaining
+  gap in typing the closure value itself), but the typer doesn't
+  know an anonymous closure's signature, so calling it falls
+  through to DYN.
 - **Box-element narrowing for `[deref $box]` / `[swap $box fn]`**:
   the typer doesn't track box element types. Deref/swap stay DYN.
   Adding TYPE_BOX_OF would mirror TYPE_FUTURE / TYPE_TYPED_VEC but
   isn't load-bearing today.
 
 These are tracked as future work but not blockers.
-| 2 — migrate compiler consumers | ✅ complete |
-| 3 — delete dead state | ✅ complete |
-| 4 — separate `TypedAstNode` | ⏭ skipped (optional, not pursued) |
-| 5 — pointer types `*T` for FFI | ❌ not started |
-
-Tests: 95/95 passing. Type-error corpus: 16/16 passing. The audit
-machinery from Stages 0–2 was deleted in commit `0aa722f` after it
-served its purpose.
 
 ## Pickup points
 
@@ -982,22 +982,20 @@ starting point. Open sub-decisions: `*T` only or also `*mut T`;
 auto-deref vs. always explicit; FFI call syntax. Resolve those
 before starting work.
 
-### Stage 1 long tail (Stage 1a–1d)
+### Stage 1 long-tail structural items
 
-The Stage 1 sub-task statuses (1a–1d) listed above still have
-"not done" items (e.g., `try` / `match` / `with-ctx` result types,
-`await`/`parallel`/`race`/`spawn` returns, scalar-element narrowing
-for `[Vec i64]` — these are now annotated correctly thanks to commit
-`a1dfe64`'s key-struct-idx propagation, double-check). Each is a
-focused typer rule; pick whichever is most impactful to user-visible
-typing in your scenario.
+The remaining Stage 1 work (listed above in the "long-tail" section)
+is structural — match arm-walk, imported-proc signatures, nested-proc
+registration, closure-call signatures, box-element narrowing. Each
+extends the typer's analysis rather than adding a leaf rule. Pick
+whichever is unblocked by an actual workload.
 
 ## Test infrastructure
 
-- **`test/test_typer.c`** — 16 typer-only cases asserting on
+- **`test/test_typer.c`** — 35 typer-only cases asserting on
   `inferred_type` directly. Doesn't go through codegen, so silent
   typer bugs are visible here.
-- **`test/test_type_errors.c`** — 11 cases locking in compile-time
+- **`test/test_type_errors.c`** — 16 cases locking in compile-time
   error messages via substring matching. Tolerates message
   rewordings within reason; lock in the wording you want by
   asserting on the load-bearing tokens (type names, "type error",
@@ -1006,4 +1004,43 @@ typing in your scenario.
   whenever a previously bespoke `snprintf` site moves to the typer.
 
 Run the suite with `bash build.sh`. Type-error binary:
-`/jacl_impl/.build/type_errors`.
+`/jacl_impl/.build/type_errors`. Typer-only binary:
+`/jacl_impl/.build/typer`.
+
+## Pickup-ready summary (last session)
+
+Stage 1 is essentially closed. The typer now handles all
+load-bearing rules in the current corpus. The next session can
+choose between:
+
+1. **Stage 5 — pointer types `*T` for FFI.** Fresh architectural
+   piece. Sub-decisions to resolve: `*T` only vs. also `*mut T`,
+   auto-deref vs. always explicit, FFI call syntax.
+2. **Address the await sharp edge** (above). Recommended path:
+   migrate the m13 `await 42` placeholders to real future
+   expressions, then make `await <non-future>` a typer error.
+3. **Tackle a structural Stage 1 item** when a real workload
+   needs it (match, imports, nested procs, closure-call typing,
+   box-element narrowing).
+
+Concrete state of the codebase post-session:
+
+- `TYPE_FUTURE` is a real type with element-type tracking via
+  the existing `JACL_SCALAR_TYPE_IDX` sentinel encoding (mirrors
+  `TYPE_TYPED_VEC`/`TYPE_TYPED_MAP`). spawn produces typed
+  futures from body-tail types; await unwraps to the element
+  type; race narrows to the unified body tail when homogeneous.
+- All five commitment-site rules from decision 2 are enforced
+  (def/mut/set/proc-param/proc-return/struct-or-ctx field-set).
+  Expression-level dyn mixing is permissive — `[+ $i32 $dyn]`
+  types as dyn and the barrier check fires at the next commit.
+- Compiler accepts `[Future T]` / `[Vec T]` / `[Map T]` /
+  `[Map K V]` as compound type annotations in def position
+  (routed through the untyped-def path; the typer narrows the
+  static type from the annotation).
+- Receiver-preserving builtins: filter, transform, take, vec-push,
+  vec-set, vec-concat, vec-slice, map-set, map-remove, map-keys,
+  map-vals all preserve typed-collection element types where
+  applicable.
+- vec-get, map-get, first narrow to typed-vec/typed-map element
+  types (struct or scalar via the shared sentinel).
