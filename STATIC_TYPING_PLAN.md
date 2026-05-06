@@ -296,18 +296,20 @@ longer load-bearing for the typer's annotation correctness —
 inner-dot `inferred_struct_idx` is set on the OUTER node before
 the rewrite touches the inner LIT_STRING.
 
-**Stage 3 deletion of `c->last_struct_idx` is still blocked by a
-*second* gap:** anonymous inline struct fields like
-`struct Wrapper {struct{x:i32,y:i32} pos}`. The compiler registers
-these in its struct_registry via `compiler__register_inline_struct`
-(canonical string `struct{x:i32,y:i32}`). The typer doesn't have
-parallel logic, so `tc->structs[wrapper_idx].field_struct_idxs[pos]`
-is `UINT32_MAX`. Chained access (`$w->pos->x`) then loses the
-inner struct_idx.
+**Update (commit `61ea693`):** anonymous-struct gap closed.
+`typer__register_inline_struct` parses canonical strings
+(`struct{x:i32,y:i32}`) and registers entries indexed by the
+canonical name. `typer__register_ctx_struct` always pre-populates
+ctx with the built-in `pwd: str` field. With those, the chained-
+dot reads migrate to the AST and `c->last_struct_idx` is deleted
+from compiler.c and jacl.h.
 
-**To finish Stage 3:** port `compiler__register_inline_struct`'s
-canonical-string parsing into the typer. ~100 lines of mostly
-mechanical work that mirrors the compiler's logic. Pending.
+**Status:** `c->last_expr_type` is the only Compiler-side type
+tracker still alive. It's read by audit-mode comparison code; the
+writes throughout compile_command keep it valid. Deletion is
+mechanical (delete writes, delete audit's last_expr_type
+comparison) but the audit serves as future-regression insurance
+during the env-into-ctx work that's queued next, so deferring.
 
 `c->last_expr_type` reads still flow through helpers like
 `compile_typed_elem_arg`'s scalar branch (typer doesn't propagate
