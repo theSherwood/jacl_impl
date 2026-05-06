@@ -240,7 +240,7 @@ behavior change.
 6. **Stage 1e — type errors emitted by the typer.** ✅ PARTIAL.
    Done: typer error infrastructure (`TyperResult`, `typer__error`)
    plumbed through `typer_infer` to `compiler_compile`'s reporting
-   machinery (commit `77709de`). Three error sites converted to use
+   machinery (commit `77709de`). Four error sites converted to use
    the shared formatters and fire from the typer:
    - typed def/mut mismatch (`jacl_format_assign_mismatch` /
      `jacl_format_assign_dyn_unnamed`) — commit `640ae7d`
@@ -248,18 +248,19 @@ behavior change.
      `jacl_format_assign_dyn_named`) — commit `f1a6af2`
    - proc declared-return vs body tail
      (`jacl_format_proc_return_mismatch`) — commit `f1a6af2`
+   - struct field-set mismatch (`jacl_format_field_mismatch` /
+     `jacl_format_field_dyn_assign`) — commit `402fd47`
 
    The compiler's parallel checks at compiler.c:5983-5995, 6204-6221,
-   6714-6726, 7272-7293 still exist as a backstop; the typer fires
-   first and its message reaches the user via compiler__error
-   re-injection. Struct-to-struct narrowing is left to the compiler
-   for now (typer's same-struct-idx tracking is not fully aligned
-   with the compiler's across module boundaries).
+   6714-6726, 7272-7293, 9722-9738 still exist as a backstop; the
+   typer fires first and its message reaches the user via
+   compiler__error re-injection. Struct-to-struct narrowing is left
+   to the compiler for now (typer's same-struct-idx tracking is not
+   fully aligned with the compiler's across module boundaries).
 
-   Not done: field-set mismatches (struct/ctx —
-   `jacl_format_field_mismatch` / `jacl_format_field_dyn_assign`),
-   struct-constructor arg-type mismatches, typed-collection element
-   mismatches, proc-call argument typing.
+   Not done: struct-constructor arg-type mismatches, typed-collection
+   element mismatches, proc-call argument typing, ctx-field-set
+   mismatches.
 7. **Stage 1f — `dyn` as a real type.** ❌ NOT STARTED.
    The architecture is in place but no rules written yet.
 8. **Run the audit-mode build continuously.** ✅ DONE — see
