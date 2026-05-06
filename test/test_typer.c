@@ -738,6 +738,56 @@ static void test_ptr_diff_returns_i64(void) {
   arena_destroy(&a);
 }
 
+/* --- Stage 5b extension: nested struct field access through pointers --- */
+
+static void test_ptr_nested_struct_field_chain(void) {
+  current_test = "ptr_nested_struct_field_chain";
+  arena_t a = {0};
+  /* $o->inner->b types as i32 (inner is struct field, b is i32).
+   * Nodes: [0] struct Inner, [1] struct Outer, [2] def addr,
+   * [3] def o, [4] $o->inner->b expression. */
+  ParseResult r = run_typer(
+      "struct Inner {i32 a i32 b}\n"
+      "struct Outer {Inner inner i32 tag}\n"
+      "def u64 addr 0\n"
+      "def [Ptr Outer] o [ptr-cast [Ptr Outer] $addr]\n"
+      "$o->inner->b", &a);
+  AstNode* outer_dot = find_cmd(r.nodes[4], ".");
+  ASSERT_NOT_NULL(outer_dot);
+  ASSERT_TYPE(outer_dot, TYPE_I32);
+  arena_destroy(&a);
+}
+
+static void test_ptr_struct_field_returns_struct(void) {
+  current_test = "ptr_struct_field_returns_struct";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "struct Inner {i32 a i32 b}\n"
+      "struct Outer {Inner inner i32 tag}\n"
+      "def u64 addr 0\n"
+      "def [Ptr Outer] o [ptr-cast [Ptr Outer] $addr]\n"
+      "$o->inner", &a);
+  AstNode* dot = find_cmd(r.nodes[4], ".");
+  ASSERT_NOT_NULL(dot);
+  ASSERT_TYPE(dot, TYPE_STRUCT);
+  arena_destroy(&a);
+}
+
+static void test_addr_of_scalar_field_returns_ptr(void) {
+  current_test = "addr_of_scalar_field_returns_ptr";
+  arena_t a = {0};
+  /* Nodes: [0] struct, [1] def addr, [2] def p, [3] addr expr. */
+  ParseResult r = run_typer(
+      "struct P {i32 x}\n"
+      "def u64 addr 0\n"
+      "def [Ptr P] p [ptr-cast [Ptr P] $addr]\n"
+      "addr $p->x", &a);
+  AstNode* a_cmd = find_cmd(r.nodes[3], "addr");
+  ASSERT_NOT_NULL(a_cmd);
+  ASSERT_TYPE(a_cmd, TYPE_PTR);
+  arena_destroy(&a);
+}
+
 /* --- Driver ------------------------------------------------------- */
 
 int main(void) {
@@ -791,6 +841,9 @@ int main(void) {
   test_ptr_deref_scalar_narrows();
   test_ptr_offset_preserves_pointee();
   test_ptr_diff_returns_i64();
+  test_ptr_nested_struct_field_chain();
+  test_ptr_struct_field_returns_struct();
+  test_addr_of_scalar_field_returns_ptr();
 
   printf("\n%d/%d passed", passes, passes + failures);
   if (failures > 0) {

@@ -1507,6 +1507,119 @@ static int test_ptr_deref_scalar(void) {
   return 1;
 }
 
+/* ===== Stage 5b extension: nested struct fields through pointers ===== */
+
+/* Two-level nested C struct mirroring a JACL struct of the same shape. */
+typedef struct CInner { int32_t a; int32_t b; } CInner;
+typedef struct COuter { CInner inner; int32_t tag; } COuter;
+static COuter g_test_outer;
+static JaclVal native_outer_addr(JaclVM* vm, JaclVal* args, int argc) {
+  (void)args; (void)argc;
+  return jacl_u64(&vm->vm.heap, (uint64_t)(uintptr_t)&g_test_outer);
+}
+
+/* Test: $p->inner->a chains through an embedded struct field. */
+static int test_nested_ptr_field_read(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+  embed__register_native(vm, "outer_addr", native_outer_addr, 0);
+
+  g_test_outer.inner.a = 11;
+  g_test_outer.inner.b = 22;
+  g_test_outer.tag     = 33;
+
+  JaclVal result = jacl_eval(vm,
+      "struct CInner {i32 a i32 b}\n"
+      "struct COuter {CInner inner i32 tag}\n"
+      "extern [Ptr COuter] outer_addr {}\n"
+      "def [Ptr COuter] o [outer_addr]\n"
+      "$o->inner->a");
+  ASSERT(!jacl_is_error(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 11);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: set $p->inner->a writes through the chain; the C side observes. */
+static int test_nested_ptr_field_write(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+  embed__register_native(vm, "outer_addr", native_outer_addr, 0);
+
+  g_test_outer.inner.a = 0;
+  g_test_outer.inner.b = 0;
+  g_test_outer.tag     = 0;
+
+  JaclVal result = jacl_eval(vm,
+      "struct CInner {i32 a i32 b}\n"
+      "struct COuter {CInner inner i32 tag}\n"
+      "extern [Ptr COuter] outer_addr {}\n"
+      "def [Ptr COuter] o [outer_addr]\n"
+      "set $o->inner->a 100\n"
+      "set $o->inner->b 200\n"
+      "set $o->tag 300");
+  ASSERT(!jacl_is_error(result));
+  ASSERT_INT_EQ(g_test_outer.inner.a, 100);
+  ASSERT_INT_EQ(g_test_outer.inner.b, 200);
+  ASSERT_INT_EQ(g_test_outer.tag,     300);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: [addr $o->inner->a] returns [Ptr i32] pointing at &o->inner.a;
+ * we verify by reading through it. */
+static int test_addr_of_nested_field(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+  embed__register_native(vm, "outer_addr", native_outer_addr, 0);
+
+  g_test_outer.inner.a = 7777;
+  g_test_outer.inner.b = 0;
+  g_test_outer.tag     = 0;
+
+  /* [ptr-addr [addr $o->inner->a]] returns the underlying u64; we
+   * compare it to the C-side &g_test_outer.inner.a. */
+  JaclVal result = jacl_eval(vm,
+      "struct CInner {i32 a i32 b}\n"
+      "struct COuter {CInner inner i32 tag}\n"
+      "extern [Ptr COuter] outer_addr {}\n"
+      "def [Ptr COuter] o [outer_addr]\n"
+      "ptr-addr [addr $o->inner->a]");
+  ASSERT(!jacl_is_error(result));
+  ASSERT(jacl_is_u64(result));
+  ASSERT(jacl_as_u64(result) == (uint64_t)(uintptr_t)&g_test_outer.inner.a);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: addr of a struct field returns [Ptr Struct]. We then deref
+ * the result through normal pointer access to verify. */
+static int test_addr_of_embedded_struct(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+  embed__register_native(vm, "outer_addr", native_outer_addr, 0);
+
+  g_test_outer.inner.a = 42;
+  g_test_outer.inner.b = 99;
+
+  /* def a binding to the inner struct's address, then read through it. */
+  JaclVal result = jacl_eval(vm,
+      "struct CInner {i32 a i32 b}\n"
+      "struct COuter {CInner inner i32 tag}\n"
+      "extern [Ptr COuter] outer_addr {}\n"
+      "def [Ptr COuter] o [outer_addr]\n"
+      "def [Ptr CInner] ip [addr $o->inner]\n"
+      "$ip->b");
+  ASSERT(!jacl_is_error(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 99);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
 /* ===== Stage 5c: pointer arithmetic ===== */
 
 /* A small static array of CPoints; JACL walks it with ptr-offset. */
@@ -1831,6 +1944,12 @@ int main(void) {
   RUN(test_ptr_field_read);
   RUN(test_ptr_field_write);
   RUN(test_ptr_deref_scalar);
+
+  printf("\n=== Embedding API: nested struct ptr access (Stage 5b ext) ===\n");
+  RUN(test_nested_ptr_field_read);
+  RUN(test_nested_ptr_field_write);
+  RUN(test_addr_of_nested_field);
+  RUN(test_addr_of_embedded_struct);
 
   printf("\n=== Embedding API: pointer arithmetic (Stage 5c) ===\n");
   RUN(test_ptr_offset_walk_array);

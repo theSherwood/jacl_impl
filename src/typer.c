@@ -2448,6 +2448,28 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         typer__error(tc, arg->start.line, arg->start.column, err);
       }
       node->inferred_type = TYPE_U64;
+    } else if (hid == HEAD_ADDR && node->data.command.arg_count == 1) {
+      /* [addr $p->field->...]: result is [Ptr T] where T is the
+       * accessed field's type. The typer trusts the typer-set
+       * inferred_type/struct_idx on the inner chain expression. */
+      AstNode* inner = node->data.command.args[0];
+      JaclType inner_t = (JaclType)inner->inferred_type;
+      uint32_t inner_sidx = inner->inferred_struct_idx;
+      if (inner_t == TYPE_STRUCT && inner_sidx != UINT32_MAX) {
+        /* addr of an embedded struct field → [Ptr InnerStruct] */
+        node->inferred_type       = TYPE_PTR;
+        node->inferred_struct_idx = inner_sidx;
+      } else if (inner_t != TYPE_DYN && inner_t != TYPE_STRUCT) {
+        /* Scalar leaf → [Ptr <scalar>] */
+        node->inferred_type       = TYPE_PTR;
+        node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(inner_t);
+      } else {
+        /* Unknown / dyn — fall back to dyn-pointer (caller-checked
+         * at runtime via the chain walker's compile-time error if
+         * the chain doesn't resolve). */
+        node->inferred_type       = TYPE_PTR;
+        node->inferred_struct_idx = UINT32_MAX;
+      }
     } else if (hid == HEAD_PTR_OFFSET && node->data.command.arg_count == 2) {
       /* [ptr-offset $p $n]: typed pointer arithmetic. Result preserves
        * the operand's pointee type. The integer offset must be a

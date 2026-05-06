@@ -6252,6 +6252,114 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_PTR_ADD_OFFSET: {
+        /* Pop u64 ptr, push ptr+offset. Used for taking the address
+         * of a nested struct field via [addr $p->inner->...]. */
+        uint16_t byte_offset = vm__read_u16(vm);
+        JaclVal ptr_val;
+        result = vm__pop(vm, &ptr_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(ptr_val)) {
+          result = vm__push(vm, ptr_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_u64(ptr_val)) {
+          vm__set_error(vm, "ptr-add-offset: expected pointer (u64)");
+          return VM_RUNTIME_ERROR;
+        }
+        uint64_t base = jacl_as_u64(ptr_val);
+        result = vm__push(vm, jacl_u64(&vm->heap, base + byte_offset));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_PTR_LOAD_INLINE: {
+        /* Pop a u64 pointer, push N inline JaclVal slots copied from
+         * *ptr+offset (interpreted as inline struct bytes). N is
+         * derived from the sub_type_idx's total_size. Mirrors
+         * OP_HEAP_RECORD_GET_INLINE but reads from raw memory. */
+        uint16_t byte_offset = vm__read_u16(vm);
+        uint16_t sub_type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || sub_type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "ptr-load-inline: invalid sub-struct type %u", (unsigned)sub_type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sub_sdef = vm->struct_registry->defs[sub_type_idx];
+        uint32_t sub_width = (sub_sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        JaclVal ptr_val;
+        result = vm__pop(vm, &ptr_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(ptr_val)) {
+          result = vm__push(vm, ptr_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_u64(ptr_val)) {
+          vm__set_error(vm, "ptr-load-inline: expected pointer (u64)");
+          return VM_RUNTIME_ERROR;
+        }
+        uint8_t* base = (uint8_t*)(uintptr_t)jacl_as_u64(ptr_val);
+        if (!base) {
+          vm__set_error(vm, "ptr-load-inline: null pointer dereference");
+          return VM_RUNTIME_ERROR;
+        }
+        if (vm->stack_top + sub_width > VM_STACK_MAX) {
+          vm__set_error(vm, "stack overflow (ptr-load-inline)");
+          return VM_STACK_OVERFLOW;
+        }
+        memset(&vm->stack[vm->stack_top], 0, sub_width * sizeof(JaclVal));
+        memcpy(&vm->stack[vm->stack_top], base + byte_offset, sub_sdef->total_size);
+        for (uint32_t si = 0; si < sub_width; si++) {
+          BITMAP_SET(vm->inline_slot_bitmap, vm->stack_top + si);
+        }
+        vm->stack_top += sub_width;
+        break;
+      }
+
+      case OP_PTR_STORE_INLINE: {
+        /* Pop N inline JaclVal slots, pop a u64 pointer, copy bytes
+         * to *ptr+offset. Pushes the pointer back for chaining.
+         * Mirrors OP_HEAP_RECORD_SET_INLINE but writes raw memory. */
+        uint16_t byte_offset = vm__read_u16(vm);
+        uint16_t sub_type_idx = vm__read_u16(vm);
+        if (!vm->struct_registry || sub_type_idx >= vm->struct_registry->count) {
+          vm__set_error(vm, "ptr-store-inline: invalid sub-struct type %u", (unsigned)sub_type_idx);
+          return VM_RUNTIME_ERROR;
+        }
+        StructTypeDef* sub_sdef = vm->struct_registry->defs[sub_type_idx];
+        uint32_t sub_width = (sub_sdef->total_size + sizeof(JaclVal) - 1) / sizeof(JaclVal);
+        if (vm->stack_top < sub_width + 1) {
+          vm__set_error(vm, "ptr-store-inline: stack underflow");
+          return VM_RUNTIME_ERROR;
+        }
+        uint8_t* inline_src = (uint8_t*)&vm->stack[vm->stack_top - sub_width];
+        JaclVal ptr_val = vm->stack[vm->stack_top - sub_width - 1];
+        if (jacl_is_error(ptr_val)) {
+          for (uint32_t si = 0; si < sub_width; si++) {
+            BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - sub_width + si);
+          }
+          vm->stack_top -= sub_width;
+          break;  /* error stays on TOS where ptr was */
+        }
+        if (!jacl_is_u64(ptr_val)) {
+          vm__set_error(vm, "ptr-store-inline: expected pointer (u64)");
+          return VM_RUNTIME_ERROR;
+        }
+        uint8_t* base = (uint8_t*)(uintptr_t)jacl_as_u64(ptr_val);
+        if (!base) {
+          vm__set_error(vm, "ptr-store-inline: null pointer dereference");
+          return VM_RUNTIME_ERROR;
+        }
+        memcpy(base + byte_offset, inline_src, sub_sdef->total_size);
+        /* Pop the inline slots; the pointer stays on TOS. */
+        for (uint32_t si = 0; si < sub_width; si++) {
+          BITMAP_CLR(vm->inline_slot_bitmap, vm->stack_top - sub_width + si);
+        }
+        vm->stack_top -= sub_width;
+        break;
+      }
+
       case OP_PTR_DIFF: {
         /* Typed pointer subtraction: pop u64 b, pop u64 a, push
          * (i64)(a-b)/elem_size. elem_size is baked in from the

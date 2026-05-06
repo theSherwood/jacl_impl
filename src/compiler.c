@@ -2930,6 +2930,91 @@ StructTypeRegistry* compiler__get_struct_registry(Compiler* c) {
   return root->struct_registry;
 }
 
+/* Resolve a (receiver, field-name) pair as part of a typed-pointer
+ * dot-chain. Used by HEAD_DOT compile (both 2-arg read and 3-arg
+ * set forms) and by the [addr] builtin to collapse arbitrarily-deep
+ * `$p->inner->...` chains into a single combined-offset opcode.
+ *
+ * Returns true (with all out-params set) if the chain bottoms out in
+ * a [Ptr Struct] base. *out_base is the leftmost expression that
+ * produces the pointer; *out_offset is the cumulative byte offset
+ * of the terminal field within the base's pointee; *out_term_t /
+ * *out_term_sidx describe the terminal field's type.
+ *
+ * Returns false if `recv` doesn't reach a [Ptr Struct] base — e.g.,
+ * recv is a struct value materialized from a vec-get, function
+ * return, or inline local. Those cases route through the existing
+ * struct-field compile paths instead. */
+static bool compiler__resolve_ptr_chain_step(Compiler* c,
+                                             AstNode* recv,
+                                             const char* fname,
+                                             uint32_t    fnlen,
+                                             AstNode** out_base,
+                                             uint32_t* out_offset,
+                                             JaclType* out_term_t,
+                                             uint32_t* out_term_sidx) {
+  if (!recv) return false;
+  StructTypeRegistry* reg = compiler__get_struct_registry(c);
+  if (!reg) return false;
+
+  JaclType recv_t = (JaclType)recv->inferred_type;
+  uint32_t recv_sidx = recv->inferred_struct_idx;
+
+  /* Direct case: receiver is a [Ptr Struct]. */
+  if (recv_t == TYPE_PTR && recv_sidx != UINT32_MAX &&
+      !JACL_IS_SCALAR_TYPE_IDX(recv_sidx) &&
+      recv_sidx < reg->count) {
+    StructTypeDef* sdef = reg->defs[recv_sidx];
+    for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+      if (sdef->fields[fi].name_len == fnlen &&
+          memcmp(sdef->fields[fi].name, fname, fnlen) == 0) {
+        *out_base       = recv;
+        *out_offset     = sdef->fields[fi].offset;
+        *out_term_t     = sdef->fields[fi].type;
+        *out_term_sidx  = sdef->fields[fi].struct_type_idx;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /* Chained case: receiver is itself a 2-arg dot whose chain ends
+   * at an embedded struct field. Recurse, then add this field's
+   * offset on top. */
+  if (recv->type == AST_COMMAND &&
+      recv->data.command.head_id == HEAD_DOT &&
+      recv->data.command.arg_count == 2 &&
+      recv->data.command.args[1]->type == AST_LIT_STRING) {
+    AstNode* inner_recv  = recv->data.command.args[0];
+    AstNode* inner_fld   = recv->data.command.args[1];
+    AstNode* inner_base;
+    uint32_t inner_offset;
+    JaclType inner_term_t;
+    uint32_t inner_term_sidx;
+    if (compiler__resolve_ptr_chain_step(c, inner_recv,
+                                         inner_fld->data.lit_string.value,
+                                         inner_fld->data.lit_string.length,
+                                         &inner_base, &inner_offset,
+                                         &inner_term_t, &inner_term_sidx) &&
+        inner_term_t == TYPE_STRUCT &&
+        inner_term_sidx < reg->count) {
+      StructTypeDef* sdef = reg->defs[inner_term_sidx];
+      for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+        if (sdef->fields[fi].name_len == fnlen &&
+            memcmp(sdef->fields[fi].name, fname, fnlen) == 0) {
+          *out_base       = inner_base;
+          *out_offset     = inner_offset + sdef->fields[fi].offset;
+          *out_term_t     = sdef->fields[fi].type;
+          *out_term_sidx  = sdef->fields[fi].struct_type_idx;
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
 /* --- Internal: emit struct-aware return --- */
 
 /* Phase 5b: emit OP_RETURN_WIDE if returning a value-type struct, else OP_RETURN.
@@ -9382,6 +9467,53 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* addr — [addr $p->field->...]: take the address of a chain leaf
+   * instead of loading its value. Walks the chain accumulator over
+   * args[0]; emits the base pointer + OP_PTR_ADD_OFFSET with the
+   * cumulative offset. Result type is [Ptr T] where T is the
+   * accessed field's type. */
+  if (hid == HEAD_ADDR) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "addr", "1 argument", argc);
+      return;
+    }
+    AstNode* expr = args[0];
+    if (expr->type != AST_COMMAND ||
+        expr->data.command.head_id != HEAD_DOT ||
+        expr->data.command.arg_count != 2 ||
+        expr->data.command.args[1]->type != AST_LIT_STRING) {
+      compiler__error(c, line, col,
+                      "addr: argument must be a field-access chain "
+                      "(e.g. $p->field or $p->inner->x)");
+      return;
+    }
+    AstNode* base_node;
+    uint32_t accumulated_offset;
+    JaclType term_t;
+    uint32_t term_sidx;
+    AstNode* recv  = expr->data.command.args[0];
+    AstNode* fld   = expr->data.command.args[1];
+    if (!compiler__resolve_ptr_chain_step(c, recv,
+                                          fld->data.lit_string.value,
+                                          fld->data.lit_string.length,
+                                          &base_node, &accumulated_offset,
+                                          &term_t, &term_sidx)) {
+      compiler__error(c, line, col,
+                      "addr: chain does not bottom out in a [Ptr T] base");
+      return;
+    }
+    (void)term_t; (void)term_sidx;  /* type info is for the typer, not codegen */
+    compiler__compile_node(c, base_node);
+    if (accumulated_offset != 0) {
+      compiler__emit_byte(c, OP_PTR_ADD_OFFSET, line);
+      compiler__emit_u16(c, (uint16_t)accumulated_offset, line);
+    }
+    /* Result type / pointee idx live on the AST node (typer-set). The
+     * runtime value is already a u64-tagged pointer, ready for any
+     * subsequent [Ptr T] use. */
+    return;
+  }
+
   /* ptr-deref — [ptr-deref $p]: load the value at *p. For [Ptr T]
    * with a scalar pointee, emits OP_PTR_LOAD at offset 0 with the
    * pointee's type. Struct pointees use $p->field for field access
@@ -9896,64 +10028,56 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     }
 
     /* Stage 5b: typed pointer field access — `$p->x` / `[. $p field]`
-     * where args[0] is `[Ptr Struct]`. Emit OP_PTR_LOAD (read) or
-     * OP_PTR_STORE (set) with the field's byte offset and type from
-     * the pointee struct in the registry. */
+     * (and arbitrarily nested chains $p->a->b->c through embedded
+     * struct fields). Walk the dot chain to accumulate the byte
+     * offset, then emit ONE opcode based on what the chain
+     * terminates at: OP_PTR_LOAD/STORE for scalar leaves,
+     * OP_PTR_LOAD_INLINE/STORE_INLINE for struct leaves. */
     if (args[1]->type == AST_LIT_STRING) {
-      JaclType recv_t = (JaclType)args[0]->inferred_type;
-      uint32_t recv_sidx = args[0]->inferred_struct_idx;
-      if (recv_t == TYPE_PTR && recv_sidx != UINT32_MAX &&
-          !JACL_IS_SCALAR_TYPE_IDX(recv_sidx)) {
-        StructTypeRegistry* reg = compiler__get_struct_registry(c);
-        if (reg && recv_sidx < reg->count) {
-          StructTypeDef* sdef = reg->defs[recv_sidx];
-          const char* field_name = args[1]->data.lit_string.value;
-          uint32_t    field_len  = args[1]->data.lit_string.length;
-          StructTypeField* field = NULL;
-          for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
-            if (sdef->fields[fi].name_len == field_len &&
-                memcmp(sdef->fields[fi].name, field_name, field_len) == 0) {
-              field = &sdef->fields[fi];
-              break;
-            }
-          }
-          if (!field) {
-            char err[256];
-            snprintf(err, sizeof(err),
-                     "field '%.*s' not found on struct '%.*s' (via [Ptr T])",
-                     (int)field_len, field_name,
-                     (int)sdef->name_len, sdef->name);
-            compiler__error(c, line, col, err);
-            return;
-          }
-          if (field->type == TYPE_STRUCT) {
-            compiler__error(c, line, col,
-                            "Stage 5b: nested struct field access through "
-                            "a pointer is not supported yet");
-            return;
-          }
-          /* Compile the pointer expression — leaves the u64 ptr on TOS. */
-          compiler__compile_node(c, args[0]);
-          if (is_set) {
-            /* Compile the value expression. The typer's field-set check
-             * already validated value type vs field type. */
-            compiler__compile_node(c, args[2]);
-            compiler__emit_byte(c, OP_PTR_STORE, line);
-            compiler__emit_u16(c, (uint16_t)field->offset, line);
-            compiler__emit_byte(c, (uint8_t)field->type, line);
-            /* Pop the pointer that OP_PTR_STORE pushes back; set form
-             * results in nil at the language level. */
+      /* For both 2-arg read and 3-arg set, args[0] is the receiver
+       * leading up to args[1] (the final field name). */
+      AstNode* base_node;
+      uint32_t accumulated_offset;
+      JaclType term_t;
+      uint32_t term_sidx;
+      if (compiler__resolve_ptr_chain_step(c, args[0],
+                                           args[1]->data.lit_string.value,
+                                           args[1]->data.lit_string.length,
+                                           &base_node, &accumulated_offset,
+                                           &term_t, &term_sidx)) {
+        /* Compile the base [Ptr Struct] expression — leaves u64 on TOS. */
+        compiler__compile_node(c, base_node);
+        if (is_set) {
+          /* Compile the value to write. */
+          compiler__compile_node(c, args[2]);
+          if (term_t == TYPE_STRUCT) {
+            compiler__emit_byte(c, OP_PTR_STORE_INLINE, line);
+            compiler__emit_u16(c, (uint16_t)accumulated_offset, line);
+            compiler__emit_u16(c, (uint16_t)term_sidx, line);
+            /* Inline-store leaves the pointer on TOS; set produces nil. */
             compiler__emit_byte(c, OP_POP, line);
-            compiler__emit_byte(c, OP_NIL, line);
-            c->last_expr_type = TYPE_NIL;
+          } else {
+            compiler__emit_byte(c, OP_PTR_STORE, line);
+            compiler__emit_u16(c, (uint16_t)accumulated_offset, line);
+            compiler__emit_byte(c, (uint8_t)term_t, line);
+            compiler__emit_byte(c, OP_POP, line);
+          }
+          compiler__emit_byte(c, OP_NIL, line);
+          c->last_expr_type = TYPE_NIL;
+        } else {
+          if (term_t == TYPE_STRUCT) {
+            compiler__emit_byte(c, OP_PTR_LOAD_INLINE, line);
+            compiler__emit_u16(c, (uint16_t)accumulated_offset, line);
+            compiler__emit_u16(c, (uint16_t)term_sidx, line);
+            c->last_expr_type = TYPE_STRUCT;
           } else {
             compiler__emit_byte(c, OP_PTR_LOAD, line);
-            compiler__emit_u16(c, (uint16_t)field->offset, line);
-            compiler__emit_byte(c, (uint8_t)field->type, line);
-            c->last_expr_type = (JaclType)field->type;
+            compiler__emit_u16(c, (uint16_t)accumulated_offset, line);
+            compiler__emit_byte(c, (uint8_t)term_t, line);
+            c->last_expr_type = term_t;
           }
-          return;
         }
+        return;
       }
     }
 

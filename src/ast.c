@@ -103,6 +103,7 @@ typedef enum {
   /* Typed pointers (Stage 5a/5b/5c) */
   HEAD_PTR_CAST, HEAD_PTR_ADDR, HEAD_PTR_DEREF,
   HEAD_PTR_OFFSET, HEAD_PTR_DIFF,
+  HEAD_ADDR,  /* [addr $p->field->...] — takes the address of a chain leaf */
 
   /* Native fn declaration with typed signature (Stage 5a) */
   HEAD_EXTERN,
@@ -173,6 +174,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "take", 4) == 0) return HEAD_TAKE;
       if (memcmp(s, "hash", 4) == 0) return HEAD_HASH;
       if (memcmp(s, "swap", 4) == 0) return HEAD_SWAP;
+      if (memcmp(s, "addr", 4) == 0) return HEAD_ADDR;
       return HEAD_NONE;
     case 5:
       if (memcmp(s, "while", 5) == 0) return HEAD_WHILE;

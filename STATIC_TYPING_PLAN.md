@@ -710,11 +710,36 @@ PROGRESS.** Done in this commit:
   `test_ptr_deref_scalar`). The write test confirms the C side
   observes JACL's mutation.
 
-**Known limit:** struct-typed fields through a pointer
-(`$p->some_struct.x`) error with "Stage 5b: nested struct field
-access through a pointer is not supported yet". Adding it requires
-either copying the nested struct into inline stack slots or
-emitting a chained pointer load — deferred.
+**Stage 5b extension — nested struct fields through pointers ✅
+COMPLETE.** Resolved the previously deferred case:
+
+- Three new opcodes (appended at end of OpCode enum):
+  - `OP_PTR_ADD_OFFSET (u16)` — pop u64 ptr, push ptr+offset.
+  - `OP_PTR_LOAD_INLINE (u16 byte_offset, u16 sub_type_idx)` —
+    pop u64 ptr, push N inline JaclVal slots from `*ptr+offset`.
+  - `OP_PTR_STORE_INLINE` — same, but writing.
+- New compiler helper `compiler__resolve_ptr_chain_step` walks
+  arbitrarily-deep `[. recv field]` chains, accumulating field
+  byte-offsets through embedded struct fields. The HEAD_DOT
+  compile path (both 2-arg read and 3-arg set) collapses the
+  whole chain into ONE opcode at the terminal field — never
+  materializes intermediate struct values.
+- Surface model (matches user expectation): `->` always produces a
+  value. Scalar leaves load via OP_PTR_LOAD; struct leaves load via
+  OP_PTR_LOAD_INLINE (whole-struct copy). `set $chain val` writes
+  through with the combined offset. The intermediate `$o->inner`
+  standalone is typed as `Inner` (struct value) — when used inside
+  a longer chain, the chain accumulator skips materialization.
+- New `[addr $expr]` builtin (HEAD_ADDR) — instead of loading the
+  chain leaf, emits the base pointer + OP_PTR_ADD_OFFSET with
+  cumulative offset. Result types as `[Ptr <field-type>]` (struct
+  pointee for struct field, scalar pointee for scalar leaf). Lets
+  the user grab a typed pointer to any nested struct or scalar.
+- Tests: 3 new typer-only (nested chain narrows to scalar, struct
+  field returns Inner, addr returns [Ptr T]), 2 new type-error
+  (addr on non-chain, addr without [Ptr T] base), 4 new embed
+  integration with real C nested structs (read, write, addr of
+  scalar field, addr of embedded struct).
 
 **Stage 5c — pointer arithmetic for array walking ✅ COMPLETE**
 
@@ -1029,7 +1054,8 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 | 4 — separate `TypedAstNode` | ⏭ skipped (optional, not pursued) |
 | 5a — pointer type + cast (foundation) | ✅ complete (`TYPE_PTR` + `[Ptr T]` annotation + `[ptr-cast]` / `[ptr-addr]` + typer misuse rules) |
 | 5a — typed externs | ✅ complete (`extern [type] name {params}` + compound return types for proc/extern) |
-| 5b — deref + field auto-deref | ✅ complete (`$p->x` / `[ptr-deref]` + new `OP_PTR_LOAD/STORE` opcodes; nested struct fields deferred) |
+| 5b — deref + field auto-deref | ✅ complete (`$p->x`, `[ptr-deref]`) |
+| 5b ext — nested struct fields through ptr | ✅ complete (`$p->inner->x`, `[addr ...]`, chain accumulator) |
 | 5c — pointer arithmetic | ✅ complete (`[ptr-offset]`, `[ptr-diff]` + opcodes; eq/lt reuse standard binary-ops) |
 
 Tests: 95/95 corpus + 35/35 typer-only + 16/16 type-error. The audit

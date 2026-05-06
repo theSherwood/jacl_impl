@@ -249,7 +249,12 @@ typedef enum {
 
   /* --- Typed pointer arithmetic (Stage 5c) --- */
   OP_PTR_OFFSET,           /* u16 elem_size; pop i32/i64 n, pop u64 p, push p + n*elem_size */
-  OP_PTR_DIFF              /* u16 elem_size; pop u64 b, pop u64 a, push (i64)(a-b)/elem_size */
+  OP_PTR_DIFF,             /* u16 elem_size; pop u64 b, pop u64 a, push (i64)(a-b)/elem_size */
+
+  /* --- Nested struct fields through pointers (Stage 5b extension) --- */
+  OP_PTR_ADD_OFFSET,       /* u16 byte_offset; pop u64 ptr, push ptr+offset */
+  OP_PTR_LOAD_INLINE,      /* u16 byte_offset, u16 sub_type_idx; pop u64 ptr, push N inline slots from *ptr+offset */
+  OP_PTR_STORE_INLINE      /* u16 byte_offset, u16 sub_type_idx; pop N inline slots, pop u64 ptr, copy bytes to *ptr+offset, push ptr */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -528,6 +533,9 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_PTR_STORE:              return "OP_PTR_STORE";
     case OP_PTR_OFFSET:             return "OP_PTR_OFFSET";
     case OP_PTR_DIFF:               return "OP_PTR_DIFF";
+    case OP_PTR_ADD_OFFSET:         return "OP_PTR_ADD_OFFSET";
+    case OP_PTR_LOAD_INLINE:        return "OP_PTR_LOAD_INLINE";
+    case OP_PTR_STORE_INLINE:       return "OP_PTR_STORE_INLINE";
     case OP_RESET_INLINE:           return "OP_RESET_INLINE";
     case OP_STRUCT_NEW_INLINE: return "OP_STRUCT_NEW_INLINE";
     case OP_STRUCT_GET_INLINE: return "OP_STRUCT_GET_INLINE";

@@ -301,6 +301,25 @@ static void run_all(void) {
     .expect_substrings = { "type error", "x", "Point", "i32", "str" },
   });
 
+  /* Stage 5b ext: addr requires a field-access chain argument. */
+  RUN("addr_non_chain_argument", {
+    .source = "def i32 x 5\naddr $x",
+    .expect_substrings = { "addr", "field-access chain" },
+  });
+
+  /* Stage 5b ext: addr on a chain that doesn't bottom out in [Ptr T]
+   * is rejected at compile time. Wrap in a proc so the local struct
+   * binding is allowed. */
+  RUN("addr_chain_no_ptr_base", {
+    .source =
+      "struct P {i32 x}\n"
+      "proc f {} {\n"
+      "  def p [P 1]\n"
+      "  addr $p->x\n"
+      "}",
+    .expect_substrings = { "addr", "[Ptr T]", "base" },
+  });
+
   /* Stage 5c: ptr-diff on two pointers with different pointees errors. */
   RUN("ptr_diff_different_pointees", {
     .source =

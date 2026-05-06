@@ -553,6 +553,7 @@ typedef enum {
   HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
   HEAD_PTR_CAST, HEAD_PTR_ADDR, HEAD_PTR_DEREF,
   HEAD_PTR_OFFSET, HEAD_PTR_DIFF,
+  HEAD_ADDR,
   HEAD_EXTERN,
   HEAD_STREAM_NEXT, HEAD_COLLECT, HEAD_COUNT, HEAD_TAKE,
   HEAD_FIRST, HEAD_LINES, HEAD_EXEC, HEAD_SIGNAL, HEAD_CANCEL,
@@ -910,7 +911,12 @@ typedef enum {
 
   /* Stage 5c — typed pointer arithmetic */
   OP_PTR_OFFSET,           /* u16 elem_size; pop i32/i64 n, pop u64 p, push p + n*elem_size */
-  OP_PTR_DIFF              /* u16 elem_size; pop u64 b, pop u64 a, push (i64)(a-b)/elem_size */
+  OP_PTR_DIFF,             /* u16 elem_size; pop u64 b, pop u64 a, push (i64)(a-b)/elem_size */
+
+  /* Nested struct fields through pointers — load/store whole inline structs at *ptr+offset */
+  OP_PTR_ADD_OFFSET,       /* u16 byte_offset; pop u64 ptr, push ptr+offset */
+  OP_PTR_LOAD_INLINE,      /* u16 byte_offset, u16 sub_type_idx; pop u64 ptr, push N inline slots from *ptr+offset */
+  OP_PTR_STORE_INLINE      /* u16 byte_offset, u16 sub_type_idx; pop N inline slots, pop u64 ptr, copy bytes to *ptr+offset, push ptr */
 } OpCode;
 
 typedef struct {
