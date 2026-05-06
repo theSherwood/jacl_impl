@@ -914,6 +914,35 @@ served its purpose.
 In rough order from "smallest, lowest-risk increment" to "freshest
 architectural piece". Each is independently shippable.
 
+### Sharp edge: `await` on a non-future operand
+
+The typer narrows `await TYPE_FUTURE` to the future's element type
+but stays permissive on `await <concrete-non-future>`. The pure-
+typing rule would be: `await 42` (or any concrete non-future) is a
+compile-time type error.
+
+We don't fire that error today because `m13`'s structural-error
+tests use `await 42` as a placeholder for "any suspending operation"
+and rely on the compiler's `cannot suspend inside try/catch` and
+`cannot suspend inside non-suspending callback` diagnostics firing
+first. A typer error would preempt the more informative structural
+diagnostic and the m13 tests fail.
+
+Resolution paths (pick when revisiting):
+
+1. **Reorder diagnostic precedence:** detect the structural-error
+   contexts in the typer too (or have the typer mark such operands
+   as "skip type check") so the structural error wins. Adds
+   coupling between the typer and the SM-analysis state.
+2. **Migrate the m13 tests:** rewrite each `await 42` to a real
+   future expression (`await [spawn { 42 }]` or similar). Doesn't
+   require typer changes; the m13 tests get slightly more elaborate
+   but the diagnostics tested are the same.
+
+Recommended: option (2). It's mechanical, keeps the typer rule
+simple, and the structural-error tests still test what they claim
+to test.
+
 ### Stage 5 — pointer types for FFI
 
 A fresh architectural piece, separate from the migration work. The
