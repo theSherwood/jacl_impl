@@ -107,7 +107,7 @@ and typer's `tc->structs`):**
 - Stage 1e — typer emits type errors directly. ✅ SUBSTANTIALLY
   COMPLETE. Seven error sites fire from the typer using the shared
   formatters in `src/type_error.c`. Two minor sites remain as
-  follow-ons (the `set $ctx.field val` arrow form, and proc-return
+  follow-ons (the `set $ctx->field val` arrow form, and proc-return
   dyn-into-typed).
 - Stage 1f — `dyn` as a real type with defined-semantics ops.
   ✅ COMPLETE. Four rules landed: proc-call dyn-into-typed-param,
@@ -290,7 +290,7 @@ behavior change.
    - Proc-call dyn-into-typed-param mismatch (the typer currently
      skips DYN args; the compiler still flags them via the
      `(use [to T $val])` cast hint).
-   - Ctx-field-set via the `set $ctx.field val` arrow form
+   - Ctx-field-set via the `set $ctx->field val` arrow form
      (currently handled by the compiler's HEAD_SET rewrite; the
      bare `[. $ctx field val]` form already typer-checks via the
      general struct field-set rule from commit `402fd47`).
@@ -911,7 +911,7 @@ architectural piece". Each is independently shippable.
 These are mechanical extensions of work already landed; should each
 be a single commit.
 
-1. **Ctx-field-set arrow form.** `set $ctx.field val` is rewritten
+1. **Ctx-field-set arrow form.** `set $ctx->field val` is rewritten
    by HEAD_SET's arrow desugar; the typer doesn't see the
    rewritten tree. The bare `[. $ctx field val]` form already
    typer-checks via the rule from commit `402fd47`. Either run the
