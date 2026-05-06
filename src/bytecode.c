@@ -245,7 +245,11 @@ typedef enum {
   /* --- Typed pointers (Stage 5b) — appended to keep prior opcode
    * positions stable for downstream consumers. --- */
   OP_PTR_LOAD,             /* u16 byte_offset, u8 field_type; pop u64 ptr, push value at *ptr+offset */
-  OP_PTR_STORE             /* u16 byte_offset, u8 field_type; pop value, pop u64 ptr, write to *ptr+offset, push ptr */
+  OP_PTR_STORE,            /* u16 byte_offset, u8 field_type; pop value, pop u64 ptr, write to *ptr+offset, push ptr */
+
+  /* --- Typed pointer arithmetic (Stage 5c) --- */
+  OP_PTR_OFFSET,           /* u16 elem_size; pop i32/i64 n, pop u64 p, push p + n*elem_size */
+  OP_PTR_DIFF              /* u16 elem_size; pop u64 b, pop u64 a, push (i64)(a-b)/elem_size */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -522,6 +526,8 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_HEAP_RECORD_SET_INLINE: return "OP_HEAP_RECORD_SET_INLINE";
     case OP_PTR_LOAD:               return "OP_PTR_LOAD";
     case OP_PTR_STORE:              return "OP_PTR_STORE";
+    case OP_PTR_OFFSET:             return "OP_PTR_OFFSET";
+    case OP_PTR_DIFF:               return "OP_PTR_DIFF";
     case OP_RESET_INLINE:           return "OP_RESET_INLINE";
     case OP_STRUCT_NEW_INLINE: return "OP_STRUCT_NEW_INLINE";
     case OP_STRUCT_GET_INLINE: return "OP_STRUCT_GET_INLINE";

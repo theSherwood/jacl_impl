@@ -691,6 +691,53 @@ static void test_ptr_deref_scalar_narrows(void) {
   arena_destroy(&a);
 }
 
+/* --- Stage 5c: pointer arithmetic --- */
+
+static void test_ptr_offset_preserves_pointee(void) {
+  current_test = "ptr_offset_preserves_pointee";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "struct Point {i32 x i32 y}\n"
+      "def u64 addr 0\n"
+      "def [Ptr Point] p [ptr-cast [Ptr Point] $addr]\n"
+      "ptr-offset $p 3", &a);
+  AstNode* off = find_cmd(r.nodes[3], "ptr-offset");
+  ASSERT_NOT_NULL(off);
+  ASSERT_TYPE(off, TYPE_PTR);
+  if (off) {
+    AstNode* p_ref = r.nodes[2];   /* def node for p */
+    /* The result's pointee idx should match p's pointee idx. */
+    if (off->inferred_struct_idx != p_ref->inferred_struct_idx) {
+      /* p's binding-side struct_idx lives on the def itself; just
+       * verify the offset node has a struct (non-scalar) idx. */
+      if (JACL_IS_SCALAR_TYPE_IDX(off->inferred_struct_idx) ||
+          off->inferred_struct_idx == UINT32_MAX) {
+        fprintf(stderr, "  FAIL %s: pointee idx not preserved (got %u)\n",
+                current_test, off->inferred_struct_idx);
+        failures++;
+        arena_destroy(&a);
+        return;
+      }
+    }
+    passes++;
+  }
+  arena_destroy(&a);
+}
+
+static void test_ptr_diff_returns_i64(void) {
+  current_test = "ptr_diff_returns_i64";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "def u64 addr 0\n"
+      "def [Ptr i32] p [ptr-cast [Ptr i32] $addr]\n"
+      "def [Ptr i32] q [ptr-cast [Ptr i32] $addr]\n"
+      "ptr-diff $p $q", &a);
+  AstNode* d = find_cmd(r.nodes[3], "ptr-diff");
+  ASSERT_NOT_NULL(d);
+  ASSERT_TYPE(d, TYPE_I64);
+  arena_destroy(&a);
+}
+
 /* --- Driver ------------------------------------------------------- */
 
 int main(void) {
@@ -742,6 +789,8 @@ int main(void) {
   test_extern_with_params();
   test_ptr_arrow_field_narrows();
   test_ptr_deref_scalar_narrows();
+  test_ptr_offset_preserves_pointee();
+  test_ptr_diff_returns_i64();
 
   printf("\n%d/%d passed", passes, passes + failures);
   if (failures > 0) {

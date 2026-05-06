@@ -9299,6 +9299,89 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* ptr-offset — [ptr-offset $p $n]: typed pointer arithmetic. Looks
+   * up the pointee's element size at compile time (struct registry
+   * for struct pointees, scalar size for scalar pointees) and bakes
+   * it into the OP_PTR_OFFSET operand. The result preserves the
+   * pointer's pointee — same [Ptr T] returned. */
+  if (hid == HEAD_PTR_OFFSET) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "ptr-offset", "2 arguments", argc);
+      return;
+    }
+    JaclType recv_t = (JaclType)args[0]->inferred_type;
+    uint32_t recv_sidx = args[0]->inferred_struct_idx;
+    if (recv_t != TYPE_PTR) {
+      compiler__error(c, line, col,
+                      "ptr-offset: first argument must be a typed pointer ([Ptr T])");
+      return;
+    }
+    if (recv_sidx == UINT32_MAX) {
+      compiler__error(c, line, col,
+                      "ptr-offset: pointer's pointee type is unknown");
+      return;
+    }
+    uint32_t elem_size;
+    if (JACL_IS_SCALAR_TYPE_IDX(recv_sidx)) {
+      JaclType pointee = JACL_TYPE_IDX_TO_SCALAR(recv_sidx);
+      elem_size = struct__type_size(pointee, NULL, 0);
+    } else {
+      StructTypeRegistry* reg = compiler__get_struct_registry(c);
+      if (!reg || recv_sidx >= reg->count || !reg->defs[recv_sidx]) {
+        compiler__error(c, line, col,
+                        "ptr-offset: unknown struct pointee type");
+        return;
+      }
+      elem_size = reg->defs[recv_sidx]->total_size;
+    }
+    if (elem_size == 0 || elem_size > 0xFFFF) {
+      compiler__error(c, line, col,
+                      "ptr-offset: pointee size out of range");
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_PTR_OFFSET, line);
+    compiler__emit_u16(c, (uint16_t)elem_size, line);
+    return;
+  }
+
+  /* ptr-diff — [ptr-diff $a $b]: typed pointer subtraction. Same
+   * pointee required (typer enforces). Result is i64 element count. */
+  if (hid == HEAD_PTR_DIFF) {
+    if (argc != 2) {
+      compiler__builtin_arity_error(c, line, col, "ptr-diff", "2 arguments", argc);
+      return;
+    }
+    JaclType lhs_t = (JaclType)args[0]->inferred_type;
+    uint32_t lhs_sidx = args[0]->inferred_struct_idx;
+    if (lhs_t != TYPE_PTR || lhs_sidx == UINT32_MAX) {
+      compiler__error(c, line, col,
+                      "ptr-diff: arguments must be typed pointers ([Ptr T])");
+      return;
+    }
+    uint32_t elem_size;
+    if (JACL_IS_SCALAR_TYPE_IDX(lhs_sidx)) {
+      elem_size = struct__type_size(JACL_TYPE_IDX_TO_SCALAR(lhs_sidx), NULL, 0);
+    } else {
+      StructTypeRegistry* reg = compiler__get_struct_registry(c);
+      if (!reg || lhs_sidx >= reg->count || !reg->defs[lhs_sidx]) {
+        compiler__error(c, line, col, "ptr-diff: unknown struct pointee type");
+        return;
+      }
+      elem_size = reg->defs[lhs_sidx]->total_size;
+    }
+    if (elem_size == 0 || elem_size > 0xFFFF) {
+      compiler__error(c, line, col, "ptr-diff: pointee size out of range");
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    compiler__compile_node(c, args[1]);
+    compiler__emit_byte(c, OP_PTR_DIFF, line);
+    compiler__emit_u16(c, (uint16_t)elem_size, line);
+    return;
+  }
+
   /* ptr-deref — [ptr-deref $p]: load the value at *p. For [Ptr T]
    * with a scalar pointee, emits OP_PTR_LOAD at offset 0 with the
    * pointee's type. Struct pointees use $p->field for field access

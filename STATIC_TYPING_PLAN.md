@@ -716,15 +716,33 @@ access through a pointer is not supported yet". Adding it requires
 either copying the nested struct into inline stack slots or
 emitting a chained pointer load — deferred.
 
-**Stage 5c — pointer arithmetic for array walking (~3-5 days)**
+**Stage 5c — pointer arithmetic for array walking ✅ COMPLETE**
 
-- `[ptr-offset $p $n]`, `[ptr-diff]`, `[ptr-eq]`, `[ptr-lt]`.
+- New opcodes `OP_PTR_OFFSET` (u16 elem_size; pop n, pop p, push
+  `p + n*elem_size`) and `OP_PTR_DIFF` (u16 elem_size; pop b, pop a,
+  push `(i64)(a-b)/elem_size`).
+- `[ptr-offset $p $n]` — typer preserves the operand's pointee
+  on the result; compiler bakes `elem_size` from the struct registry
+  (or scalar size) into the operand.
+- `[ptr-diff $a $b]` — typer requires same pointee on both sides;
+  result narrows to `i64`.
+- Equality / ordering: `==`, `<`, `>`, etc. already work on
+  pointers via the existing binary-op rules (Stage 5a's typer
+  rule rejects mixed-pointee comparison; same-pointee falls
+  through to standard tagged-u64 equality). No dedicated
+  `[ptr-eq]` / `[ptr-lt]` builtins added — would be redundant.
+- Tests: 2 new typer-only (`test_ptr_offset_preserves_pointee`,
+  `test_ptr_diff_returns_i64`); 2 new type-error
+  (`ptr_diff_different_pointees`, `ptr_offset_non_numeric_offset`);
+  2 new embed integration tests walking a real C array
+  (`test_ptr_offset_walk_array`, `test_ptr_diff_array_elements`).
 
-**Exit criteria (Stage 5 overall):** can write a JACL debugger
-script that takes a raw u64 address from a registered native fn,
-casts to `[Ptr Point]`, reads `$p->x` / `$p->y`, walks an array via
-`[ptr-offset]`, and the typer rejects pointee/value/arithmetic
-confusion at compile time.
+**Exit criteria (Stage 5 overall) — MET:** the embed test
+`test_ptr_offset_walk_array` does exactly this — takes a raw u64
+address from a registered native fn, casts to `[Ptr CPoint]`,
+walks an array via `[ptr-offset]`, reads `$p->x` from each element,
+and sums them. The typer rejects pointee mismatches, pointer
+arithmetic via `+`, and non-numeric offsets at compile time.
 
 ---
 
@@ -1012,7 +1030,7 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 | 5a — pointer type + cast (foundation) | ✅ complete (`TYPE_PTR` + `[Ptr T]` annotation + `[ptr-cast]` / `[ptr-addr]` + typer misuse rules) |
 | 5a — typed externs | ✅ complete (`extern [type] name {params}` + compound return types for proc/extern) |
 | 5b — deref + field auto-deref | ✅ complete (`$p->x` / `[ptr-deref]` + new `OP_PTR_LOAD/STORE` opcodes; nested struct fields deferred) |
-| 5c — pointer arithmetic | ❌ not started |
+| 5c — pointer arithmetic | ✅ complete (`[ptr-offset]`, `[ptr-diff]` + opcodes; eq/lt reuse standard binary-ops) |
 
 Tests: 95/95 corpus + 35/35 typer-only + 16/16 type-error. The audit
 machinery from Stages 0–2 was deleted in commit `0aa722f` after it

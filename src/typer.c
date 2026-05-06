@@ -2448,6 +2448,56 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         typer__error(tc, arg->start.line, arg->start.column, err);
       }
       node->inferred_type = TYPE_U64;
+    } else if (hid == HEAD_PTR_OFFSET && node->data.command.arg_count == 2) {
+      /* [ptr-offset $p $n]: typed pointer arithmetic. Result preserves
+       * the operand's pointee type. The integer offset must be a
+       * concrete numeric (or dyn). */
+      AstNode* p   = node->data.command.args[0];
+      AstNode* n   = node->data.command.args[1];
+      JaclType p_t = (JaclType)p->inferred_type;
+      JaclType n_t = (JaclType)n->inferred_type;
+      if (p_t != TYPE_PTR && p_t != TYPE_DYN) {
+        char err[160];
+        snprintf(err, sizeof(err),
+                 "type error: ptr-offset expects a pointer, got %s",
+                 type_name(p_t));
+        typer__error(tc, p->start.line, p->start.column, err);
+        node->inferred_type = TYPE_DYN;
+      } else if (n_t != TYPE_DYN && !is_numeric_type(n_t)) {
+        char err[160];
+        snprintf(err, sizeof(err),
+                 "type error: ptr-offset offset must be numeric, got %s",
+                 type_name(n_t));
+        typer__error(tc, n->start.line, n->start.column, err);
+        node->inferred_type = TYPE_DYN;
+      } else {
+        node->inferred_type       = TYPE_PTR;
+        node->inferred_struct_idx = p->inferred_struct_idx;
+      }
+    } else if (hid == HEAD_PTR_DIFF && node->data.command.arg_count == 2) {
+      /* [ptr-diff $a $b]: subtract two pointers of the same pointee.
+       * Result is i64 (signed element count). */
+      AstNode* a = node->data.command.args[0];
+      AstNode* b = node->data.command.args[1];
+      JaclType a_t = (JaclType)a->inferred_type;
+      JaclType b_t = (JaclType)b->inferred_type;
+      if (a_t != TYPE_PTR || b_t != TYPE_PTR) {
+        if (a_t != TYPE_DYN && b_t != TYPE_DYN) {
+          char err[160];
+          snprintf(err, sizeof(err),
+                   "type error: ptr-diff expects two pointers, got %s and %s",
+                   type_name(a_t), type_name(b_t));
+          typer__error(tc, a->start.line, a->start.column, err);
+        }
+      } else if (a->inferred_struct_idx != b->inferred_struct_idx &&
+                 a->inferred_struct_idx != UINT32_MAX &&
+                 b->inferred_struct_idx != UINT32_MAX) {
+        char err[160];
+        snprintf(err, sizeof(err),
+                 "type error: ptr-diff requires same pointee type on both sides");
+        typer__error(tc, a->start.line, a->start.column, err);
+      }
+      node->inferred_type = TYPE_I64;
     } else if (hid == HEAD_PTR_DEREF && node->data.command.arg_count == 1) {
       /* [ptr-deref $p]: load the value at *p. For [Ptr T] with a
        * scalar pointee, the result narrows to T. Struct pointees

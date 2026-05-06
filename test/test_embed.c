@@ -1507,6 +1507,63 @@ static int test_ptr_deref_scalar(void) {
   return 1;
 }
 
+/* ===== Stage 5c: pointer arithmetic ===== */
+
+/* A small static array of CPoints; JACL walks it with ptr-offset. */
+static CPoint g_test_array[3];
+static JaclVal native_arr_addr(JaclVM* vm, JaclVal* args, int argc) {
+  (void)args; (void)argc;
+  return jacl_u64(&vm->vm.heap, (uint64_t)(uintptr_t)&g_test_array[0]);
+}
+
+/* Test: walk a C array of CPoints from JACL via [ptr-offset], read
+ * fields through each typed pointer. */
+static int test_ptr_offset_walk_array(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+  embed__register_native(vm, "arr_addr", native_arr_addr, 0);
+
+  g_test_array[0].x = 10; g_test_array[0].y = 20;
+  g_test_array[1].x = 30; g_test_array[1].y = 40;
+  g_test_array[2].x = 50; g_test_array[2].y = 60;
+
+  /* Sum the x fields of all three elements. */
+  JaclVal result = jacl_eval(vm,
+      "struct CPoint {i32 x i32 y}\n"
+      "extern [Ptr CPoint] arr_addr {}\n"
+      "def [Ptr CPoint] base [arr_addr]\n"
+      "def [Ptr CPoint] e1 [ptr-offset $base 1]\n"
+      "def [Ptr CPoint] e2 [ptr-offset $base 2]\n"
+      "+ [+ $base->x $e1->x] $e2->x");
+  ASSERT(!jacl_is_error(result));
+  ASSERT(jacl_is_i32(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 90);  /* 10 + 30 + 50 */
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: ptr-diff on two pointers into the same array gives the
+ * element-count distance. */
+static int test_ptr_diff_array_elements(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+  embed__register_native(vm, "arr_addr", native_arr_addr, 0);
+
+  JaclVal result = jacl_eval(vm,
+      "struct CPoint {i32 x i32 y}\n"
+      "extern [Ptr CPoint] arr_addr {}\n"
+      "def [Ptr CPoint] base [arr_addr]\n"
+      "def [Ptr CPoint] e2 [ptr-offset $base 2]\n"
+      "ptr-diff $e2 $base");
+  ASSERT(!jacl_is_error(result));
+  ASSERT(jacl_is_i64(result));
+  ASSERT(jacl_as_i64(result) == 2);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
 /* ===== US-010: Build system / libffi detection ===== */
 
 /* Test: jacl_has_trampolines returns a bool consistent with compile-time detection */
@@ -1774,6 +1831,10 @@ int main(void) {
   RUN(test_ptr_field_read);
   RUN(test_ptr_field_write);
   RUN(test_ptr_deref_scalar);
+
+  printf("\n=== Embedding API: pointer arithmetic (Stage 5c) ===\n");
+  RUN(test_ptr_offset_walk_array);
+  RUN(test_ptr_diff_array_elements);
 
   printf("\n=== Embedding API: Build system / libffi ===\n");
   RUN(test_has_trampolines);

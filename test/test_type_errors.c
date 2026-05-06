@@ -301,6 +301,27 @@ static void run_all(void) {
     .expect_substrings = { "type error", "x", "Point", "i32", "str" },
   });
 
+  /* Stage 5c: ptr-diff on two pointers with different pointees errors. */
+  RUN("ptr_diff_different_pointees", {
+    .source =
+      "struct A {i32 x}\n"
+      "struct B {i32 y}\n"
+      "def u64 addr 0\n"
+      "def [Ptr A] a [ptr-cast [Ptr A] $addr]\n"
+      "def [Ptr B] b [ptr-cast [Ptr B] $addr]\n"
+      "ptr-diff $a $b",
+    .expect_substrings = { "type error", "ptr-diff", "same pointee" },
+  });
+
+  /* Stage 5c: ptr-offset with non-numeric offset is rejected. */
+  RUN("ptr_offset_non_numeric_offset", {
+    .source =
+      "def u64 addr 0\n"
+      "def [Ptr i32] p [ptr-cast [Ptr i32] $addr]\n"
+      "ptr-offset $p \"oops\"",
+    .expect_substrings = { "type error", "ptr-offset", "numeric", "str" },
+  });
+
   /* extern declared with typed param: calling with the wrong arg
    * type fires the same dyn/typed barrier as a JACL proc call would. */
   RUN("extern_call_wrong_arg_type", {

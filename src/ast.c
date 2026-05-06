@@ -100,8 +100,9 @@ typedef enum {
   HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
   HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
 
-  /* Typed pointers (Stage 5a/5b) */
+  /* Typed pointers (Stage 5a/5b/5c) */
   HEAD_PTR_CAST, HEAD_PTR_ADDR, HEAD_PTR_DEREF,
+  HEAD_PTR_OFFSET, HEAD_PTR_DIFF,
 
   /* Native fn declaration with typed signature (Stage 5a) */
   HEAD_EXTERN,
@@ -224,6 +225,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "defmacro", 8) == 0) return HEAD_DEFMACRO;
       if (memcmp(s, "ptr-cast", 8) == 0) return HEAD_PTR_CAST;
       if (memcmp(s, "ptr-addr", 8) == 0) return HEAD_PTR_ADDR;
+      if (memcmp(s, "ptr-diff", 8) == 0) return HEAD_PTR_DIFF;
       return HEAD_NONE;
     case 9:
       if (memcmp(s, "transform", 9) == 0) return HEAD_TRANSFORM;
@@ -239,6 +241,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "map-remove", 10) == 0) return HEAD_MAP_REMOVE;
       if (memcmp(s, "syntax-pos", 10) == 0) return HEAD_SYNTAX_POS;
       if (memcmp(s, "syntax-str", 10) == 0) return HEAD_SYNTAX_STR;
+      if (memcmp(s, "ptr-offset", 10) == 0) return HEAD_PTR_OFFSET;
       return HEAD_NONE;
     case 11:
       if (memcmp(s, "byte-length", 11) == 0) return HEAD_BYTE_LENGTH;

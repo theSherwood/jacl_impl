@@ -552,6 +552,7 @@ typedef enum {
   HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
   HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
   HEAD_PTR_CAST, HEAD_PTR_ADDR, HEAD_PTR_DEREF,
+  HEAD_PTR_OFFSET, HEAD_PTR_DIFF,
   HEAD_EXTERN,
   HEAD_STREAM_NEXT, HEAD_COLLECT, HEAD_COUNT, HEAD_TAKE,
   HEAD_FIRST, HEAD_LINES, HEAD_EXEC, HEAD_SIGNAL, HEAD_CANCEL,
@@ -905,7 +906,11 @@ typedef enum {
   /* Stage 5b — typed pointer load/store (appended to keep prior
    * opcode positions stable). */
   OP_PTR_LOAD,             /* u16 byte_offset, u8 field_type; pop u64 ptr, push value at *ptr+offset */
-  OP_PTR_STORE             /* u16 byte_offset, u8 field_type; pop value, pop u64 ptr, write to *ptr+offset, push ptr */
+  OP_PTR_STORE,            /* u16 byte_offset, u8 field_type; pop value, pop u64 ptr, write to *ptr+offset, push ptr */
+
+  /* Stage 5c — typed pointer arithmetic */
+  OP_PTR_OFFSET,           /* u16 elem_size; pop i32/i64 n, pop u64 p, push p + n*elem_size */
+  OP_PTR_DIFF              /* u16 elem_size; pop u64 b, pop u64 a, push (i64)(a-b)/elem_size */
 } OpCode;
 
 typedef struct {

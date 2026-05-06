@@ -6210,6 +6210,77 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_PTR_OFFSET: {
+        /* Typed pointer arithmetic: pop n (signed), pop u64 p, push
+         * p + n * elem_size. Used by [ptr-offset $p $n] for walking
+         * arrays. The compiler bakes elem_size in based on the
+         * pointee's static type. n may be i32 or i64. */
+        uint16_t elem_size = vm__read_u16(vm);
+        JaclVal n_val;
+        result = vm__pop(vm, &n_val);
+        if (result != VM_OK) return result;
+        JaclVal ptr_val;
+        result = vm__pop(vm, &ptr_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(ptr_val)) {
+          result = vm__push(vm, ptr_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        if (jacl_is_error(n_val)) {
+          result = vm__push(vm, n_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_u64(ptr_val)) {
+          vm__set_error(vm, "ptr-offset: expected pointer (u64) base");
+          return VM_RUNTIME_ERROR;
+        }
+        int64_t n;
+        if      (jacl_is_i32(n_val)) n = (int64_t)jacl_as_i32(n_val);
+        else if (jacl_is_i64(n_val)) n = jacl_as_i64(n_val);
+        else if (jacl_is_u32(n_val)) n = (int64_t)jacl_as_u32(n_val);
+        else if (jacl_is_u64(n_val)) n = (int64_t)jacl_as_u64(n_val);
+        else {
+          vm__set_error(vm, "ptr-offset: expected integer offset");
+          return VM_RUNTIME_ERROR;
+        }
+        uint64_t base = jacl_as_u64(ptr_val);
+        uint64_t out  = base + (uint64_t)(n * (int64_t)elem_size);
+        result = vm__push(vm, jacl_u64(&vm->heap, out));
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_PTR_DIFF: {
+        /* Typed pointer subtraction: pop u64 b, pop u64 a, push
+         * (i64)(a-b)/elem_size. elem_size is baked in from the
+         * pointee's static type. */
+        uint16_t elem_size = vm__read_u16(vm);
+        if (elem_size == 0) {
+          vm__set_error(vm, "ptr-diff: zero element size");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclVal b_val;
+        result = vm__pop(vm, &b_val);
+        if (result != VM_OK) return result;
+        JaclVal a_val;
+        result = vm__pop(vm, &a_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(a_val)) { result = vm__push(vm, a_val); if (result != VM_OK) return result; break; }
+        if (jacl_is_error(b_val)) { result = vm__push(vm, b_val); if (result != VM_OK) return result; break; }
+        if (!jacl_is_u64(a_val) || !jacl_is_u64(b_val)) {
+          vm__set_error(vm, "ptr-diff: expected two pointers (u64)");
+          return VM_RUNTIME_ERROR;
+        }
+        int64_t a = (int64_t)jacl_as_u64(a_val);
+        int64_t b = (int64_t)jacl_as_u64(b_val);
+        int64_t diff = (a - b) / (int64_t)elem_size;
+        result = vm__push(vm, jacl_i64(&vm->heap, diff));
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HEAP_RECORD_GET_DYN: {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal struct_val;
