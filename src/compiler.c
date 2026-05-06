@@ -6590,6 +6590,35 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     if (argc == 3) {
       /* Typed def: [def TYPE name value] */
+      if (args[0]->type == AST_COMMAND) {
+        /* Compound type annotation: [Vec T], [Map T], [Map K V], [Future T].
+         * The typer is the source of truth for these — it narrows
+         * the binding's static type from inferred_type and tracks
+         * element/key idxs separately. The compiler routes through
+         * the untyped-def path so the binding inherits the RHS's
+         * effective type (e.g., TYPE_FUTURE from spawn, TYPE_TYPED_VEC
+         * from a typed-vec ctor). Recognized so the user can document
+         * the intent in source even though codegen doesn't change. */
+        AstNode* tn = args[0];
+        if (tn->data.command.head &&
+            tn->data.command.head->type == AST_LIT_STRING) {
+          const char* hn = tn->data.command.head->data.lit_string.value;
+          uint32_t    hl = tn->data.command.head->data.lit_string.length;
+          bool is_compound_type =
+              (hl == 3 && (memcmp(hn, "Vec", 3) == 0 ||
+                           memcmp(hn, "Map", 3) == 0)) ||
+              (hl == 6 && memcmp(hn, "Future", 6) == 0);
+          if (is_compound_type) {
+            declared_type = TYPE_DYN;
+            type_explicit = false;
+            name_arg_idx   = 1;
+            value_arg_idx  = 2;
+            goto def_args_resolved;
+          }
+        }
+        compiler__error(c, line, col, "def type must be a keyword");
+        return;
+      }
       if (args[0]->type != AST_LIT_STRING) {
         compiler__error(c, line, col, "def type must be a keyword");
         return;
@@ -6603,6 +6632,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       type_explicit = true;
       name_arg_idx   = 1;
       value_arg_idx  = 2;
+    def_args_resolved: ;
     } else if (argc != 2) {
       compiler__builtin_arity_error(c, line, col, "def", "2 or 3 arguments", argc);
       return;

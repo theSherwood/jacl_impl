@@ -244,10 +244,12 @@ behavior change.
    type from body's tail; await of TYPE_FUTURE narrows to the
    element type. race narrows to the unified body tail type when
    all bodies produce the same concrete type, dyn otherwise. New
-   `TYPE_FUTURE` enum value (jacl.h, ast.c). `[Future T]` surface
-   annotation recognized by the typer in def/mut (compiler-side
-   support for `def [Future T]` is the same gap that exists for
-   `def [Vec T]` — typer-only today). Not done: `vec-get`/
+   `TYPE_FUTURE` enum value (jacl.h, ast.c). `[Future T]` /
+   `[Vec T]` / `[Map T]` / `[Map K V]` surface annotations are now
+   accepted by the compiler in def position (routed through the
+   untyped-def path so the binding inherits the RHS's effective
+   type — the typer remains the source of truth for the static
+   type identity). Not done: `vec-get`/
    `map-get` element types, `take`/`first`/`reset`/`swap`/`hash`/
    `interpret`/FFI cluster. Plus closures and imported procs are
    absent from the typer's proc registry.

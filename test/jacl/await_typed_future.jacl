@@ -1,0 +1,10 @@
+# expect: 42
+# Typer test: [Future i32] annotation in def. Compiler accepts the
+# compound type expression in def position; typer narrows the binding's
+# element type and threads it through await.
+proc main {} {
+  def [Future i32] f [spawn { 42 }]
+  def x [await $f]
+  print $x
+}
+main
