@@ -218,6 +218,19 @@ static void run_all(void) {
     .expect_substrings = { "type error", "i32", "dyn", "to i32" },
   });
 
+  /* await on a known concrete non-future operand — typer rejects.
+   * Dyn operands and typed futures still pass; this is the
+   * statically-knowable bad case. */
+  RUN("await_int_literal", {
+    .source = "await 42",
+    .expect_substrings = { "type error", "await", "future", "i32" },
+  });
+
+  RUN("await_typed_int_binding", {
+    .source = "def i32 x 42\nawait $x",
+    .expect_substrings = { "type error", "await", "future", "i32" },
+  });
+
   /* Ctx-field-set arrow form: typer recognizes `set $ctx->field val`
    * pre-rewrite and applies the field-type check. */
   RUN("ctx_set_arrow_type_mismatch", {

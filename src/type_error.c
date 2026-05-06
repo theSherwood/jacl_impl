@@ -112,6 +112,16 @@ int jacl_format_proc_return_dyn(char* buf, size_t bufsz,
                   type_name(declared), type_name(declared));
 }
 
+/* "type error: await expects a future, got <actual>"
+ * Operand has a known concrete non-future type. The runtime trap on
+ * non-future values still exists for dyn operands; this catches the
+ * statically-knowable case at compile time. */
+int jacl_format_await_non_future(char* buf, size_t bufsz, JaclType actual) {
+  return snprintf(buf, bufsz,
+                  "type error: await expects a future, got %s",
+                  type_name(actual));
+}
+
 /* "[Vec T]: element <idx> is not a T value (got <actual>)" / "is not a T struct"
  * Used by [Vec T] constructor element-type checks. is_scalar selects the
  * scalar wording (with "got <actual>") vs struct wording. */

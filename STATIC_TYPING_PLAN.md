@@ -945,34 +945,24 @@ These are tracked as future work but not blockers.
 In rough order from "smallest, lowest-risk increment" to "freshest
 architectural piece". Each is independently shippable.
 
-### Sharp edge: `await` on a non-future operand
+### Sharp edge: `await` on a non-future operand — RESOLVED
 
-The typer narrows `await TYPE_FUTURE` to the future's element type
-but stays permissive on `await <concrete-non-future>`. The pure-
-typing rule would be: `await 42` (or any concrete non-future) is a
-compile-time type error.
+✅ Resolved via option (2). The m13 `await 42` placeholders were
+rewritten to `await [spawn { 42 }]` (the spawn body still resolves
+to the same scalar; the surrounding suspension/structural-error
+diagnostics still fire). The typer's HEAD_AWAIT branch now errors
+when the operand has a known concrete non-future type:
 
-We don't fire that error today because `m13`'s structural-error
-tests use `await 42` as a placeholder for "any suspending operation"
-and rely on the compiler's `cannot suspend inside try/catch` and
-`cannot suspend inside non-suspending callback` diagnostics firing
-first. A typer error would preempt the more informative structural
-diagnostic and the m13 tests fail.
+> `type error: await expects a future, got <T>`
 
-Resolution paths (pick when revisiting):
-
-1. **Reorder diagnostic precedence:** detect the structural-error
-   contexts in the typer too (or have the typer mark such operands
-   as "skip type check") so the structural error wins. Adds
-   coupling between the typer and the SM-analysis state.
-2. **Migrate the m13 tests:** rewrite each `await 42` to a real
-   future expression (`await [spawn { 42 }]` or similar). Doesn't
-   require typer changes; the m13 tests get slightly more elaborate
-   but the diagnostics tested are the same.
-
-Recommended: option (2). It's mechanical, keeps the typer rule
-simple, and the structural-error tests still test what they claim
-to test.
+Dyn operands remain permitted — the runtime tag check still catches
+non-future values dynamically. The runtime-error test
+(`test_await_non_future_error` in `test/test_m13.c`) was rewritten
+to use a `def dyn x 42` binding so its operand types as `dyn`,
+preserving runtime coverage of the non-future trap. Two new cases
+in `test/test_type_errors.c` lock in the compile-time wording
+(`await_int_literal`, `await_typed_int_binding`). New shared
+formatter `jacl_format_await_non_future` lives in `src/type_error.c`.
 
 ### Stage 5 — pointer types for FFI
 
@@ -1016,12 +1006,11 @@ choose between:
 1. **Stage 5 — pointer types `*T` for FFI.** Fresh architectural
    piece. Sub-decisions to resolve: `*T` only vs. also `*mut T`,
    auto-deref vs. always explicit, FFI call syntax.
-2. **Address the await sharp edge** (above). Recommended path:
-   migrate the m13 `await 42` placeholders to real future
-   expressions, then make `await <non-future>` a typer error.
-3. **Tackle a structural Stage 1 item** when a real workload
+2. **Tackle a structural Stage 1 item** when a real workload
    needs it (match, imports, nested procs, closure-call typing,
    box-element narrowing).
+
+(The await sharp edge was resolved — see the section above.)
 
 Concrete state of the codebase post-session:
 

@@ -2237,13 +2237,11 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       }
     } else if (hid == HEAD_AWAIT && node->data.command.arg_count == 1) {
       /* await: unwraps a future. If the operand is a TYPE_FUTURE with
-       * a known element type, narrow the result to that element type;
-       * otherwise dyn. We don't error on await of a concrete non-
-       * future type today — m13's structural-error tests use
-       * `await 42` as a placeholder for "any suspending operation",
-       * and pre-empting them with a type error masks the more
-       * informative "cannot suspend inside try/catch" diagnostic.
-       * The runtime still traps on non-future operands. */
+       * a known element type, narrow the result to that element type.
+       * If the operand has a known concrete non-future type, that's a
+       * compile-time type error (await is only meaningful on futures).
+       * Dyn operands are permitted; the runtime tag check catches
+       * non-future values at await time. */
       AstNode* arg = node->data.command.args[0];
       JaclType arg_t = (JaclType)arg->inferred_type;
       if (arg_t == TYPE_FUTURE) {
@@ -2256,7 +2254,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           node->inferred_type = TYPE_STRUCT;
           node->inferred_struct_idx = e_idx;
         }
+      } else if (arg_t == TYPE_DYN) {
+        node->inferred_type = TYPE_DYN;
       } else {
+        char err[256];
+        jacl_format_await_non_future(err, sizeof(err), arg_t);
+        typer__error(tc, arg->start.line, arg->start.column, err);
         node->inferred_type = TYPE_DYN;
       }
     } else if (hl == 4 && memcmp(hn, "puts", 4) == 0) {

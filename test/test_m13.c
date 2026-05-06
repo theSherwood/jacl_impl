@@ -373,7 +373,7 @@ static bool test__compile_has_error(const char* source, const char* expected_sub
 /* Test: suspension inferred for direct use of await */
 static int test_suspension_direct_await(void) {
     SuspensionMap map = test__analyze(
-        "proc foo {} { await 42 }");
+        "proc foo {} { await [spawn { 42 }] }");
     JaclVal foo = jacl_inline_string("foo", 3);
     ASSERT(suspension_map_lookup(&map, foo));
     TEST_PASS();
@@ -400,7 +400,7 @@ static int test_suspension_direct_race(void) {
 /* Test: transitive suspension through direct calls */
 static int test_suspension_transitive(void) {
     SuspensionMap map = test__analyze(
-        "proc inner {} { await 42 }\n"
+        "proc inner {} { await [spawn { 42 }] }\n"
         "proc outer {} { inner }");
     JaclVal inner = jacl_inline_string("inner", 5);
     JaclVal outer = jacl_inline_string("outer", 5);
@@ -413,7 +413,7 @@ static int test_suspension_transitive(void) {
 static int test_suspension_nested_procs(void) {
     SuspensionMap map = test__analyze(
         "proc outer {} {\n"
-        "  proc inner {} { await 42 }\n"
+        "  proc inner {} { await [spawn { 42 }] }\n"
         "  inner\n"
         "}");
     JaclVal inner = jacl_inline_string("inner", 5);
@@ -427,7 +427,7 @@ static int test_suspension_nested_procs(void) {
    when suspending procs exist in the program */
 static int test_suspension_indirect_call(void) {
     SuspensionMap map = test__analyze(
-        "proc async_fn {} { await 42 }\n"
+        "proc async_fn {} { await [spawn { 42 }] }\n"
         "proc caller {f} { [$f] }");
     JaclVal async_fn = jacl_inline_string("async_f", 7);
     /* async_fn name is truncated to 7 chars for inline; use the actual name */
@@ -436,7 +436,7 @@ static int test_suspension_indirect_call(void) {
        Let me use shorter names. */
     (void)async_fn;
     map = test__analyze(
-        "proc afn {} { await 42 }\n"
+        "proc afn {} { await [spawn { 42 }] }\n"
         "proc caller {f} { [$f] }");
     JaclVal afn = jacl_inline_string("afn", 3);
     JaclVal caller = jacl_inline_string("caller", 6);
@@ -478,7 +478,7 @@ static int test_suspension_indirect_no_suspending_procs(void) {
 /* Test: compile error for await inside try/catch */
 static int test_suspension_error_try_catch(void) {
     ASSERT(test__compile_has_error(
-        "proc foo {} { try { await 42 } e { $e } }",
+        "proc foo {} { try { await [spawn { 42 }] } e { $e } }",
         "cannot suspend inside try/catch"));
     TEST_PASS();
 }
@@ -1589,13 +1589,16 @@ static int test_await_chained_three(void) {
     TEST_PASS();
 }
 
-/* Test: runtime error if await called with non-future value */
+/* Test: runtime error if await called with non-future value.
+ * Uses a `def dyn` binding so the typer's await-on-non-future rule
+ * doesn't fire at compile time — the operand's static type is dyn,
+ * so the runtime tag check is what catches it. */
 static int test_await_non_future_error(void) {
     arena_t arena = {0};
     VM vm;
     vm_init(&vm, &arena);
 
-    VMResult r = jacl_run("await 42", &vm, &arena);
+    VMResult r = jacl_run("def dyn x 42; await $x", &vm, &arena);
     ASSERT(r == VM_RUNTIME_ERROR);
 
     vm_destroy(&vm);
@@ -3491,7 +3494,7 @@ static int test_closure_oob_local_capture(void) {
 /* Test: ast__contains_suspension with map detects named suspending proc */
 static int test_contains_susp_named_proc(void) {
     SuspensionMap map = test__analyze(
-        "proc deep {} { await 42 }\n"
+        "proc deep {} { await [spawn { 42 }] }\n"
         "proc mid {} { def f [spawn { deep }]; await $f }");
     JaclVal deep = jacl_inline_string("deep", 4);
     JaclVal mid = jacl_inline_string("mid", 3);
@@ -3543,7 +3546,7 @@ static int test_susp_callback_reject_via_map(void) {
     /* A block containing a call to a suspending proc should be
        detected by ast__contains_suspension with map */
     ASSERT(test__compile_has_error(
-        "proc sfn {} { await 42 }\n"
+        "proc sfn {} { await [spawn { 42 }] }\n"
         "[for [vec 1 2] { sfn }]",
         "cannot suspend inside non-suspending callback"));
     TEST_PASS();
