@@ -1981,7 +1981,13 @@ extern bool jacl_val_eq (JaclVal a, JaclVal b);
 extern void collections__init (void);
 
 /* --- typer.c --- */
-extern void typer_infer (AstNode **nodes, uint32_t count);
+
+/* TyperResult: captured first error from a typer pass. Defined in typer.c
+ * because the unity build pulls typer.c in before compiler.c. */
+struct TyperResult;
+typedef struct TyperResult TyperResult;
+extern void typer_infer (AstNode **nodes, uint32_t count,
+                         TyperResult *result_or_null);
 
 /* --- type_error.c — shared formatters used by both compiler and typer.
  * Each writes to a caller buffer in snprintf style; the reporting

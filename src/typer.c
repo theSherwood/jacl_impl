@@ -23,6 +23,19 @@
 #define TYPER_MAX_STRUCT_FIELDS 32
 #define TYPER_MAX_NARROWINGS   8
 
+/* Captured first error from a typer pass; passed back to callers (mainly
+ * compiler.c) so compilation can fail with a type-error message that
+ * was detected during typing rather than codegen. The buffer is inline
+ * so no arena allocation is needed at the typer boundary; the caller
+ * copies into its own arena-backed error storage if it needs the
+ * message to outlive the typer pass. */
+typedef struct TyperResult {
+  uint32_t error_count;
+  uint32_t first_error_line;
+  uint32_t first_error_col;
+  char     first_error[256];   /* "" when error_count == 0 */
+} TyperResult;
+
 typedef struct {
   const char* name;
   uint32_t    name_len;
@@ -85,7 +98,30 @@ typedef struct {
     uint32_t    box_struct_idx;  /* UINT32_MAX if not struct */
   } narrowings[TYPER_MAX_NARROWINGS];
   uint32_t     narrowing_count;
+  /* First-error capture. NULL when the caller doesn't want typer
+   * errors (syntax.c macro-body pre-typing, test_typer harness).
+   * typer__error is a no-op when result is NULL. */
+  TyperResult* result;
 } TyperCtx;
+
+/* Record a type error. Stores location + message of the first error;
+ * later errors only bump the count. The caller (compiler.c) copies
+ * the captured message into its own arena-backed reporting before
+ * compilation continues. No-op when tc->result is NULL. */
+static void typer__error(TyperCtx* tc, uint32_t line, uint32_t col,
+                         const char* msg) {
+  if (!tc->result) return;
+  tc->result->error_count++;
+  if (tc->result->first_error[0] == '\0') {
+    tc->result->first_error_line = line;
+    tc->result->first_error_col  = col;
+    size_t cap = sizeof(tc->result->first_error);
+    size_t len = strlen(msg);
+    if (len >= cap) len = cap - 1;
+    memcpy(tc->result->first_error, msg, len);
+    tc->result->first_error[len] = '\0';
+  }
+}
 
 static void typer__infer_node(TyperCtx* tc, AstNode* node);
 static const TyperStruct* typer__find_struct(TyperCtx* tc, const char* name, uint32_t name_len);
@@ -1921,11 +1957,18 @@ static void typer__infer_node(TyperCtx* tc, AstNode* node) {
   }
 }
 
-void typer_infer(AstNode** nodes, uint32_t count) {
+void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null) {
   TyperCtx tc;
   tc.binding_count = 0;
   tc.scope_depth   = 0;
   tc.proc_count    = 0;
+  tc.result        = result_or_null;
+  if (result_or_null) {
+    result_or_null->error_count       = 0;
+    result_or_null->first_error_line  = 0;
+    result_or_null->first_error_col   = 0;
+    result_or_null->first_error[0]    = '\0';
+  }
   /* Reserve struct indices 0 and 1 so typer indices align with the
    * compiler's StructTypeRegistry: slot 0 is "dyn placeholder", slot
    * 1 is reserved for the ctx struct (see compiler.c

@@ -12080,9 +12080,17 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
 
   /* Type-inference pass. Populates inferred_type / inferred_struct_idx /
    * inferred_key_struct_idx on every AST node the walk reaches. The
-   * compiler reads these annotations rather than re-deriving types. */
+   * compiler reads these annotations rather than re-deriving types.
+   * Typer-detected errors are captured in tr and threaded back through
+   * compiler__error so compilation fails the same way it would if the
+   * compiler itself had detected the mismatch. */
+  TyperResult tr;
   if (parse.error_count == 0) {
-    typer_infer(parse.nodes, parse.count);
+    typer_infer(parse.nodes, parse.count, &tr);
+    if (tr.error_count > 0) {
+      compiler__error(&c, tr.first_error_line, tr.first_error_col,
+                      tr.first_error);
+    }
   }
 
   /* Check if top-level code is suspending */
@@ -12435,7 +12443,14 @@ bool compiler__compile_module(const char* canonical_path,
   /* Phase 3 typer pass: walk the module AST so dual-track invariants
    * hold during compile, and so consumer sites that read from
    * inferred_type don't fall back unnecessarily. */
-  typer_infer(parse.nodes, parse.count);
+  {
+    TyperResult tr;
+    typer_infer(parse.nodes, parse.count, &tr);
+    if (tr.error_count > 0) {
+      compiler__error(&mc, tr.first_error_line, tr.first_error_col,
+                      tr.first_error);
+    }
+  }
 
   /* Compile all top-level statements */
   for (uint32_t i = 0; i < parse.count; i++) {
@@ -12573,7 +12588,14 @@ ProgramResult jacl_compile_program(const char* root_path,
 
   /* Phase 3 typer pass for module programs (mirrors compiler_compile and
    * compiler__compile_module). */
-  typer_infer(parse.nodes, parse.count);
+  {
+    TyperResult tr;
+    typer_infer(parse.nodes, parse.count, &tr);
+    if (tr.error_count > 0) {
+      compiler__error(&c, tr.first_error_line, tr.first_error_col,
+                      tr.first_error);
+    }
+  }
 
   if (top_suspends) {
     /* Wrap top-level suspending code in SM closure — same logic as compiler_compile */
