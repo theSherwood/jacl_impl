@@ -217,6 +217,15 @@ static void run_all(void) {
       "[f 1]",
     .expect_substrings = { "type error", "i32", "dyn", "to i32" },
   });
+
+  /* Ctx-field-set arrow form: typer recognizes `set $ctx->field val`
+   * pre-rewrite and applies the field-type check. */
+  RUN("ctx_set_arrow_type_mismatch", {
+    .source =
+      "ctx mut i32 level = 42\n"
+      "set $ctx->level \"hello\"",
+    .expect_substrings = { "type error", "level", "i32", "str" },
+  });
 }
 
 /* --- Driver ------------------------------------------------------- */

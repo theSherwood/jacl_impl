@@ -104,11 +104,11 @@ and typer's `tc->structs`):**
 
 **What's *not* here yet:**
 
-- Stage 1e — typer emits type errors directly. ✅ SUBSTANTIALLY
-  COMPLETE. Seven error sites fire from the typer using the shared
-  formatters in `src/type_error.c`. Two minor sites remain as
-  follow-ons (the `set $ctx->field val` arrow form, and proc-return
-  dyn-into-typed).
+- Stage 1e — typer emits type errors directly. ✅ COMPLETE.
+  Eight error sites fire from the typer using the shared formatters
+  in `src/type_error.c`. Includes the `set $recv->field val` arrow
+  form (covers ctx-field-set and arbitrary chained struct field-set
+  on the pre-rewrite tree).
 - Stage 1f — `dyn` as a real type with defined-semantics ops.
   ✅ COMPLETE. Four rules landed: proc-call dyn-into-typed-param,
   binary-op arithmetic concrete-mismatch, binary-op unboxed
@@ -286,14 +286,7 @@ behavior change.
    typer's same-struct-idx tracking isn't fully aligned with the
    compiler's across module boundaries — would need a follow-on).
 
-   **Remaining (incremental, not blocking):**
-   - Proc-call dyn-into-typed-param mismatch (the typer currently
-     skips DYN args; the compiler still flags them via the
-     `(use [to T $val])` cast hint).
-   - Ctx-field-set via the `set $ctx->field val` arrow form
-     (currently handled by the compiler's HEAD_SET rewrite; the
-     bare `[. $ctx field val]` form already typer-checks via the
-     general struct field-set rule from commit `402fd47`).
+   **Remaining:** none. All Stage 1e error sites fire from the typer.
 
    **Landed since first writing of this plan:**
    - Typed-collection element ctor mismatches (`[[Vec T] e1 e2 ...]`,
@@ -304,6 +297,12 @@ behavior change.
      element and key/value types are knowable from the typer's
      struct registry. Compiler still backstops for unknown structs
      and unsupported scalars.
+   - Arrow-form field-set (`set $recv->field val`). The typer now
+     recognizes the pre-rewrite shape (SET with arg[0] a 2-arg dot
+     command) directly in `typer__handle_set` and applies the same
+     field-type check as the 3-arg dot handler. Covers ctx-field-set
+     plus arbitrary chained struct field-set without requiring the
+     compiler's HEAD_SET rewrite to run first.
 7. **Stage 1f — `dyn` as a real type.** ✅ PARTIAL.
 
    **The rules** (per decisions 1 and 2):
@@ -890,14 +889,14 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 |---|---|
 | 0 — test infra + decisions | ✅ complete |
 | 1 — typer total + authoritative | ✅ substantially complete (1a–1d partial, see Stage 1 task list) |
-| 1e — typer emits errors | ✅ substantially complete (7/9 sites; see "Pickup points" below) |
+| 1e — typer emits errors | ✅ complete (8/8 sites — all type-mismatch errors fire from the typer) |
 | 1f — dyn as a real type | ✅ complete (4 rules landed; expression-level mixing resolved as permissive) |
 | 2 — migrate compiler consumers | ✅ complete |
 | 3 — delete dead state | ✅ complete |
 | 4 — separate `TypedAstNode` | ⏭ skipped (optional, not pursued) |
 | 5 — pointer types `*T` for FFI | ❌ not started |
 
-Tests: 95/95 passing. Type-error corpus: 15/15 passing. The audit
+Tests: 95/95 passing. Type-error corpus: 16/16 passing. The audit
 machinery from Stages 0–2 was deleted in commit `0aa722f` after it
 served its purpose.
 
@@ -905,19 +904,6 @@ served its purpose.
 
 In rough order from "smallest, lowest-risk increment" to "freshest
 architectural piece". Each is independently shippable.
-
-### Small follow-ons
-
-These are mechanical extensions of work already landed; should each
-be a single commit.
-
-1. **Ctx-field-set arrow form.** `set $ctx->field val` is rewritten
-   by HEAD_SET's arrow desugar; the typer doesn't see the
-   rewritten tree. The bare `[. $ctx field val]` form already
-   typer-checks via the rule from commit `402fd47`. Either run the
-   typer on rewritten trees, or have the typer recognize the
-   pre-rewrite shape (`set` with an arrow-LHS of `$ctx`) and apply
-   the field-set rule preemptively.
 
 ### Stage 5 — pointer types for FFI
 

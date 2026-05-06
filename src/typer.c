@@ -550,10 +550,81 @@ static bool typer__handle_set(TyperCtx* tc, AstNode* node) {
   AstNode* target = args[0];
   AstNode* value  = args[1];
 
+  /* Arrow form: `set $recv->field val` parses as
+   * `set [. $recv field] val`. The compiler's HEAD_SET rewrite later
+   * morphs this into a 3-arg dot field-set; we don't see that tree
+   * yet, so detect the pre-rewrite shape here and apply the same
+   * field-type check as the 3-arg dot handler in
+   * typer__infer_command_inner. Covers the ctx-field-set arrow form
+   * (`set $ctx->pwd val`) plus arbitrary chained struct field-set. */
+  if (target->type == AST_COMMAND &&
+      target->data.command.head &&
+      target->data.command.head->type == AST_LIT_STRING &&
+      target->data.command.head->data.lit_string.length == 1 &&
+      target->data.command.head->data.lit_string.value[0] == '.' &&
+      target->data.command.arg_count == 2) {
+    /* handle_set runs before the args walk in typer__infer_command_inner
+     * (early-return dispatch), so type target and value ourselves. Typing
+     * target as a 2-arg dot recursively types its sub-args (the receiver
+     * and the field literal). We re-derive the receiver struct from
+     * target's args[0] to look up the field's *declared* type
+     * (target->inferred_type would be the field's value type — what's
+     * stored, not what we want for the check). */
+    typer__infer_node(tc, target);
+    typer__infer_node(tc, value);
+    AstNode* recv  = target->data.command.args[0];
+    AstNode* field = target->data.command.args[1];
+    JaclType recv_t    = (JaclType)recv->inferred_type;
+    uint32_t recv_sidx = recv->inferred_struct_idx;
+    /* Bare-name fallback: the parser produces a bare LIT_STRING for
+     * the innermost name in arrow chains (the compiler's rewrite
+     * later converts to a var-ref). Resolve it directly so the
+     * type check fires on the pre-rewrite tree. */
+    if (recv_t != TYPE_STRUCT && recv->type == AST_LIT_STRING &&
+        recv->data.lit_string.length > 0) {
+      const TyperBinding* b = typer__scope_resolve(tc,
+          recv->data.lit_string.value,
+          recv->data.lit_string.length,
+          recv->scope_mark);
+      if (b && b->type == TYPE_STRUCT) {
+        recv_t = TYPE_STRUCT;
+        recv_sidx = b->struct_idx;
+      }
+    }
+    if (recv_t == TYPE_STRUCT && recv_sidx < tc->struct_count &&
+        field->type == AST_LIT_STRING) {
+      const TyperStruct* sd = &tc->structs[recv_sidx];
+      const char* fn  = field->data.lit_string.value;
+      uint32_t    fnl = field->data.lit_string.length;
+      for (uint32_t fi = 0; fi < sd->field_count; fi++) {
+        if (sd->field_name_lens[fi] != fnl ||
+            memcmp(sd->field_names[fi], fn, fnl) != 0) continue;
+        JaclType field_t = (JaclType)sd->field_types[fi];
+        JaclType val_t   = (JaclType)value->inferred_type;
+        if (field_t != TYPE_DYN && val_t != TYPE_DYN &&
+            val_t != field_t &&
+            !(field_t == TYPE_STRUCT && val_t == TYPE_STRUCT)) {
+          char err[224];
+          jacl_format_field_mismatch(err, sizeof(err),
+              sd->name, sd->name_len, fn, fnl, field_t, val_t);
+          typer__error(tc, value->start.line, value->start.column, err);
+        } else if (field_t != TYPE_DYN && val_t == TYPE_DYN) {
+          char err[256];
+          jacl_format_field_dyn_assign(err, sizeof(err),
+              sd->name, sd->name_len, fn, fnl, field_t);
+          typer__error(tc, value->start.line, value->start.column, err);
+        }
+        break;
+      }
+    }
+    node->inferred_type = TYPE_NIL;
+    return true;
+  }
+
   /* Resolve target's type. For `set name value`, the name is parsed as a
    * bare string literal (AST_LIT_STRING). For `$name :: value`, it's a
    * var-ref. Both forms — plus the AST_COMMAND arrow form (handled
-   * separately in compiler.c) — should look up the binding. */
+   * above) — should look up the binding. */
   JaclType target_type = TYPE_DYN;
   const char* tname = NULL;
   uint32_t    tlen  = 0;
