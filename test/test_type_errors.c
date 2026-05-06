@@ -209,6 +209,14 @@ static void run_all(void) {
     .source = "def m [[Map i32 str] \"oops\" \"v\"]",
     .expect_substrings = { "Map", "i32", "str", "key" },
   });
+
+  /* Proc with typed return whose body tail is dyn — commitment-site rule. */
+  RUN("proc_return_dyn_into_typed", {
+    .source =
+      "proc i32 f {x} { $x }\n"
+      "[f 1]",
+    .expect_substrings = { "type error", "i32", "dyn", "to i32" },
+  });
 }
 
 /* --- Driver ------------------------------------------------------- */

@@ -98,6 +98,20 @@ int jacl_format_proc_return_mismatch(char* buf, size_t bufsz,
                   type_name(declared), type_name(actual));
 }
 
+/* "type error: proc <name> declared return type <declared>, but body returns dyn — use [to <declared> $val] at the tail"
+ * Dyn-into-typed-return — the proc body's tail value is dyn but the
+ * declared return is a concrete type. Per decision 2's commitment-
+ * site rule, this requires an explicit cast. */
+int jacl_format_proc_return_dyn(char* buf, size_t bufsz,
+                                const char* proc_name, uint32_t proc_name_len,
+                                JaclType declared) {
+  return snprintf(buf, bufsz,
+                  "type error: proc %.*s declared return type %s, "
+                  "but body returns dyn — use [to %s $val] at the tail",
+                  (int)proc_name_len, proc_name,
+                  type_name(declared), type_name(declared));
+}
+
 /* "[Vec T]: element <idx> is not a T value (got <actual>)" / "is not a T struct"
  * Used by [Vec T] constructor element-type checks. is_scalar selects the
  * scalar wording (with "got <actual>") vs struct wording. */

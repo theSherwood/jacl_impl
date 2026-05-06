@@ -846,21 +846,37 @@ static bool typer__handle_proc(TyperCtx* tc, AstNode* node) {
 
   /* Check declared return type vs body's tail type. Mirrors
    * compiler.c:7272-7293: peek through a tail-position AST_RETURN to
-   * the returned value's type, then compare. Skipped when no declared
-   * return, for generators (return_type synthesized to TYPE_STREAM),
-   * and when the resolved tail type is DYN (typer's coverage is
-   * incomplete for some tail expressions — leave to the compiler). */
+   * the returned value's type, then compare. Skipped for procs with
+   * no declared return and for generators (return_type synthesized to
+   * TYPE_STREAM).
+   *
+   * Two error cases:
+   *  - Concrete-mismatch: declared and body tail are both concrete
+   *    but different — long-standing rule.
+   *  - Dyn-into-typed-return: body tail is dyn, declared is concrete.
+   *    Per decision 2's commitment-site rule, an explicit
+   *    `[to T $val]` cast is required at the tail. */
   if (return_type != TYPE_DYN && return_type != TYPE_STREAM &&
       body->type == AST_BLOCK && body->data.block.count > 0 &&
       !body->data.block.trailing_semi) {
     AstNode* tail = body->data.block.commands[body->data.block.count - 1];
     JaclType body_t = TYPE_DYN;
+    AstNode* tail_value = NULL;
     if (tail->type == AST_RETURN && tail->data.return_stmt.value) {
-      body_t = (JaclType)tail->data.return_stmt.value->inferred_type;
+      tail_value = tail->data.return_stmt.value;
+      body_t = (JaclType)tail_value->inferred_type;
     } else if (tail->type != AST_RETURN) {
+      tail_value = tail;
       body_t = (JaclType)tail->inferred_type;
     }
-    if (body_t != TYPE_DYN && body_t != return_type &&
+    if (body_t == TYPE_DYN && tail_value) {
+      char err[224];
+      jacl_format_proc_return_dyn(err, sizeof(err),
+          name_node->data.lit_string.value,
+          name_node->data.lit_string.length,
+          return_type);
+      typer__error(tc, tail_value->start.line, tail_value->start.column, err);
+    } else if (body_t != TYPE_DYN && body_t != return_type &&
         !(return_type == TYPE_STRUCT && body_t == TYPE_STRUCT)) {
       char err[200];
       jacl_format_proc_return_mismatch(err, sizeof(err),

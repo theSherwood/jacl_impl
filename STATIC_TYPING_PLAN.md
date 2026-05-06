@@ -110,13 +110,12 @@ and typer's `tc->structs`):**
   follow-ons (the `set $ctx.field val` arrow form, and proc-return
   dyn-into-typed).
 - Stage 1f — `dyn` as a real type with defined-semantics ops.
-  ✅ PARTIAL. Three rules landed (proc-call dyn-into-typed-param,
+  ✅ COMPLETE. Four rules landed: proc-call dyn-into-typed-param,
   binary-op arithmetic concrete-mismatch, binary-op unboxed
-  comparison). One rule remaining (dyn-return into typed proc —
-  the missing fifth commitment-site rule). The previously-open
-  "mixed dyn/typed binary" case was resolved by the revised
-  decision 2 framing: expression-level mixing is permissive, the
-  barrier check fires at commitment sites only.
+  comparison, dyn-into-typed-return. The previously-open "mixed
+  dyn/typed binary" case was resolved by the revised decision 2
+  framing: expression-level mixing is permissive, the barrier
+  check fires at commitment sites only.
 - Stage 4 (separate `TypedAstNode` from `AstNode`) — optional;
   weighed against benefit. Not pursued.
 - Stage 5 (pointer types `*T` for FFI) — design pending.
@@ -326,7 +325,7 @@ behavior change.
    | `[== $i64 $i32]` | typer errors (1f ✅, mirrors compiler — unboxed can't dispatch) | error |
    | `[+ $i32 $dyn]` | accept; result `dyn` | accept (decision 2 — expression-level mixing is permitted; result types `dyn`) |
    | `[+ $dyn $dyn]` | accept; result `dyn` | accept |
-   | proc returns `$dyn_val` to typed return | compiler skips (body DYN); typer skips | **OPEN** — decision 2 commitment-site rule says error |
+   | proc returns `$dyn_val` to typed return | typer errors (1f ✅, this commit) | error |
 
    **Done in Stage 1f:**
    - Proc-call dyn-into-typed-param check fires from typer with cast
@@ -340,16 +339,11 @@ behavior change.
      unboxed (mirrors compiler.c:3859-3868). Cross-type tagged
      equality remains permitted because tests rely on it
      (`[== [vec 1] 1] → false`).
-
-   **Open / deferred for Stage 1f:**
-
-   1. **Dyn return into typed proc**: currently both passes skip.
-      Decision 2's commitment-site rule calls for an error here:
-      the proc's declared return is a typed slot the body's tail
-      value commits into. Same shape as the four already-landed
-      commitment-site rules (binding/param/struct-field). May
-      need a corpus audit before flipping; smaller blast radius
-      than expression-level mixing.
+   - Dyn-into-typed-return: typed proc whose body tail is dyn now
+     errors with cast-hint wording. Uses
+     `jacl_format_proc_return_dyn` in `src/type_error.c`. The
+     existing concrete-mismatch path
+     (`jacl_format_proc_return_mismatch`) is preserved.
 
    **Resolved (no longer Stage 1f work):**
 
@@ -897,13 +891,13 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 | 0 — test infra + decisions | ✅ complete |
 | 1 — typer total + authoritative | ✅ substantially complete (1a–1d partial, see Stage 1 task list) |
 | 1e — typer emits errors | ✅ substantially complete (7/9 sites; see "Pickup points" below) |
-| 1f — dyn as a real type | ✅ partial (3 rules landed; 1 remaining: proc-return commitment site) |
+| 1f — dyn as a real type | ✅ complete (4 rules landed; expression-level mixing resolved as permissive) |
 | 2 — migrate compiler consumers | ✅ complete |
 | 3 — delete dead state | ✅ complete |
 | 4 — separate `TypedAstNode` | ⏭ skipped (optional, not pursued) |
 | 5 — pointer types `*T` for FFI | ❌ not started |
 
-Tests: 95/95 passing. Type-error corpus: 14/14 passing. The audit
+Tests: 95/95 passing. Type-error corpus: 15/15 passing. The audit
 machinery from Stages 0–2 was deleted in commit `0aa722f` after it
 served its purpose.
 
@@ -924,20 +918,6 @@ be a single commit.
    typer on rewritten trees, or have the typer recognize the
    pre-rewrite shape (`set` with an arrow-LHS of `$ctx`) and apply
    the field-set rule preemptively.
-
-2. **Proc-return dyn-into-typed.** `proc i32 f {} { $dyn_val }`
-   currently passes both passes. The proc return is a commitment
-   site (see decision 2), so this should be an error consistent
-   with the other four commitment-site rules already landed.
-   May need a corpus audit before flipping.
-
-### Stage 1f — open language-level rules
-
-The expression-level mixing case (`[+ $i32 $dyn]`) is no longer an
-open item — per the revised decision 2 it stays permissive and
-the result types as `dyn`. The commitment-site rules are what's
-left, and the proc-return case (Pickup-Point 2 above) is the
-single remaining one.
 
 ### Stage 5 — pointer types for FFI
 
