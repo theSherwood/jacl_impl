@@ -287,22 +287,27 @@ compiler.c:9752, `struct_idx` at compiler.c:9863) read
 `c->last_struct_idx` for this reason — it's the only correct
 source post-rewrite.
 
-**Two paths to unblock:**
+**Path 2 attempted (commit `1723747`):** the typer-side companion
+landed — `HEAD_DOT` rule now resolves bare-name LIT_STRING
+receivers via `typer__scope_resolve`, so a `set ln->start->x`
+expression types correctly even though the parser produces a bare
+"ln" string at the bottom of the chain. The set rewrite is no
+longer load-bearing for the typer's annotation correctness —
+inner-dot `inferred_struct_idx` is set on the OUTER node before
+the rewrite touches the inner LIT_STRING.
 
-1. **Re-type rewritten subtrees.** Make the set handler call a
-   typer entry point on `dot_cmd` after the rewrite. Requires
-   plumbing a TyperCtx pointer into the compiler (currently
-   typer state is allocated stack-local in `typer_infer`). Or
-   make the typer reentrant.
+**Stage 3 deletion of `c->last_struct_idx` is still blocked by a
+*second* gap:** anonymous inline struct fields like
+`struct Wrapper {struct{x:i32,y:i32} pos}`. The compiler registers
+these in its struct_registry via `compiler__register_inline_struct`
+(canonical string `struct{x:i32,y:i32}`). The typer doesn't have
+parallel logic, so `tc->structs[wrapper_idx].field_struct_idxs[pos]`
+is `UINT32_MAX`. Chained access (`$w->pos->x`) then loses the
+inner struct_idx.
 
-2. **Restructure the set rewrite.** Don't mutate the AST. Have
-   the chained-dot/dot-set path handle bare-name receivers
-   directly (treat a non-VAR_REF receiver as a local lookup
-   inline). The HEAD_SET handler's responsibility shrinks to
-   just constructing the dispatch shape.
-
-Either path is a focused half-day. Path 2 is cleaner long-term;
-path 1 is mechanically smaller. Pending until needed.
+**To finish Stage 3:** port `compiler__register_inline_struct`'s
+canonical-string parsing into the typer. ~100 lines of mostly
+mechanical work that mirrors the compiler's logic. Pending.
 
 `c->last_expr_type` reads still flow through helpers like
 `compile_typed_elem_arg`'s scalar branch (typer doesn't propagate
