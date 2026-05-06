@@ -276,8 +276,56 @@ behavior change.
      (currently handled by the compiler's HEAD_SET rewrite; the
      bare `[. $ctx field val]` form already typer-checks via the
      general struct field-set rule from commit `402fd47`).
-7. **Stage 1f — `dyn` as a real type.** ❌ NOT STARTED.
-   The architecture is in place but no rules written yet.
+7. **Stage 1f — `dyn` as a real type.** ✅ PARTIAL.
+
+   **The rules** (per decisions 1 and 2):
+
+   | Form | Status today | Stage 1f intent |
+   |------|--------------|-----------------|
+   | `def i32 x $i32_val` | typer + compiler accept | accept |
+   | `def i32 x $dyn_val` | typer errors (1e ✅) | error |
+   | `def dyn x $i32_val` | accept | accept (dyn binding is the boundary marker) |
+   | `[typed_proc $i32_arg]` against `i32` param | accept | accept |
+   | `[typed_proc $dyn_arg]` against typed param | typer errors (1f ✅, commit `e25d9d5`) | error |
+   | `[. $struct field $dyn_val]` typed field | typer errors (1e ✅) | error |
+   | `[. $struct field $i32_val]` against `f32` field | typer errors (1e ✅) | error |
+   | `[+ $i32 $i32]` | accept; result `i32` | accept |
+   | `[+ $i64 $i64]` | accept; result `i64` | accept |
+   | `[+ $i32 $i64]` | compiler errors (unboxed mismatch); typer DYN | typer should error (mirror compiler) |
+   | `[+ $i32 $f32]` | compiler accepts via generic dispatch; typer DYN | **OPEN** — decision 1 says error; would be a breaking change |
+   | `[+ $i32 $dyn]` | compiler accepts via generic dispatch; typer DYN | **OPEN** — decision 2 says error |
+   | `[+ $dyn $dyn]` | accept; result `dyn` | accept |
+   | proc returns `$dyn_val` to typed return | compiler skips (body DYN); typer skips | **OPEN** — decision 2 says error |
+
+   **Done in Stage 1f:**
+   - Proc-call dyn-into-typed-param check fires from typer with cast
+     hint (`(use [to T $val])`). Mirrors compiler.c:10370-10378.
+
+   **Open / deferred for Stage 1f:**
+
+   1. **Binary-op concrete mismatch** (`[+ $i64 $i32]`): the compiler
+      already errors at compiler.c:3859-3868 for unboxed types.
+      Typer should mirror — pure consistency, no semantic change.
+      Safe to land.
+
+   2. **Binary-op tagged mismatch** (`[+ $i32 $f32]`): currently
+      accepted via runtime dispatch. Decision 1 calls for an error.
+      Real breaking change — needs an audit of test corpus and
+      possibly a migration of programs that mix tagged numerics.
+
+   3. **Mixed dyn/typed binary** (`[+ $i32 $dyn]`): currently accepted
+      via dispatch. Decision 2 calls for an error. Same migration
+      concern as (2) — broader because untyped programs are common.
+
+   4. **Dyn return into typed proc**: currently both passes skip.
+      Decision 2 calls for an error. Smaller blast radius than (3)
+      since typed return procs are less common.
+
+   The remaining items (2, 3, 4) are language-level decisions with
+   migration implications. They each need a one-pass audit of the
+   test corpus and possibly a corpus update before flipping. Out of
+   scope for the typer-architecture migration; tracked here so a
+   future session can pick them up with full context.
 8. **Run the audit-mode build continuously.** ✅ DONE — see
    "Running the audit" subsection below.
 

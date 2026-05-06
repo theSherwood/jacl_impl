@@ -1374,6 +1374,25 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       typer__infer_node(tc, rhs);
       tc->expected_type = saved_et;
       JaclType rhs_t = (JaclType)rhs->inferred_type;
+      /* Unboxed mismatch (i64/u64/f64): the compiler hard-rejects these
+       * at compiler.c:3859-3868 because unboxed values can't go through
+       * dynamic dispatch. Mirror it here so the typer fires first.
+       * Tagged-mismatch (i32+f32 etc.) and mixed dyn/typed currently
+       * stay permissive — see Stage 1f rules table in
+       * STATIC_TYPING_PLAN.md. */
+      if (lhs_t != rhs_t &&
+          (is_unboxed_type(lhs_t) || is_unboxed_type(rhs_t))) {
+        const char* verb = is_cmp ? "compare" :
+                           (hname[0] == '+' ? "add" :
+                            hname[0] == '-' ? "subtract" :
+                            hname[0] == '*' ? "multiply" :
+                            hname[0] == '/' ? "divide" : "compute");
+        char err[160];
+        snprintf(err, sizeof(err),
+                 "type error: cannot %s %s and %s",
+                 verb, type_name(lhs_t), type_name(rhs_t));
+        typer__error(tc, lhs->start.line, lhs->start.column, err);
+      }
       if (is_cmp) {
         node->inferred_type = TYPE_BOOL;
       } else if (lhs_t == rhs_t && lhs_t != TYPE_DYN) {
