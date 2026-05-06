@@ -10719,124 +10719,6 @@ static void syntax__compile_sq_node(Compiler *c, AstNode *node) {
 
 /* --- Internal: Compile a single AST node --- */
 
-#ifdef JACL_TYPER_AUDIT
-/* Static-typing migration, Stage 0: surface every divergence between
- * the typer's inferred_type and the compiler's c->last_expr_type
- * (and struct_idx companions) at the end of each compile_node call.
- * Used to build the bug list for Stage 1 and validate progress as
- * AST shapes are migrated. See STATIC_TYPING_PLAN.md.
- *
- * Output goes to stderr; categories:
- *   MISMATCH   — both passes non-DYN, types differ (typer or compiler bug)
- *   GAP        — typer DYN, compiler non-DYN (typer needs the rule)
- *   EXTRA      — typer non-DYN, compiler DYN (typer claims info compiler doesn't)
- *   STRUCT_IDX — types match but struct_idx differs (struct propagation gap) */
-typedef struct {
-  uint64_t total_audited;
-  uint64_t agree;
-  uint64_t mismatch;
-  uint64_t typer_gap;
-  uint64_t typer_extra;
-  uint64_t struct_idx_diff;
-} TyperAuditStats;
-
-static TyperAuditStats g_typer_audit;
-
-static const char* compiler__audit_node_kind(AstNode* node) {
-  switch (node->type) {
-    case AST_LIT_INT:           return "AST_LIT_INT";
-    case AST_LIT_FLOAT:         return "AST_LIT_FLOAT";
-    case AST_LIT_STRING:        return "AST_LIT_STRING";
-    case AST_VAR_REF:           return "AST_VAR_REF";
-    case AST_BLOCK:             return "AST_BLOCK";
-    case AST_COMMAND:           return "AST_COMMAND";
-    case AST_INTERP_STRING:     return "AST_INTERP_STRING";
-    case AST_BREAK:             return "AST_BREAK";
-    case AST_RETURN:            return "AST_RETURN";
-    case AST_QUOTE:             return "AST_QUOTE";
-    case AST_SYNTAX_QUOTE:      return "AST_SYNTAX_QUOTE";
-    case AST_UNQUOTE:           return "AST_UNQUOTE";
-    case AST_UNQUOTE_SPLICING:  return "AST_UNQUOTE_SPLICING";
-    case AST_SPREAD:            return "AST_SPREAD";
-    case AST_SHELL_CMD:         return "AST_SHELL_CMD";
-    case AST_USE:               return "AST_USE";
-    case AST_DEFSTRUCT:         return "AST_DEFSTRUCT";
-    case AST_DESTRUCTURE_VEC:   return "AST_DESTRUCTURE_VEC";
-    case AST_DESTRUCTURE_NAMED: return "AST_DESTRUCTURE_NAMED";
-    case AST_DEFMACRO:          return "AST_DEFMACRO";
-    case AST_CTX_DECL:          return "AST_CTX_DECL";
-    case AST_CONTINUE:          return "AST_CONTINUE";
-    case AST_ERROR:             return "AST_ERROR";
-    default:                    return "AST_???";
-  }
-}
-
-/* Format command head as "head=<name>" if AST_COMMAND with string head;
- * empty string otherwise. Buffer is static — single-threaded use only. */
-static const char* compiler__audit_head_suffix(AstNode* node) {
-  static char buf[80];
-  if (node->type != AST_COMMAND) return "";
-  AstNode* head = node->data.command.head;
-  if (!head || head->type != AST_LIT_STRING) return " head=?";
-  uint32_t len = head->data.lit_string.length;
-  if (len > sizeof(buf) - 8) len = sizeof(buf) - 8;
-  memcpy(buf, " head=", 6);
-  memcpy(buf + 6, head->data.lit_string.value, len);
-  buf[6 + len] = 0;
-  return buf;
-}
-
-static void compiler__audit_node(Compiler* c, AstNode* node) {
-  /* Skip declaration-shaped nodes whose result type isn't meaningful
-   * (top-level forms, parse errors). */
-  if (node->type == AST_USE || node->type == AST_DEFSTRUCT ||
-      node->type == AST_DEFMACRO || node->type == AST_CTX_DECL ||
-      node->type == AST_ERROR) return;
-
-  g_typer_audit.total_audited++;
-  JaclType nt = (JaclType)node->inferred_type;
-  JaclType ct = c->last_expr_type;
-
-  if (nt == ct) {
-    g_typer_audit.agree++;
-    /* struct_idx_diff comparison removed (Stage 3): the typer's
-     * inferred_struct_idx is sole truth post-migration; the
-     * compiler-side c->last_struct_idx is being deleted. */
-    return;
-  }
-
-  /* Types differ — categorize. */
-  const char* kind;
-  if (nt == TYPE_DYN) { g_typer_audit.typer_gap++;   kind = "GAP";      }
-  else if (ct == TYPE_DYN) { g_typer_audit.typer_extra++; kind = "EXTRA";   }
-  else                     { g_typer_audit.mismatch++;    kind = "MISMATCH"; }
-
-  fprintf(stderr,
-    "TYPER_AUDIT %s at %u:%u (%s%s): typer=%s compiler=%s\n",
-    kind,
-    node->start.line, node->start.column,
-    compiler__audit_node_kind(node),
-    compiler__audit_head_suffix(node),
-    type_name(nt), type_name(ct));
-}
-
-void compiler__audit_print_summary(void) {
-  fprintf(stderr,
-    "TYPER_AUDIT SUMMARY: total=%llu agree=%llu "
-    "mismatch=%llu gap=%llu extra=%llu struct_idx_diff=%llu\n",
-    (unsigned long long)g_typer_audit.total_audited,
-    (unsigned long long)g_typer_audit.agree,
-    (unsigned long long)g_typer_audit.mismatch,
-    (unsigned long long)g_typer_audit.typer_gap,
-    (unsigned long long)g_typer_audit.typer_extra,
-    (unsigned long long)g_typer_audit.struct_idx_diff);
-}
-
-void compiler__audit_reset(void) {
-  memset(&g_typer_audit, 0, sizeof(g_typer_audit));
-}
-#endif /* JACL_TYPER_AUDIT */
-
 void compiler__compile_node(Compiler* c, AstNode* node) {
   uint32_t line = node->start.line;
   c->last_expr_type = TYPE_DYN;  /* default; specific cases override */
@@ -12113,10 +11995,6 @@ void compiler__compile_node(Compiler* c, AstNode* node) {
   }
 
   c->current_scope_mark = prev_scope_mark;
-
-#ifdef JACL_TYPER_AUDIT
-  compiler__audit_node(c, node);
-#endif
 }
 
 /* --- Public API --- */
@@ -12511,11 +12389,6 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
   result.error_message = c.first_error;
   result.struct_registry = c.struct_registry;
   result.macro_table     = c.macro_table;
-
-#ifdef JACL_TYPER_AUDIT
-  compiler__audit_print_summary();
-  compiler__audit_reset();
-#endif
 
   return result;
 }
