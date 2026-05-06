@@ -434,6 +434,20 @@ static void test_try_unifies_body_and_handler(void) {
   arena_destroy(&a);
 }
 
+static void test_try_handler_can_use_err_binding(void) {
+  current_test = "try_handler_can_use_err_binding";
+  arena_t a = {0};
+  /* The error binding `e` is added to the handler scope as TYPE_DYN.
+   * The handler's tail var-ref $e resolves through it. Body and
+   * handler unify since both produce dyn. */
+  ParseResult r = run_typer("def res [try { 1 } e { $e }]", &a);
+  AstNode* tr = find_cmd(r.nodes[0], "try");
+  ASSERT_NOT_NULL(tr);
+  /* Body is i32, handler is dyn (var-ref to e) — unify fails → dyn. */
+  ASSERT_TYPE(tr, TYPE_DYN);
+  arena_destroy(&a);
+}
+
 static void test_try_heterogeneous_stays_dyn(void) {
   current_test = "try_heterogeneous_stays_dyn";
   arena_t a = {0};
@@ -530,6 +544,7 @@ int main(void) {
   test_vec_get_scalar_narrows();
   test_map_get_scalar_narrows();
   test_try_unifies_body_and_handler();
+  test_try_handler_can_use_err_binding();
   test_try_heterogeneous_stays_dyn();
   test_with_ctx_inherits_body_type();
   test_race_homogeneous_narrows();

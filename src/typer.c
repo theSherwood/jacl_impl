@@ -1468,15 +1468,24 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     } else if (hid == HEAD_TRY &&
                node->data.command.arg_count == 3 &&
                node->data.command.args[0]->type == AST_BLOCK &&
+               node->data.command.args[1]->type == AST_LIT_STRING &&
                node->data.command.args[2]->type == AST_BLOCK) {
       /* try body err handler — result is body's tail value (no error)
        * or handler's tail value (error). Unify the two; if they agree,
        * propagate the type. The error binding (args[1]) is the local
        * the handler scope binds the trapped error to — typed as DYN
-       * since we don't track error tag types. */
+       * since we don't track error tag types. Push a scope with the
+       * binding before walking the handler so var-refs to the err
+       * name resolve correctly. */
       AstNode** as = node->data.command.args;
       typer__infer_node(tc, as[0]);
+      typer__scope_push(tc);
+      typer__scope_add(tc, as[1]->data.lit_string.value,
+                       as[1]->data.lit_string.length,
+                       as[1]->scope_mark,
+                       (uint8_t)TYPE_DYN, UINT32_MAX);
       typer__infer_node(tc, as[2]);
+      typer__scope_pop(tc);
       JaclType body_t    = (JaclType)as[0]->inferred_type;
       JaclType handler_t = (JaclType)as[2]->inferred_type;
       if (body_t == handler_t) {
