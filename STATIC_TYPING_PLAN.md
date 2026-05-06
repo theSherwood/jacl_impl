@@ -266,15 +266,43 @@ load-bearing reads outside audit code remain.
 
 **Update (commit `ed1f4c3`):** `c->last_key_struct_idx` field
 deleted (its consumers were migrated to
-`args[i]->inferred_key_struct_idx`). A subsequent attempt to
-delete `c->last_struct_idx` regressed two chained-struct
-field-access tests (test_set_arrow_chained,
-test_struct_inline_field_struct_get) and was reverted. The
-nested-struct dispatch reads `c->last_struct_idx` through
-intermediate state in the inline_ref_offset chain that requires
-more careful migration. Treat the remaining `last_struct_idx`
-field as dead-but-tracked until a follow-on session does a
-careful per-site migration.
+`args[i]->inferred_key_struct_idx`).
+
+**Update (commit `fa3ff9c`):** audit's struct_idx_diff
+comparison removed — `struct_idx_diff` was 0 across all compiles
+since the registries aligned, and keeping it forced
+`c->last_struct_idx` alive. Two of the four remaining read sites
+also migrated.
+
+**The blocker for deleting `c->last_struct_idx`:** HEAD_SET's
+arrow-desugar handler at compiler.c:6155 rewrites the AST at
+compile time — it walks an expression like `[set [. [. ln start] x] 77]`,
+finds the bare-name `ln`, replaces it with a fresh AST_VAR_REF
+node, then calls `compile_node` on the rewritten dot expression.
+The typer never visited the rewritten tree, so the inner dot's
+`inferred_struct_idx` reflects the pre-rewrite state (DYN, since
+`ln` is a bare LIT_STRING in the pre-rewrite tree, not a typed
+var-ref). Two chained-dot read sites (`inline_sidx` at
+compiler.c:9752, `struct_idx` at compiler.c:9863) read
+`c->last_struct_idx` for this reason — it's the only correct
+source post-rewrite.
+
+**Two paths to unblock:**
+
+1. **Re-type rewritten subtrees.** Make the set handler call a
+   typer entry point on `dot_cmd` after the rewrite. Requires
+   plumbing a TyperCtx pointer into the compiler (currently
+   typer state is allocated stack-local in `typer_infer`). Or
+   make the typer reentrant.
+
+2. **Restructure the set rewrite.** Don't mutate the AST. Have
+   the chained-dot/dot-set path handle bare-name receivers
+   directly (treat a non-VAR_REF receiver as a local lookup
+   inline). The HEAD_SET handler's responsibility shrinks to
+   just constructing the dispatch shape.
+
+Either path is a focused half-day. Path 2 is cleaner long-term;
+path 1 is mechanically smaller. Pending until needed.
 
 `c->last_expr_type` reads still flow through helpers like
 `compile_typed_elem_arg`'s scalar branch (typer doesn't propagate
