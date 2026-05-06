@@ -260,6 +260,22 @@ typed_op... }`). Migrating those dispatches to read
 but spread across ~50 sites in compiler.c. Once done, the field
 declaration can be removed.
 
+**Update (commit `6ddee97`):** all 24 dispatch reads of
+`c->last_expr_type` migrated to `args[i]->inferred_type`. Zero
+load-bearing reads outside audit code remain.
+
+**Update (commit `ed1f4c3`):** `c->last_key_struct_idx` field
+deleted (its consumers were migrated to
+`args[i]->inferred_key_struct_idx`). A subsequent attempt to
+delete `c->last_struct_idx` regressed two chained-struct
+field-access tests (test_set_arrow_chained,
+test_struct_inline_field_struct_get) and was reverted. The
+nested-struct dispatch reads `c->last_struct_idx` through
+intermediate state in the inline_ref_offset chain that requires
+more careful migration. Treat the remaining `last_struct_idx`
+field as dead-but-tracked until a follow-on session does a
+careful per-site migration.
+
 `c->last_expr_type` reads still flow through helpers like
 `compile_typed_elem_arg`'s scalar branch (typer doesn't propagate
 the helper's expected_type through AST_LIT_INT narrowing) and the
