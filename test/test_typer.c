@@ -326,6 +326,18 @@ static void test_print_returns_nil(void) {
   arena_destroy(&a);
 }
 
+static void test_parallel_returns_vec(void) {
+  current_test = "parallel_returns_vec";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "proc f {} { 1 }\n"
+      "def res [parallel { [f] } { [f] }]", &a);
+  AstNode* par = find_cmd(r.nodes[1], "parallel");
+  ASSERT_NOT_NULL(par);
+  ASSERT_TYPE(par, TYPE_VEC);
+  arena_destroy(&a);
+}
+
 /* --- Driver ------------------------------------------------------- */
 
 int main(void) {
@@ -350,6 +362,7 @@ int main(void) {
   test_mut_sugar_returns_nil();
   test_proc_def_returns_closure();
   test_print_returns_nil();
+  test_parallel_returns_vec();
 
   printf("\n%d/%d passed", passes, passes + failures);
   if (failures > 0) {

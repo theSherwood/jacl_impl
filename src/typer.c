@@ -2049,6 +2049,13 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       /* Job control — bool indicates delivered/cancelled. */
       { HEAD_SIGNAL,      TYPE_BOOL   },
       { HEAD_CANCEL,      TYPE_BOOL   },
+      /* Concurrency: parallel resolves N futures and pushes a vec of
+       * results in input order (vm.c:5066 — `cont_arg = jacl_vector_ptr(vec)`).
+       * spawn/await/race stay DYN: spawn returns a future (no
+       * TYPE_FUTURE in the type system today), await unwraps the
+       * future to whatever type the body produced, race returns the
+       * winner's value — all dynamically determined. */
+      { HEAD_PARALLEL,    TYPE_VEC    },
       /* Syntax-object introspection (US-015) — fixed result types. */
       { HEAD_SYNTAX_KIND,     TYPE_STR },
       { HEAD_SYNTAX_ARGS,     TYPE_VEC },
