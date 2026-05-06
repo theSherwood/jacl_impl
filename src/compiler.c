@@ -7957,7 +7957,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
     /* Track typed vec element type for the loop binding */
     bool is_typed_vec_loop = (col_type == TYPE_TYPED_VEC);
-    uint32_t elem_struct_idx = c->last_struct_idx;
+    uint32_t elem_struct_idx = args[0]->inferred_struct_idx;
 
     /* Compute length → local __len */
     compiler__emit_byte(c, OP_GET_LOCAL, line);
@@ -10416,7 +10416,7 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
        * If it's a heap struct (from OP_STRUCT_MATERIALIZE or function return),
        * expand it to inline slots via OP_STRUCT_EXPAND. */
       if (expected_param_type == TYPE_STRUCT && arg_type == TYPE_STRUCT) {
-        uint32_t sidx = c->last_struct_idx;
+        uint32_t sidx = args[i]->inferred_struct_idx;
         StructTypeRegistry* reg = compiler__get_struct_registry(c);
         if (reg && sidx != UINT32_MAX && sidx < reg->count &&
             struct_def_is_user(reg->defs[sidx], reg)) {
@@ -10829,21 +10829,9 @@ static void compiler__audit_node(Compiler* c, AstNode* node) {
 
   if (nt == ct) {
     g_typer_audit.agree++;
-    /* types match — also check struct_idx for struct/typed-collection types */
-    if ((nt == TYPE_STRUCT || nt == TYPE_TYPED_VEC || nt == TYPE_TYPED_MAP) &&
-        node->inferred_struct_idx != UINT32_MAX &&
-        c->last_struct_idx != UINT32_MAX &&
-        node->inferred_struct_idx != c->last_struct_idx) {
-      g_typer_audit.struct_idx_diff++;
-      fprintf(stderr,
-        "TYPER_AUDIT STRUCT_IDX at %u:%u (%s%s): "
-        "type=%s typer_idx=%u compiler_idx=%u\n",
-        node->start.line, node->start.column,
-        compiler__audit_node_kind(node),
-        compiler__audit_head_suffix(node),
-        type_name(nt),
-        node->inferred_struct_idx, c->last_struct_idx);
-    }
+    /* struct_idx_diff comparison removed (Stage 3): the typer's
+     * inferred_struct_idx is sole truth post-migration; the
+     * compiler-side c->last_struct_idx is being deleted. */
     return;
   }
 
