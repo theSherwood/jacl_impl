@@ -374,6 +374,28 @@ static void test_await_of_dyn_stays_dyn(void) {
   arena_destroy(&a);
 }
 
+static void test_race_homogeneous_narrows(void) {
+  current_test = "race_homogeneous_narrows";
+  arena_t a = {0};
+  /* All race bodies produce i32 — race result narrows to i32. */
+  ParseResult r = run_typer("def res [race { 1 } { 2 }]", &a);
+  AstNode* rc = find_cmd(r.nodes[0], "race");
+  ASSERT_NOT_NULL(rc);
+  ASSERT_TYPE(rc, TYPE_I32);
+  arena_destroy(&a);
+}
+
+static void test_race_heterogeneous_stays_dyn(void) {
+  current_test = "race_heterogeneous_stays_dyn";
+  arena_t a = {0};
+  /* Bodies produce i32 and str — race result is dyn. */
+  ParseResult r = run_typer("def res [race { 1 } { \"two\" }]", &a);
+  AstNode* rc = find_cmd(r.nodes[0], "race");
+  ASSERT_NOT_NULL(rc);
+  ASSERT_TYPE(rc, TYPE_DYN);
+  arena_destroy(&a);
+}
+
 static void test_future_t_annotation(void) {
   current_test = "future_t_annotation";
   arena_t a = {0};
@@ -419,6 +441,8 @@ int main(void) {
   test_spawn_returns_future();
   test_await_of_future_narrows_to_element();
   test_await_of_dyn_stays_dyn();
+  test_race_homogeneous_narrows();
+  test_race_heterogeneous_stays_dyn();
   test_future_t_annotation();
 
   printf("\n%d/%d passed", passes, passes + failures);

@@ -242,11 +242,12 @@ behavior change.
    introspection, while/for/yield, signal/cancel). HEAD_PIPE result
    inherits rhs. parallel→TYPE_VEC. spawn→TYPE_FUTURE with element
    type from body's tail; await of TYPE_FUTURE narrows to the
-   element type. New `TYPE_FUTURE` enum value (jacl.h, ast.c).
-   `[Future T]` surface annotation recognized by the typer in
-   def/mut (compiler-side support for `def [Future T]` is the same
-   gap that exists for `def [Vec T]` — typer-only today). Not done:
-   `race` element-type narrowing (returns DYN today), `vec-get`/
+   element type. race narrows to the unified body tail type when
+   all bodies produce the same concrete type, dyn otherwise. New
+   `TYPE_FUTURE` enum value (jacl.h, ast.c). `[Future T]` surface
+   annotation recognized by the typer in def/mut (compiler-side
+   support for `def [Future T]` is the same gap that exists for
+   `def [Vec T]` — typer-only today). Not done: `vec-get`/
    `map-get` element types, `take`/`first`/`reset`/`swap`/`hash`/
    `interpret`/FFI cluster. Plus closures and imported procs are
    absent from the typer's proc registry.

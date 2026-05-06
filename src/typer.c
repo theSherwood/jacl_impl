@@ -2131,6 +2131,39 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       } else if (body_t != TYPE_DYN) {
         node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(body_t);
       }
+    } else if (hid == HEAD_RACE && node->data.command.arg_count >= 2) {
+      /* race: returns the first body's result to complete. If every
+       * body has the same concrete tail type, narrow the result to
+       * that type; otherwise dyn. Mirrors parallel's body-walk shape
+       * but returns a single value (the winner) instead of a vec. */
+      AstNode** as = node->data.command.args;
+      uint32_t n = node->data.command.arg_count;
+      JaclType  unified_t    = TYPE_DYN;
+      uint32_t  unified_sidx = UINT32_MAX;
+      bool      all_same     = true;
+      for (uint32_t i = 0; i < n; i++) {
+        AstNode* body = as[i];
+        if (body->type != AST_BLOCK) { all_same = false; break; }
+        JaclType bt = (JaclType)body->inferred_type;
+        if (bt == TYPE_DYN) { all_same = false; break; }
+        if (i == 0) {
+          unified_t = bt;
+          unified_sidx = body->inferred_struct_idx;
+        } else if (bt != unified_t ||
+                   (bt == TYPE_STRUCT &&
+                    body->inferred_struct_idx != unified_sidx)) {
+          all_same = false;
+          break;
+        }
+      }
+      if (all_same) {
+        node->inferred_type = unified_t;
+        if (unified_t == TYPE_STRUCT) {
+          node->inferred_struct_idx = unified_sidx;
+        }
+      } else {
+        node->inferred_type = TYPE_DYN;
+      }
     } else if (hid == HEAD_AWAIT && node->data.command.arg_count == 1) {
       /* await: unwraps a future. If the operand is a TYPE_FUTURE with
        * a known element type, narrow the result to that element type;
