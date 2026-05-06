@@ -232,10 +232,12 @@ behavior change.
      follow-on, not blocking.
    - `inline_repr` — confirmed in decision 3 that this stays in
      compiler as codegen state. No AST field needed.
-2. **Stage 1a — control-flow result types.** ✅ PARTIAL.
-   Done: `while`, `for`, `yield`, `break`, `continue`, `dot`
-   field-set. Not done: `try`, `match`, `with-ctx` (each typer
-   says DYN today).
+2. **Stage 1a — control-flow result types.** ✅ MOSTLY DONE.
+   Done: `if` (then/else unify), `while`, `for`, `yield`, `break`,
+   `continue`, `dot` field-set, `try` (body/handler unify),
+   `with-ctx` (body's tail type). Not done: `match` (each typer
+   says DYN today — needs arm-walk + unification when match is
+   used in code; not load-bearing in current corpus).
 3. **Stage 1b — call returns.** ✅ PARTIAL.
    Done: ~30 entries in `fixed_returns` (predicates, lengths,
    strings, streams, dyn collection ctors, signal/cancel, syntax-*

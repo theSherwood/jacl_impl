@@ -1465,6 +1465,39 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         node->inferred_type = TYPE_DYN;
       }
       return;
+    } else if (hid == HEAD_TRY &&
+               node->data.command.arg_count == 3 &&
+               node->data.command.args[0]->type == AST_BLOCK &&
+               node->data.command.args[2]->type == AST_BLOCK) {
+      /* try body err handler — result is body's tail value (no error)
+       * or handler's tail value (error). Unify the two; if they agree,
+       * propagate the type. The error binding (args[1]) is the local
+       * the handler scope binds the trapped error to — typed as DYN
+       * since we don't track error tag types. */
+      AstNode** as = node->data.command.args;
+      typer__infer_node(tc, as[0]);
+      typer__infer_node(tc, as[2]);
+      JaclType body_t    = (JaclType)as[0]->inferred_type;
+      JaclType handler_t = (JaclType)as[2]->inferred_type;
+      if (body_t == handler_t) {
+        node->inferred_type = body_t;
+        node->inferred_struct_idx = as[0]->inferred_struct_idx;
+      } else {
+        node->inferred_type = TYPE_DYN;
+      }
+      return;
+    } else if (hid == HEAD_WITH_CTX &&
+               node->data.command.arg_count == 2 &&
+               node->data.command.args[0]->type == AST_BLOCK &&
+               node->data.command.args[1]->type == AST_BLOCK) {
+      /* with-ctx overrides body — result is the body's tail value
+       * (overrides block produces nil). Mirrors compiler.c:8214. */
+      AstNode** as = node->data.command.args;
+      typer__infer_node(tc, as[0]);
+      typer__infer_node(tc, as[1]);
+      node->inferred_type = as[1]->inferred_type;
+      node->inferred_struct_idx = as[1]->inferred_struct_idx;
+      return;
     } else if (hid == HEAD_UNBOX &&
                node->data.command.arg_count == 1 &&
                node->data.command.args[0]->type == AST_VAR_REF) {

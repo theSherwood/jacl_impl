@@ -374,6 +374,41 @@ static void test_await_of_dyn_stays_dyn(void) {
   arena_destroy(&a);
 }
 
+static void test_try_unifies_body_and_handler(void) {
+  current_test = "try_unifies_body_and_handler";
+  arena_t a = {0};
+  /* Body and handler both produce i32 → try result narrows to i32. */
+  ParseResult r = run_typer("def res [try { 1 } e { 2 }]", &a);
+  AstNode* tr = find_cmd(r.nodes[0], "try");
+  ASSERT_NOT_NULL(tr);
+  ASSERT_TYPE(tr, TYPE_I32);
+  arena_destroy(&a);
+}
+
+static void test_try_heterogeneous_stays_dyn(void) {
+  current_test = "try_heterogeneous_stays_dyn";
+  arena_t a = {0};
+  ParseResult r = run_typer("def res [try { 1 } e { \"oops\" }]", &a);
+  AstNode* tr = find_cmd(r.nodes[0], "try");
+  ASSERT_NOT_NULL(tr);
+  ASSERT_TYPE(tr, TYPE_DYN);
+  arena_destroy(&a);
+}
+
+static void test_with_ctx_inherits_body_type(void) {
+  current_test = "with_ctx_inherits_body_type";
+  arena_t a = {0};
+  /* with-ctx overrides body — result is the body's tail type. */
+  ParseResult r = run_typer(
+      "ctx mut i32 level = 0\n"
+      "proc f {} { with-ctx { level 5 } { 42 } }", &a);
+  AstNode* proc = r.nodes[1];
+  AstNode* wc = find_cmd(proc, "with-ctx");
+  ASSERT_NOT_NULL(wc);
+  ASSERT_TYPE(wc, TYPE_I32);
+  arena_destroy(&a);
+}
+
 static void test_race_homogeneous_narrows(void) {
   current_test = "race_homogeneous_narrows";
   arena_t a = {0};
@@ -441,6 +476,9 @@ int main(void) {
   test_spawn_returns_future();
   test_await_of_future_narrows_to_element();
   test_await_of_dyn_stays_dyn();
+  test_try_unifies_body_and_handler();
+  test_try_heterogeneous_stays_dyn();
+  test_with_ctx_inherits_body_type();
   test_race_homogeneous_narrows();
   test_race_heterogeneous_stays_dyn();
   test_future_t_annotation();
