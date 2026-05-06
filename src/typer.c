@@ -687,6 +687,12 @@ static bool typer__handle_set(TyperCtx* tc, AstNode* node) {
         recv_sidx = b->struct_idx;
       }
     }
+    /* Stage 5b: auto-deref [Ptr Struct] receiver for the set-arrow
+     * form too, so `set $p->x val` field-checks against the pointee. */
+    if (recv_t == TYPE_PTR && recv_sidx != UINT32_MAX &&
+        !JACL_IS_SCALAR_TYPE_IDX(recv_sidx)) {
+      recv_t = TYPE_STRUCT;
+    }
     if (recv_t == TYPE_STRUCT && recv_sidx < tc->struct_count &&
         field->type == AST_LIT_STRING) {
       const TyperStruct* sd = &tc->structs[recv_sidx];
@@ -2442,6 +2448,37 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         typer__error(tc, arg->start.line, arg->start.column, err);
       }
       node->inferred_type = TYPE_U64;
+    } else if (hid == HEAD_PTR_DEREF && node->data.command.arg_count == 1) {
+      /* [ptr-deref $p]: load the value at *p. For [Ptr T] with a
+       * scalar pointee, the result narrows to T. Struct pointees
+       * route through $p->field; this builtin errors on them. */
+      AstNode* arg = node->data.command.args[0];
+      JaclType arg_t = (JaclType)arg->inferred_type;
+      uint32_t arg_sidx = arg->inferred_struct_idx;
+      if (arg_t == TYPE_PTR) {
+        if (JACL_IS_SCALAR_TYPE_IDX(arg_sidx)) {
+          node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(arg_sidx);
+        } else if (arg_sidx != UINT32_MAX) {
+          char err[160];
+          snprintf(err, sizeof(err),
+                   "type error: ptr-deref on a struct pointer — use "
+                   "$p->field for field access");
+          typer__error(tc, arg->start.line, arg->start.column, err);
+          node->inferred_type = TYPE_DYN;
+        } else {
+          /* Pointee unknown — fall through to dyn. */
+          node->inferred_type = TYPE_DYN;
+        }
+      } else if (arg_t == TYPE_DYN) {
+        node->inferred_type = TYPE_DYN;
+      } else {
+        char err[128];
+        snprintf(err, sizeof(err),
+                 "type error: ptr-deref expects a pointer, got %s",
+                 type_name(arg_t));
+        typer__error(tc, arg->start.line, arg->start.column, err);
+        node->inferred_type = TYPE_DYN;
+      }
     } else if (hl == 4 && memcmp(hn, "puts", 4) == 0) {
       /* "puts" is not in the HeadId table — keep the memcmp here. */
       node->inferred_type = TYPE_NIL;
@@ -2475,6 +2512,15 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           tgt_t = TYPE_STRUCT;
           tgt_sidx = b->struct_idx;
         }
+      }
+      /* Stage 5b: auto-deref a [Ptr Struct] receiver. The field-set
+       * then resolves against the pointee struct identically to a
+       * direct struct receiver — the compiler emits OP_PTR_STORE
+       * instead of OP_HEAP_RECORD_SET. Scalar pointees ([Ptr i32])
+       * have no field surface and fall through to TYPE_DYN. */
+      if (tgt_t == TYPE_PTR && tgt_sidx != UINT32_MAX &&
+          !JACL_IS_SCALAR_TYPE_IDX(tgt_sidx)) {
+        tgt_t = TYPE_STRUCT;
       }
       if (tgt_t == TYPE_STRUCT && tgt_sidx < tc->struct_count &&
           fld->type == AST_LIT_STRING) {
@@ -2532,6 +2578,13 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           tgt_t = TYPE_STRUCT;
           tgt_sidx = b->struct_idx;
         }
+      }
+      /* Stage 5b: auto-deref [Ptr Struct] receiver to its pointee for
+       * field resolution. The compiler emits OP_PTR_LOAD with the
+       * field's offset and type. Scalar pointees fall through. */
+      if (tgt_t == TYPE_PTR && tgt_sidx != UINT32_MAX &&
+          !JACL_IS_SCALAR_TYPE_IDX(tgt_sidx)) {
+        tgt_t = TYPE_STRUCT;
       }
       if (tgt_t == TYPE_STRUCT &&
           tgt_sidx < tc->struct_count &&

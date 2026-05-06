@@ -1421,6 +1421,92 @@ static int test_extern_u64_return(void) {
   return 1;
 }
 
+/* ===== Stage 5b: deref + field auto-deref through [Ptr Struct] ===== */
+
+/* A real C struct that JACL will read/write via typed pointers. */
+typedef struct CPoint { int32_t x; int32_t y; } CPoint;
+static CPoint g_test_point;
+
+/* Native fn returns a u64 address pointing at g_test_point. From JACL
+ * it's declared `extern [Ptr CPoint] cp_addr {}`. The C-side and JACL
+ * struct layouts must match (both: i32 x, i32 y), which is the
+ * debugger-scripting use case in miniature. */
+static JaclVal native_cp_addr(JaclVM* vm, JaclVal* args, int argc) {
+  (void)args; (void)argc;
+  return jacl_u64(&vm->vm.heap, (uint64_t)(uintptr_t)&g_test_point);
+}
+
+/* Test: $p->x reads the actual C struct field. */
+static int test_ptr_field_read(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+  embed__register_native(vm, "cp_addr", native_cp_addr, 0);
+
+  g_test_point.x = 7;
+  g_test_point.y = 11;
+  JaclVal result = jacl_eval(vm,
+      "struct CPoint {i32 x i32 y}\n"
+      "extern [Ptr CPoint] cp_addr {}\n"
+      "def [Ptr CPoint] p [cp_addr]\n"
+      "$p->x");
+  ASSERT(!jacl_is_error(result));
+  ASSERT(jacl_is_i32(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 7);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Test: set $p->x writes through the pointer; the C side observes it. */
+static int test_ptr_field_write(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+  embed__register_native(vm, "cp_addr", native_cp_addr, 0);
+
+  g_test_point.x = 0;
+  g_test_point.y = 0;
+  JaclVal result = jacl_eval(vm,
+      "struct CPoint {i32 x i32 y}\n"
+      "extern [Ptr CPoint] cp_addr {}\n"
+      "def [Ptr CPoint] p [cp_addr]\n"
+      "set $p->x 42\n"
+      "set $p->y 99");
+  ASSERT(!jacl_is_error(result));
+  ASSERT_INT_EQ(g_test_point.x, 42);
+  ASSERT_INT_EQ(g_test_point.y, 99);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
+/* Static scalar exposed to JACL via a native fn returning its address.
+ * JACL literals cap at INT32_MAX, so we can't bake the address as a
+ * source literal — the native fn carries it through u64. */
+static int32_t g_test_scalar;
+static JaclVal native_scalar_addr(JaclVM* vm, JaclVal* args, int argc) {
+  (void)args; (void)argc;
+  return jacl_u64(&vm->vm.heap, (uint64_t)(uintptr_t)&g_test_scalar);
+}
+
+/* Test: ptr-deref on a scalar pointer loads through the address. */
+static int test_ptr_deref_scalar(void) {
+  JaclVM* vm = jacl_vm_new();
+  ASSERT(vm != NULL);
+  embed__register_native(vm, "scalar_addr", native_scalar_addr, 0);
+
+  g_test_scalar = 12345;
+  JaclVal result = jacl_eval(vm,
+      "extern [Ptr i32] scalar_addr {}\n"
+      "def [Ptr i32] p [scalar_addr]\n"
+      "ptr-deref $p");
+  ASSERT(!jacl_is_error(result));
+  ASSERT(jacl_is_i32(result));
+  ASSERT_INT_EQ(jacl_as_i32(result), 12345);
+
+  jacl_vm_free(vm);
+  return 1;
+}
+
 /* ===== US-010: Build system / libffi detection ===== */
 
 /* Test: jacl_has_trampolines returns a bool consistent with compile-time detection */
@@ -1683,6 +1769,11 @@ int main(void) {
   printf("\n=== Embedding API: extern declarations (Stage 5a) ===\n");
   RUN(test_extern_typed_ptr_native);
   RUN(test_extern_u64_return);
+
+  printf("\n=== Embedding API: typed pointer deref (Stage 5b) ===\n");
+  RUN(test_ptr_field_read);
+  RUN(test_ptr_field_write);
+  RUN(test_ptr_deref_scalar);
 
   printf("\n=== Embedding API: Build system / libffi ===\n");
   RUN(test_has_trampolines);

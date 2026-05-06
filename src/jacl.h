@@ -551,7 +551,7 @@ typedef enum {
   HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE,
   HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
   HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
-  HEAD_PTR_CAST, HEAD_PTR_ADDR,
+  HEAD_PTR_CAST, HEAD_PTR_ADDR, HEAD_PTR_DEREF,
   HEAD_EXTERN,
   HEAD_STREAM_NEXT, HEAD_COLLECT, HEAD_COUNT, HEAD_TAKE,
   HEAD_FIRST, HEAD_LINES, HEAD_EXEC, HEAD_SIGNAL, HEAD_CANCEL,
@@ -900,7 +900,12 @@ typedef enum {
   OP_TYPED_VEC_GET_INLINE, /* uint16_t type_idx; pop idx, pop tvec; push width inline slots */
   OP_TYPED_MAP_GET_INLINE, /* uint16_t type_idx; pop key, pop tmap; push width inline slots */
   OP_INLINE_TO_LOCAL,      /* uint8_t base_slot, uint16_t type_idx; copy width inline TOS to local, pop */
-  OP_DEREF_INLINE          /* uint16_t type_idx; pop box, push inline bytes from ref->data[] */
+  OP_DEREF_INLINE,         /* uint16_t type_idx; pop box, push inline bytes from ref->data[] */
+
+  /* Stage 5b — typed pointer load/store (appended to keep prior
+   * opcode positions stable). */
+  OP_PTR_LOAD,             /* u16 byte_offset, u8 field_type; pop u64 ptr, push value at *ptr+offset */
+  OP_PTR_STORE             /* u16 byte_offset, u8 field_type; pop value, pop u64 ptr, write to *ptr+offset, push ptr */
 } OpCode;
 
 typedef struct {

@@ -9299,6 +9299,49 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* ptr-deref — [ptr-deref $p]: load the value at *p. For [Ptr T]
+   * with a scalar pointee, emits OP_PTR_LOAD at offset 0 with the
+   * pointee's type. Struct pointees use $p->field for field access
+   * (Stage 5b doesn't support whole-struct loads through pointers). */
+  if (hid == HEAD_PTR_DEREF) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "ptr-deref", "1 argument", argc);
+      return;
+    }
+    JaclType recv_t = (JaclType)args[0]->inferred_type;
+    uint32_t recv_sidx = args[0]->inferred_struct_idx;
+    /* Compile the pointer expression. */
+    compiler__compile_node(c, args[0]);
+    if (recv_t == TYPE_PTR && JACL_IS_SCALAR_TYPE_IDX(recv_sidx)) {
+      JaclType pointee = JACL_TYPE_IDX_TO_SCALAR(recv_sidx);
+      compiler__emit_byte(c, OP_PTR_LOAD, line);
+      compiler__emit_u16(c, 0, line);
+      compiler__emit_byte(c, (uint8_t)pointee, line);
+      c->last_expr_type = pointee;
+      return;
+    }
+    if (recv_t == TYPE_PTR && recv_sidx != UINT32_MAX &&
+        !JACL_IS_SCALAR_TYPE_IDX(recv_sidx)) {
+      compiler__error(c, line, col,
+                      "ptr-deref: struct pointees not supported here — "
+                      "use $p->field for field access");
+      return;
+    }
+    if (recv_t != TYPE_DYN) {
+      compiler__error(c, line, col,
+                      "ptr-deref: expected a typed pointer ([Ptr T])");
+      return;
+    }
+    /* Dyn operand: typer can't validate. The runtime will trap on
+     * non-pointer values via OP_PTR_LOAD's tag check. Default to
+     * 8-byte u64 load. */
+    compiler__emit_byte(c, OP_PTR_LOAD, line);
+    compiler__emit_u16(c, 0, line);
+    compiler__emit_byte(c, (uint8_t)TYPE_U64, line);
+    c->last_expr_type = TYPE_U64;
+    return;
+  }
+
   /* await — suspension point (state machine) or job wait */
   if (hid == HEAD_AWAIT) {
     if (argc != 1) {
@@ -9764,6 +9807,68 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
 
           /* Set type info from export */
           c->last_expr_type = found_export->type;
+          return;
+        }
+      }
+    }
+
+    /* Stage 5b: typed pointer field access — `$p->x` / `[. $p field]`
+     * where args[0] is `[Ptr Struct]`. Emit OP_PTR_LOAD (read) or
+     * OP_PTR_STORE (set) with the field's byte offset and type from
+     * the pointee struct in the registry. */
+    if (args[1]->type == AST_LIT_STRING) {
+      JaclType recv_t = (JaclType)args[0]->inferred_type;
+      uint32_t recv_sidx = args[0]->inferred_struct_idx;
+      if (recv_t == TYPE_PTR && recv_sidx != UINT32_MAX &&
+          !JACL_IS_SCALAR_TYPE_IDX(recv_sidx)) {
+        StructTypeRegistry* reg = compiler__get_struct_registry(c);
+        if (reg && recv_sidx < reg->count) {
+          StructTypeDef* sdef = reg->defs[recv_sidx];
+          const char* field_name = args[1]->data.lit_string.value;
+          uint32_t    field_len  = args[1]->data.lit_string.length;
+          StructTypeField* field = NULL;
+          for (uint32_t fi = 0; fi < sdef->field_count; fi++) {
+            if (sdef->fields[fi].name_len == field_len &&
+                memcmp(sdef->fields[fi].name, field_name, field_len) == 0) {
+              field = &sdef->fields[fi];
+              break;
+            }
+          }
+          if (!field) {
+            char err[256];
+            snprintf(err, sizeof(err),
+                     "field '%.*s' not found on struct '%.*s' (via [Ptr T])",
+                     (int)field_len, field_name,
+                     (int)sdef->name_len, sdef->name);
+            compiler__error(c, line, col, err);
+            return;
+          }
+          if (field->type == TYPE_STRUCT) {
+            compiler__error(c, line, col,
+                            "Stage 5b: nested struct field access through "
+                            "a pointer is not supported yet");
+            return;
+          }
+          /* Compile the pointer expression — leaves the u64 ptr on TOS. */
+          compiler__compile_node(c, args[0]);
+          if (is_set) {
+            /* Compile the value expression. The typer's field-set check
+             * already validated value type vs field type. */
+            compiler__compile_node(c, args[2]);
+            compiler__emit_byte(c, OP_PTR_STORE, line);
+            compiler__emit_u16(c, (uint16_t)field->offset, line);
+            compiler__emit_byte(c, (uint8_t)field->type, line);
+            /* Pop the pointer that OP_PTR_STORE pushes back; set form
+             * results in nil at the language level. */
+            compiler__emit_byte(c, OP_POP, line);
+            compiler__emit_byte(c, OP_NIL, line);
+            c->last_expr_type = TYPE_NIL;
+          } else {
+            compiler__emit_byte(c, OP_PTR_LOAD, line);
+            compiler__emit_u16(c, (uint16_t)field->offset, line);
+            compiler__emit_byte(c, (uint8_t)field->type, line);
+            c->last_expr_type = (JaclType)field->type;
+          }
           return;
         }
       }

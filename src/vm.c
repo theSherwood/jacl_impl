@@ -6119,6 +6119,97 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_PTR_LOAD: {
+        /* Pop a u64 pointer (typed [Ptr T] from typer's perspective),
+         * read N bytes at *ptr+offset interpreted as field_type, push
+         * the resulting value. Used for typed pointer field reads
+         * ($p->x) and scalar pointer derefs ([ptr-deref $p]).
+         * Operands: u16 byte_offset, u8 field_type. */
+        uint16_t byte_offset = vm__read_u16(vm);
+        uint8_t  field_type  = vm__read_byte(vm);
+        JaclVal ptr_val;
+        result = vm__pop(vm, &ptr_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(ptr_val)) {
+          result = vm__push(vm, ptr_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_u64(ptr_val)) {
+          vm__set_error(vm, "ptr-load: expected pointer (u64), got non-pointer value");
+          return VM_RUNTIME_ERROR;
+        }
+        uint8_t* base = (uint8_t*)(uintptr_t)jacl_as_u64(ptr_val);
+        if (!base) {
+          vm__set_error(vm, "ptr-load: null pointer dereference");
+          return VM_RUNTIME_ERROR;
+        }
+        JaclVal field_val;
+        switch ((JaclType)field_type) {
+          case TYPE_BOOL: field_val = jacl_bool(base[byte_offset]); break;
+          case TYPE_I32: { int32_t  n; memcpy(&n, base + byte_offset, 4); field_val = jacl_i32(n); break; }
+          case TYPE_U32: { uint32_t n; memcpy(&n, base + byte_offset, 4); field_val = jacl_u32(n); break; }
+          case TYPE_F32: { float    f; memcpy(&f, base + byte_offset, 4); field_val = jacl_f32(f); break; }
+          case TYPE_I64: { int64_t  n; memcpy(&n, base + byte_offset, 8); field_val = jacl_i64(&vm->heap, n); break; }
+          case TYPE_U64: { uint64_t n; memcpy(&n, base + byte_offset, 8); field_val = jacl_u64(&vm->heap, n); break; }
+          case TYPE_F64: { double   d; memcpy(&d, base + byte_offset, 8); field_val = jacl_f64(&vm->heap, d); break; }
+          default:
+            vm__set_error(vm, "ptr-load: unsupported field type %u", (unsigned)field_type);
+            return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, field_val);
+        if (result != VM_OK) return result;
+        break;
+      }
+
+      case OP_PTR_STORE: {
+        /* Pop value, pop pointer, write value at *ptr+offset
+         * interpreted as field_type. Pushes the pointer back so set
+         * forms can chain. Operands: u16 byte_offset, u8 field_type. */
+        uint16_t byte_offset = vm__read_u16(vm);
+        uint8_t  field_type  = vm__read_byte(vm);
+        JaclVal new_val;
+        result = vm__pop(vm, &new_val);
+        if (result != VM_OK) return result;
+        JaclVal ptr_val;
+        result = vm__pop(vm, &ptr_val);
+        if (result != VM_OK) return result;
+        if (jacl_is_error(ptr_val)) {
+          result = vm__push(vm, ptr_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        if (jacl_is_error(new_val)) {
+          result = vm__push(vm, new_val);
+          if (result != VM_OK) return result;
+          break;
+        }
+        if (!jacl_is_u64(ptr_val)) {
+          vm__set_error(vm, "ptr-store: expected pointer (u64), got non-pointer value");
+          return VM_RUNTIME_ERROR;
+        }
+        uint8_t* base = (uint8_t*)(uintptr_t)jacl_as_u64(ptr_val);
+        if (!base) {
+          vm__set_error(vm, "ptr-store: null pointer dereference");
+          return VM_RUNTIME_ERROR;
+        }
+        switch ((JaclType)field_type) {
+          case TYPE_BOOL: { base[byte_offset] = (uint8_t)(jacl_is_bool(new_val) ? jacl_as_bool(new_val) : 0); break; }
+          case TYPE_I32: { int32_t  n = jacl_is_i32(new_val) ? jacl_as_i32(new_val) : 0;             memcpy(base + byte_offset, &n, 4); break; }
+          case TYPE_U32: { uint32_t n = jacl_is_u32(new_val) ? jacl_as_u32(new_val) : 0;             memcpy(base + byte_offset, &n, 4); break; }
+          case TYPE_F32: { float    f = jacl_is_f32(new_val) ? jacl_as_f32(new_val) : 0.0f;          memcpy(base + byte_offset, &f, 4); break; }
+          case TYPE_I64: { int64_t  n = jacl_is_i64(new_val) ? jacl_as_i64(new_val) : 0;             memcpy(base + byte_offset, &n, 8); break; }
+          case TYPE_U64: { uint64_t n = jacl_is_u64(new_val) ? jacl_as_u64(new_val) : 0;             memcpy(base + byte_offset, &n, 8); break; }
+          case TYPE_F64: { double   d = jacl_is_f64(new_val) ? jacl_as_f64(new_val) : 0.0;           memcpy(base + byte_offset, &d, 8); break; }
+          default:
+            vm__set_error(vm, "ptr-store: unsupported field type %u", (unsigned)field_type);
+            return VM_RUNTIME_ERROR;
+        }
+        result = vm__push(vm, ptr_val);
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_HEAP_RECORD_GET_DYN: {
         uint16_t name_idx = vm__read_u16(vm);
         JaclVal struct_val;

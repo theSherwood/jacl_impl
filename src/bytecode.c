@@ -240,7 +240,12 @@ typedef enum {
   OP_TYPED_VEC_GET_INLINE, /* uint16_t type_idx */
   OP_TYPED_MAP_GET_INLINE, /* uint16_t type_idx */
   OP_INLINE_TO_LOCAL,      /* uint8_t base_slot, uint16_t type_idx */
-  OP_DEREF_INLINE          /* uint16_t type_idx; pop box, push inline bytes from ref->data[] */
+  OP_DEREF_INLINE,         /* uint16_t type_idx; pop box, push inline bytes from ref->data[] */
+
+  /* --- Typed pointers (Stage 5b) — appended to keep prior opcode
+   * positions stable for downstream consumers. --- */
+  OP_PTR_LOAD,             /* u16 byte_offset, u8 field_type; pop u64 ptr, push value at *ptr+offset */
+  OP_PTR_STORE             /* u16 byte_offset, u8 field_type; pop value, pop u64 ptr, write to *ptr+offset, push ptr */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -515,6 +520,8 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_HEAP_RECORD_SET_DYN:  return "OP_HEAP_RECORD_SET_DYN";
     case OP_HEAP_RECORD_GET_INLINE: return "OP_HEAP_RECORD_GET_INLINE";
     case OP_HEAP_RECORD_SET_INLINE: return "OP_HEAP_RECORD_SET_INLINE";
+    case OP_PTR_LOAD:               return "OP_PTR_LOAD";
+    case OP_PTR_STORE:              return "OP_PTR_STORE";
     case OP_RESET_INLINE:           return "OP_RESET_INLINE";
     case OP_STRUCT_NEW_INLINE: return "OP_STRUCT_NEW_INLINE";
     case OP_STRUCT_GET_INLINE: return "OP_STRUCT_GET_INLINE";

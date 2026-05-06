@@ -661,6 +661,36 @@ static void test_extern_with_params(void) {
   arena_destroy(&a);
 }
 
+/* --- Stage 5b: deref + field auto-deref --- */
+
+static void test_ptr_arrow_field_narrows(void) {
+  current_test = "ptr_arrow_field_narrows";
+  arena_t a = {0};
+  /* $p->x where $p is [Ptr Point] narrows to the field's type (i32). */
+  ParseResult r = run_typer(
+      "struct Point {i32 x i32 y}\n"
+      "def u64 addr 0\n"
+      "def [Ptr Point] p [ptr-cast [Ptr Point] $addr]\n"
+      "$p->x", &a);
+  AstNode* dot = find_cmd(r.nodes[3], ".");
+  ASSERT_NOT_NULL(dot);
+  ASSERT_TYPE(dot, TYPE_I32);
+  arena_destroy(&a);
+}
+
+static void test_ptr_deref_scalar_narrows(void) {
+  current_test = "ptr_deref_scalar_narrows";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "def u64 addr 0\n"
+      "def [Ptr u64] p [ptr-cast [Ptr u64] $addr]\n"
+      "ptr-deref $p", &a);
+  AstNode* d = find_cmd(r.nodes[2], "ptr-deref");
+  ASSERT_NOT_NULL(d);
+  ASSERT_TYPE(d, TYPE_U64);
+  arena_destroy(&a);
+}
+
 /* --- Driver ------------------------------------------------------- */
 
 int main(void) {
@@ -710,6 +740,8 @@ int main(void) {
   test_proc_future_return_compound();
   test_extern_ptr_return_call();
   test_extern_with_params();
+  test_ptr_arrow_field_narrows();
+  test_ptr_deref_scalar_narrows();
 
   printf("\n%d/%d passed", passes, passes + failures);
   if (failures > 0) {

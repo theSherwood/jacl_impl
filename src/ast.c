@@ -100,8 +100,8 @@ typedef enum {
   HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
   HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
 
-  /* Typed pointers (Stage 5a) */
-  HEAD_PTR_CAST, HEAD_PTR_ADDR,
+  /* Typed pointers (Stage 5a/5b) */
+  HEAD_PTR_CAST, HEAD_PTR_ADDR, HEAD_PTR_DEREF,
 
   /* Native fn declaration with typed signature (Stage 5a) */
   HEAD_EXTERN,
@@ -232,6 +232,7 @@ static HeadId ast__head_id_for(const char* s, uint32_t len) {
       if (memcmp(s, "error-val", 9) == 0) return HEAD_ERROR_VAL;
       if (memcmp(s, "interpret", 9) == 0) return HEAD_INTERPRET;
       if (memcmp(s, "defstruct", 9) == 0) return HEAD_DEFSTRUCT;
+      if (memcmp(s, "ptr-deref", 9) == 0) return HEAD_PTR_DEREF;
       return HEAD_NONE;
     case 10:
       if (memcmp(s, "vec-concat", 10) == 0) return HEAD_VEC_CONCAT;

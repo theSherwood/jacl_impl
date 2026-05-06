@@ -870,6 +870,10 @@ bool embed__val_matches_field_type(JaclVal val, int field_type) {
     case TYPE_DYN:     return true; /* any value accepted */
     case TYPE_NIL:     return jacl_is_nil(val);
     case TYPE_STREAM:  return jacl_is_stream(val);
+    case TYPE_TYPED_VEC: return jacl_is_vector(val);
+    case TYPE_TYPED_MAP: return jacl_is_map(val);
+    case TYPE_FUTURE:  return jacl_is_future(val);
+    case TYPE_PTR:     return jacl_is_u64(val);  /* pointer rep is u64 */
   }
   return false;
 }

@@ -270,6 +270,37 @@ static void run_all(void) {
     .expect_substrings = { "type error", "pointers", "pointee" },
   });
 
+  /* Stage 5b: ptr-deref on a struct pointer is a typer error —
+   * struct pointees route through $p->field for field access. */
+  RUN("ptr_deref_on_struct_pointer", {
+    .source =
+      "struct Point {i32 x i32 y}\n"
+      "def u64 a 0\n"
+      "def [Ptr Point] p [ptr-cast [Ptr Point] $a]\n"
+      "ptr-deref $p",
+    .expect_substrings = { "ptr-deref", "struct pointer", "$p->field" },
+  });
+
+  /* Stage 5b: ptr-deref on a non-pointer concrete type is rejected. */
+  RUN("ptr_deref_non_pointer", {
+    .source =
+      "def i32 x 5\n"
+      "ptr-deref $x",
+    .expect_substrings = { "ptr-deref", "pointer", "i32" },
+  });
+
+  /* Stage 5b: assigning the wrong-typed value through $p->field
+   * fires the existing field-mismatch formatter (typer auto-derefs
+   * the pointer to its pointee struct). */
+  RUN("ptr_field_set_wrong_type", {
+    .source =
+      "struct Point {i32 x i32 y}\n"
+      "def u64 a 0\n"
+      "def [Ptr Point] p [ptr-cast [Ptr Point] $a]\n"
+      "set $p->x \"oops\"",
+    .expect_substrings = { "type error", "x", "Point", "i32", "str" },
+  });
+
   /* extern declared with typed param: calling with the wrong arg
    * type fires the same dyn/typed barrier as a JACL proc call would. */
   RUN("extern_call_wrong_arg_type", {

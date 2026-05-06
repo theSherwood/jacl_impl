@@ -683,14 +683,38 @@ PROGRESS.** Done in this commit:
   `extern_ptr_result_pointee_mismatch`), 2 new embed integration
   tests (`test_extern_typed_ptr_native`, `test_extern_u64_return`).
 
-**Stage 5b — deref + field auto-deref (~1 week)**
+**Stage 5b — deref + field auto-deref ✅ COMPLETE**
 
-- `[ptr-deref $p]` for scalar-pointee loads.
+- New opcodes `OP_PTR_LOAD` and `OP_PTR_STORE` (u16 byte_offset, u8
+  field_type). Both pop a tagged-u64 pointer JaclVal, cast its bits
+  to `void*`, and read/write the requested type at `*ptr+offset`.
+  Trap on null and on non-u64 operands.
 - `$p->x` and `[. $p field]` auto-deref when receiver is `[Ptr
-  Struct]`.
-- `set $p->x val` and `[. $p field val]` auto-deref for write.
-- New opcode(s) for typed pointer load/store; reuse existing struct
-  layout (`struct__type_size` / field offsets).
+  Struct]`. The compiler reads the field's offset from the struct
+  registry (`StructTypeField.offset`) and emits `OP_PTR_LOAD` /
+  `OP_PTR_STORE`. Set form leaves nil at the language level (the
+  store opcode pushes the pointer for chaining; the compiler pops
+  it and emits `OP_NIL`).
+- `set $p->x val` arrow form auto-derefs through both
+  `typer__handle_set` (pre-rewrite shape) and the 3-arg HEAD_DOT
+  branch.
+- `HEAD_PTR_DEREF` + `[ptr-deref $p]` builtin for whole-value
+  scalar loads (`[Ptr i32]`, `[Ptr u64]`). Struct pointees error
+  ("use $p->field for field access"); the build deliberately doesn't
+  support whole-struct loads through pointers in this stage.
+- Tests: 2 new typer-only (`test_ptr_arrow_field_narrows`,
+  `test_ptr_deref_scalar_narrows`); 3 new type-error
+  (`ptr_deref_on_struct_pointer`, `ptr_deref_non_pointer`,
+  `ptr_field_set_wrong_type`); 3 new embed integration tests with
+  real C struct memory (`test_ptr_field_read`, `test_ptr_field_write`,
+  `test_ptr_deref_scalar`). The write test confirms the C side
+  observes JACL's mutation.
+
+**Known limit:** struct-typed fields through a pointer
+(`$p->some_struct.x`) error with "Stage 5b: nested struct field
+access through a pointer is not supported yet". Adding it requires
+either copying the nested struct into inline stack slots or
+emitting a chained pointer load — deferred.
 
 **Stage 5c — pointer arithmetic for array walking (~3-5 days)**
 
@@ -987,7 +1011,7 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 | 4 — separate `TypedAstNode` | ⏭ skipped (optional, not pursued) |
 | 5a — pointer type + cast (foundation) | ✅ complete (`TYPE_PTR` + `[Ptr T]` annotation + `[ptr-cast]` / `[ptr-addr]` + typer misuse rules) |
 | 5a — typed externs | ✅ complete (`extern [type] name {params}` + compound return types for proc/extern) |
-| 5b — deref + field auto-deref | ❌ not started |
+| 5b — deref + field auto-deref | ✅ complete (`$p->x` / `[ptr-deref]` + new `OP_PTR_LOAD/STORE` opcodes; nested struct fields deferred) |
 | 5c — pointer arithmetic | ❌ not started |
 
 Tests: 95/95 corpus + 35/35 typer-only + 16/16 type-error. The audit
