@@ -1118,7 +1118,9 @@ All five Stage 0 decisions resolved (see "Open decisions" above):
 | 5b ext — nested struct fields through ptr | ✅ complete (`$p->inner->x`, `[addr ...]`, chain accumulator) |
 | 5c — pointer arithmetic | ✅ complete (`[ptr-offset]`, `[ptr-diff]` + opcodes; eq/lt reuse standard binary-ops) |
 
-Tests: 95/95 corpus + 35/35 typer-only + 16/16 type-error. The audit
+Tests: 95 test binaries pass. Inside them: the jacl harness runs
+327 fixture files; `test/test_typer.c` runs 65 typer-only cases;
+`test/test_type_errors.c` runs 35 error-wording cases. The audit
 machinery from Stages 0–2 was deleted in commit `0aa722f` after it
 served its purpose.
 
@@ -1131,6 +1133,18 @@ the surface (`typed_import_narrows`, `err_typed_import_into_typed`,
 `err_typed_value_module_binding`). Imported struct exports
 field-typing is the remaining cross-module gap — tracked under
 "Imports design" → open follow-on.
+
+Stage 5 polish bundle landed alongside: typed pointers print as
+`Ptr<T>(0xADDR)` (new `OP_PRINT_PTR`); `[ptr-null [Ptr T]]` builtin
+replaces the `[ptr-cast [Ptr T] 0]` workaround; eleven bespoke
+pointer-error `snprintf` sites moved to shared formatters in
+`src/type_error.c` (`jacl_format_ptr_*`).
+
+Box struct-element narrowing landed: `[deref $box_of_Struct]` now
+narrows to `TYPE_STRUCT` (compiler emits the existing
+`OP_DEREF_INLINE`). Scalar-element box deref already narrowed.
+`[swap $box fn]` with struct elements still narrows to dyn —
+needs an `OP_SWAP_INLINE` parallel.
 
 ## Stage 1 long-tail — what's left
 
@@ -1343,29 +1357,41 @@ in `test/test_type_errors.c` lock in the compile-time wording
 (`await_int_literal`, `await_typed_int_binding`). New shared
 formatter `jacl_format_await_non_future` lives in `src/type_error.c`.
 
-### Stage 5 — pointer types for FFI
+### Stage 5 — pointer types ✅ COMPLETE
 
-A fresh architectural piece, separate from the migration work. The
-existing Stage 5 task list (above, in the "Stages" section) is the
-starting point. Open sub-decisions: `*T` only or also `*mut T`;
-auto-deref vs. always explicit; FFI call syntax. Resolve those
-before starting work.
+5a (foundation), 5a (typed externs), 5b (deref + field auto-deref),
+5b extension (nested struct fields through pointers), and 5c
+(pointer arithmetic) all landed. The polish bundle landed too:
+print formatting (`Ptr<T>(0xADDR)`), `[ptr-null [Ptr T]]` literal,
+and pointer-error formatter extraction into `src/type_error.c`.
+
+The original sub-decisions resolved in the simplest direction:
+`[Ptr T]` only (no `*mut T` distinction); single-level auto-deref
+on field access through `$p->field`; `[Ptr T]` annotations everywhere
+the existing compound-type syntax already accepts collection
+annotations. `*mut T` / bounds-checked array variants / bulk read
+are tracked under "Stage 5 known gaps" and remain deferred.
 
 ### Stage 1 long-tail structural items
 
-Three of the original five long-tail items have landed:
+Most of the original long-tail items have landed:
 nested-proc registration ✅, box-element narrowing ✅ (scalar +
 struct deref; swap struct-element still scalar-only),
-and the await sharp edge ✅. The remaining items:
+the await sharp edge ✅, and imported procs/values across both
+`use` forms ✅. The remaining items:
 
-- **Imported procs**: design captured above; pick up when
-  cross-module typing matters for a workload.
 - **Closure literal call signatures**: trickiest of the long-tail.
   Anonymous closures get TYPE_CLOSURE today, but the typer doesn't
   carry their signature, so calls to a captured anon closure stay
   dyn. Closing this needs the typer to record signatures on
   binding metadata when `def x { proc {x} { ... } }` and propagate
   through var-refs.
+- **Imported struct exports field-typing**: typer↔compiler
+  struct-idx alignment across modules. Pick up when typed field
+  access on imported structs matters for a workload.
+- **`[swap $box fn]` struct-element narrowing**: needs an
+  `OP_SWAP_INLINE` opcode parallel to `OP_DEREF_INLINE`. Self-
+  contained but speculative without a workload.
 - **Match arm-walk**: blocked on the match feature itself
   existing in the compiler/runtime. See entry above.
 
@@ -1386,39 +1412,56 @@ Run the suite with `bash build.sh`. Type-error binary:
 `/jacl_impl/.build/type_errors`. Typer-only binary:
 `/jacl_impl/.build/typer`.
 
-## Pickup-ready summary (last session)
+## Pickup-ready summary
 
-Stage 1 is essentially closed. The typer now handles all
-load-bearing rules in the current corpus. The next session can
-choose between:
+Stage 1 is closed. Stage 5 (pointer types) is closed including the
+polish bundle. Cross-module typing is closed for procs and values
+across both `use` forms. Struct-element box deref narrowing landed.
 
-1. **Stage 5 — pointer types `*T` for FFI.** Fresh architectural
-   piece. Sub-decisions to resolve: `*T` only vs. also `*mut T`,
-   auto-deref vs. always explicit, FFI call syntax.
-2. **Tackle a structural Stage 1 item** when a real workload
-   needs it (match, closure-call typing, swap-with-struct-element
-   inline opcode).
+The remaining items are each either bigger, language-blocked, or
+speculative without a workload:
 
-(The await sharp edge was resolved — see the section above.)
+1. **Imported struct exports field-typing** (~day). Cross-module
+   struct-idx alignment between typer and compiler. Field access on
+   imported structs stays dyn at the typer level; the compiler's
+   shared registry has the real fields, so codegen still works.
+2. **`[swap $box fn]` struct-element narrowing.** Needs a new
+   `OP_SWAP_INLINE` opcode parallel to the now-used `OP_DEREF_INLINE`.
+   Self-contained but speculative without a real workload.
+3. **Closure literal call signatures.** Trickiest of the long-tail
+   — anonymous closures get `TYPE_CLOSURE` but the typer doesn't
+   carry their signature, so calls to a captured anon closure stay
+   dyn. No design captured yet.
+4. **Match arm-walk** — language-blocked. `match` is lexed/parsed
+   but has no compiler/runtime implementation; typer rules would be
+   dead code. Re-open when match becomes a working construct.
 
-Concrete state of the codebase post-session:
+Stable surface highlights (cumulative across all sessions):
 
-- `TYPE_FUTURE` is a real type with element-type tracking via
-  the existing `JACL_SCALAR_TYPE_IDX` sentinel encoding (mirrors
-  `TYPE_TYPED_VEC`/`TYPE_TYPED_MAP`). spawn produces typed
-  futures from body-tail types; await unwraps to the element
-  type; race narrows to the unified body tail when homogeneous.
 - All five commitment-site rules from decision 2 are enforced
   (def/mut/set/proc-param/proc-return/struct-or-ctx field-set).
   Expression-level dyn mixing is permissive — `[+ $i32 $dyn]`
   types as dyn and the barrier check fires at the next commit.
+- `TYPE_FUTURE` / `TYPE_PTR` / `TYPE_BOX` are real types with
+  element-type tracking via the shared `JACL_SCALAR_TYPE_IDX`
+  sentinel encoding (mirrors `TYPE_TYPED_VEC`/`TYPE_TYPED_MAP`).
+  spawn produces typed futures; await unwraps; race narrows when
+  homogeneous; box+deref narrow on both scalar and struct elements.
 - Compiler accepts `[Future T]` / `[Vec T]` / `[Map T]` /
-  `[Map K V]` as compound type annotations in def position
-  (routed through the untyped-def path; the typer narrows the
-  static type from the annotation).
+  `[Map K V]` / `[Ptr T]` as compound type annotations in def
+  position (routed through the untyped-def path; the typer narrows
+  the static type from the annotation).
 - Receiver-preserving builtins: filter, transform, take, vec-push,
   vec-set, vec-concat, vec-slice, map-set, map-remove, map-keys,
   map-vals all preserve typed-collection element types where
   applicable.
 - vec-get, map-get, first narrow to typed-vec/typed-map element
   types (struct or scalar via the shared sentinel).
+- Imported procs and def/mut values narrow across both `use`
+  destructuring and module-binding forms; bare `$mod->field`
+  value access narrows via the HEAD_DOT 2-arg typer rule.
+- Typed pointers: full `[ptr-cast]` / `[ptr-addr]` / `[ptr-deref]`
+  / `[ptr-offset]` / `[ptr-diff]` / `[ptr-null]` / `[addr ...]`,
+  nested chain auto-deref through embedded struct fields, typed
+  `extern` declarations, `Ptr<T>(0xADDR)` print formatting,
+  shared error formatters in `src/type_error.c`.
