@@ -1132,11 +1132,8 @@ structural rather than per-builtin:
   "undefined variable '$match'". Adding typer rules would be dead
   code until the feature itself is implemented. Deferred until
   match becomes a working language construct.
-- **Imported procs** (Stage 1b): the typer's proc registry only sees
-  procs defined at the top level of the current program. `use mod
-  proc_name` imports stay DYN. Loading imported modules' typer
-  state would mean re-running the typer on the imported source —
-  bigger scope than a single typer rule.
+- **Imported procs** (Stage 1b): designed, deferred. See "Imports
+  design" section below.
 - **Nested proc registration** (Stage 1b) ✅ COMPLETE.
   `typer__register_procs` now recurses into proc bodies, picking
   up inner `proc` declarations. A nested proc called from a sibling
@@ -1173,6 +1170,82 @@ structural rather than per-builtin:
 
 These are tracked as future work but not blockers.
 
+### Imports design (deferred)
+
+Cross-module typing is the largest remaining piece. Designed but
+not implemented — captured here so a fresh session can pick it up
+without re-discovering the architecture.
+
+**Problem:** the typer runs as a pre-pass on the importer's AST
+(compiler.c:12558) BEFORE the compiler walks AST_USE nodes. When
+the typer sees `[$mod->fn args]` or a named-import call, it can't
+resolve the imported proc's signature because the imported module
+hasn't been compiled yet — `dep_mod->exports` doesn't exist at
+typer time. So all cross-module calls fall through to dyn.
+
+The compiler does the work eventually: `compiler__compile_module`
+(compiler.c:12848) recursively compiles imported modules with their
+own typer pass, populating `Module.exports[]` with full signatures
+(name + return_type + param_types + arity). That work is just
+ordered after the outer typer.
+
+**Two viable architectures:**
+
+1. **Pre-compile imports before outer typer** (preferred,
+   architecturally clean):
+   - In `compiler_compile`, scan `parse.nodes` for AST_USE before
+     line 12558.
+   - For each, call `compiler__compile_module` (existing function)
+     to load the dependency into the cache. Already handles cycles
+     via `import_stack`, so re-using its machinery is safe.
+   - Pass the populated `module_cache` and `module_prefix` to
+     `typer_infer` as additional context.
+   - Inside the typer, on each AST_USE, look up the canonical path
+     in the cache and read `dep_mod->exports[]` — every entry
+     becomes a TyperProc registration, optionally namespaced by
+     the import binding.
+
+2. **Typer self-walk imports** (pragmatic, duplicates work):
+   - Give the typer access to the arena, `module__read_file`, and
+     `module__resolve_path`.
+   - For each AST_USE, lex + parse + recursively call `typer_infer`
+     on the imported source.
+   - Capture the inner typer's proc registry; copy entries into
+     the outer typer's tc->procs prefixed by the binding name.
+   - The compiler later re-types the same module via its own walk;
+     extra cost is linear in module count.
+
+**Resolution form mapping:**
+
+| Source form | Effect on outer typer registry |
+|---|---|
+| `use "mod" name { name1 name2 }` | Register `name1` and `name2` as plain typer procs (typer doesn't track namespacing currently) |
+| `use "mod" name` (module-binding form) | Register exports under `name->proc` lookup — needs new typer machinery to resolve `[$name->proc args]` calls through a dot-receiver to the proc registry |
+| `use "mod" {name1 name2}` (no binding) | Register `name1`, `name2` as plain typer procs |
+
+**Edge cases:**
+
+- **Cycles:** option 1 reuses `import_stack` directly. Option 2
+  needs its own cycle tracker.
+- **Compile errors in dependency:** option 1 surfaces them via the
+  existing compiler__error path. Option 2 must thread errors
+  through TyperResult.
+- **Struct exports:** modules can export struct types
+  (`module->StructName` is reusable for instantiation). Imported
+  struct registration would need to merge into the typer's
+  `tc->structs[]`. Currently the compiler shares the struct
+  registry across imports (compiler.c:12903-12907) — option 1 can
+  piggyback on that; option 2 would need to copy.
+- **`prelude_is_native_fn` flag:** native fns flow through prelude
+  injection, separate from imports. Not affected.
+
+**Recommendation:** option 1. The pre-scan is ~30 lines in
+`compiler_compile`. The typer changes are ~80 lines (signature
+update, AST_USE handler, dot-call resolution). Tests: 2-3
+typer-only (basic imported call narrows; wrong-arg-type errors;
+missing-export error). Total scope: half a day in a focused
+session.
+
 ## Pickup points
 
 In rough order from "smallest, lowest-risk increment" to "freshest
@@ -1207,11 +1280,20 @@ before starting work.
 
 ### Stage 1 long-tail structural items
 
-The remaining Stage 1 work (listed above in the "long-tail" section)
-is structural — match arm-walk, imported-proc signatures, nested-proc
-registration, closure-call signatures, box-element narrowing. Each
-extends the typer's analysis rather than adding a leaf rule. Pick
-whichever is unblocked by an actual workload.
+Three of the original five long-tail items have landed:
+nested-proc registration ✅, box-element narrowing ✅ (scalar-only),
+and the await sharp edge ✅. The remaining items:
+
+- **Imported procs**: design captured above; pick up when
+  cross-module typing matters for a workload.
+- **Closure literal call signatures**: trickiest of the long-tail.
+  Anonymous closures get TYPE_CLOSURE today, but the typer doesn't
+  carry their signature, so calls to a captured anon closure stay
+  dyn. Closing this needs the typer to record signatures on
+  binding metadata when `def x { proc {x} { ... } }` and propagate
+  through var-refs.
+- **Match arm-walk**: blocked on the match feature itself
+  existing in the compiler/runtime. See entry above.
 
 ## Test infrastructure
 
