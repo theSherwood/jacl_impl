@@ -1,8 +1,8 @@
-# JACL Syntax Redesign
+# JACL Syntax Reference
 
-JACL syntax is being redesigned around a three-mode delimiter system.
+JACL syntax is built around a three-mode delimiter system. This document is the full syntax reference and per-feature implementation status. For language architecture (VM, GC, types, modules), see `DESIGN.md`.
 
-**Why:** Current syntax overloads `[]` for commands, param lists, struct fields, and import lists. Goal is a scrappy, pragmatic scripting language comfortable in a shell.
+**Why three modes:** earlier syntax overloaded `[]` for commands, param lists, struct fields, and import lists. The goal is a scrappy, pragmatic scripting language comfortable in a shell.
 
 ## Three parsing modes (delimiter-determined)
 
@@ -1040,8 +1040,8 @@ In `()`, operators work between values/expressions. The same symbol can have dif
 Operators are a kind of macro. Users can define new operators using the same mechanism the built-in operators use.
 
 - **AST representation**: macros receive and return **syntax objects** — a compile-time value type wrapping kind + datum + source position + scope marks. Quasiquoting (`syntax-quote`, `~`, `~@`) is the primary interface; introspection/construction APIs are available for advanced macros. See DESIGN.md M15 for full details.
-- **Mode-specific overloading** (tentative): same symbol can have different definitions for `{}` and `()` modes via mode annotation on `defmacro` (e.g. `defmacro | :cmd ...` vs `defmacro | :infix ...`). Whether this is the right mechanism is an open question.
 - **Hygiene**: hygienic by default — scope marks prevent macro-introduced names from colliding with caller names. Binding operators (`=`, `:`, `::`) need no special treatment because the bound name comes from the caller's code (spliced via `~`, retains caller's scope). Anaphoric macros use `^` prefix to intentionally introduce names into the caller's scope. `gensym` available for guaranteed-unique temporaries.
+- The same symbol can have different semantics per mode (e.g. `|` is a pipe in `{}` and bitwise OR in `()`). This is currently handled by the prelude defining different macros per mode at the parser level rather than a user-facing mode-dispatch mechanism on `defmacro`.
 
 ### Prelude
 
@@ -1206,10 +1206,10 @@ The syntax is the same for both phases. Full parametric generics (type variables
 10. ~~**Ranges**~~ — resolved: `(1 ..< 10)` exclusive, `(1 ..= 10)` inclusive, produce streams.
 11. ~~**Scoping**~~ — resolved: same-scope shadowing is compile error, nested scope shadowing is fine.
 12. ~~**Optional chaining**~~ — resolved: `($val ?. field)` in infix mode.
-13. **Field access syntax** — open. `.` is the natural choice but conflicts with bare word strings (filenames, paths — `.` appears in nearly every filename). Since bare character runs are strings in JACL, `.` can't be special in the middle of a token. The symbol must work uniformly across all three modes (not mode-specific). It's part of `$` sigil parsing: `$var<symbol>field`. Top candidates: `` ` `` (backtick — light, K precedent for lookups), `'` (tick — lightest, no precedent), `->` (arrow — C/C++ precedent, self-documenting, heavier). All are rare in filenames/URIs and unambiguous after `$identifier`.
+13. ~~**Field access syntax**~~ — resolved: `->` only. `$user->name`, chained `$a->b->c`. `.` was rejected because bare words are strings (filenames/paths use `.` heavily). Implemented in lexer/parser; desugars to `[. expr field]`.
 14. **Regular expressions** — deferred. Need literal syntax eventually.
 15. **Operator overloading** — desired but not designed. Operators should be user-definable.
-16. **Boolean/logical operators** — deferred. Connects to operator overloading and user-definable operators.
+16. **Boolean/logical operators** — `and`/`or`/`not`: word-form, symbol-form, or both? Precedence in `()` infix mode? Connects to operator overloading. Deferred.
 17. **Standard library surface** — deferred. What's builtin vs module?
 18. **Job detection** — Is it static (compiler sees `spawn { !cmd }`) or dynamic (runtime checks if the task launched a process)? Static means the compiler knows at spawn-site whether it's a Job or plain Future. Dynamic means any Future could become a Job if it happens to exec a process.
 19. **`cancel` semantics** — Does `cancel` on a Job send SIGTERM with a grace period then SIGKILL? Or just SIGKILL immediately? What does `cancel` do on a plain Future — cooperative cancellation or hard kill?

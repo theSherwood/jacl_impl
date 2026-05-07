@@ -8,7 +8,7 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Execution   | Bytecode VM (AST → bytecode → stack-based interpreter)                                                                                                                                                                                                                   |
 | Values      | 64-bit tagged values (tag byte + 56-bit payload). i32/f32 inline, pointers for heap types. Tainted/secret/error flag bits in tag.                                                                                                                                        |
-| Syntax      | Three-mode delimiters: `[]` juxtaposition (commands), `{}` command mode (blocks/params/struct fields), `()` infix mode. Bare words are strings; `$var` reads a variable. Binding operators (`=`, `:`, `::`) sugar `def`/`mut`/`set`. Architecture: `SYNTAX_REDESIGN.md`. |
+| Syntax      | Three-mode delimiters: `[]` juxtaposition (commands), `{}` command mode (blocks/params/struct fields), `()` infix mode. Bare words are strings; `$var` reads a variable. Binding operators (`=`, `:`, `::`) sugar `def`/`mut`/`set`. Full reference: `SYNTAX.md`.                |
 | Concurrency | Direct-style. CPS transform for await/parallel/race, state-machine transform for generators (`GENERATOR_STATE_MACHINE.md`). NxM work-stealing scheduler. Atoms for shared state, boxes for thread-local.                                                                 |
 | GC          | Epoch-based tracing, non-moving, no stop-the-world. Co-design with concurrency: `GC_CONCURRENCY_DESIGN.md`.                                                                                                                                                              |
 | Types       | Gradual typing — dynamic by default, optional static types give unboxed values. Sound at commitment sites (typed slots reject implicit dyn flow). Architecture and decisions: `TYPE_SYSTEM.md`.                                                                          |
@@ -44,22 +44,11 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 
 ## Where to read more
 
-- `SYNTAX_REDESIGN.md` — full syntax reference + per-feature implementation status
+- `SYNTAX.md` — full syntax reference + per-feature implementation status + syntax-level open questions
 - `TYPE_SYSTEM.md` — type-system architecture, decisions, deferred items
 - `STRUCT_DESIGN.md` — struct value-type architecture (no header, C-ABI layout)
 - `GENERATOR_STATE_MACHINE.md` — generator SM transform
 - `GC_CONCURRENCY_DESIGN.md` — GC and concurrency co-design
-
-## Mode-specific operator overloading (tentative)
-
-The same symbol may need different macro definitions per parsing mode (e.g. `|` = pipe in `{}`, bitwise OR in `()`). One possible approach — mode annotation on `defmacro`:
-
-```
-defmacro | :cmd {left, right} { syntax-quote [pipe ~left ~right] }
-defmacro | :infix {left, right} { syntax-quote [bit-or ~left ~right] }
-```
-
-Whether this is the right mechanism or whether mode dispatch should be handled differently is an open question.
 
 ## Known Limitations
 
@@ -71,21 +60,19 @@ Whether this is the right mechanism or whether mode dispatch should be handled d
 
 ## Open Questions
 
-These are *design*-level questions, not implementation TODOs. For per-feature implementation status see `SYNTAX_REDESIGN.md`.
+Architecture-level design questions, not implementation TODOs. Syntax-level open questions live in `SYNTAX.md`. For per-feature implementation status see `SYNTAX.md`.
 
-**Syntax:** No-precedence infix mode is settled, but ergonomics in practice still need real-world use to validate. Field-access symbol after `$` (open: backtick / tick / `->`-only — see SYNTAX_REDESIGN open question 13).
+**Type system:** Numeric tower / bignum integration (the `bignum/` lib exists but isn't wired into the VM). Variant types.
 
-**Type system:** Generics (type variables, constraints) — currently typed collections are concrete-only. Trait/protocol/interface system. Numeric tower / bignum integration (the `bignum/` lib exists but isn't wired into the VM). Variant types (and their interaction with pattern matching, when `match` lands).
+**Concurrency:** Tainted/secret flag interaction with cross-thread communication. Channel primitives (may not be needed given atoms + futures). Backpressure / bounded concurrency for `par-each`. Job/Future cancel semantics (see SYNTAX.md Q19).
 
-**Concurrency:** Tainted/secret flag interaction with cross-thread communication. Channel primitives (may not be needed given atoms + futures). Backpressure / bounded concurrency for `par-each`. Whether `cancel` on a Job sends SIGTERM-then-SIGKILL or only SIGKILL.
+**GC:** Scheduling heuristics.
 
-**GC:** Scheduling heuristics. OOM handling. Finalization for FFI resources.
-
-**Errors:** Structured error matching (depends on `match`). Error chaining / wrapping. Whether to mark procs as error-capable explicitly or trust propagation.
+**Errors:** Error chaining / wrapping. Whether to mark procs as error-capable explicitly or trust propagation.
 
 **Modules:** Search path / resolution rules beyond relative-to-importer. Versioning / dependency management. Visibility beyond underscore convention (`pub`/`priv` keywords if encapsulation needs grow).
 
-**Macros:** Mode-specific operator overloading mechanism (see section above). Whether all builtins should be rewritten as macros where possible.
+**Macros:** Whether all builtins should be rewritten as macros where possible.
 
 ## Project Layout
 
