@@ -59,7 +59,6 @@ fi
 # Define tests: src|name|flags
 TESTS=(
     "lib/arena/test_arena.c|arena|"
-    "lib/rc/test_rc.c|rc|"
     "lib/hamt/test_hamt.c|hamt|"
     "lib/hamt/test_hamt_types.c|hamt_types|"
     "lib/hamt/test_hamt_transient.c|hamt_transient|"

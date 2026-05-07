@@ -116,7 +116,6 @@ lib/           Infrastructure (single-header libraries)
   bignum/      Bigint, bigfloat, rational (declared in value tags; not currently wired into the VM)
   regex/       Thompson NFA (not currently wired in)
   segment_array/   Segment array
-  rc/          Reference counting (superseded by GC; not used)
 test/          JACL test files + test_helpers.h
 ```
 
