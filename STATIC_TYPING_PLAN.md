@@ -1121,6 +1121,12 @@ Tests: 95/95 corpus + 35/35 typer-only + 16/16 type-error. The audit
 machinery from Stages 0–2 was deleted in commit `0aa722f` after it
 served its purpose.
 
+Cross-module proc typing (destructuring form) landed this session:
+two new module fixtures (`typed_import_narrows`,
+`err_typed_import_into_typed`). Module-binding form
+(`use "path" name` → `[$name->fn ...]`) and imported struct fields
+remain deferred (see "Imports design" section).
+
 ## Stage 1 long-tail — what's left
 
 Stage 1's leaf rules are largely complete. What remains is
@@ -1132,8 +1138,20 @@ structural rather than per-builtin:
   "undefined variable '$match'". Adding typer rules would be dead
   code until the feature itself is implemented. Deferred until
   match becomes a working language construct.
-- **Imported procs** (Stage 1b): designed, deferred. See "Imports
-  design" section below.
+- **Imported procs** (Stage 1b) ✅ COMPLETE for the destructuring
+  form (`use "path" {names}`). Pre-pass in
+  `compiler__collect_typer_imports` triggers dependency compilation
+  before the outer typer runs (so `dep_mod->exports` is populated)
+  and packs each imported proc's signature into a flat
+  `TyperImportProc[]` that's handed to `typer_infer`. The typer
+  registers each entry in its proc table during the pre-pass, so
+  cross-module calls narrow to the declared return type and
+  arg-type checks fire from the typer like local-proc calls.
+  Struct constructors (filtered out — covered by the existing
+  CapitalCase placeholder pre-pass) and non-callable values
+  (`def`/`mut` imports, `arity == -1`) are skipped. The
+  module-binding form (`use "path" name` → `$mod->fn` calls) is
+  deferred — calls through dot-receivers stay dyn.
 - **Nested proc registration** (Stage 1b) ✅ COMPLETE.
   `typer__register_procs` now recurses into proc bodies, picking
   up inner `proc` declarations. A nested proc called from a sibling
@@ -1170,11 +1188,14 @@ structural rather than per-builtin:
 
 These are tracked as future work but not blockers.
 
-### Imports design (deferred)
+### Imports design — destructuring form landed; module-binding deferred
 
-Cross-module typing is the largest remaining piece. Designed but
-not implemented — captured here so a fresh session can pick it up
-without re-discovering the architecture.
+Cross-module typing for the destructuring form
+(`use "path" {names}`) is now implemented. The module-binding form
+(`use "path" name` → `[$name->fn args]`) is still deferred — calls
+through a dot-receiver stay dyn. Architecture below is preserved
+for the deferred work and for future extensions (struct exports,
+arity from imports).
 
 **Problem:** the typer runs as a pre-pass on the importer's AST
 (compiler.c:12558) BEFORE the compiler walks AST_USE nodes. When
@@ -1245,6 +1266,38 @@ update, AST_USE handler, dot-call resolution). Tests: 2-3
 typer-only (basic imported call narrows; wrong-arg-type errors;
 missing-export error). Total scope: half a day in a focused
 session.
+
+**What landed (destructuring form):** the implementation followed
+option 1's shape. A new helper `compiler__collect_typer_imports`
+walks `parse.nodes` for AST_USE before the outer `typer_infer` call,
+triggers `compiler__compile_module` for each uncached dependency,
+then reads `dep_mod->exports[]` and packs callable procs into a
+`TyperImportProc[]` array (filtered to skip structs and non-callable
+values). `typer_infer`'s signature was extended to take
+`(imports, import_count)`; the typer's pre-pass registers each
+entry in `tc.procs` so calls dispatch through the same
+`typer__find_proc` path as local procs. Two new fixture tests
+(`modules/typed_import_narrows/`, `modules/err_typed_import_into_typed/`)
+plus the pre-existing `modules/err_typed/` cover the narrowing,
+wrong-return-into-typed-binding, and arg-mismatch cases.
+
+**Open follow-ons** (deferred from this batch):
+
+1. **Module-binding form** (`use "path" name` → `[$name->fn args]`).
+   Requires a new typer registry indexed by binding name → namespaced
+   procs, plus a dot-receiver resolution rule in the call dispatch.
+   Calls through `$mod->fn` currently fall through to dyn.
+2. **Struct exports.** Imported struct types still go through the
+   CapitalCase placeholder pre-pass with empty fields. Field access
+   on imported structs stays dyn at the typer level (the compiler's
+   shared registry has the real fields, so codegen still works).
+   Closing this needs the typer's `tc.structs[]` to merge real field
+   info from imports — would need typer↔compiler struct-idx alignment
+   across modules.
+3. **Imported `def`/`mut` values.** Skipped (`arity == -1`). To type
+   them, the typer's binding registry would need to register
+   imported names as TyperBindings with their declared type. Cheap
+   to add but no current workload demands it.
 
 ## Pickup points
 

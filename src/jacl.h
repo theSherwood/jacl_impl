@@ -2008,8 +2008,24 @@ extern void collections__init (void);
  * because the unity build pulls typer.c in before compiler.c. */
 struct TyperResult;
 typedef struct TyperResult TyperResult;
+/* Imported proc signature passed to the typer so cross-module calls
+ * narrow to the declared return type instead of dyn. The compiler
+ * builds an array of these (one per imported proc name from a
+ * `use "path" {names}` destructuring import) by walking AST_USE
+ * nodes and reading each dependency module's exports. The typer
+ * registers them in its internal proc table during its pre-pass.
+ *
+ * Definition lives in typer.c so it can be used at typer-internal
+ * registration sites without an extra header pull-through. External
+ * consumers (this header's clients) only need the opaque pointer. */
+struct TyperImportProc;
+typedef struct TyperImportProc TyperImportProc;
+
+/* imports/import_count are NULL/0 when there is no module context
+ * (single-file compile, macro pre-typing, typer-only test harness). */
 extern void typer_infer (AstNode **nodes, uint32_t count,
-                         TyperResult *result_or_null);
+                         TyperResult *result_or_null,
+                         TyperImportProc *imports, uint32_t import_count);
 
 /* --- type_error.c — shared formatters used by both compiler and typer.
  * Each writes to a caller buffer in snprintf style; the reporting

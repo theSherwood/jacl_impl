@@ -1,0 +1,1 @@
+proc str greet {str name} { + "hi " $name }

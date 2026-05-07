@@ -12555,7 +12555,10 @@ CompileResult compiler_compile(ParseResult parse, arena_t* arena,
    * compiler itself had detected the mismatch. */
   TyperResult tr;
   if (parse.error_count == 0) {
-    typer_infer(parse.nodes, parse.count, &tr);
+    /* compiler_compile is the single-file entry; no module cache here.
+     * AST_USE nodes will error out during codegen ("use declaration
+     * requires module context"), which is the existing behavior. */
+    typer_infer(parse.nodes, parse.count, &tr, NULL, 0);
     if (tr.error_count > 0) {
       compiler__error(&c, tr.first_error_line, tr.first_error_col,
                       tr.first_error);
@@ -12842,6 +12845,78 @@ void module__populate_exports(Module* mod, Compiler* c) {
   }
 }
 
+/* Pre-compile dependency modules referenced by AST_USE nodes and collect
+ * imported proc signatures into a flat array for the typer.
+ *
+ * Two-in-one because both passes walk the same AST_USE list and resolve
+ * the same canonical paths: pre-compile (so dep_mod->exports is populated)
+ * has to run before collection (which reads exports), and the typer
+ * pre-pass that consumes the array has to run after collection.
+ *
+ * Only destructuring-form imports (`use "path" {names}`) contribute
+ * entries — the module-binding form (`use "path" name` → `$mod->fn`) is
+ * deferred. Within destructuring imports, struct constructors and
+ * non-callable values (def/mut imports with arity == -1) are filtered
+ * out: structs are handled by the typer's CapitalCase placeholder pass,
+ * and value imports stay typed via the consumer's binding form.
+ *
+ * `out_imports` must point at an array of at least
+ * COMPILER_GLOBAL_ARITIES_MAX entries. */
+static uint32_t compiler__collect_typer_imports(Compiler* c,
+                                                AstNode** nodes, uint32_t count,
+                                                const char* importer_path,
+                                                TyperImportProc* out_imports,
+                                                uint32_t max_imports) {
+  if (!c->module_cache || !importer_path) return 0;
+  uint32_t out_count = 0;
+  for (uint32_t i = 0; i < count; i++) {
+    AstNode* n = nodes[i];
+    if (n->type != AST_USE) continue;
+    if (n->data.use_decl.is_module_binding) continue;
+    if (n->data.use_decl.name_count == 0) continue;
+    const char* dep_canonical = module__resolve_path(
+        importer_path, n->data.use_decl.path, c->arena);
+    if (!dep_canonical) continue;
+    /* Pre-compile if not cached. Skip on cycle — the AST_USE codegen
+     * pass reports the circular-import error with full chain context. */
+    if (c->import_stack && import_stack__contains(c->import_stack, dep_canonical)) continue;
+    Module* dep_mod = module_cache__find(c->module_cache, dep_canonical);
+    if (!dep_mod) {
+      (void)compiler__compile_module(dep_canonical, c,
+                                     n->start.line, n->start.column);
+      dep_mod = module_cache__find(c->module_cache, dep_canonical);
+      if (!dep_mod) continue;
+    }
+    for (uint32_t ni = 0; ni < n->data.use_decl.name_count; ni++) {
+      if (out_count >= max_imports) return out_count;
+      const char* nm = n->data.use_decl.names[ni];
+      uint32_t    nl = n->data.use_decl.name_lens[ni];
+      ExportEntry* exp = NULL;
+      for (uint32_t ei = 0; ei < dep_mod->export_count; ei++) {
+        if (dep_mod->exports[ei].name_len == nl &&
+            memcmp(dep_mod->exports[ei].name, nm, nl) == 0) {
+          exp = &dep_mod->exports[ei];
+          break;
+        }
+      }
+      if (!exp) continue;
+      if (exp->arity < 0) continue;
+      if (exp->type == TYPE_STRUCT && exp->return_type == TYPE_STRUCT) continue;
+      TyperImportProc* slot = &out_imports[out_count++];
+      slot->name        = nm;
+      slot->name_len    = nl;
+      slot->return_type = (uint8_t)exp->return_type;
+      uint32_t pc = exp->param_count;
+      if (pc > COMPILER_MAX_PROC_PARAMS) pc = COMPILER_MAX_PROC_PARAMS;
+      slot->param_count = (uint8_t)pc;
+      for (uint32_t pi = 0; pi < pc; pi++) {
+        slot->param_types[pi] = (uint8_t)exp->param_types[pi];
+      }
+    }
+  }
+  return out_count;
+}
+
 /* Compile a module from a canonical file path.
    Reads the file, lexes, parses, and compiles into a new Module in the cache.
    Returns true on success, false on error (error reported via importer). */
@@ -12909,12 +12984,23 @@ bool compiler__compile_module(const char* canonical_path,
   mc.module_prefix   = module__build_prefix(canonical_path, arena,
                                               &mc.module_prefix_len);
 
+  /* Pre-compile imports and collect proc signatures for the typer.
+   * Triggers compilation of dependency modules so dep_mod->exports is
+   * populated, then collects imported procs so cross-module calls
+   * narrow to the declared return type instead of dyn. Errors during
+   * dep compile propagate via the importer (mc) and are surfaced after
+   * typing. */
+  TyperImportProc imports[COMPILER_GLOBAL_ARITIES_MAX];
+  uint32_t import_count = compiler__collect_typer_imports(
+      &mc, parse.nodes, parse.count, canonical_path,
+      imports, COMPILER_GLOBAL_ARITIES_MAX);
+
   /* Phase 3 typer pass: walk the module AST so dual-track invariants
    * hold during compile, and so consumer sites that read from
    * inferred_type don't fall back unnecessarily. */
   {
     TyperResult tr;
-    typer_infer(parse.nodes, parse.count, &tr);
+    typer_infer(parse.nodes, parse.count, &tr, imports, import_count);
     if (tr.error_count > 0) {
       compiler__error(&mc, tr.first_error_line, tr.first_error_col,
                       tr.first_error);
@@ -13055,11 +13141,18 @@ ProgramResult jacl_compile_program(const char* root_path,
     c.ctx_fields = ctx;
   }
 
+  /* Pre-compile imports and collect proc signatures for the typer
+   * (see compiler__collect_typer_imports). */
+  TyperImportProc imports[COMPILER_GLOBAL_ARITIES_MAX];
+  uint32_t import_count = compiler__collect_typer_imports(
+      &c, parse.nodes, parse.count, canonical,
+      imports, COMPILER_GLOBAL_ARITIES_MAX);
+
   /* Phase 3 typer pass for module programs (mirrors compiler_compile and
    * compiler__compile_module). */
   {
     TyperResult tr;
-    typer_infer(parse.nodes, parse.count, &tr);
+    typer_infer(parse.nodes, parse.count, &tr, imports, import_count);
     if (tr.error_count > 0) {
       compiler__error(&c, tr.first_error_line, tr.first_error_col,
                       tr.first_error);

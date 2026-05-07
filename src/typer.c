@@ -2901,7 +2901,20 @@ static void typer__infer_node(TyperCtx* tc, AstNode* node) {
   }
 }
 
-void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null) {
+/* Imported proc signature — see jacl.h forward declaration. The
+ * compiler builds an array of these from each AST_USE's resolved
+ * exports and hands the array to the typer; the typer registers each
+ * entry as a TyperProc during the pre-pass. */
+typedef struct TyperImportProc {
+  const char* name;
+  uint32_t    name_len;
+  uint8_t     return_type;
+  uint8_t     param_types[TYPER_MAX_PROC_PARAMS];
+  uint8_t     param_count;
+} TyperImportProc;
+
+void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null,
+                 TyperImportProc* imports, uint32_t import_count) {
   TyperCtx tc;
   tc.binding_count = 0;
   tc.scope_depth   = 0;
@@ -2967,6 +2980,30 @@ void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null) {
   typer__scope_add(&tc, "ctx", 3, 0, TYPE_STRUCT, ctx_struct_idx);
 
   typer__register_procs(&tc, nodes, count);
+
+  /* Imports pre-pass: register each compiler-supplied imported proc
+   * signature as a TyperProc so cross-module calls narrow to the
+   * declared return type. Skipped if a same-name proc is already
+   * registered (a local proc shadows the import — matches runtime
+   * lexical resolution). The compiler is responsible for filtering
+   * to destructuring-form imports and for excluding struct
+   * constructors and non-callable values; the typer trusts the array. */
+  for (uint32_t i = 0; i < import_count; i++) {
+    if (tc.proc_count >= TYPER_MAX_PROCS) break;
+    TyperImportProc* imp = &imports[i];
+    if (typer__find_proc(&tc, imp->name, imp->name_len)) continue;
+    TyperProc* p = &tc.procs[tc.proc_count++];
+    p->name              = imp->name;
+    p->name_len          = imp->name_len;
+    p->return_type       = imp->return_type;
+    p->return_struct_idx = UINT32_MAX;
+    uint32_t pc = imp->param_count;
+    if (pc > TYPER_MAX_PROC_PARAMS) pc = TYPER_MAX_PROC_PARAMS;
+    p->param_count = (uint8_t)pc;
+    for (uint32_t pi = 0; pi < pc; pi++) {
+      p->param_types[pi] = imp->param_types[pi];
+    }
+  }
 
   for (uint32_t i = 0; i < count; i++) {
     typer__infer_node(&tc, nodes[i]);

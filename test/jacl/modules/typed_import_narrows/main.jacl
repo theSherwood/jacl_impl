@@ -1,0 +1,4 @@
+# expect: 42
+use "./lib.jacl" {mul}
+def i32 z [mul 6 7]
+print $z
