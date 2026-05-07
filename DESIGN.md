@@ -8,16 +8,16 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Execution   | Bytecode VM (AST → bytecode → stack-based interpreter)                                                                                                                                                                                                                   |
 | Values      | 64-bit tagged values (tag byte + 56-bit payload). i32/f32 inline, pointers for heap types. Tainted/secret/error flag bits in tag.                                                                                                                                        |
-| Syntax      | Phase 1: bracket-delimited commands `[cmd arg1 arg2]`. Bare words are strings. `$var` for variable read. `{ ... }` for code blocks. Phase 1.5 (M6): line-based sugar — bare `cmd arg1 arg2` desugars to `[cmd ...]`. Phase 2 (later): operator sugar, assignment syntax. |
-| Concurrency | Direct-style with compiler CPS transform, NxM work-stealing scheduler, atoms for shared state                                                                                                                                                                            |
-| GC          | Epoch-based tracing (no RC at value level, no compaction, no stop-the-world)                                                                                                                                                                                             |
+| Syntax      | Three-mode delimiters: `[]` juxtaposition (commands), `{}` command mode (blocks/params/struct fields), `()` infix mode. Bare words are strings; `$var` reads a variable. Binding operators (`=`, `:`, `::`) sugar `def`/`mut`/`set`. Architecture: `SYNTAX_REDESIGN.md`. |
+| Concurrency | Direct-style. CPS transform for await/parallel/race, state-machine transform for generators (`GENERATOR_STATE_MACHINE.md`). NxM work-stealing scheduler. Atoms for shared state, boxes for thread-local.                                                                 |
+| GC          | Epoch-based tracing, non-moving, no stop-the-world. Co-design with concurrency: `GC_CONCURRENCY_DESIGN.md`.                                                                                                                                                              |
 | Types       | Gradual typing — dynamic by default, optional static types give unboxed values. Sound at commitment sites (typed slots reject implicit dyn flow). Architecture and decisions: `TYPE_SYSTEM.md`.                                                                          |
-| Errors      | Error flag on values with implicit propagation (like NaN). `try` to handle.                                                                                                                                                                                              |
-| Modules     | File-based, everything public, sandboxing via module restriction                                                                                                                                                                                                         |
-| Macros      | AST-based (homoiconic), hygienic by default                                                                                                                                                                                                                              |
-| Scoping     | Lexical. Explicit context objects for dynamic-like behavior.                                                                                                                                                                                                             |
-| Strings     | Three-tier: inline (0-7 bytes in payload), heap interned, rope-backed large                                                                                                                                                                                              |
-| Mutability  | `def` (immutable), `mut`/`set!` (mutable). `box` (thread-local), `atom` (CAS shared)                                                                                                                                                                                     |
+| Errors      | Error flag on values with implicit propagation (like NaN). `try`/`catch` to handle. Stack traces available via `stack-trace`.                                                                                                                                            |
+| Modules     | File-based. Top-level names public by default; underscore prefix marks private (compiler-enforced at import). Sandboxing via `[interpret]` with capability-based restrictions.                                                                                           |
+| Macros      | AST-based (homoiconic), hygienic by default. Quasiquoting (`syntax-quote`, `~`, `~@`); `gensym` for fresh names; `^` prefix for intentional anaphoric introduction.                                                                                                      |
+| Scoping     | Lexical. Same-scope shadowing is a compile error; nested-scope shadowing is fine. `$ctx` provides typed dynamic scoping for ambient state.                                                                                                                               |
+| Strings     | Three-tier: inline (0-7 bytes in payload), heap-interned, rope-backed large.                                                                                                                                                                                             |
+| Mutability  | `def` (immutable), `mut`/`set` (mutable cells). `box` (thread-local ref), `atom` (CAS-shared ref).                                                                                                                                                                       |
 
 ## Milestone Roadmap
 
@@ -37,100 +37,22 @@ Just A Command Lisp — a fusion of a command language and a lisp. Love child of
 | 11  | Static Type System        | **COMPLETE** | Typed/unboxed values, compile-time checking                                               |
 | 12  | Garbage Collection        | **COMPLETE** | Epoch-based tracing GC, non-moving generational (sticky mark-bit), minor/major scheduling |
 | 13  | Concurrency               | **COMPLETE** | NxM scheduler, parallel/spawn/await, escape analysis for mutable capture pinning          |
-| 14  | Module System             |              | File modules, sandboxing                                                                  |
-| 15  | Macro System              |              | AST macros, hygiene                                                                       |
-| 16  | Phase 2 Syntax            |              | Operators, assignment sugar                                                               |
-| 17  | FFI & Embedding           |              | C interop, embedding API                                                                  |
+| 14  | Module System             | **COMPLETE** | File modules, both `use` forms, cross-module typing, sandboxed `interpret`                |
+| 15  | Macro System              | **COMPLETE** | AST macros via syntax objects, hygienic expansion, quasiquoting, `gensym`                 |
+| 16  | Phase 2 Syntax            | **COMPLETE** | Three-mode delimiters, infix in `()`, binding operators (`=`/`:`/`::`)                    |
+| 17  | FFI & Embedding           | **COMPLETE** | `embed.c` API, native fns, typed `extern`, `[Ptr T]` for in-process inspection            |
 
-## Future Milestone Details
+## Where to read more
 
-### M14: Module System
+- `SYNTAX_REDESIGN.md` — full syntax reference + per-feature implementation status
+- `TYPE_SYSTEM.md` — type-system architecture, decisions, deferred items
+- `STRUCT_DESIGN.md` — struct value-type architecture (no header, C-ABI layout)
+- `GENERATOR_STATE_MACHINE.md` — generator SM transform
+- `GC_CONCURRENCY_DESIGN.md` — GC and concurrency co-design
 
-- File = module, everything public, `use` for imports
-- Module cache (compile/load once), circular import detection
-- Sandboxing: `[interpret $src $restriction-map]`
+## Mode-specific operator overloading (tentative)
 
-### M15: Macro System
-
-- `defmacro` — receives unevaluated AST, returns transformed AST
-- AST quasiquoting, hygienic expansion
-- Rewrite builtins (`proc`, `if`, etc.) as macros where possible
-
-#### Syntax Objects
-
-Macros operate on **syntax objects** — a dedicated compile-time value type (`JACL_TAG_SYNTAX`) that wraps:
-- **Kind**: AST node type (`"command"`, `"var-ref"`, `"lit-int"`, `"block"`, etc.)
-- **Datum**: payload (children for commands/blocks, raw value for literals, name for var-refs)
-- **Source position**: line/col/file for error messages pointing back to the original call site
-- **Scope marks**: set of marks for hygiene tracking (see below)
-
-Syntax objects exist only during compilation — macro bodies are Jacl code evaluated by the compiler, and syntax objects are the values they manipulate. They never appear in the running program.
-
-**Primary interface — quasiquoting:**
-```
-defmacro unless {cond, body} {
-  syntax-quote [if [not ~cond] ~body]      # ~ splices, ~@ splices and flattens
-}
-```
-
-**Introspection (advanced macros):**
-```
-syntax-kind $s          # → "command", "lit-int", "var-ref", "block", ...
-syntax-datum $s         # → raw value (for literals)
-syntax-head $s          # → head syntax object (for commands)
-syntax-args $s          # → vec of child syntax objects (for commands)
-syntax-commands $s      # → vec of child syntax objects (for blocks)
-syntax-pos $s           # → map {line: N, col: M}
-syntax->string $s       # → pretty-printed source text
-```
-
-**Construction (computed AST):**
-```
-make-syntax "command" $head $args
-make-syntax "lit-int" 42
-make-syntax "var-ref" "x"
-```
-
-#### Hygiene
-
-Hygienic by default. Each macro expansion gets a fresh scope mark. Identifiers in a `syntax-quote` template get the macro's scope mark; identifiers spliced via `~` retain their original (caller's) scope mark.
-
-```
-defmacro swap {a, b} {
-  syntax-quote {
-    tmp = ~a        # 'tmp' gets macro's scope — invisible to caller
-    ~a :: ~b
-    ~b :: $tmp
-  }
-}
-```
-
-**Binding operators need no special treatment.** In `x = 3`, `x` comes from the user's code, is passed as an argument to the `=` macro, and spliced back via `~` — it retains the caller's scope naturally.
-
-**`^` prefix for intentional introduction (anaphoric macros):**
-```
-defmacro aif {cond, body} {
-  syntax-quote {
-    ^it = ~cond       # ^it → "it" in the caller's scope
-    if $^it ~body      # body can reference $it
-  }
-}
-```
-
-**`gensym` for guaranteed-unique temporaries:**
-```
-defmacro or-else {a, b} {
-  tmp = [gensym "or_tmp"]
-  syntax-quote {
-    ~tmp = ~a
-    if (~tmp != nil) { $~tmp } { ~b }
-  }
-}
-```
-
-#### Mode-Specific Operator Overloading (tentative)
-
-Same symbol may need different macro definitions per parsing mode (e.g. `|` = pipe in `{}`, bitwise OR in `()`). One possible approach — mode annotation on `defmacro`:
+The same symbol may need different macro definitions per parsing mode (e.g. `|` = pipe in `{}`, bitwise OR in `()`). One possible approach — mode annotation on `defmacro`:
 
 ```
 defmacro | :cmd {left, right} { syntax-quote [pipe ~left ~right] }
@@ -138,18 +60,6 @@ defmacro | :infix {left, right} { syntax-quote [bit-or ~left ~right] }
 ```
 
 Whether this is the right mechanism or whether mode dispatch should be handled differently is an open question.
-
-### M16: Phase 2 Syntax
-
-- Assignment: `foo = 3` → `[def foo 3]`, `bar : 4` → `[mut bar 4]`, `bar :: 5` → `[set! bar 5]`
-- Infix operators with precedence: `$x + $y * $z` → `[+ $x [* $y $z]]`
-- Parenthesized grouping: `($x + $y) * $z`
-
-### M17: FFI & Embedding
-
-- C embedding API: `jacl_vm_new()`, `jacl_eval()`, `jacl_call()`, `jacl_register_fn()`
-- FFI for calling C from JACL with automatic marshaling
-- Struct interop, callback support (closures as C function pointers)
 
 ## Known Limitations
 
@@ -161,42 +71,53 @@ Whether this is the right mechanism or whether mode dispatch should be handled d
 
 ## Open Questions
 
-**Syntax:** Operator precedence rules. Data literal syntax (vectors, maps, sets). Pattern matching syntax. Lambda/anonymous function syntax. Control flow details (cond/match/loop). `$true/$false/$nil` vs shorter forms.
+These are *design*-level questions, not implementation TODOs. For per-feature implementation status see `SYNTAX_REDESIGN.md`.
 
-**Type System:** Generic syntax and constraints. Trait/protocol/interface system. Numeric tower (promotion rules, i32 ↔ bignum). Variant interaction with pattern matching. Rules for when `[to dyn $x]` can fail.
+**Syntax:** No-precedence infix mode is settled, but ergonomics in practice still need real-world use to validate. Field-access symbol after `$` (open: backtick / tick / `->`-only — see SYNTAX_REDESIGN open question 13).
 
-**Concurrency:** Tainted/secret flag interaction with cross-thread communication. Channel primitives (may not be needed). Cancellation semantics for `race` losers. Backpressure/bounded concurrency.
+**Type system:** Generics (type variables, constraints) — currently typed collections are concrete-only. Trait/protocol/interface system. Numeric tower / bignum integration (the `bignum/` lib exists but isn't wired into the VM). Variant types (and their interaction with pattern matching, when `match` lands).
 
-**GC:** Write barrier implementation (card table vs remembered set vs per-thread buffer). GC scheduling heuristics. OOM handling. Finalization for FFI resources.
+**Concurrency:** Tainted/secret flag interaction with cross-thread communication. Channel primitives (may not be needed given atoms + futures). Backpressure / bounded concurrency for `par-each`. Whether `cancel` on a Job sends SIGTERM-then-SIGKILL or only SIGKILL.
 
-**Errors:** Structured error matching. Stack traces (automatic vs opt-in). Error chaining/wrapping. Syntax for marking procedures as error-capable.
+**GC:** Scheduling heuristics. OOM handling. Finalization for FFI resources.
 
-**Modules:** Search path/resolution rules. Circular import handling. Versioning/dependency management.
+**Errors:** Structured error matching (depends on `match`). Error chaining / wrapping. Whether to mark procs as error-capable explicitly or trust propagation.
+
+**Modules:** Search path / resolution rules beyond relative-to-importer. Versioning / dependency management. Visibility beyond underscore convention (`pub`/`priv` keywords if encapsulation needs grow).
+
+**Macros:** Mode-specific operator overloading mechanism (see section above). Whether all builtins should be rewritten as macros where possible.
 
 ## Project Layout
 
 ```
 src/           JACL pipeline (plain .c files, unity build via jacl.c)
   jacl.c       Unity build entry point — #includes all src/*.c + lib headers
+  jacl.h       Public API for tests and embedders
   value.c      64-bit tagged values
-  lexer.c      Tokenizer
-  ast.c        AST node types
-  parser.c     Recursive descent parser
+  gc.c, gc_collect.c   Heap, allocation, tracing
+  string.c     Three-tier strings (inline, interned, rope)
+  lexer.c, parser.c, ast.c   Parse → AST
   bytecode.c   Opcodes and bytecode chunks
+  type_error.c Shared type-error formatters (see TYPE_SYSTEM.md)
+  typer.c      Type inference pass
   compiler.c   AST → bytecode compiler
+  syntax.c     Macro expansion
+  collections.c, runtime.c   Builtins + scheduler
   vm.c         Stack-based bytecode interpreter
+  embed.c      C embedding API
 lib/           Infrastructure (single-header libraries)
-  arena/       Bulk allocation (arena.h)
-  platform/    Atomics, threading (platform.h)
-  rc/          Reference counting (rc.h)
-  hamt/        Persistent hashmap (hamt.h)
-  rrb_vec/     Persistent vector (rrb_vec.h)
-  sum_tree/    B-tree + rope (sum_tree.h, rope.h)
-  chase_lev/   Work-stealing deque (chase_lev.h)
-  bignum/      Bigint, bigfloat, rational (bigint.h)
-  regex/       Thompson NFA (nfa.h)
-  segment_array/ Segment array (segment_array.h)
+  arena/       Bulk allocation
+  platform/    Atomics, threading
+  unicode/     UTF-8 / NFD helpers
+  hamt/        Persistent hashmap
+  rrb_vec/     Persistent vector
+  sum_tree/    B-tree + rope
+  chase_lev/   Work-stealing deque
+  bignum/      Bigint, bigfloat, rational (declared in value tags; not currently wired into the VM)
+  regex/       Thompson NFA (not currently wired in)
+  segment_array/   Segment array
+  rc/          Reference counting (superseded by GC; not used)
 test/          JACL test files + test_helpers.h
 ```
 
-Each test file includes `../src/jacl.c` as a single translation unit — no `#define X_IMPLEMENTATION` needed.
+Tests link against `libjacl.a` (built once from `jacl.c`) and include `../src/jacl.h` — historically tests `#include`d `jacl.c` directly, but the unity-include path survives only in two legacy tests.
