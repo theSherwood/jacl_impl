@@ -1180,26 +1180,32 @@ structural rather than per-builtin:
   gap in typing the closure value itself), but the typer doesn't
   know an anonymous closure's signature, so calling it falls
   through to DYN.
-- **Box-element narrowing for `[deref $box]` / `[swap $box fn]`**
-  ✅ COMPLETE for scalar elements. New `TYPE_BOX` JaclType mirrors
+- **Box-element narrowing for `[deref $box]`** ✅ COMPLETE for
+  both scalar and struct elements. `TYPE_BOX` JaclType mirrors
   `TYPE_FUTURE` — element idx in `inferred_struct_idx` (scalar
-  sentinel for `[box 42]`, would be a struct registry idx for
+  sentinel for `[box 42]`, real struct registry idx for
   `[box [Point 1 2]]`). `[box $val]` types as `TYPE_BOX` with the
-  value's element type; `[deref $box]` / `[swap $box $fn]` narrow
-  to the scalar element type. Untyped `def b [box ...]` now
-  inherits TYPE_BOX from the RHS the same way TYPE_FUTURE /
-  TYPE_PTR do.
+  value's element type; `[deref $box]` narrows to the scalar type
+  for scalar-element boxes and to `TYPE_STRUCT` (with the
+  pointee's struct idx) for struct-element boxes. Untyped
+  `def b [box ...]` inherits TYPE_BOX from the RHS the same way
+  TYPE_FUTURE / TYPE_PTR do. Compiler emits `OP_DEREF_INLINE` for
+  struct-element deref so inline struct bytes flow directly to
+  the binding (no heap round-trip), reusing the opcode that the
+  unbox-after-`box?`-narrowing path already used.
 
-  **Known gap (deferred):** struct-element narrowing through deref
-  was tried but reverted. The typer marking `[deref $box_of_Point]`
-  as `TYPE_STRUCT` triggers downstream compiler rules ("proc
-  returning a struct must declare return type") that the runtime
-  path doesn't actually need — the box's contents are already
-  boxed JaclVals at runtime, not inline struct slots. Closing
-  this needs a new `OP_BOX_DEREF_INLINE` opcode that materializes
-  inline struct bytes from the box's contents (parallel to
-  `OP_TYPED_VEC_GET_INLINE`). Tracked as future work; for now
-  struct-element boxes still narrow to dyn through deref.
+  **Behavior change:** procs that return a struct-element-box
+  deref now need an explicit return-type annotation
+  (`proc Point getter {} { deref $b }`) — the body's tail is
+  TYPE_STRUCT and struct-returning procs require the wide-return
+  ABI. Previously such procs compiled with no annotation because
+  the deref typed as dyn; one test
+  (`test_struct_closure_capture_materialize`) was updated.
+
+  **Still deferred:** struct-element narrowing for
+  `[swap $box fn]` — swap's fn-return path doesn't have an
+  inline-struct opcode yet (would need `OP_SWAP_INLINE`).
+  Scalar-element swap continues to narrow.
 
 These are tracked as future work but not blockers.
 
@@ -1348,7 +1354,8 @@ before starting work.
 ### Stage 1 long-tail structural items
 
 Three of the original five long-tail items have landed:
-nested-proc registration ✅, box-element narrowing ✅ (scalar-only),
+nested-proc registration ✅, box-element narrowing ✅ (scalar +
+struct deref; swap struct-element still scalar-only),
 and the await sharp edge ✅. The remaining items:
 
 - **Imported procs**: design captured above; pick up when
@@ -1389,8 +1396,8 @@ choose between:
    piece. Sub-decisions to resolve: `*T` only vs. also `*mut T`,
    auto-deref vs. always explicit, FFI call syntax.
 2. **Tackle a structural Stage 1 item** when a real workload
-   needs it (match, imports, nested procs, closure-call typing,
-   box-element narrowing).
+   needs it (match, closure-call typing, swap-with-struct-element
+   inline opcode).
 
 (The await sharp edge was resolved — see the section above.)
 

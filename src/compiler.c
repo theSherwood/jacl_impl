@@ -5708,6 +5708,36 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* deref builtin: scalar-element box → OP_DEREF (runtime tags the
+   * scalar appropriately via the box's stored value); struct-element
+   * box → OP_DEREF_INLINE (materializes inline struct bytes on TOS,
+   * mirroring the unbox path's struct-box branch). The typer
+   * narrows the AST node so this read is sufficient — no need to
+   * walk narrowings here. */
+  if (hid == HEAD_DEREF) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "deref", "1 argument", argc);
+      return;
+    }
+    compiler__compile_node(c, args[0]);
+    JaclType arg_t = (JaclType)args[0]->inferred_type;
+    uint32_t arg_sidx = args[0]->inferred_struct_idx;
+    if (arg_t == TYPE_BOX && arg_sidx != UINT32_MAX &&
+        !JACL_IS_SCALAR_TYPE_IDX(arg_sidx)) {
+      StructTypeRegistry* reg = compiler__get_struct_registry(c);
+      StructTypeDef* sdef = (reg && arg_sidx < reg->count) ? reg->defs[arg_sidx] : NULL;
+      if (struct_def_is_user(sdef, reg)) {
+        compiler__emit_byte(c, OP_DEREF_INLINE, line);
+        compiler__emit_u16(c, (uint16_t)arg_sidx, line);
+        c->last_expr_type = TYPE_STRUCT;
+        c->inline_repr = INLINE_STACK;
+        return;
+      }
+    }
+    compiler__emit_byte(c, OP_DEREF, line);
+    return;
+  }
+
   /* length builtin */
   /* Table-driven dispatch for "compile single arg → emit one-byte op →
    * set result type" builtins. set_type=false means leave last_expr_type
@@ -5719,7 +5749,9 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       { HEAD_BYTE_LENGTH, "byte-length", OP_STR_BYTE_LEN, TYPE_I32,    true  },
       { HEAD_ATOM_Q,      "atom?",       OP_IS_ATOM,      TYPE_BOOL,   true  },
       { HEAD_FUTURE_Q,    "future?",     OP_IS_FUTURE,    TYPE_BOOL,   true  },
-      { HEAD_DEREF,       "deref",       OP_DEREF,        TYPE_DYN,    false },
+      /* HEAD_DEREF is split out below to handle the struct-element
+       * box case via OP_DEREF_INLINE (matches the unbox path's
+       * narrowed struct-box branch in compile_command). */
       { HEAD_ERROR,       "error",       OP_ERROR,        TYPE_DYN,    false },
       { HEAD_ERROR_Q,     "error?",      OP_IS_ERROR,     TYPE_BOOL,   true  },
       { HEAD_ERROR_VAL,   "error-val",   OP_ERROR_VAL,    TYPE_DYN,    true  },

@@ -5996,7 +5996,10 @@ static int test_struct_closure_capture_materialize(void) {
       "struct Point {i32 x, i32 y}\n"
       "proc test {} {\n"
       "  def b [box [Point 42 99]]\n"
-      "  proc getter {} { deref $b }\n"
+      /* deref of a struct-element box now narrows to TYPE_STRUCT;
+       * the wrapping proc therefore needs an explicit return type
+       * (struct returns require a wide-return annotation). */
+      "  proc Point getter {} { deref $b }\n"
       "  def q [getter]\n"
       "  print $q->x\n"
       "  print $q->y\n"

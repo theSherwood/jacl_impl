@@ -883,6 +883,30 @@ static void test_swap_box_narrows_to_element(void) {
   arena_destroy(&a);
 }
 
+static void test_deref_box_struct_narrows(void) {
+  current_test = "deref_box_struct_narrows";
+  arena_t a = {0};
+  /* deref of a struct-element box narrows to TYPE_STRUCT with the
+   * pointee's struct registry idx — paired with OP_DEREF_INLINE on
+   * the codegen side so inline struct bytes flow without a heap
+   * round-trip. */
+  ParseResult r = run_typer(
+      "struct Point {i32 x i32 y}\n"
+      "def b [box [Point 1 2]]\n"
+      "def p [deref $b]", &a);
+  AstNode* d = find_cmd(r.nodes[2], "deref");
+  ASSERT_NOT_NULL(d);
+  ASSERT_TYPE(d, TYPE_STRUCT);
+  if (d) {
+    if (JACL_IS_SCALAR_TYPE_IDX(d->inferred_struct_idx)) {
+      fprintf(stderr, "  FAIL %s: pointee should be struct idx, got scalar sentinel %u\n",
+              current_test, d->inferred_struct_idx);
+      failures++;
+    } else { passes++; }
+  }
+  arena_destroy(&a);
+}
+
 /* --- Stage 1 long-tail: nested proc registration --- */
 
 static void test_nested_proc_call_narrows(void) {
@@ -978,6 +1002,7 @@ int main(void) {
   test_deref_box_narrows_to_int();
   test_deref_box_string();
   test_swap_box_narrows_to_element();
+  test_deref_box_struct_narrows();
   test_nested_proc_call_narrows();
 
   printf("\n%d/%d passed", passes, passes + failures);

@@ -2466,26 +2466,28 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(vt);
       }
     } else if (hid == HEAD_DEREF && node->data.command.arg_count == 1) {
-      /* [deref $box]: narrows to the box's element type for SCALAR
-       * elements. Struct elements stay dyn — materializing a struct
-       * value out of a box at codegen time needs an inline-load
-       * opcode (parallel to OP_TYPED_VEC_GET_INLINE) that doesn't
-       * exist yet. Tracked as a gap; deferred until a workload needs
-       * the stricter narrowing. */
+      /* [deref $box]: narrow to the box's element type. Scalar
+       * elements use the JACL_SCALAR_TYPE_IDX sentinel encoding;
+       * struct elements use the registry idx and the compiler
+       * emits OP_DEREF_INLINE to materialize inline struct bytes
+       * (parallel to the unbox path's struct-box handling). */
       AstNode* recv = node->data.command.args[0];
       JaclType rt = (JaclType)recv->inferred_type;
       uint32_t e_idx = recv->inferred_struct_idx;
-      if (rt == TYPE_BOX && e_idx != UINT32_MAX &&
-          JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
-        node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+      if (rt == TYPE_BOX && e_idx != UINT32_MAX) {
+        if (JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
+          node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+        } else {
+          node->inferred_type = TYPE_STRUCT;
+          node->inferred_struct_idx = e_idx;
+        }
       } else {
         node->inferred_type = TYPE_DYN;
       }
     } else if (hid == HEAD_SWAP && node->data.command.arg_count == 2) {
-      /* [swap $box $fn]: applies fn to the value, stores the result,
-       * returns the result. Same scalar-only narrowing as deref —
-       * struct elements stay dyn for the codegen-materialization
-       * reason described above. */
+      /* [swap $box $fn]: scalar-element narrowing only. Struct
+       * elements stay dyn — swap's fn-return path doesn't have an
+       * inline-struct opcode yet (would need OP_SWAP_INLINE). */
       AstNode* recv = node->data.command.args[0];
       JaclType rt = (JaclType)recv->inferred_type;
       uint32_t e_idx = recv->inferred_struct_idx;

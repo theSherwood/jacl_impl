@@ -1,0 +1,13 @@
+# expect: 42
+# expect: 99
+# Stage 1 long-tail: deref of a struct-element box narrows to TYPE_STRUCT
+# with the pointee's struct registry idx. Compiler emits OP_DEREF_INLINE so
+# inline struct bytes flow directly to the binding without a heap round-trip.
+struct Point {i32 x i32 y}
+proc main {} {
+  def b [box [Point 42 99]]
+  def p [deref $b]
+  print $p->x
+  print $p->y
+}
+main
