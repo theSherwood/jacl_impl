@@ -1126,8 +1126,12 @@ served its purpose.
 Stage 1's leaf rules are largely complete. What remains is
 structural rather than per-builtin:
 
-- **Match arm-walk** (Stage 1a): typer says DYN today. Match isn't
-  load-bearing in the current corpus; deferred until used.
+- **Match arm-walk** (Stage 1a): blocked on the language. `match`
+  is lexed and parsed (TOKEN_MATCH, HEAD_MATCH) but has no compiler
+  / runtime implementation — `match $x { ... }` falls through to
+  "undefined variable '$match'". Adding typer rules would be dead
+  code until the feature itself is implemented. Deferred until
+  match becomes a working language construct.
 - **Imported procs** (Stage 1b): the typer's proc registry only sees
   procs defined at the top level of the current program. `use mod
   proc_name` imports stay DYN. Loading imported modules' typer
