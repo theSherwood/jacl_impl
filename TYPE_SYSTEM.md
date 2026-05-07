@@ -55,20 +55,19 @@ key-side type.
 
 ## Struct registry slot reservations
 
-Both the compiler's `struct_registry` and the typer's `tc->structs`
-share the same slot layout so an idx in one means the same struct
-in the other:
+Both passes share the same slot layout so an `inferred_struct_idx`
+in the typer's annotations means the same struct in the compiler's
+registry:
 
-- Slot 0: reserved for "dyn placeholder" (`defs[0] = NULL`).
-- Slot 1: reserved for the ctx struct. Always populated (built-in
-  `pwd: str` field, plus any user `ctx Type field = default`
-  declarations). Both passes pre-reserve at registry-init time so
-  the slot indices align across registries without runtime
-  coordination.
-- Slot 2 and up: user-declared structs in source order. Anonymous
-  inline struct types (`struct{x:i32,y:i32}`) are registered on
-  demand by both passes during the defstruct walk; same source
-  order → same slot indices.
+- Slot 0: dyn placeholder (`defs[0] = NULL`).
+- Slot 1: ctx struct (always populated; pre-reserved at registry init).
+- Slot 2+: user-declared structs in source order. Anonymous inline
+  struct types (`struct{x:i32,y:i32}`) are registered on demand by
+  both passes during the defstruct walk; same source order → same
+  slot indices.
+
+For the runtime shape of the registry (`StructTypeDef`, `is_value_type`
+flag, ctx as the lone HeapRecord) see `STRUCT_DESIGN.md`.
 
 ## Key invariants
 
@@ -216,7 +215,8 @@ sentinel encoding. Surface:
 - `[ptr-cast [Ptr T] $u64]` / `[ptr-addr $p]` round-trip.
 - `[ptr-null [Ptr T]]` typed null literal.
 - `$p->field` auto-deref through `[Ptr Struct]` (single deref;
-  nested chains accumulate offsets at compile time).
+  nested chains accumulate offsets at compile time using the inline
+  byte layout described in `STRUCT_DESIGN.md`).
 - `[ptr-deref $p]` for whole-value scalar loads.
 - `[addr $p->field]` returns `[Ptr <field-type>]`.
 - `[ptr-offset $p $n]` / `[ptr-diff $a $b]` typed pointer

@@ -82,8 +82,14 @@ operate on N-slot regions.
 
 ## Static Typing Boundaries
 
-Structs cannot live in a `dyn` slot. The following are compile-time
-rejections that direct the user to `[box $val]`:
+Structs cannot live in a `dyn` slot. This is the struct-specific
+expression of `TYPE_SYSTEM.md`'s decision 2 (no implicit dyn coercion
+at commitment sites): for scalars the cast `[to T $dyn]` papers over
+the boundary, but structs have no runtime tag, so the only way across
+the boundary is the explicit `[box]` / `[box? T]` / `[unbox]` triad.
+
+The following are compile-time rejections that direct the user to
+`[box $val]`:
 
 - `def dyn d [Point ...]` — drop the `dyn` annotation or use `[box]`.
 - `mut p [Point ...]` — must wrap with `[box]` so the cell holds a box
@@ -194,15 +200,18 @@ there is no user-visible `Ptr T` syntax.
 
 The `StructTypeRegistry` is arena-backed. Each `StructTypeDef` is
 allocated with its actual field count. Lookups return stable pointers; a
-separate index array maps `type_idx` → `StructTypeDef*`.
-
-`type_idx == 0` is reserved for plain `dyn JaclVal` boxes. Struct types
-start at `type_idx == 1`. `reg->ctx_type_idx` records ctx's slot.
+separate index array maps `type_idx` → `StructTypeDef*`. `reg->ctx_type_idx`
+records ctx's slot.
 
 The `is_value_type` flag on `StructTypeDef` distinguishes user structs
 (true) from ctx (false). Since ref fields are now rejected, all user
 defstructs are value-type by construction; the flag could be replaced
 with a `idx == reg->ctx_type_idx` check.
+
+Slot reservations (slot 0 = dyn placeholder, slot 1 = ctx, slot 2+ = user
+structs in source order) are pre-arranged so the typer's `tc->structs[]`
+and the compiler's `reg->defs[]` agree on indices without runtime
+coordination — see `TYPE_SYSTEM.md` for the typer-side perspective.
 
 ## What This Eliminates
 
