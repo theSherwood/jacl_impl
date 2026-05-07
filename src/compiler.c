@@ -12846,23 +12846,25 @@ void module__populate_exports(Module* mod, Compiler* c) {
 }
 
 /* Pre-compile dependency modules referenced by AST_USE nodes and collect
- * imported proc signatures into a flat array for the typer.
+ * imported export signatures into a flat array for the typer.
  *
  * Two-in-one because both passes walk the same AST_USE list and resolve
  * the same canonical paths: pre-compile (so dep_mod->exports is populated)
  * has to run before collection (which reads exports), and the typer
  * pre-pass that consumes the array has to run after collection.
  *
- * Both forms contribute entries:
+ * Both AST_USE forms contribute entries; the entry's `arity` field
+ * disambiguates callable procs (>= 0) from def/mut value imports (< 0):
  *   - Destructuring (`use "path" {names}`): one entry per name with
- *     `binding == NULL`. Registered as TyperProcs.
+ *     `binding == NULL`. Procs become TyperProcs; values become
+ *     top-level TyperBindings (so `$x` narrows).
  *   - Module-binding (`use "path" name`): one entry per export with
- *     `binding == name`. Looked up at call time via $name->fn.
- * Within both forms, struct constructors and non-callable def/mut
- * values (`arity == -1`) are filtered out — structs are handled by
- * the typer's CapitalCase placeholder pass for destructuring; for
- * the module-binding form imported structs and values stay dyn at
- * the typer (the compiler still resolves them at codegen).
+ *     `binding == name`. Looked up at use sites — procs drive
+ *     `[$name->fn args]` call dispatch; values drive `$name->field`
+ *     access narrowing.
+ * Struct constructors (type==STRUCT && return_type==STRUCT) are
+ * filtered out: structs are handled by the typer's CapitalCase
+ * placeholder pre-pass.
  *
  * `out_imports` must point at an array of at least
  * COMPILER_GLOBAL_ARITIES_MAX entries. */
@@ -12897,18 +12899,21 @@ static uint32_t compiler__collect_typer_imports(Compiler* c,
       for (uint32_t ei = 0; ei < dep_mod->export_count; ei++) {
         if (out_count >= max_imports) return out_count;
         ExportEntry* exp = &dep_mod->exports[ei];
-        if (exp->arity < 0) continue;
         if (exp->type == TYPE_STRUCT && exp->return_type == TYPE_STRUCT) continue;
         TyperImportProc* slot = &out_imports[out_count++];
         slot->name        = exp->name;
         slot->name_len    = exp->name_len;
-        slot->return_type = (uint8_t)exp->return_type;
+        /* Procs use return_type for the call-result narrow; values
+         * (arity == -1) use it as the value's declared type. */
+        slot->return_type = (uint8_t)((exp->arity >= 0) ? exp->return_type
+                                                        : exp->type);
         uint32_t pc = exp->param_count;
         if (pc > COMPILER_MAX_PROC_PARAMS) pc = COMPILER_MAX_PROC_PARAMS;
         slot->param_count = (uint8_t)pc;
         for (uint32_t pi = 0; pi < pc; pi++) {
           slot->param_types[pi] = (uint8_t)exp->param_types[pi];
         }
+        slot->arity       = exp->arity;
         slot->binding     = binding;
         slot->binding_len = binding_len;
       }
@@ -12928,18 +12933,19 @@ static uint32_t compiler__collect_typer_imports(Compiler* c,
         }
       }
       if (!exp) continue;
-      if (exp->arity < 0) continue;
       if (exp->type == TYPE_STRUCT && exp->return_type == TYPE_STRUCT) continue;
       TyperImportProc* slot = &out_imports[out_count++];
       slot->name        = nm;
       slot->name_len    = nl;
-      slot->return_type = (uint8_t)exp->return_type;
+      slot->return_type = (uint8_t)((exp->arity >= 0) ? exp->return_type
+                                                      : exp->type);
       uint32_t pc = exp->param_count;
       if (pc > COMPILER_MAX_PROC_PARAMS) pc = COMPILER_MAX_PROC_PARAMS;
       slot->param_count = (uint8_t)pc;
       for (uint32_t pi = 0; pi < pc; pi++) {
         slot->param_types[pi] = (uint8_t)exp->param_types[pi];
       }
+      slot->arity       = exp->arity;
       slot->binding     = NULL;
       slot->binding_len = 0;
     }

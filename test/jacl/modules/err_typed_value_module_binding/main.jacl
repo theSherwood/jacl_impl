@@ -1,0 +1,4 @@
+# expect-error: cannot assign str to i32
+use "./lib.jacl" m
+def i32 oops $m->NAME
+print $oops

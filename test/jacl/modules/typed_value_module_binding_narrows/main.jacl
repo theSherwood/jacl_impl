@@ -1,0 +1,4 @@
+# expect: 8080
+use "./lib.jacl" m
+def i32 p $m->PORT
+print $p

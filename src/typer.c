@@ -69,23 +69,30 @@ typedef struct {
   uint32_t    field_struct_idxs[TYPER_MAX_STRUCT_FIELDS];
 } TyperStruct;
 
-/* Imported proc signature — see jacl.h forward declaration. The
- * compiler builds an array of these from each AST_USE's resolved
- * exports and hands the array to the typer.
+/* Imported entity from an AST_USE — see jacl.h forward declaration.
+ * The compiler builds an array of these from each AST_USE's
+ * resolved exports and hands the array to the typer.
  *
- * Two flavors share this struct:
+ * The struct carries both procs and value imports (def/mut). The
+ * `arity` field disambiguates: arity >= 0 → callable proc (param
+ * info in param_types); arity < 0 → static value (return_type is
+ * the value's type, param_types unused).
+ *
+ * Two binding flavors share this struct:
  *   - Top-level destructuring (`use "path" {names}`): `binding == NULL`.
- *     Registered as TyperProcs in tc.procs by the pre-pass.
- *   - Module-binding (`use "path" name` then `[$name->fn args]`):
- *     `binding` set to the binding name. Looked up by
- *     typer__find_bound_proc when an AST_COMMAND's head is a HEAD_DOT
- *     command resolving to that binding. */
+ *     The pre-pass registers callable entries as TyperProcs in
+ *     tc.procs and value entries as TyperBindings.
+ *   - Module-binding (`use "path" name` then `[$name->fn]` or
+ *     `$name->field`): `binding` set to the binding name. Resolved
+ *     at use sites by typer__find_bound_export when an AST_COMMAND
+ *     head or HEAD_DOT 2-arg expression names that binding. */
 typedef struct TyperImportProc {
   const char* name;
   uint32_t    name_len;
   uint8_t     return_type;
   uint8_t     param_types[TYPER_MAX_PROC_PARAMS];
   uint8_t     param_count;
+  int16_t     arity;          /* >= 0: callable proc; < 0: static value */
   const char* binding;        /* NULL for top-level destructuring imports */
   uint32_t    binding_len;
 } TyperImportProc;
@@ -123,7 +130,7 @@ typedef struct {
    * walk. Only entries with binding != NULL are read post-pre-pass —
    * those represent module-binding form imports
    * (`use "lib" m` → `[$m->fn]`) and are looked up by
-   * typer__find_bound_proc when a HEAD_DOT command resolves to a
+   * typer__find_bound_export when a HEAD_DOT command resolves to a
    * binding. Top-level destructuring entries (binding == NULL) are
    * already copied into tc->procs by the pre-pass. */
   TyperImportProc*        imports;
@@ -1507,16 +1514,18 @@ static const TyperProc* typer__find_proc(TyperCtx* tc,
   return NULL;
 }
 
-/* Look up an imported proc reached through a module binding
- * (`use "lib" m` → `[$m->fn args]`). Returns NULL if no entry
- * matches both the binding name and the field name.
+/* Look up an imported export reached through a module binding
+ * (`use "lib" m` → `[$m->fn args]` or `$m->field`). Returns NULL
+ * if no entry matches both the binding name and the field name.
+ * Procs and values share this lookup; the caller uses `arity` to
+ * tell them apart (>= 0 → proc, < 0 → value).
  *
  * The compiler stuffs all imports (top-level destructuring and
  * module-binding) into the same flat array; the binding column
  * disambiguates which form an entry belongs to. */
-static const TyperImportProc* typer__find_bound_proc(TyperCtx* tc,
-                                                     const char* binding, uint32_t binding_len,
-                                                     const char* name, uint32_t name_len) {
+static const TyperImportProc* typer__find_bound_export(TyperCtx* tc,
+                                                       const char* binding, uint32_t binding_len,
+                                                       const char* name, uint32_t name_len) {
   if (!tc->imports) return NULL;
   for (uint32_t i = 0; i < tc->import_count; i++) {
     TyperImportProc* imp = &tc->imports[i];
@@ -1868,10 +1877,13 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         recv->data.var_ref.name, recv->data.var_ref.length,
         recv->scope_mark);
     if (!shadow) {
-      const TyperImportProc* bound = typer__find_bound_proc(tc,
+      const TyperImportProc* bound = typer__find_bound_export(tc,
           recv->data.var_ref.name, recv->data.var_ref.length,
           fld->data.lit_string.value, fld->data.lit_string.length);
-      if (bound) {
+      /* Only callable exports (arity >= 0) drive the call dispatch;
+       * value imports reached through `[$mod->VALUE]` (which is rare
+       * and runtime-erroneous anyway) fall through to dyn here. */
+      if (bound && bound->arity >= 0) {
         bound_proxy.name              = bound->name;
         bound_proxy.name_len          = bound->name_len;
         bound_proxy.return_type       = bound->return_type;
@@ -2782,6 +2794,28 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       AstNode* tgt = node->data.command.args[0];
       AstNode* fld = node->data.command.args[1];
 
+      /* Module-binding value access: `$mod->field` where mod is a
+       * `use "path" mod` binding. Narrow to the export's declared
+       * type. Procs reached this way (not as a call head) are
+       * closure values — narrow to TYPE_CLOSURE. Resolution falls
+       * through if a local binding shadows the module name. */
+      if (tgt->type == AST_VAR_REF && fld->type == AST_LIT_STRING) {
+        const TyperBinding* shadow = typer__scope_resolve(tc,
+            tgt->data.var_ref.name, tgt->data.var_ref.length,
+            tgt->scope_mark);
+        if (!shadow) {
+          const TyperImportProc* bound = typer__find_bound_export(tc,
+              tgt->data.var_ref.name, tgt->data.var_ref.length,
+              fld->data.lit_string.value, fld->data.lit_string.length);
+          if (bound) {
+            node->inferred_type = (bound->arity >= 0)
+                                  ? (uint8_t)TYPE_CLOSURE
+                                  : bound->return_type;
+            return;
+          }
+        }
+      }
+
       /* Resolve target struct type. Two shapes:
        *   - tgt was already typed as STRUCT (e.g. $ln var-ref or a
        *     nested dot expression).
@@ -3065,19 +3099,28 @@ void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null,
   typer__register_procs(&tc, nodes, count);
 
   /* Imports pre-pass: register top-level destructuring imports
-   * (`binding == NULL`) as TyperProcs so cross-module calls narrow
-   * to the declared return type. Module-binding entries
-   * (`binding != NULL`, e.g. `use "lib" m` → `[$m->fn]`) stay in
-   * tc.imports and are looked up later via typer__find_bound_proc.
+   * (`binding == NULL`). Callable procs (arity >= 0) go into
+   * tc.procs; value imports (arity < 0) go into the binding scope
+   * so `$x` var-ref narrows to the declared type. Module-binding
+   * entries (`binding != NULL`, e.g. `use "lib" m` → `[$m->fn]`
+   * or `$m->field`) stay in tc.imports and are looked up at use
+   * sites by typer__find_bound_export.
    *
-   * Skipped if a same-name proc is already registered (a local proc
-   * shadows the import — matches runtime lexical resolution). The
-   * compiler is responsible for filtering to callable procs (struct
-   * constructors and non-callable def/mut values are excluded). */
+   * Skipped if a same-name proc/binding is already registered (a
+   * local def/proc shadows the import — matches runtime lexical
+   * resolution). Struct constructors are filtered out by the
+   * compiler before the array reaches the typer. */
   for (uint32_t i = 0; i < import_count; i++) {
-    if (tc.proc_count >= TYPER_MAX_PROCS) break;
     TyperImportProc* imp = &imports[i];
-    if (imp->binding) continue;  /* module-binding form: deferred to call site */
+    if (imp->binding) continue;  /* module-binding form: deferred to use site */
+    if (imp->arity < 0) {
+      /* Value import: register as a top-level TyperBinding. */
+      if (typer__scope_resolve(&tc, imp->name, imp->name_len, 0)) continue;
+      typer__scope_add(&tc, imp->name, imp->name_len, 0,
+                       imp->return_type, UINT32_MAX);
+      continue;
+    }
+    if (tc.proc_count >= TYPER_MAX_PROCS) break;
     if (typer__find_proc(&tc, imp->name, imp->name_len)) continue;
     TyperProc* p = &tc.procs[tc.proc_count++];
     p->name              = imp->name;
