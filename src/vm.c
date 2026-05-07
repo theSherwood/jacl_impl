@@ -7042,6 +7042,44 @@ VMResult vm__run(VM* vm, uint32_t min_frame) {
         break;
       }
 
+      case OP_PRINT_PTR: {
+        /* Pop a tagged u64 (the [Ptr T] value) and format as
+         * "Ptr<Name>(0xADDR)". The pointee idx encodes either a
+         * scalar JaclType (via JACL_SCALAR_TYPE_IDX) or a struct
+         * registry index. Compiler falls back to OP_PRINT when
+         * the pointee is unknown, so this handler always has a
+         * resolvable name. */
+        uint16_t pointee_idx = vm__read_u16(vm);
+        JaclVal val;
+        result = vm__pop(vm, &val);
+        if (result != VM_OK) return result;
+        VMFormatBuf fmt;
+        vm__fmt_init(&fmt, vm->arena, vm->struct_registry);
+        vm__fmt_append(&fmt, "Ptr<", 4);
+        if (JACL_IS_SCALAR_TYPE_IDX(pointee_idx)) {
+          JaclType t = (JaclType)JACL_TYPE_IDX_TO_SCALAR(pointee_idx);
+          const char* nm = type_name(t);
+          vm__fmt_append(&fmt, nm, (uint32_t)strlen(nm));
+        } else if (vm->struct_registry &&
+                   pointee_idx < vm->struct_registry->count &&
+                   vm->struct_registry->defs[pointee_idx]) {
+          StructTypeDef* sdef = vm->struct_registry->defs[pointee_idx];
+          vm__fmt_append(&fmt, sdef->name, sdef->name_len);
+        } else {
+          vm__fmt_append(&fmt, "?", 1);
+        }
+        char addr_buf[40];
+        uint64_t addr = jacl_is_u64(val) ? jacl_as_u64(val) : 0;
+        int n = snprintf(addr_buf, sizeof(addr_buf),
+                         ">(0x%" PRIx64 ")", addr);
+        vm__fmt_append(&fmt, addr_buf, (uint32_t)n);
+        vm__fmt_append(&fmt, "\n", 1);
+        vm->print_fn(fmt.data, fmt.len, vm->print_ctx);
+        result = vm__push(vm, JACL_NIL);
+        if (result != VM_OK) return result;
+        break;
+      }
+
       case OP_LOAD_INLINE_UPVALUE: {
         /* Copy N inline struct slots from a closure upvalue to TOS, no heap alloc.
            Operands: uint8_t base_uv_slot, uint16_t type_idx. */

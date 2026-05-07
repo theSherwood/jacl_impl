@@ -5691,6 +5691,17 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
       c->last_expr_type = TYPE_NIL;
       return;
     }
+    if (arg_type == TYPE_PTR && arg_struct_idx != UINT32_MAX &&
+        arg_struct_idx < UINT16_MAX) {
+      /* Typed pointer print — boxed u64 + pointee idx → "Ptr<T>(0xADDR)".
+       * Falls through to OP_PRINT below when pointee is unknown
+       * (UINT32_MAX) so the user still gets the raw address. */
+      compiler__ensure_boxed(c, line);
+      compiler__emit_byte(c, OP_PRINT_PTR, line);
+      compiler__emit_u16(c, (uint16_t)arg_struct_idx, line);
+      c->last_expr_type = TYPE_NIL;
+      return;
+    }
     compiler__ensure_boxed(c, line);
     compiler__emit_byte(c, OP_PRINT, line);
     c->last_expr_type = TYPE_NIL;
@@ -9354,6 +9365,36 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     return;
   }
 
+  /* ptr-null — [ptr-null [Ptr T]]: typed null pointer literal. At
+   * runtime null is u64(0); the typer narrows the result to TYPE_PTR
+   * with the supplied pointee idx. Pure compile-time op aside from
+   * the constant push. */
+  if (hid == HEAD_PTR_NULL) {
+    if (argc != 1) {
+      compiler__builtin_arity_error(c, line, col, "ptr-null", "1 argument", argc);
+      return;
+    }
+    AstNode* type_node = args[0];
+    AstNode* ptr_pointee = NULL;
+    if (!compiler__ptr_type_expr(type_node, &ptr_pointee)) {
+      char err[128];
+      jacl_format_ptr_null_bad_arg(err, sizeof(err));
+      char* msg = (char*)arena_alloc(c->arena, (uint32_t)(strlen(err) + 1));
+      memcpy(msg, err, strlen(err) + 1);
+      compiler__error(c, line, col, msg);
+      return;
+    }
+    /* Mirror the AST_LIT_INT TYPE_U64 path: store raw u64(0) in the
+     * constant pool and emit OP_CONST_U64 so ensure_boxed handles
+     * boxing correctly via OP_TO_DYN U64. Pre-boxing at compile time
+     * would let the tagged value flow through OP_TO_DYN and double-box. */
+    uint16_t idx = chunk_add_constant(c->chunk, (JaclVal)(uint64_t)0);
+    compiler__emit_byte(c, OP_CONST_U64, line);
+    compiler__emit_u16(c, idx, line);
+    c->last_expr_type = TYPE_U64;
+    return;
+  }
+
   /* ptr-cast — [ptr-cast [Ptr T] $u64_value]: re-tags a u64 address as
    * a typed pointer. Pure compile-time op — at runtime a pointer is the
    * same bits as a u64. The typer marks this node as TYPE_PTR with the
@@ -9366,7 +9407,11 @@ void compiler__compile_command(Compiler* c, AstNode* node) {
     AstNode* type_node = args[0];
     AstNode* ptr_pointee = NULL;
     if (!compiler__ptr_type_expr(type_node, &ptr_pointee)) {
-      compiler__error(c, line, col, "ptr-cast: first argument must be a [Ptr T] annotation");
+      char err[128];
+      jacl_format_ptr_cast_bad_first_arg(err, sizeof(err));
+      char* msg = (char*)arena_alloc(c->arena, (uint32_t)(strlen(err) + 1));
+      memcpy(msg, err, strlen(err) + 1);
+      compiler__error(c, line, col, msg);
       return;
     }
     compiler__compile_node(c, args[1]);

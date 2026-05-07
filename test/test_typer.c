@@ -525,6 +525,44 @@ static void test_future_t_annotation(void) {
 
 /* --- Stage 5a: typed pointers --- */
 
+static void test_ptr_null_typed(void) {
+  current_test = "ptr_null_typed";
+  arena_t a = {0};
+  /* [ptr-null [Ptr i32]] types as TYPE_PTR with i32 scalar pointee. */
+  ParseResult r = run_typer("def p [ptr-null [Ptr i32]]", &a);
+  AstNode* pn = find_cmd(r.nodes[0], "ptr-null");
+  ASSERT_NOT_NULL(pn);
+  ASSERT_TYPE(pn, TYPE_PTR);
+  if (pn) {
+    uint32_t want = JACL_SCALAR_TYPE_IDX(TYPE_I32);
+    if (pn->inferred_struct_idx != want) {
+      fprintf(stderr, "  FAIL %s: pointee idx expected %u got %u\n",
+              current_test, want, pn->inferred_struct_idx);
+      failures++;
+    } else { passes++; }
+  }
+  arena_destroy(&a);
+}
+
+static void test_ptr_null_struct_pointee(void) {
+  current_test = "ptr_null_struct_pointee";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "struct Point {i32 x i32 y}\n"
+      "def p [ptr-null [Ptr Point]]", &a);
+  AstNode* pn = find_cmd(r.nodes[1], "ptr-null");
+  ASSERT_NOT_NULL(pn);
+  ASSERT_TYPE(pn, TYPE_PTR);
+  if (pn) {
+    if (JACL_IS_SCALAR_TYPE_IDX(pn->inferred_struct_idx)) {
+      fprintf(stderr, "  FAIL %s: pointee should be struct idx, got scalar sentinel %u\n",
+              current_test, pn->inferred_struct_idx);
+      failures++;
+    } else { passes++; }
+  }
+  arena_destroy(&a);
+}
+
 static void test_ptr_cast_returns_typed_ptr(void) {
   current_test = "ptr_cast_returns_typed_ptr";
   arena_t a = {0};
@@ -919,6 +957,8 @@ int main(void) {
   test_race_heterogeneous_stays_dyn();
   test_future_t_annotation();
 
+  test_ptr_null_typed();
+  test_ptr_null_struct_pointee();
   test_ptr_cast_returns_typed_ptr();
   test_ptr_cast_struct_pointee();
   test_ptr_addr_returns_u64();

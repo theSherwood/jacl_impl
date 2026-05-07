@@ -1,0 +1,6 @@
+# expect: 0
+# Stage 5: ptr-null produces a typed null pointer (u64 zero at runtime).
+# ptr-addr then unwraps it back to the raw u64 address.
+def [Ptr i32] p [ptr-null [Ptr i32]]
+def back [ptr-addr $p]
+print $back

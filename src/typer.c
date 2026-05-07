@@ -608,11 +608,9 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
       /* Both sides typed pointers but pointee idx mismatch — different
        * concrete types in spirit even though the JaclType tag matches. */
       char err[200];
-      snprintf(err, sizeof(err),
-               "type error: cannot assign pointer to different pointee type "
-               "to binding '%.*s'",
-               (int)name_node->data.lit_string.length,
-               name_node->data.lit_string.value);
+      jacl_format_ptr_assign_pointee_mismatch(err, sizeof(err),
+          name_node->data.lit_string.value,
+          name_node->data.lit_string.length);
       typer__error(tc, name_node->start.line, name_node->start.column, err);
     }
   }
@@ -1780,17 +1778,14 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
        *    falls through to the generic concrete-mismatch check below. */
       if ((lhs_t == TYPE_PTR || rhs_t == TYPE_PTR) && is_arith) {
         char err[160];
-        snprintf(err, sizeof(err),
-                 "type error: cannot perform arithmetic on pointer values "
-                 "— use [ptr-offset $p $n] for typed pointer arithmetic");
+        jacl_format_ptr_arithmetic(err, sizeof(err));
         typer__error(tc, lhs->start.line, lhs->start.column, err);
       } else if (lhs_t == TYPE_PTR && rhs_t == TYPE_PTR && is_cmp &&
                  lhs->inferred_struct_idx != rhs->inferred_struct_idx &&
                  lhs->inferred_struct_idx != UINT32_MAX &&
                  rhs->inferred_struct_idx != UINT32_MAX) {
         char err[160];
-        snprintf(err, sizeof(err),
-                 "type error: cannot compare pointers to different pointee types");
+        jacl_format_ptr_compare_pointee_mismatch(err, sizeof(err));
         typer__error(tc, lhs->start.line, lhs->start.column, err);
       }
       bool concrete_mismatch = (lhs_t != rhs_t &&
@@ -2574,6 +2569,21 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         typer__error(tc, arg->start.line, arg->start.column, err);
         node->inferred_type = TYPE_DYN;
       }
+    } else if (hid == HEAD_PTR_NULL && node->data.command.arg_count == 1) {
+      /* [ptr-null [Ptr T]]: typed null pointer literal. Pure
+       * compile-time op — at runtime a null pointer is u64(0).
+       * The annotation supplies pointee identity. */
+      AstNode* type_node = node->data.command.args[0];
+      uint32_t pointee_sidx = UINT32_MAX;
+      if (!typer__ptr_type(tc, type_node, &pointee_sidx)) {
+        char err[128];
+        jacl_format_ptr_null_bad_arg(err, sizeof(err));
+        typer__error(tc, type_node->start.line, type_node->start.column, err);
+        node->inferred_type = TYPE_DYN;
+      } else {
+        node->inferred_type       = TYPE_PTR;
+        node->inferred_struct_idx = pointee_sidx;
+      }
     } else if (hid == HEAD_PTR_CAST && node->data.command.arg_count == 2) {
       /* [ptr-cast [Ptr T] $u64_value]: re-tag a u64 address as a typed
        * pointer. The annotation supplies pointee identity; the value
@@ -2583,17 +2593,14 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       uint32_t pointee_sidx = UINT32_MAX;
       if (!typer__ptr_type(tc, type_node, &pointee_sidx)) {
         char err[128];
-        snprintf(err, sizeof(err),
-                 "type error: ptr-cast first argument must be [Ptr T]");
+        jacl_format_ptr_cast_bad_first_arg(err, sizeof(err));
         typer__error(tc, type_node->start.line, type_node->start.column, err);
         node->inferred_type = TYPE_DYN;
       } else {
         JaclType val_t = (JaclType)val_node->inferred_type;
         if (val_t != TYPE_U64 && val_t != TYPE_DYN) {
           char err[128];
-          snprintf(err, sizeof(err),
-                   "type error: ptr-cast value must be u64, got %s",
-                   type_name(val_t));
+          jacl_format_ptr_cast_value_not_u64(err, sizeof(err), val_t);
           typer__error(tc, val_node->start.line, val_node->start.column, err);
         }
         node->inferred_type       = TYPE_PTR;
@@ -2606,9 +2613,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       JaclType arg_t = (JaclType)arg->inferred_type;
       if (arg_t != TYPE_PTR && arg_t != TYPE_DYN) {
         char err[128];
-        snprintf(err, sizeof(err),
-                 "type error: ptr-addr expects a pointer, got %s",
-                 type_name(arg_t));
+        jacl_format_ptr_op_expects_ptr(err, sizeof(err), "ptr-addr", arg_t);
         typer__error(tc, arg->start.line, arg->start.column, err);
       }
       node->inferred_type = TYPE_U64;
@@ -2644,16 +2649,12 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       JaclType n_t = (JaclType)n->inferred_type;
       if (p_t != TYPE_PTR && p_t != TYPE_DYN) {
         char err[160];
-        snprintf(err, sizeof(err),
-                 "type error: ptr-offset expects a pointer, got %s",
-                 type_name(p_t));
+        jacl_format_ptr_op_expects_ptr(err, sizeof(err), "ptr-offset", p_t);
         typer__error(tc, p->start.line, p->start.column, err);
         node->inferred_type = TYPE_DYN;
       } else if (n_t != TYPE_DYN && !is_numeric_type(n_t)) {
         char err[160];
-        snprintf(err, sizeof(err),
-                 "type error: ptr-offset offset must be numeric, got %s",
-                 type_name(n_t));
+        jacl_format_ptr_offset_non_numeric(err, sizeof(err), n_t);
         typer__error(tc, n->start.line, n->start.column, err);
         node->inferred_type = TYPE_DYN;
       } else {
@@ -2670,17 +2671,14 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       if (a_t != TYPE_PTR || b_t != TYPE_PTR) {
         if (a_t != TYPE_DYN && b_t != TYPE_DYN) {
           char err[160];
-          snprintf(err, sizeof(err),
-                   "type error: ptr-diff expects two pointers, got %s and %s",
-                   type_name(a_t), type_name(b_t));
+          jacl_format_ptr_diff_expects_two(err, sizeof(err), a_t, b_t);
           typer__error(tc, a->start.line, a->start.column, err);
         }
       } else if (a->inferred_struct_idx != b->inferred_struct_idx &&
                  a->inferred_struct_idx != UINT32_MAX &&
                  b->inferred_struct_idx != UINT32_MAX) {
         char err[160];
-        snprintf(err, sizeof(err),
-                 "type error: ptr-diff requires same pointee type on both sides");
+        jacl_format_ptr_diff_pointee_mismatch(err, sizeof(err));
         typer__error(tc, a->start.line, a->start.column, err);
       }
       node->inferred_type = TYPE_I64;
@@ -2696,9 +2694,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(arg_sidx);
         } else if (arg_sidx != UINT32_MAX) {
           char err[160];
-          snprintf(err, sizeof(err),
-                   "type error: ptr-deref on a struct pointer — use "
-                   "$p->field for field access");
+          jacl_format_ptr_deref_struct(err, sizeof(err));
           typer__error(tc, arg->start.line, arg->start.column, err);
           node->inferred_type = TYPE_DYN;
         } else {
@@ -2709,9 +2705,7 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
         node->inferred_type = TYPE_DYN;
       } else {
         char err[128];
-        snprintf(err, sizeof(err),
-                 "type error: ptr-deref expects a pointer, got %s",
-                 type_name(arg_t));
+        jacl_format_ptr_op_expects_ptr(err, sizeof(err), "ptr-deref", arg_t);
         typer__error(tc, arg->start.line, arg->start.column, err);
         node->inferred_type = TYPE_DYN;
       }

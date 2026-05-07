@@ -551,7 +551,7 @@ typedef enum {
   HEAD_ERROR, HEAD_ERROR_Q, HEAD_ERROR_VAL, HEAD_STACK_TRACE,
   HEAD_BOX, HEAD_BOX_Q, HEAD_ATOM, HEAD_ATOM_Q, HEAD_FUTURE_Q,
   HEAD_DEREF, HEAD_UNBOX, HEAD_RESET, HEAD_SWAP, HEAD_TO,
-  HEAD_PTR_CAST, HEAD_PTR_ADDR, HEAD_PTR_DEREF,
+  HEAD_PTR_CAST, HEAD_PTR_ADDR, HEAD_PTR_DEREF, HEAD_PTR_NULL,
   HEAD_PTR_OFFSET, HEAD_PTR_DIFF,
   HEAD_ADDR,
   HEAD_EXTERN,
@@ -2052,6 +2052,20 @@ extern int jacl_format_field_dyn_assign (char *buf, size_t bufsz,
 extern int jacl_format_proc_return_mismatch (char *buf, size_t bufsz,
                                              const char *proc_name, uint32_t proc_name_len,
                                              JaclType declared, JaclType actual);
+extern int jacl_format_ptr_assign_pointee_mismatch (char *buf, size_t bufsz,
+                                                    const char *name, uint32_t name_len);
+extern int jacl_format_ptr_arithmetic (char *buf, size_t bufsz);
+extern int jacl_format_ptr_compare_pointee_mismatch (char *buf, size_t bufsz);
+extern int jacl_format_ptr_cast_bad_first_arg (char *buf, size_t bufsz);
+extern int jacl_format_ptr_cast_value_not_u64 (char *buf, size_t bufsz, JaclType actual);
+extern int jacl_format_ptr_op_expects_ptr (char *buf, size_t bufsz,
+                                           const char *op_name, JaclType actual);
+extern int jacl_format_ptr_offset_non_numeric (char *buf, size_t bufsz, JaclType actual);
+extern int jacl_format_ptr_diff_expects_two (char *buf, size_t bufsz,
+                                             JaclType a, JaclType b);
+extern int jacl_format_ptr_diff_pointee_mismatch (char *buf, size_t bufsz);
+extern int jacl_format_ptr_deref_struct (char *buf, size_t bufsz);
+extern int jacl_format_ptr_null_bad_arg (char *buf, size_t bufsz);
 
 /* --- compiler.c --- */
 extern bool is_type_keyword (const char *word, size_t len);

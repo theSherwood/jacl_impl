@@ -1,0 +1,10 @@
+# expect: Ptr<i32>(0xf4240)
+# expect: Ptr<i32>(0x0)
+# Stage 5 polish: typed pointers print as "Ptr<T>(0xADDR)" rather than
+# the raw u64 bits. Address is hex (no leading zeros), pointee name
+# follows the [Ptr T] annotation.
+def u64 addr 1000000
+def [Ptr i32] p [ptr-cast [Ptr i32] $addr]
+print $p
+def [Ptr i32] np [ptr-null [Ptr i32]]
+print $np

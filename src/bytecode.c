@@ -254,7 +254,8 @@ typedef enum {
   /* --- Nested struct fields through pointers (Stage 5b extension) --- */
   OP_PTR_ADD_OFFSET,       /* u16 byte_offset; pop u64 ptr, push ptr+offset */
   OP_PTR_LOAD_INLINE,      /* u16 byte_offset, u16 sub_type_idx; pop u64 ptr, push N inline slots from *ptr+offset */
-  OP_PTR_STORE_INLINE      /* u16 byte_offset, u16 sub_type_idx; pop N inline slots, pop u64 ptr, copy bytes to *ptr+offset, push ptr */
+  OP_PTR_STORE_INLINE,     /* u16 byte_offset, u16 sub_type_idx; pop N inline slots, pop u64 ptr, copy bytes to *ptr+offset, push ptr */
+  OP_PRINT_PTR             /* u16 pointee_idx; pop tagged u64, print "Ptr<T>(0xADDR)" + newline */
 } OpCode;
 
 /* OP_EXEC flags byte — combine with | for mixed modes */
@@ -536,6 +537,7 @@ const char* bytecode__opcode_name(uint8_t op) {
     case OP_PTR_ADD_OFFSET:         return "OP_PTR_ADD_OFFSET";
     case OP_PTR_LOAD_INLINE:        return "OP_PTR_LOAD_INLINE";
     case OP_PTR_STORE_INLINE:       return "OP_PTR_STORE_INLINE";
+    case OP_PRINT_PTR:              return "OP_PRINT_PTR";
     case OP_RESET_INLINE:           return "OP_RESET_INLINE";
     case OP_STRUCT_NEW_INLINE: return "OP_STRUCT_NEW_INLINE";
     case OP_STRUCT_GET_INLINE: return "OP_STRUCT_GET_INLINE";

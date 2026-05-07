@@ -175,4 +175,96 @@ int jacl_format_typed_map_kv(char* buf, size_t bufsz,
                   (int)tnl, tn);
 }
 
+/* --- Pointer-related formatters (Stage 5) --- */
+
+/* "type error: cannot assign pointer to different pointee type to binding '<name>'"
+ * Cross-pointee assignment to a typed [Ptr T] binding. Both sides
+ * are pointers, just with mismatched pointee. */
+int jacl_format_ptr_assign_pointee_mismatch(char* buf, size_t bufsz,
+                                            const char* name, uint32_t name_len) {
+  return snprintf(buf, bufsz,
+                  "type error: cannot assign pointer to different pointee type "
+                  "to binding '%.*s'",
+                  (int)name_len, name);
+}
+
+/* "type error: cannot perform arithmetic on pointer values — use [ptr-offset $p $n] for typed pointer arithmetic"
+ * Fires when + - * / % is applied to any pointer operand. */
+int jacl_format_ptr_arithmetic(char* buf, size_t bufsz) {
+  return snprintf(buf, bufsz,
+                  "type error: cannot perform arithmetic on pointer values "
+                  "— use [ptr-offset $p $n] for typed pointer arithmetic");
+}
+
+/* "type error: cannot compare pointers to different pointee types"
+ * Fires for ==/!=/<.../etc. between two TYPE_PTR with different pointees. */
+int jacl_format_ptr_compare_pointee_mismatch(char* buf, size_t bufsz) {
+  return snprintf(buf, bufsz,
+                  "type error: cannot compare pointers to different pointee types");
+}
+
+/* "type error: ptr-cast first argument must be [Ptr T]"
+ * The first arg to ptr-cast must be a [Ptr T] type annotation. */
+int jacl_format_ptr_cast_bad_first_arg(char* buf, size_t bufsz) {
+  return snprintf(buf, bufsz,
+                  "type error: ptr-cast first argument must be [Ptr T]");
+}
+
+/* "type error: ptr-cast value must be u64, got <actual>"
+ * The second arg to ptr-cast must be u64 (the raw address bits). */
+int jacl_format_ptr_cast_value_not_u64(char* buf, size_t bufsz, JaclType actual) {
+  return snprintf(buf, bufsz,
+                  "type error: ptr-cast value must be u64, got %s",
+                  type_name(actual));
+}
+
+/* "type error: <op> expects a pointer, got <actual>"
+ * Used by ptr-addr / ptr-deref / ptr-offset for the receiver-arg
+ * type check; op_name is the source-level builtin name (e.g.
+ * "ptr-addr"). */
+int jacl_format_ptr_op_expects_ptr(char* buf, size_t bufsz,
+                                   const char* op_name, JaclType actual) {
+  return snprintf(buf, bufsz,
+                  "type error: %s expects a pointer, got %s",
+                  op_name, type_name(actual));
+}
+
+/* "type error: ptr-offset offset must be numeric, got <actual>"
+ * The second arg to ptr-offset must be a numeric type. */
+int jacl_format_ptr_offset_non_numeric(char* buf, size_t bufsz, JaclType actual) {
+  return snprintf(buf, bufsz,
+                  "type error: ptr-offset offset must be numeric, got %s",
+                  type_name(actual));
+}
+
+/* "type error: ptr-diff expects two pointers, got <a> and <b>"
+ * Both args to ptr-diff must be pointers. Reports the first
+ * non-pointer's type. */
+int jacl_format_ptr_diff_expects_two(char* buf, size_t bufsz,
+                                     JaclType a, JaclType b) {
+  return snprintf(buf, bufsz,
+                  "type error: ptr-diff expects two pointers, got %s and %s",
+                  type_name(a), type_name(b));
+}
+
+/* "type error: ptr-diff requires same pointee type on both sides" */
+int jacl_format_ptr_diff_pointee_mismatch(char* buf, size_t bufsz) {
+  return snprintf(buf, bufsz,
+                  "type error: ptr-diff requires same pointee type on both sides");
+}
+
+/* "type error: ptr-deref on a struct pointer — use $p->field for field access" */
+int jacl_format_ptr_deref_struct(char* buf, size_t bufsz) {
+  return snprintf(buf, bufsz,
+                  "type error: ptr-deref on a struct pointer — use "
+                  "$p->field for field access");
+}
+
+/* "type error: ptr-null argument must be [Ptr T]"
+ * Single-argument form distinct from ptr-cast (no value follows). */
+int jacl_format_ptr_null_bad_arg(char* buf, size_t bufsz) {
+  return snprintf(buf, bufsz,
+                  "type error: ptr-null argument must be [Ptr T]");
+}
+
 #endif /* JACL_TYPE_ERROR_C */

@@ -774,24 +774,25 @@ arithmetic via `+`, and non-numeric offsets at compile time.
 The core debugger-scripting workflow is complete and tested. These
 items are not blockers but are worth tracking:
 
-**Polish / ergonomics:**
+**Polish / ergonomics:** ✅ all three landed.
 
-- **`print` formatting for `[Ptr T]` values.** Today a typed pointer
-  prints as a raw u64 (e.g., `4096` or however `print` formats u64
-  values), losing the pointee identity that the typer tracks. A
-  Stage-5-aware print would format as `Ptr<Point>(0x1000)` or
-  similar. Requires the print path to consult `inferred_type` /
-  `inferred_struct_idx` on the AST node, or carry a runtime tag
-  for pointers — neither exists today.
-- **Null pointer literal.** No way to express `null` / a null
-  `[Ptr T]` in JACL source today. `[ptr-cast [Ptr T] 0]` works as
-  a workaround. A `[null [Ptr T]]` builtin or `null` keyword would
-  be cleaner; runtime traps already fire on null deref via
-  `OP_PTR_LOAD` and friends.
-- **Better error wording.** Several typer messages embed bespoke
-  `snprintf` patterns rather than going through `src/type_error.c`.
-  A small extraction pass would put pointer messages in the same
-  shared formatter file as the rest of Stage 1e/1f.
+- ✅ **`print` formatting for `[Ptr T]` values.** Compiler emits
+  `OP_PRINT_PTR` (u16 pointee idx) instead of `OP_PRINT` when the
+  printed expression has TYPE_PTR with a known pointee. Runtime
+  formats as `Ptr<Name>(0xADDR)` — `Name` is the struct name from
+  the registry for struct pointees, the type keyword (`i32`, `u64`,
+  etc.) for scalar pointees. Falls back to raw u64 print when the
+  pointee is unknown.
+- ✅ **Null pointer literal.** New `[ptr-null [Ptr T]]` builtin
+  produces a typed null pointer (u64 zero at runtime). Cleaner
+  than the `[ptr-cast [Ptr T] 0]` workaround. New HEAD_PTR_NULL;
+  typer narrows to TYPE_PTR with the supplied pointee idx; compiler
+  emits `OP_CONST_U64` of zero.
+- ✅ **Better error wording.** Eleven pointer-error sites moved
+  from bespoke `snprintf` to shared formatters in
+  `src/type_error.c` (`jacl_format_ptr_*`). Both the typer and the
+  compiler-side ptr-cast backstop call the new formatters, keeping
+  user-facing messages consistent.
 
 **Language design (deferred decisions):**
 

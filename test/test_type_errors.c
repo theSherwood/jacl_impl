@@ -226,6 +226,12 @@ static void run_all(void) {
     .expect_substrings = { "ptr-cast", "Ptr T" },
   });
 
+  /* ptr-null arg must be a [Ptr T] annotation. */
+  RUN("ptr_null_bad_arg", {
+    .source = "def p [ptr-null i32]",
+    .expect_substrings = { "ptr-null", "Ptr T" },
+  });
+
   /* ptr-cast value arg must be u64 (or dyn). i32 here is wrong. */
   RUN("ptr_cast_value_not_u64", {
     .source = "def i32 a 0\ndef p [ptr-cast [Ptr i32] $a]",
