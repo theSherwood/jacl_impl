@@ -1121,10 +1121,11 @@ Tests: 95/95 corpus + 35/35 typer-only + 16/16 type-error. The audit
 machinery from Stages 0–2 was deleted in commit `0aa722f` after it
 served its purpose.
 
-Cross-module proc typing (destructuring form) landed this session:
-two new module fixtures (`typed_import_narrows`,
-`err_typed_import_into_typed`). Module-binding form
-(`use "path" name` → `[$name->fn ...]`) and imported struct fields
+Cross-module proc typing landed this session for both call forms:
+four module fixtures (`typed_import_narrows`,
+`err_typed_import_into_typed`, `typed_module_binding_narrows`,
+`err_typed_module_binding`). Imported struct fields, imported
+def/mut values, and bare `$mod->field` value-access narrowing
 remain deferred (see "Imports design" section).
 
 ## Stage 1 long-tail — what's left
@@ -1138,20 +1139,29 @@ structural rather than per-builtin:
   "undefined variable '$match'". Adding typer rules would be dead
   code until the feature itself is implemented. Deferred until
   match becomes a working language construct.
-- **Imported procs** (Stage 1b) ✅ COMPLETE for the destructuring
-  form (`use "path" {names}`). Pre-pass in
-  `compiler__collect_typer_imports` triggers dependency compilation
-  before the outer typer runs (so `dep_mod->exports` is populated)
-  and packs each imported proc's signature into a flat
-  `TyperImportProc[]` that's handed to `typer_infer`. The typer
-  registers each entry in its proc table during the pre-pass, so
-  cross-module calls narrow to the declared return type and
-  arg-type checks fire from the typer like local-proc calls.
-  Struct constructors (filtered out — covered by the existing
-  CapitalCase placeholder pre-pass) and non-callable values
-  (`def`/`mut` imports, `arity == -1`) are skipped. The
-  module-binding form (`use "path" name` → `$mod->fn` calls) is
-  deferred — calls through dot-receivers stay dyn.
+- **Imported procs** (Stage 1b) ✅ COMPLETE for both call forms.
+  Pre-pass in `compiler__collect_typer_imports` triggers dependency
+  compilation before the outer typer runs (so `dep_mod->exports` is
+  populated) and packs each imported proc's signature into a flat
+  `TyperImportProc[]` that's handed to `typer_infer`. The struct
+  carries an optional `binding` field set for the module-binding
+  form (`use "path" m` → `[$m->fn args]`); the destructuring form
+  leaves it NULL.
+  - **Destructuring form** (`use "path" {names}`): typer pre-pass
+    registers each entry as a TyperProc, so calls dispatch via
+    `typer__find_proc` like local procs.
+  - **Module-binding form** (`use "path" m` → `[$m->fn args]`):
+    entries stay in `tc.imports` and are resolved at the call site
+    by `typer__find_bound_proc` when the outer command's head is a
+    HEAD_DOT command with a var-ref receiver matching a registered
+    binding name. Resolution falls through to dyn if a local
+    binding shadows the module name.
+  Both forms reach the same arg-type-check + return-narrowing path;
+  a stack-allocated `TyperProc` proxy carries the bound entry
+  through the existing dispatch logic. Struct constructors and
+  non-callable values (`def`/`mut` imports, `arity == -1`) are
+  filtered out. Bare `$mod->field` value access (not as a call
+  head) stays dyn — same scope decision as the destructuring form.
 - **Nested proc registration** (Stage 1b) ✅ COMPLETE.
   `typer__register_procs` now recurses into proc bodies, picking
   up inner `proc` declarations. A nested proc called from a sibling
@@ -1188,14 +1198,13 @@ structural rather than per-builtin:
 
 These are tracked as future work but not blockers.
 
-### Imports design — destructuring form landed; module-binding deferred
+### Imports design — both call forms landed
 
-Cross-module typing for the destructuring form
-(`use "path" {names}`) is now implemented. The module-binding form
-(`use "path" name` → `[$name->fn args]`) is still deferred — calls
-through a dot-receiver stay dyn. Architecture below is preserved
-for the deferred work and for future extensions (struct exports,
-arity from imports).
+Cross-module typing for both call forms (`use "path" {names}`
+destructuring and `use "path" m` module-binding) is now implemented.
+Architecture below is preserved for future extensions (struct
+exports field-typing, imported def/mut value typing, bare
+`$mod->field` value-access narrowing).
 
 **Problem:** the typer runs as a pre-pass on the importer's AST
 (compiler.c:12558) BEFORE the compiler walks AST_USE nodes. When
@@ -1267,37 +1276,46 @@ typer-only (basic imported call narrows; wrong-arg-type errors;
 missing-export error). Total scope: half a day in a focused
 session.
 
-**What landed (destructuring form):** the implementation followed
-option 1's shape. A new helper `compiler__collect_typer_imports`
-walks `parse.nodes` for AST_USE before the outer `typer_infer` call,
-triggers `compiler__compile_module` for each uncached dependency,
-then reads `dep_mod->exports[]` and packs callable procs into a
+**What landed:** the implementation followed option 1's shape.
+A new helper `compiler__collect_typer_imports` walks `parse.nodes`
+for AST_USE before the outer `typer_infer` call, triggers
+`compiler__compile_module` for each uncached dependency, then reads
+`dep_mod->exports[]` and packs callable procs into a
 `TyperImportProc[]` array (filtered to skip structs and non-callable
-values). `typer_infer`'s signature was extended to take
-`(imports, import_count)`; the typer's pre-pass registers each
-entry in `tc.procs` so calls dispatch through the same
-`typer__find_proc` path as local procs. Two new fixture tests
-(`modules/typed_import_narrows/`, `modules/err_typed_import_into_typed/`)
-plus the pre-existing `modules/err_typed/` cover the narrowing,
-wrong-return-into-typed-binding, and arg-mismatch cases.
+values). The struct carries an optional `binding` field —
+destructuring entries leave it NULL; module-binding entries stamp
+the binding name. `typer_infer`'s signature was extended to take
+`(imports, import_count)`. The typer's pre-pass registers
+NULL-binding entries in `tc.procs` (dispatched via
+`typer__find_proc` like local procs); module-binding entries stay
+in `tc.imports` and are resolved at the call site by
+`typer__find_bound_proc` when the outer command's head is a
+HEAD_DOT command with a var-ref receiver. A small stack-allocated
+TyperProc proxy carries bound entries through the same dispatch
+logic. Four fixture tests cover the narrowing and arg-mismatch
+cases for both forms (`modules/typed_import_narrows/`,
+`modules/typed_module_binding_narrows/`,
+`modules/err_typed_import_into_typed/`,
+`modules/err_typed_module_binding/`).
 
-**Open follow-ons** (deferred from this batch):
+**Open follow-ons** (deferred):
 
-1. **Module-binding form** (`use "path" name` → `[$name->fn args]`).
-   Requires a new typer registry indexed by binding name → namespaced
-   procs, plus a dot-receiver resolution rule in the call dispatch.
-   Calls through `$mod->fn` currently fall through to dyn.
-2. **Struct exports.** Imported struct types still go through the
-   CapitalCase placeholder pre-pass with empty fields. Field access
-   on imported structs stays dyn at the typer level (the compiler's
-   shared registry has the real fields, so codegen still works).
-   Closing this needs the typer's `tc.structs[]` to merge real field
-   info from imports — would need typer↔compiler struct-idx alignment
-   across modules.
-3. **Imported `def`/`mut` values.** Skipped (`arity == -1`). To type
-   them, the typer's binding registry would need to register
+1. **Imported struct exports field-typing.** Imported struct types
+   still go through the CapitalCase placeholder pre-pass with empty
+   fields. Field access on imported structs stays dyn at the typer
+   level (the compiler's shared registry has the real fields, so
+   codegen still works). Closing this needs the typer's
+   `tc.structs[]` to merge real field info from imports — would
+   need typer↔compiler struct-idx alignment across modules.
+2. **Imported `def`/`mut` values.** Skipped (`arity == -1`). To
+   type them, the typer's binding registry would need to register
    imported names as TyperBindings with their declared type. Cheap
    to add but no current workload demands it.
+3. **Bare `$mod->field` value access.** Today this stays dyn even
+   when `field` is a typed export. Module-binding-form support is
+   limited to call sites — narrowing for value access (and for
+   `$mod->fn` as a closure value, not as a call head) would need a
+   new branch in the HEAD_DOT 2-arg typer rule.
 
 ## Pickup points
 

@@ -69,6 +69,27 @@ typedef struct {
   uint32_t    field_struct_idxs[TYPER_MAX_STRUCT_FIELDS];
 } TyperStruct;
 
+/* Imported proc signature — see jacl.h forward declaration. The
+ * compiler builds an array of these from each AST_USE's resolved
+ * exports and hands the array to the typer.
+ *
+ * Two flavors share this struct:
+ *   - Top-level destructuring (`use "path" {names}`): `binding == NULL`.
+ *     Registered as TyperProcs in tc.procs by the pre-pass.
+ *   - Module-binding (`use "path" name` then `[$name->fn args]`):
+ *     `binding` set to the binding name. Looked up by
+ *     typer__find_bound_proc when an AST_COMMAND's head is a HEAD_DOT
+ *     command resolving to that binding. */
+typedef struct TyperImportProc {
+  const char* name;
+  uint32_t    name_len;
+  uint8_t     return_type;
+  uint8_t     param_types[TYPER_MAX_PROC_PARAMS];
+  uint8_t     param_count;
+  const char* binding;        /* NULL for top-level destructuring imports */
+  uint32_t    binding_len;
+} TyperImportProc;
+
 typedef struct {
   TyperBinding bindings[TYPER_MAX_BINDINGS];
   uint32_t     binding_count;
@@ -98,6 +119,15 @@ typedef struct {
     uint32_t    box_struct_idx;  /* UINT32_MAX if not struct */
   } narrowings[TYPER_MAX_NARROWINGS];
   uint32_t     narrowing_count;
+  /* Imports array, kept alive by the caller for the duration of the
+   * walk. Only entries with binding != NULL are read post-pre-pass —
+   * those represent module-binding form imports
+   * (`use "lib" m` → `[$m->fn]`) and are looked up by
+   * typer__find_bound_proc when a HEAD_DOT command resolves to a
+   * binding. Top-level destructuring entries (binding == NULL) are
+   * already copied into tc->procs by the pre-pass. */
+  TyperImportProc*        imports;
+  uint32_t                import_count;
   /* First-error capture. NULL when the caller doesn't want typer
    * errors (syntax.c macro-body pre-typing, test_typer harness).
    * typer__error is a no-op when result is NULL. */
@@ -1477,6 +1507,29 @@ static const TyperProc* typer__find_proc(TyperCtx* tc,
   return NULL;
 }
 
+/* Look up an imported proc reached through a module binding
+ * (`use "lib" m` → `[$m->fn args]`). Returns NULL if no entry
+ * matches both the binding name and the field name.
+ *
+ * The compiler stuffs all imports (top-level destructuring and
+ * module-binding) into the same flat array; the binding column
+ * disambiguates which form an entry belongs to. */
+static const TyperImportProc* typer__find_bound_proc(TyperCtx* tc,
+                                                     const char* binding, uint32_t binding_len,
+                                                     const char* name, uint32_t name_len) {
+  if (!tc->imports) return NULL;
+  for (uint32_t i = 0; i < tc->import_count; i++) {
+    TyperImportProc* imp = &tc->imports[i];
+    if (!imp->binding) continue;
+    if (imp->binding_len != binding_len) continue;
+    if (memcmp(imp->binding, binding, binding_len) != 0) continue;
+    if (imp->name_len != name_len) continue;
+    if (memcmp(imp->name, name, name_len) != 0) continue;
+    return imp;
+  }
+  return NULL;
+}
+
 /* --- Generic walkers --- */
 
 static void typer__infer_command_inner(TyperCtx* tc, AstNode* node);
@@ -1779,6 +1832,13 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
   const TyperProc*   proc   = NULL;
   const TyperStruct* sdef   = NULL;
   uint32_t           sdef_idx = UINT32_MAX;
+  /* Stack-allocated proxy for module-binding-resolved imports. The
+   * generic dispatch below reads through `proc`, and an imported
+   * proc reached via `[$mod->fn args]` has the same downstream
+   * shape as a local proc — so we copy the resolved
+   * TyperImportProc into this proxy and point `proc` at it. The
+   * proxy's lifetime spans this function, which is sufficient. */
+  TyperProc bound_proxy;
   if (head && head->type == AST_LIT_STRING) {
     proc = typer__find_proc(tc,
         head->data.lit_string.value, head->data.lit_string.length);
@@ -1791,6 +1851,36 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
           sdef_idx = i;
           break;
         }
+      }
+    }
+  } else if (head && head->type == AST_COMMAND &&
+             head->data.command.head_id == HEAD_DOT &&
+             head->data.command.arg_count == 2 &&
+             head->data.command.args[0]->type == AST_VAR_REF &&
+             head->data.command.args[1]->type == AST_LIT_STRING) {
+    /* Module-binding call: `[$mod->fn args]` parses as an outer
+     * command whose head is a HEAD_DOT command with a var-ref
+     * receiver and a literal field name. Resolve via the imports
+     * array if `$mod` doesn't shadow a local binding. */
+    AstNode* recv = head->data.command.args[0];
+    AstNode* fld  = head->data.command.args[1];
+    const TyperBinding* shadow = typer__scope_resolve(tc,
+        recv->data.var_ref.name, recv->data.var_ref.length,
+        recv->scope_mark);
+    if (!shadow) {
+      const TyperImportProc* bound = typer__find_bound_proc(tc,
+          recv->data.var_ref.name, recv->data.var_ref.length,
+          fld->data.lit_string.value, fld->data.lit_string.length);
+      if (bound) {
+        bound_proxy.name              = bound->name;
+        bound_proxy.name_len          = bound->name_len;
+        bound_proxy.return_type       = bound->return_type;
+        bound_proxy.return_struct_idx = UINT32_MAX;
+        bound_proxy.param_count       = bound->param_count;
+        for (uint32_t i = 0; i < bound->param_count && i < TYPER_MAX_PROC_PARAMS; i++) {
+          bound_proxy.param_types[i] = bound->param_types[i];
+        }
+        proc = &bound_proxy;
       }
     }
   }
@@ -1910,17 +2000,20 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
       if (arg_t == param_t) continue;
       if (param_t == TYPE_STRUCT && arg_t == TYPE_STRUCT) continue;
       char err[224];
+      /* Read name from `proc` rather than `head`: for module-binding
+       * calls (`[$mod->fn args]`) the head is an AST_COMMAND, not the
+       * literal proc name. The name was stamped on the proxy. */
       if (arg_t == TYPE_DYN) {
         snprintf(err, sizeof(err),
                  "type error: argument %u of %.*s expected %s, got dyn (use [to %s $val])",
                  i + 1,
-                 (int)head->data.lit_string.length, head->data.lit_string.value,
+                 (int)proc->name_len, proc->name,
                  type_name(param_t), type_name(param_t));
       } else {
         snprintf(err, sizeof(err),
                  "type error: argument %u of %.*s expected %s, got %s",
                  i + 1,
-                 (int)head->data.lit_string.length, head->data.lit_string.value,
+                 (int)proc->name_len, proc->name,
                  type_name(param_t), type_name(arg_t));
       }
       typer__error(tc, as[i]->start.line, as[i]->start.column, err);
@@ -2901,24 +2994,14 @@ static void typer__infer_node(TyperCtx* tc, AstNode* node) {
   }
 }
 
-/* Imported proc signature — see jacl.h forward declaration. The
- * compiler builds an array of these from each AST_USE's resolved
- * exports and hands the array to the typer; the typer registers each
- * entry as a TyperProc during the pre-pass. */
-typedef struct TyperImportProc {
-  const char* name;
-  uint32_t    name_len;
-  uint8_t     return_type;
-  uint8_t     param_types[TYPER_MAX_PROC_PARAMS];
-  uint8_t     param_count;
-} TyperImportProc;
-
 void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null,
                  TyperImportProc* imports, uint32_t import_count) {
   TyperCtx tc;
   tc.binding_count = 0;
   tc.scope_depth   = 0;
   tc.proc_count    = 0;
+  tc.imports       = imports;
+  tc.import_count  = import_count;
   tc.result        = result_or_null;
   if (result_or_null) {
     result_or_null->error_count       = 0;
@@ -2981,16 +3064,20 @@ void typer_infer(AstNode** nodes, uint32_t count, TyperResult* result_or_null,
 
   typer__register_procs(&tc, nodes, count);
 
-  /* Imports pre-pass: register each compiler-supplied imported proc
-   * signature as a TyperProc so cross-module calls narrow to the
-   * declared return type. Skipped if a same-name proc is already
-   * registered (a local proc shadows the import — matches runtime
-   * lexical resolution). The compiler is responsible for filtering
-   * to destructuring-form imports and for excluding struct
-   * constructors and non-callable values; the typer trusts the array. */
+  /* Imports pre-pass: register top-level destructuring imports
+   * (`binding == NULL`) as TyperProcs so cross-module calls narrow
+   * to the declared return type. Module-binding entries
+   * (`binding != NULL`, e.g. `use "lib" m` → `[$m->fn]`) stay in
+   * tc.imports and are looked up later via typer__find_bound_proc.
+   *
+   * Skipped if a same-name proc is already registered (a local proc
+   * shadows the import — matches runtime lexical resolution). The
+   * compiler is responsible for filtering to callable procs (struct
+   * constructors and non-callable def/mut values are excluded). */
   for (uint32_t i = 0; i < import_count; i++) {
     if (tc.proc_count >= TYPER_MAX_PROCS) break;
     TyperImportProc* imp = &imports[i];
+    if (imp->binding) continue;  /* module-binding form: deferred to call site */
     if (typer__find_proc(&tc, imp->name, imp->name_len)) continue;
     TyperProc* p = &tc.procs[tc.proc_count++];
     p->name              = imp->name;

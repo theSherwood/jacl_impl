@@ -1,0 +1,3 @@
+# expect-error: argument 1 of add expected i64, got str
+use "./lib.jacl" lib
+print [$lib->add "x" 2]

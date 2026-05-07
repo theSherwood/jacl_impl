@@ -12853,12 +12853,16 @@ void module__populate_exports(Module* mod, Compiler* c) {
  * has to run before collection (which reads exports), and the typer
  * pre-pass that consumes the array has to run after collection.
  *
- * Only destructuring-form imports (`use "path" {names}`) contribute
- * entries — the module-binding form (`use "path" name` → `$mod->fn`) is
- * deferred. Within destructuring imports, struct constructors and
- * non-callable values (def/mut imports with arity == -1) are filtered
- * out: structs are handled by the typer's CapitalCase placeholder pass,
- * and value imports stay typed via the consumer's binding form.
+ * Both forms contribute entries:
+ *   - Destructuring (`use "path" {names}`): one entry per name with
+ *     `binding == NULL`. Registered as TyperProcs.
+ *   - Module-binding (`use "path" name`): one entry per export with
+ *     `binding == name`. Looked up at call time via $name->fn.
+ * Within both forms, struct constructors and non-callable def/mut
+ * values (`arity == -1`) are filtered out — structs are handled by
+ * the typer's CapitalCase placeholder pass for destructuring; for
+ * the module-binding form imported structs and values stay dyn at
+ * the typer (the compiler still resolves them at codegen).
  *
  * `out_imports` must point at an array of at least
  * COMPILER_GLOBAL_ARITIES_MAX entries. */
@@ -12872,8 +12876,6 @@ static uint32_t compiler__collect_typer_imports(Compiler* c,
   for (uint32_t i = 0; i < count; i++) {
     AstNode* n = nodes[i];
     if (n->type != AST_USE) continue;
-    if (n->data.use_decl.is_module_binding) continue;
-    if (n->data.use_decl.name_count == 0) continue;
     const char* dep_canonical = module__resolve_path(
         importer_path, n->data.use_decl.path, c->arena);
     if (!dep_canonical) continue;
@@ -12887,6 +12889,32 @@ static uint32_t compiler__collect_typer_imports(Compiler* c,
       dep_mod = module_cache__find(c->module_cache, dep_canonical);
       if (!dep_mod) continue;
     }
+    if (n->data.use_decl.is_module_binding) {
+      /* `use "path" m`: emit one entry per module export with binding=m. */
+      const char* binding     = n->data.use_decl.binding_name;
+      uint32_t    binding_len = n->data.use_decl.binding_name_len;
+      if (!binding || binding_len == 0) continue;
+      for (uint32_t ei = 0; ei < dep_mod->export_count; ei++) {
+        if (out_count >= max_imports) return out_count;
+        ExportEntry* exp = &dep_mod->exports[ei];
+        if (exp->arity < 0) continue;
+        if (exp->type == TYPE_STRUCT && exp->return_type == TYPE_STRUCT) continue;
+        TyperImportProc* slot = &out_imports[out_count++];
+        slot->name        = exp->name;
+        slot->name_len    = exp->name_len;
+        slot->return_type = (uint8_t)exp->return_type;
+        uint32_t pc = exp->param_count;
+        if (pc > COMPILER_MAX_PROC_PARAMS) pc = COMPILER_MAX_PROC_PARAMS;
+        slot->param_count = (uint8_t)pc;
+        for (uint32_t pi = 0; pi < pc; pi++) {
+          slot->param_types[pi] = (uint8_t)exp->param_types[pi];
+        }
+        slot->binding     = binding;
+        slot->binding_len = binding_len;
+      }
+      continue;
+    }
+    if (n->data.use_decl.name_count == 0) continue;
     for (uint32_t ni = 0; ni < n->data.use_decl.name_count; ni++) {
       if (out_count >= max_imports) return out_count;
       const char* nm = n->data.use_decl.names[ni];
@@ -12912,6 +12940,8 @@ static uint32_t compiler__collect_typer_imports(Compiler* c,
       for (uint32_t pi = 0; pi < pc; pi++) {
         slot->param_types[pi] = (uint8_t)exp->param_types[pi];
       }
+      slot->binding     = NULL;
+      slot->binding_len = 0;
     }
   }
   return out_count;
