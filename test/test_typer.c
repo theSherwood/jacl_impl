@@ -1,13 +1,12 @@
 /* Typer-only test harness. Runs the typer (typer_infer) on small JACL
  * programs and asserts that specific AST nodes have the expected
- * inferred_type. First commit of Stage 0 in the static-typing
- * migration; see STATIC_TYPING_PLAN.md.
+ * inferred_type. See TYPE_SYSTEM.md for the type system overview.
  *
- * Why this exists: today the only way to test the typer is end-to-end
- * through codegen + VM. That misses every divergence between the
- * typer and the compiler that doesn't happen to manifest as a
- * runtime difference. These tests assert directly on the typer's
- * AST annotations, so a wrong inferred_type fails immediately.
+ * Why this exists: end-to-end tests through codegen + VM miss any
+ * divergence between the typer and the compiler that doesn't happen
+ * to manifest as a runtime difference. Asserting directly on the
+ * typer's AST annotations, a wrong inferred_type fails immediately
+ * even when the bytecode compiles cleanly.
  *
  * Each test compiles a small JACL string, runs the typer, then walks
  * the AST and asserts on specific nodes. The find helpers do

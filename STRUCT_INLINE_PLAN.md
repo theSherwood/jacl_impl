@@ -247,4 +247,4 @@ Possibly removable helpers:
   Document `[box]`/`[box? T]`/`[unbox]` as the only dyn boundary. Document
   ctx as the lone builtin heap record.
 - Update `DESIGN.md` references to `OBJ_STRUCT`/`JaclStruct`/value-vs-heap split.
-- Cross-check `SYNTAX_REDESIGN.md` and `SIMPLIFICATION.md` for stale references.
+- Cross-check `SYNTAX_REDESIGN.md` for stale references.

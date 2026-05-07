@@ -1,19 +1,16 @@
 /* Type-error corpus. Locks in the user-facing behavior of compile-time
- * type errors that the compiler emits today. Stage 0 of the
- * static-typing migration; see STATIC_TYPING_PLAN.md.
+ * type errors. See TYPE_SYSTEM.md for the type system overview.
  *
- * Why this exists: Stage 1 moves the type-check logic for typed
- * bindings, struct fields, ctx fields, etc. from compiler.c into
- * the typer. The risk is silently changing or losing user-facing
- * error messages. This corpus asserts on substrings of the error
- * messages so a regression fails the test rather than passing
- * silently.
+ * Why this exists: most type-mismatch errors fire from the typer
+ * via shared formatters in src/type_error.c, with the compiler as
+ * a backstop. Either pass can win the race depending on AST shape.
+ * Substring matching on key terms (type names, "type error", proc /
+ * struct names) catches regressions without locking in exact
+ * sentence wording.
  *
  * Each case compiles a small JACL string that should fail with a
- * specific compile-time error. We assert error_count > 0 plus
- * substrings of the message. Substring matching (not exact) lets
- * Stage 1 reword messages slightly without breaking the corpus,
- * as long as the key terms (types, names) stay. */
+ * specific compile-time error. We assert error_count > 0 plus the
+ * load-bearing substrings of the message. */
 
 #include "../src/jacl.h"
 #include "../lib/arena/arena.h"

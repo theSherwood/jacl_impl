@@ -1,9 +1,9 @@
 /*
- * Shared type-error message formatters. Used by compiler.c today and
- * (in Stage 1) the typer too — both passes call these to produce the
- * content of type-mismatch error messages, ensuring the user-facing
- * UX stays consistent regardless of which pass first detects an
- * error. See STATIC_TYPING_PLAN.md decision 4.
+ * Shared type-error message formatters. Both the typer and the
+ * compiler call these to produce the content of type-mismatch
+ * messages, keeping the user-facing UX consistent regardless of
+ * which pass first detects an error. See TYPE_SYSTEM.md
+ * "Type errors — shared formatters, per-pass reporting".
  *
  * Each formatter writes to a caller-provided buffer in snprintf
  * style so it composes with the existing compiler__error /

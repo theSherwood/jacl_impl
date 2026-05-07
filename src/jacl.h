@@ -2030,7 +2030,7 @@ extern void typer_infer (AstNode **nodes, uint32_t count,
 /* --- type_error.c — shared formatters used by both compiler and typer.
  * Each writes to a caller buffer in snprintf style; the reporting
  * machinery is per-pass (compiler__error / typer__error). See
- * STATIC_TYPING_PLAN.md decision 4. */
+ * TYPE_SYSTEM.md "Type errors — shared formatters, per-pass reporting". */
 extern int jacl_format_assign_mismatch (char *buf, size_t bufsz,
                                         JaclType target, JaclType actual,
                                         const char *name, uint32_t name_len);
