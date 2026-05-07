@@ -1221,65 +1221,65 @@ The syntax is the same for both phases. Full parametric generics (type variables
 
 ## Implementation status
 
-Features from this document compared against the current codebase. Last updated: 2026-04-20.
+Features from this document compared against the current codebase. Last updated: 2026-05-07.
 
 ### Implemented
 
 | Feature | Notes |
 |---------|-------|
-| Three-mode delimiter system (`[]`, `{}`, `()`) | Full lexer/parser/compiler support |
-| Infix mode — no precedence, left-to-right | Smalltalk-style, unary prefix binds tighter |
-| Pipe threading (`\|` first-arg in command mode) | Multi-stage, composes with error short-circuit |
-| Binding operators (`=`, `:`, `::`) | Sugar for `def`, `mut`, `set` — implemented as macros in prelude.jacl |
-| Arrow field access (`->`) | `$point->x`, chained, dynamic |
-| `proc` syntax (`{params} {body}`, type-before-name) | Closures, tail calls, recursion |
-| `struct` syntax (`struct Name {type field, ...}`) | C-ABI layout, typed fields |
-| `if`/`elif`/`else` | Expression-valued, composes with pipes |
-| `while` loops | With `break`/`continue` |
-| `for` — all 4 forms | C-style, collection+implicit, collection+explicit, HOF callback |
-| `break`, `continue`, `return` | Block bodies inlined, lambda bodies separate |
-| Lambda shorthand (`[\  ]` with `$it`) | Works in pipes and callbacks — implemented as macro in prelude.jacl |
-| String interpolation (`$var`, `$[...]`, `$(...)`) | All three modes, nesting |
-| Line continuation (`\` at end of line) | Plus delimiter-based multi-line |
-| Comments (`#` single-line) | `##` doc comments by convention |
-| Error handling (error values, pipe short-circuit, `try`/`catch`) | `error`, `error?`, `error-val` |
-| Persistent collections (vectors, maps) | RRB-tree vectors, HAMT maps |
-| Mutable state (`box`, `atom`, `swap`, `reset`) | Thread-local boxes, CAS atoms |
-| Concurrency (`spawn`, `await`, `parallel`, `race`) | CPS transform, NxM scheduler |
-| Static type system (gradual typing) | Typed/unboxed values, compile-time checks |
-| GC | Epoch-based tracing, generational, non-moving |
-| `filter`, `transform` (HOF) | Eager on vectors |
-| **Destructuring** (`def [a b] $v`, `def {x, y} $p`, `{..}`, `..rest`, `_`) | Vec, named, wildcard, rest, spread-all patterns |
-| **Splat/spread** (`..`) | In destructuring patterns and variadic macro params |
-| **Streams** (lazy sequences) | `lines`, `stream_next`, `collect`; lazy iteration |
-| **Macro system** (`defmacro`) | AST quasiquoting (`syntax-quote`, `~`), hygiene, `gensym` |
-| **Operators as macros** | `=`, `:`, `::`, `\|`, `\`, `and`, `or`, `not` in prelude.jacl |
-| **Variadic macros** | `defmacro foo {a ..rest}` works |
-| **Module system** (basic `use`) | `use "path" name` and `use "path" {bindings}` work |
-| **`interpret`** (sandboxed eval) | `[interpret $src]`, `[interpret $prelude $src]`, capability-based sandboxing |
+| Three-mode delimiter system (`[]`, `{}`, `()`) | yes |
+| Infix mode — no precedence, left-to-right | unary prefix binds tighter |
+| Pipe threading (`\|` first-arg in command mode) | yes |
+| Binding operators (`=`, `:`, `::`) | prelude macros |
+| Arrow field access (`->`) | chained |
+| `proc` syntax (`{params} {body}`, type-before-name) | yes |
+| `struct` syntax (`struct Name {type field, ...}`) | C-ABI layout |
+| `if`/`elif`/`else` | expression-valued |
+| `while` loops | yes |
+| `for` — all 4 forms | yes |
+| `break`, `continue`, `return` | block-inlined; lambda-separate |
+| Lambda shorthand (`[\  ]` with `$it`) | prelude macro |
+| String interpolation (`$var`, `$[...]`, `$(...)`) | nested |
+| Line continuation (`\` at end of line) | yes |
+| Comments (`#`, `##`) | yes |
+| Error handling (error values, pipe short-circuit, `try`/`catch`) | yes |
+| Persistent collections (vectors, maps) | RRB-tree, HAMT |
+| Mutable state (`box`, `atom`, `swap`, `reset`) | thread-local boxes, CAS atoms |
+| Concurrency (`spawn`, `await`, `parallel`, `race`) | CPS + SM transform; NxM scheduler |
+| Static type system (gradual typing) | see `TYPE_SYSTEM.md` |
+| GC | epoch-based tracing |
+| `filter`, `transform` (HOF) | eager on vectors |
+| Destructuring (`[pos]`, `{named}`, `{..}`, `..rest`, `_`) | yes |
+| Splat/spread (`..`) | destructure + variadic macros + spread |
+| Streams (lazy sequences) | `lines`, `stream_next`, `collect` |
+| Macro system (`defmacro`) | AST quasiquote, hygienic, `gensym` |
+| Operators as macros | in prelude.jacl |
+| Variadic macros | `..rest` in macro params |
+| Module system | both `use` forms; cross-module typing |
+| `interpret` (sandboxed eval) | capability-based |
+| Implicit context (`$ctx`) | typed, dynamically-scoped, user-extensible; `with-ctx` |
+| Typed collections (`[Vec T]`, `[Map K V]`) | see `TYPE_SYSTEM.md` |
+| Variadic procs (`proc log {level, ..msgs}`) | `..rest` in proc params |
+| Ranges (`(1 ..< 10)`, `(1 ..= 10)`) | infix in `()`; produce streams |
+| Multi-line strings (`"""..."""`) | with interpolation, Kotlin-style indent |
+| Optional chaining (`?.`) | in `()` mode |
+| Module visibility (`_` prefix = private) | compiler-enforced at import |
+| Pragmas (`#{ ... }`) | yes |
+| Same-scope shadowing error | compile-time |
 
 ### Not yet implemented
 
 | Feature | Complexity | Dependencies | Notes |
 |---------|-----------|--------------|-------|
-| **Match/case** (`match $val { pattern { body } ... }`) | Large | None | Literals, bindings, type patterns, guards, pipe composition |
-| **Variadic procs** (`proc log {level, ..msgs}`) | Medium | None | Only macros support `..rest`, not regular procs |
-| **Ranges** (`(1 ..< 10)`, `(1 ..= 10)`) | Medium | None | Infix operators in `()` mode, produce streams |
-| **Shell interop** (`!cmd`, `exec`) | Large | Streams | `!` prefix, OS pipes, stdin/stdout, error mapping |
-| **Implicit context** (`$ctx`) | Large | Shell interop uses it | Dynamic scoping, `with-ctx`, user-extensible fields |
-| **Module visibility** (underscore = private) | Small | Module system | Compiler enforcement at import boundaries |
+| **Match/case** (`match $val { pattern { body } ... }`) | Large | None | Lexed/parsed but no compiler/runtime; literals, bindings, type patterns, guards, pipe composition |
+| **Shell interop** (`!cmd`, `exec`) | Large | none (streams + `$ctx` both done) | `!` prefix, OS pipes, stdin/stdout, error mapping |
 | **Callable values** (maps/atoms in `[]` head position) | Medium | None | `[$colors red]`, `[$config port]` |
 | **Atom listeners** (`watch`) | Medium | None | General-purpose watcher mechanism |
 | **`$env`** (atom of map, `with-env`, `$home`/`$pwd`/`$pid`) | Medium | Atom listeners, callable values | Bidirectional OS sync via listeners |
 | **Aliases** (`alias ll { !ls -la }`) | Small | Shell interop | Compile-time rewrite with arg appending |
-| **Typed collections** (`[vec Point]`, `[map str i64]`) | Medium | None | Type parameterization in type position |
-| **Multi-line strings** (`"""..."""`) | Small | None | Triple-quoted, Kotlin-style whitespace stripping |
-| **Pragmas** (`#{ path-fallback }`) | Small | None | File-level configuration |
-| **Optional chaining** (`$val ?. field`) | Small | None | Nil-safe access in `()` mode |
-| **Globbing** (`glob` command) | Medium | Streams, `$ctx` | Returns stream of paths |
-| **I/O commands** (`read-file`, `write-file`, `append-file`) | Medium | Streams | Pipe-friendly file I/O |
-| **Jobs** (future + OS process) | Medium | Shell interop, concurrency | `pid`, `signal`, `cancel`, `&` sugar |
-| **`par-each`** | Medium | Streams, concurrency | Concurrent stream processing |
-| **`timeout`** | Small | Concurrency | Sugar for `race` + sleep |
+| **Globbing** (`glob` command) | Medium | Shell interop | Returns stream of paths; reads `$ctx.pwd` |
+| **I/O commands** (`read-file`, `write-file`, `append-file`) | Medium | none (streams done) | Pipe-friendly file I/O |
+| **Jobs** (future + OS process) | Medium | Shell interop | `pid`, `signal`, `cancel`, `&` sugar |
+| **`par-each`** | Medium | none (streams + concurrency both done) | Concurrent stream processing |
+| **`timeout`** | Small | none (concurrency done) | Sugar for `race` + sleep |
 | **Regular expressions** | Medium | None | Literal syntax TBD |
-| **Scoping: same-scope shadowing error** | Small | None | Compile-time check |
