@@ -1448,6 +1448,21 @@ static void typer__register_procs(TyperCtx* tc, AstNode** nodes, uint32_t count)
     for (uint32_t i = 0; i < pcount; i++) {
       p->param_types[i] = (uint8_t)pt[i];
     }
+
+    /* Nested procs: recurse into the proc body so inner `proc`
+     * declarations are visible from sibling positions inside the
+     * same scope. The typer's proc registry is flat, so a nested
+     * proc with a name colliding with a top-level proc would shadow
+     * the top-level one — same behavior as the runtime, which
+     * resolves names lexically. Externs have no body, skip them. */
+    if (!is_extern) {
+      uint32_t body_idx = (argc == 4) ? 3 : 2;
+      if (body_idx < argc && args[body_idx]->type == AST_BLOCK) {
+        AstNode* body = args[body_idx];
+        typer__register_procs(tc, body->data.block.commands,
+                              body->data.block.count);
+      }
+    }
   }
 }
 

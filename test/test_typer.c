@@ -845,6 +845,39 @@ static void test_swap_box_narrows_to_element(void) {
   arena_destroy(&a);
 }
 
+/* --- Stage 1 long-tail: nested proc registration --- */
+
+static void test_nested_proc_call_narrows(void) {
+  current_test = "nested_proc_call_narrows";
+  arena_t a = {0};
+  /* outer defines inner; calls to `inner` from outer's body should
+   * narrow to inner's declared return type (i32), not dyn. */
+  ParseResult r = run_typer(
+      "proc outer {} {\n"
+      "  proc i32 inner {} { 42 }\n"
+      "  inner\n"
+      "}", &a);
+  AstNode* outer = r.nodes[0];
+  /* The inner-call is the second AST_COMMAND with head "inner" — the
+   * first is the proc definition. find_cmd does pre-order, so it
+   * returns the proc-def node. We need the bare call. Walk the
+   * outer's body block manually. */
+  ASSERT_NOT_NULL(outer);
+  if (outer && outer->type == AST_COMMAND &&
+      outer->data.command.arg_count >= 3) {
+    AstNode* body = outer->data.command.args[2];
+    ASSERT_NOT_NULL(body);
+    if (body && body->type == AST_BLOCK && body->data.block.count >= 2) {
+      AstNode* call = body->data.block.commands[1];
+      ASSERT_TYPE(call, TYPE_I32);
+    } else {
+      fprintf(stderr, "  FAIL %s: body shape unexpected\n", current_test);
+      failures++;
+    }
+  }
+  arena_destroy(&a);
+}
+
 /* --- Driver ------------------------------------------------------- */
 
 int main(void) {
@@ -905,6 +938,7 @@ int main(void) {
   test_deref_box_narrows_to_int();
   test_deref_box_string();
   test_swap_box_narrows_to_element();
+  test_nested_proc_call_narrows();
 
   printf("\n%d/%d passed", passes, passes + failures);
   if (failures > 0) {

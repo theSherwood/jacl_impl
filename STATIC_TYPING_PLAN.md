@@ -1133,10 +1133,14 @@ structural rather than per-builtin:
   proc_name` imports stay DYN. Loading imported modules' typer
   state would mean re-running the typer on the imported source —
   bigger scope than a single typer rule.
-- **Nested proc registration** (Stage 1b): procs defined inside a
-  proc body aren't registered in the typer's proc registry, so
-  calls to them from sibling positions fall through to DYN. Not
-  surfaced by the corpus.
+- **Nested proc registration** (Stage 1b) ✅ COMPLETE.
+  `typer__register_procs` now recurses into proc bodies, picking
+  up inner `proc` declarations. A nested proc called from a sibling
+  position narrows to its declared return type instead of dyn.
+  Externs have no body so the recursion skips them. The typer's
+  proc registry stays flat, matching runtime lexical resolution
+  semantics (a nested proc with a name colliding with a top-level
+  one shadows it).
 - **Closure literals as call results** (Stage 1b): anonymous procs
   get TYPE_CLOSURE via the same path as named procs (no remaining
   gap in typing the closure value itself), but the typer doesn't
