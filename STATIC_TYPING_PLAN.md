@@ -1142,10 +1142,26 @@ structural rather than per-builtin:
   gap in typing the closure value itself), but the typer doesn't
   know an anonymous closure's signature, so calling it falls
   through to DYN.
-- **Box-element narrowing for `[deref $box]` / `[swap $box fn]`**:
-  the typer doesn't track box element types. Deref/swap stay DYN.
-  Adding TYPE_BOX_OF would mirror TYPE_FUTURE / TYPE_TYPED_VEC but
-  isn't load-bearing today.
+- **Box-element narrowing for `[deref $box]` / `[swap $box fn]`**
+  ✅ COMPLETE for scalar elements. New `TYPE_BOX` JaclType mirrors
+  `TYPE_FUTURE` — element idx in `inferred_struct_idx` (scalar
+  sentinel for `[box 42]`, would be a struct registry idx for
+  `[box [Point 1 2]]`). `[box $val]` types as `TYPE_BOX` with the
+  value's element type; `[deref $box]` / `[swap $box $fn]` narrow
+  to the scalar element type. Untyped `def b [box ...]` now
+  inherits TYPE_BOX from the RHS the same way TYPE_FUTURE /
+  TYPE_PTR do.
+
+  **Known gap (deferred):** struct-element narrowing through deref
+  was tried but reverted. The typer marking `[deref $box_of_Point]`
+  as `TYPE_STRUCT` triggers downstream compiler rules ("proc
+  returning a struct must declare return type") that the runtime
+  path doesn't actually need — the box's contents are already
+  boxed JaclVals at runtime, not inline struct slots. Closing
+  this needs a new `OP_BOX_DEREF_INLINE` opcode that materializes
+  inline struct bytes from the box's contents (parallel to
+  `OP_TYPED_VEC_GET_INLINE`). Tracked as future work; for now
+  struct-element boxes still narrow to dyn through deref.
 
 These are tracked as future work but not blockers.
 

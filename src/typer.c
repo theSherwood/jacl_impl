@@ -591,7 +591,7 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
     JaclType rhs_t = (JaclType)value_node->inferred_type;
     if (is_unboxed_type(rhs_t) || rhs_t == TYPE_STRUCT ||
         rhs_t == TYPE_STREAM || is_typed_collection(rhs_t) ||
-        rhs_t == TYPE_FUTURE) {
+        rhs_t == TYPE_FUTURE || rhs_t == TYPE_BOX) {
       effective = rhs_t;
     } else {
       effective = TYPE_DYN;
@@ -600,7 +600,8 @@ static bool typer__handle_def_or_mut(TyperCtx* tc, AstNode* node) {
   uint32_t struct_idx = UINT32_MAX;
   uint32_t key_struct_idx = UINT32_MAX;
   if (effective == TYPE_STRUCT || is_typed_collection(effective) ||
-      effective == TYPE_FUTURE || effective == TYPE_PTR) {
+      effective == TYPE_FUTURE || effective == TYPE_PTR ||
+      effective == TYPE_BOX) {
     /* Declared struct (def Point r ...) / typed-collection elem
      * (def [Vec Point] ps ...) / pointer pointee
      * (def [Ptr Point] p ...) wins; otherwise inherit from RHS. */
@@ -2336,6 +2337,49 @@ static void typer__infer_command_inner(TyperCtx* tc, AstNode* node) {
     }
     if (matched) {
       /* handled */
+    } else if (hid == HEAD_BOX && node->data.command.arg_count == 1) {
+      /* [box $val]: runtime returns a box wrapping the value. The
+       * box's element type is the value's static type, encoded the
+       * same way as TYPE_FUTURE / TYPE_TYPED_VEC — scalar sentinel
+       * for scalar elements, real struct idx for struct elements. */
+      AstNode* val = node->data.command.args[0];
+      JaclType vt = (JaclType)val->inferred_type;
+      node->inferred_type = TYPE_BOX;
+      if (vt == TYPE_STRUCT) {
+        node->inferred_struct_idx = val->inferred_struct_idx;
+      } else if (vt != TYPE_DYN) {
+        node->inferred_struct_idx = JACL_SCALAR_TYPE_IDX(vt);
+      }
+    } else if (hid == HEAD_DEREF && node->data.command.arg_count == 1) {
+      /* [deref $box]: narrows to the box's element type for SCALAR
+       * elements. Struct elements stay dyn — materializing a struct
+       * value out of a box at codegen time needs an inline-load
+       * opcode (parallel to OP_TYPED_VEC_GET_INLINE) that doesn't
+       * exist yet. Tracked as a gap; deferred until a workload needs
+       * the stricter narrowing. */
+      AstNode* recv = node->data.command.args[0];
+      JaclType rt = (JaclType)recv->inferred_type;
+      uint32_t e_idx = recv->inferred_struct_idx;
+      if (rt == TYPE_BOX && e_idx != UINT32_MAX &&
+          JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
+        node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+      } else {
+        node->inferred_type = TYPE_DYN;
+      }
+    } else if (hid == HEAD_SWAP && node->data.command.arg_count == 2) {
+      /* [swap $box $fn]: applies fn to the value, stores the result,
+       * returns the result. Same scalar-only narrowing as deref —
+       * struct elements stay dyn for the codegen-materialization
+       * reason described above. */
+      AstNode* recv = node->data.command.args[0];
+      JaclType rt = (JaclType)recv->inferred_type;
+      uint32_t e_idx = recv->inferred_struct_idx;
+      if (rt == TYPE_BOX && e_idx != UINT32_MAX &&
+          JACL_IS_SCALAR_TYPE_IDX(e_idx)) {
+        node->inferred_type = JACL_TYPE_IDX_TO_SCALAR(e_idx);
+      } else {
+        node->inferred_type = TYPE_DYN;
+      }
     } else if (hid == HEAD_SPAWN && node->data.command.arg_count == 1 &&
                node->data.command.args[0]->type == AST_BLOCK) {
       /* spawn: runtime returns a future (vm.c:4763). Element type is

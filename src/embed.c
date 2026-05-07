@@ -874,6 +874,7 @@ bool embed__val_matches_field_type(JaclVal val, int field_type) {
     case TYPE_TYPED_MAP: return jacl_is_map(val);
     case TYPE_FUTURE:  return jacl_is_future(val);
     case TYPE_PTR:     return jacl_is_u64(val);  /* pointer rep is u64 */
+    case TYPE_BOX:     return jacl_is_box(val);
   }
   return false;
 }

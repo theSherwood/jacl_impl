@@ -301,6 +301,15 @@ static void run_all(void) {
     .expect_substrings = { "type error", "x", "Point", "i32", "str" },
   });
 
+  /* Stage 1 long-tail: deref of a typed box assigned to a wrong-type
+   * binding errors at the def commitment site. */
+  RUN("box_deref_wrong_typed_binding", {
+    .source =
+      "def b [box 42]\n"
+      "def i64 x [deref $b]",
+    .expect_substrings = { "type error", "i64", "i32" },
+  });
+
   /* Stage 5b ext: addr requires a field-access chain argument. */
   RUN("addr_non_chain_argument", {
     .source = "def i32 x 5\naddr $x",

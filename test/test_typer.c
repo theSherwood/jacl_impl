@@ -788,6 +788,63 @@ static void test_addr_of_scalar_field_returns_ptr(void) {
   arena_destroy(&a);
 }
 
+/* --- Stage 1 long-tail: box element narrowing --- */
+
+static void test_box_of_int_typed(void) {
+  current_test = "box_of_int_typed";
+  arena_t a = {0};
+  ParseResult r = run_typer("def b [box 42]", &a);
+  AstNode* box = find_cmd(r.nodes[0], "box");
+  ASSERT_NOT_NULL(box);
+  ASSERT_TYPE(box, TYPE_BOX);
+  if (box) {
+    uint32_t want = JACL_SCALAR_TYPE_IDX(TYPE_I32);
+    if (box->inferred_struct_idx != want) {
+      fprintf(stderr, "  FAIL %s: box element idx expected %u got %u\n",
+              current_test, want, box->inferred_struct_idx);
+      failures++;
+    } else { passes++; }
+  }
+  arena_destroy(&a);
+}
+
+static void test_deref_box_narrows_to_int(void) {
+  current_test = "deref_box_narrows_to_int";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "def b [box 42]\n"
+      "def x [deref $b]", &a);
+  AstNode* d = find_cmd(r.nodes[1], "deref");
+  ASSERT_NOT_NULL(d);
+  ASSERT_TYPE(d, TYPE_I32);
+  arena_destroy(&a);
+}
+
+static void test_deref_box_string(void) {
+  current_test = "deref_box_string";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "def b [box \"hi\"]\n"
+      "def s [deref $b]", &a);
+  AstNode* d = find_cmd(r.nodes[1], "deref");
+  ASSERT_NOT_NULL(d);
+  ASSERT_TYPE(d, TYPE_STR);
+  arena_destroy(&a);
+}
+
+static void test_swap_box_narrows_to_element(void) {
+  current_test = "swap_box_narrows_to_element";
+  arena_t a = {0};
+  ParseResult r = run_typer(
+      "def b [box 0]\n"
+      "proc inc {x} { + $x 1 }\n"
+      "def n [swap $b $inc]", &a);
+  AstNode* s = find_cmd(r.nodes[2], "swap");
+  ASSERT_NOT_NULL(s);
+  ASSERT_TYPE(s, TYPE_I32);
+  arena_destroy(&a);
+}
+
 /* --- Driver ------------------------------------------------------- */
 
 int main(void) {
@@ -844,6 +901,10 @@ int main(void) {
   test_ptr_nested_struct_field_chain();
   test_ptr_struct_field_returns_struct();
   test_addr_of_scalar_field_returns_ptr();
+  test_box_of_int_typed();
+  test_deref_box_narrows_to_int();
+  test_deref_box_string();
+  test_swap_box_narrows_to_element();
 
   printf("\n%d/%d passed", passes, passes + failures);
   if (failures > 0) {

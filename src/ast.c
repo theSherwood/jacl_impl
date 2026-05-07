@@ -298,7 +298,8 @@ typedef enum {
   TYPE_TYPED_VEC,
   TYPE_TYPED_MAP,
   TYPE_FUTURE,
-  TYPE_PTR        /* typed pointer; pointee idx in inferred_struct_idx */
+  TYPE_PTR,       /* typed pointer; pointee idx in inferred_struct_idx */
+  TYPE_BOX        /* mutable box (cell); element idx in inferred_struct_idx */
 } JaclType;
 
 /* Typed-collection element encoding for struct_idx: real struct registry
@@ -367,6 +368,7 @@ const char* type_name(JaclType t) {
     case TYPE_TYPED_MAP: return "typed-map";
     case TYPE_FUTURE:    return "future";
     case TYPE_PTR:       return "ptr";
+    case TYPE_BOX:       return "box";
   }
   return "unknown";
 }
