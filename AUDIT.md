@@ -186,14 +186,172 @@ prevent this in the steady state, but combined with #7 it's not airtight.
 ### 9. `gc_enumerate_roots` doesn't scan VM stacks; `gc_collect` does
 The design (Section 3) claims CPS captures all live state into task closures,
 so concurrent GC doesn't need to scan VM stacks
-(`src/runtime.c:597-599`). Single-threaded `gc_mark` does scan the VM stack.
-The invariant is load-bearing: any CPS segment that loads a value out of a
-closure, computes a derived heap pointer, and holds it on the VM stack across
-a `gc_alloc` call is at risk. There's no static enforcement that bytecode
-emitted by the CPS transform never widens a heap reference between safepoints
-in a way that loses reachability. Worth a property test (instrument GC at
-random safepoints, verify no dangling stack pointers) plus an explicit list of
-"forbidden patterns" the compiler must avoid.
+(`src/runtime.c:822-829`). Single-threaded `gc_mark` does scan the VM stack
+(`src/gc_collect.c:411-415`). The invariant is load-bearing.
+
+**The audit (May 2026) traced this through the bytecode and found a real
+soundness gap.** Empirical reproduction is hard (the race window is tight
+and requires precise cross-thread alignment), but the gap is reachable in
+principle. The full analysis follows.
+
+#### 9a. The intended model
+
+- Roots: each worker's `currently_executing` task (its `gc_root{,2,3}`
+  fields hold the CPS closure + ctx), the public/private deques, the env,
+  ctx pool, saved ctx stack. **Not** the VM operand stack.
+- Closures trace `upvalues[]` *and* their chunk's constant pool
+  (`src/gc_collect.c:128-148`), so heap-typed constants are reached
+  transitively via the rooted closure.
+- Within a CPS segment, a value pushed onto the operand stack is "safe"
+  only if it is reachable from a real root *at every potential GC moment*.
+  GC moments are safepoints — `vm.c:2004`, checked at the start of every
+  opcode dispatch — and on this path concurrent mode submits
+  `gc__concurrent_task` to be picked up by some worker, which then runs
+  `gc_concurrent_collect`.
+- Mutable containers (atoms, boxes, cells) are mutated via `OP_RESET` /
+  `OP_SWAP` / `OP_BOX_SET_*`. The hybrid SATB + insertion barrier in
+  `gc_write_barrier` is the design's defense against a "V removed from
+  container but still on a thread's stack" race.
+
+#### 9b. The gap: SATB barrier is gated on `gc_active`
+
+`src/gc.c:865`:
+```c
+if (!ATOMIC_LOAD_EXPLICIT(gc_active_ptr, MEM_RELAXED)) return;
+```
+
+If `gc_active = false` at the moment of mutation, no barrier fires.
+`gc_active` is only set to `true` at step 2 of `gc_concurrent_collect`
+(`src/runtime.c:948`), which runs after a worker has picked up the
+`gc__concurrent_task` from the inbox. The window between "trigger
+submitted" and "gc_active = true" is non-zero (one inbox round-trip plus
+task dispatch).
+
+Concretely, the following sequence is unsound:
+
+```
+Thread T1 (mid-CPS-segment)          Thread T2 (different segment)         GC worker
+─────────────────────────            ─────────────────────────             ─────────────
+OP_DEREF atom A → V_old              ...                                   idle
+   (V_old pushed on T1.stack)        ...                                   idle
+   V_old.epoch = E_old               OP_RESET A V_new                      idle
+                                        write barrier: gc_active=false
+                                          → fast-path return, V_old NOT
+                                            grey-buffered
+                                        ATOMIC_STORE A ← V_new
+                                        (V_old now reachable from no root)
+OP_<allocating> X                                                          idle
+   needs_gc = true
+   safepoint: gc_concurrent_trigger                                        picks up task
+                                                                           step 1: bump epoch
+                                                                           step 2: gc_active=true
+                                                                           step 3: watermark =
+                                                                                   min(thread_epoch)
+                                                                           step 4: enumerate roots
+                                                                              A → V_new only
+                                                                              T1.stack NOT scanned
+                                                                           mark / sweep
+                                                                              V_old.epoch < watermark
+                                                                              → V_old reclaimed
+OP_<use> V_old                                                             — — —
+   UAF on V_old
+```
+
+For `V_old.epoch < watermark` to hold, V_old must have been allocated long
+enough ago that every live thread's `thread_epoch` exceeds it. That's
+exactly the profile of "old-gen heap value in a shared atom", which is
+the dominant use of atoms in idiomatic JACL (long-lived state, infrequent
+mutation, persistent-collection values).
+
+The bytecode-level entry points into this race are the mutable-load
+opcodes — `OP_DEREF`, `OP_GET_CELL_LOCAL`, `OP_GET_CELL_UPVALUE`,
+`OP_GET_STATE_FIELD_CELL`. All push the contained value verbatim with no
+grey-buffering. Loads from immutable composites (HAMT/RRB element access,
+upvalue reads, struct field reads) are safe — the source structure stays
+rooted, and the value is reachable through it.
+
+#### 9c. Why CPS doesn't save us
+
+The CPS transform splits at user-visible suspension points (`spawn`,
+`await`, `parallel`, `race`, channel ops) and captures locals live across
+each suspension into the next continuation closure. **Within** a segment,
+locals/operands live only on the VM stack. Segments are long-running by
+design (each instruction including allocations is fair game between
+suspensions), so any mutable-load → use sequence inside a single segment
+crosses many potential GC moments.
+
+CPS handles the "value crosses a suspension" case — that value is in the
+next closure. It does not handle "value loaded mid-segment, source
+mutated by another thread, GC runs before consumption."
+
+#### 9d. Severity
+
+- **Reachable**: yes, in principle. Requires a long-lived value in a
+  shared atom, a thread holding it on its stack across an allocation,
+  and another thread (or the same thread) mutating the atom in the
+  window before GC starts.
+- **Empirically observed**: not yet. The current chaos tests don't
+  exercise the exact alignment. `test/test_chaos_soak.c` performs
+  cross-worker atom writes but doesn't hold deref'd values across
+  allocations in the way that triggers the race.
+- **Practical exposure**: depends on idiom. JACL programs that
+  read-then-mutate the same atom from multiple workers under
+  GC-triggering allocation pressure can hit it. Read-mostly atoms
+  (the common case) avoid it.
+
+#### 9e. Recommended hardening (ranked)
+
+1. **Make the SATB barrier unconditional on the deletion side.** Drop
+   the `gc_active` gate for the `old_val` grey-buffer push; always fire
+   it when a heap value is overwritten in a mutable container. The
+   insertion-barrier push can stay gated (insertion only matters during
+   an active cycle). The grey buffer is reset at the end of every GC
+   cycle, so a barrier push between cycles is a bounded waste of memory
+   and one atomic store per mutation. Eliminates the race cleanly.
+   Estimated work: hours, plus a regression run.
+
+2. **Capture mutable-load values into a thread-local "stack root set."**
+   On every `OP_DEREF` / `OP_GET_CELL_*` that produces a heap value,
+   stash it into a per-worker root set that `gc_enumerate_roots` scans.
+   Clear the slot when the value is consumed. More compiler involvement;
+   matches the JVM "handle table" model. Heavier than (1).
+
+3. **Scan the VM operand stack in `gc_enumerate_roots` with safepoint
+   synchronization.** Add a BUSY-sentinel-style protocol so the GC can
+   pause T at an opcode boundary, snapshot its stack, then continue.
+   Standard tracing-GC approach; biggest change. Probably the cleanest
+   long-term answer if JACL grows beyond CPS-only concurrency.
+
+(1) is the right first move: small, contained, undoes the gap. A
+follow-up chaos test should drive a thread to OP_DEREF an atom, force a
+mutation from another thread, and force a GC trigger in the window —
+ideally surfacing the UAF on TSAN/ASAN pre-fix so we have a regression
+guard.
+
+#### 9f. Adjacent, less critical observations from the survey
+
+- `OP_DEREF` on a struct box allocates a fresh `HeapRecord`
+  (`src/vm.c:5252`). The newly allocated `HeapRecord` is pushed onto the
+  stack and consumed by the next opcode — fine, since fresh allocations
+  are epoch-protected.
+- `OP_CALL` / `OP_TAIL_CALL` on a generator allocates a state machine
+  (`src/vm.c:2484-2521`) after arguments are already staged on the
+  operand stack. The arguments themselves are on the stack across this
+  allocation. If any argument is a derived heap value loaded from a
+  mutable source in the same segment, it has the same risk profile as
+  (9b). The generator path is uncommon enough that this is a secondary
+  concern — but worth a chaos test once (1) is in.
+- Locals are stored in `vm->stack[frame->stack_base + slot]`, i.e., on
+  the operand stack itself. There is no separate "locals area." So a
+  local holding a mutable-loaded value carries the same risk for the
+  entire frame's lifetime.
+
+There is no compiler-level static check that prevents the unsound
+pattern. With (1) in place, no static check is needed: the runtime
+barrier covers it. Without (1), trying to encode a "no allocation
+between mutable load and consume" check in the compiler is fragile —
+loads can be transitive (load atom → load field → load field), and
+allocation can be hidden inside helper functions.
 
 ### 10. Single global inbox is a contention point
 `runtime__push_inbox` (`src/runtime.c:415`) is one mutex behind every external

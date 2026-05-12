@@ -435,6 +435,7 @@ the window is so tiny.
 | §4 | intern table sweep in concurrent GC | fixed 2026-05-12 (weak roots + per-cycle sweep + epoch watermark) |
 | §6 | adaptive GC threshold ignored in worker loop | fixed 2026-05-12 (atomic-relaxed load) |
 | §7 | stale current_block in concurrent sweep | fixed 2026-05-12 (blocks_mutex) |
+| §9 | SATB barrier gated on gc_active leaves a UAF window when a deref'd value is on a thread's stack and the source atom is mutated before gc_active=true | **identified 2026-05-12**, see AUDIT.md §9 — fix candidate: drop the gc_active gate on the deletion-side grey-buffer push |
 | §15 | block recycle race with owner heap walk | fixed 2026-05-12 (blocks_mutex) |
 | line_map | benign torn-read race during concurrent sweep | known-benign, doc-only |
 
