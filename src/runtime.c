@@ -359,10 +359,16 @@ THREAD_PROC_RETURN THREAD_PROC_TYPE runtime__worker_loop(void *arg) {
              * retire_epoch (the previous GC's scan has completed by then). */
             runtime__retire_task(self, task);
 
-            /* GC trigger: if allocation threshold exceeded, try to start GC */
+            /* GC trigger: if allocation threshold exceeded, try to start GC.
+             * Uses the adaptive heap->gc_threshold (tuned by
+             * gc__adjust_threshold based on survival rate), not the static
+             * GC_THRESHOLD constant — otherwise adaptive scheduling is dead
+             * in multi-threaded mode (AUDIT.md §6). */
             size_t bsg = ATOMIC_LOAD_EXPLICIT(
                 &self->vm.heap.bytes_since_gc, MEM_RELAXED);
-            if (bsg > GC_THRESHOLD) {
+            size_t thresh = ATOMIC_LOAD_EXPLICIT(
+                &self->vm.heap.gc_threshold, MEM_RELAXED);
+            if (bsg > thresh) {
                 ATOMIC_STORE_EXPLICIT(&self->vm.heap.bytes_since_gc, 0,
                                       MEM_RELAXED);
                 ATOMIC_STORE_EXPLICIT(&self->vm.heap.needs_gc, false,
@@ -827,14 +833,13 @@ void gc_enumerate_roots(Runtime *rt, GCMarkStack *ms) {
             gc__ms_push_val(ms, w->vm.env.values[i]);
         }
 
-        /* 5. Intern table entries (Phase 1: immortal strings) */
-        if (w->vm.intern_table) {
-            for (uint32_t i = 0; i < w->vm.intern_table->cap; i++) {
-                if (w->vm.intern_table->entries[i]) {
-                    gc__ms_push(ms, w->vm.intern_table->entries[i]);
-                }
-            }
-        }
+        /* 5. Intern table entries — treated as weak roots, matching
+         * single-threaded gc_mark. Live entries are kept by being reachable
+         * from real roots (env, constants, in-flight task closures). Dead
+         * entries are evicted by gc_sweep_intern_table after mark phase
+         * converges (gc_concurrent_collect step 7.5). Without this, every
+         * intern entry was pinned and the table grew without bound under
+         * string churn (AUDIT.md §4). */
 
         /* 6. Ctx pool free-list entries (keep pooled structs alive) */
         if (w->vm.ctx_pool) {
@@ -1004,6 +1009,21 @@ void gc_concurrent_collect(Runtime *rt) {
 
     /* 7. Set gc_active = false (disables write barriers) */
     ATOMIC_STORE_EXPLICIT(&rt->gc_active, 0, MEM_RELEASE);
+
+    /* 7.5. Evict dead intern table entries on each worker's table before
+     * sweep zeroes the underlying JaclHeapString memory. Mirrors the
+     * single-threaded gc_collect order (mark → sweep_intern_table →
+     * sweep). The watermark protects strings interned after this cycle's
+     * root scan: gc_enumerate_roots no longer pushes intern entries, so
+     * an entry inserted after marking would otherwise look dead.
+     * gc_sweep_intern_table takes table->lock, serializing with any
+     * concurrent jacl_intern call on a worker thread. */
+    for (i = 0; i < rt->num_workers; i++) {
+        JaclInternTable *it = rt->workers[i].vm.intern_table;
+        if (it) {
+            gc_sweep_intern_table(it, &rt->workers[i].vm.heap, watermark);
+        }
+    }
 
     /* 8. Sweep all workers' heaps with epoch watermark.
      * Skip each worker's active allocation block (current_block).

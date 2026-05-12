@@ -2,9 +2,9 @@
 
 ## If you're picking this up later
 
-This audit was written over a few sessions in May 2026. Six P0 issues + five
-soak-surfaced issues are fixed. Two P1 items remain (§4 intern table sweep
-under concurrent GC, §6 adaptive threshold in worker loop).
+This audit was written over a few sessions in May 2026. All eight P0/P1
+correctness items in the "Critical correctness issues" section are now
+fixed, along with five additional issues the soak test surfaced.
 
 **The loop that fixed each issue, for future use:**
 
@@ -88,14 +88,44 @@ the reader is iterating. The long comment in `grey_buf_push`
 snapshot `gb->entries` under acquire, freeze realloc while drain is running,
 or hand off ownership via two-phase buffer swap.
 
-### 4. Concurrent GC never sweeps the intern table
-`gc_collect` calls `gc_sweep_intern_table` (`src/gc_collect.c:667`).
-`gc_concurrent_collect` does not, and instead treats every intern-table entry
-as a strong root (`src/runtime.c:606-613`). Result: in multi-threaded mode,
-interned strings are immortal → growing memory under string churn.
-(Single-threaded major GC evicts them; this is a silent behavioral divergence.)
-Also: `gc_mark_minor` adds intern entries as strong roots too, so even
-single-threaded minor GC never evicts.
+### 4. Concurrent GC never sweeps the intern table — **FIXED**
+~~`gc_collect` calls `gc_sweep_intern_table` (`src/gc_collect.c:667`).~~
+~~`gc_concurrent_collect` does not, and instead treats every intern-table entry~~
+~~as a strong root (`src/runtime.c:606-613`). Result: in multi-threaded mode,~~
+~~interned strings are immortal → growing memory under string churn.~~
+
+Three-part fix:
+1. **Drop intern entries from the concurrent root set** (`gc_enumerate_roots`
+   now leaves them out, matching single-threaded `gc_mark`).
+2. **Sweep the intern table from `gc_concurrent_collect`** between the mark
+   convergence loop and `gc_sweep_concurrent`, once per worker.
+3. **Add epoch-watermark protection inside `gc_sweep_intern_table`** so a
+   string interned after the marker drained but before sweep_intern_table
+   ran (`hdr->epoch >= watermark`) survives, mirroring how the block sweep
+   protects fresh allocations. Single-threaded callers pass `watermark=0`
+   to disable the branch.
+
+Two related issues fell out of the fix:
+
+- **`gc__ptr_in_heap` walks `heap->blocks` without locking.** The
+  concurrent intern sweep is the first caller hitting it from the GC
+  thread while a worker may be head-inserting a block. Fixed by taking
+  `heap->blocks_mutex` for the duration of the table walk (same lock
+  the block sweep already takes — see §7/§15).
+- **`gc_sweep_intern_table`'s "retroactively mark live" path was making
+  unrooted strings effectively immortal.** Under power-of-two resize, the
+  load factor sits around 0.5, so the high-load tombstone branch almost
+  never fired and dead entries got pinned cycle after cycle. Removed the
+  branch: dead entries (mark mismatch, not epoch-protected) are always
+  tombstoned, and `jacl_intern`'s existing compaction reclaims them.
+
+Note on `gc_mark_minor` (also pushes intern entries as strong roots):
+left as-is — minor GC doesn't sweep the intern table either way, and
+the next major GC evicts. Diverging this would buy nothing.
+
+Validated by `test/test_chaos_concurrent_intern.c` — 4 workers churning
+~2M unique unrooted strings over 3s under TSAN: post-fix, ~85% get
+evicted into tombstones; pre-fix, every entry stayed live forever.
 
 ### 5. Tag overload: ParallelAgg / RaceAgg share `JACL_TAG_FUTURE`
 `parallel_agg_ptr` / `race_agg_ptr` (`src/gc.c:1066, 1103`) reuse
@@ -106,13 +136,16 @@ future tracing in `gc__trace_object` already reads `fut->state`). Today the
 design says "never exposed to user code," but this is one bytecode-emit bug
 away from corruption. Give them distinct tags, or an internal-pointer tag.
 
-### 6. Worker-loop GC trigger uses static threshold, not adaptive one
-`src/runtime.c:262` compares `bytes_since_gc > GC_THRESHOLD` (the static 1 MB
-constant) instead of `heap->gc_threshold` (the adaptive value
-`gc__adjust_threshold` tunes). So adaptive scheduling is effectively dead in
-multi-threaded mode. `gc_alloc` does the right thing inside the bump path
-(`src/gc.c:354`), but only sets `needs_gc`; the worker-loop check then ignores
-it.
+### 6. Worker-loop GC trigger uses static threshold, not adaptive one — **FIXED**
+~~`src/runtime.c:262` compares `bytes_since_gc > GC_THRESHOLD` (the static 1 MB~~
+~~constant) instead of `heap->gc_threshold` (the adaptive value~~
+~~`gc__adjust_threshold` tunes). So adaptive scheduling is effectively dead in~~
+~~multi-threaded mode.~~
+
+One-line fix: worker-loop trigger now uses an `ATOMIC_LOAD_EXPLICIT` of
+`heap->gc_threshold` (relaxed) instead of the `GC_THRESHOLD` constant.
+Now matches `gc_alloc`'s own check at `src/gc.c:368`, so adaptive
+scheduling is live in multi-threaded mode.
 
 ### 7. Stale `current_block` snapshot in concurrent sweep
 `gc_sweep_concurrent`'s `skip_block` is captured at sweep start
@@ -301,10 +334,24 @@ In rough priority:
    (§15) in one change. The hot allocation path (bump within current free
    run) is unaffected. Validated by `test/test_chaos_gc_alloc_sweep.c`
    under `--tsan`.
-7. Wire `gc_sweep_intern_table` into `gc_concurrent_collect` (#4).
-8. Make `runtime.c:262` use `heap->gc_threshold` (#6) — one-line fix.
+7. ~~Wire `gc_sweep_intern_table` into `gc_concurrent_collect` (#4)~~ —
+   **FIXED.** Concurrent collect drops intern entries from the root set,
+   then calls `gc_sweep_intern_table` per worker between mark convergence
+   and block sweep. New epoch-watermark parameter protects strings
+   interned after the marker drained. Surfaced and fixed two adjacent
+   bugs: `gc__ptr_in_heap` was walking `heap->blocks` lock-free
+   (now serialized via `blocks_mutex`), and the "retroactively mark
+   live" path in the original sweep was pinning unrooted strings
+   indefinitely under power-of-two resize (removed; always tombstone
+   dead entries). Validated by
+   `test/test_chaos_concurrent_intern.c` under both normal and `--tsan`
+   (~85% eviction rate on ~2M churned strings).
+8. ~~Make `runtime.c:262` use `heap->gc_threshold` (#6)~~ — **FIXED**,
+   one-line as predicted: relaxed-atomic load of `heap->gc_threshold`
+   replaces the static `GC_THRESHOLD` constant. Adaptive scheduling is
+   now live in multi-threaded mode.
 
-All P0s addressed. Remaining items 7–8 are P1 and quick.
+All P0/P1 correctness items are addressed.
 
 ## Additional issues found by the soak test (Phase C)
 

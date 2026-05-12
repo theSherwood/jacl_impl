@@ -2289,7 +2289,10 @@ extern void gc__trace_object (void *payload, GCMarkStack *ms);
 extern void gc_mark (ThreadHeap *heap, VM *vm);
 extern size_t gc_sweep (ThreadHeap *heap);
 extern bool gc__ptr_in_heap (ThreadHeap *heap, void *ptr);
-extern void gc_sweep_intern_table (JaclInternTable *table, ThreadHeap *heap);
+/* watermark != 0 enables concurrent-GC epoch protection: entries with
+ * hdr->epoch >= watermark are kept alive (freshly interned, marker did not
+ * observe them). Pass 0 from single-threaded callers. */
+extern void gc_sweep_intern_table (JaclInternTable *table, ThreadHeap *heap, uint32_t watermark);
 extern void gc__adjust_threshold (ThreadHeap *heap, size_t bytes_survived);
 extern void gc_collect (ThreadHeap *heap, VM *vm);
 extern void gc_mark_minor (ThreadHeap *heap, VM *vm, RememberedSet *remembered_set);

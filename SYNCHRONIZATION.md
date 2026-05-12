@@ -214,11 +214,10 @@ under the lock.
 - **Order**: `MEM_RELAXED` everywhere — these are heuristics, the value
   being slightly stale is acceptable, but the access itself must be
   atomic so TSAN can track it.
-- **Note**: the worker_loop's GC-trigger check (`bytes_since_gc > GC_THRESHOLD`)
-  uses the static threshold rather than the adaptive `gc_threshold`.
-  **UNSOUND-ish (AUDIT.md §6)**: not a race, but a correctness/efficiency
-  miss — adaptive scheduling is bypassed in multi-threaded mode.
-  **Fix pending** (one-line change).
+- **Note**: AUDIT.md §6 (the worker_loop's GC-trigger check used the
+  static `GC_THRESHOLD` constant) is **fixed**: the trigger now reads
+  `heap->gc_threshold` via `ATOMIC_LOAD_EXPLICIT(..., MEM_RELAXED)`, so
+  adaptive scheduling is live in multi-threaded mode.
 
 ### `WorkerThread.retired_tasks`, `retired_epochs`, `retired_count`
 - **W**: owner only — `runtime__retire_task` appends after a task runs;
@@ -321,10 +320,26 @@ under the lock.
 - **Sync**: thread-local, no sharing
 
 ### Intern eviction during concurrent GC
-- **UNSOUND (AUDIT.md §4)**: concurrent GC's `gc_enumerate_roots` treats
-  every intern entry as a strong root. `gc_concurrent_collect` never calls
-  `gc_sweep_intern_table`. Single-threaded major GC does evict. Net effect:
-  **interned strings leak under multi-threaded execution.** **Fix pending**.
+- AUDIT.md §4 is **fixed**:
+  - `gc_enumerate_roots` no longer pushes intern entries (weak roots,
+    matching single-threaded `gc_mark`).
+  - `gc_concurrent_collect` calls `gc_sweep_intern_table` per worker
+    between mark convergence (step 7) and block sweep (step 8).
+  - `gc_sweep_intern_table` takes an epoch `watermark` argument:
+    `hdr->epoch >= watermark` ⇒ live, so a string interned after the
+    marker drained but before the sweep ran is protected. Single-threaded
+    callers pass `watermark=0` to disable the branch and preserve
+    historical behavior.
+  - Sweep also takes `heap->blocks_mutex` for the entry walk (`gc__ptr_in_heap`
+    enumerates `heap->blocks`); same lock the block sweep holds.
+- The original "retroactively mark live" branch in `gc_sweep_intern_table`
+  was removed: dead entries (mark mismatch, not epoch-protected) are
+  always tombstoned. Power-of-two resize keeps the load near 0.5, so the
+  old "load > 0.75 ⇒ evict, else keep alive" rule pinned unrooted strings
+  cycle after cycle. `jacl_intern`'s existing tombstone compaction
+  reclaims slots on insert.
+- Validated by `test/test_chaos_concurrent_intern.c` (TSAN-clean over a
+  30s run, ~85% eviction rate on ~2M churned strings).
 
 ## 5. Concurrency primitives
 
@@ -417,8 +432,8 @@ the window is so tiny.
 | ID | Field/path | Status |
 |----|------------|--------|
 | §3 | grey_buf entries pointer during realloc | fixed 2026-05-12 (mutex) |
-| §4 | intern table sweep in concurrent GC | **pending** |
-| §6 | adaptive GC threshold ignored in worker loop | **pending** |
+| §4 | intern table sweep in concurrent GC | fixed 2026-05-12 (weak roots + per-cycle sweep + epoch watermark) |
+| §6 | adaptive GC threshold ignored in worker loop | fixed 2026-05-12 (atomic-relaxed load) |
 | §7 | stale current_block in concurrent sweep | fixed 2026-05-12 (blocks_mutex) |
 | §15 | block recycle race with owner heap walk | fixed 2026-05-12 (blocks_mutex) |
 | line_map | benign torn-read race during concurrent sweep | known-benign, doc-only |

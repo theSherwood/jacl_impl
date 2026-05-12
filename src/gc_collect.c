@@ -584,10 +584,18 @@ size_t gc_sweep(ThreadHeap *heap) {
 /* ======================================================================
  * gc_sweep_intern_table: evict dead interned strings as tombstones.
  *
- * Called after mark phase but before sweep phase during full GC only.
- * When load factor (including tombstones) > 0.75, dead entries are
- * replaced with tombstone sentinels. Otherwise, dead entries are
- * retroactively marked live to prevent dangling pointers after sweep.
+ * Called after mark phase but before sweep phase. Dead entries (mark
+ * mismatch and not epoch-protected) are always replaced with tombstone
+ * sentinels — the underlying JaclHeapString is then freed by gc_sweep.
+ * Tombstones are compacted away on the next jacl_intern insert that
+ * crosses the tombstone-ratio threshold (string.c).
+ *
+ * Earlier versions only tombstoned when load factor was already > 0.75
+ * and otherwise retroactively marked dead entries live. That made
+ * interned strings effectively immortal under sustained churn: the
+ * power-of-two resize keeps load near 0.5, so the high-load branch
+ * almost never fired, and unrooted entries were carried forward cycle
+ * after cycle (AUDIT.md §4).
  * ====================================================================== */
 
 /* Check if a pointer falls within any of this heap's blocks. */
@@ -601,17 +609,28 @@ bool gc__ptr_in_heap(ThreadHeap *heap, void *ptr) {
 }
 
 void gc_sweep_intern_table(JaclInternTable *table,
-                                   ThreadHeap *heap) {
+                                   ThreadHeap *heap,
+                                   uint32_t watermark) {
     /* Skip sweep if we're inside jacl_intern — the allocation that
      * triggered this GC is about to insert into the table, and
-     * evicting entries now would create spurious duplicates. */
+     * evicting entries now would create spurious duplicates.
+     * (Only relevant to the single-threaded path: the concurrent GC
+     * runs on its own thread where gc__interning is never set.) */
     if (gc__interning) return;
 
     uint8_t current_mark = heap->current_mark;
     MUTEX_LOCK(table->lock);
 
-    bool should_evict =
-        (table->count + table->tombstone_count) * 4 > table->cap * 3;
+    /* gc__ptr_in_heap walks heap->blocks. Under concurrent GC the owning
+     * worker may be head-inserting a fresh block from gc_alloc's slow
+     * path. Hold blocks_mutex for the walk to serialize with that
+     * insert; same lock the concurrent block-sweep takes (AUDIT.md §7,
+     * §15). Single-threaded callers (watermark==0) skip this — there's
+     * no other thread touching the list. Lock order matches jacl_intern:
+     * gc_alloc takes blocks_mutex outside table->lock, never the reverse,
+     * so acquiring blocks_mutex while holding table->lock here is safe. */
+    bool need_blocks_lock = (watermark != 0);
+    if (need_blocks_lock) MUTEX_LOCK(heap->blocks_mutex);
 
     for (uint32_t i = 0; i < table->cap; i++) {
         JaclHeapString *entry = table->entries[i];
@@ -622,18 +641,25 @@ void gc_sweep_intern_table(JaclInternTable *table,
         if (!gc__ptr_in_heap(heap, entry)) continue;
 
         GCHeader *hdr = gc_header_of(entry);
-        if (hdr->mark != current_mark) {
-            if (should_evict) {
-                table->entries[i] = INTERN_TOMBSTONE;
-                table->count--;
-                table->tombstone_count++;
-            } else {
-                /* Under threshold — keep entry alive */
-                hdr->mark = current_mark;
-            }
-        }
+        if (hdr->mark == current_mark) continue;
+
+        /* Concurrent-GC epoch protection: an entry interned after the
+         * marker enumerated roots (which no longer includes the intern
+         * table — see gc_enumerate_roots) is not marked but must survive.
+         * Fresh allocations carry hdr->epoch >= watermark, the same
+         * invariant gc_sweep_concurrent relies on. Single-threaded
+         * callers pass watermark=0, disabling this branch. */
+        if (watermark != 0 && hdr->epoch >= watermark) continue;
+
+        /* Dead. Tombstone the slot so probes still find later entries;
+         * the underlying JaclHeapString is freed by the following
+         * gc_sweep (its mark didn't get bumped this cycle). */
+        table->entries[i] = INTERN_TOMBSTONE;
+        table->count--;
+        table->tombstone_count++;
     }
 
+    if (need_blocks_lock) MUTEX_UNLOCK(heap->blocks_mutex);
     MUTEX_UNLOCK(table->lock);
 }
 
@@ -671,9 +697,11 @@ void gc_collect(ThreadHeap *heap, VM *vm) {
     gc__struct_registry = vm ? vm->struct_registry : NULL;
     gc_mark(heap, vm);
 
-    /* Evict dead intern table entries before sweep zeroes their memory */
+    /* Evict dead intern table entries before sweep zeroes their memory.
+     * watermark=0: single-threaded path, no concurrent allocations to
+     * protect — mark bit alone determines liveness. */
     if (vm && vm->intern_table) {
-        gc_sweep_intern_table(vm->intern_table, heap);
+        gc_sweep_intern_table(vm->intern_table, heap, 0);
     }
 
     size_t bytes_survived = gc_sweep(heap);
