@@ -1,5 +1,10 @@
 # GC & Concurrency Co-Design
 
+> **Companion docs**: `SYNCHRONIZATION.md` (per-field W/R/Sync/Order/
+> Invariant reference for everything described here), `AUDIT.md`
+> (gap analysis, fix narrative, open-bug punch list). When this design
+> doc changes, the other two should too.
+
 ## 1. Why Co-Design?
 
 The GC must be non-stop-the-world, and immutable values are freely shared across threads.

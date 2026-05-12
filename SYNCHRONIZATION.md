@@ -1,5 +1,9 @@
 # JACL Runtime Synchronization Reference
 
+> **Companion docs**: `GC_CONCURRENCY_DESIGN.md` (the *why*),
+> `AUDIT.md` (the *gaps*, with fix narrative + open-bug punch list).
+> Any change to runtime/GC shared state should touch all three.
+
 This document names — for every shared mutable field in the runtime + GC —
 the writer(s), reader(s), synchronization primitive, memory order, and the
 invariant the ordering preserves. It is meant as a reference, not a tutorial.
@@ -463,12 +467,16 @@ caveat in the relevant section above.
 
 Things this document doesn't yet pin down:
 
-- **CPS continuations and VM stack reachability**: the design (Section 3 of
-  GC_CONCURRENCY_DESIGN.md) claims all live values between safepoints are
-  either reachable from the task root or epoch-protected. There's no static
-  enforcement that bytecode emitted by the CPS transform preserves this.
-  Worth a property test that instruments GC at random safepoints and checks
-  for dangling references on the VM stack.
+- **CPS continuations and VM stack reachability** — partially addressed.
+  AUDIT.md §9 closed the worst hole: the SATB barrier now fires
+  unconditionally on heap-typed overwrites, so a value loaded from a
+  mutable container and held across a GC moment is protected even if
+  its source is mutated before `gc_active=true`. AUDIT.md §D.3
+  (`test/jacl/cps_inner_closure_capture.jacl`) verifies that inner
+  closures defined before a suspension still observe their captures
+  after. **Not yet built**: the property test the original design
+  asked for (instrument GC at random safepoints, check VM stack for
+  dangling references). Worth doing as belt-and-braces.
 - **Finalization**: the design defers FFI resource cleanup to explicit
   `with-open` / `defer`. There's no current GC hook for finalization.
   If one is added, it needs to specify ordering w.r.t. sweep and write

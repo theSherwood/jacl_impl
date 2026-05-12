@@ -1,5 +1,10 @@
 # JACL Codebase Audit
 
+> **Companion docs**: `GC_CONCURRENCY_DESIGN.md` (design intent),
+> `SYNCHRONIZATION.md` (per-field reference for shared runtime/GC
+> state). Open-bug punch list lives in this file's
+> "Start-here for next session" section below.
+
 ## If you're picking this up later
 
 This audit was written over several sessions in May 2026. All eight
