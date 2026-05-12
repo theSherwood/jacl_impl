@@ -2,11 +2,57 @@
 
 ## If you're picking this up later
 
-This audit was written over a few sessions in May 2026. All eight P0/P1
-correctness items in the "Critical correctness issues" section are now
-fixed, along with five additional issues the soak test surfaced.
+This audit was written over several sessions in May 2026. **All
+identified correctness bugs reachable from well-typed JACL code are
+fixed.** What remains is hardening (debug-mode asserts, error-path
+robustness, one missing test) plus the architectural / performance
+items that were always out of scope.
 
-**The loop that fixed each issue, for future use:**
+### Status at end of phase D (2026-05-12)
+
+| Phase | Scope | Outcome |
+|-------|-------|---------|
+| A | GC/concurrency design audit | 6 P0 fixes, 60s TSAN-clean soak |
+| B | Soak-surfaced races | 5 additional fixes, TSAN-validated |
+| C | Remaining P1s (§4, §6) | Intern sweep + adaptive threshold fixed |
+| C+ | §9 deep-dive | Real UAF in SATB barrier; fixed unconditionally |
+| D | Compiler/VM audit | 3 surveys; frame-check ordering fix landed |
+
+Eight P0/P1 items in "Critical correctness issues" fixed; five
+soak-surfaced issues fixed; §9 SATB-barrier UAF fixed; §D.1/D.2/D.3
+surveyed and documented. See git log for the per-commit story.
+
+### Remaining work (no correctness bugs, all hardening / tech debt)
+
+In rough priority:
+
+1. **§D.6 SEGV from `spawn` + deep recursion** — *only correctness bug
+   currently open*. Reachable from valid user code; full repro in
+   `AUDIT.md §D.6`. ASAN-traced to an unchecked
+   `jacl_as_state_machine` extraction at `vm.c:8190` reading a
+   non-SM value from `frame->stack_base + 0`. Likely a compiler/runtime
+   miscompile in the spawn-body wrapping. Investigate first.
+2. **§D.3 — closed**: `test/jacl/cps_inner_closure_capture.jacl`
+   verifies inner closures defined before a suspension still observe
+   their captured values after. Test passes; investigation closed.
+3. **§D.1 `JACL_ASSERT_TAG` macro**: ~32 unchecked `jacl_as_*`
+   extractions in `vm.c`. §D.6 shows these aren't purely "trust the
+   compiler" — the trust is breakable. Add a debug-only assert; would
+   have caught §D.6 at the call site instead of as a SEGV. Mechanical,
+   ~50 LoC.
+4. **§D.2 remaining frame-check reorderings**: `OP_PARALLEL`,
+   `OP_RACE`, `OP_SPREAD`. Same pattern as the fix that landed for
+   `OP_EACH`/`OP_TRANSFORM`/`OP_FILTER`. ~10 LoC.
+5. **§D.2 broader stack-discipline cleanup**: ~60 sites where a
+   `return VM_RUNTIME_ERROR` leaves the operand stack unbalanced.
+   Macro-based refactor; pure cleanup. Defends against DoS-style slot
+   drift.
+6. **Architectural items (§10–17)**: throughput, latency, code
+   ergonomics. Not correctness. Defer until profiled.
+
+### How earlier phases were structured
+
+**The loop each fix went through:**
 
 1. Read the audit item.
 2. Write a focused reproducer in `test/test_chaos_*.c` that pushes the exact
@@ -751,6 +797,110 @@ unchanged (87 pass, 14 pre-existing HAMT/RRB failures unrelated).
 `OP_PARALLEL`, `OP_RACE`, and `OP_SPREAD` have similar but
 shape-different sites (more state to track per iteration); same fix
 applies and is queued as follow-up.
+
+### D.6 New finding from §D.3 test work — `spawn` + deep recursion SEGV
+
+While constructing the inner-closure-capture test, a separate crash
+surfaced:
+
+```jacl
+proc burn {n} {
+  if [== $n 0] { 1 } else {
+    def g [vec 1 2 3 4 5 6 7 8 9 10]
+    burn [- $n 1]
+  }
+}
+proc main {} {
+  def f [spawn { burn 70 }]
+  def _ [await $f]
+}
+main
+```
+
+This SEGVs (single-threaded mode, default harness). Without `spawn`,
+`burn 70` returns a clean `stack overflow` error at the
+`VM_FRAMES_MAX=64` boundary. Inside `spawn`, the same depth crashes
+before the boundary check fires.
+
+ASAN trace (built with `-fsanitize=address`):
+
+```
+SEGV on unknown address 0x000000000043 — WRITE memory access.
+#0 vm__run src/vm.c:8190  →  sm->fields[field_index] = value;
+#1 vm__run src/vm.c:8559
+#2 jacl_run src/vm.c:11704
+```
+
+`src/vm.c:8190` is inside `OP_SET_STATE_FIELD`:
+
+```c
+JaclVal state_val = vm->stack[frame->stack_base + 0];
+JaclStateMachine *sm = jacl_as_state_machine(state_val);  // unchecked!
+JaclVal value;
+result = vm__pop(vm, &value);
+if (result != VM_OK) return result;
+sm->fields[field_index] = value;  // SEGV here
+```
+
+`state_val` is whatever's at `frame->stack_base + 0`. The unchecked
+`jacl_as_state_machine` extraction (one of the 32 unchecked sites in
+§D.1) masks the value to a pointer; if the value isn't a heap
+state-machine, the resulting pointer is garbage. The SEGV address
+`0x43` suggests an immediate-tagged JaclVal whose payload bits, masked
+and dereferenced as a struct pointer, indexed past `fields[0]` to a
+near-null address.
+
+**Crash threshold**: bisects to N≈58 (without `spawn`, N=64). The
+4-frame gap suggests the `spawn` body wrapper itself consumes ~4
+frames before `burn` starts recursing.
+
+**Bisection summary**:
+| Setup | Threshold | Failure mode |
+|-------|-----------|--------------|
+| `burn N` at top level | N=64 | Clean `stack overflow` runtime error |
+| `spawn { burn N }` | N≈58 | **SEGV** at `vm.c:8190` |
+
+**Why this matters**: the §D.1 audit framed the unchecked tag
+extractions as "trust the compiler — not reachable from well-typed user
+code." This crash demonstrates the trust *is* breakable from valid
+user code. Depth-N recursion is well-typed JACL. The class of bugs
+just moved from "fragile but unreachable" to "reachable DoS/crash."
+
+**Likely root cause**: the spawn body is compiled as an SM-wrapped
+closure (since `spawn` is a suspension point in `main`). When `burn`
+is called from inside it, `burn` is *not* SM-compiled (no
+await/parallel/race/yield), but its call frame inherits some context
+from the SM-wrapped caller. Somewhere along the recursive call chain,
+a frame's `stack_base + 0` no longer points to a state machine, but
+`OP_SET_STATE_FIELD` is still emitted (or executed by way of the SM
+dispatch table at the top of the SM closure).
+
+Two hypotheses to test:
+1. The state-machine dispatch prelude at the head of an SM closure
+   (the resume-point jump table) might re-execute on every recursive
+   re-entry, reading slot 0 expecting an SM that isn't there at that
+   depth.
+2. `OP_SET_STATE_FIELD` is being emitted for variables defined in the
+   spawn body, and when those variables happen to fall in a deeply-
+   recursive frame's slot 0, the SM pointer is wrong.
+
+**Severity**: high. Crashes from valid user code = bad. But probably
+straightforward to fix once root-caused (add the `assert` from §D.1's
+recommendation, find which compilation path emits the wrong opcode).
+
+**Mitigation now**: don't `spawn` a body that recurses past ~50 deep
+without a tail-call. (JACL has tail calls; the test recursion isn't
+tail-recursive because `burn`'s `else` branch wraps the recursion in
+`def g [...] burn ...`, which makes the `burn` call non-tail.)
+
+**Next step**: dump the bytecode for the spawn body and burn body
+(JACL probably has a `--dump-bc` or similar), confirm which opcode is
+executing at SEGV time, find the originating compile site.
+
+**Repro test**: `test/jacl/cps_inner_closure_capture.jacl` keeps `burn`
+at depth 30 — well below the threshold — so the existing CPS
+invariant test still passes. A dedicated reproducer for §D.6 would
+either crash or assert; punt that until we have a clear fix.
 
 ### D.5 Next steps (rough priority)
 

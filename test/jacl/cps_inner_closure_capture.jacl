@@ -1,0 +1,43 @@
+# expect: 100
+# expect: 42
+# expect: 142
+# expect: 100
+# expect: 142
+#
+# AUDIT.md §D.3: inner closure created BEFORE a suspension captures an outer
+# local; after the suspension the closure is invoked and must still observe
+# the captured value. Existing cps_closure_capture.jacl defines the inner
+# proc AFTER the suspension — this test covers the pre-suspension case.
+#
+# Two rounds verify the binding survives both a trivial suspension (round 1)
+# and a longer-lived spawned task that does some allocation (round 2).
+# Recursion depth in `burn` is kept well below VM_FRAMES_MAX so the test
+# stays focused on the closure-capture invariant, not the frame-stack limit.
+proc burn {n} {
+  if [== $n 0] { 1 } else {
+    def g [vec 1 2 3 4 5 6 7 8 9 10]
+    def h [map a 1 b 2 c 3]
+    burn [- $n 1]
+  }
+}
+
+proc main {} {
+  def x 100
+  def y 42
+
+  proc get_x {} { $x }
+  proc get_y {} { $y }
+  proc sum {} { + $x $y }
+
+  def f [spawn { 1 }]
+  def _ [await $f]
+  print [get_x]
+  print [get_y]
+  print [sum]
+
+  def f2 [spawn { burn 30 }]
+  def _ [await $f2]
+  print [get_x]
+  print [sum]
+}
+main
