@@ -725,9 +725,12 @@ void *gc__struct_registry = NULL;
  * GreyBuffer: per-thread append-only buffer for write barrier entries.
  *
  * Writer (owner) and reader (GC drain) are serialized by `gb->mutex`.
- * Push is rare in practice — only fires during gc_active && on mutable-
- * container mutation && when the stored value is a heap type — so mutex
- * contention is bounded.
+ * The deletion side of gc_write_barrier fires unconditionally on any
+ * heap-valued container overwrite (see AUDIT.md §9 for why the
+ * previous gc_active gate was unsound). Entries pushed between GC
+ * cycles are conservative marks for the next cycle — at the end of
+ * each cycle gb->count is reset to 0, so growth is bounded by the
+ * mutation rate within one cycle.
  *
  * Earlier design (lock-free, release-store on count) had an unsoundness:
  * grey_buf_push's realloc could free the old entries buffer while the
@@ -846,13 +849,25 @@ void remembered_set_destroy(RememberedSet *rs) {
 /* ======================================================================
  * Write barrier: hybrid SATB (deletion) + insertion barrier.
  *
- * Fires on mutable container mutations (reset!, swap!, set! on cells)
- * during an active concurrent GC cycle. Both the old value (evicted from
- * the container) and the new value (stored into the container) are pushed
- * to the thread-local grey buffer for the GC to process during marking.
+ * Fires on mutable container mutations (reset!, swap!, set! on cells).
  *
- * Fast path: single relaxed atomic load of gc_active flag — no overhead
- * when GC is not running or when running in single-threaded mode (NULL).
+ * Deletion side (SATB) — UNCONDITIONAL. Whenever a heap value is
+ * overwritten in a mutable container, the previous value is pushed to
+ * the thread-local grey buffer regardless of gc_active. This closes
+ * AUDIT.md §9: if the gate gated this push on gc_active, a worker that
+ * read V_old from the container onto its operand stack and then ran
+ * into a concurrent mutation (by itself or another thread) while
+ * gc_active was still false would lose V_old's reachability — V_old's
+ * only container ref is gone, the operand stack isn't a GC root in
+ * concurrent mode, and if V_old's epoch is below the next watermark
+ * the sweep would reclaim it under the worker. The grey buffer is
+ * reset every GC cycle; entries pushed between cycles cost one atomic
+ * store per heap-valued overwrite and serve as conservative marks for
+ * the next cycle. Insertion side stays gated — it only matters during
+ * an active cycle (a new value stored after GC scanned the container).
+ *
+ * Single-threaded mode (NULL gc_active_ptr) bypasses both: single
+ * tracing GC scans the VM stack, so V_old can't be lost there.
  * ====================================================================== */
 
 void gc_write_barrier(GreyBuffer *gb,
@@ -861,15 +876,13 @@ void gc_write_barrier(GreyBuffer *gb,
     /* Single-threaded mode: no gc_active flag → no barrier needed */
     if (!gc_active_ptr) return;
 
-    /* Fast path: GC not running → skip */
-    if (!ATOMIC_LOAD_EXPLICIT(gc_active_ptr, MEM_RELAXED)) return;
-
-    /* SATB deletion barrier: protect old value still on some VM stack */
+    /* SATB deletion barrier — unconditional. See header comment. */
     if (jacl_is_heap_type(old_val))
         grey_buf_push(gb, old_val);
 
-    /* Insertion barrier: protect new value stored after GC scanned container */
-    if (jacl_is_heap_type(new_val))
+    /* Insertion barrier — only during an active cycle. */
+    if (jacl_is_heap_type(new_val) &&
+        ATOMIC_LOAD_EXPLICIT(gc_active_ptr, MEM_RELAXED))
         grey_buf_push(gb, new_val);
 }
 

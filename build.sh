@@ -129,6 +129,7 @@ TESTS=(
     "test/test_chaos_gc_alloc_sweep.c|chaos_gc_alloc_sweep|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "test/test_chaos_soak.c|chaos_soak|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "test/test_chaos_concurrent_intern.c|chaos_concurrent_intern|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
+    "test/test_chaos_satb_deref.c|chaos_satb_deref|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "test/test_m12.c|m12|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "test/test_m13.c|m13|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"
     "test/test_jacl_harness.c|jacl_harness|-Wall -Wextra -std=c99 -g -D_DEFAULT_SOURCE -lpthread"

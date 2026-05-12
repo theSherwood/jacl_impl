@@ -183,16 +183,36 @@ prevent this in the steady state, but combined with #7 it's not airtight.
 
 ## Architectural concerns
 
-### 9. `gc_enumerate_roots` doesn't scan VM stacks; `gc_collect` does
+### 9. `gc_enumerate_roots` doesn't scan VM stacks; `gc_collect` does — **FIXED** (deletion barrier)
 The design (Section 3) claims CPS captures all live state into task closures,
 so concurrent GC doesn't need to scan VM stacks
 (`src/runtime.c:822-829`). Single-threaded `gc_mark` does scan the VM stack
 (`src/gc_collect.c:411-415`). The invariant is load-bearing.
 
 **The audit (May 2026) traced this through the bytecode and found a real
-soundness gap.** Empirical reproduction is hard (the race window is tight
-and requires precise cross-thread alignment), but the gap is reachable in
-principle. The full analysis follows.
+soundness gap.** Initial framing was "no static enforcement"; the gap is
+actually runtime, not compiler. Empirical reproduction is now
+deterministic — see `test/test_runtime.c:test_write_barrier_satb_protects_held_value`
+which exhibits the UAF pre-fix (V's GCHeader reads zeroed after sweep)
+and passes post-fix. The full analysis follows.
+
+**Fix landed**: `gc_write_barrier` (`src/gc.c`) now fires the SATB
+deletion-side grey-buffer push **unconditionally** on any heap-valued
+overwrite, regardless of `gc_active`. The insertion-side push remains
+gated on `gc_active` (a new value stored before GC scanned the
+container is already visible through the container). Cost: one grey-
+buffer push per heap-typed atom mutation. The grey buffer resets at
+each cycle boundary, so growth between cycles is bounded by mutation
+rate within one cycle. Validated by:
+- `test/test_runtime.c:test_write_barrier_satb_unconditional` — direct
+  invariant: heap `old_val` always pushes, immediate `old_val` never,
+  `new_val` only pushes when `gc_active=true`.
+- `test/test_runtime.c:test_write_barrier_satb_protects_held_value` —
+  end-to-end UAF reproducer running `gc_concurrent_collect` synchronously.
+- `test/test_chaos_satb_deref.c` — TSAN stress test of the pattern under
+  concurrent load.
+- Full `--tsan` sweep (`runtime`, `m13`, `chaos_soak` 60s, all chaos tests)
+  remains clean.
 
 #### 9a. The intended model
 

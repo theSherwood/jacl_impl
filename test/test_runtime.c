@@ -599,7 +599,14 @@ static int test_write_barrier_gc_active(void) {
 }
 
 static int test_write_barrier_gc_inactive(void) {
-    /* When gc_active is false, write barrier is a no-op */
+    /* When gc_active is false, only the SATB (deletion) side of the
+     * barrier fires — see AUDIT.md §9. The previous behavior (full
+     * no-op when gc_active=false) was unsound: a worker could deref V
+     * from an atom, another thread could mutate the atom unbarriered,
+     * and a subsequent concurrent GC could reclaim V before the worker
+     * consumed it. The insertion side stays gated on gc_active because
+     * a new value stored before GC enumerates the container is already
+     * visible to GC. */
     Runtime rt;
     rt_test__init_no_threads(&rt, 1);
     WorkerThread *w = &rt.workers[0];
@@ -611,10 +618,154 @@ static int test_write_barrier_gc_inactive(void) {
     gc_write_barrier(w->vm.grey_buf, w->vm.gc_active_ptr,
                      old_val, new_val);
 
-    /* Grey buffer should remain empty */
-    ASSERT_INT_EQ(w->grey_buf.count, 0);
+    /* SATB deletion barrier fired unconditionally: V_old is in the
+     * grey buffer. Insertion barrier did NOT fire (gc_active=false). */
+    ASSERT_INT_EQ(w->grey_buf.count, 1);
+    ASSERT(w->grey_buf.entries[0] == old_val);
 
     rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+/* §9 explicit invariant: a non-heap old_val never pushes (filter
+ * works), and a heap old_val ALWAYS pushes regardless of gc_active. */
+static int test_write_barrier_satb_unconditional(void) {
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+
+    /* gc_active is 0. Both non-heap (immediate i32) → no push. */
+    JaclVal imm_old = jacl_i32(7);
+    JaclVal imm_new = jacl_i32(8);
+    gc_write_barrier(w->vm.grey_buf, w->vm.gc_active_ptr, imm_old, imm_new);
+    ASSERT_INT_EQ(w->grey_buf.count, 0);
+
+    /* Heap old_val, immediate new_val: SATB push only. */
+    JaclVal heap_old = jacl_i64(&w->vm.heap, 111);
+    gc_write_barrier(w->vm.grey_buf, w->vm.gc_active_ptr, heap_old, imm_new);
+    ASSERT_INT_EQ(w->grey_buf.count, 1);
+    ASSERT(w->grey_buf.entries[0] == heap_old);
+
+    /* Heap old, heap new, gc_active=0: still SATB only. */
+    JaclVal heap_new1 = jacl_i64(&w->vm.heap, 222);
+    gc_write_barrier(w->vm.grey_buf, w->vm.gc_active_ptr, heap_old, heap_new1);
+    ASSERT_INT_EQ(w->grey_buf.count, 2);
+    ASSERT(w->grey_buf.entries[1] == heap_old);
+
+    /* Activate GC: now both fire. */
+    ATOMIC_STORE_EXPLICIT(&rt.gc_active, 1, MEM_RELEASE);
+    JaclVal heap_new2 = jacl_i64(&w->vm.heap, 333);
+    gc_write_barrier(w->vm.grey_buf, w->vm.gc_active_ptr, heap_old, heap_new2);
+    ASSERT_INT_EQ(w->grey_buf.count, 4);
+    ASSERT(w->grey_buf.entries[2] == heap_old);
+    ASSERT(w->grey_buf.entries[3] == heap_new2);
+
+    ATOMIC_STORE_EXPLICIT(&rt.gc_active, 0, MEM_RELEASE);
+    rt_test__destroy_no_threads(&rt);
+    TEST_PASS();
+}
+
+/* §9 deterministic reproducer for the deref-mutate-GC UAF.
+ *
+ * Pre-fix (gc_write_barrier gated on gc_active): an atom mutation that
+ * lands while gc_active=false skips the SATB push. If a thread holds
+ * V_old elsewhere (operand stack, C local) and a subsequent GC cycle
+ * runs with V_old.epoch < watermark, V_old gets reclaimed under the
+ * holder — UAF.
+ *
+ * This test sets up that exact pattern deterministically: we don't
+ * need workers running, just a Runtime with worker structures and the
+ * ability to call gc_concurrent_collect synchronously. We:
+ *   1. allocate V at low epoch
+ *   2. install V in atom A; root A in env
+ *   3. advance global_epoch + thread_epochs past V's epoch
+ *   4. mutate the atom (gc_active=false; barrier fast-paths)
+ *   5. run gc_concurrent_collect synchronously from the main thread
+ *   6. inspect V's GCHeader — reclaimed objects get memset(0)
+ *
+ * Pre-fix: V is reclaimed (header zeroed). Post-fix: V survives via the
+ * unconditional SATB push (V is grey-buffered at step 4 and the mark
+ * loop in step 5 marks it live). */
+static int test_write_barrier_satb_protects_held_value(void) {
+    Runtime rt;
+    rt_test__init_no_threads(&rt, 1);
+    WorkerThread *w = &rt.workers[0];
+    ThreadHeap *heap = &w->vm.heap;
+
+    /* Allocate V at epoch=1. */
+    gc__thread_epoch = 1;
+    JaclVal v = jacl_i64(heap, 0x1122334455667788LL);
+    void *v_ptr = jacl_as_ptr(v);
+    GCHeader *v_hdr = gc_header_of(v_ptr);
+    uint8_t orig_obj_type = v_hdr->obj_type;
+    uint16_t orig_total   = v_hdr->alloc_total;
+    ASSERT_INT_EQ(v_hdr->epoch, 1);
+
+    /* gc_sweep_concurrent skips heap->current_block — the block being
+     * actively bump-allocated into (AUDIT.md §7). V is in that block
+     * right after allocation. Force a new current_block by filling
+     * this one so the sweep actually visits V's block. */
+    while (heap->current_block != NULL &&
+           heap->cursor < heap->limit) {
+        /* Each iteration consumes a chunk. Eventually exhausts the
+         * current_block and forces gc_alloc's slow path to allocate
+         * a fresh block, leaving V's block off the current_block slot. */
+        (void)gc_alloc(heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+    }
+    /* Trigger one more alloc to make sure we crossed into a new block. */
+    (void)gc_alloc(heap, OBJ_HEAP_I64, sizeof(JaclHeapI64));
+
+    /* Install V in an atom, root the atom in the worker's env. */
+    JaclMutableRef *atom = (JaclMutableRef *)gc_alloc(
+        heap, OBJ_MUTABLE_REF, sizeof(JaclMutableRef) + sizeof(JaclVal));
+    atom->type_idx   = 0;
+    atom->total_size = sizeof(JaclVal);
+    MREF_VAL(atom)   = v;
+    JaclVal atom_val = jacl_atom_ptr(atom);
+    w->vm.env.names[w->vm.env.count]  = jacl_inline_string("a", 1);
+    w->vm.env.values[w->vm.env.count] = atom_val;
+    w->vm.env.count++;
+
+    /* Advance global_epoch and worker thread_epoch past V's epoch so V
+     * falls under the watermark when GC runs. */
+    ATOMIC_STORE_EXPLICIT(&rt.global_epoch, 5, MEM_RELEASE);
+    ATOMIC_STORE_EXPLICIT(&w->thread_epoch, 5, MEM_RELEASE);
+
+    /* Sanity: V is currently reachable through env→atom→MREF_VAL. */
+    ASSERT(MREF_VAL(atom) == v);
+
+    /* Allocate V_new (at the new epoch, so it's protected by watermark
+     * regardless). Mutate the atom to V_new. With gc_active=false the
+     * barrier fast-paths out pre-fix; post-fix the deletion side still
+     * pushes V into the grey buffer. */
+    gc__thread_epoch = 5;
+    JaclVal v_new = jacl_i64(heap, 0xaaaabbbbccccddddLL);
+    ASSERT_INT_EQ(ATOMIC_LOAD_EXPLICIT(&rt.gc_active, MEM_ACQUIRE), 0);
+
+    gc_write_barrier(w->vm.grey_buf, w->vm.gc_active_ptr, v, v_new);
+    MREF_VAL(atom) = v_new;
+
+    /* Now V is reachable only via this test thread's `v` local — which
+     * is not a GC root. Run a synchronous GC cycle. */
+    uint32_t expected = 0;
+    bool ok = ATOMIC_CAS(&rt.gc_running, &expected, 1,
+                         MEM_ACQ_REL, MEM_RELAXED);
+    ASSERT(ok);
+    gc_concurrent_collect(&rt);
+
+    /* Inspect V. Pre-fix: V was not grey-buffered (barrier was gated),
+     * so the mark phase didn't mark it. V.epoch=1 < watermark=5, so the
+     * sweep memset(0) zeroed V's header.
+     * Post-fix: V was grey-buffered unconditionally, the mark phase
+     * marked it, sweep skipped it, header is intact. */
+    ASSERT_INT_EQ(v_hdr->obj_type, orig_obj_type);
+    ASSERT_INT_EQ(v_hdr->alloc_total, orig_total);
+    /* Also: the value bytes should still be readable. */
+    ASSERT_I64_EQ(jacl_as_i64(v), 0x1122334455667788LL);
+
+    (void)v_new; /* silence unused warning */
+    rt_test__destroy_no_threads(&rt);
+    gc__thread_epoch = 0;
     TEST_PASS();
 }
 
@@ -1271,6 +1422,8 @@ int main(void) {
         /* US-010: Write barriers (hybrid SATB + insertion) */
         { "write_barrier_gc_active",         test_write_barrier_gc_active },
         { "write_barrier_gc_inactive",       test_write_barrier_gc_inactive },
+        { "write_barrier_satb_unconditional", test_write_barrier_satb_unconditional },
+        { "write_barrier_satb_protects_held_value", test_write_barrier_satb_protects_held_value },
         { "write_barrier_null_fast_path",    test_write_barrier_null_fast_path },
         { "write_barrier_inline_skipped",    test_write_barrier_inline_types_skipped },
         { "write_barrier_mixed_types",       test_write_barrier_mixed_types },
